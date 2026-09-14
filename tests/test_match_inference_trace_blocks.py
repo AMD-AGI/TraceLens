@@ -475,6 +475,7 @@ def test_extraction_of_a_matched_block(tmp_path):
         flow_map,
         meta,
         output_label=label,
+        llm_inference=True,
     )
     assert len(summary) == 1
     written = summary[0]["output_path"]

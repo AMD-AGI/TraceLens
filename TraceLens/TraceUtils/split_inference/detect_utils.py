@@ -367,16 +367,14 @@ class GpuAttribution:
         if self.strategy == self.STRATEGY_PROJECTION:
             by_name = self._projection_union(_window_names(roots))
             any_spans = self._projection_union(None)
-            window = SpanSet.of_events(self.projections).bounds
         else:
             by_name = SpanSet()
             any_spans = SpanSet.of_events(self.kernels_for(annotations))
-            window = any_spans.bounds
 
-        in_window = self._kernels_in(window)
-        busy = sum(k["dur"] for k in in_window)
+        all_kernels = self.kernels
+        busy = sum(k["dur"] for k in all_kernels)
         if busy <= 0:
-            return CoverageReport(self.strategy, 0.0, 0.0, 0.0, 0.0, window)
+            return CoverageReport(self.strategy, 0.0, 0.0, 0.0, 0.0, None)
 
         tiles, _ = build_root_tiles(roots)
         tile_spans = [
@@ -389,14 +387,14 @@ class GpuAttribution:
             ("spans", by_name | SpanSet.of_events(self.kernels_for(roots))),
             ("tiles", by_name | SpanSet.of_events(self.kernels_for(tile_spans))),
         ):
-            covered[label] = sum(k["dur"] for k in in_window if spans.covers(k["ts"]))
+            covered[label] = sum(k["dur"] for k in all_kernels if spans.covers(k["ts"]))
         return CoverageReport(
             self.strategy,
             covered["any"] / busy,
             covered["tiles"] / busy,
             covered["spans"] / busy,
             busy,
-            window,
+            None,
         )
 
     def _projection_union(self, names: Optional[set]) -> SpanSet:

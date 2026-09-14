@@ -11,8 +11,8 @@ Covers:
   (``find_iteration_roots``) and the priority of the primary 1211 pattern.
 - Per-iteration splitting / time-window isolation (``extract_iteration``).
 - Annotation-name parsing of the names these fixtures generate.
-- Steady-state window finding (``identify_steady_state_regions`` and
-  ``find_steady_state_window``).
+- Steady-state window finding (``find_steady_state_inference`` and
+  ``find_steady_state_generic``).
 
 No trace files are written; everything operates on in-memory dicts.
 """
@@ -21,6 +21,10 @@ import gzip, json, os, zipfile, sys, pytest
 from typing import Dict, List
 from TraceLens.TraceUtils import split_inference_trace_annotation as split
 from TraceLens.TraceUtils.annotation_utils import IterationAnnotation
+from TraceLens.TraceUtils.split_inference.steady_state_window import (
+    _identify_regions_inference,
+    _compute_reference_pd_ratio,
+)
 from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _align_graph_to_capture_by_group,
@@ -243,7 +247,7 @@ def _details(num_requests, context_requests=0):
 
 def test_identify_steady_state_regions_clear_region():
     iter_details = [_details(2) for _ in range(4)] + [_details(20) for _ in range(30)]
-    regions, global_max = split.identify_steady_state_regions(
+    regions, global_max = _identify_regions_inference(
         iter_details, num_steps=32
     )
     assert global_max == 20
@@ -252,7 +256,7 @@ def test_identify_steady_state_regions_clear_region():
 
 def test_identify_steady_state_regions_fallback():
     iter_details = [_details(20 if i % 2 == 0 else 2) for i in range(10)]
-    regions, global_max = split.identify_steady_state_regions(
+    regions, global_max = _identify_regions_inference(
         iter_details, num_steps=12
     )
     assert global_max == 20
@@ -260,7 +264,7 @@ def test_identify_steady_state_regions_fallback():
     assert regions == [(4, 6)]
 
 
-def test_find_steady_state_window_returns_contiguous_slice():
+def test_find_steady_state_inference_returns_contiguous_slice():
     roots = [
         {
             "name": SGLANG_DECODE_ANNOTATION.format(i=20),
@@ -270,8 +274,8 @@ def test_find_steady_state_window_returns_contiguous_slice():
         }
         for i in range(32)
     ]
-    window = split.find_steady_state_window(
-        roots, num_steps=8, steady_state_regions=[(0, 32)], mode="decode_only"
+    window, _ = split.find_steady_state_inference(
+        roots, num_steps=8, mode="decode_only"
     )
     assert len(window) == 8
     # The window is a contiguous slice of the original roots.
@@ -374,7 +378,7 @@ def test_extract_phases_and_save(tmp_path):
 def test_compute_reference_pd_ratio():
     iter_details = [_details(20 if i % 2 else 2) for i in range(20)]
     regions = [(0, 20)]
-    (start, end), avg_ratio, largest_ratio = split.compute_reference_pd_ratio(
+    (start, end), avg_ratio, largest_ratio = _compute_reference_pd_ratio(
         regions, iter_details
     )
     assert (start, end) == (0, 20)
@@ -382,7 +386,7 @@ def test_compute_reference_pd_ratio():
     assert 0.0 <= largest_ratio <= 1.0
 
 
-def test_find_steady_state_window_decode_only_mode():
+def test_find_steady_state_inference_decode_only_mode():
     roots = [
         {
             "name": SGLANG_DECODE_ANNOTATION.format(i=20),
@@ -392,10 +396,9 @@ def test_find_steady_state_window_decode_only_mode():
         }
         for i in range(32)
     ]
-    window = split.find_steady_state_window(
+    window, _ = split.find_steady_state_inference(
         roots,
         num_steps=8,
-        steady_state_regions=[(0, 32)],
         mode="decode_only",
     )
     assert len(window) == 8
@@ -664,17 +667,13 @@ def test_find_iteration_roots_no_annotation_trace():
     assert result.status.name == "NOT_SPLITTABLE"
 
 
-def test_find_steady_state_window_mixed_mode_with_conc_osl_r():
+def test_find_steady_state_inference_mixed_mode_with_conc_osl_r():
     names = _mixed_phase_roots(48)
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    regions, _ = split.identify_steady_state_regions(
-        split.iteration_details(roots), num_steps=16
-    )
-    window = split.find_steady_state_window(
+    window, _ = split.find_steady_state_inference(
         roots,
         num_steps=4,
-        steady_state_regions=regions,
         mode="mixed",
         CONC=20,
         OSL=100.0,
@@ -683,82 +682,79 @@ def test_find_steady_state_window_mixed_mode_with_conc_osl_r():
     assert len(window) >= 1
 
 
-def test_find_steady_state_window_mixed_no_pd_candidates(capsys):
+def test_find_steady_state_inference_mixed_no_pd_candidates(capsys):
     names = [SGLANG_DECODE.format(i=20) for _ in range(24)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    window = split.find_steady_state_window(
+    window, _ = split.find_steady_state_inference(
         roots,
         num_steps=8,
-        steady_state_regions=[(0, len(roots))],
         mode="mixed",
     )
     captured = capsys.readouterr().out
     assert "falling back to the full candidate set" in captured or len(window) >= 1
 
 
-def test_find_steady_state_window_decode_only_no_pure_run():
+def test_find_steady_state_inference_decode_only_no_pure_run():
     names = [SGLANG_EXTEND.format(t=800) for _ in range(16)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    window = split.find_steady_state_window(
+    window, _ = split.find_steady_state_inference(
         roots,
         num_steps=8,
-        steady_state_regions=[(0, len(roots))],
         mode="decode_only",
     )
     assert window == []
 
 
-def test_find_steady_state_window_max_prefilldecode():
+def test_find_steady_state_inference_max_prefilldecode():
+    # Mix prefill steps into the steady-state region so concurrency-based
+    # region detection doesn't exclude them as warmup.
     names = []
     for i in range(24):
-        if i < 8:
+        if i % 4 == 0:
             names.append(SGLANG_EXTEND.format(t=800))
         else:
             names.append(SGLANG_DECODE.format(i=20))
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    window = split.find_steady_state_window(
+    window, _ = split.find_steady_state_inference(
         roots,
         num_steps=8,
-        steady_state_regions=[(0, len(roots))],
         mode="max_prefilldecode",
     )
     assert len(window) >= 1
 
 
-def test_find_steady_state_window_max_prefilldecode_empty():
+def test_find_steady_state_inference_max_prefilldecode_empty():
     names = [SGLANG_DECODE.format(i=20) for _ in range(16)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    window = split.find_steady_state_window(
+    window, _ = split.find_steady_state_inference(
         roots,
         num_steps=8,
-        steady_state_regions=[(0, len(roots))],
         mode="max_prefilldecode",
     )
     assert window == []
 
 
-def test_find_steady_state_window_invalid_mode():
+def test_find_steady_state_inference_invalid_mode():
     names = [VLLM_PRIMARY.format(i=i) for i in range(8)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
     with pytest.raises(ValueError, match="Unknown mode"):
-        split.find_steady_state_window(
-            roots, num_steps=4, steady_state_regions=[(0, 8)], mode="invalid"
+        split.find_steady_state_inference(
+            roots, num_steps=4, mode="invalid"
         )
 
 
-def test_find_steady_state_window_conc_mismatch_warning(capsys):
+def test_find_steady_state_inference_conc_mismatch_warning(capsys):
     names = [SGLANG_DECODE.format(i=5) for _ in range(16)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    split.find_steady_state_window(
+    split.find_steady_state_inference(
         roots,
         num_steps=8,
-        steady_state_regions=[(0, len(roots))],
         mode="mixed",
         CONC=999,
     )
@@ -840,7 +836,7 @@ def test_identify_steady_state_regions_end_and_middle():
     details = [{"num_requests": 2} for _ in range(6)]
     details += [{"num_requests": 20} for _ in range(20)]
     details += [{"num_requests": 2} for _ in range(6)]
-    regions, global_max = split.identify_steady_state_regions(details, num_steps=16)
+    regions, global_max = _identify_regions_inference(details, num_steps=16)
     assert global_max == 20
     assert len(regions) >= 1
 
@@ -856,7 +852,7 @@ def test_compute_reference_pd_ratio_median_fallback(capsys):
             }
         )
     regions = [(0, 20)]
-    _, ref_ratio, _ = split.compute_reference_pd_ratio(regions, iter_details)
+    _, ref_ratio, _ = _compute_reference_pd_ratio(regions, iter_details)
     assert 0.0 <= ref_ratio <= 1.0
 
 

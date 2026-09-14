@@ -626,13 +626,14 @@ def main():
                 a["trace_json"],
                 phase_dir,
                 base_a,
-                "annotation_iteration",
+                "iteration",
                 0,
                 1,
                 a["gpu_corr_map"],
                 a["flow_corr_map"],
                 a["meta_events"],
                 output_label=f"{label_base}_A",
+                llm_inference=True,
             )
             if a_summary:
                 m["a_output_path"] = a_summary[0]["output_path"]
@@ -644,13 +645,14 @@ def main():
                 b["trace_json"],
                 phase_dir,
                 base_b,
-                "annotation_iteration",
+                "iteration",
                 0,
                 1,
                 b["gpu_corr_map"],
                 b["flow_corr_map"],
                 b["meta_events"],
                 output_label=f"{label_base}_B",
+                llm_inference=True,
             )
             if b_summary:
                 m["b_output_path"] = b_summary[0]["output_path"]
