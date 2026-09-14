@@ -1423,3 +1423,81 @@ def test_glm53_vision_attention_resolves_single_kernel_branch():
     reshape = node_by_id["visual/seq:2:blocks:attn:@op_l1665_c22_reshape:14"]
     reshape_sources = [e["sourceNodeId"] for e in reshape.get("incomingEdges", [])]
     assert reshape_sources == [concat["id"]]
+
+
+def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
+    """The 3-way ``q, k, v = qkv(h)...unbind(0)`` fans out into three ports.
+
+    ``Glm5NextVisionAttention`` unpacks ``query_states, key_states, value_states``
+    from a single ``unbind`` and then feeds ``q_norm(query_states)`` and
+    ``k_norm(key_states)`` — two submodule calls that each read a *distinct* slot
+    of that producer. The submodule-call wiring previously dropped the consumed
+    output ordinal, so ``key_states`` never appeared as its own port and both
+    norms docked to slot 0 (``query_states``). Threading the ordinal (C1) must
+    give three named ``@split_out`` ports and route ``q_norm``→``query_states``,
+    ``k_norm``→``key_states``, ``value_states``→its own slot, with no direct
+    ``q_norm``→``k_norm`` edge.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    nodes = graph["nodes"]
+    node_by_id = {node["id"]: node for node in nodes}
+
+    _assert_export_is_acyclic(nodes)
+
+    # Three distinct named slot ports fan out of the vision qkv unbind.
+    split_labels = {
+        node["label"]
+        for node in nodes
+        if "@split_out:" in node["id"]
+        and "VisionAttention" in node.get("namespace", "")
+    }
+    assert {"query_states", "key_states", "value_states"} <= split_labels
+
+    q_split = node_by_id["visual/@split_out:19:query_states"]
+    k_split = node_by_id["visual/@split_out:19:key_states"]
+    v_split = node_by_id["visual/@split_out:19:value_states"]
+
+    # Each norm's input boundary reads its own slot — k_norm no longer docks to
+    # query_states.
+    def _norm_input(kind: str) -> dict:
+        return next(
+            node
+            for node in nodes
+            if node.get("namespace", "").endswith(f"/{kind}")
+            and "VisionAttention" in node.get("namespace", "")
+            and node["id"].endswith("/@input")
+        )
+
+    q_norm_input = _norm_input("q_norm")
+    k_norm_input = _norm_input("k_norm")
+    assert [e["sourceNodeId"] for e in q_norm_input["incomingEdges"]] == [q_split["id"]]
+    assert [e["sourceNodeId"] for e in k_norm_input["incomingEdges"]] == [k_split["id"]]
+
+    # value_states is consumed directly (its transpose reads the value slot).
+    value_consumers = [
+        node
+        for node in nodes
+        if any(
+            edge["sourceNodeId"] == v_split["id"]
+            for edge in node.get("incomingEdges", [])
+        )
+    ]
+    assert value_consumers and all(
+        node.get("label") == "Transpose" for node in value_consumers
+    )
+
+    # No edge crosses between the two norms in either direction.
+    q_norm_ids = {
+        node["id"] for node in nodes if node.get("namespace", "").endswith("/q_norm")
+    }
+    k_norm_ids = {
+        node["id"] for node in nodes if node.get("namespace", "").endswith("/k_norm")
+    }
+    for node in nodes:
+        sources = {e["sourceNodeId"] for e in node.get("incomingEdges", [])}
+        if node["id"] in k_norm_ids:
+            assert not (sources & q_norm_ids), node["id"]
+        if node["id"] in q_norm_ids:
+            assert not (sources & k_norm_ids), node["id"]

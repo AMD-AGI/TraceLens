@@ -684,6 +684,7 @@ def _wire_all_predecessor_edges(
             continue
         steps_by_attr = _forward_steps_by_attr(block)
         pred_arg_maps = block.forward_step_predecessor_args
+        pred_ordinal_maps = block.forward_step_predecessor_ordinals
 
         for step_attr, preds in block.forward_step_predecessors.items():
             step_node = steps_by_attr.get(step_attr)
@@ -697,6 +698,7 @@ def _wire_all_predecessor_edges(
             if default_target is None:
                 continue
             arg_map = pred_arg_maps.get(step_attr, {})
+            ordinal_map = pred_ordinal_maps.get(step_attr, {})
             param_entries = module_param_entries.get(step_attr, {})
             entry_params = _first_op_entry_params(step_node)
             multi = len(preds) >= 2
@@ -755,6 +757,13 @@ def _wire_all_predecessor_edges(
                 link = (source_index, target_index)
                 if link not in graph.links:
                     graph.links.append(link)
+                # A module call reading a specific slot of a multi-output
+                # producer (``k_norm(key_states)`` where ``key_states`` is
+                # ordinal 1 of an ``unbind``) tags its edge with that ordinal so
+                # the producer fans out into one port per consumed slot instead
+                # of docking every consumer onto slot 0.
+                if arg_name is not None and arg_name in ordinal_map:
+                    graph.link_output_ports[link] = str(ordinal_map[arg_name])
                 if multi and link not in graph.link_port_labels and arg_name:
                     graph.link_port_labels[link] = arg_name
 

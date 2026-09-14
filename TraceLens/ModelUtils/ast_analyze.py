@@ -1134,6 +1134,7 @@ class ForwardAnalysis:
     var_producer: dict[str, str]
     step_predecessors: dict[str, tuple[str, ...]]
     step_predecessor_args: dict[str, dict[str, str]]
+    step_predecessor_ordinals: dict[str, dict[str, int]]
     return_slots: dict[str, str]
     return_order: list[str]
     primary_return_slot: str | None
@@ -1167,6 +1168,9 @@ class ClassStructure:
     forward_operations: dict[str, ForwardOperation] = field(default_factory=dict)
     forward_step_predecessors: dict[str, tuple[str, ...]] = field(default_factory=dict)
     forward_step_predecessor_args: dict[str, dict[str, str]] = field(
+        default_factory=dict
+    )
+    forward_step_predecessor_ordinals: dict[str, dict[str, int]] = field(
         default_factory=dict
     )
     single_op_methods: dict[str, ForwardOperation] = field(default_factory=dict)
@@ -1798,6 +1802,12 @@ class _ForwardOperationExtractor:
         self._name_value_ast: dict[str, ast.expr] = {}
         self.step_predecessors: dict[str, tuple[str, ...]] = {}
         self.step_predecessor_args: dict[str, dict[str, str]] = {}
+        # arg_name -> output ordinal, when a submodule call reads a specific slot
+        # of a multi-output producer (``self.k_norm(key_states)`` where
+        # ``key_states`` is ordinal 1 of an ``unbind``). Parallel to
+        # ``step_predecessor_args``; lets the export fan the producer out into one
+        # port per consumed slot instead of collapsing every consumer onto slot 0.
+        self.step_predecessor_ordinals: dict[str, dict[str, int]] = {}
         # When an ``if``/``else`` assigns the same variable to different producers
         # (e.g. ``attn_output`` = flash ``@attention`` in one branch, a manual
         # ``torch.cat`` in the other), only one survives ``var_producer`` after the
@@ -2078,6 +2088,17 @@ class _ForwardOperationExtractor:
 
         arg_producers: list[str] = []
         arg_name_map: dict[str, str] = {}
+        arg_ordinal_map: dict[str, int] = {}
+
+        def _record_arg_ordinal(name: str, producer: str, arg_node: ast.AST) -> None:
+            # If this arg reads a specific output slot of its producer (an
+            # unpacked ``unbind``/``split`` local), remember the slot against the
+            # arg name so the module-call edge can start from that port.
+            for prod, ordinal in self._read_output_ports(arg_node):
+                if prod == producer:
+                    arg_ordinal_map[name] = ordinal
+                    break
+
         if not (housekeeping and method_name is not None):
             # Skip self/cls first positional arg for submodule calls.
             start = 0
@@ -2095,12 +2116,14 @@ class _ForwardOperationExtractor:
                 if submodule_call and idx >= start and len(producers) == 1:
                     name = _arg_name(arg, idx - start)
                     arg_name_map[name] = producers[0]
+                    _record_arg_ordinal(name, producers[0], arg)
             for keyword in node.keywords:
                 producer, arg_external = self.expression(keyword.value)
                 if producer:
                     arg_producers.append(producer)
                     if submodule_call and keyword.arg:
                         arg_name_map[keyword.arg] = producer
+                        _record_arg_ordinal(keyword.arg, producer, keyword.value)
                 external.extend(arg_external)
         if label is None:
             # A call that becomes its own chain step is what later reads of its result
@@ -2113,6 +2136,8 @@ class _ForwardOperationExtractor:
                 )
                 if arg_name_map:
                     self.step_predecessor_args[own_step] = arg_name_map
+                if arg_ordinal_map:
+                    self.step_predecessor_ordinals[own_step] = arg_ordinal_map
                 return own_step, external
             producers = [value for value in (base_producer, *arg_producers) if value]
             return (producers[-1] if producers else None), external
@@ -3422,6 +3447,7 @@ def _forward_operations_from_forward(
         var_producer=dict(extractor.var_producer),
         step_predecessors=dict(extractor.step_predecessors),
         step_predecessor_args=dict(extractor.step_predecessor_args),
+        step_predecessor_ordinals=dict(extractor.step_predecessor_ordinals),
         return_slots=return_slots,
         return_order=return_order,
         primary_return_slot=primary_return_slot,
@@ -3489,6 +3515,7 @@ def expand_class_forward_dataflow(
     )
     cls.forward_step_predecessors = dict(analysis.step_predecessors)
     cls.forward_step_predecessor_args = dict(analysis.step_predecessor_args)
+    cls.forward_step_predecessor_ordinals = dict(analysis.step_predecessor_ordinals)
     cls.forward_operations = _refine_forward_operation_predecessors(
         forward,
         cls.forward_operations,
@@ -3544,6 +3571,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         forward_operations: dict[str, ForwardOperation] = {}
         forward_step_predecessors: dict[str, tuple[str, ...]] = {}
         forward_step_predecessor_args: dict[str, dict[str, str]] = {}
+        forward_step_predecessor_ordinals: dict[str, dict[str, int]] = {}
         forward_return_slots: dict[str, str] = {}
         forward_return_order: list[str] = []
         primary_return_slot: str | None = None
@@ -3617,6 +3645,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 if analysis.operations:
                     forward_step_predecessors = dict(analysis.step_predecessors)
                     forward_step_predecessor_args = dict(analysis.step_predecessor_args)
+                    forward_step_predecessor_ordinals = dict(
+                        analysis.step_predecessor_ordinals
+                    )
                     forward_loop_carried = list(analysis.loop_carried)
                     (
                         forward_calls,
@@ -3677,6 +3708,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 if analysis.operations:
                     forward_step_predecessors = dict(analysis.step_predecessors)
                     forward_step_predecessor_args = dict(analysis.step_predecessor_args)
+                    forward_step_predecessor_ordinals = dict(
+                        analysis.step_predecessor_ordinals
+                    )
                     forward_loop_carried = list(analysis.loop_carried)
                     module_calls = _module_calls_for_forward_merge(
                         forward_calls,
@@ -3721,6 +3755,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 ):
                     forward_step_predecessors = dict(probed.step_predecessors)
                     forward_step_predecessor_args = dict(probed.step_predecessor_args)
+                    forward_step_predecessor_ordinals = dict(
+                        probed.step_predecessor_ordinals
+                    )
                     forward_loop_carried = list(probed.loop_carried)
                     module_calls = _module_calls_for_forward_merge(
                         forward_calls,
@@ -3769,6 +3806,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             forward_operations=forward_operations,
             forward_step_predecessors=forward_step_predecessors,
             forward_step_predecessor_args=forward_step_predecessor_args,
+            forward_step_predecessor_ordinals=forward_step_predecessor_ordinals,
             single_op_methods=single_op_methods,
             multi_op_methods=multi_op_methods,
             forward_return_slots=forward_return_slots,
