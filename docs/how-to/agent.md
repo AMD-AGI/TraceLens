@@ -57,25 +57,10 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 
 ### Collect a trace
 
-The orchestrator runs against a single `torch.profiler` trace (`.json` or
-`.json.gz`). Collection is workload-specific:
+The orchestrator runs against a PyTorch profiler trace. Collection is workload-specific:
 
-- **Generic Eager Traces**: Instrument your loop with
-  `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture
-  (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state
-  window of a handful of post-warmup steps, then log the trace with
-  `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank
-  analysis.
-- **Inference Traces with Graph Capture**: Collection has framework-specific
-  requirements. Follow
-  [Generate a PyTorch inference performance report](./generate-perf-report-pytorch-inference.md).
-  The Profiling Skill automates
-  vLLM, SGLang, and ATOM benchmarking and PyTorch profiler trace collection using
-  Magpie, producing analysis-ready traces. For
-  graph-mode workloads you produce two artifacts: a graph-replay trace and a
-  graph-capture folder. In inference mode with execution mode
-  `graph replay + capture`, TraceLens merges call-stack and shape information from
-  the capture folder into the replay tree before analysis.
+- **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. See [Collect a trace](../../../docs/how-to/generate-perf-report-pytorch.md#collect-a-trace).
+- **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](../../../docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](../Profiling/README.md) automates vLLM/SGLang/ATOM benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces. For graph-mode workloads you produce two artifacts: a graph-replay trace and a graph-capture folder. In inference mode with execution mode `graph replay + capture`, TraceLens merges call-stack and shape information from the capture folder into the replay tree before analysis.
 
 ### Establish a hardware baseline
 
@@ -206,6 +191,7 @@ node, or an SSH plus container-exec wrapper for a containerized node.
 
 - [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
 - [Generate a PyTorch inference performance report](./generate-perf-report-pytorch-inference.md)
+- [Inference performance analysis](../conceptual/inference-analysis.md)
 - [Analyze traces with the TraceLens SDK](./sdk-analysis.md)
 - [Trace2Tree data model](../conceptual/trace2tree.md)
 - [GEMM analysis](../conceptual/gemm-analysis.md)
