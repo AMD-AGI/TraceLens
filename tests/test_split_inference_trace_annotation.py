@@ -47,6 +47,7 @@ from TraceLens.Trace2Tree.inference_iteration_roots import (
     _reattach_worker_threads,
 )
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.util import normalize_name_for_comparison
 from TraceLens.TraceUtils.split_inference.detect_utils import DetectStatus
 from TraceLens.TraceUtils.split_inference.root_detection import (
     _child_groups,
@@ -1445,3 +1446,120 @@ VLLM_PRIMARY = (
 SGLANG_DECODE = "step[DECODE bs={i}]"
 SGLANG_EXTEND = "step[EXTEND bs=2 toks={t}]"
 VLLM_BACKUP = "execute_context_3({i})_generation_2(50)"
+
+
+def _warmup_loop_events(turns: int = 6) -> List[Dict]:
+    """A loop whose first turn does the iteration's work plus extra setup.
+
+    The setup frame breaks the stride, so the period search anchors after the
+    first turn and leaves it outside every block. That is the shape bookend
+    promotion exists for: the turn is a real iteration, and dropping it reports
+    its GPU time as work no root explains.
+    """
+    events: List[Dict] = [
+        {
+            "ph": "X",
+            "cat": "cpu_op",
+            "name": "event_loop",
+            "pid": 1,
+            "tid": 1,
+            "ts": 0,
+            "dur": turns * 2000,
+            "args": {"Sequence number": 0},
+        }
+    ]
+    corr = 500
+    for turn in range(turns):
+        base = 100 + turn * 2000
+        second = ("setup", 10) if turn == 0 else ("mlp", 50)
+        for name, offset, kernel_dur in (
+            ("attention", 300, 100),
+            (second[0], 800, second[1]),
+        ):
+            events.append(
+                {
+                    "ph": "X",
+                    "cat": "cpu_op",
+                    "name": name,
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": base + offset,
+                    "dur": 200,
+                    "args": {"Sequence number": turn, "correlation": corr},
+                }
+            )
+            events.extend(
+                [
+                    {
+                        "ph": "X",
+                        "cat": "cuda_runtime",
+                        "name": "hipLaunchKernel",
+                        "pid": 1,
+                        "tid": 1,
+                        "ts": base + offset + 10,
+                        "dur": 5,
+                        "args": {"correlation": corr},
+                    },
+                    {
+                        "ph": "X",
+                        "cat": "kernel",
+                        "name": f"{name}_kernel",
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base + offset + 50,
+                        "dur": kernel_dur,
+                        "args": {"correlation": corr, "stream": 7},
+                    },
+                    {
+                        "ph": "s",
+                        "id": corr,
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base + offset + 50,
+                        "cat": "ac2g",
+                        "name": "ac2g",
+                    },
+                    {
+                        "ph": "f",
+                        "id": corr,
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base + offset + 50 + kernel_dur,
+                        "cat": "ac2g",
+                        "name": "ac2g",
+                        "bp": "e",
+                    },
+                ]
+            )
+            corr += 1
+    return events
+
+
+def test_bookend_promotion_adopts_a_warmup_turn_that_does_the_same_work():
+    """The off-stride first turn is kept, because its GPU signature matches."""
+    turns = 6
+    events = _warmup_loop_events(turns)
+    tree = TraceToTree(events, prune_nongpu_paths=True)
+    tree.build_tree(add_python_func=True)
+    _reattach_worker_threads(tree)
+    node = next(e for e in tree.events_by_uid.values() if e.get("name") == "event_loop")
+    ordered = sorted(tree.get_children_events(node), key=lambda e: e.get("ts", 0))
+    _, gputime_by_name = _child_groups(tree, ordered)
+
+    # The setup frame means the repeating run starts only at the second turn.
+    live = [e for e in ordered if gputime_by_name.get(e.get("name", ""), 0.0) > 0]
+    _, _, start = _find_repeating_period(
+        [normalize_name_for_comparison(e.get("name", "")) for e in live]
+    )
+    assert start > 0
+
+    candidate = _periodic_candidate(
+        tree, node, ordered, gputime_by_name, _total_gpu_time(tree), 0
+    )
+    assert candidate is not None
+    # Every turn is a root, warmup included, and nothing is left for the cascade
+    # to bolt on afterwards.
+    assert len(candidate.roots) == turns
+    assert candidate.roots[0]["ts"] < live[start]["ts"]
+    assert candidate.diagnostics["before_uids"] == []
+    assert candidate.diagnostics["branch_coverage"] > 0.99
