@@ -1429,6 +1429,46 @@ def test_glm53_vision_attention_resolves_single_kernel_branch():
     assert reshape_sources == [concat["id"]]
 
 
+def test_glm53_vision_attention_flags_impl_dead_interface_input():
+    """``max_seqlen`` is declared interface but dead under sdpa, so it is flagged.
+
+    ``Glm5NextVisionAttention.forward`` takes packed-attention metadata by keyword
+    (``cu_seqlens``, ``max_seqlen``). Only the flash branch reads ``max_seqlen``
+    (``get_max_seqlen(...)`` / ``max_length_q=``); the resolved sdpa branch consumes
+    ``cu_seqlens`` (``cu_seqlens[1:] - cu_seqlens[:-1]``) but never ``max_seqlen``. So
+    ``max_seqlen`` is part of the module *interface* yet dead in this implementation:
+    the kernel must declare ``cu_seqlens`` as a live input and surface ``max_seqlen``
+    as an ``unused_interface_inputs`` flag rather than a wired input port.
+
+    General: keys off forward-signature params referenced only in dropped branches.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    nodes = graph["nodes"]
+
+    _assert_export_is_acyclic(nodes)
+
+    node_by_id = {node["id"]: node for node in nodes}
+    kernel = node_by_id["visual/seq:3:blocks:attn:@attention:12"]
+    details = next(
+        attr["value"]
+        for attr in kernel.get("attrs", [])
+        if attr.get("key") == "details"
+    )
+
+    # cu_seqlens is a live declared input; max_seqlen is not.
+    assert "inputs:" in details
+    inputs_segment = [
+        seg for seg in details.split(";") if seg.strip().startswith("inputs:")
+    ][0]
+    assert "cu_seqlens" in inputs_segment
+    assert "max_seqlen" not in inputs_segment
+
+    # max_seqlen is surfaced as an interface input dead in this implementation.
+    assert "unused_interface_inputs: max_seqlen" in details
+
+
 def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
     """The 3-way ``q, k, v = qkv(h)...unbind(0)`` fans out into three ports.
 

@@ -946,7 +946,17 @@ def _leaf_node(
     param_inputs: list[str] | None = None,
     boundary_input_name: str | None = None,
 ) -> BlockNode:
-    role = _classify_role(attr_name, class_name)
+    # A traced free function's synthetic attr embeds the callee name
+    # (``@fn_l1840_get_vision_attention_seqlens``). Token-classifying that name
+    # misreads incidental words: ``get_vision_attention_seqlens`` matches the
+    # "attention" token and the node is treated as an attention kernel, which the
+    # graph then folds away — so a real, consumed computation vanishes. These
+    # synthetics are their own op kind, not module roles, so give them a neutral
+    # role and let the dedicated ``@attention`` kernel keep the attention role.
+    if is_function_synthetic(attr_name):
+        role = "other"
+    else:
+        role = _classify_role(attr_name, class_name)
     return BlockNode(
         attr_name=attr_name,
         class_name=class_name,
@@ -2059,6 +2069,7 @@ def build_block_node(
                     details=list(child_details),
                     label=positional_display_label(call_attr),
                     basic=False,
+                    output_names=cls.forward_step_output_names.get(call_attr),
                 )
             )
             continue
@@ -2072,6 +2083,7 @@ def build_block_node(
                     details=list(child_details),
                     label=function_display_label(call_attr),
                     basic=False,
+                    output_names=cls.forward_step_output_names.get(call_attr),
                 )
             )
             continue

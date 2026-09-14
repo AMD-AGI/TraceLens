@@ -1267,6 +1267,7 @@ class ForwardAnalysis:
     step_predecessors: dict[str, tuple[str, ...]]
     step_predecessor_args: dict[str, dict[str, str]]
     step_predecessor_ordinals: dict[str, dict[str, int]]
+    step_output_names: dict[str, list[str]]
     return_slots: dict[str, str]
     return_order: list[str]
     primary_return_slot: str | None
@@ -1305,6 +1306,7 @@ class ClassStructure:
     forward_step_predecessor_ordinals: dict[str, dict[str, int]] = field(
         default_factory=dict
     )
+    forward_step_output_names: dict[str, list[str]] = field(default_factory=dict)
     single_op_methods: dict[str, ForwardOperation] = field(default_factory=dict)
     multi_op_methods: dict[str, list[ForwardOperation]] = field(default_factory=dict)
     forward_return_slots: dict[str, str] = field(default_factory=dict)
@@ -1940,6 +1942,11 @@ class _ForwardOperationExtractor:
         # ``step_predecessor_args``; lets the export fan the producer out into one
         # port per consumed slot instead of collapsing every consumer onto slot 0.
         self.step_predecessor_ordinals: dict[str, dict[str, int]] = {}
+        # producer attr -> ordered output names, for a tuple-unpacked synthetic
+        # call (``q_embed, k_embed = apply_rotary_pos_emb_vision(...)``) that is
+        # not an inline ``self.operations`` entry. Lets the export fan the
+        # positional/function node out into one named output port per slot.
+        self.step_output_names: dict[str, list[str]] = {}
         # When an ``if``/``else`` assigns the same variable to different producers
         # (e.g. ``attn_output`` = flash ``@attention`` in one branch, a manual
         # ``torch.cat`` in the other), only one survives ``var_producer`` after the
@@ -2408,6 +2415,18 @@ class _ForwardOperationExtractor:
         names = [elt.id for elt in target.elts if isinstance(elt, ast.Name)]
         if len(names) < 2 or len(names) != len(target.elts):
             return
+        # A tuple-returning positional kernel
+        # (``q_embed, k_embed = apply_rotary_pos_emb_vision(...)``) is its own
+        # chain node, not an inline ``self.operations`` entry. Record the ordered
+        # output names against the producer attr (threaded to the block node) and
+        # stamp each local's ordinal explicitly, so consumers wire to the matching
+        # port and the node fans out one named output per slot. General: fires for
+        # any multi-output positional synthetic, no class-name checks.
+        if is_positional_synthetic(producer):
+            self.step_output_names[producer] = names
+            for ordinal, name in enumerate(names):
+                self.var_output_ordinal[name] = ordinal
+            return
         for index, operation in enumerate(self.operations):
             if operation.attr_name != producer:
                 continue
@@ -2662,19 +2681,7 @@ class _ForwardOperationExtractor:
 
         General: keys off the shared transformers predicate name, not any model.
         """
-        node = test
-        negate = False
-        while isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            negate = not negate
-            node = node.operand
-        if not isinstance(node, ast.Call):
-            return None
-        if _expr_name(node.func) not in _FLASH_REQUEST_PREDICATES:
-            return None
-        impl = self.config.get("_attn_implementation")
-        resolved = impl.strip().lower() if isinstance(impl, str) and impl.strip() else "sdpa"
-        is_flash = resolved in _FLASH_IMPL_NAMES
-        return (not is_flash) if negate else is_flash
+        return _resolve_flash_predicate(test, self.config)
 
     def statements(
         self, statements: list[ast.stmt], *, condition: str | None = None
@@ -3590,6 +3597,7 @@ def _forward_operations_from_forward(
         step_predecessors=dict(extractor.step_predecessors),
         step_predecessor_args=dict(extractor.step_predecessor_args),
         step_predecessor_ordinals=dict(extractor.step_predecessor_ordinals),
+        step_output_names=dict(extractor.step_output_names),
         return_slots=return_slots,
         return_order=return_order,
         primary_return_slot=primary_return_slot,
@@ -3658,6 +3666,7 @@ def expand_class_forward_dataflow(
     cls.forward_step_predecessors = dict(analysis.step_predecessors)
     cls.forward_step_predecessor_args = dict(analysis.step_predecessor_args)
     cls.forward_step_predecessor_ordinals = dict(analysis.step_predecessor_ordinals)
+    cls.forward_step_output_names = dict(analysis.step_output_names)
     cls.forward_operations = _refine_forward_operation_predecessors(
         forward,
         cls.forward_operations,
@@ -3714,6 +3723,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         forward_step_predecessors: dict[str, tuple[str, ...]] = {}
         forward_step_predecessor_args: dict[str, dict[str, str]] = {}
         forward_step_predecessor_ordinals: dict[str, dict[str, int]] = {}
+        forward_step_output_names: dict[str, list[str]] = {}
         forward_return_slots: dict[str, str] = {}
         forward_return_order: list[str] = []
         primary_return_slot: str | None = None
@@ -3790,6 +3800,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     forward_step_predecessor_ordinals = dict(
                         analysis.step_predecessor_ordinals
                     )
+                    forward_step_output_names = dict(analysis.step_output_names)
                     forward_loop_carried = list(analysis.loop_carried)
                     (
                         forward_calls,
@@ -3853,6 +3864,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     forward_step_predecessor_ordinals = dict(
                         analysis.step_predecessor_ordinals
                     )
+                    forward_step_output_names = dict(analysis.step_output_names)
                     forward_loop_carried = list(analysis.loop_carried)
                     module_calls = _module_calls_for_forward_merge(
                         forward_calls,
@@ -3900,6 +3912,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     forward_step_predecessor_ordinals = dict(
                         probed.step_predecessor_ordinals
                     )
+                    forward_step_output_names = dict(probed.step_output_names)
                     forward_loop_carried = list(probed.loop_carried)
                     module_calls = _module_calls_for_forward_merge(
                         forward_calls,
@@ -3949,6 +3962,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             forward_step_predecessors=forward_step_predecessors,
             forward_step_predecessor_args=forward_step_predecessor_args,
             forward_step_predecessor_ordinals=forward_step_predecessor_ordinals,
+            forward_step_output_names=forward_step_output_names,
             single_op_methods=single_op_methods,
             multi_op_methods=multi_op_methods,
             forward_return_slots=forward_return_slots,
@@ -4554,6 +4568,131 @@ def _enrich_kernel_import_details(
             ]
 
 
+def _resolve_flash_predicate(
+    test: ast.expr, config: dict[str, Any] | None
+) -> bool | None:
+    """Evaluate ``is_flash_attention_requested(config)`` from the checkpoint.
+
+    Module-level twin of ``_ForwardOperationExtractor._resolve_flash_request_predicate``
+    so passes that only hold a ``config`` dict (not the extractor) can resolve the
+    same predicate. Returns the boolean the predicate evaluates to, or ``None`` when
+    *test* is not one of these flash-request predicates. General: keys off the shared
+    transformers predicate name, not any model.
+    """
+    node = test
+    negate = False
+    while isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        negate = not negate
+        node = node.operand
+    if not isinstance(node, ast.Call):
+        return None
+    if _expr_name(node.func) not in _FLASH_REQUEST_PREDICATES:
+        return None
+    impl = (config or {}).get("_attn_implementation")
+    resolved = impl.strip().lower() if isinstance(impl, str) and impl.strip() else "sdpa"
+    is_flash = resolved in _FLASH_IMPL_NAMES
+    return (not is_flash) if negate else is_flash
+
+
+def _split_resolved_dropped_stmts(
+    stmts: list[ast.stmt], config: dict[str, Any] | None
+) -> tuple[list[ast.stmt], list[ast.stmt]]:
+    """Partition forward statements into the ones that run and the ones dropped.
+
+    Resolves ``if is_flash_attention_requested(config):`` branches from the
+    checkpoint (undecidable branches are conservatively treated as *resolved*, so
+    nothing there is ever mislabelled dead). Only these flash-request predicates
+    are resolved; every other ``If`` keeps both arms as resolved.
+    """
+    resolved: list[ast.stmt] = []
+    dropped: list[ast.stmt] = []
+
+    def walk(body: list[ast.stmt]) -> None:
+        for stmt in body:
+            if isinstance(stmt, ast.If):
+                verdict = _resolve_flash_predicate(stmt.test, config)
+                if verdict is None:
+                    walk(stmt.body)
+                    walk(stmt.orelse)
+                    continue
+                taken = stmt.body if verdict else stmt.orelse
+                untaken = stmt.orelse if verdict else stmt.body
+                dropped.extend(untaken)
+                walk(taken)
+            else:
+                resolved.append(stmt)
+
+    walk(stmts)
+    return resolved, dropped
+
+
+def _loaded_names(stmts: list[ast.stmt]) -> set[str]:
+    names: set[str] = set()
+    for stmt in stmts:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                names.add(node.id)
+    return names
+
+
+def _forward_func_of(cls_node: ast.ClassDef) -> ast.FunctionDef | None:
+    return next(
+        (
+            item
+            for item in cls_node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+
+
+def _flag_unused_interface_inputs(
+    classes: dict[str, ClassStructure],
+    config: dict[str, Any] | None,
+) -> None:
+    """Flag interface inputs a module declares but its selected impl never reads.
+
+    A dispatched-attention module takes packed-attention metadata by keyword
+    (``cu_seqlens``, ``max_seqlen``) that only the flash code path consumes; the
+    default sdpa/eager path ignores some of it. Once ``is_flash_attention_requested``
+    resolves to the non-flash branch, such a parameter is a genuine part of the
+    module's *interface* yet dead in *this* implementation. Rather than fabricate a
+    live data edge for it, drop it from the wired kernel inputs and record it as an
+    ``unused_interface_inputs`` detail so the graph stays honest about the interface.
+
+    General: keys off forward-signature params referenced only in dropped branches,
+    for any config-dispatched attention module — no model or parameter names baked in.
+    """
+    for cls in classes.values():
+        details = cls.forward_step_details.get(SYNTHETIC_ATTENTION)
+        if not details:
+            continue
+        forward = _forward_func_of(cls.node)
+        if forward is None:
+            continue
+        resolved_stmts, dropped_stmts = _split_resolved_dropped_stmts(
+            forward.body, config
+        )
+        if not dropped_stmts:
+            continue
+        interface = _forward_input_names(forward)
+        referenced_resolved = _loaded_names(resolved_stmts)
+        referenced_dropped = _loaded_names(dropped_stmts)
+        dead = sorted(
+            name
+            for name in interface
+            if name in referenced_dropped and name not in referenced_resolved
+        )
+        if not dead:
+            continue
+        for name in dead:
+            cls.attention_inputs.pop(name, None)
+        cls.forward_step_details[SYNTHETIC_ATTENTION] = [
+            *details,
+            f"unused_interface_inputs: {','.join(dead)}",
+        ]
+
+
 def _resolve_dispatched_attention_kernel(
     classes: dict[str, ClassStructure],
     config: dict[str, Any] | None,
@@ -4759,6 +4898,12 @@ def attention_kernel_details(
         lines = [f"kernel: {kernel}"]
         if attention_inputs:
             lines.append(f"inputs: {','.join(attention_inputs.keys())}")
+        # Interface inputs the module declares but this resolved kernel never reads
+        # (e.g. ``max_seqlen`` under sdpa) are surfaced as a distinct flag rather than
+        # a wired input port — see ``_flag_unused_interface_inputs``.
+        for line in details:
+            if line.startswith("unused_interface_inputs:"):
+                lines.append(line)
         return lines
 
     return []
@@ -4768,7 +4913,9 @@ def _capture_attention_inputs(
     node: ast.AST,
     var_chains: dict[str, list[str]],
     attention_inputs: dict[str, list[str]],
+    forward_input_names: set[str] | None = None,
 ) -> None:
+    forward_input_names = forward_input_names or set()
     for call in ast.walk(node):
         if not isinstance(call, ast.Call):
             continue
@@ -4788,6 +4935,24 @@ def _capture_attention_inputs(
             chain = var_chains.get(arg.id, [])
             if chain:
                 attention_inputs[arg.id] = list(chain)
+        # Packed-attention metadata (``cu_seq_lens_q=cu_seqlens``,
+        # ``max_length_q=max_seqlen``) reaches the kernel by keyword and is a real
+        # kernel input, but it arrives as a forward parameter of the attention
+        # module (empty provenance chain) rather than a prior op — the positional
+        # scan above misses both facts. Record such keyword tensor arguments so the
+        # kernel declares them as input ports; the empty chain marks a boundary
+        # forward input that the cross-module predecessor pass threads back to its
+        # producer. General: any attention-interface keyword whose value is a
+        # module forward input or a prior-step tensor.
+        for keyword in call.keywords:
+            value = keyword.value
+            if not isinstance(value, ast.Name):
+                continue
+            chain = var_chains.get(value.id, [])
+            if chain:
+                attention_inputs[value.id] = list(chain)
+            elif value.id in forward_input_names:
+                attention_inputs.setdefault(value.id, [])
         return
 
 
@@ -5236,7 +5401,9 @@ def _walk_forward_stmt(
             attention_inputs,
             forward_step_details,
         )
-        _capture_attention_inputs(node, var_chains, attention_inputs)
+        _capture_attention_inputs(
+            node, var_chains, attention_inputs, forward_input_names
+        )
         _capture_call_side_inputs(
             node, var_chains, forward_input_names, side_inputs, calls
         )
@@ -5256,7 +5423,9 @@ def _walk_forward_stmt(
             attention_inputs,
             forward_step_details,
         )
-        _capture_attention_inputs(node, var_chains, attention_inputs)
+        _capture_attention_inputs(
+            node, var_chains, attention_inputs, forward_input_names
+        )
         _capture_call_side_inputs(
             node, var_chains, forward_input_names, side_inputs, calls
         )
@@ -5276,7 +5445,9 @@ def _walk_forward_stmt(
             attention_inputs,
             forward_step_details,
         )
-        _capture_attention_inputs(node, var_chains, attention_inputs)
+        _capture_attention_inputs(
+            node, var_chains, attention_inputs, forward_input_names
+        )
         _capture_call_side_inputs(
             node, var_chains, forward_input_names, side_inputs, calls
         )
@@ -5313,7 +5484,9 @@ def _walk_forward_stmt(
             attention_inputs,
             forward_step_details,
         )
-        _capture_attention_inputs(node, var_chains, attention_inputs)
+        _capture_attention_inputs(
+            node, var_chains, attention_inputs, forward_input_names
+        )
         _capture_call_side_inputs(
             node, var_chains, forward_input_names, side_inputs, calls
         )
@@ -6088,6 +6261,7 @@ def analyze_source(
     finalize_class_registry(visitor.classes)
     _enrich_kernel_import_details(visitor.classes, external_imports)
     _resolve_dispatched_attention_kernel(visitor.classes, config)
+    _flag_unused_interface_inputs(visitor.classes, config)
 
     decoder = _pick_decoder_class(visitor.classes)
     causal_lm = _pick_causal_lm_class(visitor.classes)
