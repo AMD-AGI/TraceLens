@@ -264,7 +264,12 @@ def annotate_nodes_with_shapes(
                     for attr in metadata.get("attrs", [])
                     if attr.get("key") not in {"shape", "tensor_shape", "dtype"}
                 ] + [
-                    {"key": "shape", "value": format_shape(port_spec)},
+                    # Keep the ``shape`` field dtype-qualified, matching
+                    # ``_apply_shape_attrs``/``_apply_multi_port_shape_attrs``.
+                    # ``group_boundary_shapes`` reads this value for an expandable
+                    # module's ``output_shape`` layer attribute, so dropping the
+                    # dtype here left collapsed modules showing shape without type.
+                    {"key": "shape", "value": format_shape_with_dtype(port_spec)},
                     {
                         "key": "tensor_shape",
                         "value": format_shape_tensor(port_spec),

@@ -1017,6 +1017,47 @@ def test_shape_fill_and_boundary_multiple_crossings():
     assert store == {"g": ["x"]}
 
 
+def test_group_output_boundary_shape_keeps_dtype():
+    """An expandable module's ``output_shape`` layer attribute carries dtype.
+
+    ``annotate_nodes_with_shapes`` rebuilds an ``@output`` boundary's per-port
+    metadata from the producer feeding each port. That ``shape`` field must stay
+    dtype-qualified (like every other shape-application path) because
+    ``group_boundary_shapes`` reads it for the collapsed module's
+    ``output_shape`` -- otherwise a collapsed module shows shape without type.
+    """
+    nodes = [
+        {"id": "mod/producer", "label": "RMSNorm"},
+        {
+            "id": "mod/@output",
+            "label": "Output",
+            "namespace": "decoder/mod",
+            "attrs": [{"key": "synthetic", "value": "@output"}],
+            "incomingEdges": [
+                {"sourceNodeId": "mod/producer", "targetNodeInputId": "0"}
+            ],
+            "outputsMetadata": [
+                {"id": "0", "attrs": [{"key": "port_label", "value": "hidden_states"}]}
+            ],
+        },
+    ]
+    shapes.annotate_nodes_with_shapes(
+        nodes,
+        {
+            "mod/producer": TensorSpec(("B", "S", "H"), "bfloat16"),
+            "mod/@output": TensorSpec(("B", "S", "H"), "bfloat16"),
+        },
+        id_prefix="",
+    )
+    port = nodes[1]["outputsMetadata"][0]
+    port_attrs = {attr["key"]: attr["value"] for attr in port["attrs"]}
+    assert port_attrs["shape"] == "[B, S, H] bfloat16"
+    assert port_attrs["dtype"] == "bfloat16"
+
+    boundary = shapes.group_boundary_shapes(nodes)
+    assert boundary["decoder/mod"]["output_shape"] == "[B, S, H] bfloat16"
+
+
 def test_fill_missing_node_shapes_cast_resolves_downcast_dtype():
     # A residual-mix `.to(dtype)` cast fed a float32 HyperConnection output must
     # render as a genuine float32 -> float16 downcast, not a float32 no-op.
