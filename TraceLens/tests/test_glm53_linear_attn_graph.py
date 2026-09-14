@@ -1469,6 +1469,49 @@ def test_glm53_vision_attention_flags_impl_dead_interface_input():
     assert "unused_interface_inputs: max_seqlen" in details
 
 
+def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
+    """The ``cu_seqlens`` producer is a visible node wired into the kernel.
+
+    ``Glm5NextVisionModel.forward`` computes packed-attention metadata via
+    ``get_vision_attention_seqlens(...)`` *before* the block loop and hands the
+    result to each block's attention as the ``cu_seqlens`` keyword. That producer
+    must render as its own node and its output must reach the attention kernel
+    across the loop-body boundary — not be dropped (which would leave the kernel
+    port sourced from a raw model input) nor stripped as a dangling leaf.
+
+    General: a boundary attention input (empty provenance chain) becomes a kernel
+    ``param_inputs`` entry, giving the caller's predecessor edge a docking point;
+    the kernel-input port then names the crossing boundary after the tensor.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    nodes = graph["nodes"]
+
+    _assert_export_is_acyclic(nodes)
+
+    node_by_id = {node["id"]: node for node in nodes}
+
+    # The free-function producer renders as a visible node (not stripped).
+    producer_id = (
+        "visual/seq:0:@fn_l1840_get_vision_attention_seqlens:"
+        "@fn_l1840_get_vision_attention_seqlens:0"
+    )
+    assert producer_id in node_by_id
+
+    # Its output crosses the block-loop boundary named after the tensor it feeds
+    # (``cu_seqlens``), not a generic ``hidden_states_2`` fallback.
+    cu_mirror = node_by_id["visual/@input_mirror:cu_seqlens^cu_seqlens"]
+    assert [e["sourceNodeId"] for e in cu_mirror["incomingEdges"]] == [producer_id]
+
+    # The kernel's cu_seqlens input port is fed through that boundary, and the
+    # crossing carries no back edge.
+    cu_port = node_by_id["visual/@kernel_in:45:cu_seqlens"]
+    assert [e["sourceNodeId"] for e in cu_port["incomingEdges"]] == [
+        "visual/@input:cu_seqlens"
+    ]
+
+
 def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
     """The 3-way ``q, k, v = qkv(h)...unbind(0)`` fans out into three ports.
 
@@ -1499,9 +1542,30 @@ def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
     }
     assert {"query_states", "key_states", "value_states"} <= split_labels
 
-    q_split = node_by_id["visual/@split_out:20:query_states"]
-    k_split = node_by_id["visual/@split_out:20:key_states"]
-    v_split = node_by_id["visual/@split_out:20:value_states"]
+    # Locate the qkv unbind group (the one fanning out all three slots) without
+    # hardcoding its graph index, which shifts as sibling nodes are added.
+    def _vision_split(slot: str) -> dict:
+        candidates = [
+            node
+            for node in nodes
+            if node["id"].endswith(f":{slot}")
+            and "@split_out:" in node["id"]
+            and "VisionAttention" in node.get("namespace", "")
+        ]
+        prefixes = {node["id"].rsplit(":", 1)[0] for node in candidates}
+        full_group = next(
+            prefix
+            for prefix in prefixes
+            if all(
+                f"{prefix}:{name}" in node_by_id
+                for name in ("query_states", "key_states", "value_states")
+            )
+        )
+        return node_by_id[f"{full_group}:{slot}"]
+
+    q_split = _vision_split("query_states")
+    k_split = _vision_split("key_states")
+    v_split = _vision_split("value_states")
 
     # Each norm's input boundary reads its own slot — k_norm no longer docks to
     # query_states.

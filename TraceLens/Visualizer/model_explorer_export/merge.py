@@ -943,6 +943,13 @@ def _entry_bucket_label(
         )
         if parameter and external_count == 1:
             return parameter
+    # A kernel input port (``@kernel_port_in``) names the exact tensor it
+    # carries into the kernel (``cu_seqlens``). When such a port is the group's
+    # entry for an outside producer, that label names the boundary far better
+    # than a generic ``hidden_states_2`` fallback.
+    for node in entries:
+        if _node_attr(node, "synthetic") == "@kernel_port_in" and node.get("label"):
+            return node["label"]
     return None
 
 

@@ -2011,6 +2011,20 @@ def build_block_node(
                 if output_node is not None:
                     child_nodes.append(output_node)
             else:
+                # A boundary attention input (empty provenance chain) is a
+                # forward parameter fed straight to the kernel from an enclosing
+                # scope — e.g. ``cu_seqlens`` produced before the block loop.
+                # Declaring it as a ``param_inputs`` entry gives the kernel a
+                # dedicated pipeline entry point so the caller's predecessor edge
+                # (``@fn_..._get_vision_attention_seqlens -> @attention``) docks
+                # on the kernel instead of being dropped onto the block's head
+                # norm (which the guard in section 1b would then skip, leaving
+                # the producer dangling and stripped).
+                boundary_inputs = [
+                    port
+                    for port, chain in cls.attention_inputs.items()
+                    if not chain
+                ]
                 child_nodes.append(
                     _leaf_node(
                         attr_name=call_attr,
@@ -2020,6 +2034,7 @@ def build_block_node(
                         details=attention_kernel_details(
                             child_details, cls.attention_inputs
                         ),
+                        param_inputs=boundary_inputs,
                         basic=False,
                     )
                 )
