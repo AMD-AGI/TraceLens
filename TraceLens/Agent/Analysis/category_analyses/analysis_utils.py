@@ -648,6 +648,13 @@ def build_operation_metrics(
                 op_metric["fusion_flagged"] = True
                 op_metric["fusion_candidate_name"] = matched
 
+        # After fusion_flagged is set: the ladder reads it to skip fused rows.
+        score = _row_impact_score(op_metric, e2e_ms_total, comparison_scope)
+        op_metric["impact_score"] = round(score["impact_score"], 2) if score else None
+        op_metric["impact_estimate_method"] = (
+            score["impact_estimate_method"] if score else None
+        )
+
         cs_raw = row.get("call_stack_full")
         cs_str = "" if cs_raw is None or pd.isna(cs_raw) else str(cs_raw)
 
@@ -679,6 +686,44 @@ def build_operation_metrics(
             op.pop("_raw_call_stack", None)
 
     return operations
+
+
+def _row_impact_score(
+    op: dict, baseline_ms: float, comparison_scope: str
+) -> Optional[dict]:
+    """Per-op impact ladder: the single owner of which estimate method applies.
+
+    Returns ``{"impact_score", "impact_estimate_method"}`` (unrounded mid + method)
+    or ``None`` when no method applies. The ``min_impact_score`` noise floor and the
+    low/high band spread are envelope concerns of the caller, not the ladder: a row
+    may legitimately carry a sub-floor score. The mid is unrounded so callers derive
+    the band from it exactly (``low``/``high`` are fixed ratios of the mid).
+    """
+    if op.get("fusion_flagged"):
+        return None
+    time_ms = op.get("time_ms", 0)
+    if time_ms <= 0:
+        return None
+
+    eff = op.get("efficiency", {})
+    eff_pct = eff.get("efficiency_percent")
+    if eff_pct is not None and not eff.get("is_anomaly") and baseline_ms > 0:
+        gap_mid = (TARGET_MID / TARGET_HIGH) * max(0, 1 - eff_pct / TARGET_HIGH)
+        return {
+            "impact_score": gap_mid * time_ms / baseline_ms * 100,
+            "impact_estimate_method": "quantified",
+        }
+
+    if comparison_scope == "standalone":
+        pct = op.get("percent_of_total")
+        if pct is None or pct <= 0:
+            return None
+        return {
+            "impact_score": pct * HEURISTIC_FRACTION_MID,
+            "impact_estimate_method": "heuristic",
+        }
+
+    return None
 
 
 def compute_impact_estimates(
@@ -733,25 +778,19 @@ def compute_impact_estimates(
 
     estimates = []
     for op in operations:
-        if op.get("fusion_flagged"):
+        score = _row_impact_score(
+            op, baseline_ms if baseline_ok else 0, comparison_scope
+        )
+        if score is None:
             continue
-        time_ms = op.get("time_ms", 0)
-        if time_ms <= 0:
-            continue
-        eff = op.get("efficiency", {})
-        eff_pct = eff.get("efficiency_percent")
-
-        if eff_pct is not None and not eff.get("is_anomaly") and baseline_ok:
-            gap_high = max(0, 1 - eff_pct / TARGET_HIGH)
-            gap_low = (TARGET_LOW / TARGET_HIGH) * gap_high
-            gap_mid = (TARGET_MID / TARGET_HIGH) * gap_high
-
-            impact_score_high = gap_high * time_ms / baseline_ms * 100
-            impact_score_low = gap_low * time_ms / baseline_ms * 100
-            impact_score_mid = gap_mid * time_ms / baseline_ms * 100
-
+        impact_score_mid = score["impact_score"]
+        time_ms = op["time_ms"]
+        if score["impact_estimate_method"] == "quantified":
+            impact_score_high = impact_score_mid * (TARGET_HIGH / TARGET_MID)
+            impact_score_low = impact_score_mid * (TARGET_LOW / TARGET_MID)
             if impact_score_high < min_impact_score:
                 continue
+            eff = op.get("efficiency", {})
             estimates.append(
                 {
                     "operation": op.get("name", "Unknown"),
@@ -761,28 +800,21 @@ def compute_impact_estimates(
                     "impact_score": round(impact_score_mid, 2),
                     "impact_score_low": round(impact_score_low, 2),
                     "impact_score_high": round(impact_score_high, 2),
-                    "efficiency_pct": round(eff_pct, 2),
+                    "efficiency_pct": round(eff.get("efficiency_percent"), 2),
                     "bound_type": eff.get("bound_type"),
                     "library": op.get("library"),
                     "time_ms": round(time_ms, 3),
                 }
             )
-        # Heuristic fallback, NOT the default path: reached only when the
-        # quantified branch above did not apply -- i.e. the op has no perf model
-        # (efficiency_percent is None), its efficiency is anomalous, or baseline_ms
-        # was non-positive. Standalone only; comparative efficiency is a t2/t1
-        # ratio, not a roofline gap.
-        elif comparison_scope == "standalone":
-            pct = op.get("percent_of_total")
-            if pct is None or pct <= 0:
-                continue
+        else:
+            pct = op["percent_of_total"]
             estimates.append(
                 {
                     "operation": op.get("name", "Unknown"),
                     "category": category,
                     "type": "unmodeled_significant",
                     "estimate_method": "heuristic",
-                    "impact_score": round(pct * HEURISTIC_FRACTION_MID, 2),
+                    "impact_score": round(impact_score_mid, 2),
                     "impact_score_low": round(pct * HEURISTIC_FRACTION_LOW, 2),
                     "impact_score_high": round(pct * HEURISTIC_FRACTION_HIGH, 2),
                     "efficiency_pct": None,

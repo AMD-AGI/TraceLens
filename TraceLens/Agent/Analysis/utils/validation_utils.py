@@ -930,10 +930,11 @@ class MarkerValidator:
     KIND_ATTR_RE = re.compile(r"\bkind=(\w+)\b")
     ATTR_RE = re.compile(r"\b(\w+)=([^\s]+)")
 
-    KNOWN_KINDS = {"p_item", "detail_estimate", "top_ops"}
+    KNOWN_KINDS = {"p_item", "detail_estimate", "top_ops", "op_row"}
     REQUIRED_ATTRS_BY_KIND = {
         "p_item": ("low", "mid", "high"),
         "detail_estimate": ("low", "high"),
+        "op_row": ("rank", "impacts"),
     }
     # Compute findings files that do NOT need a p_item marker.
     COMPUTE_NO_P_ITEM: set = set()
@@ -1012,6 +1013,37 @@ class MarkerValidator:
                 f"{rel}: {n_headings} ### P<N>: headings but {n_markers} kind=p_item markers"
             )
         errors.extend(cls._check_detail_estimate_per_candidate(text, rel))
+        errors.extend(cls._check_op_row_csv_count(text, rel))
+        return errors
+
+    @classmethod
+    def _check_op_row_csv_count(cls, text, rel):
+        """Each compute candidate's kind=op_row marker must carry one CSV
+        impact per data-table row (alignment is the reader's job, not this).
+        """
+        lines = text.splitlines()
+        errors = []
+        for start, end in _iter_compute_candidate_blocks(text):
+            table = _find_data_table(lines, start, end)
+            if table is None:
+                continue
+            n_rows = sum(1 for _ in table[2])
+            block = "\n".join(lines[start:end])
+            for m in cls.BEGIN_RE.finditer(block):
+                inner = m.group(1)
+                km = cls.KIND_ATTR_RE.search(inner)
+                if not km or km.group(1) != "op_row":
+                    continue
+                im = re.search(r"impacts=(\S.*?)(?:\s+\w+=|\s*-->|\s*$)", inner)
+                impacts = im.group(1).strip() if im else ""
+                n_csv = (
+                    len([v for v in impacts.split(",") if v.strip()]) if impacts else 0
+                )
+                if n_csv != n_rows:
+                    errors.append(
+                        f"{rel}: kind=op_row has {n_csv} impacts but "
+                        f"the Data table has {n_rows} rows"
+                    )
         return errors
 
     @classmethod

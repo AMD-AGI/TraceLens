@@ -1088,6 +1088,72 @@ def test_check_marker_reasoning_candidates_no_subsections(tmp_path):
     assert "No Detailed Analysis" in rows[0]["details"]
 
 
+def _op_row_report(impacts):
+    return (
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### Kernel P1: First\n"
+        "**Data:**\n"
+        "| Operation | Time (ms) |\n"
+        "|-----------|-----------|\n"
+        "| op_a | 1.0 |\n"
+        "| op_b | 2.0 |\n"
+        f"<!-- impact-begin kind=op_row rank=1 impacts={impacts} -->\n"
+        "<!-- impact-end -->\n"
+    )
+
+
+def test_check_marker_op_rows_complete(tmp_path):
+    out = _write_report(tmp_path, _op_row_report("3.2,1.1"))
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "PASS"
+
+
+def test_check_marker_op_rows_count_mismatch(tmp_path):
+    out = _write_report(tmp_path, _op_row_report("3.2"))
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "FAIL"
+    assert "1 impacts" in rows[0]["details"] and "2 rows" in rows[0]["details"]
+
+
+def test_check_marker_op_rows_missing_attr(tmp_path):
+    text = (
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### Kernel P1: First\n"
+        "**Data:**\n"
+        "| Operation | Time (ms) |\n"
+        "|-----------|-----------|\n"
+        "| op_a | 1.0 |\n"
+        "<!-- impact-begin kind=op_row rank=1 -->\n"
+        "<!-- impact-end -->\n"
+    )
+    out = _write_report(tmp_path, text)
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "FAIL"
+    assert "impacts" in rows[0]["details"]
+
+
+def test_check_marker_op_rows_unpaired(tmp_path):
+    text = (
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### Kernel P1: First\n"
+        "**Data:**\n"
+        "| Operation | Time (ms) |\n"
+        "|-----------|-----------|\n"
+        "| op_a | 1.0 |\n"
+        "<!-- impact-begin kind=op_row rank=1 impacts=3.2 -->\n"
+    )
+    out = _write_report(tmp_path, text)
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "FAIL"
+    assert "Unpaired" in rows[0]["details"]
+
+
+def test_check_marker_op_rows_none_present(tmp_path):
+    out = _write_report(tmp_path, "## Executive Summary\nx\n")
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "PASS"
+
+
 # ---------------------------------------------------------------------------
 # run_post_processing: pure scalar helpers
 # ---------------------------------------------------------------------------
