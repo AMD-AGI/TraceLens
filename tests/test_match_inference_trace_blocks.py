@@ -39,9 +39,9 @@ import sys
 import pandas as pd
 import pytest
 
-from TraceLens.TraceUtils import match_inference_trace_blocks as match
+from TraceLens.TraceUtils.trace_matcher import match_inference_trace_blocks as match
 from TraceLens.TraceUtils.annotation_utils import ITERATION_PATTERNS
-from TraceLens.TraceUtils.split_inference_trace_annotation import (
+from TraceLens.TraceUtils.util import (
     extract_and_save,
     preprocess_trace,
 )

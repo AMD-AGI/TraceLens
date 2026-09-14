@@ -23,11 +23,11 @@ from statistics import median
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..annotation_utils import PROVENANCE_KEY, name_skeleton
-
-# Projections *enclose* the kernels they describe, so summing GPU time over both
-# double-counts. Kept apart here and recombined by consumers that want both.
-GPU_KERNEL_CATEGORIES = ("kernel", "gpu_memcpy", "gpu_memset")
-PROJECTION_CATEGORY = "gpu_user_annotation"
+from ...util import (
+    GPU_EVENT_CATEGORIES,
+    GPU_KERNEL_CATEGORIES,
+    PROJECTION_CATEGORY,
+)
 
 # Coverage to accept roots outright, and the floor below which a trace is
 # unsplittable rather than degraded.

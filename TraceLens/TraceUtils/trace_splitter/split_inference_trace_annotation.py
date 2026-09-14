@@ -159,8 +159,8 @@ import os
 
 import pandas as pd
 
-from ..util import DataLoader
-from .annotation_utils import (
+from ...util import DataLoader
+from ..annotation_utils import (
     ITERATION_BACKUP_PATTERNS,  # noqa: F401
     ITERATION_PATTERNS,  # noqa: F401
     IterationAnnotation,
@@ -173,26 +173,28 @@ SERVING_KINDS = {
 }
 
 # Re-exports for tests and downstream callers.
-from .split_inference import (  # noqa: F401
+from . import (  # noqa: F401
     DetectStatus,
     build_cpu_event_index,
     build_root_tiles,
     classify_phases_from_batch_sizes,
     divide_phases_and_save,
     collect_ancestor_events,
-    extract_and_save,
     extract_iteration,
     extract_phases_and_save,
     find_iteration_roots,
     find_steady_state_generic,
     find_steady_state_inference,
     find_steady_state_inference_from_shapes,
-    get_filename,
     infer_batch_sizes_from_shapes,
     parse_range,
+)
+from ..util import (  # noqa: F401
+    extract_and_save,
+    get_filename,
     preprocess_trace,
 )
-from .split_inference.detect_utils import GPU_KERNEL_CATEGORIES
+from ...util import GPU_KERNEL_CATEGORIES
 
 MANIFEST_NAME = "split_manifest.json"
 

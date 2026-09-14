@@ -18,7 +18,7 @@ from TraceLens.TraceUtils.annotation_utils import (
     name_skeleton,
     parse_annotation,
 )
-from TraceLens.TraceUtils.split_inference import (
+from TraceLens.TraceUtils.trace_splitter import (
     DetectStatus,
     PhaseConfidence,
     build_root_tiles,
@@ -26,13 +26,13 @@ from TraceLens.TraceUtils.split_inference import (
     find_iteration_roots,
     preprocess_trace,
 )
-from TraceLens.TraceUtils.split_inference.detect_utils import (
+from TraceLens.TraceUtils.trace_splitter.detect_utils import (
     COVERAGE_GATE,
     GpuAttribution,
     IntervalIndex,
     group_by_thread,
 )
-from TraceLens.TraceUtils.split_inference.root_detection import (
+from TraceLens.TraceUtils.trace_splitter.root_detection import (
     build_families,
     collect_annotations,
 )

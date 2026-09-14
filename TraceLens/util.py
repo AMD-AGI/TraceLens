@@ -26,6 +26,10 @@ from typing import List, Dict, Callable, Iterable, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
+GPU_KERNEL_CATEGORIES = ("kernel", "gpu_memcpy", "gpu_memset")
+PROJECTION_CATEGORY = "gpu_user_annotation"
+GPU_EVENT_CATEGORIES = [*GPU_KERNEL_CATEGORIES, PROJECTION_CATEGORY]
+
 
 # Benign native XLA logs (id > INT_MAX, from packed HLO instruction ids in xprof
 # 2.20.1). Emitted to fd 2 before absl init, so only filterable at the fd level.

@@ -36,7 +36,7 @@ CLASS_ROUTES = [
     (r"PseudoOp|MLA|TraceToTree|Trace2Tree", "test_pseudo_ops_extension.py"),
     (r"TraceDiff|Tracediff|tracediff", "test_tracediff.py"),
     (
-        r"SplitAnnotation|split_inference|CaptureMerge|GraphCapture",
+        r"SplitAnnotation|trace_splitter|CaptureMerge|GraphCapture",
         "test_split_inference_trace_annotation.py",
     ),
     (r"CompareTraces|JaxLlama", "test_compare_traces_jax_llama.py"),
@@ -100,7 +100,7 @@ METHOD_ROUTES = [
     (r"TraceDiff|trace_diff|tracediff", "test_tracediff.py"),
     (r"TraceToTree|trace_to_tree|pseudo_ops|JaxTraceToTree", "test_trace2tree.py"),
     (
-        r"split_inference|annotation_utils|inference_iteration",
+        r"trace_splitter|annotation_utils|inference_iteration",
         "test_split_inference_trace_annotation.py",
     ),
     (

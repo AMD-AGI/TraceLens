@@ -16,7 +16,7 @@ from TraceLens.Trace2Tree.inference_iteration_roots import (
     _find_repeating_period,
     _reattach_worker_threads,
 )
-from TraceLens.TraceUtils.split_inference.root_detection import (
+from TraceLens.TraceUtils.trace_splitter.root_detection import (
     _total_gpu_time,
     detect_from_branch_descent,
 )

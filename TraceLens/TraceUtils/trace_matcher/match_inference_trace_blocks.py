@@ -50,7 +50,7 @@ from typing import List, Optional, Tuple
 import pandas as pd
 
 from TraceLens.util import DataLoader
-from .annotation_utils import (
+from ..annotation_utils import (
     PHASE_DECODE_ONLY,
     PHASE_PREFILLDECODE,
     PHASE_PREFILL_ONLY,
@@ -60,7 +60,7 @@ from .annotation_utils import (
     find_phase_from_window,
     iteration_details,
 )
-from TraceLens.TraceUtils.split_inference_trace_annotation import (
+from ..util import (
     extract_and_save,
     get_filename,
     preprocess_trace,

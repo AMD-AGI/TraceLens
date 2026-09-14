@@ -4,12 +4,11 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Stage 3: preprocess traces, extract iteration windows, and write output files."""
+"""Stage 3: extract iteration windows and write output files."""
 
 import gzip
 import json
 import os
-import zipfile
 from bisect import bisect_left, bisect_right
 from collections import Counter
 
@@ -17,64 +16,14 @@ from tqdm import tqdm
 
 from ...util import most_common_first_dim
 from ..annotation_utils import (
-    ITERATION_BACKUP_PATTERNS,
-    ITERATION_PATTERNS,
     find_phase_from_window,
     has_context,
     has_generation,
     is_decode_only,
     iteration_details,
 )
-
-from .detect_utils import (
-    GPU_KERNEL_CATEGORIES,
-    PROJECTION_CATEGORY,
-    build_root_tiles,
-)
-
-# Kernels plus the annotation projections that describe them. Anything summing
-# GPU *time* must use GPU_KERNEL_CATEGORIES instead, since a projection encloses
-# the kernels it describes and counting both double-counts.
-GPU_EVENT_CATEGORIES = [*GPU_KERNEL_CATEGORIES, PROJECTION_CATEGORY]
-
-
-def get_filename(filepath: str) -> dict:
-    """Load trace JSON from file (.json, .json.gz, or .zip)."""
-    print(f"Loading trace: {filepath}")
-    if filepath.endswith(".zip"):
-        with zipfile.ZipFile(filepath, "r") as zf:
-            # Find the JSON file inside the zip
-            json_files = [f for f in zf.namelist() if f.endswith(".json")]
-            if not json_files:
-                raise ValueError(f"No .json file found in {filepath}")
-            json_file = json_files[0]
-            print(f"  Reading {json_file} from zip...")
-            return json_file
-    return filepath
-
-
-def preprocess_trace(events: list[dict]):
-    gpu_corr_map = {}
-    flow_corr_map = {}
-    meta_events = []
-    for e in tqdm(events):
-        ts = e.get("ts")
-        ph = e.get("ph")
-        cat = e.get("cat")
-        if ts is None:
-            meta_events.append(e)
-            continue
-        if ph in ("s", "f"):
-            corr = e.get("id")
-            if corr is not None:
-                flow_corr_map.setdefault(corr, []).append(e)
-            continue
-        if cat in GPU_EVENT_CATEGORIES:
-            corr = e.get("args", {}).get("correlation")
-            if corr is not None:
-                gpu_corr_map.setdefault(corr, []).append(e)
-            continue
-    return gpu_corr_map, flow_corr_map, meta_events
+from ...util import GPU_EVENT_CATEGORIES
+from .detect_utils import build_root_tiles
 
 
 def build_cpu_event_index(
@@ -303,136 +252,6 @@ def parse_range(range_str: str, max_len: int) -> tuple[int, int]:
     return start, min(end, max_len)
 
 
-def extract_and_save(
-    roots: list[list[dict]],
-    events: list[dict],
-    trace_json: dict,
-    output_dir: str,
-    base_name: str,
-    prefix: str,
-    start: int,
-    end: int,
-    gpu_corr_map: dict,
-    flow_corr_map: dict,
-    meta_events: list[dict],
-    output_label: str | None = None,
-    root_tiles: dict | None = None,
-    llm_inference: bool = False,
-):
-    """Extract and save a range of iterations.
-
-    If ``output_label`` is provided the output filename becomes
-    ``{output_label}_{name_append}_{base_name}.json.gz`` instead of the
-    default ``{base_name}_{prefix}_{idx}_{name_append}.json.gz``.
-
-    ``root_tiles`` should be built over the whole root list so that a root at the
-    edge of a selected window still knows where its successor begins.
-    """
-    extraction_summary = []
-    if len(roots) == 0 or len(roots[0]) == 0:
-        print(f"No {prefix} events found in the specified range, skipping extraction")
-        return extraction_summary
-    selected = roots[start:end]
-    indices = range(start, end)
-    if len(selected) == 0:
-        print(f"No {prefix} events found in the specified range, skipping extraction")
-        return extraction_summary
-    cpu_idx = build_cpu_event_index(events)
-    for idx, root in zip(indices, selected):
-        iter_details = iteration_details(root)
-        iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = extract_iteration(
-            root,
-            events,
-            trace_json,
-            gpu_corr_map,
-            flow_corr_map,
-            meta_events,
-            root_tiles=root_tiles,
-            cpu_event_index=cpu_idx,
-        )
-        is_annotation = "iteration" in prefix
-        # Use the structured phase-aware name for any annotation extraction
-        # produced by the steady-state code paths (output_label is set), and
-        # for any multi-step annotation window. Single-step annotations from
-        # --store-single-iteration keep their literal step name.
-        is_structured = is_annotation and (output_label is not None or len(root) > 1)
-
-        if (is_structured or not is_annotation) and len(batch_list) == len(
-            iter_details
-        ):
-            for bs, iteration in zip(batch_list, iter_details):
-                iteration["batch_size"] = bs
-
-        phase_details = find_phase_from_window(iter_details)
-
-        if is_structured:
-            name_append = (
-                f"prefill_{phase_details['num_prefill']}"
-                f"_prefilldecode_{phase_details['num_prefilldecode']}"
-                f"_decode_{phase_details['num_decode']}"
-                f"_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
-            )
-        elif is_annotation and len(root) == 1:
-            root_name = root[0]["name"]
-            is_known_annotation = any(
-                pat.match(root_name)
-                for pat in ITERATION_PATTERNS + ITERATION_BACKUP_PATTERNS
-            )
-            if is_known_annotation:
-                name_append = (
-                    root_name.replace("/", "_")
-                    .replace("(", "_")
-                    .replace(")", "")
-                    .replace(":", "")
-                    .replace(" ", "_")
-                )
-            else:
-                name_append = ""
-        else:
-            if len(batch_list) == len(iter_details):
-                name_append = f"batch{int(sum(batch_list)/len(batch_list))}_gpu{prefix}"
-            else:
-                name_append = f"batch_NA_gpu{prefix}"
-
-        if output_label is not None:
-            if llm_inference:
-                out_path = os.path.join(
-                    output_dir, f"{output_label}_{name_append}_{base_name}.json.gz"
-                )
-            else:
-                out_path = os.path.join(
-                    output_dir, f"{output_label}_{base_name}.json.gz"
-                )
-        elif is_annotation and len(root) == 1 and root[0].get("name") in ("warmup", "wrapup"):
-            out_path = os.path.join(
-                output_dir, f"{base_name}_{root[0]['name']}.json.gz"
-            )
-        else:
-            suffix = f"_{name_append}" if name_append else ""
-            out_path = os.path.join(
-                output_dir, f"{base_name}_{prefix}_{idx}{suffix}.json.gz"
-            )
-        with gzip.open(out_path, "wb") as f:
-            f.write(json.dumps(iter_trace).encode("utf-8"))
-
-        print(
-            f"  {prefix} {idx}: {len(iter_trace['traceEvents'])} events -> {out_path}"
-        )
-        extraction_summary.append(
-            {
-                "idx": idx,
-                "output_path": out_path,
-                "event_count": len(iter_trace["traceEvents"]),
-                "num_gpu_events": num_gpu_events,
-                "gpu_duration": gpu_dur,
-                "gpu_busy_duration": gpu_busy,
-                "steps": iter_details,
-                "phase": phase_details,
-            }
-        )
-    return extraction_summary
-
-
 def extract_phases_and_save(
     roots: list[list[dict]],
     events: list[dict],
@@ -541,6 +360,8 @@ def divide_phases_and_save(
     root_tiles: dict | None = None,
     phase_labels: list[str] | None = None,
 ) -> list[dict]:
+    from ..util import extract_and_save
+
     """
     Group contiguous steps of the same phase within steady-state regions and
     save each contiguous run as a single trace file into one of two sub-folders:

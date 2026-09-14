@@ -12,7 +12,7 @@ import zipfile
 
 import pytest
 
-from TraceLens.TraceUtils import split_inference_trace_annotation as split
+from TraceLens.TraceUtils.trace_splitter import split_inference_trace_annotation as split
 from TraceLens.TraceUtils.annotation_utils import (
     PHASE_DECODE_ONLY,
     PHASE_PREFILLDECODE,
@@ -22,7 +22,7 @@ from TraceLens.TraceUtils.annotation_utils import (
     find_phase_from_window,
     ITERATION_PATTERNS,
 )
-from TraceLens.TraceUtils.match_inference_trace_blocks import (
+from TraceLens.TraceUtils.trace_matcher.match_inference_trace_blocks import (
     Block,
     _avg_block_distance,
     _block_steps,
@@ -131,7 +131,7 @@ def test_preprocess_trace_builds_correlation_maps():
 
 
 def test_compute_reference_pd_ratio_uses_largest_region(capsys):
-    from TraceLens.TraceUtils.split_inference.steady_state_window import (
+    from TraceLens.TraceUtils.trace_splitter.steady_state_window import (
         _compute_reference_pd_ratio,
     )
 
