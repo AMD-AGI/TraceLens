@@ -14,6 +14,7 @@ GPU architecture JSON files define specifications used for roofline analysis in 
 {
     "name": "MI300X",
     "mem_bw_gbps": 5300,
+    "mem_latency_us": 0.3,
     "max_achievable_tflops": {
         "matrix_fp16": 654,
         "matrix_bf16": 708,
@@ -36,6 +37,7 @@ GPU architecture JSON files define specifications used for roofline analysis in 
 |-------|-------------|
 | `name` | GPU model name |
 | `mem_bw_gbps` | Memory bandwidth in GB/s |
+| `mem_latency_us` | (Optional) Global HBM access latency floor in microseconds. Enables `LATENCY_BOUND` roofline classification for small transfers. If omitted, roofline falls back to bandwidth-only (`COMPUTE_BOUND` / `MEMORY_BOUND`) and emits a warning. |
 | `max_achievable_tflops` | Max achievable TFLOPS by compute type and precision |
 | `_reference` | (Optional) Source reference for the values |
 
