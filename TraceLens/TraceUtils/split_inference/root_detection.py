@@ -155,6 +155,85 @@ def build_families(
 
 
 # --- steps ------------------------------------------------------------------
+
+
+def _compute_gpu_signature(
+    tree: TraceToTree, block: Sequence[dict],
+) -> List[str]:
+    """Normalized names contributing >50% of GPU time in a representative block.
+
+    Returns the smallest prefix of names (sorted by descending GPU contribution)
+    whose combined GPU time exceeds half the block total.  Used by the bookend
+    promotion step to decide whether a prefix/suffix region is a real iteration.
+    """
+    name_gpu: Dict[str, float] = {}
+    total = 0.0
+    for event in block:
+        gpu = _descendant_gpu_time(tree, [event])
+        norm = normalize_name_for_comparison(event.get("name", ""))
+        name_gpu[norm] = name_gpu.get(norm, 0) + gpu
+        total += gpu
+    if not total:
+        return []
+    sorted_names = sorted(name_gpu.items(), key=lambda x: -x[1])
+    sig: List[str] = []
+    accumulated = 0.0
+    for name, gpu in sorted_names:
+        sig.append(name)
+        accumulated += gpu
+        if accumulated > total * 0.5:
+            break
+    return sig
+
+
+def _matches_gpu_signature(
+    events: Sequence[dict], signature: List[str],
+) -> bool:
+    """True when *signature* names appear as a subsequence in *events*."""
+    names = [normalize_name_for_comparison(e.get("name", "")) for e in events]
+    sig_idx = 0
+    for name in names:
+        if sig_idx < len(signature) and name == signature[sig_idx]:
+            sig_idx += 1
+    return sig_idx == len(signature)
+
+
+def _promote_bookend_iterations(
+    tree: TraceToTree,
+    ordered: Sequence[dict],
+    start: int,
+    unit_blocks: List[List[dict]],
+) -> tuple:
+    """Promote prefix/suffix regions to iteration blocks when they match
+    the GPU signature of the detected iterations.
+
+    Returns ``(unit_blocks, prefix, suffix)`` where *unit_blocks* may have
+    gained entries at the front/back and *prefix*/*suffix* contain only the
+    events that were NOT promoted.
+    """
+    rep_block = unit_blocks[len(unit_blocks) // 2]
+    iter_sig = _compute_gpu_signature(tree, rep_block)
+
+    prefix = list(ordered[:start])
+    blocked_uids = {e.get("UID") for b in unit_blocks for e in b}
+    last_block_end = (
+        unit_blocks[-1][-1]["ts"] + unit_blocks[-1][-1].get("dur", 0)
+    )
+    suffix = [
+        e for e in ordered
+        if e["ts"] >= last_block_end and e.get("UID") not in blocked_uids
+    ]
+
+    if iter_sig and prefix and _matches_gpu_signature(prefix, iter_sig):
+        unit_blocks.insert(0, prefix)
+        prefix = []
+    if iter_sig and suffix and _matches_gpu_signature(suffix, iter_sig):
+        unit_blocks.append(suffix)
+        suffix = []
+
+    return unit_blocks, prefix, suffix
+
+
 def _total_gpu_time(tree: TraceToTree) -> float:
     return sum(
         e.get("dur", 0)
@@ -204,6 +283,9 @@ def detect_from_branch_descent(
             if period is not None:
                 unit_blocks = _blocks_by_pattern(ordered, pattern, start)
                 if len(unit_blocks) >= MIN_LABEL_CHILDREN:
+                    unit_blocks, prefix, suffix = _promote_bookend_iterations(
+                        tree, ordered, start, unit_blocks,
+                    )
                     iteration_roots = []
                     blocked = []
                     for block in unit_blocks:
@@ -217,14 +299,12 @@ def detect_from_branch_descent(
                     cov = iter_gpu_time / total_gpu
                     blocked_uids = {e.get("UID") for e in blocked}
                     before_uids = [
-                        e.get("UID") for e in ordered[:start]
+                        e.get("UID") for e in prefix
                         if e.get("UID") not in blocked_uids
                     ]
-                    last_blocked_ts = blocked[-1]["ts"] + blocked[-1].get("dur", 0)
                     after_uids = [
-                        e.get("UID") for e in ordered
-                        if e["ts"] >= last_blocked_ts
-                        and e.get("UID") not in blocked_uids
+                        e.get("UID") for e in suffix
+                        if e.get("UID") not in blocked_uids
                     ]
                     candidate = RootSet(
                         roots=iteration_roots,
@@ -272,31 +352,37 @@ def detect_from_sibling_roots(
     if period is None:
         return None
 
-    blocks = (len(ordered) - start) // period
+    n_blocks = (len(ordered) - start) // period
+    unit_blocks = [
+        list(ordered[start + i * period : start + (i + 1) * period])
+        for i in range(n_blocks)
+    ]
+    if not unit_blocks:
+        return None
+
+    unit_blocks, prefix, suffix = _promote_bookend_iterations(
+        tree, ordered, start, unit_blocks,
+    )
+
     sibling_roots = []
     blocked = []
-    for index in range(blocks):
-        block = ordered[start + index * period : start + (index + 1) * period]
+    for block in unit_blocks:
         first, last = block[0], block[-1]
         event = dict(first)
         event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
         sibling_roots.append(event)
         blocked.extend(block)
-    if not sibling_roots:
-        return None
 
     iter_gpu_time = _descendant_gpu_time(tree, blocked) if total_gpu else 0.0
     cov = iter_gpu_time / total_gpu if total_gpu else 0.0
     blocked_uids = {e.get("UID") for e in blocked}
     before_uids = [
-        e.get("UID") for e in ordered[:start]
+        e.get("UID") for e in prefix
         if e.get("UID") not in blocked_uids
     ]
-    last_blocked_ts = blocked[-1]["ts"] + blocked[-1].get("dur", 0)
     after_uids = [
-        e.get("UID") for e in ordered
-        if e["ts"] >= last_blocked_ts
-        and e.get("UID") not in blocked_uids
+        e.get("UID") for e in suffix
+        if e.get("UID") not in blocked_uids
     ]
     return RootSet(
         roots=sibling_roots,
