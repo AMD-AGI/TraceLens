@@ -26,7 +26,9 @@ from TraceLens.ModelUtils.ast_analyze import (
     displays_as_linear,
     effective_forward_calls,
     expand_conditional_block_components,
+    function_display_label,
     functional_display_label,
+    is_function_synthetic,
     is_functional_synthetic,
     is_forward_operation,
     is_positional_synthetic,
@@ -2056,6 +2058,19 @@ def build_block_node(
                     forward_order=child_order,
                     details=list(child_details),
                     label=positional_display_label(call_attr),
+                    basic=False,
+                )
+            )
+            continue
+
+        if is_function_synthetic(call_attr):
+            child_nodes.append(
+                _leaf_node(
+                    attr_name=call_attr,
+                    class_name="FunctionOp",
+                    forward_order=child_order,
+                    details=list(child_details),
+                    label=function_display_label(call_attr),
                     basic=False,
                 )
             )

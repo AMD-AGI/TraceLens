@@ -67,6 +67,26 @@ POSITIONAL_SYNTHETIC_PREFIX = "@positional_"
 _POSITIONAL_SOURCE_POS_RE = re.compile(
     rf"^{re.escape(POSITIONAL_SYNTHETIC_PREFIX)}l(\d+)_"
 )
+# A bare call to a module-level free function that is neither a recognised tensor
+# op, a rope helper, nor an attention kernel (e.g. ``get_vision_position_ids(...)``).
+# The forward still runs real computation there, so it must render as its own node
+# rather than vanishing; the line number keeps repeated call sites distinct.
+FUNCTION_SYNTHETIC_PREFIX = "@fn_"
+_FUNCTION_SOURCE_POS_RE = re.compile(
+    rf"^{re.escape(FUNCTION_SYNTHETIC_PREFIX)}l(\d+)_"
+)
+# Python builtins and scalar constructors that appear in a forward but never carry
+# a tensor the diagram should show as a computation node.
+_NON_TENSOR_BUILTINS = frozenset(
+    {
+        "len", "int", "float", "bool", "str", "range", "enumerate", "zip",
+        "super", "print", "isinstance", "issubclass", "getattr", "setattr",
+        "hasattr", "delattr", "type", "min", "max", "sum", "abs", "round",
+        "list", "tuple", "dict", "set", "frozenset", "sorted", "reversed",
+        "map", "filter", "any", "all", "repr", "format", "iter", "next",
+        "id", "hash", "vars", "dir", "callable", "slice", "object",
+    }
+)
 
 
 def positional_synthetic_attr(func_name: str, lineno: int) -> str:
@@ -97,6 +117,52 @@ def positional_display_label(attr_name_or_func: str) -> str:
         name = _POSITIONAL_SOURCE_POS_RE.sub("", name)
     text = name.replace("_", " ").strip()
     return text[:1].upper() + text[1:] if text else name
+
+
+def function_synthetic_attr(func_name: str, lineno: int) -> str:
+    """Synthetic attr for a bare free-function call traced in a forward.
+
+    Mirrors ``positional_synthetic_attr`` but for functions that are not rope
+    helpers, so a computed side-input (``get_vision_position_ids(...)``) becomes a
+    visible node instead of vanishing. The line number keeps each call site apart.
+    """
+    return f"{FUNCTION_SYNTHETIC_PREFIX}l{lineno}_{func_name}"
+
+
+def is_function_synthetic(attr_name: str) -> bool:
+    return attr_name.startswith(FUNCTION_SYNTHETIC_PREFIX)
+
+
+def function_synthetic_source_pos(attr_name: str) -> tuple[int, int] | None:
+    """Source position of a traced free-function call, for ordering among siblings."""
+    match = _FUNCTION_SOURCE_POS_RE.match(attr_name)
+    if match is None:
+        return None
+    return int(match.group(1)), 0
+
+
+def function_display_label(attr_name_or_func: str) -> str:
+    """Display label for a traced free function (get_vision_position_ids ->
+    Get vision position ids)."""
+    name = attr_name_or_func
+    if name.startswith(FUNCTION_SYNTHETIC_PREFIX):
+        name = _FUNCTION_SOURCE_POS_RE.sub("", name)
+    text = name.replace("_", " ").strip()
+    return text[:1].upper() + text[1:] if text else name
+
+
+def _is_emittable_free_function(func: ast.AST, target: str | None) -> bool:
+    """True for a bare ``foo(...)`` call to a module-level function worth showing.
+
+    Excludes Python builtins/scalar constructors (which never carry a tensor to
+    diagram). The callers check submodule/functional/attention/positional first, so
+    only genuinely unrecognised free functions reach this gate.
+    """
+    return (
+        isinstance(func, ast.Name)
+        and bool(target)
+        and target not in _NON_TENSOR_BUILTINS
+    )
 
 
 def functional_synthetic_attr(op_name: str) -> str:
@@ -194,6 +260,17 @@ _KERNEL_MERGE_NAME_RE = re.compile(
     r"(attention|attn|recurrent|flash|sdpa|linear_attn|kernel|chunk)",
     re.IGNORECASE,
 )
+# A metadata helper whose name merely *mentions* attention (e.g.
+# ``get_vision_attention_seqlens``) computes cu_seqlens/masks, not the attention
+# output. Its result head-noun (``seqlens``/``ids``/``mask``) or builder prefix
+# (``get_``/``build_``) marks it as plumbing, so it must not be swept into the
+# attention-kernel bucket by the substring match above.
+_KERNEL_MERGE_HELPER_RE = re.compile(
+    r"^(get|build|make|prepare|compute|create|update|_)_"
+    r"|(_seqlens?|_ids?|_masks?|_lengths?|_indices|_index|_sizes?|"
+    r"_positions?|_offsets?|_cache|_shapes?)$",
+    re.IGNORECASE,
+)
 _SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "Buffer", "getattr"})
 _SKIP_INIT_FORWARD_ATTRS = frozenset(
     {
@@ -225,6 +302,45 @@ def _is_positional_function_call(func: ast.AST, target: str) -> bool:
     if not isinstance(func, ast.Name):
         return False
     return bool(POSITIONAL_ATTR_RE.search(target))
+
+
+def _traced_free_function_arg_names(func: ast.FunctionDef) -> set[str]:
+    """Names passed positionally into a traced free-function node in ``func``.
+
+    A rope helper or other module-level free function (``get_vision_position_ids``)
+    renders as its own node; the plain-``Name`` tensors it reads are that node's
+    real sources. Collecting them lets a secondary forward input feeding one be
+    seeded as the method boundary so the edge starts from the input.
+
+    Calls nested inside a conditional are skipped: only unconditional free-function
+    nodes render (see ``_extract_self_calls_ordered``'s ``skip_free_fn``), so seeding
+    an input consumed only by a dropped-branch helper would resurrect otherwise-dead
+    ops (e.g. a per-chunk ``lengths`` subtract) with no visible consumer.
+    """
+    conditional_calls: set[int] = set()
+    for stmt in ast.walk(func):
+        if isinstance(stmt, ast.If):
+            for child in stmt.body + stmt.orelse:
+                for sub in ast.walk(child):
+                    if isinstance(sub, ast.Call):
+                        conditional_calls.add(id(sub))
+    names: set[str] = set()
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call) or id(node) in conditional_calls:
+            continue
+        callee = node.func
+        target = _expr_name(callee)
+        traced = (
+            bool(target)
+            and isinstance(callee, ast.Name)
+            and _is_positional_function_call(callee, target)
+        ) or _is_emittable_free_function(callee, target)
+        if not traced:
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.Name):
+                names.add(arg.id)
+    return names
 
 
 def _is_literal_true(node: ast.AST) -> bool:
@@ -388,14 +504,23 @@ def _unwrap_expr(node: ast.AST) -> ast.AST:
     return node
 
 
-def _extract_self_calls_ordered(node: ast.AST, out: list[str]) -> None:
-    """Collect self.module(...) calls in approximate evaluation order (inner-first)."""
+def _extract_self_calls_ordered(
+    node: ast.AST, out: list[str], skip_free_fn: bool = False
+) -> None:
+    """Collect self.module(...) calls in approximate evaluation order (inner-first).
+
+    ``skip_free_fn`` suppresses only the unrecognised free-function (``@fn_``) node
+    emission. Set it when the call lives inside a conditional branch: ``forward_calls``
+    is built branch-unaware (both arms of an ``if`` are walked), so an ``@fn_`` node
+    from a branch that config-resolution later drops would leak in and scramble the
+    surrounding wiring. Recognised ops/kernels/rope helpers are unaffected.
+    """
     node = _unwrap_expr(node)
     if isinstance(node, ast.Call):
         for arg in node.args:
-            _extract_self_calls_ordered(arg, out)
+            _extract_self_calls_ordered(arg, out, skip_free_fn)
         for keyword in node.keywords:
-            _extract_self_calls_ordered(keyword.value, out)
+            _extract_self_calls_ordered(keyword.value, out, skip_free_fn)
 
         func = node.func
         if isinstance(func, ast.Attribute) and _is_self_attr(func, func.attr):
@@ -415,31 +540,37 @@ def _extract_self_calls_ordered(node: ast.AST, out: list[str]) -> None:
             # the only place the diagram can show the rotation happening.
             _append_forward_call(out, positional_synthetic_attr(target, node.lineno))
             return
+        if not skip_free_fn and _is_emittable_free_function(func, target):
+            # Any other module-level free function still runs real computation the
+            # forward feeds downstream (``get_vision_position_ids(...)``); show it as
+            # its own node instead of dropping it.
+            _append_forward_call(out, function_synthetic_attr(target, node.lineno))
+            return
         return
 
     if isinstance(node, ast.BinOp):
-        _extract_self_calls_ordered(node.left, out)
-        _extract_self_calls_ordered(node.right, out)
+        _extract_self_calls_ordered(node.left, out, skip_free_fn)
+        _extract_self_calls_ordered(node.right, out, skip_free_fn)
         return
 
     if isinstance(node, (ast.List, ast.Tuple)):
         for elt in node.elts:
-            _extract_self_calls_ordered(elt, out)
+            _extract_self_calls_ordered(elt, out, skip_free_fn)
         return
 
     if isinstance(node, ast.IfExp):
-        _extract_self_calls_ordered(node.body, out)
-        _extract_self_calls_ordered(node.orelse, out)
+        _extract_self_calls_ordered(node.body, out, skip_free_fn)
+        _extract_self_calls_ordered(node.orelse, out, skip_free_fn)
         return
 
     if isinstance(node, ast.Subscript):
-        _extract_self_calls_ordered(node.value, out)
+        _extract_self_calls_ordered(node.value, out, skip_free_fn)
         return
 
     if isinstance(node, ast.Compare):
-        _extract_self_calls_ordered(node.left, out)
+        _extract_self_calls_ordered(node.left, out, skip_free_fn)
         for comparator in node.comparators:
-            _extract_self_calls_ordered(comparator, out)
+            _extract_self_calls_ordered(comparator, out, skip_free_fn)
         return
 
 
@@ -1031,6 +1162,7 @@ def _forward_mixes_modules_and_inline_ops(
         if call in init_assignments
         or is_positional_synthetic(call)
         or is_functional_synthetic(call)
+        or is_function_synthetic(call)
     ]
     if not module_calls or not parsed_operations:
         return False
@@ -1941,6 +2073,8 @@ class _ForwardOperationExtractor:
             return SYNTHETIC_ATTENTION
         if target and _is_positional_function_call(func, target):
             return positional_synthetic_attr(target, node.lineno)
+        if _is_emittable_free_function(func, target):
+            return function_synthetic_attr(target, node.lineno)
         return None
 
     def _self_attr_input(self, node: ast.Attribute) -> tuple[str | None, list[str]]:
@@ -2832,6 +2966,7 @@ def _module_calls_for_forward_merge(
         for call in forward_calls
         if call in init_assignments
         or is_positional_synthetic(call)
+        or is_function_synthetic(call)
         or call == SYNTHETIC_ATTENTION
         or not call.startswith("@")
         or (is_functional_synthetic(call) and not drop_functional)
@@ -2910,6 +3045,7 @@ def _forward_calls_in_source_order(
             call_positions.get(call)
             or functional_positions.get(call)
             or positional_synthetic_source_pos(call)
+            or function_synthetic_source_pos(call)
         )
         if where is None and call == SYNTHETIC_ATTENTION:
             where = kernel_position
@@ -3434,6 +3570,12 @@ def _forward_operations_from_forward(
     # resolve to the chain input instead of silently inheriting the wrong producer.
     if primary:
         extractor.var_producer[primary] = FORWARD_METHOD_INPUT
+    # A secondary forward input consumed by a traced free-function node is that
+    # node's real source; seed it as the method boundary so the edge starts from
+    # the input instead of dangling. Gated to those args so ordinary side-inputs
+    # (handed straight to a submodule) keep flowing through param attribution.
+    for name in _traced_free_function_arg_names(func) & _forward_input_names(func):
+        extractor.var_producer.setdefault(name, FORWARD_METHOD_INPUT)
     extractor.statements(func.body)
     extractor._apply_branch_alternatives()
     extractor._drop_phantom_attention_steps()
@@ -4299,6 +4441,8 @@ def _is_kernel_merge_call(func: ast.AST) -> bool:
     base = name.split(".")[-1]
     if base in _SYNTHETIC_ATTENTION_NAMES:
         return True
+    if _KERNEL_MERGE_HELPER_RE.search(base):
+        return False
     return bool(_KERNEL_MERGE_NAME_RE.search(base))
 
 
@@ -5080,10 +5224,11 @@ def _walk_forward_stmt(
     forward_step_details: dict[str, list[str]],
     self_values: dict | None = None,
     name_value_ast: dict[str, ast.expr] | None = None,
+    in_conditional: bool = False,
 ) -> str | None:
     if isinstance(node, ast.Assign):
         stmt_calls: list[str] = []
-        _extract_self_calls_ordered(node.value, stmt_calls)
+        _extract_self_calls_ordered(node.value, stmt_calls, in_conditional)
         _inject_kernel_merge(
             node.value,
             var_chains,
@@ -5103,7 +5248,7 @@ def _walk_forward_stmt(
 
     if isinstance(node, ast.AnnAssign) and node.value is not None:
         stmt_calls = []
-        _extract_self_calls_ordered(node.value, stmt_calls)
+        _extract_self_calls_ordered(node.value, stmt_calls, in_conditional)
         _inject_kernel_merge(
             node.value,
             var_chains,
@@ -5123,7 +5268,7 @@ def _walk_forward_stmt(
 
     if isinstance(node, ast.Expr):
         stmt_calls = []
-        _extract_self_calls_ordered(node.value, stmt_calls)
+        _extract_self_calls_ordered(node.value, stmt_calls, in_conditional)
         _inject_kernel_merge(
             node.value,
             var_chains,
@@ -5139,7 +5284,7 @@ def _walk_forward_stmt(
 
     if isinstance(node, ast.AugAssign):
         stmt_calls = []
-        _extract_self_calls_ordered(node.value, stmt_calls)
+        _extract_self_calls_ordered(node.value, stmt_calls, in_conditional)
         _inject_kernel_merge(
             node.value,
             var_chains,
@@ -5160,7 +5305,7 @@ def _walk_forward_stmt(
 
     if isinstance(node, ast.Return) and node.value is not None:
         stmt_calls = []
-        _extract_self_calls_ordered(node.value, stmt_calls)
+        _extract_self_calls_ordered(node.value, stmt_calls, in_conditional)
         _inject_kernel_merge(
             node.value,
             var_chains,
@@ -5189,6 +5334,7 @@ def _walk_forward_stmt(
                 forward_step_details,
                 self_values,
                 name_value_ast,
+                in_conditional=True,
             )
         return pending_norm
 
@@ -5207,6 +5353,7 @@ def _walk_forward_stmt(
                 forward_step_details,
                 self_values,
                 name_value_ast,
+                in_conditional=in_conditional,
             )
         # Tensor operations are annotated by _ForwardOperationExtractor, but
         # expanded helper calls (for example `_apply_gate()`) are not operations
@@ -5240,6 +5387,7 @@ def _walk_forward_stmt(
                 forward_step_details,
                 self_values,
                 name_value_ast,
+                in_conditional=in_conditional,
             )
         return pending_norm
 

@@ -527,7 +527,11 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
         graph, key_to_index[concat_key], key_to_index[conv_key]
     )
     assert _has_computation_path(graph, key_to_index[conv_key], key_to_index[split_key])
-    assert (input_index, key_to_index[forget_entry_key]) in links
+    # The block input reaches the forget gate through the now-visible
+    # ``apply_mask_to_padding_states`` op (C4b), rather than a direct edge.
+    assert _has_computation_path(
+        graph, input_index, key_to_index[forget_entry_key]
+    )
     assert key_to_index[branch_mul_key] in sources
     assert key_to_index[branch_add_key] in sources
 
@@ -1202,7 +1206,7 @@ def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
     ]
     assert consumers, "visual @loop_carried_in has no consumer"
     assert any(
-        consumer.startswith("visual/seq:2:blocks") for consumer in consumers
+        consumer.startswith("visual/seq:3:blocks") for consumer in consumers
     ), consumers
 
     # Topological order: the LC-in floats above every loop-body node even though
@@ -1211,7 +1215,7 @@ def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
     body_positions = [
         index
         for node in nodes
-        if node["id"].startswith("visual/seq:2:blocks")
+        if node["id"].startswith("visual/seq:3:blocks")
         and "@loop_carried" not in node["id"]
         for index in (positions[node["id"]],)
     ]
@@ -1257,7 +1261,7 @@ def test_glm53_vision_tower_carries_patch_axis_not_text_seq():
 
     # Patch-embed pipeline: [Pv,1176] -> view [Pv,3,2,14,14] -> Conv3d
     # [Pv,1024,1,1,1] -> view [Pv,1024].
-    pe = "visual/seq:0:patch_embed:patch_embed:0"
+    pe = "visual/seq:1:patch_embed:patch_embed:0"
     assert _output_shape(node_by_id[f"{pe}/@input"]) == "[Pv, 1176] bfloat16"
     assert (
         _output_shape(node_by_id[f"{pe}/seq:0:@op_l1713_c24_view:@op_l1713_c24_view:0"])
@@ -1270,7 +1274,7 @@ def test_glm53_vision_tower_carries_patch_axis_not_text_seq():
     assert _output_shape(node_by_id[f"{pe}/@output"]) == "[Pv, 1024] bfloat16"
 
     # After the spatial merge the merger projects the pooled [Pv/4, 4096] rows.
-    merger_out = node_by_id["visual/seq:8:merger/@output"]
+    merger_out = node_by_id["visual/seq:9:merger/@output"]
     assert _output_shape(merger_out) == "[Pv/4, 4096] bfloat16"
     assert len(merger_out.get("incomingEdges", [])) == 1
 
@@ -1420,7 +1424,7 @@ def test_glm53_vision_attention_resolves_single_kernel_branch():
     assert concat["id"] not in concat_sources
 
     # The output reshape reads only that single Concat.
-    reshape = node_by_id["visual/seq:2:blocks:attn:@op_l1665_c22_reshape:14"]
+    reshape = node_by_id["visual/seq:3:blocks:attn:@op_l1665_c22_reshape:14"]
     reshape_sources = [e["sourceNodeId"] for e in reshape.get("incomingEdges", [])]
     assert reshape_sources == [concat["id"]]
 
@@ -1455,9 +1459,9 @@ def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
     }
     assert {"query_states", "key_states", "value_states"} <= split_labels
 
-    q_split = node_by_id["visual/@split_out:19:query_states"]
-    k_split = node_by_id["visual/@split_out:19:key_states"]
-    v_split = node_by_id["visual/@split_out:19:value_states"]
+    q_split = node_by_id["visual/@split_out:20:query_states"]
+    k_split = node_by_id["visual/@split_out:20:key_states"]
+    v_split = node_by_id["visual/@split_out:20:value_states"]
 
     # Each norm's input boundary reads its own slot — k_norm no longer docks to
     # query_states.
