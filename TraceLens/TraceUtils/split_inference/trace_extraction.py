@@ -450,7 +450,7 @@ def extract_phases_and_save(
     """Extract and save a range of iterations."""
     extraction_summary = []
 
-    if "iteration" not in prefix:
+    if "annotation_iteration" not in prefix:
         print("phase extraction only supported for annotation iterations, skipping")
         return extraction_summary
     for root in roots:
