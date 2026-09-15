@@ -1150,7 +1150,6 @@ class TestTreePerfPhase11:
         assert isinstance(df, pd.DataFrame)
 
 
-
 class TestTreePerfPhase12:
     def test_reorder_cols_and_kernel_stats_edges(self):
         df = pd.DataFrame(
@@ -1317,7 +1316,6 @@ class TestTreePerfPhase12:
         assert isinstance(df, pd.DataFrame)
 
 
-
 class TestTreePerfCollectPhase12:
     def test_is_leaf_cpu_op_via_descendant_kernel(self):
         corr = 600
@@ -1475,7 +1473,6 @@ class TestTreePerfPhase4:
         launchers = analyzer.get_df_kernel_launchers(include_args=True)
         summary = TreePerfAnalyzer.get_df_kernel_launchers_summary(launchers)
         assert isinstance(summary, pd.DataFrame)
-
 
 
 class TestTreePerfDeepPaths:
