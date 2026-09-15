@@ -43,6 +43,8 @@ TraceLens is a Python library for **automated performance analysis of training a
 pip install git+https://github.com/AMD-AGI/TraceLens.git
 ```
 
+For JAX XPlane (`.pb`) traces, install the [JAX extra](docs/how-to/generate-perf-report-jax.md#before-you-begin).
+
 ### 2. Collect Traces
 
 TraceLens analyses profiler traces from PyTorch, JAX, and AMD rocprofv3; see [Supported Profile Formats](#supported-profile-formats) for the full list. The instructions below cover collecting a PyTorch trace:
@@ -150,7 +152,7 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 
 ```bash
 git clone https://github.com/AMD-AGI/TraceLens.git && cd TraceLens
-pip install -e .[dev]
+pip install -e '.[dev,jax]'
 python -m pytest tests/ -v
 ```
 
