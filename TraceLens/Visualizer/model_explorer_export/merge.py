@@ -85,6 +85,7 @@ from TraceLens.Visualizer.model_explorer_export.styles import (
     ensure_readable_text,
     finalize_graph_node_styles,
     input_port_style,
+    is_layout_only_label,
     output_port_style,
     spine_tile_style,
 )
@@ -1939,6 +1940,107 @@ def _prune_noop_cast_nodes(nodes: list[dict[str, Any]]) -> None:
     nodes[:] = [node for node in nodes if str(node.get("id")) not in removed_ids]
 
 
+def _elide_view_split_onto_producer(nodes: list[dict[str, Any]]) -> None:
+    """Fold a multi-output slice op (``Unbind``/``Split``/``Chunk``) into the
+    layout-only op that produces its input, exposing the slices as named output
+    ports on that producer instead of via a separate tile.
+
+    The ``q, k, v = qkv(h).reshape(...).permute(...).unbind(0)`` idiom (and its
+    ``... .transpose(...).split(...)`` cousins) chains pure view ops that
+    together do one thing -- carve a fused tensor into named slices. The trailing
+    ``unbind``/``split`` computes nothing; when its sole producer is itself a
+    layout-only op feeding nobody else, the split tile is a redundant hop -- the
+    bare ``unbind`` → ``q_norm``/``k_norm``/``transpose`` pass-through the owner
+    flagged. Dropping it and re-homing its per-slice ports (``query_states`` /
+    ``key_states`` / ``value_states``, shapes intact) onto the producer keeps
+    every slice visible -- no computation is hidden -- with one fewer hop.
+
+    Guarded to stay general and safe:
+      * only the pure slice ops (``Unbind``/``Split``/``Chunk``);
+      * exactly one incoming edge (a single producer port to re-home onto);
+      * the producer is a REAL layout-only op (not synthetic, not a compute op
+        like ``Linear`` -- a fused-weight split such as ``pre_w/post_w/comb_w``
+        stays its own tile, since its producer genuinely transforms values);
+      * that producer port feeds ONLY this split (else re-labeling its port as
+        slices would corrupt the other consumer) and the producer exposes a
+        single output port to replace.
+    """
+    node_by_id = {str(node.get("id")): node for node in nodes}
+
+    def _is_synthetic(candidate: dict[str, Any]) -> bool:
+        return any(
+            attr.get("key") == "synthetic" for attr in candidate.get("attrs", [])
+        )
+
+    # How many edges read each (producer_id, port) endpoint.
+    consumer_count: dict[tuple[str, str], int] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []):
+            key = (
+                str(edge.get("sourceNodeId") or ""),
+                str(edge.get("sourceNodeOutputId", "0")),
+            )
+            consumer_count[key] = consumer_count.get(key, 0) + 1
+
+    redirect: dict[str, str] = {}  # split id -> producer id (ports preserved)
+    for node in nodes:
+        if str(node.get("label") or "") not in {"Unbind", "Split", "Chunk"}:
+            continue
+        incoming = node.get("incomingEdges", [])
+        if len(incoming) != 1:
+            continue
+        edge = incoming[0]
+        source_id = str(edge.get("sourceNodeId") or "")
+        source_port = str(edge.get("sourceNodeOutputId", "0"))
+        producer = node_by_id.get(source_id)
+        if producer is None or _is_synthetic(producer):
+            continue
+        if not is_layout_only_label(str(producer.get("label") or "")):
+            continue
+        if consumer_count.get((source_id, source_port), 0) != 1:
+            continue  # producer port fans out beyond this split
+        if len(producer.get("outputsMetadata", []) or []) != 1:
+            continue  # producer already multi-port -- don't clobber
+        # Re-home the split's per-slice ports (labels + shapes) onto the producer.
+        producer["outputsMetadata"] = [
+            dict(port) for port in node.get("outputsMetadata", [])
+        ]
+        names = _node_attr(node, "output_names")
+        if names is not None:
+            attrs = [
+                attr
+                for attr in producer.get("attrs", [])
+                if attr.get("key") != "output_names"
+            ]
+            attrs.append({"key": "output_names", "value": names})
+            producer["attrs"] = attrs
+        redirect[str(node.get("id"))] = source_id
+
+    if not redirect:
+        return
+
+    removed_ids = set(redirect)
+    for node in nodes:
+        if str(node.get("id")) in removed_ids:
+            continue
+        incoming = node.get("incomingEdges", [])
+        if not incoming:
+            continue
+        changed = False
+        new_incoming = []
+        for edge in incoming:
+            source_id = str(edge.get("sourceNodeId") or "")
+            if source_id in redirect:
+                edge = dict(edge)
+                edge["sourceNodeId"] = redirect[source_id]
+                changed = True
+            new_incoming.append(edge)
+        if changed:
+            node["incomingEdges"] = new_incoming
+
+    nodes[:] = [node for node in nodes if str(node.get("id")) not in removed_ids]
+
+
 def _dim_is_weak(dim: str) -> bool:
     """A shape dim carries no real information when it is ``-1`` or a collapsed
     product (``BxS``) — either hides the batch/seq structure a sibling edge end
@@ -3622,6 +3724,11 @@ def build_merged_model_graph(
     if spec.layer_mix:
         model_attrs["layer_mix"] = spec.layer_mix
     model_attrs.update(build_fact_sheet_group_attributes(spec))
+
+    # Fold trailing view-splits (qkv unbind, q/k/v split) onto their layout-only
+    # producer so the slices show as named ports, not a redundant pass-through
+    # tile. Runs after shapes settle so the re-homed ports carry final shapes.
+    _elide_view_split_onto_producer(nodes)
 
     finalize_graph_node_styles(nodes)
 
