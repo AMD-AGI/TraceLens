@@ -1642,6 +1642,60 @@ def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
     ]
 
 
+def test_glm53_vision_attention_kernel_reads_all_qkv_no_orphans():
+    """The vision attention kernel reads query/key/value_states plus cu_seqlens.
+
+    ``Glm5NextVisionAttention.forward`` computes ``query_states``, ``key_states``
+    and ``value_states`` (each ending in an ``unsqueeze``) and hands all three to
+    the attention interface alongside ``cu_seqlens``. The taken sdpa branch spells
+    that call inside an ``else``-branch comprehension the provenance walk never
+    descends into, and ``value_states`` never passes through a submodule call, so
+    the kernel previously wired only ``query_states``/``cu_seqlens`` — dropping
+    ``key_states``/``value_states`` and leaving their ``unsqueeze`` ops as orphan
+    leaves.
+
+    General: when the taken branch hides the attention call, the kernel's q/k/v
+    predecessors are reconstructed from the first visible attention-interface call
+    by resolving each positional ``Name`` arg through the topology producer map
+    (``var_producer``) — which tracks inline ops and non-module tensors alike — so
+    every declared kernel input is labeled and wired, with no orphaned tensor ops.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    node_by_id = {node["id"]: node for node in nodes}
+
+    _assert_export_is_acyclic(nodes)
+
+    kernel = node_by_id["visual/seq:3:blocks:attn:@attention:12"]
+    kernel_sources = {e["sourceNodeId"] for e in kernel.get("incomingEdges", [])}
+
+    # Every declared kernel input is a distinct, correctly-labeled port node, and
+    # the three tensor ports source their own unsqueeze producer (not one shared).
+    expected_producers = {
+        "query_states": "visual/seq:3:blocks:attn:@op_l1616_c23_unsqueeze:7",
+        "key_states": "visual/seq:3:blocks:attn:@op_l1617_c21_unsqueeze:9",
+        "value_states": "visual/seq:3:blocks:attn:@op_l1618_c23_unsqueeze:11",
+        "cu_seqlens": "visual/@input:cu_seqlens",
+    }
+    for label, producer_id in expected_producers.items():
+        port = next(
+            n
+            for n in nodes
+            if n["id"].startswith("visual/@kernel_in:")
+            and n["id"].endswith(f":{label}")
+        )
+        assert port["id"] in kernel_sources, label
+        assert [e["sourceNodeId"] for e in port["incomingEdges"]] == [producer_id]
+
+    # The q/k/v unsqueeze ops are no longer orphan leaves: each feeds a kernel port.
+    fed = {e["sourceNodeId"] for n in nodes for e in n.get("incomingEdges", [])}
+    for producer_id in expected_producers.values():
+        if producer_id.startswith("visual/seq:3:blocks:attn:"):
+            assert producer_id in fed, producer_id
+
+
 def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
     """``position_embeddings`` reaches ``apply_rotary`` across the block loop.
 

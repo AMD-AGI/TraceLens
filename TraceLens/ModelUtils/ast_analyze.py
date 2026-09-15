@@ -2953,6 +2953,65 @@ class _ForwardOperationExtractor:
             if new_preds != preds:
                 self.step_predecessors[step] = new_preds
 
+    def _reconstruct_attention_step(self, body: list[ast.stmt]) -> None:
+        """Wire the attention kernel's q/k/v when the taken branch hid the call.
+
+        The extractor records ``step_predecessors[@attention]`` when it visits the
+        ``attention_interface(self, query, key, value, ...)`` call. But that call
+        can live in a branch or comprehension the extractor does not descend into
+        — a dispatched attention often runs the eager path as
+        ``[interface(self, q, k, v, ...) for q, k, v in zip(*splits)]`` while the
+        flash branch spells the operands out positionally. Either way the kernel
+        collapses to one ``@attention`` node whose real inputs are the same three
+        tensors, and ``var_producer`` already holds each one's final producer
+        (through the trailing ``transpose``/``unsqueeze`` reshapes, and including a
+        ``value`` tensor that flows only through such ops).
+
+        When ``@attention`` is a forward call but carries no predecessors, recover
+        them from the first attention-interface call in source order: resolve each
+        positional tensor operand to its producer and record it, named after the
+        operand so the kernel port is labelled ``query_states``/``key_states``/
+        ``value_states``. General: no branch or comprehension shape is assumed —
+        the operands are read straight off whichever call the source spells out.
+        """
+        existing = self.step_predecessors.get(SYNTHETIC_ATTENTION)
+        if existing:
+            return
+        call = next(
+            (
+                node
+                for stmt in body
+                for node in ast.walk(stmt)
+                if isinstance(node, ast.Call)
+                and _expr_name(node.func) in _SYNTHETIC_ATTENTION_NAMES
+            ),
+            None,
+        )
+        if call is None:
+            return
+        start = (
+            1
+            if call.args
+            and isinstance(call.args[0], ast.Name)
+            and call.args[0].id == "self"
+            else 0
+        )
+        predecessors: list[str] = []
+        arg_names: dict[str, str] = {}
+        for arg in call.args[start:]:
+            if not isinstance(arg, ast.Name):
+                continue
+            producer = self.var_producer.get(arg.id)
+            if producer is None:
+                continue
+            predecessors.append(producer)
+            arg_names.setdefault(arg.id, producer)
+        if not predecessors:
+            return
+        self.step_predecessors[SYNTHETIC_ATTENTION] = self._dedupe(predecessors)
+        if arg_names:
+            self.step_predecessor_args[SYNTHETIC_ATTENTION] = arg_names
+
     def _drop_phantom_attention_steps(self) -> None:
         """Remove attention kernel steps that carry no predecessors.
 
@@ -3972,6 +4031,7 @@ def _forward_operations_from_forward(
         extractor.var_producer.setdefault(name, FORWARD_METHOD_INPUT)
     extractor.statements(func.body)
     extractor._apply_branch_alternatives()
+    extractor._reconstruct_attention_step(func.body)
     extractor._drop_phantom_attention_steps()
     return_slots, return_order, primary_return_slot = _extract_forward_return_metadata(
         func,
