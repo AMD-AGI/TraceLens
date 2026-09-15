@@ -21,11 +21,20 @@ performance.
 Confirm you have the following before continuing.
 
 - [TraceLens installed](../install/install.md).
-- A JAX XPlane protobuf trace (`xplane.pb`). JAX parsing uses the `xprof`
-  dependency, installed automatically with TraceLens.
+- A JAX XPlane protobuf trace (`xplane.pb`).
+- The optional JAX dependencies, including the `xprof` converter:
+
+  ```bash
+  pip install 'TraceLens[jax] @ git+https://github.com/AMD-AGI/TraceLens.git'
+  ```
+
+  For a source checkout, use `pip install -e '.[jax]'`. The pinned
+  `xprof==2.20.1` provides wheels for CPython 3.9–3.12 on Linux x86-64 and
+  macOS ARM64; use a compatible interpreter for JAX parsing. Other TraceLens
+  input formats do not require this converter.
 
 ```{note}
-JAX protobuf parsing has been validated with `tensorboard` 2.19.0,
+The legacy fallback has been validated with `tensorboard` 2.19.0,
 `tensorboard-plugin-profile` 2.19.0, and `protobuf` 5.29.2. Other versions might
 not work.
 ```
@@ -103,4 +112,3 @@ Options:
   [collective-communication report](./collective-report.md).
 - Analyze [PyTorch](./generate-perf-report-pytorch.md) or
   [rocprof](./generate-perf-report-rocprof.md) traces.
-
