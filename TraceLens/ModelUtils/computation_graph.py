@@ -785,6 +785,20 @@ def _wire_all_predecessor_edges(
                         if pred_node is not None
                         else None
                     ) or []
+                    # When each slot traces to its own distinct internal
+                    # producer (``cos, sin = self.recomposition_frequencies(...)``
+                    # → two separate ops), every producer is single-output so its
+                    # edge must read port "0", not the tuple ordinal. The genuine
+                    # tuple-returning case (all slots share one producer) keeps the
+                    # ordinal port so the op fans out by slice.
+                    distinct_slot_producers = False
+                    if pred_node is not None and pred_node.forward_return_slots:
+                        producer_ids = {
+                            pred_node.forward_return_slots.get(s)
+                            for s in slot_order
+                        }
+                        producer_ids.discard(None)
+                        distinct_slot_producers = len(producer_ids) > 1
                     for consumer_index, ordinal in fan_out:
                         slot_source = source_index
                         slot_port = str(ordinal)
@@ -801,6 +815,13 @@ def _wire_all_predecessor_edges(
                             )
                             if resolved != source_index:
                                 slot_source = resolved
+                                slot_port = "0"
+                            elif distinct_slot_producers:
+                                # Last slot's producer coincides with the frame
+                                # tail (``attr_last_index[pred]``); it is still a
+                                # distinct single-output op, so read port "0"
+                                # instead of the ordinal (which would dangle — the
+                                # op has no port matching the tuple index).
                                 slot_port = "0"
                         slot_link = (slot_source, consumer_index)
                         if slot_link not in graph.links:

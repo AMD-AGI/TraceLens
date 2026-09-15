@@ -1876,6 +1876,39 @@ def test_glm53_vision_rotary_cos_and_sin_have_distinct_producers():
     assert not _has_export_path(nodes, sine["id"], cos_producer)
 
 
+def test_glm53_vision_rotary_output_edges_reference_real_producer_ports():
+    """``@output:sin`` must read an existing port of its producer, not the ordinal.
+
+    ``cos, sin = self.recomposition_frequencies(...)`` traces each slot to a
+    *distinct* single-output op. The ordinal-1 (``sin``) slot's producer happens
+    to coincide with the frame tail, so the fan-out used to tag its edge with the
+    tuple ordinal ``"1"`` -- but that op has only output port ``"0"``. The
+    dangling ``sourceNodeOutputId`` left the viewer unable to resolve a shape,
+    rendering ``sin`` as ``?``. Both slot edges must reference a port that exists
+    on the producer's ``outputsMetadata``.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    node_by_id = {node["id"]: node for node in nodes}
+
+    for slot in ("cos", "sin"):
+        out = node_by_id[f"visual/sidefeed:2:rotary_pos_emb/@output:{slot}"]
+        edges = out["incomingEdges"]
+        assert len(edges) == 1, [e["sourceNodeId"] for e in edges]
+        edge = edges[0]
+        producer = node_by_id[edge["sourceNodeId"]]
+        producer_ports = {
+            str(port.get("id")) for port in producer.get("outputsMetadata", [])
+        }
+        assert str(edge.get("sourceNodeOutputId", "0")) in producer_ports, (
+            slot,
+            edge.get("sourceNodeOutputId"),
+            sorted(producer_ports),
+        )
+
+
 def test_glm53_vision_apply_rotary_tuple_returns_dock_per_ordinal():
     """``q_embed, k_embed = apply_rotary_pos_emb_vision(...)`` exits per slot.
 
