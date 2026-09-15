@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import importlib.util
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -163,6 +164,197 @@ def _is_emittable_free_function(func: ast.AST, target: str | None) -> bool:
         and bool(target)
         and target not in _NON_TENSOR_BUILTINS
     )
+
+
+# Tensor methods that force a host round-trip: they materialise tensor contents
+# into Python objects, which only happens on CPU. A free function using any of
+# these (directly, or via another free function it calls) runs host-side work.
+_HOST_MATERIALIZE_METHODS = frozenset({"tolist", "item", "numpy", "cpu"})
+
+
+def _call_forces_host(call: ast.Call) -> bool:
+    """True when a call is a tensor->host materialisation (``.tolist()``/``.to('cpu')``)."""
+    func = call.func
+    if not isinstance(func, ast.Attribute):
+        return False
+    if func.attr in _HOST_MATERIALIZE_METHODS:
+        return True
+    if func.attr == "to":
+        for arg in [*call.args, *(kw.value for kw in call.keywords)]:
+            if isinstance(arg, ast.Constant) and arg.value == "cpu":
+                return True
+    return False
+
+
+def _absolute_import_bindings(
+    tree: ast.AST, current_module: str
+) -> dict[str, str]:
+    """Map imported names to ``absolute.module#symbol`` for one module's AST.
+
+    Resolves relative imports (``from ...vision_utils import x``) to their absolute
+    dotted module against *current_module* (the module the AST belongs to), so a
+    cross-file callee can be located with ``importlib.util.find_spec``.
+    """
+    parts = current_module.split(".")
+    bindings: dict[str, str] = {}
+    if not isinstance(tree, ast.Module):
+        return bindings
+    for stmt in tree.body:
+        if isinstance(stmt, ast.ImportFrom):
+            if stmt.level:
+                base = parts[: -stmt.level] if len(parts) >= stmt.level else []
+                module = ".".join(base + (stmt.module.split(".") if stmt.module else []))
+            else:
+                module = stmt.module or ""
+            for alias in stmt.names:
+                if alias.name == "*":
+                    continue
+                bindings[alias.asname or alias.name] = f"{module}#{alias.name}"
+        elif isinstance(stmt, ast.Import):
+            for alias in stmt.names:
+                bindings[alias.asname or alias.name] = f"{alias.name}#{alias.name}"
+    return bindings
+
+
+class _HostSourceResolver:
+    """Detects whether a free function runs host/CPU work by reading source ASTs.
+
+    Locates each callee's defining file with ``importlib.util.find_spec`` (no module
+    execution — spec.origin + ``ast.parse`` only) and walks it for host-materialisation
+    idioms, recursing into the free functions it calls. The analysed modeling file is
+    seeded directly so its local helpers resolve without a spec lookup. General across
+    models: any helper doing host-side index building is flagged, none are hardcoded.
+    """
+
+    def __init__(self) -> None:
+        # module -> ({func_name: FunctionDef}, {imported_name: "module#symbol"}) | None
+        self._modules: dict[str, tuple[dict[str, ast.FunctionDef], dict[str, str]] | None] = {}
+
+    def seed(self, module: str | None, tree: ast.AST) -> None:
+        if not module or not isinstance(tree, ast.Module):
+            return
+        funcs = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        self._modules[module] = (funcs, _absolute_import_bindings(tree, module))
+
+    def _load(
+        self, module: str
+    ) -> tuple[dict[str, ast.FunctionDef], dict[str, str]] | None:
+        if module in self._modules:
+            return self._modules[module]
+        result: tuple[dict[str, ast.FunctionDef], dict[str, str]] | None = None
+        origin: str | None = None
+        try:
+            spec = importlib.util.find_spec(module)
+            origin = spec.origin if spec is not None else None
+        except (ImportError, AttributeError, ValueError):
+            origin = None
+        if origin and Path(origin).is_file():
+            try:
+                tree = ast.parse(Path(origin).read_text(encoding="utf-8"))
+            except (OSError, SyntaxError, ValueError):
+                tree = None
+            if isinstance(tree, ast.Module):
+                funcs = {
+                    node.name: node
+                    for node in tree.body
+                    if isinstance(node, ast.FunctionDef)
+                }
+                result = (funcs, _absolute_import_bindings(tree, module))
+        self._modules[module] = result
+        return result
+
+    def runs_on_host(
+        self, module: str, name: str, _seen: set[tuple[str, str]] | None = None
+    ) -> bool:
+        seen = _seen if _seen is not None else set()
+        key = (module, name)
+        if key in seen:
+            return False
+        seen.add(key)
+        loaded = self._load(module)
+        if loaded is None:
+            return False
+        funcs, imports = loaded
+        func = funcs.get(name)
+        if func is None:
+            # Imported (re-exported) here — follow it to the defining module.
+            binding = imports.get(name)
+            if binding:
+                dest, _, symbol = binding.partition("#")
+                if dest and dest != module:
+                    return self.runs_on_host(dest, symbol, seen)
+            return False
+        if any(
+            isinstance(node, ast.Call) and _call_forces_host(node)
+            for node in ast.walk(func)
+        ):
+            return True
+        for node in ast.walk(func):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                continue
+            callee = node.func.id
+            if callee in funcs:
+                if self.runs_on_host(module, callee, seen):
+                    return True
+            elif callee in imports:
+                dest, _, symbol = imports[callee].partition("#")
+                if dest and self.runs_on_host(dest, symbol, seen):
+                    return True
+        return False
+
+
+def _analyzed_base_module(config: dict[str, Any] | None) -> str | None:
+    """Dotted module of the analysed modeling file, for resolving its own imports."""
+    if not isinstance(config, dict):
+        return None
+    model_type = str(config.get("model_type") or "").strip().replace("-", "_")
+    if not model_type:
+        return None
+    return f"transformers.models.{model_type}.modeling_{model_type}"
+
+
+def _annotate_host_free_functions(
+    classes: dict[str, "ClassStructure"],
+    tree: ast.AST,
+    config: dict[str, Any] | None,
+) -> None:
+    """Flag each traced free-function call that runs host/CPU work.
+
+    A ``get_vision_position_ids(...)`` side-input node built from a synthetic
+    function/positional attr gets ``forward_step_runs_on_host[attr] = True`` when the
+    callee (or something it transitively calls) materialises a tensor on the host.
+    Rope helpers (``apply_rotary_pos_emb_vision``) carry no such idiom -> stay False.
+    """
+    base_module = _analyzed_base_module(config)
+    resolver = _HostSourceResolver()
+    resolver.seed(base_module, tree)
+    cache: dict[str, bool] = {}
+    for cls in classes.values():
+        attrs = set()
+        for mapping in (
+            cls.forward_step_details,
+            cls.forward_operations,
+            cls.forward_step_output_names,
+            cls.multi_op_methods,
+            cls.single_op_methods,
+            cls.forward_step_predecessors,
+        ):
+            attrs.update(mapping.keys())
+        attrs.update(cls.forward_calls)
+        for attr in attrs:
+            if not (is_function_synthetic(attr) or is_positional_synthetic(attr)):
+                continue
+            name = _synthetic_call_function_name(attr)
+            if not name or base_module is None:
+                continue
+            if name not in cache:
+                cache[name] = resolver.runs_on_host(base_module, name)
+            if cache[name]:
+                cls.forward_step_runs_on_host[attr] = True
 
 
 def functional_synthetic_attr(op_name: str) -> str:
@@ -1552,6 +1744,9 @@ class ClassStructure:
     loop_carried: list[LoopCarriedSpec] = field(default_factory=list)
     forward_param_inputs: list[str] = field(default_factory=list)
     dataflow_expanded: bool = False
+    # Synthetic free-function/positional call attr -> True when that call (or a
+    # function it transitively calls) runs host/CPU work (``.tolist()``/``.item()``).
+    forward_step_runs_on_host: dict[str, bool] = field(default_factory=dict)
 
 
 def stack_entry_dataflow(cls: ClassStructure) -> StackEntryDataflow | None:
@@ -6757,6 +6952,7 @@ def analyze_source(
     )
     visitor.visit(tree)
     finalize_class_registry(visitor.classes)
+    _annotate_host_free_functions(visitor.classes, tree, config)
     _enrich_kernel_import_details(visitor.classes, external_imports)
     _resolve_dispatched_attention_kernel(visitor.classes, config)
     _flag_unused_interface_inputs(visitor.classes, config)

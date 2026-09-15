@@ -1850,6 +1850,49 @@ def test_glm53_vision_rotary_frame_named_after_source_function():
     )
 
 
+def test_glm53_vision_index_helpers_labelled_cpu_ops():
+    """Host-side index helpers carry a ``device: cpu`` label; tensor ops do not.
+
+    ``get_vision_position_ids`` materialises grid metadata into Python
+    (``grid_thw.tolist()`` + a loop) and ``get_vision_attention_seqlens`` reaches a
+    ``.item()`` through ``get_max_seqlen`` -- both run on the host. The label is
+    derived generally by AST-introspecting the transformers callables (following
+    cross-file imports and callees), not from a hardcoded name list, so the rope
+    helper ``apply_rotary_pos_emb_vision`` -- which has no host-materialisation idiom
+    -- stays unlabelled.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+
+    def _attr_name(node: dict) -> str:
+        return str(_attr_value(node, "attr_name") or "")
+
+    def _find(fragment: str) -> dict:
+        matches = [n for n in nodes if fragment in _attr_name(n)]
+        assert len(matches) == 1, [n["id"] for n in matches]
+        return matches[0]
+
+    position_ids = _find("get_vision_position_ids")
+    attention_seqlens = _find("get_vision_attention_seqlens")
+    assert _attr_value(position_ids, "device") == "cpu"
+    assert _attr_value(attention_seqlens, "device") == "cpu"
+
+    # The label is targeted, not blanket: only the two genuine host helpers carry
+    # it. The pure-tensor rope helper (``apply_rotary_pos_emb_vision``), which has no
+    # host-materialisation idiom, is absent from this set -- proving it is not
+    # mislabelled.
+    cpu_nodes = [n for n in nodes if _attr_value(n, "device") == "cpu"]
+    assert {_attr_name(n) for n in cpu_nodes} == {
+        "@fn_l1839_get_vision_position_ids",
+        "@fn_l1840_get_vision_attention_seqlens",
+    }
+    assert not any(
+        "apply_rotary_pos_emb_vision" in str(n.get("id", "")) for n in cpu_nodes
+    )
+
+
 def test_glm53_router_outputs_no_redundant_mirror_passthrough():
     """The router's ``topk_weights`` reaches the experts without a duplicate tile.
 

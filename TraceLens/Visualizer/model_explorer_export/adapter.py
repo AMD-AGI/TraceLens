@@ -107,6 +107,8 @@ def _node_attrs(spec) -> list[dict[str, str]]:
             attrs.append(_kv("attn_implementation", kernel))
     if block is not None and block.details:
         attrs.append(_kv("details", "; ".join(block.details)))
+    if block is not None and block.runs_on_host:
+        attrs.append(_kv("device", "cpu"))
     return attrs
 
 

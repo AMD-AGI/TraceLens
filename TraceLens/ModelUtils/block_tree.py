@@ -763,6 +763,9 @@ class BlockNode:
     forward_step_return_producers: dict[str, list[str]] = field(
         default_factory=dict
     )
+    # A traced free-function call whose body (or a callee) materialises a tensor on
+    # the host (``.tolist()``/``.item()``) — rendered with a ``device: cpu`` label.
+    runs_on_host: bool = False
 
 
 PortStyle = Literal["floating", "inline"]
@@ -968,6 +971,7 @@ def _leaf_node(
     param_inputs: list[str] | None = None,
     boundary_input_name: str | None = None,
     boundary_input_ordinal: int | None = None,
+    runs_on_host: bool = False,
 ) -> BlockNode:
     # A traced free function's synthetic attr embeds the callee name
     # (``@fn_l1840_get_vision_attention_seqlens``). Token-classifying that name
@@ -997,6 +1001,7 @@ def _leaf_node(
         param_inputs=list(param_inputs or []),
         boundary_input_name=boundary_input_name,
         boundary_input_ordinal=boundary_input_ordinal,
+        runs_on_host=runs_on_host,
     )
 
 
@@ -1020,6 +1025,7 @@ def _expanded_free_function_node(
     """
     method_ops = cls.multi_op_methods.get(call_attr)
     output_names = cls.forward_step_output_names.get(call_attr)
+    runs_on_host = cls.forward_step_runs_on_host.get(call_attr, False)
     if method_ops:
         name = _synthetic_call_function_name(call_attr) or call_attr
         call_context = [
@@ -1085,6 +1091,7 @@ def _expanded_free_function_node(
             details=[f"function `{name}()`", *call_context],
             output_names=list(output_names or []),
             children=children,
+            runs_on_host=runs_on_host,
         )
     return _leaf_node(
         attr_name=call_attr,
@@ -1095,6 +1102,7 @@ def _expanded_free_function_node(
         basic=False,
         output_names=output_names,
         param_inputs=fallback_param_inputs,
+        runs_on_host=runs_on_host,
     )
 
 
