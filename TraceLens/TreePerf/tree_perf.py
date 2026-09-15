@@ -33,6 +33,7 @@ from ..PerfModel.torch_op_mapping import (
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
+from ..trace_health import run_trace_health_check
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils, merge_intervals
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
@@ -213,6 +214,11 @@ class TreePerfAnalyzer:
             key: value for key, value in data.items() if key != "traceEvents"
         }
         data = data["traceEvents"]
+
+        health_report = run_trace_health_check(
+            data, trace_metadata, capture_trace_filepath
+        )
+        health_report.log_findings()
 
         categorizer = (
             TraceToTree.default_categorizer
@@ -3024,6 +3030,10 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
     ) -> "JaxTreePerfAnalyzer":
         data = DataLoader.load_data(profile_filepath)
         data_pb = data["traceEvents"]
+
+        health_report = run_trace_health_check(data_pb)
+        health_report.log_findings()
+
         categorizer = TraceEventUtils.prepare_event_categorizer(data_pb)
         metadata_events, events = TraceEventUtils.split_event_list(data_pb)
         linking_key = "correlation_id"
