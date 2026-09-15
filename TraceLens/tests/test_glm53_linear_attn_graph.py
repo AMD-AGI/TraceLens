@@ -1725,75 +1725,76 @@ def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
     _assert_export_is_acyclic(nodes)
 
     # The rope helper renders like any module call (D3): its own ``@input``
-    # boundary. ``position_embeddings`` enters on a single frame-local boundary
-    # tile that fans out one port per unpacked slot (cos = port 0, sin = port 1)
-    # to the two unsqueezes -- neither reads hidden_states, and the tuple does not
-    # collapse onto slot 0 or drop the second slot.
-    frame_pe_input = (
-        "@positional_l1615_apply_rotary_pos_emb_vision:@/@input:position_embeddings"
-    )
-    assert any(n["id"].endswith(frame_pe_input) for n in nodes), frame_pe_input
-    frame_pe_input_id = next(
-        n["id"] for n in nodes if n["id"].endswith(frame_pe_input)
-    )
+    # boundary. The ``cos, sin = position_embeddings`` unpack is honoured at the
+    # boundary -- the two tuple slots stay DISTINCT tiles (``@input:cos`` and
+    # ``@input:sin``) named after the rotary block's return slots, rather than
+    # collapsing back onto one ``position_embeddings`` tile that fans ports 0/1.
+    # Each slice feeds its own unsqueeze; neither reads hidden_states.
+    frame_prefix = "@positional_l1615_apply_rotary_pos_emb_vision:@/@input:"
+    for slot in ("cos", "sin"):
+        assert any(
+            n["id"].endswith(frame_prefix + slot) for n in nodes
+        ), frame_prefix + slot
+    assert not any(
+        n["id"].endswith(frame_prefix + "position_embeddings") for n in nodes
+    ), "cos/sin must not re-merge onto a position_embeddings tile"
 
-    def _pe_slot_port(node_suffix: str) -> str:
+    frame_cos_id = next(n["id"] for n in nodes if n["id"].endswith(frame_prefix + "cos"))
+    frame_sin_id = next(n["id"] for n in nodes if n["id"].endswith(frame_prefix + "sin"))
+
+    def _sole_slot_source(node_suffix: str) -> str:
         node = next(n for n in nodes if n["id"].endswith(node_suffix))
         assert not any(
             "hidden_states" in e["sourceNodeId"] for e in node["incomingEdges"]
         ), node["id"]
-        pe_edges = [
-            e for e in node["incomingEdges"] if e["sourceNodeId"] == frame_pe_input_id
+        slot_edges = [
+            e
+            for e in node["incomingEdges"]
+            if e["sourceNodeId"] in {frame_cos_id, frame_sin_id}
         ]
-        assert len(pe_edges) == 1, node["id"]
-        return pe_edges[0].get("sourceNodeOutputId", "0")
+        assert len(slot_edges) == 1, node["id"]
+        return slot_edges[0]["sourceNodeId"]
 
-    cos_port = _pe_slot_port(
-        "@positional_l1615_apply_rotary_pos_emb_vision:@op_l1574_c15_unsqueeze:2"
+    # cos -> the c15 unsqueeze, sin -> the c42 unsqueeze (per D1 ordinal wiring).
+    assert (
+        _sole_slot_source(
+            "@positional_l1615_apply_rotary_pos_emb_vision:@op_l1574_c15_unsqueeze:2"
+        )
+        == frame_cos_id
     )
-    sin_port = _pe_slot_port(
-        "@positional_l1615_apply_rotary_pos_emb_vision:@op_l1574_c42_unsqueeze:4"
+    assert (
+        _sole_slot_source(
+            "@positional_l1615_apply_rotary_pos_emb_vision:@op_l1574_c42_unsqueeze:4"
+        )
+        == frame_sin_id
     )
-    assert {cos_port, sin_port} == {"0", "1"}, (cos_port, sin_port)
 
-    # The frame boundary traces back across the loop to the vision model's own
-    # ``position_embeddings`` input (both ordinals), which in turn traces to the
-    # pre-loop rotary producer's per-slot cos/sin outputs.
-    frame_pe_mirror = next(
-        e["sourceNodeId"]
-        for e in node_by_id[frame_pe_input_id]["incomingEdges"]
-    )
-    frame_mirror_sources = {
-        (e["sourceNodeId"], e.get("sourceNodeOutputId", "0"))
-        for e in node_by_id[frame_pe_mirror]["incomingEdges"]
-    }
-    assert frame_mirror_sources == {
-        ("visual/@input:position_embeddings", "0"),
-        ("visual/@input:position_embeddings", "1"),
-    }, frame_mirror_sources
+    # Each frame slice traces back across the loop -- through its frame mirror to
+    # the vision model's own ``@input:<slot>`` tile, and on to the pre-loop rotary
+    # producer's distinct per-slot ``@output:<slot>`` (cos -> cos, sin -> sin; no
+    # cross-alias).
+    def _sole_source(node_id: str) -> str:
+        edges = node_by_id[node_id]["incomingEdges"]
+        assert len(edges) == 1, (node_id, edges)
+        return edges[0]["sourceNodeId"]
 
-    # The pre-loop producer is a tuple return (cos, sin); each slot has a distinct
-    # per-port output node (no collision onto a single @output), so the vision
-    # mirror carries one incoming edge per slot.
-    pe_mirror = node_by_id["visual/@input_mirror:position_embeddings^position_embeddings"]
-    producer_ids = {e["sourceNodeId"] for e in pe_mirror["incomingEdges"]}
-    assert all(
-        "rotary_pos_emb/@output" in pid for pid in producer_ids
-    ), producer_ids
-    assert {
-        pid.rsplit("@output:", 1)[1].split("^", 1)[0] for pid in producer_ids
-    } == {"cos", "sin"}, producer_ids
+    for slot, frame_id in (("cos", frame_cos_id), ("sin", frame_sin_id)):
+        frame_mirror = _sole_source(frame_id)
+        vision_input = _sole_source(frame_mirror)
+        assert vision_input == f"visual/@input:{slot}", (slot, vision_input)
+        output_mirror = _sole_source(vision_input)
+        producer = _sole_source(output_mirror)
+        assert producer == f"visual/sidefeed:2:rotary_pos_emb/@output:{slot}", (
+            slot,
+            producer,
+        )
 
-    # The crossing carries the vision producer's shape, not the text sequence axis
-    # -- at the vision boundary, its mirror, and the new frame-local boundary.
-    for boundary_id in (
-        "visual/@input:position_embeddings",
-        pe_mirror["id"],
-        frame_pe_input_id,
-    ):
-        shape = _output_shape(node_by_id[boundary_id])
-        assert shape is not None and "Pv" in shape, (boundary_id, shape)
-        assert "B, S" not in shape, (boundary_id, shape)
+        # The crossing carries the vision producer's shape (Pv), not the text
+        # sequence axis, at every hop of the split boundary.
+        for boundary_id in (frame_id, frame_mirror, vision_input):
+            shape = _output_shape(node_by_id[boundary_id])
+            assert shape is not None and "Pv" in shape, (boundary_id, shape)
+            assert "B, S" not in shape, (boundary_id, shape)
 
 
 def test_glm53_vision_rotary_cos_and_sin_have_distinct_producers():
@@ -1932,10 +1933,10 @@ def test_glm53_vision_rotary_frame_has_module_like_boundaries():
     straight onto external producers, so the frame had no @input/@output tiles and
     did not read like a module. The owner rule is that a free-function call renders
     exactly like any other module call -- so the frame now carries one @input tile
-    per forward argument it reads (``q``, ``k``, ``position_embeddings``) and one
-    @output tile per tuple return slot. The ``position_embeddings`` tuple stays a
-    single logical input that fans its ordinals internally (covered elsewhere); the
-    boundary set here is what makes the frame a first-class group.
+    per forward argument it reads (``q``, ``k``, and the two ``position_embeddings``
+    tuple slots ``cos``/``sin``, which stay distinct tiles rather than collapsing
+    onto one) and one @output tile per tuple return slot. The boundary set here is
+    what makes the frame a first-class group.
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -1957,11 +1958,78 @@ def test_glm53_vision_rotary_frame_has_module_like_boundaries():
             if f"/{kind}:" in n["id"] and "_mirror:" not in n["id"]
         }
 
-    # One @input tile per forward argument the helper reads.
-    assert _boundary_labels("@input") == {"q", "k", "position_embeddings"}
+    # One @input tile per forward argument the helper reads; the position_embeddings
+    # tuple contributes its two distinct slots (cos, sin), not a merged tile.
+    assert _boundary_labels("@input") == {"q", "k", "cos", "sin"}
     # One @output tile per tuple return slot (q_embed, k_embed) -- a group cannot
     # expose an output without an entry boundary, so the frame has both.
     assert len(_boundary_labels("@output")) == 2
+
+
+def test_glm53_vision_attention_qk_norm_read_distinct_unbind_slices():
+    """q_norm/k_norm boundaries are named after the qkv slice each one reads.
+
+    ``Glm5NextVisionAttention`` unbinds a fused qkv projection into
+    ``query_states, key_states, value_states`` and runs q_norm over the query slice,
+    k_norm over the key slice. Both norms otherwise showed a generic
+    ``hidden_states`` @input fed by the same unbind, reading as if they consumed the
+    same tensor. Each boundary is now named after the producer slice it reads
+    (``query_states`` for q_norm on unbind port 0, ``key_states`` for k_norm on port
+    1), so the two siblings are visibly distinct.
+
+    The per-slice shapes also match the whole -- an unbind slice keeps every
+    non-split axis (``[Pv, 1024]``), it does not shed ``Pv`` down to ``[1024]``.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    node_by_id = {node["id"]: node for node in nodes}
+
+    _assert_export_is_acyclic(nodes)
+
+    unbind = next(
+        n
+        for n in nodes
+        if n["id"].endswith("attn:@op_l1608_c12_unbind:2")
+    )
+    # Every unbind slice keeps the whole's non-split axes (no dropped Pv).
+    whole_shape = _output_shape(unbind)
+    assert whole_shape is not None and whole_shape.startswith("[Pv, 1024]"), whole_shape
+    port_shapes = {
+        str(item["id"]): next(
+            a["value"] for a in item["attrs"] if a["key"] == "shape"
+        )
+        for item in unbind["outputsMetadata"]
+    }
+    assert all(shape.startswith("[Pv, 1024]") for shape in port_shapes.values()), (
+        port_shapes
+    )
+
+    def _is_input(node) -> bool:
+        return any(
+            a.get("key") == "synthetic" and a.get("value") == "@input"
+            for a in node.get("attrs", [])
+        )
+
+    def _norm_input(norm: str, slot: str, port: str) -> None:
+        tile = next(
+            n
+            for n in nodes
+            if n.get("namespace", "").endswith(f"/{norm}") and _is_input(n)
+        )
+        assert tile.get("label") == slot, (norm, tile.get("label"))
+        # Boundary is fed by the matching unbind ordinal.
+        sources = {
+            (e["sourceNodeId"], e.get("sourceNodeOutputId", "0"))
+            for e in tile["incomingEdges"]
+        }
+        assert sources == {(unbind["id"], port)}, (norm, sources)
+        shape = _output_shape(tile)
+        assert shape is not None and shape.startswith("[Pv, 1024]"), (norm, shape)
+
+    _norm_input("q_norm", "query_states", "0")
+    _norm_input("k_norm", "key_states", "1")
 
 
 def test_glm53_vision_rotary_frame_named_after_source_function():

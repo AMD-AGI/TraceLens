@@ -1034,7 +1034,12 @@ class ShapeInferencer:
             details = [str(item) for item in node.metadata.get("details", [])]
             for ordinal in range(len(output_names)):
                 sliced = _multi_output_slice_shape(
-                    whole, details, op_label, ordinal, self.context.dims
+                    whole,
+                    details,
+                    op_label,
+                    ordinal,
+                    self.context.dims,
+                    output_count=len(output_names),
                 )
                 if sliced is not None:
                     merged[f"{node.id}{PORT_SPEC_SEP}{ordinal}"] = sliced
@@ -2914,6 +2919,7 @@ def _multi_output_slice_shape(
     operation_label: str,
     ordinal: int,
     dims: dict[str, DimExpr],
+    output_count: int | None = None,
 ) -> TensorSpec | None:
     """Shape of one output slice of a split/chunk/unbind.
 
@@ -2931,6 +2937,19 @@ def _multi_output_slice_shape(
         dim = default_dim
     resolved_dim = dim % len(source.shape)
     if operation_label == "unbind":
+        # ``source`` may be the whole pre-unbind tensor (its unbind axis still
+        # present, sized to the number of outputs) or -- when the trace only
+        # recorded a single output tensor -- one already-materialised slice. Drop
+        # the axis only in the former case; slicing an already-sliced spec a second
+        # time would wrongly shed a real dimension ([Pv, 1024] -> [1024]).
+        axis_size = source.shape[resolved_dim]
+        whole = (
+            output_count is not None
+            and isinstance(axis_size, int)
+            and axis_size == output_count
+        )
+        if not whole:
+            return source
         new_shape = tuple(
             value for index, value in enumerate(source.shape) if index != resolved_dim
         )

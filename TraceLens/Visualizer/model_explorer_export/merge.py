@@ -401,6 +401,75 @@ def _labeled_tensor_port_label(node: dict[str, Any] | None) -> str | None:
     return label if isinstance(label, str) and label else None
 
 
+def _source_output_port_label(node: dict[str, Any] | None, port: str) -> str | None:
+    """The ``port_label`` recorded for a producer's ``port`` output slot, if any."""
+    if node is None:
+        return None
+    for item in node.get("outputsMetadata", []) or []:
+        if str(item.get("id", "")) != str(port):
+            continue
+        for attr in item.get("attrs", []):
+            if attr.get("key") == "port_label" and attr.get("value"):
+                return str(attr["value"])
+    return None
+
+
+def _source_slice_label(
+    source_id: str,
+    source_port: str,
+    node_by_id: dict[str, dict[str, Any]],
+) -> str | None:
+    """Name a boundary after the producer *slice* it reads, when that slice is one
+    of several a multi-output producer emits.
+
+    A consumer reading one named slice of a multi-output producer -- ``key_states``
+    from a qkv ``unbind``, ``cos``/``sin`` from a rotary block that returns a tuple --
+    should show that slice's own name on its boundary tile, not the generic forward
+    parameter (``hidden_states`` / ``position_embeddings``). Fires only when the
+    producer is genuinely multi-output, so an ordinary single-tensor input keeps its
+    parameter name (bounded blast radius).
+    """
+    source = node_by_id.get(source_id)
+    if source is None:
+        return None
+    port = str(source_port)
+    # (a) A multi-output op (unbind/split/chunk) tags its slices with output_names.
+    names_attr = _node_attr(source, "output_names")
+    if names_attr:
+        names = [name for name in names_attr.split(",") if name]
+        if len(names) > 1:
+            label = _source_output_port_label(source, port)
+            if label:
+                return label
+            if port.isdigit() and int(port) < len(names):
+                return names[int(port)]
+    # (b) A named slice boundary tile: an @output / @input (or their mirrors)
+    #     that is one of >= 2 sibling boundary tiles in its namespace, i.e. a
+    #     specific named slice rather than a lone generic boundary. A nested block
+    #     reading the split ``cos``/``sin`` tiles a parent already carved out keeps
+    #     the slice name instead of collapsing back onto the tuple parameter. A
+    #     single-slot boundary (one @output feeding an input) is left untouched.
+    syn = _node_attr(source, "synthetic")
+    families = ({"@output", "@output_mirror"}, {"@input", "@input_mirror"})
+    family = next((fam for fam in families if syn in fam), None)
+    if family is not None:
+        namespace = source.get("namespace", "")
+        slots = sum(
+            1
+            for other in node_by_id.values()
+            if _node_attr(other, "synthetic") in family
+            and other.get("namespace", "") == namespace
+        )
+        if slots >= 2:
+            label = _source_output_port_label(source, port)
+            if label:
+                return label
+            source_label = source.get("label")
+            if isinstance(source_label, str) and source_label:
+                return source_label
+    return None
+
+
 def _infer_entry_port_label(
     edge: dict[str, Any],
     target: dict[str, Any],
@@ -940,6 +1009,7 @@ def _entry_bucket_label(
     entries: list[dict[str, Any]],
     internal_ids: set[str],
     node_by_id: dict[str, dict[str, Any]],
+    resolve_slot_label: Any = None,
 ) -> str | None:
     """Name a boundary input after the tensor arriving on it, when it is known."""
     for node in entries:
@@ -947,8 +1017,26 @@ def _entry_bucket_label(
             source = (edge["sourceNodeId"], edge.get("sourceNodeOutputId", "0"))
             if source not in sources:
                 continue
-            label = _edge_port_label(edge) or _labeled_tensor_port_label(
-                node_by_id.get(edge["sourceNodeId"])
+            # A boundary that reads one named return slot of a multi-return child
+            # (``cos``/``sin`` of the rotary block, arriving as the tuple parameter
+            # ``position_embeddings``) is named after that slot, so the two slices
+            # stay distinct tiles instead of collapsing onto the tuple's name.
+            slot_label = (
+                resolve_slot_label(
+                    edge["sourceNodeId"], edge.get("sourceNodeOutputId", "0")
+                )
+                if resolve_slot_label is not None
+                else None
+            )
+            label = (
+                slot_label
+                or _source_slice_label(
+                    edge["sourceNodeId"],
+                    edge.get("sourceNodeOutputId", "0"),
+                    node_by_id,
+                )
+                or _edge_port_label(edge)
+                or _labeled_tensor_port_label(node_by_id.get(edge["sourceNodeId"]))
             )
             if label:
                 return label
@@ -983,6 +1071,7 @@ def _inject_group_inputs(
     section_nodes: list[dict[str, Any]],
     *,
     skip_namespaces: frozenset[str] = frozenset(),
+    resolve_slot_label: Any = None,
 ) -> None:
     """Add a visible @input port to expanded namespace groups that lack one."""
     node_by_id = {node["id"]: node for node in section_nodes}
@@ -1043,7 +1132,9 @@ def _inject_group_inputs(
 
         buckets = _group_entry_buckets(entry_nodes, internal_ids)
         bucket_labels = [
-            _entry_bucket_label(sources, entries, internal_ids, node_by_id)
+            _entry_bucket_label(
+                sources, entries, internal_ids, node_by_id, resolve_slot_label
+            )
             for sources, entries in buckets
         ]
         # Entry steps that read the same forward parameter share one tile even if
@@ -1504,9 +1595,21 @@ def _wrap_actual_group_boundary(
     if not inputs or not outputs:
         return outputs
     input_id = _merge_node_id(id_prefix, "@input")
+    # A block whose sole input reads one named slice of a multi-output producer
+    # (q_norm reads ``query_states``, k_norm reads ``key_states`` of the qkv unbind)
+    # names its boundary after that slice, so two sibling blocks fed by different
+    # slices no longer look like they read the same tensor.
+    input_label = "hidden_states"
+    if len(inputs) == 1:
+        source_id, source_port = _source_parts(inputs[0])
+        slice_label = _source_slice_label(
+            source_id, source_port, {node["id"]: node for node in nodes}
+        )
+        if slice_label:
+            input_label = slice_label
     input_node = _make_group_input_node(
         input_id=input_id,
-        label="hidden_states",
+        label=input_label,
         namespace=namespace,
         incoming_edges=[
             _source_edge(source, str(index)) for index, source in enumerate(inputs)
@@ -2630,7 +2733,47 @@ def _append_section(
     inject_skip = set(pipeline_inject_skip)
     if skip_variant_root_input:
         inject_skip.add(namespace_prefix)
-    _inject_group_inputs(section_nodes, skip_namespaces=frozenset(inject_skip))
+
+    def _return_slot_label(source_id: str, source_port: str) -> str | None:
+        """Name a boundary input after the child return slot it reads.
+
+        Symmetric to the output side (``_resolve_slot_names_for_prefix``): when a
+        boundary reads one slice of a multi-return child (the rotary block returns
+        ``(cos, sin)`` as the caller's ``position_embeddings`` tuple), it is named
+        after that slot so the slices stay distinct tiles rather than collapsing
+        onto the tuple parameter's name. Runs before ``@output`` tiles exist, so it
+        matches the child's recorded return producers against the raw source id.
+        """
+        for child in block_tree.children:
+            slots = child.forward_return_slots
+            if not slots or len(slots) < 2:
+                continue
+            order = child.forward_return_order or list(slots.keys())
+            producer_slots: dict[str, list[str]] = {}
+            for slot in order:
+                producer = slots.get(slot)
+                if producer is not None:
+                    producer_slots.setdefault(producer, []).append(slot)
+            for slot, producer in slots.items():
+                if producer is not None and slot not in producer_slots.get(
+                    producer, []
+                ):
+                    producer_slots.setdefault(producer, []).append(slot)
+            for producer, slot_list in producer_slots.items():
+                if not producer or producer not in source_id:
+                    continue
+                if len(slot_list) == 1:
+                    return slot_list[0]
+                idx = int(source_port) if str(source_port).isdigit() else None
+                if idx is not None and idx < len(slot_list):
+                    return slot_list[idx]
+        return None
+
+    _inject_group_inputs(
+        section_nodes,
+        skip_namespaces=frozenset(inject_skip),
+        resolve_slot_label=_return_slot_label,
+    )
     def _resolve_slot_names_for_prefix(prefix: str) -> dict[str, list[str]] | None:
         """Map source attr_names → return slot names for multi-return children.
 
