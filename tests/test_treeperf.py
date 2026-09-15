@@ -45,10 +45,7 @@ from tests.fixtures.reporting import _rich_pftrace_events
 from tests.fixtures.traces import (
     INFERENCE_ROOT,
     JAX_PB,
-    RESNET,
     RESNET_TRACE,
-    RESNET_TRACE as RESNET_CKPT,
-    TRACES_ROOT,
     _discover_trace_gz_files,
 )
 from tests.fixtures.treeperf import (
