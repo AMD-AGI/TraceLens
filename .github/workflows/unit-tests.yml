@@ -48,7 +48,7 @@ jobs:
           python -m venv .venv
           . .venv/bin/activate
           python -m pip install --upgrade pip
-          pip install '.[jax]' pytest pytest-xdist pytest-cov openpyxl orjson rocm-origami
+          pip install '.[jax,kernel_source]' pytest pytest-xdist pytest-cov openpyxl orjson rocm-origami
 
       - name: Run unit tests
         run: |
