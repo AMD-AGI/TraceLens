@@ -28,6 +28,10 @@ _LEGACY_GPU_KERNEL = "#8e44ad"
 _SYNTHETIC = "#ecf0f1"
 _INPUT = "#d9e8f5"
 _LAYOUT_ONLY = "#ffffff"
+# Ops that execute on the host CPU (index/seqlen helpers) get a pale purple fill
+# so they read as distinct from the gray GPU op tiles.
+_HOST_OP = "#e8daef"
+_HOST_OP_BORDER = "#a569bd"
 
 _GPU_KERNEL_FILLS = frozenset(
     {
@@ -243,6 +247,15 @@ def detail_tile_style(
             "backgroundColor": "#f9e79f",
             "textColor": _DARK_TEXT,
             "borderColor": "#b7950b",
+        }
+
+    # Host/CPU ops (``get_vision_position_ids`` and friends) render pale purple so
+    # they stand apart from the gray GPU op tiles, regardless of op kind.
+    if block is not None and getattr(block, "runs_on_host", False):
+        return {
+            "backgroundColor": _HOST_OP,
+            "textColor": _DARK_TEXT,
+            "borderColor": _HOST_OP_BORDER,
         }
 
     # Combine tiles (Multiply, Add, …) use the same gray as Linear/RMSNorm.

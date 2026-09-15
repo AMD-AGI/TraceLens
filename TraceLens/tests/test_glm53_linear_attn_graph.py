@@ -2142,6 +2142,14 @@ def test_glm53_vision_index_helpers_labelled_cpu_ops():
         "apply_rotary_pos_emb_vision" in str(n.get("id", "")) for n in cpu_nodes
     )
 
+    # Host ops render pale purple (not the gray GPU-op fill) so they read as
+    # distinct in the viewer.
+    for node in cpu_nodes:
+        assert node.get("style", {}).get("backgroundColor") == "#e8daef", (
+            _attr_name(node),
+            node.get("style"),
+        )
+
 
 def test_glm53_router_outputs_no_redundant_mirror_passthrough():
     """The router's ``topk_weights`` reaches the experts without a duplicate tile.
