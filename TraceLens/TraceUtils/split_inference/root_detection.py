@@ -185,85 +185,6 @@ def _branch_candidate(
     )
 
 
-def _compute_gpu_signature(tree: TraceToTree, block: Sequence[dict]) -> List[str]:
-    """Normalized names carrying the first half of a block's GPU time.
-
-    The names are sorted by descending GPU contribution and cut as soon as they
-    pass half the block's total, so the signature describes what an iteration
-    unmistakably does rather than everything it happens to touch.
-    """
-    name_gpu: Dict[str, float] = {}
-    total = 0.0
-    for event in block:
-        gpu = _descendant_gpu_time(tree, [event])
-        norm = normalize_name_for_comparison(event.get("name", ""))
-        name_gpu[norm] = name_gpu.get(norm, 0.0) + gpu
-        total += gpu
-    if not total:
-        return []
-    signature: List[str] = []
-    accumulated = 0.0
-    for name, gpu in sorted(name_gpu.items(), key=lambda x: -x[1]):
-        signature.append(name)
-        accumulated += gpu
-        if accumulated > total * 0.5:
-            break
-    return signature
-
-
-def _matches_gpu_signature(events: Sequence[dict], signature: List[str]) -> bool:
-    """True when ``signature`` appears as a subsequence of ``events``' names.
-
-    A subsequence rather than a contiguous run: a warmup pass does the same work
-    as a steady-state iteration with extra setup interleaved.
-    """
-    index = 0
-    for event in events:
-        if index < len(signature) and (
-            normalize_name_for_comparison(event.get("name", "")) == signature[index]
-        ):
-            index += 1
-    return index == len(signature)
-
-
-def _promote_bookend_iterations(
-    tree: TraceToTree,
-    ordered: Sequence[dict],
-    start: int,
-    unit_blocks: List[List[dict]],
-) -> tuple:
-    """Adopt the leading and trailing regions as iterations when they do the same work.
-
-    The period search anchors on a repeating run, which leaves whatever precedes
-    and follows it outside every block -- typically a warmup pass and a wrapup,
-    each doing an iteration's work without matching its stride. Judging them by
-    GPU signature rather than by name is what lets them in: they are the same
-    computation, so excluding them reports GPU time no root accounts for.
-
-    Returns ``(unit_blocks, prefix, suffix)`` with the promoted regions moved
-    into ``unit_blocks`` and only the unpromoted remainder left behind.
-    """
-    representative = unit_blocks[len(unit_blocks) // 2]
-    signature = _compute_gpu_signature(tree, representative)
-
-    prefix = list(ordered[:start])
-    blocked_uids = {e.get("UID") for block in unit_blocks for e in block}
-    last = unit_blocks[-1][-1]
-    last_block_end = last["ts"] + last.get("dur", 0)
-    suffix = [
-        e
-        for e in ordered
-        if e["ts"] >= last_block_end and e.get("UID") not in blocked_uids
-    ]
-
-    if signature and prefix and _matches_gpu_signature(prefix, signature):
-        unit_blocks.insert(0, prefix)
-        prefix = []
-    if signature and suffix and _matches_gpu_signature(suffix, signature):
-        unit_blocks.append(suffix)
-        suffix = []
-    return unit_blocks, prefix, suffix
-
 
 def _bookend_diagnostics(
     blocked: Sequence[dict],
@@ -314,11 +235,15 @@ def _periodic_candidate(
     unit_blocks = _blocks_by_pattern(live, pattern, start)
     if len(unit_blocks) < MIN_LABEL_CHILDREN:
         return None
-    # ``live``, not ``ordered``: ``start`` indexes the sequence the period was
-    # found in, so the bookends have to be taken from that same sequence.
-    unit_blocks, prefix, suffix = _promote_bookend_iterations(
-        tree, live, start, unit_blocks
+    prefix = list(live[:start])
+    blocked_uids = {e.get("UID") for b in unit_blocks for e in b}
+    last_block_end = (
+        unit_blocks[-1][-1]["ts"] + unit_blocks[-1][-1].get("dur", 0)
     )
+    suffix = [
+        e for e in live
+        if e["ts"] >= last_block_end and e.get("UID") not in blocked_uids
+    ]
     iteration_roots: List[dict] = []
     blocked: List[dict] = []
     for block in unit_blocks:
@@ -488,9 +413,15 @@ def detect_from_sibling_roots(
     ]
     if not unit_blocks:
         return None
-    unit_blocks, prefix, suffix = _promote_bookend_iterations(
-        tree, ordered, start, unit_blocks
+    prefix = list(ordered[:start])
+    blocked_uids_tmp = {e.get("UID") for b in unit_blocks for e in b}
+    last_block_end = (
+        unit_blocks[-1][-1]["ts"] + unit_blocks[-1][-1].get("dur", 0)
     )
+    suffix = [
+        e for e in ordered
+        if e["ts"] >= last_block_end and e.get("UID") not in blocked_uids_tmp
+    ]
 
     sibling_roots = []
     blocked = []
