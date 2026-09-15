@@ -1111,7 +1111,27 @@ class BranchBlock:
         "Sigmoid",
         "shared expert path",
     ]
-    assert {"proj", "shared", "left", "right"} <= set(info.forward_calls)
+    # ``proj`` (3 sequential calls) and ``shared`` (2 sequential calls) are
+    # genuinely repeated, so each call site is disambiguated with an ``@l{lineno}``
+    # suffix; the base attr still resolves back for class/component lookups. The
+    # branch-exclusive ``left``/``right`` (one call each, mutually exclusive arms)
+    # are not repeated and stay bare.
+    forward_calls = set(info.forward_calls)
+    assert {aa.base_submodule_attr(c) for c in forward_calls} >= {
+        "proj",
+        "shared",
+        "left",
+        "right",
+    }
+    assert "left" in forward_calls and "right" in forward_calls
+    assert "proj" not in forward_calls and "shared" not in forward_calls
+    assert (
+        len({c for c in forward_calls if aa.base_submodule_attr(c) == "proj"}) == 3
+    )
+    assert (
+        len({c for c in forward_calls if aa.base_submodule_attr(c) == "shared"}) == 2
+    )
+    # ``side_inputs`` is keyed by the base attr (call sites merged).
     assert info.side_inputs["shared"][0].source_kind == "forward_input"
 
 

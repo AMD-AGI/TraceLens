@@ -771,11 +771,41 @@ def _wire_all_predecessor_edges(
                     else None
                 )
                 if fan_out:
+                    # When the tuple producer is a multi-return module whose slots
+                    # trace to *distinct* internal producers (``cos, sin =
+                    # self.recomposition_frequencies(...)`` in the rope embedding),
+                    # dock each consumer onto its own slot's producer instead of
+                    # aliasing every slot onto the single last-slot tail. Each such
+                    # producer has a single output, so its edge carries port "0";
+                    # slots that share one producer keep the fan-out ordinal port so
+                    # a genuine tuple-returning op still splits by ordinal.
+                    pred_node = steps_by_attr.get(pred)
+                    slot_order = (
+                        pred_node.forward_return_order
+                        if pred_node is not None
+                        else None
+                    ) or []
                     for consumer_index, ordinal in fan_out:
-                        slot_link = (source_index, consumer_index)
+                        slot_source = source_index
+                        slot_port = str(ordinal)
+                        if (
+                            pred_node is not None
+                            and pred_node.forward_return_slots
+                            and 0 <= ordinal < len(slot_order)
+                        ):
+                            resolved = _resolve_return_slot_source(
+                                pred_node,
+                                slot_order[ordinal],
+                                attr_last_index,
+                                source_index,
+                            )
+                            if resolved != source_index:
+                                slot_source = resolved
+                                slot_port = "0"
+                        slot_link = (slot_source, consumer_index)
                         if slot_link not in graph.links:
                             graph.links.append(slot_link)
-                        graph.link_output_ports[slot_link] = str(ordinal)
+                        graph.link_output_ports[slot_link] = slot_port
                         if multi and arg_name and slot_link not in graph.link_port_labels:
                             graph.link_port_labels[slot_link] = arg_name
                     continue

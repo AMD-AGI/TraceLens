@@ -152,6 +152,42 @@ def function_display_label(attr_name_or_func: str) -> str:
     return text[:1].upper() + text[1:] if text else name
 
 
+# A submodule/method call's step key is normally the bare child attr
+# (``self.norm(x)`` -> ``norm``). When the SAME child is called more than once in
+# a single forward (``cos = self.recomposition_frequencies(cos)`` then
+# ``sin = self.recomposition_frequencies(sin)``), that bare key collides: the
+# second call overwrites the first's predecessors and ``var_producer`` binding, so
+# one branch is dead-code-eliminated. Disambiguate repeated call sites with an
+# ``@l{lineno}`` suffix (mirroring the synthetic kinds) so each call keeps its own
+# wiring; strip it back to the base attr wherever the key indexes ``init_assignments``
+# / ``multi_op_methods`` (the child-class join point).
+_SUBMODULE_CALLSITE_RE = re.compile(r"@l(\d+)$")
+
+
+def submodule_callsite_attr(attr: str, lineno: int) -> str:
+    """Call-site-disambiguated step key for a repeated submodule/method call."""
+    return f"{attr}@l{lineno}"
+
+
+def submodule_callsite_source_pos(attr: str) -> tuple[int, int] | None:
+    """Source position encoded in a call-site step key, for ordering among siblings."""
+    match = _SUBMODULE_CALLSITE_RE.search(attr)
+    if match is None:
+        return None
+    return int(match.group(1)), 0
+
+
+def base_submodule_attr(attr: str) -> str:
+    """Strip a call-site ``@l{lineno}`` suffix back to the base child attr.
+
+    Safe for every key: the suffix is anchored to the end, synthetic attrs
+    (``@op_l..``/``@positional_l..``/``@fn_l..``) end in their function/op name
+    rather than a trailing ``@l\\d+``, and real submodule attrs are plain
+    identifiers. Only keys produced by ``submodule_callsite_attr`` are affected.
+    """
+    return _SUBMODULE_CALLSITE_RE.sub("", attr)
+
+
 def _is_emittable_free_function(func: ast.AST, target: str | None) -> bool:
     """True for a bare ``foo(...)`` call to a module-level function worth showing.
 
@@ -712,7 +748,10 @@ def _unwrap_expr(node: ast.AST) -> ast.AST:
 
 
 def _extract_self_calls_ordered(
-    node: ast.AST, out: list[str], skip_free_fn: bool = False
+    node: ast.AST,
+    out: list[str],
+    skip_free_fn: bool = False,
+    repeated_attrs: frozenset[str] = frozenset(),
 ) -> None:
     """Collect self.module(...) calls in approximate evaluation order (inner-first).
 
@@ -721,17 +760,25 @@ def _extract_self_calls_ordered(
     is built branch-unaware (both arms of an ``if`` are walked), so an ``@fn_`` node
     from a branch that config-resolution later drops would leak in and scramble the
     surrounding wiring. Recognised ops/kernels/rope helpers are unaffected.
+
+    ``repeated_attrs`` names the self-submodule attrs called more than once in this
+    forward; each call to one gets a call-site ``@l{lineno}`` suffix so two calls to
+    the same child stay distinct steps (see ``submodule_callsite_attr``). Empty by
+    default, so single-call forwards keep bare keys (byte-identical).
     """
     node = _unwrap_expr(node)
     if isinstance(node, ast.Call):
         for arg in node.args:
-            _extract_self_calls_ordered(arg, out, skip_free_fn)
+            _extract_self_calls_ordered(arg, out, skip_free_fn, repeated_attrs)
         for keyword in node.keywords:
-            _extract_self_calls_ordered(keyword.value, out, skip_free_fn)
+            _extract_self_calls_ordered(keyword.value, out, skip_free_fn, repeated_attrs)
 
         func = node.func
         if isinstance(func, ast.Attribute) and _is_self_attr(func, func.attr):
-            _append_forward_call(out, func.attr)
+            attr = func.attr
+            if attr in repeated_attrs:
+                attr = submodule_callsite_attr(attr, node.lineno)
+            _append_forward_call(out, attr)
             return
         functional_op = _functional_call_name(func)
         if functional_op:
@@ -756,29 +803,118 @@ def _extract_self_calls_ordered(
         return
 
     if isinstance(node, ast.BinOp):
-        _extract_self_calls_ordered(node.left, out, skip_free_fn)
-        _extract_self_calls_ordered(node.right, out, skip_free_fn)
+        _extract_self_calls_ordered(node.left, out, skip_free_fn, repeated_attrs)
+        _extract_self_calls_ordered(node.right, out, skip_free_fn, repeated_attrs)
         return
 
     if isinstance(node, (ast.List, ast.Tuple)):
         for elt in node.elts:
-            _extract_self_calls_ordered(elt, out, skip_free_fn)
+            _extract_self_calls_ordered(elt, out, skip_free_fn, repeated_attrs)
         return
 
     if isinstance(node, ast.IfExp):
-        _extract_self_calls_ordered(node.body, out, skip_free_fn)
-        _extract_self_calls_ordered(node.orelse, out, skip_free_fn)
+        _extract_self_calls_ordered(node.body, out, skip_free_fn, repeated_attrs)
+        _extract_self_calls_ordered(node.orelse, out, skip_free_fn, repeated_attrs)
         return
 
     if isinstance(node, ast.Subscript):
-        _extract_self_calls_ordered(node.value, out, skip_free_fn)
+        _extract_self_calls_ordered(node.value, out, skip_free_fn, repeated_attrs)
         return
 
     if isinstance(node, ast.Compare):
-        _extract_self_calls_ordered(node.left, out, skip_free_fn)
+        _extract_self_calls_ordered(node.left, out, skip_free_fn, repeated_attrs)
         for comparator in node.comparators:
-            _extract_self_calls_ordered(comparator, out, skip_free_fn)
+            _extract_self_calls_ordered(comparator, out, skip_free_fn, repeated_attrs)
         return
+
+
+def _self_call_sites_in_expr(node: ast.AST) -> dict[str, set[int]]:
+    """Distinct source linenos calling each ``self.<attr>`` inside an expression."""
+    sites: dict[str, set[int]] = {}
+    for inner in ast.walk(node):
+        if (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and _is_self_attr(inner.func, inner.func.attr)
+        ):
+            sites.setdefault(inner.func.attr, set()).add(inner.lineno)
+    return sites
+
+
+def _merge_sequential_sites(
+    acc: dict[str, set[int]], nxt: dict[str, set[int]]
+) -> dict[str, set[int]]:
+    """Union call sites that execute one-after-another on the same path."""
+    out = {attr: set(sites) for attr, sites in acc.items()}
+    for attr, sites in nxt.items():
+        out.setdefault(attr, set()).update(sites)
+    return out
+
+
+def _merge_branch_sites(
+    body: dict[str, set[int]], orelse: dict[str, set[int]]
+) -> dict[str, set[int]]:
+    """Pick the busier branch per attr; mutually-exclusive arms don't both count."""
+    out: dict[str, set[int]] = {}
+    for attr in set(body) | set(orelse):
+        body_sites = body.get(attr, set())
+        else_sites = orelse.get(attr, set())
+        out[attr] = body_sites if len(body_sites) >= len(else_sites) else else_sites
+    return out
+
+
+def _path_max_self_call_sites(stmts: list[ast.stmt]) -> dict[str, set[int]]:
+    """Max distinct co-executing ``self.<attr>`` call linenos along any one path.
+
+    ``ast.walk`` alone over-counts a child invoked once in each arm of an
+    ``if/else`` (only one arm runs), which would wrongly disambiguate a single
+    logical call (GLM's ``self.self_attn`` in its linear/full branches). Walking
+    the control flow — summing sequential statements but taking the *larger* arm of
+    a branch — counts only calls that can truly coexist, so genuinely repeated
+    straight-line calls (rotary ``recomposition_frequencies(cos)`` then ``(sin)``)
+    are still caught while branch alternatives are not.
+    """
+    result: dict[str, set[int]] = {}
+    for stmt in stmts:
+        if isinstance(stmt, ast.If):
+            stmt_sites = _merge_sequential_sites(
+                _self_call_sites_in_expr(stmt.test),
+                _merge_branch_sites(
+                    _path_max_self_call_sites(stmt.body),
+                    _path_max_self_call_sites(stmt.orelse),
+                ),
+            )
+        elif isinstance(stmt, (ast.For, ast.While)):
+            iter_or_test = getattr(stmt, "iter", None) or getattr(stmt, "test", None)
+            stmt_sites = _merge_sequential_sites(
+                _self_call_sites_in_expr(iter_or_test) if iter_or_test else {},
+                _merge_sequential_sites(
+                    _path_max_self_call_sites(stmt.body),
+                    _path_max_self_call_sites(stmt.orelse),
+                ),
+            )
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            stmt_sites = _path_max_self_call_sites(stmt.body)
+        elif isinstance(stmt, ast.Try):
+            stmt_sites = _path_max_self_call_sites(
+                stmt.body + stmt.orelse + stmt.finalbody
+            )
+        else:
+            stmt_sites = _self_call_sites_in_expr(stmt)
+        result = _merge_sequential_sites(result, stmt_sites)
+    return result
+
+
+def _repeated_self_call_attrs(body: list[ast.stmt]) -> frozenset[str]:
+    """Self-submodule/method attrs called from >1 distinct site on one exec path.
+
+    Only these attrs receive call-site-disambiguated step keys; every other
+    forward keeps bare keys, so the common single-call case stays byte-identical.
+    Mutually-exclusive branch arms are not treated as repeats (see
+    ``_path_max_self_call_sites``).
+    """
+    sites = _path_max_self_call_sites(list(body))
+    return frozenset(attr for attr, linenos in sites.items() if len(linenos) > 1)
 
 
 def _self_attr_name(node: ast.AST | None) -> str | None:
@@ -975,18 +1111,19 @@ def _method_forward_step_details(
     }
     details: dict[str, list[str]] = {}
     for call_attr in forward_calls:
-        if call_attr in init_assignments:
+        base = base_submodule_attr(call_attr)
+        if base in init_assignments:
             continue
         if call_attr.startswith("@") or call_attr == SYNTHETIC_ATTENTION:
             continue
-        func = method_funcs.get(call_attr)
+        func = method_funcs.get(base)
         if func is None:
             continue
         combine_op = _detect_method_combine_op(func, class_name=class_node.name)
         if combine_op is None:
             continue
         details[call_attr] = [
-            f"method `{call_attr}()`",
+            f"method `{base}()`",
             f"{COMBINE_DETAIL_PREFIX} {combine_op}",
         ]
     return details
@@ -1010,13 +1147,14 @@ def _single_op_forward_methods(
     }
     single: dict[str, ForwardOperation] = {}
     for call_attr in forward_calls:
+        base = base_submodule_attr(call_attr)
         if (
-            call_attr in init_assignments
+            base in init_assignments
             or call_attr.startswith("@")
             or call_attr == SYNTHETIC_ATTENTION
         ):
             continue
-        func = method_funcs.get(call_attr)
+        func = method_funcs.get(base)
         if func is None:
             continue
         # Combine-op methods drive side-input merge rendering, so leave them named.
@@ -1028,7 +1166,9 @@ def _single_op_forward_methods(
             all_tensor_ops=all_tensor_ops,
         )
         if len(operations.operations) == 1:
-            single[call_attr] = operations.operations[0]
+            # Keyed by the base method name; two call sites of the same repeated
+            # method resolve here through ``base_submodule_attr`` in the block tree.
+            single[base] = operations.operations[0]
     return single
 
 
@@ -1046,13 +1186,14 @@ def _multi_op_forward_methods(
     }
     expanded: dict[str, list[ForwardOperation]] = {}
     for call_attr in forward_calls:
+        base = base_submodule_attr(call_attr)
         if (
-            call_attr in init_assignments
+            base in init_assignments
             or call_attr.startswith("@")
             or call_attr == SYNTHETIC_ATTENTION
         ):
             continue
-        func = method_funcs.get(call_attr)
+        func = method_funcs.get(base)
         if func is None:
             continue
         # Combine helpers (for example Kimi's moe_infer) are represented by their
@@ -1065,7 +1206,9 @@ def _multi_op_forward_methods(
             all_tensor_ops=all_tensor_ops,
         )
         if len(operations.operations) > 1:
-            expanded[call_attr] = operations.operations
+            # Keyed by the base method name; two call sites of the same repeated
+            # method resolve here through ``base_submodule_attr`` in the block tree.
+            expanded[base] = operations.operations
     return expanded
 
 
@@ -1517,11 +1660,15 @@ def _forward_owns_tensor_math(
     composite children (norms, attention, another MLP) leave the math to those
     children, and their own statements are residual plumbing represented elsewhere.
     """
-    module_calls = [call for call in forward_calls if call in init_assignments]
+    module_calls = [
+        call for call in forward_calls if base_submodule_attr(call) in init_assignments
+    ]
     if not module_calls:
         return False
     return all(
-        displays_as_pointwise_leaf(call, init_assignments[call])
+        displays_as_pointwise_leaf(
+            base_submodule_attr(call), init_assignments[base_submodule_attr(call)]
+        )
         for call in module_calls
     )
 
@@ -1555,11 +1702,12 @@ def _forward_delegates_only_to_sibling_methods(
     if not forward_calls:
         return False
     for call in forward_calls:
-        if call in init_assignments:
+        base = base_submodule_attr(call)
+        if base in init_assignments:
             return False  # a real submodule carries that part of the math
         if is_positional_synthetic(call) or is_functional_synthetic(call):
             return False  # positional/functional child, handled elsewhere
-        if call not in method_names:
+        if base not in method_names:
             return False  # unknown free call — don't assume inline ownership
     return True
 
@@ -1573,7 +1721,7 @@ def _forward_mixes_modules_and_inline_ops(
     module_calls = [
         call
         for call in forward_calls
-        if call in init_assignments
+        if base_submodule_attr(call) in init_assignments
         or is_positional_synthetic(call)
         or is_functional_synthetic(call)
         or is_function_synthetic(call)
@@ -2340,11 +2488,17 @@ class _ForwardOperationExtractor:
         param_names: set[str] | None = None,
         config: dict[str, Any] | None = None,
         module_functions: dict[str, ast.FunctionDef] | None = None,
+        repeated_submodule_attrs: frozenset[str] | None = None,
     ) -> None:
         self.self_values = self_values
         self.all_tensor_ops = all_tensor_ops
         self.config = dict(config or {})
         self.param_names = set(param_names or ())
+        # Self-submodule attrs called more than once in this forward. A call to one
+        # gets a call-site ``@l{lineno}`` step key so two calls to the same child
+        # (rotary ``recomposition_frequencies(cos)`` then ``(sin)``) keep distinct
+        # predecessors/producer bindings instead of the second overwriting the first.
+        self.repeated_submodule_attrs = frozenset(repeated_submodule_attrs or ())
         # Module-level free functions (``apply_rotary_pos_emb_vision``, ...) keyed
         # by name, so a traced synthetic call can map its positional args to the
         # callee's parameter names and route each to the producer feeding it.
@@ -2533,6 +2687,8 @@ class _ForwardOperationExtractor:
         """
         func = node.func
         if method_name is not None and _is_self_attr(func, method_name):
+            if method_name in self.repeated_submodule_attrs:
+                return submodule_callsite_attr(method_name, node.lineno)
             return method_name
         target = _expr_name(func)
         if target and (
@@ -3678,9 +3834,11 @@ def _forward_calls_in_source_order(
     for call in module_calls:
         where = (
             call_positions.get(call)
+            or call_positions.get(base_submodule_attr(call))
             or functional_positions.get(call)
             or positional_synthetic_source_pos(call)
             or function_synthetic_source_pos(call)
+            or submodule_callsite_source_pos(call)
         )
         if where is None and call == SYNTHETIC_ATTENTION:
             where = kernel_position
@@ -4201,6 +4359,7 @@ def _forward_operations_from_forward(
         param_names=_forward_input_names(func) - {primary} if primary else set(),
         config=config,
         module_functions=module_functions,
+        repeated_submodule_attrs=_repeated_self_call_attrs(func.body),
     )
     # An operation reading the primary parameter partway through the forward reads the
     # value arriving at the chain, not the previous step. Naming it lets those reads
@@ -6043,6 +6202,7 @@ def _parse_forward(
     forward_input_names = _forward_input_names(func)
     self_values = self_values or {}
     name_value_ast = _collect_name_value_ast(func)
+    repeated_attrs = _repeated_self_call_attrs(func.body)
 
     for node in func.body:
         pending_norm = _walk_forward_stmt(
@@ -6057,6 +6217,7 @@ def _parse_forward(
             forward_step_details,
             self_values,
             name_value_ast,
+            repeated_attrs=repeated_attrs,
         )
     forward_step_details.update(_positional_step_details(func))
     return (
@@ -6081,10 +6242,13 @@ def _walk_forward_stmt(
     self_values: dict | None = None,
     name_value_ast: dict[str, ast.expr] | None = None,
     in_conditional: bool = False,
+    repeated_attrs: frozenset[str] = frozenset(),
 ) -> str | None:
     if isinstance(node, ast.Assign):
         stmt_calls: list[str] = []
-        _extract_self_calls_ordered(node.value, stmt_calls, in_conditional)
+        _extract_self_calls_ordered(
+            node.value, stmt_calls, in_conditional, repeated_attrs
+        )
         _inject_kernel_merge(
             node.value,
             var_chains,
@@ -6106,7 +6270,9 @@ def _walk_forward_stmt(
 
     if isinstance(node, ast.AnnAssign) and node.value is not None:
         stmt_calls = []
-        _extract_self_calls_ordered(node.value, stmt_calls, in_conditional)
+        _extract_self_calls_ordered(
+            node.value, stmt_calls, in_conditional, repeated_attrs
+        )
         _inject_kernel_merge(
             node.value,
             var_chains,
@@ -6128,7 +6294,9 @@ def _walk_forward_stmt(
 
     if isinstance(node, ast.Expr):
         stmt_calls = []
-        _extract_self_calls_ordered(node.value, stmt_calls, in_conditional)
+        _extract_self_calls_ordered(
+            node.value, stmt_calls, in_conditional, repeated_attrs
+        )
         _inject_kernel_merge(
             node.value,
             var_chains,
@@ -6146,7 +6314,9 @@ def _walk_forward_stmt(
 
     if isinstance(node, ast.AugAssign):
         stmt_calls = []
-        _extract_self_calls_ordered(node.value, stmt_calls, in_conditional)
+        _extract_self_calls_ordered(
+            node.value, stmt_calls, in_conditional, repeated_attrs
+        )
         _inject_kernel_merge(
             node.value,
             var_chains,
@@ -6167,7 +6337,9 @@ def _walk_forward_stmt(
 
     if isinstance(node, ast.Return) and node.value is not None:
         stmt_calls = []
-        _extract_self_calls_ordered(node.value, stmt_calls, in_conditional)
+        _extract_self_calls_ordered(
+            node.value, stmt_calls, in_conditional, repeated_attrs
+        )
         _inject_kernel_merge(
             node.value,
             var_chains,
@@ -6199,6 +6371,7 @@ def _walk_forward_stmt(
                 self_values,
                 name_value_ast,
                 in_conditional=True,
+                repeated_attrs=repeated_attrs,
             )
         return pending_norm
 
@@ -6218,6 +6391,7 @@ def _walk_forward_stmt(
                 self_values,
                 name_value_ast,
                 in_conditional=in_conditional,
+                repeated_attrs=repeated_attrs,
             )
         # Tensor operations are annotated by _ForwardOperationExtractor, but
         # expanded helper calls (for example `_apply_gate()`) are not operations
@@ -6252,6 +6426,7 @@ def _walk_forward_stmt(
                 self_values,
                 name_value_ast,
                 in_conditional=in_conditional,
+                repeated_attrs=repeated_attrs,
             )
         return pending_norm
 

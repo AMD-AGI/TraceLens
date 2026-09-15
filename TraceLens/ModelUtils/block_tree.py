@@ -23,6 +23,7 @@ from TraceLens.ModelUtils.ast_analyze import (
     SideInputSpec,
     attention_kernel_details,
     attention_kernel_label,
+    base_submodule_attr,
     displays_as_linear,
     effective_forward_calls,
     expand_conditional_block_components,
@@ -2085,7 +2086,8 @@ def build_block_node(
             forward_steps = effective_forward_calls(cls)
         else:
             uses_init_modules = any(
-                step in cls.init_assignments for step in parsed_steps
+                base_submodule_attr(step) in cls.init_assignments
+                for step in parsed_steps
             )
             forward_steps = (
                 parsed_steps if not uses_init_modules else effective_forward_calls(cls)
@@ -2113,8 +2115,15 @@ def build_block_node(
 
     for index, call_attr in enumerate(forward_steps):
         child_order = order_map.get(call_attr, index)
-        child_details = cls.forward_step_details.get(call_attr) or cls.init_details.get(
-            call_attr, []
+        # A repeated submodule/method call carries a call-site ``@l{lineno}`` suffix
+        # so its wiring stays distinct (``recomposition_frequencies@l1773`` vs
+        # ``@l1774``); the base attr is the join key for the child class / method-op
+        # tables, which are keyed once per child.
+        base_attr = base_submodule_attr(call_attr)
+        child_details = (
+            cls.forward_step_details.get(call_attr)
+            or cls.forward_step_details.get(base_attr)
+            or cls.init_details.get(base_attr, [])
         )
 
         if call_attr == SYNTHETIC_ATTENTION:
@@ -2233,11 +2242,11 @@ def build_block_node(
             child_nodes.append(expanded)
             continue
 
-        child_class = cls.init_assignments.get(call_attr)
+        child_class = cls.init_assignments.get(base_attr)
         if child_class is None or child_class in _SKIP_INIT_CLASS_NAMES:
             if child_class in _SKIP_INIT_CLASS_NAMES:
                 continue
-            method_ops = cls.multi_op_methods.get(call_attr)
+            method_ops = cls.multi_op_methods.get(base_attr)
             if method_ops:
                 call_context = [
                     detail
@@ -2247,11 +2256,11 @@ def build_block_node(
                 child_nodes.append(
                     BlockNode(
                         attr_name=call_attr,
-                        class_name=call_attr,
-                        role=_classify_role(call_attr, call_attr),
-                        label=call_attr.strip("_").replace("_", " "),
+                        class_name=base_attr,
+                        role=_classify_role(base_attr, base_attr),
+                        label=base_attr.strip("_").replace("_", " "),
                         forward_order=child_order,
-                        details=[f"method `{call_attr}()`", *call_context],
+                        details=[f"method `{base_attr}()`", *call_context],
                         children=[
                             _leaf_node(
                                 attr_name=operation.attr_name,
@@ -2280,7 +2289,7 @@ def build_block_node(
                     )
                 )
                 continue
-            single_op = cls.single_op_methods.get(call_attr)
+            single_op = cls.single_op_methods.get(base_attr)
             if single_op is not None:
                 # Keep the method's attr_name so forward wiring still resolves the step.
                 child_nodes.append(
@@ -2302,9 +2311,9 @@ def build_block_node(
             child_nodes.append(
                 _leaf_node(
                     attr_name=call_attr,
-                    class_name=call_attr,
+                    class_name=base_attr,
                     forward_order=child_order,
-                    details=child_details or [f"method `{call_attr}()`"],
+                    details=child_details or [f"method `{base_attr}()`"],
                 )
             )
             continue

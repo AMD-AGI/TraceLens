@@ -1772,6 +1772,85 @@ def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
         assert "B, S" not in shape, (boundary_id, shape)
 
 
+def test_glm53_vision_rotary_cos_and_sin_have_distinct_producers():
+    """The rotary embedding keeps *both* a Cosine and a Sine branch.
+
+    ``Glm5NextVisionRotaryEmbedding.forward`` calls the *same* child twice --
+    ``cos = self.recomposition_frequencies(cos)`` then
+    ``sin = self.recomposition_frequencies(sin)`` -- and returns ``(cos, sin)``.
+    A submodule call's step key is the bare child attr, so the second call used to
+    overwrite the first: the ``cos`` branch was dead-code-eliminated, the real
+    Cosine op orphaned, and both return slots aliased onto the single (sin)
+    producer.
+
+    General: a child called more than once in a forward gets each call site
+    disambiguated with an ``@l{lineno}`` suffix (``submodule_callsite_attr`` /
+    ``base_submodule_attr``), so the two calls are two distinct steps. The result
+    here: a live Cosine *and* Sine op, two separate ``recomposition_frequencies``
+    frames, and ``@output:cos`` / ``@output:sin`` backed by *different* producers
+    that trace back to the Cosine and Sine ops respectively (no cross-alias).
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    node_by_id = {node["id"]: node for node in nodes}
+
+    _assert_export_is_acyclic(nodes)
+
+    rotary_ns = "Glm5NextVisionRotaryEmbedding"
+
+    def _sole_labelled(label: str) -> dict:
+        matches = [
+            n
+            for n in nodes
+            if n.get("label") == label and rotary_ns in str(n.get("namespace", ""))
+        ]
+        assert len(matches) == 1, [n["id"] for n in matches]
+        return matches[0]
+
+    # Both trig branches survive as distinct live ops (cos is no longer DCE'd).
+    cosine = _sole_labelled("Cosine")
+    sine = _sole_labelled("Sine")
+
+    # The repeated child produced two disambiguated call-site frames.
+    import re
+
+    recomp_frames = {
+        m.group(0)
+        for n in nodes
+        for m in [re.search(r"recomposition_frequencies@l\d+", str(n["id"]))]
+        if m
+    }
+    assert len(recomp_frames) == 2, sorted(recomp_frames)
+
+    # ``@output:cos`` and ``@output:sin`` each have one producer, and the two
+    # producers are different nodes in different recomposition frames.
+    def _sole_producer(slot: str) -> str:
+        out = node_by_id[f"visual/sidefeed:2:rotary_pos_emb/@output:{slot}"]
+        edges = out["incomingEdges"]
+        assert len(edges) == 1, [e["sourceNodeId"] for e in edges]
+        return edges[0]["sourceNodeId"]
+
+    cos_producer = _sole_producer("cos")
+    sin_producer = _sole_producer("sin")
+    assert cos_producer != sin_producer, cos_producer
+
+    def _frame_of(node_id: str) -> str:
+        m = re.search(r"recomposition_frequencies@l\d+", node_id)
+        assert m, node_id
+        return m.group(0)
+
+    assert _frame_of(cos_producer) != _frame_of(sin_producer)
+
+    # The Cosine op reaches cos's output and the Sine op reaches sin's output --
+    # and crucially NOT the swapped pairing (no alias onto the single branch).
+    assert _has_export_path(nodes, cosine["id"], cos_producer)
+    assert _has_export_path(nodes, sine["id"], sin_producer)
+    assert not _has_export_path(nodes, cosine["id"], sin_producer)
+    assert not _has_export_path(nodes, sine["id"], cos_producer)
+
+
 def test_glm53_vision_apply_rotary_tuple_returns_dock_per_ordinal():
     """``q_embed, k_embed = apply_rotary_pos_emb_vision(...)`` docks per slot.
 
