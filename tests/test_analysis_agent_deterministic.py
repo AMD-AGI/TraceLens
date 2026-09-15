@@ -28,6 +28,7 @@ from TraceLens.Agent.Analysis.utils.deterministic_fallback import (
     main,
     render_fallback_report,
 )
+from TraceLens.Agent.Analysis.utils.validation_utils import MarkerValidator
 
 # ---------------------------------------------------------------------------
 # Structural regexes: match the markers/headings the producer emits, so the
@@ -382,6 +383,11 @@ def test_writer_emits_report_mode_warning_and_op_rows(tmp_path):
 
     # report-begin/report-end are paired.
     assert len(_REPORT_BEGIN_RE.findall(md)) == len(_REPORT_END_RE.findall(md))
+
+    # impact-begin/impact-end are paired too: every p_item AND op_row marker is
+    # closed.
+    scan_errors, _ = MarkerValidator.scan(md, "analysis.md")
+    assert not any("pairing mismatch" in e for e in scan_errors), scan_errors
 
     # Exactly one report_mode marker, mode=deterministic-fallback, before the title body.
     modes = _REPORT_MODE_RE.findall(md)

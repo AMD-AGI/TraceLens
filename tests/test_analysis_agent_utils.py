@@ -1365,6 +1365,41 @@ def test_validate_report_passes(tmp_path):
     assert missing == []
 
 
+# Two top kind=warning markers, one per producer (subagent failure and
+# high_variance data-quality). No trace in the corpus produces a warning, so this fixture is the
+# end-to-end check that a warning-bearing report clears the gate.
+_TOP_WARNING_MARKERS = """<!-- report-begin kind=warning -->
+> **⚠ Analysis incomplete.** Excluded from recommendations (script failures):
+> - conv_analyzer (Compute Kernel) — subprocess exited non-zero
+<!-- report-end -->
+
+<!-- report-begin kind=warning -->
+> **⚠ Data Quality.** Unreliable kernel-time (CoV > 1.0, extreme variance across instances):
+> - fused_moe (moe_unfused) — CoV 1.4
+<!-- report-end -->
+"""
+
+
+def _report_with_warnings():
+    # Insert the two warning markers after the report_mode marker block, before
+    # the Executive Summary, exactly where the template emits them.
+    return _passing_report().replace(
+        "<!-- report-end -->\n\n## Executive Summary",
+        "<!-- report-end -->\n\n" + _TOP_WARNING_MARKERS + "\n## Executive Summary",
+    )
+
+
+def test_validate_report_passes_with_top_warning_markers(tmp_path):
+    content = _report_with_warnings()
+    assert content.count("<!-- report-begin kind=warning -->") == 2
+    assert "## Warnings" not in content
+    _write(str(tmp_path / "analysis.md"), content)
+    (tmp_path / "priority_data.json").write_text(json.dumps(_priority_data_two()))
+    passed, missing = validate_report(str(tmp_path))
+    assert passed, missing
+    assert missing == []
+
+
 def test_validate_report_missing_file(tmp_path):
     passed, missing = validate_report(str(tmp_path))
     assert not passed

@@ -175,6 +175,7 @@ def render_fallback_report(unified_perf_csv: Path, graph_replay_fraction: float)
             "<!-- impact-begin kind=p_item category=unknown "
             f"low={low} mid={mid} high={high} -->"
         )
+        lines.append("<!-- impact-end -->")
         lines.append("")
         lines.append("**Data:**")
         lines.append("")
