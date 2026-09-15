@@ -539,9 +539,9 @@ def find_execution_roots(graph_tree):
 
     Primary (detailed) patterns are tried first, and native (backup) patterns are used only when no primary root is found.
     """
-    from ..TraceUtils.annotation_utils import find_iteration_roots_by_priority
+    from ..TraceUtils.annotation_utils import find_known_annotations
 
-    return find_iteration_roots_by_priority(graph_tree.events)
+    return find_known_annotations(graph_tree.events)
 
 
 def find_graph_roots_under_execution(execution_root, graphlaunch_events):

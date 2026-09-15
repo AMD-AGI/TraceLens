@@ -126,7 +126,7 @@ Example file structure (--find-steady-state):
 Example execution_details.json entry:
 {
   "idx": 0,
-  "output_path": "./output/trace_annotation_iteration_0.json.gz",
+  "output_path": "./output/trace_iteration_0.json.gz",
   "event_count": 45230,
   "num_gpu_events": 1250,
   "gpu_duration": 2300000,
@@ -153,6 +153,8 @@ After splitting traces, analyze them with:
 
 import argparse
 import json
+import gzip
+import json
 import os
 
 import pandas as pd
@@ -161,23 +163,86 @@ from ..util import DataLoader
 from .annotation_utils import (
     ITERATION_BACKUP_PATTERNS,  # noqa: F401
     ITERATION_PATTERNS,  # noqa: F401
-    iteration_details,
+    IterationAnnotation,
 )
+
+SERVING_KINDS = {
+    "vllm_detailed", "vllm_native",
+    "sglang_detailed", "sglang_native",
+    "atom_detailed", "atom_native",
+}
 
 # Re-exports for tests and downstream callers.
 from .split_inference import (  # noqa: F401
-    compute_reference_pd_ratio,
+    DetectStatus,
+    build_cpu_event_index,
+    build_root_tiles,
+    classify_phases_from_batch_sizes,
     divide_phases_and_save,
+    collect_ancestor_events,
     extract_and_save,
     extract_iteration,
     extract_phases_and_save,
     find_iteration_roots,
-    find_steady_state_window,
+    find_steady_state_generic,
+    find_steady_state_inference,
+    find_steady_state_inference_from_shapes,
     get_filename,
-    identify_steady_state_regions,
+    infer_batch_sizes_from_shapes,
     parse_range,
     preprocess_trace,
 )
+from .split_inference.detect_utils import GPU_KERNEL_CATEGORIES
+
+MANIFEST_NAME = "split_manifest.json"
+
+
+def _write_manifest(output_dir: str, manifest: dict) -> None:
+    """Record how the split was decided, next to the slices it produced.
+
+    A split is only trustworthy if its quality is written down, so this is
+    emitted even when nothing was extracted.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, MANIFEST_NAME)
+    with open(path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"Wrote split manifest to {path}")
+
+
+def _conservation(events: list, per_iteration_details: list | None, args) -> dict:
+    """Check that slicing did not lose or duplicate GPU events.
+
+    Only the one-file-per-iteration pass can be checked this way, and only over
+    the whole trace: those windows partition the timeline, so every kernel should
+    land in exactly one slice. Steady-state windows deliberately re-extract the
+    same kernels, so counting them too would compare a total against itself plus
+    overlap.
+
+    The tiles span the iterations, not the capture, so a healthy trace still
+    leaves kernels unclaimed: warmup launched before the first root and teardown
+    after the last one. Those are excluded on purpose, which is why the failure
+    this reports is duplication rather than a shortfall -- extracting more than
+    exists means some kernel was counted under two iterations, and that is a bug.
+    The shortfall is reported as a quantity instead, since only its size is
+    interesting.
+    """
+    kernels_in_trace = sum(1 for e in events if e.get("cat") in GPU_KERNEL_CATEGORIES)
+    report = {"n_gpu_events_in_trace": kernels_in_trace}
+    partitioned = (
+        per_iteration_details is not None
+        and args.iterations == "all"
+        and not args.no_gap_fill
+    )
+    if not (partitioned and kernels_in_trace):
+        return report
+
+    extracted = sum(entry.get("num_gpu_events", 0) for entry in per_iteration_details)
+    report["n_gpu_events_extracted"] = extracted
+    report["n_gpu_events_outside_iterations"] = kernels_in_trace - extracted
+    report["gpu_events_duplicated"] = extracted > kernels_in_trace
+    report["gpu_event_retention"] = round(extracted / kernels_in_trace, 4)
+    return report
 
 
 def main():
@@ -250,8 +315,40 @@ def main():
             "output_dir/decode_only/. Each step is a separate trace file."
         ),
     )
+    parser.add_argument(
+        "--no-gap-fill",
+        action="store_true",
+        default=False,
+        help=(
+            "Score each iteration by its own annotation span instead of extending "
+            "it to the next root. Work between two roots is then dropped, as it "
+            "was before gap-free extraction; use this only to reproduce old output."
+        ),
+    )
+    parser.add_argument(
+        "--allow-degraded",
+        action="store_true",
+        default=False,
+        help=(
+            "Continue even when the detected roots do not account for enough GPU "
+            "time. The manifest records the shortfall either way."
+        ),
+    )
+    parser.add_argument(
+        "--llm-inference",
+        action="store_true",
+        default=False,
+        help=(
+            "Treat as LLM inference trace. When annotations lack serving "
+            "semantics (e.g. no vLLM/SGLang/ATOM annotations), derive batch "
+            "size from cpu_op shapes and use it for phase classification "
+            "(prefill vs decode) and steady-state identification."
+        ),
+    )
     args = parser.parse_args()
     execution_details = []
+    # Only the partitioning pass can be checked for kernel conservation.
+    per_iteration_details: list | None = None
 
     # Load trace
     trace_json = DataLoader.load_data(get_filename(args.trace_path))
@@ -259,10 +356,49 @@ def main():
     gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
     print(f"Loaded {len(events)} events")
 
-    iteration_roots = find_iteration_roots(events)
+    detection = find_iteration_roots(events)
+    iteration_roots = detection.roots
+    manifest = detection.to_manifest()
+    print(
+        f"\nDetection: {detection.method} -> {len(iteration_roots)} roots, "
+        f"status={detection.status.name}, phase_confidence="
+        f"{detection.phase_confidence.value}"
+    )
+    if detection.coverage:
+        print(
+            f"GPU coverage ({detection.coverage.strategy}): "
+            f"{detection.coverage.covered_selected:.1%} by the selected roots, "
+            f"{detection.coverage.span_share:.1%} of that inside their spans"
+        )
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+
+    if detection.status is DetectStatus.NOT_SPLITTABLE and not args.allow_degraded:
+        manifest["aborted"] = True
+        _write_manifest(args.output_dir, manifest)
+        print(
+            "\nRefusing to split: the detected roots do not account for enough of "
+            "the GPU's work, so per-iteration slices would be misleading. "
+            f"See {MANIFEST_NAME} for the coverage breakdown, or pass "
+            "--allow-degraded to continue anyway."
+        )
+        return
+
+    # Built over every root, not just a selected window: the last root of a
+    # window still needs to know where the next one starts.
+    root_tiles = None
+    if not args.no_gap_fill and iteration_roots:
+        root_tiles, overlaps = build_root_tiles(iteration_roots)
+        manifest["gap_fill"] = True
+        manifest["n_overlapping_roots"] = overlaps
+        if overlaps:
+            print(
+                f"Warning: {overlaps} roots overlap their successor and keep their "
+                "own span; their windows are not gap-free."
+            )
+    else:
+        manifest["gap_fill"] = False
     base_name = os.path.basename(args.trace_path)
     base_name = (
         base_name.replace(".pt.trace", "").replace(".json.gz", "").replace(".json", "")
@@ -280,38 +416,83 @@ def main():
                 trace_json,
                 args.output_dir,
                 base_name,
-                "annotation_iteration",
+                "iteration",
                 start,
                 end,
                 gpu_corr_map,
                 flow_corr_map,
                 meta_events,
+                root_tiles=root_tiles,
             )
+            per_iteration_details = temp_execution_details
             execution_details.extend(temp_execution_details)
+        elif args.iterations != "all":
+            selected_roots = iteration_roots[start:end]
+            print(
+                f"\nExtracting iterations {start} to {end - 1} "
+                f"as a single trace with ancestor context..."
+            )
+            iter_trace, batch_list, num_gpu, gpu_dur, gpu_busy = extract_iteration(
+                selected_roots,
+                events,
+                trace_json,
+                gpu_corr_map,
+                flow_corr_map,
+                meta_events,
+                root_tiles=root_tiles,
+            )
+            uid_map = detection.diagnostics.get("_events_by_uid", {})
+            ancestors = collect_ancestor_events(selected_roots, uid_map)
+            existing_events = {id(e) for e in iter_trace["traceEvents"]}
+            for a in ancestors:
+                if id(a) not in existing_events:
+                    iter_trace["traceEvents"].append(a)
+            range_label = f"{start}:{end}" if end - start > 1 else str(start)
+            out_path = os.path.join(
+                args.output_dir, f"{base_name}_iteration_{range_label}.json.gz"
+            )
+            os.makedirs(args.output_dir, exist_ok=True)
+            with gzip.open(out_path, "wb") as f:
+                f.write(json.dumps(iter_trace).encode("utf-8"))
+            print(
+                f"  {len(iter_trace['traceEvents'])} events "
+                f"({len(ancestors)} ancestors) -> {out_path}"
+            )
+            execution_details.append({
+                "idx": f"{start}:{end}",
+                "output_path": out_path,
+                "event_count": len(iter_trace["traceEvents"]),
+                "num_gpu_events": num_gpu,
+                "gpu_duration": gpu_dur,
+                "gpu_busy_duration": gpu_busy,
+            })
 
-        # Determine the working set and compute steady-state regions once,
-        # shared across all downstream calls.
-        steady_state_regions: list[tuple[int, int]] = []
+        # Determine the working set (exclude warmup/wrapup bookend roots).
+        _BOOKEND_NAMES = {"warmup", "wrapup"}
         if args.iterations != "all":
-            working_roots = iteration_roots[start:end]
-            steady_state_regions: list[tuple[int, int]] = [(0, end - start)]
+            working_roots = [
+                r for r in iteration_roots[start:end]
+                if r.get("name") not in _BOOKEND_NAMES
+            ]
             print(
                 f"\nUsing explicit iteration range [{start}, {end}) as the working region."
             )
         else:
-            working_roots = iteration_roots
-            if args.find_steady_state or args.divide_phases:
-                _iter_details = iteration_details(working_roots)
-                steady_state_regions, _ = identify_steady_state_regions(
-                    _iter_details, args.num_steps
-                )
+            working_roots = [
+                r for r in iteration_roots
+                if r.get("name") not in _BOOKEND_NAMES
+            ]
+
+        # Check if annotations have serving semantics (concurrency info).
+        _ann = IterationAnnotation(working_roots[0]["name"]) if working_roots else None
+        llm_inference_annotations = _ann is not None and _ann.kind in SERVING_KINDS
 
         _extract_args = (
             events,
             trace_json,
             args.output_dir,
             base_name,
-            "annotation_iteration",
+            "iteration",
             0,
             1,
             gpu_corr_map,
@@ -319,63 +500,138 @@ def main():
             meta_events,
         )
 
+        # Derive batch sizes from shapes when --llm-inference is set and
+        # annotations lack serving semantics.
+        batch_sizes: list[int | None] | None = None
+        if args.llm_inference and not llm_inference_annotations and working_roots:
+            cpu_idx = build_cpu_event_index(events)
+            batch_sizes = infer_batch_sizes_from_shapes(
+                working_roots, cpu_idx, root_tiles,
+            )
+            valid = [b for b in batch_sizes if b is not None]
+            if not valid:
+                batch_sizes = None
+                print(
+                    "\n[llm-inference] No cpu_op shapes found — falling back to "
+                    "generic duration-based steady state."
+                )
+            else:
+                print(
+                    f"\n[llm-inference] Inferred batch sizes from shapes for "
+                    f"{len(valid)}/{len(batch_sizes)} iterations"
+                    f", median={sorted(valid)[len(valid)//2]}"
+                )
+
+        def _find_ss(mode: str):
+            """Route to the appropriate steady-state finder."""
+            if llm_inference_annotations:
+                kwargs = {"mode": mode}
+                if mode == "mixed":
+                    kwargs.update(CONC=args.CONC, OSL=args.OSL, R=args.R)
+                return find_steady_state_inference(
+                    working_roots, num_steps=args.num_steps, **kwargs,
+                )
+            elif batch_sizes is not None:
+                return find_steady_state_inference_from_shapes(
+                    working_roots, batch_sizes, num_steps=args.num_steps, mode=mode,
+                )
+            else:
+                return find_steady_state_generic(
+                    working_roots, num_steps=args.num_steps,
+                )
+
         if args.divide_phases:
-            print("\n--- Dividing steady-state steps by phase ---")
-            temp_execution_details = divide_phases_and_save(
-                working_roots,
-                events,
-                trace_json,
-                args.output_dir,
-                base_name,
-                gpu_corr_map,
-                flow_corr_map,
-                meta_events,
-                steady_state_regions=steady_state_regions,
-            )
-            execution_details.extend(temp_execution_details)
+            if not llm_inference_annotations and batch_sizes is None:
+                print(
+                    "\n--divide-phases requires LLM inference annotations or "
+                    "--llm-inference flag. Skipping phase division for this trace."
+                )
+            elif llm_inference_annotations:
+                print("\n--- Dividing steady-state steps by phase ---")
+                _, ss_regions = _find_ss("mixed")
+                temp_execution_details = divide_phases_and_save(
+                    working_roots,
+                    events,
+                    trace_json,
+                    args.output_dir,
+                    base_name,
+                    gpu_corr_map,
+                    flow_corr_map,
+                    meta_events,
+                    steady_state_regions=ss_regions or [(0, len(working_roots))],
+                    root_tiles=root_tiles,
+                )
+                execution_details.extend(temp_execution_details)
+            else:
+                # --llm-inference without serving annotations: use shape-based phases
+                print("\n--- Dividing steady-state steps by phase (from shapes) ---")
+                _, ss_regions = _find_ss("mixed")
+                phase_labels = classify_phases_from_batch_sizes(batch_sizes)
+                temp_execution_details = divide_phases_and_save(
+                    working_roots,
+                    events,
+                    trace_json,
+                    args.output_dir,
+                    base_name,
+                    gpu_corr_map,
+                    flow_corr_map,
+                    meta_events,
+                    steady_state_regions=ss_regions or [(0, len(working_roots))],
+                    root_tiles=root_tiles,
+                    phase_labels=phase_labels,
+                )
+                execution_details.extend(temp_execution_details)
 
-        elif args.find_steady_state:
-            # Three separate contiguous windows — no phase-splitting, no idle gaps
-            print("\n--- Finding mixed steady-state window ---")
-            mixed_roots = find_steady_state_window(
-                working_roots,
-                num_steps=args.num_steps,
-                steady_state_regions=steady_state_regions,
-                mode="mixed",
-                CONC=args.CONC,
-                OSL=args.OSL,
-                R=args.R,
-            )
-            temp_execution_details = extract_and_save(
-                [mixed_roots], *_extract_args, output_label="mixed_steady_state"
-            )
-            execution_details.extend(temp_execution_details)
+        if args.find_steady_state:
+            if llm_inference_annotations or args.llm_inference:
+                # Inference path: three windows (annotation-based or shape-based)
+                print("\n--- Finding mixed steady-state window ---")
+                mixed_roots, _ = _find_ss("mixed")
+                temp_execution_details = extract_and_save(
+                    [mixed_roots],
+                    *_extract_args,
+                    output_label="mixed_steady_state",
+                    root_tiles=root_tiles,
+                    llm_inference=True,
+                )
+                execution_details.extend(temp_execution_details)
 
-            print("\n--- Finding decode-only steady-state window ---")
-            do_roots = find_steady_state_window(
-                working_roots,
-                num_steps=args.num_steps,
-                steady_state_regions=steady_state_regions,
-                mode="decode_only",
-            )
-            temp_execution_details = extract_and_save(
-                [do_roots], *_extract_args, output_label="decode_only_steady_state"
-            )
-            execution_details.extend(temp_execution_details)
+                print("\n--- Finding decode-only steady-state window ---")
+                do_roots, _ = _find_ss("decode_only")
+                temp_execution_details = extract_and_save(
+                    [do_roots],
+                    *_extract_args,
+                    output_label="decode_only_steady_state",
+                    root_tiles=root_tiles,
+                    llm_inference=True,
+                )
+                execution_details.extend(temp_execution_details)
 
-            print("\n--- Finding biggest prefill-decode steady-state window ---")
-            pd_roots = find_steady_state_window(
-                working_roots,
-                num_steps=args.num_steps,
-                steady_state_regions=steady_state_regions,
-                mode="max_prefilldecode",
-            )
-            temp_execution_details = extract_and_save(
-                [pd_roots], *_extract_args, output_label="prefilldecode_steady_state"
-            )
-            execution_details.extend(temp_execution_details)
+                print("\n--- Finding biggest prefill-decode steady-state window ---")
+                pd_roots, _ = _find_ss("max_prefilldecode")
+                temp_execution_details = extract_and_save(
+                    [pd_roots],
+                    *_extract_args,
+                    output_label="prefilldecode_steady_state",
+                    root_tiles=root_tiles,
+                    llm_inference=True,
+                )
+                execution_details.extend(temp_execution_details)
+            else:
+                # Generic path: single duration-based window
+                print("\n--- Finding steady-state window by duration ---")
+                ss_roots, _ = _find_ss("mixed")
+                temp_execution_details = extract_and_save(
+                    [ss_roots],
+                    *_extract_args,
+                    output_label="steady_state",
+                    root_tiles=root_tiles,
+                )
+                execution_details.extend(temp_execution_details)
 
     print(f"\nDone! Extracted {len(execution_details)} traces to {args.output_dir}")
+    manifest.update(_conservation(events, per_iteration_details, args))
+    _write_manifest(args.output_dir, manifest)
     if len(execution_details) > 0:
         json_path = os.path.join(args.output_dir, "execution_details.json")
         with open(json_path, "w") as f:

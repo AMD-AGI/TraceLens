@@ -12,9 +12,13 @@ import pytest
 from copy import deepcopy
 from typing import Dict, List
 from TraceLens.Trace2Tree.inference_iteration_roots import (
-    _detect_iteration_roots_from_tree,
+    _entry_roots,
     _find_repeating_period,
-    find_iteration_roots_generic,
+    _reattach_worker_threads,
+)
+from TraceLens.TraceUtils.split_inference.root_detection import (
+    _total_gpu_time,
+    detect_from_branch_descent,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _align_capture_to_graph,
@@ -165,14 +169,14 @@ class TestInferenceIterationRoots:
             "cpu_op",
             "training_loop",
             ts=0,
-            dur=7000,
+            dur=20000,
             pid=1,
             tid=1,
             args={"Sequence number": 0},
         )
         events.append(loop)
         corr = 100
-        for iteration in range(3):
+        for iteration in range(8):
             base_ts = 100 + iteration * 2000
             for step_name, offset in [("step_fwd", 0), ("step_bwd", 400)]:
                 op = _mk_event(
@@ -195,27 +199,28 @@ class TestInferenceIterationRoots:
                 corr += 1
 
         tree = _build_tree(events)
-        loop_evt = next(e for e in tree.events if e["name"] == "training_loop")
-        roots = _detect_iteration_roots_from_tree(tree, loop_evt)
-        assert roots is not None
-        assert len(roots) == 3
-        assert all(root["dur"] > 0 for root in roots)
+        result = detect_from_branch_descent(
+            tree, _entry_roots(tree), _total_gpu_time(tree)
+        )
+        assert result is not None
+        assert len(result.roots) == 8
+        assert all(root["dur"] > 0 for root in result.roots)
 
-    def test_find_iteration_roots_generic_end_to_end(self):
+    def test_branch_descent_end_to_end(self):
         events: List[Dict] = []
         events.append(
             _mk_event(
                 "cpu_op",
                 "training_loop",
                 ts=0,
-                dur=7000,
+                dur=20000,
                 pid=1,
                 tid=1,
                 args={"Sequence number": 0},
             )
         )
         corr = 200
-        for iteration in range(3):
+        for iteration in range(8):
             base_ts = 100 + iteration * 2000
             for step_name, offset in [("iter_fwd", 0), ("iter_bwd", 400)]:
                 op = _mk_event(
@@ -237,9 +242,13 @@ class TestInferenceIterationRoots:
                 )
                 corr += 1
 
-        roots = find_iteration_roots_generic(events)
-        assert roots is not None
-        assert len(roots) >= 1
+        tree = _build_tree(events)
+        _reattach_worker_threads(tree)
+        result = detect_from_branch_descent(
+            tree, _entry_roots(tree), _total_gpu_time(tree)
+        )
+        assert result is not None
+        assert len(result.roots) >= 1
 
 
 class TestPseudoOpsUtils:

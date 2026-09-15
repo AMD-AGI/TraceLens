@@ -10,9 +10,12 @@ import gzip
 import json
 import os
 import zipfile
+from bisect import bisect_left, bisect_right
+from collections import Counter
 
 from tqdm import tqdm
 
+from ...util import most_common_first_dim
 from ..annotation_utils import (
     ITERATION_BACKUP_PATTERNS,
     ITERATION_PATTERNS,
@@ -23,7 +26,16 @@ from ..annotation_utils import (
     iteration_details,
 )
 
-GPU_EVENT_CATEGORIES = ["kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation"]
+from .detect_utils import (
+    GPU_KERNEL_CATEGORIES,
+    GPU_USER_ANNOTATION,
+    build_root_tiles,
+)
+
+# Kernels plus the GPU annotation spans that describe them. Anything summing
+# GPU *time* must use GPU_KERNEL_CATEGORIES instead, since a projection encloses
+# the kernels it describes and counting both double-counts.
+GPU_EVENT_CATEGORIES = [*GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION]
 
 
 def get_filename(filepath: str) -> dict:
@@ -65,6 +77,68 @@ def preprocess_trace(events: list[dict]):
     return gpu_corr_map, flow_corr_map, meta_events
 
 
+def build_cpu_event_index(
+    events: list[dict],
+) -> tuple[list[dict], list[float]]:
+    """Pre-filter and sort CPU-side events for extraction.
+
+    Returns ``(cpu_events, cpu_starts)`` -- the sorted event list and a parallel
+    list of timestamps for bisect lookups.  Build once, pass to every
+    :func:`extract_iteration` call on the same trace.
+    """
+    cpu_events = []
+    for e in events:
+        ts = e.get("ts")
+        dur = e.get("dur")
+        if ts is None or dur is None:
+            continue
+        if e.get("cat") in GPU_EVENT_CATEGORIES:
+            continue
+        cpu_events.append(e)
+    cpu_events.sort(key=lambda e: e["ts"])
+    cpu_starts = [e["ts"] for e in cpu_events]
+    return cpu_events, cpu_starts
+
+
+
+def infer_batch_sizes_from_shapes(
+    roots: list[dict],
+    cpu_event_index: tuple[list[dict], list[float]],
+    root_tiles: dict | None = None,
+) -> list[int | None]:
+    """Derive batch size per iteration from the most common first dim of cpu_op Input Dims.
+
+    Performs a lightweight scan (no full extraction) using the pre-built
+    cpu_event_index for bisect-based windowing.  Returns one value per root,
+    or ``None`` when no cpu_op with ``Input Dims`` falls in the window.
+    """
+    cpu_events, cpu_starts = cpu_event_index
+    batch_sizes: list[int | None] = []
+
+    for root in roots:
+        if root_tiles is not None:
+            key = (root.get("pid"), root.get("tid"), root.get("ts", 0))
+            win_ts, win_end = root_tiles.get(
+                key, (root["ts"], root["ts"] + root["dur"])
+            )
+        else:
+            win_ts = root["ts"]
+            win_end = win_ts + root["dur"]
+
+        lo = bisect_left(cpu_starts, win_ts)
+        hi = bisect_right(cpu_starts, win_end)
+        win_dur = win_end - win_ts
+
+        # Filter to events within the window, excluding enclosing spans
+        window_events = [
+            e for e in cpu_events[lo:hi]
+            if win_ts <= e["ts"] < win_end and e["dur"] <= win_dur
+        ]
+        batch_sizes.append(most_common_first_dim(window_events, exclude_mem_ops=True))
+
+    return batch_sizes
+
+
 def extract_iteration(
     iteration_roots: list[dict],
     events: list[dict],
@@ -72,8 +146,30 @@ def extract_iteration(
     gpu_corr_map: dict,
     flow_corr_map: dict,
     meta_events: list[dict],
+    root_tiles: dict | None = None,
+    gap_fill: bool = True,
+    cpu_event_index: tuple[list[dict], list[float]] | None = None,
 ) -> dict:
-    """Extract a single iteration trace."""
+    """Extract a single iteration trace.
+
+    Events are assigned to the window containing their *start* timestamp, which
+    makes the windows a partition of the timeline. Testing for full containment
+    instead would drop any event straddling a boundary from both neighbours, so
+    closing the gaps alone would not stop kernels going missing.
+
+    Events longer than their window are enclosing spans -- thread roots, outer
+    python frames -- which belong to no single iteration and are left out. They
+    carry no correlation id, so no kernel is lost with them.
+
+    ``root_tiles`` should come from :func:`build_root_tiles` over the *whole* root
+    list: built from a selected window instead, the window's last root would lose
+    the boundary of the root that follows it. Pass ``gap_fill=False`` to score
+    each root by its own span.
+
+    ``cpu_event_index`` is an optional ``(cpu_events, cpu_starts)`` tuple from
+    :func:`build_cpu_event_index`.  When provided the expensive full-event scan
+    and sort is skipped -- pass it when calling in a loop over many roots.
+    """
 
     filtered_events = []
     gpu_dur = 0
@@ -81,58 +177,58 @@ def extract_iteration(
     num_gpu_events = 0
     batch_list = []
 
-    # Pre-index GPU and flow events by correlation id
-
-    # Compute the global time window for all iteration roots
     if not iteration_roots:
         return trace_json.copy(), [], 0, 0, 0
-    min_iter_ts = min(root.get("ts", 0) for root in iteration_roots)
-    max_iter_end = max(
-        root.get("ts", 0) + root.get("dur", 0) for root in iteration_roots
-    )
-    # Collect all relevant tid/pid pairs
-    tid_pid_set = {(root.get("tid"), root.get("pid")) for root in iteration_roots}
 
-    # Pre-filter all CPU events in the global window and by tid/pid
-    cpu_events = []
-    for e in events:
-        ts = e.get("ts")
-        if ts is None:
-            continue
-        dur = e.get("dur")
-        if dur is None:
-            continue
-        e_end = ts + dur
-        e_tid = e.get("tid")
-        e_pid = e.get("pid")
-        if (e_tid, e_pid) in tid_pid_set and (
-            min_iter_ts <= ts and e_end <= max_iter_end
-        ):
-            cpu_events.append(e)
+    if not gap_fill:
+        windows = [
+            (r.get("ts", 0), r.get("ts", 0) + r.get("dur", 0)) for r in iteration_roots
+        ]
+    else:
+        tiles = (
+            root_tiles
+            if root_tiles is not None
+            else build_root_tiles(iteration_roots)[0]
+        )
+        windows = [
+            tiles.get(
+                (r.get("pid"), r.get("tid"), r.get("ts", 0)),
+                (r.get("ts", 0), r.get("ts", 0) + r.get("dur", 0)),
+            )
+            for r in iteration_roots
+        ]
 
-    # For each iteration root, filter CPU events and collect correlation ids
-    for iteration_root in tqdm(iteration_roots):
+    max_iter_end = max(end for _, end in windows)
+    if root_tiles:
+        max_iter_end = max(max_iter_end, max(end for _, end in root_tiles.values()))
+
+    if cpu_event_index is not None:
+        cpu_events, cpu_starts = cpu_event_index
+    else:
+        cpu_events, cpu_starts = build_cpu_event_index(events)
+
+    # For each iteration window collect the CPU events whose start falls in it,
+    # regardless of thread, then follow their correlation ids to the GPU work.
+    for iteration_root, (win_ts, win_end) in zip(tqdm(iteration_roots), windows):
         start_time = []
         end_time = []
-        iter_tid = iteration_root.get("tid")
-        iter_pid = iteration_root.get("pid")
-        iter_ts = iteration_root.get("ts", 0)
-        iter_end = iter_ts + iteration_root.get("dur", 0)
+        win_dur = win_end - win_ts
+        is_last = win_end == max_iter_end
 
         correlation_ids: set[int] = set()
 
-        # CPU events: filter from pre-filtered list
-        for e in cpu_events:
-            ts = e.get("ts")
-            dur = e.get("dur")
-            e_end = ts + dur
-            e_tid = e.get("tid")
-            e_pid = e.get("pid")
-            if (
-                e_tid == iter_tid
-                and e_pid == iter_pid
-                and (iter_ts <= ts and e_end <= iter_end)
-            ):
+        # Bisect to the window's slice so widening to all threads stays cheap.
+        lo = bisect_left(cpu_starts, win_ts)
+        hi = bisect_right(cpu_starts, win_end)
+        for e in cpu_events[lo:hi]:
+            ts = e["ts"]
+            # Half-open so neighbouring windows cannot both claim an event; the
+            # final window is closed so nothing at the very end is orphaned.
+            within = win_ts <= ts < win_end or (is_last and ts == win_end)
+            # Spans longer than the window are enclosing frames (thread roots,
+            # outer python frames) that belong to no single iteration; they carry
+            # no correlation id, so no kernel is lost by skipping them.
+            if within and e["dur"] <= win_dur:
                 filtered_events.append(e)
                 corr = e.get("args", {}).get("correlation")
                 if corr is not None:
@@ -167,6 +263,36 @@ def extract_iteration(
     return output, list(set(batch_list)), num_gpu_events, gpu_dur, gpu_busy
 
 
+def collect_ancestor_events(
+    iteration_roots: list[dict],
+    events_by_uid: dict,
+) -> list[dict]:
+    """Collect ancestor events from iteration roots up to the process entry.
+
+    Walks up the ``parent`` chain from each root, collecting the enclosing
+    frames (thread root, outer python frames) that ``extract_iteration``
+    normally excludes because their duration exceeds the iteration window.
+    Only the ancestor events themselves are included, not their other children.
+
+    ``events_by_uid`` should be a UID→event mapping from the tree
+    (e.g. ``tree.events_by_uid``).
+    """
+    ancestor_uids: set = set()
+
+    for root in iteration_roots:
+        parent_uid = root.get("parent")
+        while parent_uid is not None:
+            if parent_uid in ancestor_uids:
+                break
+            ancestor_uids.add(parent_uid)
+            parent = events_by_uid.get(parent_uid)
+            if parent is None:
+                break
+            parent_uid = parent.get("parent")
+
+    return [events_by_uid[uid] for uid in ancestor_uids if uid in events_by_uid]
+
+
 def parse_range(range_str: str, max_len: int) -> tuple[int, int]:
     """Parse a range string like '10:20' or 'all'."""
     if range_str == "all":
@@ -190,15 +316,19 @@ def extract_and_save(
     flow_corr_map: dict,
     meta_events: list[dict],
     output_label: str | None = None,
+    root_tiles: dict | None = None,
+    llm_inference: bool = False,
 ):
     """Extract and save a range of iterations.
 
     If ``output_label`` is provided the output filename becomes
     ``{output_label}_{name_append}_{base_name}.json.gz`` instead of the
     default ``{base_name}_{prefix}_{idx}_{name_append}.json.gz``.
+
+    ``root_tiles`` should be built over the whole root list so that a root at the
+    edge of a selected window still knows where its successor begins.
     """
     extraction_summary = []
-    # print(f"roots: {roots}")
     if len(roots) == 0 or len(roots[0]) == 0:
         print(f"No {prefix} events found in the specified range, skipping extraction")
         return extraction_summary
@@ -207,12 +337,20 @@ def extract_and_save(
     if len(selected) == 0:
         print(f"No {prefix} events found in the specified range, skipping extraction")
         return extraction_summary
+    cpu_idx = build_cpu_event_index(events)
     for idx, root in zip(indices, selected):
         iter_details = iteration_details(root)
         iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = extract_iteration(
-            root, events, trace_json, gpu_corr_map, flow_corr_map, meta_events
+            root,
+            events,
+            trace_json,
+            gpu_corr_map,
+            flow_corr_map,
+            meta_events,
+            root_tiles=root_tiles,
+            cpu_event_index=cpu_idx,
         )
-        is_annotation = "annotation_iteration" in prefix
+        is_annotation = "iteration" in prefix
         # Use the structured phase-aware name for any annotation extraction
         # produced by the steady-state code paths (output_label is set), and
         # for any multi-step annotation window. Single-step annotations from
@@ -257,8 +395,17 @@ def extract_and_save(
                 name_append = f"batch_NA_gpu{prefix}"
 
         if output_label is not None:
+            if llm_inference:
+                out_path = os.path.join(
+                    output_dir, f"{output_label}_{name_append}_{base_name}.json.gz"
+                )
+            else:
+                out_path = os.path.join(
+                    output_dir, f"{output_label}_{base_name}.json.gz"
+                )
+        elif is_annotation and len(root) == 1 and root[0].get("name") in ("warmup", "wrapup"):
             out_path = os.path.join(
-                output_dir, f"{output_label}_{name_append}_{base_name}.json.gz"
+                output_dir, f"{base_name}_{root[0]['name']}.json.gz"
             )
         else:
             suffix = f"_{name_append}" if name_append else ""
@@ -298,6 +445,7 @@ def extract_phases_and_save(
     gpu_corr_map: dict,
     flow_corr_map: dict,
     meta_events: list[dict],
+    root_tiles: dict | None = None,
 ):
     """Extract and save a range of iterations."""
     extraction_summary = []
@@ -322,6 +470,7 @@ def extract_phases_and_save(
                     gpu_corr_map,
                     flow_corr_map,
                     meta_events,
+                    root_tiles=root_tiles,
                 )
             )
             name_append = f"prefilldecode_{phase_details['num_prefilldecode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
@@ -354,6 +503,7 @@ def extract_phases_and_save(
                     gpu_corr_map,
                     flow_corr_map,
                     meta_events,
+                    root_tiles=root_tiles,
                 )
             )
             name_append = f"decode_{phase_details['num_decode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
@@ -388,6 +538,8 @@ def divide_phases_and_save(
     flow_corr_map: dict,
     meta_events: list[dict],
     steady_state_regions: list[tuple[int, int]],
+    root_tiles: dict | None = None,
+    phase_labels: list[str] | None = None,
 ) -> list[dict]:
     """
     Group contiguous steps of the same phase within steady-state regions and
@@ -404,22 +556,37 @@ def divide_phases_and_save(
     steady_state_regions
         Pre-computed steady-state region list as ``(start, end)`` index pairs.
         Pass ``[(0, len(iteration_roots))]`` to treat the entire slice as steady state.
+    phase_labels
+        Optional per-iteration phase labels (``"decode"`` or ``"prefill_bearing"``),
+        e.g. from :func:`classify_phases_from_batch_sizes`.  When provided,
+        annotation-based classification is skipped — use this for
+        ``--llm-inference`` traces without serving annotations.
     """
-    iter_details = iteration_details(iteration_roots)
     regions = steady_state_regions
     print(f"[divide-phases] Steady-state regions: {regions}")
 
     # Build an ordered list of (phase_label, root) for all steady-state steps
     steady_steps: list[tuple[str, dict]] = []
-    for s, e in regions:
-        for idx in range(s, e):
-            detail = iter_details[idx]
-            root = iteration_roots[idx]
-            if has_context(detail):
-                steady_steps.append(("prefilldecodemix", root))
-            elif has_generation(detail):
-                steady_steps.append(("decode_only", root))
-            # steps that are neither (e.g. idle) are skipped
+    if phase_labels is not None:
+        for s, e in regions:
+            for idx in range(s, e):
+                root = iteration_roots[idx]
+                label = phase_labels[idx]
+                if label == "prefill_bearing":
+                    steady_steps.append(("prefilldecodemix", root))
+                else:
+                    steady_steps.append(("decode_only", root))
+    else:
+        iter_details = iteration_details(iteration_roots)
+        for s, e in regions:
+            for idx in range(s, e):
+                detail = iter_details[idx]
+                root = iteration_roots[idx]
+                if has_context(detail):
+                    steady_steps.append(("prefilldecodemix", root))
+                elif has_generation(detail):
+                    steady_steps.append(("decode_only", root))
+                # steps that are neither (e.g. idle) are skipped
 
     # Group into contiguous runs of the same phase
     runs: list[tuple[str, list[dict]]] = []  # (phase, [roots])
@@ -473,13 +640,15 @@ def divide_phases_and_save(
                 trace_json,
                 out_dir,
                 base_name,
-                "annotation_iteration",
+                "iteration",
                 0,
                 1,
                 gpu_corr_map,
                 flow_corr_map,
                 meta_events,
                 output_label=f"{phase}_{name_append}",
+                root_tiles=root_tiles,
+                llm_inference=True,
             )
         )
 

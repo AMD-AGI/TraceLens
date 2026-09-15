@@ -18,9 +18,8 @@ from TraceLens.TraceUtils.annotation_utils import (
     PHASE_PREFILLDECODE,
     average_detail,
     find_events_by_patterns,
-    find_iteration_roots_by_priority,
+    find_known_annotations,
     find_phase_from_window,
-    ITERATION_BACKUP_PATTERNS,
     ITERATION_PATTERNS,
 )
 from TraceLens.TraceUtils.match_inference_trace_blocks import (
@@ -132,11 +131,15 @@ def test_preprocess_trace_builds_correlation_maps():
 
 
 def test_compute_reference_pd_ratio_uses_largest_region(capsys):
+    from TraceLens.TraceUtils.split_inference.steady_state_window import (
+        _compute_reference_pd_ratio,
+    )
+
     iter_details = [{"context_requests": 1} for _ in range(4)] + [
         {"context_requests": 0} for _ in range(6)
     ]
     regions = [(0, 4), (4, 10)]
-    largest, avg_ratio, largest_ratio = split.compute_reference_pd_ratio(
+    largest, avg_ratio, largest_ratio = _compute_reference_pd_ratio(
         regions, iter_details
     )
     assert largest == (4, 10)
@@ -159,19 +162,17 @@ def test_find_events_by_patterns_filters_and_sorts():
     assert [e["ts"] for e in matches] == [1, 3]
 
 
-def test_find_iteration_roots_by_priority_prefers_primary_patterns():
+def test_find_known_annotations_prefers_primary_patterns():
     events = [
         _root(VLLM_PREFILLDECODE, ts=1),
         _root("execute_context_3(100)_generation_2(50)", ts=2),
     ]
-    roots = find_iteration_roots_by_priority(events)
+    roots = find_known_annotations(events)
     assert len(roots) == 1
     assert "sq128" in roots[0]["name"]
 
     backup_only = [_root("execute_context_3(100)_generation_2(50)", ts=1)]
-    roots = find_iteration_roots_by_priority(
-        backup_only, pattern_tiers=[ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS]
-    )
+    roots = find_known_annotations(backup_only)
     assert len(roots) == 1
     assert roots[0]["name"].startswith("execute_context")
 

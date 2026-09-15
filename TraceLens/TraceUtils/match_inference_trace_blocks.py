@@ -56,7 +56,7 @@ from .annotation_utils import (
     PHASE_PREFILL_ONLY,
     average_detail,
     classify_phase,
-    find_iteration_roots_by_priority,
+    find_known_annotations,
     find_phase_from_window,
     iteration_details,
 )
@@ -485,8 +485,7 @@ def load_trace(path: str):
     gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
     print(f"Loaded {len(events)} events from {path}")
     # Detailed patterns take priority over the native patterns.
-    label = f"execution steps (iteration) [{os.path.basename(path)}]"
-    iteration_roots = find_iteration_roots_by_priority(events, label=label)
+    iteration_roots = find_known_annotations(events)
     return {
         "trace_json": trace_json,
         "events": events,
@@ -627,13 +626,14 @@ def main():
                 a["trace_json"],
                 phase_dir,
                 base_a,
-                "annotation_iteration",
+                "iteration",
                 0,
                 1,
                 a["gpu_corr_map"],
                 a["flow_corr_map"],
                 a["meta_events"],
                 output_label=f"{label_base}_A",
+                llm_inference=True,
             )
             if a_summary:
                 m["a_output_path"] = a_summary[0]["output_path"]
@@ -645,13 +645,14 @@ def main():
                 b["trace_json"],
                 phase_dir,
                 base_b,
-                "annotation_iteration",
+                "iteration",
                 0,
                 1,
                 b["gpu_corr_map"],
                 b["flow_corr_map"],
                 b["meta_events"],
                 output_label=f"{label_base}_B",
+                llm_inference=True,
             )
             if b_summary:
                 m["b_output_path"] = b_summary[0]["output_path"]
