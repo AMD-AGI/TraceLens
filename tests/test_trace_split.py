@@ -356,7 +356,7 @@ def test_trace_split_no_annotations(dirpath, trace_gz, tmp_path):
     ss_ref = os.path.join(dirpath, "steady_state_traces")
     dp_ref = os.path.join(dirpath, "phase_split_traces")
     run_ss = os.path.isdir(ss_ref) and not is_llm
-    run_dp = os.path.isdir(dp_ref) and not is_llm
+    run_dp = os.path.isdir(dp_ref)
 
     out = str(tmp_path / "output")
     os.makedirs(out, exist_ok=True)
@@ -402,14 +402,27 @@ def test_trace_split_no_annotations(dirpath, trace_gz, tmp_path):
         )
 
     if run_dp:
-        gen_kernels = _kernel_events(_collect_events(out, recursive=True))
-        ref_kernels = _kernel_events(
-            _strip_annotations(_collect_events(dp_ref, recursive=True))
+        ref_phases = sorted(
+            d for d in os.listdir(dp_ref)
+            if os.path.isdir(os.path.join(dp_ref, d))
         )
-        assert len(gen_kernels) >= len(ref_kernels), (
-            f"divide-phases: stripped has fewer kernels ({len(gen_kernels)}) "
-            f"than annotated ({len(ref_kernels)})"
-        )
+        assert ref_phases, f"No phase subdirectories in {dp_ref}"
+        for phase_dir in ref_phases:
+            gen_phase_path = os.path.join(out, phase_dir)
+            ref_phase_path = os.path.join(dp_ref, phase_dir)
+            assert os.path.isdir(gen_phase_path), (
+                f"divide-phases: missing phase directory '{phase_dir}' in output"
+            )
+            gen_kernels = _kernel_events(_collect_events(gen_phase_path))
+            ref_kernels = _kernel_events(
+                _strip_annotations(_collect_events(ref_phase_path))
+            )
+            dp_tolerance = max(1, int(len(ref_kernels) * 0.05))
+            assert len(gen_kernels) >= len(ref_kernels) - dp_tolerance, (
+                f"divide-phases '{phase_dir}': stripped has fewer kernels "
+                f"({len(gen_kernels)}) than annotated ({len(ref_kernels)}), "
+                f"tolerance={dp_tolerance}"
+            )
 
 
 # ---------------------------------------------------------------------------

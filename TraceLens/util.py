@@ -1114,16 +1114,29 @@ class PftraceParser:
         return pftrace_data.get("traceEvents", [])
 
 
+_MEMORY_VIEW_OPS = frozenset({
+    "aten::select", "aten::slice", "aten::as_strided", "aten::narrow",
+    "aten::copy_", "aten::_to_copy", "aten::to",
+    "aten::index_put_", "aten::_index_put_impl_",
+    "aten::resize_", "aten::resolve_conj", "aten::resolve_neg",
+    "aten::expand", "aten::permute", "aten::transpose", "aten::contiguous",
+    "aten::view", "aten::reshape", "aten::unsqueeze", "aten::squeeze",
+    "aten::flatten", "aten::unflatten",
+})
+
+
 def most_common_first_dim(events: list[dict]) -> int | None:
     """Return the most common first dimension across all ``Input Dims`` of cpu_op events.
 
-    Scans every ``cpu_op`` event's ``Input Dims`` argument, collects the first
-    element of each dimension list, and returns the most frequent value.
-    Returns ``None`` when no cpu_op carries ``Input Dims``.
+    Skips memory/view ops whose tensor dimensions reflect cache or layout
+    sizes rather than the batch dimension.
+    Returns ``None`` when no eligible cpu_op carries ``Input Dims``.
     """
     first_dims: list[int] = []
     for e in events:
         if e.get("cat") != "cpu_op":
+            continue
+        if e.get("name", "") in _MEMORY_VIEW_OPS:
             continue
         input_dims = e.get("args", {}).get("Input Dims")
         if not input_dims:

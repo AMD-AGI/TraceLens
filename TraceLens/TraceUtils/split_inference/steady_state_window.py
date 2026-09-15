@@ -42,6 +42,7 @@ from ..annotation_utils import (
 
 def _identify_regions_by_peak(
     values: list[int], num_steps: int, label: str = "Steady state",
+    min_run: int = 5,
 ) -> tuple[list[tuple[int, int]], int]:
     """Find contiguous regions where ``values`` are near the global peak.
 
@@ -68,8 +69,8 @@ def _identify_regions_by_peak(
             if steady_state_started:
                 prev_events_in_steady -= 1
 
-        if prev_events_in_steady > 5 and not steady_state_started:
-            print(f"{label} started at index {i - 5}")
+        if prev_events_in_steady > min_run and not steady_state_started:
+            print(f"{label} started at index {i - min_run}")
             steady_state_started = True
             start_index = i - prev_events_in_steady + 1
 
@@ -86,7 +87,7 @@ def _identify_regions_by_peak(
             prev_events_in_steady = 0
 
     if steady_state_started and not steady_state_ended:
-        regions.append((start_index, i))
+        regions.append((start_index, i + 1))
 
     print(f"{label} regions: {regions}")
 
@@ -418,13 +419,21 @@ def _identify_regions_by_decode_baseline(
 
     decode_regions, global_max = _identify_regions_by_peak(
         decode_bs, num_steps, label="Steady state (decode baseline)",
+        min_run=1,
     )
 
-    # Map decode-space indices back to full-iteration indices
+    # Map decode-space indices back to full-iteration indices and extend
+    # into adjacent prefill_bearing iterations so the region captures the
+    # full serving workload (the annotation path includes these naturally).
+    n = len(phase_labels)
     full_regions: list[tuple[int, int]] = []
     for ds, de in decode_regions:
         full_start = decode_indices[ds]
         full_end = decode_indices[min(de - 1, len(decode_indices) - 1)] + 1
+        while full_start > 0 and phase_labels[full_start - 1] == "prefill_bearing":
+            full_start -= 1
+        while full_end < n and phase_labels[full_end] == "prefill_bearing":
+            full_end += 1
         full_regions.append((full_start, full_end))
 
     return full_regions, global_max
