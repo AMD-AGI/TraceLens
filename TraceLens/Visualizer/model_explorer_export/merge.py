@@ -1732,6 +1732,57 @@ def _mirror_boundary_inputs(nodes: list[dict[str, Any]]) -> None:
     nodes.extend(mirrors)
 
 
+def _collapse_mirror_boundary_passthroughs(nodes: list[dict[str, Any]]) -> None:
+    """Merge an ``@output_mirror`` and ``@input_mirror`` for one tensor in one scope.
+
+    A tensor produced inside child ``A`` and consumed inside sibling child ``B``,
+    both under parent ``P``, otherwise renders as four tiles: ``A``'s ``@output``,
+    ``P``'s ``@output_mirror``, ``P``'s ``@input_mirror`` and ``B``'s ``@input``. The
+    two mirror tiles both sit in ``P`` and carry the same tensor name (a
+    ``topk_weights`` feeding a ``topk_weights``), reading as a dangling duplicate
+    pair. When an ``@input_mirror``'s incoming edges all come from a single
+    ``@output_mirror`` in the *same* namespace, the two describe the same tensor at
+    the same scope: drop the ``@input_mirror`` and repoint its consumers onto the
+    ``@output_mirror``. Dataflow is unchanged (the same producer reaches the same
+    consumers); one redundant tile per crossing disappears. General — any multi-slot
+    boundary handoff between siblings collapses, not just the router's.
+    """
+    by_id = {str(node["id"]): node for node in nodes}
+    consumers: dict[str, list[dict[str, Any]]] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []):
+            consumers.setdefault(str(edge.get("sourceNodeId")), []).append(node)
+
+    removed: set[str] = set()
+    for node in list(nodes):
+        if _node_attr(node, "synthetic") != "@input_mirror":
+            continue
+        incoming = node.get("incomingEdges", [])
+        sources = {str(edge.get("sourceNodeId")) for edge in incoming}
+        if len(sources) != 1:
+            continue
+        (source_id,) = tuple(sources)
+        producer = by_id.get(source_id)
+        if producer is None or _node_attr(producer, "synthetic") != "@output_mirror":
+            continue
+        if producer.get("namespace") != node.get("namespace"):
+            continue
+        producer_ports = [
+            str(item.get("id", "")) for item in producer.get("outputsMetadata", [])
+        ]
+        producer_port = producer_ports[0] if producer_ports else ""
+        input_mirror_id = str(node["id"])
+        for consumer in consumers.get(input_mirror_id, []):
+            for edge in consumer.get("incomingEdges", []):
+                if str(edge.get("sourceNodeId")) == input_mirror_id:
+                    edge["sourceNodeId"] = source_id
+                    edge["sourceNodeOutputId"] = producer_port
+        removed.add(input_mirror_id)
+
+    if removed:
+        nodes[:] = [node for node in nodes if str(node["id"]) not in removed]
+
+
 def _prune_noop_cast_nodes(nodes: list[dict[str, Any]]) -> None:
     """Remove ``Cast`` nodes whose output dtype equals their (single) input's
     dtype — the AST-path counterpart of the torch-trace backend's no-op
@@ -3443,6 +3494,7 @@ def build_merged_model_graph(
     _label_boundary_outputs_by_port(nodes)
     _mirror_boundary_inputs(nodes)
     _mirror_boundary_outputs(nodes)
+    _collapse_mirror_boundary_passthroughs(nodes)
 
     if shape_inferencer is not None:
         fill_missing_node_shapes(nodes, context=shape_inferencer.context)

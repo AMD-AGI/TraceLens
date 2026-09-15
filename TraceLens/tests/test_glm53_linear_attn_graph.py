@@ -1025,9 +1025,13 @@ def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
     )
     # The expert dispatch flattens into the MoE scope, so its boundary inputs are
     # mirrored directly under ``Glm5NextTextMoE``. The routed activations
-    # (``hidden_states``) and the gate weights (``topk_weights``) cross into the
-    # loop; ``topk_indices`` now feeds the MoE-scope ``one_hot`` preamble at the
-    # same scope as the router that produces it, so it needs no boundary mirror.
+    # (``hidden_states``) cross into the loop from *outside* the MoE, so they keep a
+    # boundary mirror. ``topk_weights`` is produced by the sibling router in this
+    # same MoE scope: its output mirror feeds the loop input directly, and the
+    # redundant 1:1 ``@input_mirror`` pass-through is collapsed away (D4 -- a
+    # ``topk_weights`` input tile that went into no block). ``topk_indices`` feeds
+    # the MoE-scope ``one_hot`` preamble at the router's scope, so it never needed a
+    # mirror.
     expert_input_mirrors = [
         node
         for node in graph["nodes"]
@@ -1038,9 +1042,9 @@ def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
         )
         and node.get("namespace", "").endswith("/Glm5NextTextMoE")
     ]
-    assert {"hidden_states", "topk_weights"} <= {
-        node["label"] for node in expert_input_mirrors
-    }
+    mirror_labels = {node["label"] for node in expert_input_mirrors}
+    assert "hidden_states" in mirror_labels
+    assert "topk_weights" not in mirror_labels
 
     experts = build_block_node(
         attr_name="experts",
@@ -1843,6 +1847,75 @@ def test_glm53_vision_rotary_frame_named_after_source_function():
     assert any(
         "@positional_l1615_apply_rotary_pos_emb_vision" in str(node.get("id", ""))
         for node in nodes
+    )
+
+
+def test_glm53_router_outputs_no_redundant_mirror_passthrough():
+    """The router's ``topk_weights`` reaches the experts without a duplicate tile.
+
+    ``topk_weights`` is produced in the router and consumed inside the sibling
+    experts loop, both under the ``Glm5NextTextMoE`` group. The boundary machinery
+    otherwise leaves two identically named mirror tiles adjacent in the MoE scope --
+    an ``@output_mirror`` feeding an input-styled ``@input_mirror`` -- which reads as
+    a dangling ``topk_weights`` input node that goes into no block. The pass-through
+    collapse drops the redundant ``@input_mirror`` and repoints the loop input onto
+    the ``@output_mirror`` directly. Dataflow is unchanged: the experts still gather
+    ``topk_weights`` and one-hot ``topk_indices``.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    node_by_id = {node["id"]: node for node in nodes}
+
+    _assert_export_is_acyclic(nodes)
+
+    def _synth(node: dict) -> str | None:
+        return _attr_value(node, "synthetic")
+
+    # No single-source @input_mirror is fed by a same-namespace @output_mirror: the
+    # redundant 1:1 mirror-to-mirror handoff is collapsed everywhere it occurred. A
+    # multi-source tuple fan-in (the vision ``position_embeddings`` gathering cos+sin
+    # output mirrors) is a distinct, meaningful structure and stays.
+    mirror_by_id = {n["id"]: n for n in nodes}
+    for node in nodes:
+        if _synth(node) != "@input_mirror":
+            continue
+        sources = {str(e.get("sourceNodeId")) for e in node.get("incomingEdges", [])}
+        if len(sources) != 1:
+            continue
+        producer = mirror_by_id.get(next(iter(sources)))
+        if producer is None:
+            continue
+        assert not (
+            _synth(producer) == "@output_mirror"
+            and producer.get("namespace") == node.get("namespace")
+        ), node["id"]
+
+    # The experts loop's topk_weights input now reads straight from the router's
+    # output mirror (no interposed @input_mirror), and the gather still consumes it.
+    loop_input = node_by_id[
+        "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/@input:topk_weights"
+    ]
+    sources = [e["sourceNodeId"] for e in loop_input["incomingEdges"]]
+    assert sources == [
+        "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/"
+        "sideproducer:1:gate:@op_l1/@output:topk_weights^topk_weights"
+    ], sources
+    assert _synth(node_by_id[sources[0]]) == "@output_mirror"
+
+    gather = node_by_id[
+        "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/"
+        "sidefeed:1:experts:@op_l134_c70_gather:12"
+    ]
+    assert loop_input["id"] in {e["sourceNodeId"] for e in gather["incomingEdges"]}
+    # topk_indices wiring into the experts one-hot is untouched.
+    one_hot = node_by_id[
+        "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/"
+        "sidefeed:1:experts:@op_l126_c19_one_hot:1"
+    ]
+    assert any(
+        "topk_indices" in e["sourceNodeId"] for e in one_hot["incomingEdges"]
     )
 
 
