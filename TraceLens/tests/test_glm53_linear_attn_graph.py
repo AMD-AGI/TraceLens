@@ -1811,6 +1811,41 @@ def test_glm53_vision_apply_rotary_tuple_returns_dock_per_ordinal():
     assert q_embed["id"] in all_sources
 
 
+def test_glm53_vision_rotary_frame_named_after_source_function():
+    """The rope-helper frame reads like any module call, not a synthetic attr.
+
+    A traced free-function call (``apply_rotary_pos_emb_vision(q, k, cos, sin)``)
+    expands into a frame carrying the raw synthetic call attr
+    (``@positional_l1615_apply_rotary_pos_emb_vision``) as both class and attr name.
+    The frame's *namespace segment* must be the clean source function name, exactly
+    as a module class would render; the raw attr still survives inside each op's id
+    so the rename is id-stable.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+
+    # The clean function name appears as a namespace segment...
+    segments = {
+        part
+        for node in nodes
+        for part in str(node.get("namespace", "")).split("/")
+    }
+    assert "apply_rotary_pos_emb_vision" in segments
+    # ...and the ugly synthetic-attr segment never does.
+    assert not any(
+        seg.startswith("_positional_l") or seg.startswith("_fn_l")
+        for seg in segments
+    ), sorted(s for s in segments if "positional" in s or s.startswith("_fn_l"))
+
+    # The raw synthetic attr is still embedded in the frame's op ids (id-stable).
+    assert any(
+        "@positional_l1615_apply_rotary_pos_emb_vision" in str(node.get("id", ""))
+        for node in nodes
+    )
+
+
 def _attr_value(node: dict, key: str) -> str | None:
     for attr in node.get("attrs", []):
         if attr.get("key") == key:

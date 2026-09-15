@@ -14,6 +14,7 @@ from typing import Any
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.ast_analyze import (
     _pick_stack_model_class,
+    _synthetic_call_function_name,
     expand_class_forward_dataflow,
     FUNCTION_SYNTHETIC_PREFIX,
     POSITIONAL_SYNTHETIC_PREFIX,
@@ -881,10 +882,11 @@ def _is_free_function_frame_namespace(
     """True when ``namespace`` is a traced free-function's inline-expanded body.
 
     A rope helper (``apply_rotary_pos_emb_vision``) or other traced free function
-    (``get_vision_position_ids``) is expanded into a namespace whose segment is the
-    sanitized synthetic call attr (``@positional_l1615_...`` -> ``_positional_l1615_``).
-    The raw attr survives verbatim inside each op's id, so recover it from there and
-    confirm it sanitizes to this namespace's own segment.
+    (``get_vision_position_ids``) is expanded into a namespace named after the source
+    function (``apply_rotary_pos_emb_vision``). The raw synthetic call attr survives
+    verbatim inside each op's id (``@positional_l1615_apply_rotary_pos_emb_vision``),
+    so recover it from there and confirm it maps to this namespace's own segment --
+    either via the sanitized raw attr (legacy) or the recovered clean function name.
     """
     if "/" not in namespace:
         return False
@@ -893,10 +895,16 @@ def _is_free_function_frame_namespace(
         if node.get("namespace", "") != namespace:
             continue
         for part in re.split(r"[/:]", str(node.get("id", ""))):
-            if (
+            if not (
                 part.startswith(POSITIONAL_SYNTHETIC_PREFIX)
                 or part.startswith(FUNCTION_SYNTHETIC_PREFIX)
-            ) and _sanitize_namespace_segment(part) == segment:
+            ):
+                continue
+            function_name = _synthetic_call_function_name(part)
+            if _sanitize_namespace_segment(part) == segment or (
+                function_name is not None
+                and _sanitize_namespace_segment(function_name) == segment
+            ):
                 return True
     return False
 

@@ -568,6 +568,15 @@ def inline_block_frame_label(block: BlockNode) -> str:
         return block.label
     if is_fused_silu_mul_class(block.class_name):
         return block.class_name
+    # A traced free-function frame carries the raw synthetic call attr as both its
+    # class_name and attr_name (``@positional_l1615_apply_rotary_pos_emb_vision``).
+    # Name the frame after the source function so it reads like any module call
+    # (``apply_rotary_pos_emb_vision``) rather than the internal synthetic attr; the
+    # raw attr still survives inside each op's id, so this only renames the frame.
+    if is_positional_synthetic(block.attr_name) or is_function_synthetic(
+        block.attr_name
+    ):
+        return _synthetic_call_function_name(block.attr_name) or block.attr_name
     # A frame holding a whole computation is identified by the module class that
     # implements it; a frame around a single step is better named by the attribute
     # that step is reached through.
