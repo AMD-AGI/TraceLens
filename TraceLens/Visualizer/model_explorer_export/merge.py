@@ -14,10 +14,7 @@ from typing import Any
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.ast_analyze import (
     _pick_stack_model_class,
-    _synthetic_call_function_name,
     expand_class_forward_dataflow,
-    FUNCTION_SYNTHETIC_PREFIX,
-    POSITIONAL_SYNTHETIC_PREFIX,
     stack_entry_dataflow,
 )
 from TraceLens.ModelUtils.block_tree import (
@@ -876,56 +873,24 @@ def _namespace_internal_ids(
 _INLINE_FRAME_NAMESPACE_SUFFIXES = frozenset({"SituAndMul", "SiluAndMul"})
 
 
-def _is_free_function_frame_namespace(
-    section_nodes: list[dict[str, Any]], namespace: str
-) -> bool:
-    """True when ``namespace`` is a traced free-function's inline-expanded body.
-
-    A rope helper (``apply_rotary_pos_emb_vision``) or other traced free function
-    (``get_vision_position_ids``) is expanded into a namespace named after the source
-    function (``apply_rotary_pos_emb_vision``). The raw synthetic call attr survives
-    verbatim inside each op's id (``@positional_l1615_apply_rotary_pos_emb_vision``),
-    so recover it from there and confirm it maps to this namespace's own segment --
-    either via the sanitized raw attr (legacy) or the recovered clean function name.
-    """
-    if "/" not in namespace:
-        return False
-    segment = namespace.rsplit("/", 1)[-1]
-    for node in section_nodes:
-        if node.get("namespace", "") != namespace:
-            continue
-        for part in re.split(r"[/:]", str(node.get("id", ""))):
-            if not (
-                part.startswith(POSITIONAL_SYNTHETIC_PREFIX)
-                or part.startswith(FUNCTION_SYNTHETIC_PREFIX)
-            ):
-                continue
-            function_name = _synthetic_call_function_name(part)
-            if _sanitize_namespace_segment(part) == segment or (
-                function_name is not None
-                and _sanitize_namespace_segment(function_name) == segment
-            ):
-                return True
-    return False
-
-
 def _skip_nested_inline_frame_input(
     section_nodes: list[dict[str, Any]], namespace: str
 ) -> bool:
     """Inline-expanded frames keep their ops' direct edges, no synthetic @input.
 
-    Two inline-frame kinds must not receive a group boundary:
-    - an activation frame (``SituAndMul``) inherits the parent MLP's single input;
-    - a traced free-function frame (a rope helper, ``get_vision_position_ids``)
-      whose ops already reference their true external producers with the correct
-      output-port ordinals. A frame-local boundary would flatten a tuple fan-out
-      (the cos/sin ``position_embeddings[0]``/``[1]`` split) onto one port; leaving
-      the ops docked to the enclosing block's boundary preserves the ordinals.
+    An activation frame (``SituAndMul``) inherits the parent MLP's single input and
+    must not receive its own group boundary.
+
+    Traced free-function frames (a rope helper, ``get_vision_position_ids``) are
+    NOT skipped: the owner rule is that a free-function call renders like any other
+    module call, with real ``@input``/``@output`` boundaries. A tuple fan-out on the
+    boundary (cos/sin ``position_embeddings[0]``/``[1]``) is preserved by the same
+    per-ordinal machinery a multi-return module uses -- ``_group_entry_buckets``
+    keys a bucket by the producer node, so both ordinal ports land on one boundary
+    tile that re-exposes them.
     """
     if "/" not in namespace:
         return False
-    if _is_free_function_frame_namespace(section_nodes, namespace):
-        return True
     segment = namespace.rsplit("/", 1)[-1]
     if segment not in _INLINE_FRAME_NAMESPACE_SUFFIXES:
         return False

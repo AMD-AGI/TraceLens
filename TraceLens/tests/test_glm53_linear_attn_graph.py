@@ -1724,19 +1724,26 @@ def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
 
     _assert_export_is_acyclic(nodes)
 
-    # The expanded apply_rotary frame unpacks ``cos, sin = position_embeddings``
-    # and feeds each to its own unsqueeze. The boundary fans out one port per
-    # slot (cos = port 0, sin = port 1) instead of collapsing both onto slot 0 or
-    # dropping the second slot; neither reads hidden_states.
+    # The rope helper renders like any module call (D3): its own ``@input``
+    # boundary. ``position_embeddings`` enters on a single frame-local boundary
+    # tile that fans out one port per unpacked slot (cos = port 0, sin = port 1)
+    # to the two unsqueezes -- neither reads hidden_states, and the tuple does not
+    # collapse onto slot 0 or drop the second slot.
+    frame_pe_input = (
+        "@positional_l1615_apply_rotary_pos_emb_vision:@/@input:position_embeddings"
+    )
+    assert any(n["id"].endswith(frame_pe_input) for n in nodes), frame_pe_input
+    frame_pe_input_id = next(
+        n["id"] for n in nodes if n["id"].endswith(frame_pe_input)
+    )
+
     def _pe_slot_port(node_suffix: str) -> str:
         node = next(n for n in nodes if n["id"].endswith(node_suffix))
         assert not any(
             "hidden_states" in e["sourceNodeId"] for e in node["incomingEdges"]
         ), node["id"]
         pe_edges = [
-            e
-            for e in node["incomingEdges"]
-            if e["sourceNodeId"] == "visual/@input:position_embeddings"
+            e for e in node["incomingEdges"] if e["sourceNodeId"] == frame_pe_input_id
         ]
         assert len(pe_edges) == 1, node["id"]
         return pe_edges[0].get("sourceNodeOutputId", "0")
@@ -1749,9 +1756,24 @@ def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
     )
     assert {cos_port, sin_port} == {"0", "1"}, (cos_port, sin_port)
 
-    # The boundary traces back to the pre-loop rotary producer, across its
-    # mirror. The producer is a tuple return (cos, sin); each slot has a
-    # distinct per-port output node (no collision onto a single @output), so the
+    # The frame boundary traces back across the loop to the vision model's own
+    # ``position_embeddings`` input (both ordinals), which in turn traces to the
+    # pre-loop rotary producer's per-slot cos/sin outputs.
+    frame_pe_mirror = next(
+        e["sourceNodeId"]
+        for e in node_by_id[frame_pe_input_id]["incomingEdges"]
+    )
+    frame_mirror_sources = {
+        (e["sourceNodeId"], e.get("sourceNodeOutputId", "0"))
+        for e in node_by_id[frame_pe_mirror]["incomingEdges"]
+    }
+    assert frame_mirror_sources == {
+        ("visual/@input:position_embeddings", "0"),
+        ("visual/@input:position_embeddings", "1"),
+    }, frame_mirror_sources
+
+    # The pre-loop producer is a tuple return (cos, sin); each slot has a distinct
+    # per-port output node (no collision onto a single @output), so the vision
     # mirror carries one incoming edge per slot.
     pe_mirror = node_by_id["visual/@input_mirror:position_embeddings^position_embeddings"]
     producer_ids = {e["sourceNodeId"] for e in pe_mirror["incomingEdges"]}
@@ -1762,10 +1784,12 @@ def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
         pid.rsplit("@output:", 1)[1].split("^", 1)[0] for pid in producer_ids
     } == {"cos", "sin"}, producer_ids
 
-    # The crossing carries the vision producer's shape, not the text sequence axis.
+    # The crossing carries the vision producer's shape, not the text sequence axis
+    # -- at the vision boundary, its mirror, and the new frame-local boundary.
     for boundary_id in (
         "visual/@input:position_embeddings",
         pe_mirror["id"],
+        frame_pe_input_id,
     ):
         shape = _output_shape(node_by_id[boundary_id])
         assert shape is not None and "Pv" in shape, (boundary_id, shape)
@@ -1852,23 +1876,21 @@ def test_glm53_vision_rotary_cos_and_sin_have_distinct_producers():
 
 
 def test_glm53_vision_apply_rotary_tuple_returns_dock_per_ordinal():
-    """``q_embed, k_embed = apply_rotary_pos_emb_vision(...)`` docks per slot.
+    """``q_embed, k_embed = apply_rotary_pos_emb_vision(...)`` exits per slot.
 
-    The inline-expanded rotary frame returns a tuple: ``q_embed`` is its ordinal-0
-    producer (an internal cast) and ``k_embed`` its ordinal-1 producer (the frame's
-    *last* op). The two consumers sit next in source order — ``q_embed``'s transpose
-    (l1616) then ``k_embed``'s transpose (l1617). The source-order chain fed the
-    l1616 transpose from the frame's last op (``k_embed``), so it read *both* slots.
-
-    General: a consumer reading a specific return slot of a tuple-returning inline
-    frame docks onto that slot's internal producer, and the stale frame-tail chain
-    edge is removed — so the q-path reads only ``q_embed`` and the k-path only
-    ``k_embed`` (no cross-slot edge, ``q_embed`` no longer orphaned).
+    The rope helper now renders like any module call (D3): the tuple return exits
+    through the frame's own per-slot ``@output`` boundary. ``q_embed`` is the
+    ordinal-0 producer (an internal cast, l1577) and ``k_embed`` the ordinal-1
+    producer (l1578); each backs its own frame output tile. The two consumers sit
+    next in source order -- ``q_embed``'s transpose (l1616) then ``k_embed``'s
+    (l1617) -- and each reads only its own slot's output (no cross-slot edge,
+    ``q_embed`` not orphaned).
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
+    node_by_id = {node["id"]: node for node in nodes}
 
     _assert_export_is_acyclic(nodes)
 
@@ -1877,21 +1899,69 @@ def test_glm53_vision_apply_rotary_tuple_returns_dock_per_ordinal():
 
     q_embed = _one(":@op_l1577_c14_cast:14")   # rotary tuple slot 0
     k_embed = _one(":@op_l1578_c14_cast:15")   # rotary tuple slot 1
+
+    # Each tuple slot exits through its own frame @output tile, backed by that
+    # slot's internal producer.
+    q_out = _one("apply_rotary_pos_emb_vision:@/@output:result_1")
+    k_out = _one("apply_rotary_pos_emb_vision:@/@output:result_2")
+    assert [e["sourceNodeId"] for e in q_out["incomingEdges"]] == [q_embed["id"]]
+    assert [e["sourceNodeId"] for e in k_out["incomingEdges"]] == [k_embed["id"]]
+
+    # Downstream, each transpose reads only its own slot's output -- through that
+    # slot's own output mirror, with no stale cross edge between the q/k paths.
+    # (The frame @output tile is re-exposed to the parent via an ``^`` mirror.)
+    q_out_mirror = q_out["id"] + "^result_1"
+    k_out_mirror = k_out["id"] + "^result_2"
+    assert q_out_mirror in node_by_id and k_out_mirror in node_by_id
     q_transpose = _one(":@op_l1616_c23_transpose:6")
     k_transpose = _one(":@op_l1617_c21_transpose:8")
-
-    q_sources = [e["sourceNodeId"] for e in q_transpose["incomingEdges"]]
-    k_sources = [e["sourceNodeId"] for e in k_transpose["incomingEdges"]]
-
-    # Each transpose reads exactly its own rotary slot — no stale cross edge.
-    assert q_sources == [q_embed["id"]], q_sources
-    assert k_sources == [k_embed["id"]], k_sources
+    assert [e["sourceNodeId"] for e in q_transpose["incomingEdges"]] == [q_out_mirror]
+    assert [e["sourceNodeId"] for e in k_transpose["incomingEdges"]] == [k_out_mirror]
 
     # ``q_embed`` (ordinal-0 slot) is consumed, not orphaned.
     all_sources = {
         e["sourceNodeId"] for n in nodes for e in n.get("incomingEdges", [])
     }
     assert q_embed["id"] in all_sources
+
+
+def test_glm53_vision_rotary_frame_has_module_like_boundaries():
+    """The rope-helper frame gets real @input/@output boundaries like a module (D3).
+
+    A traced free-function call used to skip boundary injection: its ops docked
+    straight onto external producers, so the frame had no @input/@output tiles and
+    did not read like a module. The owner rule is that a free-function call renders
+    exactly like any other module call -- so the frame now carries one @input tile
+    per forward argument it reads (``q``, ``k``, ``position_embeddings``) and one
+    @output tile per tuple return slot. The ``position_embeddings`` tuple stays a
+    single logical input that fans its ordinals internally (covered elsewhere); the
+    boundary set here is what makes the frame a first-class group.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+
+    _assert_export_is_acyclic(nodes)
+
+    frame_ns = "visual/Glm5NextVisionBlock/Glm5NextVisionAttention/apply_rotary_pos_emb_vision"
+    frame_nodes = [n for n in nodes if n.get("namespace", "") == frame_ns]
+    assert frame_nodes, sorted(
+        {n.get("namespace", "") for n in nodes if "apply_rotary" in n.get("namespace", "")}
+    )
+
+    def _boundary_labels(kind: str) -> set[str]:
+        return {
+            n.get("label")
+            for n in frame_nodes
+            if f"/{kind}:" in n["id"] and "_mirror:" not in n["id"]
+        }
+
+    # One @input tile per forward argument the helper reads.
+    assert _boundary_labels("@input") == {"q", "k", "position_embeddings"}
+    # One @output tile per tuple return slot (q_embed, k_embed) -- a group cannot
+    # expose an output without an entry boundary, so the frame has both.
+    assert len(_boundary_labels("@output")) == 2
 
 
 def test_glm53_vision_rotary_frame_named_after_source_function():
