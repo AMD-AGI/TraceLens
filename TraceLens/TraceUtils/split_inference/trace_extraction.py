@@ -28,14 +28,14 @@ from ..annotation_utils import (
 
 from .detect_utils import (
     GPU_KERNEL_CATEGORIES,
-    PROJECTION_CATEGORY,
+    GPU_USER_ANNOTATION,
     build_root_tiles,
 )
 
-# Kernels plus the annotation projections that describe them. Anything summing
+# Kernels plus the GPU annotation spans that describe them. Anything summing
 # GPU *time* must use GPU_KERNEL_CATEGORIES instead, since a projection encloses
 # the kernels it describes and counting both double-counts.
-GPU_EVENT_CATEGORIES = [*GPU_KERNEL_CATEGORIES, PROJECTION_CATEGORY]
+GPU_EVENT_CATEGORIES = [*GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION]
 
 
 def get_filename(filepath: str) -> dict:
@@ -134,7 +134,7 @@ def infer_batch_sizes_from_shapes(
             e for e in cpu_events[lo:hi]
             if win_ts <= e["ts"] < win_end and e["dur"] <= win_dur
         ]
-        batch_sizes.append(most_common_first_dim(window_events))
+        batch_sizes.append(most_common_first_dim(window_events, exclude_mem_ops=True))
 
     return batch_sizes
 

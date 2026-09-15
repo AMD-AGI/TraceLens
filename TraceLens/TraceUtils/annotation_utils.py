@@ -454,48 +454,18 @@ def dominant_cluster(groups: Dict[str, List[str]]) -> Tuple[Optional[str], float
     return skeleton, len(groups[skeleton]) / total
 
 
-# --- cached identity and inheritance ----------------------------------------
-# Stamped onto roots whose window and identity come from different annotations.
-PROVENANCE_KEY = "split_provenance"
-
-
+# --- cached identity ---------------------------------------------------------
 @lru_cache(maxsize=None)
 def parse_annotation(name: str) -> IterationAnnotation:
     """Memoized parse. Treat the result as read-only; instances are shared.
-
-    Construction runs up to seven regex matches, and detection parses the same
-    few hundred distinct names across hundreds of thousands of instances.
     """
     return IterationAnnotation(name)
 
 
 def is_parseable(name: str) -> bool:
     """True when a parser recognized the name, so its metadata is real.
-
-    The distinction matters because unparseable names still yield a full detail
-    dict, just a fabricated one (one decode-equivalent request), so callers that
-    test the numbers instead of this predicate cannot tell the two apart.
     """
     return parse_annotation(name).matched
-
-
-def inherit_identity(target: dict, source: dict) -> dict:
-    """Copy of ``target`` that parses as ``source``.
-
-    Timestamps, process and thread stay with ``target``: the outer span decides
-    the extraction window while the inner annotation supplies phase and batch
-    size. Both names are recorded so the two-level choice stays auditable.
-    """
-    prior = target.get(PROVENANCE_KEY) or {}
-    out = dict(target)
-    out["name"] = source.get("name", "")
-    out[PROVENANCE_KEY] = {
-        # Keep the original window owner when a root is relabelled more than
-        # once, otherwise the second pass erases where the span came from.
-        "window_from": prior.get("window_from") or target.get("name", ""),
-        "identity_from": source.get("name", ""),
-    }
-    return out
 
 
 def has_context(detail: dict) -> bool:

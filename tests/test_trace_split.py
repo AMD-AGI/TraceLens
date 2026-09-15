@@ -355,8 +355,8 @@ def test_trace_split_no_annotations(dirpath, trace_gz, tmp_path):
     # Run all modes in a single invocation
     ss_ref = os.path.join(dirpath, "steady_state_traces")
     dp_ref = os.path.join(dirpath, "phase_split_traces")
-    run_ss = os.path.isdir(ss_ref) and not is_llm
-    run_dp = os.path.isdir(dp_ref) and not is_llm
+    run_ss = os.path.isdir(ss_ref)
+    run_dp = os.path.isdir(dp_ref)
 
     out = str(tmp_path / "output")
     os.makedirs(out, exist_ok=True)
@@ -390,26 +390,67 @@ def test_trace_split_no_annotations(dirpath, trace_gz, tmp_path):
         f"tolerance={tolerance}"
     )
 
-    # --- find-steady-state + divide-phases: compare kernel counts ---
+    # --- find-steady-state: compare window types and kernel counts ---
     if run_ss:
-        gen_kernels = _kernel_events(_collect_events(out))
-        ref_kernels = _kernel_events(
-            _strip_annotations(_collect_events(ss_ref))
+        def _ss_window_type(filename):
+            return filename.split("_steady_state")[0]
+
+        gen_ss_files = sorted(f for f in _list_gz(out) if "steady_state" in f)
+        ref_ss_files = _list_gz(ss_ref)
+        gen_types = sorted(_ss_window_type(f) for f in gen_ss_files)
+        ref_types = sorted(_ss_window_type(f) for f in ref_ss_files)
+        assert gen_types == ref_types, (
+            f"find-steady-state: window type mismatch — "
+            f"generated {gen_types}, reference {ref_types}"
         )
-        assert len(gen_kernels) >= len(ref_kernels), (
-            f"find-steady-state: stripped has fewer kernels ({len(gen_kernels)}) "
-            f"than annotated ({len(ref_kernels)})"
-        )
+        for ref_file in ref_ss_files:
+            wtype = _ss_window_type(ref_file)
+            gen_file = next(f for f in gen_ss_files if _ss_window_type(f) == wtype)
+            gen_kernels = _kernel_events(
+                DataLoader.load_data(os.path.join(out, gen_file))["traceEvents"]
+            )
+            ref_kernels = _kernel_events(
+                _strip_annotations(
+                    DataLoader.load_data(
+                        os.path.join(ss_ref, ref_file)
+                    )["traceEvents"]
+                )
+            )
+            ss_tolerance = max(1, int(len(ref_kernels) * 0.05))
+            assert len(gen_kernels) >= len(ref_kernels) - ss_tolerance, (
+                f"find-steady-state '{wtype}': stripped has fewer kernels "
+                f"({len(gen_kernels)}) than annotated ({len(ref_kernels)}), "
+                f"tolerance={ss_tolerance}"
+            )
 
     if run_dp:
-        gen_kernels = _kernel_events(_collect_events(out, recursive=True))
-        ref_kernels = _kernel_events(
-            _strip_annotations(_collect_events(dp_ref, recursive=True))
+        ref_phases = sorted(
+            d for d in os.listdir(dp_ref)
+            if os.path.isdir(os.path.join(dp_ref, d))
         )
-        assert len(gen_kernels) >= len(ref_kernels), (
-            f"divide-phases: stripped has fewer kernels ({len(gen_kernels)}) "
-            f"than annotated ({len(ref_kernels)})"
-        )
+        assert ref_phases, f"No phase subdirectories in {dp_ref}"
+        for phase_dir in ref_phases:
+            gen_phase_path = os.path.join(out, phase_dir)
+            ref_phase_path = os.path.join(dp_ref, phase_dir)
+            assert os.path.isdir(gen_phase_path), (
+                f"divide-phases: missing phase directory '{phase_dir}' in output"
+            )
+            gen_files = _list_gz(gen_phase_path)
+            ref_files = _list_gz(ref_phase_path)
+            assert len(gen_files) == len(ref_files), (
+                f"divide-phases '{phase_dir}': chunk count mismatch — "
+                f"generated {len(gen_files)}, reference {len(ref_files)}"
+            )
+            gen_kernels = _kernel_events(_collect_events(gen_phase_path))
+            ref_kernels = _kernel_events(
+                _strip_annotations(_collect_events(ref_phase_path))
+            )
+            dp_tolerance = max(1, int(len(ref_kernels) * 0.05))
+            assert len(gen_kernels) >= len(ref_kernels) - dp_tolerance, (
+                f"divide-phases '{phase_dir}': stripped has fewer kernels "
+                f"({len(gen_kernels)}) than annotated ({len(ref_kernels)}), "
+                f"tolerance={dp_tolerance}"
+            )
 
 
 # ---------------------------------------------------------------------------

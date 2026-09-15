@@ -43,10 +43,15 @@ from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from tests.fixtures.traces import INFERENCE_ROOT
 from TraceLens.Trace2Tree.inference_iteration_roots import (
     _entry_roots,
+    _find_repeating_period,
     _reattach_worker_threads,
 )
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.util import normalize_name_for_comparison
+from TraceLens.TraceUtils.split_inference.detect_utils import DetectStatus
 from TraceLens.TraceUtils.split_inference.root_detection import (
+    _child_groups,
+    _periodic_candidate,
     _total_gpu_time,
     detect_from_branch_descent,
 )
@@ -247,18 +252,14 @@ def _details(num_requests, context_requests=0):
 
 def test_identify_steady_state_regions_clear_region():
     iter_details = [_details(2) for _ in range(4)] + [_details(20) for _ in range(30)]
-    regions, global_max = _identify_regions_inference(
-        iter_details, num_steps=32
-    )
+    regions, global_max = _identify_regions_inference(iter_details, num_steps=32)
     assert global_max == 20
     assert regions == [(4, 33)]
 
 
 def test_identify_steady_state_regions_fallback():
     iter_details = [_details(20 if i % 2 == 0 else 2) for i in range(10)]
-    regions, global_max = _identify_regions_inference(
-        iter_details, num_steps=12
-    )
+    regions, global_max = _identify_regions_inference(iter_details, num_steps=12)
     assert global_max == 20
     assert len(regions) == 1
     assert regions == [(4, 6)]
@@ -743,9 +744,7 @@ def test_find_steady_state_inference_invalid_mode():
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
     with pytest.raises(ValueError, match="Unknown mode"):
-        split.find_steady_state_inference(
-            roots, num_steps=4, mode="invalid"
-        )
+        split.find_steady_state_inference(roots, num_steps=4, mode="invalid")
 
 
 def test_find_steady_state_inference_conc_mismatch_warning(capsys):
@@ -1248,3 +1247,319 @@ class TestCaptureMergeFinal:
             p.write_text(json.dumps(events))
             _get_cached_capture_tree((f"k{i}", str(p)), str(p))
         assert len(tcm._capture_tree_cache) <= tcm._CAPTURE_TREE_CACHE_MAX_SIZE
+
+
+def _conditional_loop_events(
+    turns: int, worked: set, noisy: set = frozenset(), post: bool = False
+) -> List[Dict]:
+    """An event loop where only the turns in ``worked`` run the GPU frame.
+
+    Every turn also emits a kernel-free bookkeeping frame, so the child-name
+    sequence has no contiguous period -- the shape that made real sglang overlap
+    scheduling undetectable.
+
+    ``noisy`` turns emit one extra kernel-free frame, which is enough to break
+    the stride even when every turn does work. ``post`` adds a second, much
+    cheaper GPU frame per working turn, so the loop body is two frames wide.
+    """
+    events: List[Dict] = [
+        {
+            "ph": "X",
+            "cat": "cpu_op",
+            "name": "event_loop",
+            "pid": 1,
+            "tid": 1,
+            "ts": 0,
+            "dur": turns * 2000,
+            "args": {"Sequence number": 0},
+        }
+    ]
+    corr = 900
+    for turn in range(turns):
+        base = 100 + turn * 2000
+        idle = (("idle", 200),) if turn in noisy else ()
+        for name, offset in (("get_next_batch", 0), ("bookkeeping", 100)) + idle:
+            events.append(
+                {
+                    "ph": "X",
+                    "cat": "cpu_op",
+                    "name": name,
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": base + offset,
+                    "dur": 50,
+                    "args": {"Sequence number": turn},
+                }
+            )
+        if turn not in worked:
+            continue
+        frames = [("run_batch", 300, 400, 100)]
+        if post:
+            frames.append(("post_process", 800, 100, 5))
+        for name, offset, dur, kernel_dur in frames:
+            events.append(
+                {
+                    "ph": "X",
+                    "cat": "cpu_op",
+                    "name": name,
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": base + offset,
+                    "dur": dur,
+                    "args": {"Sequence number": turn, "correlation": corr},
+                }
+            )
+            events.extend(
+                [
+                    {
+                        "ph": "X",
+                        "cat": "cuda_runtime",
+                        "name": "hipLaunchKernel",
+                        "pid": 1,
+                        "tid": 1,
+                        "ts": base + offset + 10,
+                        "dur": 5,
+                        "args": {"correlation": corr},
+                    },
+                    {
+                        "ph": "X",
+                        "cat": "kernel",
+                        "name": f"{name}_kernel",
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base + offset + 50,
+                        "dur": kernel_dur,
+                        "args": {"correlation": corr, "stream": 7},
+                    },
+                    {
+                        "ph": "s",
+                        "id": corr,
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base + offset + 50,
+                        "cat": "ac2g",
+                        "name": "ac2g",
+                    },
+                    {
+                        "ph": "f",
+                        "id": corr,
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base + offset + 50 + kernel_dur,
+                        "cat": "ac2g",
+                        "name": "ac2g",
+                        "bp": "e",
+                    },
+                ]
+            )
+            corr += 1
+    return events
+
+
+def _descend(events: List[Dict]):
+    tree = TraceToTree(events, prune_nongpu_paths=True)
+    tree.build_tree(add_python_func=True)
+    _reattach_worker_threads(tree)
+    return detect_from_branch_descent(tree, _entry_roots(tree), _total_gpu_time(tree))
+
+
+def test_branch_descent_finds_conditional_loop_body():
+    """The working frame is found even though it runs on only some turns."""
+    worked = {0, 1, 3, 4, 6, 8, 10, 11}
+    result = _descend(_conditional_loop_events(14, worked))
+
+    assert result is not None
+    assert result.diagnostics["branch_source"] == "frame_family"
+    assert len(result.roots) == len(worked)
+    assert {r["name"] for r in result.roots} == {"run_batch"}
+    assert result.status is DetectStatus.SPLITTABLE
+
+
+def test_branch_descent_periodicity_ignores_kernel_free_frames():
+    """Chatter is dropped before the period search, not only after it.
+
+    ``_blocks_by_pattern`` already tolerates kernel-free intruders, but that
+    tolerance never runs when their irregular spacing is the very thing stopping
+    a period from being found.
+    """
+    events = _conditional_loop_events(
+        12, worked=set(range(12)), noisy={2, 5, 9}, post=True
+    )
+    tree = TraceToTree(events, prune_nongpu_paths=True)
+    tree.build_tree(add_python_func=True)
+    _reattach_worker_threads(tree)
+    node = next(e for e in tree.events_by_uid.values() if e.get("name") == "event_loop")
+    ordered = sorted(tree.get_children_events(node), key=lambda e: e.get("ts", 0))
+    _, gputime_by_name = _child_groups(tree, ordered)
+
+    # The idle frames land on 3 of 12 turns, leaving no contiguous repeating run.
+    assert _find_repeating_period([e.get("name", "") for e in ordered])[0] is None
+
+    candidate = _periodic_candidate(
+        tree, node, ordered, gputime_by_name, _total_gpu_time(tree), 0
+    )
+    assert candidate is not None
+    assert candidate.diagnostics["branch_coverage"] > 0.9
+
+
+def test_branch_descent_rejects_frames_with_no_gpu_work():
+    """A frame explaining no GPU work is never an answer, however often it runs.
+
+    The loop below is perfectly periodic, so the pattern path does produce a
+    candidate -- it just accounts for none of the trace's GPU time, which sits on
+    an unrelated frame. Reporting it was how 63 CPU-only roots got emitted.
+    """
+    events = _conditional_loop_events(14, worked=set())
+    events.extend(
+        [
+            {
+                "ph": "X",
+                "cat": "cpu_op",
+                "name": "unrelated_work",
+                "pid": 1,
+                "tid": 1,
+                "ts": 90000,
+                "dur": 500,
+                "args": {"correlation": 42},
+            },
+            {
+                "ph": "X",
+                "cat": "kernel",
+                "name": "gemm_kernel",
+                "pid": 0,
+                "tid": 7,
+                "ts": 90100,
+                "dur": 200,
+                "args": {"correlation": 42, "stream": 7},
+            },
+        ]
+    )
+    # Guard the guard: the detector must reach the coverage check, not bail out
+    # early on a trace with no GPU work at all.
+    assert sum(e["dur"] for e in events if e.get("cat") == "kernel") > 0
+    assert _descend(events) is None
+
+
+VLLM_PRIMARY = (
+    "execute_{i}_context_3(sq128sk256sqsq1sqsk1)_generation_2(sq1sk300sqsq1sqsk1)"
+)
+SGLANG_DECODE = "step[DECODE bs={i}]"
+SGLANG_EXTEND = "step[EXTEND bs=2 toks={t}]"
+VLLM_BACKUP = "execute_context_3({i})_generation_2(50)"
+
+
+def _warmup_loop_events(turns: int = 6) -> List[Dict]:
+    """A loop whose first turn does the iteration's work plus extra setup.
+
+    The setup frame breaks the stride, so the period search anchors after the
+    first turn and leaves it outside every block. That is the shape bookend
+    promotion exists for: the turn is a real iteration, and dropping it reports
+    its GPU time as work no root explains.
+    """
+    events: List[Dict] = [
+        {
+            "ph": "X",
+            "cat": "cpu_op",
+            "name": "event_loop",
+            "pid": 1,
+            "tid": 1,
+            "ts": 0,
+            "dur": turns * 2000,
+            "args": {"Sequence number": 0},
+        }
+    ]
+    corr = 500
+    for turn in range(turns):
+        base = 100 + turn * 2000
+        second = ("setup", 10) if turn == 0 else ("mlp", 50)
+        for name, offset, kernel_dur in (
+            ("attention", 300, 100),
+            (second[0], 800, second[1]),
+        ):
+            events.append(
+                {
+                    "ph": "X",
+                    "cat": "cpu_op",
+                    "name": name,
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": base + offset,
+                    "dur": 200,
+                    "args": {"Sequence number": turn, "correlation": corr},
+                }
+            )
+            events.extend(
+                [
+                    {
+                        "ph": "X",
+                        "cat": "cuda_runtime",
+                        "name": "hipLaunchKernel",
+                        "pid": 1,
+                        "tid": 1,
+                        "ts": base + offset + 10,
+                        "dur": 5,
+                        "args": {"correlation": corr},
+                    },
+                    {
+                        "ph": "X",
+                        "cat": "kernel",
+                        "name": f"{name}_kernel",
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base + offset + 50,
+                        "dur": kernel_dur,
+                        "args": {"correlation": corr, "stream": 7},
+                    },
+                    {
+                        "ph": "s",
+                        "id": corr,
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base + offset + 50,
+                        "cat": "ac2g",
+                        "name": "ac2g",
+                    },
+                    {
+                        "ph": "f",
+                        "id": corr,
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base + offset + 50 + kernel_dur,
+                        "cat": "ac2g",
+                        "name": "ac2g",
+                        "bp": "e",
+                    },
+                ]
+            )
+            corr += 1
+    return events
+
+
+def test_bookend_promotion_adopts_a_warmup_turn_that_does_the_same_work():
+    """The off-stride first turn is kept, because its GPU signature matches."""
+    turns = 6
+    events = _warmup_loop_events(turns)
+    tree = TraceToTree(events, prune_nongpu_paths=True)
+    tree.build_tree(add_python_func=True)
+    _reattach_worker_threads(tree)
+    node = next(e for e in tree.events_by_uid.values() if e.get("name") == "event_loop")
+    ordered = sorted(tree.get_children_events(node), key=lambda e: e.get("ts", 0))
+    _, gputime_by_name = _child_groups(tree, ordered)
+
+    # The setup frame means the repeating run starts only at the second turn.
+    live = [e for e in ordered if gputime_by_name.get(e.get("name", ""), 0.0) > 0]
+    _, _, start = _find_repeating_period(
+        [normalize_name_for_comparison(e.get("name", "")) for e in live]
+    )
+    assert start > 0
+
+    candidate = _periodic_candidate(
+        tree, node, ordered, gputime_by_name, _total_gpu_time(tree), 0
+    )
+    assert candidate is not None
+    # Every turn is a root, warmup included, and nothing is left for the cascade
+    # to bolt on afterwards.
+    assert len(candidate.roots) == turns
+    assert candidate.roots[0]["ts"] < live[start]["ts"]
+    assert candidate.diagnostics["before_uids"] == []
+    assert candidate.diagnostics["branch_coverage"] > 0.99
