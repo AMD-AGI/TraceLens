@@ -133,8 +133,13 @@ class TestMicrobenchHelpers:
         "gpu_name,mem_gb,expected",
         [
             ("AMD Instinct MI300X", 192.0, "MI300X"),
+            ("AMD Instinct MI210", 64.0, "MI210"),
+            # Trailing "Graphics" is a marketing suffix, not the model.
+            ("AMD Radeon 8060S Graphics", 64.0, "Radeon_8060S"),
+            ("AMD Radeon 890M Graphics", 32.0, "Radeon_890M"),
             ("Generic GPU", 280.0, "MI355X"),
             ("Some Card", 64.0, "Card"),
+            ("", 0.0, "GPU"),
         ],
     )
     def test_arch_product_name(self, gpu_name, mem_gb, expected):

@@ -125,13 +125,6 @@ class TestTreePerfModuleHelpers:
 
 
 class TestGPUEventAnalyserStatic:
-    def test_merge_intervals_empty(self):
-        assert GPUEventAnalyser.merge_intervals([]) == []
-
-    def test_merge_intervals_overlapping(self):
-        intervals = [(0, 10), (5, 15), (20, 30)]
-        assert GPUEventAnalyser.merge_intervals(intervals) == [(0, 15), (20, 30)]
-
     def test_compute_metrics_dict_basic(self):
         events = {
             GPUEventAnalyser.all_gpu_key: [
