@@ -27,7 +27,6 @@ from ...Trace2Tree.inference_iteration_roots import (
     _blocks_by_pattern,
     _descendant_gpu_time,
     _find_repeating_period,
-    _gpu_bearing,
 )
 from ...Trace2Tree.trace_to_tree import TraceToTree
 from ..annotation_utils import (
@@ -445,7 +444,7 @@ def detect_from_branch_descent(
             ):
                 break
         for child in children:
-            if _gpu_bearing(child):
+            if not child.get("non_gpu_path", False):
                 queue.append((child, depth + 1))
 
     if best is not None:

@@ -256,19 +256,15 @@ def _reattach_worker_threads(tree: TraceToTree) -> TraceToTree:
             continue
         root["parent"] = host_node["UID"]
         host_node.setdefault("children", []).append(root["UID"])
-        # Flag the new ancestry GPU-bearing so the descent will follow it: the
-        # reattached subtree carries kernels the host frames previously lacked.
+        gpu_uids = root.get("gpu_events", [])
         ancestor: Optional[dict] = host_node
-        while ancestor is not None and not ancestor.get("_kernel_bearing"):
-            ancestor["_kernel_bearing"] = True
+        while ancestor is not None and ancestor.get("non_gpu_path", False):
+            if gpu_uids:
+                ancestor.setdefault("gpu_events", []).extend(gpu_uids)
+            ancestor.pop("non_gpu_path", None)
             ancestor = tree.get_parent_event(ancestor)
         reattached += 1
     return tree
-
-
-def _gpu_bearing(event: dict) -> bool:
-    """Whether ``event`` has any GPU work under it (native or reattached)."""
-    return bool(event.get("gpu_events") or event.get("_kernel_bearing"))
 
 
 def _descendant_gpu_time(tree: TraceToTree, nodes: Sequence[dict]) -> float:
@@ -319,10 +315,10 @@ def _blocks_by_pattern(
                 block.append(child)
                 pos += 1
                 j += 1
-            elif not _gpu_bearing(child):
+            elif child.get("non_gpu_path", False):
                 j += 1  # skip a kernel-less intruder, keep matching this position
             else:
-                break  # kernel-bearing deviation: a real break, stop matching
+                break  # GPU-bearing deviation: a real break, stop matching
         if pos == period:
             blocks.append(block)
             i = j
