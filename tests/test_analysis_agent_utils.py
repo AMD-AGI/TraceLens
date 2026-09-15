@@ -1196,11 +1196,83 @@ def test_check_report_requires_top_ops(tmp_path):
 
 
 def test_check_report_with_top_ops_ok(tmp_path):
-    text = "<!-- impact-begin kind=top_ops -->\n| a |\n<!-- impact-end -->\n"
+    text = (
+        "<!-- report-begin kind=report_mode mode=agentic -->\n"
+        "<!-- report-end -->\n"
+        "<!-- impact-begin kind=top_ops -->\n| a |\n<!-- impact-end -->\n"
+    )
     p = tmp_path / "analysis.md"
     _write(str(p), text)
     errors = MarkerValidator.check_report(str(p))
     assert errors == []
+
+
+# ----- MarkerValidator.scan_report + report_mode / warning gate -----
+
+
+def test_scan_report_valid_report_mode():
+    text = (
+        "<!-- report-begin kind=report_mode mode=agentic -->\n" "<!-- report-end -->\n"
+    )
+    errors, counts = MarkerValidator.scan_report(text, "analysis.md")
+    assert errors == []
+    assert counts["report_mode"] == 1
+
+
+def test_scan_report_report_mode_missing_mode():
+    text = "<!-- report-begin kind=report_mode -->\n<!-- report-end -->\n"
+    errors, _ = MarkerValidator.scan_report(text, "analysis.md")
+    assert any(
+        "report kind=report_mode missing required attr mode" in e for e in errors
+    )
+
+
+def test_scan_report_valid_warning():
+    text = (
+        "<!-- report-begin kind=warning -->\n"
+        "> **⚠ Data Quality.** high variance detected.\n"
+        "<!-- report-end -->\n"
+    )
+    errors, counts = MarkerValidator.scan_report(text, "analysis.md")
+    assert errors == []
+    assert counts["warning"] == 1
+
+
+def test_scan_report_unknown_kind_rejected():
+    text = "<!-- report-begin kind=bogus -->\n<!-- report-end -->\n"
+    errors, _ = MarkerValidator.scan_report(text, "analysis.md")
+    assert any("unknown report kind=bogus" in e for e in errors)
+
+
+def test_scan_report_unpaired_rejected():
+    text = (
+        "<!-- report-begin kind=report_mode mode=agentic -->\n"
+        "<!-- report-begin kind=warning -->\n"
+        "<!-- report-end -->\n"
+    )
+    errors, _ = MarkerValidator.scan_report(text, "analysis.md")
+    assert any("report-marker pairing mismatch" in e for e in errors)
+
+
+def test_check_report_requires_report_mode(tmp_path):
+    text = "<!-- impact-begin kind=top_ops -->\n| a |\n<!-- impact-end -->\n"
+    p = tmp_path / "analysis.md"
+    _write(str(p), text)
+    errors = MarkerValidator.check_report(str(p))
+    assert any("exactly one kind=report_mode" in e for e in errors)
+
+
+def test_check_report_rejects_legacy_warnings_section(tmp_path):
+    text = (
+        "<!-- report-begin kind=report_mode mode=agentic -->\n"
+        "<!-- report-end -->\n"
+        "<!-- impact-begin kind=top_ops -->\n| a |\n<!-- impact-end -->\n"
+        "## Warnings\n\nsome legacy prose\n"
+    )
+    p = tmp_path / "analysis.md"
+    _write(str(p), text)
+    errors = MarkerValidator.check_report(str(p))
+    assert any("legacy mid-document ## Warnings" in e for e in errors)
 
 
 # ----- validate_report + _validate_report_priority_consistency (R1-R4) -----
@@ -1208,6 +1280,8 @@ def test_check_report_with_top_ops_ok(tmp_path):
 
 def _passing_report():
     return """# Analysis Report
+<!-- report-begin kind=report_mode mode=agentic -->
+<!-- report-end -->
 
 ## Executive Summary
 
@@ -3068,6 +3142,8 @@ def _full_report(extra_kf_impact=""):
     if extra_kf_impact:
         kf += extra_kf_impact + "\n"
     return f"""# Analysis Report
+<!-- report-begin kind=report_mode mode=agentic -->
+<!-- report-end -->
 
 ## Executive Summary
 

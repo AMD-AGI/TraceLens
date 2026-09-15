@@ -41,6 +41,20 @@ _REASONING_MARKER_RE = re.compile(
     r"<!--\s*reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->",
     re.IGNORECASE,
 )
+_REPORT_MODE_RE = re.compile(
+    r"<!--\s*report-begin\s+kind=report_mode\s+mode=([\w-]+)\s*-->",
+    re.IGNORECASE,
+)
+_REPORT_WARNING_RE = re.compile(
+    r"<!--\s*report-begin\s+kind=warning\s*-->",
+    re.IGNORECASE,
+)
+_REPORT_BEGIN_RE = re.compile(r"<!--\s*report-begin\b", re.IGNORECASE)
+_REPORT_END_RE = re.compile(r"<!--\s*report-end\s*-->", re.IGNORECASE)
+_OP_ROW_RE = re.compile(
+    r"<!--\s*impact-begin\s+kind=op_row\s+rank=(\d+)\s+impacts=([^>]*?)-->",
+    re.IGNORECASE,
+)
 _HEADING_RE = re.compile(
     r"^####\s+(?:[\U0001F300-\U0001FAFF☀-➿]+\s+)?P(\d+):\s*(.+?)\s*$",
     re.MULTILINE,
@@ -350,6 +364,52 @@ def test_writer_structure_contract(tmp_path):
     # NEGATIVE — downgrading #### P to ### P makes _HEADING_RE find no headings.
     downgraded = md.replace("#### P", "### P")
     assert len(_HEADING_RE.findall(downgraded)) == 0
+
+
+# ---------------------------------------------------------------------------
+# Report-level marker contract: exactly one paired report_mode
+# (mode=deterministic-fallback), exactly one paired warning, and one op_row per
+# P-item (one-value CSV == 1 row). The fallback path skips Steps 3-12 so
+# check_report never runs on it; this unit test is the sole enforcer.
+# ---------------------------------------------------------------------------
+def test_writer_emits_report_mode_warning_and_op_rows(tmp_path):
+    rows = [
+        ("hipGraphLaunch->foo (Synthetic Op)", 60.0, 60.0),
+        ("hipGraphLaunch->bar (Synthetic Op)", 40.0, 40.0),
+    ]
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
+
+    # report-begin/report-end are paired.
+    assert len(_REPORT_BEGIN_RE.findall(md)) == len(_REPORT_END_RE.findall(md))
+
+    # Exactly one report_mode marker, mode=deterministic-fallback, before the title body.
+    modes = _REPORT_MODE_RE.findall(md)
+    assert modes == ["deterministic-fallback"]
+    assert md.index("report-begin kind=report_mode") < md.index("#### P1:")
+
+    # Exactly one warning marker wrapping the degraded banner.
+    assert len(_REPORT_WARNING_RE.findall(md)) == 1
+    warn_idx = md.index("report-begin kind=warning")
+    banner_idx = md.index("> **⚠ Degraded (deterministic fallback) report.**")
+    assert warn_idx < banner_idx < md.index("#### P1:")
+
+    # One op_row per P-item; each CSV carries exactly one value (== 1 data row).
+    op_rows = _OP_ROW_RE.findall(md)
+    n_pitems = len(_HEADING_RE.findall(md))
+    assert len(op_rows) == n_pitems == 2
+    for rank, impacts in op_rows:
+        vals = [v for v in impacts.strip().split(",") if v.strip()]
+        assert len(vals) == 1
+
+    # op_row mid matches the P-item card's mid for the same rank.
+    pitem_mids = [
+        re.search(r"mid=([\d.]+)", blob).group(1)
+        for blob in _PITEM_MARKER_RE.findall(md)
+    ]
+    op_row_by_rank = {int(rank): impacts.strip() for rank, impacts in op_rows}
+    for i, mid in enumerate(pitem_mids, start=1):
+        assert op_row_by_rank[i] == mid
 
 
 # ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ _MV_BEGIN_RE = re.compile(r"<!--\s*impact-begin\s+([^>]*?)-->", re.DOTALL)
 _MV_END_RE = re.compile(r"<!--\s*impact-end\s*-->")
 _MV_KIND_ATTR_RE = re.compile(r"\bkind=(\w+)\b")
 _MV_ATTR_RE = re.compile(r"\b(\w+)=([^\s]+)")
+_MV_REPORT_BEGIN_RE = re.compile(r"<!--\s*report-begin\s+([^>]*?)-->", re.DOTALL)
 _TOP_OPS_ROW_RE = re.compile(r"<!--\s*top-ops-row\s+([^>]*?)-->")
 _DETAIL_P_HEADER_RE = re.compile(r"^####\s+.+P(\d+):", re.MULTILINE)
 _DETAIL_P_HEADER_FALLBACK_RE = re.compile(r"^(?:####|###)\s+.+P(\d+):", re.MULTILINE)
@@ -1337,6 +1338,46 @@ def _check_marker_op_rows(output_dir, comparison_scope=None):
     return rows
 
 
+def _check_marker_report_mode(output_dir, comparison_scope=None):
+    """Marker eval 6: exactly one top-of-report kind=report_mode marker.
+
+    Gates the LLM path so agentic/comparative reports carry the report_mode
+    marker parallel to the op_row eval. Expected mode = comparative when
+    comparison_scope is comparative, else agentic.
+    """
+    content = _read_report(output_dir)
+    if content is None:
+        return _marker_not_found(
+            "marker_eval_6", "Report mode marker (kind=report_mode)"
+        )
+
+    modes = [
+        _marker_attrs_from_inner(inner).get("mode")
+        for inner in _MV_REPORT_BEGIN_RE.findall(content)
+        if (km := _MV_KIND_ATTR_RE.search(inner)) and km.group(1) == "report_mode"
+    ]
+    expected = "comparative" if comparison_scope == "comparative" else "agentic"
+    errors = []
+    if len(modes) != 1:
+        errors.append(
+            f"expected exactly one kind=report_mode marker, found {len(modes)}"
+        )
+    elif modes[0] != expected:
+        errors.append(f"report_mode mode={modes[0]!r}, expected {expected!r}")
+
+    result = "PASS" if not errors else "FAIL"
+    return [
+        _make_marker_row(
+            "marker_eval_6",
+            "Report mode marker (kind=report_mode)",
+            result,
+            "; ".join(errors) if errors else "",
+            "template" if result == "FAIL" else "",
+            "Fix top-of-report kind=report_mode marker" if result == "FAIL" else "",
+        )
+    ]
+
+
 _MULTI_EVAL_CHECKS = [
     _check_report_template,
     _check_exec_summary,
@@ -1347,6 +1388,7 @@ _MULTI_EVAL_CHECKS = [
     _check_marker_detail_estimates,
     _check_marker_reasoning_candidates,
     _check_marker_op_rows,
+    _check_marker_report_mode,
 ]
 
 _GATE_FAIL_NEW_EVALS = [
@@ -1359,6 +1401,7 @@ _GATE_FAIL_NEW_EVALS = [
     ("marker_eval_3", "Detail estimate markers (kind=detail_estimate)"),
     ("marker_eval_4", "Reasoning-candidate markers"),
     ("marker_eval_5", "Per-row impact markers (kind=op_row)"),
+    ("marker_eval_6", "Report mode marker (kind=report_mode)"),
 ]
 
 
