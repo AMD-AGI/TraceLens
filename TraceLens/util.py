@@ -1125,18 +1125,20 @@ _MEMORY_VIEW_OPS = frozenset({
 })
 
 
-def most_common_first_dim(events: list[dict]) -> int | None:
+def most_common_first_dim(
+    events: list[dict], exclude_mem_ops: bool = False,
+) -> int | None:
     """Return the most common first dimension across all ``Input Dims`` of cpu_op events.
 
-    Skips memory/view ops whose tensor dimensions reflect cache or layout
-    sizes rather than the batch dimension.
+    When *exclude_mem_ops* is True, skips memory/view ops whose tensor
+    dimensions reflect cache or layout sizes rather than the batch dimension.
     Returns ``None`` when no eligible cpu_op carries ``Input Dims``.
     """
     first_dims: list[int] = []
     for e in events:
         if e.get("cat") != "cpu_op":
             continue
-        if e.get("name", "") in _MEMORY_VIEW_OPS:
+        if exclude_mem_ops and e.get("name", "") in _MEMORY_VIEW_OPS:
             continue
         input_dims = e.get("args", {}).get("Input Dims")
         if not input_dims:
