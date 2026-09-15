@@ -437,6 +437,18 @@ Output behavior matches the PyTorch report: a single Excel workbook is written
 next to the trace by default; use `--output_xlsx_path` or `--output_csvs_dir` to
 change the destination.
 
+To add vLLM request-lifecycle tables from a separately captured AsyncLLM
+frontend trace:
+
+```bash
+TraceLens_generate_perf_report_pytorch_inference \
+    --profile_json_path rank0.pt.trace.json.gz \
+    --engine vllm \
+    --async_llm_trace async_llm.pt.trace.json.gz \
+    --output_xlsx_path report.xlsx \
+    --output_csvs_dir report_csvs
+```
+
 ## Merge capture traces
 
 In graph mode, the replay trace records kernel launches but loses the CPU
@@ -471,11 +483,37 @@ relevant to serving traces:
 | ---------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--profile_json_path`      | required  | Path to the graph-replay `torch.profiler` trace (`.json` or `.json.gz`).                                                                       |
 | `--capture_folder PATH`    | `None`  | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). Mutually exclusive with `--comparison_json_path`. |
+| `--engine {vllm,sglang,atom,xdit}` | `None` | Serving engine that produced the worker trace. `--async_llm_trace` is applied only for `vllm`. |
+| `--async_llm_trace PATH`   | `None`  | Optional vLLM AsyncLLM / frontend `torch.profiler` file. Adds request-lifecycle sheets to the same Excel workbook and CSV directory. Not auto-discovered. |
 | `--group_by_parent_module` | `False` | Group kernel-launcher summaries by parent `nn.Module` in addition to operation name.                                                               |
 | `--group_by_num_kernels`   | `False` | Group summary rows by the number of kernels.                                                                                                        |
 | `--include_call_stack`     | `False` | Add the CPU call stack to the report.                                                                                                               |
 | `--include_overlap_info`   | `False` | Add kernel-overlap sheets (`*_kl_overlap`) when overlap data exists.                                                                              |
 | `--enable_pseudo_ops`      | `False` | Augment the tree with pseudo-ops to isolate kernels (for example, `FusedMoE`).                                                                     |
+
+### vLLM AsyncLLM frontend tables
+
+Worker traces collected with `ignore_frontend True` omit the AsyncLLM process.
+The frontend file is a second, explicit input: pass
+`--engine vllm --async_llm_trace <frontend.json.gz>` and the existing report
+writes three extra sheets (also as CSVs under `--output_csvs_dir`):
+
+| Sheet | Grain | Contents |
+| ----- | ----- | -------- |
+| `vllm_async_ingress` | one row per `_send_input` | HTTP `create_completion`, `assign_request_id`, and send, aligned in arrival order |
+| `vllm_async_output_groups` | one row per `_finish_request` | finishes under each `process_outputs` group (`n_finished` is the group size) |
+| `vllm_async_engine_steps` | one row per vLLM `execute_context_*` | arrivals in `(previous_step_end, this_step_end]` and finishes from the paired `process_outputs` |
+
+These tables don't join send-order to finish-order. A request that arrived first
+can finish in a later output group when output sequence lengths mix in the same
+batch. `n_arrivals` is only meaningful when the frontend and worker traces share
+a profiler clock. Idle `execute_context_0(0)_generation_0(0)` annotations are
+dropped; decode-only `execute_context_0(0)_generation_N(N)` steps are kept.
+
+Engine steps come from `--profile_json_path` (the GPU worker). The frontend tree
+is built with `TraceToTree(..., prune_nongpu_paths=False)` and
+`add_python_func=True` so CPU-only AsyncLLM traces keep their python_function
+spans.
 
 Run the tool with `--help` for the complete, version-specific argument list.
 
