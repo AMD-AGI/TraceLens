@@ -572,7 +572,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
 
 **Write order (one heredoc per step):**
 
-   a. **Initialize** — truncate and write the title line + `## Executive Summary` (metrics table, `{{PERF_PLOT}}` placeholder). Use `<prefix> tee <output_dir>/analysis.md << 'SECTION_EOF'` (truncating `tee`, not append) for this first write only.
+   a. **Initialize** — truncate and write the title line, the `report_mode` + any `kind=warning` markers (see the template title block and the Warnings rule below), then `## Executive Summary` (metrics table, `{{PERF_PLOT}}` placeholder). Use `<prefix> tee <output_dir>/analysis.md << 'SECTION_EOF'` (truncating `tee`, not append) for this first write only.
       - Data sources: `category_data/category_manifest.json` (`gpu_utilization` keys), `priority_data.json` (top bottleneck).
 
    b. **Compute Kernel Optimizations** — append `## Compute Kernel Optimizations` with `### Top Operations` table and P-item cards. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
@@ -594,7 +594,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
       - `metadata/model_info.json` — substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
       - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/Agent/Analysis/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
 
-**Failure exclusion:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a `## Warnings` section (between Executive Summary and Compute Kernel Optimizations) only if failures exist.
+**Failure exclusion:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`; emit one top `kind=warning` marker per failure and per `high_variance` operation (CoV > 1.0 in `*_metrics.json`) instead. No mid-document `## Warnings` section — validation rejects it.
 
 The report at `<output_dir>/analysis.md` must use these exact `##` headers — do NOT rename them:
 1. `## Executive Summary`
