@@ -1194,8 +1194,9 @@ class TraceToTree(BaseTraceToTree):
         # 1. Get the linking id from the input event
         # 2. Find the corresponding start and end ac2g events for the linking id
         # 3. Find the output event using the pid, tid, and linking id of the end ac2g event
-        # 4. Some runtimes (e.g. hipDrvLaunchKernelEx) emit only the finish half of the
-        #    ac2g flow, so fall back to an unambiguous correlation-id match
+        # 4. Some runtimes (e.g. hipDrvLaunchKernelEx, hipMemsetAsync) emit only
+        #    the finish half of the ac2g flow, so fall back to an unambiguous
+        #    correlation-id match.
         link_id = input_event.get(TraceEventUtils.TraceKeys.Args, {}).get(
             self.linking_key
         )
