@@ -20,7 +20,8 @@ import sys
 from pathlib import Path
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 
 _TOOL_DIR = (
     Path(__file__).parent.parent / "TraceLens" / "TraceUtils" / "kernel_shape_tool"

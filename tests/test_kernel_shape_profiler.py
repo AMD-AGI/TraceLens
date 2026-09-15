@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Optional, Union
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 
 # The tool is delivered on PYTHONPATH (see sitecustomize.py), so it is imported
 # as a top-level module rather than through the TraceLens package.
