@@ -634,6 +634,74 @@ class TestTraceToTreeUtilities:
         assert "non_gpu_path" not in gpu_op_evt
         assert cpu_only.get("non_gpu_path") is True
 
+    def test_links_kernel_when_ac2g_start_is_missing(self):
+        def _launch_events(corr, gpu_events, launcher="hipDrvLaunchKernelEx"):
+            events = [
+                _mk_event("cpu_op", "aten::mm", ts=0, dur=100, pid=1, tid=1, args={}),
+                _mk_event(
+                    "cuda_runtime",
+                    launcher,
+                    ts=5,
+                    dur=5,
+                    pid=1,
+                    tid=1,
+                    args={"correlation": corr},
+                ),
+            ]
+            for idx, (cat, name) in enumerate(gpu_events):
+                events.append(
+                    _mk_event(
+                        cat,
+                        name,
+                        ts=20 + idx * 20,
+                        dur=10,
+                        pid=0,
+                        tid=7,
+                        args={"correlation": corr, "stream": 7},
+                    )
+                )
+            events.append(_mk_ac2g(corr, pid=0, tid=7, ts=20, phase="f"))
+            return events
+
+        # A single unambiguous kernel is recovered from the correlation id.
+        unique = _build_tree(_launch_events(26391, [("kernel", "Cijk_Alik_Bljk")]))
+        mm = next(e for e in unique.events if e["name"] == "aten::mm")
+        gpu_events = unique.get_gpu_events(mm)
+        assert len(gpu_events) == 1
+        assert gpu_events[0]["name"] == "Cijk_Alik_Bljk"
+
+        # Several kernels share the correlation id, so the match is ambiguous.
+        ambiguous = _build_tree(
+            _launch_events(42, [("kernel", "kernel_a"), ("kernel", "kernel_b")])
+        )
+        mm = next(e for e in ambiguous.events if e["name"] == "aten::mm")
+        assert ambiguous.get_gpu_events(mm) == []
+
+        # Unique memsets with only the ac2g finish event are linked too.
+        # Real traces also contain kernel launches, which is how linking_key
+        # is set to "correlation"; a memset-only trace would fall back to
+        # "External id" and never take this path.
+        memset_events = _launch_events(
+            43, [("gpu_memset", "Memset (Device)")], launcher="hipMemsetAsync"
+        )
+        memset_events.insert(
+            1,
+            _mk_event(
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=1,
+                dur=1,
+                pid=1,
+                tid=1,
+                args={"correlation": 1},
+            ),
+        )
+        memset = _build_tree(memset_events)
+        mm = next(e for e in memset.events if e["name"] == "aten::mm")
+        gpu_events = memset.get_gpu_events(mm)
+        assert len(gpu_events) == 1
+        assert gpu_events[0]["name"] == "Memset (Device)"
+
     def test_linking_key_uses_correlation_when_present(self):
         events = [
             _mk_event("cpu_op", "aten::add", ts=0, dur=10, pid=1, tid=1, args={}),

@@ -70,11 +70,15 @@ These are installed automatically with the package:
 | `orjson` | Fast JSON parsing of large traces. |
 | `tabulate` | Text/Markdown table rendering. |
 | `matplotlib` | Roofline and other plots. |
-| `xprof==2.20.1` | JAX XPlane parsing (HLO sidecar generation; supports JAX 0.8+). |
-| `protobuf>=6.31.1,<7.0.0` | Required by `xprof`'s `grpcio-status` dependency. |
 | `backports.strenum` | `StrEnum` backport for Python < 3.11. |
 | `office365-rest-python-client`, `msal` | Optional SharePoint/365 integrations. |
 | `traceconv` | Optional; required only for `.pftrace` input. Resolved from `PATH` or downloaded automatically if not provided with `--traceconv`. |
+
+The optional `[jax]` extra installs `xprof==2.20.1` and
+`protobuf>=6.31.1,<7.0.0` for JAX XPlane parsing and HLO sidecar generation.
+The pinned converter supplies CPython 3.9–3.12 wheels for Linux x86-64 and
+macOS ARM64. These dependencies are not required for PyTorch or rocprof
+reports. See [JAX setup](../how-to/generate-perf-report-jax.md#before-you-begin).
 
 ## Supported trace formats
 
@@ -83,8 +87,7 @@ TraceLens supports the following trace formats:
 | Format | Producing tool |
 |--------|----------------|
 | PyTorch Chrome trace (`.json`, `.json.gz`, `.zip`) | `torch.profiler` |
-| JAX XPlane protobuf (`.pb`) | JAX profiler / `xprof` | 
+| JAX XPlane protobuf (`.pb`) | JAX profiler or `xprof` | 
 | rocprofv3 JSON (`*_results.json`) | AMD ROCm ROCprofiler-SDK | 
 | rocprofv3 pftrace / Perfetto-style | `rocprofv3 --output-format pftrace` | 
-
 
