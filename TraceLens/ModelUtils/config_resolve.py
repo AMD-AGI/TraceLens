@@ -115,6 +115,42 @@ def normalize_config(
     return normalized
 
 
+# Canonical HF config attribute names and the aliases a ``PretrainedConfig``
+# subclass commonly stores them under (its ``attribute_map``). A vision config
+# such as ``Glm4vVisionConfig``/``Glm5NextVisionConfig`` stores only
+# ``num_heads``, yet its config *object* answers ``config.num_attention_heads``
+# through that map. A plain dict does not, so overlaying such a sub-config onto a
+# parent that defines the canonical name would let the parent's value leak.
+_CONFIG_ATTRIBUTE_ALIASES: dict[str, tuple[str, ...]] = {
+    "num_attention_heads": ("num_heads", "n_heads", "num_query_heads"),
+    "num_key_value_heads": ("num_kv_heads",),
+    "hidden_size": ("n_embd", "d_model", "hidden_dim"),
+}
+
+
+def apply_config_attribute_aliases(overlay: dict[str, Any]) -> dict[str, Any]:
+    """Backfill canonical HF config keys from their aliases within *overlay*.
+
+    Returns a new dict where each canonical name in ``_CONFIG_ATTRIBUTE_ALIASES``
+    that is absent (or falsy) is populated from the first present alias. This
+    mirrors ``PretrainedConfig.attribute_map`` so that when a nested sub-config
+    (a ``vision_config`` storing ``num_heads``) is merged onto a parent config
+    that defines the canonical name (text ``num_attention_heads``), the overlay
+    shadows the parent instead of the parent leaking through. The input is left
+    unchanged.
+    """
+    resolved = dict(overlay)
+    for canonical, aliases in _CONFIG_ATTRIBUTE_ALIASES.items():
+        if resolved.get(canonical):
+            continue
+        for alias in aliases:
+            value = resolved.get(alias)
+            if value:
+                resolved[canonical] = value
+                break
+    return resolved
+
+
 def _paths_from_model_index(config: dict[str, Any]) -> list[str]:
     paths: list[str] = []
     for key, value in config.items():

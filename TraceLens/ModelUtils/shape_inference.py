@@ -371,7 +371,73 @@ class ModuleDimRegistry:
                 local_vars=local_vars,
                 context=context,
             )
+            registry._capture_buffer_shapes(
+                class_name,
+                structure.node,
+                config=class_config,
+                context=context,
+            )
         return registry
+
+    def _capture_buffer_shapes(
+        self,
+        class_name: str,
+        class_node: ast.ClassDef,
+        *,
+        config: dict[str, Any],
+        context: ShapeContext,
+    ) -> None:
+        """Register 1-D buffers assigned from ``torch.arange`` (RoPE ``inv_freq``).
+
+        Handles ``self.<attr> = nn.Buffer(x)`` and ``self.register_buffer("attr", x)``
+        when ``x`` traces to a ``torch.arange`` (through local aliases and one
+        same-class method hop). General; only fires when a concrete length resolves,
+        so non-arange buffers are left untouched.
+        """
+        init_func = _find_init_function(class_node)
+        if init_func is None:
+            return
+        ast_locals = _function_ast_locals(init_func)
+        dim_locals = _resolved_scalar_locals(init_func, config=config, context=context)
+        for stmt in ast.walk(init_func):
+            attr: str | None = None
+            source: ast.AST | None = None
+            if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
+                if _call_class_name(stmt.value) == "Buffer" and stmt.value.args:
+                    self_targets = [
+                        target
+                        for target in stmt.targets
+                        if isinstance(target, ast.Attribute) and _is_self_attr(target)
+                    ]
+                    if self_targets:
+                        attr = self_targets[0].attr
+                        source = stmt.value.args[0]
+            elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                call = stmt.value
+                if (
+                    _call_class_name(call) == "register_buffer"
+                    and len(call.args) >= 2
+                    and isinstance(call.args[0], ast.Constant)
+                    and isinstance(call.args[0].value, str)
+                ):
+                    attr = call.args[0].value
+                    source = call.args[1]
+            if attr is None or source is None:
+                continue
+            if (class_name, attr) in self.parameter:
+                continue
+            length = _resolve_buffer_length(
+                source,
+                class_node=class_node,
+                config=config,
+                context=context,
+                ast_locals=ast_locals,
+                dim_locals=dim_locals,
+            )
+            if isinstance(length, int) and length > 0:
+                spec = ModuleParameterSpec(shape=(length,))
+                self.parameter[(class_name, attr)] = spec
+                self.parameter_by_attr.setdefault(attr, spec)
 
     def _walk_init_body(
         self,
@@ -1230,6 +1296,29 @@ class ShapeInferencer:
             widest
         ) > _broadcast_rank(inputs[0]):
             return widest
+        # Fill size-1 axes of the widest operand from concrete axes another
+        # operand supplies (``[Pv, ?, 1] * [16] -> [Pv, ?, 16]`` in axial RoPE).
+        # Only genuine 1->n broadcasts change the result; every other case keeps
+        # the previous inputs[0] passthrough.
+        if widest.shape and any(dim == 1 for dim in widest.shape):
+            axes = list(widest.shape)
+            changed = False
+            for other in inputs:
+                if other is widest or not other.shape:
+                    continue
+                for offset in range(1, len(axes) + 1):
+                    if offset > len(other.shape):
+                        break
+                    other_dim = other.shape[-offset]
+                    if (
+                        axes[-offset] == 1
+                        and isinstance(other_dim, int)
+                        and other_dim != 1
+                    ):
+                        axes[-offset] = other_dim
+                        changed = True
+            if changed:
+                return TensorSpec(shape=tuple(axes), dtype=widest.dtype)
         return inputs[0]
 
     def _gather_input_specs(self, graph: ModelGraph, node_id: str) -> list[TensorSpec]:
@@ -1294,10 +1383,21 @@ class ShapeInferencer:
             node.label in {"×", "+", "Elementwise ×", "Multiply", "Add"}
             or synthetic == "@combine"
         ):
-            if inputs:
+            operands = list(inputs)
+            # A hidden buffer operand (axial-RoPE ``inv_freq``, absorbed onto this
+            # op by ``_absorb_buffer_only_ops`` so the buffer stays invisible)
+            # carries a captured shape the visible edges lost. Fold it back in so
+            # broadcasting recovers the real width (``[Pv, ?, 1] * inv_freq[16]``).
+            for name in node.metadata.get("external_inputs", []):
+                parameter = self._lookup_parameter_spec(
+                    node, root=root, names=[str(name)]
+                )
+                if parameter is not None and parameter.shape:
+                    operands.append(TensorSpec(shape=parameter.shape, dtype=dtype))
+            if operands:
                 if node.label in {"+", "Add"}:
-                    return max(inputs, key=_broadcast_rank)
-                return self._elementwise_operand(inputs)
+                    return max(operands, key=_broadcast_rank)
+                return self._elementwise_operand(operands)
             return self._activation_spec(dtype)
 
         # Catch-all for any remaining synthetic wiring nodes (kernel ports,
@@ -1380,7 +1480,70 @@ class ShapeInferencer:
 
         if operation_label == "unsqueeze":
             source = inputs[0] if inputs else external_spec() or TensorSpec((), dtype)
-            return TensorSpec(shape=(1, *source.shape), dtype=source.dtype)
+            dim_str = _detail_value(details, "dim")
+            dim = _int_dim(dim_str) if dim_str is not None else 0
+            if dim is None:
+                dim = 0
+            rank = len(source.shape)
+            insert_at = dim if dim >= 0 else rank + 1 + dim
+            insert_at = max(0, min(insert_at, rank))
+            return TensorSpec(
+                shape=(*source.shape[:insert_at], 1, *source.shape[insert_at:]),
+                dtype=source.dtype,
+            )
+
+        if operation_label == "slice":
+            source = (
+                inputs[0]
+                if inputs
+                else external_spec()
+                or TensorSpec(self._active_hidden_shape(), dtype)
+            )
+            select_str = _detail_value(details, "select_dim")
+            drop: set[int] = set()
+            if select_str:
+                for token in select_str.split(","):
+                    parsed = _int_dim(token.strip())
+                    if parsed is not None and source.shape:
+                        drop.add(parsed % len(source.shape))
+            if drop:
+                return TensorSpec(
+                    shape=tuple(
+                        size
+                        for axis, size in enumerate(source.shape)
+                        if axis not in drop
+                    ),
+                    dtype=source.dtype,
+                )
+            return source
+
+        if operation_label == "tile":
+            source = (
+                inputs[0]
+                if inputs
+                else external_spec()
+                or TensorSpec(self._active_hidden_shape(), dtype)
+            )
+            repeat_str = _detail_value(details, "repeat")
+            dim_str = _detail_value(details, "dim")
+            dim = _int_dim(dim_str) if dim_str is not None else -1
+            if dim is None:
+                dim = -1
+            try:
+                repeat = int(repeat_str) if repeat_str is not None else 1
+            except (TypeError, ValueError):
+                repeat = 1
+            if source.shape and repeat > 1:
+                resolved_dim = dim % len(source.shape)
+                dim_val = source.shape[resolved_dim]
+                if isinstance(dim_val, int):
+                    return TensorSpec(
+                        shape=_replace_dim(
+                            source.shape, resolved_dim, dim_val * repeat
+                        ),
+                        dtype=source.dtype,
+                    )
+            return source
 
         if operation_label in {"split", "chunk", "unbind"}:
             source = (
@@ -3319,6 +3482,189 @@ def _call_class_name(node: ast.Call) -> str | None:
     return None
 
 
+def _function_ast_locals(func: ast.FunctionDef) -> dict[str, tuple[ast.AST, int | None]]:
+    """Map local names to ``(value_expr, tuple_index)`` for a function's assignments.
+
+    ``a = expr`` -> ``a: (expr, None)``; ``a, b = expr`` -> ``a: (expr, 0)``,
+    ``b: (expr, 1)``. Used to chase a buffer tensor back through local aliases and
+    tuple unpacks (e.g. ``inv_freq, self.scaling = rope_init_fn(...)``).
+    """
+    locals_map: dict[str, tuple[ast.AST, int | None]] = {}
+    for stmt in ast.walk(func):
+        if isinstance(stmt, ast.AnnAssign):
+            if stmt.value is not None and isinstance(stmt.target, ast.Name):
+                locals_map[stmt.target.id] = (stmt.value, None)
+            continue
+        if not isinstance(stmt, ast.Assign):
+            continue
+        for target in stmt.targets:
+            if isinstance(target, ast.Name):
+                locals_map[target.id] = (stmt.value, None)
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                for index, elt in enumerate(target.elts):
+                    if isinstance(elt, ast.Name):
+                        locals_map[elt.id] = (stmt.value, index)
+    return locals_map
+
+
+def _resolved_scalar_locals(
+    func: ast.FunctionDef, *, config: dict[str, Any], context: ShapeContext
+) -> dict[str, DimExpr]:
+    """Resolve a function's simple ``name = <dim expr>`` locals to concrete dims.
+
+    Feeds ``torch.arange`` argument resolution (``spatial_dim = dim // 2``) when we
+    hop into a RoPE init helper.
+    """
+    local_vars: dict[str, DimExpr] = {}
+    for stmt in func.body:
+        if isinstance(stmt, ast.Assign):
+            for target in stmt.targets:
+                if isinstance(target, ast.Name):
+                    resolved = _resolve_dim_expr(
+                        stmt.value, config=config, local_vars=local_vars, context=context
+                    )
+                    if resolved is not None:
+                        local_vars[target.id] = resolved
+    return local_vars
+
+
+def _last_return_value(func: ast.FunctionDef) -> ast.AST | None:
+    found: ast.AST | None = None
+    for node in ast.walk(func):
+        if isinstance(node, ast.Return) and node.value is not None:
+            found = node.value
+    return found
+
+
+def _arange_length(
+    call: ast.Call,
+    *,
+    config: dict[str, Any],
+    local_vars: dict[str, DimExpr],
+    context: ShapeContext,
+) -> int | None:
+    """Length of ``torch.arange(start, stop, step)`` when all bounds resolve to ints."""
+
+    def resolve(node: ast.AST) -> DimExpr | None:
+        return _resolve_dim_expr(
+            node, config=config, local_vars=local_vars, context=context
+        )
+
+    positional = list(call.args)
+    start: DimExpr | None = 0
+    stop: DimExpr | None = None
+    step: DimExpr | None = 1
+    if len(positional) == 1:
+        stop = resolve(positional[0])
+    elif len(positional) >= 2:
+        start = resolve(positional[0])
+        stop = resolve(positional[1])
+        if len(positional) >= 3:
+            step = resolve(positional[2])
+    for keyword in call.keywords:
+        if keyword.arg == "start":
+            start = resolve(keyword.value)
+        elif keyword.arg == "end":
+            stop = resolve(keyword.value)
+        elif keyword.arg == "step":
+            step = resolve(keyword.value)
+    if not (isinstance(start, int) and isinstance(stop, int) and isinstance(step, int)):
+        return None
+    if step <= 0:
+        return None
+    return max(0, (stop - start + step - 1) // step)
+
+
+def _resolve_buffer_length(
+    node: ast.AST | None,
+    *,
+    class_node: ast.ClassDef,
+    config: dict[str, Any],
+    context: ShapeContext,
+    ast_locals: dict[str, tuple[ast.AST, int | None]],
+    dim_locals: dict[str, DimExpr],
+    index: int | None = None,
+    depth: int = 0,
+) -> int | None:
+    """Trace a 1-D buffer tensor back to a ``torch.arange`` and return its length.
+
+    Follows local aliases and tuple unpacks (``ast_locals``), one same-class method
+    hop (``rope_init_fn = self.compute_axial_rope_parameters``; the static
+    ``compute_axial_rope_parameters`` return), and length-preserving elementwise
+    wrappers (``.to(device)``, ``.float()``, ``1.0 / base ** (...)``). General for
+    any RoPE-style buffer; returns ``None`` (skip) when the chain does not terminate
+    in an ``arange``.
+    """
+    if node is None or depth > 8:
+        return None
+    if isinstance(node, ast.Name):
+        bound = ast_locals.get(node.id)
+        if bound is None:
+            return None
+        value, tuple_index = bound
+        next_index = index if index is not None else tuple_index
+        return _resolve_buffer_length(
+            value, class_node=class_node, config=config, context=context,
+            ast_locals=ast_locals, dim_locals=dim_locals,
+            index=next_index, depth=depth + 1,
+        )
+    if isinstance(node, ast.Call):
+        func = node.func
+        fname = _call_class_name(node)
+        if fname == "arange":
+            return _arange_length(
+                node, config=config, local_vars=dim_locals, context=context
+            )
+        # One same-class method hop: `self.method(...)` or an aliased method name.
+        method_name: str | None = None
+        if isinstance(func, ast.Attribute) and _is_self_attr(func):
+            method_name = func.attr
+        elif isinstance(func, ast.Name):
+            alias = ast_locals.get(func.id)
+            if alias is not None and isinstance(alias[0], ast.Attribute) and _is_self_attr(alias[0]):
+                method_name = alias[0].attr
+        if method_name is not None:
+            method = _find_method(class_node, method_name)
+            if method is None:
+                return None
+            returned = _last_return_value(method)
+            if returned is None:
+                return None
+            target = returned
+            selector = index
+            if isinstance(returned, ast.Tuple) and index is not None and index < len(returned.elts):
+                target = returned.elts[index]
+                selector = None
+            return _resolve_buffer_length(
+                target, class_node=class_node, config=config, context=context,
+                ast_locals=_function_ast_locals(method),
+                dim_locals=_resolved_scalar_locals(method, config=config, context=context),
+                index=selector, depth=depth + 1,
+            )
+        if fname == "Buffer" and node.args:
+            return _resolve_buffer_length(
+                node.args[0], class_node=class_node, config=config, context=context,
+                ast_locals=ast_locals, dim_locals=dim_locals, index=None, depth=depth + 1,
+            )
+        # Length-preserving tensor method, e.g. `inv_freq.to(device)` / `.float()`.
+        if isinstance(func, ast.Attribute):
+            return _resolve_buffer_length(
+                func.value, class_node=class_node, config=config, context=context,
+                ast_locals=ast_locals, dim_locals=dim_locals, index=index, depth=depth + 1,
+            )
+        return None
+    if isinstance(node, (ast.BinOp, ast.UnaryOp)):
+        for child in ast.iter_child_nodes(node):
+            length = _resolve_buffer_length(
+                child, class_node=class_node, config=config, context=context,
+                ast_locals=ast_locals, dim_locals=dim_locals, index=None, depth=depth + 1,
+            )
+            if length is not None:
+                return length
+        return None
+    return None
+
+
 def _eval_config_condition(
     test: ast.AST,
     *,
@@ -3437,6 +3783,16 @@ def _resolve_dim_expr(
                 if isinstance(nested, dict):
                     return _int_dim(nested.get(key.value))
             return _config_dim(key.value, config=config, context=context)
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        # ``getattr(config, 'head_dim', None) or hidden // heads`` — take the
+        # first operand that resolves to a truthy int, matching ``or`` semantics.
+        for value in node.values:
+            resolved = _resolve_dim_expr(
+                value, config=config, local_vars=local_vars, context=context
+            )
+            if isinstance(resolved, int) and resolved:
+                return resolved
+        return None
     if isinstance(node, ast.BinOp):
         left = _resolve_dim_expr(
             node.left, config=config, local_vars=local_vars, context=context
@@ -3537,8 +3893,10 @@ def _int_dim(value: Any) -> int | None:
         return value
     if isinstance(value, float) and value.is_integer():
         return int(value)
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lstrip("-").isdigit():
+            return int(text)
     return None
 
 

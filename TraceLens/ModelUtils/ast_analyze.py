@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis
+from TraceLens.ModelUtils.config_resolve import apply_config_attribute_aliases
 
 DECODER_CLASS_RE = re.compile(
     r"(DecoderLayer|DecoderBlock|TransformerBlock|ModelBlock|Block)$",
@@ -2046,12 +2047,14 @@ _LAYOUT_ONLY_METHOD_LABELS = {
     "view_as_real": "View as real",
 }
 
-# Split / Concat rearrange tensors without computing new values. They stay
-# visible in the graph (unlike the layout methods above, which are optional)
-# but share the white data-movement fill.
+# Split / Concat / Slice / Tile rearrange or replicate tensors without computing
+# new values. They stay visible in the graph (unlike the layout methods above,
+# which are optional) but share the white data-movement fill.
 LAYOUT_ONLY_LABELS = frozenset(_LAYOUT_ONLY_METHOD_LABELS.values()) | {
     "Split",
     "Concat",
+    "Slice",
+    "Tile",
 }
 
 # Keyed on the trailing call name, so `x.mean(...)` and `torch.mean(x)` both resolve.
@@ -2573,6 +2576,10 @@ class _ForwardOperationExtractor:
         self.branch_alternatives: dict[str, set[str]] = {}
         self.loop_carried: list[LoopCarriedSpec] = []
         self._used_ids: set[str] = set()
+        # Subscript nodes materialised into their own op (``Slice``/``Unsqueeze``).
+        # The op owns the boundary param it read, so an enclosing expression must
+        # not re-attribute that param to itself (it reads the new op instead).
+        self._materialized_subscripts: set[int] = set()
 
     @staticmethod
     def _dedupe(values: list[str]) -> tuple[str, ...]:
@@ -2669,6 +2676,14 @@ class _ForwardOperationExtractor:
                 and _owns_own_step(current)
             ):
                 return
+            # A subscript already emitted as its own Slice/Unsqueeze op owns the
+            # boundary param it read; the enclosing op reads that op, not the param.
+            if (
+                not is_root
+                and isinstance(current, ast.Subscript)
+                and id(current) in self._materialized_subscripts
+            ):
+                return
             if isinstance(current, ast.Name) and current.id in self.param_names:
                 names.append(current.id)
             for child in ast.iter_child_nodes(current):
@@ -2759,6 +2774,43 @@ class _ForwardOperationExtractor:
                     [*base_external, *index_external],
                 )
                 return producer, []
+            # A pure slice that selects a single index along a non-sole axis
+            # (``freq[:, 0]``) drops that axis: a real ``Slice`` op, not an alias.
+            # Materialising it keeps a later ``cat([freq_h, freq_w])`` reading two
+            # distinct producers instead of the same base twice. A boundary param
+            # read directly (``position_ids[..., None]``) has no producer but wires
+            # through ``param_inputs``; still worth its own op.
+            reads_param = bool(self._param_refs(node))
+            if base is not None or base_external or reads_param:
+                base_predecessors = [base] if base else []
+                select_dims = _subscript_select_dims(node.slice)
+                if select_dims:
+                    self._materialized_subscripts.add(id(node))
+                    producer = self._emit(
+                        node,
+                        "Slice",
+                        base_predecessors,
+                        base_external,
+                        details=[
+                            "select_dim: " + ", ".join(str(dim) for dim in select_dims)
+                        ],
+                    )
+                    return producer, []
+                # ``x[..., None]`` / ``x[:, None]`` inserts a size-1 axis: an
+                # unsqueeze, not a pass-through, so downstream broadcasting sees
+                # the new axis.
+                if _subscript_inserts_axis(node.slice):
+                    unsqueeze_dim = _none_insert_dim(node.slice)
+                    if unsqueeze_dim is not None:
+                        self._materialized_subscripts.add(id(node))
+                        producer = self._emit(
+                            node,
+                            "Unsqueeze",
+                            base_predecessors,
+                            base_external,
+                            details=[f"dim: {unsqueeze_dim}"],
+                        )
+                        return producer, []
             return base, base_external
         if isinstance(node, ast.UnaryOp):
             return self.expression(node.operand)
@@ -3051,10 +3103,31 @@ class _ForwardOperationExtractor:
             and isinstance(node.func.value, ast.Name)
         ):
             details.append(f"mutates: {node.func.value.id}")
+        if label in {"Concat", "Stack"}:
+            # The assembly axis drives the output width; record it so shape
+            # inference sums (concat) or tiles along the right dim.
+            dim_arg = next(
+                (kw.value for kw in node.keywords if kw.arg == "dim"), None
+            )
+            if dim_arg is None and len(node.args) > 1:
+                dim_arg = node.args[1]
+            if dim_arg is not None:
+                details.append(f"dim: {ast.unparse(dim_arg)}")
+        emit_predecessors = [
+            value for value in (base_producer, *arg_producers) if value
+        ]
+        if label == "Concat" and len(emit_predecessors) >= 2:
+            # ``cat([freq_hw, freq_hw])`` concatenates one tensor with itself: the
+            # deduped edge would collapse to a single-input concat that looks
+            # inert. It is really a Tile (repeat k along the concat dim).
+            distinct = dict.fromkeys(emit_predecessors)
+            if len(distinct) == 1:
+                label = "Tile"
+                details.append(f"repeat: {len(emit_predecessors)}")
         producer = self._emit(
             node,
             label,
-            [value for value in (base_producer, *arg_producers) if value],
+            emit_predecessors,
             external,
             details=details,
         )
@@ -3180,6 +3253,10 @@ class _ForwardOperationExtractor:
                 for index, elt in enumerate(targets[0].elts):
                     if isinstance(elt, ast.Name):
                         self.shape_unpack_tokens[elt.id] = f"{base}.shape[{index}]"
+        if len(targets) == 1 and isinstance(targets[0], ast.Name):
+            token = _single_shape_index_token(value)
+            if token is not None:
+                self.shape_unpack_tokens[targets[0].id] = token
         if isinstance(value, ast.Tuple):
             for target in targets:
                 if isinstance(target, ast.Name):
@@ -4510,7 +4587,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         other class — the entire text path — keeps the top-level config unchanged.
         """
         if class_name in self.vision_scoped_classes and self.vision_config:
-            return {**self.config, **self.vision_config}
+            return {**self.config, **apply_config_attribute_aliases(self.vision_config)}
         return self.config
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
@@ -4902,6 +4979,76 @@ def _subscript_index_operands(index: ast.AST) -> list[ast.AST]:
     ]
 
 
+def _is_int_index(node: ast.AST) -> bool:
+    """True for a literal integer axis-index (``x[:, 0]``), not ``None``/``...``/bool."""
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, int)
+        and not isinstance(node.value, bool)
+    )
+
+
+def _subscript_select_dims(index: ast.AST) -> list[int]:
+    """Axes an integer *select* drops from a multi-axis pure slice (``x[:, c]``).
+
+    A single index alongside a range slice (``freq[:, 0]``) selects one position
+    and drops that axis — a genuine ``Slice`` op. A bare leading index (``x[0]``)
+    or a full/range slice with no accompanying select carries no dropped axis and
+    stays a pass-through alias, so this returns ``[]`` for those. Axes after an
+    ``Ellipsis`` are numbered from the end so ``x[..., 0]`` drops ``-1``.
+    """
+    elts = index.elts if isinstance(index, ast.Tuple) else [index]
+    if len(elts) < 2 or not any(isinstance(elt, ast.Slice) for elt in elts):
+        return []
+    ellipsis_at = next(
+        (
+            pos
+            for pos, elt in enumerate(elts)
+            if isinstance(elt, ast.Constant) and elt.value is Ellipsis
+        ),
+        None,
+    )
+    if ellipsis_at is None:
+        return [pos for pos, elt in enumerate(elts) if _is_int_index(elt)]
+    tail = elts[ellipsis_at + 1 :]
+    return [
+        -(len(tail) - offset) for offset, elt in enumerate(tail) if _is_int_index(elt)
+    ]
+
+
+def _subscript_inserts_axis(index: ast.AST) -> bool:
+    """True when a subscript inserts a size-1 axis via ``None`` (``x[..., None]``)."""
+    elts = index.elts if isinstance(index, ast.Tuple) else [index]
+    return any(
+        isinstance(elt, ast.Constant) and elt.value is None for elt in elts
+    )
+
+
+def _none_insert_dim(index: ast.AST) -> int | None:
+    """Axis at which a single ``None`` inserts a size-1 dim, or None if ambiguous.
+
+    ``x[..., None]`` appends (dim ``-1``); ``x[None]`` prepends (dim ``0``);
+    ``x[:, None]`` inserts at that position. Only single-``None`` subscripts
+    resolve; anything more elaborate falls back to a pass-through alias.
+    """
+    elts = index.elts if isinstance(index, ast.Tuple) else [index]
+    none_positions = [
+        pos
+        for pos, elt in enumerate(elts)
+        if isinstance(elt, ast.Constant) and elt.value is None
+    ]
+    if len(none_positions) != 1:
+        return None
+    pos = none_positions[0]
+    has_ellipsis_before = any(
+        isinstance(elt, ast.Constant) and elt.value is Ellipsis
+        for elt in elts[:pos]
+    )
+    if has_ellipsis_before:
+        return -1
+    return pos
+
+
 def _is_inplace_method(name: str) -> bool:
     """True for tensor in-place mutators (``copy_``, ``add_``, ``masked_fill_``…).
 
@@ -4942,6 +5089,36 @@ def _shape_read_base(value: ast.AST) -> str | None:
         and not _is_self_attr(node, node.attr)
     ):
         return ast.unparse(node.value)
+    return None
+
+
+def _single_shape_index_token(value: ast.AST) -> str | None:
+    """Positional-axis read bound to a scalar local, as a resolver token.
+
+    ``seq_length = hidden_states.shape[0]`` reads one axis into a plain name (not a
+    tuple unpack), so it escapes ``_shape_read_base``'s ``a, b = x.shape[:2]``
+    path. Returning ``"hidden_states.shape[0]"`` lets ``_render_shape_dim`` expand a
+    later ``reshape(seq_length, 3, self.num_heads, -1)`` into
+    ``hidden_states.shape[0], 3, 16, -1`` -- which the shape inferencer resolves by
+    copying the source's leading axis. Returns ``None`` unless *value* is exactly a
+    ``<tensor>.shape[<int>]`` read.
+    """
+    if not isinstance(value, ast.Subscript):
+        return None
+    base = value.value
+    if not (
+        isinstance(base, ast.Attribute)
+        and base.attr == "shape"
+        and not _is_self_attr(base, base.attr)
+    ):
+        return None
+    index = value.slice
+    if (
+        isinstance(index, ast.Constant)
+        and isinstance(index.value, int)
+        and not isinstance(index.value, bool)
+    ):
+        return f"{ast.unparse(base.value)}.shape[{index.value}]"
     return None
 
 

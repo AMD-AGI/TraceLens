@@ -22,7 +22,10 @@ from TraceLens.ModelUtils.block_tree import (
     is_method_wrapper,
 )
 from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis, LayerVariant
-from TraceLens.ModelUtils.config_resolve import load_checkpoint_config
+from TraceLens.ModelUtils.config_resolve import (
+    apply_config_attribute_aliases,
+    load_checkpoint_config,
+)
 from TraceLens.ModelUtils.github import fetch_github_source, github_config_path, parse_github_url
 from TraceLens.ModelUtils.source import read_sources, resolve_source_files
 
@@ -1027,24 +1030,46 @@ def _refine_positional_from_code(
 _VISION_TOWER_ATTRS = frozenset({"visual", "vision_tower", "vision_model", "vision"})
 
 
+def _model_type_to_pascal(model_type: str) -> str:
+    """Convert an HF ``model_type`` (snake_case) to its class-name PascalCase stem.
+
+    ``glm5_next_vision -> Glm5NextVision``. Only the first character of each
+    ``_``-separated part is upper-cased, so digits and existing casing inside a
+    part are preserved (``glm5 -> Glm5``), matching HF's own class naming.
+    """
+    return "".join(part[:1].upper() + part[1:] for part in model_type.split("_") if part)
+
+
 def _vision_tower_class_from_config(model_type: str, registry: dict) -> str | None:
     """Resolve a ``vision_config`` model_type to its tower model-class name.
 
-    transformers maps ``model_type -> config class`` (e.g. ``glm5_next_vision ->
-    Glm5NextVisionConfig``) but does not register vision towers as auto-models, so
-    the model class is derived by the ``*VisionConfig -> *VisionModel`` naming
-    convention and confirmed against the parsed AST class registry (which is what
-    the detail-tree builder walks).
+    The tower class follows the ``<model_type> -> <PascalCase>Model`` convention
+    (``glm5_next_vision -> Glm5NextVisionModel``) and is confirmed against the
+    parsed AST class registry (which is what the detail-tree builder walks).
+
+    transformers' ``CONFIG_MAPPING_NAMES`` gives an authoritative
+    ``model_type -> config class`` mapping for models it ships, but a remote-code
+    checkpoint (GLM-5.3's ``glm5_next_vision``) is absent from it — so that lookup
+    is only a first preference, and the naming convention applied directly to the
+    model_type is the general fallback. Confirming every candidate against the
+    registry keeps the derivation from inventing a class that does not exist.
     """
+    candidates: list[str] = []
     try:
         from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
+
+        config_class = CONFIG_MAPPING_NAMES.get(model_type)
+        if config_class and config_class.endswith("Config"):
+            candidates.append(config_class[: -len("Config")] + "Model")
     except ImportError:
-        return None
-    config_class = CONFIG_MAPPING_NAMES.get(model_type)
-    if not config_class or not config_class.endswith("Config"):
-        return None
-    model_class = config_class[: -len("Config")] + "Model"
-    return model_class if model_class in registry else None
+        pass
+    pascal = _model_type_to_pascal(model_type)
+    if pascal:
+        candidates.append(pascal + "Model")
+    for candidate in candidates:
+        if candidate in registry:
+            return candidate
+    return None
 
 
 def find_vision_tower(spec: ArchitectureSpec) -> tuple[str, str] | None:
@@ -1126,7 +1151,7 @@ def vision_scoped_config(spec: ArchitectureSpec) -> dict[str, Any]:
     vision_config = config.get("vision_config")
     if not isinstance(vision_config, dict):
         return dict(config)
-    return {**config, **vision_config}
+    return {**config, **apply_config_attribute_aliases(vision_config)}
 
 
 def vision_tower_component(spec: ArchitectureSpec) -> BlockComponent | None:

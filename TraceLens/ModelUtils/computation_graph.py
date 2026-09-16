@@ -1305,6 +1305,58 @@ def _prune_weight_only_ops(graph: ComputationGraph) -> ComputationGraph:
     return _prune_computation_nodes(graph, weight_only)
 
 
+def _absorb_buffer_only_ops(graph: ComputationGraph) -> ComputationGraph:
+    """Fold a lone buffer-reading op into its activation consumer.
+
+    ``freqs = position_ids * self.inv_freq.float()`` casts ``inv_freq`` in an op
+    that reads *no* activation — an empty ``operation_predecessors`` and a single
+    ``external_inputs`` buffer, with no fanned-out ``output_names``. On its own it
+    is a rootless node whose only real content is a hidden buffer (which the owner
+    rule keeps invisible), and the source-order spine hands it a neighbour's shape,
+    so shape inference mis-sizes it. Move the buffer onto every consumer's
+    ``external_inputs`` — where the elementwise shape rule can broadcast against
+    the captured buffer width (``[Pv, ?, 1] * inv_freq[16] -> [Pv, ?, 16]``) — and
+    drop the op. Guarded so a consumer keeps at least one other operand: a buffer
+    op that is a consumer's *sole* input is a genuine spine head, left alone (that
+    single-output ``x = x * self.weight`` case ``_prune_weight_only_ops`` also
+    deliberately spares).
+    """
+    preds: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    succs: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    for source, target in graph.links:
+        preds[target].append(source)
+        succs[source].append(target)
+
+    absorb: set[int] = set()
+    for index, spec in enumerate(graph.nodes):
+        block = spec.block
+        if block is None or not is_forward_operation(block.attr_name):
+            continue
+        if not block.external_inputs:
+            continue
+        if block.param_inputs or block.operation_predecessors or block.output_names:
+            continue
+        consumers = succs[index]
+        if not consumers:
+            continue
+        # Every consumer must retain another operand once this op is gone; a
+        # consumer whose only input is this buffer op is a real spine head.
+        if any(len(preds[consumer]) <= 1 for consumer in consumers):
+            continue
+        for consumer in consumers:
+            consumer_block = graph.nodes[consumer].block
+            if consumer_block is None:
+                continue
+            for name in block.external_inputs:
+                if name not in consumer_block.external_inputs:
+                    consumer_block.external_inputs.append(name)
+        absorb.add(index)
+
+    if not absorb:
+        return graph
+    return _prune_computation_nodes(graph, absorb)
+
+
 def _prune_linear_weight_operands(
     graph: ComputationGraph, root: BlockNode | None = None
 ) -> ComputationGraph:
@@ -3356,6 +3408,7 @@ def build_computation_graph(
     )
     graph = _strip_dangling_leaves(graph, root=root)
     graph = _prune_weight_only_ops(graph)
+    graph = _absorb_buffer_only_ops(graph)
     graph = _prune_linear_weight_operands(graph, root=root)
     add_forward_output(graph, root=root)
     _add_kernel_output_port_nodes(graph)
