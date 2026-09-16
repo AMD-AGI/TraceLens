@@ -853,6 +853,41 @@ def test_no_consumer_op_pruned_but_chains_sinks_and_loop_carried_kept():
     assert "@output" in ids
 
 
+def test_fill_repeated_loop_counts_from_repeat_namespace():
+    def _lc(node_id, namespace, sublabel):
+        return {
+            "id": node_id,
+            "namespace": namespace,
+            "attrs": [
+                {"key": "synthetic", "value": "@loop_carried"},
+                {"key": "sublabel", "value": sublabel},
+            ],
+        }
+
+    nodes = [
+        # ModuleList loop (no static range bound) inside a 24× repeat group.
+        _lc("visual/@loop_carried_in:l1:hidden_states",
+            "visual/24x_Glm5NextVisionBlock", "hidden_states · repeated"),
+        # Nearest (deepest) repeat segment wins when nested.
+        _lc("d/@loop_carried_in:l2:h", "45x_Decoder/2x_Inner", "h · repeated"),
+        # Already-counted inner loop is left untouched.
+        _lc("d/@loop_carried_in:l3:comb", "45x_Decoder/Loop_19_iterations",
+            "comb · 19 iterations"),
+        # A loop-carried boundary with no enclosing repeat group stays "repeated".
+        _lc("x/@loop_carried_in:l4:y", "x", "y · repeated"),
+    ]
+
+    merge._fill_repeated_loop_counts(nodes)
+
+    def _sub(node):
+        return next(a["value"] for a in node["attrs"] if a["key"] == "sublabel")
+
+    assert _sub(nodes[0]) == "hidden_states · 24 iterations"
+    assert _sub(nodes[1]) == "h · 2 iterations"  # deepest 2x_ wins, not 45x_
+    assert _sub(nodes[2]) == "comb · 19 iterations"  # unchanged
+    assert _sub(nodes[3]) == "y · repeated"  # no repeat namespace → unchanged
+
+
 def _cast_node(node_id: str, *, source: str, dtype: str, shape: str = "B x S x 4") -> dict:
     """A `Cast` node with one incoming edge and its own inferred output dtype."""
     return {

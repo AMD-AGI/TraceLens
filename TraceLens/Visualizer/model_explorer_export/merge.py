@@ -3772,6 +3772,43 @@ def _tag_secondary_module_groups(
         existing = {node.get("namespace", "") for node in nodes}
 
 
+_REPEAT_SEGMENT_RE = re.compile(r"^(\d+)x_")
+
+
+def _fill_repeated_loop_counts(nodes: list[dict[str, Any]]) -> None:
+    """Show the trip count on loop-carried boundaries of ModuleList loops.
+
+    A ``for blk in self.blocks:`` loop has no static ``range(...)`` bound, so the
+    AST analyzer leaves its ``@loop_carried`` boundary labeled ``<var> · repeated``.
+    But the block body lives in an ``{N}x_Cls`` namespace whose count is authoritative
+    (placed from the live meta tree — the decoder banner and ``_tag_secondary_module_groups``).
+    Fill the count from the nearest enclosing ``{N}x_`` namespace segment so the
+    boundary reads ``<var> · {N} iterations`` like the config-bounded inner loops.
+    Cosmetic (sublabel only); no nodes or edges change, so acyclicity is untouched.
+    """
+    for node in nodes:
+        if _node_attr(node, "synthetic") != "@loop_carried":
+            continue
+        sublabel_attr = next(
+            (a for a in node.get("attrs", []) if a.get("key") == "sublabel"), None
+        )
+        if sublabel_attr is None or not sublabel_attr.get("value", "").endswith("· repeated"):
+            continue
+        # Nearest (deepest) enclosing repeat group owns this loop's trip count.
+        count = next(
+            (
+                match.group(1)
+                for segment in reversed(node.get("namespace", "").split("/"))
+                if (match := _REPEAT_SEGMENT_RE.match(segment))
+            ),
+            None,
+        )
+        if count is None:
+            continue
+        variable = sublabel_attr["value"].rsplit(" · ", 1)[0]
+        sublabel_attr["value"] = f"{variable} · {count} iterations"
+
+
 def build_merged_model_graph(
     spec: ArchitectureSpec,
     *,
@@ -3979,6 +4016,10 @@ def build_merged_model_graph(
         group_node_attributes=group_node_attributes,
         group_node_configs=group_node_configs,
     )
+
+    # Fill trip counts on ModuleList loop-carried boundaries (``<var> · repeated``
+    # -> ``<var> · N iterations``) from the ``{N}x_`` namespaces just finalized.
+    _fill_repeated_loop_counts(nodes)
 
     graph_attributes: dict[str, dict[str, str]] = {
         "": model_attrs,
