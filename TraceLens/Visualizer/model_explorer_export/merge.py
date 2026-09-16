@@ -2041,6 +2041,100 @@ def _elide_view_split_onto_producer(nodes: list[dict[str, Any]]) -> None:
     nodes[:] = [node for node in nodes if str(node.get("id")) not in removed_ids]
 
 
+def _node_output_dims(node: dict[str, Any], port: str) -> list[str] | None:
+    """Dims recorded for one output port of ``node`` (dtype stripped), if known.
+
+    Reads the per-port ``outputsMetadata`` shape (present in the final payload and
+    for multi-port split/unbind tiles), falling back to the node-level
+    ``output_shape`` attr (stamped when a ``ShapeInferencer`` drives the build).
+    Returns ``None`` when no shape is recorded yet.
+    """
+    meta = node.get("outputsMetadata", []) or []
+    if len(meta) == 1:
+        chosen: dict[str, Any] | None = meta[0]
+    else:
+        chosen = next((m for m in meta if str(m.get("id", "0")) == str(port)), None)
+    if chosen is not None:
+        for attr in chosen.get("attrs", []):
+            if attr.get("key") == "shape":
+                dims, _dtype = _split_shape_dtype(str(attr.get("value", "")))
+                return dims
+    for attr in node.get("attrs", []):
+        if attr.get("key") == "output_shape":
+            dims, _dtype = _split_shape_dtype(str(attr.get("value", "")))
+            return dims
+    return None
+
+
+def _elide_noop_single_input_concat(nodes: list[dict[str, Any]]) -> None:
+    """Fold a single-input ``Concat`` whose output shape equals its input shape
+    onto its producer.
+
+    ``torch.cat([x], dim=d)`` is ``x`` -- a Concat left with one incoming edge
+    concatenates a tensor with nothing and computes nothing. The one that survives
+    here is the vision attention sdpa fallback's per-chunk reassembly
+    (``torch.cat([interface(q,k,v) for q,k,v in zip(*splits)], dim=1)``): the
+    windowed comprehension collapses to a single representative iteration, so the
+    reassembly cat reads exactly one kernel output and restores the same
+    ``[Pv, 1024]`` it received. The block-diagonal windowing that cat re-stitches
+    is already carried by the kernel's ``cu_seqlens`` input, so the cat re-stitches
+    nothing the graph does not already show -- eliding it hides no computation and
+    enforces the owner invariant that a Concat has more than one input.
+
+    General and guarded: fires only when a node is labeled ``Concat`` and has
+    exactly one incoming edge -- ``torch.cat`` over a single tensor is that tensor,
+    so it necessarily preserves shape. When both endpoints' dims are recorded and
+    *differ*, the node is left untouched: that is a replication (``cat([x, x])``,
+    already relabeled ``Tile`` upstream), not an identity.
+    """
+    node_by_id = {str(node.get("id")): node for node in nodes}
+
+    redirect: dict[str, tuple[str, str]] = {}  # concat id -> (producer id, port)
+    for node in nodes:
+        if str(node.get("label") or "") != "Concat":
+            continue
+        incoming = node.get("incomingEdges", [])
+        if len(incoming) != 1:
+            continue
+        edge = incoming[0]
+        source_id = str(edge.get("sourceNodeId") or "")
+        source_port = str(edge.get("sourceNodeOutputId", "0"))
+        producer = node_by_id.get(source_id)
+        if producer is None:
+            continue
+        out_dims = _node_output_dims(node, "0")
+        in_dims = _node_output_dims(producer, source_port)
+        if out_dims is not None and in_dims is not None and out_dims != in_dims:
+            continue  # shape-changing replication -- not a provable identity
+        redirect[str(node.get("id"))] = (source_id, source_port)
+
+    if not redirect:
+        return
+
+    removed_ids = set(redirect)
+    for node in nodes:
+        if str(node.get("id")) in removed_ids:
+            continue
+        incoming = node.get("incomingEdges", [])
+        if not incoming:
+            continue
+        changed = False
+        new_incoming = []
+        for edge in incoming:
+            source_id = str(edge.get("sourceNodeId") or "")
+            if source_id in redirect:
+                producer_id, producer_port = redirect[source_id]
+                edge = dict(edge)
+                edge["sourceNodeId"] = producer_id
+                edge["sourceNodeOutputId"] = producer_port
+                changed = True
+            new_incoming.append(edge)
+        if changed:
+            node["incomingEdges"] = new_incoming
+
+    nodes[:] = [node for node in nodes if str(node.get("id")) not in removed_ids]
+
+
 def _dim_is_weak(dim: str) -> bool:
     """A shape dim carries no real information when it is ``-1`` or a collapsed
     product (``BxS``) — either hides the batch/seq structure a sibling edge end
@@ -3729,6 +3823,12 @@ def build_merged_model_graph(
     # producer so the slices show as named ports, not a redundant pass-through
     # tile. Runs after shapes settle so the re-homed ports carry final shapes.
     _elide_view_split_onto_producer(nodes)
+
+    # Drop no-op single-input Concats (in==out): the vision sdpa fallback's
+    # per-chunk reassembly cat collapses to one representative kernel output, so it
+    # concatenates nothing -- the windowing is already carried by the kernel's
+    # cu_seqlens. Runs after shapes settle so the identity check sees final dims.
+    _elide_noop_single_input_concat(nodes)
 
     finalize_graph_node_styles(nodes)
 

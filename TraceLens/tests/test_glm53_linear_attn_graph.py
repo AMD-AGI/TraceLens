@@ -1535,7 +1535,11 @@ def test_glm53_vision_attention_resolves_single_kernel_branch():
     # No duplicated kernel-output node survives from the untaken flash branch.
     assert not [n for n in attn_nodes if "@kernel_out" in n["id"]]
 
-    # Exactly one per-chunk Concat, fed by the single kernel, with no self-loop.
+    # No per-chunk reassembly Concat survives: ``torch.cat`` over the windowed
+    # comprehension collapses to one representative kernel output, so the cat has a
+    # single input and restores the same ``[Pv, 1024]`` it received -- a provable
+    # no-op that ``_elide_noop_single_input_concat`` folds onto the kernel (the
+    # block-diagonal windowing is already carried by the kernel's ``cu_seqlens``).
     # The rope helper's own ``rotate_half`` Concats live in the expanded
     # ``apply_rotary_pos_emb_vision`` frame (a separate computation) and are
     # excluded here.
@@ -1545,16 +1549,13 @@ def test_glm53_vision_attention_resolves_single_kernel_branch():
         if n.get("label") == "Concat"
         and "apply_rotary_pos_emb_vision" not in n["id"]
     ]
-    assert len(concats) == 1, [n["id"] for n in concats]
-    concat = concats[0]
-    concat_sources = [e["sourceNodeId"] for e in concat.get("incomingEdges", [])]
-    assert concat_sources == [kernel["id"]]
-    assert concat["id"] not in concat_sources
+    assert concats == [], [n["id"] for n in concats]
 
-    # The output reshape reads only that single Concat.
+    # The output reshape now reads the single kernel directly (the elided cat was
+    # a pass-through between them).
     reshape = node_by_id["visual/seq:3:blocks:attn:@op_l1665_c22_reshape:14"]
     reshape_sources = [e["sourceNodeId"] for e in reshape.get("incomingEdges", [])]
-    assert reshape_sources == [concat["id"]]
+    assert reshape_sources == [kernel["id"]]
 
 
 def test_glm53_vision_attention_flags_impl_dead_interface_input():
@@ -1963,6 +1964,42 @@ def test_glm53_vision_rotary_recomposition_slice_concat_tile_widths():
         if not re.search(r"recomposition_frequencies@l\d+", str(node["id"])):
             continue
         assert len(_incoming(node)) >= 2, node["id"]
+
+
+def test_glm53_no_single_input_concat_survives_anywhere():
+    """The owner invariant holds graph-wide: every ``Concat`` has >1 input.
+
+    ``torch.cat([x], dim=d)`` is ``x`` -- a Concat left with a single incoming edge
+    concatenates nothing and computes nothing. The vision attention sdpa fallback's
+    per-chunk reassembly cat
+    (``torch.cat([interface(q,k,v) for q,k,v in zip(*splits)], dim=1)``) collapses
+    to one representative kernel output, so it reads exactly one edge and restores
+    the same ``[Pv, 1024]`` it received; the block-diagonal windowing it re-stitches
+    is already carried by the kernel's ``cu_seqlens``. ``_elide_noop_single_input_concat``
+    folds every such no-op onto its producer, so none survives.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    node_by_id = {node["id"]: node for node in nodes}
+
+    _assert_export_is_acyclic(nodes)
+
+    single_input_concats = [
+        node["id"]
+        for node in nodes
+        if node.get("label") == "Concat"
+        and len(node.get("incomingEdges", []) or []) == 1
+    ]
+    assert single_input_concats == [], single_input_concats
+
+    # The known vision fallback reassembly cat is gone; its consumer (the output
+    # reshape) now reads the attention kernel directly.
+    assert "visual/seq:3:blocks:attn:@op_l1663_c26_concat:13" not in node_by_id
+    reshape = node_by_id["visual/seq:3:blocks:attn:@op_l1665_c22_reshape:14"]
+    reshape_sources = [e["sourceNodeId"] for e in reshape.get("incomingEdges", [])]
+    assert reshape_sources == ["visual/seq:3:blocks:attn:@attention:12"]
 
 
 def test_glm53_vision_rotary_output_edges_reference_real_producer_ports():
