@@ -56,12 +56,14 @@ setup(
         "orjson",
         "PyYAML",
         "matplotlib",
-        "xprof==2.20.1",  # Last version with HLO sidecar generation; supports JAX 0.8+ (with benign INT_MAX warnings)
-        "protobuf>=6.31.1,<7.0.0",  # Required by xprof's grpcio-status dependency
         # 'openpyxl',
         # 'tensorflow',
     ],
     extras_require={
+        "jax": [
+            "xprof==2.20.1",  # Last version with HLO sidecar generation; supports JAX 0.8+.
+            "protobuf>=6.31.1,<7.0.0",
+        ],
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
         ],
@@ -70,6 +72,7 @@ setup(
         ],
         "dev": [
             "pytest",
+            "setuptools",
             "black==26.3.1",
         ],
     },
