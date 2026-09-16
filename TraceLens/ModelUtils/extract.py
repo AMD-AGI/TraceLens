@@ -646,6 +646,7 @@ def _infer_layer_variants(
     )
 
     buckets: Counter[tuple[str, str | None, str, str | None, str | None]] = Counter()
+    indices_by_key: dict[tuple[str, str | None, str, str | None, str | None], list[int]] = {}
     for layer_idx in range(num_layers):
         attn_class = (
             _resolve_conditional_class(layer_idx, attn_rules, config)
@@ -684,7 +685,9 @@ def _infer_layer_variants(
         ffn_role = ffn_role_for_class(ffn_attr or "mlp", ffn_class or "MLP")
         ffn_display = _label_for(ffn_role, ffn_class or "", ffn_attr or "")
 
-        buckets[(attn_label, attn_class, ffn_display, ffn_class, ffn_attr)] += 1
+        key = (attn_label, attn_class, ffn_display, ffn_class, ffn_attr)
+        buckets[key] += 1
+        indices_by_key.setdefault(key, []).append(layer_idx)
 
     if len(buckets) <= 1:
         only = next(iter(buckets.items()), None)
@@ -698,10 +701,11 @@ def _infer_layer_variants(
         return
 
     variants: list[LayerVariant] = []
-    for (attn_label, attn_class, ffn_display, ffn_class, ffn_attr), count in sorted(
+    for key, count in sorted(
         buckets.items(),
         key=lambda item: (-item[1], item[0][0], item[0][2]),
     ):
+        attn_label, attn_class, ffn_display, ffn_class, ffn_attr = key
         variants.append(
             LayerVariant(
                 label=f"{attn_label} + {ffn_display}",
@@ -711,6 +715,7 @@ def _infer_layer_variants(
                 ffn_label=ffn_display,
                 ffn_class=ffn_class,
                 ffn_attr=ffn_attr,
+                layer_indices=list(indices_by_key[key]),
             )
         )
 
@@ -765,15 +770,24 @@ def _reconcile_layer_variants(
         spec.layer_variants = []
         return
 
-    live_counts = sorted(buckets.values(), reverse=True)
+    # The signatures are ordered by layer index, so grouping their positions gives
+    # the exact 0-based indices each variant occupies (feeds the fact-sheet ranges).
+    indices_by_sig: dict[str, list[int]] = {}
+    for idx, signature in enumerate(primary.signatures):
+        indices_by_sig.setdefault(signature, []).append(idx)
+    # Signatures in descending count order (count then signature) — the same order
+    # the AST variants are matched against below.
+    ordered_sigs = sorted(buckets, key=lambda sig: (-buckets[sig], sig))
+
     ast_variants = spec.layer_variants
     if ast_variants and len(ast_variants) == len(buckets):
         # Keep the AST-derived rich labels/classes (they feed subgraph resolution via
-        # class_registry) but take the authoritative counts from the live buckets,
-        # matching the AST's descending-count ordering.
+        # class_registry) but take the authoritative counts + layer indices from the
+        # live buckets, matching the AST's descending-count ordering.
         ordered = sorted(ast_variants, key=lambda variant: -variant.count)
-        for variant, count in zip(ordered, live_counts):
-            variant.count = count
+        for variant, signature in zip(ordered, ordered_sigs):
+            variant.count = buckets[signature]
+            variant.layer_indices = list(indices_by_sig[signature])
         spec.layer_variants = ordered
         return
 
@@ -781,14 +795,13 @@ def _reconcile_layer_variants(
     # from the live signatures. Labels degrade to the discriminating child-class
     # string, but the counts stay correct and the grouping stays acyclic.
     variants: list[LayerVariant] = []
-    for signature, count in sorted(
-        buckets.items(), key=lambda item: (-item[1], item[0])
-    ):
+    for signature in ordered_sigs:
         variants.append(
             LayerVariant(
                 label=f"{primary.element_class} {signature}",
-                count=count,
+                count=buckets[signature],
                 attention_label=primary.element_class,
+                layer_indices=list(indices_by_sig[signature]),
             )
         )
     spec.layer_variants = variants
@@ -1011,6 +1024,31 @@ def _rebuild_stack_components(
     )
 
 
+def _format_layer_index_ranges(indices: list[int]) -> str:
+    """Collapse ascending 0-based layer indices into compact ranges.
+
+    A consecutive run longer than two indices becomes ``a-b``; runs of one or two
+    indices are listed individually (``0, 1``) so a bare pair is never written as a
+    range. Used to annotate each decoder-layer variant with the iterations it covers.
+    """
+    if not indices:
+        return ""
+    ordered = sorted(set(indices))
+    runs: list[list[int]] = []
+    for idx in ordered:
+        if runs and idx == runs[-1][-1] + 1:
+            runs[-1].append(idx)
+        else:
+            runs.append([idx])
+    parts: list[str] = []
+    for run in runs:
+        if len(run) > 2:
+            parts.append(f"{run[0]}-{run[-1]}")
+        else:
+            parts.extend(str(index) for index in run)
+    return ", ".join(parts)
+
+
 def _finalize_layer_repeat_lines(spec: ArchitectureSpec) -> None:
     """Fill in resolved layer counts on AST-derived repeat lines.
 
@@ -1034,6 +1072,9 @@ def _finalize_layer_repeat_lines(spec: ArchitectureSpec) -> None:
         existing = set(lines)
         for variant in spec.layer_variants:
             line = f"{variant.count} × {variant.label}"
+            ranges = _format_layer_index_ranges(variant.layer_indices)
+            if ranges:
+                line += f" (layers {ranges})"
             if line not in existing:
                 lines.append(line)
                 existing.add(line)

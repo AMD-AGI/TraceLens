@@ -26,6 +26,9 @@ class LayerVariant:
     ffn_label: str = "FFN"
     ffn_class: str | None = None
     ffn_attr: str | None = None
+    # 0-based decoder-layer indices that use this template, in ascending order.
+    # Feeds the fact sheet's "(layers 0-30, 44)" range annotation.
+    layer_indices: list[int] = field(default_factory=list)
 
 
 @dataclass

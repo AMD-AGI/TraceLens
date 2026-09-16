@@ -705,6 +705,30 @@ def test_reconcile_selects_primary_by_decoder_class_over_longest():
 # ---------------------------------------------------------------------------
 # image_placeholder_token_id (general VLM image-mask token key)
 # ---------------------------------------------------------------------------
+def test_format_layer_index_ranges_collapses_runs_over_two():
+    fmt = extract._format_layer_index_ranges
+    assert fmt([]) == ""
+    assert fmt([5]) == "5"
+    # A bare pair stays individual (a run must exceed two to become a-b).
+    assert fmt([0, 1]) == "0, 1"
+    assert fmt([0, 1, 2]) == "0-2"
+    # Mixed: long run collapses, isolated indices and a pair stay listed.
+    assert fmt([0, 1, 2, 3, 7, 9, 10]) == "0-3, 7, 9, 10"
+    # Unsorted / duplicated input is normalized.
+    assert fmt([44, 0, 1, 2, 2]) == "0-2, 44"
+
+
+def test_reconcile_populates_variant_layer_indices():
+    spec = ArchitectureSpec(name="x", model_type="x", num_hidden_layers=0)
+    spec.decoder_class = "Blk"
+    # Interleaved signatures -> non-contiguous indices per variant.
+    sigs = ["(A)", "(A)", "(A)", "(B)", "(A)", "(B)"]
+    reconcile_live_module_groups(spec, [_group("layers", 6, "Blk", sigs)])
+    by_count = {v.count: v for v in spec.layer_variants}
+    assert by_count[4].layer_indices == [0, 1, 2, 4]  # signature (A)
+    assert by_count[2].layer_indices == [3, 5]  # signature (B)
+
+
 def test_image_placeholder_token_id_reads_general_keys():
     # GLM / Qwen2-VL convention.
     assert extract.image_placeholder_token_id({"image_token_id": 154854}) == 154854
