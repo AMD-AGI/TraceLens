@@ -700,3 +700,26 @@ def test_reconcile_selects_primary_by_decoder_class_over_longest():
     ]
     reconcile_live_module_groups(spec, groups)
     assert spec.num_hidden_layers == 28  # picked the decoder, not the vision tower
+
+
+# ---------------------------------------------------------------------------
+# image_placeholder_token_id (general VLM image-mask token key)
+# ---------------------------------------------------------------------------
+def test_image_placeholder_token_id_reads_general_keys():
+    # GLM / Qwen2-VL convention.
+    assert extract.image_placeholder_token_id({"image_token_id": 154854}) == 154854
+    # LLaVA convention.
+    assert extract.image_placeholder_token_id({"image_token_index": 32000}) == 32000
+    # Precedence order follows _IMAGE_TOKEN_CONFIG_KEYS (id before index).
+    assert extract.image_placeholder_token_id(
+        {"image_token_index": 1, "image_token_id": 2}
+    ) == 2
+
+
+def test_image_placeholder_token_id_absent_or_invalid_is_none():
+    assert extract.image_placeholder_token_id(None) is None
+    assert extract.image_placeholder_token_id({}) is None
+    assert extract.image_placeholder_token_id({"vocab_size": 32000}) is None
+    # bool is an int subclass but is never a real token id.
+    assert extract.image_placeholder_token_id({"image_token_id": True}) is None
+    assert extract.image_placeholder_token_id({"image_token_id": "154854"}) is None

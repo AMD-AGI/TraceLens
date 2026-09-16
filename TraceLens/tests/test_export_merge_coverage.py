@@ -2057,6 +2057,22 @@ def test_attach_vision_language_combine_merges_text_and_vision():
     assert ports == ["inputs_embeds", "image_mask", "image_embeds"]
 
 
+def test_ensure_image_mask_node_dedupes_and_stamps_bool_shape():
+    nodes: list[dict] = []
+    first = merge._ensure_image_mask_node(nodes, namespace="image_inputs", token_id=42)
+    # Same boundary is reused, never duplicated (idempotent by id).
+    second = merge._ensure_image_mask_node(nodes, namespace="")
+    assert first == second == "@image_mask"
+    assert len([n for n in nodes if n["id"] == "@image_mask"]) == 1
+    mask = nodes[0]
+    assert mask["namespace"] == "image_inputs"
+    detail = next(a["value"] for a in mask["attrs"] if a["key"] == "detail")
+    assert "image_token_id (42)" in detail
+    # Boolean [B, S] selector shape, not the combine's [B, S, hidden].
+    shape = next(a["value"] for a in mask["attrs"] if a["key"] == "output_shape")
+    assert shape == "[B, S] bool"
+
+
 def test_attach_vision_language_combine_applies_shape_from_context():
     # With a shape inferencer available, the combine carries the (B, S, hidden)
     # embedding shape so downstream nodes resolve their inputs.
@@ -2165,6 +2181,64 @@ def test_merge_graph_emits_vision_group_and_visual_language_edge(
     )
     sources = {edge["sourceNodeId"] for edge in combine["incomingEdges"]}
     assert sources == {"embed_tokens", "@image_mask", "visual/@output"}
+
+
+def _build_vision_graph_with_raw_config(monkeypatch, raw_config):
+    """Build a merged vision graph under the standard vision monkeypatch."""
+    embed = _component("embed_tokens", "embedding", class_name="Embedding", label="Embedding")
+    vision = _component("visual", "vision", class_name="VisionModel", label="Vision Tower", order=0)
+    spec = _spec(stack_pre=[embed], stack_tail=[], block_components=[], raw_config=raw_config)
+    _vision_merge_monkeypatch(monkeypatch, embed=embed, vision=vision)
+    monkeypatch.setattr(
+        merge, "component_has_detail_section",
+        lambda component, spec: component.attr_name == "visual",
+    )
+    monkeypatch.setattr(
+        merge, "_resolve_section_tree_for_component",
+        lambda *a, **k: ("Vision Tower", BlockNode("visual", "VisionModel", "vision", "Vision Tower")),
+    )
+    monkeypatch.setattr(merge, "is_transparent_inline_expansion", lambda tree: False)
+    monkeypatch.setattr(merge, "expand_block_tree_inplace", lambda tree, basic_ops=None: tree)
+
+    def fake_append(nodes, **kw):
+        prefix = kw["id_prefix"]
+        if prefix == "visual":
+            nodes.append({"id": "visual/@output", "label": "result", "namespace": "visual"})
+            return [("visual/@output", "result")]
+        nodes.append({"id": prefix, "label": "Embedding", "namespace": kw["namespace_prefix"]})
+        return [prefix]
+
+    monkeypatch.setattr(merge, "_append_section", fake_append)
+    return merge.build_merged_model_graph(spec)
+
+
+def test_image_mask_colocated_with_image_patches_when_token_key_present(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # With a general image-token config key, the image patches (@vision_input)
+    # and the placeholder mask (@image_mask) share one "image_inputs" group so
+    # the layout places them side by side rather than floating the mask next to
+    # its distant masked_scatter consumer.
+    graph = _build_vision_graph_with_raw_config(monkeypatch, {"image_token_id": 154854})
+    by_id = {node["id"]: node for node in graph["nodes"]}
+    assert by_id["@vision_input"]["namespace"] == "image_inputs"
+    assert by_id["@image_mask"]["namespace"] == "image_inputs"
+    assert graph["groupNodeAttributes"]["image_inputs"]["label"] == "Image inputs"
+    # The mask carries the resolved token id and a boolean [B, S] selector shape.
+    mask = by_id["@image_mask"]
+    detail = next(a["value"] for a in mask["attrs"] if a["key"] == "detail")
+    assert "154854" in detail
+    shape = next(a["value"] for a in mask["attrs"] if a["key"] == "output_shape")
+    assert shape == "[B, S] bool"
+
+
+def test_image_mask_not_grouped_without_token_key(monkeypatch: pytest.MonkeyPatch):
+    # No image-token key -> no co-location group; inputs stay at the top level.
+    graph = _build_vision_graph_with_raw_config(monkeypatch, {})
+    by_id = {node["id"]: node for node in graph["nodes"]}
+    assert by_id["@vision_input"]["namespace"] == ""
+    assert by_id["@image_mask"]["namespace"] == ""
+    assert "image_inputs" not in graph["groupNodeAttributes"]
 
 
 def test_merge_graph_text_only_spec_has_no_vision_section(

@@ -29,6 +29,7 @@ from TraceLens.ModelUtils.computation_graph import ComputationGraph, build_compu
 from TraceLens.ModelUtils.extract import (
     ArchitectureSpec,
     architecture_section_trees,
+    image_placeholder_token_id,
     vision_tower_component,
 )
 from TraceLens.ModelUtils.shape_inference import (
@@ -525,6 +526,48 @@ def _make_group_input_node(
     if incoming_edges:
         node["incomingEdges"] = incoming_edges
     return node
+
+
+# Both image-side model inputs — the pixel/patch tensor and the image-placeholder
+# mask — live in this shared group so they render next to each other, instead of
+# the mask floating beside its distant ``masked_scatter`` consumer.
+_IMAGE_INPUT_NAMESPACE = "image_inputs"
+_IMAGE_MASK_ID = "@image_mask"
+
+
+def _ensure_image_mask_node(
+    nodes: list[dict[str, Any]],
+    *,
+    namespace: str,
+    token_id: int | None = None,
+) -> str:
+    """Append the ``@image_mask`` boundary if absent; return its id.
+
+    The mask is the ``input_ids == image_token_id`` selector the vision-language
+    ``masked_scatter`` uses. It may be pre-created next to the image-patch input
+    (when the model exposes an image-token key); this keeps the combine's
+    reference a no-op in that case, and still synthesizes the boundary for VLMs
+    with no such key.
+    """
+    for node in nodes:
+        if node.get("id") == _IMAGE_MASK_ID:
+            return _IMAGE_MASK_ID
+    node = _make_group_input_node(
+        input_id=_IMAGE_MASK_ID,
+        label="image_mask",
+        namespace=namespace,
+        port_label="image_mask",
+    )
+    if token_id is not None:
+        node["attrs"].append(
+            {"key": "detail", "value": f"input_ids == image_token_id ({token_id})"}
+        )
+    # ``input_ids == image_token_id`` is a boolean ``[B, S]`` selector. Stamp it
+    # explicitly so the boundary shows the true mask shape rather than inheriting
+    # the combine's ``[B, S, hidden]`` embedding shape by back-fill.
+    apply_shape_attrs(node, TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value), "bool"))
+    nodes.append(node)
+    return _IMAGE_MASK_ID
 
 
 def _make_group_output_node(
@@ -3516,10 +3559,17 @@ def _append_vision_section(
     if component is None or not component_has_detail_section(component, spec):
         return None
 
+    # When the model exposes an image-placeholder token key, the pixel input and
+    # the ``input_ids == image_token_id`` mask are both image-side model inputs;
+    # group them so the mask renders next to the patches rather than beside its
+    # distant ``masked_scatter`` consumer. Keyless VLMs keep the flat top-level
+    # input and let the combine synthesize the mask.
+    mask_token = image_placeholder_token_id(spec.raw_config)
+    input_namespace = _IMAGE_INPUT_NAMESPACE if mask_token is not None else ""
     vision_input_node = {
         "id": "@vision_input",
         "label": "Image patches",
-        "namespace": "",
+        "namespace": input_namespace,
         "attrs": [{"key": "synthetic", "value": "@input"}],
         "style": ensure_readable_text(input_port_style()),
     }
@@ -3537,6 +3587,16 @@ def _append_vision_section(
             ),
         )
     nodes.append(vision_input_node)
+    if mask_token is not None:
+        _ensure_image_mask_node(nodes, namespace=input_namespace, token_id=mask_token)
+        group_node_attributes[_IMAGE_INPUT_NAMESPACE] = {"label": "Image inputs"}
+        group_node_configs.append(
+            {
+                "namespaceRegex": f"^{re.escape(_IMAGE_INPUT_NAMESPACE)}$",
+                **input_port_style(),
+                "layoutDirection": "TOP_BOTTOM",
+            }
+        )
     resolved = _resolve_section_tree_for_component(
         spec, component, variant=None, basic_ops=basic_ops
     )
@@ -3588,15 +3648,10 @@ def _attach_vision_language_combine(
     # ``image_mask`` is the boolean placeholder-token selector derived from the
     # token ids (``input_ids == image_token_id``). It's a genuine control input
     # to the scatter, not a data tensor produced by either stack, so surface it
-    # as a dedicated synthetic boundary rather than papering over it.
-    mask_id = "@image_mask"
-    mask_node = _make_group_input_node(
-        input_id=mask_id,
-        label="image_mask",
-        namespace="",
-        port_label="image_mask",
-    )
-    nodes.append(mask_node)
+    # as a dedicated synthetic boundary. It is normally pre-created next to the
+    # image-patch input (grouped there); this is a no-op then and only synthesizes
+    # the boundary for a VLM that exposes no image-token key.
+    mask_id = _ensure_image_mask_node(nodes, namespace="")
     combine_id = "@vision_language_combine"
     node: dict[str, Any] = {
         "id": combine_id,

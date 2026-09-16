@@ -1274,6 +1274,31 @@ def vision_scoped_config(spec: ArchitectureSpec) -> dict[str, Any]:
     return {**config, **apply_config_attribute_aliases(vision_config)}
 
 
+# HF VLMs mark image positions in ``input_ids`` with a reserved token id. The
+# key name varies by family (Qwen2-VL / GLM: ``image_token_id``; LLaVA and kin:
+# ``image_token_index``), but its presence is the general signal that the model
+# has an image-placeholder mask (``input_ids == <id>``) pairing with the pixel
+# inputs — the control tensor of the ``masked_scatter`` that injects vision
+# embeddings.
+_IMAGE_TOKEN_CONFIG_KEYS = ("image_token_id", "image_token_index", "image_token")
+
+
+def image_placeholder_token_id(config: dict[str, Any] | None) -> int | None:
+    """Return the image-placeholder token id from a model config, or ``None``.
+
+    General across VLM families via the conventional config keys above; used to
+    identify the image-mask input so it can be grouped with the pixel/image-patch
+    input rather than floating next to its distant ``masked_scatter`` consumer.
+    """
+    if not config:
+        return None
+    for key in _IMAGE_TOKEN_CONFIG_KEYS:
+        value = config.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
 def vision_tower_component(spec: ArchitectureSpec) -> BlockComponent | None:
     """Return a synthetic ``BlockComponent`` for the vision tower, or ``None``."""
     found = find_vision_tower(spec)
