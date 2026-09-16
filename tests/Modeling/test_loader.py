@@ -15,7 +15,7 @@ import pytest
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.loader import load_model_spec, resolve_checkpoint_arg
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
 
 def test_resolve_checkpoint_arg_prefers_flag():

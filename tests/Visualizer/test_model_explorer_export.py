@@ -28,7 +28,7 @@ from TraceLens.Visualizer.model_explorer_export.ast_build import (
     build_model_explorer_payload,
 )
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
 
 def test_output_boundary_exports_duplicate_producers_as_named_ports():
@@ -1068,14 +1068,16 @@ def test_viewer_url_uses_root_path():
 
 def test_viewer_shell_reserves_fact_sheet_column():
     index_html = (
-        Path(__file__).resolve().parents[1]
+        Path(__file__).resolve().parents[2]
+        / "TraceLens"
         / "Visualizer"
         / "model_explorer_export"
         / "viewer"
         / "index.html"
     ).read_text(encoding="utf-8")
     app_js = (
-        Path(__file__).resolve().parents[1]
+        Path(__file__).resolve().parents[2]
+        / "TraceLens"
         / "Visualizer"
         / "model_explorer_export"
         / "viewer"

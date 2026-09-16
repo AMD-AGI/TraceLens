@@ -31,7 +31,7 @@ from TraceLens.ModelUtils.model_graph import (
     collect_non_reduced_operations,
 )
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
 
 def _mla_fixture_root() -> BlockNode:

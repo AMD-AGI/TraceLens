@@ -25,7 +25,7 @@ from TraceLens.ModelUtils.kernel_pipeline import (
     parse_kernel_import,
 )
 
-_FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "kda_kernel"
+_FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "kda_kernel"
 _KIMI_CODE_PATH = (
     Path.home()
     / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"

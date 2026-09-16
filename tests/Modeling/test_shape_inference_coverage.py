@@ -946,7 +946,7 @@ def test_active_geometry_switches_to_vision_patch_axis():
 # export_operators, export_architecture, topological ordering, dedup, etc.)
 # ---------------------------------------------------------------------------
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
 
 def test_build_operator_export_full_pipeline(tmp_path):

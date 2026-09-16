@@ -26,7 +26,7 @@ from TraceLens.ModelUtils.shape_inference import (
 )
 from TraceLens.ModelUtils.meta_trace import symbolise_meta_shape
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
 
 def _mla_fixture_root() -> BlockNode:

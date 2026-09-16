@@ -1,4 +1,10 @@
 ###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+###############################################################################
 # Coverage tests for TraceLens/ModelUtils/meta_trace.py
 #
 # Exercises the meta-device shape tracing entrypoints (``trace_meta_shapes``

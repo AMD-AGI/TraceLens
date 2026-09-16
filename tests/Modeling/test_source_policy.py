@@ -15,7 +15,7 @@ from TraceLens.ModelUtils.github import fetch_github_source, parse_github_url
 from TraceLens.ModelUtils.source import resolve_github_files
 from TraceLens.ModelUtils.source_policy import SourcePolicy, set_source_policy
 
-FIXTURES = Path(__file__).parent / "fixtures"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
 
 def test_default_policy_allows_transformers():

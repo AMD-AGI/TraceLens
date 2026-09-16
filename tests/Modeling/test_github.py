@@ -15,7 +15,7 @@ from TraceLens.ModelUtils.github import parse_github_url
 from TraceLens.ModelUtils.source import resolve_github_files, resolve_source_files
 from TraceLens.ModelUtils.source_policy import SourcePolicy, set_source_policy
 
-FIXTURES = Path(__file__).parent / "fixtures"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
 
 @pytest.fixture(autouse=True)

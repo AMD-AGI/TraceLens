@@ -1,4 +1,10 @@
 ###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+###############################################################################
 # Coverage tests for TraceLens/ModelUtils/torch_trace.py
 #
 # These exercise the config-patching, Auto-class resolution, meta-device

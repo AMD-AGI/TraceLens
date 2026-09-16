@@ -83,7 +83,7 @@ For development on the visualizer, combine extras:
 
 ```bash
 pip install -e ".[Visualizer,dev]"
-python3 -m pytest TraceLens/tests/
+python3 -m pytest tests/Visualizer/ tests/Modeling/
 ```
 
 ## Optional: `traceconv` for `.pftrace` input
