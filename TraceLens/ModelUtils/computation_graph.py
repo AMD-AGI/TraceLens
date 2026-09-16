@@ -2417,13 +2417,18 @@ def _prune_computation_nodes(
             expanded.extend(_expand_succs(target, active | {index}))
         return expanded
 
-    bridged_links: set[tuple[int, int]] = set()
+    # Insertion-ordered set: surviving links keep their original ``graph.links``
+    # order, and synthetic bridges are appended after. A plain ``set`` here would
+    # emit links in hash order, which silently reorders the incoming edges of
+    # untouched elementwise ops (an RMSNorm ``x * rsqrt`` whose operands flip so
+    # the width-1 factor lands at ``inputs[0]``), corrupting shape inference.
+    bridged_links: dict[tuple[int, int], None] = {}
     bridged_port_labels: dict[tuple[int, int], str] = {}
     bridged_output_ports: dict[tuple[int, int], str] = {}
     for source, target in graph.links:
         if source in remove_indices or target in remove_indices:
             continue
-        bridged_links.add((source, target))
+        bridged_links[(source, target)] = None
         port_label = graph.link_port_labels.get((source, target))
         if port_label:
             bridged_port_labels[(source, target)] = port_label
@@ -2440,7 +2445,7 @@ def _prune_computation_nodes(
                     for kept_target in _expand_succs(target):
                         if kept_source == kept_target:
                             continue
-                        bridged_links.add((kept_source, kept_target))
+                        bridged_links.setdefault((kept_source, kept_target), None)
                         if (
                             port_label
                             and (kept_source, kept_target) not in bridged_port_labels
