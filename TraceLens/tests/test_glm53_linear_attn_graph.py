@@ -2752,3 +2752,72 @@ def test_glm53_vision_block_renders_as_secondary_nx_group():
     assert "45x_Glm5NextTextDecoderLayer" in attrs
     # Node ids stay stable (edges intact) — only the namespace field was rewritten.
     assert any(str(n["id"]).startswith("visual/seq:3:blocks") for n in nodes)
+
+
+def test_glm53_decoder_spine_gets_loop_carried_boundary():
+    """The decoder repeat group gets the same loop-carried boundary the vision
+    tower has, via one general merge post-pass -- the same code for both.
+
+    The 45× container is a pure grouping namespace whose three parallel variant
+    branches all read the embedded hidden_states and reconverge on the hyper-head.
+    The synthesized ``@loop_carried_in/out`` pair carries the pre-collapse state
+    across the (rendered-parallel) iterations, with the single exempt back edge.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    _assert_export_is_acyclic(nodes)
+    by_id = {node["id"]: node for node in nodes}
+
+    in_id = "decoder/@loop_carried_in:decoder:hidden_states"
+    out_id = "decoder/@loop_carried_out:decoder:hidden_states"
+    assert in_id in by_id and out_id in by_id
+    for tile_id in (in_id, out_id):
+        tile = by_id[tile_id]
+        assert tile["namespace"] == "45x_Glm5NextTextDecoderLayer"
+        assert next(a["value"] for a in tile["attrs"] if a["key"] == "synthetic") == (
+            "@loop_carried"
+        )
+        # Count is filled from the 45x_ namespace by _fill_repeated_loop_counts.
+        assert next(a["value"] for a in tile["attrs"] if a["key"] == "sublabel") == (
+            "hidden_states · 45 iterations"
+        )
+
+    def _sources(node_id):
+        return {e["sourceNodeId"] for e in by_id[node_id]["incomingEdges"]}
+
+    # carried-in: initial value from the embedded hidden_states + back edge.
+    assert _sources(in_id) == {"@model_forward/@op_l1477_c24_contiguous", out_id}
+    # every variant branch input now reads the carried-in tile. Only the three
+    # top-level variant container inputs (decoder/{31x,11x,3x}.../@input, one "/"
+    # below the container) are carried; deeper /@input tiles are interior.
+    variant_inputs = [
+        node["id"]
+        for node in nodes
+        if node["id"].startswith("decoder/")
+        and node["id"].endswith("/@input")
+        and node["id"].count("/") == 2
+    ]
+    assert len(variant_inputs) == 3
+    for node_id in variant_inputs:
+        assert _sources(node_id) == {in_id}
+    # the hyper-head reads the loop's updated value (carried-out); the final norm
+    # still follows the head, unchanged.
+    assert _sources("hc_head") == {out_id}
+    assert _sources("norm/@input") == {"hc_head"}
+
+    # No loop-invariant inputs cross the decoder spine boundary, so none are invented.
+    assert not any(
+        n.get("namespace") == "45x_Glm5NextTextDecoderLayer" and "/@input:" in n["id"]
+        for n in nodes
+    )
+
+    # The vision tower's CG-built boundary is left as the single instance (no double
+    # wrap by the post-pass), and its loop-invariant cos/sin inputs are untouched.
+    # (The vision block's ``{N}x_`` count segment is applied by the CLI export via the
+    # live meta tree, which this in-process spec build does not populate; the post-pass
+    # keys its no-op guard off the pre-existing loop-carried tile either way.)
+    vision_in = [n["id"] for n in nodes if "visual/@loop_carried_in:" in n["id"]]
+    assert len(vision_in) == 1
+    assert "visual/@input:cos" in by_id and "visual/@input:sin" in by_id

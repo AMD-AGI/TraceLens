@@ -888,6 +888,138 @@ def test_fill_repeated_loop_counts_from_repeat_namespace():
     assert _sub(nodes[3]) == "y · repeated"  # no repeat namespace → unchanged
 
 
+def _synthetic_input(node_id, namespace, source, *, label="hidden_states"):
+    return {
+        "id": node_id,
+        "label": label,
+        "namespace": namespace,
+        "attrs": [{"key": "synthetic", "value": "@input"}],
+        "incomingEdges": [{"sourceNodeId": source, "sourceNodeOutputId": "0",
+                           "targetNodeInputId": "0"}],
+    }
+
+
+def _synthetic_output(node_id, namespace, source):
+    return {
+        "id": node_id,
+        "label": "Output",
+        "namespace": namespace,
+        "attrs": [{"key": "synthetic", "value": "@output"}],
+        "incomingEdges": [{"sourceNodeId": source, "sourceNodeOutputId": "result",
+                           "targetNodeInputId": "0"}],
+    }
+
+
+def _plain(node_id, namespace, sources, *, shape=None):
+    node = {"id": node_id, "namespace": namespace, "attrs": [],
+            "incomingEdges": [{"sourceNodeId": s, "sourceNodeOutputId": "0",
+                               "targetNodeInputId": str(i)} for i, s in enumerate(sources)]}
+    if shape is not None:
+        node["attrs"].append({"key": "output_shape", "value": shape})
+    return node
+
+
+def _lc_in_edges(node):
+    return [(e["sourceNodeId"], e.get("metadata", {}).get("port_label"))
+            for e in node["incomingEdges"]]
+
+
+def _consumers(nodes, node_id):
+    return [n["id"] for n in nodes for e in n.get("incomingEdges", [])
+            if e["sourceNodeId"] == node_id]
+
+
+def test_synthesize_loop_boundary_wraps_parallel_variant_container():
+    """The decoder spine's parallel variant branches get one loop-carried pair."""
+    nodes = [
+        _plain("src", "", [], shape="[B, S, 4, 4096] bfloat16"),
+        _synthetic_input("dec/3x_A/@input", "45x_Dec/3x_A", "src"),
+        _synthetic_input("dec/2x_B/@input", "45x_Dec/2x_B", "src"),
+        _synthetic_output("dec/3x_A/@output", "45x_Dec/3x_A", "dec/3x_A/@input"),
+        _synthetic_output("dec/2x_B/@output", "45x_Dec/2x_B", "dec/2x_B/@input"),
+        _plain("head", "", ["dec/3x_A/@output", "dec/2x_B/@output"]),
+        _plain("sink", "", ["head"]),
+    ]
+    merge._synthesize_repeat_loop_boundaries(nodes)
+    by_id = {n["id"]: n for n in nodes}
+    in_id = "dec/@loop_carried_in:dec:hidden_states"
+    out_id = "dec/@loop_carried_out:dec:hidden_states"
+
+    assert in_id in by_id and out_id in by_id
+    for tile_id in (in_id, out_id):
+        tile = by_id[tile_id]
+        assert tile["namespace"] == "45x_Dec"
+        assert merge._node_attr(tile, "synthetic") == "@loop_carried"
+        assert merge._node_attr(tile, "output_shape") == "[B, S, 4, 4096] bfloat16"
+
+    # carried-in: initial value from the source + back edge from carried-out.
+    assert set(_lc_in_edges(by_id[in_id])) == {("src", None), (out_id, "next iteration")}
+    # both variant branches now read the carried-in tile, not the raw source.
+    assert _consumers(nodes, in_id) == ["dec/3x_A/@input", "dec/2x_B/@input"]
+    # carried-out collects the branch outputs (the pre-collapse updated value)...
+    assert set(_lc_in_edges(by_id[out_id])) == {
+        ("dec/3x_A/@output", "updated"), ("dec/2x_B/@output", "updated")}
+    # ...and the post-loop head + back edge read it (deduped to a single head edge).
+    assert sorted(_consumers(nodes, out_id)) == [in_id, "head"]
+    assert [e["sourceNodeId"] for e in by_id["head"]["incomingEdges"]] == [out_id]
+
+
+def test_synthesize_loop_boundary_wraps_single_template_container():
+    """A single-template group wraps its lone @output the same way."""
+    nodes = [
+        _plain("src", "", [], shape="[B, S, 4096] bfloat16"),
+        _synthetic_input("dec/@input", "45x_Dec", "src"),
+        _synthetic_output("dec/@output", "45x_Dec", "dec/@input"),
+        _plain("sink", "", ["dec/@output"]),
+    ]
+    merge._synthesize_repeat_loop_boundaries(nodes)
+    by_id = {n["id"]: n for n in nodes}
+    in_id = "dec/@loop_carried_in:dec:hidden_states"
+    out_id = "dec/@loop_carried_out:dec:hidden_states"
+
+    assert set(_lc_in_edges(by_id[in_id])) == {("src", None), (out_id, "next iteration")}
+    assert _consumers(nodes, in_id) == ["dec/@input"]
+    assert set(_lc_in_edges(by_id[out_id])) == {("dec/@output", "updated")}
+    assert sorted(_consumers(nodes, out_id)) == [in_id, "sink"]
+
+
+def test_synthesize_loop_boundary_is_noop_when_already_wrapped():
+    """The vision tower's CG-built boundary is left untouched (no double wrap)."""
+    nodes = [
+        _plain("src", "", [], shape="[Pv, 1176] bfloat16"),
+        {
+            "id": "visual/@loop_carried_in:l1:hidden_states",
+            "namespace": "visual/24x_Block",
+            "attrs": [{"key": "synthetic", "value": "@loop_carried"}],
+            "incomingEdges": [{"sourceNodeId": "src", "sourceNodeOutputId": "0",
+                               "targetNodeInputId": "0"}],
+        },
+        _synthetic_output("visual/@output", "visual/24x_Block",
+                          "visual/@loop_carried_in:l1:hidden_states"),
+        _plain("sink", "", ["visual/@output"]),
+    ]
+    before = len(nodes)
+    merge._synthesize_repeat_loop_boundaries(nodes)
+    assert len(nodes) == before
+    assert sum("@loop_carried_in:" in n["id"] for n in nodes) == 1
+
+
+def test_synthesize_loop_boundary_skips_multi_source_container():
+    """Multiple external inputs (loop-invariant reads) are not yet hoisted -> skip."""
+    nodes = [
+        _plain("hidden", "", [], shape="[B, S, D] bfloat16"),
+        _plain("cos", "", [], shape="[S, D] bfloat16"),
+        _synthetic_input("g/24x_Block/@input", "24x_Block", "hidden"),
+        _synthetic_input("g/24x_Block/@input:cos", "24x_Block", "cos", label="cos"),
+        _synthetic_output("g/24x_Block/@output", "24x_Block", "g/24x_Block/@input"),
+        _plain("sink", "", ["g/24x_Block/@output"]),
+    ]
+    before = len(nodes)
+    merge._synthesize_repeat_loop_boundaries(nodes)
+    assert len(nodes) == before
+    assert not any("@loop_carried" in n["id"] for n in nodes)
+
+
 def _cast_node(node_id: str, *, source: str, dtype: str, shape: str = "B x S x 4") -> dict:
     """A `Cast` node with one incoming edge and its own inferred output dtype."""
     return {

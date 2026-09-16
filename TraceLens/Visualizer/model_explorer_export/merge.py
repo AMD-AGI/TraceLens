@@ -83,6 +83,7 @@ from TraceLens.Visualizer.model_explorer_export.styles import (
     ROLE_COLORS,
     _GPU_KERNEL_BORDER,
     build_group_node_configs,
+    detail_tile_style,
     ensure_readable_text,
     finalize_graph_node_styles,
     input_port_style,
@@ -3809,6 +3810,202 @@ def _fill_repeated_loop_counts(nodes: list[dict[str, Any]]) -> None:
         sublabel_attr["value"] = f"{variable} · {count} iterations"
 
 
+def _repeat_group_container(namespace: str) -> str | None:
+    """Outermost ``{N}x_`` repeat group enclosing ``namespace`` (or ``None``).
+
+    Truncates at (and including) the FIRST ``{N}x_`` segment, so a nested variant
+    like ``45x_DecoderLayer/31x_.../attn_hc`` maps to its OUTER loop container
+    ``45x_DecoderLayer`` -- the three parallel variant branches belong to one loop.
+    """
+    segments = namespace.split("/")
+    for index, segment in enumerate(segments):
+        if _REPEAT_SEGMENT_RE.match(segment):
+            return "/".join(segments[: index + 1])
+    return None
+
+
+def _copy_carried_shape(dst: dict[str, Any], src: dict[str, Any] | None) -> None:
+    """Mirror a source node's output shape onto a synthesized carried tile.
+
+    The pass runs after shape inference has settled, so a freshly built tile would
+    otherwise render shapeless; copy the carried tensor's shape/dtype so the
+    rerouted wires keep their shape label like the CG-built vision boundary.
+    """
+    if src is None:
+        return
+    shape = _node_attr(src, "output_shape")
+    if shape is None:
+        return
+    dtype = _node_attr(src, "output_dtype")
+    dst["attrs"].append({"key": "output_shape", "value": shape})
+    port_attrs = [
+        {"key": "shape", "value": shape},
+        {"key": "tensor_shape", "value": shape},
+    ]
+    if dtype is not None:
+        dst["attrs"].append({"key": "output_dtype", "value": dtype})
+        port_attrs.append({"key": "dtype", "value": dtype})
+    dst["outputsMetadata"] = [{"id": "0", "attrs": port_attrs}]
+
+
+def _wrap_container_loop_carried(nodes: list[dict[str, Any]], container: str) -> None:
+    """Wrap one ``{N}x_`` repeat group with a ``@loop_carried`` in/out boundary.
+
+    No-op when the group already carries a container-level ``@loop_carried`` tile
+    (the vision tower, built by the ComputationGraph) or when its boundary does not
+    fit the single-carried-variable shape (multiple external inputs, no exit).
+    """
+    subtree_ids = {
+        node["id"]
+        for node in nodes
+        if _namespace_is_descendant(node.get("namespace", ""), container)
+    }
+    if not subtree_ids:
+        return
+    # Already wrapped by the CG (vision): a loop-carried tile sits at this exact
+    # namespace level. Inner-loop tiles live deeper, so they do not count.
+    for node in nodes:
+        if (
+            node.get("namespace") == container
+            and _node_attr(node, "synthetic") == "@loop_carried"
+            and "@loop_carried_in:" in node.get("id", "")
+        ):
+            return
+
+    # Entry edges: external source -> a synthetic @input tile inside the group.
+    entries: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    for node in nodes:
+        if node["id"] not in subtree_ids or not _is_synthetic_input(node):
+            continue
+        for edge in node.get("incomingEdges", []):
+            source = edge.get("sourceNodeId")
+            if source is not None and source not in subtree_ids:
+                entries.setdefault(source, []).append((node, edge))
+    # A single external source is the loop-carried variable. Multiple sources mean
+    # loop-invariant inputs to hoist as well (as vision's @input:cos/sin) -- no
+    # current structural-spine group has those, so stay conservative and skip.
+    if len(entries) != 1:
+        return
+    carried_source, carried_targets = next(iter(entries.items()))
+    variable = carried_targets[0][0].get("label") or "hidden_states"
+
+    # Exit edges: an interior node -> an external consumer. The distinct interior
+    # sources are the loop's updated value -- one @output for a single-template
+    # group, or the parallel variant branches' @outputs (all the pre-collapse
+    # carried tensor, before a post-loop head like ``hc_head`` collapses it).
+    exit_edges = [
+        (node, edge)
+        for node in nodes
+        if node["id"] not in subtree_ids
+        for edge in node.get("incomingEdges", [])
+        if edge.get("sourceNodeId") in subtree_ids
+    ]
+    if not exit_edges:
+        return
+    exit_sources: list[str] = []
+    for _consumer, edge in exit_edges:
+        source = edge["sourceNodeId"]
+        if source not in exit_sources:
+            exit_sources.append(source)
+
+    node_by_id = {node["id"]: node for node in nodes}
+    id_prefix = carried_targets[0][0]["id"].split("/", 1)[0]
+    in_id = f"{id_prefix}/@loop_carried_in:{id_prefix}:{variable}"
+    out_id = f"{id_prefix}/@loop_carried_out:{id_prefix}:{variable}"
+    style = ensure_readable_text(detail_tile_style(None, synthetic="@loop_carried"))
+
+    def _make_tile(tile_id: str, label: str) -> dict[str, Any]:
+        return {
+            "id": tile_id,
+            "label": label,
+            "namespace": container,
+            "attrs": [
+                {"key": "sublabel", "value": f"{variable} · repeated"},
+                {"key": "synthetic", "value": "@loop_carried"},
+                {"key": "operation", "value": "synthetic"},
+            ],
+            "style": style,
+        }
+
+    in_node = _make_tile(in_id, "Loop carried dependencies in")
+    out_node = _make_tile(out_id, "Loop carried dependencies out")
+    _copy_carried_shape(in_node, node_by_id.get(carried_source))
+    _copy_carried_shape(out_node, node_by_id.get(carried_source))
+
+    # Carried-in: initial value from the external source + back edge from carried-out.
+    src_port = carried_targets[0][1].get("sourceNodeOutputId", "0")
+    in_node["incomingEdges"] = [
+        {
+            "sourceNodeId": out_id,
+            "sourceNodeOutputId": "0",
+            "targetNodeInputId": "1",
+            "metadata": {"port_label": "next iteration"},
+        },
+        {
+            "sourceNodeId": carried_source,
+            "sourceNodeOutputId": src_port,
+            "targetNodeInputId": "1",
+        },
+    ]
+    for _tile, edge in carried_targets:
+        edge["sourceNodeId"] = in_id
+        edge["sourceNodeOutputId"] = "0"
+
+    # Carried-out: fed by the interior exit sources (the loop's updated value);
+    # their external consumers now read carried-out so the updated value flows out
+    # through the boundary, then on to any post-loop head.
+    out_node["incomingEdges"] = [
+        {
+            "sourceNodeId": source,
+            "sourceNodeOutputId": "0",
+            "targetNodeInputId": "0",
+            "metadata": {"port_label": "updated"},
+        }
+        for source in exit_sources
+    ]
+    for _consumer, edge in exit_edges:
+        edge["sourceNodeId"] = out_id
+        edge["sourceNodeOutputId"] = "0"
+    # Several exit sources feeding one consumer (a hyper-head merging the parallel
+    # variant branches) now all read carried-out -- the single merged loop value --
+    # so collapse them to one edge instead of N identical slots.
+    for consumer_id in {consumer["id"] for consumer, _edge in exit_edges}:
+        consumer = node_by_id[consumer_id]
+        deduped: list[dict[str, Any]] = []
+        seen_carried_out = False
+        for edge in consumer.get("incomingEdges", []):
+            if edge.get("sourceNodeId") == out_id:
+                if seen_carried_out:
+                    continue
+                seen_carried_out = True
+            deduped.append(edge)
+        consumer["incomingEdges"] = deduped
+
+    nodes.append(in_node)
+    nodes.append(out_node)
+
+
+def _synthesize_repeat_loop_boundaries(nodes: list[dict[str, Any]]) -> None:
+    """Give every ``{N}x_`` repeat group a loop-carried boundary like the vision tower.
+
+    The vision block loop is computation-graphed, so ``_add_loop_carried_nodes``
+    already produced its ``@loop_carried_in/out`` tiles -- this pass finds that
+    boundary present and skips it. The decoder's outer ``for layer in self.layers``
+    loop is only rendered structurally (``@input``/``@output`` tiles), so this pass
+    synthesizes the matching boundary + single back edge for it. One uniform pass
+    over both groups: the same code handles the vision tower and the main spine.
+    """
+    seen: set[str] = set()
+    containers: list[str] = []
+    for node in nodes:
+        container = _repeat_group_container(node.get("namespace", ""))
+        if container is not None and container not in seen:
+            seen.add(container)
+            containers.append(container)
+    for container in containers:
+        _wrap_container_loop_carried(nodes, container)
+
+
 def build_merged_model_graph(
     spec: ArchitectureSpec,
     *,
@@ -4016,6 +4213,13 @@ def build_merged_model_graph(
         group_node_attributes=group_node_attributes,
         group_node_configs=group_node_configs,
     )
+
+    # Give every ``{N}x_`` repeat group the same loop-carried boundary the vision
+    # tower gets from the ComputationGraph. No-op on groups already wrapped (vision);
+    # synthesizes the boundary for the structural decoder spine. Runs after the
+    # ``{N}x_`` namespaces are final so the no-op guard and container detection see
+    # them, and before the count fill below stamps ``· N iterations``.
+    _synthesize_repeat_loop_boundaries(nodes)
 
     # Fill trip counts on ModuleList loop-carried boundaries (``<var> · repeated``
     # -> ``<var> · N iterations``) from the ``{N}x_`` namespaces just finalized.
