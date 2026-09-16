@@ -595,6 +595,7 @@ def generate_perf_report_pytorch(
     perf_analyzer.tree.apply_annotation(
         name_filters=[
             "vllm::unified_attention_with_output",
+            "vllm::rocm_aiter_sparse_attn_indexer",
             "aiter::mha_varlen_fwd",
             "pseudo_mla_decode_fwd",
             "pseudo_mla_prefill_fwd",
