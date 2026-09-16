@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,85 @@ _log = logging.getLogger(__name__)
 # and get misread as batch/sequence when symbolising.
 _OP_PROBE_BATCH = 2
 _OP_PROBE_SEQ = 137
+
+
+@dataclass(frozen=True)
+class MetaModuleGroup:
+    """A repeated ``nn.ModuleList`` read structurally off the instantiated tree.
+
+    ``signatures`` holds one structural signature per element (ordered tuple of the
+    element's immediate child class names), so callers can bucket the elements into
+    sub-variants with ``collections.Counter(signatures)``.
+    """
+
+    path: str
+    length: int
+    element_class: str
+    signatures: tuple[str, ...]
+
+
+def _element_signature(element: Any) -> str:
+    """Structural signature of a ModuleList element.
+
+    The ordered tuple of the element's immediate child module class names, rendered
+    as a stable string. This separates e.g. an MoE-bearing decoder layer from a dense
+    one (different ``mlp`` child class) without descending the whole subtree. Tuning
+    knob: deepen one level if this under-splits a model's variants.
+    """
+    child_classes = [type(child).__name__ for _, child in element.named_children()]
+    return "(" + ",".join(child_classes) + ")"
+
+
+def walk_meta_module_tree(checkpoint: str | Path) -> list[MetaModuleGroup] | None:
+    """Read the repeated-``ModuleList`` structure off the instantiated meta tree.
+
+    Instantiates the model on the ``meta`` device and walks ``named_modules()`` for
+    every non-empty ``nn.ModuleList``, recording its path, ``len()``, element class
+    name, and per-element structural signature. Returns *None* when torch /
+    transformers are unavailable or the model cannot be instantiated.
+
+    Unlike :func:`trace_meta_shapes` this runs **no forward pass** and applies **no
+    rotary patch**: building the module tree on the meta device allocates no storage,
+    needs no GPU, and never touches the data-dependent ops (``.item()``/``.tolist()``,
+    rotary CPU tensors, ``ACT2FN[...]``) that make meta *forwards* fragile. Reading
+    structure needs only the reliable instantiation half.
+    """
+    try:
+        import torch
+    except ImportError:
+        _log.info(
+            "torch and/or transformers not installed; "
+            "skipping meta-device module-tree walk"
+        )
+        return None
+
+    # Instantiate our own clean model — no shared instance with the forward-based
+    # tracers, so an in-place rotary patch there can never contaminate this walk.
+    try:
+        from TraceLens.ModelUtils.torch_trace import _instantiate_meta
+
+        model, _config = _instantiate_meta(checkpoint)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("Could not instantiate model on meta device: %s", exc)
+        return None
+
+    try:
+        groups: list[MetaModuleGroup] = []
+        for path, mod in model.named_modules():
+            if not isinstance(mod, torch.nn.ModuleList) or len(mod) == 0:
+                continue
+            groups.append(
+                MetaModuleGroup(
+                    path=path,
+                    length=len(mod),
+                    element_class=type(mod[0]).__name__,
+                    signatures=tuple(_element_signature(element) for element in mod),
+                )
+            )
+    finally:
+        del model
+
+    return groups
 
 
 def trace_meta_shapes(

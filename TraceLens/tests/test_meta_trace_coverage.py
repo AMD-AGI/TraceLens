@@ -268,3 +268,83 @@ def test_symbolise_meta_shape():
     assert out == ("B", "S", 32)
     # no substitution when dims don't match
     assert mt.symbolise_meta_shape((7, 9), batch_size=1, seq_len=128) == (7, 9)
+
+
+# ---------------------------------------------------------------------------
+# walk_meta_module_tree (forward-free structural ModuleList walk)
+# ---------------------------------------------------------------------------
+
+
+def test_walk_meta_module_tree_llama(llama_ckpt):
+    groups = mt.walk_meta_module_tree(llama_ckpt)
+    assert groups is not None
+    layer_groups = [g for g in groups if g.path.endswith("layers")]
+    assert layer_groups, [g.path for g in groups]
+    g = layer_groups[0]
+    assert g.length == 2  # num_hidden_layers in the fixture
+    assert g.element_class.endswith("DecoderLayer")
+    assert len(g.signatures) == g.length
+
+
+def test_walk_meta_module_tree_torch_unavailable(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "torch", None)
+    assert mt.walk_meta_module_tree("whatever") is None
+
+
+def test_walk_meta_module_tree_instantiation_failure(monkeypatch):
+    def _boom(_ckpt):
+        raise RuntimeError("cannot load")
+
+    monkeypatch.setattr(tt, "_instantiate_meta", _boom)
+    assert mt.walk_meta_module_tree("bad/checkpoint") is None
+
+
+def test_walk_meta_module_tree_multiple_lists(monkeypatch):
+    """Two independent ModuleLists -> two MetaModuleGroups (vision-tower case)."""
+
+    class TwoLists(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([Block() for _ in range(3)])
+            self.vision = nn.ModuleList([nn.Linear(4, 4) for _ in range(5)])
+
+    monkeypatch.setattr(tt, "_instantiate_meta", lambda _c: (TwoLists(), None))
+    groups = mt.walk_meta_module_tree("x")
+    assert groups is not None
+    by_path = {g.path: g for g in groups}
+    assert by_path["layers"].length == 3
+    assert by_path["layers"].element_class == "Block"
+    assert by_path["vision"].length == 5
+    assert by_path["vision"].element_class == "Linear"
+
+
+def test_walk_meta_module_tree_mixed_signatures(monkeypatch):
+    """Elements with different child structure bucket into distinct signatures."""
+    from collections import Counter
+
+    class DenseLayer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attn = nn.Linear(4, 4)
+            self.mlp = nn.Linear(4, 4)
+
+    class MoELayer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attn = nn.Linear(4, 4)
+            self.moe = nn.ModuleList([nn.Linear(4, 4)])
+
+    class Hybrid(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList(
+                [DenseLayer() for _ in range(5)] + [MoELayer() for _ in range(3)]
+            )
+
+    monkeypatch.setattr(tt, "_instantiate_meta", lambda _c: (Hybrid(), None))
+    groups = mt.walk_meta_module_tree("x")
+    assert groups is not None
+    layer_group = next(g for g in groups if g.path == "layers")
+    assert layer_group.length == 8
+    buckets = Counter(layer_group.signatures)
+    assert sorted(buckets.values()) == [3, 5]
