@@ -12,11 +12,12 @@ See LICENSE for license information.
 
 ```
 
-`TraceLens_generate_perf_report_pytorch_inference` is the inference-oriented
-variant of the PyTorch report. It targets inference traces from frameworks such
-as vLLM, SGLang, ATOM, and xDiT that run in CUDA/HIP graph mode, and can merge the
-graph-capture traces back into the graph-replay trace to recover the call-stack
-and input-shape metadata that graph execution drops.
+`TraceLens_generate_perf_report_pytorch` is a unified PyTorch report generator
+for both training and inference traces. For inference traces from frameworks such
+as vLLM, SGLang, ATOM, and xDiT that run in CUDA/HIP graph mode, use
+`--capture_folder` to merge graph-capture traces back into the graph-replay
+trace and recover the call-stack and input-shape metadata that graph execution
+drops, and `--group_by_parent_module` for module-level grouping.
 
 This topic covers the end-to-end inference workflow: collecting traces, splitting
 them into steady-state windows, and generating the report. For training or
@@ -429,7 +430,7 @@ Report generation is supported for both eager-mode and graph-mode (capture +
 replay) traces. Pass the graph-replay trace to generate the default Excel report:
 
 ```bash
-TraceLens_generate_perf_report_pytorch_inference \
+TraceLens_generate_perf_report_pytorch \
     --profile_json_path tests/traces/inference/graph_full/graph_execution.json.gz
 ```
 
@@ -446,7 +447,7 @@ traces back into the replay trace and restore that metadata for richer operator
 and roofline analysis:
 
 ```bash
-TraceLens_generate_perf_report_pytorch_inference \
+TraceLens_generate_perf_report_pytorch \
     --profile_json_path tests/traces/inference/graph_full/graph_execution.json.gz \
     --capture_folder tests/traces/inference/graph_full/capture_traces
 ```

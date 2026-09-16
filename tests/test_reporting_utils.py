@@ -26,7 +26,6 @@ from TraceLens.Agent.Analysis.category_analyses import (
 )
 from TraceLens.Reporting import (
     generate_multi_rank_collective_report_pytorch as coll_mod,
-    generate_perf_report_pytorch_inference as inf_mod,
     reporting_utils as ru,
     tracediff_comparison_extension as tde,
 )
@@ -51,7 +50,7 @@ from tests.fixtures.traces import (
     TRACES_ROOT,
     _discover_inference_cases,
 )
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+from TraceLens.Reporting.generate_perf_report_pytorch import (
     add_truncated_kernel_details as add_truncated_inference,
     add_truncated_kernel_details as add_truncated_kernel_details_inference,
     apply_extension as apply_extension_inference,
@@ -60,6 +59,7 @@ from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     generate_perf_report_pytorch as gen_inf,
     generate_perf_report_pytorch as generate_inference_report,
     get_dfs_short_kernels as get_dfs_short_kernels_inference,
+    main as generate_perf_report_pytorch_main,
     perf_report_sanity_check,
 )
 from TraceLens.Reporting.compare_perf_reports_pytorch import (
@@ -1068,7 +1068,7 @@ def test_inference_report_main_cli(tmp_path):
 
     old_argv = sys.argv
     sys.argv = [
-        "generate_perf_report_pytorch_inference",
+        "generate_perf_report_pytorch",
         "--profile_json_path",
         trace,
         "--output_csvs_dir",
@@ -1080,7 +1080,7 @@ def test_inference_report_main_cli(tmp_path):
         "--group_by_parent_module",
     ]
     try:
-        inf_mod.main()
+        generate_perf_report_pytorch_main()
     finally:
         sys.argv = old_argv
     assert xlsx.exists()
@@ -1643,13 +1643,10 @@ class TestReportingCliPhase9:
         assert (tmp_path / "csv" / "gpu_timeline.csv").exists()
 
     def test_generate_perf_report_inference_main(self, tmp_path):
-        mod = importlib.import_module(
-            "TraceLens.Reporting.generate_perf_report_pytorch_inference"
-        )
         trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "inf.json")
         old_argv = sys.argv
         sys.argv = [
-            "generate_perf_report_pytorch_inference",
+            "generate_perf_report_pytorch",
             "--profile_json_path",
             trace,
             "--output_csvs_dir",
@@ -1658,7 +1655,7 @@ class TestReportingCliPhase9:
             str(tmp_path / "out.xlsx"),
         ]
         try:
-            mod.main()
+            generate_perf_report_pytorch_main()
         finally:
             sys.argv = old_argv
         assert (tmp_path / "csv" / "gpu_timeline.csv").exists()
@@ -1994,8 +1991,6 @@ def test_pytorch_report_main(tmp_path):
     )
     out_dir = tmp_path / "py_csvs"
     xlsx = tmp_path / "py.xlsx"
-    mod = importlib.import_module("TraceLens.Reporting.generate_perf_report_pytorch")
-
     old_argv = sys.argv
     sys.argv = [
         "generate_perf_report_pytorch",
@@ -2011,7 +2006,7 @@ def test_pytorch_report_main(tmp_path):
         "--group_by_num_kernels",
     ]
     try:
-        mod.main()
+        generate_perf_report_pytorch_main()
     finally:
         sys.argv = old_argv
     assert xlsx.exists()

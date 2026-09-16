@@ -4,10 +4,10 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for helper functions in generate_perf_report_pytorch_inference."""
+"""Unit tests for helper functions in generate_perf_report_pytorch."""
 
 import os, pandas as pd, pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+from TraceLens.Reporting.generate_perf_report_pytorch import (
     add_truncated_kernel_details,
     get_dfs_short_kernels,
     perf_report_sanity_check,
