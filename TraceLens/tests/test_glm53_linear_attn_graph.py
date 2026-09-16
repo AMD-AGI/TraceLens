@@ -1876,6 +1876,95 @@ def test_glm53_vision_rotary_cos_and_sin_have_distinct_producers():
     assert not _has_export_path(nodes, sine["id"], cos_producer)
 
 
+def test_glm53_vision_rotary_recomposition_slice_concat_tile_widths():
+    """``recomposition_frequencies`` renders as Slice x2 -> Concat -> Tile.
+
+    ``Glm5NextVisionRotaryEmbedding.recomposition_frequencies`` does
+    ``freq_h, freq_w = freq[:, 0], freq[:, 1]`` (two single-index slices that each
+    drop the indexed axis), ``freq_hw = torch.cat([freq_h, freq_w], -1)`` (CAT #1),
+    then ``torch.cat([freq_hw, freq_hw], -1)`` (CAT #2, a self-concat).
+
+    Three coupled defects used to make every recomposition op a no-op: the slice
+    operands aliased the single ``freqs`` producer (CAT #1 had one input), the
+    self-concat collapsed its two identical operands (CAT #2 had one input), and
+    the whole chain mis-inferred to the flat patch width ``[Pv, 1176]``. General
+    fixes -- materialize concat slice operands as real ``Slice`` ops, relabel a cat
+    of identical operands as ``Tile``, and flow the buffer-derived trailing width
+    (``inv_freq`` length 16, vision ``head_dim`` 64) into ``freqs`` -- give the
+    honest chain: Slice ``[Pv, 16]`` x2 -> Concat ``[Pv, 32]`` -> Tile ``[Pv, 64]``.
+    """
+    pytest.importorskip("huggingface_hub")
+    import re
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    node_by_id = {node["id"]: node for node in nodes}
+
+    _assert_export_is_acyclic(nodes)
+
+    def _incoming(node: dict) -> list[dict]:
+        return node.get("incomingEdges", []) or []
+
+    frames = sorted(
+        {
+            match.group(0)
+            for node in nodes
+            for match in [re.search(r"recomposition_frequencies@l\d+", str(node["id"]))]
+            if match
+        }
+    )
+    # One recomposition frame per trig branch (cos and sin).
+    assert len(frames) == 2, frames
+
+    for frame in frames:
+        frame_nodes = [node for node in nodes if frame in str(node["id"])]
+        slices = [n for n in frame_nodes if n.get("label") == "Slice"]
+        concats = [n for n in frame_nodes if n.get("label") == "Concat"]
+        tiles = [n for n in frame_nodes if n.get("label") == "Tile"]
+
+        # CAT #1: two distinct Slice inputs [Pv, 16] -> Concat [Pv, 32].
+        assert len(slices) == 2, [n["id"] for n in slices]
+        for sliced in slices:
+            assert str(_attr_value(sliced, "output_shape")).startswith("[Pv, 16]"), (
+                sliced["id"],
+                _attr_value(sliced, "output_shape"),
+            )
+        assert len(concats) == 1, [n["id"] for n in concats]
+        concat = concats[0]
+        concat_sources = {edge["sourceNodeId"] for edge in _incoming(concat)}
+        assert len(_incoming(concat)) == 2, sorted(concat_sources)
+        assert concat_sources == {n["id"] for n in slices}, concat_sources
+        assert str(_attr_value(concat, "output_shape")).startswith("[Pv, 32]"), (
+            _attr_value(concat, "output_shape")
+        )
+
+        # CAT #2: the self-concat becomes a single-input Tile [Pv, 32] -> [Pv, 64].
+        assert len(tiles) == 1, [n["id"] for n in tiles]
+        tile = tiles[0]
+        assert len(_incoming(tile)) == 1, [e["sourceNodeId"] for e in _incoming(tile)]
+        assert _incoming(tile)[0]["sourceNodeId"] == concat["id"]
+        assert str(_attr_value(tile, "output_shape")).startswith("[Pv, 64]"), (
+            _attr_value(tile, "output_shape")
+        )
+
+    # The rotary outputs carry the vision head_dim [Pv, 64], not the patch width.
+    for slot in ("cos", "sin"):
+        out = node_by_id[f"visual/sidefeed:2:rotary_pos_emb/@output:{slot}"]
+        assert str(_attr_value(out, "output_shape")).startswith("[Pv, 64]"), (
+            slot,
+            _attr_value(out, "output_shape"),
+        )
+
+    # No recomposition Concat is a degenerate single-input / identity cat.
+    for node in nodes:
+        if node.get("label") != "Concat":
+            continue
+        if not re.search(r"recomposition_frequencies@l\d+", str(node["id"])):
+            continue
+        assert len(_incoming(node)) >= 2, node["id"]
+
+
 def test_glm53_vision_rotary_output_edges_reference_real_producer_ports():
     """``@output:sin`` must read an existing port of its producer, not the ordinal.
 
