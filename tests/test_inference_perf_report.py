@@ -11,7 +11,7 @@
 #   - Optionally capture_traces/ (graph capture mode)
 #   - Optionally gpu_arch.json
 
-import os, numpy as np, pandas as pd, pytest, ast, re, gzip, json, glob
+import os, shutil, numpy as np, pandas as pd, pytest, ast, re, gzip, json, glob
 from pandas.api.types import is_float_dtype
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     classify_graph_capture_trace,
@@ -316,6 +316,22 @@ def test_inference_perf_report(
             f"'{sheet_name}' has differences in {profile_path}:"
             f"{format_diff_details(diff_cols)}"
         )
+
+
+def test_inference_perf_report_default_output_path(tmp_path):
+    """No output_xlsx_path/output_csvs_dir given -> auto-derive next to the
+    input trace, replacing the '.json' suffix."""
+    cases = find_inference_test_cases()
+    if not cases:
+        pytest.skip("No inference trace fixtures found")
+    dirpath, trace_gz, _capture_folder, _gpu_arch_path = cases[0].values
+    profile_path = shutil.copy(os.path.join(dirpath, trace_gz), tmp_path)
+
+    result = generate_perf_report_pytorch(profile_json_path=profile_path)
+
+    expected_xlsx = profile_path.rsplit(".json", 1)[0] + "_perf_report.xlsx"
+    assert os.path.exists(expected_xlsx)
+    assert isinstance(result, dict)
 
 
 # ---------------------------------------------------------------------------

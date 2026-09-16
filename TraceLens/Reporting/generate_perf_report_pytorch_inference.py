@@ -25,8 +25,8 @@ from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_name
 from TraceLens.Reporting.generate_perf_report_pytorch import _find_entry_point
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
-    request_install,
     resolve_gpu_arch,
+    write_report_outputs,
 )
 from TraceLens.util import TraceEventUtils
 from TraceLens.TraceUtils.annotation_utils import (
@@ -1168,25 +1168,12 @@ def generate_perf_report_pytorch(
                 print(f"Added {len(additional_dfs)} additional sheets from extension")
 
     # Write CSVs and/or Excel (independent options)
-    if output_csvs_dir:
-        os.makedirs(output_csvs_dir, exist_ok=True)
-        for sheet_name, df in dict_name2df.items():
-            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
-            print(f"DataFrame '{sheet_name}' written to {csv_path}")
-
-    if output_xlsx_path is not None or output_csvs_dir is None:
-        if output_xlsx_path is None:
-            base_path = profile_json_path.rsplit(".json", 1)[0]
-            output_xlsx_path = base_path + "_perf_report.xlsx"
-        if importlib.util.find_spec("openpyxl") is None:
-            print("Error importing openpyxl")
-            request_install("openpyxl")
-
-        with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
-            for sheet_name, df in dict_name2df.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-            print(f"DataFrames successfully written to {output_xlsx_path}")
+    if output_xlsx_path is None and output_csvs_dir is None:
+        base_path = profile_json_path.rsplit(".json", 1)[0]
+        output_xlsx_path = base_path + "_perf_report.xlsx"
+    write_report_outputs(
+        dict_name2df, xlsx_path=output_xlsx_path, csvs_dir=output_csvs_dir
+    )
 
     return dict_name2df
 
