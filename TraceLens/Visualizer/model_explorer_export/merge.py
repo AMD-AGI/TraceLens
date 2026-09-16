@@ -1896,6 +1896,64 @@ def _collapse_mirror_boundary_passthroughs(nodes: list[dict[str, Any]]) -> None:
         nodes[:] = [node for node in nodes if str(node["id"]) not in removed]
 
 
+def _collapse_kernel_input_passthroughs(nodes: list[dict[str, Any]]) -> None:
+    """Drop a module ``@input`` tile that only feeds a same-scope kernel port.
+
+    A kernel input that is never transformed between the module boundary and the
+    kernel renders as two consecutive same-named tiles in one box: the module
+    ``@input:cu_seqlens`` and, right below it, the kernel's
+    ``@kernel_in:…:cu_seqlens`` port. (Contrast a real kernel input like
+    ``query_states``, whose port is fed by the rotary op, not by an input tile --
+    the ``apply_rotary_pos_emb_vision`` handling -- so it shows one tile.) When a
+    ``@kernel_port_in`` port is fed solely by an ``@input`` tile in the *same*
+    namespace carrying the *same* name, and that input tile has no other consumer,
+    the two describe one untransformed passthrough: drop the ``@input`` tile and
+    let the kernel port read the input's own source. Dataflow is unchanged; one
+    redundant tile disappears. General -- any same-scope module-input-into-kernel
+    passthrough collapses, not just ``cu_seqlens``.
+    """
+    by_id = {str(node["id"]): node for node in nodes}
+    consumers: dict[str, list[dict[str, Any]]] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []):
+            consumers.setdefault(str(edge.get("sourceNodeId")), []).append(node)
+
+    def _port_name(node: dict[str, Any]) -> str:
+        return _node_attr(node, "port_label") or str(node.get("label", ""))
+
+    removed: set[str] = set()
+    for port in list(nodes):
+        if _node_attr(port, "synthetic") != "@kernel_port_in":
+            continue
+        incoming = port.get("incomingEdges", [])
+        if len(incoming) != 1:
+            continue
+        source_id = str(incoming[0].get("sourceNodeId"))
+        module_input = by_id.get(source_id)
+        if module_input is None or source_id in removed:
+            continue
+        if _node_attr(module_input, "synthetic") != "@input":
+            continue
+        if module_input.get("namespace") != port.get("namespace"):
+            continue
+        if _port_name(module_input) != _port_name(port):
+            continue
+        # The input tile must be a pure passthrough: this kernel port is its only
+        # consumer, and it forwards a single upstream source.
+        if [c["id"] for c in consumers.get(source_id, [])] != [port["id"]]:
+            continue
+        upstream = module_input.get("incomingEdges", [])
+        if len(upstream) != 1:
+            continue
+        forwarded = upstream[0]
+        incoming[0]["sourceNodeId"] = forwarded.get("sourceNodeId")
+        incoming[0]["sourceNodeOutputId"] = forwarded.get("sourceNodeOutputId")
+        removed.add(source_id)
+
+    if removed:
+        nodes[:] = [node for node in nodes if str(node["id"]) not in removed]
+
+
 def _prune_noop_cast_nodes(nodes: list[dict[str, Any]]) -> None:
     """Remove ``Cast`` nodes whose output dtype equals their (single) input's
     dtype — the AST-path counterpart of the torch-trace backend's no-op
@@ -4170,6 +4228,7 @@ def build_merged_model_graph(
     _mirror_boundary_inputs(nodes)
     _mirror_boundary_outputs(nodes)
     _collapse_mirror_boundary_passthroughs(nodes)
+    _collapse_kernel_input_passthroughs(nodes)
 
     if shape_inferencer is not None:
         fill_missing_node_shapes(nodes, context=shape_inferencer.context)

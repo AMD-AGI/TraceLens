@@ -1020,6 +1020,83 @@ def test_synthesize_loop_boundary_skips_multi_source_container():
     assert not any("@loop_carried" in n["id"] for n in nodes)
 
 
+def _kernel_in(node_id, namespace, source, *, label):
+    return {
+        "id": node_id,
+        "label": label,
+        "namespace": namespace,
+        "attrs": [{"key": "synthetic", "value": "@kernel_port_in"}],
+        "incomingEdges": [{"sourceNodeId": source, "sourceNodeOutputId": "0",
+                           "targetNodeInputId": "0"}],
+    }
+
+
+def _input_mirror(node_id, namespace, source, *, label):
+    return {
+        "id": node_id,
+        "label": label,
+        "namespace": namespace,
+        "attrs": [{"key": "synthetic", "value": "@input_mirror"},
+                  {"key": "port_label", "value": label}],
+        "incomingEdges": [{"sourceNodeId": source, "sourceNodeOutputId": label,
+                           "targetNodeInputId": label}],
+    }
+
+
+def test_collapse_kernel_input_passthrough_drops_redundant_module_input():
+    """A kernel port fed only by a same-scope same-name @input tile collapses:
+    the untransformed passthrough (cu_seqlens) loses its redundant @input tile."""
+    attn = "blk/Attn"
+    nodes = [
+        _plain("producer", "", [], shape="[Pv, 1176] bfloat16"),
+        _input_mirror("blk/@input_mirror:cu_seqlens^cu_seqlens", "blk", "producer",
+                      label="cu_seqlens"),
+        _synthetic_input("blk/@input:cu_seqlens", attn,
+                         "blk/@input_mirror:cu_seqlens^cu_seqlens", label="cu_seqlens"),
+        _kernel_in("blk/@kernel_in:9:cu_seqlens", attn, "blk/@input:cu_seqlens",
+                   label="cu_seqlens"),
+        # Control: a real kernel input (query_states) fed by a computation, not an
+        # @input tile -- must be left untouched (the apply_rotary reference shape).
+        _plain("rotary_q", attn, [], shape="[Pv, 64] bfloat16"),
+        _kernel_in("blk/@kernel_in:9:query_states", attn, "rotary_q",
+                   label="query_states"),
+        _plain("kernel", attn, ["blk/@kernel_in:9:cu_seqlens",
+                                 "blk/@kernel_in:9:query_states"]),
+    ]
+    merge._collapse_kernel_input_passthroughs(nodes)
+    by_id = {n["id"]: n for n in nodes}
+
+    # The redundant module-input tile is gone; the kernel port reads the mirror.
+    assert "blk/@input:cu_seqlens" not in by_id
+    cu_port = by_id["blk/@kernel_in:9:cu_seqlens"]
+    assert [e["sourceNodeId"] for e in cu_port["incomingEdges"]] == [
+        "blk/@input_mirror:cu_seqlens^cu_seqlens"
+    ]
+    # The real kernel input is untouched (its source is a computation, not @input).
+    q_port = by_id["blk/@kernel_in:9:query_states"]
+    assert [e["sourceNodeId"] for e in q_port["incomingEdges"]] == ["rotary_q"]
+
+
+def test_collapse_kernel_input_passthrough_keeps_shared_module_input():
+    """An @input tile with a second consumer is NOT a pure passthrough -> kept."""
+    attn = "blk/Attn"
+    nodes = [
+        _plain("producer", "", [], shape="[Pv, 1176] bfloat16"),
+        _synthetic_input("blk/@input:mask", attn, "producer", label="mask"),
+        _kernel_in("blk/@kernel_in:9:mask", attn, "blk/@input:mask", label="mask"),
+        # Second consumer of the same @input tile: a real op reads it too.
+        _plain("other_op", attn, ["blk/@input:mask"]),
+        _plain("kernel", attn, ["blk/@kernel_in:9:mask"]),
+    ]
+    merge._collapse_kernel_input_passthroughs(nodes)
+    by_id = {n["id"]: n for n in nodes}
+    # Shared input tile survives; the kernel port still reads it.
+    assert "blk/@input:mask" in by_id
+    assert [e["sourceNodeId"] for e in by_id["blk/@kernel_in:9:mask"]["incomingEdges"]] == [
+        "blk/@input:mask"
+    ]
+
+
 def _cast_node(node_id: str, *, source: str, dtype: str, shape: str = "B x S x 4") -> dict:
     """A `Cast` node with one incoming edge and its own inferred output dtype."""
     return {

@@ -1647,9 +1647,13 @@ def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
     cu_mirror = node_by_id["visual/@input_mirror:cu_seqlens^cu_seqlens"]
     assert [e["sourceNodeId"] for e in cu_mirror["incomingEdges"]] == [producer_id]
 
-    # The kernel's cu_seqlens input port is fed through that boundary, and the
-    # crossing carries no back edge. (Looked up by suffix: the ``@kernel_in``
-    # ordinal shifts as unrelated nodes are added/removed.)
+    # cu_seqlens is never transformed between the block boundary and the kernel,
+    # so its redundant module-input tile collapses onto the kernel port
+    # (_collapse_kernel_input_passthroughs): the kernel's cu_seqlens port reads the
+    # block-level mirror directly, with no intervening ``@input:cu_seqlens`` tile.
+    # (Looked up by suffix: the ``@kernel_in`` ordinal shifts as unrelated nodes
+    # are added/removed.)
+    assert "visual/@input:cu_seqlens" not in node_by_id
     cu_port = next(
         n
         for n in nodes
@@ -1657,7 +1661,7 @@ def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
         and n["id"].endswith(":cu_seqlens")
     )
     assert [e["sourceNodeId"] for e in cu_port["incomingEdges"]] == [
-        "visual/@input:cu_seqlens"
+        "visual/@input_mirror:cu_seqlens^cu_seqlens"
     ]
 
 
@@ -1696,7 +1700,10 @@ def test_glm53_vision_attention_kernel_reads_all_qkv_no_orphans():
         "query_states": "visual/seq:3:blocks:attn:@op_l1616_c23_unsqueeze:7",
         "key_states": "visual/seq:3:blocks:attn:@op_l1617_c21_unsqueeze:9",
         "value_states": "visual/seq:3:blocks:attn:@op_l1618_c23_unsqueeze:11",
-        "cu_seqlens": "visual/@input:cu_seqlens",
+        # cu_seqlens's redundant module-input tile collapses onto the kernel port,
+        # which then reads the block-level mirror directly (see
+        # _collapse_kernel_input_passthroughs).
+        "cu_seqlens": "visual/@input_mirror:cu_seqlens^cu_seqlens",
     }
     for label, producer_id in expected_producers.items():
         port = next(
