@@ -253,8 +253,19 @@ def test_glm_attention_expand_kv_assembles_key_states_from_split_and_expand():
             for edge in consumer.get("incomingEdges", [])
         )
 
+    def consumes_split_slice(consumer, split_id):
+        # A multi-output Split surfaces each slice as its own named ``@slice_out``
+        # passthrough tile; a consumer reads the slice via that tile, not the Split
+        # node directly.
+        slice_prefix = split_id + "^@slice_out:"
+        return any(
+            edge["sourceNodeId"].startswith(slice_prefix)
+            for edge in consumer.get("incomingEdges", [])
+        )
+
     # Each of Split and Expand feeds a Copy that writes it into ``key_states``.
-    assert any(consumes(copy, split["id"]) for copy in copies)
+    # (The Split reaches its Copy through one of its named slice tiles.)
+    assert any(consumes_split_slice(copy, split["id"]) for copy in copies)
     assert any(consumes(copy, expand["id"]) for copy in copies)
     # The final Copy is what the module returns (reaches the block output).
     assert any(

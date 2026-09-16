@@ -212,7 +212,7 @@ def input_port_style() -> dict[str, str]:
 
 def output_port_style() -> dict[str, str]:
     """Synthetic @output ports on graph and subgraph boundaries."""
-    return {"backgroundColor": "#d5f5e3", "textColor": _DARK_TEXT}
+    return {"backgroundColor": _INPUT, "textColor": _DARK_TEXT}
 
 
 def detail_tile_style(

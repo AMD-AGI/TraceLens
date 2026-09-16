@@ -734,17 +734,15 @@ def _alternate_forward_dispatches(func: ast.FunctionDef) -> set[str]:
 
 
 def _unwrap_expr(node: ast.AST) -> ast.AST:
+    # Strip trailing *bare* attribute accesses (``x.T``/``x.mT``/``x.data``) to reach
+    # the underlying call. Method *calls* in a chain (``x.reshape(...).unbind(0)``)
+    # are peeled by ``_extract_self_calls_ordered`` itself, which descends a
+    # non-producer method call's receiver as operand 0 — so chaining, a purely
+    # syntactic convenience, never hides the base producer regardless of which
+    # ``torch.Tensor`` methods appear in the chain (no method allowlist to keep up
+    # to date; see the receiver descent below).
     while isinstance(node, ast.Attribute):
         node = node.value
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-        owner = _expr_name(node.func.value)
-        if node.func.attr in _METHOD_CHAIN_OPS and owner not in {
-            "torch",
-            "F",
-            "torch.nn.functional",
-            "nn.functional",
-        }:
-            return _unwrap_expr(node.func.value)
     return node
 
 
@@ -801,6 +799,17 @@ def _extract_self_calls_ordered(
             # its own node instead of dropping it.
             _append_forward_call(out, function_synthetic_attr(target, node.lineno))
             return
+        # No producer form matched: this is a tensor-method chain link
+        # (``.reshape(...)``/``.permute(...)``/``.unbind(0)``/``.to(dtype)`` — any
+        # ``torch.Tensor`` method returning a tensor, at *any* position in a chain).
+        # Chaining is a syntactic convenience: ``recv.op(*args)`` is equivalent to
+        # ``op(recv, *args)`` with ``recv`` as operand 0. Descend into the receiver
+        # so the base producer (``self.qkv(...)``) is still collected however long
+        # the chain is and whatever methods it uses. The link's own args were already
+        # visited above, so a producer passed as a method argument is not dropped
+        # either. Free-function calls (``func`` is an ``ast.Name``) don't reach here.
+        if isinstance(func, ast.Attribute):
+            _extract_self_calls_ordered(func.value, out, skip_free_fn, repeated_attrs)
         return
 
     if isinstance(node, ast.BinOp):
@@ -1732,7 +1741,14 @@ def _forward_mixes_modules_and_inline_ops(
     inline_ops = sum(
         1 for op in parsed_operations if is_forward_operation(op.attr_name)
     )
-    return inline_ops >= 2
+    # A single inline op is enough. When a forward calls a composite child and
+    # then combines its result inline (``left, right = self.split(x); return
+    # self.proj(right) + left``), that lone Add is real computation the module
+    # owns and must stay visible — it is not residual plumbing represented
+    # elsewhere. ``_forward_owns_tensor_math`` only fires when *every* module
+    # call is a pointwise leaf, so the composite-child + inline-op case reaches
+    # here as its sole retention path.
+    return inline_ops >= 1
 
 
 def _label_for(role: str, class_name: str, attr_name: str) -> str:

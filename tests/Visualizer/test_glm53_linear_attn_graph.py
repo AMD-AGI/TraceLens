@@ -33,6 +33,18 @@ def _graph_key_for_op(graph, fragment: str) -> str:
     return matches[0]
 
 
+def _export_node(nodes, fragment: str) -> dict:
+    """The unique export node whose id contains ``fragment`` (ordinal-agnostic).
+
+    An op's slot ordinal (the trailing ``:N`` in its id) shifts whenever unrelated
+    nodes are added or removed from its block; matching on the stable
+    ``@op_l<line>_c<col>_<name>`` fragment keeps these tests robust to that churn.
+    """
+    matches = [n for n in nodes if fragment in n["id"]]
+    assert len(matches) == 1, (fragment, [n["id"] for n in matches])
+    return matches[0]
+
+
 def _linear_attn_variant_prefix(spec) -> str:
     variant = next(
         v for v in spec.layer_variants if "LinearAttention" in (v.attention_class or "")
@@ -1567,7 +1579,7 @@ def test_glm53_vision_attention_resolves_single_kernel_branch():
 
     # The output reshape now reads the single kernel directly (the elided cat was
     # a pass-through between them).
-    reshape = node_by_id["visual/seq:3:blocks:attn:@op_l1665_c22_reshape:14"]
+    reshape = _export_node(nodes, "visual/seq:3:blocks:attn:@op_l1665_c22_reshape")
     reshape_sources = [e["sourceNodeId"] for e in reshape.get("incomingEdges", [])]
     assert reshape_sources == [kernel["id"]]
 
@@ -1593,7 +1605,7 @@ def test_glm53_vision_attention_flags_impl_dead_interface_input():
     _assert_export_is_acyclic(nodes)
 
     node_by_id = {node["id"]: node for node in nodes}
-    kernel = node_by_id["visual/seq:3:blocks:attn:@attention:12"]
+    kernel = _export_node(nodes, "visual/seq:3:blocks:attn:@attention:")
     details = next(
         attr["value"]
         for attr in kernel.get("attrs", [])
@@ -1691,15 +1703,21 @@ def test_glm53_vision_attention_kernel_reads_all_qkv_no_orphans():
 
     _assert_export_is_acyclic(nodes)
 
-    kernel = node_by_id["visual/seq:3:blocks:attn:@attention:12"]
+    kernel = _export_node(nodes, "visual/seq:3:blocks:attn:@attention:")
     kernel_sources = {e["sourceNodeId"] for e in kernel.get("incomingEdges", [])}
 
     # Every declared kernel input is a distinct, correctly-labeled port node, and
     # the three tensor ports source their own unsqueeze producer (not one shared).
     expected_producers = {
-        "query_states": "visual/seq:3:blocks:attn:@op_l1616_c23_unsqueeze:7",
-        "key_states": "visual/seq:3:blocks:attn:@op_l1617_c21_unsqueeze:9",
-        "value_states": "visual/seq:3:blocks:attn:@op_l1618_c23_unsqueeze:11",
+        "query_states": _export_node(
+            nodes, "visual/seq:3:blocks:attn:@op_l1616_c23_unsqueeze"
+        )["id"],
+        "key_states": _export_node(
+            nodes, "visual/seq:3:blocks:attn:@op_l1617_c21_unsqueeze"
+        )["id"],
+        "value_states": _export_node(
+            nodes, "visual/seq:3:blocks:attn:@op_l1618_c23_unsqueeze"
+        )["id"],
         # cu_seqlens's redundant module-input tile collapses onto the kernel port,
         # which then reads the block-level mirror directly (see
         # _collapse_kernel_input_passthroughs).
@@ -2017,10 +2035,11 @@ def test_glm53_no_single_input_concat_survives_anywhere():
 
     # The known vision fallback reassembly cat is gone; its consumer (the output
     # reshape) now reads the attention kernel directly.
-    assert "visual/seq:3:blocks:attn:@op_l1663_c26_concat:13" not in node_by_id
-    reshape = node_by_id["visual/seq:3:blocks:attn:@op_l1665_c22_reshape:14"]
+    assert not any("@op_l1663_c26_concat" in n["id"] for n in nodes)
+    reshape = _export_node(nodes, "visual/seq:3:blocks:attn:@op_l1665_c22_reshape")
+    kernel = _export_node(nodes, "visual/seq:3:blocks:attn:@attention:")
     reshape_sources = [e["sourceNodeId"] for e in reshape.get("incomingEdges", [])]
-    assert reshape_sources == ["visual/seq:3:blocks:attn:@attention:12"]
+    assert reshape_sources == [kernel["id"]]
 
 
 def test_glm53_multi_input_concat_sums_operand_widths_not_identity():
@@ -2135,8 +2154,8 @@ def test_glm53_vision_apply_rotary_tuple_returns_dock_per_ordinal():
     def _one(suffix: str) -> dict:
         return next(n for n in nodes if n["id"].endswith(suffix))
 
-    q_embed = _one(":@op_l1577_c14_cast:14")   # rotary tuple slot 0
-    k_embed = _one(":@op_l1578_c14_cast:15")   # rotary tuple slot 1
+    q_embed = _export_node(nodes, ":@op_l1577_c14_cast:")   # rotary tuple slot 0
+    k_embed = _export_node(nodes, ":@op_l1578_c14_cast:")   # rotary tuple slot 1
 
     # Each tuple slot exits through its own frame @output tile, backed by that
     # slot's internal producer.
@@ -2151,8 +2170,8 @@ def test_glm53_vision_apply_rotary_tuple_returns_dock_per_ordinal():
     q_out_mirror = q_out["id"] + "^result_1"
     k_out_mirror = k_out["id"] + "^result_2"
     assert q_out_mirror in node_by_id and k_out_mirror in node_by_id
-    q_transpose = _one(":@op_l1616_c23_transpose:6")
-    k_transpose = _one(":@op_l1617_c21_transpose:8")
+    q_transpose = _export_node(nodes, ":@op_l1616_c23_transpose:")
+    k_transpose = _export_node(nodes, ":@op_l1617_c21_transpose:")
     assert [e["sourceNodeId"] for e in q_transpose["incomingEdges"]] == [q_out_mirror]
     assert [e["sourceNodeId"] for e in k_transpose["incomingEdges"]] == [k_out_mirror]
 
@@ -2212,14 +2231,15 @@ def test_glm53_vision_attention_qk_norm_read_distinct_unbind_slices():
     slice, k_norm over the key slice. Both norms otherwise showed a generic
     ``hidden_states`` @input reading as if they consumed the same tensor.
 
-    The trailing ``unbind`` is a bare view-split hop; it is folded onto its
-    layout-only producer (the ``permute``), which now exposes the three slices as
-    named output ports. Each norm boundary is named after the slice it reads
-    (``query_states`` on producer port 0, ``key_states`` on port 1), so the two
-    siblings are visibly distinct, and no redundant unbind tile survives.
+    Part C keeps the ``unbind`` visible (no elision) and surfaces each of its
+    output slices as its own named, input-styled passthrough tile
+    (``query_states``/``key_states``/``value_states``) -- Model Explorer does not
+    render output-*port* names, so the tiles are what make the slices readable.
+    Each norm boundary reads its own slice tile (``query_states`` = port 0,
+    ``key_states`` = port 1), so the two siblings are visibly distinct.
 
-    The per-slice shapes match the whole -- each slice keeps every non-split axis
-    (``[Pv, 1024]``), it does not shed ``Pv`` down to ``[1024]``.
+    The per-slice shape is the post-permute head-split view (``[Pv, 16, 64]``),
+    the same tensor each norm actually consumes.
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -2228,37 +2248,31 @@ def test_glm53_vision_attention_qk_norm_read_distinct_unbind_slices():
 
     _assert_export_is_acyclic(nodes)
 
-    # The bare unbind hop is gone: its slices moved onto the permute producer.
-    assert not any(
-        n["id"].endswith("attn:@op_l1608_c12_unbind:2") for n in nodes
-    ), "expected the qkv unbind to be folded onto its producer"
-
-    producer = next(
+    # The unbind stays visible; each slice is surfaced as its own named tile.
+    unbind = next(
         n
         for n in nodes
-        if n["id"].endswith("attn:@op_l1608_c12_permute:1")
+        if "attn:@op_l1608_c12_unbind:" in n["id"] and "^@slice_out:" not in n["id"]
     )
-    # The producer carries the three fused-qkv slices as named output ports.
-    port_labels = {
-        str(item["id"]): next(
-            (a["value"] for a in item["attrs"] if a["key"] == "port_label"), None
-        )
-        for item in producer["outputsMetadata"]
+    tiles_by_port = {
+        n["id"].rsplit(":", 1)[1]: n
+        for n in nodes
+        if n["id"].startswith(unbind["id"] + "^@slice_out:")
     }
-    assert port_labels == {
+    assert {port: tile.get("label") for port, tile in tiles_by_port.items()} == {
         "0": "query_states",
         "1": "key_states",
         "2": "value_states",
-    }, port_labels
-    port_shapes = {
-        str(item["id"]): next(
-            a["value"] for a in item["attrs"] if a["key"] == "shape"
-        )
-        for item in producer["outputsMetadata"]
-    }
-    assert all(shape.startswith("[Pv, 1024]") for shape in port_shapes.values()), (
-        port_shapes
-    )
+    }, tiles_by_port
+    for port, tile in tiles_by_port.items():
+        # Each tile reads exactly its own unbind slice port.
+        sources = {
+            (e["sourceNodeId"], str(e.get("sourceNodeOutputId", "0")))
+            for e in tile["incomingEdges"]
+        }
+        assert sources == {(unbind["id"], port)}, (port, sources)
+        shape = _output_shape(tile)
+        assert shape is not None and shape.startswith("[Pv, 16, 64]"), (port, shape)
 
     def _is_input(node) -> bool:
         return any(
@@ -2273,14 +2287,9 @@ def test_glm53_vision_attention_qk_norm_read_distinct_unbind_slices():
             if n.get("namespace", "").endswith(f"/{norm}") and _is_input(n)
         )
         assert tile.get("label") == slot, (norm, tile.get("label"))
-        # Boundary is fed by the matching producer slice port.
-        sources = {
-            (e["sourceNodeId"], e.get("sourceNodeOutputId", "0"))
-            for e in tile["incomingEdges"]
-        }
-        assert sources == {(producer["id"], port)}, (norm, sources)
-        shape = _output_shape(tile)
-        assert shape is not None and shape.startswith("[Pv, 1024]"), (norm, shape)
+        # Boundary is fed by the matching named slice tile.
+        sources = {e["sourceNodeId"] for e in tile["incomingEdges"]}
+        assert sources == {tiles_by_port[port]["id"]}, (norm, sources)
 
     _norm_input("q_norm", "query_states", "0")
     _norm_input("k_norm", "key_states", "1")
@@ -2463,17 +2472,17 @@ def _port_attr(metadata: dict, key: str) -> str | None:
 
 
 def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
-    """The 3-way ``q, k, v = qkv(h)...unbind(0)`` fans out into three real ports.
+    """The 3-way ``q, k, v = qkv(h)...unbind(0)`` fans out into three named tiles.
 
     ``Glm5NextVisionAttention`` unpacks ``query_states, key_states, value_states``
     from ``qkv(h).reshape(...).permute(...).unbind(0)`` and then feeds
     ``q_norm(query_states)`` and ``k_norm(key_states)`` — two submodule calls that
-    each read a *distinct* slot. The trailing ``unbind`` is a bare view-split hop,
-    so it is folded onto its layout-only producer (the ``permute``): that producer
-    now exposes one named output port per slot (no unbind tile, no synthetic
-    per-slice tiles). Each consumer reads its own ordinal via ``sourceNodeOutputId``
-    and each port carries its own slice shape. ``q_norm`` reads ordinal 0, ``k_norm``
-    ordinal 1, ``value_states`` ordinal 2, with no direct ``q_norm``→``k_norm`` edge.
+    each read a *distinct* slot. Part C keeps the ``unbind`` visible and surfaces
+    each of its output slices as its own named, input-styled passthrough tile
+    (``query_states``/``key_states``/``value_states``). The legacy ``@split_out:``
+    dummy-tile prefix must NOT reappear — the tiles use ``^@slice_out:``. Each
+    consumer reads its own slice tile: ``q_norm`` reads slice 0, ``k_norm`` slice 1,
+    the value transpose slice 2, with no direct ``q_norm``→``k_norm`` edge.
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -2483,32 +2492,35 @@ def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
 
     _assert_export_is_acyclic(nodes)
 
-    # The bare unbind hop is gone, and there are no synthetic per-slice tiles.
+    # The obsolete @split_out dummy-tile prefix stays gone; tiles use @slice_out.
     assert not any("@split_out:" in node["id"] for node in nodes)
-    assert not any(node["id"].endswith("@op_l1608_c12_unbind:2") for node in nodes)
 
-    # The slices live on the layout-only producer the unbind was folded into.
-    producer = next(
-        node
-        for node in nodes
-        if "VisionAttention" in node.get("namespace", "")
-        and (_attr_value(node, "output_names") or "").split(",")
-        == ["query_states", "key_states", "value_states"]
+    # The unbind stays visible and fans out into three named slice tiles.
+    unbind = next(
+        n
+        for n in nodes
+        if "attn:@op_l1608_c12_unbind:" in n["id"] and "^@slice_out:" not in n["id"]
     )
-    assert producer["id"].endswith("@op_l1608_c12_permute:1"), producer["id"]
+    tiles_by_port = {
+        n["id"].rsplit(":", 1)[1]: n
+        for n in nodes
+        if n["id"].startswith(unbind["id"] + "^@slice_out:")
+    }
+    assert {port: tile.get("label") for port, tile in tiles_by_port.items()} == {
+        "0": "query_states",
+        "1": "key_states",
+        "2": "value_states",
+    }, tiles_by_port
+    for port, tile in tiles_by_port.items():
+        assert _output_shape(tile), (port, tile["id"])
+        sources = {
+            (e["sourceNodeId"], str(e.get("sourceNodeOutputId", "0")))
+            for e in tile["incomingEdges"]
+        }
+        assert sources == {(unbind["id"], port)}, (port, sources)
 
-    # Three ordinal-keyed output ports, each labeled with its slot and carrying a
-    # per-slice shape (the head-dim slot axis dropped by the unbind).
-    for ordinal, slot in enumerate(
-        ("query_states", "key_states", "value_states")
-    ):
-        port = _port_metadata(producer, str(ordinal))
-        assert port is not None, ordinal
-        assert _port_attr(port, "port_label") == slot
-        assert _port_attr(port, "shape"), slot
-
-    # Each norm's input boundary reads the producer and selects its own ordinal —
-    # k_norm no longer docks to query_states (ordinal 0).
+    # Each norm's input boundary reads its own slice tile — k_norm no longer docks
+    # to query_states (slice 0).
     def _norm_input(kind: str) -> dict:
         return next(
             node
@@ -2520,22 +2532,19 @@ def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
 
     q_norm_input = _norm_input("q_norm")
     k_norm_input = _norm_input("k_norm")
-    q_edges = [
-        e for e in q_norm_input["incomingEdges"] if e["sourceNodeId"] == producer["id"]
-    ]
-    k_edges = [
-        e for e in k_norm_input["incomingEdges"] if e["sourceNodeId"] == producer["id"]
-    ]
-    assert [e["sourceNodeOutputId"] for e in q_edges] == ["0"]
-    assert [e["sourceNodeOutputId"] for e in k_edges] == ["1"]
+    assert {e["sourceNodeId"] for e in q_norm_input["incomingEdges"]} == {
+        tiles_by_port["0"]["id"]
+    }
+    assert {e["sourceNodeId"] for e in k_norm_input["incomingEdges"]} == {
+        tiles_by_port["1"]["id"]
+    }
 
-    # value_states (ordinal 2) is consumed directly by its transpose.
+    # value_states (slice 2) is consumed directly by its transpose.
     value_consumers = [
         node
         for node in nodes
         if any(
-            edge["sourceNodeId"] == producer["id"]
-            and edge.get("sourceNodeOutputId") == "2"
+            edge["sourceNodeId"] == tiles_by_port["2"]["id"]
             for edge in node.get("incomingEdges", [])
         )
     ]
@@ -2558,19 +2567,17 @@ def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
             assert not (sources & k_norm_ids), node["id"]
 
 
-def test_glm53_view_split_folds_onto_layout_producer_not_compute():
-    """A trailing view-split collapses onto a layout-only producer, never a compute one.
+def test_glm53_view_split_stays_visible_with_named_slice_tiles():
+    """Every ``split``/``unbind`` stays visible with one named tile per slice.
 
-    A ``reshape/transpose/permute(...).unbind|split(...)`` chain ends in a pure
-    slice op that computes nothing. When its sole producer is *itself* a
-    layout-only view op that feeds no one else, the split is a redundant hop and
-    is folded away — its named slice ports move onto that producer (general rule,
-    not a vision special case). The text ``self_attn`` ``query, key, value`` split
-    (fed by a ``Transpose``) folds exactly like the vision qkv unbind.
-
-    A split whose producer genuinely transforms values must NOT fold: the
-    ``pre_w/post_w/comb_w`` activation split reads ``F.linear(flat, self.fn)``, so
-    it stays its own tile with the ``Linear`` producer untouched.
+    Part C removed the view-split elision: a ``reshape/transpose(...).split(...)``
+    chain no longer folds its trailing slice op onto the layout producer. Instead
+    the split node stays and each of its output slices becomes its own named,
+    input-styled passthrough tile — Model Explorer does not render output-*port*
+    names, so the tiles are what make the slices readable. This is a general rule,
+    not a vision special case: the text ``self_attn`` ``query, key, value`` split
+    (fed by a ``Transpose``) keeps its three ``query``/``key``/``value`` tiles just
+    like the ``F.linear``-fed ``pre_w/post_w/comb_w`` activation split.
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -2580,30 +2587,50 @@ def test_glm53_view_split_folds_onto_layout_producer_not_compute():
 
     _assert_export_is_acyclic(nodes)
 
-    # --- Folded: the text self_attn query/key/value split (producer = Transpose).
-    qkv_split_ids = [
-        n["id"]
-        for n in nodes
-        if n["id"].endswith("self_attn/seq:11:@op_l688_c28_split:@op_l688_c28_split:0")
-    ]
-    assert not qkv_split_ids, ("split should have folded", qkv_split_ids)
-    transpose = next(
+    # The obsolete @split_out dummy-tile prefix must not reappear.
+    assert not any("@split_out:" in node["id"] for node in nodes)
+
+    def _slice_tiles(split_node: dict) -> dict[str, dict]:
+        return {
+            n["id"].rsplit(":", 1)[1]: n
+            for n in nodes
+            if n["id"].startswith(split_node["id"] + "^@slice_out:")
+        }
+
+    # --- The text self_attn query/key/value split stays visible with 3 tiles.
+    # (Decoder layers collapse into MoE/MLP representatives; either exercises the
+    # same split — pick the first one, excluding its own slice tiles.)
+    qkv_split = next(
         n
         for n in nodes
-        if n["id"].endswith("self_attn/seq:10:@op_l689_c12_transpose:@op_l689_c12_transpose:0")
+        if n["id"].endswith(
+            "self_attn/seq:11:@op_l688_c28_split:@op_l688_c28_split:0"
+        )
     )
-    labels = [
-        _port_attr(port, "port_label") for port in transpose["outputsMetadata"]
-    ]
-    assert labels == ["query", "key", "value"], labels
+    qkv_tiles = _slice_tiles(qkv_split)
+    assert {port: tile.get("label") for port, tile in qkv_tiles.items()} == {
+        "0": "query",
+        "1": "key",
+        "2": "value",
+    }, qkv_tiles
+    for tile in qkv_tiles.values():
+        assert _output_shape(tile), tile["id"]
+    # It is fed by the layout-only Transpose producer (single tensor in).
+    (split_src,) = qkv_split["incomingEdges"]
+    transpose = node_by_id[split_src["sourceNodeId"]]
+    assert transpose["id"].endswith(
+        "self_attn/seq:10:@op_l689_c12_transpose:@op_l689_c12_transpose:0"
+    ), transpose["id"]
 
-    # --- Preserved: the F.linear-fed pre_w/post_w/comb_w split keeps its tile,
+    # --- The F.linear-fed pre_w/post_w/comb_w split also stays, with its tiles,
     # and its Linear producer is left single-port.
     fn_split = next(
         n
         for n in nodes
         if "comb_w" in (_attr_value(n, "output_names") or "")
     )
+    fn_tiles = _slice_tiles(fn_split)
+    assert len(fn_tiles) == 3, fn_tiles
     (producer_edge,) = fn_split["incomingEdges"]
     producer = node_by_id[producer_edge["sourceNodeId"]]
     assert producer.get("label") == "Linear", producer.get("label")
@@ -2828,3 +2855,36 @@ def test_glm53_decoder_spine_gets_loop_carried_boundary():
     vision_in = [n["id"] for n in nodes if "visual/@loop_carried_in:" in n["id"]]
     assert len(vision_in) == 1
     assert "visual/@input:cos" in by_id and "visual/@input:sin" in by_id
+
+
+def test_glm53_vision_attention_qkv_linear_is_restored():
+    """The fused ``qkv`` Linear at the head of vision attention stays visible.
+
+    ``Glm5NextVisionAttention.forward`` opens with
+    ``qkv(hidden_states).reshape(...).permute(...).unbind(0)`` -- a single method
+    chain. The general no-allowlist extraction fix (Part A1) means the leading
+    ``self.qkv(...)`` submodule call is no longer swallowed by the trailing tensor
+    methods: it renders as its own ``Linear`` node that reads the block input and
+    feeds the reshape that begins the q/k/v split. Its learned weight operand stays
+    hidden (#40), so the node keeps a single input.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    node_by_id = {n["id"]: n for n in nodes}
+
+    _assert_export_is_acyclic(nodes)
+
+    qkv = _export_node(nodes, "seq:3:blocks:attn:qkv:")
+    assert qkv.get("label") == "Linear", qkv.get("label")
+    # Reads the block input directly; the learned weight operand is hidden.
+    sources = {e["sourceNodeId"] for e in qkv["incomingEdges"]}
+    assert sources == {"visual/@input:hidden_states"}, sources
+
+    # It feeds the reshape that opens the qkv split chain (reshape -> permute ->
+    # unbind), so the fused projection is really wired into the attention path.
+    reshape = _export_node(nodes, "seq:3:blocks:attn:@op_l1608_c12_reshape:")
+    reshape_sources = {e["sourceNodeId"] for e in reshape["incomingEdges"]}
+    assert qkv["id"] in reshape_sources, reshape_sources
+    assert node_by_id[qkv["id"]]  # sanity: node is present in the export

@@ -620,6 +620,18 @@ def test_styles_readability_finalization_and_group_config_ordering():
     )
 
 
+def test_output_port_style_matches_input_blue():
+    """@output boundary ports carry the same input-blue fill as @input ports.
+
+    Part D: an @output tile is a data boundary, not computation, so it must read
+    as an interface port (input blue ``#d9e8f5``) rather than the old distinct
+    output color — matching ``input_port_style`` exactly.
+    """
+    out_style = styles.output_port_style()
+    assert out_style["backgroundColor"] == "#d9e8f5"
+    assert out_style == styles.input_port_style()
+
+
 @pytest.mark.parametrize(
     ("synthetic", "label", "operation", "has_children", "background"),
     [

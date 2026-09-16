@@ -187,6 +187,40 @@ def test_wire_multi_input_bridges_only_dangling_consumer():
     assert (1, 2) not in guarded.links
 
 
+def _qkv_producer_graph(emit_producer: bool):
+    """Root where a ``reshape`` op reads a leaf ``qkv`` submodule producer.
+
+    Part A2 setup: ``qkv`` is a leaf submodule (no children, not a forward op), so
+    it must emit exactly one node. The ``reshape`` operation lists it as a
+    predecessor. When ``emit_producer`` is False the ``qkv`` node is missing from
+    the graph (the historical silent-drop), which the recurrence guard must catch.
+    """
+    qkv = _node("qkv", class_name="Linear", forward_order=0)
+    reshape = _node(
+        "@op_l1_c0_reshape",
+        class_name="Reshape",
+        forward_order=1,
+        operation_predecessors=["qkv"],
+    )
+    root = _node("root", children=[qkv, reshape])
+    nodes = []
+    if emit_producer:
+        nodes.append(_spec(block=qkv, key="qkv"))
+    nodes.append(_spec(block=reshape, key="reshape"))
+    graph = cg.ComputationGraph(nodes=nodes)
+    cg._wire_all_predecessor_edges(graph, root, input_index=None)
+    return graph
+
+
+def test_recurrence_guard_flags_dropped_submodule_producer():
+    # Missing producer: the guard raises, naming the dropped ``qkv`` submodule.
+    with pytest.raises(cg.DroppedSubmoduleProducerError, match="qkv"):
+        _qkv_producer_graph(emit_producer=False)
+    # Emitted producer: no error, and the reshape docks onto the qkv node.
+    graph = _qkv_producer_graph(emit_producer=True)
+    assert (0, 1) in graph.links
+
+
 def test_forward_steps_by_attr():
     a = _node("a")
     b = _node("b")

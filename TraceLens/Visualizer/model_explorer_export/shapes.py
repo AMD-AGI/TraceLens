@@ -21,6 +21,7 @@ from TraceLens.ModelUtils.shape_inference import (
     _permute_shape,
     _reduce_conv_spatial,
     _resolve_cast_dtype,
+    _resolve_expand_shape,
     _resolve_view_shape,
 )
 
@@ -455,6 +456,49 @@ def _fallback_node_spec(
             shape = list(source.shape)
             shape.insert(max(0, min(dim, len(shape))), 1)
             return TensorSpec(tuple(shape), source.dtype)
+
+    if label == "Squeeze" and specs:
+        source = specs[0]
+        dim_detail = next(
+            (
+                detail.split(":", 1)[1].strip()
+                for detail in details
+                if detail.startswith("dim:")
+            ),
+            None,
+        )
+        shape = list(source.shape)
+        if not shape:
+            return source
+        if dim_detail is None:
+            # Bare squeeze drops every size-1 axis.
+            return TensorSpec(
+                tuple(size for size in shape if size != 1), source.dtype
+            )
+        try:
+            dim = int(dim_detail)
+        except ValueError:
+            return source
+        axis = dim % len(shape)
+        if 0 <= axis < len(shape) and shape[axis] == 1:
+            del shape[axis]
+            return TensorSpec(tuple(shape), source.dtype)
+        return source
+
+    if label == "Expand" and specs:
+        source = specs[0]
+        shape_detail = next(
+            (
+                detail.split(":", 1)[1].strip()
+                for detail in details
+                if detail.startswith("shape:")
+            ),
+            "",
+        )
+        resolved = _resolve_expand_shape(shape_detail, source, dims or {})
+        if resolved is not None:
+            return TensorSpec(resolved, source.dtype)
+        return source
 
     if label in {"Multiply", "Add", "×", "+"} and len(specs) >= 2:
         rank = max(len(spec.shape) for spec in specs)

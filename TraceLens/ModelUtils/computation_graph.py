@@ -564,6 +564,38 @@ def _has_inline_attention_child(block: BlockNode) -> bool:
     )
 
 
+class DroppedSubmoduleProducerError(RuntimeError):
+    """A forward operation references a submodule producer that never emitted a node.
+
+    The safety net behind the ``qkv`` extraction fix (Part A2): historically a
+    dropped submodule call (e.g. ``qkv`` when a method chain hid it) was wired at
+    the ``source_index is None`` choke point by silently skipping the edge, so the
+    consumer fell back to reading the module boundary. Raising here converts any
+    such future silent drop into a detectable error naming the missing producer.
+    """
+
+
+def _leaf_submodule_producers(wiring_blocks: list[BlockNode]) -> set[str]:
+    """Attr names of leaf submodule calls that must emit exactly one node.
+
+    A leaf submodule child (no children of its own, not a forward operation --
+    e.g. a fused ``qkv`` Linear) renders as a single node. If such a name is
+    referenced as an operation predecessor but has no emitted node, it was
+    silently dropped. Inline-expanded modules (``q_norm`` etc.) are excluded: they
+    have children, so their own attr legitimately maps to no single node.
+    """
+    producers: set[str] = set()
+    for block in wiring_blocks:
+        for child in getattr(block, "children", []) or []:
+            if (
+                child.attr_name
+                and not is_forward_operation(child.attr_name)
+                and not (getattr(child, "children", []) or [])
+            ):
+                producers.add(child.attr_name)
+    return producers
+
+
 def _iter_wiring_blocks(root: BlockNode) -> list[BlockNode]:
     """Return *root* plus descendant blocks that own an inline attention kernel.
 
@@ -613,6 +645,10 @@ def _wire_all_predecessor_edges(
     # attention's ``@attention``) keep their real q/k/v and output edges.
     wiring_blocks = _iter_wiring_blocks(root)
 
+    # Leaf submodule producers (e.g. a fused ``qkv`` Linear) that must each emit a
+    # node; used by the A2 recurrence guard to catch a silently-dropped producer.
+    leaf_submodule_producers = _leaf_submodule_producers(wiring_blocks)
+
     # Build per-module param entry indices from inline frames so that
     # side-fed arguments land on the correct expanded pipeline node.  Graph-wide
     # and independent of which block we are wiring, so build it once.
@@ -644,6 +680,15 @@ def _wire_all_predecessor_edges(
                 else:
                     source_index = attr_last_index.get(pred)
                 if source_index is None:
+                    # A2 recurrence guard: a leaf submodule producer referenced
+                    # here must have emitted a node. If it did not, it was silently
+                    # dropped (the historical ``qkv`` bug) -- fail loudly naming it
+                    # instead of skipping the edge and falling back to ``@input``.
+                    if pred in leaf_submodule_producers:
+                        raise DroppedSubmoduleProducerError(
+                            f"operation {child.attr_name!r} references submodule "
+                            f"producer {pred!r} that was never emitted as a node"
+                        )
                     continue
                 # A consumer reading a specific return slot of an inline-expanded
                 # tuple-returning free function (``query_states`` = ordinal 0 of
@@ -743,6 +788,16 @@ def _wire_all_predecessor_edges(
 
             for pred, arg_name in pairs:
                 if pred == FORWARD_METHOD_INPUT:
+                    # A descendant wiring block (an inline-expanded nested module
+                    # such as a vision attention) is visited only to wire its
+                    # flattened kernel edges; its steps' ``@method_input`` was
+                    # already bound to the module's real argument by the inline
+                    # pipeline chain at node-construction time. Mapping it to the
+                    # enclosing graph's global input here would add a second,
+                    # spurious edge — e.g. the attention's first op ``qkv`` reading
+                    # both ``norm1`` (its true arg) and the raw block input.
+                    if block is not root:
+                        continue
                     source_index = input_index
                 else:
                     source_index = attr_last_index.get(pred)

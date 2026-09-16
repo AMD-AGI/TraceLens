@@ -1350,6 +1350,29 @@ def test_cast_contiguous_squeeze_expand():
     assert expanded.shape[-1] == 4096
 
 
+def test_squeeze_drops_named_and_negative_size_one_axis():
+    # ``x.squeeze(dim)`` drops only a *size-1* axis, and a negative dim is
+    # normalized against rank (owner requirement: squeeze must support negatives).
+    inf = _make_inferencer()
+    src = TensorSpec(("B", 1, "S", 1), "float16")
+
+    # Positive dim hitting the size-1 axis 1.
+    pos = inf._infer_node_output(_node("squeeze", details=["dim: 1"]), [src], root=None)
+    assert pos.shape == ("B", "S", 1)
+
+    # Negative dim -1 == axis 3 (size 1) -> dropped.
+    neg = inf._infer_node_output(_node("squeeze", details=["dim: -1"]), [src], root=None)
+    assert neg.shape == ("B", 1, "S")
+
+    # Negative dim pointing at a non-1 axis is a torch no-op (passthrough).
+    noop = inf._infer_node_output(_node("squeeze", details=["dim: -2"]), [src], root=None)
+    assert noop.shape == ("B", 1, "S", 1)
+
+    # Bare squeeze drops every size-1 axis.
+    bare = inf._infer_node_output(_node("squeeze"), [src], root=None)
+    assert bare.shape == ("B", "S")
+
+
 def test_topk_with_empty_source_shape():
     inf = _make_inferencer()
     inf.context.dims[Symbol.EXPERTS_PER_TOK.value] = 4

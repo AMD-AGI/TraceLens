@@ -1711,7 +1711,10 @@ class ShapeInferencer:
                 return inputs[0]
             return TensorSpec(self._active_hidden_shape(), dtype)
 
-        if operation_label in {"cast", "contiguous", "squeeze", "expand"}:
+        if operation_label in {"cast", "contiguous"}:
+            # Both keep the source shape. ``contiguous`` is a pure layout no-op
+            # (shape *and* dtype pass through); ``cast`` reads its ``dtype:``
+            # detail to change dtype only.
             source = (
                 inputs[0]
                 if inputs
@@ -1719,19 +1722,63 @@ class ShapeInferencer:
                 or TensorSpec(self._active_hidden_shape(), dtype)
             )
             cast_dtype = source.dtype
-            dtype_detail = next(
-                (
-                    item.split(":", 1)[1].strip()
-                    for item in details
-                    if item.startswith("dtype:")
-                ),
-                "",
-            )
-            if operation_label == "cast" and dtype_detail:
-                cast_dtype = _resolve_cast_dtype(
-                    dtype_detail, source.dtype, self.context.dtype
-                )
+            if operation_label == "cast":
+                dtype_detail = _detail_value(details, "dtype") or ""
+                if dtype_detail:
+                    cast_dtype = _resolve_cast_dtype(
+                        dtype_detail, source.dtype, self.context.dtype
+                    )
             return TensorSpec(shape=source.shape, dtype=cast_dtype)
+
+        if operation_label == "squeeze":
+            # Drop a size-1 axis (torch no-ops on any other size). ``x.squeeze(dim)``
+            # normalizes a negative ``dim`` against rank; bare ``x.squeeze()`` drops
+            # every size-1 axis.
+            source = (
+                inputs[0]
+                if inputs
+                else external_spec()
+                or TensorSpec(self._active_hidden_shape(), dtype)
+            )
+            shape = source.shape
+            if not shape:
+                return source
+            dim_str = _detail_value(details, "dim")
+            if dim_str is None:
+                # Bare squeeze: drop all size-1 axes.
+                reduced = tuple(size for size in shape if size != 1)
+                return TensorSpec(shape=reduced, dtype=source.dtype)
+            dim = _int_dim(dim_str)
+            if dim is None:
+                return source
+            axis = dim % len(shape)
+            if 0 <= axis < len(shape) and shape[axis] == 1:
+                return TensorSpec(
+                    shape=tuple(
+                        size for index, size in enumerate(shape) if index != axis
+                    ),
+                    dtype=source.dtype,
+                )
+            return source
+
+        if operation_label == "expand":
+            # Broadcast a size-1 axis to a concrete target. Uses its OWN resolver:
+            # unlike view/reshape, ``expand``'s ``-1`` means "keep this axis" (not
+            # element conservation). Falls back to passthrough when the target
+            # cannot be positionally aligned, never corrupting rank.
+            source = (
+                inputs[0]
+                if inputs
+                else external_spec()
+                or TensorSpec(self._active_hidden_shape(), dtype)
+            )
+            shape_detail = _detail_value(details, "shape") or ""
+            resolved = _resolve_expand_shape(
+                shape_detail, source, self.context.dims
+            )
+            if resolved is not None:
+                return TensorSpec(shape=resolved, dtype=source.dtype)
+            return source
 
         if operation_label == "topk":
             source = (
@@ -2560,16 +2607,33 @@ class ShapeInferencer:
         """
         known = self.module_dims.known_classes()
         candidates: list[str] = []
-        for name in (
-            node.metadata.get("class_name"),
-            self._owner_class_name(node, root),
-            root.class_name if root is not None else None,
-        ):
+
+        def _add(name: str | None) -> None:
             # Only real module-owning classes scope the lookup; a primitive op
             # label (``Conv2d``/``View``) in node metadata is not an owner, so it
             # must not block the attr-only fallback for an unscoped node.
             if name and name in known and name not in candidates:
                 candidates.append(name)
+
+        _add(node.metadata.get("class_name"))
+        # Every module segment along the id path is a potential declaring class
+        # for this node's attr, most specific first. A leaf module call (``qkv``)
+        # resolves its own attr segment to its instance class (``Linear``, a
+        # primitive that is filtered out here); the enclosing module
+        # (``Glm5NextVisionAttention``) is the class that DECLARES ``self.qkv`` and
+        # owns the ``(class, attr)`` linear/conv spec. Walk the whole ancestor
+        # chain — not just the first match — so an inline-expanded leaf resolves
+        # against its declaring class even when node metadata carries no class.
+        if root is not None:
+            classes = self._owner_classes.get(id(root))
+            if classes is None:
+                classes = _descendant_classes(root)
+                self._owner_classes[id(root)] = classes
+            for segment in reversed(re.split(r"[:/]", node.id)):
+                if segment.startswith("@"):
+                    continue
+                _add(classes.get(segment))
+        _add(root.class_name if root is not None else None)
         return candidates
 
     def _lookup_linear_spec(
@@ -2937,6 +3001,45 @@ def _resolve_view_shape(
         resolved[neg_index] = merged
 
     return tuple(resolved) if resolved else None
+
+
+def _resolve_expand_shape(
+    detail: str,
+    source: TensorSpec,
+    dims: dict[str, DimExpr],
+) -> tuple[DimExpr, ...] | None:
+    """Resolve ``Tensor.expand`` arguments into a concrete broadcast shape.
+
+    ``expand`` broadcasts existing size-1 axes to a larger size; a ``-1`` (or a
+    value matching the current axis) keeps that axis unchanged. This differs from
+    ``view``/``reshape`` (whose ``-1`` means element conservation), so it needs
+    its own resolver. Alignment is positional against ``source.shape``: on any
+    rank mismatch — the args cannot be aligned axis-for-axis (e.g. the router's
+    ``-1, 1, 288`` against a 4-D source) — return ``None`` so the caller passes
+    the source through rather than corrupting its rank.
+    """
+    if not detail or not source.shape:
+        return None
+    parts = [p.strip() for p in detail.split(",") if p.strip()]
+    if len(parts) != len(source.shape):
+        return None  # cannot align axis-for-axis — pass through
+    resolved: list[DimExpr] = []
+    for part, current in zip(parts, source.shape):
+        if part == "-1":
+            resolved.append(current)
+            continue
+        try:
+            target: DimExpr | None = int(part)
+        except ValueError:
+            target = _resolve_dim_name(part, dims)
+        # Only a genuine size-1 axis broadcasts; every other axis keeps its
+        # current (possibly symbolic) size — matching what a ``-1`` would do and
+        # torch's requirement that a non-1 axis equal the requested size.
+        if target is not None and current == 1 and target != 1:
+            resolved.append(target)
+        else:
+            resolved.append(current)
+    return tuple(resolved)
 
 
 def _looks_valid(result: TensorSpec, inputs: list[TensorSpec]) -> bool:

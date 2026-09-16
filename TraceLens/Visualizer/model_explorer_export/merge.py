@@ -2143,6 +2143,111 @@ def _elide_view_split_onto_producer(nodes: list[dict[str, Any]]) -> None:
     nodes[:] = [node for node in nodes if str(node.get("id")) not in removed_ids]
 
 
+def _port_meta_attr(port: dict[str, Any], key: str) -> str | None:
+    """Read one attr value from a port's ``outputsMetadata`` entry."""
+    for attr in port.get("attrs", []):
+        if attr.get("key") == key:
+            value = attr.get("value")
+            if isinstance(value, str):
+                return value
+    return None
+
+
+def _add_split_slice_tiles(nodes: list[dict[str, Any]]) -> None:
+    """Surface each output slice of a multi-output split (``Unbind`` / ``Split`` /
+    ``Chunk``) as its own named, input-styled passthrough tile.
+
+    Model Explorer does not render output-*port* names, so a split's per-slice
+    ports (``query_states`` / ``key_states`` / ``value_states``) are invisible on
+    the split node itself, and folding the split away would hide the split
+    entirely. Mirroring how the rotary block surfaces named ``cos`` / ``sin``
+    tiles, synthesize one tile per slice carrying the slot label and that slice's
+    shape, and rewire every consumer of the port to read the tile instead. The
+    split node stays visible -- no computation is hidden -- and every slice now
+    shows a readable name and its own shape.
+
+    General: fires for any ``Unbind`` / ``Split`` / ``Chunk`` node with two or
+    more output slices. Per-slice shapes come from ``outputsMetadata`` when a
+    ``ShapeInferencer`` drove the build; without one the tiles still appear, named
+    from the node's ``output_names`` attr (index-aligned to the ports consumers
+    already read) -- the split's topology must not depend on shape inference being
+    available. Uses a distinct ``@slice_out`` synthetic tag -- it must not
+    reintroduce the retired ``@split_out:`` id prefix.
+    """
+    tiles: list[dict[str, Any]] = []
+    # (split_id, port_id) -> (tile_id, tile_port) for every slice we surface.
+    port_redirect: dict[tuple[str, str], tuple[str, str]] = {}
+    for node in nodes:
+        if str(node.get("label") or "") not in {"Unbind", "Split", "Chunk"}:
+            continue
+        split_id = str(node.get("id"))
+        namespace = str(node.get("namespace", ""))
+        ports = node.get("outputsMetadata", []) or []
+        # (port_id, port_label, shape_value) per slice. Prefer the shape-bearing
+        # ``outputsMetadata``; fall back to the ``output_names`` attr so the tiles
+        # exist even when no ShapeInferencer stamped per-port shapes.
+        slices: list[tuple[str, str, str | None]] = []
+        if len(ports) >= 2:
+            for port in ports:
+                port_id = str(port.get("id", "0"))
+                label = _port_meta_attr(port, "port_label") or f"slice_{port_id}"
+                slices.append((port_id, label, _port_meta_attr(port, "shape")))
+        else:
+            names = [
+                name.strip()
+                for name in (_node_attr(node, "output_names") or "").split(",")
+                if name.strip()
+            ]
+            if len(names) >= 2:
+                slices = [(str(i), name, None) for i, name in enumerate(names)]
+        if len(slices) < 2:
+            continue  # a single-output "split" is not really a split
+        for port_id, port_label, shape_value in slices:
+            tile_id = f"{split_id}^@slice_out:{port_id}"
+            tile = _make_group_input_node(
+                input_id=tile_id,
+                label=port_label,
+                namespace=namespace,
+                port_label=port_label,
+                incoming_edges=[
+                    {
+                        "sourceNodeId": split_id,
+                        "sourceNodeOutputId": port_id,
+                        "targetNodeInputId": "0",
+                        "metadata": {"port_label": port_label},
+                    }
+                ],
+            )
+            # A slice tile is not a real graph-input boundary; tag it distinctly so
+            # boundary passes (mirroring, pruning) leave it alone.
+            tile["attrs"] = [
+                {"key": "synthetic", "value": "@slice_out"},
+                {"key": "port_label", "value": port_label},
+            ]
+            if shape_value:
+                dims, dtype = _split_shape_dtype(shape_value)
+                apply_shape_attrs(tile, TensorSpec(tuple(dims), dtype or "float16"))
+            tiles.append(tile)
+            port_redirect[(split_id, port_id)] = (tile_id, "0")
+
+    if not port_redirect:
+        return
+
+    # Repoint each existing consumer of a split port onto its new tile. The tiles
+    # are not in ``nodes`` yet, so their own edge back to the split is untouched.
+    for node in nodes:
+        for edge in node.get("incomingEdges", []) or []:
+            key = (
+                str(edge.get("sourceNodeId") or ""),
+                str(edge.get("sourceNodeOutputId", "0")),
+            )
+            target = port_redirect.get(key)
+            if target is not None:
+                edge["sourceNodeId"], edge["sourceNodeOutputId"] = target
+
+    nodes.extend(tiles)
+
+
 def _node_output_dims(node: dict[str, Any], port: str) -> list[str] | None:
     """Dims recorded for one output port of ``node`` (dtype stripped), if known.
 
@@ -4222,7 +4327,6 @@ def build_merged_model_graph(
                 ports=root_ports,
             )
         )
-    _prune_noop_cast_nodes(nodes)
     _prune_unconsumed_outputs(nodes)
     _label_boundary_outputs_by_port(nodes)
     _mirror_boundary_inputs(nodes)
@@ -4234,6 +4338,11 @@ def build_merged_model_graph(
         fill_missing_node_shapes(nodes, context=shape_inferencer.context)
         _reconcile_edge_endpoint_shapes(nodes)
         _assert_edge_endpoint_shapes_agree(nodes)
+
+    # Elide no-op (same-dtype) casts and keep dtype-changing ones. Runs AFTER
+    # the shape-settle block so the dynamic ``.to(x.dtype)`` casts have their
+    # dtype attrs populated and resolve as bfloat16->bfloat16 no-ops.
+    _prune_noop_cast_nodes(nodes)
 
     model_attrs: dict[str, str] = {
         "title": spec.name,
@@ -4249,10 +4358,11 @@ def build_merged_model_graph(
         model_attrs["layer_mix"] = spec.layer_mix
     model_attrs.update(build_fact_sheet_group_attributes(spec))
 
-    # Fold trailing view-splits (qkv unbind, q/k/v split) onto their layout-only
-    # producer so the slices show as named ports, not a redundant pass-through
-    # tile. Runs after shapes settle so the re-homed ports carry final shapes.
-    _elide_view_split_onto_producer(nodes)
+    # Surface each split/unbind slice (qkv unbind, q/k/v split) as its own named,
+    # input-styled tile. Model Explorer does not render output-port names, so the
+    # split node stays visible and each slice gets a readable name + its own
+    # shape. Runs after shapes settle so the tiles carry final per-slice shapes.
+    _add_split_slice_tiles(nodes)
 
     # Drop no-op single-input Concats (in==out): the vision sdpa fallback's
     # per-chunk reassembly cat collapses to one representative kernel output, so it
