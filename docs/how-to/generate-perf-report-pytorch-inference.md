@@ -510,10 +510,11 @@ batch. `n_arrivals` is only meaningful when the frontend and worker traces share
 a profiler clock. Idle `execute_context_0(0)_generation_0(0)` annotations are
 dropped; decode-only `execute_context_0(0)_generation_N(N)` steps are kept.
 
-Engine steps come from `--profile_json_path` (the GPU worker). The frontend tree
-is built with `TraceToTree(..., prune_nongpu_paths=False)` and
-`add_python_func=True` so CPU-only AsyncLLM traces keep their python_function
-spans.
+Engine steps come from `--profile_json_path` (the GPU worker). The frontend
+file is prefiltered to `_send_input`, `assign_request_id`, `create_completion`,
+`process_outputs`, and `_finish_request` before `TraceToTree` runs
+(`add_python_func=True`, `prune_nongpu_paths=False`). Magpie AsyncLLM traces
+otherwise contain millions of unrelated python spans.
 
 Run the tool with `--help` for the complete, version-specific argument list.
 

@@ -23,6 +23,7 @@ from TraceLens.TraceUtils.vllm_async_llm import (
     SHEET_INGRESS,
     SHEET_OUTPUT_GROUPS,
     build_vllm_async_llm_report_dfs,
+    prefilter_async_llm_events,
     python_display_name,
 )
 from tests.fixtures.reporting import _build_synthetic_trace, _mk_event
@@ -213,6 +214,32 @@ def test_finish_via_python_parent_id_when_not_nested(tmp_path):
     assert len(groups) == 1
     assert groups.loc[0, "n_finished"] == 1
     assert dfs[SHEET_ENGINE_STEPS].loc[0, "n_finished"] == 1
+
+
+def test_prefilter_drops_unrelated_python_spans(tmp_path):
+    noise = [
+        _py(f"asyncio/base_events.py({i}): _run_once", ts=1500 + i, dur=1)
+        for i in range(200)
+    ]
+    events = _async_llm_events() + noise
+    kept = prefilter_async_llm_events(events)
+    assert all(
+        python_display_name(e.get("name") or "")
+        in {
+            "_send_input",
+            "assign_request_id",
+            "create_completion",
+            "process_outputs",
+            "_finish_request",
+        }
+        for e in kept
+    )
+    assert len(kept) == len(_async_llm_events()) - 2  # drops _create_completion + _send_input_message
+    async_path = _write_chrome(tmp_path / "async.json", events)
+    dfs = build_vllm_async_llm_report_dfs(async_path, worker_events=_worker_events())
+    assert len(dfs[SHEET_INGRESS]) == 2
+    assert len(dfs[SHEET_OUTPUT_GROUPS]) == 3
+    assert len(dfs[SHEET_ENGINE_STEPS]) == 2
 
 
 def test_keeps_decode_only_engine_step(tmp_path):

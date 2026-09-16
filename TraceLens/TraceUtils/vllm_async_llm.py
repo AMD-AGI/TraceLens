@@ -41,6 +41,19 @@ DISPLAY_CREATE_COMPLETION = "create_completion"
 DISPLAY_PROCESS_OUTPUTS = "process_outputs"
 DISPLAY_FINISH = "_finish_request"
 
+# Magpie AsyncLLM traces record the whole frontend process. Only these
+# python_function display names carry request-lifecycle signal; the rest
+# (tokenizer internals, asyncio, etc.) must not enter TraceToTree.
+KEEP_PYTHON_DISPLAYS = frozenset(
+    {
+        DISPLAY_SEND_INPUT,
+        DISPLAY_ASSIGN,
+        DISPLAY_CREATE_COMPLETION,
+        DISPLAY_PROCESS_OUTPUTS,
+        DISPLAY_FINISH,
+    }
+)
+
 _INGRESS_COLUMNS = ["event_ord", "t_http_ms", "t_assign_ms", "t_send_ms"]
 _OUTPUT_GROUP_COLUMNS = [
     "group",
@@ -91,6 +104,22 @@ def load_chrome_events(path: str) -> List[dict]:
     if isinstance(data, list):
         return data
     raise ValueError(f"No Chrome traceEvents in {path}")
+
+
+def prefilter_async_llm_events(events: Sequence[dict]) -> List[dict]:
+    """Keep request-lifecycle python spans; drop metadata and unrelated stacks.
+
+    A colocated Magpie AsyncLLM file is typically millions of python_function
+    events. TraceToTree on that set OOMs; the grains only need the five
+    display names in ``KEEP_PYTHON_DISPLAYS``.
+    """
+    kept: List[dict] = []
+    for event in events:
+        if event.get("ph") == "M":
+            continue
+        if python_display_name(event.get("name") or "") in KEEP_PYTHON_DISPLAYS:
+            kept.append(event)
+    return kept
 
 
 def build_async_llm_tree(events: List[dict]) -> TraceToTree:
@@ -229,7 +258,12 @@ def build_vllm_async_llm_report_dfs(
     worker_events: Optional[Sequence[dict]] = None,
 ) -> Dict[str, pd.DataFrame]:
     """Build the three AsyncLLM sheets from an explicit frontend trace path."""
-    events = load_chrome_events(async_llm_trace_path)
+    raw_events = load_chrome_events(async_llm_trace_path)
+    events = prefilter_async_llm_events(raw_events)
+    print(
+        f"vLLM AsyncLLM prefilter: {len(raw_events)} events -> "
+        f"{len(events)} request-lifecycle spans"
+    )
     tree = build_async_llm_tree(events)
 
     http_events = http_create_completion_events(tree.events)
