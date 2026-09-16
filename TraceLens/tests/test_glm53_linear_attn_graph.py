@@ -2719,3 +2719,36 @@ def test_glm53_live_meta_tree_is_authoritative_for_grouping():
         11,
         31,
     }
+
+
+def test_glm53_vision_block_renders_as_secondary_nx_group():
+    """Deliverable D: the vision tower block renders its own 24× group with a
+    count-bearing namespace + repeat attribute, mirroring the decoder banner,
+    and the merged graph stays acyclic."""
+    from TraceLens.ModelUtils.extract import reconcile_live_module_groups
+    from TraceLens.ModelUtils.meta_trace import walk_meta_module_tree
+
+    checkpoint = "zai-org/GLM-5.3-Flash"
+    spec = load_model_spec(checkpoint, detailed=True)
+    reconcile_live_module_groups(spec, walk_meta_module_tree(checkpoint))
+
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    _assert_export_is_acyclic(nodes)
+
+    block_ns = {
+        n["namespace"]
+        for n in nodes
+        if n.get("namespace", "").startswith("visual/24x_Glm5NextVisionBlock")
+    }
+    assert block_ns, "vision block body should be renamed to the 24× namespace"
+    # The bare (count-less) block namespace must be fully rewritten.
+    assert not any(
+        n.get("namespace", "").split("/")[-1] == "Glm5NextVisionBlock" for n in nodes
+    )
+    attrs = graph["groupNodeAttributes"]
+    assert attrs["visual/24x_Glm5NextVisionBlock"]["repeat"] == "24x_Glm5NextVisionBlock"
+    # The decoder's own N× banner is unaffected (its element class is the primary).
+    assert "45x_Glm5NextTextDecoderLayer" in attrs
+    # Node ids stay stable (edges intact) — only the namespace field was rewritten.
+    assert any(str(n["id"]).startswith("visual/seq:3:blocks") for n in nodes)

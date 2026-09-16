@@ -2289,3 +2289,147 @@ def test_merge_data_movement_reshape_flatten_and_expand():
     # Expand keeps the source dim at its ``-1`` slot (broadcast, not flatten).
     exp = merge._data_movement_shape(_op("Expand", "-1, 8"), TensorSpec((4, 1)), spec=spec)
     assert exp.shape == (4, 8)
+
+
+# ---------------------------------------------------------------------------
+# Secondary ModuleList tagging (Deliverable D — vision tower N× groups)
+# ---------------------------------------------------------------------------
+
+
+def _meta_group(path, length, element_class):
+    from TraceLens.ModelUtils.meta_trace import MetaModuleGroup
+
+    return MetaModuleGroup(
+        path=path,
+        length=length,
+        element_class=element_class,
+        signatures=("()",) * length,
+    )
+
+
+def test_rename_namespace_prefix_rewrites_nodes_attrs_and_configs():
+    nodes = [
+        {"id": "visual.blocks/x", "namespace": "visual/VisionBlock"},
+        {"id": "visual.blocks/y", "namespace": "visual/VisionBlock/Attn"},
+        {"id": "other", "namespace": "visual/PatchEmbed"},
+    ]
+    attrs = {
+        "visual/VisionBlock": {"input_shape": "[Pv, 1024]"},
+        "visual/VisionBlock/Attn": {"input_shape": "[Pv, 1024]"},
+        "visual/PatchEmbed": {"input_shape": "[Pv, 1176]"},
+    }
+    import re as _re
+
+    configs = [
+        {"namespaceRegex": f"^{_re.escape('visual/VisionBlock')}$"},
+        {"namespaceRegex": f"^{_re.escape('visual/VisionBlock/Attn')}$"},
+        {"namespaceRegex": f"^{_re.escape('visual/PatchEmbed')}$"},
+    ]
+    merge._rename_namespace_prefix(
+        nodes, attrs, configs, "visual/VisionBlock", "visual/24x_VisionBlock"
+    )
+    # node ids untouched; only namespace rewritten, and only under the prefix.
+    assert [n["namespace"] for n in nodes] == [
+        "visual/24x_VisionBlock",
+        "visual/24x_VisionBlock/Attn",
+        "visual/PatchEmbed",
+    ]
+    assert [n["id"] for n in nodes] == ["visual.blocks/x", "visual.blocks/y", "other"]
+    assert set(attrs) == {
+        "visual/24x_VisionBlock",
+        "visual/24x_VisionBlock/Attn",
+        "visual/PatchEmbed",
+    }
+    assert configs[0]["namespaceRegex"] == f"^{_re.escape('visual/24x_VisionBlock')}$"
+    assert configs[1]["namespaceRegex"] == f"^{_re.escape('visual/24x_VisionBlock/Attn')}$"
+    assert configs[2]["namespaceRegex"] == f"^{_re.escape('visual/PatchEmbed')}$"
+
+
+def test_tag_secondary_module_groups_tags_vision_block_not_decoder():
+    spec = SimpleNamespace(
+        decoder_class="DecoderLayer",
+        meta_module_groups=[
+            _meta_group("language_model.layers", 45, "DecoderLayer"),
+            _meta_group("visual.blocks", 24, "VisionBlock"),
+        ],
+    )
+    nodes = [
+        {"id": "decoder/a", "namespace": "45x_DecoderLayer"},
+        {"id": "visual.blocks/b", "namespace": "visual/VisionBlock"},
+        {"id": "visual.blocks/c", "namespace": "visual/VisionBlock/Attn"},
+    ]
+    attrs = {"visual/VisionBlock": {"input_shape": "[Pv, 1024]"}}
+    configs: list = []
+    merge._tag_secondary_module_groups(
+        nodes,
+        spec=spec,
+        group_node_attributes=attrs,
+        group_node_configs=configs,
+    )
+    # Vision block gets the count-bearing namespace + repeat attr; decoder (its
+    # element class already the primary banner) is left alone.
+    assert {n["namespace"] for n in nodes} == {
+        "45x_DecoderLayer",
+        "visual/24x_VisionBlock",
+        "visual/24x_VisionBlock/Attn",
+    }
+    assert attrs["visual/24x_VisionBlock"]["repeat"] == "24x_VisionBlock"
+    assert attrs["visual/24x_VisionBlock"]["input_shape"] == "[Pv, 1024]"
+    assert any(
+        c["namespaceRegex"] == "^visual/24x_VisionBlock$"
+        and c["borderColor"] == "#c0392b"
+        for c in configs
+    )
+
+
+def test_tag_secondary_module_groups_two_disjoint_repeat_namespaces():
+    """Two independent secondary ModuleLists -> two disjoint N× namespaces."""
+    spec = SimpleNamespace(
+        decoder_class="",
+        meta_module_groups=[
+            _meta_group("audio.blocks", 6, "AudioBlock"),
+            _meta_group("visual.blocks", 24, "VisionBlock"),
+        ],
+    )
+    nodes = [
+        {"id": "audio/x", "namespace": "audio/AudioBlock"},
+        {"id": "visual/y", "namespace": "visual/VisionBlock"},
+    ]
+    attrs: dict = {}
+    configs: list = []
+    merge._tag_secondary_module_groups(
+        nodes, spec=spec, group_node_attributes=attrs, group_node_configs=configs
+    )
+    assert {n["namespace"] for n in nodes} == {
+        "audio/6x_AudioBlock",
+        "visual/24x_VisionBlock",
+    }
+    assert attrs["audio/6x_AudioBlock"]["repeat"] == "6x_AudioBlock"
+    assert attrs["visual/24x_VisionBlock"]["repeat"] == "24x_VisionBlock"
+
+
+def test_tag_secondary_module_groups_noops_without_match_or_groups():
+    # No meta groups -> untouched.
+    nodes = [{"id": "n", "namespace": "visual/VisionBlock"}]
+    attrs: dict = {}
+    configs: list = []
+    merge._tag_secondary_module_groups(
+        nodes,
+        spec=SimpleNamespace(decoder_class="", meta_module_groups=[]),
+        group_node_attributes=attrs,
+        group_node_configs=configs,
+    )
+    assert nodes[0]["namespace"] == "visual/VisionBlock"
+    assert not configs
+    # Group whose element class matches no rendered namespace -> untouched.
+    merge._tag_secondary_module_groups(
+        nodes,
+        spec=SimpleNamespace(
+            decoder_class="",
+            meta_module_groups=[_meta_group("experts", 128, "ExpertMLP")],
+        ),
+        group_node_attributes=attrs,
+        group_node_configs=configs,
+    )
+    assert nodes[0]["namespace"] == "visual/VisionBlock"
+    assert not configs

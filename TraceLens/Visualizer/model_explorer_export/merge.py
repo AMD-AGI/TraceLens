@@ -3635,6 +3635,88 @@ def _attach_vision_language_combine(
     return [(combine_id, "0")]
 
 
+def _rename_namespace_prefix(
+    nodes: list[dict[str, Any]],
+    group_node_attributes: dict[str, dict[str, str]],
+    group_node_configs: list[dict[str, Any]],
+    old: str,
+    new: str,
+) -> None:
+    """Rewrite the namespace segment ``old`` -> ``new`` across nodes, group
+    attributes, and config regexes. Only the ``namespace`` field is touched —
+    node ids (and therefore edges) are left intact, exactly as the decoder group
+    keeps ``decoder/...`` ids under the ``45x_...`` namespace."""
+    for node in nodes:
+        ns = node.get("namespace", "")
+        if ns == old or ns.startswith(old + "/"):
+            node["namespace"] = new + ns[len(old):]
+    for key in list(group_node_attributes.keys()):
+        if key == old or key.startswith(old + "/"):
+            group_node_attributes[new + key[len(old):]] = group_node_attributes.pop(key)
+    esc_old, esc_new = re.escape(old), re.escape(new)
+    for config in group_node_configs:
+        regex = config.get("namespaceRegex")
+        if isinstance(regex, str) and esc_old in regex:
+            config["namespaceRegex"] = regex.replace(esc_old, esc_new)
+
+
+def _tag_secondary_module_groups(
+    nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group_node_attributes: dict[str, dict[str, str]],
+    group_node_configs: list[dict[str, Any]],
+) -> None:
+    """Tag secondary repeated ModuleLists (e.g. a VLM vision tower's block) as
+    their own ``N×`` group, mirroring the decoder banner.
+
+    The primary decoder ModuleList is already grouped via ``_decoder_namespace``.
+    Every *other* live ``MetaModuleGroup`` (vision tower blocks, etc.) is rendered
+    as a single inline body namespaced by its element class — a repeated block with
+    no visible count. Here we rename that body's namespace segment ``Cls`` ->
+    ``{length}x_Cls`` so the viewer shows the count exactly like the decoder, and
+    add the matching ``repeat`` attribute + red group styling. Purely a
+    namespace/attribute rewrite — no new nodes or edges, so it cannot create a
+    cycle. Degrades to a no-op when the live tree is unavailable or no rendered
+    namespace matches a secondary group's element class."""
+    groups = getattr(spec, "meta_module_groups", None)
+    if not groups:
+        return
+    decoder_seg = _sanitize_namespace_segment(spec.decoder_class or "")
+    existing = {node.get("namespace", "") for node in nodes}
+    for group in groups:
+        if group.length < 2:
+            continue
+        seg = _sanitize_namespace_segment(group.element_class)
+        if not seg or seg == decoder_seg:
+            continue
+        # The block body is the outermost rendered namespace whose final segment
+        # is the element class (its children carry their own class segments).
+        candidates = [ns for ns in existing if ns and ns.rsplit("/", 1)[-1] == seg]
+        if not candidates:
+            continue
+        old_ns = min(candidates, key=len)
+        parent, _, _ = old_ns.rpartition("/")
+        new_seg = f"{group.length}x_{seg}"
+        new_ns = f"{parent}/{new_seg}" if parent else new_seg
+        if new_ns == old_ns or new_ns in existing:
+            continue
+        _rename_namespace_prefix(
+            nodes, group_node_attributes, group_node_configs, old_ns, new_ns
+        )
+        group_node_attributes.setdefault(new_ns, {})["repeat"] = new_seg
+        group_node_configs.append(
+            {
+                "namespaceRegex": f"^{re.escape(new_ns)}$",
+                "backgroundColor": "#fff5f4",
+                "borderColor": "#c0392b",
+                "textColor": "#1a1a1a",
+                "layoutDirection": "TOP_BOTTOM",
+            }
+        )
+        existing = {node.get("namespace", "") for node in nodes}
+
+
 def build_merged_model_graph(
     spec: ArchitectureSpec,
     *,
@@ -3831,6 +3913,17 @@ def build_merged_model_graph(
     _elide_noop_single_input_concat(nodes)
 
     finalize_graph_node_styles(nodes)
+
+    # Tag secondary repeated ModuleLists (e.g. the vision tower block) as their
+    # own N× groups from the live meta tree, mirroring the decoder banner. Runs
+    # after styles settle and before group attributes/configs are assembled so
+    # the renamed namespaces flow into both.
+    _tag_secondary_module_groups(
+        nodes,
+        spec=spec,
+        group_node_attributes=group_node_attributes,
+        group_node_configs=group_node_configs,
+    )
 
     graph_attributes: dict[str, dict[str, str]] = {
         "": model_attrs,
