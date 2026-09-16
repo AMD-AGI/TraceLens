@@ -46,6 +46,16 @@ def build_model_explorer_payload(
     )
     if inferencer is not None and meta_shapes_checkpoint is not None:
         inferencer.load_meta_shapes(meta_shapes_checkpoint)
+    if meta_shapes_checkpoint is not None:
+        # Drive the N× repeated-block grouping (count, banner class, sub-variant
+        # counts) from the live meta module tree instead of config ints + role
+        # regexes. This runs before the graph/fact-sheet read the spec. It is
+        # independent of load_meta_shapes (structure needs only instantiation, never
+        # the fragile forward); reconcile is a no-op when instantiation fails.
+        from TraceLens.ModelUtils.extract import reconcile_live_module_groups
+        from TraceLens.ModelUtils.meta_trace import walk_meta_module_tree
+
+        reconcile_live_module_groups(spec, walk_meta_module_tree(meta_shapes_checkpoint))
     graph = build_merged_model_graph(
         spec,
         basic_ops=_export_basic_ops(resolved_basic_ops),

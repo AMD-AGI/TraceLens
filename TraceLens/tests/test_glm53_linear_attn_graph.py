@@ -2681,3 +2681,41 @@ def test_glm53_hyperconnection_weight_only_ops_are_hidden():
         if any(e["sourceNodeId"] == split_id for e in n.get("incomingEdges", []))
     ]
     assert consumers, "the surviving split must still feed downstream ops"
+
+
+def test_glm53_live_meta_tree_is_authoritative_for_grouping():
+    """The live meta module tree drives the N× grouping, overriding config ints,
+    and captures the vision tower as a secondary repeated group."""
+    from collections import Counter
+
+    from TraceLens.ModelUtils.extract import reconcile_live_module_groups
+    from TraceLens.ModelUtils.meta_trace import walk_meta_module_tree
+
+    checkpoint = "zai-org/GLM-5.3-Flash"
+    spec = load_model_spec(checkpoint, detailed=True)
+    groups = walk_meta_module_tree(checkpoint)
+    assert groups is not None, "meta instantiation should succeed on the meta device"
+
+    # Prove the live len() is authoritative by corrupting the AST/config count first.
+    spec.num_hidden_layers = 999
+    reconcile_live_module_groups(spec, groups)
+    assert spec.num_hidden_layers == 45  # len(language_model.layers)
+    assert spec.decoder_class == "Glm5NextTextDecoderLayer"
+
+    # Sub-variant counts come from the per-element structural signatures (31/11/3),
+    # with the AST's rich attention/ffn classes preserved (equal cardinality).
+    assert sorted(v.count for v in spec.layer_variants) == [3, 11, 31]
+    assert {v.attention_class for v in spec.layer_variants} == {
+        "Glm5NextTextLinearAttention",
+        "Glm5NextTextAttention",
+    }
+
+    # The vision tower is captured as an independent repeated group (Deliverable D).
+    by_path = {g.path: g for g in spec.meta_module_groups}
+    assert by_path["visual.blocks"].length == 24
+    assert by_path["visual.blocks"].element_class == "Glm5NextVisionBlock"
+    assert set(Counter(by_path["language_model.layers"].signatures).values()) == {
+        3,
+        11,
+        31,
+    }

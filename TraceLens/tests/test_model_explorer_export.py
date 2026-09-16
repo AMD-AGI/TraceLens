@@ -1488,3 +1488,40 @@ def test_build_model_explorer_payload_custom_model():
 
     labels = {node["label"].split("\n", 1)[0] for node in graphs[0]["nodes"]}
     assert "Linear" in labels
+
+
+def test_payload_reconciles_live_module_groups(monkeypatch):
+    """build_model_explorer_payload wires the live meta-tree walk into the spec."""
+    import TraceLens.ModelUtils.meta_trace as meta_trace
+    from TraceLens.ModelUtils.meta_trace import MetaModuleGroup
+
+    spec = load_architecture(FIXTURES / "custom_model", name="x", detailed=True)
+    canned = [
+        MetaModuleGroup(
+            path="model.layers",
+            length=99,
+            element_class=spec.decoder_class or "Blk",
+            signatures=("(a)",) * 99,
+        )
+    ]
+    monkeypatch.setattr(meta_trace, "walk_meta_module_tree", lambda _ck: canned)
+    build_model_explorer_payload(
+        spec, include_shapes=False, meta_shapes_checkpoint="fake/ckpt"
+    )
+    # live len() drove the banner count and the groups were stored on the spec
+    assert spec.num_hidden_layers == 99
+    assert spec.meta_module_groups == canned
+
+
+def test_payload_skips_reconcile_when_walk_returns_none(monkeypatch):
+    """Graceful degradation: no meta groups -> spec count untouched."""
+    import TraceLens.ModelUtils.meta_trace as meta_trace
+
+    spec = load_architecture(FIXTURES / "custom_model", name="x", detailed=True)
+    original = spec.num_hidden_layers
+    monkeypatch.setattr(meta_trace, "walk_meta_module_tree", lambda _ck: None)
+    build_model_explorer_payload(
+        spec, include_shapes=False, meta_shapes_checkpoint="fake/ckpt"
+    )
+    assert spec.num_hidden_layers == original
+    assert spec.meta_module_groups == []
