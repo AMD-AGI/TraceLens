@@ -43,8 +43,11 @@ from TraceLens.ModelUtils.extract import (
     find_vision_tower,
     load_architecture,
     parse_architecture,
+    reconcile_live_module_groups,
     vision_tower_component,
 )
+from TraceLens.ModelUtils.blocks import LayerVariant
+from TraceLens.ModelUtils.meta_trace import MetaModuleGroup
 
 
 def _structure(name: str, **kwargs) -> ClassStructure:
@@ -609,3 +612,91 @@ def test_load_architecture_local_checkpoint_detailed(tmp_path):
     assert spec.decoder_class == "DecoderLayer"
     assert spec.export_block_trees
     assert spec.basic_ops is not None
+
+
+# ---------------------------------------------------------------------------
+# reconcile_live_module_groups (live meta-tree grouping override)
+# ---------------------------------------------------------------------------
+
+
+def _group(path, length, element_class, signatures):
+    return MetaModuleGroup(
+        path=path,
+        length=length,
+        element_class=element_class,
+        signatures=tuple(signatures),
+    )
+
+
+def test_reconcile_live_count_overrides_config():
+    spec = ArchitectureSpec(name="x", model_type="x", num_hidden_layers=8)
+    spec.decoder_class = "FooDecoderLayer"
+    groups = [_group("model.layers", 31, "FooDecoderLayer", ["(a)"] * 31)]
+    reconcile_live_module_groups(spec, groups)
+    assert spec.num_hidden_layers == 31
+    assert spec.meta_module_groups == groups
+
+
+def test_reconcile_labels_banner_when_decoder_class_missing():
+    spec = ArchitectureSpec(name="x", model_type="x", num_hidden_layers=4)
+    spec.decoder_class = None  # AST could not name it (opaque _from_config)
+    groups = [_group("language_model.layers", 4, "OpaqueBlock", ["(a)"] * 4)]
+    reconcile_live_module_groups(spec, groups)
+    assert spec.decoder_class == "OpaqueBlock"
+
+
+def test_reconcile_synthesizes_variants_from_signatures():
+    spec = ArchitectureSpec(name="x", model_type="x", num_hidden_layers=14)
+    spec.decoder_class = "Blk"
+    sigs = ["(Attn,MLP)"] * 11 + ["(Attn,MoE)"] * 3
+    reconcile_live_module_groups(spec, [_group("layers", 14, "Blk", sigs)])
+    assert spec.num_hidden_layers == 14
+    counts = sorted(v.count for v in spec.layer_variants)
+    assert counts == [3, 11]
+
+
+def test_reconcile_overrides_counts_on_matching_cardinality():
+    spec = ArchitectureSpec(name="x", model_type="x", num_hidden_layers=14)
+    spec.decoder_class = "Blk"
+    # AST produced two rich variants but with wrong counts.
+    spec.layer_variants = [
+        LayerVariant(label="full", count=7, attention_label="Full",
+                     attention_class="FullAttn", ffn_class="MLP"),
+        LayerVariant(label="lin", count=7, attention_label="Lin",
+                     attention_class="LinAttn", ffn_class="MLP"),
+    ]
+    sigs = ["(FullAttn,MLP)"] * 11 + ["(LinAttn,MLP)"] * 3
+    reconcile_live_module_groups(spec, [_group("layers", 14, "Blk", sigs)])
+    by_count = {v.count: v for v in spec.layer_variants}
+    assert set(by_count) == {11, 3}
+    # rich AST classes preserved, only counts changed
+    assert by_count[11].attention_class == "FullAttn"
+    assert by_count[3].attention_class == "LinAttn"
+
+
+def test_reconcile_single_bucket_clears_variants():
+    spec = ArchitectureSpec(name="x", model_type="x", num_hidden_layers=6)
+    spec.decoder_class = "Blk"
+    spec.layer_variants = [LayerVariant(label="x", count=6, attention_label="A")]
+    reconcile_live_module_groups(spec, [_group("layers", 6, "Blk", ["(a)"] * 6)])
+    assert spec.layer_variants == []
+
+
+def test_reconcile_none_leaves_spec_unchanged():
+    spec = ArchitectureSpec(name="x", model_type="x", num_hidden_layers=8)
+    spec.decoder_class = "Keep"
+    reconcile_live_module_groups(spec, None)
+    assert spec.num_hidden_layers == 8
+    assert spec.decoder_class == "Keep"
+    assert spec.meta_module_groups == []
+
+
+def test_reconcile_selects_primary_by_decoder_class_over_longest():
+    spec = ArchitectureSpec(name="x", model_type="x", num_hidden_layers=0)
+    spec.decoder_class = "TextLayer"
+    groups = [
+        _group("visual.blocks", 40, "VisionBlock", ["(v)"] * 40),  # longest
+        _group("model.layers", 28, "TextLayer", ["(t)"] * 28),  # decoder class
+    ]
+    reconcile_live_module_groups(spec, groups)
+    assert spec.num_hidden_layers == 28  # picked the decoder, not the vision tower

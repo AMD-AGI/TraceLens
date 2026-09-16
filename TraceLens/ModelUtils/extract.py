@@ -9,9 +9,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from TraceLens.ModelUtils.meta_trace import MetaModuleGroup
 
 from TraceLens.ModelUtils.ast_analyze import analyze_sources, dump_ast
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
@@ -28,6 +32,8 @@ from TraceLens.ModelUtils.config_resolve import (
 )
 from TraceLens.ModelUtils.github import fetch_github_source, github_config_path, parse_github_url
 from TraceLens.ModelUtils.source import read_sources, resolve_source_files
+
+_log = logging.getLogger(__name__)
 
 BYTES_PER_BF16 = 2
 
@@ -77,6 +83,10 @@ class ArchitectureSpec:
     layer_mix: str | None = None
     layer_variants: list[LayerVariant] = field(default_factory=list)
     layer_repeat_lines: list[str] = field(default_factory=list)
+    # Canonical pre-substitution repeat lines ("N × Class (v in range(...))"), kept so
+    # _finalize_layer_repeat_lines is idempotent and can be re-run after the live-tree
+    # reconciliation changes counts.
+    layer_repeat_lines_raw: list[str] = field(default_factory=list)
     layer_notes: list[str] = field(default_factory=list)
 
     # Embeddings / output
@@ -89,6 +99,9 @@ class ArchitectureSpec:
     checkpoint_source: str = ""
     github_source: str = ""
     raw_config: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    # Live meta-tree structure (repeated ModuleLists), when instantiation succeeds.
+    meta_module_groups: list[MetaModuleGroup] = field(default_factory=list)
 
     # AST-derived block graph
     block_components: list[BlockComponent] = field(default_factory=list)
@@ -720,6 +733,105 @@ def _infer_layer_variants(
         spec.layer_notes.append("Per-layer module types from AST/config")
 
 
+def _select_primary_group(
+    spec: ArchitectureSpec, groups: list[MetaModuleGroup]
+) -> MetaModuleGroup | None:
+    """Pick the decoder ModuleList from the live groups — no role/name heuristic.
+
+    Prefer the group whose elements are the AST-named decoder class, else the
+    conventional ``layers`` attribute path, else the longest repeated ModuleList.
+    """
+    if not groups:
+        return None
+    if spec.decoder_class:
+        for group in groups:
+            if group.element_class == spec.decoder_class:
+                return group
+    for group in groups:
+        if group.path == "layers" or group.path.endswith(".layers"):
+            return group
+    return max(groups, key=lambda group: group.length)
+
+
+def _reconcile_layer_variants(
+    spec: ArchitectureSpec, primary: MetaModuleGroup
+) -> None:
+    """Drive sub-variant counts from the live per-element structural signatures."""
+    from collections import Counter
+
+    buckets = Counter(primary.signatures)
+    if len(buckets) <= 1:
+        # A single uniform block — the N× banner alone suffices.
+        spec.layer_variants = []
+        return
+
+    live_counts = sorted(buckets.values(), reverse=True)
+    ast_variants = spec.layer_variants
+    if ast_variants and len(ast_variants) == len(buckets):
+        # Keep the AST-derived rich labels/classes (they feed subgraph resolution via
+        # class_registry) but take the authoritative counts from the live buckets,
+        # matching the AST's descending-count ordering.
+        ordered = sorted(ast_variants, key=lambda variant: -variant.count)
+        for variant, count in zip(ordered, live_counts):
+            variant.count = count
+        spec.layer_variants = ordered
+        return
+
+    # Cardinality disagrees (AST produced none or a different number): synthesize
+    # from the live signatures. Labels degrade to the discriminating child-class
+    # string, but the counts stay correct and the grouping stays acyclic.
+    variants: list[LayerVariant] = []
+    for signature, count in sorted(
+        buckets.items(), key=lambda item: (-item[1], item[0])
+    ):
+        variants.append(
+            LayerVariant(
+                label=f"{primary.element_class} {signature}",
+                count=count,
+                attention_label=primary.element_class,
+            )
+        )
+    spec.layer_variants = variants
+
+
+def reconcile_live_module_groups(
+    spec: ArchitectureSpec, groups: list[MetaModuleGroup] | None
+) -> None:
+    """Override the repeated-block grouping from the live meta module tree.
+
+    The N× decoder group's count and banner class, plus the sub-variant counts, come
+    from ``len(nn.ModuleList)`` + element class name + per-element structural signature
+    read off the instantiated tree — no name regex, no config-key role guessing, and
+    it sees through opaque ``_from_config`` sub-stacks the AST cannot follow. When
+    *groups* is *None* (torch unavailable / instantiation failed) the spec is left
+    untouched so the config-derived banner stands (graceful degradation).
+    """
+    if not groups:
+        return
+    spec.meta_module_groups = list(groups)
+
+    primary = _select_primary_group(spec, groups)
+    if primary is None:
+        return
+
+    # Live len() is the authoritative repeated-block count.
+    if spec.num_hidden_layers != primary.length:
+        _log.info(
+            "live ModuleList %r len=%d overrides config num_hidden_layers=%s",
+            primary.path,
+            primary.length,
+            spec.num_hidden_layers,
+        )
+        spec.num_hidden_layers = primary.length
+    # Label the banner from the live element class when AST could not name it (e.g.
+    # GLM-5.3's opaque _from_config decoder).
+    if not spec.decoder_class:
+        spec.decoder_class = primary.element_class
+
+    _reconcile_layer_variants(spec, primary)
+    _finalize_layer_repeat_lines(spec)
+
+
 def _config_moe_layer(layer_idx: int, config: dict[str, Any]) -> bool:
     num_experts = _as_int(
         _get(
@@ -900,10 +1012,17 @@ def _rebuild_stack_components(
 
 
 def _finalize_layer_repeat_lines(spec: ArchitectureSpec) -> None:
-    """Fill in resolved layer counts on AST-derived repeat lines."""
-    if not spec.layer_repeat_lines:
+    """Fill in resolved layer counts on AST-derived repeat lines.
+
+    Idempotent: always rebuilds from ``layer_repeat_lines_raw`` (the canonical
+    pre-substitution lines) so it can be re-run after the live-tree reconciliation
+    changes ``num_hidden_layers``/``layer_variants`` without duplicating variant
+    lines or leaving a stale count.
+    """
+    raw = spec.layer_repeat_lines_raw or spec.layer_repeat_lines
+    if not raw:
         return
-    lines = list(spec.layer_repeat_lines)
+    lines = list(raw)
     if spec.num_hidden_layers is not None and lines:
         first = lines[0]
         if first.startswith("N ×"):
@@ -935,6 +1054,7 @@ def _merge_code_analysis(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None
     spec.custom_blocks = list(analysis.custom_blocks)
     spec.class_registry = dict(analysis.class_registry)
     spec.layer_repeat_lines = list(analysis.layer_repeat_lines)
+    spec.layer_repeat_lines_raw = list(analysis.layer_repeat_lines)
     _rebuild_stack_components(spec, analysis)
     if spec.raw_config and spec.num_hidden_layers:
         _infer_layer_variants(
