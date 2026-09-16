@@ -14,6 +14,7 @@ from TraceLens.util import (
     PftraceParser,
     RocprofParser,
     TraceEventUtils,
+    merge_intervals,
     suppress_native_hlo_logs,
 )
 from TraceLens.Agent.Analysis.category_analyses import (
@@ -724,6 +725,46 @@ def test_dataloader_load_json_gz(tmp_path):
     assert DataLoader.load_data(str(trace_path)) == payload
 
 
+@pytest.mark.parametrize("compressed", [False, True])
+def test_json_loading_does_not_import_jax_dependencies(
+    tmp_path, monkeypatch, compressed
+):
+    real_import = __import__
+
+    def reject_converter_import(name, *args, **kwargs):
+        if name.split(".", 1)[0] in {"xprof", "tensorboard_plugin_profile"}:
+            raise AssertionError("JSON loading must not import a JAX converter")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", reject_converter_import)
+    payload = {"traceEvents": [{"name": "kernel", "cat": "kernel"}]}
+    trace_path = tmp_path / ("trace.json.gz" if compressed else "trace.json")
+    if compressed:
+        with gzip.open(trace_path, "wt", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+    else:
+        trace_path.write_text(json.dumps(payload))
+
+    assert DataLoader.load_data(str(trace_path)) == payload
+
+
+@pytest.mark.parametrize("hlo_metadata", [False, True])
+def test_protobuf_loading_requires_jax_extra(monkeypatch, hlo_metadata):
+    real_import = __import__
+
+    def reject_converter_import(name, *args, **kwargs):
+        if name.split(".", 1)[0] in {"xprof", "tensorboard_plugin_profile"}:
+            raise ModuleNotFoundError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", reject_converter_import)
+    with pytest.raises(ImportError, match=r"TraceLens\[jax\]"):
+        if hlo_metadata:
+            JaxProfileProcessor.process_protobuf_file("trace.xplane.pb", "main")
+        else:
+            DataLoader.load_data("trace.xplane.pb")
+
+
 def test_dataloader_save_preprocessed_json(tmp_path):
     payload = {"events": [1, 2, 3]}
     trace_path = tmp_path / "trace.json"
@@ -1252,3 +1293,34 @@ class TestAnalysisUtilsPhase8:
             comparison_scope="standalone",
         )
         assert isinstance(metrics, list)
+
+
+class TestMergeIntervals:
+    """Validate the canonical interval-merging helper shared by GPUEventAnalyser,
+    RocprofAnalyzer, and genesis_analysis."""
+
+    def test_non_overlapping(self):
+        intervals = [(0, 10), (20, 30), (40, 50)]
+        assert merge_intervals(intervals) == [(0, 10), (20, 30), (40, 50)]
+
+    def test_overlapping(self):
+        intervals = [(0, 15), (10, 25), (20, 30)]
+        assert merge_intervals(intervals) == [(0, 30)]
+
+    def test_adjacent(self):
+        intervals = [(0, 10), (10, 20)]
+        assert merge_intervals(intervals) == [(0, 20)]
+
+    def test_unsorted_input(self):
+        intervals = [(40, 50), (0, 10), (5, 15)]
+        assert merge_intervals(intervals) == [(0, 15), (40, 50)]
+
+    def test_empty_list(self):
+        assert merge_intervals([]) == []
+
+    def test_single_interval(self):
+        assert merge_intervals([(100, 200)]) == [(100, 200)]
+
+    def test_fully_nested(self):
+        intervals = [(0, 100), (10, 50), (20, 30)]
+        assert merge_intervals(intervals) == [(0, 100)]

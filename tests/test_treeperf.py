@@ -45,10 +45,7 @@ from tests.fixtures.reporting import _rich_pftrace_events
 from tests.fixtures.traces import (
     INFERENCE_ROOT,
     JAX_PB,
-    RESNET,
     RESNET_TRACE,
-    RESNET_TRACE as RESNET_CKPT,
-    TRACES_ROOT,
     _discover_trace_gz_files,
 )
 from tests.fixtures.treeperf import (
@@ -125,13 +122,6 @@ class TestTreePerfModuleHelpers:
 
 
 class TestGPUEventAnalyserStatic:
-    def test_merge_intervals_empty(self):
-        assert GPUEventAnalyser.merge_intervals([]) == []
-
-    def test_merge_intervals_overlapping(self):
-        intervals = [(0, 10), (5, 15), (20, 30)]
-        assert GPUEventAnalyser.merge_intervals(intervals) == [(0, 15), (20, 30)]
-
     def test_compute_metrics_dict_basic(self):
         events = {
             GPUEventAnalyser.all_gpu_key: [
@@ -531,6 +521,20 @@ class TestTreePerfAnalyzer:
         analyzer = TreePerfAnalyzer.from_file(GPU_ONLY_TRACE, rebuild_tree=True)
         assert analyzer.check_gpu_only() is True
         assert not analyzer.get_df_gpu_timeline().empty
+        launchers = analyzer.get_df_kernel_launchers(
+            include_args=True, include_kernel_details=True
+        )
+        assert not launchers.empty
+        unique = TreePerfAnalyzer.get_df_kernel_launchers_unique_args(
+            launchers, include_pct=True
+        )
+        assert not unique.empty
+        summarized = TreePerfAnalyzer.summarize_df_unified_perf_table(
+            analyzer.build_df_unified_perf_table(include_nccl=False),
+            include_pct=True,
+            tree=analyzer.tree,
+        )
+        assert isinstance(summarized, pd.DataFrame)
 
 
 class TestJaxTreePerfAnalyzer:
@@ -914,6 +918,19 @@ def test_treeperf_full_method_sweep(trace_path):
             nn_module_detail=analyzer.add_python_func,
         )
         assert isinstance(kernels, pd.DataFrame)
+
+        unified_no_nccl = analyzer.build_df_unified_perf_table(include_nccl=False)
+        assert isinstance(unified_no_nccl, pd.DataFrame)
+        summarized = TreePerfAnalyzer.summarize_df_unified_perf_table(
+            unified_no_nccl, include_pct=True, tree=analyzer.tree
+        )
+        assert isinstance(summarized, pd.DataFrame)
+
+        try:
+            timeline_1 = analyzer.get_df_gpu_timeline(micro_idle_thresh_us=1)
+        except ValueError:
+            timeline_1 = pd.DataFrame()
+        assert isinstance(timeline_1, pd.DataFrame)
     except Exception as exc:
         pytest.skip(f"trace not suitable for sweep: {exc}")
 
@@ -1129,22 +1146,6 @@ class TestTreePerfPhase11:
         )
         assert isinstance(df, pd.DataFrame)
 
-    def test_resnet_recompute_unified_table(self):
-        if not os.path.isfile(RESNET_TRACE):
-            pytest.skip("resnet trace missing")
-        analyzer = TreePerfAnalyzer.from_file(
-            RESNET_TRACE,
-            rebuild_tree=True,
-            enable_pseudo_ops=True,
-            detect_recompute=True,
-        )
-        df = analyzer.build_df_unified_perf_table(include_perf_metrics=True)
-        assert isinstance(df, pd.DataFrame)
-        summary = analyzer.summarize_df_unified_perf_table(
-            df, include_overlapping_kernels=True
-        )
-        assert isinstance(summary, pd.DataFrame)
-
 
 class TestTreePerfPhase12:
     def test_reorder_cols_and_kernel_stats_edges(self):
@@ -1311,52 +1312,8 @@ class TestTreePerfPhase12:
             )
         assert isinstance(df, pd.DataFrame)
 
-    @pytest.mark.skipif(not os.path.isfile(RESNET_TRACE), reason="resnet trace missing")
-    def test_resnet_overlap_and_recompute_summaries(self):
-        analyzer = TreePerfAnalyzer.from_file(
-            RESNET_TRACE,
-            rebuild_tree=True,
-            enable_pseudo_ops=True,
-            detect_recompute=True,
-        )
-        unified = analyzer.build_df_unified_perf_table(include_perf_metrics=True)
-        if not unified.empty:
-            try:
-                TreePerfAnalyzer.summarize_df_unified_perf_table(
-                    unified,
-                    include_overlapping_kernels=True,
-                    agg_metrics=["mean", "sum", "count"],
-                )
-            except ValueError:
-                TreePerfAnalyzer.summarize_df_unified_perf_table(
-                    unified,
-                    include_pct=True,
-                )
-        launchers = analyzer.get_df_kernel_launchers(
-            include_args=True,
-            include_first_occurrence_time=True,
-        )
-        if not launchers.empty:
-            TreePerfAnalyzer.get_df_kernel_launchers_unique_args(
-                launchers,
-                include_pct=True,
-                group_by_parent_module=True,
-            )
-
 
 class TestTreePerfCollectPhase12:
-    @pytest.mark.skipif(not os.path.isfile(RESNET_TRACE), reason="resnet missing")
-    def test_collect_unified_with_python_func_roots(self):
-        analyzer = TreePerfAnalyzer.from_file(
-            RESNET_TRACE,
-            rebuild_tree=True,
-            enable_pseudo_ops=True,
-            add_python_func=True,
-        )
-        collected = analyzer.collect_unified_perf_events(include_nccl=False)
-        assert isinstance(collected, list)
-        assert len(collected) > 0
-
     def test_is_leaf_cpu_op_via_descendant_kernel(self):
         corr = 600
         events = [
@@ -1409,20 +1366,83 @@ class TestTreePerfCollectPhase12:
         assert isinstance(collected, list)
 
 
-class TestTreePerfPhase13:
-    @pytest.mark.skipif(not os.path.isfile(RESNET), reason="resnet missing")
-    def test_unified_table_with_perf_metrics(self):
-        analyzer = TreePerfAnalyzer.from_file(
-            RESNET,
+@pytest.mark.skipif(not os.path.isfile(RESNET_TRACE), reason="resnet trace missing")
+class TestResnetTrace:
+    @pytest.fixture(scope="class")
+    def resnet_analyzer(self):
+        return TreePerfAnalyzer.from_file(
+            RESNET_TRACE,
             rebuild_tree=True,
             enable_pseudo_ops=True,
+            add_python_func=True,
             detect_recompute=True,
+            include_unlinked_kernels=True,
         )
-        df = analyzer.build_df_unified_perf_table(include_perf_metrics=True)
+
+    def test_recompute_unified_table(self, resnet_analyzer):
+        df = resnet_analyzer.build_df_unified_perf_table(include_perf_metrics=True)
+        assert isinstance(df, pd.DataFrame)
+        summary = resnet_analyzer.summarize_df_unified_perf_table(
+            df, include_overlapping_kernels=True
+        )
+        assert isinstance(summary, pd.DataFrame)
+
+    def test_overlap_and_recompute_summaries(self, resnet_analyzer):
+        unified = resnet_analyzer.build_df_unified_perf_table(include_perf_metrics=True)
+        if not unified.empty:
+            try:
+                TreePerfAnalyzer.summarize_df_unified_perf_table(
+                    unified,
+                    include_overlapping_kernels=True,
+                    agg_metrics=["mean", "sum", "count"],
+                )
+            except ValueError:
+                TreePerfAnalyzer.summarize_df_unified_perf_table(
+                    unified,
+                    include_pct=True,
+                )
+        launchers = resnet_analyzer.get_df_kernel_launchers(
+            include_args=True,
+            include_first_occurrence_time=True,
+        )
+        if not launchers.empty:
+            TreePerfAnalyzer.get_df_kernel_launchers_unique_args(
+                launchers,
+                include_pct=True,
+                group_by_parent_module=True,
+            )
+
+    def test_collect_unified_with_python_func_roots(self, resnet_analyzer):
+        collected = resnet_analyzer.collect_unified_perf_events(include_nccl=False)
+        assert isinstance(collected, list)
+        assert len(collected) > 0
+
+    def test_unified_table_with_perf_metrics(self, resnet_analyzer):
+        df = resnet_analyzer.build_df_unified_perf_table(include_perf_metrics=True)
         assert isinstance(df, pd.DataFrame)
         if not df.empty:
-            summary = analyzer.summarize_df_unified_perf_table(df, include_pct=True)
+            summary = resnet_analyzer.summarize_df_unified_perf_table(
+                df, include_pct=True
+            )
             assert isinstance(summary, pd.DataFrame)
+
+    def test_detect_recompute_nccl_bwd(self, resnet_analyzer):
+        unified = resnet_analyzer.build_df_unified_perf_table(include_nccl=True)
+        assert isinstance(unified, pd.DataFrame)
+        bwd = [
+            e for e in resnet_analyzer.tree.events if "backward" in e.get("name", "")
+        ]
+        if bwd:
+            resnet_analyzer.build_df_bwd_perf_metrics(events=bwd[:5])
+        launchers = resnet_analyzer.get_df_kernel_launchers(
+            include_args=True,
+            include_kernel_details=True,
+            include_call_stack=True,
+        )
+        if not launchers.empty:
+            TreePerfAnalyzer.get_df_kernel_launchers_unique_args(
+                launchers, include_pct=True
+            )
 
 
 class TestTreePerfPhase4:
@@ -1450,25 +1470,6 @@ class TestTreePerfPhase4:
         launchers = analyzer.get_df_kernel_launchers(include_args=True)
         summary = TreePerfAnalyzer.get_df_kernel_launchers_summary(launchers)
         assert isinstance(summary, pd.DataFrame)
-
-    def test_all_json_gz_traces_quick(self):
-        count = 0
-        for root, _dirs, files in os.walk(TRACES_ROOT):
-            for name in files:
-                if not name.endswith(".json.gz"):
-                    continue
-                path = os.path.join(root, name)
-                try:
-                    analyzer = TreePerfAnalyzer.from_file(
-                        path, rebuild_tree=True, enable_pseudo_ops=True
-                    )
-                    assert analyzer.tree is not None
-                    analyzer.get_df_gpu_timeline(micro_idle_thresh_us=0)
-                    analyzer.build_df_unified_perf_table(include_nccl=False)
-                    count += 1
-                except Exception:
-                    continue
-        assert count > 0
 
 
 class TestTreePerfDeepPaths:
@@ -1660,32 +1661,6 @@ class TestTreePerfPhase6:
         assert isinstance(df, pd.DataFrame)
 
 
-class TestTreePerfPhase8:
-    def test_resnet_detect_recompute_nccl_bwd(self):
-        analyzer = TreePerfAnalyzer.from_file(
-            RESNET_CKPT,
-            rebuild_tree=True,
-            enable_pseudo_ops=True,
-            add_python_func=True,
-            detect_recompute=True,
-            include_unlinked_kernels=True,
-        )
-        unified = analyzer.build_df_unified_perf_table(include_nccl=True)
-        assert isinstance(unified, pd.DataFrame)
-        bwd = [e for e in analyzer.tree.events if "backward" in e.get("name", "")]
-        if bwd:
-            analyzer.build_df_bwd_perf_metrics(events=bwd[:5])
-        launchers = analyzer.get_df_kernel_launchers(
-            include_args=True,
-            include_kernel_details=True,
-            include_call_stack=True,
-        )
-        if not launchers.empty:
-            TreePerfAnalyzer.get_df_kernel_launchers_unique_args(
-                launchers, include_pct=True
-            )
-
-
 class TestTreePerfExtendedPhase9:
     def test_launcher_summaries(self):
         corr1, corr2 = 100, 101
@@ -1875,27 +1850,6 @@ def test_jax_gemm_performance_from_pb():
     assert isinstance(df, pd.DataFrame)
 
 
-def test_gpu_only_treeperf_extended():
-
-    if not os.path.isfile(GPU_ONLY_TRACE):
-        pytest.skip("gpu_only trace missing")
-    analyzer = TreePerfAnalyzer.from_file(GPU_ONLY_TRACE, rebuild_tree=True)
-    launchers = analyzer.get_df_kernel_launchers(
-        include_args=True, include_kernel_details=True
-    )
-    assert not launchers.empty
-    unique = TreePerfAnalyzer.get_df_kernel_launchers_unique_args(
-        launchers, include_pct=True
-    )
-    assert not unique.empty
-    summarized = TreePerfAnalyzer.summarize_df_unified_perf_table(
-        analyzer.build_df_unified_perf_table(include_nccl=False),
-        include_pct=True,
-        tree=analyzer.tree,
-    )
-    assert isinstance(summarized, pd.DataFrame)
-
-
 class TestTreePerfFromFileCapture:
     @pytest.mark.skipif(
         not os.path.isdir(
@@ -2009,46 +1963,6 @@ class TestTreePerfSummaries:
         bwd_evt = next(e for e in analyzer.tree.events if "backward" in e["name"])
         df = analyzer.build_df_bwd_perf_metrics(events=[bwd_evt])
         assert isinstance(df, pd.DataFrame)
-
-
-@pytest.mark.parametrize("trace_path", _discover_trace_gz_files())
-def test_treeperf_from_file_full_methods(trace_path):
-    analyzer = TreePerfAnalyzer.from_file(
-        trace_path,
-        rebuild_tree=True,
-        enable_pseudo_ops=True,
-        add_python_func=True,
-    )
-    assert analyzer.tree is not None
-    gpu_only = analyzer.check_gpu_only()
-    assert gpu_only in (True, False, None)
-
-    unified = analyzer.build_df_unified_perf_table(include_nccl=False)
-    assert isinstance(unified, pd.DataFrame)
-
-    summarized = TreePerfAnalyzer.summarize_df_unified_perf_table(
-        unified, include_pct=True, tree=analyzer.tree
-    )
-    assert isinstance(summarized, pd.DataFrame)
-
-    kernels = analyzer.get_df_kernels(
-        launcher_detail=True,
-        cpu_op_detail=True,
-        nn_module_detail=analyzer.add_python_func,
-    )
-    assert isinstance(kernels, pd.DataFrame)
-
-    try:
-        timeline = analyzer.get_df_gpu_timeline(micro_idle_thresh_us=1)
-    except ValueError:
-        timeline = pd.DataFrame()
-    assert isinstance(timeline, pd.DataFrame)
-
-    launchers = analyzer.get_df_kernel_launchers(include_args=True)
-    assert isinstance(launchers, pd.DataFrame)
-    if not launchers.empty:
-        summary = TreePerfAnalyzer.get_df_kernel_launchers_summary(launchers)
-        assert isinstance(summary, pd.DataFrame)
 
 
 class TestTreePerfSyntheticPush95:

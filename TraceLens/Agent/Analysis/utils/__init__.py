@@ -11,6 +11,11 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
 )
 
 from .arch_utils import list_platforms, load_arch
+from .deterministic_fallback import (
+    GRAPH_REPLAY_FRACTION_MAX,
+    GraphReplayCoverage,
+    check_graph_replay_coverage,
+)
 from .plot_utils import (
     generate_and_embed_plot,
     generate_perf_plot,
@@ -30,6 +35,9 @@ from .validation_utils import (
 
 __all__ = [
     "build_category_findings",
+    "check_graph_replay_coverage",
+    "GraphReplayCoverage",
+    "GRAPH_REPLAY_FRACTION_MAX",
     "prepare_model_identification_data",
     "generate_and_embed_plot",
     "generate_perf_plot",
