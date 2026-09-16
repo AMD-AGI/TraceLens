@@ -2002,6 +2002,63 @@ def test_glm53_no_single_input_concat_survives_anywhere():
     assert reshape_sources == ["visual/seq:3:blocks:attn:@attention:12"]
 
 
+def test_glm53_multi_input_concat_sums_operand_widths_not_identity():
+    """A multi-input ``Concat`` must grow along its axis -- never mirror one input.
+
+    ``append_visible_tail`` does ``torch.cat([topk_indices, tail_indices], dim=-1)``.
+    The two operands have *mismatched* rank (``topk_indices`` is 5-D, ``tail_indices``
+    is a 7-D ``[..., None]``-expanded slice), so the concat rule used to resolve the
+    axis ``dim % rank`` against the widest operand and then silently DROP every
+    operand shorter than that resolved axis -- leaving a single contributor and an
+    identity output (``in_shape == out_shape``), which is meaningless for a cat that
+    joins two tensors. The rule now resolves the negative axis PER OPERAND (from the
+    end) and sums each contributor's size there, so the output width is strictly the
+    sum and differs from every input.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    node_by_id = {node["id"]: node for node in nodes}
+
+    concat = next(
+        node
+        for node in nodes
+        if node.get("label") == "Concat"
+        and "append_visible_tail" in node["id"]
+        and node["id"].endswith("@op_l1027_c15_concat:13")
+    )
+    edges = concat.get("incomingEdges", []) or []
+    assert len(edges) == 2, [e["sourceNodeId"] for e in edges]
+
+    def _port_shape(node, port_id):
+        for port in node.get("outputsMetadata", []) or []:
+            if str(port.get("id")) == str(port_id):
+                for attr in port.get("attrs", []) or []:
+                    if attr.get("key") == "shape":
+                        return attr.get("value")
+        return None
+
+    def _last_dim(shape_str):
+        # "[B, 1, 1, S, 1, 1, 9] int64" -> 9
+        inner = shape_str.split("]", 1)[0].lstrip("[")
+        return inner.rsplit(",", 1)[-1].strip()
+
+    out_shape = _port_shape(concat, "0")
+    assert out_shape is not None, concat["id"]
+    in_last_dims = []
+    for edge in edges:
+        producer = node_by_id[edge["sourceNodeId"]]
+        in_shape = _port_shape(producer, edge.get("sourceNodeOutputId", "0"))
+        assert in_shape is not None, edge["sourceNodeId"]
+        # The output must not mirror any single operand -- a two-input cat changes shape.
+        assert in_shape != out_shape, (producer["id"], in_shape, out_shape)
+        in_last_dims.append(int(_last_dim(in_shape)))
+
+    # Concat axis width is the sum of the operands' sizes there, not one of them.
+    assert int(_last_dim(out_shape)) == sum(in_last_dims), (out_shape, in_last_dims)
+
+
 def test_glm53_vision_rotary_output_edges_reference_real_producer_ports():
     """``@output:sin`` must read an existing port of its producer, not the ordinal.
 

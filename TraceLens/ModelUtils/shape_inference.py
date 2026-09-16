@@ -1605,21 +1605,35 @@ class ShapeInferencer:
             if operation_label == "stack":
                 base = inputs[0]
                 return TensorSpec(shape=(len(inputs), *base.shape), dtype=base.dtype)
-            # Concat: sum the last dim when all inputs have the same rank
+            # Concat: the output matches every input except along the concat
+            # axis, whose size is the SUM of the inputs' sizes there. torch.cat
+            # requires all inputs to share a rank, so a negative dim names the same
+            # axis from the end for each -- resolve the axis PER OPERAND so a
+            # (mis-inferred) rank mismatch can't silently drop the shorter operand
+            # and fabricate an identity concat (output == one input's shape). Only
+            # sum when every operand contributes a concrete size at that axis;
+            # otherwise fall back to the widest operand.
             dim_str = _detail_value(details, "dim")
             dim = _int_dim(dim_str) if dim_str is not None else -1
             if dim is None:
                 dim = -1
             base = max(inputs, key=_broadcast_rank)
-            resolved_dim = dim % len(base.shape) if base.shape else 0
+            base_dim = dim % len(base.shape) if base.shape else 0
             concat_sizes = []
+            usable = True
             for inp in inputs:
-                if inp.shape and len(inp.shape) > resolved_dim:
-                    concat_sizes.append(inp.shape[resolved_dim])
-            if concat_sizes and all(isinstance(s, int) for s in concat_sizes):
+                if not inp.shape:
+                    usable = False
+                    break
+                inp_dim = dim % len(inp.shape) if dim < 0 else dim
+                if inp_dim < 0 or inp_dim >= len(inp.shape):
+                    usable = False
+                    break
+                concat_sizes.append(inp.shape[inp_dim])
+            if usable and concat_sizes and all(isinstance(s, int) for s in concat_sizes):
                 total = sum(concat_sizes)
                 return TensorSpec(
-                    shape=_replace_dim(base.shape, resolved_dim, total),
+                    shape=_replace_dim(base.shape, base_dim, total),
                     dtype=base.dtype,
                 )
             return base
