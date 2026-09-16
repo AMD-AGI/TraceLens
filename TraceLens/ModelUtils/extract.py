@@ -880,7 +880,7 @@ def _rebuild_stack_components(
     causal_lm = (
         registry.get(analysis.causal_lm_class)
         if analysis.causal_lm_class
-        else _pick_causal_lm_class(registry)
+        else _pick_causal_lm_class(registry, spec.raw_config)
     )
     stack_model = (
         registry.get(analysis.stack_model_class)

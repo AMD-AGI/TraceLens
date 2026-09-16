@@ -1486,7 +1486,17 @@ def test_glm53_norm_boundary_connects_directly_to_attention_input():
 def test_glm53_hyper_head_precedes_final_norm():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    assert [component.attr_name for component in spec.stack_tail] == ["hc_head", "norm"]
+    # The stack tail mirrors ``logits = lm_head(norm(hc_head(hidden)))``: the text
+    # model's hyper-connection head and final norm, then the ForConditionalGeneration
+    # wrapper's vocab projection. ``lm_head`` is owned by the wrapper -- named in the
+    # config's ``architectures`` -- so it is only present because the causal-LM class
+    # is resolved from config rather than the ``ForCausalLM`` name (which this wrapper
+    # does not match).
+    assert [component.attr_name for component in spec.stack_tail] == [
+        "hc_head",
+        "norm",
+        "lm_head",
+    ]
 
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     node_by_id = {node["id"]: node for node in graph["nodes"]}
@@ -1494,6 +1504,10 @@ def test_glm53_hyper_head_precedes_final_norm():
     norm_output = node_by_id["norm/@output"]
     assert norm_input["incomingEdges"][0]["sourceNodeId"] == "hc_head"
     assert [item["id"] for item in norm_output["outputsMetadata"]] == ["hidden_states"]
+    # The wrapper's projection reads the final norm and produces the model output.
+    lm_head = node_by_id["lm_head"]
+    assert lm_head["incomingEdges"][0]["sourceNodeId"] == "norm/@output"
+    assert node_by_id["@output"]["incomingEdges"][0]["sourceNodeId"] == "lm_head"
     assert norm_output["label"] == "hidden_states"
     assert "norm/@output^hidden_states" not in node_by_id
     assert _has_export_path(graph["nodes"], "hc_head", norm_output["id"])

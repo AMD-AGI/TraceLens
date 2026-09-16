@@ -6706,11 +6706,47 @@ def _pick_model_class_by_structure(
     return ranked[0][2]
 
 
-def _pick_causal_lm_class(classes: dict[str, ClassStructure]) -> ClassStructure | None:
+def _pick_causal_lm_class(
+    classes: dict[str, ClassStructure],
+    config: dict[str, Any] | None = None,
+) -> ClassStructure | None:
+    """Return the top-level checkpoint class (the one owning the output head).
+
+    The config's ``architectures`` list names the concrete class the checkpoint
+    instantiates -- ``LlamaForCausalLM`` for a plain LM, but ``*ForConditionalGeneration``
+    (or any custom name) for a multimodal wrapper. Prefer that authoritative key:
+    the ``ForCausalLM``-substring heuristic below silently returns ``None`` for every
+    non-causal wrapper, which drops its ``lm_head`` from the exported stack. Fall back
+    to the name heuristic only when the config does not name a parsed class.
+    """
+    architectures = (
+        config.get("architectures") if isinstance(config, dict) else None
+    ) or []
+    for arch in architectures:
+        info = classes.get(arch)
+        if info is not None:
+            return info
     for info in classes.values():
         if info.name.endswith("ForCausalLM") or "ForCausalLM" in info.name:
             return info
     return None
+
+
+def _looks_like_stack(info: ClassStructure) -> bool:
+    """True when a class is itself the language stack (owns embeddings/decoder layers).
+
+    A multimodal wrapper's ``.model`` is often a container that builds its real
+    sub-stacks through ``_from_config`` (opaque factory calls that leave no class
+    name to follow). Such a container owns neither the token embedding nor a decoder
+    layer directly, so it must not be mistaken for the stack -- the bottom-up
+    structural pick finds the true language model instead.
+    """
+    for attr, class_name in info.init_assignments.items():
+        if _classify_role(attr, class_name) == "embedding":
+            return True
+        if DECODER_CLASS_RE.search(class_name):
+            return True
+    return False
 
 
 def _pick_stack_model_class(
@@ -6718,12 +6754,10 @@ def _pick_stack_model_class(
     causal_lm: ClassStructure | None,
 ) -> ClassStructure | None:
     if causal_lm is not None:
-        model_attr = causal_lm.init_assignments.get("model")
-        if model_attr and model_attr in classes:
-            return classes[model_attr]
-        transform_attr = causal_lm.init_assignments.get("transformer")
-        if transform_attr and transform_attr in classes:
-            return classes[transform_attr]
+        for attr in ("model", "transformer", "language_model"):
+            child = causal_lm.init_assignments.get(attr)
+            if child and child in classes and _looks_like_stack(classes[child]):
+                return classes[child]
     return _pick_model_class(classes)
 
 
@@ -6838,21 +6872,33 @@ def build_stack_components(
                 )
             )
 
-    # Inference repos without a ForCausalLM wrapper hang the head off the stack itself.
-    head_owner = causal_lm if causal_lm is not None else stack_model
-    if head_owner is not None:
+    # Collect the output head(s). A ForCausalLM / ForConditionalGeneration wrapper
+    # owns the vocab projection (``lm_head``); the stack model may ALSO own its own
+    # head-role reduction (e.g. a hyper-connection head that runs inside the stack
+    # before the wrapper's projection). Take head-role children from BOTH so neither
+    # is dropped -- the stack's heads run first, then the wrapper's. Inference repos
+    # without a wrapper hang the head off the stack itself, which the stack pass still
+    # covers. ``owner_base`` keeps every wrapper head sorted after the stack heads
+    # since forward orders from two different owners are not otherwise comparable.
+    seen_heads: set[tuple[str, str]] = set()
+    for owner_base, head_owner in ((0, stack_model), (1000, causal_lm)):
+        if head_owner is None:
+            continue
         order = {attr: idx for idx, attr in enumerate(head_owner.forward_calls)}
         for attr, class_name in head_owner.init_assignments.items():
             if class_name in _SKIP_INIT_CLASS_NAMES:
                 continue
             if _classify_role(attr, class_name) != "head":
                 continue
+            if (attr, class_name) in seen_heads:
+                continue
+            seen_heads.add((attr, class_name))
             tail.append(
                 _stack_component(
                     attr_name=attr,
                     class_name=class_name,
                     role="head",
-                    forward_order=order.get(attr),
+                    forward_order=owner_base + order.get(attr, 0),
                     details=head_owner.init_details.get(attr, []),
                 )
             )
@@ -7310,7 +7356,7 @@ def analyze_source(
     _flag_unused_interface_inputs(visitor.classes, config)
 
     decoder = _pick_decoder_class(visitor.classes)
-    causal_lm = _pick_causal_lm_class(visitor.classes)
+    causal_lm = _pick_causal_lm_class(visitor.classes, config)
     stack_model = _pick_stack_model_class(visitor.classes, causal_lm)
     model = stack_model or _pick_model_class(visitor.classes)
     analysis = CodeAnalysis(source_files=[filename])
@@ -7431,7 +7477,7 @@ def analyze_sources(
     merged.class_registry = merge_class_registries(*registries)
     # Re-pick graph-owning classes from the combined registry. First-file-wins
     # lets a vision modeling file stamp a ViT backbone (or leave these unset).
-    causal_lm = _pick_causal_lm_class(merged.class_registry)
+    causal_lm = _pick_causal_lm_class(merged.class_registry, config)
     stack_model = _pick_stack_model_class(merged.class_registry, causal_lm)
     model = stack_model or _pick_model_class(merged.class_registry)
     if causal_lm is not None:
