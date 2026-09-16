@@ -53,8 +53,8 @@ jobs:
       - name: Run unit tests
         run: |
           . .venv/bin/activate
-          python -m pytest tests/ -v --tb=short -n auto --dist loadgroup \
-            -m "not gpu" \
+          python -m pytest tests/ -v --tb=short -n auto --dist worksteal \
+            -m "not gpu" --durations=20 \
             --cov=./TraceLens --cov-config=.coveragerc \
             --cov-report=xml --cov-fail-under=95 \
             --junitxml=junit.xml -o junit_family=legacy
