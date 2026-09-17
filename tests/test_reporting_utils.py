@@ -6,7 +6,7 @@
 
 """Unit tests for TraceLens.Reporting.reporting_utils helpers."""
 
-import json, os, pandas as pd, pytest, gzip, importlib, sys, subprocess, textwrap
+import io, json, os, pandas as pd, pytest, gzip, importlib, sys, subprocess, textwrap
 from unittest import mock
 from TraceLens.Reporting.reporting_utils import (
     _node_span_for_pg,
@@ -637,6 +637,33 @@ def test_pytorch_get_dfs_short_kernels_with_data():
     analyzer = _MockShortKernelAnalyzer()
     hist, grouped = get_dfs_short_kernels_pytorch(analyzer, topk=2)
     assert len(grouped) == 2
+
+
+@pytest.mark.parametrize(
+    "get_fn",
+    [get_dfs_short_kernels_pytorch, get_dfs_short_kernels_inference],
+    ids=["pytorch", "inference"],
+)
+def test_get_dfs_short_kernels_all_nan_groupby_cols(get_fn):
+    """Regression test for #938: when all short kernels have NaN in the
+    groupby columns (e.g. CUDA graph replay traces), the returned DataFrame
+    must not have MultiIndex columns, which would crash to_excel(index=False).
+    """
+    kernels = pd.DataFrame(
+        {
+            "Kernel duration (µs)": [3.0, 5.0],
+            "Kernel name": ["k_a", "k_b"],
+            "Parent cpu_op": [pd.NA, pd.NA],
+            "Input dims": [pd.NA, pd.NA],
+            "Input strides": [pd.NA, pd.NA],
+            "Concrete Inputs": [pd.NA, pd.NA],
+        }
+    )
+    analyzer = _MockShortKernelAnalyzer(kernels=kernels)
+    _, grouped = get_fn(analyzer)
+    assert not isinstance(grouped.columns, pd.MultiIndex)
+    assert grouped.empty
+    grouped.to_excel(io.BytesIO(), index=False)
 
 
 # ---------------------------------------------------------------------------
