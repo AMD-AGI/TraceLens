@@ -1189,12 +1189,24 @@ def _multi_op_forward_methods(
     *,
     self_values: dict[str, Any],
     all_tensor_ops: bool,
-) -> dict[str, list[ForwardOperation]]:
-    """Forward helper methods with enough tensor operations to expand as a subgraph."""
+) -> tuple[
+    dict[str, list[ForwardOperation]],
+    dict[str, tuple[dict[str, str], list[str], str | None]],
+]:
+    """Forward helper methods with enough tensor operations to expand as a subgraph.
+
+    Also returns, per method, its ``(return_slots, return_order,
+    primary_return_slot)`` so a tuple-returning helper (``key_states,
+    value_states = self.expand_kv(...)``) exposes every return slot as its own
+    frame output — the consumer then docks the right slot onto each port instead
+    of collapsing parallel returns onto the frame tail. General: read off the
+    method's own return statement, no class-name checks.
+    """
     method_funcs = {
         item.name: item for item in class_node.body if isinstance(item, ast.FunctionDef)
     }
     expanded: dict[str, list[ForwardOperation]] = {}
+    returns: dict[str, tuple[dict[str, str], list[str], str | None]] = {}
     for call_attr in forward_calls:
         base = base_submodule_attr(call_attr)
         if (
@@ -1219,7 +1231,18 @@ def _multi_op_forward_methods(
             # Keyed by the base method name; two call sites of the same repeated
             # method resolve here through ``base_submodule_attr`` in the block tree.
             expanded[base] = operations.operations
-    return expanded
+            if len(operations.return_order) >= 2:
+                op_attrs = {op.attr_name for op in operations.operations}
+                if all(
+                    producer in op_attrs
+                    for producer in operations.return_slots.values()
+                ):
+                    returns[base] = (
+                        dict(operations.return_slots),
+                        list(operations.return_order),
+                        operations.primary_return_slot,
+                    )
+    return expanded, returns
 
 
 def _synthetic_call_function_name(call_attr: str) -> str | None:
@@ -1896,6 +1919,14 @@ class ClassStructure:
     ] = field(default_factory=dict)
     single_op_methods: dict[str, ForwardOperation] = field(default_factory=dict)
     multi_op_methods: dict[str, list[ForwardOperation]] = field(default_factory=dict)
+    # For an inline-expanded forward *method* returning a tuple
+    # (``key_states, value_states = self.expand_kv(...)``): base method name ->
+    # ``(return_slots, return_order, primary_return_slot)``, so the method frame
+    # exposes every return slot as its own output port and consumers dock onto
+    # the matching slot instead of collapsing onto the frame tail.
+    multi_op_method_returns: dict[
+        str, tuple[dict[str, str], list[str], str | None]
+    ] = field(default_factory=dict)
     # For an inline-expanded free function returning a tuple
     # (``q_embed, k_embed = apply_rotary_pos_emb_vision(...)``): call attr ->
     # ordered internal producer attrs, so a consumer reading a specific return
@@ -2978,6 +3009,41 @@ class _ForwardOperationExtractor:
                 self.step_predecessors[own_step] = self._dedupe(
                     [value for value in (base_producer, *arg_producers) if value]
                 )
+                # A dispatched attention interface call
+                # (``attention_interface(self, q, k, v, mask, ...)``) is a bare
+                # local, not a ``self.<attr>`` submodule call, so the positional
+                # arg-name/ordinal capture above was skipped. Record each tensor
+                # operand's name and output ordinal here so the kernel's ports
+                # dock onto the correct producer slot — ``value_states`` = slot 1
+                # of a tuple-returning ``expand_kv`` — instead of two operands
+                # collapsing onto one producer under dedupe and the remaining
+                # ports sliding onto the wrong sources. General: reads operands
+                # straight off whichever call the source spells out.
+                if own_step == SYNTHETIC_ATTENTION and not arg_name_map:
+                    attn_start = (
+                        1
+                        if node.args
+                        and isinstance(node.args[0], ast.Name)
+                        and node.args[0].id == "self"
+                        else 0
+                    )
+                    for arg in node.args[attn_start:]:
+                        if not isinstance(arg, ast.Name):
+                            continue
+                        arg_producer = self.var_producer.get(arg.id)
+                        if arg_producer is None:
+                            continue
+                        # Only an operand that reads a *specific output slot* of a
+                        # multi-output producer (``value_states`` = slot 1 of a
+                        # tuple-returning ``expand_kv``) needs its port docked; a
+                        # single-output operand (``g`` from ``self.forget_gate``)
+                        # carries no slot and must not be published as a step
+                        # predecessor arg, or it perturbs how the enclosing frame's
+                        # child submodule (forget_gate) is expanded downstream.
+                        recorded_before = arg.id in arg_ordinal_map
+                        _record_arg_ordinal(arg.id, arg_producer, arg)
+                        if arg.id in arg_ordinal_map and not recorded_before:
+                            arg_name_map.setdefault(arg.id, arg_producer)
                 # A traced free-function node (rope helper, ...) is expanded into
                 # its body's ops when the callee is known; map each positional arg
                 # to the callee's parameter name so the cross-module predecessor
@@ -3167,6 +3233,14 @@ class _ForwardOperationExtractor:
             return
         for name in self._target_names(stmt):
             self.var_producer[name] = producer
+            # A reassignment drops any stale tuple-unpack ordinal: ``up`` bound to
+            # chunk slice 1 by ``gate, up = x.chunk(2)`` becomes a fresh single-
+            # output value after ``up = up.clamp(...)``. Without clearing, a later
+            # read of ``up`` would still dock onto slice 1 of the chunk and the
+            # real (reassigned) producer's edge would carry a dangling port.
+            # ``_record_output_unpack`` re-stamps genuine unpack targets right
+            # after this. General: any single-name reassignment.
+            self.var_output_ordinal.pop(name, None)
 
     _MULTI_OUTPUT_LABELS = frozenset({"Split", "Chunk", "Unbind"})
 
@@ -3212,6 +3286,18 @@ class _ForwardOperationExtractor:
             for ordinal, name in enumerate(names):
                 self.var_output_ordinal[name] = ordinal
             return
+        # A tuple-unpack of a submodule/method call expanded as its own frame
+        # (``key_states, value_states = self.expand_kv(...)``). The producer is
+        # not an inline op in this scope, so tag each unpacked local with its
+        # return ordinal and publish the ordered slot names. A consumer reading a
+        # specific local (``value_states``) then docks onto the matching frame
+        # return slot instead of collapsing every local onto the frame tail (and
+        # being dropped by predecessor dedupe). General: fires for any
+        # tuple-returning call, no class-name checks.
+        if isinstance(stmt.value, ast.Call):
+            self.step_output_names[producer] = names
+            for ordinal, name in enumerate(names):
+                self.var_output_ordinal[name] = ordinal
 
     def _propagate_param_alias(
         self, targets: list[ast.expr], value: ast.AST
@@ -3568,6 +3654,8 @@ class _ForwardOperationExtractor:
                             and element_producer is not None
                         ):
                             self.var_producer[element_target.id] = element_producer
+                            # Parallel reassignment also drops any stale ordinal.
+                            self.var_output_ordinal.pop(element_target.id, None)
                     continue
                 producer, _ = self.expression(stmt.value)
                 self._track_shape_assignment(targets, value)
@@ -3998,6 +4086,7 @@ def _extract_forward_return_metadata(
     func: ast.FunctionDef,
     var_producer: dict[str, str],
     step_predecessors: dict[str, tuple[str, ...]] | None = None,
+    multi_output_slots: set[str] | None = None,
 ) -> tuple[dict[str, str], list[str], str | None]:
     """Map ``return (a, b, c)`` names to the inline ops that produce them."""
     return_order: list[str] = []
@@ -4015,7 +4104,9 @@ def _extract_forward_return_metadata(
     # descends from) so the parent wires the true output (the merger), not the
     # intermediate. Ambiguous fan-out (``hidden_states, past_key_values`` — a cache
     # side-channel not on the main chain) leaves several terminals; fall back then.
-    terminal = _sole_terminal_return_slot(slots, step_predecessors or {})
+    terminal = _sole_terminal_return_slot(
+        slots, step_predecessors or {}, multi_output_slots or set()
+    )
     if terminal is not None:
         # The intermediate slots are subsumed by the terminal — they are ancestors
         # on its data chain, so they stay live via its producer and must not become
@@ -4039,6 +4130,7 @@ def _extract_forward_return_metadata(
 def _sole_terminal_return_slot(
     slots: dict[str, str],
     step_predecessors: dict[str, tuple[str, ...]],
+    multi_output_slots: set[str] | None = None,
 ) -> str | None:
     """The one returned slot every other returned slot is a data-ancestor of.
 
@@ -4047,6 +4139,15 @@ def _sole_terminal_return_slot(
     the source-order heuristics instead of arbitrarily promoting one branch.
     """
     if len(slots) < 2:
+        return None
+    # A returned slot that names a slice of a multi-output op
+    # (``k_nope, value_states = torch.split(...)`` -> ``return key_states,
+    # value_states``) is a genuine parallel tensor, not an intermediate on
+    # another slot's chain — even though it shares its producer op with a
+    # sibling slice that a downstream slot *does* consume. Ancestry is tracked
+    # per producer attr, which cannot tell the two slices apart, so never
+    # collapse when any slot is such a slice; keep every slot as its own return.
+    if multi_output_slots and any(name in multi_output_slots for name in slots):
         return None
     producers = {name: producer for name, producer in slots.items()}
 
@@ -4484,6 +4585,7 @@ def _forward_operations_from_forward(
         func,
         extractor.var_producer,
         extractor.step_predecessors,
+        set(extractor.var_output_ordinal),
     )
     return ForwardAnalysis(
         operations=extractor.operations,
@@ -4635,6 +4737,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
         forward_loop_carried: list[LoopCarriedSpec] = []
         single_op_methods: dict[str, ForwardOperation] = {}
         multi_op_methods: dict[str, list[ForwardOperation]] = {}
+        multi_op_method_returns: dict[
+            str, tuple[dict[str, str], list[str], str | None]
+        ] = {}
         forward_step_return_producers: dict[str, list[str]] = {}
         init_func = next(
             (
@@ -4742,7 +4847,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 self_values=_self_config_values(init_func, self._config_for_class(node.name)),
                 all_tensor_ops=self.all_tensor_ops,
             )
-            multi_op_methods = _multi_op_forward_methods(
+            multi_op_methods, multi_op_method_returns = _multi_op_forward_methods(
                 node,
                 forward_calls,
                 init_assignments,
@@ -4907,6 +5012,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             forward_step_boundary_arg_params=forward_step_boundary_arg_params,
             single_op_methods=single_op_methods,
             multi_op_methods=multi_op_methods,
+            multi_op_method_returns=multi_op_method_returns,
             forward_step_return_producers=forward_step_return_producers,
             forward_return_slots=forward_return_slots,
             forward_return_order=forward_return_order,

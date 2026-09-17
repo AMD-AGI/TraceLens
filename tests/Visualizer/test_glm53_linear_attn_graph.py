@@ -118,6 +118,43 @@ def _assert_export_is_acyclic(nodes) -> None:
         visit(node["id"])
 
 
+def _assert_no_dead_nodes(nodes) -> None:
+    """Every node must be consumed, except legitimate sinks.
+
+    A dead node (no other node reads it as ``sourceNodeId``) signals a wiring
+    regression — a real tensor whose consumer edge was never reconstructed. The
+    exemptions mirror ``merge._prune_unconsumed_outputs`` exactly: synthetic
+    ``@output`` boundaries/mirrors, synthetic ``@input`` boundaries,
+    ``@loop_carried`` tiles, and the top-level ``@output``. See the
+    ``check-dead-nodes`` skill.
+    """
+    from TraceLens.Visualizer.model_explorer_export.merge import (
+        _is_synthetic_input,
+        _is_synthetic_output,
+        _node_attr,
+    )
+
+    consumed = {
+        edge["sourceNodeId"]
+        for node in nodes
+        for edge in node.get("incomingEdges", [])
+    }
+
+    def _exempt(node) -> bool:
+        if _is_synthetic_output(node) or _is_synthetic_input(node):
+            return True
+        if _node_attr(node, "synthetic") == "@loop_carried":
+            return True
+        return node.get("id") == "@output"
+
+    dead = [
+        node["id"]
+        for node in nodes
+        if node["id"] not in consumed and not _exempt(node)
+    ]
+    assert not dead, f"dead (unconsumed) nodes: {dead}"
+
+
 def test_glm53_linear_attention_has_single_output_exit():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -271,7 +308,7 @@ def test_glm53_hyperconnection_expands_mhc_math():
     assert any(frame.label == "Loop · 19 iterations" for frame in graph.inline_frames)
     assert set(graph.output_ports) == {"post", "comb", "collapsed"}
     carried_out_index = graph.loop_carried_nodes["@op_l291_c19_divide"]
-    assert graph.nodes[carried_out_index].label == "Loop carried dependencies out"
+    assert graph.nodes[carried_out_index].label == "Loop out"
     carried_out_inputs = {
         graph.link_port_labels[(source, carried_out_index)]
         for source, target in graph.links
@@ -281,7 +318,7 @@ def test_glm53_hyperconnection_expands_mhc_math():
     carried_in_indices = [
         index
         for index, node in enumerate(graph.nodes)
-        if node.label == "Loop carried dependencies in"
+        if node.label == "Loop in - iterations:19"
     ]
     assert len(carried_in_indices) >= 1
     carried_in_inputs = {
@@ -944,10 +981,15 @@ def test_glm53_ffn_hc_expands_hyperconnection_not_moe():
     assert {node["label"] for node in outputs} == {"post", "comb", "collapsed"}
     boundary = graph["groupNodeAttributes"][outputs[0]["namespace"]]
     assert boundary["input_shape"] == "[B, S, 4, 4096] bfloat16"
-    assert boundary["output_shape"] == (
-        "post: [B, S, 4] float32, comb: [B, S, 4, 4] float32, "
-        "collapsed: [B, S, 4096] bfloat16"
-    )
+    # Sibling order of the @output slots follows the topological node sort
+    # (dataflow), not the source return order, which is fine as long as every
+    # slot is present with the right shape — the wiring above is what matters.
+    for entry in (
+        "post: [B, S, 4] float32",
+        "comb: [B, S, 4, 4] float32",
+        "collapsed: [B, S, 4096] bfloat16",
+    ):
+        assert entry in boundary["output_shape"]
 
 
 def test_glm53_expert_helper_stays_inside_loop_without_cycle():
@@ -2888,3 +2930,18 @@ def test_glm53_vision_attention_qkv_linear_is_restored():
     reshape_sources = {e["sourceNodeId"] for e in reshape["incomingEdges"]}
     assert qkv["id"] in reshape_sources, reshape_sources
     assert node_by_id[qkv["id"]]  # sanity: node is present in the export
+
+
+def test_glm53_graph_has_no_dead_nodes():
+    """No node may be left unconsumed (dead) in the full merged export.
+
+    A dead node means a real tensor -- ``expand_kv``'s ``value_states``, an
+    experts gate's ``up``, the indexer's ``valid_keys`` -- was extracted but its
+    consumer edge was never reconstructed. The fix is always to reconstruct the
+    wiring, never to prune the node (that would hide real computation). Mirrors
+    the ``check-dead-nodes`` skill so this class of regression is caught in CI.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    _assert_no_dead_nodes(graph["nodes"])

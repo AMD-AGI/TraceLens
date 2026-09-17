@@ -464,7 +464,7 @@ def test_overview_defaults_order_labels_and_namespaces():
     ]
     assert overview._display_label(spec.block_components[0], spec) == "late"
     assert overview._display_label(spec.block_components[1], spec) == "RMSNorm"
-    assert overview._display_label(spec.block_components[2], spec) == "Logits"
+    assert overview._display_label(spec.block_components[2], spec) == "Linear"
     assert overview._decoder_namespace(spec) == "2x_Dense"
     assert (
         overview._decoder_namespace(
@@ -534,7 +534,7 @@ def test_overview_forward_labels_and_build_graph():
     )
     by_id = {node["id"]: node for node in graph["nodes"]}
     assert by_id["decoder/self_attn"]["subgraphIds"] == ["attention-detail"]
-    assert by_id["head"]["label"] == "Logits"
+    assert by_id["head"]["label"] == "Linear"
     assert by_id["embed"]["incomingEdges"][0]["sourceNodeId"] == "@input"
     assert graph["groupNodeAttributes"][""]["forward"].endswith("unknown step")
 
@@ -843,7 +843,7 @@ def test_no_consumer_op_pruned_but_chains_sinks_and_loop_carried_kept():
         # A loop-carried-in with no consumer yet is wired later — never pruned here.
         {
             "id": "block/@loop_carried_in:loop_l1_c1:h",
-            "label": "Loop carried dependencies in",
+            "label": "Loop in - iterations:N",
             "attrs": [{"key": "synthetic", "value": "@loop_carried"}],
             "incomingEdges": [{"sourceNodeId": "@input", "sourceNodeOutputId": "0"}],
         },

@@ -96,7 +96,11 @@ def _display_label(component: BlockComponent, spec: ArchitectureSpec) -> str:
     if component.role == "norm":
         return spec.norm_type or component.label or "RMSNorm"
     if component.role == "head" and component.class_name == "Linear":
-        return "Logits"
+        # The lm_head is a real Linear projection (matmul, learned weight hidden);
+        # render it as the ``Linear`` op it is, like every other Linear, rather
+        # than as an opaque ``Logits`` box. ``logits`` stays the output tensor's
+        # name (see ``shapes.py`` output handling), but the node reads as Linear.
+        return "Linear"
     if component.role == "embedding":
         return component.label
     return component.label or component.attr_name

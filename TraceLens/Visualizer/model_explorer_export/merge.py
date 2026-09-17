@@ -3971,6 +3971,11 @@ def _fill_repeated_loop_counts(nodes: list[dict[str, Any]]) -> None:
             continue
         variable = sublabel_attr["value"].rsplit(" · ", 1)[0]
         sublabel_attr["value"] = f"{variable} · {count} iterations"
+        # Mirror the count into the "Loop in" label when the boundary was built
+        # with a symbolic count (CG loops whose trip count is only known from the
+        # enclosing ``{N}x_`` namespace, e.g. the vision block loop).
+        if node.get("label") == "Loop in - iterations:N":
+            node["label"] = f"Loop in - iterations:{count}"
 
 
 def _repeat_group_container(namespace: str) -> str | None:
@@ -4090,8 +4095,19 @@ def _wrap_container_loop_carried(nodes: list[dict[str, Any]], container: str) ->
             "style": style,
         }
 
-    in_node = _make_tile(in_id, "Loop carried dependencies in")
-    out_node = _make_tile(out_id, "Loop carried dependencies out")
+    # Trip count for the "Loop in" label comes from the enclosing ``{N}x_`` repeat
+    # segment; when no static count is present, use a symbolic ``N`` so the loop
+    # still reads as bounded by an iteration variable.
+    count_token = next(
+        (
+            match.group(1)
+            for segment in container.split("/")
+            if (match := _REPEAT_SEGMENT_RE.match(segment))
+        ),
+        "N",
+    )
+    in_node = _make_tile(in_id, f"Loop in - iterations:{count_token}")
+    out_node = _make_tile(out_id, "Loop out")
     _copy_carried_shape(in_node, node_by_id.get(carried_source))
     _copy_carried_shape(out_node, node_by_id.get(carried_source))
 
@@ -4146,6 +4162,68 @@ def _wrap_container_loop_carried(nodes: list[dict[str, Any]], container: str) ->
 
     nodes.append(in_node)
     nodes.append(out_node)
+
+
+def _is_loop_back_edge(source_id: str | None, target_id: str) -> bool:
+    """The single permitted cycle-creating edge: ``@loop_carried_out -> _in``.
+
+    This is the only edge a topological sort must ignore; every other edge is a
+    genuine dataflow dependency. Mirrors the acyclicity check used in the tests.
+    """
+    return (
+        "@loop_carried_in:" in target_id
+        and source_id is not None
+        and "@loop_carried_out:" in source_id
+    )
+
+
+def _topologically_order_nodes(nodes: list[dict[str, Any]]) -> None:
+    """Reorder ``nodes`` producer-before-consumer with a stable Kahn sort.
+
+    Every dataflow edge (stored as a consumer's ``incomingEdges``) except the one
+    permitted ``@loop_carried_out -> @loop_carried_in`` back edge per loop becomes
+    an ordering constraint, so each ``@loop_carried_in`` sorts ahead of its loop
+    body and each ``@loop_carried_out`` after it. Ties break by original list
+    index, preserving within-namespace sibling order and byte-determinism (Model
+    Explorer groups by ``namespace``; list order only sets sibling order). Any
+    residual left by an unexpected real cycle is appended in original order rather
+    than dropped — acyclicity itself is asserted by the graph tests.
+    """
+    import heapq
+
+    index_of = {node["id"]: i for i, node in enumerate(nodes)}
+    count = len(nodes)
+    adjacency: list[list[int]] = [[] for _ in range(count)]
+    indegree = [0] * count
+    for target_i, node in enumerate(nodes):
+        target_id = node["id"]
+        seen: set[int] = set()
+        for edge in node.get("incomingEdges", []):
+            source_id = edge.get("sourceNodeId")
+            source_i = index_of.get(source_id)
+            if source_i is None or source_i in seen:
+                continue
+            if _is_loop_back_edge(source_id, target_id):
+                continue
+            seen.add(source_i)
+            adjacency[source_i].append(target_i)
+            indegree[target_i] += 1
+
+    ready = [i for i in range(count) if indegree[i] == 0]
+    heapq.heapify(ready)
+    order: list[int] = []
+    while ready:
+        current = heapq.heappop(ready)
+        order.append(current)
+        for nxt in adjacency[current]:
+            indegree[nxt] -= 1
+            if indegree[nxt] == 0:
+                heapq.heappush(ready, nxt)
+
+    if len(order) != count:
+        placed = set(order)
+        order.extend(i for i in range(count) if i not in placed)
+    nodes[:] = [nodes[i] for i in order]
 
 
 def _synthesize_repeat_loop_boundaries(nodes: list[dict[str, Any]]) -> None:
@@ -4393,6 +4471,10 @@ def build_merged_model_graph(
     # Fill trip counts on ModuleList loop-carried boundaries (``<var> · repeated``
     # -> ``<var> · N iterations``) from the ``{N}x_`` namespaces just finalized.
     _fill_repeated_loop_counts(nodes)
+
+    # Emit nodes producer-before-consumer so each ``@loop_carried_in`` renders
+    # ahead of its loop body and each ``@loop_carried_out`` after it.
+    _topologically_order_nodes(nodes)
 
     graph_attributes: dict[str, dict[str, str]] = {
         "": model_attrs,

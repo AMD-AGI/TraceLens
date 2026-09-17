@@ -2253,6 +2253,19 @@ def build_block_node(
                     for detail in child_details
                     if detail.startswith(("loop:", "condition:"))
                 ]
+                # A tuple-returning method (``key_states, value_states =
+                # self.expand_kv(...)``) carries its return slots so the frame
+                # exposes each as its own output port; a consumer then docks the
+                # matching slot instead of every slot collapsing onto the tail.
+                method_returns = cls.multi_op_method_returns.get(base_attr)
+                m_return_slots, m_return_order, m_primary_return = (
+                    method_returns if method_returns else ({}, [], None)
+                )
+                m_primary_output_step = (
+                    m_return_slots.get(m_primary_return)
+                    if m_primary_return and m_return_slots
+                    else None
+                )
                 child_nodes.append(
                     BlockNode(
                         attr_name=call_attr,
@@ -2261,6 +2274,11 @@ def build_block_node(
                         label=base_attr.strip("_").replace("_", " "),
                         forward_order=child_order,
                         details=[f"method `{base_attr}()`", *call_context],
+                        forward_return_slots=dict(m_return_slots),
+                        forward_return_order=list(m_return_order),
+                        primary_return_slot=m_primary_return,
+                        primary_output_step=m_primary_output_step,
+                        multi_return_module=len(m_return_order) >= 2,
                         children=[
                             _leaf_node(
                                 attr_name=operation.attr_name,

@@ -484,6 +484,12 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
 
             for source, label in all_inputs:
                 graph.link_port_labels.pop((source, kernel_index), None)
+                # Preserve the producer's output ordinal: a kernel input reading a
+                # specific slice of a multi-output producer (``value_states`` is
+                # ordinal 1 of an ``expand_kv`` split) must keep that port so the
+                # new source→port edge docks the right slice instead of defaulting
+                # to slice 0.
+                source_port = graph.link_output_ports.get((source, kernel_index))
                 safe_label = label.replace("/", "_")
                 port_index = _add_node(
                     graph,
@@ -493,6 +499,8 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
                 )
                 _inherit_kernel_frames(graph, kernel_index, port_index)
                 graph.links.append((source, port_index))
+                if source_port is not None:
+                    graph.link_output_ports[(source, port_index)] = source_port
                 graph.links.append((port_index, kernel_index))
 
 
@@ -1776,8 +1784,22 @@ def _add_linear_pipeline_chain(
             attr_last_index,
             chain_input_index=chain_input_index,
         )
+        # A consumer reading a specific slice of a multi-output producer
+        # (``up`` is ordinal 1 of a ``gate_up.chunk(2)``) must tag its edge with
+        # that ordinal so the split fans out into per-slice tiles and the right
+        # slice is docked -- otherwise the edge defaults to slice 0 and the
+        # unread slice is left dangling.
+        port_by_source: dict[int, int] = {}
+        if attr_last_index is not None and sub_step.operation_predecessor_ports:
+            for pred_attr, ordinal in sub_step.operation_predecessor_ports.items():
+                pred_index = attr_last_index.get(pred_attr)
+                if pred_index is not None:
+                    port_by_source[pred_index] = ordinal
         for source_index in explicit_sources:
             graph.links.append((source_index, step_index))
+            ordinal = port_by_source.get(source_index)
+            if ordinal is not None:
+                graph.link_output_ports[(source_index, step_index)] = str(ordinal)
 
         if not explicit_sources and not _reads_only_a_side_parameter(sub_step):
             if sub_index == 0:
@@ -2320,6 +2342,14 @@ def _add_loop_carried_nodes(
             if matching_frames
             else None
         )
+        # The iteration count belongs in the "Loop in" label; when the trip count
+        # is not statically known, fall back to a symbolic ``N`` rather than a bare
+        # count so the loop still reads as bounded by some iteration variable.
+        count_token = (
+            str(carried.iteration_count)
+            if carried.iteration_count is not None
+            else "N"
+        )
         iter_sublabel = (
             f"{carried.variable} · {carried.iteration_count} iterations"
             if carried.iteration_count is not None
@@ -2328,14 +2358,14 @@ def _add_loop_carried_nodes(
         in_node_index = _add_node(
             graph,
             key=f"@loop_carried_in:{carried.loop_id}:{carried.variable}",
-            label="Loop carried dependencies in",
+            label=f"Loop in - iterations:{count_token}",
             sublabel=iter_sublabel,
             synthetic=SYNTHETIC_LOOP_CARRIED,
         )
         out_node_index = _add_node(
             graph,
             key=f"@loop_carried_out:{carried.loop_id}:{carried.variable}",
-            label="Loop carried dependencies out",
+            label="Loop out",
             sublabel=iter_sublabel,
             synthetic=SYNTHETIC_LOOP_CARRIED,
         )
