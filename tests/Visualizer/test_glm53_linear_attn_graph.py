@@ -2188,7 +2188,9 @@ def test_glm53_multi_input_concat_sums_operand_widths_not_identity():
         for node in nodes
         if node.get("label") == "Concat"
         and "append_visible_tail" in node["id"]
-        and node["id"].endswith("@op_l1027_c15_concat:13")
+        # Anchor on the stable line/col of the ``torch.cat`` call; the trailing
+        # per-scope emission ordinal shifts whenever a sibling op becomes visible.
+        and "@op_l1027_c15_concat" in node["id"]
     )
     edges = concat.get("incomingEdges", []) or []
     assert len(edges) == 2, [e["sourceNodeId"] for e in edges]
@@ -3034,3 +3036,82 @@ def test_glm53_graph_has_no_dead_nodes():
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     _assert_no_dead_nodes(graph["nodes"])
+
+
+def test_glm53_build_attention_mask_frame_is_not_opaque():
+    """``build_attention_mask_from_topk`` must render every inner op, not an empty box.
+
+    The sparse-attention decoder block builds its mask by
+    ``ge``/``lt`` -> ``&`` -> ``clamp`` -> ``scatter_add_`` -> ``ne`` -> ``unsqueeze``
+    -> ``where``. Two independent bugs used to collapse the whole frame:
+
+    * the attention kernel's ``query_states`` and ``attention_mask`` ports were
+      never wired -- an ``arg_map`` that named only the tuple-slot operands
+      (``key_states``/``value_states`` from ``expand_kv``) was treated as
+      exhaustive, dropping the other predecessors -- so the mask output
+      dead-ended into a frame boundary tile and the merge's dead-branch prune
+      deleted the entire chain; and
+    * the comparison/scatter ops were absent from the tensor-method label table,
+      so even the surviving ops were incomplete and mis-wired.
+
+    After the fix the frame shows the full chain and the kernel reads all four
+    declared inputs.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+
+    frame = "seq:12:build_attention_mask_from_topk"
+    frame_labels = {
+        n.get("label")
+        for n in nodes
+        if frame in n["id"]
+        and not any(a.get("key") == "synthetic" for a in n.get("attrs", []))
+    }
+    # Every real computation in the source body must be its own visible op.
+    for expected in (
+        "Greater equal",
+        "Less",
+        "Bitwise and",
+        "Clamp",
+        "Cast",
+        "Scatter add",
+        "Not equal",
+        "Unsqueeze",
+        "Where",
+    ):
+        assert expected in frame_labels, (expected, sorted(frame_labels))
+
+    # The internal chain must be correctly ordered, not short-circuited: the
+    # final Where reads the Unsqueeze, which reads the Not equal, which reads the
+    # Scatter add (not the Cast directly, as the incomplete extraction did).
+    where = _export_node(nodes, f"{frame}:@op_l1258_c15_where")
+    unsqueeze = _export_node(nodes, f"{frame}:@op_l1249_c15_unsqueeze")
+    not_equal = _export_node(nodes, f"{frame}:@op_l1249_c15_not_equal")
+    scatter_add = _export_node(nodes, f"{frame}:@op_l1246_c8_scatter_add")
+    assert unsqueeze["id"] in {e["sourceNodeId"] for e in where["incomingEdges"]}
+    assert not_equal["id"] in {e["sourceNodeId"] for e in unsqueeze["incomingEdges"]}
+    assert scatter_add["id"] in {e["sourceNodeId"] for e in not_equal["incomingEdges"]}
+
+    # The attention kernel of the sparse block must read all four declared ports;
+    # query_states and attention_mask are the ones that used to be dropped.
+    kernel = next(
+        n
+        for n in nodes
+        if n.get("label") == "Attention"
+        and "11x_Glm5NextTextAttention" in n["id"]
+        and n["id"].endswith(":@attention:0")
+    )
+    node_by_id = {n["id"]: n for n in nodes}
+    port_labels = {
+        node_by_id[e["sourceNodeId"]].get("label")
+        for e in kernel["incomingEdges"]
+    }
+    assert {"query_states", "key_states", "value_states", "attention_mask"} <= port_labels, (
+        sorted(port_labels)
+    )
+
+    # The mask the frame produces must actually reach the kernel's mask port
+    # (proving the chain is consumed, hence not pruned).
+    assert _has_export_path(nodes, where["id"], kernel["id"])

@@ -2265,6 +2265,15 @@ _TENSOR_METHOD_LABELS = {
     "minimum": "Minimum",
     "where": "Where",
     "one_hot": "One hot",
+    # Elementwise comparisons (each returns a boolean tensor; written as the
+    # method form ``a.ge(b)`` rather than the ``a >= b`` operator, so they reach
+    # the tensor-method label table rather than the BinOp/Compare path).
+    "ge": "Greater equal",
+    "gt": "Greater",
+    "le": "Less equal",
+    "lt": "Less",
+    "eq": "Equal",
+    "ne": "Not equal",
     "cos": "Cosine",
     "sin": "Sine",
     # Indexing and assembly
@@ -2273,6 +2282,8 @@ _TENSOR_METHOD_LABELS = {
     "masked_scatter": "Masked scatter",
     "scatter": "Scatter",
     "scatter_": "Scatter",
+    "scatter_add": "Scatter add",
+    "scatter_add_": "Scatter add",
     "index_add": "Index add",
     "index_add_": "Index add",
     "nonzero": "Nonzero",

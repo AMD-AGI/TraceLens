@@ -791,6 +791,24 @@ def _wire_all_predecessor_edges(
                 pairs: list[tuple[str, str | None]] = [
                     (src, name) for name, src in arg_map.items()
                 ]
+                # An arg_map that names only *some* predecessors must not
+                # suppress the rest.  The attention interface records an arg
+                # name only for operands that read a specific output slot of a
+                # tuple-returning producer (``key_states``/``value_states`` from
+                # ``expand_kv``); single-output operands such as
+                # ``query_states`` (a plain ``transpose``) and
+                # ``attention_mask`` (``build_attention_mask_from_topk``) get no
+                # entry.  Those predecessors still carry a real data edge — wire
+                # each uncovered one positionally (arg_name ``None``) so a
+                # declared kernel port is not left unwired and its producing
+                # chain pruned as a dead branch.  General: fires for any module
+                # whose forward_step_predecessors outnumber its named args; a
+                # module with a complete arg_map (vision attention) or an empty
+                # one (linear attention) is unaffected.
+                covered = set(arg_map.values())
+                pairs.extend(
+                    (pred, None) for pred in preds if pred not in covered
+                )
             else:
                 pairs = [(pred, None) for pred in preds]
 
