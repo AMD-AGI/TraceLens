@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from statistics import mean, pstdev
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from ..util import normalize_name_for_comparison
+from ..util import GPU_KERNEL_CATEGORIES, normalize_name_for_comparison
 from .trace_to_tree import TraceToTree
 
 # A period must explain more than half the sequence, matching the original rule.
@@ -34,7 +34,6 @@ PYTHON_TIER = "python_function"
 # Branch-descent tier: walk down the call tree until a frame's own children form
 # a repeating family whose per-iteration windows account for ~all the GPU work.
 BRANCH_DESCENT_TIER = "branch_descent"
-GPU_KERNEL_CATS = ("kernel", "gpu_memcpy", "gpu_memset")
 # The per-iteration windows must explain at least this share of GPU time; below
 # it the repeating family is a sub-loop, not the iteration boundary.
 BRANCH_COVERAGE_GATE = 0.95
@@ -278,7 +277,7 @@ def _descendant_gpu_time(tree: TraceToTree, nodes: Sequence[dict]) -> float:
             continue
         seen.add(uid)
         event = tree.get_UID2event(uid)
-        if event.get("cat") in GPU_KERNEL_CATS:
+        if event.get("cat") in GPU_KERNEL_CATEGORIES:
             total += event.get("dur", 0)
         children = event.get("children")
         if children:

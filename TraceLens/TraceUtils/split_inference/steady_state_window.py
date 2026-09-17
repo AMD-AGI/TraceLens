@@ -479,10 +479,6 @@ def find_steady_state_inference_from_shapes(
     if not batch_sizes or not iteration_roots:
         return [], []
 
-    total = len(iteration_roots)
-    if total == 0:
-        return [], []
-
     phase_labels = classify_phases_from_batch_sizes(batch_sizes, max_num_seq=max_num_seq)
     regions, _ = _identify_regions_by_decode_baseline(batch_sizes, phase_labels, num_steps)
 

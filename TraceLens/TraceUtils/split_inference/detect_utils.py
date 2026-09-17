@@ -20,12 +20,9 @@ from bisect import bisect_left
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from statistics import median
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
-# A GPU annotation span *encloses* the kernels it describes, so summing GPU time
-# over both double-counts. Kept apart here, recombined by consumers wanting both.
-GPU_KERNEL_CATEGORIES = ("kernel", "gpu_memcpy", "gpu_memset")
-GPU_USER_ANNOTATION = "gpu_user_annotation"
+from ...util import GPU_EVENT_CATEGORIES, GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION
 
 # Coverage to accept roots outright, and the floor below which a trace is
 # unsplittable rather than degraded.
@@ -133,9 +130,6 @@ class IntervalIndex:
     def __init__(self, events: Iterable[dict]):
         buckets: Dict[Tuple, List[dict]] = {}
         for e in events:
-            ts, dur = e.get("ts"), e.get("dur")
-            if ts is None or dur is None:
-                continue
             buckets.setdefault((e.get("pid"), e.get("tid")), []).append(e)
         self._threads: Dict[Tuple, Tuple[List[float], List[float], List[dict]]] = {}
         for key, evs in buckets.items():
@@ -246,6 +240,64 @@ class SpanSet:
         return self.spans[0][0], max(end for _, end in self.spans)
 
 
+# --- Single-pass event index ------------------------------------------------
+
+ANNOTATION_CAT = "user_annotation"
+
+
+class TraceIndex:
+    """All event categories extracted in a single pass over the trace."""
+
+    def __init__(self, events: Iterable[dict]):
+        self.kernels: List[dict] = []
+        self.annotations: List[dict] = []
+        self.gpu_annotation_spans: List[dict] = []
+        self.meta_events: List[dict] = []
+        self.gpu_corr_map: Dict = {}
+        self.flow_corr_map: Dict = {}
+        self.corr_cpu: List[dict] = []
+
+        for e in events:
+            ts = e.get("ts")
+            cat = e.get("cat")
+
+            if ts is None:
+                self.meta_events.append(e)
+                continue
+
+            ph = e.get("ph")
+            if ph in ("s", "f"):
+                corr = e.get("id")
+                if corr is not None:
+                    self.flow_corr_map.setdefault(corr, []).append(e)
+                continue
+
+            dur = e.get("dur")
+            if dur is None:
+                continue
+
+            if cat == ANNOTATION_CAT:
+                if "Input Dims" not in (e.get("args") or {}):
+                    self.annotations.append(e)
+                continue
+
+            corr = (e.get("args") or {}).get("correlation")
+
+            if cat == GPU_USER_ANNOTATION:
+                self.gpu_annotation_spans.append(e)
+                if corr is not None:
+                    self.gpu_corr_map.setdefault(corr, []).append(e)
+            elif cat in GPU_KERNEL_CATEGORIES:
+                self.kernels.append(e)
+                if corr is not None:
+                    self.gpu_corr_map.setdefault(corr, []).append(e)
+            elif corr is not None:
+                self.corr_cpu.append(e)
+
+        self.kernels.sort(key=lambda x: x["ts"])
+        self.annotations.sort(key=lambda e: e["ts"])
+
+
 # --- GPU attribution and coverage -------------------------------------------
 class GpuAttribution:
     """Attributes GPU kernels to annotations and measures coverage.
@@ -261,30 +313,21 @@ class GpuAttribution:
     STRATEGY_GPU_SPAN = "gpu_span"
     STRATEGY_CORRELATION = "correlation"
 
-    def __init__(self, events: Iterable[dict]):
-        self.kernels: List[dict] = []
-        self.gpu_annotation_spans: List[dict] = []
-        corr_cpu: List[dict] = []
-        self._corr_kernels: Dict[int, List[dict]] = {}
-        for e in events:
-            ts, dur, cat = e.get("ts"), e.get("dur"), e.get("cat")
-            if ts is None or dur is None:
-                continue
-            corr = (e.get("args") or {}).get("correlation")
-            if cat == GPU_USER_ANNOTATION:
-                self.gpu_annotation_spans.append(e)
-            elif cat in GPU_KERNEL_CATEGORIES:
-                self.kernels.append(e)
-                if corr is not None:
-                    self._corr_kernels.setdefault(corr, []).append(e)
-            elif corr is not None:
-                corr_cpu.append(e)
+    def __init__(self, source: TraceIndex):
+        self.annotations = source.annotations
+        self.kernels = source.kernels
+        self.gpu_annotation_spans = source.gpu_annotation_spans
 
-        self.kernels.sort(key=lambda x: x["ts"])
         self._kernel_starts = [k["ts"] for k in self.kernels]
         self.gpu_busy = sum(k["dur"] for k in self.kernels)
 
-        self._corr_cpu = corr_cpu
+        self._corr_kernels: Dict[int, List[dict]] = {}
+        for k in self.kernels:
+            corr = (k.get("args") or {}).get("correlation")
+            if corr is not None:
+                self._corr_kernels.setdefault(corr, []).append(k)
+
+        self._corr_cpu = source.corr_cpu
         self._cpu_index_cache: Optional[IntervalIndex] = None
         self._spans_by_external_id: Dict[object, List[dict]] = {}
         for span in self.gpu_annotation_spans:

@@ -33,7 +33,6 @@ from TraceLens.util import TraceEventUtils
 from TraceLens.TraceUtils.annotation_utils import (
     CAPTURE_PATTERN,
     CaptureAnnotation,
-    find_events_by_patterns,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
@@ -182,6 +181,14 @@ def perf_report_sanity_check(
     }
 
 
+def find_capture_annotation_events(events):
+    return sorted(
+        [e for e in events if e.get("cat") == "user_annotation"
+         and CAPTURE_PATTERN.match(e.get("name", ""))],
+        key=lambda x: x.get("ts", 0),
+    )
+
+
 def classify_graph_capture_trace(input_folder: str):
     """
     Return {file, batch_size, mode} for a single graph-capture trace file.
@@ -251,7 +258,7 @@ def classify_graph_capture_trace(input_folder: str):
         trace_json = load_trace(filepath)
         events = trace_json.get("traceEvents", [])
         dummy_roots = find_dummy_run_roots(events)
-        annotation_roots = find_events_by_patterns(events, [CAPTURE_PATTERN])
+        annotation_roots = find_capture_annotation_events(events)
         basename = os.path.basename(filepath)
 
         if annotation_roots and len(annotation_roots) == len(dummy_roots):

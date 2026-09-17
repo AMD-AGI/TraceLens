@@ -681,6 +681,9 @@ class TraceEventUtils:
         MemSet = "gpu_memset"
         MemCpy = "gpu_memcpy"
 
+    class GpuUserAnnotation(StrEnum):
+        GpuUserAnnotation = "gpu_user_annotation"
+
     class CpuEventCategories(StrEnum):
         Kernel = "cpu_op"
         Runtime = "cuda_runtime"
@@ -936,6 +939,11 @@ class TraceEventUtils:
     def is_rocm_legacy_memset(text: str) -> bool:
         """Return True if *text* is a rocclr legacy fill kernel name (ROCm 7.1)."""
         return bool(text and TraceEventUtils._ROCM_LEGACY_MEMSET_NAMES.match(text))
+
+
+GPU_KERNEL_CATEGORIES = tuple(TraceEventUtils.GpuEventCategories)
+GPU_USER_ANNOTATION = TraceEventUtils.GpuUserAnnotation.GpuUserAnnotation
+GPU_EVENT_CATEGORIES = (*GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION)
 
 
 class RocprofParser:

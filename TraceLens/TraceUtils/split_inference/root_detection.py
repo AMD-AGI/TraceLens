@@ -11,27 +11,26 @@ Steps 1 and 2 group every annotation into families, known and unknown alike.
 tree-based detection path for traces no annotation family explains.
 """
 
-from dataclasses import dataclass
 from statistics import mean, pstdev
 from typing import Dict, List, Optional, Sequence
 
 from collections import deque
 
-from ...util import normalize_name_for_comparison
+from ...util import GPU_KERNEL_CATEGORIES, normalize_name_for_comparison
 from ...Trace2Tree.inference_iteration_roots import (
     BRANCH_COVERAGE_GATE,
     BRANCH_DESCENT_TIER,
     BRANCH_MAX_NODES,
-    GPU_KERNEL_CATS,
     MIN_LABEL_CHILDREN,
     _blocks_by_pattern,
     _descendant_gpu_time,
+    _entry_roots,
     _find_repeating_period,
+    _reattach_worker_threads,
 )
 from ...Trace2Tree.trace_to_tree import TraceToTree
 from ..annotation_utils import (
-    ANNOTATION_CAT,
-    is_parseable,
+    find_known_annotations,
     name_skeleton,
 )
 from .detect_utils import (
@@ -42,40 +41,11 @@ from .detect_utils import (
     GpuAttribution,
     PhaseConfidence,
     RootSet,
+    TraceIndex,
 )
 
 
-@dataclass
-class AnnotationFamily:
-    """All instances of one logical annotation, keyed by its skeleton.
-
-    CPU-side only: GPU annotation spans duplicate one annotation across streams,
-    so any count from them is inflated. They give "has GPU work" signal only.
-    """
-
-    skeleton: str
-    instances: List[dict]
-    gpu_time: float = 0.0
-    parseable: bool = False
-    interarrival_cv: float = 0.0
-
-    @property
-    def count(self) -> int:
-        return len(self.instances)
-
-    @property
-    def regular(self) -> bool:
-        """Enough instances to be a per-iteration event rather than a one-off."""
-        return self.count >= MIN_ROOTS
-
-    @property
-    def rank(self) -> tuple:
-        """Sort key for choosing between families: most GPU work, steadiest."""
-        return (-self.gpu_time, round(self.interarrival_cv, 3), -self.count)
-
-
 def _interarrival_cv(instances: Sequence[dict]) -> float:
-    """Variation in the spacing between consecutive instances."""
     stamps = sorted(e.get("ts", 0) for e in instances)
     gaps = [b - a for a, b in zip(stamps, stamps[1:]) if b > a]
     if len(gaps) < 2:
@@ -84,51 +54,12 @@ def _interarrival_cv(instances: Sequence[dict]) -> float:
     return pstdev(gaps) / average if average else 0.0
 
 
-def collect_annotations(events: Sequence[dict]) -> List[dict]:
-    """CPU-side *marker* annotations, in time order.
-
-    Input Dims are checked for to avoid selecting operation annotations as iteration roots.
-    """
-    annotations = [
-        e
-        for e in events
-        if e.get("cat") == ANNOTATION_CAT
-        and e.get("ts") is not None
-        and e.get("dur") is not None
-        and "Input Dims" not in (e.get("args") or {})
-    ]
-    annotations.sort(key=lambda e: e["ts"])
-    return annotations
-
-
-def build_families(
-    annotations: Sequence[dict], attribution: GpuAttribution
-) -> List[AnnotationFamily]:
-    """Group annotations and drop the ones with no GPU work."""
-    grouped: Dict[str, List[dict]] = {}
-    for event in annotations:
-        grouped.setdefault(name_skeleton(event.get("name", "")), []).append(event)
-
-    families = [
-        AnnotationFamily(
-            skeleton=skeleton,
-            instances=instances,
-            gpu_time=attribution.gpu_time_for_family(instances),
-            parseable=any(is_parseable(e.get("name", "")) for e in instances),
-            interarrival_cv=_interarrival_cv(instances),
-        )
-        for skeleton, instances in grouped.items()
-    ]
-
-    return [f for f in families if f.gpu_time > 0]
-
-
 # --- steps ------------------------------------------------------------------
 def _total_gpu_time(tree: TraceToTree) -> float:
     return sum(
         e.get("dur", 0)
         for e in tree.events_by_uid.values()
-        if e.get("cat") in GPU_KERNEL_CATS
+        if e.get("cat") in GPU_KERNEL_CATEGORIES
     )
 
 
@@ -270,7 +201,7 @@ def _grouped_candidate(
     """One candidate from the recurring child frame that carries the GPU work.
 
     A *conditional* loop body has no contiguous period. Grouping by name ignores
-    the gaps, exactly as ``build_families`` does one level up.
+    the gaps, exactly as the unknown-family detector does one level up.
 
     Ranked by GPU time, then cadence, then count. Only the winning family becomes roots.
     """
@@ -479,3 +410,293 @@ def detect_from_sibling_roots(
     candidate.method = "generic:sibling_roots"
     candidate.diagnostics["period_label_tier"] = "sibling_roots"
     return candidate
+
+
+# ---------------------------------------------------------------------------
+# Cascade: find_iteration_roots
+# ---------------------------------------------------------------------------
+
+BOOKEND_FLOOR = 0.50
+
+
+def _annotation_root_set(
+    roots: Sequence[dict],
+    attribution: GpuAttribution,
+    method: str,
+    phase_confidence: PhaseConfidence,
+    root_family_known: bool,
+) -> RootSet:
+    """Build a graded RootSet from a set of annotation roots.
+
+    Audits GPU coverage and sets status: SPLITTABLE when the roots explain
+    enough GPU work -- unless the match is a suspiciously short (warmup-only)
+    run and the labels aren't known -- DEGRADED above the floor, else
+    NOT_SPLITTABLE.
+
+    ``root_family`` lists every distinct name skeleton present: one for a
+    single-family set (unknown families, vLLM), several when known iteration
+    annotations span phases (SGLang EXTEND/DECODE, ATOM prefill/decode).
+    """
+    ordered = sorted(roots, key=lambda e: e.get("ts", 0))
+    coverage = attribution.audit(ordered)
+    few_roots = len(ordered) < MIN_ROOTS
+    known_labels = phase_confidence is PhaseConfidence.HIGH
+    if coverage.passes and (known_labels or not few_roots):
+        status = DetectStatus.SPLITTABLE
+    elif coverage.covered_selected >= COVERAGE_FLOOR:
+        status = DetectStatus.DEGRADED
+    else:
+        status = DetectStatus.NOT_SPLITTABLE
+
+    skeletons = sorted({name_skeleton(r.get("name", "")) for r in ordered})
+    return RootSet(
+        roots=ordered,
+        method=method,
+        phase_confidence=phase_confidence,
+        status=status,
+        coverage=coverage,
+        diagnostics={
+            "n_roots": len(ordered),
+            "root_family": ", ".join(skeletons),
+            "root_family_known": root_family_known,
+            "suspiciously_few_roots": few_roots,
+        },
+    )
+
+
+def _detect_from_known_annotations(
+    annotations: Sequence[dict], attribution: GpuAttribution,
+) -> Optional[RootSet]:
+    known = find_known_annotations(annotations)
+    if not known:
+        return None
+    return _annotation_root_set(
+        known,
+        attribution,
+        method="annotation:tier",
+        phase_confidence=PhaseConfidence.HIGH,
+        root_family_known=True,
+    )
+
+
+def _detect_from_unknown_annotations(
+    annotations: Sequence[dict], attribution: GpuAttribution,
+) -> Optional[RootSet]:
+    grouped: Dict[str, List[dict]] = {}
+    for event in annotations:
+        grouped.setdefault(name_skeleton(event.get("name", "")), []).append(event)
+
+    candidates = []
+    for instances in grouped.values():
+        if len(instances) < MIN_ROOTS:
+            continue
+        gpu_time = attribution.gpu_time_for_family(instances)
+        if gpu_time <= 0:
+            continue
+        candidates.append((gpu_time, instances))
+
+    if not candidates:
+        return None
+    _, instances = max(candidates, key=lambda c: c[0])
+    return _annotation_root_set(
+        instances,
+        attribution,
+        method="family:unknown_only",
+        phase_confidence=PhaseConfidence.UNKNOWN,
+        root_family_known=False,
+    )
+
+
+def _log_attempt(step: str, root_set: Optional[RootSet]) -> None:
+    if root_set is None:
+        print(f"[roots] {step}: no candidate")
+        return
+    cov = root_set.coverage
+    max_shown = 3
+
+    skeletons = sorted({name_skeleton(r.get("name", "")) for r in root_set.roots})
+    shown = ", ".join(
+        s if len(s) <= 60 else s[:57] + "..." for s in skeletons[:max_shown]
+    )
+    if len(skeletons) > max_shown:
+        shown += f", +{len(skeletons) - max_shown} more"
+    head = (
+        f"[roots] {step}: {len(root_set.roots)} roots via {root_set.method} "
+        f"[{shown}]"
+    )
+    if cov is None:
+        print(f"{head}, coverage not measured, status={root_set.status.name}")
+        return
+    print(
+        f"{head}, GPU coverage={cov.covered_selected:.1%}, "
+        f"{cov.span_share:.1%} inside root spans "
+        f"({cov.strategy}), status={root_set.status.name}"
+    )
+
+
+def _try_bookend_enhancement(
+    candidate: RootSet,
+    tree: TraceToTree,
+    total_gpu: float,
+) -> Optional[RootSet]:
+    if not total_gpu or not candidate.roots:
+        return None
+
+    uid_map = tree.events_by_uid
+    before = [
+        uid_map[uid]
+        for uid in candidate.diagnostics.get("before_uids", ())
+        if uid in uid_map
+    ]
+    after = [
+        uid_map[uid]
+        for uid in candidate.diagnostics.get("after_uids", ())
+        if uid in uid_map
+    ]
+    if not before and not after:
+        return None
+
+    before_gpu = _descendant_gpu_time(tree, before) if before else 0.0
+    after_gpu = _descendant_gpu_time(tree, after) if after else 0.0
+    if before_gpu <= 0 and after_gpu <= 0:
+        return None
+
+    def _span(events: Sequence[dict], name: str) -> dict:
+        ordered = sorted(events, key=lambda e: e["ts"])
+        last = ordered[-1]
+        root = dict(ordered[0])
+        root["name"] = name
+        root["dur"] = last["ts"] + last.get("dur", 0) - ordered[0]["ts"]
+        return root
+
+    roots = list(candidate.roots)
+    diagnostics = dict(candidate.diagnostics)
+    if before_gpu > 0:
+        roots.insert(0, _span(before, "warmup"))
+        diagnostics["warmup_gpu_pct"] = round(100 * before_gpu / total_gpu, 1)
+    if after_gpu > 0:
+        roots.append(_span(after, "wrapup"))
+        diagnostics["wrapup_gpu_pct"] = round(100 * after_gpu / total_gpu, 1)
+
+    coverage = (
+        before_gpu + diagnostics.get("iter_gpu_time", 0.0) + after_gpu
+    ) / total_gpu
+    diagnostics["bookend_enhancement"] = True
+    diagnostics["branch_coverage"] = round(coverage, 4)
+    return RootSet(
+        roots=roots,
+        method=candidate.method,
+        phase_confidence=candidate.phase_confidence,
+        status=_grade(coverage),
+        diagnostics=diagnostics,
+    )
+
+
+def find_iteration_roots(
+    events: Sequence[dict],
+    trace_index: TraceIndex = None,
+) -> RootSet:
+    """Find iteration roots and report how much GPU work they account for.
+
+    Flat cascade -- each step is tried in order and returns as soon as a
+    detector produces roots with acceptable GPU coverage:
+
+    1. Known annotation patterns (vLLM execute_*, SGLang step[*], etc.)
+    2. Unknown annotation families (ProfilerStep, scheduler.run_batch, etc.)
+    3. Descend down call tree root, searching for repeating patterns.
+    4. Search across roots, looking for periodicity across top-level frames.
+    """
+    attribution = GpuAttribution(trace_index)
+    annotations = trace_index.annotations
+    all_candidates: List[RootSet] = []
+
+    def _check(step: str, root_set: Optional[RootSet]) -> bool:
+        """Log the result and return True if SPLITTABLE."""
+        _log_attempt(step, root_set)
+        if root_set is not None:
+            all_candidates.append(root_set)
+        return root_set is not None and root_set.status is DetectStatus.SPLITTABLE
+
+    # --- 1. Known annotation patterns -----------------------------------------
+    step1 = _detect_from_known_annotations(annotations, attribution)
+    if _check("1 known annotations", step1):
+        return step1
+
+    # --- 2. Unknown annotation families ---------------------------------------
+    step2 = _detect_from_unknown_annotations(annotations, attribution)
+    if _check("2 unknown families", step2):
+        return step2
+
+    # --- 3 & 4. Tree-based detectors (built once) ----------------------------
+    try:
+        tree = TraceToTree(list(events), prune_nongpu_paths=True)
+        tree.build_tree(add_python_func=True)
+    except Exception as exc:
+        print(f"TraceToTree build failed ({exc}), skipping tree detectors.")
+        if best_fallback is not None:
+            return best_fallback
+        return RootSet(
+            roots=[],
+            method="none",
+            status=DetectStatus.NOT_SPLITTABLE,
+            diagnostics={"reason": "tree build failed and no annotations"},
+        )
+
+    tree = _reattach_worker_threads(tree)
+    entry_roots = _entry_roots(tree)
+    total_gpu = _total_gpu_time(tree)
+
+    def _attach_uid_map(root_set: RootSet) -> RootSet:
+        root_set.diagnostics["_events_by_uid"] = tree.events_by_uid
+        return root_set
+
+    if total_gpu == 0:
+        return RootSet(
+            roots=[],
+            method="none",
+            status=DetectStatus.NOT_SPLITTABLE,
+            diagnostics={"reason": "no GPU work"},
+        )
+
+    # --- 3. Branch descent ----------------------------------------------------
+    branch_set = detect_from_branch_descent(tree, entry_roots, total_gpu)
+    if branch_set is not None:
+        branch_set.coverage = attribution.audit(branch_set.roots)
+    if _check("3 branch descent", branch_set):
+        return _attach_uid_map(branch_set)
+
+    # --- 4. Sibling roots ----------------------------------------------------
+    sibling_set = detect_from_sibling_roots(tree, entry_roots, total_gpu)
+    if sibling_set is not None:
+        sibling_set.coverage = attribution.audit(sibling_set.roots)
+    if _check("4 sibling roots", sibling_set):
+        return _attach_uid_map(sibling_set)
+
+    # --- 5. Bookend enhancement ----------------------------------------------
+    bookend_set = None
+    for candidate in (branch_set, sibling_set):
+        if candidate is None or not candidate.roots:
+            continue
+        if candidate.diagnostics.get("branch_coverage", 0) < BOOKEND_FLOOR:
+            continue
+        bookend_set = _try_bookend_enhancement(candidate, tree, total_gpu)
+        if bookend_set is not None:
+            bookend_set.coverage = attribution.audit(bookend_set.roots)
+            break
+    if _check("5 bookend enhancement", bookend_set):
+        return _attach_uid_map(bookend_set)
+
+    # --- Return the best result across all detectors --------------------------
+    for candidate in all_candidates:
+        if candidate.status is not DetectStatus.NOT_SPLITTABLE:
+            _log_attempt("fallback (best usable)", candidate)
+            return _attach_uid_map(candidate)
+    if all_candidates:
+        _log_attempt("fallback (last resort)", all_candidates[0])
+        return _attach_uid_map(all_candidates[0])
+    return RootSet(
+        roots=[],
+        method="none",
+        status=DetectStatus.NOT_SPLITTABLE,
+        diagnostics={"reason": "no annotations and no repeating call pattern"},
+    )

@@ -15,7 +15,7 @@ from collections import Counter
 
 from tqdm import tqdm
 
-from ...util import most_common_first_dim
+from ...util import GPU_EVENT_CATEGORIES, GPU_KERNEL_CATEGORIES, most_common_first_dim
 from ..annotation_utils import (
     ITERATION_BACKUP_PATTERNS,
     ITERATION_PATTERNS,
@@ -26,55 +26,9 @@ from ..annotation_utils import (
     iteration_details,
 )
 
-from .detect_utils import (
-    GPU_KERNEL_CATEGORIES,
-    GPU_USER_ANNOTATION,
-    build_root_tiles,
-)
-
-# Kernels plus the GPU annotation spans that describe them. Anything summing
-# GPU *time* must use GPU_KERNEL_CATEGORIES instead, since a projection encloses
-# the kernels it describes and counting both double-counts.
-GPU_EVENT_CATEGORIES = [*GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION]
+from .detect_utils import build_root_tiles
 
 
-def get_filename(filepath: str) -> dict:
-    """Load trace JSON from file (.json, .json.gz, or .zip)."""
-    print(f"Loading trace: {filepath}")
-    if filepath.endswith(".zip"):
-        with zipfile.ZipFile(filepath, "r") as zf:
-            # Find the JSON file inside the zip
-            json_files = [f for f in zf.namelist() if f.endswith(".json")]
-            if not json_files:
-                raise ValueError(f"No .json file found in {filepath}")
-            json_file = json_files[0]
-            print(f"  Reading {json_file} from zip...")
-            return json_file
-    return filepath
-
-
-def preprocess_trace(events: list[dict]):
-    gpu_corr_map = {}
-    flow_corr_map = {}
-    meta_events = []
-    for e in tqdm(events):
-        ts = e.get("ts")
-        ph = e.get("ph")
-        cat = e.get("cat")
-        if ts is None:
-            meta_events.append(e)
-            continue
-        if ph in ("s", "f"):
-            corr = e.get("id")
-            if corr is not None:
-                flow_corr_map.setdefault(corr, []).append(e)
-            continue
-        if cat in GPU_EVENT_CATEGORIES:
-            corr = e.get("args", {}).get("correlation")
-            if corr is not None:
-                gpu_corr_map.setdefault(corr, []).append(e)
-            continue
-    return gpu_corr_map, flow_corr_map, meta_events
 
 
 def build_cpu_event_index(
@@ -432,100 +386,6 @@ def extract_and_save(
         )
     return extraction_summary
 
-
-def extract_phases_and_save(
-    roots: list[list[dict]],
-    events: list[dict],
-    trace_json: dict,
-    output_dir: str,
-    base_name: str,
-    prefix: str,
-    start: int,
-    end: int,
-    gpu_corr_map: dict,
-    flow_corr_map: dict,
-    meta_events: list[dict],
-    root_tiles: dict | None = None,
-):
-    """Extract and save a range of iterations."""
-    extraction_summary = []
-
-    if "annotation_iteration" not in prefix:
-        print("phase extraction only supported for annotation iterations, skipping")
-        return extraction_summary
-    for root in roots:
-        iter_details = iteration_details(root)
-        prefilldecode_steps = [r for r, i in zip(root, iter_details) if has_context(i)]
-        decode_steps = [r for r, i in zip(root, iter_details) if is_decode_only(i)]
-
-        if len(prefilldecode_steps) > 0:
-            iter_details = iteration_details(prefilldecode_steps)
-            phase_details = find_phase_from_window(iter_details)
-
-            iter_trace, _batch_list, num_gpu_events, gpu_dur, gpu_busy = (
-                extract_iteration(
-                    prefilldecode_steps,
-                    events,
-                    trace_json,
-                    gpu_corr_map,
-                    flow_corr_map,
-                    meta_events,
-                    root_tiles=root_tiles,
-                )
-            )
-            name_append = f"prefilldecode_{phase_details['num_prefilldecode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
-
-            out_path = os.path.join(output_dir, f"{name_append}_{base_name}.json.gz")
-            with gzip.open(out_path, "wb") as f:
-                f.write(json.dumps(iter_trace).encode("utf-8"))
-
-            print(f"  {prefix}: {len(iter_trace['traceEvents'])} events -> {out_path}")
-            extraction_summary.append(
-                {
-                    "idx": 0,
-                    "output_path": out_path,
-                    "event_count": len(iter_trace["traceEvents"]),
-                    "num_gpu_events": num_gpu_events,
-                    "gpu_duration": gpu_dur,
-                    "gpu_busy_duration": gpu_busy,
-                    "steps": iter_details,
-                    "phase": phase_details,
-                }
-            )
-        if len(decode_steps) > 0:
-            iter_details = iteration_details(decode_steps)
-            phase_details = find_phase_from_window(iter_details)
-            iter_trace, _batch_list, num_gpu_events, gpu_dur, gpu_busy = (
-                extract_iteration(
-                    decode_steps,
-                    events,
-                    trace_json,
-                    gpu_corr_map,
-                    flow_corr_map,
-                    meta_events,
-                    root_tiles=root_tiles,
-                )
-            )
-            name_append = f"decode_{phase_details['num_decode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
-
-            out_path = os.path.join(output_dir, f"{name_append}_{base_name}.json.gz")
-            with gzip.open(out_path, "wb") as f:
-                f.write(json.dumps(iter_trace).encode("utf-8"))
-
-            print(f"  {prefix}: {len(iter_trace['traceEvents'])} events -> {out_path}")
-            extraction_summary.append(
-                {
-                    "idx": 0,
-                    "output_path": out_path,
-                    "event_count": len(iter_trace["traceEvents"]),
-                    "num_gpu_events": num_gpu_events,
-                    "gpu_duration": gpu_dur,
-                    "gpu_busy_duration": gpu_busy,
-                    "steps": iter_details,
-                    "phase": phase_details,
-                }
-            )
-    return extraction_summary
 
 
 def divide_phases_and_save(

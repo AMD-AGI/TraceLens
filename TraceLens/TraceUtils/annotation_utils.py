@@ -375,41 +375,19 @@ class CaptureAnnotation:
         return self.kind is not None
 
 
-def find_events_by_patterns(
-    events: List[dict],
-    patterns: List["re.Pattern"],
-    cat: Optional[str] = ANNOTATION_CAT,
-    label: Optional[str] = None,
-    verbose: bool = False,
-) -> List[dict]:
-    """Events whose name matches any of patterns, sorted by timestamp."""
-    matches = [
-        e
-        for e in events
-        if (cat is None or e.get("cat") == cat)
-        and any(p.match(e.get("name", "")) for p in patterns)
-    ]
-    matches.sort(key=lambda x: x.get("ts", 0))
-    if label is not None:
-        print(f"Found {len(matches)} {label} events")
-    if verbose:
-        for m in matches:
-            print(m.get("name", ""))
-    return matches
-
-
-def find_known_annotations(
-    events: List[dict],
-    cat: Optional[str] = ANNOTATION_CAT,
-) -> List[dict]:
+def find_known_annotations(annotations: List[dict]) -> List[dict]:
     """Annotations matching a recognized iteration pattern, sorted by timestamp.
 
     Tries the detailed tier first, then the native/backup tier, returning the
     first tier that produces any matches.
     """
     for patterns in (ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS):
-        matches = find_events_by_patterns(events, patterns, cat=cat)
+        matches = [
+            e for e in annotations
+            if any(p.match(e.get("name", "")) for p in patterns)
+        ]
         if matches:
+            matches.sort(key=lambda x: x.get("ts", 0))
             return matches
     return []
 

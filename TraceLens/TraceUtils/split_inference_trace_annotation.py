@@ -152,7 +152,6 @@ After splitting traces, analyze them with:
 """
 
 import argparse
-import json
 import gzip
 import json
 import os
@@ -177,12 +176,12 @@ from .split_inference import (  # noqa: F401
     DetectStatus,
     build_cpu_event_index,
     build_root_tiles,
+    TraceIndex,
     classify_phases_from_batch_sizes,
     divide_phases_and_save,
     collect_ancestor_events,
     extract_and_save,
     extract_iteration,
-    extract_phases_and_save,
     find_iteration_roots,
     find_steady_state_generic,
     find_steady_state_inference,
@@ -190,9 +189,8 @@ from .split_inference import (  # noqa: F401
     get_filename,
     infer_batch_sizes_from_shapes,
     parse_range,
-    preprocess_trace,
 )
-from .split_inference.detect_utils import GPU_KERNEL_CATEGORIES
+from ..util import GPU_KERNEL_CATEGORIES
 
 MANIFEST_NAME = "split_manifest.json"
 
@@ -363,10 +361,13 @@ def main():
     # Load trace
     trace_json = DataLoader.load_data(get_filename(args.trace_path))
     events = trace_json.get("traceEvents", [])
-    gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
+    trace_index = TraceIndex(events)
+    gpu_corr_map = trace_index.gpu_corr_map
+    flow_corr_map = trace_index.flow_corr_map
+    meta_events = trace_index.meta_events
     print(f"Loaded {len(events)} events")
 
-    detection = find_iteration_roots(events)
+    detection = find_iteration_roots(events, trace_index=trace_index)
     iteration_roots = detection.roots
     manifest = detection.to_manifest()
     print(
@@ -415,7 +416,7 @@ def main():
     )
 
     # Extract iterations
-    if args.iterations and iteration_roots:
+    if iteration_roots:
         start, end = parse_range(args.iterations, len(iteration_roots))
 
         if args.store_single_iteration:
@@ -461,7 +462,6 @@ def main():
             out_path = os.path.join(
                 args.output_dir, f"{base_name}_iteration_{range_label}.json.gz"
             )
-            os.makedirs(args.output_dir, exist_ok=True)
             with gzip.open(out_path, "wb") as f:
                 f.write(json.dumps(iter_trace).encode("utf-8"))
             print(
@@ -569,7 +569,7 @@ def main():
                     gpu_corr_map,
                     flow_corr_map,
                     meta_events,
-                    steady_state_regions=ss_regions or [(0, len(working_roots))],
+                    steady_state_regions=ss_regions,
                     root_tiles=root_tiles,
                 )
                 execution_details.extend(temp_execution_details)
@@ -587,7 +587,7 @@ def main():
                     gpu_corr_map,
                     flow_corr_map,
                     meta_events,
-                    steady_state_regions=ss_regions or [(0, len(working_roots))],
+                    steady_state_regions=ss_regions,
                     root_tiles=root_tiles,
                     phase_labels=phase_labels,
                 )
@@ -643,7 +643,7 @@ def main():
     print(f"\nDone! Extracted {len(execution_details)} traces to {args.output_dir}")
     manifest.update(_conservation(events, per_iteration_details, args))
     _write_manifest(args.output_dir, manifest)
-    if len(execution_details) > 0:
+    if execution_details:
         json_path = os.path.join(args.output_dir, "execution_details.json")
         with open(json_path, "w") as f:
             json.dump(execution_details, f, indent=2)
