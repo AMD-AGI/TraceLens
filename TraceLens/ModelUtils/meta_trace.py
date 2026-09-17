@@ -207,6 +207,111 @@ def trace_meta_shapes(
     return shapes
 
 
+def trace_meta_input_specs(
+    checkpoint: str | Path,
+    config: dict[str, Any] | None = None,
+    *,
+    seq_len: int = 130,
+    batch_size: int = 2,
+) -> dict[str, tuple[tuple[Any, ...], str]] | None:
+    """Run a meta forward and return globally-consistent forward-parameter *input* shapes.
+
+    Returns a mapping ``param_name -> (symbolised_shape, dtype_str)`` for every
+    forward parameter whose captured ``(shape, dtype)`` is **identical across
+    every module that receives it**. Any parameter observed with conflicting
+    shapes (e.g. ``hidden_states`` at several widths, or ``position_ids`` present
+    in both the text ``[B, S]`` and the vision path) is dropped, so an ambiguous
+    seed is never emitted. This lets a caller resolve a boundary that would
+    otherwise fall back to the generic activation default — most notably an
+    ``attention_mask``/index bookkeeping parameter that is genuinely ``[B, S]``,
+    not ``[B, S, hidden]``.
+
+    ``batch_size`` and ``seq_len`` are deliberately chosen distinct from common
+    structural dims (head_dim 128, num_heads 64, …) so :func:`symbolise_meta_shape`
+    does not alias a feature axis onto ``B``/``S`` (seq_len 128 == head_dim 128
+    would corrupt a ``[B, S, 64, 128]`` gate into ``[B, S, 64, S]``).
+
+    Returns *None* when torch is unavailable, the model cannot be instantiated, or
+    nothing consistent was captured. Best-effort, like :func:`trace_meta_shapes`.
+    """
+    try:
+        import torch
+    except ImportError:
+        return None
+
+    try:
+        from TraceLens.ModelUtils.torch_trace import (
+            _instantiate_meta,
+            _patch_rotary_embeddings,
+        )
+
+        model, _config = _instantiate_meta(checkpoint)
+        _patch_rotary_embeddings(model)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("Could not instantiate model on meta device: %s", exc)
+        return None
+
+    import inspect
+
+    # param_name -> set of (symbolised_shape, dtype_str) seen across all modules.
+    observed: dict[str, set[tuple[tuple[Any, ...], str]]] = {}
+
+    def _record(param: str, tensor: Any) -> None:
+        shape = symbolise_meta_shape(
+            tuple(int(d) for d in tensor.shape),
+            batch_size=batch_size,
+            seq_len=seq_len,
+        )
+        dtype = str(tensor.dtype).replace("torch.", "")
+        observed.setdefault(param, set()).add((shape, dtype))
+
+    def _make_hook(module: Any):
+        try:
+            params = list(inspect.signature(module.forward).parameters)
+        except (TypeError, ValueError):
+            params = []
+
+        def hook(_module, args, kwargs):
+            for index, value in enumerate(args):
+                if isinstance(value, torch.Tensor):
+                    name = params[index] if index < len(params) else f"arg{index}"
+                    _record(name, value)
+            for name, value in (kwargs or {}).items():
+                if isinstance(value, torch.Tensor):
+                    _record(name, value)
+
+        return hook
+
+    handles = [
+        mod.register_forward_pre_hook(_make_hook(mod), with_kwargs=True)
+        for _name, mod in model.named_modules()
+    ]
+    try:
+        dummy = torch.zeros(batch_size, seq_len, dtype=torch.long, device="meta")
+        with torch.no_grad():
+            model(dummy)
+    except Exception:
+        # Meta tensors fail on data-dependent ops; pre-hooks already fired for
+        # every module reached before the failure (incl. the sparse indexer).
+        pass
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    # Keep only globally-unambiguous parameters (exactly one observed value).
+    resolved = {
+        param: next(iter(values))
+        for param, values in observed.items()
+        if len(values) == 1
+    }
+    if resolved:
+        _log.info(
+            "Meta-device tracing captured %d consistent input params", len(resolved)
+        )
+        return resolved
+    return None
+
+
 def _norm_op(name: Any) -> str:
     """Normalize an op name for cross-source matching (AST id vs FX node)."""
     return re.sub(r"[^a-z0-9]", "", str(name).lower())

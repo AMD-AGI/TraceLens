@@ -892,6 +892,12 @@ class ShapeInferencer:
         self._introspecting: set[str] = set()
         # Meta-device traced shapes (module path -> symbolic shape).
         self._meta_shapes: dict[str, TensorSpec] = {}
+        # Meta-device forward-parameter *input* shapes, keyed by parameter name,
+        # restricted to parameters that are globally shape-consistent (see
+        # ``trace_meta_input_specs``). Used to resolve an ``@input`` boundary that
+        # would otherwise fall back to the generic ``(B, S, hidden)`` default —
+        # e.g. an ``attention_mask`` that is genuinely ``[B, S]``.
+        self._meta_input_specs: dict[str, TensorSpec] = {}
         # Checkpoint retained for the lazy per-op FX fallback (see below).
         self._meta_checkpoint: str | Path | None = None
         # Per-op FX ground-truth shapes, keyed by (line, op, occurrence).
@@ -1037,6 +1043,15 @@ class ShapeInferencer:
                 shape=(Symbol.VISION_PATCH.value, self._vision_patch_flat),
                 dtype=self.context.dtype,
             )
+        # Meta-device ground truth for a globally-consistent forward parameter
+        # (e.g. ``attention_mask`` → ``[B, S]``). Lowest precedence: it only
+        # resolves a boundary the explicit override and vision seed both declined,
+        # replacing the generic ``(B, S, hidden)`` default with the real observed
+        # shape. Parameters with any cross-module shape disagreement were dropped
+        # upstream, so this never fires on an ambiguous name (``hidden_states`` etc.).
+        meta_input = self._meta_input_specs.get(node.label or "")
+        if meta_input is not None:
+            return meta_input
         return None
 
     def load_meta_shapes(
@@ -1050,27 +1065,41 @@ class ShapeInferencer:
 
         Returns *True* when shapes were successfully captured.
         """
-        from TraceLens.ModelUtils.meta_trace import trace_meta_shapes, symbolise_meta_shape
+        from TraceLens.ModelUtils.meta_trace import (
+            trace_meta_shapes,
+            trace_meta_input_specs,
+            symbolise_meta_shape,
+        )
 
         # Retain for the lazy per-op FX fallback, even if module-level tracing
         # below captures nothing.
         self._meta_checkpoint = checkpoint
+
+        # Globally-consistent forward-parameter input shapes (own collision-free
+        # trace dims; see ``trace_meta_input_specs``). Seeds ``@input`` boundaries
+        # that would otherwise take the generic activation default.
+        input_specs = trace_meta_input_specs(
+            checkpoint, config=self.spec.raw_config
+        )
+        if input_specs:
+            for param, (shape, dtype) in input_specs.items():
+                self._meta_input_specs[param] = TensorSpec(shape=shape, dtype=dtype)
+
         raw = trace_meta_shapes(
             checkpoint,
             config=self.spec.raw_config,
             seq_len=seq_len,
             batch_size=batch_size,
         )
-        if raw is None:
-            return False
-        for module_path, shape in raw.items():
-            sym = symbolise_meta_shape(
-                shape, batch_size=batch_size, seq_len=seq_len
-            )
-            self._meta_shapes[module_path] = TensorSpec(
-                shape=sym, dtype=self.context.dtype
-            )
-        return bool(self._meta_shapes)
+        if raw is not None:
+            for module_path, shape in raw.items():
+                sym = symbolise_meta_shape(
+                    shape, batch_size=batch_size, seq_len=seq_len
+                )
+                self._meta_shapes[module_path] = TensorSpec(
+                    shape=sym, dtype=self.context.dtype
+                )
+        return bool(self._meta_shapes or self._meta_input_specs)
 
     def infer_model_graph(
         self, graph: ModelGraph, *, root: BlockNode | None = None
@@ -1537,6 +1566,15 @@ class ShapeInferencer:
         # Catch-all for any remaining synthetic wiring nodes (kernel ports,
         # hidden_states, etc.) — silent passthrough, no warning.
         if synthetic is not None and synthetic.startswith("@"):
+            # An ``@input_mirror`` shows the value flowing in from the enclosing
+            # scope; its true shape is the boundary parameter's. When that
+            # parameter is a globally-consistent meta ground truth (e.g.
+            # ``attention_mask`` → ``[B, S]``), prefer it over the passthrough,
+            # whose upstream would otherwise be the generic activation default.
+            if synthetic == "@input_mirror":
+                meta_input = self._meta_input_specs.get(node.label or "")
+                if meta_input is not None:
+                    return meta_input
             if inputs:
                 return inputs[0]
             return self._activation_spec(dtype)
