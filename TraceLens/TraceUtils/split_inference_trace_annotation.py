@@ -345,6 +345,16 @@ def main():
             "(prefill vs decode) and steady-state identification."
         ),
     )
+    parser.add_argument(
+        "--max-num-seq",
+        type=int,
+        default=None,
+        help=(
+            "Maximum number of concurrent sequences (decode batch size cap). "
+            "Iterations with batch size above this value are classified as "
+            "prefill-bearing. When not set, a heuristic is used."
+        ),
+    )
     args = parser.parse_args()
     execution_details = []
     # Only the partitioning pass can be checked for kernel conservation.
@@ -534,6 +544,7 @@ def main():
             elif batch_sizes is not None:
                 return find_steady_state_inference_from_shapes(
                     working_roots, batch_sizes, num_steps=args.num_steps, mode=mode,
+                    max_num_seq=args.max_num_seq,
                 )
             else:
                 return find_steady_state_generic(
@@ -566,7 +577,7 @@ def main():
                 # --llm-inference without serving annotations: use shape-based phases
                 print("\n--- Dividing steady-state steps by phase (from shapes) ---")
                 _, ss_regions = _find_ss("mixed")
-                phase_labels = classify_phases_from_batch_sizes(batch_sizes)
+                phase_labels = classify_phases_from_batch_sizes(batch_sizes, max_num_seq=args.max_num_seq)
                 temp_execution_details = divide_phases_and_save(
                     working_roots,
                     events,

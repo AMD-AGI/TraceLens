@@ -224,9 +224,6 @@ def _periodic_candidate(
     live = [e for e in ordered if gputime_by_name.get(e.get("name", ""), 0.0) > 0]
     if len(live) < MIN_LABEL_CHILDREN:
         return None
-    # Normalized names, because ``_blocks_by_pattern`` matches on them: the two
-    # have to agree, and normalizing is what lets a python frame repeat at all
-    # when its line number shifts between iterations.
     period, pattern, start = _find_repeating_period(
         [normalize_name_for_comparison(e.get("name", "")) for e in live]
     )
@@ -245,6 +242,7 @@ def _periodic_candidate(
         if e["ts"] >= last_block_end and e.get("UID") not in blocked_uids
     ]
     iteration_roots: List[dict] = []
+    root_gpu_times: List[float] = []
     blocked: List[dict] = []
     for block in unit_blocks:
         first, last = block[0], block[-1]
@@ -252,16 +250,13 @@ def _periodic_candidate(
         event["name"] = node.get("name", event.get("name", ""))
         event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
         iteration_roots.append(event)
+        root_gpu_times.append(_descendant_gpu_time(tree, block))
         blocked.extend(block)
+    extra = _bookend_diagnostics(blocked, prefix, suffix)
+    extra["root_gpu_times"] = root_gpu_times
     return _branch_candidate(
-        tree,
-        iteration_roots,
-        blocked,
-        total_gpu,
-        depth,
-        "period",
-        period,
-        extra=_bookend_diagnostics(blocked, prefix, suffix),
+        tree, iteration_roots, blocked, total_gpu, depth,
+        "period", period, extra=extra,
     )
 
 
@@ -309,18 +304,106 @@ def _grouped_candidate(
             for gpu, _, count, name, _ in with_gpu[1:4]
         ],
     }
-    # The group's own frames, so there is no synthetic event to fabricate.
+    root_gpu_times = [_descendant_gpu_time(tree, [e]) for e in instances]
+    extra["root_gpu_times"] = root_gpu_times
     return _branch_candidate(
-        tree,
-        list(instances),
-        list(instances),
-        total_gpu,
-        depth,
-        "frame_family",
-        None,
-        gpu_time=gpu_time,
-        extra=extra,
+        tree, list(instances), list(instances), total_gpu, depth,
+        "frame_family", None, gpu_time=gpu_time, extra=extra,
     )
+
+
+_GAP_RATIO_THRESHOLD = 10.0
+
+
+def _filter_low_gpu_roots(candidate: RootSet, tree: TraceToTree, total_gpu: float) -> RootSet:
+    """Drop roots whose GPU time falls below a natural cluster gap.
+
+    Sorts per-root GPU times, finds the largest multiplicative gap between
+    consecutive values, and drops everything on the low side if the gap
+    ratio exceeds ``_GAP_RATIO_THRESHOLD``.
+    """
+    gpu_times = candidate.diagnostics.get("root_gpu_times")
+    if not gpu_times or len(gpu_times) < MIN_LABEL_CHILDREN:
+        return candidate
+
+    nonzero = [(i, g) for i, g in enumerate(gpu_times) if g > 0]
+    if len(nonzero) < MIN_LABEL_CHILDREN:
+        return candidate
+    indexed = sorted(nonzero, key=lambda x: x[1])
+    max_ratio = 1.0
+    split_at = -1
+    for i in range(len(indexed) - 1):
+        ratio = indexed[i + 1][1] / indexed[i][1]
+        if ratio > max_ratio:
+            max_ratio = ratio
+            split_at = i
+
+    if max_ratio < _GAP_RATIO_THRESHOLD:
+        return candidate
+
+    keep_indices = {idx for idx, _ in indexed[split_at + 1:]}
+    if len(keep_indices) < MIN_LABEL_CHILDREN:
+        return candidate
+
+    new_roots = [r for i, r in enumerate(candidate.roots) if i in keep_indices]
+    new_gpu_times = [g for i, g in enumerate(gpu_times) if i in keep_indices]
+    new_gpu_total = sum(new_gpu_times)
+    cov = new_gpu_total / total_gpu if total_gpu else 0.0
+
+    diag = dict(candidate.diagnostics)
+    diag["root_gpu_times"] = new_gpu_times
+    diag["branch_coverage"] = round(cov, 4)
+    diag["iter_gpu_time"] = new_gpu_total
+    diag["dropped_low_gpu_roots"] = len(candidate.roots) - len(new_roots)
+
+    return RootSet(
+        roots=new_roots,
+        method=candidate.method,
+        phase_confidence=candidate.phase_confidence,
+        status=_grade(cov),
+        diagnostics=diag,
+    )
+
+
+def find_pattern(
+    tree: TraceToTree,
+    ordered: Sequence[dict],
+    total_gpu: float,
+    node: Optional[dict] = None,
+    depth: int = 0,
+) -> Optional[RootSet]:
+    """Find the best repeating pattern in an ordered list of children.
+
+    Tries both a contiguous repeating name run (``_periodic_candidate``) and
+    the best name-grouped child frame (``_grouped_candidate``), returning
+    whichever covers more GPU work. Roots with negligible GPU time are
+    dropped when a natural cluster gap separates them from the real
+    iterations.
+
+    When *node* is provided, iteration roots are named after it (branch
+    descent). Otherwise each root keeps its own name (sibling roots).
+    """
+    if len(ordered) < MIN_LABEL_CHILDREN:
+        return None
+    groups, gputime_by_name = _child_groups(tree, ordered)
+    best: Optional[RootSet] = None
+    dummy_node = node if node is not None else {}
+    for candidate in (
+        _periodic_candidate(
+            tree, dummy_node, ordered, gputime_by_name, total_gpu, depth
+        ),
+        _grouped_candidate(tree, groups, gputime_by_name, total_gpu, depth),
+    ):
+        if candidate is None:
+            continue
+        cov = candidate.diagnostics["branch_coverage"]
+        if cov > 0 and (
+            best is None or cov > best.diagnostics["branch_coverage"]
+        ):
+            best = candidate
+    if best is not None:
+        best = _filter_low_gpu_roots(best, tree, total_gpu)
+    return best
 
 
 def detect_from_branch_descent(
@@ -330,11 +413,10 @@ def detect_from_branch_descent(
 ) -> Optional[RootSet]:
     """Walk the call tree to find the frame whose children repeat and cover the GPU.
 
-    Two candidates compete at every node -- a contiguous repeating name run, and
-    the best name-grouped child frame -- and the one covering more GPU work wins.
-    The BFS keeps descending past nodes whose candidates explain too little GPU
-    work (sub-loops). Returns the best :class:`RootSet` found, or ``None``. The
-    caller decides whether coverage is acceptable.
+    At every node, :func:`find_pattern` tries both a contiguous repeating name
+    run and the best name-grouped child frame. The BFS keeps descending past
+    nodes whose candidates explain too little GPU work (sub-loops). Returns the
+    best :class:`RootSet` found, or ``None``.
     """
     best: Optional[RootSet] = None
     queue = deque((r, 0) for r in entry_roots)
@@ -347,22 +429,13 @@ def detect_from_branch_descent(
         children = tree.get_children_events(node)
         if len(children) >= MIN_LABEL_CHILDREN:
             ordered = sorted(children, key=lambda e: e.get("ts", 0))
-            groups, gputime_by_name = _child_groups(tree, ordered)
-            for candidate in (
-                _periodic_candidate(
-                    tree, node, ordered, gputime_by_name, total_gpu, depth
-                ),
-                _grouped_candidate(tree, groups, gputime_by_name, total_gpu, depth),
+            candidate = find_pattern(tree, ordered, total_gpu, node=node, depth=depth)
+            if candidate is not None and (
+                best is None
+                or candidate.diagnostics["branch_coverage"]
+                > best.diagnostics["branch_coverage"]
             ):
-                if candidate is None:
-                    continue
-                cov = candidate.diagnostics["branch_coverage"]
-                # A frame explaining no GPU work is never an answer, however
-                # early it is found: pure CPU output processing was winning.
-                if cov > 0 and (
-                    best is None or cov > best.diagnostics["branch_coverage"]
-                ):
-                    best = candidate
+                best = candidate
             if (
                 best is not None
                 and best.diagnostics["branch_coverage"] >= BRANCH_COVERAGE_GATE
@@ -400,53 +473,9 @@ def detect_from_sibling_roots(
         return None
 
     ordered = sorted(entry_roots, key=lambda e: e.get("ts", 0))
-    period, _, start = _find_repeating_period(
-        [normalize_name_for_comparison(e.get("name", "")) for e in ordered]
-    )
-    if period is None:
+    candidate = find_pattern(tree, ordered, total_gpu)
+    if candidate is None:
         return None
-
-    blocks = (len(ordered) - start) // period
-    unit_blocks = [
-        list(ordered[start + index * period : start + (index + 1) * period])
-        for index in range(blocks)
-    ]
-    if not unit_blocks:
-        return None
-    prefix = list(ordered[:start])
-    blocked_uids_tmp = {e.get("UID") for b in unit_blocks for e in b}
-    last_block_end = (
-        unit_blocks[-1][-1]["ts"] + unit_blocks[-1][-1].get("dur", 0)
-    )
-    suffix = [
-        e for e in ordered
-        if e["ts"] >= last_block_end and e.get("UID") not in blocked_uids_tmp
-    ]
-
-    sibling_roots = []
-    blocked = []
-    for block in unit_blocks:
-        first, last = block[0], block[-1]
-        event = dict(first)
-        event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
-        sibling_roots.append(event)
-        blocked.extend(block)
-
-    iter_gpu_time = _descendant_gpu_time(tree, blocked)
-    cov = iter_gpu_time / total_gpu if total_gpu else 0.0
-    diagnostics = _bookend_diagnostics(blocked, prefix, suffix)
-    diagnostics.update(
-        {
-            "period_label_tier": "sibling_roots",
-            "period": period,
-            "branch_coverage": round(cov, 4),
-            "iter_gpu_time": iter_gpu_time,
-        }
-    )
-    return RootSet(
-        roots=sibling_roots,
-        method="generic:sibling_roots",
-        phase_confidence=PhaseConfidence.UNKNOWN,
-        status=_grade(cov),
-        diagnostics=diagnostics,
-    )
+    candidate.method = "generic:sibling_roots"
+    candidate.diagnostics["period_label_tier"] = "sibling_roots"
+    return candidate
