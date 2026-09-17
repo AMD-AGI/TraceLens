@@ -19,6 +19,9 @@ import logging
 import re
 from pathlib import Path
 
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    HEURISTIC_FRACTION_MID,
+)
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     MarkerValidator,
     _find_data_table,
@@ -29,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 MAX_COMPUTE_TASKS = 100
-IDENTIFICATION_CAP = 1000
+IDENTIFICATION_CAP = 2000
 REASONING_CAP = 2000
 RESOLUTION_CAP = 2000
 
@@ -232,6 +235,7 @@ class AnalysisMdParser:
         rank_m = re.search(
             r"reasoning-candidate\s+tier=compute\s+rank=(\d+)", lines[start]
         )
+        md_rank = f"P{rank_m.group(1)}" if rank_m else None
         category = category_by_rank.get(int(rank_m.group(1))) if rank_m else None
 
         heading = next((ln for ln in lines[start:end] if ln.startswith("####")), None)
@@ -252,12 +256,14 @@ class AnalysisMdParser:
         for member in members:
             member["category"] = category
             member["library"] = library
+            member["analysis_md_rank"] = md_rank
         impacts = self._parse_op_row_marker(block)
         low, high = self._parse_finding_range(block)
         return {
             "members": members,
             "impacts": impacts,
             "prose": prose,
+            "rank": md_rank,
             "low": low,
             "high": high,
         }
@@ -291,6 +297,7 @@ class AnalysisMdParser:
                     "kernel_launcher_path": self._cell_or_null(get("kernel_path")),
                     "library": None,
                     "category": None,
+                    "analysis_md_rank": None,
                     "args_shapes": args_shapes,
                     "args_datatypes": args_datatypes,
                     "time_ms": self._first_float(get("time_ms")),
@@ -330,15 +337,23 @@ class AnalysisMdParser:
                 mapping[int(link_m.group(1))] = cat_m.group(1)
         return mapping
 
-    def _parse_op_row_marker(self, block: str) -> "list[float] | None":
-        """Return the ``kind=op_row`` ``impacts=`` CSV as floats, or None."""
+    def _parse_op_row_marker(self, block: str) -> "list[float | None] | None":
+        """Return the ``kind=op_row`` ``impacts=`` CSV, one entry per row.
+
+        A ``—`` cell (spec-legal null) maps to ``None`` so the reader can
+        fall back to that row's ``pct_e2e``; the whole marker is None when absent.
+        """
         for m in MarkerValidator.BEGIN_RE.finditer(block):
             inner = m.group(1)
             km = MarkerValidator.KIND_ATTR_RE.search(inner)
             if not km or km.group(1) != "op_row":
                 continue
             im = MarkerValidator.OP_ROW_IMPACTS_RE.search(inner)
-            return [float(v) for v in im.group(1).split(",") if v.strip()]
+            return [
+                None if v.strip() in _NULL_CELLS else float(v)
+                for v in im.group(1).split(",")
+                if v.strip()
+            ]
         return None
 
     def _parse_finding_range(self, block: str) -> tuple:
@@ -529,22 +544,26 @@ class ComputeGrouper:
             members = finding["members"]
             impacts = finding["impacts"]
             for ri, member in enumerate(members):
+                row_impact = impacts[ri] if impacts is not None else None
                 score = (
-                    impacts[ri] if impacts is not None else (member["pct_e2e"] or 0.0)
+                    row_impact
+                    if row_impact is not None
+                    else (member["pct_e2e"] or 0.0) * HEURISTIC_FRACTION_MID
                 )
 
                 if self.is_fallback:
                     key = member["kernel_name"][0] if member["kernel_name"] else ""
                     operation = None
                 else:
-                    key = member["operation_cell"] or ""
-                    operation = key or None
+                    operation = AnalysisMdParser._cell_or_null(member["operation_cell"])
+                    key = operation or ""
 
                 emitted = {
                     "impact_score": score,
                     "kernel_launcher_path": member["kernel_launcher_path"],
                     "library": member["library"],
                     "category": member["category"],
+                    "analysis_md_rank": member["analysis_md_rank"],
                     "kernel_name": member["kernel_name"],
                     "args_shapes": member["args_shapes"],
                     "args_datatypes": member["args_datatypes"],
@@ -616,18 +635,23 @@ class ComputeGrouper:
         return tasks
 
     def _accumulate_prose(self, ordered_fi: list, findings: dict) -> dict:
-        """Concatenate per-finding prose in member-impact order under fixed caps."""
+        """Concatenate per-finding prose under fixed caps; prefix ``[P<rank>]`` only when merged."""
         caps = {
             "identification": IDENTIFICATION_CAP,
             "reasoning": REASONING_CAP,
             "resolution": RESOLUTION_CAP,
         }
+        label = len(ordered_fi) > 1
         out: dict = {}
         truncated = False
         for field, cap in caps.items():
-            blocks = [
-                body for fi in ordered_fi if (body := findings[fi]["prose"].get(field))
-            ]
+            blocks = []
+            for fi in ordered_fi:
+                body = findings[fi]["prose"].get(field)
+                if not body:
+                    continue
+                rank = findings[fi]["rank"]
+                blocks.append(f"[{rank}] {body}" if (label and rank) else body)
             if not blocks:
                 out[field] = None
                 continue

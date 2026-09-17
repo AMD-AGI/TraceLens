@@ -190,6 +190,7 @@ def _accumulate_usage(usage, totals):
     )
     totals["cache_read"] += (
         usage.get("cacheReadTokens")
+        or usage.get("cached_input_tokens")
         or usage.get("cache_read_input_tokens")
         or usage.get("cacheRead")
         or usage.get("cache_read")
@@ -249,6 +250,9 @@ def parse_ndjson_stream(ndjson_path):
     agent_end_record = None
     pi_turn_count = 0
     pi_tool_calls = 0
+    codex_completion_record = None
+    codex_turn_count = 0
+    codex_tool_calls = 0
     first_ts = None
     last_ts = None
     token_totals = {"input": 0, "output": 0, "cache_read": 0}
@@ -273,6 +277,31 @@ def parse_ndjson_stream(ndjson_path):
                 result_record = rec
             elif rec_type == "agent_end":
                 agent_end_record = rec
+            elif rec_type == "turn.started":
+                codex_turn_count += 1
+            elif rec_type == "turn.completed":
+                codex_completion_record = {**rec, "is_error": False}
+            elif rec_type in ("turn.failed", "error"):
+                codex_completion_record = {**rec, "is_error": True}
+            elif rec_type in ("item.started", "item.completed"):
+                item = rec.get("item") or {}
+                if item.get("type") == "command_execution":
+                    cmd = item.get("command", "")
+                    stdout = item.get("aggregated_output", "")
+                    if rec_type == "item.started":
+                        codex_tool_calls += 1
+                    _detect_steps_from_shell(cmd, stdout, steps_reached)
+                    tc = {
+                        "shellToolCall": {
+                            "args": {"command": cmd},
+                            "result": {"success": {"stdout": stdout}},
+                        }
+                    }
+                    c = _detect_report_write_from_command(tc)
+                    if c is None and rec_type == "item.completed":
+                        c = _detect_report_write(tc)
+                    if c is not None:
+                        report_content = c
             elif rec_type == "turn_end":
                 pi_turn_count += 1
                 msg = rec.get("message") or {}
@@ -336,10 +365,18 @@ def parse_ndjson_stream(ndjson_path):
                         if turn_id is not None:
                             turn_ids.add(turn_id)
 
-    diag["turns"] = pi_turn_count if pi_turn_count else len(turn_ids)
-    diag["tool_calls"] = pi_tool_calls if pi_tool_calls else tool_call_count
+    diag["turns"] = (
+        codex_turn_count
+        if codex_turn_count
+        else pi_turn_count if pi_turn_count else len(turn_ids)
+    )
+    diag["tool_calls"] = (
+        codex_tool_calls
+        if codex_tool_calls
+        else pi_tool_calls if pi_tool_calls else tool_call_count
+    )
 
-    completion = result_record or agent_end_record
+    completion = codex_completion_record or result_record or agent_end_record
     if completion:
         diag["outcome"] = "error" if completion.get("is_error") else "success"
         duration_ms = completion.get("duration_ms")
@@ -362,6 +399,7 @@ def parse_ndjson_stream(ndjson_path):
             diag["cache_read_tokens"] = (
                 usage.get("cacheReadTokens")
                 or usage.get("cacheReadInputTokens")
+                or usage.get("cached_input_tokens")
                 or usage.get("cache_read_input_tokens")
                 or usage.get("cacheRead")
                 or usage.get("cache_read")

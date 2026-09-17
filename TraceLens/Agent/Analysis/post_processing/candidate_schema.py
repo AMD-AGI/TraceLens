@@ -9,7 +9,7 @@
 The contract between the ``render_analysis_json`` producer and any downstream
 consumer of ``analysis.json``. Additive-only: a drifted field surfaces as a
 ``TypedDict`` mismatch at the read boundary, never a silent mis-parse. Compute
-tier only (v1); no fusion/system task shapes, no ``schema_version``.
+tier only; no fusion/system task currnetly``.
 """
 
 from typing import NotRequired, Optional, TypedDict
@@ -30,6 +30,7 @@ class ComputeMember(TypedDict):
     kernel_launcher_path: Optional[str]
     library: Optional[str]
     category: Optional[str]
+    analysis_md_rank: Optional[str]
     kernel_name: list[str]
     args_shapes: Optional[list[str]]
     args_datatypes: Optional[list[str]]
