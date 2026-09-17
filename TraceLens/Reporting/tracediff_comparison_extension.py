@@ -22,6 +22,7 @@ Matching uses ``gpu_op_uid`` values from ``df_unified_perf``.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
@@ -351,6 +352,158 @@ def _enrich_sheet_with_trace2(
     return df
 
 
+_MULTI_OP_LCA_THRESHOLD = 5
+
+
+def _rollup_multi_op_lcas(
+    df: pd.DataFrame,
+    diff_stats_df: pd.DataFrame,
+    lca_metadata: Dict[Any, Dict[str, Any]],
+) -> pd.DataFrame:
+    """Replace summary rows from multi-op LCAs with a single LCA-level row.
+
+    When an LCA contains kernels from many trace1 ops (>threshold), the
+    per-op trace2 time is the full LCA busy_time — making individual op
+    comparisons meaningless.  This function detects those rows, removes
+    them, and inserts one rolled-up row per unique trace1 LCA name where
+    both t1 and t2 are LCA-level busy_times.
+    """
+    if df.empty or diff_stats_df.empty or not lca_metadata:
+        return df
+
+    if "source" not in diff_stats_df.columns:
+        return df
+
+    ds = diff_stats_df.dropna(subset=["lowest_common_ancestor_id"])
+    trace1_ds = ds[ds["source"] == "trace1"]
+    trace2_ds = ds[ds["source"] == "trace2"]
+    if trace1_ds.empty:
+        return df
+
+    # Step 1: LCA ID → trace1 row count; identify multi-op LCA IDs
+    lca_t1_counts = trace1_ds.groupby("lowest_common_ancestor_id").size()
+    multi_op_lca_ids = set(
+        lca_t1_counts[lca_t1_counts > _MULTI_OP_LCA_THRESHOLD].index
+    )
+    if not multi_op_lca_ids:
+        return df
+
+    # Step 2: LCA ID → busy_times (for building rolled-up rows)
+    lca_t1_busy = (
+        trace1_ds.groupby("lowest_common_ancestor_id")["busy_time"].first()
+    )
+    lca_t2_busy = (
+        trace2_ds.groupby("lowest_common_ancestor_id")["busy_time"].first()
+        if not trace2_ds.empty
+        else pd.Series(dtype=float)
+    )
+
+    # Step 3: LCA ID → trace1 LCA name (before " | ")
+    lca_id_to_t1_name: Dict[Any, str] = {}
+    for lca_id in multi_op_lca_ids:
+        grp = trace1_ds[trace1_ds["lowest_common_ancestor_id"] == lca_id]
+        full_name = grp["lowest_common_ancestor_name"].dropna()
+        if full_name.empty:
+            lca_id_to_t1_name[lca_id] = "unknown"
+            continue
+        raw = str(full_name.iloc[0])
+        lca_id_to_t1_name[lca_id] = raw.split(" | ")[0]
+
+    # Step 4: Identify affected summary rows
+    affected_rows: Dict[Any, Set] = {}  # summary row idx → set of multi-op LCA IDs
+    for row_idx, meta in lca_metadata.items():
+        overlap = set(meta.get("lca_ids", [])) & multi_op_lca_ids
+        if overlap:
+            affected_rows[row_idx] = overlap
+
+    if not affected_rows:
+        return df
+
+    # Step 5: Group affected rows by trace1 LCA name
+    #   For each affected row, pick the most common trace1 LCA name among
+    #   its multi-op LCA IDs as the group key.
+    groups: Dict[str, Dict] = {}  # t1_name → {row_indices, lca_ids}
+    for row_idx, overlap_lca_ids in affected_rows.items():
+        names = [lca_id_to_t1_name[lid] for lid in overlap_lca_ids]
+        group_name = Counter(names).most_common(1)[0][0]
+        if group_name not in groups:
+            groups[group_name] = {"row_indices": set(), "lca_ids": set()}
+        groups[group_name]["row_indices"].add(row_idx)
+        groups[group_name]["lca_ids"].update(overlap_lca_ids)
+
+    # Step 6: Build rolled-up rows
+    kt_col = _KERNEL_TIME_COL_FOR_SPEEDUP_DELTA
+    rollup_rows = []
+    all_drop_indices = set()
+
+    for group_name, info in groups.items():
+        row_indices = info["row_indices"]
+        group_lca_ids = info["lca_ids"]
+        all_drop_indices.update(row_indices)
+
+        t1_total = sum(
+            float(lca_t1_busy.get(lid, 0.0)) for lid in group_lca_ids
+        )
+        t2_total = sum(
+            float(lca_t2_busy.get(lid, 0.0)) for lid in group_lca_ids
+        )
+        n_instances = len(group_lca_ids)
+        t2_matched = sum(
+            1 for lid in group_lca_ids if lid in lca_t2_busy.index
+        )
+
+        lca_id_str = "; ".join(str(int(lid)) for lid in sorted(group_lca_ids))
+        lca_name_strs = []
+        for lid in sorted(group_lca_ids):
+            grp = trace1_ds[trace1_ds["lowest_common_ancestor_id"] == lid]
+            fn = grp["lowest_common_ancestor_name"].dropna()
+            if not fn.empty:
+                lca_name_strs.append(str(fn.iloc[0]))
+        lca_name_str = "; ".join(dict.fromkeys(lca_name_strs))
+
+        categories = set()
+        for ri in row_indices:
+            if ri in df.index and "op category" in df.columns:
+                categories.add(df.loc[ri, "op category"])
+        op_cat = categories.pop() if len(categories) == 1 else "other"
+
+        speedup = (t2_total / t1_total) if t1_total > 0 else np.nan
+
+        new_row = {c: np.nan for c in df.columns}
+        new_row["name"] = group_name
+        new_row["op category"] = op_cat
+        new_row["operation_count"] = n_instances
+        if kt_col in df.columns:
+            new_row[kt_col] = t1_total
+        new_row["speedup (trace2/trace1)"] = speedup
+        new_row["delta_us (trace2 - trace1)"] = t2_total - t1_total
+        new_row[_TRACE2_OP_COUNT_COL] = float(t2_matched)
+        new_row["lca_id"] = lca_id_str
+        new_row["lca_name"] = lca_name_str
+        new_row["lca_total_kernel_time_trace1_us"] = t1_total
+        new_row["lca_total_kernel_time_trace2_us"] = t2_total
+
+        rollup_rows.append(new_row)
+
+    # Step 7: Drop affected rows, append rolled-up rows
+    valid_drop = [idx for idx in all_drop_indices if idx in df.index]
+    result = df.drop(index=valid_drop)
+
+    if rollup_rows:
+        rollup_df = pd.DataFrame(rollup_rows, columns=df.columns)
+        result = pd.concat([result, rollup_df], ignore_index=True)
+
+    n_removed = len(valid_drop)
+    n_added = len(rollup_rows)
+    n_multi = len(multi_op_lca_ids)
+    print(
+        f"[TraceDiff] Multi-op LCA rollup: {n_multi} LCAs (>{_MULTI_OP_LCA_THRESHOLD} "
+        f"trace1 rows), {n_removed} summary rows replaced by {n_added} rolled-up rows."
+    )
+
+    return result
+
+
 def enrich_perf_report_dict_inplace(
     perf_dfs: Dict[str, pd.DataFrame],
     diff_stats_df: pd.DataFrame,
@@ -385,6 +538,12 @@ def enrich_perf_report_dict_inplace(
         ups_df,
         kt_col,
         lca_metadata=lca_metadata,
+    )
+
+    working["unified_perf_summary"] = _rollup_multi_op_lcas(
+        working["unified_perf_summary"],
+        diff_stats_df,
+        lca_metadata,
     )
 
     print(

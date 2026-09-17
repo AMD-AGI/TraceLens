@@ -77,6 +77,19 @@ def prepare_model_identification_data(
     with open(os.path.join(metadata_dir, "nn_modules.txt"), "w") as f:
         f.write("\n".join(nn_modules) + "\n" if nn_modules else "")
 
+    workload_type = (
+        "training" if df["name"].str.contains("Backward").any() else "inference"
+    )
+    model_info = {
+        "model": "Cannot be inferred from trace",
+        "architecture": "Cannot be inferred from trace",
+        "scale": "Cannot be inferred from trace",
+        "precision": "Cannot be inferred from trace",
+        "workload_type": workload_type,
+    }
+    with open(os.path.join(metadata_dir, "model_info.json"), "w") as f:
+        json.dump(model_info, f, indent=2)
+
     return True
 
 

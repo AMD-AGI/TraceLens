@@ -533,7 +533,7 @@ Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/Agent/
 
 **On failure (subagent error, timeout, or `model_info.json` not written):**
 1. **Retry exactly once** by re-launching the same subagent with the same prompt.
-2. If the retry also fails, write fallback `metadata/model_info.json` with all four fields set to `"Cannot be inferred from trace"`.
+2. If the retry also fails, write fallback `metadata/model_info.json` with `model`, `architecture`, `scale`, `precision` set to `"Cannot be inferred from trace"` and `workload_type` set to `"inference"`.
 
 Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Workload" if model is "Cannot be inferred from trace".
 
@@ -591,10 +591,14 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
       - `category_data/*_metrics.json` (per-op tables, impact estimates).
 
    f. **Appendix** — append `## Appendix` with `### Model Architecture` and `### Hardware Reference`. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
-      - `metadata/model_info.json` — substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
+      - `metadata/model_info.json` — substitute `<model>`, `<architecture>`, `<scale>`, `<precision>`, `<workload_type>` with the five field values.
       - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/Agent/Analysis/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
 
-**Failure exclusion:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a `## Warnings` section (between Executive Summary and Compute Kernel Optimizations) only if failures exist.
+**Failure exclusion:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`.
+
+**Comparative training warning:** If `<comparison_scope>` is `comparative` and `metadata/model_info.json` has `workload_type` = `"training"`, include a `## Warnings` section (between Executive Summary and Compute Kernel Optimizations) with this banner:
+
+> **⚠️ Experimental: Comparative analysis of training traces is experimental. Cross-platform differences in operator fusion, autograd graph structure, and backward pass decomposition may cause inaccurate per-operator runtime attribution. LCA-level runtime comparisons (rolled-up rows) are more reliable than individual operator comparisons in the backward pass.**
 
 The report at `<output_dir>/analysis.md` must use these exact `##` headers — do NOT rename them:
 1. `## Executive Summary`

@@ -29,13 +29,13 @@ When invoked by the orchestrator, you will receive the following context:
 - `<output_dir>/metadata/condensed_op_info.csv` — CSV with columns **name**, **Input type**, and **Input Dims** (extracted from the perf report by the script)
 
 **Output file you must write:**
-- `<output_dir>/metadata/model_info.json` — JSON with exactly four fields: `model`, `architecture`, `scale`, `precision`
+- `<output_dir>/metadata/model_info.json` — JSON with exactly five fields: `model`, `architecture`, `scale`, `precision`, `workload_type`
 
 ---
 
 ## Output Schema (model_info.json)
 
-Write a JSON file with exactly these four keys:
+Write a JSON file with exactly these five keys:
 
 | Field | Description | Examples |
 |-------|-------------|----------|
@@ -43,6 +43,7 @@ Write a JSON file with exactly these four keys:
 | **architecture** | High-level architecture type | CNN, RNN, Transformer |
 | **scale** | Model scale/size | base, 7B, 70B, base–7B |
 | **precision** | Compute/dtype used | BF16, FP8, FP16, FP32 |
+| **workload_type** | Training or inference | training, inference |
 
 
 ---
@@ -62,7 +63,7 @@ if not prepare_model_identification_data('<output_dir>', '<comparison_scope>'):
 "
 ```
 
-The script does **not** perform any inference. It only produces the CSV for you to analyze.
+The script produces the CSV for you to analyze and seeds `metadata/model_info.json` with a pre-computed `workload_type` field (`"training"` or `"inference"`, detected from whether backward ops exist). You must preserve this field when writing the final `model_info.json`.
 
 ### Step 2: Read nn_modules.txt for model identity
 
@@ -70,7 +71,11 @@ If `<output_dir>/metadata/nn_modules.txt` exists and is non-empty, use it to inf
 
 If the file is absent or empty, skip this step and infer **model** from `condensed_op_info.csv` in Step 3.
 
-### Step 3: Analyze condensed_op_info.csv and write model_info.json
+### Step 3: Read seeded model_info.json
+
+Read `<output_dir>/metadata/model_info.json` (written by the Step 1 script). It contains a pre-computed `workload_type` field. Note its value — you must preserve it in the final output.
+
+### Step 4: Analyze condensed_op_info.csv and write model_info.json
 
 Open `<output_dir>/metadata/condensed_op_info.csv` and analyze the **name**, **Input type**, and **Input Dims** values across the rows. Infer:
 - **model** (if not already determined in Step 2)
@@ -78,7 +83,7 @@ Open `<output_dir>/metadata/condensed_op_info.csv` and analyze the **name**, **I
 - **scale**
 - **precision**
 
-Write `<output_dir>/metadata/model_info.json` with these four keys. **Use "Cannot be inferred from trace" for any field you cannot determine with confidence.**
+Write `<output_dir>/metadata/model_info.json` with these five keys, preserving the `workload_type` value from Step 3. **Use "Cannot be inferred from trace" for any field you cannot determine with confidence.**
 
 ---
 
@@ -88,13 +93,14 @@ Write `<output_dir>/metadata/model_info.json` with these four keys. **Use "Canno
 - **Architecture**: From **name** and **Input Dims** — e.g. convolution → CNN; bmm + softmax + (batch, heads, seq, seq) → Transformer.
 - **Scale**: From typical hidden/embed sizes in **Input Dims**
 - **Model**: Prefer `nn_modules.txt` (Step 2) over op-name inference.
+- **Workload type**: Pre-computed by the extraction script. Preserve the value from the seeded `model_info.json`.
 
 ---
 
 ## Error Handling
 
-- If the script fails or `condensed_op_info.csv` is missing: write `metadata/model_info.json` with all four fields set to `"Cannot be inferred from trace"`.
-- Always ensure `metadata/model_info.json` exists and is a valid JSON with keys `model`, `architecture`, `scale`, `precision` before returning to the orchestrator.
+- If the script fails or `condensed_op_info.csv` is missing: write `metadata/model_info.json` with `model`, `architecture`, `scale`, `precision` set to `"Cannot be inferred from trace"` and `workload_type` set to `"inference"`.
+- Always ensure `metadata/model_info.json` exists and is a valid JSON with keys `model`, `architecture`, `scale`, `precision`, `workload_type` before returning to the orchestrator.
 
 ---
 
@@ -102,5 +108,5 @@ Write `<output_dir>/metadata/model_info.json` with these four keys. **Use "Canno
 
 1. **Conservative inference** -- use "Cannot be inferred from trace" for any field you cannot determine with high confidence
 2. **Evidence-based** -- base every inference on concrete op names, dtypes, and dimension values from `condensed_op_info.csv`
-3. **Exact output schema** -- always produce a valid JSON with exactly four keys: `model`, `architecture`, `scale`, `precision`
-4. **Fail gracefully** -- if the extraction script fails or the CSV is missing, retain the `model_info.json` with all fields set to the default unknown string
+3. **Exact output schema** -- always produce a valid JSON with exactly five keys: `model`, `architecture`, `scale`, `precision`, `workload_type`
+4. **Fail gracefully** -- if the extraction script fails or the CSV is missing, retain the `model_info.json` with all fields set to the default unknown string (except `workload_type` which defaults to `"inference"`)

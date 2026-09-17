@@ -105,7 +105,10 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 
 ## Warnings
 
-**Include this section ONLY if any subagent failed OR any operation has high_variance: true in *_metrics.json:**
+**Include this section ONLY if comparison_scope is comparative and workload_type is training.**
+
+<!-- Comparative training warning (if comparative + training): -->
+> **⚠️ Experimental:** Comparative analysis of training traces is experimental. Cross-platform differences in operator fusion, autograd graph structure, and backward pass decomposition may cause inaccurate per-operator runtime attribution. LCA-level runtime comparisons (rolled-up rows) are more reliable than individual operator comparisons in the backward pass.
 
 <!-- Subagent failures (if any): -->
 The following analyses could not be completed due to script failures:
@@ -492,6 +495,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 - **Architecture**: <architecture>
 - **Scale**: <scale>
 - **Precision**: <precision>
+- **Workload Type**: <workload_type>
 
 ### Hardware Reference
 - **Platform**: <platform>
