@@ -599,18 +599,111 @@ def _positional_helper_functions(tree: ast.AST) -> list[str]:
     return names
 
 
-def _module_forward_functions(tree: ast.AST) -> dict[str, ast.FunctionDef]:
+def _imported_forward_functions(
+    tree: ast.AST, base_module: str | None
+) -> dict[str, ast.FunctionDef]:
+    """Resolve imported free functions' definitions from their defining files.
+
+    A forward that calls a helper imported from a sibling file
+    (``from ...vision_utils import get_vision_position_ids``) otherwise renders the
+    call as one opaque tile, because the definition is not in this module's tree.
+    Locating the source (``importlib.util.find_spec`` + ``ast.parse``, no module
+    execution) lets the export inline the helper's computation like a local free
+    function. General: every imported name is followed to its module, none are
+    hardcoded.
+    """
+    if not base_module or not isinstance(tree, ast.Module):
+        return {}
+    # module -> ({func_name: FunctionDef}, {imported_name: "module#symbol"}) | None
+    module_cache: dict[
+        str, tuple[dict[str, ast.FunctionDef], dict[str, str]] | None
+    ] = {}
+
+    def _load(
+        module: str,
+    ) -> tuple[dict[str, ast.FunctionDef], dict[str, str]] | None:
+        if module in module_cache:
+            return module_cache[module]
+        value: tuple[dict[str, ast.FunctionDef], dict[str, str]] | None = None
+        origin: str | None = None
+        try:
+            spec = importlib.util.find_spec(module)
+            origin = spec.origin if spec is not None else None
+        except (ImportError, AttributeError, ValueError):
+            origin = None
+        if origin and Path(origin).is_file():
+            try:
+                mod_tree = ast.parse(Path(origin).read_text(encoding="utf-8"))
+            except (OSError, SyntaxError, ValueError):
+                mod_tree = None
+            if isinstance(mod_tree, ast.Module):
+                funcs = {
+                    node.name: node
+                    for node in mod_tree.body
+                    if isinstance(node, ast.FunctionDef)
+                }
+                value = (funcs, _absolute_import_bindings(mod_tree, module))
+        module_cache[module] = value
+        return value
+
+    resolved: dict[str, ast.FunctionDef] = {}
+    seen_modules: set[str] = set()
+
+    def _resolve_binding(local_name: str, binding: str, depth: int) -> None:
+        dest, _, symbol = binding.partition("#")
+        if not dest:
+            return
+        loaded = _load(dest)
+        if loaded is None:
+            return
+        funcs, _ = loaded
+        func = funcs.get(symbol)
+        if isinstance(func, ast.FunctionDef):
+            resolved.setdefault(local_name, func)
+        _harvest_module(dest, depth)
+
+    def _harvest_module(module: str, depth: int) -> None:
+        # A resolved helper may call sibling free functions defined in (or imported
+        # into) its own module; harvesting them lets those nested calls inline too.
+        # Bounded depth keeps the pool from fanning out across the whole package.
+        if depth <= 0 or module in seen_modules:
+            return
+        seen_modules.add(module)
+        loaded = _load(module)
+        if loaded is None:
+            return
+        funcs, bindings = loaded
+        for fname, fdef in funcs.items():
+            resolved.setdefault(fname, fdef)
+        for name, binding in bindings.items():
+            _resolve_binding(name, binding, depth - 1)
+
+    for local_name, binding in _absolute_import_bindings(tree, base_module).items():
+        _resolve_binding(local_name, binding, depth=2)
+    return resolved
+
+
+def _module_forward_functions(
+    tree: ast.AST, config: dict[str, Any] | None = None
+) -> dict[str, ast.FunctionDef]:
     """Module-level ``def``s keyed by name, for expanding traced free-function calls.
 
     A rope helper or other free function called from a forward
     (``apply_rotary_pos_emb_vision(q, k, cos, sin)``) renders as an opaque tile
     unless its body is available to inline. Collecting the definitions lets the
-    export show the computation it performs, like a submodule's forward.
+    export show the computation it performs, like a submodule's forward. Helpers
+    imported from sibling files are resolved cross-file (``config`` supplies the
+    analysed module's dotted path) so they expand the same way; a local definition
+    always wins over an import on a name clash.
     """
     functions: dict[str, ast.FunctionDef] = {}
     for node in getattr(tree, "body", []):
         if isinstance(node, ast.FunctionDef):
             functions.setdefault(node.name, node)
+    for name, func in _imported_forward_functions(
+        tree, _analyzed_base_module(config)
+    ).items():
+        functions.setdefault(name, func)
     return functions
 
 
@@ -1088,6 +1181,15 @@ def _detect_method_combine_op(
     func: ast.FunctionDef, *, class_name: str = ""
 ) -> str | None:
     """Infer a combine-operator symbol from a helper method body."""
+    # A pure aggregation node returns the single combined tensor. A method that
+    # returns a tuple of several tensors (``pool_keys, pool_indices, pool_valid``)
+    # is doing more than a weighted sum — it merely *contains* one as an inner step,
+    # so it must expand into its full computation, not collapse to one ``Σ`` tile.
+    for node in reversed(func.body):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple):
+            if len(node.value.elts) > 1:
+                return None
+            break
     weighted = False
     for node in ast.walk(func):
         value: ast.AST | None = None
@@ -1290,13 +1392,27 @@ def _inline_nested_free_functions(
 
     # Synthetic predecessors that name a known free function and have no op yet.
     nested_calls: list[str] = []
+
+    def _consider(pred: str) -> None:
+        if pred in own or pred in nested_calls:
+            return
+        name = _synthetic_call_function_name(pred)
+        if name and name in module_functions and name not in _seen:
+            nested_calls.append(pred)
+
     for op in operations:
         for pred in op.predecessors:
-            if pred in own or pred in nested_calls:
-                continue
-            name = _synthetic_call_function_name(pred)
-            if name and name in module_functions and name not in _seen:
-                nested_calls.append(pred)
+            _consider(pred)
+    # A thin dispatcher's body may be only free-function calls whose results are
+    # returned or chained (``get_vision_attention_seqlens`` = cu_seqlens helper +
+    # max_seqlen helper), so no in-body op references them. Seed from the call
+    # chain (step predecessors, in dependency order) and the return producers so
+    # those calls still inline instead of leaving the frame an opaque tile.
+    for pred in analysis.step_predecessors:
+        _consider(pred)
+    for producer in analysis.return_slots.values():
+        if producer:
+            _consider(producer)
     if not nested_calls:
         return operations
 
@@ -2565,6 +2681,19 @@ class _ForwardOperationExtractor:
         # positional read token (``x.shape[0]``) so a later ``view``/``reshape``
         # arg naming ``a`` resolves to that axis instead of an opaque local.
         self.shape_unpack_tokens: dict[str, str] = {}
+        # Locals holding a host-side integer (``number_of_pools = (seq_len + k - 1)
+        # // k``) rather than a tensor. Arithmetic over only these (and shape ints /
+        # config scalars / int literals) is index/shape bookkeeping — it must not
+        # emit fake tensor ops (Add/FloorDivide/Multiply) that dangle when their
+        # result feeds a size argument like ``torch.arange(n * k)``.
+        self.host_scalar_vars: set[str] = set()
+        # Ordered return producers captured as the return statement is walked, so a
+        # subscripted return element (``return pool_keys[:, keep], ...``) — which
+        # produces a gather op but binds no name — still docks its consumer. Keyed
+        # by the element's base name; the name-based ``_extract_forward_return_metadata``
+        # misses these because there is no local for the sliced value.
+        self.return_producer_order: list[str] = []
+        self.return_producer_slots: dict[str, str] = {}
         # ``hidden_shape = (a, b, -1, self.head_dim)`` — a local tuple used as a
         # reshape target. Record the literal so ``view(hidden_shape)`` expands to
         # its dims rather than the un-resolvable variable name.
@@ -2788,6 +2917,49 @@ class _ForwardOperationExtractor:
             return None, [node.attr]
         return None, []
 
+    @staticmethod
+    def _return_element_label(node: ast.AST) -> str | None:
+        """Base name of a return element, seeing through a trailing subscript.
+
+        ``pool_keys[:, keep]`` -> ``pool_keys``; a bare ``pool_keys`` -> ``pool_keys``.
+        Used to name the return slot a subscripted return produces.
+        """
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+            return node.value.id
+        return None
+
+    def _is_host_scalar_expr(self, node: ast.AST) -> bool:
+        """A pure host-side integer expression (shape math / index bookkeeping).
+
+        True for int literals, shape-unpacked locals (``seq_len`` from
+        ``x.shape[:2]``), integer config scalars (``self.index_kpool``), ``len(...)``,
+        ``<tensor>.shape[i]``, and arithmetic combining only these. Such expressions
+        compute Python ints for sizes/offsets, not tensors, so emitting them as
+        tensor ops would leave dangling nodes. Requires *every* operand to be host
+        scalar — a tensor operand (``pool_indices + offsets``) makes it False.
+        """
+        if isinstance(node, ast.Constant):
+            return isinstance(node.value, int) and not isinstance(node.value, bool)
+        if isinstance(node, ast.Name):
+            return node.id in self.shape_unpack_tokens or node.id in self.host_scalar_vars
+        if isinstance(node, ast.Attribute):
+            value = _config_value(node, self.config, self.self_values)
+            return isinstance(value, int) and not isinstance(value, bool)
+        if isinstance(node, ast.Subscript):
+            base = node.value
+            return isinstance(base, ast.Attribute) and base.attr == "shape"
+        if isinstance(node, ast.BinOp):
+            return self._is_host_scalar_expr(node.left) and self._is_host_scalar_expr(
+                node.right
+            )
+        if isinstance(node, ast.UnaryOp):
+            return self._is_host_scalar_expr(node.operand)
+        if isinstance(node, ast.Call):
+            return _expr_name(node.func) == "len"
+        return False
+
     def expression(self, node: ast.AST) -> tuple[str | None, list[str]]:
         if isinstance(node, ast.Name):
             return self.var_producer.get(node.id), []
@@ -2875,6 +3047,9 @@ class _ForwardOperationExtractor:
                 external.extend(item_external)
             return (producers[-1] if producers else None), external
         if isinstance(node, ast.BinOp):
+            # Host-side integer arithmetic (shape/index math) is not a tensor op.
+            if self._is_host_scalar_expr(node):
+                return None, []
             left, left_external = self.expression(node.left)
             right, right_external = self.expression(node.right)
             label = _BINOP_LABELS.get(type(node.op))
@@ -3658,6 +3833,10 @@ class _ForwardOperationExtractor:
                             self.var_output_ordinal.pop(element_target.id, None)
                     continue
                 producer, _ = self.expression(stmt.value)
+                if producer is None and self._is_host_scalar_expr(value):
+                    for target in targets:
+                        if isinstance(target, ast.Name):
+                            self.host_scalar_vars.add(target.id)
                 self._track_shape_assignment(targets, value)
                 for target in targets:
                     if isinstance(target, ast.Name):
@@ -3753,7 +3932,17 @@ class _ForwardOperationExtractor:
                         self.var_producer[owner.id] = producer
                 continue
             if isinstance(stmt, ast.Return) and stmt.value is not None:
-                self.expression(stmt.value)
+                elements = (
+                    stmt.value.elts
+                    if isinstance(stmt.value, ast.Tuple)
+                    else [stmt.value]
+                )
+                for element in elements:
+                    producer, _ = self.expression(element)
+                    label = self._return_element_label(element)
+                    if label and producer and label not in self.return_producer_slots:
+                        self.return_producer_slots[label] = producer
+                        self.return_producer_order.append(label)
                 continue
             if isinstance(stmt, ast.If):
                 outcome = self._resolve_flash_request_predicate(stmt.test)
@@ -4090,9 +4279,16 @@ def _extract_forward_return_metadata(
 ) -> tuple[dict[str, str], list[str], str | None]:
     """Map ``return (a, b, c)`` names to the inline ops that produce them."""
     return_order: list[str] = []
+    returns_call_wrapper = False
     for stmt in reversed(func.body):
         if isinstance(stmt, ast.Return) and stmt.value is not None:
             return_order = _return_value_names(stmt.value)
+            # A ``ModelOutput``/dataclass wrapper (``return BaseModelOutputWithPooling(
+            # last_hidden_state=x, pooler_output=y)``) is accessed by field, so the
+            # caller typically reads one terminal. A bare ``return (a, b)`` tuple is
+            # unpacked positionally, so every element is a real output and must not
+            # be collapsed onto its most-downstream member.
+            returns_call_wrapper = isinstance(stmt.value, ast.Call)
             break
     slots = {name: var_producer[name] for name in return_order if name in var_producer}
     input_name = _primary_forward_input_name(func)
@@ -4104,8 +4300,12 @@ def _extract_forward_return_metadata(
     # descends from) so the parent wires the true output (the merger), not the
     # intermediate. Ambiguous fan-out (``hidden_states, past_key_values`` — a cache
     # side-channel not on the main chain) leaves several terminals; fall back then.
-    terminal = _sole_terminal_return_slot(
-        slots, step_predecessors or {}, multi_output_slots or set()
+    terminal = (
+        _sole_terminal_return_slot(
+            slots, step_predecessors or {}, multi_output_slots or set()
+        )
+        if returns_call_wrapper
+        else None
     )
     if terminal is not None:
         # The intermediate slots are subsumed by the terminal — they are ancestors
@@ -4587,6 +4787,19 @@ def _forward_operations_from_forward(
         extractor.step_predecessors,
         set(extractor.var_output_ordinal),
     )
+    # Fill slots the name-based extraction missed — subscripted return elements
+    # (``return pool_keys[:, keep], ...``) whose producer was captured while the
+    # return statement was walked. Preserves source order so each consumer docks
+    # onto its own slice op instead of the frame's last op (which would orphan the
+    # others).
+    for label in extractor.return_producer_order:
+        producer = extractor.return_producer_slots.get(label)
+        if producer and label not in return_slots:
+            return_slots[label] = producer
+            if label not in return_order:
+                return_order.append(label)
+    if primary_return_slot is None and return_order:
+        primary_return_slot = return_order[-1]
     return ForwardAnalysis(
         operations=extractor.operations,
         var_producer=dict(extractor.var_producer),
@@ -4868,6 +5081,24 @@ class _ModelAstVisitor(ast.NodeVisitor):
             )
             multi_op_methods.update(free_fn_methods)
             forward_step_return_producers.update(free_fn_return_producers)
+            # A tuple-returning *method* expanded inline (``pool_keys,
+            # pool_indices, pool_valid = self.get_pooled_states(...)``) exposes
+            # the same ordinal→producer mapping as a free function: publish its
+            # ordered internal producers so a consumer reading a specific return
+            # ordinal docks onto that slot's producer instead of every consumer
+            # collapsing onto the frame's last op (which strands the other slots
+            # as dead nodes). General: driven off the method's own return tuple,
+            # no class-name checks.
+            for method_base, (
+                ret_slots,
+                ret_order,
+                _ret_primary,
+            ) in multi_op_method_returns.items():
+                producers = [ret_slots.get(slot) for slot in ret_order]
+                if len(producers) >= 2 and all(p is not None for p in producers):
+                    forward_step_return_producers.setdefault(
+                        method_base, [p for p in producers if p is not None]
+                    )
             delegates_inline = _forward_delegates_to_nothing(node.name, forward_calls)
             method_names = {
                 item.name
@@ -7433,7 +7664,7 @@ def build_class_registry(
         config=config,
         all_tensor_ops=all_tensor_ops,
         activation_param_bindings=activation_param_bindings,
-        module_functions=_module_forward_functions(tree),
+        module_functions=_module_forward_functions(tree, config),
     )
     visitor.visit(tree)
     return visitor.classes
@@ -7468,7 +7699,7 @@ def analyze_source(
         vision_config=(config or {}).get("vision_config")
         if isinstance(config, dict)
         else None,
-        module_functions=_module_forward_functions(tree),
+        module_functions=_module_forward_functions(tree, config),
     )
     visitor.visit(tree)
     finalize_class_registry(visitor.classes)

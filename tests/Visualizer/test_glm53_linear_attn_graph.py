@@ -1296,6 +1296,16 @@ def test_glm53_operation_tile_colors_are_consistent_per_label():
         # and they carry tensor names rather than operation names.
         if any(attr.get("key") == "synthetic" for attr in node.get("attrs", [])):
             continue
+        # Host (CPU) ops are deliberately colored by device (pale purple), not by
+        # op identity: an index-bookkeeping ``Slice``/``Pad`` inside an expanded
+        # host helper (``get_vision_position_ids``) reads as CPU work, so the same
+        # op label legitimately renders host-purple here and device-white/gray
+        # elsewhere. Exclude them from the per-label single-color invariant.
+        if any(
+            attr.get("key") == "device" and attr.get("value") == "cpu"
+            for attr in node.get("attrs", [])
+        ):
+            continue
         label = node.get("label", "")
         fills.setdefault(label, set()).add(style.get("backgroundColor"))
 
@@ -1689,12 +1699,22 @@ def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
 
     node_by_id = {node["id"]: node for node in nodes}
 
-    # The free-function producer renders as a visible node (not stripped).
+    # ``get_vision_attention_seqlens`` expands into its computation: the nested
+    # ``get_vision_cu_seqlens`` helper builds ``cu_seqlens`` (Repeat interleave ->
+    # Cumulative sum -> Pad), exposed through its frame ``@output``. That output is
+    # the visible producer (not stripped) that must reach the kernel.
     producer_id = (
         "visual/seq:0:@fn_l1840_get_vision_attention_seqlens:"
-        "@fn_l1840_get_vision_attention_seqlens:0"
+        "@fn_l76_get_vision_cu_seqlens/@output"
     )
     assert producer_id in node_by_id
+    # The cu_seqlens math is genuinely visible, not a single opaque tile.
+    cu_op_labels = {
+        node.get("label")
+        for node in nodes
+        if "@fn_l76_get_vision_cu_seqlens" in node["id"]
+    }
+    assert {"Repeat interleave", "Cumulative sum", "Pad"} <= cu_op_labels
 
     # Its output crosses the block-loop boundary named after the tensor it feeds
     # (``cu_seqlens``), not a generic ``hidden_states_2`` fallback.
@@ -2047,6 +2067,66 @@ def test_glm53_vision_rotary_recomposition_slice_concat_tile_widths():
         assert len(_incoming(node)) >= 2, node["id"]
 
 
+def test_glm53_vision_rotary_position_ids_two_coordinate_axes():
+    """The rotary ``position_ids`` chain reads ``[Pv, 2]``, not the flat patch width.
+
+    ``Glm5NextVisionRotaryEmbedding.forward`` consumes ``position_ids`` of shape
+    ``(total_tokens, N)`` where ``N`` is the coordinate-axis count (h, w -> 2). The
+    embedding is inlined into the vision tower forward, so ``position_ids`` has no
+    ``@input`` boundary to seed; instead the op that first reads it (``position_ids
+    [..., None]``, port ``position_ids``, source line inside the rotary forward) is
+    seeded ``[Pv, N]`` from source -- ``N`` = the number of distinct constant
+    coordinate selects (``freq[:, 0]``, ``freq[:, 1]``) in ``recomposition_
+    frequencies``. Without the seed the chain inherited the flat patch geometry
+    ``[Pv, 1176]`` (``in_ch * temporal * patch^2``) and poisoned every upstream
+    frequency op.
+    """
+    pytest.importorskip("huggingface_hub")
+    import re
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+
+    # The rotary *embedding* frame (``self.rotary_pos_emb(...)``), not the
+    # downstream ``apply_rotary_pos_emb_vision`` that rotates q/k. Exclude the
+    # recomposition sub-frame (already covered by its own test).
+    rotary = [
+        n
+        for n in nodes
+        if ":rotary_pos_emb:" in str(n["id"])
+        and "apply_rotary" not in str(n["id"])
+        and not re.search(r"recomposition_frequencies@l\d+", str(n["id"]))
+    ]
+    assert rotary, "no inlined vision rotary ops found"
+
+    # The raw ``position_ids[..., None]`` unsqueeze -> [Pv, 2, 1].
+    unsqueeze = [n for n in rotary if n.get("label") == "Unsqueeze"]
+    assert unsqueeze, [n["id"] for n in rotary]
+    for node in unsqueeze:
+        assert str(_output_shape(node)).startswith("[Pv, 2, 1]"), (
+            node["id"],
+            _output_shape(node),
+        )
+
+    # ``* inv_freq`` then cos/sin keep the coordinate axis: [Pv, 2, 16].
+    for label in ("Multiply", "Cosine", "Sine"):
+        chain = [n for n in rotary if n.get("label") == label]
+        assert chain, label
+        for node in chain:
+            assert str(_output_shape(node)).startswith("[Pv, 2, 16]"), (
+                node["id"],
+                _output_shape(node),
+            )
+
+    # Nothing in the rotary chain still carries the flat patch width.
+    for node in rotary:
+        assert "1176" not in str(_output_shape(node)), (
+            node["id"],
+            _output_shape(node),
+        )
+
+
 def test_glm53_no_single_input_concat_survives_anywhere():
     """The owner invariant holds graph-wide: every ``Concat`` has >1 input.
 
@@ -2391,25 +2471,34 @@ def test_glm53_vision_index_helpers_labelled_cpu_ops():
     def _attr_name(node: dict) -> str:
         return str(_attr_value(node, "attr_name") or "")
 
-    def _find(fragment: str) -> dict:
-        matches = [n for n in nodes if fragment in _attr_name(n)]
-        assert len(matches) == 1, [n["id"] for n in matches]
-        return matches[0]
+    def _find_all(fragment: str) -> list[dict]:
+        matches = [n for n in nodes if fragment in str(n.get("id", ""))]
+        assert matches, fragment
+        return matches
 
-    position_ids = _find("get_vision_position_ids")
-    attention_seqlens = _find("get_vision_attention_seqlens")
-    assert _attr_value(position_ids, "device") == "cpu"
-    assert _attr_value(attention_seqlens, "device") == "cpu"
+    # Each host helper now expands into its index-bookkeeping ops; every one of
+    # those ops keeps the ``device: cpu`` label (the signal propagates onto the
+    # children when the single opaque tile opens up, not just the frame).
+    for fragment in ("get_vision_position_ids", "get_vision_attention_seqlens"):
+        ops = [
+            n
+            for n in _find_all(fragment)
+            if _attr_value(n, "device") is not None
+        ]
+        assert ops, fragment
+        assert all(_attr_value(n, "device") == "cpu" for n in ops), fragment
 
-    # The label is targeted, not blanket: only the two genuine host helpers carry
-    # it. The pure-tensor rope helper (``apply_rotary_pos_emb_vision``), which has no
-    # host-materialisation idiom, is absent from this set -- proving it is not
-    # mislabelled.
+    # The label is targeted, not blanket: only ops under the two genuine host
+    # helpers carry it. The pure-tensor rope helper (``apply_rotary_pos_emb_vision``),
+    # which has no host-materialisation idiom, is absent from this set -- proving it
+    # is not mislabelled.
     cpu_nodes = [n for n in nodes if _attr_value(n, "device") == "cpu"]
-    assert {_attr_name(n) for n in cpu_nodes} == {
-        "@fn_l1839_get_vision_position_ids",
-        "@fn_l1840_get_vision_attention_seqlens",
-    }
+    assert cpu_nodes
+    assert all(
+        "get_vision_position_ids" in str(n.get("id", ""))
+        or "get_vision_attention_seqlens" in str(n.get("id", ""))
+        for n in cpu_nodes
+    )
     assert not any(
         "apply_rotary_pos_emb_vision" in str(n.get("id", "")) for n in cpu_nodes
     )

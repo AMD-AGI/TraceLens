@@ -1081,6 +1081,11 @@ def _expanded_free_function_node(
                     param_inputs=translated,
                     boundary_input_name=boundary_name,
                     boundary_input_ordinal=boundary_ordinal,
+                    # A host helper (``get_vision_position_ids``) expands into its
+                    # index-bookkeeping ops; each one still runs on the host, so the
+                    # ``device: cpu`` label/style propagates onto every child rather
+                    # than being lost when the single opaque tile opens up.
+                    runs_on_host=runs_on_host,
                 )
             )
         return BlockNode(

@@ -849,6 +849,36 @@ class ShapeInferencer:
         # Per-graph @input overrides (port label -> spec), populated by callers that
         # know a section's true upstream boundary shape. Empty for the default path.
         self._entry_specs: dict[str, TensorSpec] = {}
+        # A vision rotary embedding consumes ``position_ids`` as
+        # ``(total_tokens, N)`` where N is the number of coordinate axes (h,w -> 2;
+        # t,h,w -> 3). Without an authoritative seed the boundary inherits the flat
+        # patch geometry ([Pv, 1176]) and poisons the whole freq chain. Introspect
+        # N from source (the rotary recomposition selects one frequency slice per
+        # axis) and seed the ``position_ids`` @input with ``[Pv, N]``. General:
+        # only for models with a vision tower, driven off the source, no
+        # class-name checks.
+        # Authoritative ``[Pv, N]`` seed for the vision rotary ``position_ids``,
+        # plus the rotary forward's source-line range. The rotary is inlined into
+        # the vision tower forward (no ``@input`` boundary of its own), so besides
+        # the @input override below we also seed the internal op that reads the raw
+        # ``position_ids`` parameter — the one whose port carries ``position_ids``
+        # and whose ``@op_l<line>`` sits inside the rotary forward. See
+        # ``_gather_input_specs``.
+        self._vision_posid_seed: tuple[TensorSpec, int, int] | None = None
+        if self._vision_tower_class is not None and self._vision_scoped:
+            seed = self._vision_position_ids_seed()
+            if seed is not None:
+                axis, start_line, end_line = seed
+                self._entry_specs["position_ids"] = TensorSpec(
+                    shape=(Symbol.VISION_PATCH.value, axis), dtype="int64"
+                )
+                self._vision_posid_seed = (
+                    TensorSpec(
+                        shape=(Symbol.VISION_PATCH.value, axis), dtype="int64"
+                    ),
+                    start_line,
+                    end_line,
+                )
         # @input boundary node ids this graph resolved via an authoritative
         # ``_entry_spec_for`` seed/override. A root-less subgraph recursion must
         # not clobber these with its default activation spec (see infer_model_graph).
@@ -917,6 +947,64 @@ class ShapeInferencer:
         return TensorSpec(
             shape=(*self._active_seq_axes, h), dtype=dtype or self.context.dtype
         )
+
+    def _vision_position_ids_seed(self) -> tuple[int, int, int] | None:
+        """Resolve the vision rotary ``position_ids`` shape ``[Pv, N]`` from source.
+
+        Returns ``(N, forward_start_line, forward_end_line)`` for the vision rotary
+        embedding, or ``None`` when no such class exists.
+
+        ``N`` (coordinate-axis size) is read structurally: the vision rotary
+        embedding recomposes its frequencies by selecting one slice per coordinate
+        axis (``freq_h, freq_w = freq[:, 0], freq[:, 1]`` for the (h, w) case; a
+        third select for (t, h, w)), so ``N`` equals the number of distinct constant
+        column indices selected from the frequency tensor — read straight off the
+        source, no class-name or model-specific checks. Restricted to the
+        vision-scoped class whose forward takes a ``position_ids`` argument (the
+        rotary embedding), so a text rope is never matched. The forward line range
+        lets callers recognise the op that reads the raw ``position_ids`` parameter
+        (its ``@op_l<line>`` falls inside this range) and seed it authoritatively,
+        since the inlined rotary frame has no ``@input`` boundary of its own.
+        """
+        best: tuple[int, int, int] | None = None
+        for name, structure in self.spec.class_registry.items():
+            if name not in self._vision_scoped:
+                continue
+            node = getattr(structure, "node", None)
+            if not isinstance(node, ast.ClassDef):
+                continue
+            forward = next(
+                (
+                    item
+                    for item in node.body
+                    if isinstance(item, ast.FunctionDef) and item.name == "forward"
+                ),
+                None,
+            )
+            if forward is None:
+                continue
+            params = {arg.arg for arg in forward.args.args}
+            if "position_ids" not in params:
+                continue
+            indices: set[int] = set()
+            for sub in ast.walk(node):
+                if not isinstance(sub, ast.Subscript):
+                    continue
+                sl = sub.slice
+                # A coordinate select ``freq[:, i]``: a 2-tuple subscript whose
+                # first element is a full slice and second a constant int index.
+                if isinstance(sl, ast.Tuple) and len(sl.elts) == 2:
+                    first, second = sl.elts
+                    if isinstance(first, ast.Slice):
+                        value = _ast_const_int(second)
+                        if value is not None:
+                            indices.add(value)
+            # Only trust a contiguous 0..N-1 coordinate fan (``freq[:, 0]``,
+            # ``freq[:, 1]``); anything else is an unrelated subscript pattern.
+            if len(indices) >= 2 and indices == set(range(len(indices))):
+                end_line = getattr(forward, "end_lineno", None) or forward.lineno
+                best = (len(indices), forward.lineno, end_line)
+        return best
 
     def _entry_spec_for(
         self, node: ModelGraphNode, root: BlockNode | None
@@ -1016,10 +1104,28 @@ class ShapeInferencer:
         self._entry_seeded_ids = set()
         order = _topological_order(graph)
         node_by_id = {node.id: node for node in graph.nodes}
+        # Consumers per source, for redocking the dedicated position_ids producer.
+        consumers_of: dict[str, list[str]] = {}
+        for edge in graph.edges:
+            consumers_of.setdefault(edge.source, []).append(edge.target)
 
         for node_id in order:
             node = node_by_id[node_id]
             input_specs = self._gather_input_specs(graph, node_id)
+            seeded = self._vision_position_ids_input(node)
+            if seeded is not None:
+                input_specs = seeded
+                # The rotary op reads position_ids from a dedicated host producer
+                # (``get_vision_position_ids``); its host index-bookkeeping cannot
+                # be shape-inferred, so it carries a bogus shape that the merged
+                # ``@input:position_ids`` boundary would otherwise inherit. Stamp
+                # that producer (the source feeding only this op) with the same
+                # authoritative ``[Pv, N]`` seed so the boundary reads correctly.
+                for edge in graph.edges:
+                    if edge.target != node_id:
+                        continue
+                    if consumers_of.get(edge.source) == [node_id]:
+                        self._tensor_specs[edge.source] = seeded[0]
             output = self._infer_node_output(node, input_specs, root=root)
             self._tensor_specs[node_id] = output
             if node.metadata.get("synthetic") == "@input":
@@ -1330,6 +1436,34 @@ class ShapeInferencer:
             if source_spec is not None:
                 specs.append(source_spec)
         return specs
+
+    def _vision_position_ids_input(
+        self, node: ModelGraphNode
+    ) -> list[TensorSpec] | None:
+        """Authoritative ``[Pv, N]`` input for the vision rotary ``position_ids`` op.
+
+        The vision rotary embedding is inlined into the tower forward, so its
+        ``position_ids`` parameter has no ``@input`` boundary to seed. Instead we
+        seed the single internal op that first reads that parameter — identified,
+        name-agnostically, by its ``position_ids`` port and by its source line
+        falling inside the rotary forward (see ``_vision_position_ids_seed``). Its
+        incoming edges otherwise carry the flat patch geometry (``[Pv, 1176]``) or
+        the host index-bookkeeping producer's mis-inferred shape; both are wrong.
+        Returns ``None`` (leave edge specs untouched) for every other node.
+        """
+        seed = self._vision_posid_seed
+        if seed is None:
+            return None
+        # Only while a vision-scoped section is the active geometry.
+        if self._active_seq_axes != (Symbol.VISION_PATCH.value,):
+            return None
+        if (node.metadata.get("port_label") or "") != "position_ids":
+            return None
+        spec, start_line, end_line = seed
+        line = _op_line_of(node.id)
+        if line is None or not (start_line <= line <= end_line):
+            return None
+        return [spec]
 
     def _infer_node_output(
         self,
@@ -4001,6 +4135,24 @@ def _detail_value(details: Sequence[str], key: str) -> str | None:
         if text.startswith(prefix):
             return text[len(prefix) :].strip()
     return None
+
+
+def _ast_const_int(node: ast.AST) -> int | None:
+    """The non-negative int a constant subscript index carries (``freq[:, 1]``)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(
+        node.value, bool
+    ):
+        return node.value if node.value >= 0 else None
+    return None
+
+
+_OP_LINE_RE = re.compile(r"@op_l(\d+)_c")
+
+
+def _op_line_of(node_id: str) -> int | None:
+    """Source line encoded in an op node id (``...@op_l1766_c32_unsqueeze...``)."""
+    match = _OP_LINE_RE.search(node_id)
+    return int(match.group(1)) if match else None
 
 
 def _int_dim(value: Any) -> int | None:
