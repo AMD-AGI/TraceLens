@@ -645,9 +645,8 @@ def test_pytorch_get_dfs_short_kernels_with_data():
     ids=["pytorch", "inference"],
 )
 def test_get_dfs_short_kernels_all_nan_groupby_cols(get_fn):
-    """Regression test for #938: when all short kernels have NaN in the
-    groupby columns (e.g. CUDA graph replay traces), the returned DataFrame
-    must not have MultiIndex columns, which would crash to_excel(index=False).
+    """MultiIndex columns must be flattened even when all short kernels have
+    NaN in the groupby columns, otherwise to_excel(index=False) raises.
     """
     kernels = pd.DataFrame(
         {
