@@ -11,12 +11,14 @@ from unittest import mock
 from TraceLens.Reporting.reporting_utils import (
     _node_span_for_pg,
     _parse_pg_ranks,
+    _safe_sheet_name,
     add_gpu_arch_cli_args,
     add_node_span_columns,
     detect_gpus_per_node,
     export_data_df,
     request_install,
     resolve_gpu_arch,
+    write_report_outputs,
 )
 from TraceLens.Agent.Analysis.category_analyses import (
     analysis_utils as au,
@@ -120,7 +122,10 @@ from TraceLens.Reporting.generate_perf_report_genesis import (
     _cleanup_work_dir,
     generate_perf_report_genesis,
 )
-from TraceLens.Reporting.pftrace_utils import ensure_trace_json
+from TraceLens.Reporting.pftrace_utils import (
+    derive_pftrace_output_path,
+    ensure_trace_json,
+)
 
 GPU_ONLY_TRACE = os.path.join(
     os.path.dirname(__file__),
@@ -3165,3 +3170,194 @@ class TestReportingExtended:
             include_call_stack=True,
         )
         assert (tmp_path / "ext_out" / "gpu_timeline.csv").exists()
+
+
+###############################################################################
+# reporting_utils — _safe_sheet_name
+###############################################################################
+
+
+class TestSafeSheetName:
+    """Validate Excel sheet name deduplication and length limits."""
+
+    def test_no_collision(self):
+        used = set()
+        name = _safe_sheet_name("gpu_timeline", used)
+        assert name == "gpu_timeline"
+        assert "gpu_timeline" in used
+
+    def test_collision_adds_suffix(self):
+        used = {"gpu_timeline"}
+        name = _safe_sheet_name("gpu_timeline", used)
+        assert name == "gpu_timeline_1"
+        assert "gpu_timeline_1" in used
+
+    def test_multiple_collisions(self):
+        used = {"test_sheet", "test_sheet_1", "test_sheet_2"}
+        name = _safe_sheet_name("test_sheet", used)
+        assert name == "test_sheet_3"
+
+    def test_truncates_to_31_chars(self):
+        used = set()
+        long_name = "a" * 50
+        name = _safe_sheet_name(long_name, used)
+        assert len(name) <= 31
+
+    def test_truncation_with_collision(self):
+        long_name = "a" * 31
+        used = {long_name}
+        name = _safe_sheet_name(long_name, used)
+        assert len(name) <= 31
+        assert name != long_name
+        assert name.endswith("_1")
+
+
+###############################################################################
+# reporting_utils — write_report_outputs
+###############################################################################
+
+
+def _read_sheets(xlsx_path):
+    """Return {sheet_name: DataFrame} for an .xlsx file."""
+    return pd.read_excel(xlsx_path, sheet_name=None)
+
+
+class TestWriteReportOutputs:
+    def _dfs(self):
+        return {
+            "alpha": pd.DataFrame({"a": [1, 2], "b": [3, 4]}),
+            "beta": pd.DataFrame({"x": [5]}),
+        }
+
+    def test_csvs_only(self, tmp_path):
+        out = tmp_path / "csvs"
+        write_report_outputs(self._dfs(), csvs_dir=str(out))
+        assert (out / "alpha.csv").exists()
+        assert (out / "beta.csv").exists()
+        # No xlsx requested -> none written
+        assert not list(tmp_path.glob("*.xlsx"))
+        pd.testing.assert_frame_equal(
+            pd.read_csv(out / "alpha.csv"), self._dfs()["alpha"]
+        )
+
+    def test_xlsx_only(self, tmp_path):
+        xlsx = tmp_path / "report.xlsx"
+        write_report_outputs(self._dfs(), xlsx_path=str(xlsx))
+        assert xlsx.exists()
+        assert not list(tmp_path.glob("*.csv"))
+        sheets = _read_sheets(xlsx)
+        assert set(sheets) == {"alpha", "beta"}
+
+    def test_both_outputs_written(self, tmp_path):
+        xlsx = tmp_path / "report.xlsx"
+        csvs = tmp_path / "csvs"
+        write_report_outputs(self._dfs(), xlsx_path=str(xlsx), csvs_dir=str(csvs))
+        assert xlsx.exists()
+        assert (csvs / "alpha.csv").exists()
+        assert (csvs / "beta.csv").exists()
+
+    def test_neither_output_is_noop(self, tmp_path):
+        write_report_outputs(self._dfs())
+        assert not list(tmp_path.iterdir())
+
+    def test_long_sheet_names_truncated_and_deduped(self, tmp_path):
+        xlsx = tmp_path / "report.xlsx"
+        dfs = {
+            "a" * 40: pd.DataFrame({"c": [1]}),
+            "a" * 45: pd.DataFrame({"c": [2]}),  # truncates to same 31 chars -> deduped
+        }
+        write_report_outputs(dfs, xlsx_path=str(xlsx))
+        names = list(_read_sheets(xlsx))
+        assert all(len(n) <= 31 for n in names)
+        assert len(names) == 2  # no collision -> both sheets present
+
+    def test_skip_empty_drops_empty_and_none(self, tmp_path):
+        xlsx = tmp_path / "report.xlsx"
+        csvs = tmp_path / "csvs"
+        dfs = {
+            "keep": pd.DataFrame({"a": [1]}),
+            "empty": pd.DataFrame(),
+            "none": None,
+        }
+        write_report_outputs(
+            dfs, xlsx_path=str(xlsx), csvs_dir=str(csvs), skip_empty=True
+        )
+        assert set(_read_sheets(xlsx)) == {"keep"}
+        assert (csvs / "keep.csv").exists()
+        assert not (csvs / "empty.csv").exists()
+        assert not (csvs / "none.csv").exists()
+
+    def test_skip_empty_default_keeps_empty(self, tmp_path):
+        xlsx = tmp_path / "report.xlsx"
+        dfs = {
+            "keep": pd.DataFrame({"a": [1]}),
+            "empty": pd.DataFrame({"a": []}),
+        }
+        write_report_outputs(dfs, xlsx_path=str(xlsx))
+        assert set(_read_sheets(xlsx)) == {"keep", "empty"}
+
+    def test_hide_columns_hides_and_keeps_data(self, tmp_path):
+        from openpyxl import load_workbook
+        from openpyxl.utils import get_column_letter
+
+        xlsx = tmp_path / "report.xlsx"
+        df = pd.DataFrame({"keep": [1], "hide_me": [2], "also_keep": [3]})
+        write_report_outputs(
+            {"data": df}, xlsx_path=str(xlsx), hide_columns={"data": ["hide_me"]}
+        )
+        ws = load_workbook(xlsx)["data"]
+        hidden_col = get_column_letter(df.columns.get_loc("hide_me") + 1)  # "B"
+        assert ws.column_dimensions[hidden_col].hidden is True
+        # Non-hidden columns are not hidden, and the data is still present
+        keep_col = get_column_letter(df.columns.get_loc("keep") + 1)
+        assert ws.column_dimensions[keep_col].hidden is False
+        assert set(_read_sheets(xlsx)["data"].columns) == {
+            "keep",
+            "hide_me",
+            "also_keep",
+        }
+
+    def test_hide_columns_ignores_missing_column(self, tmp_path):
+        xlsx = tmp_path / "report.xlsx"
+        df = pd.DataFrame({"a": [1]})
+        # Should not raise even though "nonexistent" isn't a column
+        write_report_outputs(
+            {"data": df}, xlsx_path=str(xlsx), hide_columns={"data": ["nonexistent"]}
+        )
+        assert xlsx.exists()
+
+    def test_sheet_named_like_openpyxl_default(self, tmp_path):
+        # "sheet" collides case-insensitively with openpyxl's default "Sheet",
+        # so openpyxl renames it; the worksheet lookup must not rely on the
+        # requested name.  hide_columns exercises that lookup path.
+        xlsx = tmp_path / "report.xlsx"
+        df = pd.DataFrame({"a": [1], "b": [2]})
+        write_report_outputs(
+            {"sheet": df}, xlsx_path=str(xlsx), hide_columns={"sheet": ["b"]}
+        )
+        assert xlsx.exists()
+
+
+###############################################################################
+# pftrace_utils — derive_pftrace_output_path
+###############################################################################
+
+
+class TestDerivePftraceOutputPath:
+    def test_pftrace_suffix(self):
+        assert (
+            derive_pftrace_output_path("/tmp/trace.pftrace", "_activity_report.xlsx")
+            == "/tmp/trace_activity_report.xlsx"
+        )
+
+    def test_json_gz_suffix(self):
+        assert (
+            derive_pftrace_output_path("/tmp/trace.json.gz", "_hip_api_report.xlsx")
+            == "/tmp/trace_hip_api_report.xlsx"
+        )
+
+    def test_plain_json_suffix(self):
+        assert (
+            derive_pftrace_output_path("/tmp/trace.json", "_memory_copy_report.xlsx")
+            == "/tmp/trace_memory_copy_report.xlsx"
+        )
