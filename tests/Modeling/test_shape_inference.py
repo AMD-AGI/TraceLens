@@ -649,6 +649,49 @@ def test_transpose_shape_inference():
     assert result.shape == ("B", 32, "S", 128)
 
 
+def test_view_resolves_inferred_size_one_axis_to_int():
+    # ``view(B, S, -1, 128)`` on a ``[B, S, 128]`` source infers the ``-1`` axis
+    # to a concrete size of 1. It must be an ``int`` 1, not the string "1" — a
+    # stringified 1 reads as a symbolic axis and defeats a following squeeze.
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 128), dtype="float16")
+    node = _node("View", details=["shape: x.shape[0], x.shape[1], -1, 128"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", "S", 1, 128)
+    assert result.shape[2] == 1 and isinstance(result.shape[2], int)
+
+
+def test_squeeze_drops_inferred_size_one_view_axis():
+    # The regression the phantom-rank bug produced: ``.view(...).squeeze(2)``
+    # where the viewed axis is an inferred size-1 must collapse to rank-3.
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 128), dtype="float16")
+    view = _node("View", details=["shape: x.shape[0], x.shape[1], -1, 128"])
+    viewed = inf._infer_node_output(view, [inp], root=None)
+    squeeze = _node("Squeeze", details=["dim: 2"])
+    result = inf._infer_node_output(squeeze, [viewed], root=None)
+    assert result.shape == ("B", "S", 128)
+
+
+def test_flatten_collapses_trailing_span():
+    # ``flatten(-2)`` merges the last two axes; previously flatten shared the
+    # view/reshape path, found no shape detail, and passed through unchanged.
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 4, 128), dtype="float16")
+    node = _node("Flatten", details=["start_dim: -2"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", "S", 512)
+
+
+def test_flatten_collapses_explicit_span_symbolic():
+    # A span containing a symbolic axis yields a readable ``*``-joined product.
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 4, 8), dtype="float16")
+    node = _node("Flatten", details=["start_dim: 1", "end_dim: 2"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", "S*4", 8)
+
+
 def test_matmul_shape_inference():
     inf = _make_inferencer()
     a = TensorSpec(shape=("B", "S", 4096), dtype="float16")

@@ -1572,7 +1572,45 @@ class ShapeInferencer:
                 return TensorSpec((experts,), dtype)
             return None
 
-        if operation_label in {"view", "reshape", "flatten"}:
+        if operation_label == "flatten":
+            # Collapse axes ``[start_dim, end_dim]`` (inclusive) into one, per
+            # ``torch.flatten``. Defaults: start_dim=0, end_dim=-1. Unlike
+            # view/reshape there is no target-shape detail, so the old code path
+            # (shared with view) always passed the tensor through unchanged,
+            # leaving phantom rank downstream.
+            source = (
+                inputs[0]
+                if inputs
+                else external_spec()
+                or TensorSpec(self._active_hidden_shape(), dtype)
+            )
+            shape = source.shape
+            if not shape:
+                return source
+            start_detail = _detail_value(details, "start_dim")
+            end_detail = _detail_value(details, "end_dim")
+            if start_detail is None and end_detail is None:
+                # No captured span. A bare ``flatten()`` collapses everything, but
+                # a missing detail is indistinguishable from "args not captured",
+                # so pass through rather than guess a full collapse.
+                return source
+            rank = len(shape)
+            start = _int_dim(start_detail)
+            end = _int_dim(end_detail)
+            start = 0 if start is None else start % rank
+            end = rank - 1 if end is None else end % rank
+            if start >= end or not (0 <= start < rank and 0 <= end < rank):
+                # Single-axis or unresolvable span: nothing to merge.
+                return source
+            merged = _merge_axes(shape[start : end + 1])
+            if merged is None:
+                return source
+            return TensorSpec(
+                shape=shape[:start] + (merged,) + shape[end + 1 :],
+                dtype=source.dtype,
+            )
+
+        if operation_label in {"view", "reshape"}:
             source = (
                 inputs[0]
                 if inputs
@@ -2984,7 +3022,7 @@ def _dim_factors(dim: DimExpr) -> list[str]:
 
 def _merge_flatten_dim(
     source_shape: tuple[DimExpr, ...], explicit_dims: list[DimExpr]
-) -> str | None:
+) -> DimExpr | None:
     """Compute the ``-1`` dim of a reshape by conservation of elements.
 
     The flattened axis equals ``prod(source) / prod(explicit target dims)``.
@@ -3021,8 +3059,16 @@ def _merge_flatten_dim(
         return None
     if src_num % tgt_num == 0:
         num = src_num // tgt_num
+        if not remaining:
+            # A purely numeric flatten dim must be a real ``int`` (``1``, ``64``),
+            # not the string ``"1"``/``"64"``. Downstream size checks compare
+            # ``dim == 1`` (squeeze dropping a size-1 axis, expand broadcasting a
+            # size-1 axis, broadcast-rank); a stringified ``"1"`` fails those and
+            # leaks a phantom "symbolic" axis (e.g. ``squeeze(2)`` refusing to
+            # collapse ``[B, S, "1", 128]``).
+            return num
         factors = remaining + ([str(num)] if num != 1 else [])
-        return "*".join(factors) if factors else "1"
+        return "*".join(factors)
     # The numeric part does not divide evenly (e.g. flattening ``[B*S, 4096]``
     # to ``[-1, 2, 2, 4096]`` leaves ``B*S/4``). When the target numeric is an
     # exact multiple of the source numeric, express the flatten dim as the
@@ -3034,6 +3080,29 @@ def _merge_flatten_dim(
         base = "*".join(remaining)
         return f"{base}/{divisor}" if divisor != 1 else base
     return None
+
+
+def _merge_axes(axes: tuple[DimExpr, ...]) -> DimExpr | None:
+    """Multiply a contiguous span of shape axes into one flattened dim.
+
+    Used by ``flatten`` (collapse ``[start_dim, end_dim]``). Pure-numeric spans
+    return an ``int`` (``8``); spans with symbolic factors return a readable
+    ``*``-joined product (``"K*P"``) with size-1 axes dropped. Tolerates both
+    ``int`` and stringified numeric axes. ``None`` only for an empty span.
+    """
+    if not axes:
+        return None
+    num = 1
+    syms: list[str] = []
+    for dim in axes:
+        for token in _dim_factors(dim):
+            if token.lstrip("-").isdigit():
+                num *= int(token)
+            else:
+                syms.append(token)
+    if not syms:
+        return num
+    return "*".join(syms + ([str(num)] if num != 1 else []))
 
 
 def _permute_shape(

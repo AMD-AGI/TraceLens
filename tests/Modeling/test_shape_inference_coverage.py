@@ -1234,9 +1234,15 @@ def test_view_resolved_flatten_and_fallback():
     # -1 marker -> collapse leading dims.
     m = inf._infer_node_output(_node("reshape", details=["shape: -1, unknownname"]), [src], root=None)
     assert m.shape == ("B*S", 16)
-    # Unresolvable, no -1 -> pass through source.
-    f = inf._infer_node_output(_node("flatten", details=["shape: unknownname"]), [src], root=None)
+    # Bare flatten (no captured start/end span) passes through rather than
+    # guessing a full collapse from missing extraction info.
+    f = inf._infer_node_output(_node("flatten"), [src], root=None)
     assert f.shape == ("B", "S", 16)
+    # A trailing-span flatten collapses only [start_dim, end_dim].
+    t = inf._infer_node_output(
+        _node("flatten", details=["start_dim: -2"]), [src], root=None
+    )
+    assert t.shape == ("B", "S*16")
 
 
 def test_unsqueeze_adds_leading_axis():

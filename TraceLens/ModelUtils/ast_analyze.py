@@ -3352,6 +3352,24 @@ class _ForwardOperationExtractor:
         if call_name == "einsum":
             if node.args and isinstance(node.args[0], ast.Constant):
                 details.append(f"equation: {node.args[0].value}")
+        if call_name == "flatten":
+            # ``Tensor.flatten(start_dim=0, end_dim=-1)`` /
+            # ``torch.flatten(t, start_dim, end_dim)`` collapse the axes in
+            # ``[start_dim, end_dim]`` into one. Record both so shape inference
+            # can compute the merged extent instead of passing the tensor
+            # through unchanged (which left phantom rank, e.g. topk_indices).
+            is_method = isinstance(node.func, ast.Attribute) and not (
+                isinstance(node.func.value, ast.Name) and node.func.value.id == "torch"
+            )
+            arg_start = 0 if is_method else 1
+            flatten_args = node.args[arg_start:]
+            if len(flatten_args) >= 1:
+                details.append(f"start_dim: {ast.unparse(flatten_args[0])}")
+            if len(flatten_args) >= 2:
+                details.append(f"end_dim: {ast.unparse(flatten_args[1])}")
+            for keyword in node.keywords:
+                if keyword.arg in {"start_dim", "end_dim"}:
+                    details.append(f"{keyword.arg}: {ast.unparse(keyword.value)}")
         if call_name in _DIM_DETAIL_METHODS:
             if node.args:
                 details.append(f"dim: {ast.unparse(node.args[0])}")
