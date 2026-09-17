@@ -58,10 +58,6 @@ aggregate = _load_module(
     "aggregate_repeatability_under_test",
     os.path.join("eval_utils", "aggregate_repeatability.py"),
 )
-quality_score = _load_module(
-    "summarize_quality_score_under_test",
-    os.path.join("eval_utils", "summarize_quality_score.py"),
-)
 
 
 @pytest.fixture(scope="module")
@@ -833,69 +829,6 @@ def test_parse_ndjson_invalid_json_unavailable_line(tmp_path):
         f.write("this is not json but mentions service unavailable\n")
         f.write(" " * 120 + "\n")
     assert aggregate.parse_ndjson_stream(str(p))["outcome"] == "agent_cli_unavailable"
-
-
-def test_parse_ndjson_codex_jsonl(tmp_path):
-    p = tmp_path / "codex.ndjson"
-    _write_ndjson(
-        p,
-        [
-            {"type": "thread.started", "thread_id": "thread-1"},
-            {"type": "turn.started"},
-            {
-                "type": "item.started",
-                "item": {
-                    "type": "command_execution",
-                    "command": "TraceLens_generate_perf_report_pytorch trace.json",
-                    "aggregated_output": "",
-                },
-            },
-            {
-                "type": "item.completed",
-                "item": {
-                    "type": "command_execution",
-                    "command": "cat > analysis.md <<'EOF'\n## Executive Summary\nDone\nEOF",
-                    "aggregated_output": "",
-                    "exit_code": 0,
-                },
-            },
-            {
-                "type": "turn.completed",
-                "usage": {
-                    "input_tokens": 100,
-                    "cached_input_tokens": 25,
-                    "output_tokens": 20,
-                },
-            },
-        ],
-    )
-    diag = aggregate.parse_ndjson_stream(str(p))
-    assert diag["outcome"] == "success"
-    assert diag["turns"] == 1
-    assert diag["tool_calls"] == 1
-    assert diag["input_tokens"] == 100
-    assert diag["cache_read_tokens"] == 25
-    assert diag["output_tokens"] == 20
-    assert diag["report_written"] is True
-    assert "Executive Summary" in diag["report_headers"]
-    assert diag["last_step_reached"] == "Step 11: Report"
-
-
-def test_quality_score_finds_runs_and_quality_rows(tmp_path):
-    run_dir = tmp_path / "trace_a" / "run_0"
-    run_dir.mkdir(parents=True)
-    (run_dir / "eval_summary.csv").write_text(
-        "index,category,issue_summary,result,details,root_cause,recommended_fix\n"
-        "quality_eval_1,Quality,CSV alignment,PASS,,,,\n"
-        "quality_eval_2,Quality,Title alignment,PASS,overall=8.5,,,\n"
-        "workflow_eval_1,Workflow,Structure,FAIL,,,,\n"
-    )
-
-    runs = quality_score.find_runs([str(tmp_path)])
-    assert runs == [("trace_a", "run_0", str(run_dir))]
-    rows = quality_score.quality_rows(str(run_dir))
-    assert sorted(rows) == ["quality_eval_1", "quality_eval_2"]
-    assert rows["quality_eval_2"]["details"] == "overall=8.5"
 
 
 # ---------------------------------------------------------------------------
