@@ -367,6 +367,10 @@ def main():
     meta_events = trace_index.meta_events
     print(f"Loaded {len(events)} events")
 
+    if sum(k.get("dur", 0) for k in trace_index.kernels) == 0:
+        print("No GPU work in trace; nothing to split.")
+        return
+
     detection = find_iteration_roots(events, trace_index=trace_index)
     iteration_roots = detection.roots
     manifest = detection.to_manifest()

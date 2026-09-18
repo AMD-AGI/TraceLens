@@ -9,17 +9,13 @@
 from bisect import bisect_right
 from collections import Counter
 from dataclasses import dataclass
-from statistics import mean, pstdev
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from ..util import GPU_KERNEL_CATEGORIES, normalize_name_for_comparison
+from ..util import GPU_KERNEL_CATEGORIES
 from .trace_to_tree import TraceToTree
 
 # A period must explain more than half the sequence, matching the original rule.
 MIN_PERIOD_COVERAGE = 0.5
-# Candidate periods come from gaps between recurrences of one label; cap the
-# number verified so a pathological sequence cannot blow up the search.
-MAX_PERIOD_CANDIDATES = 64
 # A longer period is only preferred over a shorter one it is a multiple of when
 # it explains meaningfully more of the sequence.
 DIVISOR_COVERAGE_TOLERANCE = 0.05
@@ -47,18 +43,16 @@ class PeriodCandidate:
 
     period: int
     start: int
-    repeats: int
     coverage: float
-    duration_cv: float
 
     @property
     def rank(self) -> tuple:
-        """Sort key: explain the most sequence, most evenly, with the shortest unit.
+        """Sort key: explain the most sequence, with the shortest unit.
 
-        Coverage is rounded so float noise cannot outrank a steadier candidate,
-        and period breaks ties downward since every multiple explains as much.
+        Coverage is rounded so float noise cannot reorder near-ties, and period
+        breaks ties downward since every multiple explains as much.
         """
-        return (-round(self.coverage, 3), round(self.duration_cv, 3), self.period)
+        return (-round(self.coverage, 3), self.period)
 
 
 def _candidate_periods(codes: Sequence[int], min_repeats: int) -> List[int]:
@@ -75,7 +69,7 @@ def _candidate_periods(codes: Sequence[int], min_repeats: int) -> List[int]:
     _, anchor = min(eligible)
     positions = [i for i, code in enumerate(codes) if code == anchor]
     gaps = {b - a for a, b in zip(positions, positions[1:]) if b > a}
-    return sorted(gaps)[:MAX_PERIOD_CANDIDATES]
+    return sorted(gaps)
 
 
 def _longest_periodic_run(codes: Sequence[int], period: int) -> Tuple[int, int]:
@@ -100,27 +94,6 @@ def _longest_periodic_run(codes: Sequence[int], period: int) -> Tuple[int, int]:
     return best_start, (best_len + period) // period
 
 
-def _duration_cv(
-    durations: Optional[Sequence[float]], start: int, period: int, repeats: int
-) -> float:
-    """Coefficient of variation of per-occurrence duration.
-
-    A real iteration takes about the same time every time, which separates a
-    genuine loop from a coincidental label match.
-    """
-    if not durations:
-        return 0.0
-    blocks = [
-        sum(durations[start + i * period : start + (i + 1) * period])
-        for i in range(repeats)
-    ]
-    blocks = [b for b in blocks if b > 0]
-    if len(blocks) < 2:
-        return 0.0
-    average = mean(blocks)
-    return pstdev(blocks) / average if average else 0.0
-
-
 def _drop_multiples(candidates: List[PeriodCandidate]) -> List[PeriodCandidate]:
     """Keep primitive periods; any multiple of one is valid and explains no more."""
     kept: List[PeriodCandidate] = []
@@ -135,19 +108,19 @@ def _drop_multiples(candidates: List[PeriodCandidate]) -> List[PeriodCandidate]:
     return kept
 
 
-def find_period_candidates(
-    labels: Sequence[str],
-    durations: Optional[Sequence[float]] = None,
-    min_repeats: int = 3,
-) -> List[PeriodCandidate]:
-    """Every qualifying repeating period in ``labels``, best first.
+def _find_repeating_period(
+    names: List[str], min_repeats: int = 3
+) -> Tuple[Optional[int], Optional[List[str]], Optional[int]]:
+    """Best repeating name sequence in ``names`` as ``(period, pattern, start)``.
 
-    Scored candidates rather than one answer let callers cross-check against an
-    independent detection instead of trusting a single verdict.
+    Labels are encoded as small ints so the verification loop compares cheaply.
+    Candidate periods come from the gaps between one label's recurrences; each is
+    verified by its longest period-aligned run and kept only if it repeats enough
+    (``min_repeats``) and explains enough of the sequence (``MIN_PERIOD_COVERAGE``).
+    The primitive period that explains the most wins, shortest unit breaking ties.
     """
-    # Labels as small ints, so comparisons are cheap in the verification loop.
     table: Dict[str, int] = {}
-    codes = [table.setdefault(label, len(table)) for label in labels]
+    codes = [table.setdefault(name, len(table)) for name in names]
     total = len(codes)
     found: List[PeriodCandidate] = []
     for period in _candidate_periods(codes, min_repeats):
@@ -159,26 +132,10 @@ def find_period_candidates(
         coverage = repeats * period / total
         if coverage <= MIN_PERIOD_COVERAGE:
             continue
-        found.append(
-            PeriodCandidate(
-                period,
-                start,
-                repeats,
-                coverage,
-                _duration_cv(durations, start, period, repeats),
-            )
-        )
-    return _drop_multiples(sorted(found, key=lambda c: c.rank))
-
-
-def _find_repeating_period(
-    names: List[str], min_repeats: int = 3
-) -> Tuple[Optional[int], Optional[List[str]], Optional[int]]:
-    """Best repeating name sequence in ``names`` as ``(period, pattern, start)``."""
-    candidates = find_period_candidates(names, min_repeats=min_repeats)
-    if not candidates:
+        found.append(PeriodCandidate(period, start, coverage))
+    if not found:
         return None, None, None
-    best = candidates[0]
+    best = _drop_multiples(sorted(found, key=lambda c: c.rank))[0]
     return best.period, list(names[best.start : best.start + best.period]), best.start
 
 
@@ -286,9 +243,12 @@ def _descendant_gpu_time(tree: TraceToTree, nodes: Sequence[dict]) -> float:
 
 
 def _blocks_by_pattern(
-    ordered: Sequence[dict], pattern: Sequence[str], start: int
+    ordered: Sequence[dict], pattern: Sequence[str], start: int, norm: Dict
 ) -> List[List[dict]]:
     """Split ``ordered`` into one block per repetition of ``pattern``.
+
+    ``norm`` maps each event's UID to its normalized name, so names are compared
+    against ``pattern`` without re-normalizing on every step.
 
     A fixed stride of ``len(pattern)`` smears an iteration across two blocks the
     moment a stray frame slips between two repetitions -- a context-manager, a
@@ -310,7 +270,7 @@ def _blocks_by_pattern(
         j = i
         while pos < period and j < n:
             child = ordered[j]
-            if normalize_name_for_comparison(child.get("name", "")) == pattern[pos]:
+            if norm[child["UID"]] == pattern[pos]:
                 block.append(child)
                 pos += 1
                 j += 1
