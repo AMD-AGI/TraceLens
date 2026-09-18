@@ -41,20 +41,46 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
 )
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from tests.fixtures.traces import INFERENCE_ROOT
-from TraceLens.Trace2Tree.inference_iteration_roots import (
+from TraceLens.Trace2Tree.util import (
     _entry_roots,
-    _find_repeating_period,
     _reattach_worker_threads,
 )
+from TraceLens.TraceUtils.split_inference.period_detection import (
+    _find_repeating_period,
+)
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from TraceLens.util import normalize_name_for_comparison
+from TraceLens.util import GPU_KERNEL_CATEGORIES, normalize_name_for_comparison
 from TraceLens.TraceUtils.split_inference.detect_utils import DetectStatus
 from TraceLens.TraceUtils.split_inference.root_detection import (
     _child_groups,
     _periodic_candidate,
-    _total_gpu_time,
     detect_from_branch_descent,
 )
+
+
+def _total_gpu(tree):
+    """Total GPU kernel time in the tree (was root_detection._total_gpu_time)."""
+    return sum(
+        e.get("dur", 0)
+        for e in tree.events_by_uid.values()
+        if e.get("cat") in GPU_KERNEL_CATEGORIES
+    )
+
+
+def _norm(ordered):
+    """UID -> normalized name, as find_pattern now builds for its helpers."""
+    return {e["UID"]: normalize_name_for_comparison(e.get("name", "")) for e in ordered}
+
+
+def _maps(events):
+    """(gpu_corr_map, flow_corr_map, meta_events) -- was preprocess_trace(events)."""
+    ti = split.TraceIndex(events)
+    return ti.gpu_corr_map, ti.flow_corr_map, ti.meta_events
+
+
+def _detect(events):
+    """find_iteration_roots with the TraceIndex it now requires."""
+    return split.find_iteration_roots(events, trace_index=split.TraceIndex(events))
 from TraceLens.Trace2Tree import trace_capture_merge_experimental as tcm
 
 # --------------------------------------------------------------------------- #
@@ -132,16 +158,16 @@ def test_1211_only_selection_and_splitting():
     names = [VLLM_PRIMARY_ANNOTATION.format(i=i) for i in range(16)]
     trace = make_trace(names)
     events = trace["traceEvents"]
-    gpu_map, flow_map, meta = split.preprocess_trace(events)
+    gpu_map, flow_map, meta = _maps(events)
 
-    roots = split.find_iteration_roots(events).roots
+    roots = _detect(events).roots
     assert roots is not None
     assert len(roots) == 16
 
     # Single-root window: verify the splitting logic isolates exactly one root.
     k = 7
     out, batch_list, num_gpu_events, gpu_dur, gpu_busy = split.extract_iteration(
-        [roots[k]], events, trace, gpu_map, flow_map, meta
+        [roots[k]], split.TraceData(events, trace, gpu_map, flow_map, meta)
     )
     out_names = {e["name"] for e in out["traceEvents"]}
     assert num_gpu_events == 2
@@ -158,7 +184,7 @@ def test_1211_only_selection_and_splitting():
 
     # Multi-root window: all 16 roots together.
     _, _, num_gpu_events_all, _, _ = split.extract_iteration(
-        roots, events, trace, gpu_map, flow_map, meta
+        roots, split.TraceData(events, trace, gpu_map, flow_map, meta)
     )
     assert num_gpu_events_all == 32  # 16 x 2
 
@@ -183,7 +209,7 @@ def test_1211_prioritized_over_1219():
     names += [SGLANG_DECODE_ANNOTATION.format(i=20) for _ in range(16)]
     trace = make_trace(names)
 
-    roots = split.find_iteration_roots(trace["traceEvents"]).roots
+    roots = _detect(trace["traceEvents"]).roots
     assert roots is not None
     assert len(roots) == 16  # only the 1211 roots
     primary = split.ITERATION_PATTERNS[0]
@@ -206,7 +232,7 @@ def test_1219_only_uses_backup():
             names.append(SGLANG_EXTEND_ANNOTATION.format(t=800))
     trace = make_trace(names)
 
-    roots = split.find_iteration_roots(trace["traceEvents"]).roots
+    roots = _detect(trace["traceEvents"]).roots
     assert roots is not None
     assert len(roots) == 16
 
@@ -228,7 +254,7 @@ def test_1213_only_uses_backup():
     names = [VLLM_BACKUP_ANNOTATION.format(i=100 + i) for i in range(16)]
     trace = make_trace(names)
 
-    roots = split.find_iteration_roots(trace["traceEvents"]).roots
+    roots = _detect(trace["traceEvents"]).roots
     assert roots is not None
     assert len(roots) == 16
 
@@ -254,7 +280,9 @@ def test_identify_steady_state_regions_clear_region():
     iter_details = [_details(2) for _ in range(4)] + [_details(20) for _ in range(30)]
     regions, global_max = _identify_regions_inference(iter_details, num_steps=32)
     assert global_max == 20
-    assert regions == [(4, 33)]
+    # 30 steady steps at indices 4..33; the region is half-open, so it ends at 34
+    # (the old [4, 33) dropped the last steady step -- fixed in an earlier commit).
+    assert regions == [(4, 34)]
 
 
 def test_identify_steady_state_regions_fallback():
@@ -290,7 +318,7 @@ def test_parse_range_variants():
     assert split.parse_range("10:20", 16) == (10, 16)
 
 
-def test_preprocess_trace_collects_flow_and_gpu_maps():
+def test_trace_index_collects_flow_and_gpu_maps():
     events = [
         {"ph": "M", "name": "process_name", "pid": 1},
         {"ph": "s", "id": 7, "ts": 0, "pid": 1, "tid": 1},
@@ -306,7 +334,7 @@ def test_preprocess_trace_collects_flow_and_gpu_maps():
             "args": {"correlation": 7},
         },
     ]
-    gpu_map, flow_map, meta = split.preprocess_trace(events)
+    gpu_map, flow_map, meta = _maps(events)
     assert 7 in gpu_map and gpu_map[7][0]["name"] == "kernel_a"
     assert 7 in flow_map and len(flow_map[7]) == 2
     assert len(meta) == 1
@@ -315,9 +343,9 @@ def test_preprocess_trace_collects_flow_and_gpu_maps():
 def test_extract_iteration_empty_roots():
     trace = make_trace([VLLM_PRIMARY_ANNOTATION.format(i=0)])
     events = trace["traceEvents"]
-    gpu_map, flow_map, meta = split.preprocess_trace(events)
+    gpu_map, flow_map, meta = _maps(events)
     out, batch_list, num_gpu, gpu_dur, gpu_busy = split.extract_iteration(
-        [], events, trace, gpu_map, flow_map, meta
+        [], split.TraceData(events, trace, gpu_map, flow_map, meta)
     )
     assert out["traceEvents"] == trace["traceEvents"]
     assert batch_list == []
@@ -330,61 +358,25 @@ def test_extract_and_save_writes_gzip(tmp_path):
     names = [VLLM_PRIMARY_ANNOTATION.format(i=i) for i in range(4)]
     trace = make_trace(names)
     events = trace["traceEvents"]
-    gpu_map, flow_map, meta = split.preprocess_trace(events)
-    roots = split.find_iteration_roots(events).roots
+    gpu_map, flow_map, meta = _maps(events)
+    roots = _detect(events).roots
     grouped = [[r] for r in roots]
-    summary = split.extract_and_save(
+    summary = split.extract_and_save_split(
         grouped,
-        events,
-        trace,
-        str(tmp_path),
-        "trace",
+        split.ExtractContext(
+            split.TraceData(events, trace, gpu_map, flow_map, meta),
+            output_dir=str(tmp_path),
+            base_name="trace",
+        ),
         "annotation_iteration",
         0,
         2,
-        gpu_map,
-        flow_map,
-        meta,
     )
     assert len(summary) == 2
     assert os.path.exists(summary[0]["output_path"])
     with gzip.open(summary[0]["output_path"], "rt", encoding="utf-8") as f:
         loaded = json.load(f)
     assert len(loaded["traceEvents"]) > 0
-
-
-def test_extract_phases_and_save(tmp_path):
-    names = [VLLM_PRIMARY_ANNOTATION.format(i=i) for i in range(8)]
-    trace = make_trace(names)
-    events = trace["traceEvents"]
-    gpu_map, flow_map, meta = split.preprocess_trace(events)
-    roots = split.find_iteration_roots(events).roots
-    summary = split.extract_phases_and_save(
-        [[r] for r in roots],
-        events,
-        trace,
-        str(tmp_path),
-        "trace",
-        "annotation_iteration",
-        0,
-        8,
-        gpu_map,
-        flow_map,
-        meta,
-    )
-    assert len(summary) >= 1
-    assert all(os.path.exists(item["output_path"]) for item in summary)
-
-
-def test_compute_reference_pd_ratio():
-    iter_details = [_details(20 if i % 2 else 2) for i in range(20)]
-    regions = [(0, 20)]
-    (start, end), avg_ratio, largest_ratio = _compute_reference_pd_ratio(
-        regions, iter_details
-    )
-    assert (start, end) == (0, 20)
-    assert 0.0 <= avg_ratio <= 1.0
-    assert 0.0 <= largest_ratio <= 1.0
 
 
 def test_find_steady_state_inference_decode_only_mode():
@@ -409,18 +401,16 @@ def test_divide_phases_and_save(tmp_path):
     names = [VLLM_PRIMARY_ANNOTATION.format(i=i) for i in range(12)]
     trace = make_trace(names)
     events = trace["traceEvents"]
-    gpu_map, flow_map, meta = split.preprocess_trace(events)
-    roots = split.find_iteration_roots(events).roots
+    gpu_map, flow_map, meta = _maps(events)
+    roots = _detect(events).roots
     summary = split.divide_phases_and_save(
         roots,
-        events,
-        trace,
-        str(tmp_path),
-        "trace",
-        gpu_map,
-        flow_map,
-        meta,
-        steady_state_regions=[(0, len(roots))],
+        split.ExtractContext(
+            split.TraceData(events, trace, gpu_map, flow_map, meta),
+            output_dir=str(tmp_path),
+            base_name="trace",
+        ),
+        [(0, len(roots))],
     )
     assert len(summary) >= 1
     assert any("prefilldecodemix" in item["output_path"] for item in summary)
@@ -515,7 +505,7 @@ def test_branch_descent_from_synthetic_events():
     tree = TraceToTree(events, prune_nongpu_paths=False)
     tree.build_tree(add_python_func=True)
     _reattach_worker_threads(tree)
-    result = detect_from_branch_descent(tree, _entry_roots(tree), _total_gpu_time(tree))
+    result = detect_from_branch_descent(tree, _entry_roots(tree), _total_gpu(tree))
     assert result is not None
     assert len(result.roots) >= 1
 
@@ -597,7 +587,7 @@ def test_get_filename_zip_raises_when_no_json(tmp_path):
 def test_find_iteration_roots_backup_fallback():
     names = [SGLANG_DECODE.format(i=20) for _ in range(8)]
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"]).roots
+    roots = _detect(trace["traceEvents"]).roots
     assert roots is not None
     assert len(roots) == 8
 
@@ -664,14 +654,14 @@ def test_find_iteration_roots_no_annotation_trace():
         )
         corr += 1
 
-    result = split.find_iteration_roots(events)
+    result = _detect(events)
     assert result.status.name == "NOT_SPLITTABLE"
 
 
 def test_find_steady_state_inference_mixed_mode_with_conc_osl_r():
     names = _mixed_phase_roots(48)
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"]).roots
+    roots = _detect(trace["traceEvents"]).roots
     window, _ = split.find_steady_state_inference(
         roots,
         num_steps=4,
@@ -686,7 +676,7 @@ def test_find_steady_state_inference_mixed_mode_with_conc_osl_r():
 def test_find_steady_state_inference_mixed_no_pd_candidates(capsys):
     names = [SGLANG_DECODE.format(i=20) for _ in range(24)]
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"]).roots
+    roots = _detect(trace["traceEvents"]).roots
     window, _ = split.find_steady_state_inference(
         roots,
         num_steps=8,
@@ -699,7 +689,7 @@ def test_find_steady_state_inference_mixed_no_pd_candidates(capsys):
 def test_find_steady_state_inference_decode_only_no_pure_run():
     names = [SGLANG_EXTEND.format(t=800) for _ in range(16)]
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"]).roots
+    roots = _detect(trace["traceEvents"]).roots
     window, _ = split.find_steady_state_inference(
         roots,
         num_steps=8,
@@ -718,7 +708,7 @@ def test_find_steady_state_inference_max_prefilldecode():
         else:
             names.append(SGLANG_DECODE.format(i=20))
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"]).roots
+    roots = _detect(trace["traceEvents"]).roots
     window, _ = split.find_steady_state_inference(
         roots,
         num_steps=8,
@@ -730,7 +720,7 @@ def test_find_steady_state_inference_max_prefilldecode():
 def test_find_steady_state_inference_max_prefilldecode_empty():
     names = [SGLANG_DECODE.format(i=20) for _ in range(16)]
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"]).roots
+    roots = _detect(trace["traceEvents"]).roots
     window, _ = split.find_steady_state_inference(
         roots,
         num_steps=8,
@@ -742,7 +732,7 @@ def test_find_steady_state_inference_max_prefilldecode_empty():
 def test_find_steady_state_inference_invalid_mode():
     names = [VLLM_PRIMARY.format(i=i) for i in range(8)]
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"]).roots
+    roots = _detect(trace["traceEvents"]).roots
     with pytest.raises(ValueError, match="Unknown mode"):
         split.find_steady_state_inference(roots, num_steps=4, mode="invalid")
 
@@ -750,7 +740,7 @@ def test_find_steady_state_inference_invalid_mode():
 def test_find_steady_state_inference_conc_mismatch_warning(capsys):
     names = [SGLANG_DECODE.format(i=5) for _ in range(16)]
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"]).roots
+    roots = _detect(trace["traceEvents"]).roots
     split.find_steady_state_inference(
         roots,
         num_steps=8,
@@ -763,70 +753,17 @@ def test_find_steady_state_inference_conc_mismatch_warning(capsys):
 def test_extract_and_save_empty_roots(tmp_path):
     trace = _make_trace([VLLM_PRIMARY.format(i=0)])
     events = trace["traceEvents"]
-    gpu_map, flow_map, meta = split.preprocess_trace(events)
-    summary = split.extract_and_save(
+    gpu_map, flow_map, meta = _maps(events)
+    summary = split.extract_and_save_split(
         [[]],
-        events,
-        trace,
-        str(tmp_path),
-        "trace",
+        split.ExtractContext(
+            split.TraceData(events, trace, gpu_map, flow_map, meta),
+            output_dir=str(tmp_path),
+            base_name="trace",
+        ),
         "annotation_iteration",
         0,
         1,
-        gpu_map,
-        flow_map,
-        meta,
-    )
-    assert summary == []
-
-
-def test_extract_phases_and_save_decode_branch(tmp_path):
-    names = []
-    for i in range(8):
-        if i % 2 == 0:
-            names.append(SGLANG_EXTEND.format(t=800))
-        else:
-            names.append(SGLANG_DECODE.format(i=20))
-    trace = _make_trace(names)
-    events = trace["traceEvents"]
-    gpu_map, flow_map, meta = split.preprocess_trace(events)
-    roots = split.find_iteration_roots(events).roots
-    summary = split.extract_phases_and_save(
-        [roots],
-        events,
-        trace,
-        str(tmp_path),
-        "trace",
-        "annotation_iteration",
-        0,
-        1,
-        gpu_map,
-        flow_map,
-        meta,
-    )
-    assert len(summary) >= 2
-    labels = {os.path.basename(item["output_path"]) for item in summary}
-    assert any("prefilldecode_" in name for name in labels)
-    assert any("decode_" in name for name in labels)
-
-
-def test_extract_phases_and_save_skips_non_annotation_prefix(tmp_path):
-    trace = _make_trace([VLLM_PRIMARY.format(i=0)])
-    events = trace["traceEvents"]
-    gpu_map, flow_map, meta = split.preprocess_trace(events)
-    roots = split.find_iteration_roots(events).roots
-    summary = split.extract_phases_and_save(
-        [[r] for r in roots],
-        events,
-        trace,
-        str(tmp_path),
-        "trace",
-        "run_iteration",
-        0,
-        1,
-        gpu_map,
-        flow_map,
-        meta,
     )
     assert summary == []
 
@@ -853,6 +790,19 @@ def test_compute_reference_pd_ratio_median_fallback(capsys):
     regions = [(0, 20)]
     _, ref_ratio, _ = _compute_reference_pd_ratio(regions, iter_details)
     assert 0.0 <= ref_ratio <= 1.0
+
+
+def test_compute_reference_pd_ratio_uses_largest_region(capsys):
+    iter_details = [{"context_requests": 1} for _ in range(4)] + [
+        {"context_requests": 0} for _ in range(6)
+    ]
+    regions = [(0, 4), (4, 10)]
+    largest, avg_ratio, largest_ratio = _compute_reference_pd_ratio(
+        regions, iter_details
+    )
+    assert largest == (4, 10)
+    assert avg_ratio == pytest.approx(0.4)
+    assert largest_ratio == pytest.approx(0.0)
 
 
 def test_main_store_single_iteration(tmp_path):
@@ -1360,7 +1310,7 @@ def _descend(events: List[Dict]):
     tree = TraceToTree(events, prune_nongpu_paths=True)
     tree.build_tree(add_python_func=True)
     _reattach_worker_threads(tree)
-    return detect_from_branch_descent(tree, _entry_roots(tree), _total_gpu_time(tree))
+    return detect_from_branch_descent(tree, _entry_roots(tree), _total_gpu(tree))
 
 
 def test_branch_descent_finds_conditional_loop_body():
@@ -1390,13 +1340,13 @@ def test_branch_descent_periodicity_ignores_kernel_free_frames():
     _reattach_worker_threads(tree)
     node = next(e for e in tree.events_by_uid.values() if e.get("name") == "event_loop")
     ordered = sorted(tree.get_children_events(node), key=lambda e: e.get("ts", 0))
-    _, gputime_by_name = _child_groups(tree, ordered)
+    _, gputime_by_name = _child_groups(tree, ordered, _norm(ordered))
 
     # The idle frames land on 3 of 12 turns, leaving no contiguous repeating run.
     assert _find_repeating_period([e.get("name", "") for e in ordered])[0] is None
 
     candidate = _periodic_candidate(
-        tree, node, ordered, gputime_by_name, _total_gpu_time(tree), 0
+        tree, node, ordered, gputime_by_name, _total_gpu(tree), 0, _norm(ordered)
     )
     assert candidate is not None
     assert candidate.diagnostics["branch_coverage"] > 0.9
@@ -1544,7 +1494,7 @@ def test_bookend_promotion_adopts_a_warmup_turn_that_does_the_same_work():
     _reattach_worker_threads(tree)
     node = next(e for e in tree.events_by_uid.values() if e.get("name") == "event_loop")
     ordered = sorted(tree.get_children_events(node), key=lambda e: e.get("ts", 0))
-    _, gputime_by_name = _child_groups(tree, ordered)
+    _, gputime_by_name = _child_groups(tree, ordered, _norm(ordered))
 
     # The setup frame means the repeating run starts only at the second turn.
     live = [e for e in ordered if gputime_by_name.get(e.get("name", ""), 0.0) > 0]
@@ -1554,12 +1504,12 @@ def test_bookend_promotion_adopts_a_warmup_turn_that_does_the_same_work():
     assert start > 0
 
     candidate = _periodic_candidate(
-        tree, node, ordered, gputime_by_name, _total_gpu_time(tree), 0
+        tree, node, ordered, gputime_by_name, _total_gpu(tree), 0, _norm(ordered)
     )
     assert candidate is not None
-    # Every turn is a root, warmup included, and nothing is left for the cascade
-    # to bolt on afterwards.
-    assert len(candidate.roots) == turns
-    assert candidate.roots[0]["ts"] < live[start]["ts"]
-    assert candidate.diagnostics["before_uids"] == []
-    assert candidate.diagnostics["branch_coverage"] > 0.99
+    # The clean repeating run forms the roots; the off-stride warmup turn is no
+    # longer promoted inline -- it is recorded as a bookend for the cascade's
+    # _try_bookend_enhancement step to adopt.
+    assert len(candidate.roots) == turns - 1
+    assert candidate.diagnostics["before_uids"]
+    assert candidate.roots[0]["ts"] == live[start]["ts"]

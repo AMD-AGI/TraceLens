@@ -130,6 +130,8 @@ class IntervalIndex:
     def __init__(self, events: Iterable[dict]):
         buckets: Dict[Tuple, List[dict]] = {}
         for e in events:
+            if e.get("dur") is None:
+                continue  # flow markers etc. have no span; skip rather than crash
             buckets.setdefault((e.get("pid"), e.get("tid")), []).append(e)
         self._threads: Dict[Tuple, Tuple[List[float], List[float], List[dict]]] = {}
         for key, evs in buckets.items():

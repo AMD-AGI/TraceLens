@@ -61,9 +61,11 @@ from .annotation_utils import (
     iteration_details,
 )
 from TraceLens.TraceUtils.split_inference_trace_annotation import (
-    extract_and_save,
+    ExtractContext,
+    TraceData,
+    TraceIndex,
+    extract_and_save_split,
     get_filename,
-    preprocess_trace,
 )
 
 PER_STEP_KEYS = (
@@ -482,7 +484,12 @@ def load_trace(path: str):
     print(f"\n=== Loading {path} ===")
     trace_json = DataLoader.load_data(get_filename(path))
     events = trace_json.get("traceEvents", [])
-    gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
+    ti = TraceIndex(events)
+    gpu_corr_map, flow_corr_map, meta_events = (
+        ti.gpu_corr_map,
+        ti.flow_corr_map,
+        ti.meta_events,
+    )
     print(f"Loaded {len(events)} events from {path}")
     # Detailed patterns take priority over the native patterns.
     iteration_roots = find_known_annotations(events)
@@ -620,18 +627,22 @@ def main():
             label_base = f"{phase}_best_A{m['a_block_index']}_B{m['b_block_index']}"
 
             print(f"\n--- {phase} best (A) ---")
-            a_summary = extract_and_save(
+            a_summary = extract_and_save_split(
                 [m["a_block"].roots],
-                a["events"],
-                a["trace_json"],
-                phase_dir,
-                base_a,
+                ExtractContext(
+                    TraceData(
+                        a["events"],
+                        a["trace_json"],
+                        a["gpu_corr_map"],
+                        a["flow_corr_map"],
+                        a["meta_events"],
+                    ),
+                    output_dir=phase_dir,
+                    base_name=base_a,
+                ),
                 "iteration",
                 0,
                 1,
-                a["gpu_corr_map"],
-                a["flow_corr_map"],
-                a["meta_events"],
                 output_label=f"{label_base}_A",
                 llm_inference=True,
             )
@@ -639,18 +650,22 @@ def main():
                 m["a_output_path"] = a_summary[0]["output_path"]
 
             print(f"\n--- {phase} best (B) ---")
-            b_summary = extract_and_save(
+            b_summary = extract_and_save_split(
                 [m["b_block"].roots],
-                b["events"],
-                b["trace_json"],
-                phase_dir,
-                base_b,
+                ExtractContext(
+                    TraceData(
+                        b["events"],
+                        b["trace_json"],
+                        b["gpu_corr_map"],
+                        b["flow_corr_map"],
+                        b["meta_events"],
+                    ),
+                    output_dir=phase_dir,
+                    base_name=base_b,
+                ),
                 "iteration",
                 0,
                 1,
-                b["gpu_corr_map"],
-                b["flow_corr_map"],
-                b["meta_events"],
                 output_label=f"{label_base}_B",
                 llm_inference=True,
             )

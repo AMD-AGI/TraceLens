@@ -11,13 +11,12 @@ from __future__ import annotations
 import pytest
 from copy import deepcopy
 from typing import Dict, List
-from TraceLens.Trace2Tree.inference_iteration_roots import (
+from TraceLens.util import GPU_KERNEL_CATEGORIES
+from TraceLens.Trace2Tree.util import (
     _entry_roots,
-    _find_repeating_period,
     _reattach_worker_threads,
 )
 from TraceLens.TraceUtils.split_inference.root_detection import (
-    _total_gpu_time,
     detect_from_branch_descent,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
@@ -72,6 +71,15 @@ from TraceLens.Trace2Tree.extensions.v4_paged_decode_pseudo_ops import (
     create_pseudo_ops_v4_paged_decode,
 )
 from TraceLens.Trace2Tree import trace_to_tree as ttt
+
+
+def _total_gpu(tree):
+    """Total GPU kernel time in the tree (was root_detection._total_gpu_time)."""
+    return sum(
+        e.get("dur", 0)
+        for e in tree.events_by_uid.values()
+        if e.get("cat") in GPU_KERNEL_CATEGORIES
+    )
 
 
 def _mk_event(
@@ -150,19 +158,6 @@ def _add_gpu_chain(
 
 
 class TestInferenceIterationRoots:
-    def test_find_repeating_period_skips_prefix(self):
-        names = ["setup", "fwd", "bwd", "fwd", "bwd", "fwd", "bwd"]
-        period, pattern, start = _find_repeating_period(names)
-        assert period == 2
-        assert pattern == ["fwd", "bwd"]
-        assert start == 1
-
-    def test_find_repeating_period_no_match(self):
-        period, pattern, start = _find_repeating_period(["a", "b", "c", "d"])
-        assert period is None
-        assert pattern is None
-        assert start is None
-
     def test_find_iteration_roots_from_synthetic_tree(self):
         events: List[Dict] = []
         loop = _mk_event(
@@ -200,7 +195,7 @@ class TestInferenceIterationRoots:
 
         tree = _build_tree(events)
         result = detect_from_branch_descent(
-            tree, _entry_roots(tree), _total_gpu_time(tree)
+            tree, _entry_roots(tree), _total_gpu(tree)
         )
         assert result is not None
         assert len(result.roots) == 8
@@ -245,7 +240,7 @@ class TestInferenceIterationRoots:
         tree = _build_tree(events)
         _reattach_worker_threads(tree)
         result = detect_from_branch_descent(
-            tree, _entry_roots(tree), _total_gpu_time(tree)
+            tree, _entry_roots(tree), _total_gpu(tree)
         )
         assert result is not None
         assert len(result.roots) >= 1

@@ -42,8 +42,10 @@ import pytest
 from TraceLens.TraceUtils import match_inference_trace_blocks as match
 from TraceLens.TraceUtils.annotation_utils import ITERATION_PATTERNS
 from TraceLens.TraceUtils.split_inference_trace_annotation import (
-    extract_and_save,
-    preprocess_trace,
+    ExtractContext,
+    TraceData,
+    TraceIndex,
+    extract_and_save_split,
 )
 
 DECODE_ONLY = match.PHASE_DECODE_ONLY
@@ -458,22 +460,26 @@ def test_extraction_of_a_matched_block(tmp_path):
     ``--no-extract`` is the path ``extract_and_save`` actually writes.
     """
     events = A_TRACE["traceEvents"]
-    gpu_map, flow_map, meta = preprocess_trace(events)
+    ti = TraceIndex(events)
     block = A_WINDOWS[1]
     label = "decode_only_best_A1_B1_A"
 
-    summary = extract_and_save(
+    summary = extract_and_save_split(
         [block.roots],
-        events,
-        A_TRACE,
-        str(tmp_path),
-        "trace_a",
+        ExtractContext(
+            TraceData(
+                events,
+                A_TRACE,
+                ti.gpu_corr_map,
+                ti.flow_corr_map,
+                ti.meta_events,
+            ),
+            output_dir=str(tmp_path),
+            base_name="trace_a",
+        ),
         "annotation_iteration",
         0,
         1,
-        gpu_map,
-        flow_map,
-        meta,
         output_label=label,
         llm_inference=True,
     )

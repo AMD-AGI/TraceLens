@@ -8,9 +8,6 @@
 
 import pytest
 
-from TraceLens.Trace2Tree.inference_iteration_roots import (
-    find_period_candidates,
-)
 from TraceLens.TraceUtils.annotation_utils import (
     cluster_by_skeleton,
     dominant_cluster,
@@ -21,10 +18,11 @@ from TraceLens.TraceUtils.annotation_utils import (
 from TraceLens.TraceUtils.split_inference import (
     DetectStatus,
     PhaseConfidence,
+    TraceData,
+    TraceIndex,
     build_root_tiles,
     extract_iteration,
     find_iteration_roots,
-    preprocess_trace,
 )
 from TraceLens.TraceUtils.split_inference.detect_utils import (
     COVERAGE_GATE,
@@ -32,10 +30,31 @@ from TraceLens.TraceUtils.split_inference.detect_utils import (
     IntervalIndex,
     group_by_thread,
 )
-from TraceLens.TraceUtils.split_inference.root_detection import (
-    build_families,
-    collect_annotations,
+from TraceLens.TraceUtils.split_inference.period_detection import (
+    _find_repeating_period,
 )
+
+
+def collect_annotations(events):
+    """The annotation events of a raw trace (was root_detection.collect_annotations)."""
+    return TraceIndex(events).annotations
+
+
+def _trace_data(events):
+    """A ``TraceData`` for extraction, built from a raw event list."""
+    ti = TraceIndex(events)
+    return TraceData(
+        events,
+        {"traceEvents": events},
+        ti.gpu_corr_map,
+        ti.flow_corr_map,
+        ti.meta_events,
+    )
+
+
+def _detect(events):
+    """find_iteration_roots with the TraceIndex it now requires."""
+    return find_iteration_roots(events, trace_index=TraceIndex(events))
 
 VLLM = "execute_{i}_context_3(sq128sk256sqsq1sqsk1)_generation_2(sq1sk300sqsq1sqsk1)"
 
@@ -177,40 +196,28 @@ class TestAnnotationIdentity:
 # --------------------------------------------------------------------------- #
 class TestPeriodicity:
     def test_skips_a_warmup_prefix(self):
-        best = find_period_candidates(["setup", "a", "b", "a", "b", "a", "b"])[0]
-        assert (best.period, best.start, best.repeats) == (2, 1, 3)
+        period, pattern, start = _find_repeating_period(
+            ["setup", "a", "b", "a", "b", "a", "b"]
+        )
+        assert (period, start) == (2, 1)
+        assert pattern == ["a", "b"]
 
     def test_no_repetition_yields_nothing(self):
-        assert find_period_candidates(["a", "b", "c", "d"]) == []
+        assert _find_repeating_period(["a", "b", "c", "d"]) == (None, None, None)
 
     def test_too_few_repeats_rejected(self):
-        assert find_period_candidates(["a", "b", "a", "b"]) == []
+        assert _find_repeating_period(["a", "b", "a", "b"]) == (None, None, None)
 
     def test_reports_a_primitive_period_not_a_multiple(self):
         """Every multiple of a valid period is valid; only the unit is useful."""
-        candidates = find_period_candidates(["a", "b"] * 12)
-        assert candidates[0].period == 2
-        assert all(c.period % 2 or c.period == 2 for c in candidates)
+        period, _, _ = _find_repeating_period(["a", "b"] * 12)
+        assert period == 2
 
     def test_sub_iteration_noise_does_not_win(self):
         """A launch repeating within the iteration must not become the period."""
         labels = (["step"] + ["launch"] * 5) * 8
-        best = find_period_candidates(labels)[0]
-        assert best.period == 6
-        assert best.repeats == 8
-
-    def test_duration_variance_is_reported(self):
-        labels = ["a", "b"] * 5
-        steady = find_period_candidates(labels, durations=[10, 20] * 5)[0]
-        erratic = find_period_candidates(
-            labels, durations=[10, 20, 900, 20, 10, 20, 10, 500, 10, 20]
-        )[0]
-        assert steady.duration_cv == 0.0
-        assert erratic.duration_cv > steady.duration_cv
-
-    def test_coverage_reported(self):
-        best = find_period_candidates(["x", "y"] * 10)[0]
-        assert best.coverage == 1.0
+        period, _, _ = _find_repeating_period(labels)
+        assert period == 6
 
 
 # --------------------------------------------------------------------------- #
@@ -253,13 +260,13 @@ class TestIntervalIndex:
 class TestGpuAttribution:
     def test_prefers_gpu_annotation_spans_when_present(self):
         events = serving_trace(4, with_gpu_annotation=True)
-        attribution = GpuAttribution(events)
+        attribution = GpuAttribution(TraceIndex(events))
         _, strategy = attribution.attributed_kernels(collect_annotations(events))
         assert strategy == GpuAttribution.STRATEGY_GPU_SPAN
 
     def test_falls_back_to_correlation_without_gpu_annotation_spans(self):
         events = serving_trace(4)
-        attribution = GpuAttribution(events)
+        attribution = GpuAttribution(TraceIndex(events))
         _, strategy = attribution.attributed_kernels(collect_annotations(events))
         assert strategy == GpuAttribution.STRATEGY_CORRELATION
 
@@ -272,7 +279,7 @@ class TestGpuAttribution:
         events = serving_trace(4, with_gpu_annotation=True)
         annotations = collect_annotations(events)
         unannotated = annotation("step[DECODE bs=9]", 90_000, 400)
-        attribution = GpuAttribution(events + [unannotated])
+        attribution = GpuAttribution(TraceIndex(events + [unannotated]))
         _, strategy = attribution.attributed_kernels(annotations + [unannotated])
         assert strategy == GpuAttribution.STRATEGY_CORRELATION
 
@@ -280,12 +287,12 @@ class TestGpuAttribution:
         """Counting an annotation span as GPU time double-counts the kernels inside."""
         events = serving_trace(4, with_gpu_annotation=True)
         annotations = collect_annotations(events)
-        assert GpuAttribution(events).audit(annotations).gpu_busy == 4 * 40
+        assert GpuAttribution(TraceIndex(events)).audit(annotations).gpu_busy == 4 * 40
 
     def test_full_coverage_when_every_kernel_is_annotated(self):
         events = serving_trace(8)
         annotations = collect_annotations(events)
-        report = GpuAttribution(events).audit(annotations)
+        report = GpuAttribution(TraceIndex(events)).audit(annotations)
         assert report.covered_selected == 1.0
         assert report.passes
 
@@ -309,7 +316,7 @@ class TestGpuAttribution:
             corr += 1
 
         roots = collect_annotations(events)
-        report = GpuAttribution(events).audit(roots)
+        report = GpuAttribution(TraceIndex(events)).audit(roots)
         # A tenth of GPU time is launched after the annotations close.
         assert report.covered_spans == pytest.approx(0.9)
         # The windows reclaim it, bar the final iteration's tail, which falls
@@ -321,7 +328,7 @@ class TestGpuAttribution:
         """Coverage from window extension alone is not root coverage."""
         events = serving_trace(40)
         annotations = collect_annotations(events)
-        report = GpuAttribution(events).audit(annotations[::20])
+        report = GpuAttribution(TraceIndex(events)).audit(annotations[::20])
         assert report.covered_selected > report.covered_spans
         assert report.span_share < 0.5
         assert not report.passes
@@ -334,7 +341,7 @@ class TestGpuAttribution:
         """
         events = serving_trace(40)
         annotations = collect_annotations(events)
-        attribution = GpuAttribution(events)
+        attribution = GpuAttribution(TraceIndex(events))
         assert attribution.audit(annotations).covered_selected == 1.0
         assert not attribution.audit(annotations[:2]).passes
 
@@ -342,7 +349,7 @@ class TestGpuAttribution:
         events = serving_trace(8)
         # A kernel with no launch site inside any annotation.
         events.append(kernel(1500, 4000, 99999, name="orphan"))
-        attribution = GpuAttribution(events)
+        attribution = GpuAttribution(TraceIndex(events))
         report = attribution.audit(collect_annotations(events))
         assert report.covered_selected < COVERAGE_GATE
 
@@ -350,7 +357,7 @@ class TestGpuAttribution:
         """The signature of roots sitting at the wrong nesting level."""
         events = serving_trace(8)
         annotations = collect_annotations(events)
-        attribution = GpuAttribution(events)
+        attribution = GpuAttribution(TraceIndex(events))
         assert (
             attribution.audit(annotations[:2]).covered_selected
             < attribution.audit(annotations).covered_selected
@@ -358,55 +365,18 @@ class TestGpuAttribution:
 
     def test_family_gpu_time(self):
         events = serving_trace(4)
-        attribution = GpuAttribution(events)
+        attribution = GpuAttribution(TraceIndex(events))
         annotations = collect_annotations(events)
         assert attribution.gpu_time_for_family(annotations) == 4 * 40
 
 
 # --------------------------------------------------------------------------- #
-# C9: families
-# --------------------------------------------------------------------------- #
-class TestFamilies:
-    def _events(self):
-        """A scheduler family wrapping a decode family, plus CPU-only chatter."""
-        events = []
-        corr = 800
-        for i in range(12):
-            base = 1000 + i * 1000
-            events.append(annotation("scheduler.process_batch_result", base, 500))
-            events.append(annotation(f"step[DECODE bs={i + 1}]", base + 50, 200))
-            events.append(annotation("scheduler.log_stats", base + 700, 10))
-            events.append(launch(base + 60, corr))
-            events.append(kernel(base + 600, 300, corr))
-            corr += 1
-        return events
-
-    def test_prunes_families_with_no_gpu_work(self):
-        events = self._events()
-        families = build_families(collect_annotations(events), GpuAttribution(events))
-        skeletons = {f.skeleton for f in families}
-        assert "scheduler.log_stats" not in skeletons
-        assert {"scheduler.process_batch_result", "step[DECODE bs=#]"} <= skeletons
-
-    def test_regularity_needs_enough_instances(self):
-        events = serving_trace(3)
-        families = build_families(collect_annotations(events), GpuAttribution(events))
-        assert families and not families[0].regular
-
-    def test_parseability_recorded_per_family(self):
-        events = self._events()
-        families = build_families(collect_annotations(events), GpuAttribution(events))
-        by_skeleton = {f.skeleton: f for f in families}
-        assert by_skeleton["step[DECODE bs=#]"].parseable
-        assert not by_skeleton["scheduler.process_batch_result"].parseable
-
-
 # --------------------------------------------------------------------------- #
 # Stage 1 end to end
 # --------------------------------------------------------------------------- #
 class TestDetectionFlow:
     def test_healthy_trace_resolves_without_probes(self):
-        result = find_iteration_roots(serving_trace(16))
+        result = _detect(serving_trace(16))
         assert result.status is DetectStatus.SPLITTABLE
         assert result.phase_confidence is PhaseConfidence.HIGH
         assert result.method == "annotation:tier"
@@ -430,10 +400,10 @@ class TestDetectionFlow:
             events.append(kernel(base + 600, 300, corr))
             corr += 1
 
-        result = find_iteration_roots(events)
+        result = _detect(events)
         assert len(result) == 20
         assert result.method == "family:unknown_only"
-        assert result.diagnostics["root_family_skeleton"] == "scheduler.run_batch"
+        assert result.diagnostics["root_family"] == "scheduler.run_batch"
         assert result.status is DetectStatus.SPLITTABLE
 
     def test_unknown_family_with_nested_known_annotations(self):
@@ -453,10 +423,10 @@ class TestDetectionFlow:
                 events.append(kernel(base + 900 + step * 50, 100, corr))
                 corr += 1
 
-        result = find_iteration_roots(events)
+        result = _detect(events)
         assert result.method == "family:unknown_only"
         assert len(result) == 12
-        assert result.diagnostics["root_family_skeleton"] == "scheduler.run_batch"
+        assert result.diagnostics["root_family"] == "scheduler.run_batch"
 
     def test_unknown_family_catches_enclosing_annotation(self):
         """When only a few iterations have known annotations, the unknown
@@ -471,12 +441,12 @@ class TestDetectionFlow:
             events.append(kernel(base + 600, 300, corr))
             corr += 1
 
-        result = find_iteration_roots(events)
+        result = _detect(events)
         assert result.status is DetectStatus.SPLITTABLE
         assert result.method == "family:unknown_only"
         assert len(result) == 20
         assert (
-            result.diagnostics["root_family_skeleton"]
+            result.diagnostics["root_family"]
             == "scheduler.process_batch_result"
         )
 
@@ -490,7 +460,7 @@ class TestDetectionFlow:
             events.append(kernel(base + 600, 300, corr))
             corr += 1
 
-        result = find_iteration_roots(events)
+        result = _detect(events)
         assert len(result) == 12
         assert result.method == "annotation:tier"
 
@@ -503,14 +473,14 @@ class TestDetectionFlow:
             events.append(kernel(base + 500, 200, corr))
             corr += 1
 
-        result = find_iteration_roots(events)
+        result = _detect(events)
         assert len(result) == 10
         assert result.method == "family:unknown_only"
         assert result.phase_confidence is PhaseConfidence.UNKNOWN
         assert result.status is not DetectStatus.NOT_SPLITTABLE
 
     def test_empty_trace_reports_not_splittable(self):
-        result = find_iteration_roots([])
+        result = _detect([])
         assert result.status is DetectStatus.NOT_SPLITTABLE
         assert len(result) == 0
 
@@ -519,12 +489,12 @@ class TestDetectionFlow:
         # probe ladder; the roots are graded straight to degraded/not-splittable.
         events = serving_trace(16)
         events.append(kernel(1500, 500_000, 99999, name="unaccounted"))
-        result = find_iteration_roots(events)
+        result = _detect(events)
         assert result.coverage.covered_selected < COVERAGE_GATE
         assert result.status in (DetectStatus.DEGRADED, DetectStatus.NOT_SPLITTABLE)
 
     def test_manifest_reports_quality(self):
-        manifest = find_iteration_roots(serving_trace(16)).to_manifest()
+        manifest = _detect(serving_trace(16)).to_manifest()
         assert manifest["status"] == 0
         assert manifest["phase_confidence"] == "high"
         assert manifest["n_roots"] == 16
@@ -585,16 +555,15 @@ class TestGapFreeExtraction:
 
     def test_gap_kernels_are_recovered(self):
         events = self._trace()
-        trace = {"traceEvents": events}
-        gpu_map, flow_map, meta = preprocess_trace(events)
+        td = _trace_data(events)
         roots = collect_annotations(events)
         tiles, _ = build_root_tiles(roots)
 
         _, _, dropped, _, _ = extract_iteration(
-            roots, events, trace, gpu_map, flow_map, meta, gap_fill=False
+            roots, td, gap_fill=False
         )
         out, _, kept, _, busy = extract_iteration(
-            roots, events, trace, gpu_map, flow_map, meta, root_tiles=tiles
+            roots, td, root_tiles=tiles
         )
         assert dropped == 3
         assert kept == 6
@@ -604,14 +573,13 @@ class TestGapFreeExtraction:
 
     def test_every_kernel_lands_in_exactly_one_window(self):
         events = self._trace()
-        trace = {"traceEvents": events}
-        gpu_map, flow_map, meta = preprocess_trace(events)
+        td = _trace_data(events)
         roots = collect_annotations(events)
         tiles, _ = build_root_tiles(roots)
 
         per_root = [
             extract_iteration(
-                [r], events, trace, gpu_map, flow_map, meta, root_tiles=tiles
+                [r], td, root_tiles=tiles
             )[2]
             for r in roots
         ]
@@ -629,14 +597,13 @@ class TestGapFreeExtraction:
         events = self._trace()
         events.append(launch(500, 99))
         events.append(kernel(600, 40, 99, name="k_warmup"))
-        trace = {"traceEvents": events}
-        gpu_map, flow_map, meta = preprocess_trace(events)
+        td = _trace_data(events)
         roots = collect_annotations(events)
         tiles, _ = build_root_tiles(roots)
 
         per_root = [
             extract_iteration(
-                [r], events, trace, gpu_map, flow_map, meta, root_tiles=tiles
+                [r], td, root_tiles=tiles
             )[2]
             for r in roots
         ]
@@ -659,11 +626,10 @@ class TestGapFreeExtraction:
                 "args": {},
             }
         )
-        trace = {"traceEvents": events}
-        gpu_map, flow_map, meta = preprocess_trace(events)
+        td = _trace_data(events)
         roots = collect_annotations(events)
         tiles, _ = build_root_tiles(roots)
         out, _, _, _, _ = extract_iteration(
-            [roots[0]], events, trace, gpu_map, flow_map, meta, root_tiles=tiles
+            [roots[0]], td, root_tiles=tiles
         )
         assert "whole_run" not in {e["name"] for e in out["traceEvents"]}
