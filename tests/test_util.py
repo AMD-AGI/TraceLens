@@ -6,7 +6,7 @@
 
 """Unit tests for TraceLens.util helpers."""
 
-import contextlib, gzip, json, os, sys, types, pytest, pandas as pd
+import contextlib, gzip, json, os, sys, types, pytest, pandas as pd, orjson
 from unittest.mock import patch
 from TraceLens.util import (
     DataLoader,
@@ -804,6 +804,19 @@ def test_dataloader_load_pb_none_raises(mock_suppress, tmp_path):
 
     with patch.dict(sys.modules, modules):
         with pytest.raises(RuntimeError, match="returned None"):
+            DataLoader.load_data(str(trace_path))
+
+
+@patch("TraceLens.util.suppress_native_hlo_logs")
+def test_dataloader_load_pb_invalid_json_raises(mock_suppress, tmp_path):
+    trace_path = tmp_path / "trace.pb"
+    trace_path.write_bytes(b"pb")
+    mock_suppress.return_value = contextlib.nullcontext()
+    # pb conversion yields a str; invalid JSON must re-raise, not UTF-8-retry.
+    modules = _install_mock_xprof_convert((b"{not json", None))
+
+    with patch.dict(sys.modules, modules):
+        with pytest.raises(orjson.JSONDecodeError):
             DataLoader.load_data(str(trace_path))
 
 
