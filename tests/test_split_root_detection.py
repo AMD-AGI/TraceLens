@@ -8,14 +8,14 @@
 
 import pytest
 
-from TraceLens.TraceUtils.annotation_utils import (
+from TraceLens.TraceUtils.utils.annotation_utils import (
     cluster_by_skeleton,
     dominant_cluster,
     is_parseable,
     name_skeleton,
     parse_annotation,
 )
-from TraceLens.TraceUtils.split_inference import (
+from TraceLens.TraceUtils.trace_split import (
     DetectStatus,
     PhaseConfidence,
     TraceData,
@@ -24,13 +24,13 @@ from TraceLens.TraceUtils.split_inference import (
     extract_iteration,
     find_iteration_roots,
 )
-from TraceLens.TraceUtils.split_inference.detect_utils import (
+from TraceLens.TraceUtils.utils.detect_utils import (
     COVERAGE_GATE,
     GpuAttribution,
     IntervalIndex,
     group_by_thread,
 )
-from TraceLens.TraceUtils.split_inference.period_detection import (
+from TraceLens.TraceUtils.trace_split.period_detection import (
     _find_repeating_period,
 )
 

@@ -19,9 +19,9 @@ No trace files are written; everything operates on in-memory dicts.
 
 import gzip, json, os, zipfile, sys, pytest
 from typing import Dict, List
-from TraceLens.TraceUtils import split_inference_trace_annotation as split
-from TraceLens.TraceUtils.annotation_utils import IterationAnnotation
-from TraceLens.TraceUtils.split_inference.steady_state_window import (
+from TraceLens.TraceUtils.trace_split import main as split
+from TraceLens.TraceUtils.utils.annotation_utils import IterationAnnotation
+from TraceLens.TraceUtils.trace_split.steady_state_window import (
     _identify_regions_inference,
     _compute_reference_pd_ratio,
 )
@@ -45,13 +45,13 @@ from TraceLens.Trace2Tree.util import (
     _entry_roots,
     _reattach_worker_threads,
 )
-from TraceLens.TraceUtils.split_inference.period_detection import (
+from TraceLens.TraceUtils.trace_split.period_detection import (
     _find_repeating_period,
 )
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.util import GPU_KERNEL_CATEGORIES, normalize_name_for_comparison
-from TraceLens.TraceUtils.split_inference.detect_utils import DetectStatus
-from TraceLens.TraceUtils.split_inference.root_detection import (
+from TraceLens.TraceUtils.utils.detect_utils import DetectStatus
+from TraceLens.TraceUtils.trace_split.root_detection import (
     _child_groups,
     _periodic_candidate,
     detect_from_branch_descent,
@@ -814,7 +814,7 @@ def test_main_store_single_iteration(tmp_path):
 
     old_argv = sys.argv
     sys.argv = [
-        "split_inference_trace_annotation",
+        "main.py",
         str(trace_path),
         "-o",
         str(out_dir),
@@ -842,7 +842,7 @@ def test_main_find_steady_state(tmp_path):
 
     old_argv = sys.argv
     sys.argv = [
-        "split_inference_trace_annotation",
+        "main.py",
         str(trace_path),
         "-o",
         str(out_dir),
@@ -872,7 +872,7 @@ def test_main_divide_phases(tmp_path):
 
     old_argv = sys.argv
     sys.argv = [
-        "split_inference_trace_annotation",
+        "main.py",
         str(trace_path),
         "-o",
         str(out_dir),
@@ -899,7 +899,7 @@ def test_main_explicit_iteration_range(tmp_path):
 
     old_argv = sys.argv
     sys.argv = [
-        "split_inference_trace_annotation",
+        "main.py",
         str(trace_path),
         "-o",
         str(out_dir),

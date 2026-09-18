@@ -6,7 +6,7 @@
 
 """Inference trace splitting: execution roots, steady-state windows, extraction."""
 
-from .detect_utils import ExtractContext, TraceData, TraceIndex
+from ..utils.detect_utils import ExtractContext, TraceData, TraceIndex
 from .root_detection import (
     DetectStatus,
     PhaseConfidence,
@@ -23,7 +23,7 @@ from .steady_state_window import (
     find_steady_state_inference,
     find_steady_state_inference_from_shapes,
 )
-from .trace_extraction import (
+from ..utils.trace_extraction import (
     build_cpu_event_index,
     build_root_tiles,
     collect_ancestor_events,

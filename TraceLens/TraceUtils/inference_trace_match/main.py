@@ -35,7 +35,7 @@ Output
 
 Usage
 -----
-    python match_inference_trace_blocks.py <trace_a> <trace_b> -o <out_dir>
+    python -m TraceLens.TraceUtils.inference_trace_match.main <trace_a> <trace_b> -o <out_dir>
                                            [--no-extract]
                                            [--phases decode_only,prefilldecode]
 """
@@ -50,7 +50,7 @@ from typing import List, Optional, Tuple
 import pandas as pd
 
 from TraceLens.util import DataLoader
-from .annotation_utils import (
+from ..utils.annotation_utils import (
     PHASE_DECODE_ONLY,
     PHASE_PREFILLDECODE,
     PHASE_PREFILL_ONLY,
@@ -60,7 +60,7 @@ from .annotation_utils import (
     find_phase_from_window,
     iteration_details,
 )
-from TraceLens.TraceUtils.split_inference_trace_annotation import (
+from ..trace_split import (
     ExtractContext,
     TraceData,
     TraceIndex,

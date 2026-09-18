@@ -539,7 +539,7 @@ def find_execution_roots(graph_tree):
 
     Primary (detailed) patterns are tried first, and native (backup) patterns are used only when no primary root is found.
     """
-    from ..TraceUtils.annotation_utils import find_known_annotations
+    from ..TraceUtils.utils.annotation_utils import find_known_annotations
 
     return find_known_annotations(graph_tree.events)
 
@@ -651,7 +651,7 @@ def find_execution_details(execution_root) -> Optional[str]:
     Returns ``None`` when no integer batch size can be determined.
     """
     name = execution_root["name"]
-    from ..TraceUtils.annotation_utils import IterationAnnotation
+    from ..TraceUtils.utils.annotation_utils import IterationAnnotation
 
     ann = IterationAnnotation(name)
     if ann.matched and ann.batch_size is not None:

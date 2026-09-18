@@ -27,7 +27,7 @@ region list (e.g. ``divide_phases_and_save``).
 import math
 from statistics import mean, median, pstdev
 
-from ..annotation_utils import (
+from ..utils.annotation_utils import (
     has_context,
     is_decode_only,
     is_mixed,

@@ -16,7 +16,7 @@ from collections import Counter
 from tqdm import tqdm
 
 from ...util import GPU_EVENT_CATEGORIES, GPU_KERNEL_CATEGORIES
-from ..annotation_utils import (
+from .annotation_utils import (
     ITERATION_BACKUP_PATTERNS,
     ITERATION_PATTERNS,
     find_phase_from_window,

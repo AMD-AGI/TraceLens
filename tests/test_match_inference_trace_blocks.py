@@ -39,9 +39,9 @@ import sys
 import pandas as pd
 import pytest
 
-from TraceLens.TraceUtils import match_inference_trace_blocks as match
-from TraceLens.TraceUtils.annotation_utils import ITERATION_PATTERNS
-from TraceLens.TraceUtils.split_inference_trace_annotation import (
+from TraceLens.TraceUtils.inference_trace_match import main as match
+from TraceLens.TraceUtils.utils.annotation_utils import ITERATION_PATTERNS
+from TraceLens.TraceUtils.trace_split import (
     ExtractContext,
     TraceData,
     TraceIndex,
@@ -522,7 +522,7 @@ def trace_paths(tmp_path_factory):
 
 
 def run_main(monkeypatch, *argv):
-    monkeypatch.setattr(sys, "argv", ["match_inference_trace_blocks.py", *argv])
+    monkeypatch.setattr(sys, "argv", ["main.py", *argv])
     match.main()
 
 

@@ -22,11 +22,11 @@ from ...Trace2Tree.util import (
     _entry_roots,
     _reattach_worker_threads,
 )
-from ..annotation_utils import (
+from ..utils.annotation_utils import (
     find_known_annotations,
     name_skeleton,
 )
-from .detect_utils import (
+from ..utils.detect_utils import (
     COVERAGE_FLOOR,
     COVERAGE_GATE,
     MIN_ROOTS,
