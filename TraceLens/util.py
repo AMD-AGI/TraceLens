@@ -12,6 +12,7 @@ import re
 import glob
 import sys
 import tempfile
+import zipfile
 from collections import Counter, defaultdict
 
 try:
@@ -107,6 +108,24 @@ def normalize_name_for_comparison(name, strip_details=False):
         normalized = re.sub(r":\s+\S+$", "", normalized)
         normalized = re.sub(r"^.*/([^/]+\.py)$", r"\1", normalized)
     return _KERNEL_LAUNCH_EQUIVALENTS.get(normalized, normalized)
+
+
+def get_filename(filepath: str) -> str:
+    """Resolve a trace path to load (.json, .json.gz, or .zip).
+
+    For a ``.zip`` the first ``.json`` member's name inside the archive is
+    returned; otherwise the path is returned unchanged.
+    """
+    print(f"Loading trace: {filepath}")
+    if filepath.endswith(".zip"):
+        with zipfile.ZipFile(filepath, "r") as zf:
+            json_files = [f for f in zf.namelist() if f.endswith(".json")]
+            if not json_files:
+                raise ValueError(f"No .json file found in {filepath}")
+            json_file = json_files[0]
+            print(f"  Reading {json_file} from zip...")
+            return json_file
+    return filepath
 
 
 # generic data loader class for json, json.gz, or tensorboard pb files

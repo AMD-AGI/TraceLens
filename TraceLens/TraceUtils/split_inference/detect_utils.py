@@ -245,6 +245,39 @@ class SpanSet:
 ANNOTATION_CAT = "user_annotation"
 
 
+@dataclass
+class TraceData:
+    """The parsed trace and its correlation maps, threaded through extraction.
+
+    The immutable inputs every extraction call needs: the raw event list, the
+    trace JSON to clone into each output, and the correlation maps that link CPU
+    launches to GPU work. Output location and gap-fill tiles are *not* here --
+    those are per-call parameters, not trace data.
+    """
+
+    events: List[dict]
+    trace_json: dict
+    gpu_corr_map: dict
+    flow_corr_map: dict
+    meta_events: List[dict]
+
+
+@dataclass
+class ExtractContext:
+    """A write job shared by every ``extract_and_save_*`` call in a run.
+
+    Bundles the trace with its output target so the writers take one context
+    instead of the same four arguments each. ``output_dir`` is the base directory
+    (``divide_phases_and_save`` writes into per-phase subfolders of it), and
+    ``root_tiles`` are the gap-free extraction windows over the whole root list.
+    """
+
+    trace: TraceData
+    output_dir: str
+    base_name: str
+    root_tiles: Optional[dict] = None
+
+
 class TraceIndex:
     """All event categories extracted in a single pass over the trace."""
 

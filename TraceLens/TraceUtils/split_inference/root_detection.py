@@ -44,14 +44,14 @@ from .period_detection import (
 # Label sequences shorter than this are utility-function child lists, not loops.
 MIN_LABEL_CHILDREN = 4
 
-# Branch-descent tier: walk down the call tree until a frame's own children form
-# a repeating family whose per-iteration windows account for ~all the GPU work.
-BRANCH_DESCENT_TIER = "branch_descent"
 # The per-iteration windows must explain at least this share of GPU time; below
 # it the repeating family is a sub-loop, not the iteration boundary.
 BRANCH_COVERAGE_GATE = 0.95
 # Bound the descent so a pathological tree cannot walk forever / explode a level.
 BRANCH_MAX_NODES = 200000
+# A branch/sibling candidate is extended with warmup/wrapup bookends only when it
+# already explains at least this share of GPU time on its own.
+BOOKEND_FLOOR = 0.50
 
 
 # --- steps ------------------------------------------------------------------
@@ -93,7 +93,7 @@ def _branch_candidate(
 ) -> RootSet:
     cov = gpu_time / total_gpu
     diagnostics = {
-        "period_label_tier": BRANCH_DESCENT_TIER,
+        "period_label_tier": "branch_descent",
         "period": period,
         "period_depth": depth,
         "branch_source": source,
@@ -103,7 +103,7 @@ def _branch_candidate(
     }
     return RootSet(
         roots=roots,
-        method=f"generic:{BRANCH_DESCENT_TIER}",
+        method="generic:branch_descent",
         phase_confidence=PhaseConfidence.UNKNOWN,
         status=_grade(cov),
         diagnostics=diagnostics,
@@ -356,6 +356,8 @@ def detect_from_branch_descent(
             if not child.get("non_gpu_path", False):
                 queue.append((child, depth + 1))
 
+    if best is not None:
+        best.diagnostics["_events_by_uid"] = tree.events_by_uid
     return best
 
 
@@ -376,14 +378,13 @@ def detect_from_sibling_roots(
         return None
     candidate.method = "generic:sibling_roots"
     candidate.diagnostics["period_label_tier"] = "sibling_roots"
+    candidate.diagnostics["_events_by_uid"] = tree.events_by_uid
     return candidate
 
 
 # ---------------------------------------------------------------------------
 # Cascade: find_iteration_roots
 # ---------------------------------------------------------------------------
-
-BOOKEND_FLOOR = 0.50
 
 
 def _annotation_root_set(
@@ -550,6 +551,7 @@ def _try_bookend_enhancement(
     ) / total_gpu
     diagnostics["bookend_enhancement"] = True
     diagnostics["branch_coverage"] = round(coverage, 4)
+    diagnostics["_events_by_uid"] = tree.events_by_uid
     return RootSet(
         roots=roots,
         method=candidate.method,
@@ -557,6 +559,17 @@ def _try_bookend_enhancement(
         status=_grade(coverage),
         diagnostics=diagnostics,
     )
+
+
+def _candidate_coverage(candidate: RootSet) -> float:
+    """GPU coverage for ranking, from whichever measure the candidate carries.
+
+    Annotation and bookend candidates have an audited ``coverage`` report; the
+    branch/sibling detectors record their estimate in ``branch_coverage``.
+    """
+    if candidate.coverage:
+        return candidate.coverage.covered_selected
+    return candidate.diagnostics.get("branch_coverage", 0.0)
 
 
 def find_iteration_roots(
@@ -601,10 +614,7 @@ def find_iteration_roots(
     except Exception as exc:
         print(f"TraceToTree build failed ({exc}), skipping tree detectors.")
         if all_candidates:
-            best = max(
-                all_candidates,
-                key=lambda c: c.coverage.covered_selected if c.coverage else 0.0,
-            )
+            best = max(all_candidates, key=_candidate_coverage)
             print("Returning annotation family with best coverage as fallback")
             return best
         return RootSet(
@@ -618,24 +628,20 @@ def find_iteration_roots(
     entry_roots = _entry_roots(tree)
     total_gpu = attribution.gpu_busy
 
-    def _attach_uid_map(root_set: RootSet) -> RootSet:
-        root_set.diagnostics["_events_by_uid"] = tree.events_by_uid
-        return root_set
-
     # --- 3. Branch descent ----------------------------------------------------
     branch_set = detect_from_branch_descent(tree, entry_roots, total_gpu)
     if _check("3 branch descent", branch_set):
-        return _attach_uid_map(branch_set)
+        return branch_set
 
     # --- 4. Sibling roots ----------------------------------------------------
     sibling_set = detect_from_sibling_roots(tree, entry_roots, total_gpu)
     if _check("4 sibling roots", sibling_set):
-        return _attach_uid_map(sibling_set)
+        return sibling_set
 
     # --- 5. Bookend enhancement ----------------------------------------------
     bookend_set = None
     for candidate in (branch_set, sibling_set):
-        if candidate is None or not candidate.roots:
+        if candidate is None:
             continue
         if candidate.diagnostics.get("branch_coverage", 0) < BOOKEND_FLOOR:
             continue
@@ -644,19 +650,21 @@ def find_iteration_roots(
             bookend_set.coverage = attribution.audit(bookend_set.roots)
             break
     if _check("5 bookend enhancement", bookend_set):
-        return _attach_uid_map(bookend_set)
+        return bookend_set
 
     # --- Return the best result across all detectors --------------------------
-    for candidate in all_candidates:
-        if candidate.status is not DetectStatus.NOT_SPLITTABLE:
-            _log_attempt("fallback (best usable)", candidate)
-            return _attach_uid_map(candidate)
+    usable = [c for c in all_candidates if c.status is not DetectStatus.NOT_SPLITTABLE]
+    if usable:
+        best = max(usable, key=_candidate_coverage)
+        _log_attempt("fallback (best usable)", best)
+        return best
     if all_candidates:
-        _log_attempt("fallback (last resort)", all_candidates[0])
-        return _attach_uid_map(all_candidates[0])
+        best = max(all_candidates, key=_candidate_coverage)
+        _log_attempt("fallback (last resort)", best)
+        return best
     return RootSet(
         roots=[],
         method="none",
         status=DetectStatus.NOT_SPLITTABLE,
-        diagnostics={"reason": "no annotations and no repeating call pattern"},
+        diagnostics={"reason": "no splittable annotations and no repeating call pattern"},
     )
