@@ -1036,7 +1036,12 @@ def _expanded_free_function_node(
     method_ops = cls.multi_op_methods.get(call_attr)
     output_names = cls.forward_step_output_names.get(call_attr)
     runs_on_host = cls.forward_step_runs_on_host.get(call_attr, False)
-    if method_ops:
+    # A host-only helper (``get_vision_position_ids``) builds integer index
+    # bookkeeping whose per-op shapes are not meaningfully inferable (advanced
+    # indexing / host arithmetic), so expanding it only surfaces wrong inner
+    # shapes. Keep it a single opaque leaf (still ``device: cpu`` labelled); only
+    # device-side helpers (rope math) expand into their visible tensor ops.
+    if method_ops and not runs_on_host:
         name = _synthetic_call_function_name(call_attr) or call_attr
         call_context = [
             detail

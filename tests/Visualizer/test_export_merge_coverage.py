@@ -2472,14 +2472,20 @@ def test_image_mask_colocated_with_image_patches_when_token_key_present(
     monkeypatch: pytest.MonkeyPatch,
 ):
     # With a general image-token config key, the image patches (@vision_input)
-    # and the placeholder mask (@image_mask) share one "image_inputs" group so
-    # the layout places them side by side rather than floating the mask next to
-    # its distant masked_scatter consumer.
+    # and the placeholder mask (@image_mask) render at top level (no separate box)
+    # but stay adjacent in sort order, next to each other rather than floating the
+    # mask beside its distant masked_scatter consumer.
     graph = _build_vision_graph_with_raw_config(monkeypatch, {"image_token_id": 154854})
-    by_id = {node["id"]: node for node in graph["nodes"]}
-    assert by_id["@vision_input"]["namespace"] == "image_inputs"
-    assert by_id["@image_mask"]["namespace"] == "image_inputs"
-    assert graph["groupNodeAttributes"]["image_inputs"]["label"] == "Image inputs"
+    nodes = graph["nodes"]
+    by_id = {node["id"]: node for node in nodes}
+    assert by_id["@vision_input"]["namespace"] == ""
+    assert by_id["@image_mask"]["namespace"] == ""
+    assert "image_inputs" not in graph["groupNodeAttributes"]
+    # Model inputs lead in forward-signature order: tokenized text (input_ids)
+    # before the image patches, and the derived mask immediately after the patches.
+    order = [node["id"] for node in nodes]
+    assert order.index("@input") < order.index("@vision_input")
+    assert order.index("@image_mask") == order.index("@vision_input") + 1
     # The mask carries the resolved token id and a boolean [B, S] selector shape.
     mask = by_id["@image_mask"]
     detail = next(a["value"] for a in mask["attrs"] if a["key"] == "detail")

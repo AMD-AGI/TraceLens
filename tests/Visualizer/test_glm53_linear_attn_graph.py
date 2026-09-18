@@ -1296,11 +1296,10 @@ def test_glm53_operation_tile_colors_are_consistent_per_label():
         # and they carry tensor names rather than operation names.
         if any(attr.get("key") == "synthetic" for attr in node.get("attrs", [])):
             continue
-        # Host (CPU) ops are deliberately colored by device (pale purple), not by
-        # op identity: an index-bookkeeping ``Slice``/``Pad`` inside an expanded
-        # host helper (``get_vision_position_ids``) reads as CPU work, so the same
-        # op label legitimately renders host-purple here and device-white/gray
-        # elsewhere. Exclude them from the per-label single-color invariant.
+        # Host (CPU) helpers are deliberately colored by device (pale purple), not
+        # by op identity: a collapsed host helper (``get_vision_position_ids``)
+        # reads as CPU work, so its node renders host-purple while same-labelled
+        # device ops render white/gray. Exclude them from the single-color invariant.
         if any(
             attr.get("key") == "device" and attr.get("value") == "cpu"
             for attr in node.get("attrs", [])
@@ -1699,22 +1698,19 @@ def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
 
     node_by_id = {node["id"]: node for node in nodes}
 
-    # ``get_vision_attention_seqlens`` expands into its computation: the nested
-    # ``get_vision_cu_seqlens`` helper builds ``cu_seqlens`` (Repeat interleave ->
-    # Cumulative sum -> Pad), exposed through its frame ``@output``. That output is
-    # the visible producer (not stripped) that must reach the kernel.
+    # ``get_vision_attention_seqlens`` is a host-only helper: its integer
+    # index-bookkeeping (the nested ``get_vision_cu_seqlens``: Repeat interleave ->
+    # Cumulative sum -> Pad) has no meaningfully inferable per-op shapes, so it
+    # renders as a single opaque ``device: cpu`` node rather than expanding. That
+    # single producer node is the visible ``cu_seqlens`` source (not stripped) that
+    # must still reach the kernel.
     producer_id = (
         "visual/seq:0:@fn_l1840_get_vision_attention_seqlens:"
-        "@fn_l76_get_vision_cu_seqlens/@output"
+        "@fn_l1840_get_vision_attention_seqlens:0"
     )
     assert producer_id in node_by_id
-    # The cu_seqlens math is genuinely visible, not a single opaque tile.
-    cu_op_labels = {
-        node.get("label")
-        for node in nodes
-        if "@fn_l76_get_vision_cu_seqlens" in node["id"]
-    }
-    assert {"Repeat interleave", "Cumulative sum", "Pad"} <= cu_op_labels
+    # It stays collapsed: no expanded cu_seqlens math leaks into the graph.
+    assert not any("@fn_l76_get_vision_cu_seqlens" in node["id"] for node in nodes)
 
     # Its output crosses the block-loop boundary named after the tensor it feeds
     # (``cu_seqlens``), not a generic ``hidden_states_2`` fallback.
@@ -2478,9 +2474,9 @@ def test_glm53_vision_index_helpers_labelled_cpu_ops():
         assert matches, fragment
         return matches
 
-    # Each host helper now expands into its index-bookkeeping ops; every one of
-    # those ops keeps the ``device: cpu`` label (the signal propagates onto the
-    # children when the single opaque tile opens up, not just the frame).
+    # Each host helper stays collapsed as a single opaque leaf (its per-op index
+    # bookkeeping shapes are not meaningfully inferable), and that leaf keeps the
+    # ``device: cpu`` label so the host provenance is still visible.
     for fragment in ("get_vision_position_ids", "get_vision_attention_seqlens"):
         ops = [
             n

@@ -530,9 +530,9 @@ def _make_group_input_node(
 
 
 # Both image-side model inputs — the pixel/patch tensor and the image-placeholder
-# mask — live in this shared group so they render next to each other, instead of
-# the mask floating beside its distant ``masked_scatter`` consumer.
-_IMAGE_INPUT_NAMESPACE = "image_inputs"
+# mask — render at top level (no separate box). ``_order_model_inputs`` keeps them
+# adjacent in sort order, next to each other rather than the mask floating beside
+# its distant ``masked_scatter`` consumer.
 _IMAGE_MASK_ID = "@image_mask"
 
 
@@ -3729,11 +3729,10 @@ def _append_vision_section(
     # distant ``masked_scatter`` consumer. Keyless VLMs keep the flat top-level
     # input and let the combine synthesize the mask.
     mask_token = image_placeholder_token_id(spec.raw_config)
-    input_namespace = _IMAGE_INPUT_NAMESPACE if mask_token is not None else ""
     vision_input_node = {
         "id": "@vision_input",
         "label": "Image patches",
-        "namespace": input_namespace,
+        "namespace": "",
         "attrs": [{"key": "synthetic", "value": "@input"}],
         "style": ensure_readable_text(input_port_style()),
     }
@@ -3752,15 +3751,7 @@ def _append_vision_section(
         )
     nodes.append(vision_input_node)
     if mask_token is not None:
-        _ensure_image_mask_node(nodes, namespace=input_namespace, token_id=mask_token)
-        group_node_attributes[_IMAGE_INPUT_NAMESPACE] = {"label": "Image inputs"}
-        group_node_configs.append(
-            {
-                "namespaceRegex": f"^{re.escape(_IMAGE_INPUT_NAMESPACE)}$",
-                **input_port_style(),
-                "layoutDirection": "TOP_BOTTOM",
-            }
-        )
+        _ensure_image_mask_node(nodes, namespace="", token_id=mask_token)
     resolved = _resolve_section_tree_for_component(
         spec, component, variant=None, basic_ops=basic_ops
     )
@@ -4177,6 +4168,43 @@ def _is_loop_back_edge(source_id: str | None, target_id: str) -> bool:
     )
 
 
+# Top-level model-input boundaries, in the order they appear in the model's
+# forward signature (``input_ids`` precedes ``pixel_values``); the derived
+# image-placeholder mask renders immediately after the pixel input so the two
+# image-side inputs stay adjacent. Any other top-level ``@input`` keeps its
+# relative order after these.
+_MODEL_INPUT_ORDER = ("@input", "@vision_input", _IMAGE_MASK_ID)
+
+
+def _order_model_inputs(nodes: list[dict[str, Any]]) -> None:
+    """Move the top-level model-input boundaries to the front in forward order.
+
+    They are graph sources (no incoming edges), so hoisting them ahead of the
+    body is topology-safe; making them contiguous keeps the two image-side inputs
+    adjacent (the reason they no longer need a shared box). The following stable
+    :func:`_topologically_order_nodes` preserves this relative order.
+    """
+    priority = {nid: i for i, nid in enumerate(_MODEL_INPUT_ORDER)}
+    model_inputs = [
+        node
+        for node in nodes
+        if not node.get("namespace") and _is_synthetic_input(node)
+    ]
+    if len(model_inputs) < 2:
+        return
+    hoisted = {id(node) for node in model_inputs}
+    index_of = {id(node): i for i, node in enumerate(nodes)}
+    ordered = sorted(
+        model_inputs,
+        key=lambda node: (
+            priority.get(node["id"], len(priority)),
+            index_of[id(node)],
+        ),
+    )
+    rest = [node for node in nodes if id(node) not in hoisted]
+    nodes[:] = ordered + rest
+
+
 def _topologically_order_nodes(nodes: list[dict[str, Any]]) -> None:
     """Reorder ``nodes`` producer-before-consumer with a stable Kahn sort.
 
@@ -4472,8 +4500,11 @@ def build_merged_model_graph(
     # -> ``<var> · N iterations``) from the ``{N}x_`` namespaces just finalized.
     _fill_repeated_loop_counts(nodes)
 
-    # Emit nodes producer-before-consumer so each ``@loop_carried_in`` renders
-    # ahead of its loop body and each ``@loop_carried_out`` after it.
+    # Hoist the model-input boundaries to the front in forward-signature order
+    # (keeping the two image-side inputs adjacent), then emit nodes
+    # producer-before-consumer so each ``@loop_carried_in`` renders ahead of its
+    # loop body and each ``@loop_carried_out`` after it.
+    _order_model_inputs(nodes)
     _topologically_order_nodes(nodes)
 
     graph_attributes: dict[str, dict[str, str]] = {
