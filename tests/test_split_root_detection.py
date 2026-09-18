@@ -18,12 +18,14 @@ from TraceLens.TraceUtils.utils.annotation_utils import (
 from TraceLens.TraceUtils.trace_split import (
     DetectStatus,
     PhaseConfidence,
+    RootSet,
     TraceData,
     TraceIndex,
     build_root_tiles,
     extract_iteration,
     find_iteration_roots,
 )
+from TraceLens.TraceUtils.trace_split import root_detection as rd
 from TraceLens.TraceUtils.utils.detect_utils import (
     COVERAGE_GATE,
     GpuAttribution,
@@ -633,3 +635,184 @@ class TestGapFreeExtraction:
             [roots[0]], td, root_tiles=tiles
         )
         assert "whole_run" not in {e["name"] for e in out["traceEvents"]}
+
+
+# --------------------------------------------------------------------------- #
+# Bookend enhancement (_try_bookend_enhancement, exercised directly)
+# --------------------------------------------------------------------------- #
+class _FakeTree:
+    """Minimal stand-in exposing what _try_bookend_enhancement/_descendant_gpu_time need."""
+
+    def __init__(self, events_by_uid):
+        self.events_by_uid = events_by_uid
+
+    def get_UID2event(self, uid):
+        return self.events_by_uid[uid]
+
+
+def _gpu_node(uid, ts, dur, children=()):
+    return {"UID": uid, "cat": "kernel", "ts": ts, "dur": dur, "children": list(children)}
+
+
+def _cpu_node(uid, ts, dur, children=()):
+    return {
+        "UID": uid,
+        "cat": "python_function",
+        "ts": ts,
+        "dur": dur,
+        "children": list(children),
+    }
+
+
+class TestTryBookendEnhancement:
+    def _candidate(self, diagnostics):
+        return RootSet(
+            roots=[annotation("iter", 100, 700)],
+            method="branch:descend",
+            status=DetectStatus.DEGRADED,
+            diagnostics=diagnostics,
+        )
+
+    def test_adds_warmup_and_wrapup_spans_and_grades_coverage(self):
+        tree = _FakeTree(
+            {
+                1: _gpu_node(1, 0, 100),      # before the iterations
+                2: _gpu_node(2, 900, 50),     # after the iterations
+            }
+        )
+        candidate = self._candidate(
+            {"before_uids": [1], "after_uids": [2], "iter_gpu_time": 850.0}
+        )
+        result = rd._try_bookend_enhancement(candidate, tree, total_gpu=1000.0)
+
+        assert result is not None
+        assert [r["name"] for r in result.roots] == ["warmup", "iter", "wrapup"]
+        assert result.diagnostics["warmup_gpu_pct"] == 10.0
+        assert result.diagnostics["wrapup_gpu_pct"] == 5.0
+        assert result.diagnostics["bookend_enhancement"] is True
+        # (100 + 850 + 50) / 1000 == 1.0 -> SPLITTABLE
+        assert result.diagnostics["branch_coverage"] == 1.0
+        assert result.status is DetectStatus.SPLITTABLE
+
+    def test_only_a_warmup_when_there_is_no_trailing_work(self):
+        tree = _FakeTree({1: _gpu_node(1, 0, 100)})
+        candidate = self._candidate(
+            {"before_uids": [1], "after_uids": [], "iter_gpu_time": 850.0}
+        )
+        result = rd._try_bookend_enhancement(candidate, tree, total_gpu=1000.0)
+        assert [r["name"] for r in result.roots] == ["warmup", "iter"]
+        assert "wrapup_gpu_pct" not in result.diagnostics
+
+    def test_none_when_no_bookend_uids(self):
+        tree = _FakeTree({})
+        candidate = self._candidate({"iter_gpu_time": 850.0})
+        assert rd._try_bookend_enhancement(candidate, tree, total_gpu=1000.0) is None
+
+    def test_none_when_total_gpu_is_zero(self):
+        tree = _FakeTree({1: _gpu_node(1, 0, 100)})
+        candidate = self._candidate({"before_uids": [1], "iter_gpu_time": 0.0})
+        assert rd._try_bookend_enhancement(candidate, tree, total_gpu=0.0) is None
+
+    def test_none_when_bookend_events_have_no_gpu_time(self):
+        # UIDs resolve, but the referenced work is CPU-only -> nothing to add.
+        tree = _FakeTree({1: _cpu_node(1, 0, 100), 2: _cpu_node(2, 900, 50)})
+        candidate = self._candidate(
+            {"before_uids": [1], "after_uids": [2], "iter_gpu_time": 850.0}
+        )
+        assert rd._try_bookend_enhancement(candidate, tree, total_gpu=1000.0) is None
+
+
+# --------------------------------------------------------------------------- #
+# find_iteration_roots: tree-based return paths and fallbacks
+#
+# The tree detectors and annotation detectors are patched so each terminal
+# branch of the cascade is driven deterministically without a hand-built tree.
+# --------------------------------------------------------------------------- #
+class TestCascadeReturns:
+    def _rootset(self, status, method, coverage=0.0, roots=None):
+        return RootSet(
+            roots=roots if roots is not None else [annotation("r", 1000, 100)],
+            method=method,
+            status=status,
+            diagnostics={"branch_coverage": coverage},
+        )
+
+    def _no_annotations(self, monkeypatch):
+        monkeypatch.setattr(rd, "_detect_from_known_annotations", lambda a, attr: None)
+        monkeypatch.setattr(rd, "_detect_from_unknown_annotations", lambda a, attr: None)
+
+    def _run(self):
+        events = serving_trace(2)
+        return find_iteration_roots(events, trace_index=TraceIndex(events))
+
+    # --- step 4: sibling roots returns when branch descent finds nothing ------
+    def test_returns_sibling_roots_when_branch_descent_is_empty(self, monkeypatch):
+        self._no_annotations(monkeypatch)
+        sib = self._rootset(DetectStatus.SPLITTABLE, "generic:sibling_roots", 0.99)
+        monkeypatch.setattr(rd, "detect_from_branch_descent", lambda *a: None)
+        monkeypatch.setattr(rd, "detect_from_sibling_roots", lambda *a: sib)
+
+        result = self._run()
+        assert result is sib
+
+    # --- step 5: bookend enhancement promotes a sub-gate candidate ------------
+    def test_bookend_enhancement_return_path(self, monkeypatch):
+        self._no_annotations(monkeypatch)
+        # Branch descent explains > BOOKEND_FLOOR of GPU but is not splittable.
+        branch = self._rootset(DetectStatus.DEGRADED, "generic:branch_descent", 0.70)
+        booked = self._rootset(DetectStatus.SPLITTABLE, "generic:branch_descent+bookend", 0.99)
+        monkeypatch.setattr(rd, "detect_from_branch_descent", lambda *a: branch)
+        monkeypatch.setattr(rd, "detect_from_sibling_roots", lambda *a: None)
+        monkeypatch.setattr(rd, "_try_bookend_enhancement", lambda cand, tree, total: booked)
+
+        result = self._run()
+        assert result is booked
+        # The cascade audits the promoted candidate before returning it.
+        assert result.coverage is not None
+
+    def test_bookend_skipped_below_floor_falls_through_to_best_usable(self, monkeypatch):
+        # Branch coverage under BOOKEND_FLOOR -> bookend loop skips it, and with no
+        # splittable detector the best usable (non-not-splittable) candidate wins.
+        degraded = self._rootset(DetectStatus.DEGRADED, "annotation:degraded", 0.80)
+        monkeypatch.setattr(rd, "_detect_from_known_annotations", lambda a, attr: degraded)
+        monkeypatch.setattr(rd, "_detect_from_unknown_annotations", lambda a, attr: None)
+        low = self._rootset(DetectStatus.DEGRADED, "generic:branch_descent", 0.10)
+        monkeypatch.setattr(rd, "detect_from_branch_descent", lambda *a: low)
+        monkeypatch.setattr(rd, "detect_from_sibling_roots", lambda *a: None)
+
+        # If a bookend were attempted it would raise -- assert it is not reached.
+        def _boom(*a, **k):
+            raise AssertionError("bookend must be skipped below the floor")
+
+        monkeypatch.setattr(rd, "_try_bookend_enhancement", _boom)
+
+        result = self._run()
+        # best usable by coverage: degraded (0.80) beats the branch candidate (0.10)
+        assert result is degraded
+
+    # --- build-failure branch -------------------------------------------------
+    def test_tree_build_failure_returns_best_annotation_fallback(self, monkeypatch):
+        cand = self._rootset(DetectStatus.DEGRADED, "annotation:degraded", 0.60)
+        monkeypatch.setattr(rd, "_detect_from_known_annotations", lambda a, attr: cand)
+        monkeypatch.setattr(rd, "_detect_from_unknown_annotations", lambda a, attr: None)
+
+        def _boom(*a, **k):
+            raise RuntimeError("synthetic build failure")
+
+        monkeypatch.setattr(rd, "TraceToTree", _boom)
+
+        result = self._run()
+        assert result is cand
+
+    def test_tree_build_failure_without_annotations_is_not_splittable(self, monkeypatch):
+        self._no_annotations(monkeypatch)
+
+        def _boom(*a, **k):
+            raise RuntimeError("synthetic build failure")
+
+        monkeypatch.setattr(rd, "TraceToTree", _boom)
+
+        result = self._run()
+        assert result.status is DetectStatus.NOT_SPLITTABLE
+        assert result.method == "none"
+        assert result.diagnostics["reason"] == "tree build failed and no annotations"

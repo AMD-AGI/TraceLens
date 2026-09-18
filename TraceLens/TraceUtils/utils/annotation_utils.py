@@ -384,7 +384,8 @@ def find_known_annotations(annotations: List[dict]) -> List[dict]:
     for patterns in (ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS):
         matches = [
             e for e in annotations
-            if any(p.match(e.get("name", "")) for p in patterns)
+            if e.get("cat") == ANNOTATION_CAT
+            and any(p.match(e.get("name", "")) for p in patterns)
         ]
         if matches:
             matches.sort(key=lambda x: x.get("ts", 0))
