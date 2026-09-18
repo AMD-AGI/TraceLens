@@ -16,18 +16,12 @@ from typing import Dict, List, Optional, Sequence
 from collections import deque
 
 from ...util import normalize_name_for_comparison
-from ...Trace2Tree.inference_iteration_roots import (
-    BRANCH_COVERAGE_GATE,
-    BRANCH_DESCENT_TIER,
-    BRANCH_MAX_NODES,
-    MIN_LABEL_CHILDREN,
-    _blocks_by_pattern,
+from ...Trace2Tree.trace_to_tree import TraceToTree
+from ...Trace2Tree.util import (
     _descendant_gpu_time,
     _entry_roots,
-    _find_repeating_period,
     _reattach_worker_threads,
 )
-from ...Trace2Tree.trace_to_tree import TraceToTree
 from ..annotation_utils import (
     find_known_annotations,
     name_skeleton,
@@ -42,6 +36,22 @@ from .detect_utils import (
     RootSet,
     TraceIndex,
 )
+from .period_detection import (
+    _blocks_by_pattern,
+    _find_repeating_period,
+)
+
+# Label sequences shorter than this are utility-function child lists, not loops.
+MIN_LABEL_CHILDREN = 4
+
+# Branch-descent tier: walk down the call tree until a frame's own children form
+# a repeating family whose per-iteration windows account for ~all the GPU work.
+BRANCH_DESCENT_TIER = "branch_descent"
+# The per-iteration windows must explain at least this share of GPU time; below
+# it the repeating family is a sub-loop, not the iteration boundary.
+BRANCH_COVERAGE_GATE = 0.95
+# Bound the descent so a pathological tree cannot walk forever / explode a level.
+BRANCH_MAX_NODES = 200000
 
 
 # --- steps ------------------------------------------------------------------
@@ -346,16 +356,6 @@ def detect_from_branch_descent(
             if not child.get("non_gpu_path", False):
                 queue.append((child, depth + 1))
 
-    if best is not None:
-        print(
-            f"[roots]   branch best: {len(best.roots)} roots via "
-            f"{best.diagnostics['branch_source']} under "
-            f"'{best.roots[0].get('name', '')[:70]}', "
-            f"period={best.diagnostics['period']}, "
-            f"depth={best.diagnostics['period_depth']}, "
-            f"coverage={best.diagnostics['branch_coverage']:.1%} "
-            f"-> {best.status.name}"
-        )
     return best
 
 
@@ -624,15 +624,11 @@ def find_iteration_roots(
 
     # --- 3. Branch descent ----------------------------------------------------
     branch_set = detect_from_branch_descent(tree, entry_roots, total_gpu)
-    if branch_set is not None:
-        branch_set.coverage = attribution.audit(branch_set.roots)
     if _check("3 branch descent", branch_set):
         return _attach_uid_map(branch_set)
 
     # --- 4. Sibling roots ----------------------------------------------------
     sibling_set = detect_from_sibling_roots(tree, entry_roots, total_gpu)
-    if sibling_set is not None:
-        sibling_set.coverage = attribution.audit(sibling_set.roots)
     if _check("4 sibling roots", sibling_set):
         return _attach_uid_map(sibling_set)
 
