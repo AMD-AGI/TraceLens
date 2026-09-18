@@ -52,6 +52,7 @@ from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.util import GPU_KERNEL_CATEGORIES, normalize_name_for_comparison
 from TraceLens.TraceUtils.utils.detect_utils import DetectStatus
 from TraceLens.TraceUtils.trace_split.root_detection import (
+    RootSet,
     _child_groups,
     _periodic_candidate,
     detect_from_branch_descent,
@@ -750,6 +751,134 @@ def test_find_steady_state_inference_conc_mismatch_warning(capsys):
     assert "expected peak concurrency" in capsys.readouterr().out
 
 
+def _plain_roots(n):
+    """Minimal iteration roots for the shape/duration steady-state finders."""
+    return [{"name": f"root_{i}", "ts": i, "dur": 100} for i in range(n)]
+
+
+def test_find_steady_state_inference_conc_osl_r_num_steps_sufficient(capsys):
+    # ideal_pd_ratio = (20*2)/(5*(1+0)) = 8 -> min steps = 1, so num_steps=8 is
+    # already large enough and the "num_steps >= min required" branch runs.
+    names = _mixed_phase_roots(48)
+    roots = _detect(_make_trace(names)["traceEvents"]).roots
+    split.find_steady_state_inference(
+        roots, num_steps=8, mode="mixed", CONC=20, OSL=5.0, R=0.0
+    )
+    assert ">= min required" in capsys.readouterr().out
+
+
+# --- shape-based steady state (find_steady_state_inference_from_shapes) ------
+def test_ss_from_shapes_empty_returns_empty():
+    assert split.find_steady_state_inference_from_shapes([], [], num_steps=4) == ([], [])
+    assert split.find_steady_state_inference_from_shapes(
+        _plain_roots(4), [], num_steps=4
+    ) == ([], [])
+
+
+def test_ss_from_shapes_mixed_large_region_prefers_prefill_window():
+    # A large decode region (bs=32) with interior prefill spikes (bs=900):
+    # region >= num_steps drives the sliding-window candidate loop, and windows
+    # containing a prefill are preferred.
+    batch_sizes = [32, 32, 32, 900, 32, 32, 32, 900, 32, 32, 32, 32]
+    roots = _plain_roots(len(batch_sizes))
+    window, _ = split.find_steady_state_inference_from_shapes(
+        roots, batch_sizes, num_steps=4, mode="mixed", max_num_seq=64
+    )
+    assert 0 < len(window) <= 4
+    start = roots.index(window[0])
+    assert window == roots[start : start + len(window)]
+
+
+def test_ss_from_shapes_region_extends_into_flanking_prefill():
+    # Prefills at both region edges force the decode-baseline region to extend
+    # outward to include them.
+    batch_sizes = [900, 32, 32, 32, 32, 32, 900]
+    roots = _plain_roots(len(batch_sizes))
+    _, regions = split.find_steady_state_inference_from_shapes(
+        roots, batch_sizes, num_steps=3, mode="mixed", max_num_seq=64
+    )
+    assert regions == [(0, len(batch_sizes))]
+
+
+def test_ss_from_shapes_all_prefill_falls_back_to_leading_window():
+    # No decode iterations -> no decode baseline -> region falls back to
+    # [0, num_steps).
+    batch_sizes = [900, 900, 900, 900, 900]
+    roots = _plain_roots(len(batch_sizes))
+    _, regions = split.find_steady_state_inference_from_shapes(
+        roots, batch_sizes, num_steps=3, mode="mixed", max_num_seq=64
+    )
+    assert regions == [(0, 3)]
+
+
+def test_ss_from_shapes_invalid_mode():
+    with pytest.raises(ValueError, match="Unknown mode"):
+        split.find_steady_state_inference_from_shapes(
+            _plain_roots(4), [32, 32, 32, 32], num_steps=2, mode="bogus"
+        )
+
+
+# --- generic duration-CV steady state (find_steady_state_generic) ------------
+def test_ss_generic_empty_roots():
+    assert split.find_steady_state_generic([], num_steps=4) == ([], [])
+
+
+def test_ss_generic_centered_window_when_num_steps_below_scan():
+    # Uniform durations pass the CV gate; num_steps < scan_size (=4) triggers
+    # the centered sub-window path.
+    roots = _plain_roots(10)
+    window, _ = split.find_steady_state_generic(roots, num_steps=2)
+    assert len(window) == 2
+
+
+def test_ss_generic_no_passing_cv_uses_lowest_cv_window():
+    # Alternating durations keep every window's CV above the threshold, so the
+    # lowest-CV window is chosen as a fallback.
+    durs = [10, 1000, 10, 1000, 10, 1000, 10, 1000]
+    roots = [{"name": f"r{i}", "ts": i, "dur": d} for i, d in enumerate(durs)]
+    window, _ = split.find_steady_state_generic(roots, num_steps=4)
+    assert len(window) >= 1
+
+
+def test_collect_ancestor_events_walks_parent_chain_once():
+    events_by_uid = {
+        1: {"UID": 1, "name": "process", "parent": None},
+        2: {"UID": 2, "name": "thread", "parent": 1},
+        3: {"UID": 3, "name": "root_a", "parent": 2},
+        4: {"UID": 4, "name": "root_b", "parent": 2},  # shares the same ancestors
+    }
+    ancestors = split.collect_ancestor_events(
+        [events_by_uid[3], events_by_uid[4]], events_by_uid
+    )
+    # Both ancestors collected, and the shared chain is walked only once.
+    assert {a["name"] for a in ancestors} == {"process", "thread"}
+
+    # A root whose parent points at a missing UID stops the walk cleanly.
+    dangling = {"UID": 5, "name": "orphan", "parent": 99}
+    assert split.collect_ancestor_events([dangling], {5: dangling}) == []
+
+
+def test_extract_and_save_split_generic_naming_folds_in_batch_size(tmp_path):
+    # A non-annotation ("generic") extraction: the batch size read from the
+    # vllm attention op's Input Dims is folded into the per-iteration name.
+    root = {"name": "generic_root", "cat": "cpu_op", "ts": 100, "dur": 200,
+            "pid": 1, "tid": 1, "args": {}}
+    attn = {"name": "vllm::unified_attention_with_output", "cat": "cpu_op",
+            "ts": 110, "dur": 5, "pid": 1, "tid": 1,
+            "args": {"Input Dims": [[8, 64]], "correlation": 500}}
+    events = [root, attn]
+    gpu_map, flow_map, meta = _maps(events)
+    ctx = split.ExtractContext(
+        split.TraceData(events, {"traceEvents": events}, gpu_map, flow_map, meta),
+        output_dir=str(tmp_path),
+        base_name="trace",
+    )
+    summary = split.extract_and_save_split([[root]], ctx, "gpu", 0, 1)
+    assert len(summary) == 1
+    assert "batch8" in os.path.basename(summary[0]["output_path"])
+    assert summary[0]["steps"][0]["batch_size"] == 8
+
+
 def test_extract_and_save_empty_roots(tmp_path):
     trace = _make_trace([VLLM_PRIMARY.format(i=0)])
     events = trace["traceEvents"]
@@ -912,6 +1041,105 @@ def test_main_explicit_iteration_range(tmp_path):
         sys.argv = old_argv
 
     assert out_dir.exists()
+
+
+def _invoke_main(trace_path, out_dir, *flags):
+    """Run ``split.main()`` with a temporary argv."""
+    old_argv = sys.argv
+    sys.argv = ["main.py", str(trace_path), "-o", str(out_dir), *flags]
+    try:
+        split.main()
+    finally:
+        sys.argv = old_argv
+
+
+def _write_trace(trace, path):
+    path.write_text(json.dumps(trace))
+    return path
+
+
+def test_main_no_gpu_work_is_skipped(tmp_path, capsys):
+    # A trace with no GPU kernels has nothing to split.
+    trace = {"traceEvents": [
+        {"name": "cpu_only", "cat": "cpu_op", "ts": 0, "dur": 1,
+         "pid": 1, "tid": 1, "args": {}},
+    ]}
+    out_dir = tmp_path / "out"
+    _invoke_main(_write_trace(trace, tmp_path / "t.json"), out_dir)
+    assert "No GPU work" in capsys.readouterr().out
+    assert not (out_dir / "execution_details.json").exists()
+
+
+def _force_status(monkeypatch, events, status):
+    """Detect the real roots once, then pin ``find_iteration_roots`` to report
+    the same roots with a forced ``status``."""
+    real = _detect(events)  # unpatched call
+    forced = RootSet(
+        roots=real.roots,
+        method="test:forced",
+        status=status,
+        coverage=real.coverage,
+        diagnostics=real.diagnostics,
+    )
+    monkeypatch.setattr(split, "find_iteration_roots", lambda *a, **k: forced)
+
+
+def test_main_refuses_degraded_without_allow_flag(tmp_path, capsys, monkeypatch):
+    trace = _make_trace([VLLM_PRIMARY.format(i=i) for i in range(6)])
+    _force_status(monkeypatch, trace["traceEvents"], DetectStatus.DEGRADED)
+    out_dir = tmp_path / "out"
+    _invoke_main(_write_trace(trace, tmp_path / "t.json"), out_dir)
+    assert "degraded share" in capsys.readouterr().out
+    assert (out_dir / split.MANIFEST_NAME).exists()
+    assert not (out_dir / "execution_details.json").exists()
+
+
+def test_main_allow_degraded_splits_a_degraded_trace(tmp_path, monkeypatch):
+    trace = _make_trace([VLLM_PRIMARY.format(i=i) for i in range(6)])
+    _force_status(monkeypatch, trace["traceEvents"], DetectStatus.DEGRADED)
+    out_dir = tmp_path / "out"
+    _invoke_main(
+        _write_trace(trace, tmp_path / "t.json"), out_dir,
+        "--store-single-iteration", "--allow-degraded",
+    )
+    # The flag lets a DEGRADED trace through to extraction.
+    assert (out_dir / "execution_details.json").exists()
+
+
+def test_main_never_splits_not_splittable_even_with_flag(tmp_path, capsys, monkeypatch):
+    trace = _make_trace([VLLM_PRIMARY.format(i=i) for i in range(6)])
+    _force_status(monkeypatch, trace["traceEvents"], DetectStatus.NOT_SPLITTABLE)
+    out_dir = tmp_path / "out"
+    _invoke_main(
+        _write_trace(trace, tmp_path / "t.json"), out_dir, "--allow-degraded",
+    )
+    assert "enough of the" in capsys.readouterr().out
+    assert (out_dir / split.MANIFEST_NAME).exists()
+    assert not (out_dir / "execution_details.json").exists()
+
+
+def test_main_no_gap_fill_records_choice(tmp_path):
+    trace = _make_trace([VLLM_PRIMARY.format(i=i) for i in range(6)])
+    out_dir = tmp_path / "out"
+    _invoke_main(
+        _write_trace(trace, tmp_path / "t.json"), out_dir,
+        "--store-single-iteration", "--no-gap-fill",
+    )
+    with open(out_dir / split.MANIFEST_NAME) as f:
+        assert json.load(f)["gap_fill"] is False
+
+
+def test_main_llm_inference_without_shapes_falls_back(tmp_path, capsys):
+    # Non-serving annotations + --llm-inference, but no cpu_op Input Dims, so the
+    # shape path finds nothing and falls back to duration-based steady state.
+    names = [f"my_custom_step_{i}" for i in range(10)]
+    trace = _make_trace(names)
+    out_dir = tmp_path / "out"
+    _invoke_main(
+        _write_trace(trace, tmp_path / "t.json"), out_dir,
+        "--find-steady-state", "--num-steps", "4", "--llm-inference",
+    )
+    assert "No cpu_op shapes found" in capsys.readouterr().out
 
 
 class TestCaptureMergeAndMoe:
