@@ -44,10 +44,27 @@ def test_unsqueeze_with_two_tensor_operands_warns():
     assert "tensor operand" in warnings[0]
 
 
-def test_unsqueeze_with_zero_tensor_operands_is_tolerated():
-    # A sole hidden constant/buffer operand (pruned per "never show constants")
-    # leaves 0 tensor edges -- ambiguous, so no warning.
-    node = _op_node("n:const_unsqueeze", "Unsqueeze", ["Scalar"], [[]])
+def test_unsqueeze_with_zero_tensor_operands_now_warns():
+    # Constants/buffers are now first-class ``"Constant"`` operands, so a real
+    # activation edge is always expected: an axis op left with 0 activation tensor
+    # operands means its sole activation operand went missing -- a wiring bug.
+    node = _op_node("n:empty_unsqueeze", "Unsqueeze", ["Scalar"], [[]])
+    warnings = type_check_graph_nodes([node])
+    assert len(warnings) == 1
+    assert "n:empty_unsqueeze" in warnings[0]
+    assert "tensor operand" in warnings[0]
+
+
+def test_unsqueeze_with_one_tensor_plus_constant_is_clean():
+    # A ``Constant`` operand (a render-dropped buffer/param read) does not count as
+    # an activation tensor, so an unsqueeze with one activation + one constant is
+    # correctly wired and must stay clean.
+    node = _op_node(
+        "n:const_ok_unsqueeze",
+        "Unsqueeze",
+        ["int64", "Constant"],
+        [["Pv", "2"], ["16"]],
+    )
     assert type_check_graph_nodes([node]) == []
 
 

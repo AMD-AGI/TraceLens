@@ -93,6 +93,11 @@ def _node_attrs(spec) -> list[dict[str, str]]:
         attrs.append(_kv("port_style", spec.port_style))
     if spec.synthetic:
         attrs.append(_kv("synthetic", spec.synthetic))
+    if getattr(spec, "constant", False):
+        # A constant / learned-weight / buffer operand: kept in the JSON so its
+        # shape flows into the profiler-style operand annotation, but filtered out
+        # at HTML render time (see viewer_page._payload_without_constants).
+        attrs.append(_kv("constant", "true"))
     # A tuple-unpacked split/chunk/unbind fans out into real output ports (one per
     # unpacked name). Publish the ordered names so the shape pass can label each
     # port (``pre_w``/``post_w``/``comb_w``) and carry its per-slice shape.

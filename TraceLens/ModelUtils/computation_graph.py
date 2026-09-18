@@ -75,6 +75,12 @@ class GraphNodeSpec:
     port_label: str | None = None
     port_style: PortStyle | None = None
     synthetic: str | None = None
+    # A constant / learned-weight / buffer operand. Kept as a first-class node in
+    # the exported JSON (so profiler-style operand annotation can pick up its
+    # shape), but dropped at HTML render time so the drawn picture stays free of
+    # constants (owner rule "never show constants" -- enforced in rendering, not
+    # by deleting data).
+    constant: bool = False
     # Extra key/values merged verbatim into the node's exported metadata. Used by
     # synthetic split output-port nodes to carry their output ordinal and the
     # parent split's ``details`` so shape inference can size each slice.
@@ -132,6 +138,7 @@ def _add_node(
     port_label: str | None = None,
     port_style: PortStyle | None = None,
     synthetic: str | None = None,
+    constant: bool = False,
     extra_metadata: dict[str, Any] | None = None,
 ) -> int:
     display = label if label is not None else (block.label if block else key)
@@ -143,6 +150,7 @@ def _add_node(
         port_label=port_label,
         port_style=port_style,
         synthetic=synthetic,
+        constant=constant,
         extra_metadata=extra_metadata,
     )
     graph.nodes.append(spec)
@@ -1293,7 +1301,6 @@ def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
     for _source, target in graph.links:
         incoming_count[target] = incoming_count.get(target, 0) + 1
     param_index: dict[str, int] = {}
-    param_consumers: set[str] = set()
     # A tuple-unpacked boundary input (``cos, sin = position_embeddings``) feeds
     # several ops, one per slot. Docking is tracked per ``(param, ordinal)`` so
     # each slot reaches its own consumer (``position_embeddings`` port0 -> the
@@ -1310,10 +1317,6 @@ def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
                 if block.boundary_input_name == param
                 else None
             )
-            # Nested expressions can repeat a parameter on each extracted operation
-            # (one_hot(x).permute(...)). Dock a whole-tensor param only at its first
-            # visible consumer; a tuple-unpacked one at the first consumer of each
-            # slot.
             if (
                 param == primary
                 or block.boundary_input_name != param
@@ -1322,9 +1325,20 @@ def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
             ):
                 continue
             if ordinal is None:
-                if param in param_consumers:
+                # A nested expression can repeat a parameter on each op it is
+                # extracted into (``one_hot(x).permute(...)``): the outer op's
+                # ``param_inputs`` leaks the reference even though the param
+                # already reaches it through the inner op's own edge. An op
+                # that already has a real activation predecessor owns its
+                # input that way, so skip it here rather than docking a
+                # duplicate boundary edge. An op with *no* activation
+                # predecessor is a genuine, independent reader of the
+                # boundary param (e.g. two unrelated statements each read
+                # ``attention_mask`` directly) and must get its own edge from
+                # the shared boundary tile, however many other ops already
+                # read the same param elsewhere.
+                if block.operation_predecessors:
                     continue
-                param_consumers.add(param)
             else:
                 if (param, ordinal) in param_ordinal_consumers:
                     continue
@@ -1418,27 +1432,60 @@ def _add_submodule_boundary_param_inputs(
                 graph.links.append(link)
 
 
-def _prune_weight_only_ops(graph: ComputationGraph) -> ComputationGraph:
-    """Hide ops whose value derives solely from module parameters/buffers.
+def _propagate_constant_closure(graph: ComputationGraph, seed: set[int]) -> None:
+    """Tag ``seed`` nodes ``constant`` and forward-propagate the tag in place.
 
-    Constants and learned weights are never drawn: ``F.linear`` shows its
+    A forward op *every* one of whose operands is already constant is itself a
+    pure constant (e.g. ``comb_b.view(hc, hc)`` fed only by a weight ``split``),
+    so it is tagged too. Edges are left intact — the render filter drops the
+    whole constant closure together, and shape inference can still read a
+    tagged node's operand shapes from the surviving graph.
+    """
+    preds: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    for source, target in graph.links:
+        preds[target].append(source)
+    constant: set[int] = set(seed)
+    changed = True
+    while changed:
+        changed = False
+        for index, spec in enumerate(graph.nodes):
+            if index in constant:
+                continue
+            block = spec.block
+            if block is None or not is_forward_operation(block.attr_name):
+                continue
+            operands = preds[index]
+            if operands and all(source in constant for source in operands):
+                constant.add(index)
+                changed = True
+    for index in constant:
+        graph.nodes[index].constant = True
+
+
+def _tag_weight_only_ops(graph: ComputationGraph) -> ComputationGraph:
+    """Tag ``constant`` the ops whose value derives solely from module parameters/buffers.
+
+    Constants and learned weights are never *drawn*: ``F.linear`` shows its
     activation input and hides ``self.weight``. Two mHC mapping ops slip past
     that rule because the weight is their *only* operand and it is fanned out —
     ``pre_b, post_b, comb_b = self.base.split(...)`` and
     ``pre_scale, post_scale, comb_scale = self.scale.unbind(0)`` read a raw
     ``nn.Parameter`` with no activation flowing through. Such an op (and any op
     reachable only through it, e.g. ``comb_b.view(hc, hc)``) is a constant and
-    must not appear. Consumers that mix the result back with a real activation
-    (``pre_w * pre_scale + pre_b``) stay; they simply lose the hidden operand.
+    must not be drawn. Consumers that mix the result back with a real activation
+    (``pre_w * pre_scale + pre_b``) stay; they simply lose the hidden operand at
+    render time.
 
-    General: roots are sourceless *multi-output* forward ops reading only a
-    ``self.<attr>`` external — mirroring the conservative multi-output guard in
+    The op and its fan-out closure are tagged ``constant`` (kept in the JSON,
+    dropped by the render filter) rather than pruned. General: roots are
+    sourceless *multi-output* forward ops reading only a ``self.<attr>`` external
+    — mirroring the conservative multi-output guard in
     :func:`_reads_only_a_side_parameter` (a single-output ``x = x * self.weight``
-    may continue the spine implicitly, so it is left alone). Weight-only-ness is
-    then propagated to any op every one of whose operands is itself weight-only.
+    may continue the spine implicitly, so it is left alone). Constant-ness is then
+    propagated to any op every one of whose operands is itself constant.
     """
     incoming: set[int] = {target for _source, target in graph.links}
-    weight_only: set[int] = set()
+    roots: set[int] = set()
     for index, spec in enumerate(graph.nodes):
         block = spec.block
         if block is None or not is_forward_operation(block.attr_name):
@@ -1446,45 +1493,34 @@ def _prune_weight_only_ops(graph: ComputationGraph) -> ComputationGraph:
         if index in incoming:
             continue
         if block.external_inputs and block.output_names:
-            weight_only.add(index)
-    if not weight_only:
+            roots.add(index)
+    if not roots:
         return graph
-
-    preds: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
-    for source, target in graph.links:
-        preds[target].append(source)
-    changed = True
-    while changed:
-        changed = False
-        for index, spec in enumerate(graph.nodes):
-            if index in weight_only:
-                continue
-            block = spec.block
-            if block is None or not is_forward_operation(block.attr_name):
-                continue
-            operands = preds[index]
-            if operands and all(source in weight_only for source in operands):
-                weight_only.add(index)
-                changed = True
-
-    return _prune_computation_nodes(graph, weight_only)
+    _propagate_constant_closure(graph, roots)
+    return graph
 
 
-def _absorb_buffer_only_ops(graph: ComputationGraph) -> ComputationGraph:
-    """Fold a lone buffer-reading op into its activation consumer.
+def _tag_buffer_only_ops(graph: ComputationGraph) -> ComputationGraph:
+    """Tag ``constant`` a lone buffer-reading op and fold its buffer onto consumers.
 
     ``freqs = position_ids * self.inv_freq.float()`` casts ``inv_freq`` in an op
     that reads *no* activation — an empty ``operation_predecessors`` and a single
     ``external_inputs`` buffer, with no fanned-out ``output_names``. On its own it
     is a rootless node whose only real content is a hidden buffer (which the owner
-    rule keeps invisible), and the source-order spine hands it a neighbour's shape,
-    so shape inference mis-sizes it. Move the buffer onto every consumer's
-    ``external_inputs`` — where the elementwise shape rule can broadcast against
-    the captured buffer width (``[Pv, ?, 1] * inv_freq[16] -> [Pv, ?, 16]``) — and
-    drop the op. Guarded so a consumer keeps at least one other operand: a buffer
-    op that is a consumer's *sole* input is a genuine spine head, left alone (that
-    single-output ``x = x * self.weight`` case ``_prune_weight_only_ops`` also
-    deliberately spares).
+    rule keeps invisible from the drawn picture), and the source-order spine hands
+    it a neighbour's shape.
+
+    The buffer is folded onto every consumer's ``external_inputs`` — where the
+    elementwise shape rule can broadcast against the captured buffer width
+    (``[Pv, ?, 1] * inv_freq[16] -> [Pv, ?, 16]``), keeping the consumer's inferred
+    output shape identical — and the op is tagged ``constant`` rather than dropped:
+    it stays in the JSON (its ``constant`` output shape sizes from the buffer, so
+    the profiler-style operand annotation can explain the consumer's shape jump)
+    and its edge is kept, but the render filter drops it so the drawn consumer
+    keeps only its activation operand. Guarded so a consumer keeps at least one
+    other operand: a buffer op that is a consumer's *sole* input is a genuine spine
+    head, left alone (that single-output ``x = x * self.weight`` case
+    :func:`_tag_weight_only_ops` also deliberately spares).
     """
     preds: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
     succs: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
@@ -1492,7 +1528,7 @@ def _absorb_buffer_only_ops(graph: ComputationGraph) -> ComputationGraph:
         preds[target].append(source)
         succs[source].append(target)
 
-    absorb: set[int] = set()
+    spurious_incoming: set[tuple[int, int]] = set()
     for index, spec in enumerate(graph.nodes):
         block = spec.block
         if block is None or not is_forward_operation(block.attr_name):
@@ -1504,8 +1540,9 @@ def _absorb_buffer_only_ops(graph: ComputationGraph) -> ComputationGraph:
         consumers = succs[index]
         if not consumers:
             continue
-        # Every consumer must retain another operand once this op is gone; a
-        # consumer whose only input is this buffer op is a real spine head.
+        # Every consumer must retain another operand once this op is filtered out
+        # of the render; a consumer whose only input is this buffer op is a real
+        # spine head.
         if any(len(preds[consumer]) <= 1 for consumer in consumers):
             continue
         for consumer in consumers:
@@ -1515,17 +1552,25 @@ def _absorb_buffer_only_ops(graph: ComputationGraph) -> ComputationGraph:
             for name in block.external_inputs:
                 if name not in consumer_block.external_inputs:
                     consumer_block.external_inputs.append(name)
-        absorb.add(index)
+        spec.constant = True
+        # The op reads no activation operand (empty ``operation_predecessors`` /
+        # ``param_inputs``), so any incoming edge it carries is a source-order
+        # spine artifact — not a real dataflow edge. Drop it so the op becomes a
+        # true buffer source whose output shape sizes from the buffer (``[16]``)
+        # instead of passing through a neighbour's shape (``[Pv, 2, 1]``).
+        for source in preds[index]:
+            spurious_incoming.add((source, index))
 
-    if not absorb:
-        return graph
-    return _prune_computation_nodes(graph, absorb)
+    if spurious_incoming:
+        graph.links = [link for link in graph.links if link not in spurious_incoming]
+
+    return graph
 
 
-def _prune_linear_weight_operands(
+def _tag_linear_weight_operands(
     graph: ComputationGraph, root: BlockNode | None = None
 ) -> ComputationGraph:
-    """Hide the weight argument of an ``F.linear`` op, mirroring ``nn.Linear``.
+    """Tag the weight argument of an ``F.linear`` op ``constant``, mirroring ``nn.Linear``.
 
     ``F.linear(input, weight[, bias])`` records its operands in call order, so the
     entries after the first are the weight (and optional bias). When such an
@@ -1533,17 +1578,18 @@ def _prune_linear_weight_operands(
     names a ``self.<param>`` — a raw weight, a ``self.weight.float()`` cast, or a
     per-expert ``self.gate_up_proj[expert_idx]`` gather) it is a learned weight
     and, like the absorbed weight of an ``nn.Linear`` submodule, must not be
-    drawn. Only the activation operand (index 0) survives, so the op renders with
-    a single input.
+    *drawn*. Only the activation operand (index 0) is a real activation.
 
-    The weight *edge* is removed rather than bridged across the producer: a
-    gathered weight shares its routing-index predecessor with the activation
-    gather, and bridging would rewire that index into the linear as a spurious
-    operand. Removing the edge leaves the producer dangling, and the existing
-    dangling-leaf strip then drops it and any param-only ancestors, while shared
-    predecessors keep their other consumers.
+    The weight producer and its param-only closure are tagged ``constant`` rather
+    than pruned: the node and its weight *edge* stay in the exported JSON (so the
+    profiler-style operand annotation can report the weight's shape), but the
+    render filter drops every ``constant`` node so the drawn op keeps a single
+    input. The weight edge is kept, not bridged: a gathered weight shares its
+    routing-index predecessor with the activation gather, and that index (a real
+    activation) is not part of the constant closure, so it keeps its other
+    consumers and stays drawn.
     """
-    weight_edges: set[tuple[int, int]] = set()
+    weight_sources: set[int] = set()
     for target, spec in enumerate(graph.nodes):
         block = spec.block
         if block is None or not is_forward_operation(block.attr_name):
@@ -1565,14 +1611,70 @@ def _prune_linear_weight_operands(
             # A learned-weight operand reads a module parameter directly; a
             # computed weight (e.g. a LoRA delta) would not, so it is left drawn.
             if source_block.attr_name in weight_attrs and source_block.external_inputs:
-                weight_edges.add((source, target))
-    if not weight_edges:
+                weight_sources.add(source)
+    if not weight_sources:
         return graph
-    graph.links = [link for link in graph.links if link not in weight_edges]
-    for link in weight_edges:
-        graph.link_port_labels.pop(link, None)
-        graph.link_output_ports.pop(link, None)
-    return _strip_dangling_leaves(graph, root=root)
+    _propagate_constant_closure(graph, weight_sources)
+    return graph
+
+
+def _materialize_external_input_constants(graph: ComputationGraph) -> ComputationGraph:
+    """Materialize each op's unresolved ``self.<attr>`` constant as a leaf node.
+
+    Some constant operands never become their own graph node: a mixed op like the
+    axial-RoPE ``freqs = position_ids_expanded * self.inv_freq`` reads its buffer
+    directly, so ``inv_freq`` survives only as a bare string in ``external_inputs``
+    with no node or edge — which is why the ``Multiply``'s ``[Pv, 2, 1] ->
+    [Pv, 2, 16]`` jump looks unexplained. For every such name not already produced
+    for the op by a constant predecessor, add a leaf node tagged ``constant``
+    (sized downstream from the meta parameter/buffer registry) and wire it in as a
+    trailing operand so its shape shows up in the operand annotation. The render
+    filter drops every ``constant`` node, so the drawn op is unchanged.
+
+    A leaf is only added for a *non-constant* op: a constant op's own weight reads
+    are already dropped as a whole, so re-materializing them would be redundant.
+    """
+    provided: dict[int, set[str]] = {index: set() for index in range(len(graph.nodes))}
+    for source, target in graph.links:
+        src = graph.nodes[source]
+        if not src.constant:
+            continue
+        if src.block is not None:
+            provided[target].update(src.block.external_inputs)
+        if src.extra_metadata:
+            provided[target].update(src.extra_metadata.get("external_inputs", []))
+
+    new_links: list[tuple[int, int]] = []
+    for index in range(len(graph.nodes)):
+        spec = graph.nodes[index]
+        block = spec.block
+        if block is None or not is_forward_operation(block.attr_name):
+            continue
+        if spec.constant:
+            continue
+        for name in block.external_inputs:
+            if name in provided[index]:
+                continue
+            provided[index].add(name)
+            leaf = _add_node(
+                graph,
+                key=f"{spec.key}:const:{name}",
+                block=None,
+                label=str(name).split(".")[-1],
+                constant=True,
+                extra_metadata={"external_inputs": [str(name)]},
+            )
+            new_links.append((leaf, index))
+            # The leaf is an internal operand of its consumer, so it must live in
+            # the same inline frame(s) — otherwise it lands in the parent namespace
+            # and its edge reads as *external* to the consumer's group, which makes
+            # the group-input injector mistake the consumer for a boundary entry
+            # (a spurious ``@input:<param>_N`` that would survive the render filter).
+            for frame in graph.inline_frames:
+                if index in frame.node_indices:
+                    frame.node_indices.append(leaf)
+    graph.links.extend(new_links)
+    return graph
 
 
 def add_forward_output(
@@ -2171,6 +2273,9 @@ def _ensure_side_chain_tail_index(
         producer = segment.side_producer_nodes.get(source_attr)
         if producer is None:
             return None
+        resolved_input = _resolve_primary_input(
+            source_attr, root, attr_last_index, input_index, None
+        )
         return _add_side_producer_index(
             graph,
             producer,
@@ -2178,7 +2283,7 @@ def _ensure_side_chain_tail_index(
             source_attr=source_attr,
             port_label=side.port_label,
             port_style="inline",
-            input_index=input_index,
+            input_index=resolved_input,
             attr_last_index=attr_last_index,
             basic_ops=basic_ops,
             inline_expansion=inline_expansion,
@@ -2193,7 +2298,20 @@ def _ensure_side_chain_tail_index(
             continue
 
         if tail_index is None:
-            branch_from_input = attr in root.input_fed_steps or len(chain) == 1
+            # A step that literally reads the enclosing forward's still-pristine
+            # input (``input_fed_steps``) genuinely branches from it. Otherwise —
+            # including the historical ``len(chain) == 1`` case — resolve the
+            # step's own primary (non-side) operand the same way a
+            # ``SideFeedSegment`` consumer's primary input is resolved, instead of
+            # assuming a single-step chain is always fed by the raw method input.
+            if attr in root.input_fed_steps:
+                resolved_input = input_index
+                branch_from_input = True
+            else:
+                resolved_input = _resolve_primary_input(
+                    attr, root, attr_last_index, input_index, None
+                )
+                branch_from_input = resolved_input is not None
             tail_index = _add_side_producer_index(
                 graph,
                 step,
@@ -2201,7 +2319,7 @@ def _ensure_side_chain_tail_index(
                 source_attr=attr,
                 port_label=side.port_label if attr == source_attr else None,
                 port_style="inline",
-                input_index=input_index,
+                input_index=resolved_input,
                 attr_last_index=attr_last_index,
                 basic_ops=basic_ops,
                 link_input=branch_from_input,
@@ -3595,9 +3713,10 @@ def build_computation_graph(
         strip_unused_return_branches=strip_unused_return_branches,
     )
     graph = _strip_dangling_leaves(graph, root=root)
-    graph = _prune_weight_only_ops(graph)
-    graph = _absorb_buffer_only_ops(graph)
-    graph = _prune_linear_weight_operands(graph, root=root)
+    graph = _tag_weight_only_ops(graph)
+    graph = _tag_buffer_only_ops(graph)
+    graph = _tag_linear_weight_operands(graph, root=root)
+    graph = _materialize_external_input_constants(graph)
     add_forward_output(graph, root=root)
     _add_kernel_output_port_nodes(graph)
     if basic_ops is not None and basic_ops.basic_only:

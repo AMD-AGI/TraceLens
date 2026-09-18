@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 from types import SimpleNamespace
 
 import pytest
@@ -1464,7 +1465,16 @@ def test_shape_module_registry_lookup_and_ambiguity():
             ("B", "S", 2),
             "float16",
         ),
-        ("sum", [TensorSpec(("B", "S", 8))], ["dim: -1"], ("B", "S", 1), "float16"),
+        # torch reductions default to keepdim=False -- the reduced axis is
+        # dropped, not collapsed to size 1, unless keepdim=True is explicit.
+        ("sum", [TensorSpec(("B", "S", 8))], ["dim: -1"], ("B", "S"), "float16"),
+        (
+            "sum",
+            [TensorSpec(("B", "S", 8))],
+            ["dim: -1", "keepdim: True"],
+            ("B", "S", 1),
+            "float16",
+        ),
         ("sum", [TensorSpec(("B", "S", 8))], ["dim: 2"], ("B", "S", 8), "float16"),
         (
             "multiply",
@@ -1981,13 +1991,20 @@ def test_merge_build_graph_expanded_tail_and_shape_boundaries(
         return [kwargs["id_prefix"]]
 
     monkeypatch.setattr(merge, "_append_section", fake_append)
-    monkeypatch.setattr(merge, "fill_missing_node_shapes", lambda nodes, context: None)
+    monkeypatch.setattr(
+        merge,
+        "fill_missing_node_shapes",
+        lambda nodes, context, boundary_spec=None: None,
+    )
     monkeypatch.setattr(
         merge,
         "group_boundary_shapes",
         lambda nodes: {"tail": {"input_shape": "B x S x 16"}},
     )
-    inferencer = SimpleNamespace(context=ShapeContext({"H": 16}))
+    inferencer = SimpleNamespace(
+        context=ShapeContext({"H": 16}),
+        boundary_input_spec=lambda *args, **kwargs: None,
+    )
     graph = merge.build_merged_model_graph(spec, shape_inferencer=inferencer)
 
     assert calls == [("tail", "tail")]
@@ -2816,3 +2833,117 @@ def test_annotate_op_input_signatures_skips_synthetic_boundaries():
     }
     merge._annotate_op_input_signatures([boundary])
     assert all(a["key"] not in {"op_type", "input_shapes"} for a in boundary["attrs"])
+
+
+# --------------------------------------------------------------------------- #
+# Render-time constant filter (viewer_page). Constants stay in the JSON as
+# first-class ``constant``-tagged nodes; the HTML render drops them behind a
+# flag defaulting to drop. These units guard the filter's contract: it removes
+# constant nodes + their edges, prunes now-empty group frames, and NEVER mutates
+# its input (the persisted JSON must stay complete).
+# --------------------------------------------------------------------------- #
+
+from TraceLens.Visualizer.model_explorer_export import viewer_page
+
+
+def _const_node(node_id, namespace=""):
+    return {
+        "id": node_id,
+        "label": "Const",
+        "namespace": namespace,
+        "attrs": [{"key": "constant", "value": "true"}],
+    }
+
+
+def _op_with_edges(node_id, sources, namespace=""):
+    return {
+        "id": node_id,
+        "label": "Op",
+        "namespace": namespace,
+        "incomingEdges": [{"sourceNodeId": s} for s in sources],
+    }
+
+
+def _sample_graph():
+    return {
+        "nodes": [
+            _const_node("w:const", namespace="blk"),
+            {"id": "act", "label": "Act", "namespace": "blk"},
+            _op_with_edges("mul", ["act", "w:const"], namespace="blk"),
+        ],
+        "groupNodeAttributes": {"blk": {"attr": "x"}},
+    }
+
+
+def test_graph_without_constants_drops_constant_node_and_its_edge():
+    graph = _sample_graph()
+    filtered = viewer_page._graph_without_constants(graph)
+    ids = [n["id"] for n in filtered["nodes"]]
+    assert "w:const" not in ids
+    assert set(ids) == {"act", "mul"}
+    # The consumer keeps its activation edge, loses only the constant edge.
+    mul = next(n for n in filtered["nodes"] if n["id"] == "mul")
+    assert [e["sourceNodeId"] for e in mul["incomingEdges"]] == ["act"]
+
+
+def test_graph_without_constants_does_not_mutate_input():
+    graph = _sample_graph()
+    before = copy.deepcopy(graph)
+    viewer_page._graph_without_constants(graph)
+    assert graph == before, "filter must not mutate the source graph (JSON stays complete)"
+
+
+def test_graph_without_constants_prunes_now_empty_group():
+    # A group frame whose only member is a constant must not be drawn empty.
+    graph = {
+        "nodes": [
+            _const_node("only:const", namespace="lonely"),
+            {"id": "keep", "label": "Act", "namespace": "kept"},
+        ],
+        "groupNodeAttributes": {"lonely": {"attr": "x"}, "kept": {"attr": "y"}},
+    }
+    filtered = viewer_page._graph_without_constants(graph)
+    assert "lonely" not in filtered["groupNodeAttributes"]
+    assert "kept" in filtered["groupNodeAttributes"]
+
+
+def test_graph_without_constants_strips_edge_only_incoming():
+    # A consumer fed solely by a constant loses its incomingEdges entirely.
+    graph = {
+        "nodes": [
+            _const_node("c"),
+            _op_with_edges("sink", ["c"]),
+        ]
+    }
+    filtered = viewer_page._graph_without_constants(graph)
+    sink = next(n for n in filtered["nodes"] if n["id"] == "sink")
+    assert "incomingEdges" not in sink
+
+
+def test_payload_without_constants_keeps_source_payload_complete():
+    payload = {
+        "graphCollections": [
+            {"graphs": [_sample_graph()]},
+        ]
+    }
+    before = copy.deepcopy(payload)
+    filtered = viewer_page._payload_without_constants(payload)
+    # Source payload still carries the constant (JSON artifact is never filtered).
+    assert payload == before
+    src_ids = [n["id"] for n in payload["graphCollections"][0]["graphs"][0]["nodes"]]
+    assert "w:const" in src_ids
+    # Filtered overlay has no constants.
+    out_ids = [n["id"] for n in filtered["graphCollections"][0]["graphs"][0]["nodes"]]
+    assert "w:const" not in out_ids
+
+
+def test_compose_viewer_html_flag_controls_constant_visibility():
+    payload = {
+        "graphCollections": [{"graphs": [_sample_graph()]}],
+        "label": "model",
+    }
+    dropped = viewer_page.compose_viewer_html(payload, drop_constants=True)
+    kept = viewer_page.compose_viewer_html(payload, drop_constants=False)
+    # The constant node id appears in the shown-constants HTML, not the default.
+    assert "w:const" not in dropped
+    assert "w:const" in kept

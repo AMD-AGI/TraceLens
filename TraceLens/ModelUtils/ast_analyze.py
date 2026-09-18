@@ -2679,11 +2679,22 @@ class _ForwardOperationExtractor:
         config: dict[str, Any] | None = None,
         module_functions: dict[str, ast.FunctionDef] | None = None,
         repeated_submodule_attrs: frozenset[str] | None = None,
+        class_methods: dict[str, ast.FunctionDef] | None = None,
     ) -> None:
         self.self_values = self_values
         self.all_tensor_ops = all_tensor_ops
         self.config = dict(config or {})
         self.param_names = set(param_names or ())
+        # Plain instance methods defined in the SAME class as the forward being
+        # traced (``append_visible_tail``, ``get_visible_tokens``, ...), keyed by
+        # name. A ``self.<method>(...)`` call site's positional args are the
+        # CALLER's local variable names; when the callee is one of these sibling
+        # methods, its own declared parameter names are what its inlined body's
+        # ops key their ``boundary_input``/entry-param lookups on. Resolving the
+        # call against the callee's real signature (mirroring
+        # ``_free_function_param_names`` below) keeps a caller/callee local-name
+        # mismatch from stranding an argument onto the callee's default target.
+        self.class_methods = dict(class_methods or {})
         # Self-submodule attrs called more than once in this forward. A call to one
         # gets a call-site ``@l{lineno}`` step key so two calls to the same child
         # (rotary ``recomposition_frequencies(cos)`` then ``(sin)``) keep distinct
@@ -2942,6 +2953,28 @@ class _ForwardOperationExtractor:
         if definition is None:
             return None
         return [arg.arg for arg in definition.args.posonlyargs + definition.args.args]
+
+    def _class_method_param_names(self, method_name: str) -> list[str] | None:
+        """Positional parameter names of a same-class sibling method's own ``def``.
+
+        A ``self.append_visible_tail(topk_indices, visible_tokens, valid_keys)``
+        call site names its args after the CALLER's locals; the callee's own
+        parameter names (``topk_indices, token_visible, key_valid``) are what its
+        inlined body actually keys on. Resolving against the callee's real
+        signature — analogous to ``_free_function_param_names`` for module-level
+        functions — keeps a caller/callee name mismatch from losing an argument.
+        Returns ``None`` when *method_name* isn't a literal ``def`` in this class
+        (e.g. an ``nn.Module`` submodule attribute), leaving that call's existing
+        caller-local-name behavior untouched.
+        """
+        definition = self.class_methods.get(method_name)
+        if definition is None:
+            return None
+        args = definition.args
+        names = [arg.arg for arg in args.posonlyargs + args.args]
+        if names and names[0] == "self":
+            names = names[1:]
+        return names
 
     def _self_attr_input(self, node: ast.Attribute) -> tuple[str | None, list[str]]:
         if isinstance(node.value, ast.Name) and node.value.id == "self":
@@ -3321,6 +3354,17 @@ class _ForwardOperationExtractor:
                 and node.args[0].id == "self"
             ):
                 start = 1
+            # ``self.append_visible_tail(topk_indices, visible_tokens, valid_keys)``
+            # names its args after the CALLER's locals; when the callee is a
+            # sibling method inlined from its own ``def``, its body keys entry
+            # params on ITS OWN parameter names (``token_visible``, ``key_valid``,
+            # ...). Resolve those names once so a caller/callee mismatch doesn't
+            # strand an argument onto the callee's default target.
+            callee_param_names = (
+                self._class_method_param_names(method_name)
+                if submodule_call and method_name is not None
+                else None
+            )
             for idx, arg in enumerate(node.args):
                 # A host-scalar positional (``key_states.shape[2]``) is an int size
                 # read, not a tensor operand: it must contribute no producer, or the
@@ -3333,7 +3377,14 @@ class _ForwardOperationExtractor:
                 arg_producers.extend(producers)
                 external.extend(arg_external)
                 if submodule_call and idx >= start and len(producers) == 1:
-                    name = _arg_name(arg, idx - start)
+                    positional_index = idx - start
+                    name = None
+                    if callee_param_names is not None and positional_index < len(
+                        callee_param_names
+                    ):
+                        name = callee_param_names[positional_index]
+                    if name is None:
+                        name = _arg_name(arg, positional_index)
                     arg_name_map[name] = producers[0]
                     _record_arg_ordinal(name, producers[0], arg)
             for keyword in node.keywords:
@@ -4981,6 +5032,7 @@ def _forward_operations_from_forward(
     all_tensor_ops: bool,
     config: dict[str, Any] | None = None,
     module_functions: dict[str, ast.FunctionDef] | None = None,
+    class_methods: dict[str, ast.FunctionDef] | None = None,
 ) -> ForwardAnalysis:
     # The primary parameter is the main path, so only the extra ones can identify
     # which step consumes a side feed.
@@ -4992,6 +5044,7 @@ def _forward_operations_from_forward(
         config=config,
         module_functions=module_functions,
         repeated_submodule_attrs=_repeated_self_call_attrs(func.body),
+        class_methods=class_methods,
     )
     # An operation reading the primary parameter partway through the forward reads the
     # value arriving at the chain, not the previous step. Naming it lets those reads
@@ -5085,10 +5138,16 @@ def expand_class_forward_dataflow(
         ),
         None,
     )
+    class_methods = {
+        item.name: item
+        for item in cls.node.body
+        if isinstance(item, ast.FunctionDef)
+    }
     analysis = _forward_operations_from_forward(
         forward,
         self_values=_self_config_values(init_func, {}),
         all_tensor_ops=True,
+        class_methods=class_methods,
     )
     if not analysis.operations:
         return
@@ -5263,6 +5322,16 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 forward_func, parallel_gates
             )
             forward_step_details = dict(parsed_step_details)
+            # Plain instance methods defined in this same class (not ``__init__``
+            # submodule attrs). A ``self.<method>(...)`` call site's args are the
+            # CALLER's local names; resolving against the callee's own signature
+            # (when it is one of these) keeps a caller/callee name mismatch from
+            # stranding an argument (see ``_class_method_param_names``).
+            class_methods = {
+                item.name: item
+                for item in node.body
+                if isinstance(item, ast.FunctionDef)
+            }
             if _is_moe_gate_class(node.name, forward_calls):
                 values = _self_config_values(init_func, self._config_for_class(node.name))
                 analysis = _forward_operations_from_forward(
@@ -5271,6 +5340,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     all_tensor_ops=self.all_tensor_ops,
                     config=self._config_for_class(node.name),
                     module_functions=self.module_functions,
+                    class_methods=class_methods,
                 )
                 if analysis.operations:
                     forward_step_predecessors = dict(analysis.step_predecessors)
@@ -5378,6 +5448,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     all_tensor_ops=self.all_tensor_ops,
                     config=self._config_for_class(node.name),
                     module_functions=self.module_functions,
+                    class_methods=class_methods,
                 )
                 if analysis.operations:
                     forward_step_predecessors = dict(analysis.step_predecessors)
@@ -5429,6 +5500,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     all_tensor_ops=self.all_tensor_ops,
                     config=self._config_for_class(node.name),
                     module_functions=self.module_functions,
+                    class_methods=class_methods,
                 )
                 if _forward_mixes_modules_and_inline_ops(
                     forward_calls,
@@ -5592,7 +5664,15 @@ def _subscript_index_operands(index: ast.AST) -> list[ast.AST]:
 
 
 def _is_int_index(node: ast.AST) -> bool:
-    """True for a literal integer axis-index (``x[:, 0]``), not ``None``/``...``/bool."""
+    """True for a literal integer axis-index (``x[:, 0]`` or ``x[:, -1]``), not
+    ``None``/``...``/bool.
+
+    A negative literal parses as ``UnaryOp(USub, Constant(n))``, not a bare
+    ``Constant`` — unwrap that one level so ``x[..., -1]`` is recognised as an
+    integer select exactly like its positive-index sibling ``x[..., 1]``.
+    """
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        node = node.operand
     return (
         isinstance(node, ast.Constant)
         and isinstance(node.value, int)
@@ -5601,16 +5681,19 @@ def _is_int_index(node: ast.AST) -> bool:
 
 
 def _subscript_select_dims(index: ast.AST) -> list[int]:
-    """Axes an integer *select* drops from a multi-axis pure slice (``x[:, c]``).
+    """Axes an integer *select* drops from a multi-axis subscript (``x[:, c]``).
 
     A single index alongside a range slice (``freq[:, 0]``) selects one position
     and drops that axis — a genuine ``Slice`` op. A bare leading index (``x[0]``)
-    or a full/range slice with no accompanying select carries no dropped axis and
-    stays a pass-through alias, so this returns ``[]`` for those. Axes after an
-    ``Ellipsis`` are numbered from the end so ``x[..., 0]`` drops ``-1``.
+    with no accompanying ``:``/``...`` carries no dropped axis and stays a
+    pass-through alias, so this returns ``[]`` for that. ``Ellipsis`` unambiguously
+    stands for "every preceding axis", so a bare trailing integer index after one
+    (``packed_states[..., -1]``) is just as much a genuine drop-that-axis select
+    as ``x[..., 0]`` even with no explicit ``:`` slice alongside it — the trailing
+    axes are numbered from the end so ``x[..., 0]``/``x[..., -1]`` both drop ``-1``.
     """
     elts = index.elts if isinstance(index, ast.Tuple) else [index]
-    if len(elts) < 2 or not any(isinstance(elt, ast.Slice) for elt in elts):
+    if len(elts) < 2:
         return []
     ellipsis_at = next(
         (
@@ -5621,6 +5704,8 @@ def _subscript_select_dims(index: ast.AST) -> list[int]:
         None,
     )
     if ellipsis_at is None:
+        if not any(isinstance(elt, ast.Slice) for elt in elts):
+            return []
         return [pos for pos, elt in enumerate(elts) if _is_int_index(elt)]
     tail = elts[ellipsis_at + 1 :]
     return [

@@ -107,6 +107,86 @@ def walk_meta_module_tree(checkpoint: str | Path) -> list[MetaModuleGroup] | Non
     return groups
 
 
+@dataclass(frozen=True)
+class MetaTensorSpec:
+    """Shape + dtype of an ``nn.Parameter`` / buffer read off the meta tree."""
+
+    shape: tuple[int, ...]
+    dtype: str
+
+
+@dataclass(frozen=True)
+class MetaTensorIndex:
+    """Meta parameter/buffer tensors indexed for constant-operand resolution.
+
+    ``by_qualified`` keys the fully-qualified name (``visual.rotary_pos_emb.inv_freq``)
+    and ``by_class_attr`` keys ``(owner_class_name, leaf_attr)`` (``("Glm5NextVisionRotaryEmbedding", "inv_freq")``),
+    mirroring how :meth:`ShapeInferencer._lookup_parameter_spec` resolves a
+    parameter — but adding dtype and covering buffers, not just parameters.
+    """
+
+    by_qualified: dict[str, MetaTensorSpec]
+    by_class_attr: dict[tuple[str, str], MetaTensorSpec]
+
+
+def harvest_meta_tensors(checkpoint: str | Path) -> MetaTensorIndex | None:
+    """Index every parameter and buffer of the meta-instantiated model.
+
+    Instantiates the model on the ``meta`` device (zero memory, no weights) and
+    walks ``named_parameters()`` + ``named_buffers()``, recording each tensor's
+    shape and dtype. Runs **no forward pass** and applies **no rotary patch** —
+    like :func:`walk_meta_module_tree`, reading tensor metadata needs only the
+    reliable instantiation half. Returns *None* when torch/transformers are
+    unavailable or the model cannot be instantiated.
+    """
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        _log.info(
+            "torch and/or transformers not installed; skipping meta-tensor harvest"
+        )
+        return None
+
+    try:
+        from TraceLens.ModelUtils.torch_trace import _instantiate_meta
+
+        model, _config = _instantiate_meta(checkpoint)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("Could not instantiate model on meta device: %s", exc)
+        return None
+
+    def _dtype_name(tensor: Any) -> str:
+        return str(tensor.dtype).replace("torch.", "")
+
+    try:
+        # Map each owning module path to its class so a qualified tensor name
+        # (``visual.rotary_pos_emb.inv_freq``) can be keyed by ``(class, leaf)``.
+        module_class: dict[str, str] = {
+            path: type(mod).__name__ for path, mod in model.named_modules()
+        }
+        by_qualified: dict[str, MetaTensorSpec] = {}
+        by_class_attr: dict[tuple[str, str], MetaTensorSpec] = {}
+        for name, tensor in list(model.named_parameters()) + list(
+            model.named_buffers()
+        ):
+            spec = MetaTensorSpec(
+                shape=tuple(int(dim) for dim in tensor.shape),
+                dtype=_dtype_name(tensor),
+            )
+            by_qualified[name] = spec
+            owner_path, _, leaf = name.rpartition(".")
+            owner_class = module_class.get(owner_path)
+            if owner_class:
+                by_class_attr.setdefault((owner_class, leaf), spec)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("Meta-tensor harvest failed: %s", exc)
+        return None
+    finally:
+        del model
+
+    return MetaTensorIndex(by_qualified=by_qualified, by_class_attr=by_class_attr)
+
+
 def trace_meta_shapes(
     checkpoint: str | Path,
     config: dict[str, Any] | None = None,

@@ -114,6 +114,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Open the viewer in a browser after export (implies --serve)",
     )
+    parser.add_argument(
+        "--drop-constants",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Drop constant/learned-weight/buffer nodes when rendering HTML "
+            "(default: on). Use --no-drop-constants to render them. The exported "
+            "JSON always keeps constants regardless of this flag."
+        ),
+    )
 
     ast_group = parser.add_argument_group("model source options")
     ast_group.add_argument(
@@ -256,12 +266,19 @@ def file_created_at(path: Path) -> datetime:
 
 
 def write_optional_output(
-    payload: dict, output: Path, *, generated_at: datetime | None = None
+    payload: dict,
+    output: Path,
+    *,
+    generated_at: datetime | None = None,
+    drop_constants: bool = True,
 ) -> Path:
     if is_html_output(output):
-        saved = save_viewer_html(payload, output, generated_at=generated_at)
+        saved = save_viewer_html(
+            payload, output, generated_at=generated_at, drop_constants=drop_constants
+        )
         print(f"Wrote standalone viewer: {saved}")
         return saved
+    # The JSON artifact always keeps constants -- the flag only affects HTML.
     saved = save_model_explorer_payload(payload, output)
     print(f"Wrote Model Explorer JSON: {saved}")
     return saved
@@ -291,7 +308,12 @@ def _run_from_payload(
     serve_requested = args.serve or args.open
     if not serve_requested or args.output is not None:
         try:
-            write_optional_output(payload, output, generated_at=generated_at)
+            write_optional_output(
+                payload,
+                output,
+                generated_at=generated_at,
+                drop_constants=args.drop_constants,
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"Error writing output: {exc}", file=sys.stderr)
             return 1
@@ -302,7 +324,12 @@ def _run_from_payload(
         try:
             if args.open:
                 open_viewer(url)
-            serve_viewer(payload=payload, port=args.port, block=args.serve)
+            serve_viewer(
+                payload=payload,
+                port=args.port,
+                block=args.serve,
+                drop_constants=args.drop_constants,
+            )
             if not args.serve:
                 print("Viewer started in the background. Press Ctrl+C to exit.")
                 try:
@@ -422,7 +449,12 @@ def _run_torch_module(
         if output is None or output == Path("__default__"):
             output = Path.cwd() / (module_stem + ".html")
         try:
-            write_optional_output(payload, output, generated_at=datetime.now())
+            write_optional_output(
+                payload,
+                output,
+                generated_at=datetime.now(),
+                drop_constants=args.drop_constants,
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"Error writing output: {exc}", file=sys.stderr)
             return 1
@@ -433,7 +465,12 @@ def _run_torch_module(
         try:
             if args.open:
                 open_viewer(url)
-            serve_viewer(payload=payload, port=args.port, block=args.serve)
+            serve_viewer(
+                payload=payload,
+                port=args.port,
+                block=args.serve,
+                drop_constants=args.drop_constants,
+            )
             if not args.serve:
                 print("Viewer started in the background. Press Ctrl+C to exit.")
                 try:
@@ -497,14 +534,24 @@ def main(argv: list[str] | None = None) -> int:
             else args.output
         )
         try:
-            write_optional_output(payload, output, generated_at=datetime.now())
+            write_optional_output(
+                payload,
+                output,
+                generated_at=datetime.now(),
+                drop_constants=args.drop_constants,
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"Error writing output: {exc}", file=sys.stderr)
             return 1
     elif not serve_requested:
         try:
             output = default_html_output_path(checkpoint, getattr(args, "github", None))
-            write_optional_output(payload, output, generated_at=datetime.now())
+            write_optional_output(
+                payload,
+                output,
+                generated_at=datetime.now(),
+                drop_constants=args.drop_constants,
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"Error writing output: {exc}", file=sys.stderr)
             return 1
@@ -515,7 +562,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if args.open:
                 open_viewer(url)
-            serve_viewer(payload=payload, port=args.port, block=args.serve)
+            serve_viewer(
+                payload=payload,
+                port=args.port,
+                block=args.serve,
+                drop_constants=args.drop_constants,
+            )
             if not args.serve:
                 print("Viewer started in the background. Press Ctrl+C to exit.")
                 try:

@@ -1164,6 +1164,13 @@ def _inject_group_inputs(
         outside_sources: set[tuple[str, str]] = set()
 
         for node in scoped_nodes:
+            # A ``constant`` leaf (a materialized buffer/param read such as
+            # ``self.attention_scaling``) is an internal value source the render
+            # filter drops, not an activation the group reads from outside. It has
+            # no incoming edge, so without this guard it would be mistaken for an
+            # entry point and spawn a spurious ``@input`` boundary.
+            if _node_attr(node, "constant") == "true":
+                continue
             incoming = list(node.get("incomingEdges", []))
             external = [
                 edge for edge in incoming if edge["sourceNodeId"] not in internal_ids
@@ -1286,27 +1293,38 @@ def _inject_group_inputs(
             external = [
                 edge for edge in original if edge["sourceNodeId"] not in internal_ids
             ]
+            # Redirect each external edge onto the boundary tile its own source
+            # landed on, preserving that edge's ORIGINAL targetNodeInputId instead
+            # of renumbering sequentially from ``len(internal)``. An order-sensitive
+            # op (``cat``/``stack``) can read its external operand before an
+            # internal one (operand 0 external, operand 1 internal); renumbering
+            # then collides with an internal edge that already holds the target id
+            # the formula computes, silently dropping the external operand.
             redocked: list[dict[str, Any]] = []
-            for index, input_id in enumerate(input_ids):
+            for edge in external:
+                source = (
+                    edge["sourceNodeId"],
+                    edge.get("sourceNodeOutputId", "0"),
+                )
+                input_id = next(
+                    (
+                        candidate
+                        for candidate in input_ids
+                        if source in tile_source_slot.get(candidate, {})
+                    ),
+                    input_ids[0] if input_ids else None,
+                )
+                if input_id is None:
+                    redocked.append(edge)
+                    continue
                 slot_map = tile_source_slot.get(input_id, {})
                 # Preserve the exact tuple slot this consumer read from the shared
                 # producer; a single-source boundary keeps port "0" (unchanged).
-                port = "0"
-                for edge in external:
-                    source = (
-                        edge["sourceNodeId"],
-                        edge.get("sourceNodeOutputId", "0"),
-                    )
-                    if source in slot_map:
-                        port = str(slot_map[source])
-                        break
-                redocked.append(
-                    {
-                        "sourceNodeId": input_id,
-                        "sourceNodeOutputId": port,
-                        "targetNodeInputId": str(len(internal) + index),
-                    }
-                )
+                port = str(slot_map.get(source, 0))
+                rewired = dict(edge)
+                rewired["sourceNodeId"] = input_id
+                rewired["sourceNodeOutputId"] = port
+                redocked.append(rewired)
             entry["incomingEdges"] = internal + redocked
 
 
@@ -1992,6 +2010,12 @@ def _prune_noop_cast_nodes(nodes: list[dict[str, Any]]) -> None:
     for node in nodes:
         if str(node.get("label") or "") != "Cast":
             continue
+        if _node_attr(node, "constant") == "true":
+            # A constant/buffer cast (e.g. ``self.inv_freq`` read via
+            # ``external_inputs``) is a value SOURCE, never a same-dtype
+            # passthrough to elide. Eliding it would delete the operand and
+            # collapse its consumer's two edges onto the sibling activation.
+            continue
         incoming = node.get("incomingEdges", [])
         if len(incoming) != 1:
             continue  # only the simple single-input case is unambiguous
@@ -2487,6 +2511,12 @@ def _annotate_op_input_signatures(nodes: list[dict[str, Any]]) -> None:
                 dims, dtype = resolved
                 input_shapes.append(dims)
                 input_types.append(dtype or "Tensor")
+            # A constant/learned-weight/buffer operand keeps its shape (so a
+            # shape jump like the rotary ``Multiply`` stays explained) but is
+            # typed ``Constant`` so the type-check pass counts only real
+            # activation operands.
+            if source is not None and _node_attr(source, "constant") == "true":
+                input_types[-1] = "Constant"
             concrete_inputs.append("")
         for value in _op_scalar_details(node):
             input_shapes.append([])
@@ -2498,6 +2528,49 @@ def _annotate_op_input_signatures(nodes: list[dict[str, Any]]) -> None:
         _set_node_attr(node, "input_shapes", json.dumps(input_shapes))
         _set_node_attr(node, "input_types", json.dumps(input_types))
         _set_node_attr(node, "concrete_inputs", json.dumps(concrete_inputs))
+
+
+def _stamp_boundary_input_shapes(
+    nodes: list[dict[str, Any]], shape_inferencer: ShapeInferencer
+) -> None:
+    """Restamp leaf ``@input`` boundary tiles from meta-device ground truth.
+
+    A forward-parameter boundary (``@input:<param>``) that is a pure leaf -- no
+    incoming producer edge -- is shaped upstream by generic activation
+    heuristics, which mis-size a boundary whose name merely resembles an
+    activation. The clearest case: the ``attention_mask`` boundary reaching the
+    indexer is stamped ``(B, S, hidden)`` by the ``"attention" in id`` heuristic,
+    when the real parameter is a ``(B, S)`` bool mask -- inflating the downstream
+    ``cat`` operand to rank 4 and tripping the type-check.
+
+    When a meta forward observed the real parameter shape,
+    ``boundary_input_spec`` returns it and that is authoritative, so restamp the
+    tile. A connected boundary (it already carries a real producer edge, e.g.
+    ``position_embeddings`` from a ``rotary_pos_emb``) inherits its producer's
+    shape and is left untouched -- meta never overrides a real dataflow edge.
+
+    Because this pass *overrides* an already-shaped tile, it trusts only the
+    class-scoped (locally-definite) meta shape, never the global fallback -- a
+    parameter observed in just one module family (``position_ids`` as ``(1, S)``
+    on the text stack, but ``[Pv, 2]`` on the vision rotary) must not have its
+    other family's authoritative shape clobbered.
+    """
+    for node in nodes:
+        if _node_attr(node, "synthetic") not in {"@input", "@input_mirror"}:
+            continue
+        if node.get("incomingEdges"):
+            continue
+        param = _node_attr(node, "boundary_input") or str(node.get("label") or "")
+        param = param.strip()
+        if not param:
+            continue
+        namespace = str(node.get("namespace") or "")
+        spec = shape_inferencer.boundary_input_spec(
+            param, namespace, class_scoped_only=True
+        )
+        if spec is None:
+            continue
+        apply_shape_attrs(node, spec)
 
 
 def _reconcile_edge_endpoint_shapes(nodes: list[dict[str, Any]]) -> None:
@@ -3762,7 +3835,11 @@ def _append_decoder_layers(
             )
         result = variant_exits or list(previous_exits)
         if shape_inferencer is not None:
-            fill_missing_node_shapes(merged_nodes, context=shape_inferencer.context)
+            fill_missing_node_shapes(
+                merged_nodes,
+                context=shape_inferencer.context,
+                boundary_spec=shape_inferencer.boundary_input_spec,
+            )
         return result
 
     decoder_inputs = list(previous_exits)
@@ -3799,7 +3876,11 @@ def _append_decoder_layers(
         first_node_index=first_node_index,
     )
     if shape_inferencer is not None:
-        fill_missing_node_shapes(merged_nodes, context=shape_inferencer.context)
+        fill_missing_node_shapes(
+            merged_nodes,
+            context=shape_inferencer.context,
+            boundary_spec=shape_inferencer.boundary_input_spec,
+        )
     return result
 
 
@@ -4558,7 +4639,12 @@ def build_merged_model_graph(
     _collapse_kernel_input_passthroughs(nodes)
 
     if shape_inferencer is not None:
-        fill_missing_node_shapes(nodes, context=shape_inferencer.context)
+        fill_missing_node_shapes(
+            nodes,
+            context=shape_inferencer.context,
+            boundary_spec=shape_inferencer.boundary_input_spec,
+        )
+        _stamp_boundary_input_shapes(nodes, shape_inferencer)
         _reconcile_edge_endpoint_shapes(nodes)
         _assert_edge_endpoint_shapes_agree(nodes)
 

@@ -61,11 +61,18 @@ def serve_viewer(
     json_path: Path | None = None,
     port: int = 8765,
     block: bool = False,
+    drop_constants: bool = True,
 ) -> str:
-    """Start a local HTTP server with the graph payload embedded in index.html."""
+    """Start a local HTTP server with the graph payload embedded in index.html.
+
+    ``drop_constants`` (default true) filters ``constant`` nodes out of the served
+    HTML; the underlying payload/JSON is unaffected.
+    """
     ensure_viewer_assets()
     resolved_payload = _load_payload(payload=payload, json_path=json_path)
-    served_index = compose_viewer_html(resolved_payload, inline_app=False)
+    served_index = compose_viewer_html(
+        resolved_payload, inline_app=False, drop_constants=drop_constants
+    )
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
@@ -128,6 +135,12 @@ def main() -> int:
     )
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--open", action="store_true")
+    parser.add_argument(
+        "--drop-constants",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Drop constant nodes when rendering (default: on).",
+    )
     args = parser.parse_args()
 
     json_path = args.json.expanduser().resolve()
@@ -138,7 +151,12 @@ def main() -> int:
     print(f"Open viewer: {url}")
     if args.open:
         open_viewer(url)
-    serve_viewer(json_path=json_path, port=args.port, block=True)
+    serve_viewer(
+        json_path=json_path,
+        port=args.port,
+        block=True,
+        drop_constants=args.drop_constants,
+    )
     return 0
 
 

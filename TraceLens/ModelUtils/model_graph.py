@@ -310,6 +310,8 @@ def _minimal_metadata(spec: GraphNodeSpec) -> dict[str, Any]:
         metadata["port_style"] = spec.port_style
     if spec.synthetic:
         metadata["synthetic"] = spec.synthetic
+    if getattr(spec, "constant", False):
+        metadata["constant"] = True
     if spec.extra_metadata:
         metadata.update(spec.extra_metadata)
     return metadata

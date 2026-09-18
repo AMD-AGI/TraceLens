@@ -30,8 +30,16 @@ def _graph_key(graph, suffix: str) -> str:
 
 
 def _graph_key_for_op(graph, fragment: str) -> str:
-    """Locate a node by block and op identity, ignoring its slot within the block."""
-    matches = [node.key for node in graph.nodes if fragment in node.key]
+    """Locate a node by block and op identity, ignoring its slot within the block.
+
+    Materialized constant-operand leaves (``...:const:<name>``) share the op's key
+    prefix but are not the op itself, so they are excluded.
+    """
+    matches = [
+        node.key
+        for node in graph.nodes
+        if fragment in node.key and ":const:" not in node.key
+    ]
     assert len(matches) == 1, matches
     return matches[0]
 
@@ -42,8 +50,11 @@ def _export_node(nodes, fragment: str) -> dict:
     An op's slot ordinal (the trailing ``:N`` in its id) shifts whenever unrelated
     nodes are added or removed from its block; matching on the stable
     ``@op_l<line>_c<col>_<name>`` fragment keeps these tests robust to that churn.
+
+    Materialized constant-operand leaves (``...:const:<name>``) share the op's id
+    prefix but are not the op itself, so they are excluded.
     """
-    matches = [n for n in nodes if fragment in n["id"]]
+    matches = [n for n in nodes if fragment in n["id"] and ":const:" not in n["id"]]
     assert len(matches) == 1, (fragment, [n["id"] for n in matches])
     return matches[0]
 
@@ -636,17 +647,22 @@ def test_glm53_linear_attention_projections_are_parallel_off_masked_input():
 
 
 def test_glm53_flinear_weight_operand_is_hidden():
-    """Every rendered ``Linear`` has a single input; learned weights are hidden.
+    """Every *rendered* ``Linear`` has a single input; learned weights are constants.
 
     ``F.linear(input, weight)`` records both operands, so the hyper-connection,
-    MoE-experts and router linears each carried a second tensor input -- the
+    MoE-experts and router linears each carry a second tensor input -- the
     learned weight (a ``self.fn.float()`` cast, a per-expert ``gate_up_proj``
-    gather, a ``self.weight.type(float32)`` cast). Just like the absorbed weight
-    of an ``nn.Linear`` submodule, that operand must not be drawn: a ``Linear``
-    node has exactly one input, the activation. Zero inputs would mean the
-    activation edge was wrongly removed instead.
+    gather, a ``self.weight.type(float32)`` cast). That weight operand is kept in
+    the exported JSON as a first-class node tagged ``constant`` (so operand
+    annotation can report its shape), but the render filter drops every
+    ``constant`` node so the drawn ``Linear`` has exactly one input, the
+    activation. Zero inputs would mean the activation edge was wrongly removed.
     """
     pytest.importorskip("huggingface_hub")
+    from TraceLens.Visualizer.model_explorer_export.viewer_page import (
+        _graph_without_constants,
+        _node_is_constant,
+    )
 
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
@@ -654,20 +670,33 @@ def test_glm53_flinear_weight_operand_is_hidden():
     linear_nodes = [node for node in graph["nodes"] if node.get("label") == "Linear"]
     # The export contains hyper-connection, experts and router F.linear ops.
     assert linear_nodes
+    constant_ids = {n["id"] for n in graph["nodes"] if _node_is_constant(n)}
+    # At least one F.linear weight operand is kept in the JSON as a constant node.
+    assert constant_ids
+
+    # In the JSON every ``Linear`` keeps exactly one *activation* (non-constant)
+    # input; any extra operand is a learned weight tagged ``constant``.
     for node in linear_nodes:
         incoming = node.get("incomingEdges", [])
+        activation = [e for e in incoming if e.get("sourceNodeId") not in constant_ids]
+        assert len(activation) == 1, (node["id"], [e.get("sourceNodeId") for e in incoming])
+
+    # After the render-time constant filter, every ``Linear`` has a single input.
+    rendered = _graph_without_constants(graph)
+    rendered_by_id = {n["id"]: n for n in rendered["nodes"]}
+    for node in linear_nodes:
+        drawn = rendered_by_id[node["id"]]
+        incoming = drawn.get("incomingEdges", [])
         assert len(incoming) == 1, (node["id"], [e.get("sourceNodeId") for e in incoming])
 
 
 def test_glm53_hyperconnection_linear_keeps_activation_drops_weight():
-    """The surviving hyper-connection linear input is the activation, not ``fn``.
+    """The hyper-connection linear keeps one activation operand + a constant weight.
 
-    Removing the weight operand must leave the activation (``flat``) edge intact
-    and disconnect the ``self.fn.float()`` weight producer -- confirming the pass
-    hides the learned weight rather than the activation. (The disconnected weight
-    cast may linger as a dangling leaf in this intermediate per-class graph when
-    an inline frame protects it from the leaf strip; the merged export drops it,
-    which ``test_glm53_flinear_weight_operand_is_hidden`` covers.)
+    ``F.linear`` records both operands. The activation (``flat``) edge stays a
+    plain operand while the ``self.fn.float()`` weight producer is tagged
+    ``constant`` -- confirming the pass marks the learned weight (rather than
+    hiding the activation) for render-time removal, while keeping it in the graph.
     """
     pytest.importorskip("huggingface_hub")
     from TraceLens.ModelUtils.block_tree import build_block_node
@@ -689,19 +718,24 @@ def test_glm53_hyperconnection_linear_keeps_activation_drops_weight():
         if node.block is not None and node.block.attr_name.endswith("_linear")
     )
     incoming = [source for source, dest in graph.links if dest == linear_index]
-    assert len(incoming) == 1, [graph.nodes[s].key for s in incoming]
-    # The surviving producer is an activation op, never a param-reading weight op.
-    survivor = graph.nodes[incoming[0]].block
+    # Exactly one *activation* (non-constant) operand survives as a drawn input.
+    activation = [s for s in incoming if not graph.nodes[s].constant]
+    assert len(activation) == 1, [graph.nodes[s].key for s in incoming]
+    survivor = graph.nodes[activation[0]].block
     assert not (survivor is not None and survivor.external_inputs), (
-        graph.nodes[incoming[0]].key,
+        graph.nodes[activation[0]].key,
         survivor.external_inputs if survivor else None,
     )
-    # The learned-weight producer that read ``self.fn`` no longer feeds the linear.
-    assert not any(
-        graph.nodes[source].block is not None
-        and "fn" in graph.nodes[source].block.external_inputs
+    # The learned-weight producer that reads ``self.fn`` still feeds the linear,
+    # but is tagged ``constant`` so the render filter drops it.
+    weight_sources = [
+        source
         for source in incoming
-    )
+        if graph.nodes[source].block is not None
+        and "fn" in graph.nodes[source].block.external_inputs
+    ]
+    assert weight_sources, [graph.nodes[s].key for s in incoming]
+    assert all(graph.nodes[source].constant for source in weight_sources)
 
 
 def test_glm53_dead_code_elimination_is_idempotent_for_hyperconnection():
@@ -1395,14 +1429,18 @@ def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
         consumer.startswith("visual/seq:3:blocks") for consumer in consumers
     ), consumers
 
-    # Topological order: the LC-in floats above every loop-body node even though
-    # the body lives in child namespaces (``visual/Block/norm1`` etc.).
+    # Topological order: the LC-in floats above every loop-body *activation* node
+    # even though the body lives in child namespaces (``visual/Block/norm1`` etc.).
+    # Materialized ``constant`` leaves (buffer/param reads such as ``self.inv_freq``)
+    # are pure sources with no incoming edge, so they legitimately sort ahead of the
+    # LC-in; they are filtered out of the rendered graph, so exclude them here.
     positions = {node["id"]: index for index, node in enumerate(nodes)}
     body_positions = [
         index
         for node in nodes
         if node["id"].startswith("visual/seq:3:blocks")
         and "@loop_carried" not in node["id"]
+        and _attr_value(node, "constant") != "true"
         for index in (positions[node["id"]],)
     ]
     assert body_positions
@@ -2126,6 +2164,142 @@ def test_glm53_vision_rotary_position_ids_two_coordinate_axes():
         )
 
 
+def test_glm53_rotary_multiply_has_inv_freq_constant_operand():
+    """The vision-rotary ``freqs = position_ids_expanded * self.inv_freq`` Multiply
+    carries its ``inv_freq`` buffer as a first-class ``constant`` operand node.
+
+    This is the payoff of keeping constants in the JSON: the Multiply's
+    ``[Pv, 2, 1] -> [Pv, 2, 16]`` jump is no longer unexplained -- the ``inv_freq``
+    ``[16]`` buffer read is a real ``constant`` node wired in as a second operand,
+    and it shows up in the op's profiler-style ``input_shapes`` signature. The node
+    is tagged ``constant`` so the render filter drops it from the drawn picture.
+    """
+    pytest.importorskip("huggingface_hub")
+    import re
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    node_by_id = {n["id"]: n for n in nodes}
+
+    rotary_multiplies = [
+        n
+        for n in nodes
+        if n.get("label") == "Multiply"
+        and ":rotary_pos_emb:" in str(n["id"])
+        and "apply_rotary" not in str(n["id"])
+        and not re.search(r"recomposition_frequencies@l\d+", str(n["id"]))
+    ]
+    assert rotary_multiplies, "no vision-rotary Multiply found"
+
+    # ``self.inv_freq`` enters the freqs Multiply as a ``constant``-tagged operand
+    # sized ``[16]`` (it is the read/cast of the length-16 buffer, so it is tagged
+    # rather than named). Detect it by that shape + tag, not by an id substring.
+    saw_inv_freq_const = False
+    for mul in rotary_multiplies:
+        const_sources = [
+            node_by_id[e["sourceNodeId"]]
+            for e in mul.get("incomingEdges", [])
+            if _attr_value(node_by_id.get(e["sourceNodeId"], {}), "constant") == "true"
+        ]
+        for src in const_sources:
+            if str(_output_shape(src)).startswith("[16]"):
+                saw_inv_freq_const = True
+                # The [16] buffer appears in the Multiply's operand signature, which
+                # is what explains the [Pv, 2, 1] -> [Pv, 2, 16] shape jump.
+                shapes = _attr_value(mul, "input_shapes")
+                assert shapes is not None and "16" in shapes, shapes
+    assert saw_inv_freq_const, "inv_freq [16] constant operand not wired to rotary Multiply"
+
+
+def test_glm53_harvest_meta_tensors_resolves_inv_freq_and_a_weight():
+    """``harvest_meta_tensors`` indexes buffer + parameter shapes/dtypes off meta.
+
+    Resolver unit for the constant-shape path: the vision rotary ``inv_freq``
+    buffer resolves to length ``[16]`` and a Linear weight resolves 2-D, with a
+    dtype string that round-trips (no ``torch.`` prefix) through the shape
+    formatter.
+    """
+    pytest.importorskip("huggingface_hub")
+    from TraceLens.ModelUtils.meta_trace import harvest_meta_tensors
+
+    index = harvest_meta_tensors("zai-org/GLM-5.3-Flash")
+    if index is None:
+        pytest.skip("meta instantiation unavailable")
+
+    # inv_freq buffer -> [16], keyed by (owner_class, leaf).
+    inv_freq = [
+        spec
+        for (owner, leaf), spec in index.by_class_attr.items()
+        if leaf == "inv_freq"
+    ]
+    assert inv_freq, "no inv_freq buffer harvested"
+    assert any(tuple(s.shape) == (16,) for s in inv_freq), [s.shape for s in inv_freq]
+
+    # Every harvested dtype round-trips (no ``torch.`` prefix leaks through).
+    for spec in list(index.by_qualified.values()):
+        assert not spec.dtype.startswith("torch."), spec.dtype
+
+    # At least one 2-D learned weight is present.
+    two_d_weights = [
+        spec for name, spec in index.by_qualified.items()
+        if name.endswith(".weight") and len(spec.shape) == 2
+    ]
+    assert two_d_weights, "no 2-D weight harvested"
+
+
+def test_glm53_constants_stay_in_json_but_drop_from_rendered_html():
+    """Constants are first-class nodes in the JSON, filtered only at HTML render.
+
+    The exported graph keeps every ``constant`` node; the render-time filter
+    (``_graph_without_constants``) removes them so the drawn picture shows no
+    constants -- the owner rule "never show constants", applied in rendering
+    rather than by deleting data.
+    """
+    pytest.importorskip("huggingface_hub")
+    from TraceLens.Visualizer.model_explorer_export.viewer_page import (
+        _graph_without_constants,
+    )
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+
+    constants = [n for n in nodes if _attr_value(n, "constant") == "true"]
+    assert constants, "expected constant nodes in the JSON"
+
+    rendered = _graph_without_constants(graph)
+    rendered_ids = {n["id"] for n in rendered["nodes"]}
+    assert not any(_attr_value(n, "constant") == "true" for n in rendered["nodes"])
+    # None of the JSON's constant nodes survive into the rendered graph.
+    assert not (set(n["id"] for n in constants) & rendered_ids)
+
+
+def test_glm53_every_constant_node_has_a_consumer():
+    """A ``constant`` node is a pure source materialized only when wired to an op.
+
+    So a constant with no consumer is impossible by construction; if one appears it
+    is a materialization/wiring bug (it would also survive the dead-node scan only
+    because constants are not exempt -- they must always feed something).
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+
+    consumed = {
+        e["sourceNodeId"]
+        for n in nodes
+        for e in n.get("incomingEdges", [])
+    }
+    orphan_constants = [
+        n["id"]
+        for n in nodes
+        if _attr_value(n, "constant") == "true" and n["id"] not in consumed
+    ]
+    assert orphan_constants == [], orphan_constants
+
+
 def test_glm53_no_single_input_concat_survives_anywhere():
     """The owner invariant holds graph-wide: every ``Concat`` has >1 input.
 
@@ -2216,10 +2390,23 @@ def test_glm53_multi_input_concat_sums_operand_widths_not_identity():
         assert in_shape is not None, edge["sourceNodeId"]
         # The output must not mirror any single operand -- a two-input cat changes shape.
         assert in_shape != out_shape, (producer["id"], in_shape, out_shape)
-        in_last_dims.append(int(_last_dim(in_shape)))
+        in_last_dims.append(_last_dim(in_shape))
 
     # Concat axis width is the sum of the operands' sizes there, not one of them.
-    assert int(_last_dim(out_shape)) == sum(in_last_dims), (out_shape, in_last_dims)
+    # A width may be a concrete int or a symbolic term (e.g. "S*8"); fold every
+    # concrete size into one running total and join it with the symbolic terms,
+    # mirroring how the shape inferencer itself combines concat-axis sizes.
+    int_total = 0
+    symbolic_terms = []
+    for dim in in_last_dims:
+        try:
+            int_total += int(dim)
+        except ValueError:
+            symbolic_terms.append(dim)
+    if int_total or not symbolic_terms:
+        symbolic_terms.append(str(int_total))
+    expected = " + ".join(symbolic_terms)
+    assert _last_dim(out_shape) == expected, (out_shape, in_last_dims)
 
 
 def test_glm53_vision_rotary_output_edges_reference_real_producer_ports():
@@ -2589,6 +2776,20 @@ def _attr_value(node: dict, key: str) -> str | None:
     return None
 
 
+def _activation_incoming(node: dict, node_by_id: dict) -> list[dict]:
+    """Incoming edges from real activation producers, skipping ``constant`` sources.
+
+    A materialized buffer/param/hyper-parameter read (e.g. ``self.qkv_dim`` fed to
+    ``torch.split``) now lives in the JSON as a ``constant``-tagged leaf and is
+    dropped at render time, so it is never counted as an activation operand.
+    """
+    return [
+        edge
+        for edge in node.get("incomingEdges", [])
+        if _attr_value(node_by_id.get(edge["sourceNodeId"], {}), "constant") != "true"
+    ]
+
+
 def _port_metadata(node: dict, port: str) -> dict | None:
     for metadata in node.get("outputsMetadata", []):
         if str(metadata.get("id")) == str(port):
@@ -2747,8 +2948,9 @@ def test_glm53_view_split_stays_visible_with_named_slice_tiles():
     }, qkv_tiles
     for tile in qkv_tiles.values():
         assert _output_shape(tile), tile["id"]
-    # It is fed by the layout-only Transpose producer (single tensor in).
-    (split_src,) = qkv_split["incomingEdges"]
+    # It is fed by the layout-only Transpose producer (single tensor in); the
+    # ``qkv_dim`` split-size read is a render-dropped constant, not an activation.
+    (split_src,) = _activation_incoming(qkv_split, node_by_id)
     transpose = node_by_id[split_src["sourceNodeId"]]
     assert transpose["id"].endswith(
         "self_attn/seq:10:@op_l689_c12_transpose:@op_l689_c12_transpose:0"
@@ -2763,7 +2965,7 @@ def test_glm53_view_split_stays_visible_with_named_slice_tiles():
     )
     fn_tiles = _slice_tiles(fn_split)
     assert len(fn_tiles) == 3, fn_tiles
-    (producer_edge,) = fn_split["incomingEdges"]
+    (producer_edge,) = _activation_incoming(fn_split, node_by_id)
     producer = node_by_id[producer_edge["sourceNodeId"]]
     assert producer.get("label") == "Linear", producer.get("label")
     assert len(producer["outputsMetadata"]) == 1, producer["outputsMetadata"]
@@ -2805,17 +3007,23 @@ def test_glm53_vision_mlp_gate_and_up_are_parallel():
 
 
 def test_glm53_hyperconnection_weight_only_ops_are_hidden():
-    """The mHC mapping's weight-only unpacks are not drawn.
+    """The mHC mapping's weight-only unpacks are constants, dropped at render.
 
     ``pre_b, post_b, comb_b = self.base.split(...)`` and
     ``pre_scale, post_scale, comb_scale = self.scale.unbind(0)`` unpack a raw
     ``nn.Parameter`` with no activation flowing through, so — like any learned
-    weight — the op and any ``@tensor:external`` operand for ``base``/``scale``
-    must not appear. The ``pre_w/post_w/comb_w`` split stays: it unpacks
-    ``F.linear(flat, self.fn)``, which transforms the real activation ``flat``,
-    and its consumers keep that real operand after the weight operands vanish.
+    weight — the unpack op is tagged ``constant``: it stays in the exported JSON
+    but the render filter drops it (never drawn). The ``pre_w/post_w/comb_w``
+    split stays a real (non-constant) op: it unpacks ``F.linear(flat, self.fn)``,
+    which transforms the real activation ``flat``, and its consumers keep that
+    real operand.
     """
     pytest.importorskip("huggingface_hub")
+    from TraceLens.Visualizer.model_explorer_export.viewer_page import (
+        _graph_without_constants,
+        _node_is_constant,
+    )
+
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
@@ -2824,23 +3032,35 @@ def test_glm53_hyperconnection_weight_only_ops_are_hidden():
     attn_hc = [n for n in nodes if "attn_hc" in n["id"]]
     assert attn_hc, "expected the attn_hc mHC mapping nodes"
 
-    # The learned base/scale weights and their weight-only unpacks are gone.
-    externals = [n for n in attn_hc if ":external:" in n["id"]]
-    assert not externals, [n["id"] for n in externals]
+    # The learned base/scale weight-only unpacks are present in the JSON but
+    # tagged ``constant`` (so operand annotation still sees them); the render
+    # filter drops them so they are never drawn.
     base_split = [n for n in attn_hc if n["id"].endswith(":@op_l281_c32_split:0")]
     scale_unbind = [n for n in attn_hc if n["id"].endswith(":@op_l282_c44_unbind:0")]
-    assert not base_split, [n["id"] for n in base_split]
-    assert not scale_unbind, [n["id"] for n in scale_unbind]
+    assert base_split, "expected the base.split weight-only unpack in the JSON"
+    assert scale_unbind, "expected the scale.unbind weight-only unpack in the JSON"
+    assert all(_node_is_constant(n) for n in base_split), [n["id"] for n in base_split]
+    assert all(_node_is_constant(n) for n in scale_unbind), [
+        n["id"] for n in scale_unbind
+    ]
 
-    # The activation-derived split (F.linear(flat, self.fn)) survives with its
-    # three named output ports, and a real edge still feeds its consumers.
+    # After the render-time constant filter, the weight-only unpacks are gone.
+    rendered_ids = {n["id"] for n in _graph_without_constants(graph)["nodes"]}
+    assert not (rendered_ids & {n["id"] for n in base_split})
+    assert not (rendered_ids & {n["id"] for n in scale_unbind})
+
+    # The activation-derived split (F.linear(flat, self.fn)) survives as a real
+    # (non-constant) node with its three named output ports, still in the drawn
+    # graph, and a real edge still feeds its consumers.
     fn_split = [
         n
         for n in attn_hc
         if "comb_w" in (_attr_value(n, "output_names") or "")
     ]
     assert fn_split, "expected the pre_w/post_w/comb_w activation split to survive"
+    assert not any(_node_is_constant(n) for n in fn_split), [n["id"] for n in fn_split]
     split_id = fn_split[0]["id"]
+    assert split_id in rendered_ids, "the activation split must stay in the drawn graph"
     consumers = [
         n
         for n in attn_hc

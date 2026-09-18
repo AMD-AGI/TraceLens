@@ -1270,11 +1270,11 @@ def test_concat_with_inputs_and_symbolic_fallback():
     b = TensorSpec(("B", "S", 2048), "float16")
     out = inf._infer_node_output(_node("concat", details=["dim: -1"]), [a, b], root=None)
     assert out.shape == ("B", "S", 3072)
-    # Symbolic last dims -> not all int -> return widest base.
+    # Symbolic last dims -> sum the concatenated axis symbolically.
     c = TensorSpec(("B", "S", "H"), "float16")
     d = TensorSpec(("B", "S", "H"), "float16")
     out2 = inf._infer_node_output(_node("concat", details=["dim: -1"]), [c, d], root=None)
-    assert out2.shape == ("B", "S", "H")
+    assert out2.shape == ("B", "S", "H + H")
 
 
 def test_transpose_and_permute():

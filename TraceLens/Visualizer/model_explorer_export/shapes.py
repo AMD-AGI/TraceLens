@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from TraceLens.ModelUtils.block_tree import BlockNode
 from TraceLens.ModelUtils.shape_inference import (
@@ -552,13 +552,23 @@ def _fallback_node_spec(
 
 
 def fill_missing_node_shapes(
-    nodes: list[dict[str, Any]], *, context: ShapeContext
+    nodes: list[dict[str, Any]],
+    *,
+    context: ShapeContext,
+    boundary_spec: Callable[[str, str], TensorSpec | None] | None = None,
 ) -> None:
     """Give every node a shape so the viewer never falls back to rendering ``?``.
 
     Spine summaries, group input ports and nested-diagram nodes have no entry in the
     per-section inference results, so they inherit the shape of whatever feeds them and
     otherwise fall back to the model's activation shape.
+
+    ``boundary_spec(label, namespace)`` optionally supplies the meta-device ground
+    truth for an ``@input`` boundary parameter (e.g. the sparse-attention indexer's
+    ``attention_mask`` is ``[B, S]`` bool, not the generic ``(B, S, hidden)``). It is
+    consulted before the label heuristics so a boundary whose name merely *contains*
+    a heuristic keyword (``attention_mask`` matching the attention-module rule) is
+    sized from what the model actually passed rather than mislabelled.
     """
     hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
     vocab = context.dims.get(Symbol.VOCAB.value, Symbol.VOCAB.value)
@@ -584,8 +594,10 @@ def fill_missing_node_shapes(
             pending.append(node)
 
     for node in list(pending):
-        label = str(node.get("label") or "").strip().lower()
+        orig_label = str(node.get("label") or "").strip()
+        label = orig_label.lower()
         node_id = str(node.get("id", ""))
+        namespace = str(node.get("namespace") or "")
         synthetic = _node_synthetic(node)
         # A boundary/mirror carrying a real producer (``position_embeddings`` from
         # a ``rotary_pos_emb``) must inherit that producer's shape, not be caught
@@ -595,15 +607,29 @@ def fill_missing_node_shapes(
         connected_boundary = synthetic in {"@input", "@input_mirror"} and bool(
             _incoming_sources(node)
         )
+        # Meta-device ground truth for a forward-parameter boundary wins over the
+        # label heuristics below, which key off substrings and would otherwise
+        # mislabel a boundary whose name merely contains a keyword (the
+        # ``attention_mask`` boundary matching the attention-module ``(B, S, H)``
+        # rule). Only applies to real ``@input`` boundaries and only when the meta
+        # trace observed the parameter; everything else keeps the old behaviour.
+        meta_boundary: TensorSpec | None = None
+        if boundary_spec is not None and synthetic in {"@input", "@input_mirror"}:
+            meta_boundary = boundary_spec(orig_label, namespace)
+
         seeded: TensorSpec | None = None
         if node_id == "@input" or label in {"tokenized text", "input_ids"}:
             seeded = tokens
         elif label == "logits" or node_id.split("/")[-1] in {"lm_head", "output"}:
             seeded = logits
         elif connected_boundary:
-            # Leave it pending: the edge-propagation pass below inherits the
-            # producer's shape.
+            # A real incoming dataflow edge always beats a meta guess: leave it
+            # pending so the edge-propagation pass below inherits the producer's
+            # concrete shape. Meta ground-truth (below) only seeds *leaf*
+            # boundaries that have no producer to inherit from.
             seeded = None
+        elif meta_boundary is not None:
+            seeded = meta_boundary
         elif "embedding" in label or "embed" in node_id:
             # Embeddings widen token ids, so they must not inherit the (B, S) input shape.
             seeded = activation

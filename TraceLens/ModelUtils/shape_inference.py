@@ -686,6 +686,21 @@ _POINTWISE_LABELS = frozenset(
         "bitwise or",
         "bitwise xor",
         "copy",
+        # ``scatter_add`` writes into a copy of its first operand, so the output
+        # keeps that operand's shape and dtype like any other element-wise write.
+        "scatter add",
+    }
+)
+# Display labels (lowercased) for element-wise comparisons. Like a pointwise op
+# they keep the widest operand's shape, but the result dtype is always boolean.
+_COMPARISON_LABELS = frozenset(
+    {
+        "greater",
+        "greater equal",
+        "less",
+        "less equal",
+        "equal",
+        "not equal",
     }
 )
 
@@ -904,6 +919,12 @@ class ShapeInferencer:
         # ``attention_mask`` is a 4-D causal mask on the decoder attention yet a
         # flat ``[B, S]`` padding mask on the sparse-attention indexer.
         self._meta_input_specs_by_class: dict[tuple[str, str], TensorSpec] = {}
+        # Whether the meta forward-parameter input specs above have been populated.
+        # ``load_meta_shapes`` fills them eagerly (CLI path); a direct
+        # ``build_merged_model_graph`` never calls it, so ``boundary_input_spec``
+        # lazily traces them on first use so ``@input`` boundaries are sized from
+        # ground truth in both paths.
+        self._meta_input_specs_loaded: bool = False
         # Checkpoint retained for the lazy per-op FX fallback (see below).
         self._meta_checkpoint: str | Path | None = None
         # Per-op FX ground-truth shapes, keyed by (line, op, occurrence).
@@ -914,6 +935,64 @@ class ShapeInferencer:
         # node.id -> occurrence index of this op on its source line within its
         # block instance (matches the FX-side occurrence counting).
         self._op_line_occ: dict[str, int] = {}
+        # Lazily-harvested meta parameter/buffer index (shape + dtype), used to
+        # size a materialized ``constant`` leaf (a buffer like the rotary
+        # ``inv_freq``). ``False`` = not yet built; ``None`` = build failed/unavailable.
+        self._meta_tensor_index: Any = False
+
+    def _ensure_meta_tensor_index(self) -> Any:
+        if self._meta_tensor_index is not False:
+            return self._meta_tensor_index
+        self._meta_tensor_index = None
+        if self._meta_checkpoint is None:
+            return None
+        try:
+            from TraceLens.ModelUtils.meta_trace import harvest_meta_tensors
+
+            self._meta_tensor_index = harvest_meta_tensors(self._meta_checkpoint)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("Meta-tensor harvest failed: %s", exc)
+        return self._meta_tensor_index
+
+    def constant_spec(
+        self,
+        node: ModelGraphNode,
+        *,
+        root: BlockNode | None,
+        names: Sequence[str],
+    ) -> TensorSpec | None:
+        """Shape + dtype of a materialized ``constant`` leaf (buffer / learned weight).
+
+        Prefers the harvested meta tensor index (has a real dtype and covers
+        buffers) keyed by ``(owner_class, leaf)`` then by qualified-name suffix,
+        and falls back to :meth:`_lookup_parameter_spec` (which also covers
+        ``torch.arange``-derived buffers registered from the AST) with the model
+        dtype when meta is unavailable.
+        """
+        index = self._ensure_meta_tensor_index()
+        if index is not None:
+            owner = self._owner_class_name(node, root)
+            for name in names:
+                leaf = str(name).split(".")[-1].strip()
+                if owner is not None:
+                    spec = index.by_class_attr.get((owner, leaf))
+                    if spec is not None:
+                        return TensorSpec(shape=tuple(spec.shape), dtype=spec.dtype)
+            for name in names:
+                qualified = str(name).strip()
+                for full, spec in index.by_qualified.items():
+                    if full == qualified or full.endswith("." + qualified):
+                        return TensorSpec(shape=tuple(spec.shape), dtype=spec.dtype)
+        parameter = self._lookup_parameter_spec(node, root=root, names=names)
+        if parameter is not None:
+            has_weight = any("weight" in str(n).lower() for n in names)
+            param_dtype = (
+                self.context.weight_dtype(str(node.id))
+                if has_weight
+                else self.context.dtype
+            )
+            return TensorSpec(shape=parameter.shape, dtype=param_dtype)
+        return None
 
     def _detect_patch_embed_class(self) -> str | None:
         """Vision-scoped class whose conv consumes the raw image channels."""
@@ -1073,11 +1152,112 @@ class ShapeInferencer:
         cross-module-consistent shape. Returns *None* when neither is known.
         """
         param = label or ""
+        self._ensure_meta_input_specs()
         if root is not None and root.class_name:
             scoped = self._meta_input_specs_by_class.get((root.class_name, param))
             if scoped is not None:
                 return scoped
         return self._meta_input_specs.get(param)
+
+    def boundary_input_spec(
+        self,
+        label: str | None,
+        namespace: str | None = None,
+        *,
+        class_scoped_only: bool = False,
+    ) -> TensorSpec | None:
+        """Meta ground truth for a merged ``@input`` boundary, class-scoped first.
+
+        The merge-time boundary tiles (``@input:<param>``) are not part of the
+        ModelGraph that ``_entry_spec_for`` shapes, so ``fill_missing_node_shapes``
+        seeds them from here instead of the generic ``(B, S, hidden)`` default.
+        Resolution mirrors :meth:`_meta_input_specs_for`, but the owning module
+        class is read from the boundary's ``namespace`` (its segments name the
+        enclosing module classes) rather than a ``BlockNode`` root: try each
+        namespace segment as a candidate class, then fall back to the global
+        cross-module-consistent shape. Returns *None* when the parameter's shape
+        was never observed on meta (so the caller keeps its existing heuristics).
+
+        ``class_scoped_only`` suppresses the global fallback. A caller that
+        *overrides* an already-resolved boundary (rather than filling a missing
+        one) must trust only the locally-definite class-scoped shape: the global
+        map is "consistent by absence" -- a parameter the meta trace happened to
+        observe in only one module family (e.g. ``position_ids`` seen as ``(1, S)``
+        on the text stack but never on the vision rotary, which uses ``[Pv, 2]``)
+        lands in the global map and would wrongly clobber the other family's
+        authoritative shape.
+        """
+        param = (label or "").strip()
+        if not param:
+            return None
+        self._ensure_meta_input_specs()
+        if namespace:
+            for segment in reversed(str(namespace).split("/")):
+                segment = segment.strip()
+                if not segment:
+                    continue
+                scoped = self._meta_input_specs_by_class.get((segment, param))
+                if scoped is not None:
+                    return scoped
+        if class_scoped_only:
+            return None
+        return self._meta_input_specs.get(param)
+
+    def _ensure_meta_input_specs(self) -> None:
+        """Populate the forward-parameter input specs on first use.
+
+        ``load_meta_shapes`` fills these eagerly on the CLI path, but a direct
+        ``build_merged_model_graph`` (the library / test path) never calls it.
+        In that case trace them once, lazily, from the spec's checkpoint so
+        ``boundary_input_spec`` sizes ``@input`` boundaries from meta ground
+        truth in both paths. The result is cached (including the empty case) so
+        the meta forward runs at most once per inferencer.
+        """
+        if self._meta_input_specs_loaded:
+            return
+        self._meta_input_specs_loaded = True
+        checkpoint = self._meta_checkpoint_id()
+        if not checkpoint:
+            return
+        try:
+            from TraceLens.ModelUtils.meta_trace import trace_meta_input_specs
+
+            input_specs = trace_meta_input_specs(
+                checkpoint, config=self.spec.raw_config
+            )
+        except Exception:  # pragma: no cover - defensive; meta trace is best-effort
+            return
+        if not input_specs:
+            return
+        global_specs, class_specs = input_specs
+        for param, (shape, dtype) in global_specs.items():
+            self._meta_input_specs.setdefault(param, TensorSpec(shape=shape, dtype=dtype))
+        for (class_name, param), (shape, dtype) in class_specs.items():
+            self._meta_input_specs_by_class.setdefault(
+                (class_name, param), TensorSpec(shape=shape, dtype=dtype)
+            )
+
+    def _meta_checkpoint_id(self) -> str | None:
+        """A checkpoint id ``AutoConfig.from_pretrained`` accepts, or *None*.
+
+        The CLI path stores a bare, instantiable id on ``_meta_checkpoint``. The
+        direct-build path only has ``spec.checkpoint_source``, which is a display
+        label — for a Hub model it is ``hf://<owner>/<name>/<config-path>``, which
+        ``AutoConfig`` rejects. Strip the scheme and keep the ``<owner>/<name>``
+        repo id; pass any other source (local path, etc.) through unchanged.
+        """
+        explicit = self._meta_checkpoint
+        if explicit:
+            return str(explicit)
+        source = str(getattr(self.spec, "checkpoint_source", "") or "").strip()
+        if not source:
+            return None
+        if source.startswith("hf://"):
+            parts = [seg for seg in source[len("hf://") :].split("/") if seg]
+            if len(parts) >= 2:
+                return "/".join(parts[:2])
+            return "/".join(parts) or None
+        return source
 
     def load_meta_shapes(
         self,
@@ -1106,6 +1286,8 @@ class ShapeInferencer:
         input_specs = trace_meta_input_specs(
             checkpoint, config=self.spec.raw_config
         )
+        # This eager fill supersedes the lazy ``_ensure_meta_input_specs`` trace.
+        self._meta_input_specs_loaded = True
         if input_specs:
             global_specs, class_specs = input_specs
             for param, (shape, dtype) in global_specs.items():
@@ -1555,6 +1737,25 @@ class ShapeInferencer:
                 return inputs[-1]
             return self._activation_spec(dtype)
 
+        if node.metadata.get("constant") and not inputs:
+            # A materialized constant/buffer leaf (e.g. the rotary ``inv_freq``):
+            # its output *is* the parameter/buffer tensor, so size it directly from
+            # the meta parameter/buffer registry rather than any incoming edge.
+            names = [str(name) for name in node.metadata.get("external_inputs", [])]
+            if names:
+                spec = self.constant_spec(node, root=root, names=names)
+                if spec is not None:
+                    return spec
+                # A ``self.<attr>`` read that resolves to no registered
+                # parameter/buffer is a scalar hyper-parameter (an ``eps``, a
+                # ``scaling`` factor), not an activation. Size it as a single
+                # element ``[1]`` rather than falling through to the ``(B, S, H)``
+                # activation default (which would be a wrong operand shape in the
+                # constants view and trip the "no shape rule" warning). A 0-d
+                # ``()`` cannot be used: the display formatter drops an empty
+                # shape, so the node would be re-filled with the section default.
+                return TensorSpec(shape=(1,), dtype=self.context.dtype)
+
         if synthetic == "@tensor":
             label = (node.metadata.get("port_label") or node.label or "").lower()
             experts = self.context.dims.get(Symbol.EXPERTS.value, Symbol.EXPERTS.value)
@@ -1581,8 +1782,8 @@ class ShapeInferencer:
             or synthetic == "@combine"
         ):
             operands = list(inputs)
-            # A hidden buffer operand (axial-RoPE ``inv_freq``, absorbed onto this
-            # op by ``_absorb_buffer_only_ops`` so the buffer stays invisible)
+            # A hidden buffer operand (axial-RoPE ``inv_freq``, folded onto this
+            # op by ``_tag_buffer_only_ops`` so the buffer stays invisible)
             # carries a captured shape the visible edges lost. Fold it back in so
             # broadcasting recovers the real width (``[Pv, ?, 1] * inv_freq[16]``).
             for name in node.metadata.get("external_inputs", []):
@@ -1872,9 +2073,12 @@ class ShapeInferencer:
             # requires all inputs to share a rank, so a negative dim names the same
             # axis from the end for each -- resolve the axis PER OPERAND so a
             # (mis-inferred) rank mismatch can't silently drop the shorter operand
-            # and fabricate an identity concat (output == one input's shape). Only
-            # sum when every operand contributes a concrete size at that axis;
-            # otherwise fall back to the widest operand.
+            # and fabricate an identity concat (output == one input's shape). Sum
+            # every operand's contribution at that axis -- concrete sizes fold
+            # into one running total, symbolic sizes (e.g. "S*8") join it as
+            # terms -- so a single symbolic contributor no longer forces a bail
+            # out to "keep the widest operand's shape" (which silently swallows
+            # every other operand's width, including concrete ones).
             dim_str = _detail_value(details, "dim")
             dim = _int_dim(dim_str) if dim_str is not None else -1
             if dim is None:
@@ -1892,8 +2096,8 @@ class ShapeInferencer:
                     usable = False
                     break
                 concat_sizes.append(inp.shape[inp_dim])
-            if usable and concat_sizes and all(isinstance(s, int) for s in concat_sizes):
-                total = sum(concat_sizes)
+            if usable and concat_sizes:
+                total = _sum_dim_sizes(concat_sizes)
                 return TensorSpec(
                     shape=_replace_dim(base.shape, base_dim, total),
                     dtype=base.dtype,
@@ -2088,10 +2292,24 @@ class ShapeInferencer:
                 if not index_reduction:
                     return source
                 return TensorSpec(shape=source.shape, dtype="int64")
-            return TensorSpec(
-                shape=_replace_last_dim(source.shape, 1),
-                dtype="int64" if index_reduction else source.dtype,
-            )
+            out_dtype = "int64" if index_reduction else source.dtype
+            # torch reductions default to ``keepdim=False`` -- the reduced axis is
+            # dropped, not collapsed to size 1. Only an explicit ``keepdim=True``
+            # keeps it. Collapsing unconditionally (the previous behaviour)
+            # fabricates a phantom trailing axis a downstream ``cat``/``stack``
+            # then disagrees with its sibling operand's real rank on.
+            if _detail_value(details, "keepdim") == "True":
+                return TensorSpec(
+                    shape=_replace_last_dim(source.shape, 1), dtype=out_dtype
+                )
+            return TensorSpec(shape=source.shape[:-1], dtype=out_dtype)
+
+        if operation_label in _COMPARISON_LABELS:
+            # Element-wise comparison: broadcast to the widest operand, boolean out.
+            if inputs:
+                source = max(inputs, key=_broadcast_rank)
+                return TensorSpec(shape=source.shape, dtype="bool")
+            return TensorSpec(shape=self._active_hidden_shape(), dtype="bool")
 
         # An activation module resolved from a registry (e.g. ``act_fn = ACT2FN[...]``)
         # keeps its attribute name as the label (``act_fn``) while its class is the
@@ -3381,6 +3599,31 @@ def _replace_dim(
     if 0 <= dim < len(lst):
         lst[dim] = value
     return tuple(lst)
+
+
+def _sum_dim_sizes(sizes: list[DimExpr]) -> DimExpr:
+    """Combine per-operand axis sizes (e.g. for ``concat``) into their sum.
+
+    Sizes are ``int`` when concrete and ``str`` (e.g. ``"S*8"``) when symbolic.
+    A single non-int size used to force the whole sum to bail out to "keep the
+    widest operand's shape" (an identity concat), which is wrong whenever any
+    contributor -- not just the widest one -- has a genuinely symbolic size.
+    Fold every concrete size into one running total and join it with the
+    symbolic terms, so ``["S*8", 1]`` -> ``"S*8 + 1"`` instead of silently
+    dropping the ``1``.
+    """
+    if all(isinstance(size, int) for size in sizes):
+        return sum(sizes)  # type: ignore[arg-type]
+    total = 0
+    parts: list[str] = []
+    for size in sizes:
+        if isinstance(size, int):
+            total += size
+        else:
+            parts.append(str(size))
+    if total:
+        parts.append(str(total))
+    return " + ".join(parts) if parts else 0
 
 
 def _eval_dim_expr(node: Any, dims: dict[str, DimExpr]) -> int | None:
