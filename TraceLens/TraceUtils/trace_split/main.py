@@ -260,7 +260,8 @@ def _load_and_detect(args):
     """Load the trace, detect iteration roots, and enforce the splittability gate.
 
     Returns ``(detection, trace_json, trace_index)``, or ``None`` when there is
-    nothing to split (no GPU work, or NOT_SPLITTABLE without ``--allow-degraded``).
+    nothing to split: no GPU work, a NOT_SPLITTABLE result, or a DEGRADED result
+    without ``--allow-degraded``.
     """
     trace_json = DataLoader.load_data(get_filename(args.trace_path))
     events = trace_json.get("traceEvents", [])
@@ -286,16 +287,28 @@ def _load_and_detect(args):
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    if detection.status is DetectStatus.NOT_SPLITTABLE and not args.allow_degraded:
+    # SPLITTABLE always extracts; DEGRADED extracts only with --allow-degraded;
+    # NOT_SPLITTABLE never extracts (the flag does not override it).
+    splittable = detection.status is DetectStatus.SPLITTABLE or (
+        detection.status is DetectStatus.DEGRADED and args.allow_degraded
+    )
+    if not splittable:
         manifest = detection.to_manifest()
         manifest["aborted"] = True
         _write_manifest(args.output_dir, manifest)
-        print(
-            "\nRefusing to split: the detected roots do not account for enough of "
-            "the GPU's work, so per-iteration slices would be misleading. "
-            f"See {MANIFEST_NAME} for the coverage breakdown, or pass "
-            "--allow-degraded to continue anyway."
-        )
+        if detection.status is DetectStatus.DEGRADED:
+            print(
+                "\nRefusing to split: the detected roots account for only a "
+                "degraded share of the GPU's work, so per-iteration slices may be "
+                f"misleading. See {MANIFEST_NAME} for the coverage breakdown, or "
+                "pass --allow-degraded to split anyway."
+            )
+        else:
+            print(
+                "\nRefusing to split: no iteration roots account for enough of the "
+                "GPU's work to split on. "
+                f"See {MANIFEST_NAME} for the coverage breakdown."
+            )
         return None
 
     return detection, trace_json, trace_index
@@ -570,8 +583,10 @@ def main():
         action="store_true",
         default=False,
         help=(
-            "Continue even when the detected roots do not account for enough GPU "
-            "time. The manifest records the shortfall either way."
+            "Split even when the result is DEGRADED (GPU coverage below the "
+            "splittable gate but above the floor). Has no effect on NOT_SPLITTABLE "
+            "traces, which are never split. The manifest records the coverage "
+            "either way."
         ),
     )
     parser.add_argument(

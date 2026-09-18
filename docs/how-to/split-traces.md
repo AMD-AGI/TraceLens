@@ -64,11 +64,11 @@ run in a single invocation.
 | `--find-steady-state` | off | Extract a steady-state window instead of sequential iterations. |
 | `--num-steps` | `32` | Number of iterations to extract for the steady-state window. |
 | `--divide-phases` | off | Write every steady-state step into phase sub-folders, `prefilldecodemix/` and `decode_only/`. |
-| `--llm-inference` | off | Treat the trace as LLM inference. When serving annotations are absent, batch size is derived from `cpu_op` shapes and used for phase classification and steady-state identification. |
+| `--llm-inference` | off | Treats the trace as LLM inference. When serving annotations are absent, batch sizes are used for phase classification and steady-state identification. |
 | `--CONC`, `--OSL`, `--R` | none | Benchmark parameters. When all three are given, the ideal prefill-decode ratio is computed analytically and overrides the empirical estimate. See [Recommended profiling window](../conceptual/inference-analysis.md#recommended-profiling-window). |
 | `--max-num-seq` | none | Batch-size threshold above which a shape-inferred iteration is prefill-bearing. When omitted, the threshold is inferred. |
-| `--no-gap-fill` | off | Score each iteration by its own span instead of extending it to the next root. Work between two roots is then dropped; use this only to reproduce pre-gap-free output. |
-| `--allow-degraded` | off | Continue even when the detected roots do not clear the coverage gate. The manifest records the shortfall either way. |
+| `--no-gap-fill` | off | Score each iteration by its own span instead of extending it to the next root. Work between two roots is then dropped. |
+| `--allow-degraded` | off | Return splits even when GPU coverage is below acceptable threshold. |
 
 ## Iteration-root detection
 

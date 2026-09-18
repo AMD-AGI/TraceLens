@@ -27,6 +27,7 @@ from TraceLens.TraceUtils.trace_split import (
 )
 from TraceLens.TraceUtils.trace_split import root_detection as rd
 from TraceLens.TraceUtils.utils.detect_utils import (
+    COVERAGE_FLOOR,
     COVERAGE_GATE,
     GpuAttribution,
     IntervalIndex,
@@ -373,6 +374,26 @@ class TestGpuAttribution:
 
 
 # --------------------------------------------------------------------------- #
+# Coverage grading
+# --------------------------------------------------------------------------- #
+class TestGrade:
+    """_grade maps GPU coverage to a three-way status at the gate and floor."""
+
+    def test_at_or_above_gate_is_splittable(self):
+        assert rd._grade(1.0) is DetectStatus.SPLITTABLE
+        assert rd._grade(COVERAGE_GATE) is DetectStatus.SPLITTABLE
+
+    def test_between_floor_and_gate_is_degraded(self):
+        assert rd._grade(COVERAGE_GATE - 1e-6) is DetectStatus.DEGRADED
+        assert rd._grade((COVERAGE_FLOOR + COVERAGE_GATE) / 2) is DetectStatus.DEGRADED
+        assert rd._grade(COVERAGE_FLOOR) is DetectStatus.DEGRADED
+
+    def test_below_floor_is_not_splittable(self):
+        assert rd._grade(COVERAGE_FLOOR - 1e-6) is DetectStatus.NOT_SPLITTABLE
+        assert rd._grade(0.0) is DetectStatus.NOT_SPLITTABLE
+
+
+# --------------------------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 # Stage 1 end to end
 # --------------------------------------------------------------------------- #
@@ -486,14 +507,25 @@ class TestDetectionFlow:
         assert result.status is DetectStatus.NOT_SPLITTABLE
         assert len(result) == 0
 
-    def test_uncovered_work_grades_directly_without_probes(self):
+    def test_moderately_uncovered_work_grades_degraded(self):
         # Escalation probes were removed: uncovered work no longer triggers a
-        # probe ladder; the roots are graded straight to degraded/not-splittable.
+        # probe ladder; the roots are graded straight from their coverage.
+        # 16 annotated kernels (40 each = 640) plus 110 of unaccounted GPU work
+        # before the first iteration -> 640 / 750 = 0.85, inside [FLOOR, GATE).
+        events = serving_trace(16)
+        events.append(kernel(100, 110, 99999, name="unaccounted"))
+        result = _detect(events)
+        assert COVERAGE_FLOOR <= result.coverage.covered_selected < COVERAGE_GATE
+        assert result.status is DetectStatus.DEGRADED
+
+    def test_heavily_uncovered_work_grades_not_splittable(self):
+        # The same shape, but the unaccounted work dwarfs the annotated kernels,
+        # dropping coverage below the floor.
         events = serving_trace(16)
         events.append(kernel(1500, 500_000, 99999, name="unaccounted"))
         result = _detect(events)
-        assert result.coverage.covered_selected < COVERAGE_GATE
-        assert result.status in (DetectStatus.DEGRADED, DetectStatus.NOT_SPLITTABLE)
+        assert result.coverage.covered_selected < COVERAGE_FLOOR
+        assert result.status is DetectStatus.NOT_SPLITTABLE
 
     def test_manifest_reports_quality(self):
         manifest = _detect(serving_trace(16)).to_manifest()
