@@ -213,18 +213,31 @@ def trace_meta_input_specs(
     *,
     seq_len: int = 130,
     batch_size: int = 2,
-) -> dict[str, tuple[tuple[Any, ...], str]] | None:
-    """Run a meta forward and return globally-consistent forward-parameter *input* shapes.
+) -> (
+    tuple[
+        dict[str, tuple[tuple[Any, ...], str]],
+        dict[tuple[str, str], tuple[tuple[Any, ...], str]],
+    ]
+    | None
+):
+    """Run a meta forward and return forward-parameter *input* shapes.
 
-    Returns a mapping ``param_name -> (symbolised_shape, dtype_str)`` for every
-    forward parameter whose captured ``(shape, dtype)`` is **identical across
-    every module that receives it**. Any parameter observed with conflicting
-    shapes (e.g. ``hidden_states`` at several widths, or ``position_ids`` present
-    in both the text ``[B, S]`` and the vision path) is dropped, so an ambiguous
-    seed is never emitted. This lets a caller resolve a boundary that would
-    otherwise fall back to the generic activation default — most notably an
-    ``attention_mask``/index bookkeeping parameter that is genuinely ``[B, S]``,
-    not ``[B, S, hidden]``.
+    Returns a pair ``(global_specs, class_specs)``:
+
+    * ``global_specs`` maps ``param_name -> (symbolised_shape, dtype_str)`` for
+      every forward parameter whose captured ``(shape, dtype)`` is **identical
+      across every module that receives it**. Any parameter observed with
+      conflicting shapes (e.g. ``hidden_states`` at several widths, or
+      ``position_ids`` present in both the text ``[B, S]`` and the vision path)
+      is dropped, so an ambiguous global seed is never emitted.
+    * ``class_specs`` maps ``(class_name, param_name) -> (shape, dtype)`` for
+      every parameter whose shape is unambiguous **within the modules of one
+      class**. This resolves a boundary whose name is globally ambiguous but
+      locally definite — most notably ``attention_mask``, which is a 4-D causal
+      mask on the decoder attention yet a flat ``[B, S]`` padding mask on the
+      sparse-attention indexer. Keyed by the receiving module's own class, so the
+      indexer's ``@input:attention_mask`` seeds ``[B, S]`` while the decoder's
+      keeps its causal shape.
 
     ``batch_size`` and ``seq_len`` are deliberately chosen distinct from common
     structural dims (head_dim 128, num_heads 64, …) so :func:`symbolise_meta_shape`
@@ -232,7 +245,7 @@ def trace_meta_input_specs(
     would corrupt a ``[B, S, 64, 128]`` gate into ``[B, S, 64, S]``).
 
     Returns *None* when torch is unavailable, the model cannot be instantiated, or
-    nothing consistent was captured. Best-effort, like :func:`trace_meta_shapes`.
+    nothing was captured. Best-effort, like :func:`trace_meta_shapes`.
     """
     try:
         import torch
@@ -255,8 +268,10 @@ def trace_meta_input_specs(
 
     # param_name -> set of (symbolised_shape, dtype_str) seen across all modules.
     observed: dict[str, set[tuple[tuple[Any, ...], str]]] = {}
+    # (class_name, param_name) -> set of (shape, dtype) seen within that class.
+    observed_by_class: dict[tuple[str, str], set[tuple[tuple[Any, ...], str]]] = {}
 
-    def _record(param: str, tensor: Any) -> None:
+    def _record(class_name: str, param: str, tensor: Any) -> None:
         shape = symbolise_meta_shape(
             tuple(int(d) for d in tensor.shape),
             batch_size=batch_size,
@@ -264,8 +279,10 @@ def trace_meta_input_specs(
         )
         dtype = str(tensor.dtype).replace("torch.", "")
         observed.setdefault(param, set()).add((shape, dtype))
+        observed_by_class.setdefault((class_name, param), set()).add((shape, dtype))
 
     def _make_hook(module: Any):
+        class_name = type(module).__name__
         try:
             params = list(inspect.signature(module.forward).parameters)
         except (TypeError, ValueError):
@@ -275,10 +292,10 @@ def trace_meta_input_specs(
             for index, value in enumerate(args):
                 if isinstance(value, torch.Tensor):
                     name = params[index] if index < len(params) else f"arg{index}"
-                    _record(name, value)
+                    _record(class_name, name, value)
             for name, value in (kwargs or {}).items():
                 if isinstance(value, torch.Tensor):
-                    _record(name, value)
+                    _record(class_name, name, value)
 
         return hook
 
@@ -304,11 +321,20 @@ def trace_meta_input_specs(
         for param, values in observed.items()
         if len(values) == 1
     }
-    if resolved:
+    # Per-class: keep parameters unambiguous within their own class.
+    resolved_by_class = {
+        key: next(iter(values))
+        for key, values in observed_by_class.items()
+        if len(values) == 1
+    }
+    if resolved or resolved_by_class:
         _log.info(
-            "Meta-device tracing captured %d consistent input params", len(resolved)
+            "Meta-device tracing captured %d consistent input params "
+            "(%d class-scoped)",
+            len(resolved),
+            len(resolved_by_class),
         )
-        return resolved
+        return resolved, resolved_by_class
     return None
 
 

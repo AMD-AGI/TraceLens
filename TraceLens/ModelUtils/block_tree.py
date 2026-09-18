@@ -764,6 +764,15 @@ class BlockNode:
     forward_step_return_producers: dict[str, list[str]] = field(
         default_factory=dict
     )
+    # Submodule call attr -> secondary forward params it reads directly as bare
+    # boundary args (``q = self.wq_b(q_resid)`` -> ``{'wq_b': ('q_resid',)}``).
+    # A secondary param handed straight to a plain submodule has no internal
+    # producer, so without this the submodule's input would collapse onto the
+    # frame's primary ``@input``; the graph pass turns each into a dedicated
+    # ``@input:<param>`` boundary port the submodule reads and the caller docks.
+    forward_step_boundary_params: dict[str, tuple[str, ...]] = field(
+        default_factory=dict
+    )
     # A traced free-function call whose body (or a callee) materialises a tensor on
     # the host (``.tolist()``/``.item()``) — rendered with a ``device: cpu`` label.
     runs_on_host: bool = False
@@ -2279,6 +2288,7 @@ def build_block_node(
                         label=base_attr.strip("_").replace("_", " "),
                         forward_order=child_order,
                         details=[f"method `{base_attr}()`", *call_context],
+                        input_label=cls.multi_op_method_inputs.get(base_attr),
                         forward_return_slots=dict(m_return_slots),
                         forward_return_order=list(m_return_order),
                         primary_return_slot=m_primary_return,
@@ -2421,6 +2431,7 @@ def build_block_node(
             cls.forward_step_predecessor_ordinals
         ),
         forward_step_return_producers=dict(cls.forward_step_return_producers),
+        forward_step_boundary_params=dict(cls.forward_step_boundary_params),
     )
 
 

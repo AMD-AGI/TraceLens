@@ -1334,6 +1334,80 @@ def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
                     graph.link_output_ports[(source, index)] = str(ordinal)
 
 
+def _add_submodule_boundary_param_inputs(
+    graph: ComputationGraph, root: BlockNode, input_index: int | None
+) -> None:
+    """Give a plain submodule fed only by a bare secondary forward param its port.
+
+    ``q = self.wq_b(q_resid)`` hands a submodule a secondary forward parameter
+    that has no internal producer. :func:`_add_forward_param_inputs` only creates a
+    boundary for a param an *operation* reads (``attention_mask.to(...)``), so a
+    param consumed straight by a plain submodule call is missed: the submodule's
+    input collapses onto the frame's primary ``@input`` (``hidden_states``) and the
+    caller's ``q_resid`` argument has no port to dock onto (it then mis-lands, e.g.
+    surfacing as a wrong ``attention_mask`` mirror). Create a dedicated
+    ``@input:<param>`` boundary the submodule reads instead.
+
+    General and name-agnostic: driven by ``forward_step_boundary_params`` (the bare
+    forward params each submodule call reads). Only fires when the submodule has no
+    real primary predecessor — i.e. the bare param is its sole operand — so a
+    submodule that also takes the primary keeps its true input untouched.
+    """
+    boundary = root.forward_step_boundary_params
+    if not boundary:
+        return
+    primary = _input_label_for(root)
+    param_index: dict[str, int] = {}
+    for call_attr, params in boundary.items():
+        # A submodule with a real primary predecessor already reads its true input.
+        if root.forward_step_predecessors.get(call_attr):
+            continue
+        if root.forward_step_predecessor_args.get(call_attr):
+            continue
+        secondary = [
+            param
+            for param in params
+            if param != primary and param in root.forward_param_inputs
+        ]
+        if len(secondary) != 1:
+            continue
+        param = secondary[0]
+        member_indices = {
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.block is not None and spec.block.attr_name == call_attr
+        }
+        if not member_indices:
+            continue
+        source = param_index.get(param)
+        if source is None:
+            source = _add_node(
+                graph,
+                key=f"{SYNTHETIC_INPUT}:{param}",
+                label=param,
+                synthetic=SYNTHETIC_INPUT,
+            )
+            param_index[param] = source
+        redirected = False
+        if input_index is not None:
+            for target in sorted(member_indices):
+                stale = (input_index, target)
+                if stale not in graph.links:
+                    continue
+                graph.links.remove(stale)
+                graph.link_output_ports.pop(stale, None)
+                graph.link_port_labels.pop(stale, None)
+                link = (source, target)
+                if link not in graph.links:
+                    graph.links.append(link)
+                redirected = True
+        if not redirected:
+            first = min(member_indices)
+            link = (source, first)
+            if link not in graph.links:
+                graph.links.append(link)
+
+
 def _prune_weight_only_ops(graph: ComputationGraph) -> ComputationGraph:
     """Hide ops whose value derives solely from module parameters/buffers.
 
@@ -3504,6 +3578,7 @@ def build_computation_graph(
         graph.primary_output_index = last_index
     if resolved_include_input:
         _add_forward_param_inputs(graph, root)
+        _add_submodule_boundary_param_inputs(graph, root, input_index)
     graph = _apply_dead_code_elimination(
         graph,
         root,

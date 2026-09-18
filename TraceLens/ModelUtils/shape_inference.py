@@ -898,6 +898,12 @@ class ShapeInferencer:
         # would otherwise fall back to the generic ``(B, S, hidden)`` default —
         # e.g. an ``attention_mask`` that is genuinely ``[B, S]``.
         self._meta_input_specs: dict[str, TensorSpec] = {}
+        # Class-scoped meta-device forward-parameter *input* shapes, keyed by
+        # ``(receiving module class name, parameter name)``. Resolves a boundary
+        # whose name is globally ambiguous but locally definite — e.g.
+        # ``attention_mask`` is a 4-D causal mask on the decoder attention yet a
+        # flat ``[B, S]`` padding mask on the sparse-attention indexer.
+        self._meta_input_specs_by_class: dict[tuple[str, str], TensorSpec] = {}
         # Checkpoint retained for the lazy per-op FX fallback (see below).
         self._meta_checkpoint: str | Path | None = None
         # Per-op FX ground-truth shapes, keyed by (line, op, occurrence).
@@ -1043,16 +1049,35 @@ class ShapeInferencer:
                 shape=(Symbol.VISION_PATCH.value, self._vision_patch_flat),
                 dtype=self.context.dtype,
             )
-        # Meta-device ground truth for a globally-consistent forward parameter
-        # (e.g. ``attention_mask`` → ``[B, S]``). Lowest precedence: it only
-        # resolves a boundary the explicit override and vision seed both declined,
-        # replacing the generic ``(B, S, hidden)`` default with the real observed
-        # shape. Parameters with any cross-module shape disagreement were dropped
-        # upstream, so this never fires on an ambiguous name (``hidden_states`` etc.).
-        meta_input = self._meta_input_specs.get(node.label or "")
+        # Meta-device ground truth for a forward parameter. Lowest precedence: it
+        # only resolves a boundary the explicit override and vision seed both
+        # declined, replacing the generic ``(B, S, hidden)`` default with the real
+        # observed shape. The class-scoped map is consulted first — it resolves a
+        # parameter whose name is globally ambiguous but locally definite (e.g.
+        # ``attention_mask`` is ``[B, S]`` on the sparse-attention indexer but a
+        # 4-D causal mask on the decoder attention). The global map only carries
+        # parameters with no cross-module disagreement, so it never fires on an
+        # ambiguous name (``hidden_states`` etc.).
+        meta_input = self._meta_input_specs_for(node.label, root)
         if meta_input is not None:
             return meta_input
         return None
+
+    def _meta_input_specs_for(
+        self, label: str | None, root: BlockNode | None
+    ) -> TensorSpec | None:
+        """Meta ground truth for a boundary ``label``, class-scoped first.
+
+        Prefers the shape observed for this parameter *within the module class*
+        that owns the boundary (``root.class_name``); falls back to the global
+        cross-module-consistent shape. Returns *None* when neither is known.
+        """
+        param = label or ""
+        if root is not None and root.class_name:
+            scoped = self._meta_input_specs_by_class.get((root.class_name, param))
+            if scoped is not None:
+                return scoped
+        return self._meta_input_specs.get(param)
 
     def load_meta_shapes(
         self,
@@ -1082,8 +1107,13 @@ class ShapeInferencer:
             checkpoint, config=self.spec.raw_config
         )
         if input_specs:
-            for param, (shape, dtype) in input_specs.items():
+            global_specs, class_specs = input_specs
+            for param, (shape, dtype) in global_specs.items():
                 self._meta_input_specs[param] = TensorSpec(shape=shape, dtype=dtype)
+            for (class_name, param), (shape, dtype) in class_specs.items():
+                self._meta_input_specs_by_class[(class_name, param)] = TensorSpec(
+                    shape=shape, dtype=dtype
+                )
 
         raw = trace_meta_shapes(
             checkpoint,
@@ -1099,7 +1129,11 @@ class ShapeInferencer:
                 self._meta_shapes[module_path] = TensorSpec(
                     shape=sym, dtype=self.context.dtype
                 )
-        return bool(self._meta_shapes or self._meta_input_specs)
+        return bool(
+            self._meta_shapes
+            or self._meta_input_specs
+            or self._meta_input_specs_by_class
+        )
 
     def infer_model_graph(
         self, graph: ModelGraph, *, root: BlockNode | None = None
@@ -1572,7 +1606,7 @@ class ShapeInferencer:
             # ``attention_mask`` → ``[B, S]``), prefer it over the passthrough,
             # whose upstream would otherwise be the generic activation default.
             if synthetic == "@input_mirror":
-                meta_input = self._meta_input_specs.get(node.label or "")
+                meta_input = self._meta_input_specs_for(node.label, root)
                 if meta_input is not None:
                     return meta_input
             if inputs:
@@ -1725,6 +1759,24 @@ class ShapeInferencer:
                     ),
                     dtype=source.dtype,
                 )
+            # A bounded range-slice to a config-derived constant
+            # (``topk_indices[..., :output_width]``) resizes that axis to the
+            # folded width, overriding whatever the source axis held (it may have
+            # been inflated by proven data-dependent internals upstream).
+            resize_str = _detail_value(details, "resize_dim")
+            if resize_str and source.shape:
+                shape = list(source.shape)
+                rank = len(shape)
+                for token in resize_str.split(","):
+                    axis_str, _, size_str = token.strip().partition("=")
+                    axis = _int_dim(axis_str.strip())
+                    try:
+                        size = int(size_str.strip())
+                    except (TypeError, ValueError):
+                        size = None
+                    if axis is not None and size is not None:
+                        shape[axis % rank] = size
+                return TensorSpec(shape=tuple(shape), dtype=source.dtype)
             return source
 
         if operation_label == "tile":
@@ -4329,6 +4381,18 @@ def _parse_module_ctor(
     local_vars: dict[str, DimExpr],
     context: ShapeContext,
 ) -> ModuleLinearSpec | ModuleConvSpec | ModuleEmbeddingSpec | ModuleParameterSpec | None:
+    if isinstance(node, ast.IfExp):
+        # Conditional module assignment, e.g.
+        # ``self.q_a_proj = nn.Linear(...) if q_lora_rank is not None else nn.Identity()``.
+        # Resolve to whichever branch is a recognizable module constructor so the
+        # real submodule (not the Identity fallback) supplies in/out dims.
+        for branch in (node.body, node.orelse):
+            spec = _parse_module_ctor(
+                branch, config=config, local_vars=local_vars, context=context
+            )
+            if spec is not None:
+                return spec
+        return None
     if not isinstance(node, ast.Call):
         return None
     class_name = _call_class_name(node) or ""

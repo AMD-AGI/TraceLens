@@ -1294,6 +1294,7 @@ def _multi_op_forward_methods(
 ) -> tuple[
     dict[str, list[ForwardOperation]],
     dict[str, tuple[dict[str, str], list[str], str | None]],
+    dict[str, str],
 ]:
     """Forward helper methods with enough tensor operations to expand as a subgraph.
 
@@ -1301,14 +1302,17 @@ def _multi_op_forward_methods(
     primary_return_slot)`` so a tuple-returning helper (``key_states,
     value_states = self.expand_kv(...)``) exposes every return slot as its own
     frame output — the consumer then docks the right slot onto each port instead
-    of collapsing parallel returns onto the frame tail. General: read off the
-    method's own return statement, no class-name checks.
+    of collapsing parallel returns onto the frame tail — and its primary
+    parameter name so the frame's ``@input`` boundary is labelled after the
+    method's own first parameter. General: read off the method's own signature
+    and return statement, no class-name checks.
     """
     method_funcs = {
         item.name: item for item in class_node.body if isinstance(item, ast.FunctionDef)
     }
     expanded: dict[str, list[ForwardOperation]] = {}
     returns: dict[str, tuple[dict[str, str], list[str], str | None]] = {}
+    inputs: dict[str, str] = {}
     for call_attr in forward_calls:
         base = base_submodule_attr(call_attr)
         if (
@@ -1333,6 +1337,9 @@ def _multi_op_forward_methods(
             # Keyed by the base method name; two call sites of the same repeated
             # method resolve here through ``base_submodule_attr`` in the block tree.
             expanded[base] = operations.operations
+            primary_input = _primary_forward_input_name(func)
+            if primary_input is not None:
+                inputs[base] = primary_input
             if len(operations.return_order) >= 2:
                 op_attrs = {op.attr_name for op in operations.operations}
                 if all(
@@ -1344,7 +1351,7 @@ def _multi_op_forward_methods(
                         list(operations.return_order),
                         operations.primary_return_slot,
                     )
-    return expanded, returns
+    return expanded, returns, inputs
 
 
 def _synthetic_call_function_name(call_attr: str) -> str | None:
@@ -2043,6 +2050,12 @@ class ClassStructure:
     multi_op_method_returns: dict[
         str, tuple[dict[str, str], list[str], str | None]
     ] = field(default_factory=dict)
+    # For an inline-expanded forward *method*: base method name -> its primary
+    # (first non-``self``) parameter name, so the method frame's ``@input``
+    # boundary is labelled after the method's own parameter
+    # (``build_attention_mask_from_topk`` -> ``topk_indices``) instead of falling
+    # back to the generic ``hidden_states``.
+    multi_op_method_inputs: dict[str, str] = field(default_factory=dict)
     # For an inline-expanded free function returning a tuple
     # (``q_embed, k_embed = apply_rotary_pos_emb_vision(...)``): call attr ->
     # ordered internal producer attrs, so a consumer reading a specific return
@@ -2698,6 +2711,17 @@ class _ForwardOperationExtractor:
         # emit fake tensor ops (Add/FloorDivide/Multiply) that dangle when their
         # result feeds a size argument like ``torch.arange(n * k)``.
         self.host_scalar_vars: set[str] = set()
+        # Host-scalar locals whose value folds to a concrete int (``output_width =
+        # self.index_topk`` → 2048; ``output_width += self.index_kpool - 1``).
+        # Lets a slice/pad-to-constant (``topk_indices[..., :output_width]``)
+        # resize an axis to the folded width instead of aliasing through, and is
+        # kept a superset of the names in ``host_scalar_vars`` that resolve.
+        self.host_scalar_values: dict[str, int] = {}
+        # Set while resolving the *base* of an in-place slice mutation
+        # (``key_states[..., :n].copy_(src)``): that subscript is an lvalue, so the
+        # range-slice must NOT materialise a resize ``Slice`` op — the base tensor
+        # is written into, not sliced-then-read.
+        self._suppress_slice_resize = False
         # Ordered return producers captured as the return statement is walked, so a
         # subscripted return element (``return pool_keys[:, keep], ...``) — which
         # produces a gather op but binds no name — still docks its consumer. Keyed
@@ -2971,6 +2995,109 @@ class _ForwardOperationExtractor:
             return _expr_name(node.func) == "len"
         return False
 
+    def _fold_host_int(self, node: ast.AST) -> int | None:
+        """Fold a host-scalar expression to a concrete non-negative int, else None.
+
+        Resolves int literals, previously-folded host-scalar locals
+        (``host_scalar_values``), integer ``self.<attr>``/``config.<attr>``
+        scalars (via the constructor-resolved ``self_values`` and the config
+        dict), and ``+ - * // %`` / unary-sign arithmetic over those. Used to give
+        a slice/pad-to-constant bound (``topk_indices[..., :output_width]``) its
+        concrete width so shape inference can resize the axis. Returns *None* for
+        anything not statically resolvable (kept general — no name allowlist).
+        """
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, int) and not isinstance(node.value, bool):
+                return node.value
+            return None
+        if isinstance(node, ast.Name):
+            return self.host_scalar_values.get(node.id)
+        if isinstance(node, ast.Attribute):
+            value = _config_value(node, self.config, self.self_values)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+            return None
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+            operand = self._fold_host_int(node.operand)
+            if operand is None:
+                return None
+            return -operand if isinstance(node.op, ast.USub) else operand
+        if isinstance(node, ast.BinOp):
+            left = self._fold_host_int(node.left)
+            right = self._fold_host_int(node.right)
+            if left is None or right is None:
+                return None
+            try:
+                if isinstance(node.op, ast.Add):
+                    return left + right
+                if isinstance(node.op, ast.Sub):
+                    return left - right
+                if isinstance(node.op, ast.Mult):
+                    return left * right
+                if isinstance(node.op, ast.FloorDiv):
+                    return left // right
+                if isinstance(node.op, ast.Mod):
+                    return left % right
+            except (TypeError, ValueError, ZeroDivisionError):
+                return None
+        return None
+
+    def _record_host_scalar(self, target: ast.AST, value: ast.AST) -> None:
+        """Fold ``target = value``/``target += …`` to an int and cache it, if host-scalar."""
+        if not isinstance(target, ast.Name):
+            return
+        folded = self._fold_host_int(value)
+        if folded is not None and folded >= 0:
+            self.host_scalar_values[target.id] = folded
+        else:
+            # A reassignment to a now-unresolvable value must not keep the stale int.
+            self.host_scalar_values.pop(target.id, None)
+
+    def _subscript_resize_dims(self, index: ast.AST) -> list[tuple[int, int]]:
+        """Axes a bounded range-slice (``x[..., :output_width]``) resizes to a constant.
+
+        Returns ``(axis, size)`` pairs for each ``ast.Slice`` element whose bound(s)
+        fold to a concrete int — ``:B`` → size ``B``; ``a:b`` → size ``b - a`` — so
+        shape inference can set that axis to the folded width instead of passing the
+        source axis through unchanged. Axes after an ``Ellipsis`` are numbered from
+        the end (``x[..., :B]`` resizes ``-1``). Slices with a non-static or full
+        (``:``) bound, and integer selects (handled by ``_subscript_select_dims``),
+        are skipped. Returns ``[]`` when nothing resolves — the caller then aliases.
+        """
+        elts = index.elts if isinstance(index, ast.Tuple) else [index]
+        ellipsis_at = next(
+            (
+                pos
+                for pos, elt in enumerate(elts)
+                if isinstance(elt, ast.Constant) and elt.value is Ellipsis
+            ),
+            None,
+        )
+        resize: list[tuple[int, int]] = []
+        for pos, elt in enumerate(elts):
+            if not isinstance(elt, ast.Slice) or elt.step is not None:
+                continue
+            if elt.upper is None:
+                continue
+            upper = self._fold_host_int(elt.upper)
+            if upper is None:
+                continue
+            if elt.lower is None:
+                size = upper
+            else:
+                lower = self._fold_host_int(elt.lower)
+                if lower is None:
+                    continue
+                size = upper - lower
+            if size < 0:
+                continue
+            if ellipsis_at is None or pos < ellipsis_at:
+                axis = pos
+            else:
+                axis = -(len(elts) - pos)
+            resize.append((axis, size))
+        return resize
+
     def expression(self, node: ast.AST) -> tuple[str | None, list[str]]:
         if isinstance(node, ast.Name):
             return self.var_producer.get(node.id), []
@@ -3023,6 +3150,31 @@ class _ForwardOperationExtractor:
                         base_external,
                         details=[
                             "select_dim: " + ", ".join(str(dim) for dim in select_dims)
+                        ],
+                    )
+                    return producer, []
+                # A bounded range-slice to a config-derived constant width
+                # (``topk_indices[..., :output_width]``) resizes that axis to the
+                # folded size — a real ``Slice``, not a pass-through alias, so the
+                # axis reads its true width even when the source axis was inflated
+                # by proven data-dependent internals upstream. Skip a host-scalar
+                # shape read (``hidden_states.shape[:2]``): it is index bookkeeping
+                # and must emit no tensor op.
+                resize_dims = (
+                    []
+                    if self._suppress_slice_resize or self._is_host_scalar_expr(node)
+                    else self._subscript_resize_dims(node.slice)
+                )
+                if resize_dims:
+                    self._materialized_subscripts.add(id(node))
+                    producer = self._emit(
+                        node,
+                        "Slice",
+                        base_predecessors,
+                        base_external,
+                        details=[
+                            "resize_dim: "
+                            + ", ".join(f"{axis}={size}" for axis, size in resize_dims)
                         ],
                     )
                     return producer, []
@@ -3170,6 +3322,12 @@ class _ForwardOperationExtractor:
             ):
                 start = 1
             for idx, arg in enumerate(node.args):
+                # A host-scalar positional (``key_states.shape[2]``) is an int size
+                # read, not a tensor operand: it must contribute no producer, or the
+                # shape's base tensor is fabricated as a data dependency / @input.
+                if self._is_host_scalar_expr(arg):
+                    positional_producers.append([])
+                    continue
                 producers, arg_external = _collect_call_arg_producers(arg)
                 positional_producers.append(producers)
                 arg_producers.extend(producers)
@@ -3179,6 +3337,11 @@ class _ForwardOperationExtractor:
                     arg_name_map[name] = producers[0]
                     _record_arg_ordinal(name, producers[0], arg)
             for keyword in node.keywords:
+                # Likewise skip a host-scalar keyword (``kv_length=key_states.shape[2]``):
+                # mapping it to the shape's base tensor producer fabricates a phantom
+                # @input port on the callee frame (the "key_states" defect).
+                if self._is_host_scalar_expr(keyword.value):
+                    continue
                 producer, arg_external = self.expression(keyword.value)
                 if producer:
                     arg_producers.append(producer)
@@ -3866,6 +4029,8 @@ class _ForwardOperationExtractor:
                     for target in targets:
                         if isinstance(target, ast.Name):
                             self.host_scalar_vars.add(target.id)
+                for target in targets:
+                    self._record_host_scalar(target, value)
                 self._track_shape_assignment(targets, value)
                 for target in targets:
                     if isinstance(target, ast.Name):
@@ -3897,6 +4062,21 @@ class _ForwardOperationExtractor:
                 self._record_output_unpack(stmt, producer)
                 continue
             if isinstance(stmt, ast.AugAssign):
+                # ``output_width += self.index_kpool - 1`` over host scalars is
+                # index bookkeeping: fold the accumulation and emit no tensor op
+                # (an empty-predecessor Add would dangle). Only a genuine tensor
+                # accumuland (target bound to a real producer) emits an op.
+                if (
+                    isinstance(stmt.target, ast.Name)
+                    and stmt.target.id not in self.var_producer
+                    and self._is_host_scalar_expr(stmt.value)
+                ):
+                    combined = ast.BinOp(
+                        left=stmt.target, op=stmt.op, right=stmt.value
+                    )
+                    self._record_host_scalar(stmt.target, combined)
+                    self.host_scalar_vars.add(stmt.target.id)
+                    continue
                 left, left_external = self.expression(stmt.target)
                 right, right_external = self.expression(stmt.value)
                 label = _BINOP_LABELS.get(type(stmt.op))
@@ -3926,7 +4106,13 @@ class _ForwardOperationExtractor:
                 ):
                     root = _subscript_root_name(value.func.value)
                     if root is not None:
-                        base_producer, base_external = self.expression(value.func.value)
+                        self._suppress_slice_resize = True
+                        try:
+                            base_producer, base_external = self.expression(
+                                value.func.value
+                            )
+                        finally:
+                            self._suppress_slice_resize = False
                         operand_producers: list[str] = []
                         operand_external: list[str] = []
                         for operand in (*value.args, *(kw.value for kw in value.keywords)):
@@ -3988,9 +4174,11 @@ class _ForwardOperationExtractor:
                 else:
                     test = ast.unparse(stmt.test)
                     before_env = dict(self.var_producer)
+                    before_host = dict(self.host_scalar_values)
                     before = len(self.operations)
                     self.statements(stmt.body, condition=test)
                     body_env = dict(self.var_producer)
+                    body_host = dict(self.host_scalar_values)
                     for index in range(before, len(self.operations)):
                         op = self.operations[index]
                         self.operations[index] = ForwardOperation(
@@ -4000,9 +4188,11 @@ class _ForwardOperationExtractor:
                             }
                         )
                     self.var_producer = dict(before_env)
+                    self.host_scalar_values = dict(before_host)
                     before_else = len(self.operations)
                     self.statements(stmt.orelse, condition=f"not ({test})")
                     else_env = dict(self.var_producer)
+                    else_host = dict(self.host_scalar_values)
                     for index in range(before_else, len(self.operations)):
                         op = self.operations[index]
                         self.operations[index] = ForwardOperation(
@@ -4016,8 +4206,14 @@ class _ForwardOperationExtractor:
                     # A variable assigned in both branches keeps only the
                     # survivor's producer below. Remember the losing branch's
                     # producer as an alternative so a later consumer of the merged
-                    # variable depends on both (see ``branch_alternatives``).
-                    for variable, survivor_producer in survivor_env.items():
+                    # variable depends on both (see ``branch_alternatives``). When
+                    # the survivor branch merely passes a boundary parameter through
+                    # (no op producer) but the other branch computes a real op
+                    # (``topk_indices = self.indexer(...)`` vs ``= prev_topk_indices``),
+                    # adopt the real producer so the merged variable's consumers wire
+                    # to the visible computation instead of resolving to nothing.
+                    for variable in set(survivor_env) | set(other_env):
+                        survivor_producer = survivor_env.get(variable)
                         other_producer = other_env.get(variable)
                         if (
                             survivor_producer
@@ -4027,7 +4223,20 @@ class _ForwardOperationExtractor:
                             self.branch_alternatives.setdefault(
                                 survivor_producer, set()
                             ).add(other_producer)
+                        elif not survivor_producer and other_producer:
+                            survivor_env[variable] = other_producer
                     self.var_producer = survivor_env
+                    # Host scalars that survive with a single unambiguous value are
+                    # kept; a name that folds to different constants on each branch
+                    # is ambiguous, so drop it (a later slice bound then declines to
+                    # fold rather than resize to a branch-specific width).
+                    survivor_host = else_host if stmt.orelse else body_host
+                    other_host = body_host if stmt.orelse else else_host
+                    self.host_scalar_values = {
+                        name: value
+                        for name, value in survivor_host.items()
+                        if other_host.get(name, value) == value
+                    }
                 continue
             if isinstance(stmt, ast.For):
                 iteration_count = self._loop_iteration_count(stmt)
@@ -4937,6 +5146,17 @@ class _ModelAstVisitor(ast.NodeVisitor):
         self.activation_param_bindings = activation_param_bindings or {}
         self.vision_scoped_classes = set(vision_scoped_classes or ())
         self.vision_config = dict(vision_config or {})
+        # A multimodal composite config nests the decoder's own settings under
+        # ``text_config`` (``index_topk``/``index_kpool`` live there, not at the
+        # top level). Overlay it for the text path so a class resolves
+        # ``config.index_topk`` to its real value instead of ``_UNKNOWN``. Derived
+        # here (not a constructor arg) so both entry points pick it up. Empty for
+        # a flat single-modality config, making the overlay a no-op.
+        self.text_config = (
+            dict((config or {}).get("text_config") or {})
+            if isinstance(config, dict)
+            else {}
+        )
         self.module_functions = dict(module_functions or {})
 
     def _config_for_class(self, class_name: str) -> dict[str, Any]:
@@ -4944,10 +5164,14 @@ class _ModelAstVisitor(ast.NodeVisitor):
 
         Vision-tower classes overlay ``vision_config`` (vision wins, because
         ``hidden_size`` exists at both levels: 4096 text vs 1024 vision). Every
-        other class — the entire text path — keeps the top-level config unchanged.
+        other class — the text path — overlays ``text_config`` when the composite
+        config nests it, so decoder-only settings (``index_topk``) resolve; a flat
+        config leaves the top level unchanged.
         """
         if class_name in self.vision_scoped_classes and self.vision_config:
             return {**self.config, **apply_config_attribute_aliases(self.vision_config)}
+        if self.text_config:
+            return {**self.config, **apply_config_attribute_aliases(self.text_config)}
         return self.config
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
@@ -4982,6 +5206,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         multi_op_method_returns: dict[
             str, tuple[dict[str, str], list[str], str | None]
         ] = {}
+        multi_op_method_inputs: dict[str, str] = {}
         forward_step_return_producers: dict[str, list[str]] = {}
         init_func = next(
             (
@@ -5089,7 +5314,11 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 self_values=_self_config_values(init_func, self._config_for_class(node.name)),
                 all_tensor_ops=self.all_tensor_ops,
             )
-            multi_op_methods, multi_op_method_returns = _multi_op_forward_methods(
+            (
+                multi_op_methods,
+                multi_op_method_returns,
+                multi_op_method_inputs,
+            ) = _multi_op_forward_methods(
                 node,
                 forward_calls,
                 init_assignments,
@@ -5273,6 +5502,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             single_op_methods=single_op_methods,
             multi_op_methods=multi_op_methods,
             multi_op_method_returns=multi_op_method_returns,
+            multi_op_method_inputs=multi_op_method_inputs,
             forward_step_return_producers=forward_step_return_producers,
             forward_return_slots=forward_return_slots,
             forward_return_order=forward_return_order,
