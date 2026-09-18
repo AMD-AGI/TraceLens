@@ -315,11 +315,21 @@ def _first_op_entry_params(module: "BlockNode") -> set[str]:
         return set()
     first = min(children, key=lambda child: child.forward_order or 0)
     arg_map = (module.forward_step_predecessor_args or {}).get(first.attr_name, {})
-    return {
+    entry = {
         _normalize_param_name(name)
         for name, src in arg_map.items()
         if src == FORWARD_METHOD_INPUT
     }
+    if not arg_map:
+        # The first forward step is an inline op (e.g. ``position_ids[..., None]``)
+        # rather than a submodule call, so it has no entry in
+        # ``forward_step_predecessor_args``. Deriving the entry params from its own
+        # ``param_inputs`` (the forward parameters it reads directly) lets the
+        # section-1b skip-guard drop caller args the op never consumes, instead of
+        # dumping every caller arg onto it. A submodule-call first child carries no
+        # ``param_inputs`` here, so this leaves that (permissive) path unchanged.
+        entry |= {_normalize_param_name(name) for name in (first.param_inputs or ())}
+    return entry
 
 
 def _resolve_return_slot_source(

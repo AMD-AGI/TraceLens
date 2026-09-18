@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -49,6 +50,7 @@ from TraceLens.Visualizer.model_explorer_export.adapter import (
     _sanitize_namespace_segment,
 )
 from TraceLens.Visualizer.model_explorer_export.fact_sheet import build_fact_sheet_group_attributes
+from TraceLens.Visualizer.model_explorer_export.type_check import type_check_graph_nodes
 from TraceLens.Visualizer.model_explorer_export.shapes import (
     annotate_nodes_with_shapes,
     apply_shape_attrs,
@@ -312,6 +314,16 @@ def _node_attr(node: dict[str, Any], key: str) -> str | None:
             if isinstance(value, str):
                 return value
     return None
+
+
+def _set_node_attr(node: dict[str, Any], key: str, value: str) -> None:
+    """Set (replace or append) a single ``{key, value}`` attr on a node."""
+    attrs = node.setdefault("attrs", [])
+    for attr in attrs:
+        if attr.get("key") == key:
+            attr["value"] = value
+            return
+    attrs.append({"key": key, "value": value})
 
 
 def _group_input_id(prefix: str, port_label: str | None = None) -> str:
@@ -2381,6 +2393,111 @@ def _split_shape_dtype(text: str) -> tuple[list[str], str]:
             else:
                 shape_text = stripped
     return parse_shape_dims(shape_text), dtype
+
+
+# Detail keys whose value is a scalar operand argument (not a tensor edge), e.g.
+# ``dim: -1`` on an unsqueeze/squeeze/select. These are the "inputs not shown in
+# the graph" the profiler records as ``[]``/``Scalar``/concrete-value entries.
+_SCALAR_DETAIL_KEYS = frozenset(
+    {"dim", "dim0", "dim1", "select_dim", "resize_dim", "start_dim", "end_dim"}
+)
+
+
+def _is_operation_node(node: dict[str, Any]) -> bool:
+    """A node representing a real computation (op/kernel/module), not a synthetic
+    boundary/mirror/loop tile — the nodes worth describing profiler-style and
+    type-checking."""
+    if _is_synthetic_input(node) or _is_synthetic_output(node):
+        return False
+    if _node_attr(node, "synthetic") == "@loop_carried":
+        return False
+    # A genuine op/kernel/module node carries both a class label and an inferred
+    # output shape; synthetic passthrough tiles carry neither together.
+    return bool(_node_attr(node, "class_name")) and bool(
+        _node_attr(node, "output_shape")
+    )
+
+
+def _producer_output_dims(
+    source: dict[str, Any] | None, port: str
+) -> tuple[list[str], str] | None:
+    """Resolve one producer output port to ``(dims, dtype)``, honouring per-port
+    shapes on multi-output (split/unbind) producers, else the node's
+    ``output_shape`` attr."""
+    if source is None:
+        return None
+    metadata = _find_port_metadata(source, "outputsMetadata", port)
+    if metadata is not None:
+        shape_attr = _port_shape_attrs(metadata)
+        if shape_attr is not None:
+            return _split_shape_dtype(str(shape_attr.get("value", "")))
+    text = _node_attr(source, "output_shape")
+    if text:
+        return _split_shape_dtype(text)
+    return None
+
+
+def _op_scalar_details(node: dict[str, Any]) -> list[str]:
+    """Scalar operand arguments declared in a node's ``details`` attr (``dim: -1``
+    -> ``"-1"``), in declaration order."""
+    raw = _node_attr(node, "details")
+    if not raw:
+        return []
+    scalars: list[str] = []
+    for part in raw.split(";"):
+        key, sep, value = part.partition(":")
+        if sep and key.strip() in _SCALAR_DETAIL_KEYS:
+            scalars.append(value.strip())
+    return scalars
+
+
+def _annotate_op_input_signatures(nodes: list[dict[str, Any]]) -> None:
+    """Attach PyTorch-profiler-style input descriptions + a machine-readable
+    ``op_type`` to every operation node.
+
+    The profiler represents an operator's inputs as three parallel lists: shapes
+    (``Input Dims`` — a scalar is ``[]``), types (``Input type`` — a scalar is
+    ``"Scalar"``), and concrete scalar values (``Concrete Inputs`` — ``""`` for a
+    tensor). We mirror that: tensor operands come from the node's incoming edges
+    (resolved to each producer's output-port shape/dtype, in ``targetNodeInputId``
+    order), followed by the scalar operand args declared in ``details`` (e.g. an
+    ``unsqueeze``'s ``dim``), which are real inputs that are never drawn as graph
+    edges. This makes those hidden scalar inputs explicit and gives the type-check
+    pass a uniform, profiler-shaped view of every op's operands.
+    """
+    node_by_id = {str(node.get("id")): node for node in nodes}
+    for node in nodes:
+        if not _is_operation_node(node):
+            continue
+        input_shapes: list[list[str]] = []
+        input_types: list[str] = []
+        concrete_inputs: list[str] = []
+        edges = sorted(
+            node.get("incomingEdges", []),
+            key=lambda edge: str(edge.get("targetNodeInputId", "0")),
+        )
+        for edge in edges:
+            source = node_by_id.get(str(edge.get("sourceNodeId") or ""))
+            port = str(edge.get("sourceNodeOutputId", "0"))
+            resolved = _producer_output_dims(source, port)
+            if resolved is None:
+                input_shapes.append([])
+                input_types.append("Tensor")
+            else:
+                dims, dtype = resolved
+                input_shapes.append(dims)
+                input_types.append(dtype or "Tensor")
+            concrete_inputs.append("")
+        for value in _op_scalar_details(node):
+            input_shapes.append([])
+            input_types.append("Scalar")
+            concrete_inputs.append(value)
+        op_type = node.get("label") or _node_attr(node, "class_name")
+        if op_type:
+            _set_node_attr(node, "op_type", str(op_type))
+        _set_node_attr(node, "input_shapes", json.dumps(input_shapes))
+        _set_node_attr(node, "input_types", json.dumps(input_types))
+        _set_node_attr(node, "concrete_inputs", json.dumps(concrete_inputs))
 
 
 def _reconcile_edge_endpoint_shapes(nodes: list[dict[str, Any]]) -> None:
@@ -4475,6 +4592,14 @@ def build_merged_model_graph(
     # concatenates nothing -- the windowing is already carried by the kernel's
     # cu_seqlens. Runs after shapes settle so the identity check sees final dims.
     _elide_noop_single_input_concat(nodes)
+
+    # Describe every operation node's operands PyTorch-profiler-style (op_type +
+    # input_shapes/input_types/concrete_inputs, including scalar args that are not
+    # graph edges), then type-check the ops whose operand contract is known.
+    # Warnings only -- an offender is a wiring/extraction fidelity bug to fix
+    # upstream, not a reason to fail the export. Runs after edges/shapes are final.
+    _annotate_op_input_signatures(nodes)
+    type_check_graph_nodes(nodes)
 
     finalize_graph_node_styles(nodes)
 

@@ -2769,3 +2769,50 @@ def test_tag_secondary_module_groups_noops_without_match_or_groups():
     )
     assert nodes[0]["namespace"] == "visual/VisionBlock"
     assert not configs
+
+
+def test_annotate_op_input_signatures_records_tensor_and_scalar_inputs():
+    """An op node gets profiler-style operand attrs: a tensor input resolved from
+    its producer's output port, followed by a scalar arg parsed from ``details``."""
+    import json
+
+    producer = {
+        "id": "prod",
+        "attrs": [
+            {"key": "class_name", "value": "GetPos"},
+            {"key": "output_shape", "value": "[Pv, 2] int64"},
+        ],
+        "outputsMetadata": [
+            {"id": "0", "attrs": [{"key": "shape", "value": "[Pv, 2] int64"}]}
+        ],
+    }
+    unsqueeze = {
+        "id": "op:unsqueeze",
+        "label": "Unsqueeze",
+        "attrs": [
+            {"key": "class_name", "value": "Unsqueeze"},
+            {"key": "details", "value": "dim: -1"},
+            {"key": "output_shape", "value": "[Pv, 2, 1] int64"},
+        ],
+        "incomingEdges": [
+            {"sourceNodeId": "prod", "sourceNodeOutputId": "0", "targetNodeInputId": "0"}
+        ],
+    }
+    merge._annotate_op_input_signatures([producer, unsqueeze])
+
+    attrs = {a["key"]: a["value"] for a in unsqueeze["attrs"]}
+    assert attrs["op_type"] == "Unsqueeze"
+    assert json.loads(attrs["input_shapes"]) == [["Pv", "2"], []]
+    assert json.loads(attrs["input_types"]) == ["int64", "Scalar"]
+    assert json.loads(attrs["concrete_inputs"]) == ["", "-1"]
+
+
+def test_annotate_op_input_signatures_skips_synthetic_boundaries():
+    """Synthetic @input/@output tiles are not operation nodes and get no attrs."""
+    boundary = {
+        "id": "grp/@input",
+        "label": "x",
+        "attrs": [{"key": "synthetic", "value": "@input"}],
+    }
+    merge._annotate_op_input_signatures([boundary])
+    assert all(a["key"] not in {"op_type", "input_shapes"} for a in boundary["attrs"])

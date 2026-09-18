@@ -8,9 +8,12 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
+from TraceLens.Visualizer.model_explorer_export.type_check import type_check_graph_nodes
 from TraceLens.ModelUtils.computation_graph import add_forward_output, build_computation_graph
 from TraceLens.ModelUtils.loader import load_model_spec
 from TraceLens.ModelUtils.shape_inference import ShapeInferencer
@@ -3032,6 +3035,60 @@ def test_glm53_graph_has_no_dead_nodes():
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     _assert_no_dead_nodes(graph["nodes"])
+
+
+def test_glm53_vision_rotary_unsqueeze_single_tensor_operand():
+    """The vision-rotary ``position_ids[..., None]`` op takes one tensor + a scalar.
+
+    It used to render with TWO incoming edges -- ``position_ids`` AND a spurious
+    ``hidden_states`` -- because when a module's first forward step is an inline op
+    (not a submodule call) the section-1b entry-param guard was disarmed and every
+    caller argument of ``rotary_pos_emb(hidden_states, position_ids)`` was dumped
+    onto it. After the fix the op reads only ``position_ids``; the scalar ``dim``
+    (-1) is recorded profiler-style as an extra input, not a graph edge.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+
+    unsqueeze = next(
+        n for n in nodes if "@op_l1766_c32_unsqueeze" in n["id"]
+    )
+    # Exactly one incoming edge, from the position_ids boundary -- no hidden_states.
+    assert len(unsqueeze.get("incomingEdges", [])) == 1
+    source = unsqueeze["incomingEdges"][0]["sourceNodeId"]
+    assert source.endswith("/@input") or "position_ids" in source
+    assert "hidden_states" not in source
+
+    # Profiler-style operand description: one int64 tensor + one scalar dim (-1).
+    attrs = {a["key"]: a["value"] for a in unsqueeze["attrs"]}
+    assert attrs["op_type"] == "Unsqueeze"
+    assert json.loads(attrs["input_types"]) == ["int64", "Scalar"]
+    assert json.loads(attrs["input_shapes"]) == [["Pv", "2"], []]
+    assert json.loads(attrs["concrete_inputs"]) == ["", "-1"]
+
+
+def test_glm53_graph_type_check_no_axis_op_violations():
+    """The type-check pass runs over the full export and flags no axis-op misuse.
+
+    ``type_check_graph_nodes`` emits warnings (never errors) for operations whose
+    operand contract is violated. The owner-flagged class -- axis ops
+    (``unsqueeze``/``squeeze``/``select``) receiving a second *tensor* operand
+    where a scalar ``dim`` belongs -- must be clean after the wiring fix. (Two
+    known ``concat`` rank warnings from the documented advanced-index phantom-rank
+    legs may remain; they are tracked separately and are warnings by design.)
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    warnings = type_check_graph_nodes(graph["nodes"])
+
+    axis_op_warnings = [
+        w for w in warnings if any(f"[{op}]" in w for op in ("unsqueeze", "squeeze", "select"))
+    ]
+    assert axis_op_warnings == [], axis_op_warnings
+    assert not any("l1766" in w for w in warnings)
 
 
 def test_glm53_build_attention_mask_frame_is_not_opaque():
