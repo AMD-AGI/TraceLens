@@ -3140,14 +3140,18 @@ def test_glm53_vision_block_renders_as_secondary_nx_group():
     assert any(str(n["id"]).startswith("visual/seq:3:blocks") for n in nodes)
 
 
-def test_glm53_decoder_spine_gets_loop_carried_boundary():
-    """The decoder repeat group gets the same loop-carried boundary the vision
-    tower has, via one general merge post-pass -- the same code for both.
+def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
+    """The heterogeneous decoder spine synthesizes NO loop-carried boundary.
 
-    The 45× container is a pure grouping namespace whose three parallel variant
-    branches all read the embedded hidden_states and reconverge on the hyper-head.
-    The synthesized ``@loop_carried_in/out`` pair carries the pre-collapse state
-    across the (rendered-parallel) iterations, with the single exempt back edge.
+    The 45× container is a pure grouping namespace whose three variant branches run
+    *different* modules by iteration (31 of one class, then 11, then 3) and
+    reconverge on the hyper-head. A single loop-carried abstraction would
+    misrepresent that sequence of distinct variant runs, so
+    ``_wrap_container_loop_carried`` detects the heterogeneity (more than one
+    distinct interior exit source) and returns before synthesizing anything --
+    restoring the pre-synthesis direct wiring: each variant ``@input`` reads the
+    embedded ``hidden_states`` producer, and the hyper-head reads the variant
+    ``@output``s directly. No group ``@input``/``@output``, no back edge.
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -3156,28 +3160,20 @@ def test_glm53_decoder_spine_gets_loop_carried_boundary():
     _assert_export_is_acyclic(nodes)
     by_id = {node["id"]: node for node in nodes}
 
-    in_id = "decoder/@loop_carried_in:decoder:hidden_states"
-    out_id = "decoder/@loop_carried_out:decoder:hidden_states"
-    assert in_id in by_id and out_id in by_id
-    for tile_id in (in_id, out_id):
-        tile = by_id[tile_id]
-        assert tile["namespace"] == "45x_Glm5NextTextDecoderLayer"
-        assert next(a["value"] for a in tile["attrs"] if a["key"] == "synthetic") == (
-            "@loop_carried"
-        )
-        # Count is filled from the 45x_ namespace by _fill_repeated_loop_counts.
-        assert next(a["value"] for a in tile["attrs"] if a["key"] == "sublabel") == (
-            "hidden_states · 45 iterations"
-        )
+    # No decoder-level loop-carried tiles were synthesized for the heterogeneous group.
+    assert "decoder/@loop_carried_in:decoder:hidden_states" not in by_id
+    assert "decoder/@loop_carried_out:decoder:hidden_states" not in by_id
+    assert not any(
+        _attr_value(n, "synthetic") == "@loop_carried"
+        and n.get("namespace") == "45x_Glm5NextTextDecoderLayer"
+        for n in nodes
+    )
 
     def _sources(node_id):
         return {e["sourceNodeId"] for e in by_id[node_id]["incomingEdges"]}
 
-    # carried-in: initial value from the embedded hidden_states + back edge.
-    assert _sources(in_id) == {"@model_forward/@op_l1477_c24_contiguous", out_id}
-    # every variant branch input now reads the carried-in tile. Only the three
-    # top-level variant container inputs (decoder/{31x,11x,3x}.../@input, one "/"
-    # below the container) are carried; deeper /@input tiles are interior.
+    # Each of the three top-level variant container inputs reads the embedded
+    # hidden_states producer directly -- the pre-synthesis wiring, no loop-in tile.
     variant_inputs = [
         node["id"]
         for node in nodes
@@ -3187,10 +3183,19 @@ def test_glm53_decoder_spine_gets_loop_carried_boundary():
     ]
     assert len(variant_inputs) == 3
     for node_id in variant_inputs:
-        assert _sources(node_id) == {in_id}
-    # the hyper-head reads the loop's updated value (carried-out); the final norm
-    # still follows the head, unchanged.
-    assert _sources("hc_head") == {out_id}
+        assert _sources(node_id) == {"@model_forward/@op_l1477_c24_contiguous"}
+
+    # The hyper-head reads the three variant ``@output``s directly (no loop-out
+    # intermediary), and the final norm still follows the head, unchanged.
+    variant_outputs = {
+        node["id"]
+        for node in nodes
+        if node["id"].startswith("decoder/")
+        and node["id"].endswith("/@output")
+        and node["id"].count("/") == 2
+    }
+    assert len(variant_outputs) == 3
+    assert _sources("hc_head") == variant_outputs
     assert _sources("norm/@input") == {"hc_head"}
 
     # No loop-invariant inputs cross the decoder spine boundary, so none are invented.
@@ -3199,11 +3204,9 @@ def test_glm53_decoder_spine_gets_loop_carried_boundary():
         for n in nodes
     )
 
-    # The vision tower's CG-built boundary is left as the single instance (no double
-    # wrap by the post-pass), and its loop-invariant cos/sin inputs are untouched.
-    # (The vision block's ``{N}x_`` count segment is applied by the CLI export via the
-    # live meta tree, which this in-process spec build does not populate; the post-pass
-    # keys its no-op guard off the pre-existing loop-carried tile either way.)
+    # The vision tower's CG-built boundary (a *uniform* loop) is untouched -- the
+    # suppression is targeted at heterogeneous groups only, so a single instance of
+    # the vision loop-carried boundary and its loop-invariant cos/sin inputs remain.
     vision_in = [n["id"] for n in nodes if "visual/@loop_carried_in:" in n["id"]]
     assert len(vision_in) == 1
     assert "visual/@input:cos" in by_id and "visual/@input:sin" in by_id
@@ -3388,3 +3391,128 @@ def test_glm53_build_attention_mask_frame_is_not_opaque():
     # The mask the frame produces must actually reach the kernel's mask port
     # (proving the chain is consumed, hence not pruned).
     assert _has_export_path(nodes, where["id"], kernel["id"])
+
+
+def test_glm53_graph_integrity_checks_emit_no_warnings():
+    """I1 dead-node / I2 no-source / I3 constant-soundness are clean on both graphs.
+
+    The structural-integrity checks run on the FULL built graph and on the
+    render-filtered graph (constants dropped). Dropping the constant closure can
+    orphan a survivor that lost its only constant producer, so both views must be
+    checked. Zero warnings means every node is consumed (I1), every non-boundary
+    non-constant node has a real source (I2), and no ``constant`` node hides a
+    floating-point activation (I3). A warning is a wiring/tagging fidelity bug.
+    """
+    pytest.importorskip("huggingface_hub")
+    from TraceLens.Visualizer.model_explorer_export.type_check import (
+        integrity_check_graph_nodes,
+    )
+    from TraceLens.Visualizer.model_explorer_export.viewer_page import (
+        _graph_without_constants,
+    )
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+
+    built = integrity_check_graph_nodes(graph["nodes"], label="built")
+    assert built == [], built
+
+    rendered = _graph_without_constants(graph)
+    filtered = integrity_check_graph_nodes(rendered["nodes"], label="render-filtered")
+    assert filtered == [], filtered
+
+
+def test_glm53_attn_hc_constant_closure_is_well_formed():
+    """The mHC learned-param unpack closure is uniformly constant, sourced, sound.
+
+    ``pre_b, post_b, comb_b = self.base.split(...)`` /
+    ``pre_scale, post_scale, comb_scale = self.scale.unbind(0)`` / ``self.fn.float()``
+    read raw ``nn.Parameter``s. Each such sourceless constant op gets a
+    materialized root leaf (``base``/``scale``/``fn``), and every ``^@slice_out:``
+    tile it fans into inherits the ``constant`` tag -- so the whole closure drops
+    cleanly at render with no orphan/dead node (the regression that left ``comb_b``
+    dead and ``pre_scale``/``pre_b`` sourceless).
+    """
+    pytest.importorskip("huggingface_hub")
+    from TraceLens.Visualizer.model_explorer_export.viewer_page import (
+        _graph_without_constants,
+    )
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+
+    # Root parameter leaves are materialized, constant, and sourceless.
+    for name in ("base", "scale", "fn"):
+        leaves = [
+            n for n in nodes
+            if n["id"].endswith(f":const:{name}")
+            and _attr_value(n, "constant") == "true"
+        ]
+        assert leaves, f"expected a materialized constant leaf for self.{name}"
+        for leaf in leaves:
+            assert not leaf.get("incomingEdges"), f"{name} leaf must be a pure source"
+
+    # Every slice tile fanned out of a constant split is itself constant.
+    const_split_ids = {
+        n["id"] for n in nodes
+        if n.get("label") in {"Split", "Unbind", "Chunk"}
+        and _attr_value(n, "constant") == "true"
+    }
+    assert const_split_ids, "expected constant Split/Unbind/Chunk unpack ops"
+    for node in nodes:
+        if _attr_value(node, "synthetic") != "@slice_out":
+            continue
+        parent = {
+            e["sourceNodeId"] for e in node.get("incomingEdges", []) or []
+        }
+        if parent & const_split_ids:
+            assert _attr_value(node, "constant") == "true", (
+                f"slice tile {node['id']} of a constant split must be constant"
+            )
+
+    # After the render filter drops the whole closure, nothing is left orphaned or
+    # dead: the constant slice tiles and their consumers (comb_b.view, ...) all go.
+    rendered = _graph_without_constants(graph)
+    _assert_no_dead_nodes(rendered["nodes"])
+
+
+def test_glm53_heterogeneous_decoder_group_has_no_loop_carried_tiles():
+    """The heterogeneous 45x decoder group synthesizes no loop-carried boundary.
+
+    The ``45x_Glm5NextTextDecoderLayer`` group runs *different* modules by
+    iteration (31 of one variant, then 11, then 3), so a single loop-carried
+    abstraction misrepresents it. ``_wrap_container_loop_carried`` detects the
+    heterogeneity (more than one distinct interior exit source) and suppresses
+    synthesis: the expanded submodule ``@input``/``@output`` tiles keep their
+    direct wiring to the external producer/consumer instead. Uniform loops (the
+    vision tower, the CG-built ``Loop_19``/``Loop_288`` per-op loops) keep theirs.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+
+    container = "45x_Glm5NextTextDecoderLayer"
+    # Sanity: the decoder repeat container really is present as a namespace.
+    assert any(
+        str(n.get("namespace", "")).split("/")[0] == container for n in nodes
+    ), f"expected the {container} repeat group in the export"
+
+    # No @loop_carried tile sits at the decoder container level itself.
+    decoder_level_loop_tiles = [
+        n["id"]
+        for n in nodes
+        if _attr_value(n, "synthetic") == "@loop_carried"
+        and str(n.get("namespace", "")) == container
+    ]
+    assert decoder_level_loop_tiles == [], decoder_level_loop_tiles
+
+    # The uniform loops still carry theirs (vision block + CG-built per-op loops),
+    # so suppression is targeted, not a blanket removal.
+    surviving_loop_tiles = [
+        n for n in nodes if _attr_value(n, "synthetic") == "@loop_carried"
+    ]
+    assert surviving_loop_tiles, "uniform loops must keep their loop-carried tiles"
+
+    _assert_export_is_acyclic(nodes)

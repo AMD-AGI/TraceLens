@@ -50,7 +50,10 @@ from TraceLens.Visualizer.model_explorer_export.adapter import (
     _sanitize_namespace_segment,
 )
 from TraceLens.Visualizer.model_explorer_export.fact_sheet import build_fact_sheet_group_attributes
-from TraceLens.Visualizer.model_explorer_export.type_check import type_check_graph_nodes
+from TraceLens.Visualizer.model_explorer_export.type_check import (
+    integrity_check_graph_nodes,
+    type_check_graph_nodes,
+)
 from TraceLens.Visualizer.model_explorer_export.shapes import (
     annotate_nodes_with_shapes,
     apply_shape_attrs,
@@ -2218,6 +2221,11 @@ def _add_split_slice_tiles(nodes: list[dict[str, Any]]) -> None:
             continue
         split_id = str(node.get("id"))
         namespace = str(node.get("namespace", ""))
+        # A constant split (e.g. ``pre_b, post_b, comb_b = self.base.split(...)``)
+        # produces constant slices; each tile must carry the tag so the render
+        # filter drops the whole learned-param closure together instead of
+        # orphaning the untagged slice tiles.
+        split_is_constant = _node_attr(node, "constant") == "true"
         ports = node.get("outputsMetadata", []) or []
         # (port_id, port_label, shape_value) per slice. Prefer the shape-bearing
         # ``outputsMetadata``; fall back to the ``output_names`` attr so the tiles
@@ -2260,6 +2268,8 @@ def _add_split_slice_tiles(nodes: list[dict[str, Any]]) -> None:
                 {"key": "synthetic", "value": "@slice_out"},
                 {"key": "port_label", "value": port_label},
             ]
+            if split_is_constant:
+                tile["attrs"].append({"key": "constant", "value": "true"})
             if shape_value:
                 dims, dtype = _split_shape_dtype(shape_value)
                 apply_shape_attrs(tile, TensorSpec(tuple(dims), dtype or "float16"))
@@ -4265,6 +4275,19 @@ def _wrap_container_loop_carried(nodes: list[dict[str, Any]], container: str) ->
         if source not in exit_sources:
             exit_sources.append(source)
 
+    # Heterogeneous loop: the group instantiates *different* modules by iteration
+    # (the decoder's 31/11/3 variant runs), so the collapsed body is really a
+    # sequence of distinct variant blocks feeding a post-loop head -- multiple
+    # distinct interior exit sources. A single loop-carried abstraction
+    # misrepresents that, so synthesize nothing: return before creating or wiring
+    # any @loop_carried tile, leaving the body @input edges (already sourced from
+    # the external producer) and @output edges (already targeting the external
+    # consumers) exactly as the earlier passes built them -- i.e. direct
+    # producer->submodule and submodule->consumer wiring, no back edge. Uniform
+    # loops (a single exit source) keep their loop-carried boundary.
+    if len(exit_sources) > 1:
+        return
+
     node_by_id = {node["id"]: node for node in nodes}
     id_prefix = carried_targets[0][0]["id"].split("/", 1)[0]
     in_id = f"{id_prefix}/@loop_carried_in:{id_prefix}:{variable}"
@@ -4717,6 +4740,12 @@ def build_merged_model_graph(
     # loop body and each ``@loop_carried_out`` after it.
     _order_model_inputs(nodes)
     _topologically_order_nodes(nodes)
+
+    # Structural-integrity check on the FINAL built graph (after loop-carried
+    # synthesis + ordering): I1 dead-node / I2 no-source / I3 constant soundness.
+    # Warnings only -- an offender is a wiring/extraction fidelity bug to fix
+    # upstream. The render-filtered graph is checked separately in the viewer.
+    integrity_check_graph_nodes(nodes, label="built")
 
     graph_attributes: dict[str, dict[str, str]] = {
         "": model_attrs,

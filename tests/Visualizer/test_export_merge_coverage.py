@@ -942,8 +942,18 @@ def _consumers(nodes, node_id):
             if e["sourceNodeId"] == node_id]
 
 
-def test_synthesize_loop_boundary_wraps_parallel_variant_container():
-    """The decoder spine's parallel variant branches get one loop-carried pair."""
+def test_synthesize_loop_boundary_suppressed_for_heterogeneous_container():
+    """A container whose iterations run *different* modules (multiple distinct
+    variant exit sources) is NOT wrapped in a loop-carried pair.
+
+    A single loop-carried abstraction would misrepresent a container that is
+    really a *sequence* of distinct variant runs (decoder: 31 layers of one
+    class, then 11, then 3), so ``_synthesize_repeat_loop_boundaries`` returns
+    early and leaves the pre-synthesis direct wiring untouched: every variant
+    ``@input`` still reads the external producer and the post-container consumer
+    still reads the variant ``@output``s directly. No ``@loop_carried`` tile and
+    no back edge are created.
+    """
     nodes = [
         _plain("src", "", [], shape="[B, S, 4, 4096] bfloat16"),
         _synthetic_input("dec/3x_A/@input", "45x_Dec/3x_A", "src"),
@@ -955,26 +965,19 @@ def test_synthesize_loop_boundary_wraps_parallel_variant_container():
     ]
     merge._synthesize_repeat_loop_boundaries(nodes)
     by_id = {n["id"]: n for n in nodes}
-    in_id = "dec/@loop_carried_in:dec:hidden_states"
-    out_id = "dec/@loop_carried_out:dec:hidden_states"
 
-    assert in_id in by_id and out_id in by_id
-    for tile_id in (in_id, out_id):
-        tile = by_id[tile_id]
-        assert tile["namespace"] == "45x_Dec"
-        assert merge._node_attr(tile, "synthetic") == "@loop_carried"
-        assert merge._node_attr(tile, "output_shape") == "[B, S, 4, 4096] bfloat16"
+    # No loop-carried tiles are synthesized for the heterogeneous container.
+    assert "dec/@loop_carried_in:dec:hidden_states" not in by_id
+    assert "dec/@loop_carried_out:dec:hidden_states" not in by_id
+    assert not any(
+        merge._node_attr(n, "synthetic") == "@loop_carried" for n in nodes)
 
-    # carried-in: initial value from the source + back edge from carried-out.
-    assert set(_lc_in_edges(by_id[in_id])) == {("src", None), (out_id, "next iteration")}
-    # both variant branches now read the carried-in tile, not the raw source.
-    assert _consumers(nodes, in_id) == ["dec/3x_A/@input", "dec/2x_B/@input"]
-    # carried-out collects the branch outputs (the pre-collapse updated value)...
-    assert set(_lc_in_edges(by_id[out_id])) == {
-        ("dec/3x_A/@output", "updated"), ("dec/2x_B/@output", "updated")}
-    # ...and the post-loop head + back edge read it (deduped to a single head edge).
-    assert sorted(_consumers(nodes, out_id)) == [in_id, "head"]
-    assert [e["sourceNodeId"] for e in by_id["head"]["incomingEdges"]] == [out_id]
+    # Direct wiring is preserved: both variant @inputs still read the raw source,
+    # and the post-container head still reads the variant @outputs directly.
+    assert _lc_in_edges(by_id["dec/3x_A/@input"]) == [("src", None)]
+    assert _lc_in_edges(by_id["dec/2x_B/@input"]) == [("src", None)]
+    assert [e["sourceNodeId"] for e in by_id["head"]["incomingEdges"]] == [
+        "dec/3x_A/@output", "dec/2x_B/@output"]
 
 
 def test_synthesize_loop_boundary_wraps_single_template_container():

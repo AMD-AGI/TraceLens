@@ -1635,7 +1635,9 @@ def _materialize_external_input_constants(graph: ComputationGraph) -> Computatio
     are already dropped as a whole, so re-materializing them would be redundant.
     """
     provided: dict[int, set[str]] = {index: set() for index in range(len(graph.nodes))}
+    fed: set[int] = set()
     for source, target in graph.links:
+        fed.add(target)
         src = graph.nodes[source]
         if not src.constant:
             continue
@@ -1650,7 +1652,13 @@ def _materialize_external_input_constants(graph: ComputationGraph) -> Computatio
         block = spec.block
         if block is None or not is_forward_operation(block.attr_name):
             continue
-        if spec.constant:
+        # A constant op's weight reads are normally dropped wholesale by the
+        # render filter, so re-materializing them is redundant — EXCEPT a
+        # *sourceless* constant op (e.g. ``pre_b, post_b, comb_b =
+        # self.base.split(...)``), which would otherwise render with no input at
+        # all. Give those their root parameter leaf so the constant closure is
+        # well-formed (has a source) and drops as a unit at render time.
+        if spec.constant and index in fed:
             continue
         for name in block.external_inputs:
             if name in provided[index]:

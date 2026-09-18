@@ -364,7 +364,9 @@ def test_cli_serves_opens_and_handles_server_error(monkeypatch, capsys):
         == 0
     )
     opened.assert_called_once_with("url:42")
-    served.assert_called_once_with(payload=_payload(), port=42, block=True)
+    served.assert_called_once_with(
+        payload=_payload(), port=42, block=True, drop_constants=True
+    )
     assert "Open viewer: url:42" in capsys.readouterr().out
 
     served.side_effect = RuntimeError("busy")
@@ -511,7 +513,9 @@ def test_serve_main_happy_path(monkeypatch, tmp_path):
 
     assert serve.main() == 0
     opened.assert_called_once_with("http://127.0.0.1:81/")
-    served.assert_called_once_with(json_path=payload_path, port=81, block=True)
+    served.assert_called_once_with(
+        json_path=payload_path, port=81, block=True, drop_constants=True
+    )
 
 
 def test_build_payload_with_and_without_inference(monkeypatch):

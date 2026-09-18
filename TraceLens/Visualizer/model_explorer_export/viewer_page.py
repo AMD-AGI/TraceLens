@@ -17,6 +17,9 @@ from typing import Any
 from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
     with_generated_timestamp,
 )
+from TraceLens.Visualizer.model_explorer_export.type_check import (
+    integrity_check_graph_nodes,
+)
 
 VIEWER_DIR = Path(__file__).resolve().parent / "viewer"
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -130,6 +133,12 @@ def _graph_without_constants(graph: dict[str, Any]) -> dict[str, Any]:
         pruned = {ns: cfg for ns, cfg in group_attrs.items() if ns in live_namespaces}
         if len(pruned) != len(group_attrs):
             new_graph["groupNodeAttributes"] = pruned
+
+    # Re-run the structural-integrity check on the render-filtered graph: dropping
+    # constants can orphan a survivor that lost its only constant producer, so this
+    # is exactly where I1/I2 catch a mistagged/under-propagated constant closure
+    # (the attn_hc slice-tile regression). Warnings only.
+    integrity_check_graph_nodes(kept_nodes, label="render-filtered")
     return new_graph
 
 

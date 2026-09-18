@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from TraceLens.ModelUtils.shape_inference import _normalize_op_name
@@ -133,4 +134,145 @@ def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
         warnings.extend(_check_node(node))
     for line in warnings:
         _log.warning("graph type-check: %s", line)
+    return warnings
+
+
+# --------------------------------------------------------------------------- #
+# Graph-integrity checks (I1 dead-node, I2 no-source/orphan, I3 constant sound).
+#
+# These are structural invariants over the whole node list, orthogonal to the
+# per-op operand type-check above. Like it, they emit WARNINGS only -- an
+# offender is a wiring/extraction fidelity bug to fix upstream, never a reason to
+# fail the export. Self-contained (no ``merge`` import) to avoid a circular
+# dependency; the predicates below mirror ``merge._is_synthetic_input`` /
+# ``_is_synthetic_output`` / ``_node_attr`` exactly.
+# --------------------------------------------------------------------------- #
+
+
+def _node_attr_value(node: dict[str, Any], key: str) -> str | None:
+    for attr in node.get("attrs", []):
+        if attr.get("key") == key:
+            value = attr.get("value")
+            if isinstance(value, str):
+                return value
+    return None
+
+
+def _is_synthetic_input(node: dict[str, Any]) -> bool:
+    node_id = str(node.get("id", ""))
+    if node_id == "@input" or re.search(r"/@input(?::|$)", node_id):
+        return True
+    return _node_attr_value(node, "synthetic") == "@input"
+
+
+def _is_synthetic_output(node: dict[str, Any]) -> bool:
+    node_id = str(node.get("id", ""))
+    if node_id == "@output" or node_id.endswith("/@output"):
+        return True
+    return _node_attr_value(node, "synthetic") == "@output"
+
+
+def _is_loop_carried(node: dict[str, Any]) -> bool:
+    return _node_attr_value(node, "synthetic") == "@loop_carried"
+
+
+def _has_incoming(node: dict[str, Any]) -> bool:
+    return bool(node.get("incomingEdges"))
+
+
+def _is_float_dtype(type_str: Any) -> bool:
+    """True for a floating-point tensor dtype (real activation), not an index/mask.
+
+    ``input_types`` entries are either a raw torch dtype string (``float16``,
+    ``bfloat16``, ``int64``, ``bool`` ...) or a synthetic operand kind
+    (``"Constant"`` / ``"Scalar"``). Only the floating-point tensor dtypes carry
+    real activation data; integers are indices/masks and the synthetic kinds are
+    non-activation, so both are legitimate operands of a hidden constant closure.
+    """
+    if not isinstance(type_str, str):
+        return False
+    lowered = type_str.lower()
+    return any(token in lowered for token in ("float", "bfloat", "half", "double"))
+
+
+def integrity_check_graph_nodes(nodes: list[dict[str, Any]], *, label: str = "") -> list[str]:
+    """Check three structural invariants; return + log warning lines. Never raises.
+
+    - **I1 dead-node** -- every non-exempt node's value is consumed by some other
+      node. Exempt: synthetic ``@input``/``@output`` boundaries, ``@loop_carried``
+      tiles, and the top-level ``@output`` (legitimate sinks). A dead node is a
+      wiring bug: a real tensor was extracted but its consumer edge never rebuilt.
+    - **I2 no-source / orphan** -- every node that is not a boundary
+      (``@input``/``@output``), not a constant leaf (``constant`` tag with no
+      inputs), and not a ``@loop_carried_in`` (seed/back-edge fed) has >=1 incoming
+      edge. Catches sourceless ops (the ``self.base.split`` regression) and
+      orphaned passthrough tiles.
+    - **I3 constant soundness** -- no ``constant``-tagged node carries a real
+      floating-point *activation* operand. A genuinely constant node reads only
+      other constants (learned weights / buffers, annotated ``"Constant"``),
+      integer *indices* (a dynamic weight/expert selection like
+      ``self.gate_up_proj[expert_idx]``), or scalar args -- never a raw float
+      tensor. A float dtype in ``input_types`` means a real activation is being
+      hidden at render, i.e. the node is mistagged. This is dtype-local (no source
+      walk), so it correctly spares weight-selection gathers whose only wired
+      operand is an int64 routing index while still catching a float activation
+      wrongly folded into the constant closure.
+    """
+    consumed = {
+        str(e.get("sourceNodeId"))
+        for n in nodes
+        for e in n.get("incomingEdges", []) or []
+        if e.get("sourceNodeId") is not None
+    }
+    warnings: list[str] = []
+    tag = f" [{label}]" if label else ""
+
+    for node in nodes:
+        node_id = str(node.get("id", ""))
+        is_const = _node_attr_value(node, "constant") == "true"
+
+        # I1 dead-node.
+        exempt_sink = (
+            _is_synthetic_input(node)
+            or _is_synthetic_output(node)
+            or _is_loop_carried(node)
+            or node_id == "@output"
+        )
+        if not exempt_sink and node_id not in consumed:
+            warnings.append(
+                f"I1 dead-node{tag}: {node_id} [label={node.get('label')!r}, "
+                f"constant={is_const}] produces a value nothing consumes; rebuild "
+                f"its missing consumer edge upstream (do not prune)."
+            )
+
+        # I2 no-source / orphan.
+        exempt_source = (
+            _is_synthetic_input(node)
+            or _is_synthetic_output(node)
+            or (is_const and not _has_incoming(node))  # materialized constant leaf
+            or "@loop_carried_in:" in node_id  # seeded + back-edge fed
+        )
+        if not exempt_source and not _has_incoming(node):
+            warnings.append(
+                f"I2 no-source{tag}: {node_id} [label={node.get('label')!r}, "
+                f"constant={is_const}] has no incoming edge; it is orphaned/sourceless "
+                f"-- wire it to its real producer upstream."
+            )
+
+        # I3 constant soundness: a constant node must carry no raw float activation
+        # operand (only "Constant"/"Scalar"/integer-index dtypes).
+        if is_const:
+            input_types = _load_list(node, "input_types") or []
+            float_operands = [t for t in input_types if _is_float_dtype(t)]
+            if float_operands:
+                warnings.append(
+                    f"I3 constant-unsound{tag}: {node_id} [label={node.get('label')!r}] "
+                    f"is tagged constant but carries floating-point activation "
+                    f"operand(s) {float_operands} (input_types={input_types}); a real "
+                    f"activation is being hidden at render -- fix the tagging upstream, "
+                    f"not the render."
+                )
+
+    for line in warnings:
+        _log.warning("graph integrity: %s", line)
     return warnings
