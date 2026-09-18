@@ -930,6 +930,7 @@ class MarkerValidator:
     END_RE = re.compile(r"<!--\s*impact-end\s*-->")
     KIND_ATTR_RE = re.compile(r"\bkind=(\w+)\b")
     ATTR_RE = re.compile(r"\b(\w+)=([^\s]+)")
+    OP_ROW_IMPACTS_RE = re.compile(r"impacts=(\S.*?)(?:\s+\w+=|\s*-->|\s*$)")
 
     # Report-level marker family
     REPORT_BEGIN_RE = re.compile(r"<!--\s*report-begin\s+([^>]*?)-->", re.DOTALL)
@@ -1086,7 +1087,7 @@ class MarkerValidator:
                 km = cls.KIND_ATTR_RE.search(inner)
                 if not km or km.group(1) != "op_row":
                     continue
-                im = re.search(r"impacts=(\S.*?)(?:\s+\w+=|\s*-->|\s*$)", inner)
+                im = cls.OP_ROW_IMPACTS_RE.search(inner)
                 impacts = im.group(1).strip() if im else ""
                 n_csv = (
                     len([v for v in impacts.split(",") if v.strip()]) if impacts else 0
