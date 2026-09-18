@@ -526,6 +526,21 @@ def test_merge_capture_trace_integration(dirpath, trace_gz, capture_folder):
     assert len(merged.events) > 0
 
 
+@pytest.mark.parametrize("dirpath,trace_gz,capture_folder", _discover_cases())
+def test_from_file_with_capture_trace_filepath(dirpath, trace_gz, capture_folder):
+    """TreePerfAnalyzer.from_file() with capture_trace_filepath must not crash (issue #1013)."""
+    if capture_folder is None:
+        pytest.skip("no capture traces")
+    metadata = os.path.join(capture_folder, "execution_details.json")
+    if not os.path.isfile(metadata):
+        pytest.skip("no execution_details.json")
+    trace_path = os.path.join(dirpath, trace_gz)
+    analyzer = TreePerfAnalyzer.from_file(
+        trace_path, capture_trace_filepath=capture_folder
+    )
+    assert len(analyzer.tree.events) > 0
+
+
 class TestCaptureMergeHelpers:
     def test_align_capture_to_graph_memcpy(self):
         capture = [{"name": "cudaMemcpy", "args": {}}]
