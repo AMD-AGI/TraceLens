@@ -21,6 +21,28 @@ analyze and yields sharper, more comparable results. Splitting works on annotate
 serving traces and on generic traces from any framework, adapting to the
 information each trace carries.
 
+## Key terms
+
+The rest of this page uses the following terms.
+
+- **Iteration** — the repeating unit of work in the trace: one execution step for
+  LLM serving, one forward/backward pass for training, or one denoise step for
+  diffusion.
+- **Iteration root** — the event that marks the start of one iteration and encloses
+  its work. The set of iteration roots is what the splitter is looking for; the
+  slices are cut at their boundaries.
+- **Split (slice)** — the events belonging to a single iteration (or a selected
+  window), written out as its own standalone trace.
+- **Family** — a group of annotations.
+- **Candidate** — one detector's proposed set of iteration roots.
+- **Coverage** — the fraction of GPU-busy time that a candidate's per-iteration
+  windows cover.
+- **Tile** — the window covering the start of one iteration and the start of the next iteration. Tiles are contiguous so no kernels between roots are dropped.
+- **Steady-state region** — the stretch of iterations at peak, saturated
+  concurrency (or, for non-serving traces, most consistent duration). See
+[Steady-state region](../conceptual/inference-analysis.md#steady-state-region)
+- **Phase** — for LLM inference, an iteration's type: prefill vs decode vs prefilldecode
+
 ## Before you begin
 
 Confirm you have the following before continuing.
@@ -67,7 +89,7 @@ run in a single invocation.
 | `--llm-inference` | off | Treats the trace as LLM inference. When serving annotations are absent, batch sizes are used for phase classification and steady-state identification. |
 | `--CONC`, `--OSL`, `--R` | none | Benchmark parameters. When all three are given, the ideal prefill-decode ratio is computed analytically and overrides the empirical estimate. See [Recommended profiling window](../conceptual/inference-analysis.md#recommended-profiling-window). |
 | `--max-num-seq` | none | Batch-size threshold above which a shape-inferred iteration is prefill-bearing. When omitted, the threshold is inferred. |
-| `--no-gap-fill` | off | Score each iteration by its own span instead of extending it to the next root. Work between two roots is then dropped. |
+| `--no-gap-fill` | off | Don't use tiling (explained later) |
 | `--allow-degraded` | off | Return splits even when GPU coverage is below acceptable threshold. |
 
 ## Iteration-root detection
@@ -101,6 +123,9 @@ flowchart TD
 
 The detectors, in order:
 
+**Annotation-based detectors (steps 1–2).** These run first and use
+annotation events in the trace. No call tree is needed.
+
 1. **Known annotations.** Traces from patched vLLM (`execute_*`), SGLang
    (`step[*]`), ATOM, or any framework emitting `ProfilerStep#*` carry explicit
    per-iteration markers. When a recognized pattern is found, the detector also
@@ -110,25 +135,32 @@ The detectors, in order:
 2. **Unknown annotation families.** When only some steps match a known pattern,
    annotations are grouped into families by name skeleton, with digit runs
    collapsed so that `execute_1_...` and `execute_2_...` share a key. The family
-   that best explains the timeline — often an enclosing frame such as
-   `scheduler.run_batch` — becomes the iteration unit.
-3. **Branch descent.** For traces with no usable annotations, the call tree is
-   built and worker-thread call stacks are spliced back onto the main thread so
-   that training traces are traversable. A search from the tree roots finds the
-   first frame whose GPU-bearing children form a repeating pattern. Considering
-   only GPU-bearing children filters out the setup and scheduling calls that
-   obscure the iteration structure, and the coverage gate prevents the search from
-   stopping on a shallow sub-loop that repeats but does almost no work.
+   that best explains the timeline becomes the iteration unit.
+
+**Call-stack-based detectors (steps 3–5).** These run only when no annotation
+detector clears the coverage gate. Before step 3, the full call tree is built
+and worker-thread call stacks are spliced back onto the main thread so that
+training traces — where iteration work is dispatched across threads — are
+traversable as a single tree.
+
+3. **Branch descent.** A search from the tree roots finds the first frame whose
+   GPU-bearing children form a repeating pattern. Considering only GPU-bearing
+   children filters out the setup and scheduling calls that obscure the iteration
+   structure, and the coverage gate prevents the search from stopping on a shallow
+   sub-loop that repeats but does almost no work.
 4. **Sibling roots.** Some traces, especially those with sparse Python call
-   stacks, have many shallow roots rather than one deep root, so the repeat lives
+   stacks, have many shallow roots rather than one deep root, so the repeating pattern lives
    across roots rather than within one. Sibling-root detection finds the repeating
    period across the top-level frames.
-5. **Bookend enhancement.** A branch or sibling candidate that already explains at
-   least 50% of GPU time but falls below the gate is extended with `warmup` work
-   before the first iteration and `wrapup` work after the last, drawn from the
-   parent's GPU-bearing children. When the additions raise the grade, they are
-   kept. This is what makes diffusion traces splittable: HunyuanVideo's four
-   denoise steps cover 58% of GPU time on their own, and 100% with bookends.
+5. **Bookend enhancement.** The repeating detectors find only the loop body, but a
+   workload often does heavy one-off GPU work on either side of that loop. When a
+   branch or sibling candidate already explains at least 50% of GPU time, the
+   splitter wraps the parent's GPU-bearing children before the first iteration and
+   after the last into two synthetic roots — a `warmup` root and a `wrapup` root —
+   and keeps them if they lift the candidate over the gate. This is what makes
+   diffusion traces splittable: HunyuanVideo's four denoise steps cover 58% of GPU
+   time on their own, and 100% once the leading encode and trailing decode are
+   captured as bookends.
 
 If no detector clears the gate, the best candidate by coverage is returned with an
 honest status so you can still use it with `--allow-degraded`; a trace that no
@@ -138,19 +170,15 @@ The detector that fires depends on what the trace contains:
 
 | Detector | Fires when | Example workloads |
 |----------|------------|-------------------|
-| Known or unknown annotations | The trace has `user_annotation` events with enough GPU coverage | vLLM, SGLang, ATOM, Megatron (`ProfilerStep`), anything calling `profiler.step()` |
+| Known or unknown annotations | The trace has `user_annotation` events with enough GPU coverage | vLLM, SGLang, ATOM, Megatron, anything calling `profiler.step()` |
 | Branch descent | There are no usable annotations, but the call tree has a frame whose children repeat | Training loops, diffusion denoise, `torch.compile` workloads |
 | Sibling roots | Branch descent finds no repeating children, but the top-level frames repeat | Workloads with sparse call-stack information |
 
 ## Extraction and the split manifest
 
-Once the roots are known, each iteration is given a half-open time window, or
-*tile*. Tiles are built per thread and leave no gaps: the span between one root
-and the next belongs to the earlier root, so a kernel launched just after an
-annotation closes — common with vLLM sampling — is still captured, and no kernel
-is lost. Events are assigned to a tile by start timestamp, correlation IDs are
-followed from each CPU launch to its GPU kernel, and enclosing frames that span
-multiple iterations belong to none and are excluded.
+Once the roots are known, each iteration is given a *tile*. A tile is the span between one root
+and the next. This captures kernels that launch just after an
+iteration but before the next iteration starts.
 
 Alongside the slices, the splitter writes a `split_manifest.json` describing the
 result. Its key fields are:
@@ -158,39 +186,38 @@ result. Its key fields are:
 | Field | Meaning |
 |-------|---------|
 | `status` | `0` splittable, `1` degraded (requires `--allow-degraded`), `2` not splittable. |
-| `method` | The detector that produced the roots, such as `annotation:tier`, `family:unknown_only`, `generic:branch_descent`, or `generic:sibling_roots`. |
+| `method` | The detector that produced the roots: `annotation:tier`, `family:unknown_only`, `generic:branch_descent`, or `generic:sibling_roots`. |
 | `n_roots` | The number of iterations found. |
 | `attribution_strategy` | How kernels were mapped to roots for the coverage audit: GPU-side annotation spans when present, otherwise CPU launch correlation IDs. |
-| `coverage_selected_roots` | The fraction of GPU time explained by the roots' tile windows — the primary quality metric. |
+| `coverage_selected_roots` | The fraction of GPU time explained by the tiles — the primary quality metric. |
 | `gpu_event_retention` | The fraction of GPU kernels that survived extraction. This should be `1.0`, meaning every kernel is accounted for across the slices. |
 | `gpu_events_duplicated` | Whether any kernel was claimed by more than one slice, which indicates a tiling error. |
-| `gap_fill` | Whether gap-free tiling was used. |
+| `gap_fill` | Whether tiling was used. |
 
 A per-iteration `execution_details` file records the same accounting for each
 slice.
 
-```{note}
 When the detected roots do not clear the coverage gate and `--allow-degraded` is
 not set, the splitter writes the manifest with `aborted` set to `true` and stops
 before extraction, so you can inspect the coverage breakdown before deciding
 whether to proceed.
-```
 
 ## Steady-state identification
 
-The steady-state region is the stretch of highest, saturated concurrency — the
-part of a serving run worth profiling. For the concepts behind it, including the
-CONC, OSL, and R parameters, see
-[Steady-state region](../conceptual/inference-analysis.md#steady-state-region).
-The method used to find it adapts to the trace:
+The steady-state region represents the most meaningful part of the workload, the definition of which changes depending on the workload. For LLM-inference, it's concurrency. Concurrency is read from the LLM inference serving annotations (`num_requests`), so without them it cannot be measured directly. For LLM inference traces that lack
+annotations, the steady state region is derived from the batch sizes
+which act as a proxy for concurrency. And for non-LLM workloads, concurrency is not a property at
+all, so steady state is defined differently again — by the iterations whose
+durations are most consistent. The method therefore adapts to the trace:
 
 | Tier | Condition | Method |
 |------|-----------|--------|
-| Concurrency | Serving annotations are present | Find the region where `num_requests` is near its peak, then select a window by mode within the largest such region. Honors `--CONC`, `--OSL`, and `--R`. |
-| Decode baseline | `--llm-inference`, no serving annotations | Use decode-iteration batch sizes as a concurrency proxy (in decode, batch size approximates the number of sequences), find where they are near peak, and map the region back to full iteration indices. |
-| Duration | No annotations and no `--llm-inference` | Find the most duration-consistent window with a sliding-window coefficient of variation. This tier has no phase awareness. |
+| Concurrency | Serving annotations are present | Find the region where `num_requests` is near its peak, then select a window by mode within the largest such region. Honors `--CONC`, `--OSL`, and `--R`. See
+[Steady-state region](../conceptual/inference-analysis.md#steady-state-region)|
+| Batch size | `--llm-inference` is passed, but there are no serving annotations | Use decode-iteration batch sizes as a concurrency proxy (in decode, batch size approximates the number of sequences), find where they are near peak, and map the region back to full iteration indices. |
+| Duration | `--llm-inference` is not passed, and there are no serving annotations | Find the most duration-consistent window. |
 
-The decode-baseline tier filters to decode iterations, scans for the peak, then
+The batch-size tier filters to decode iterations, scans for the peak, then
 re-includes the prefill iterations that fall inside the region:
 
 ```text
@@ -220,21 +247,23 @@ Result: region [4, 8) — consistent durations, with warmup (iteration 2) and
 
 ## Phase division
 
-Phase division separates LLM-inference steps into *prefill-bearing* steps, where a
-prefill request is packed with decodes, and *decode-only* steps. Because it is
-meaningful only for LLM inference, it uses the same information tiers:
+Phase division separates LLM-inference steps into *prefill-bearing* steps, which
+contain at least one prefill request — whether on its own or packed together with
+decodes — and *decode-only* steps. Phase division only runs on LLM inference traces:
 
 | Tier | Condition | Method |
 |------|-----------|--------|
-| Annotation | vLLM, SGLang, or ATOM annotations are present | Parse `context_requests` and `generation_requests` from the annotation name. A step with `context_requests > 0` is prefill-bearing; otherwise it is decode. |
-| Shape | `--llm-inference`, no serving annotations | Derive batch size per iteration from the most common first dimension of `cpu_op` `Input Dims`, then split decode from prefill by batch size. |
+| Annotation | LLM serving annotations are present | Parse `context_requests` and `generation_requests` from the annotation name. A step with `context_requests > 0` is prefill-bearing; otherwise it is decode. |
+| Batch size | `--llm-inference`, no serving annotations | Derive batch size per iteration from the most common first dimension of CPU op input dimensions, then split decode from prefill by batch size. |
 
-For the shape tier, the threshold is either taken from `--max-num-seq` directly
-or inferred: among the unique batch sizes, with the two smallest ramp-up values
-dropped as noise, the splitter finds the largest multiplicative gap and splits
-there when it is at least a factor of two. Iterations at or below the threshold
-are decode; those above it are prefill-bearing. Deriving batch size from `cpu_op`
-input shapes has proven the most reliable signal when annotations are absent.
+For the batch size tier, the prefill vs. decode threshold is first derived from `--max-num-seq`. This flag specifies the maximum sequence length. Any batch size above this threshold is prefill and anything below is decode. If this flag isn't specified, then the trace splitter uses the list of batch sizes across splits to guess what the threshold is. The splitter finds the largest multiplicative gap between two batch sizes. Iterations at or below this gap are decode; those above it are prefill. Deriving batch size from CPU operation input shapes has proven the most reliable signal when annotations are absent.
+Two important notes about the inferred threshold:
+
+- The gap only counts as a real prefill/decode boundary when it is at least
+  **2x** A smaller gap is treated as normal decode variation, and every iteration is labelled
+  decode.
+- The **two smallest batch sizes are dropped** before looking for the gap, so
+  ramp-up iterations (whose batch is still filling) don't create a false boundary.
 
 ```{note}
 The shape-based path has two limitations. For a pure-prefill trace there is no
