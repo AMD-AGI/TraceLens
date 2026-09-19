@@ -21,7 +21,7 @@ both are consumed by key elsewhere and must agree on ``batch_size``.
 
 import pytest
 
-from TraceLens.TraceUtils.annotation_utils import (
+from TraceLens.TraceUtils.utils.annotation_utils import (
     ITERATION_BACKUP_PATTERNS,
     ITERATION_PATTERNS,
     PHASE_DECODE_ONLY,
@@ -31,8 +31,7 @@ from TraceLens.TraceUtils.annotation_utils import (
     IterationAnnotation,
     average_detail,
     classify_phase,
-    find_events_by_patterns,
-    find_iteration_roots_by_priority,
+    find_known_annotations,
     find_phase_from_window,
     has_context,
     has_generation,
@@ -838,86 +837,26 @@ def _event(name, ts=0, cat="user_annotation"):
     return {"name": name, "ts": ts, "cat": cat}
 
 
-def test_find_events_by_patterns_filters_by_category_and_sorts_by_ts():
-    events = [
-        _event(NATIVE_DECODE, ts=30),
-        _event(NATIVE_DECODE, ts=10),
-        _event(NATIVE_DECODE, ts=20, cat="cpu_op"),
-        _event("unrelated_op", ts=5),
-    ]
-    found = find_events_by_patterns(events, ITERATION_BACKUP_PATTERNS)
-    assert [e["ts"] for e in found] == [10, 30]
-
-    # cat=None keeps the cpu_op copy as well.
-    found = find_events_by_patterns(events, ITERATION_BACKUP_PATTERNS, cat=None)
-    assert [e["ts"] for e in found] == [10, 20, 30]
-
-
-def test_find_events_by_patterns_returns_each_event_once():
-    """A name matching two patterns in the same tier is not duplicated."""
-    events = [_event(DETAILED_DECODE)]
-    both = [ITERATION_PATTERNS[0], ITERATION_PATTERNS[0]]
-    assert len(find_events_by_patterns(events, both)) == 1
-
-
-def test_find_events_by_patterns_on_no_match():
-    assert find_events_by_patterns([_event("unrelated")], ITERATION_PATTERNS) == []
-
-
-def test_find_events_by_patterns_logging(capsys):
-    events = [_event(NATIVE_DECODE), _event("unrelated")]
-    find_events_by_patterns(events, ITERATION_BACKUP_PATTERNS)
-    assert capsys.readouterr().out == ""
-
-    find_events_by_patterns(events, ITERATION_BACKUP_PATTERNS, label="iteration")
-    assert capsys.readouterr().out == "Found 1 iteration events\n"
-
-    find_events_by_patterns(
-        events, ITERATION_BACKUP_PATTERNS, label="iteration", verbose=True
-    )
-    assert capsys.readouterr().out == f"Found 1 iteration events\n{NATIVE_DECODE}\n"
-
-
-def test_find_events_by_patterns_with_a_single_pattern():
-    events = [
-        _event(DETAILED_MIXED, ts=20),
-        _event(DETAILED_DECODE, ts=10),
-        _event(NATIVE_DECODE, ts=5),
-        _event(DETAILED_DECODE, ts=1, cat="cpu_op"),
-    ]
-    roots = find_events_by_patterns(events, [ITERATION_PATTERNS[0]])
-    assert [e["ts"] for e in roots] == [10, 20]
-
-
-def test_find_iteration_roots_by_priority_prefers_the_detailed_tier():
+def test_find_known_annotations_prefers_the_detailed_tier():
     events = [
         _event(DETAILED_DECODE, ts=10),
         _event(NATIVE_DECODE, ts=20),
         _event("step[DECODE bs=64]", ts=30),
     ]
-    roots = find_iteration_roots_by_priority(events)
+    roots = find_known_annotations(events)
     assert [e["name"] for e in roots] == [DETAILED_DECODE]
 
 
-def test_find_iteration_roots_by_priority_falls_back_to_the_native_tier():
+def test_find_known_annotations_falls_back_to_the_native_tier():
     events = [_event(NATIVE_DECODE, ts=20), _event("step[DECODE bs=64]", ts=10)]
-    roots = find_iteration_roots_by_priority(events)
+    roots = find_known_annotations(events)
     assert [e["ts"] for e in roots] == [10, 20]
 
 
-def test_find_iteration_roots_by_priority_on_no_match():
-    assert find_iteration_roots_by_priority([_event("unrelated")]) == []
-    # Detailed annotations are ignored when they carry the wrong category.
+def test_find_known_annotations_on_no_match():
+    assert find_known_annotations([_event("unrelated")]) == []
     wrong_cat = [_event(DETAILED_DECODE, cat="cpu_op")]
-    assert find_iteration_roots_by_priority(wrong_cat) == []
-
-
-def test_find_iteration_roots_by_priority_accepts_custom_tiers():
-    events = [_event(DETAILED_DECODE, ts=10), _event(NATIVE_DECODE, ts=20)]
-    roots = find_iteration_roots_by_priority(
-        events, pattern_tiers=[ITERATION_BACKUP_PATTERNS]
-    )
-    assert [e["name"] for e in roots] == [NATIVE_DECODE]
+    assert find_known_annotations(wrong_cat) == []
 
 
 # --------------------------------------------------------------------------- #

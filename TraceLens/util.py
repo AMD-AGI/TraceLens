@@ -12,7 +12,8 @@ import re
 import glob
 import sys
 import tempfile
-from collections import defaultdict
+import zipfile
+from collections import Counter, defaultdict
 
 try:
     from enum import StrEnum
@@ -86,6 +87,46 @@ def merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, f
     return merged
 
 
+_KERNEL_LAUNCH_EQUIVALENTS = {
+    "hipModuleLaunchKernel": "__kernel_launch__",
+    "cuLaunchKernel": "__kernel_launch__",
+}
+
+
+def normalize_name_for_comparison(name, strip_details=False):
+    """Normalize a trace event name for comparison.
+
+    Strips volatile parts (line numbers, hex addresses) so that names like
+    ``scheduler.py(3006): run_batch`` and ``scheduler.py(2996): run_batch``
+    compare as equal.
+    """
+    if name is None:
+        return name
+    normalized = re.sub(r"0x[0-9a-fA-F]+", "0xXXXX", name)
+    normalized = re.sub(r"\.py\(\d+\):", ".py:", normalized)
+    if strip_details:
+        normalized = re.sub(r":\s+\S+$", "", normalized)
+        normalized = re.sub(r"^.*/([^/]+\.py)$", r"\1", normalized)
+    return _KERNEL_LAUNCH_EQUIVALENTS.get(normalized, normalized)
+
+
+def get_filename(filepath: str) -> str:
+    """Resolve a trace path to load (.json, .json.gz, or .zip).
+
+    For a ``.zip`` the first ``.json`` member's name inside the archive is
+    returned; otherwise the path is returned unchanged.
+    """
+    print(f"Loading trace: {filepath}")
+    if filepath.endswith(".zip"):
+        with zipfile.ZipFile(filepath, "r") as zf:
+            json_files = [f for f in zf.namelist() if f.endswith(".json")]
+            if not json_files:
+                raise ValueError(f"No .json file found in {filepath}")
+            json_file = json_files[0]
+            print(f"  Reading {json_file} from zip...")
+            return json_file
+    return filepath
+    
 def _load_xplane_converter():
     """Load the optional JAX converter, preserving the legacy profile backend."""
     try:
@@ -664,6 +705,9 @@ class TraceEventUtils:
         MemSet = "gpu_memset"
         MemCpy = "gpu_memcpy"
 
+    class GpuUserAnnotation(StrEnum):
+        GpuUserAnnotation = "gpu_user_annotation"
+
     class CpuEventCategories(StrEnum):
         Kernel = "cpu_op"
         Runtime = "cuda_runtime"
@@ -921,6 +965,11 @@ class TraceEventUtils:
         return bool(text and TraceEventUtils._ROCM_LEGACY_MEMSET_NAMES.match(text))
 
 
+GPU_KERNEL_CATEGORIES = tuple(TraceEventUtils.GpuEventCategories)
+GPU_USER_ANNOTATION = TraceEventUtils.GpuUserAnnotation.GpuUserAnnotation
+GPU_EVENT_CATEGORIES = (*GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION)
+
+
 class RocprofParser:
     """Parser for rocprofiler-sdk JSON format (rocprofv3)"""
 
@@ -1095,3 +1144,40 @@ class PftraceParser:
     def get_events(pftrace_data: dict) -> List[dict]:
         """Return the traceEvents list from loaded pftrace data."""
         return pftrace_data.get("traceEvents", [])
+
+
+_MEMORY_VIEW_OPS = frozenset({
+    "aten::select", "aten::slice", "aten::as_strided", "aten::narrow",
+    "aten::copy_", "aten::_to_copy", "aten::to",
+    "aten::index_put_", "aten::_index_put_impl_",
+    "aten::resize_", "aten::resolve_conj", "aten::resolve_neg",
+    "aten::expand", "aten::permute", "aten::transpose", "aten::contiguous",
+    "aten::view", "aten::reshape", "aten::unsqueeze", "aten::squeeze",
+    "aten::flatten", "aten::unflatten",
+})
+
+
+def most_common_first_dim(
+    events: list[dict], exclude_mem_ops: bool = False,
+) -> int | None:
+    """Return the most common first dimension across all ``Input Dims`` of cpu_op events.
+
+    When *exclude_mem_ops* is True, skips memory/view ops whose tensor
+    dimensions reflect cache or layout sizes rather than the batch dimension.
+    Returns ``None`` when no eligible cpu_op carries ``Input Dims``.
+    """
+    first_dims: list[int] = []
+    for e in events:
+        if e.get("cat") != "cpu_op":
+            continue
+        if exclude_mem_ops and e.get("name", "") in _MEMORY_VIEW_OPS:
+            continue
+        input_dims = e.get("args", {}).get("Input Dims")
+        if not input_dims:
+            continue
+        for dim_list in input_dims:
+            if isinstance(dim_list, list) and dim_list and isinstance(dim_list[0], int):
+                first_dims.append(dim_list[0])
+    if not first_dims:
+        return None
+    return Counter(first_dims).most_common(1)[0][0]

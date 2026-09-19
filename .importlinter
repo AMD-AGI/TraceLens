@@ -11,3 +11,6 @@ depth = 10
 ignore_imports =
     TraceLens.Trace2Tree.trace_capture_merge_experimental -> TraceLens.TraceUtils.annotation_utils
     TraceLens.TraceUtils.split_inference.execution_roots -> TraceLens.Trace2Tree.inference_iteration_roots
+    TraceLens.TraceUtils.split_inference.root_detection -> TraceLens.Trace2Tree.inference_iteration_roots
+    TraceLens.TraceUtils.split_inference.root_probes -> TraceLens.Trace2Tree.inference_iteration_roots
+    TraceLens.TraceUtils.split_inference.root_probes -> TraceLens.Trace2Tree.trace_to_tree
