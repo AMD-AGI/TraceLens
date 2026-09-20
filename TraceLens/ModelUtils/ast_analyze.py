@@ -77,6 +77,12 @@ FUNCTION_SYNTHETIC_PREFIX = "@fn_"
 _FUNCTION_SOURCE_POS_RE = re.compile(
     rf"^{re.escape(FUNCTION_SYNTHETIC_PREFIX)}l(\d+)_"
 )
+# Trailing per-element discriminator appended by ``function_synthetic_attr`` /
+# ``positional_synthetic_attr`` / ``submodule_callsite_attr`` when one call site
+# is cloned across a ``map(lambda x: ..., (a, b))`` tuple -- both clones share the
+# lambda body's own line (and column), so the discriminator is what keeps them
+# from colliding on one key.
+_MAP_DISCRIMINATOR_RE = re.compile(r"@m\d+$")
 # Python builtins and scalar constructors that appear in a forward but never carry
 # a tensor the diagram should show as a computation node.
 _NON_TENSOR_BUILTINS = frozenset(
@@ -91,13 +97,17 @@ _NON_TENSOR_BUILTINS = frozenset(
 )
 
 
-def positional_synthetic_attr(func_name: str, lineno: int) -> str:
+def positional_synthetic_attr(
+    func_name: str, lineno: int, discriminator: int | None = None
+) -> str:
     """Synthetic attr for a rope helper called as a plain function in a forward.
 
     The line number keeps each application site distinct, since a forward commonly
-    rotates queries and keys with separate calls to the same helper.
+    rotates queries and keys with separate calls to the same helper. ``discriminator``
+    mirrors ``function_synthetic_attr``'s -- see there for when it is needed.
     """
-    return f"{POSITIONAL_SYNTHETIC_PREFIX}l{lineno}_{func_name}"
+    base = f"{POSITIONAL_SYNTHETIC_PREFIX}l{lineno}_{func_name}"
+    return base if discriminator is None else f"{base}@m{discriminator}"
 
 
 def is_positional_synthetic(attr_name: str) -> bool:
@@ -117,18 +127,28 @@ def positional_display_label(attr_name_or_func: str) -> str:
     name = attr_name_or_func
     if name.startswith(POSITIONAL_SYNTHETIC_PREFIX):
         name = _POSITIONAL_SOURCE_POS_RE.sub("", name)
+        name = _MAP_DISCRIMINATOR_RE.sub("", name)
     text = name.replace("_", " ").strip()
     return text[:1].upper() + text[1:] if text else name
 
 
-def function_synthetic_attr(func_name: str, lineno: int) -> str:
+def function_synthetic_attr(
+    func_name: str, lineno: int, discriminator: int | None = None
+) -> str:
     """Synthetic attr for a bare free-function call traced in a forward.
 
     Mirrors ``positional_synthetic_attr`` but for functions that are not rope
     helpers, so a computed side-input (``get_vision_position_ids(...)``) becomes a
     visible node instead of vanishing. The line number keeps each call site apart.
+
+    ``discriminator`` disambiguates two applications of the SAME call that share
+    one source line -- ``q, k = map(lambda x: rearrange(x, ...), (q, k))`` applies
+    one lambda body to each tuple element, so both synthesized calls are clones of
+    the exact same AST node (identical line AND column) and would otherwise
+    collide on one key, silently dropping one element's producer.
     """
-    return f"{FUNCTION_SYNTHETIC_PREFIX}l{lineno}_{func_name}"
+    base = f"{FUNCTION_SYNTHETIC_PREFIX}l{lineno}_{func_name}"
+    return base if discriminator is None else f"{base}@m{discriminator}"
 
 
 def is_function_synthetic(attr_name: str) -> bool:
@@ -149,6 +169,7 @@ def function_display_label(attr_name_or_func: str) -> str:
     name = attr_name_or_func
     if name.startswith(FUNCTION_SYNTHETIC_PREFIX):
         name = _FUNCTION_SOURCE_POS_RE.sub("", name)
+        name = _MAP_DISCRIMINATOR_RE.sub("", name)
     text = name.replace("_", " ").strip()
     return text[:1].upper() + text[1:] if text else name
 
@@ -913,16 +934,26 @@ def _extract_self_calls_ordered(
         if target in _SYNTHETIC_ATTENTION_NAMES or _is_kernel_merge_call(func):
             _append_forward_call(out, SYNTHETIC_ATTENTION)
             return
+        # A ``map(lambda x: BODY(x), (a, b))`` idiom clones BODY's own call node
+        # once per tuple element (see ``_expand_map_lambda_tuple``); every clone
+        # shares BODY's original source position, so the discriminator stamped on
+        # the clone is what keeps their synthetic keys from colliding (mirrors
+        # ``_call_step_producer``/``_map_element_step_attr``).
+        discriminator = getattr(node, "_tracelens_map_discriminator", None)
         if target and _is_positional_function_call(func, target):
             # Rope helpers live at module level, so the block that applies them is
             # the only place the diagram can show the rotation happening.
-            _append_forward_call(out, positional_synthetic_attr(target, node.lineno))
+            _append_forward_call(
+                out, positional_synthetic_attr(target, node.lineno, discriminator)
+            )
             return
         if not skip_free_fn and _is_emittable_free_function(func, target):
             # Any other module-level free function still runs real computation the
             # forward feeds downstream (``get_vision_position_ids(...)``); show it as
             # its own node instead of dropping it.
-            _append_forward_call(out, function_synthetic_attr(target, node.lineno))
+            _append_forward_call(
+                out, function_synthetic_attr(target, node.lineno, discriminator)
+            )
             return
         # No producer form matched: this is a tensor-method chain link
         # (``.reshape(...)``/``.permute(...)``/``.unbind(0)``/``.to(dtype)`` — any
@@ -2804,6 +2835,75 @@ def _collect_name_value_ast(func: ast.FunctionDef) -> dict[str, ast.expr]:
     return name_value_ast
 
 
+class _MapLambdaParamSubstituter(ast.NodeTransformer):
+    """Replaces a lambda's own parameter Name with a caller-supplied expression."""
+
+    def __init__(self, param_name: str, replacement: ast.expr):
+        self.param_name = param_name
+        self.replacement = replacement
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:  # noqa: N802 (ast API name)
+        if node.id == self.param_name:
+            return copy.deepcopy(self.replacement)
+        return node
+
+
+def _expand_map_lambda_tuple(value: ast.expr) -> ast.expr:
+    """Rewrite ``map(lambda x: BODY(x), (a, b, ...))`` into ``BODY(a), BODY(b), ...``.
+
+    ``q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=...), (q, k))``
+    applies ONE lambda body to each element of a literal tuple/list. ``map`` is a
+    plain Python builtin the extractor never emits as its own step, so the whole
+    call resolves through the generic single-producer fallback, which takes the
+    LAST resolved argument producer for the entire expression -- both ``q`` and
+    ``k`` collapse onto ``k``'s producer, orphaning ``q``'s producer entirely.
+
+    Expanding the call up front into one clone of the lambda body per element
+    -- with the lambda's own parameter substituted by that element's actual
+    expression -- lets each element flow through the ordinary
+    ``a, b = expr(a), expr(b)`` parallel-tuple-assignment path with its own
+    identity, keyed on its own producer. General: any ``map(lambda <param>:
+    <body>, <tuple/list literal>)`` right-hand side, regardless of which
+    function the lambda body calls.
+
+    Returns *value* unchanged when it is not this exact shape (a single-param
+    lambda mapped over a literal tuple/list).
+    """
+    if not (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id == "map"
+        and len(value.args) == 2
+        and not value.keywords
+        and isinstance(value.args[0], ast.Lambda)
+    ):
+        return value
+    lam = value.args[0]
+    lam_args = lam.args
+    if lam_args.vararg or lam_args.kwonlyargs or lam_args.kwarg or lam_args.defaults:
+        return value
+    if len(lam_args.posonlyargs) + len(lam_args.args) != 1:
+        return value
+    param_name = (lam_args.posonlyargs or lam_args.args)[0].arg
+    iterable = value.args[1]
+    if not isinstance(iterable, (ast.Tuple, ast.List)):
+        return value
+
+    elements: list[ast.expr] = []
+    for index, item in enumerate(iterable.elts):
+        substituted = _MapLambdaParamSubstituter(param_name, item).visit(
+            copy.deepcopy(lam.body)
+        )
+        ast.fix_missing_locations(substituted)
+        # Both clones share the lambda body's own source position (one textual
+        # call site applied twice), so the free-function/positional synthetic
+        # naming that keys on ``lineno`` alone would still collide. Stamp a
+        # discriminator any downstream call-producer lookup can key on.
+        substituted._tracelens_map_discriminator = index  # type: ignore[attr-defined]
+        elements.append(substituted)
+    return ast.Tuple(elts=elements, ctx=ast.Load())
+
+
 class _ForwardOperationExtractor:
     """Recover primitive tensor operations and their data dependencies."""
 
@@ -2981,19 +3081,51 @@ class _ForwardOperationExtractor:
         # node attr in ``merge._annotate_op_input_signatures``.
         if raw_op:
             emitted_details.append(f"raw_op: {raw_op}")
+        predecessor_ports = self._read_output_ports(node)
         self.operations.append(
             ForwardOperation(
                 attr_name=attr_name,
                 label=display,
                 class_name=display,
-                predecessors=self._dedupe(predecessors),
+                predecessors=self._dedupe_predecessors(predecessors, predecessor_ports),
                 external_inputs=self._dedupe(external_inputs),
                 details=tuple(emitted_details),
                 param_inputs=self._param_refs(node),
-                predecessor_ports=self._read_output_ports(node),
+                predecessor_ports=predecessor_ports,
             )
         )
         return attr_name
+
+    @staticmethod
+    def _dedupe_predecessors(
+        values: list[str], ports: tuple[tuple[str, int], ...]
+    ) -> tuple[str, ...]:
+        """Drop repeats, except a producer read at several distinct output
+        ordinals within this same expression keeps one entry per ordinal.
+
+        ``torch.cat((q_pass, q_rot), dim=-1)`` reassembling a ``torch.split``
+        reads the SAME split producer twice, at two different output slots.
+        A plain identity dedupe (as for every other predecessor list) would
+        collapse that to a single entry and silently drop the second slice's
+        edge. ``ports`` (see ``_read_output_ports``) records how many
+        distinct ordinals each producer here is actually read at, so this
+        keeps exactly that many copies -- one every other repeat of the same
+        producer (not backed by a distinct ordinal) is still deduped away.
+        """
+        repeat_needed: dict[str, int] = {}
+        for producer, _ordinal in ports:
+            repeat_needed[producer] = repeat_needed.get(producer, 0) + 1
+        kept: list[str] = []
+        seen_count: dict[str, int] = {}
+        for value in values:
+            if not value:
+                continue
+            limit = max(repeat_needed.get(value, 0), 1)
+            count = seen_count.get(value, 0)
+            if count < limit:
+                kept.append(value)
+                seen_count[value] = count + 1
+        return tuple(kept)
 
     def _emit_branch_select(
         self,
@@ -3032,21 +3164,29 @@ class _ForwardOperationExtractor:
         When an operation reads ``comb_w`` (unpacked as ordinal 2 of a split), it
         consumes that specific output port, not the whole split. Walk the
         expression for such locals so the graph can wire the edge to the matching
-        port. A local read at several ordinals of the *same* producer keeps the
-        first seen (a single consumer edge carries one port label).
+        port. An op that reassembles two different slices of the *same* split in
+        one expression (``torch.cat((q_pass, q_rot), dim=-1)``) reads it at two
+        distinct ordinals -- keep every distinct (producer, ordinal) pair, in
+        read order, so each slice keeps its own port instead of the second read
+        silently collapsing onto the first.
         """
         if not self.var_output_ordinal:
             return ()
-        ports: dict[str, int] = {}
+        ports: list[tuple[str, int]] = []
+        seen: set[tuple[str, int]] = set()
         for current in ast.walk(node):
             if isinstance(current, ast.Name):
                 ordinal = self.var_output_ordinal.get(current.id)
                 if ordinal is None:
                     continue
                 producer = self.var_producer.get(current.id)
-                if producer and producer not in ports:
-                    ports[producer] = ordinal
-        return tuple(ports.items())
+                if not producer:
+                    continue
+                key = (producer, ordinal)
+                if key not in seen:
+                    seen.add(key)
+                    ports.append(key)
+        return tuple(ports)
 
     def _param_refs(self, node: ast.AST) -> tuple[str, ...]:
         """Secondary forward parameters this operation's expression reads.
@@ -3111,10 +3251,15 @@ class _ForwardOperationExtractor:
             or (isinstance(func, ast.Name) and _is_kernel_merge_call(func))
         ):
             return SYNTHETIC_ATTENTION
+        # A ``map(lambda x: BODY(x), (a, b))`` idiom clones BODY's own call node
+        # once per tuple element (see ``_expand_map_lambda_tuple``); every clone
+        # shares BODY's original source position, so the discriminator stamped on
+        # the clone is what keeps their synthetic keys from colliding.
+        discriminator = getattr(node, "_tracelens_map_discriminator", None)
         if target and _is_positional_function_call(func, target):
-            return positional_synthetic_attr(target, node.lineno)
+            return positional_synthetic_attr(target, node.lineno, discriminator)
         if _is_emittable_free_function(func, target):
-            return function_synthetic_attr(target, node.lineno)
+            return function_synthetic_attr(target, node.lineno, discriminator)
         return None
 
     def _free_function_param_names(self, node: ast.Call) -> list[str] | None:
@@ -4042,9 +4187,20 @@ class _ForwardOperationExtractor:
         if label == "Concat" and len(emit_predecessors) >= 2:
             # ``cat([freq_hw, freq_hw])`` concatenates one tensor with itself: the
             # deduped edge would collapse to a single-input concat that looks
-            # inert. It is really a Tile (repeat k along the concat dim).
+            # inert. It is really a Tile (repeat k along the concat dim). A repeat
+            # of the same producer *string* is not automatically a repeat of the
+            # same value, though: reassembling two different slices of one
+            # multi-output split (``torch.cat((q_pass, q_rot), dim=-1)``) shares a
+            # producer but reads two distinct output ordinals from it, so it is a
+            # genuine concatenation of two different tensors, not a self-repeat.
             distinct = dict.fromkeys(emit_predecessors)
-            if len(distinct) == 1:
+            ordinal_counts: dict[str, int] = {}
+            for producer, _ordinal in self._read_output_ports(node):
+                ordinal_counts[producer] = ordinal_counts.get(producer, 0) + 1
+            multi_ordinal_producers = {
+                producer for producer, count in ordinal_counts.items() if count > 1
+            }
+            if len(distinct) == 1 and not (set(distinct) & multi_ordinal_producers):
                 label = "Tile"
                 details.append(f"repeat: {len(emit_predecessors)}")
         producer = self._emit(
@@ -4470,7 +4626,7 @@ class _ForwardOperationExtractor:
     ) -> None:
         for stmt in statements:
             if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
-                value = stmt.value
+                value = _expand_map_lambda_tuple(stmt.value)
                 targets = (
                     stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
                 )
@@ -4503,7 +4659,7 @@ class _ForwardOperationExtractor:
                             # Parallel reassignment also drops any stale ordinal.
                             self.var_output_ordinal.pop(element_target.id, None)
                     continue
-                producer, _ = self.expression(stmt.value)
+                producer, _ = self.expression(value)
                 if producer is None and self._is_host_scalar_expr(value):
                     for target in targets:
                         if isinstance(target, ast.Name):
@@ -6528,6 +6684,27 @@ def _tuple_source_names(value: ast.AST) -> list[str] | None:
     return None
 
 
+def _map_element_step_attr(node: ast.AST) -> str | None:
+    """Synthetic step key for one expanded ``map(lambda x: BODY(x), ...)`` element.
+
+    Mirrors the relevant subset of ``_ForwardOperationExtractor._call_step_producer``
+    (positional/free-function synthetic naming, including the per-element
+    discriminator ``_expand_map_lambda_tuple`` stamps on each clone) for this
+    module-level provenance tracker, which runs independently of that class and
+    otherwise never sees inside a lambda body.
+    """
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    target = _expr_name(func)
+    discriminator = getattr(node, "_tracelens_map_discriminator", None)
+    if target and _is_positional_function_call(func, target):
+        return positional_synthetic_attr(target, node.lineno, discriminator)
+    if _is_emittable_free_function(func, target):
+        return function_synthetic_attr(target, node.lineno, discriminator)
+    return None
+
+
 def _record_assign_targets(
     node: ast.Assign,
     stmt_calls: list[str],
@@ -6546,9 +6723,23 @@ def _record_assign_targets(
     target = node.targets[0]
     if isinstance(target, ast.Tuple):
         source_names = _tuple_source_names(node.value)
+        # ``q, k = map(lambda x: rearrange(x, ...), (q, k))`` applies the SAME
+        # lambda body once per element; that body's call becomes its own node
+        # (``_expand_map_lambda_tuple``/``_call_step_producer``), so each
+        # element's true provenance chain ends at THAT step, not at its
+        # pre-map source. ``stmt_calls`` cannot see it (built by
+        # ``_extract_self_calls_ordered``, which never descends into a lambda
+        # body), so resolve it directly from the expanded per-element clones.
+        # Only set (and only aligned with ``source_names``) when *node.value*
+        # is actually this map idiom -- ``_expand_map_lambda_tuple`` returns
+        # any other value unchanged.
+        expanded = _expand_map_lambda_tuple(node.value)
+        expanded_elements = (
+            expanded.elts if isinstance(expanded, ast.Tuple) and expanded is not node.value else None
+        )
         if source_names is not None and len(source_names) == len(target.elts):
             zipped = True
-            for elt, source_name in zip(target.elts, source_names):
+            for index, (elt, source_name) in enumerate(zip(target.elts, source_names)):
                 if not isinstance(elt, ast.Name):
                     zipped = False
                     break
@@ -6556,6 +6747,10 @@ def _record_assign_targets(
                 for call in stmt_calls:
                     if call not in source_chain:
                         source_chain.append(call)
+                if expanded_elements is not None:
+                    own_step = _map_element_step_attr(expanded_elements[index])
+                    if own_step and own_step not in source_chain:
+                        source_chain.append(own_step)
                 assign_one(elt, source_chain or list(stmt_calls))
             if zipped:
                 return
@@ -7569,8 +7764,15 @@ def _walk_forward_stmt(
 ) -> str | None:
     if isinstance(node, ast.Assign):
         stmt_calls: list[str] = []
+        # ``q, k = map(lambda x: BODY(x), (q, k))`` applies one lambda body to
+        # each tuple element; rewritten into an equivalent per-element ``Tuple``
+        # (see ``_expand_map_lambda_tuple``) so the existing ``ast.Tuple``
+        # handling below walks each clone's own call and materializes a real
+        # step for it (each clone stays distinct via its stamped discriminator).
+        # Every other consumer of ``node.value`` still reads the untouched map()
+        # call -- only call *extraction* needs the expanded shape.
         _extract_self_calls_ordered(
-            node.value, stmt_calls, in_conditional, repeated_attrs
+            _expand_map_lambda_tuple(node.value), stmt_calls, in_conditional, repeated_attrs
         )
         _inject_kernel_merge(
             node.value,

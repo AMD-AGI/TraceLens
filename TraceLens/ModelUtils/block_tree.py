@@ -731,9 +731,12 @@ class BlockNode:
     operation_predecessors: list[str] = field(default_factory=list)
     # Ordered output-port names for a multi-output op (split/chunk/unbind that was
     # tuple-unpacked); ``operation_predecessor_ports`` maps a producer attr this
-    # node consumes to the output ordinal it reads. Both empty for ordinary ops.
+    # node consumes to the output ordinal(s) it reads. Almost always one ordinal;
+    # a node that reassembles two different slices of the *same* multi-output
+    # producer (``torch.cat((q_pass, q_rot), dim=-1)``) reads two, so the value is
+    # an ordered tuple rather than a single int. Both empty for ordinary ops.
     output_names: list[str] = field(default_factory=list)
-    operation_predecessor_ports: dict[str, int] = field(default_factory=dict)
+    operation_predecessor_ports: dict[str, tuple[int, ...]] = field(default_factory=dict)
     kernel_second_operand: str | None = None
     external_inputs: list[str] = field(default_factory=list)
     param_inputs: list[str] = field(default_factory=list)
@@ -967,6 +970,23 @@ def _label_for_call(attr_name: str, class_name: str | None) -> str:
     return readable[:24]
 
 
+def _predecessor_ports_dict(
+    pairs: tuple[tuple[str, int], ...],
+) -> dict[str, tuple[int, ...]]:
+    """Producer attr -> ordinal(s) a step's expression reads from it.
+
+    Usually one ordinal per producer. A step that reads two different output
+    slots of the *same* multi-output producer within one expression
+    (``torch.cat((q_pass, q_rot), dim=-1)`` reassembling a ``torch.split``)
+    needs both preserved, in read order -- a plain ``dict(pairs)`` would keep
+    only the last-written ordinal and silently drop the other slice's edge.
+    """
+    ordinals: dict[str, list[int]] = {}
+    for producer, ordinal in pairs:
+        ordinals.setdefault(producer, []).append(ordinal)
+    return {producer: tuple(values) for producer, values in ordinals.items()}
+
+
 def _leaf_node(
     *,
     attr_name: str,
@@ -978,7 +998,7 @@ def _leaf_node(
     kernel_predecessors: list[str] | None = None,
     operation_predecessors: list[str] | None = None,
     output_names: list[str] | None = None,
-    operation_predecessor_ports: dict[str, int] | None = None,
+    operation_predecessor_ports: dict[str, tuple[int, ...]] | None = None,
     kernel_second_operand: str | None = None,
     external_inputs: list[str] | None = None,
     param_inputs: list[str] | None = None,
@@ -1093,7 +1113,7 @@ def _expanded_free_function_node(
                     basic=True,
                     operation_predecessors=list(operation.predecessors),
                     output_names=list(operation.output_names),
-                    operation_predecessor_ports=dict(operation.predecessor_ports),
+                    operation_predecessor_ports=_predecessor_ports_dict(operation.predecessor_ports),
                     external_inputs=list(operation.external_inputs),
                     param_inputs=translated,
                     boundary_input_name=boundary_name,
@@ -2248,7 +2268,7 @@ def build_block_node(
                     basic=True,
                     operation_predecessors=list(operation.predecessors),
                     output_names=list(operation.output_names),
-                    operation_predecessor_ports=dict(operation.predecessor_ports),
+                    operation_predecessor_ports=_predecessor_ports_dict(operation.predecessor_ports),
                     external_inputs=list(operation.external_inputs),
                     param_inputs=list(operation.param_inputs),
                     boundary_input_name=_boundary_input_name(operation, cls),
@@ -2350,7 +2370,7 @@ def build_block_node(
                                 basic=True,
                                 operation_predecessors=list(operation.predecessors),
                                 output_names=list(operation.output_names),
-                                operation_predecessor_ports=dict(
+                                operation_predecessor_ports=_predecessor_ports_dict(
                                     operation.predecessor_ports
                                 ),
                                 external_inputs=list(operation.external_inputs),
@@ -2374,7 +2394,7 @@ def build_block_node(
                         basic=True,
                         operation_predecessors=list(single_op.predecessors),
                         output_names=list(single_op.output_names),
-                        operation_predecessor_ports=dict(single_op.predecessor_ports),
+                        operation_predecessor_ports=_predecessor_ports_dict(single_op.predecessor_ports),
                         external_inputs=list(single_op.external_inputs),
                         param_inputs=list(single_op.param_inputs),
                     )

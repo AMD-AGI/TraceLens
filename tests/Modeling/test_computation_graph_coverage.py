@@ -529,6 +529,25 @@ def test_prune_computation_nodes_noop():
     assert cg._prune_computation_nodes(graph, set()) is graph
 
 
+def test_prune_computation_nodes_preserves_multi_ordinal_duplicate_link():
+    """A consumer reassembling two ordinals of the same split (``torch.cat((q_pass,
+    q_rot))``) repeats the same (source, target) pair with a list-valued port. A
+    node-removal/reindex pass elsewhere in the graph must not collapse that
+    duplicate down to one edge -- doing so silently drops the second slice's
+    consumer edge (the q_rot dead-node regression)."""
+    a = _node("a")
+    b = _node("b")
+    c = _node("c")
+    graph = cg.ComputationGraph(
+        nodes=[_spec(block=a, key="a"), _spec(block=b, key="b"), _spec(block=c, key="drop")],
+        links=[(0, 1), (0, 1), (1, 2)],
+        link_output_ports={(0, 1): ["0", "1"]},
+    )
+    pruned = cg._prune_computation_nodes(graph, {2})
+    assert pruned.links.count((0, 1)) == 2
+    assert pruned.link_output_ports[(0, 1)] == ["0", "1"]
+
+
 def test_dead_node_indices_and_dce():
     keep = _node("keep")
     dead = _node("dead")
@@ -1719,6 +1738,24 @@ def test_operation_source_indices():
     sources = cg._operation_source_indices(step, {"a": 3}, chain_input_index=1)
     assert 3 in sources and 1 in sources
     assert cg._operation_source_indices(step, None) == []
+
+
+def test_operation_source_indices_multi_ordinal_repeat():
+    """A consumer reading two distinct ordinals of the same producer in one
+    expression (``torch.cat((q_pass, q_rot))`` reassembling a split) repeats
+    that producer's attr in ``operation_predecessors``; the resolved source
+    index must repeat too (one entry per ordinal), not collapse to one."""
+    step = _node(
+        "@op",
+        operation_predecessors=["split", "split"],
+        operation_predecessor_ports={"split": (0, 1)},
+    )
+    sources = cg._operation_source_indices(step, {"split": 7})
+    assert sources == [7, 7]
+
+    # A plain (non-repeated) predecessor keeps its usual single entry.
+    single_step = _node("@op2", operation_predecessors=["split"])
+    assert cg._operation_source_indices(single_step, {"split": 7}) == [7]
 
 
 # --------------------------------------------------------------------------- #

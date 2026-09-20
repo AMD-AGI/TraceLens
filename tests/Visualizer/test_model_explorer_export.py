@@ -17,7 +17,11 @@ import pytest
 from TraceLens.ModelUtils.ast_analyze import SYNTHETIC_ATTENTION
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.block_tree import BlockNode
-from TraceLens.ModelUtils.computation_graph import build_computation_graph
+from TraceLens.ModelUtils.computation_graph import (
+    ComputationGraph,
+    GraphNodeSpec,
+    build_computation_graph,
+)
 from TraceLens.ModelUtils.extract import load_architecture
 
 from TraceLens.Visualizer.model_explorer_export.adapter import (
@@ -124,6 +128,31 @@ def test_computation_graph_to_explorer_graph_topology():
         attr["key"] == "operation" and attr["value"] == "gpu_kernel"
         for attr in attention["attrs"]
     )
+
+
+def test_incoming_edges_consumes_list_valued_output_port_in_order():
+    """A consumer reassembling two ordinals of the same multi-output producer in
+    one expression (``torch.cat((q_pass, q_rot))``) carries two parallel edges
+    between the same (producer, consumer) node pair, one per ordinal --
+    ``computation.links`` repeats that pair and ``link_output_ports`` records a
+    list of ports instead of one string. The converted graph must emit two
+    distinct ``incomingEdges`` entries, each docked to its own ordinal, in
+    order -- not silently collapse the second slice onto the first (the q_rot
+    dead-node regression)."""
+    producer = GraphNodeSpec(key="split", label="Split")
+    consumer = GraphNodeSpec(key="concat", label="Concat")
+    computation = ComputationGraph(
+        nodes=[producer, consumer],
+        links=[(0, 1), (0, 1)],
+        link_output_ports={(0, 1): ["0", "1"]},
+    )
+    graph = computation_graph_to_explorer_graph(computation, graph_id="g")
+    consumer_node = next(node for node in graph["nodes"] if node["id"] == "concat")
+    edges = consumer_node["incomingEdges"]
+    assert len(edges) == 2
+    assert [edge["sourceNodeOutputId"] for edge in edges] == ["0", "1"]
+    assert [edge["targetNodeInputId"] for edge in edges] == ["0", "1"]
+    assert all(edge["sourceNodeId"] == "split" for edge in edges)
 
 
 def test_inline_frames_become_namespaces():

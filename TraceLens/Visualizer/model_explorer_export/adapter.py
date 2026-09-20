@@ -148,6 +148,15 @@ def _incoming_edges(
 ) -> dict[str, list[dict[str, Any]]]:
     incoming: dict[str, list[dict[str, Any]]] = defaultdict(list)
     target_input_counter: dict[str, int] = defaultdict(int)
+    # A single (source, target) node pair almost always carries one output
+    # port, but a consumer that reassembles two different slices of the same
+    # multi-output producer in one expression (``torch.cat((q_pass, q_rot),
+    # dim=-1)``) needs two parallel edges between that pair, each docked to its
+    # own slice -- ``computation.links`` then literally repeats that tuple and
+    # ``link_output_ports`` records a list of ports instead of one string.
+    # Track how many times each pair has been visited so far to consume that
+    # list in order (one port per repeat) instead of reusing the first port.
+    link_visit_counter: dict[tuple[int, int], int] = defaultdict(int)
 
     for source_index, target_index in computation.links:
         source_id = index_to_id.get(source_index)
@@ -168,11 +177,20 @@ def _incoming_edges(
             target_input_id = str(target_input_counter[target_id])
             target_input_counter[target_id] += 1
 
+        link_key = (source_index, target_index)
+        port_value = computation.link_output_ports.get(link_key, _DEFAULT_OUTPUT_ID)
+        if isinstance(port_value, list):
+            visit = link_visit_counter[link_key]
+            link_visit_counter[link_key] += 1
+            source_output_id = (
+                port_value[visit] if visit < len(port_value) else port_value[-1]
+            )
+        else:
+            source_output_id = port_value
+
         edge: dict[str, Any] = {
             "sourceNodeId": source_id,
-            "sourceNodeOutputId": computation.link_output_ports.get(
-                (source_index, target_index), _DEFAULT_OUTPUT_ID
-            ),
+            "sourceNodeOutputId": source_output_id,
             "targetNodeInputId": target_input_id,
         }
         if metadata:

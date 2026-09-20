@@ -105,7 +105,15 @@ class ComputationGraph:
     nodes: list[GraphNodeSpec] = field(default_factory=list)
     links: list[tuple[int, int]] = field(default_factory=list)
     link_port_labels: dict[tuple[int, int], str] = field(default_factory=dict)
-    link_output_ports: dict[tuple[int, int], str] = field(default_factory=dict)
+    # Almost always a single output-port id per (source, target) link. A list
+    # appears only when one consumer reassembles two different slices of the
+    # same multi-output producer in one expression (``torch.cat((q_pass,
+    # q_rot), dim=-1)``): that pair then carries two parallel edges, one port
+    # per repeat, consumed in order (see ``_merge_link_output_port`` /
+    # ``adapter._incoming_edges``).
+    link_output_ports: dict[tuple[int, int], str | list[str]] = field(
+        default_factory=dict
+    )
     inline_frames: list[InlineFrameSpec] = field(default_factory=list)
     side_effect_frame_ids: set[str] = field(default_factory=set)
     excluded_output_indices: set[int] = field(default_factory=set)
@@ -664,6 +672,19 @@ def _wire_all_predecessor_edges(
     attr_last_index = _rebuild_attr_last_index(graph)
     block_index_by_id = _build_block_index_map(graph)
 
+    # A kernel-pipeline attention step's *result* is materialized as a separate
+    # ``@attn_output`` sibling node (or, absent one, the pipeline's own tail),
+    # not a node literally named ``SYNTHETIC_ATTENTION`` -- but other steps'
+    # AST-recorded predecessors (e.g. an output-norm reading ``o = <attention
+    # call>``) still name it by that original key. Alias the key so those
+    # consumer edges resolve to the real producer instead of being dropped.
+    if SYNTHETIC_ATTENTION not in attr_last_index:
+        attention_source = attr_last_index.get("@attn_output") or attr_last_index.get(
+            "@attn_pipeline"
+        )
+        if attention_source is not None:
+            attr_last_index[SYNTHETIC_ATTENTION] = attention_source
+
     # A nested module that is inline-expanded into this graph keeps its own
     # operation/forward-step predecessor metadata describing data flow among
     # nodes that now live directly in this graph.  Wire predecessor edges for
@@ -700,6 +721,13 @@ def _wire_all_predecessor_edges(
                 if pred != FORWARD_METHOD_INPUT and not is_forward_operation(pred)
             ]
             multi_input = len(child.operation_predecessors) >= 2
+            # A predecessor read at several distinct output ordinals of the same
+            # producer within one expression (``torch.cat((q_pass, q_rot))``
+            # reassembling a split) repeats that producer's attr in
+            # ``operation_predecessors``; track how many times each has been
+            # seen so far in this loop to pick the matching ordinal, in read
+            # order, out of ``operation_predecessor_ports``'s per-producer tuple.
+            pred_occurrence: dict[str, int] = {}
             for pred in child.operation_predecessors:
                 if pred == FORWARD_METHOD_INPUT:
                     source_index = input_index
@@ -716,6 +744,12 @@ def _wire_all_predecessor_edges(
                             f"producer {pred!r} that was never emitted as a node"
                         )
                     continue
+                pred_ordinals = child.operation_predecessor_ports.get(pred, ())
+                occurrence = pred_occurrence.get(pred, 0)
+                pred_occurrence[pred] = occurrence + 1
+                consumed_ordinal = (
+                    pred_ordinals[occurrence] if occurrence < len(pred_ordinals) else None
+                )
                 # A consumer reading a specific return slot of an inline-expanded
                 # tuple-returning free function (``query_states`` = ordinal 0 of
                 # ``apply_rotary_pos_emb_vision``) must dock onto that slot's
@@ -724,7 +758,6 @@ def _wire_all_predecessor_edges(
                 # per-ordinal producer and skip the port tag — the internal op has
                 # a single output, so no fan-out ordinal applies.
                 return_producers = block.forward_step_return_producers.get(pred)
-                consumed_ordinal = child.operation_predecessor_ports.get(pred)
                 slot_resolved = False
                 if (
                     return_producers
@@ -752,15 +785,30 @@ def _wire_all_predecessor_edges(
                     elif resolved is not None:
                         slot_resolved = True
                 link = (source_index, target_index)
-                if link not in graph.links:
-                    graph.links.append(link)
                 # A consumer that reads a specific slice of a multi-output op
                 # (``comb_w`` = ordinal 2 of a split) tags its edge with that
                 # ordinal, so the split can later fan out into one named output
                 # port per slice with its own shape.
-                ordinal = child.operation_predecessor_ports.get(pred)
-                if ordinal is not None and not slot_resolved:
-                    graph.link_output_ports[link] = str(ordinal)
+                port_str = (
+                    str(consumed_ordinal)
+                    if consumed_ordinal is not None and not slot_resolved
+                    else None
+                )
+                if link not in graph.links:
+                    graph.links.append(link)
+                    if port_str is not None:
+                        graph.link_output_ports[link] = port_str
+                elif port_str is not None and not _link_output_port_recorded(
+                    graph.link_output_ports.get(link), port_str
+                ):
+                    # The link already exists but this occurrence names a
+                    # genuinely different output ordinal of the same producer --
+                    # a second slice feeding the same consumer, not a duplicate.
+                    # Add a parallel edge instead of collapsing onto the first.
+                    graph.links.append(link)
+                    graph.link_output_ports[link] = _merge_link_output_port(
+                        graph.link_output_ports.get(link), port_str
+                    )
                 if multi_input and link not in graph.link_port_labels:
                     source_label = (
                         graph.nodes[source_index].label
@@ -943,8 +991,21 @@ def _wire_all_predecessor_edges(
                 # the norm and, since the kernel that produces ``cu_seqlens`` runs
                 # later, closes a cycle. Skip only when we positively know the
                 # first op's inputs (``entry_params`` non-empty).
+                #
+                # This mismatch check only makes sense for a genuine EXTRA side
+                # arg living alongside a primary one (``multi`` -- 2+ declared
+                # predecessors): ``entry_params`` is named in the CALLEE's own
+                # parameter vocabulary (e.g. KimiMLP's ``x``), while ``arg_name``
+                # is named in the CALLER's local-variable vocabulary at the call
+                # site (e.g. ``identity`` aliasing ``hidden_states`` before
+                # ``self.shared_experts(identity)``). Those two naming domains
+                # only coincidentally match, so when there is a single declared
+                # predecessor it IS the primary argument by construction --
+                # comparing its caller-side name against the callee's own
+                # parameter name would spuriously fail and drop a real edge.
                 if (
-                    arg_name is not None
+                    multi
+                    and arg_name is not None
                     and target_index == default_target
                     and entry_params
                     and _normalize_param_name(arg_name) not in entry_params
@@ -1105,6 +1166,43 @@ def _inline_frame_exit_index(
     return dangling[-1] if dangling else None
 
 
+def _link_output_port_recorded(
+    existing: str | list[str] | None, port: str
+) -> bool:
+    """True when ``port`` is already the (or one of the) recorded output port(s)
+    of a graph link.
+
+    A single (source, target) node pair ordinarily carries one output port, but
+    a consumer that reassembles two different slices of the same multi-output
+    producer in one expression (``torch.cat((q_pass, q_rot), dim=-1)``) needs
+    two parallel edges between that same pair, each tagged with its own slice.
+    ``graph.link_output_ports`` stores those as a list in that rare case; every
+    other link keeps the plain single-string value it always had.
+    """
+    if existing is None:
+        return False
+    if isinstance(existing, list):
+        return port in existing
+    return existing == port
+
+
+def _merge_link_output_port(
+    existing: str | list[str] | None, port: str
+) -> str | list[str]:
+    """Record an additional output port on a link, promoting to a list only
+    when a second, genuinely different port is added (see
+    ``_link_output_port_recorded``)."""
+    if existing is None:
+        return port
+    if isinstance(existing, list):
+        if port not in existing:
+            existing.append(port)
+        return existing
+    if existing == port:
+        return existing
+    return [existing, port]
+
+
 def _wire_inline_frame_dangling_outputs(graph: ComputationGraph) -> None:
     """No-op: previously connected dead-end inline-frame nodes to the frame
     exit, but this fabricated edges not present in the model.  Dead-end nodes
@@ -1117,17 +1215,33 @@ def _operation_source_indices(
     *,
     chain_input_index: int | None = None,
 ) -> list[int]:
-    """Nodes an operation reads from, when its forward names them outright."""
+    """Nodes an operation reads from, when its forward names them outright.
+
+    Ordinarily a dedupe-by-identity: each source node appears once, even if
+    ``operation_predecessors`` names it more than once. But a node that reads
+    two different output ordinals of the *same* multi-output producer in one
+    expression (``torch.cat((q_pass, q_rot), dim=-1)`` reassembling a split)
+    legitimately needs two parallel edges from that one source -- allow up to
+    as many repeats as ``operation_predecessor_ports`` records distinct
+    ordinals for that predecessor, so the second slice's edge is not dropped.
+    """
     if attr_last_index is None:
         return []
     sources: list[int] = []
+    seen_counts: dict[int, int] = {}
+    ports = step.operation_predecessor_ports
     for predecessor in step.operation_predecessors:
         if predecessor == FORWARD_METHOD_INPUT:
             source_index = chain_input_index
         else:
             source_index = attr_last_index.get(predecessor)
-        if source_index is not None and source_index not in sources:
+        if source_index is None:
+            continue
+        limit = max(len(ports.get(predecessor, ())), 1)
+        count = seen_counts.get(source_index, 0)
+        if count < limit:
             sources.append(source_index)
+            seen_counts[source_index] = count + 1
     return sources
 
 
@@ -2000,18 +2114,30 @@ def _add_linear_pipeline_chain(
         # (``up`` is ordinal 1 of a ``gate_up.chunk(2)``) must tag its edge with
         # that ordinal so the split fans out into per-slice tiles and the right
         # slice is docked -- otherwise the edge defaults to slice 0 and the
-        # unread slice is left dangling.
-        port_by_source: dict[int, int] = {}
+        # unread slice is left dangling. A producer read at several distinct
+        # ordinals in this one expression (``torch.cat((q_pass, q_rot))``
+        # reassembling a split) repeats that source in ``explicit_sources``, one
+        # entry per ordinal (see ``_operation_source_indices``) -- consume the
+        # recorded ordinals in the same order so each repeat docks its own slot.
+        port_by_source: dict[int, list[int]] = {}
         if attr_last_index is not None and sub_step.operation_predecessor_ports:
-            for pred_attr, ordinal in sub_step.operation_predecessor_ports.items():
+            for pred_attr, ordinals in sub_step.operation_predecessor_ports.items():
                 pred_index = attr_last_index.get(pred_attr)
                 if pred_index is not None:
-                    port_by_source[pred_index] = ordinal
+                    port_by_source[pred_index] = list(ordinals)
+        source_use_count: dict[int, int] = {}
         for source_index in explicit_sources:
-            graph.links.append((source_index, step_index))
-            ordinal = port_by_source.get(source_index)
-            if ordinal is not None:
-                graph.link_output_ports[(source_index, step_index)] = str(ordinal)
+            link = (source_index, step_index)
+            graph.links.append(link)
+            ordinals = port_by_source.get(source_index)
+            if ordinals:
+                use_index = source_use_count.get(source_index, 0)
+                source_use_count[source_index] = use_index + 1
+                if use_index < len(ordinals):
+                    port_str = str(ordinals[use_index])
+                    graph.link_output_ports[link] = _merge_link_output_port(
+                        graph.link_output_ports.get(link), port_str
+                    )
 
         if not explicit_sources and not _reads_only_a_side_parameter(sub_step):
             if sub_index == 0:
@@ -2421,7 +2547,20 @@ def _node_has_incoming_links(graph: ComputationGraph, index: int) -> bool:
 
 
 def _forward_steps_by_attr(root: BlockNode) -> dict[str, BlockNode]:
-    return {step.attr_name: step for step in root.children if step.attr_name}
+    by_attr = {step.attr_name: step for step in root.children if step.attr_name}
+    # A kernel-pipeline attention step (``chunk_kda`` and similar multi-substep
+    # kernels) is materialized under its own ``@attn_pipeline``/``@attn_output``
+    # nodes, not the original ``SYNTHETIC_ATTENTION`` step key its AST-recorded
+    # predecessor metadata (``forward_step_predecessors``) was captured under --
+    # ``_kernel_pipeline_block_nodes`` renames it while decomposing the call.
+    # Alias the original key back to the pipeline's entry node so producer edges
+    # traced by that key (q/k/v/gate projections feeding the kernel) still dock
+    # on the real materialized node instead of being silently dropped.
+    if SYNTHETIC_ATTENTION not in by_attr:
+        pipeline = by_attr.get("@attn_pipeline")
+        if pipeline is not None:
+            by_attr[SYNTHETIC_ATTENTION] = pipeline
+    return by_attr
 
 
 def _build_block_index_map(graph: ComputationGraph) -> dict[int, int]:
@@ -2782,18 +2921,28 @@ def _prune_computation_nodes(
             expanded.extend(_expand_succs(target, active | {index}))
         return expanded
 
-    # Insertion-ordered set: surviving links keep their original ``graph.links``
-    # order, and synthetic bridges are appended after. A plain ``set`` here would
-    # emit links in hash order, which silently reorders the incoming edges of
-    # untouched elementwise ops (an RMSNorm ``x * rsqrt`` whose operands flip so
-    # the width-1 factor lands at ``inputs[0]``), corrupting shape inference.
-    bridged_links: dict[tuple[int, int], None] = {}
+    # Surviving links keep their original ``graph.links`` order *and*
+    # multiplicity -- a consumer that reassembles two different slices of the
+    # same multi-output producer in one expression legitimately repeats the
+    # same (source, target) pair (one parallel edge per slice, ports recorded
+    # in ``link_output_ports`` as a list); collapsing that pair into a single
+    # entry here would silently drop the second slice's edge. Track a
+    # dedicated set of the *synthesized* bridge pairs only (the loop below),
+    # so those still collapse when multiple removed paths converge on the same
+    # (kept_source, kept_target) crossing -- a plain ``set`` for the surviving
+    # copy would also emit links in hash order, which silently reorders the
+    # incoming edges of untouched elementwise ops (an RMSNorm ``x * rsqrt``
+    # whose operands flip so the width-1 factor lands at ``inputs[0]``),
+    # corrupting shape inference.
+    bridged_links: list[tuple[int, int]] = []
+    bridge_pairs_added: set[tuple[int, int]] = set()
     bridged_port_labels: dict[tuple[int, int], str] = {}
-    bridged_output_ports: dict[tuple[int, int], str] = {}
+    bridged_output_ports: dict[tuple[int, int], str | list[str]] = {}
     for source, target in graph.links:
         if source in remove_indices or target in remove_indices:
             continue
-        bridged_links[(source, target)] = None
+        bridged_links.append((source, target))
+        bridge_pairs_added.add((source, target))
         port_label = graph.link_port_labels.get((source, target))
         if port_label:
             bridged_port_labels[(source, target)] = port_label
@@ -2810,7 +2959,10 @@ def _prune_computation_nodes(
                     for kept_target in _expand_succs(target):
                         if kept_source == kept_target:
                             continue
-                        bridged_links.setdefault((kept_source, kept_target), None)
+                        bridge_key = (kept_source, kept_target)
+                        if bridge_key not in bridge_pairs_added:
+                            bridge_pairs_added.add(bridge_key)
+                            bridged_links.append(bridge_key)
                         if (
                             port_label
                             and (kept_source, kept_target) not in bridged_port_labels
@@ -3656,8 +3808,34 @@ def build_computation_graph(
                     chain_input_index=input_index,
                 )
                 if explicit_sources:
+                    # A predecessor read at several distinct output ordinals of
+                    # the same producer within one expression (``torch.cat((q_pass,
+                    # q_rot))`` reassembling a split) repeats that source in
+                    # ``explicit_sources``; tag each repeat with its own ordinal
+                    # (mirroring ``_add_linear_pipeline_chain``) so
+                    # ``_wire_all_predecessor_edges`` -- which also walks this
+                    # same step as part of its containing block's inline wiring
+                    # -- recognizes the existing edges instead of appending
+                    # further untagged duplicates on top of them.
+                    port_by_source: dict[int, list[int]] = {}
+                    if sub_step.operation_predecessor_ports:
+                        for pred_attr, ordinals in sub_step.operation_predecessor_ports.items():
+                            pred_index = attr_last_index.get(pred_attr)
+                            if pred_index is not None:
+                                port_by_source[pred_index] = list(ordinals)
+                    source_use_count: dict[int, int] = {}
                     for source_index in explicit_sources:
-                        graph.links.append((source_index, step_index))
+                        link = (source_index, step_index)
+                        graph.links.append(link)
+                        ordinals = port_by_source.get(source_index)
+                        if ordinals:
+                            use_index = source_use_count.get(source_index, 0)
+                            source_use_count[source_index] = use_index + 1
+                            if use_index < len(ordinals):
+                                port_str = str(ordinals[use_index])
+                                graph.link_output_ports[link] = _merge_link_output_port(
+                                    graph.link_output_ports.get(link), port_str
+                                )
                 elif (
                     not _reads_only_a_side_parameter(sub_step)
                     and not sub_step.operation_predecessors
