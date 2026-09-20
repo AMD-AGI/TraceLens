@@ -174,6 +174,69 @@ def forward(self, x, weight, index, flag):
     assert compact.operations == []
 
 
+def test_both_branch_reassignment_emits_select_join():
+    # A variable assigned in BOTH arms of an unresolved if/else to *different*
+    # producers is joined by an explicit Select (phi): both branch computations stay
+    # reachable and the downstream consumer reads the single Select, never a union of
+    # two mutually-exclusive tensor operands. (Defect A2.)
+    func = _function("""
+def forward(self, x, flag):
+    if flag:
+        y = x.reshape(2, -1)
+    else:
+        y = x.float()
+    return y.matmul(x)
+""")
+    analysis = aa._forward_operations_from_forward(
+        func, self_values={}, all_tensor_ops=True
+    )
+    by_label = lambda label: [op for op in analysis.operations if op.label == label]
+
+    selects = by_label("Select")
+    assert len(selects) == 1, [op.label for op in analysis.operations]
+    select = selects[0]
+    # The Select carries the branch condition and joins the two branch producers.
+    assert any(detail.startswith("select: ") for detail in select.details), (
+        select.details
+    )
+    reshape = by_label("Reshape")[0]
+    cast = by_label("Cast")[0]
+    assert set(select.predecessors) == {reshape.attr_name, cast.attr_name}
+
+    # The downstream consumer reads the Select and NOT either branch producer
+    # directly -- a single tensor operand, not a two-input union.
+    matmul = by_label("MatMul")[0]
+    assert select.attr_name in matmul.predecessors
+    assert reshape.attr_name not in matmul.predecessors
+    assert cast.attr_name not in matmul.predecessors
+
+
+def test_lower_bounded_range_slice_emits_visible_slice_op():
+    # ``z = y[:, :, -k:]`` narrows the last axis by a non-static bound. It must
+    # surface as a visible Slice op consuming the base -- not silently alias the base
+    # tensor through (the dropped-narrowing-slice defect C).
+    func = _function("""
+def forward(self, x, k):
+    y = x.reshape(2, -1)
+    z = y[:, :, -k:]
+    return z.matmul(x)
+""")
+    analysis = aa._forward_operations_from_forward(
+        func, self_values={}, all_tensor_ops=True
+    )
+    by_label = lambda label: [op for op in analysis.operations if op.label == label]
+
+    slices = by_label("Slice")
+    assert slices, [op.label for op in analysis.operations]
+    slice_op = slices[0]
+    reshape = by_label("Reshape")[0]
+    # The Slice consumes the base tensor...
+    assert reshape.attr_name in slice_op.predecessors
+    # ...and the downstream consumer reads the Slice, so the narrowing is not elided.
+    matmul = by_label("MatMul")[0]
+    assert slice_op.attr_name in matmul.predecessors
+
+
 def test_extractor_models_index_bitwise_and_inplace_copy_consumers():
     # Real consumption patterns the tracer must not drop: advanced (tensor) indexing
     # is a gather, bitwise ``&``/``|`` combine two operands, and an in-place ``copy_``

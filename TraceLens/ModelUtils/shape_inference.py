@@ -1980,6 +1980,17 @@ class ShapeInferencer:
                 return TensorSpec(shape=tuple(shape), dtype=source.dtype)
             return source
 
+        if operation_label == "select":
+            # An explicit branch-merge (phi): exactly one of its mutually-exclusive
+            # inputs flows through per invocation, and both carry the same shape,
+            # so the output is just that shape -- a pure passthrough of any operand.
+            return (
+                inputs[0]
+                if inputs
+                else external_spec()
+                or TensorSpec(self._active_hidden_shape(), dtype)
+            )
+
         if operation_label == "tile":
             source = (
                 inputs[0]

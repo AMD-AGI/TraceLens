@@ -142,6 +142,9 @@ def block_purpose(node: BlockNode) -> str | None:
             cleaned
             and not cleaned.startswith("method `")
             and not cleaned.startswith("kernel:")
+            # ``raw_op: <name>`` is machine metadata for the type-check (lifted to
+            # its own node attr at export), never a human-facing description.
+            and not cleaned.startswith("raw_op:")
         ):
             if _FUNCTIONAL_CALL_DETAIL_RE.match(cleaned):
                 continue

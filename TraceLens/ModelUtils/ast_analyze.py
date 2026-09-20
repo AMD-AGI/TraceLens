@@ -2182,6 +2182,14 @@ def effective_forward_calls(cls: ClassStructure) -> list[str]:
 
 
 _UNKNOWN = object()
+# A constructor attribute that is scalar-*typed* (an int/float/str/bool setting
+# built from config reads and arithmetic) but whose concrete value could not be
+# resolved -- e.g. ``self.qkv_dim = self.head_dim * self.num_heads`` when the
+# ``linear_head_dim`` config key is not serialized in a given checkpoint. Stored
+# so callers can tell "scalar setting, value unknown" from "genuine tensor
+# attribute (parameter/buffer), never recorded". ``_config_value`` normalizes it
+# back to ``_UNKNOWN`` so arithmetic/comparison folding stays value-based.
+_SCALAR_SETTING = object()
 _HOUSEKEEPING_METHODS = frozenset(
     {
         "view",
@@ -2444,7 +2452,11 @@ def _config_value(
                     return nested.get(nested_key[1], _UNKNOWN)
             return _UNKNOWN
         if isinstance(node.value, ast.Name) and node.value.id == "self":
-            return self_values.get(node.attr, _UNKNOWN)
+            resolved = self_values.get(node.attr, _UNKNOWN)
+            # A scalar-typed-but-unresolved attribute carries no usable value for
+            # arithmetic/comparison folding; surface it as unknown here so the rest
+            # of ``_config_value`` never operates on the sentinel object.
+            return _UNKNOWN if resolved is _SCALAR_SETTING else resolved
         base = _config_value(node.value, config, self_values)
         if isinstance(base, dict):
             return base.get(node.attr, _UNKNOWN)
@@ -2532,6 +2544,57 @@ def _config_value(
     return _UNKNOWN
 
 
+def _expr_is_scalar_typed(node: ast.AST, values: dict[str, Any]) -> bool:
+    """True when a constructor RHS builds a scalar setting, not a tensor/module.
+
+    Recognizes the expression shapes model ``__init__``s use for int/float/str
+    hyper-parameters: literals, ``config.<key>`` reads, references to other
+    already-recorded scalar attributes, arithmetic / comparison / boolean over
+    those, and host builtins (``len``/``int``/``getattr(config, ...)``). A tensor
+    or submodule assignment (``nn.Linear(...)``, ``nn.Parameter(...)``,
+    ``self.forget_gate(...)``, a bare passed-in ``weight`` name) matches none of
+    these, so it is *not* scalar-typed and stays a genuine tensor attribute. Kept
+    general -- structural, no attribute-name or config-key literals.
+    """
+    if isinstance(node, ast.Constant):
+        return not isinstance(node.value, bytes)
+    if isinstance(node, ast.Name):
+        return node.id == "config"
+    if isinstance(node, ast.Attribute):
+        if isinstance(node.value, ast.Name):
+            if node.value.id == "config":
+                return True
+            if node.value.id == "self":
+                return node.attr in values
+        return _expr_is_scalar_typed(node.value, values)
+    if isinstance(node, ast.BinOp):
+        return _expr_is_scalar_typed(node.left, values) and _expr_is_scalar_typed(
+            node.right, values
+        )
+    if isinstance(node, ast.UnaryOp):
+        return _expr_is_scalar_typed(node.operand, values)
+    if isinstance(node, (ast.BoolOp, ast.Compare)):
+        return True
+    if isinstance(node, ast.IfExp):
+        return _expr_is_scalar_typed(node.body, values) and _expr_is_scalar_typed(
+            node.orelse, values
+        )
+    if isinstance(node, ast.Call):
+        return _expr_name(node.func) in {
+            "len",
+            "int",
+            "float",
+            "bool",
+            "round",
+            "abs",
+            "min",
+            "max",
+            "sum",
+            "getattr",
+        }
+    return False
+
+
 def _self_config_values(
     init_func: ast.FunctionDef | None, config: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2548,11 +2611,14 @@ def _self_config_values(
         value = _config_value(value_node, config, values)
         for target in targets:
             if isinstance(target, ast.Attribute) and _is_self_attr(target, target.attr):
-                if value is not _UNKNOWN or any(
-                    isinstance(item, ast.Name) and item.id == "config"
-                    for item in ast.walk(value_node)
-                ):
+                if value is not _UNKNOWN:
                     values[target.attr] = value
+                elif _expr_is_scalar_typed(value_node, values):
+                    # Scalar-typed but unresolvable (config key absent / derived
+                    # from such): record under the sentinel so it is treated as a
+                    # setting, never fabricated as a tensor operand, yet is not
+                    # mistaken for a concrete value by the folding paths.
+                    values[target.attr] = _SCALAR_SETTING
     return values
 
 
@@ -2828,12 +2894,22 @@ class _ForwardOperationExtractor:
         external_inputs: list[str],
         *,
         details: list[str] | None = None,
+        raw_op: str | None = None,
     ) -> str:
         attr_name = self._operation_id(node, label)
         if label.lower() in {"matmul", "matmull"}:
             display = classify_matmul_label(external_inputs=external_inputs)
         else:
             display = operation_display_label(label)
+        emitted_details = list(details or ())
+        # Carry the underlying torch op name (the one the display label discards)
+        # so the downstream type-check can resolve the op's real operand arity from
+        # its actual function parameters -- keyed on the name the model itself
+        # calls, never a static op-name list. Threaded via the details channel
+        # (both build paths carry details) and lifted to a dedicated ``raw_op``
+        # node attr in ``merge._annotate_op_input_signatures``.
+        if raw_op:
+            emitted_details.append(f"raw_op: {raw_op}")
         self.operations.append(
             ForwardOperation(
                 attr_name=attr_name,
@@ -2841,9 +2917,40 @@ class _ForwardOperationExtractor:
                 class_name=display,
                 predecessors=self._dedupe(predecessors),
                 external_inputs=self._dedupe(external_inputs),
-                details=tuple(details or ()),
+                details=tuple(emitted_details),
                 param_inputs=self._param_refs(node),
                 predecessor_ports=self._read_output_ports(node),
+            )
+        )
+        return attr_name
+
+    def _emit_branch_select(
+        self,
+        node: ast.AST,
+        survivor_producer: str,
+        other_producer: str,
+        test: str,
+    ) -> str:
+        """Emit an explicit Select (phi) node joining two mutually-exclusive branch
+        producers of one reassigned variable, and return its id.
+
+        The two producers come from the taken/not-taken arms of an ``if`` whose
+        predicate could not be statically resolved, so exactly one runs per
+        invocation. Rendering an explicit merge keeps both branch computations
+        reachable while giving downstream consumers a single tensor to read. The
+        node is built directly (not via ``_emit``) so its label stays ``Select``
+        -- it must not be display-mapped onto ``Slice`` nor resolve to
+        ``aten::select`` -- and it carries no ``raw_op``, so the arity type-check
+        skips it (a phi legitimately takes N tensor operands).
+        """
+        attr_name = self._operation_id(node, "Select")
+        self.operations.append(
+            ForwardOperation(
+                attr_name=attr_name,
+                label="Select",
+                class_name="Select",
+                predecessors=self._dedupe([survivor_producer, other_producer]),
+                details=(f"select: {test}",),
             )
         )
         return attr_name
@@ -2978,8 +3085,18 @@ class _ForwardOperationExtractor:
 
     def _self_attr_input(self, node: ast.Attribute) -> tuple[str | None, list[str]]:
         if isinstance(node.value, ast.Name) and node.value.id == "self":
-            # Attributes with a known scalar value are settings, not tensor inputs;
-            # ones that could not be evaluated (parameters, buffers) are inputs.
+            # Attributes recorded by the constructor pass are settings, not tensor
+            # inputs. This covers concretely-resolved scalars (``self.hidden_size``
+            # = 4096) AND scalar-typed attributes whose value could not be resolved
+            # because a config key was absent (``self.qkv_dim = self.head_dim *
+            # self.num_heads`` when ``linear_head_dim`` is not serialized) -- both
+            # are stored, the latter under the ``_SCALAR_SETTING`` sentinel. A
+            # genuine tensor attribute (an ``nn.Parameter`` / ``register_buffer`` /
+            # submodule assignment) is never a scalar-typed constructor expression,
+            # so it is NOT recorded and remains a tensor input here (materialized as
+            # a Constant leaf). This keeps a scalar size/axis attribute used as an
+            # op argument (``torch.split(x, [self.qkv_dim] * 3, -1)``) off the
+            # tensor edges instead of fabricating a spurious rank-1 Constant operand.
             if self.self_values.get(node.attr, _UNKNOWN) is not _UNKNOWN:
                 return None, []
             return None, [node.attr]
@@ -3025,7 +3142,21 @@ class _ForwardOperationExtractor:
         if isinstance(node, ast.UnaryOp):
             return self._is_host_scalar_expr(node.operand)
         if isinstance(node, ast.Call):
-            return _expr_name(node.func) == "len"
+            func_name = node.func.id if isinstance(node.func, ast.Name) else None
+            # ``len(...)`` is always a Python int. ``min``/``max``/``int``/... over
+            # host-scalar arguments (``select_k = min(self.index_topk //
+            # self.index_kpool, scores.shape[-1])``) is size/budget bookkeeping,
+            # not a tensor reduction -- a bare-builtin call whose every argument is
+            # itself host-scalar stays host-scalar. A method / namespaced reduction
+            # (``scores.min()``, ``torch.max(t)``) is NOT a bare Name and operates
+            # on tensors, so it is excluded and still emits a real op.
+            if func_name == "len":
+                return True
+            if func_name in {"min", "max", "int", "abs", "round", "sum"}:
+                return bool(node.args) and all(
+                    self._is_host_scalar_expr(arg) for arg in node.args
+                )
+            return False
         return False
 
     def _fold_host_int(self, node: ast.AST) -> int | None:
@@ -3131,6 +3262,25 @@ class _ForwardOperationExtractor:
             resize.append((axis, size))
         return resize
 
+    @staticmethod
+    def _subscript_narrows_range(index: ast.AST) -> bool:
+        """True when a subscript contains a partial range slice on some axis.
+
+        A partial ``ast.Slice`` -- one with a ``lower``, ``upper``, or ``step``
+        bound (``x[:, :, -seq_len:]``, ``x[..., 1:]``, ``x[::2]``) -- narrows or
+        strides that axis, so it is a real ``Slice`` op even when the bound is a
+        symbol that cannot fold to a static width. A full ``:`` (all bounds
+        ``None``) and a bare ellipsis carry no narrowing and stay pass-through.
+        Foldable bounded slices are handled first by ``_subscript_resize_dims``;
+        this catches the non-foldable remainder so the op is never dropped.
+        """
+        elts = index.elts if isinstance(index, ast.Tuple) else [index]
+        return any(
+            isinstance(elt, ast.Slice)
+            and (elt.lower is not None or elt.upper is not None or elt.step is not None)
+            for elt in elts
+        )
+
     def expression(self, node: ast.AST) -> tuple[str | None, list[str]]:
         if isinstance(node, ast.Name):
             return self.var_producer.get(node.id), []
@@ -3211,6 +3361,31 @@ class _ForwardOperationExtractor:
                         ],
                     )
                     return producer, []
+                # A partial range slice whose bound does not fold to a static width
+                # (``mixed_qkv[:, :, -seq_len:]``) still narrows/strides an axis: a
+                # real ``Slice`` op, not a silent alias. The bound is symbolic, so
+                # the detail is descriptive only (shape inference cannot size it and
+                # passes the shape through), but the op stays visible in the graph.
+                # Require a real upstream tensor producer: a range slice over a
+                # param/host read with no producer (``cu_seqlens[1:] -
+                # cu_seqlens[:-1]`` index bookkeeping) has nothing to slice and must
+                # stay pass-through, not become an orphan op. Skip host-scalar shape
+                # reads too, as the resize branch does.
+                if (
+                    base is not None
+                    and not self._suppress_slice_resize
+                    and not self._is_host_scalar_expr(node)
+                    and self._subscript_narrows_range(node.slice)
+                ):
+                    self._materialized_subscripts.add(id(node))
+                    producer = self._emit(
+                        node,
+                        "Slice",
+                        base_predecessors,
+                        base_external,
+                        details=[f"slice: {ast.unparse(node.slice)}"],
+                    )
+                    return producer, []
                 # ``x[..., None]`` / ``x[:, None]`` inserts a size-1 axis: an
                 # unsqueeze, not a pass-through, so downstream broadcasting sees
                 # the new axis.
@@ -3271,6 +3446,13 @@ class _ForwardOperationExtractor:
             )
             return producer, []
         if not isinstance(node, ast.Call):
+            return None, []
+        # A host-scalar builtin call (``min``/``max``/``len`` over shape/config
+        # ints) computes a Python size, not a tensor: emitting it as an op would
+        # dangle a fake reduction node and mis-wire its result onto whatever size
+        # argument reads it (``scores.topk(select_k, ...)``). Mirrors the BinOp
+        # host-scalar guard above.
+        if self._is_host_scalar_expr(node):
             return None, []
 
         method_name: str | None = None
@@ -3630,6 +3812,11 @@ class _ForwardOperationExtractor:
             emit_predecessors,
             external,
             details=details,
+            # The raw callable/method name the model itself calls at this site
+            # (``transpose``/``cat``/``view``/...), read straight from the AST --
+            # not a static op list. The display label discards it; the type-check
+            # needs it to resolve the op's real operand arity from its parameters.
+            raw_op=functional_name or call_name,
         )
         return producer, []
 
@@ -4254,15 +4441,16 @@ class _ForwardOperationExtractor:
                         )
                     survivor_env = else_env if stmt.orelse else body_env
                     other_env = body_env if stmt.orelse else else_env
-                    # A variable assigned in both branches keeps only the
-                    # survivor's producer below. Remember the losing branch's
-                    # producer as an alternative so a later consumer of the merged
-                    # variable depends on both (see ``branch_alternatives``). When
-                    # the survivor branch merely passes a boundary parameter through
-                    # (no op producer) but the other branch computes a real op
-                    # (``topk_indices = self.indexer(...)`` vs ``= prev_topk_indices``),
-                    # adopt the real producer so the merged variable's consumers wire
-                    # to the visible computation instead of resolving to nothing.
+                    # A variable assigned in both mutually-exclusive branches to
+                    # different producers is the output of exactly one branch per
+                    # invocation. Join them with an explicit Select (phi) node so
+                    # the merged variable's consumers read a single tensor while
+                    # both branch computations stay reachable (they feed the
+                    # Select). When the survivor branch merely passes a boundary
+                    # parameter through (no op producer) but the other branch
+                    # computes a real op (``topk_indices = self.indexer(...)`` vs
+                    # ``= prev_topk_indices``), adopt the real producer so the
+                    # merged variable wires to the visible computation.
                     for variable in set(survivor_env) | set(other_env):
                         survivor_producer = survivor_env.get(variable)
                         other_producer = other_env.get(variable)
@@ -4271,9 +4459,12 @@ class _ForwardOperationExtractor:
                             and other_producer
                             and survivor_producer != other_producer
                         ):
-                            self.branch_alternatives.setdefault(
-                                survivor_producer, set()
-                            ).add(other_producer)
+                            survivor_env[variable] = self._emit_branch_select(
+                                stmt,
+                                survivor_producer,
+                                other_producer,
+                                test,
+                            )
                         elif not survivor_producer and other_producer:
                             survivor_env[variable] = other_producer
                     self.var_producer = survivor_env

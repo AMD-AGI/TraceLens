@@ -2010,10 +2010,14 @@ def _collapse_same_name_boundary_passthroughs(nodes: list[dict[str, Any]]) -> No
     that is a pure passthrough of one upstream value -- no class/config/name
     literals. Boundaries where the name genuinely changes across the edge (a real
     rename such as ``@input:hidden_states <- @output:collapsed``) differ by name
-    and are left untouched, as are real-op-fed inputs. Cross-namespace crossings
-    (``input_layernorm`` -> ``self_attn``) collapse too; ``@loop_carried_*`` and
-    ``@slice_out`` tiles are outside both synthetic sets, so loop boundaries and
-    split tiles -- and the one permitted loop back edge -- are never disturbed.
+    and are left untouched, as are real-op-fed inputs. Only same-*hierarchy-level*
+    pairs collapse: when the producer @output and consumer @input belong to
+    different owning modules the crossing is a real module entry/exit
+    (``input_layernorm/@output:hidden_states`` -> ``self_attn/@input``) and both
+    tiles are kept, so every module keeps its own @input/@output boundary.
+    ``@loop_carried_*`` and ``@slice_out`` tiles are outside both synthetic sets,
+    so loop boundaries and split tiles -- and the one permitted loop back edge --
+    are never disturbed.
 
     Which tile survives: for a kernel port the port is kept (the kernel needs it)
     and made to read the producer's own upstream; for an ``@input``/``@input_mirror``
@@ -2037,6 +2041,14 @@ def _collapse_same_name_boundary_passthroughs(nodes: list[dict[str, Any]]) -> No
                     if attr.get("key") == "port_label":
                         return str(attr.get("value"))
         return _port_name(source)
+
+    def _owner_namespace(node_id: str) -> str:
+        # The module namespace that owns a boundary tile -- its id minus the
+        # trailing ``/@...`` boundary token. Two boundary tiles sharing an owner
+        # are at the same hierarchy level; differing owners means the crossing
+        # enters or exits a module.
+        idx = node_id.rfind("/@")
+        return node_id[:idx] if idx != -1 else ""
 
     changed = True
     while changed:
@@ -2071,6 +2083,15 @@ def _collapse_same_name_boundary_passthroughs(nodes: list[dict[str, Any]]) -> No
                 continue
             output_id = incoming[0].get("sourceNodeOutputId", "0")
             if _source_port_name(producer, output_id) != _port_name(consumer):
+                continue
+            # Only collapse a same-name pair at the *same* hierarchy level. When
+            # the producer @output and consumer @input belong to different owning
+            # modules, the crossing is a real module entry/exit boundary
+            # (``input_layernorm/@output:hidden_states`` -> ``self_attn/@input``);
+            # keep both tiles so every module keeps its @input/@output boundary.
+            if _owner_namespace(str(producer["id"])) != _owner_namespace(
+                str(consumer["id"])
+            ):
                 continue
 
             if consumer_syn == "@kernel_port_in":

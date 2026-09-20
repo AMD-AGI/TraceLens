@@ -22,6 +22,8 @@ type-checked".
 
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 import logging
 import re
@@ -31,15 +33,143 @@ from TraceLens.ModelUtils.shape_inference import _normalize_op_name
 
 _log = logging.getLogger(__name__)
 
-# Ops that take exactly one tensor operand plus a scalar ``dim`` argument. Feeding
-# them a second *tensor* operand (a graph edge) is the classic mis-wiring the
-# owner flagged: ``position_ids[..., None]`` must not also receive ``hidden_states``.
-_SINGLE_TENSOR_AXIS_OPS = frozenset({"unsqueeze", "squeeze", "select"})
 
-# Ops whose visible tensor operands must all share the same rank (they concatenate
-# or stack along one axis). A hidden constant/buffer operand is never a concat
-# input, so a rank disagreement among visible operands is a real bug.
-_SAME_RANK_OPS = frozenset({"cat", "concat", "concatenate", "stack"})
+# --------------------------------------------------------------------------- #
+# Dynamic operand-arity resolution.
+#
+# An operation's tensor-operand contract is read from the op's *real function
+# parameters*, never from a hardcoded op-name list: the raw op name is the one
+# recovered from the model's own forward source (stamped as the ``raw_op`` node
+# attr by the extractor), and its arity comes from introspecting that callable.
+# ``inspect.signature`` is tried first -- it reads any annotated pure-Python op --
+# and the aten operator schema is the fallback for the C-builtin torch ops
+# (``transpose``/``cat``/``view``/``squeeze``/...) that have no introspectable
+# Python signature. An op whose parameters cannot be resolved is simply skipped
+# (no false positives).
+# --------------------------------------------------------------------------- #
+
+# Parameter type strings that denote a single tensor operand vs an unbounded
+# tensor *list* (the variadic ``cat``/``stack`` contract). Matched against both
+# ``inspect`` annotations and aten schema argument types.
+_TENSOR_ARG_TYPES = frozenset({"Tensor", "Optional[Tensor]", "Tensor?"})
+_TENSOR_LIST_ARG_TYPES = frozenset({"List[Tensor]", "Tensor[]"})
+
+
+def _annotation_tensor_kind(annotation: Any) -> str:
+    """Classify an ``inspect`` parameter annotation: ``"tensor"`` / ``"list"`` / ""."""
+    text = (
+        annotation
+        if isinstance(annotation, str)
+        else getattr(annotation, "__name__", None) or str(annotation)
+    )
+    text = text.replace("torch.", "").replace(" ", "")
+    if text in _TENSOR_ARG_TYPES or text == "Tensor":
+        return "tensor"
+    if text in _TENSOR_LIST_ARG_TYPES or (
+        text.startswith(("List[", "Sequence[", "Tuple[", "Iterable[")) and "Tensor" in text
+    ):
+        return "list"
+    if text.startswith("Optional[") and "Tensor" in text and "List" not in text:
+        return "tensor"
+    return ""
+
+
+def _ceiling_via_inspect(name: str) -> tuple[int | None, bool] | None:
+    """``(max_tensor_operands, is_variadic)`` from ``inspect``, or ``None`` if it
+    cannot type the op (unresolvable callable, no signature, or no annotations)."""
+    try:
+        import torch
+    except Exception:  # pragma: no cover - torch always present in the pipeline
+        return None
+    fn = None
+    for owner in (torch.Tensor, torch):
+        candidate = getattr(owner, name, None)
+        if candidate is not None:
+            fn = candidate
+            break
+    if fn is None:
+        return None
+    try:
+        signature = inspect.signature(fn)
+    except (ValueError, TypeError):
+        return None
+    count = 0
+    variadic = False
+    saw_annotation = False
+    for param in signature.parameters.values():
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            variadic = True
+            continue
+        if param.kind in (
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+        if param.annotation is inspect.Parameter.empty:
+            continue
+        saw_annotation = True
+        kind = _annotation_tensor_kind(param.annotation)
+        if kind == "list":
+            variadic = True
+        elif kind == "tensor":
+            count += 1
+    if not saw_annotation:
+        # ``inspect`` gave a signature but no types (e.g. ``torch.split``): it
+        # cannot distinguish tensor operands from scalar args -- defer to the schema.
+        return None
+    return (None, True) if variadic else (count, False)
+
+
+def _ceiling_via_aten_schema(name: str) -> tuple[int | None, bool]:
+    """``(max_tensor_operands, is_variadic)`` from the aten operator schema.
+
+    Counts non-``out`` (positional / non-kwarg-only) ``Tensor``/``Optional[Tensor]``
+    arguments; a ``List[Tensor]`` argument marks the op variadic (unbounded, e.g.
+    ``cat``). Unknown ops (custom free functions with no aten schema) return
+    ``(None, False)`` -> skipped by the caller.
+    """
+    try:
+        import torch
+
+        schemas = torch._C._jit_get_schemas_for_operator(f"aten::{name}")
+    except Exception:
+        return None, False
+    if not schemas:
+        return None, False
+    counts: list[int] = []
+    any_variadic = False
+    for schema in schemas:
+        count = 0
+        variadic = False
+        for arg in getattr(schema, "arguments", []):
+            if getattr(arg, "kwarg_only", False):
+                continue
+            arg_type = str(getattr(arg, "type", ""))
+            if arg_type in _TENSOR_LIST_ARG_TYPES:
+                variadic = True
+            elif arg_type in _TENSOR_ARG_TYPES:
+                count += 1
+        if variadic:
+            any_variadic = True
+        else:
+            counts.append(count)
+    if any_variadic:
+        return None, True
+    return (max(counts) if counts else None), False
+
+
+@functools.lru_cache(maxsize=None)
+def _operand_ceiling(raw_op: str) -> tuple[int | None, bool]:
+    """``(max_tensor_operands, is_variadic)`` for an op, resolved from its real
+    parameters. ``(None, False)`` means the arity could not be determined (skip);
+    ``(None, True)`` means an unbounded tensor-list op (``cat``/``stack``)."""
+    name = str(raw_op or "").strip()
+    if not name:
+        return None, False
+    via_inspect = _ceiling_via_inspect(name)
+    if via_inspect is not None:
+        return via_inspect
+    return _ceiling_via_aten_schema(name)
 
 
 def _load_list(node: dict[str, Any], key: str) -> list[Any] | None:
@@ -63,6 +193,16 @@ def _op_type(node: dict[str, Any]) -> str:
     return str(node.get("label") or "")
 
 
+def _raw_op(node: dict[str, Any]) -> str:
+    """The underlying torch op name recovered from the model's forward source
+    (stamped by the extractor as the ``raw_op`` attr), or "" if none. This is the
+    name the display label discards; the arity check keys on it, never on a list."""
+    for attr in node.get("attrs", []):
+        if attr.get("key") == "raw_op":
+            return str(attr.get("value") or "")
+    return ""
+
+
 def _is_constant_node(node: dict[str, Any]) -> bool:
     for attr in node.get("attrs", []):
         if attr.get("key") == "constant":
@@ -70,10 +210,21 @@ def _is_constant_node(node: dict[str, Any]) -> bool:
     return False
 
 
-# Operand types that are not real activation tensors: a ``Scalar`` (a ``dim`` /
-# scalar arg) or a ``Constant`` (a learned weight / buffer / constant operand,
-# which is drawn only in the constants-visible view and filtered out otherwise).
-_NON_ACTIVATION_TYPES = frozenset({"Scalar", "Constant"})
+def _operand_is_tensor(op_type: str, shape: Any) -> bool:
+    """Whether an operand counts as a real tensor input for the arity check.
+
+    A ``"Scalar"`` operand (a ``dim`` / scalar argument) never counts. A
+    ``"Constant"`` operand (a learned weight / buffer, present in the built graph
+    before render-filtering) counts only when it is rank >= 1 -- a hidden 1-D
+    constant tensor wired onto a single-tensor op is exactly the mis-wiring the
+    owner flagged. A rank-0 constant (a folded scalar) does not count. Any other
+    type is a real activation dtype and counts.
+    """
+    if op_type == "Scalar":
+        return False
+    if op_type == "Constant":
+        return isinstance(shape, list) and len(shape) >= 1
+    return True
 
 
 def _check_node(node: dict[str, Any]) -> list[str]:
@@ -90,35 +241,62 @@ def _check_node(node: dict[str, Any]) -> list[str]:
     input_shapes = _load_list(node, "input_shapes")
     if input_types is None:
         return []
-    tensor_count = sum(1 for t in input_types if t not in _NON_ACTIVATION_TYPES)
+    shapes = input_shapes if isinstance(input_shapes, list) else []
+    tensor_count = sum(
+        1
+        for i, t in enumerate(input_types)
+        if _operand_is_tensor(t, shapes[i] if i < len(shapes) else None)
+    )
     node_id = node.get("id")
     warnings: list[str] = []
 
-    if op in _SINGLE_TENSOR_AXIS_OPS and tensor_count != 1:
-        # These ops take exactly one activation tensor plus a scalar ``dim``. More
-        # than one tensor operand means a caller argument was mis-wired onto the op
-        # (e.g. ``position_ids[..., None]`` also receiving ``hidden_states``); zero
-        # means the sole activation operand went missing. Constants/buffers are now
-        # first-class ``"Constant"`` operands excluded from this count, so a hidden
-        # buffer no longer masks a missing activation -- either extreme is a bug.
-        warnings.append(
-            f"{node_id} [{op}]: takes exactly 1 tensor operand + a scalar dim, but "
-            f"got {tensor_count} tensor operands (input_types={input_types}). The "
-            f"activation operand must be wired as exactly one tensor edge, with any "
-            f"scalar dim argument kept off the edges."
-        )
+    # Resolve the op's operand contract dynamically from its real function
+    # parameters (``inspect`` first, then the aten schema) keyed on the raw op
+    # name recovered from the model's own forward source -- never a static list.
+    ceiling, variadic = _operand_ceiling(_raw_op(node))
 
-    if op in _SAME_RANK_OPS and input_shapes is not None:
-        ranks = {
-            len(shape)
-            for shape, typ in zip(input_shapes, input_types)
-            if typ not in _NON_ACTIVATION_TYPES and isinstance(shape, list)
-        }
-        if len(ranks) > 1:
+    if variadic:
+        # An unbounded tensor-list op (``cat``/``stack``): any number of tensor
+        # operands is legal, but they must all share rank (they join along one
+        # axis). A hidden constant is never a concat input, so a rank disagreement
+        # among the counted tensor operands is a real bug.
+        if input_shapes is not None:
+            ranks = {
+                len(shapes[i])
+                for i, t in enumerate(input_types)
+                if i < len(shapes)
+                and isinstance(shapes[i], list)
+                and _operand_is_tensor(t, shapes[i])
+            }
+            if len(ranks) > 1:
+                warnings.append(
+                    f"{node_id} [{op}]: tensor operands disagree on rank "
+                    f"{sorted(ranks)} (input_shapes={input_shapes}); an op that "
+                    f"joins a list of tensors along one axis must receive operands "
+                    f"of equal rank."
+                )
+    elif ceiling is not None:
+        if tensor_count == 0:
+            # A bounded op consumes at least one tensor (you cannot ``unsqueeze``
+            # or ``transpose`` nothing). Zero counted tensor operands means the op's
+            # sole activation edge went missing -- an upstream wiring/pruning bug.
             warnings.append(
-                f"{node_id} [{op}]: tensor operands disagree on rank {sorted(ranks)} "
-                f"(input_shapes={input_shapes}); concat/stack operands must share "
-                f"rank."
+                f"{node_id} [{op}]: its parameters take {ceiling} tensor "
+                f"operand(s), but 0 tensor operands are wired "
+                f"(input_types={input_types}). The op's activation input went "
+                f"missing -- an upstream edge was dropped or mis-typed."
+            )
+        elif tensor_count > ceiling:
+            # The op's parameters bound it to ``ceiling`` tensor operands, but more
+            # tensor edges are wired -- a caller argument was mis-wired onto the op
+            # (e.g. two mutually-exclusive branches both feeding a ``transpose``, or
+            # a hidden constant tensor added to a single-tensor axis op).
+            warnings.append(
+                f"{node_id} [{op}]: its parameters take at most {ceiling} tensor "
+                f"operand(s), but {tensor_count} tensor operands are wired "
+                f"(input_types={input_types}). Extra tensor edges mean a caller "
+                f"argument was mis-wired onto the op; scalar/axis arguments must be "
+                f"kept off the edges."
             )
 
     return warnings
@@ -196,6 +374,16 @@ def _source_port_label(source: dict[str, Any], output_id: Any) -> str:
     return _port_label(source)
 
 
+def _boundary_owner_namespace(node_id: str) -> str:
+    """The module namespace that owns a boundary tile -- its id minus the trailing
+    ``/@...`` boundary token. A same-name ``@output -> @input`` crossing between
+    *different* owners is a legitimate module entry/exit; only a redundant pair
+    within the *same* owner should have been folded (mirrors the same-namespace
+    guard in ``merge._collapse_same_name_boundary_passthroughs``)."""
+    idx = node_id.rfind("/@")
+    return node_id[:idx] if idx != -1 else ""
+
+
 def _has_incoming(node: dict[str, Any]) -> bool:
     return bool(node.get("incomingEdges"))
 
@@ -240,11 +428,12 @@ def integrity_check_graph_nodes(nodes: list[dict[str, Any]], *, label: str = "")
     - **I4 same-name boundary passthrough** -- no input-family boundary tile
       (``@input``/``@input_mirror``/``@kernel_port_in``) is fed solely by an
       output-family boundary tile (``@output``/``@output_mirror``) carrying the
-      *identical* tensor name. Such a pair is one untransformed value rendered as
-      two tiles and should have been folded by
-      ``merge._collapse_same_name_boundary_passthroughs``; a survivor means that
-      pass failed to fire. Renamed crossings (different port labels) are legitimate
-      and never flagged.
+      *identical* tensor name **within the same owning module namespace**. Such a
+      same-level pair is one untransformed value rendered as two tiles and should
+      have been folded by ``merge._collapse_same_name_boundary_passthroughs``; a
+      survivor means that pass failed to fire. A same-name crossing between
+      *different* owners (a real module entry/exit) is expected and never flagged,
+      as are renamed crossings (different port labels).
     """
     consumed = {
         str(e.get("sourceNodeId"))
@@ -316,7 +505,10 @@ def integrity_check_graph_nodes(nodes: list[dict[str, Any]], *, label: str = "")
                     src_name = _source_port_label(
                         source, incoming[0].get("sourceNodeOutputId", "0")
                     )
-                    if name == src_name:
+                    same_owner = _boundary_owner_namespace(
+                        node_id
+                    ) == _boundary_owner_namespace(str(source.get("id", "")))
+                    if name == src_name and same_owner:
                         warnings.append(
                             f"I4 same-name-passthrough{tag}: {node_id} "
                             f"[label={node.get('label')!r}] is fed solely by same-name "

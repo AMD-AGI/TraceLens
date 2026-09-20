@@ -267,13 +267,28 @@ def test_glm_attention_expand_kv_assembles_key_states_from_split_and_expand():
     # (The Split reaches its Copy through one of its named slice tiles.)
     assert any(consumes_split_slice(copy, split["id"]) for copy in copies)
     assert any(consumes(copy, expand["id"]) for copy in copies)
-    # The final Copy assembles ``key_states`` and now feeds the attention kernel's
-    # key port directly: the redundant same-name ``expand_kv/@output:key_states``
-    # boundary tile was folded into the kernel port by the same-name collapse pass.
+    # The final Copy assembles ``key_states`` and feeds the ``expand_kv`` submodule's
+    # own ``@output:key_states`` boundary. That crossing exits a module (expand_kv ->
+    # the parent self_attn), so the hierarchy-aware same-name collapse KEEPS the
+    # boundary tile rather than folding it onto the kernel port. Walking the kept
+    # ``@output``/``@output_mirror`` chain reaches the attention kernel's key port.
+    out_boundary = next(
+        node
+        for node in graph["nodes"]
+        if synthetic(node) == "@output"
+        and node["label"] == "key_states"
+        and consumes(node, copies[-1]["id"])
+    )
+    out_mirror = next(
+        node
+        for node in graph["nodes"]
+        if synthetic(node) == "@output_mirror"
+        and consumes(node, out_boundary["id"])
+    )
     key_port = next(
         node
         for node in graph["nodes"]
-        if synthetic(node) == "@kernel_port_in" and consumes(node, copies[-1]["id"])
+        if synthetic(node) == "@kernel_port_in" and consumes(node, out_mirror["id"])
     )
     assert key_port["label"] == "key_states"
     assert any(

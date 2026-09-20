@@ -13,30 +13,43 @@ import json
 from TraceLens.Visualizer.model_explorer_export.type_check import type_check_graph_nodes
 
 
-def _op_node(node_id, op_type, input_types, input_shapes):
-    return {
-        "id": node_id,
-        "label": op_type,
-        "attrs": [
-            {"key": "op_type", "value": op_type},
-            {"key": "input_types", "value": json.dumps(input_types)},
-            {"key": "input_shapes", "value": json.dumps(input_shapes)},
-        ],
-    }
+def _op_node(node_id, op_type, input_types, input_shapes, raw_op=None):
+    # ``raw_op`` is the underlying callable/method name the extractor stamps at
+    # emit time (``unsqueeze``, ``cat``, ``transpose``); the type-check resolves
+    # each op's operand ceiling dynamically from that name's real parameters
+    # (``inspect`` signature / aten schema), never from a static op-name list, so
+    # a node the extractor tagged carries it here to exercise that resolution.
+    attrs = [
+        {"key": "op_type", "value": op_type},
+        {"key": "input_types", "value": json.dumps(input_types)},
+        {"key": "input_shapes", "value": json.dumps(input_shapes)},
+    ]
+    if raw_op is not None:
+        attrs.append({"key": "raw_op", "value": raw_op})
+    return {"id": node_id, "label": op_type, "attrs": attrs}
 
 
 def test_good_unsqueeze_one_tensor_plus_scalar_is_clean():
-    node = _op_node("n:unsqueeze", "Unsqueeze", ["int64", "Scalar"], [["Pv", "2"], []])
+    node = _op_node(
+        "n:unsqueeze",
+        "Unsqueeze",
+        ["int64", "Scalar"],
+        [["Pv", "2"], []],
+        raw_op="unsqueeze",
+    )
     assert type_check_graph_nodes([node]) == []
 
 
 def test_unsqueeze_with_two_tensor_operands_warns():
     # The classic mis-wiring: a second tensor operand where the scalar dim belongs.
+    # ``unsqueeze``'s aten schema takes one Tensor + an int, so two tensor operands
+    # exceed the dynamically-resolved ceiling of 1.
     node = _op_node(
         "n:bad_unsqueeze",
         "Unsqueeze",
         ["int64", "float16"],
         [["Pv", "2"], ["Pv", "1176"]],
+        raw_op="unsqueeze",
     )
     warnings = type_check_graph_nodes([node])
     assert len(warnings) == 1
@@ -44,26 +57,78 @@ def test_unsqueeze_with_two_tensor_operands_warns():
     assert "tensor operand" in warnings[0]
 
 
+def test_transpose_with_two_tensor_operands_warns():
+    # ``transpose(Tensor, int, int)`` bounds to one tensor operand; two mutually
+    # exclusive branches both feeding it (the original linear-attention defect)
+    # exceed that ceiling. ``transpose`` was absent from the retired static list --
+    # the dynamic aten-schema resolution now covers it with no per-op enumeration.
+    node = _op_node(
+        "n:bad_transpose",
+        "Transpose",
+        ["bfloat16", "bfloat16"],
+        [["B", "S", "H"], ["B", "S", "H"]],
+        raw_op="transpose",
+    )
+    warnings = type_check_graph_nodes([node])
+    assert len(warnings) == 1
+    assert "n:bad_transpose" in warnings[0]
+    assert "tensor operand" in warnings[0]
+
+
 def test_unsqueeze_with_zero_tensor_operands_now_warns():
     # Constants/buffers are now first-class ``"Constant"`` operands, so a real
     # activation edge is always expected: an axis op left with 0 activation tensor
     # operands means its sole activation operand went missing -- a wiring bug.
-    node = _op_node("n:empty_unsqueeze", "Unsqueeze", ["Scalar"], [[]])
+    node = _op_node(
+        "n:empty_unsqueeze", "Unsqueeze", ["Scalar"], [[]], raw_op="unsqueeze"
+    )
     warnings = type_check_graph_nodes([node])
     assert len(warnings) == 1
     assert "n:empty_unsqueeze" in warnings[0]
     assert "tensor operand" in warnings[0]
 
 
-def test_unsqueeze_with_one_tensor_plus_constant_is_clean():
-    # A ``Constant`` operand (a render-dropped buffer/param read) does not count as
-    # an activation tensor, so an unsqueeze with one activation + one constant is
-    # correctly wired and must stay clean.
+def test_unsqueeze_with_one_tensor_plus_constant_warns():
+    # A hidden ``Constant`` operand with rank >= 1 (a buffer/param read, or the
+    # mis-materialized ``[self.qkv_dim] * 3`` split-size that motivated this check)
+    # DOES count as a tensor operand: an axis op bounded to one tensor plus such a
+    # constant is over-wired and must warn. (Flips the earlier "constant excluded"
+    # behavior per the owner's "second input is a constant tensor" case.)
+    node = _op_node(
+        "n:const_bad_unsqueeze",
+        "Unsqueeze",
+        ["int64", "Constant"],
+        [["Pv", "2"], ["16"]],
+        raw_op="unsqueeze",
+    )
+    warnings = type_check_graph_nodes([node])
+    assert len(warnings) == 1
+    assert "n:const_bad_unsqueeze" in warnings[0]
+    assert "tensor operand" in warnings[0]
+
+
+def test_unsqueeze_with_one_tensor_plus_rank0_constant_is_clean():
+    # A rank-0 ``Constant`` (a scalar setting captured as a constant) is not an
+    # activation tensor, so one activation + one rank-0 constant stays clean.
     node = _op_node(
         "n:const_ok_unsqueeze",
         "Unsqueeze",
         ["int64", "Constant"],
-        [["Pv", "2"], ["16"]],
+        [["Pv", "2"], []],
+        raw_op="unsqueeze",
+    )
+    assert type_check_graph_nodes([node]) == []
+
+
+def test_cat_with_many_tensor_operands_does_not_count_warn():
+    # ``cat(List[Tensor], dim)`` is variadic: any number of tensor operands is
+    # legal, so the operand-count ceiling never applies (only the rank check does).
+    node = _op_node(
+        "n:cat_ok",
+        "Concat",
+        ["float16", "float16", "float16", "float16"],
+        [["B", "S", "8"]] * 4,
+        raw_op="cat",
     )
     assert type_check_graph_nodes([node]) == []
 
@@ -74,6 +139,7 @@ def test_concat_rank_disagreement_warns():
         "Concat",
         ["float16", "float16", "float16"],
         [["B", "S", "128"], ["B", "S", "128"], ["B", "S", "4096", "1"]],
+        raw_op="cat",
     )
     warnings = type_check_graph_nodes([node])
     assert len(warnings) == 1
@@ -86,13 +152,30 @@ def test_concat_same_rank_is_clean():
         "Concat",
         ["float16", "float16"],
         [["B", "S", "128"], ["B", "S", "128"]],
+        raw_op="cat",
     )
     assert type_check_graph_nodes([node]) == []
 
 
 def test_unknown_op_is_skipped():
-    # An op with no known operand contract must not produce false positives.
-    node = _op_node("n:mystery", "SomeCustomKernel", ["float16", "float16"], [[], []])
+    # An op whose raw name resolves to no signature / aten schema has no known
+    # operand contract, so it is skipped -- no false positives on custom kernels.
+    node = _op_node(
+        "n:mystery",
+        "SomeCustomKernel",
+        ["float16", "float16"],
+        [[], []],
+        raw_op="some_custom_kernel",
+    )
+    assert type_check_graph_nodes([node]) == []
+
+
+def test_op_without_raw_op_is_skipped():
+    # Without a stamped ``raw_op`` there is no name to resolve a contract from, so
+    # the count check cannot false-positive on ops the extractor did not tag.
+    node = _op_node(
+        "n:untagged", "Unsqueeze", ["int64", "float16"], [["Pv", "2"], ["Pv", "3"]]
+    )
     assert type_check_graph_nodes([node]) == []
 
 

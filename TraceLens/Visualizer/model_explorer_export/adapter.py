@@ -111,7 +111,23 @@ def _node_attrs(spec) -> list[dict[str, str]]:
         if kernel:
             attrs.append(_kv("attn_implementation", kernel))
     if block is not None and block.details:
-        attrs.append(_kv("details", "; ".join(block.details)))
+        # The extractor threads the underlying torch op name (the one the display
+        # label discards) as a ``raw_op: <name>`` detail so the type-check can
+        # resolve the op's real operand arity from its actual function parameters
+        # -- keyed on the name the model itself calls, never a static op list. Lift
+        # it to its own ``raw_op`` attr and keep it out of the visible details.
+        raw_op = ""
+        visible_details: list[str] = []
+        for detail in block.details:
+            name, sep, value = detail.partition(":")
+            if sep and name.strip() == "raw_op":
+                raw_op = value.strip()
+                continue
+            visible_details.append(detail)
+        if raw_op:
+            attrs.append(_kv("raw_op", raw_op))
+        if visible_details:
+            attrs.append(_kv("details", "; ".join(visible_details)))
     if block is not None and block.runs_on_host:
         attrs.append(_kv("device", "cpu"))
     return attrs

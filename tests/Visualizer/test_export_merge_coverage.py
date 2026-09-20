@@ -1125,13 +1125,15 @@ def test_collapse_kernel_input_passthrough_keeps_shared_module_input():
     ]
 
 
-def test_collapse_same_name_boundary_folds_output_into_input():
-    """A same-name ``@output`` -> ``@input`` crossing folds to one tile.
+def test_collapse_same_name_boundary_keeps_cross_module_crossing():
+    """A same-name ``@output`` -> ``@input`` crossing ENTERS a different module,
+    so both boundary tiles are kept.
 
-    ``input_layernorm/@output:hidden_states`` feeding
-    ``self_attn/@input:hidden_states`` is one untransformed tensor rendered twice.
-    The consumer ``@input`` tile is dropped and its downstream is repointed onto
-    the surviving producer ``@output`` -- even across the namespace boundary."""
+    ``input_layernorm/@output:hidden_states`` feeding ``self_attn/@input:
+    hidden_states`` is a genuine module entry: the consuming module legitimately
+    declares its own ``@input`` boundary. Collapsing across the namespace edge
+    would delete ``self_attn``'s ``@input`` (defect B); the same-hierarchy guard
+    keeps both tiles and leaves the consumer reading its own ``@input``."""
     nodes = [
         _plain("real_op", "mod_a", [], shape="[B, S, H] bfloat16"),
         _output_tile("mod_a/@output:hidden_states", "mod_a", "real_op",
@@ -1143,10 +1145,35 @@ def test_collapse_same_name_boundary_folds_output_into_input():
     merge._collapse_same_name_boundary_passthroughs(nodes)
     by_id = {n["id"]: n for n in nodes}
 
-    assert "mod_b/@input:hidden_states" not in by_id
+    assert "mod_b/@input:hidden_states" in by_id
     assert "mod_a/@output:hidden_states" in by_id
     assert [e["sourceNodeId"] for e in by_id["consumer"]["incomingEdges"]] == [
-        "mod_a/@output:hidden_states"
+        "mod_b/@input:hidden_states"
+    ]
+
+
+def test_collapse_same_name_boundary_folds_same_namespace_pair():
+    """A same-name ``@output`` -> ``@input`` pair WITHIN one module namespace is a
+    redundant tile rendered twice (no hierarchy crossing) and still folds to one.
+
+    Both tiles share the owning namespace ``mod`` (the token before the trailing
+    ``/@...`` boundary marker), so this is not a module entry/exit -- the consumer
+    ``@input`` tile is dropped and repointed onto the surviving ``@output``."""
+    nodes = [
+        _plain("mod/real_op", "mod", [], shape="[B, S, H] bfloat16"),
+        _output_tile("mod/@output:hidden_states", "mod", "mod/real_op",
+                     label="hidden_states"),
+        _synthetic_input("mod/@input:hidden_states", "mod",
+                         "mod/@output:hidden_states", label="hidden_states"),
+        _plain("mod/consumer", "mod", ["mod/@input:hidden_states"]),
+    ]
+    merge._collapse_same_name_boundary_passthroughs(nodes)
+    by_id = {n["id"]: n for n in nodes}
+
+    assert "mod/@input:hidden_states" not in by_id
+    assert "mod/@output:hidden_states" in by_id
+    assert [e["sourceNodeId"] for e in by_id["mod/consumer"]["incomingEdges"]] == [
+        "mod/@output:hidden_states"
     ]
 
 
