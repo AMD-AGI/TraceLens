@@ -1387,6 +1387,29 @@ def _is_simple_parallel_output_gate(child: BlockNode) -> bool:
     return len(collect_function_steps(child)) <= 1
 
 
+_OP_STEP_NAME_RE = re.compile(r"^@op_l\d+_c\d+_(.+)$")
+
+
+def _next_sibling_is_activation_step(
+    child_nodes: list[BlockNode], index: int, activation: str
+) -> bool:
+    """True when the very next sibling already IS this gate's activation.
+
+    ``g = self.gate_proj(x).sigmoid()`` (assigned to its own local, as opposed
+    to being applied fully inline inside another expression) gets its ``.sigmoid()``
+    extracted as its own ordinary tensor-op step immediately following the gate's
+    call in ``forward_calls`` -- the same statement that made ``_parallel_gate_activation``
+    recognize the gate in the first place. Synthesizing a SECOND ``@gate_activation``
+    node inside the gate's own frame in that case would duplicate a computation that
+    the plain sibling step already performs and wires correctly, producing two
+    producers for one value (the downstream consumer then wires onto both).
+    """
+    if index + 1 >= len(child_nodes):
+        return False
+    match = _OP_STEP_NAME_RE.match(child_nodes[index + 1].attr_name)
+    return bool(match) and match.group(1) == activation.lower()
+
+
 def _wrap_parallel_gate_children(
     child_nodes: list[BlockNode],
     parallel_gates: list[str],
@@ -1398,7 +1421,7 @@ def _wrap_parallel_gate_children(
     gate_attrs = set(parallel_gates)
     side_inputs = side_inputs or {}
     wrapped: list[BlockNode] = []
-    for child in child_nodes:
+    for index, child in enumerate(child_nodes):
         if child.attr_name not in gate_attrs:
             wrapped.append(child)
             continue
@@ -1407,6 +1430,14 @@ def _wrap_parallel_gate_children(
             continue
         activation = gate_activations.get(child.attr_name)
         if activation is None and displays_as_linear(child.attr_name, child.class_name):
+            wrapped.append(child)
+            continue
+        if activation and _next_sibling_is_activation_step(
+            child_nodes, index, activation
+        ):
+            # Already represented as its own ordinary step right after this gate;
+            # let that step (and its real predecessor/consumer wiring) stand alone
+            # instead of also nesting a synthetic duplicate inside this frame.
             wrapped.append(child)
             continue
         consumer, _ = _gate_side_consumer(side_inputs, child.attr_name)

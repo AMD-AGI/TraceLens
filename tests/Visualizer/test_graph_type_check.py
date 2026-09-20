@@ -182,3 +182,74 @@ def test_op_without_raw_op_is_skipped():
 def test_node_without_signature_attrs_is_skipped():
     node = {"id": "n:plain", "label": "Unsqueeze", "attrs": []}
     assert type_check_graph_nodes([node]) == []
+
+
+def _slice_node(node_id, details, input_shape, output_shape, input_type="float32"):
+    # A materialized narrowing ``Slice`` op carrying a structured shape-change
+    # detail plus profiler-style input/output shapes, exercising the "declared a
+    # shape change but the output shape did not change" check.
+    return {
+        "id": node_id,
+        "label": "Slice",
+        "attrs": [
+            {"key": "op_type", "value": "Slice"},
+            {"key": "details", "value": details},
+            {"key": "input_types", "value": json.dumps([input_type])},
+            {"key": "input_shapes", "value": json.dumps([input_shape])},
+            {"key": "output_shape", "value": output_shape},
+        ],
+    }
+
+
+def test_shape_slice_that_narrows_the_axis_is_clean():
+    # ``rotate_half``'s ``x[..., : x.shape[-1] // 2]`` halves the last axis: the
+    # output shape differs from the input, so no warning.
+    node = _slice_node(
+        "n:rotate_half_slice",
+        "shape_slice: -1=|shape[-1] // 2",
+        ["3", "Pv", "16", "64"],
+        "[3, Pv, 16, 32] float32",
+    )
+    assert type_check_graph_nodes([node]) == []
+
+
+def test_shape_slice_with_unchanged_output_shape_warns():
+    # The regression this check guards: the declared narrowing was lost, so the
+    # slice's output shape still equals its input shape.
+    node = _slice_node(
+        "n:noop_slice",
+        "shape_slice: -1=|shape[-1] // 2",
+        ["3", "Pv", "16", "64"],
+        "[3, Pv, 16, 64] float32",
+    )
+    warnings = type_check_graph_nodes([node])
+    assert len(warnings) == 1
+    assert "n:noop_slice" in warnings[0]
+    assert "narrowing was lost" in warnings[0]
+
+
+def test_select_dim_with_unchanged_output_shape_warns():
+    # ``select_dim`` drops an axis; an output of equal rank/shape means the axis
+    # drop was lost.
+    node = _slice_node(
+        "n:noop_select",
+        "select_dim: 1",
+        ["Pv", "16"],
+        "[Pv, 16] float32",
+    )
+    warnings = type_check_graph_nodes([node])
+    assert len(warnings) == 1
+    assert "n:noop_select" in warnings[0]
+
+
+def test_descriptive_slice_detail_never_warns_on_unchanged_shape():
+    # A symbolic, non-foldable range slice (``mixed_qkv[:, :, -seq_len:]``) carries
+    # only a descriptive ``slice:`` detail; shape inference legitimately passes the
+    # shape through, so an unchanged output must NOT warn.
+    node = _slice_node(
+        "n:symbolic_slice",
+        "slice: (:, :, -seq_len:)",
+        ["B", "192", "S"],
+        "[B, 192, S] float32",
+    )
+    assert type_check_graph_nodes([node]) == []

@@ -599,6 +599,24 @@ def _positional_helper_functions(tree: ast.AST) -> list[str]:
     return names
 
 
+def _free_function_call_targets(funcs: dict[str, ast.FunctionDef]) -> set[str]:
+    """Bare-name call targets referenced anywhere in a set of function bodies.
+
+    Used to scope ``_imported_forward_functions``'s recursive import-following to
+    names a harvested module's own functions actually call, rather than every
+    name the module happens to import. A pure re-export module (no top-level
+    ``def``s of its own -- e.g. a package ``__init__.py``) contributes nothing
+    here, so none of its re-exports get chased just because one of them was
+    independently resolved from somewhere else.
+    """
+    names: set[str] = set()
+    for func in funcs.values():
+        for node in ast.walk(func):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                names.add(node.func.id)
+    return names
+
+
 def _imported_forward_functions(
     tree: ast.AST, base_module: str | None
 ) -> dict[str, ast.FunctionDef]:
@@ -675,7 +693,21 @@ def _imported_forward_functions(
         funcs, bindings = loaded
         for fname, fdef in funcs.items():
             resolved.setdefault(fname, fdef)
+        # Only chase bindings the module's own functions actually call. A module
+        # can import (and re-export) far more names than its own code ever uses --
+        # e.g. a package's ``__init__.py`` re-exporting its whole public surface,
+        # or a large module importing dozens of symbols only a few of which are
+        # referenced locally. Walking every binding regardless of use lets the
+        # recursion wander into an unrelated dependency and, on a bare-name
+        # collision, silently resolve one of *our* free-function names (like a
+        # model's own ``rearrange`` helper) to a same-named symbol from a
+        # completely different place -- with a different implementation and a
+        # different calling convention. Restricting to call targets keeps the
+        # harvest scoped to what the resolved helper(s) can actually reach.
+        called = _free_function_call_targets(funcs)
         for name, binding in bindings.items():
+            if name not in called:
+                continue
             _resolve_binding(name, binding, depth - 1)
 
     for local_name, binding in _absolute_import_bindings(tree, base_module).items():
@@ -2376,7 +2408,11 @@ _BINOP_LABELS = {
 
 
 def is_forward_operation(attr_name: str) -> bool:
-    return attr_name.startswith(FORWARD_OPERATION_PREFIX)
+    # A free-function frame inlines its ops under a ``@fn_..::`` namespace
+    # (see ``_inline_nested_free_functions``); the op's identity is the final
+    # ``::``-separated segment, so a frame-scoped op is still a forward operation.
+    segment = attr_name.rsplit("::", 1)[-1]
+    return segment.startswith(FORWARD_OPERATION_PREFIX)
 
 
 def operation_display_label(label: str, *, class_name: str | None = None) -> str:
@@ -2595,13 +2631,48 @@ def _expr_is_scalar_typed(node: ast.AST, values: dict[str, Any]) -> bool:
     return False
 
 
+def _flatten_control_flow_body(stmts: list[ast.stmt]) -> list[ast.stmt]:
+    """Flatten ``if``/``for``/``while``/``with``/``try`` bodies into one ordered,
+    straight-line statement list (never descending into a nested ``def``/class).
+
+    A constructor commonly guards its config-derived scalar assignments in a
+    ``try: self.x = config.x \\n except Exception: raise ...`` (or an
+    ``if cond: self.x = a \\n else: self.x = b``) block -- a defensive pattern,
+    not specific to any one model family. Walking only ``init_func.body``
+    misses every assignment nested one level inside such a block, silently
+    dropping it out of ``self_values`` -- which then makes the read-site
+    treat that name as an unresolved external tensor operand instead of a
+    scalar setting (see ``_self_attr_input``'s ``_SCALAR_SETTING`` handling).
+    Mirrors the existing control-flow-aware walk in
+    ``_path_max_self_call_sites`` above.
+    """
+    flat: list[ast.stmt] = []
+    for stmt in stmts:
+        flat.append(stmt)
+        if isinstance(stmt, ast.If):
+            flat.extend(_flatten_control_flow_body(stmt.body))
+            flat.extend(_flatten_control_flow_body(stmt.orelse))
+        elif isinstance(stmt, (ast.For, ast.While)):
+            flat.extend(_flatten_control_flow_body(stmt.body))
+            flat.extend(_flatten_control_flow_body(stmt.orelse))
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            flat.extend(_flatten_control_flow_body(stmt.body))
+        elif isinstance(stmt, ast.Try):
+            flat.extend(_flatten_control_flow_body(stmt.body))
+            for handler in stmt.handlers:
+                flat.extend(_flatten_control_flow_body(handler.body))
+            flat.extend(_flatten_control_flow_body(stmt.orelse))
+            flat.extend(_flatten_control_flow_body(stmt.finalbody))
+    return flat
+
+
 def _self_config_values(
     init_func: ast.FunctionDef | None, config: dict[str, Any]
 ) -> dict[str, Any]:
     values: dict[str, Any] = {}
     if init_func is None:
         return values
-    for stmt in init_func.body:
+    for stmt in _flatten_control_flow_body(init_func.body):
         if not isinstance(stmt, (ast.Assign, ast.AnnAssign)):
             continue
         targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
@@ -3263,6 +3334,149 @@ class _ForwardOperationExtractor:
         return resize
 
     @staticmethod
+    def _shape_relative_expr(bound: ast.AST, base_ast: ast.AST) -> str | None:
+        """Rewrite ``<base>.shape[k]`` refs in an arithmetic slice bound to a ``shape[k]`` symbol.
+
+        ``rotate_half`` slices ``x[..., : x.shape[-1] // 2]``: the bound cannot fold
+        to a static int at extraction (it reads ``x.shape``) but IS concrete at shape
+        inference, which knows ``x``'s shape. Returns a normalized expression string
+        (``shape[-1] // 2``) when ``bound`` is pure integer arithmetic over the sliced
+        operand's OWN ``.shape[...]`` and int constants; ``None`` for any other
+        reference (a config symbol, a different tensor's shape), leaving the slice
+        descriptive/pass-through. General: only the operand's own shape is resolvable
+        from the operand's inferred shape alone.
+        """
+        base_dump = ast.dump(base_ast)
+        ok = True
+
+        def _const_int_index(idx: ast.AST) -> int | None:
+            if isinstance(idx, ast.Constant) and isinstance(idx.value, int):
+                return idx.value
+            if (
+                isinstance(idx, ast.UnaryOp)
+                and isinstance(idx.op, ast.USub)
+                and isinstance(idx.operand, ast.Constant)
+                and isinstance(idx.operand.value, int)
+            ):
+                return -idx.operand.value
+            return None
+
+        class _Rewriter(ast.NodeTransformer):
+            def visit_Subscript(self, n: ast.Subscript):
+                v = n.value
+                if (
+                    isinstance(v, ast.Attribute)
+                    and v.attr == "shape"
+                    and ast.dump(v.value) == base_dump
+                ):
+                    axis = _const_int_index(n.slice)
+                    if axis is not None:
+                        return ast.copy_location(
+                            ast.Subscript(
+                                value=ast.Name(id="shape", ctx=ast.Load()),
+                                slice=ast.Constant(value=axis),
+                                ctx=ast.Load(),
+                            ),
+                            n,
+                        )
+                return self.generic_visit(n)
+
+        rewritten = _Rewriter().visit(ast.parse(ast.unparse(bound), mode="eval").body)
+
+        # Validate: only ``shape[int]`` reads, int constants, and +/-/*//// arithmetic.
+        for sub in ast.walk(rewritten):
+            if isinstance(sub, ast.Subscript):
+                if not (isinstance(sub.value, ast.Name) and sub.value.id == "shape"):
+                    ok = False
+            elif isinstance(sub, ast.Name):
+                if sub.id != "shape":
+                    ok = False
+            elif isinstance(sub, ast.BinOp):
+                if not isinstance(
+                    sub.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Div)
+                ):
+                    ok = False
+            elif isinstance(sub, ast.Constant):
+                if not isinstance(sub.value, int):
+                    ok = False
+            elif isinstance(
+                sub,
+                (
+                    ast.UnaryOp,
+                    ast.operator,
+                    ast.unaryop,
+                    ast.expr_context,
+                    ast.Expression,
+                ),
+            ):
+                # Operator / context marker nodes (``FloorDiv``, ``USub``, ``Load`` …)
+                # yielded by ``ast.walk`` carry no operands to validate.
+                continue
+            else:
+                ok = False
+        if not ok:
+            return None
+        # Require at least one shape reference — a bound of pure constants would
+        # already have folded via ``_subscript_resize_dims``.
+        if not any(
+            isinstance(s, ast.Name) and s.id == "shape" for s in ast.walk(rewritten)
+        ):
+            return None
+        return ast.unparse(rewritten)
+
+    def _subscript_shape_relative_dims(
+        self, node: ast.Subscript
+    ) -> list[tuple[int, str | None, str | None]]:
+        """Axes a range-slice narrows using bounds over the operand's OWN shape.
+
+        Returns ``(axis, lower_expr, upper_expr)`` per ``ast.Slice`` element whose
+        present bound(s) are pure arithmetic over ``<this operand>.shape[k]`` (a
+        ``None`` bound stays ``None``); shape inference evaluates the exprs against the
+        operand's concrete shape to size the axis. Skips an element whose present bound
+        is NOT shape-relative (a plain symbol we cannot size). ``[]`` when nothing is
+        shape-relative — caller falls back to a descriptive pass-through slice.
+        """
+        base_ast = node.value
+        index = node.slice
+        elts = index.elts if isinstance(index, ast.Tuple) else [index]
+        ellipsis_at = next(
+            (
+                pos
+                for pos, elt in enumerate(elts)
+                if isinstance(elt, ast.Constant) and elt.value is Ellipsis
+            ),
+            None,
+        )
+        out: list[tuple[int, str | None, str | None]] = []
+        for pos, elt in enumerate(elts):
+            if not isinstance(elt, ast.Slice) or elt.step is not None:
+                continue
+            if elt.lower is None and elt.upper is None:
+                continue
+            lower_expr = (
+                self._shape_relative_expr(elt.lower, base_ast)
+                if elt.lower is not None
+                else None
+            )
+            upper_expr = (
+                self._shape_relative_expr(elt.upper, base_ast)
+                if elt.upper is not None
+                else None
+            )
+            if elt.lower is not None and lower_expr is None:
+                continue
+            if elt.upper is not None and upper_expr is None:
+                continue
+            if lower_expr is None and upper_expr is None:
+                continue
+            if ellipsis_at is None or pos < ellipsis_at:
+                axis = pos
+            else:
+                axis = -(len(elts) - pos)
+            out.append((axis, lower_expr, upper_expr))
+        return out
+
+    @staticmethod
     def _subscript_narrows_range(index: ast.AST) -> bool:
         """True when a subscript contains a partial range slice on some axis.
 
@@ -3358,6 +3572,33 @@ class _ForwardOperationExtractor:
                         details=[
                             "resize_dim: "
                             + ", ".join(f"{axis}={size}" for axis, size in resize_dims)
+                        ],
+                    )
+                    return producer, []
+                # A range slice whose bound is arithmetic over the operand's OWN
+                # shape (``rotate_half``'s ``x[..., : x.shape[-1] // 2]``) narrows the
+                # axis to a width that is not a static int at extraction but IS
+                # concrete at shape inference. Emit a ``shape_slice`` detail carrying
+                # the per-axis lower/upper expressions (over a ``shape`` symbol) so the
+                # inferencer sizes the axis instead of passing the shape through.
+                shape_rel_dims = (
+                    []
+                    if self._suppress_slice_resize or self._is_host_scalar_expr(node)
+                    else self._subscript_shape_relative_dims(node)
+                )
+                if shape_rel_dims:
+                    self._materialized_subscripts.add(id(node))
+                    producer = self._emit(
+                        node,
+                        "Slice",
+                        base_predecessors,
+                        base_external,
+                        details=[
+                            "shape_slice: "
+                            + ", ".join(
+                                f"{axis}={lo or ''}|{up or ''}"
+                                for axis, lo, up in shape_rel_dims
+                            )
                         ],
                     )
                     return producer, []
@@ -6388,14 +6629,13 @@ def _collect_kernel_producers(
         if chain:
             producers[label] = list(chain)
 
-    for keyword in call.keywords:
-        if keyword.arg in _KERNEL_PRODUCER_SKIP_KWARGS:
-            continue
-        if isinstance(keyword.value, ast.Attribute):
-            continue
-        if keyword.arg:
-            consider(keyword.arg, keyword.value)
-
+    # Collect in CALL-ARGUMENT order: positional args first, then keywords.
+    # This order is the one the kernel's inputs are physically wired in (the
+    # merged-graph predecessor pass links producers in call order), so the
+    # declared ``inputs:`` list must match it — otherwise the positional
+    # port-matcher scrambles labels whenever a kernel mixes positional tensors
+    # with keyword tensors (e.g. ``kernel(query, key, value, g=g, beta=beta)``
+    # would declare ``g,beta,query,key,value`` and mislabel every port).
     args = call.args
     start = 1 if args and isinstance(args[0], ast.Name) and args[0].id == "self" else 0
     for index, arg in enumerate(args[start:], start=start):
@@ -6403,6 +6643,14 @@ def _collect_kernel_producers(
             consider(arg.id, arg)
         else:
             consider(f"in{index - start}", arg)
+
+    for keyword in call.keywords:
+        if keyword.arg in _KERNEL_PRODUCER_SKIP_KWARGS:
+            continue
+        if isinstance(keyword.value, ast.Attribute):
+            continue
+        if keyword.arg:
+            consider(keyword.arg, keyword.value)
 
     return producers
 
@@ -7431,6 +7679,23 @@ def _walk_forward_stmt(
         return _register_forward_calls(stmt_calls, calls, norm_before, pending_norm)
 
     if isinstance(node, ast.If):
+        # Both arms are walked into the same ordered ``calls`` list regardless of
+        # which one actually executes. When there IS a second arm (``orelse``),
+        # an unrecognised free-function (``@fn_``) call from either arm could
+        # collide with the other arm's -- unlike a ``self.<attr>`` submodule
+        # producer (joined by an explicit ``Select`` phi, see
+        # ``_emit_branch_select``), a free-function node has no branch-select
+        # mechanism, so both would otherwise leak into the sequence as if
+        # unconditional. Suppressing them there is safe: `skip_free_fn` only
+        # drops the ``@fn_`` node emission, not the op(s) the call's *result*
+        # feeds (those still emit via ``_emit`` with a ``condition:`` detail).
+        # A single-armed ``if cond: ...`` (no ``else``) has no alternative arm
+        # to collide with -- it is exactly one, condition-tagged block, so a
+        # free-function call inside it is as real as any other op there and
+        # must not be suppressed (that previously orphaned the op reading its
+        # result: the op kept its edge target, but the target node was never
+        # built).
+        branch_in_conditional = in_conditional or bool(node.orelse)
         branch = node.body + node.orelse
         for child in branch:
             pending_norm = _walk_forward_stmt(
@@ -7445,7 +7710,7 @@ def _walk_forward_stmt(
                 forward_step_details,
                 self_values,
                 name_value_ast,
-                in_conditional=True,
+                in_conditional=branch_in_conditional,
                 repeated_attrs=repeated_attrs,
             )
         return pending_norm

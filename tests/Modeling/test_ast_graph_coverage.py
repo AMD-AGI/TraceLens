@@ -1273,3 +1273,15 @@ def test_return_metadata_keeps_parallel_outputs_distinct():
     )
     assert set(analysis.return_order) == {"hidden_states", "past_key_values"}
     assert analysis.primary_return_slot == "hidden_states"
+
+
+def test_is_forward_operation_recognizes_free_function_frame_op():
+    # A plain op attr_name is a forward operation.
+    assert aa.is_forward_operation("@op_l1563_c9_slice")
+    # A free-function frame inlines its ops under a ``@fn_..::`` namespace; the
+    # op's identity is the trailing ``::``-segment, so a frame-scoped op is still
+    # a forward operation (its details/shape must survive into the graph build).
+    assert aa.is_forward_operation("@fn_l1575_rotate_half::@op_l1563_c9_slice")
+    # A frame namespace with no trailing op segment is not itself a forward op.
+    assert not aa.is_forward_operation("@fn_l1575_rotate_half")
+    assert not aa.is_forward_operation("self_attn")

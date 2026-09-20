@@ -1978,6 +1978,37 @@ class ShapeInferencer:
                     if axis is not None and size is not None:
                         shape[axis % rank] = size
                 return TensorSpec(shape=tuple(shape), dtype=source.dtype)
+            # A range slice whose bound is arithmetic over the operand's OWN shape
+            # (``rotate_half``'s ``x[..., : x.shape[-1] // 2]``) is sized here: the
+            # per-axis ``lower|upper`` expressions reference a ``shape`` symbol we bind
+            # to this operand's concrete shape. An axis whose bound cannot be evaluated
+            # to an int (a symbolic dim) is left unchanged.
+            shape_slice_str = _detail_value(details, "shape_slice")
+            if shape_slice_str and source.shape:
+                shape = list(source.shape)
+                rank = len(shape)
+                for token in shape_slice_str.split(", "):
+                    axis_str, _, bounds = token.strip().partition("=")
+                    axis = _int_dim(axis_str.strip())
+                    if axis is None:
+                        continue
+                    lower_s, _, upper_s = bounds.partition("|")
+                    dim = _int_dim(str(shape[axis % rank]))
+                    if dim is None:
+                        continue
+                    lo = _eval_shape_expr(lower_s.strip(), shape)
+                    hi = _eval_shape_expr(upper_s.strip(), shape)
+                    if lo is None:
+                        lo = 0
+                    if hi is None:
+                        hi = dim
+                    if lo < 0:
+                        lo += dim
+                    if hi < 0:
+                        hi += dim
+                    size = max(0, min(hi, dim) - max(lo, 0))
+                    shape[axis % rank] = size
+                return TensorSpec(shape=tuple(shape), dtype=source.dtype)
             return source
 
         if operation_label == "select":
@@ -4580,6 +4611,65 @@ def _int_dim(value: Any) -> int | None:
         if text.lstrip("-").isdigit():
             return int(text)
     return None
+
+
+def _eval_shape_expr(expr: str, shape: Sequence[Any]) -> int | None:
+    """Evaluate a slice-bound expression over a ``shape`` symbol to an int, or None.
+
+    ``expr`` is emitted by ``ast_analyze._shape_relative_expr`` and references only a
+    ``shape`` list, int constants, and ``+ - * // /`` arithmetic (e.g.
+    ``shape[-1] // 2``). Returns ``None`` when the expression is empty, indexes a
+    symbolic (non-int) dim, or contains anything outside that safe grammar — the
+    caller then leaves the axis unchanged.
+    """
+    if not expr:
+        return None
+
+    def _eval(node: ast.AST) -> int | None:
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            return node.value
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+            operand = _eval(node.operand)
+            if operand is None:
+                return None
+            return -operand if isinstance(node.op, ast.USub) else operand
+        if isinstance(node, ast.BinOp):
+            left = _eval(node.left)
+            right = _eval(node.right)
+            if left is None or right is None:
+                return None
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, (ast.FloorDiv, ast.Div)):
+                if right == 0:
+                    return None
+                return left // right
+            return None
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "shape"
+        ):
+            idx = _eval(node.slice)
+            if idx is None or not shape:
+                return None
+            try:
+                return _int_dim(shape[idx])
+            except IndexError:
+                return None
+        return None
+
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return None
+    return _eval(tree)
 
 
 def _vision_patch_flat_dim(vision_config: dict[str, Any]) -> int | None:

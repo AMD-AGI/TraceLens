@@ -649,6 +649,22 @@ def test_transpose_shape_inference():
     assert result.shape == ("B", 32, "S", 128)
 
 
+def test_shape_slice_narrows_axis_by_own_shape_arithmetic():
+    # ``rotate_half``'s ``x[..., : x.shape[-1] // 2]`` narrows the last axis to
+    # half its concrete width: the ``shape_slice`` detail carries the per-axis
+    # ``lower|upper`` expressions over the operand's own ``shape`` symbol, and the
+    # inferencer sizes the axis (64 -> 32) instead of passing the shape through.
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 16, 64), dtype="float16")
+    lower = _node("Slice", details=["shape_slice: -1=|shape[-1] // 2"])
+    result = inf._infer_node_output(lower, [inp], root=None)
+    assert result.shape == ("B", "S", 16, 32)
+    # The complementary upper half ``x[..., x.shape[-1] // 2 :]`` also narrows to 32.
+    upper = _node("Slice", details=["shape_slice: -1=shape[-1] // 2|"])
+    result = inf._infer_node_output(upper, [inp], root=None)
+    assert result.shape == ("B", "S", 16, 32)
+
+
 def test_view_resolves_inferred_size_one_axis_to_int():
     # ``view(B, S, -1, 128)`` on a ``[B, S, 128]`` source infers the ``-1`` axis
     # to a concrete size of 1. It must be an ``int`` 1, not the string "1" — a

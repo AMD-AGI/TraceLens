@@ -210,6 +210,44 @@ def _is_constant_node(node: dict[str, Any]) -> bool:
     return False
 
 
+# Structured shape-change declarations the extractor stamps on a materialized
+# narrowing/indexing ``Slice`` op: ``select_dim`` drops an axis, ``resize_dim``
+# sets an axis to a folded constant width, ``shape_slice`` narrows an axis by
+# arithmetic over the operand's own shape. Each GUARANTEES the op's output shape
+# differs from its input -- so an output that still equals the input means the
+# declared narrowing was lost. The purely-descriptive ``slice:`` detail (a
+# symbolic, non-foldable bound) is intentionally excluded: shape inference cannot
+# size it and legitimately passes the shape through.
+_SHAPE_CHANGE_DETAIL_PREFIXES = ("select_dim:", "resize_dim:", "shape_slice:")
+
+
+def _details_lines(node: dict[str, Any]) -> list[str]:
+    for attr in node.get("attrs", []):
+        if attr.get("key") == "details":
+            value = attr.get("value")
+            if isinstance(value, str):
+                return [line.strip() for line in value.splitlines() if line.strip()]
+    return []
+
+
+def _output_shape_dims(node: dict[str, Any]) -> list[str] | None:
+    """The output shape's per-axis dim tokens (dtype suffix stripped), or None."""
+    for attr in node.get("attrs", []):
+        if attr.get("key") == "output_shape":
+            value = attr.get("value")
+            if not isinstance(value, str):
+                return None
+            start = value.find("[")
+            end = value.find("]", start + 1)
+            if start == -1 or end == -1:
+                return None
+            inner = value[start + 1 : end].strip()
+            if not inner:
+                return []
+            return [tok.strip() for tok in inner.split(",")]
+    return None
+
+
 def _operand_is_tensor(op_type: str, shape: Any) -> bool:
     """Whether an operand counts as a real tensor input for the arity check.
 
@@ -298,6 +336,33 @@ def _check_node(node: dict[str, Any]) -> list[str]:
                 f"argument was mis-wired onto the op; scalar/axis arguments must be "
                 f"kept off the edges."
             )
+
+    # A shape-changing slice/select/resize op whose output shape still equals its
+    # input shape did not actually change the shape -- the declared narrowing was
+    # dropped in shape inference (the ``rotate_half`` no-op slice class of bug).
+    change_details = [
+        line
+        for line in _details_lines(node)
+        if line.startswith(_SHAPE_CHANGE_DETAIL_PREFIXES)
+    ]
+    if change_details:
+        out_dims = _output_shape_dims(node)
+        tensor_inputs = [
+            shapes[i]
+            for i, t in enumerate(input_types)
+            if i < len(shapes)
+            and isinstance(shapes[i], list)
+            and _operand_is_tensor(t, shapes[i])
+        ]
+        if out_dims is not None and len(tensor_inputs) == 1:
+            in_dims = [str(dim) for dim in tensor_inputs[0]]
+            if in_dims == out_dims:
+                warnings.append(
+                    f"{node_id} [{op}]: declares a shape change "
+                    f"({'; '.join(change_details)}) but its output shape {out_dims} "
+                    f"equals its input shape {in_dims} -- the narrowing was lost; "
+                    f"shape inference did not apply the declared slice/select."
+                )
 
     return warnings
 
