@@ -1987,6 +1987,117 @@ def _collapse_kernel_input_passthroughs(nodes: list[dict[str, Any]]) -> None:
         nodes[:] = [node for node in nodes if str(node["id"]) not in removed]
 
 
+# Boundary tiles a value flows *out of* / *into* at a namespace edge. A same-name
+# ``@output``->``@input`` pair describes one untransformed tensor rendered as two
+# tiles, so it collapses to one (see below).
+_OUTPUT_BOUNDARY_SYNTHETIC = frozenset({"@output", "@output_mirror"})
+_INPUT_BOUNDARY_SYNTHETIC = frozenset({"@input", "@input_mirror", "@kernel_port_in"})
+
+
+def _collapse_same_name_boundary_passthroughs(nodes: list[dict[str, Any]]) -> None:
+    """Collapse every same-name ``@output``->``@input`` boundary passthrough to one tile.
+
+    A producer's ``@output`` tile feeding a consumer's ``@input`` (or
+    ``@input_mirror``/``@kernel_port_in``) tile that carries the *identical*
+    tensor name is one untransformed value rendered as two stacked/edge-linked
+    tiles -- e.g. ``expand_kv/@output:key_states`` -> ``@output_mirror`` ->
+    the attention ``@kernel_in:key_states`` port, or
+    ``input_layernorm/@output:hidden_states`` -> ``self_attn/@input:hidden_states``.
+    Fold each such pair to a single tile.
+
+    General: keyed purely on same-name equality (via the producer's specific
+    output-port label) and on the producer being an ``@output``-family boundary
+    that is a pure passthrough of one upstream value -- no class/config/name
+    literals. Boundaries where the name genuinely changes across the edge (a real
+    rename such as ``@input:hidden_states <- @output:collapsed``) differ by name
+    and are left untouched, as are real-op-fed inputs. Cross-namespace crossings
+    (``input_layernorm`` -> ``self_attn``) collapse too; ``@loop_carried_*`` and
+    ``@slice_out`` tiles are outside both synthetic sets, so loop boundaries and
+    split tiles -- and the one permitted loop back edge -- are never disturbed.
+
+    Which tile survives: for a kernel port the port is kept (the kernel needs it)
+    and made to read the producer's own upstream; for an ``@input``/``@input_mirror``
+    the producer ``@output`` is kept and the dropped tile's consumers are repointed
+    onto it. Repointing always targets an *upstream* node, so forward paths only
+    shorten -- acyclicity is preserved -- and collapsed tiles are removed from the
+    node list (not merely detached), so no dead nodes are introduced. Applied
+    iteratively so multi-hop chains (``@output`` -> ``@output_mirror`` ->
+    ``@kernel_port_in``) reduce to a single edge.
+    """
+
+    def _port_name(node: dict[str, Any]) -> str:
+        return _node_attr(node, "port_label") or str(node.get("label", ""))
+
+    def _source_port_name(source: dict[str, Any], output_id: Any) -> str:
+        # Match the producer's *specific* output port so a multi-output @output
+        # tile compares per port, not by the tile's aggregate label.
+        for port in source.get("outputsMetadata", []):
+            if str(port.get("id")) == str(output_id):
+                for attr in port.get("attrs", []):
+                    if attr.get("key") == "port_label":
+                        return str(attr.get("value"))
+        return _port_name(source)
+
+    changed = True
+    while changed:
+        changed = False
+        by_id = {str(node["id"]): node for node in nodes}
+        consumers: dict[str, list[dict[str, Any]]] = {}
+        for node in nodes:
+            for edge in node.get("incomingEdges", []):
+                consumers.setdefault(str(edge.get("sourceNodeId")), []).append(node)
+
+        removed: set[str] = set()
+        for consumer in list(nodes):
+            if str(consumer["id"]) in removed:
+                continue
+            consumer_syn = _node_attr(consumer, "synthetic")
+            if consumer_syn not in _INPUT_BOUNDARY_SYNTHETIC:
+                continue
+            incoming = consumer.get("incomingEdges", [])
+            if len(incoming) != 1:
+                continue
+            source_id = str(incoming[0].get("sourceNodeId"))
+            if source_id in removed:
+                continue
+            producer = by_id.get(source_id)
+            if producer is None:
+                continue
+            if _node_attr(producer, "synthetic") not in _OUTPUT_BOUNDARY_SYNTHETIC:
+                continue
+            # The producer must be a pure passthrough: exactly one upstream source.
+            producer_upstream = producer.get("incomingEdges", [])
+            if len(producer_upstream) != 1:
+                continue
+            output_id = incoming[0].get("sourceNodeOutputId", "0")
+            if _source_port_name(producer, output_id) != _port_name(consumer):
+                continue
+
+            if consumer_syn == "@kernel_port_in":
+                # Keep the kernel port; make it read the producer's own upstream.
+                forwarded = producer_upstream[0]
+                incoming[0]["sourceNodeId"] = forwarded.get("sourceNodeId")
+                incoming[0]["sourceNodeOutputId"] = forwarded.get("sourceNodeOutputId")
+                # Drop the producer only when this port was its sole consumer.
+                if [c["id"] for c in consumers.get(source_id, [])] == [consumer["id"]]:
+                    removed.add(source_id)
+            else:
+                # @input / @input_mirror: keep the producer @output, drop this tile,
+                # and repoint every consumer of it back onto the producer.
+                consumer_id = str(consumer["id"])
+                for downstream in consumers.get(consumer_id, []):
+                    for edge in downstream.get("incomingEdges", []):
+                        if str(edge.get("sourceNodeId")) == consumer_id:
+                            edge["sourceNodeId"] = producer["id"]
+                            edge["sourceNodeOutputId"] = output_id
+                removed.add(consumer_id)
+
+            changed = True
+
+        if removed:
+            nodes[:] = [node for node in nodes if str(node["id"]) not in removed]
+
+
 def _prune_noop_cast_nodes(nodes: list[dict[str, Any]]) -> None:
     """Remove ``Cast`` nodes whose output dtype equals their (single) input's
     dtype — the AST-path counterpart of the torch-trace backend's no-op
@@ -4660,6 +4771,7 @@ def build_merged_model_graph(
     _mirror_boundary_outputs(nodes)
     _collapse_mirror_boundary_passthroughs(nodes)
     _collapse_kernel_input_passthroughs(nodes)
+    _collapse_same_name_boundary_passthroughs(nodes)
 
     if shape_inferencer is not None:
         fill_missing_node_shapes(

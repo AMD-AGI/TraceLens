@@ -1,18 +1,18 @@
 ---
 name: check-graph-integrity
-description: Run after editing graph-export, block-tree, computation-graph, ast, or shape-inference code (TraceLens/ModelUtils/*, TraceLens/Visualizer/model_explorer_export/*). Rebuilds the merged Model Explorer graph and runs three structural-integrity checks (I1 dead-node, I2 no-source/orphan, I3 constant-soundness) on BOTH the built graph and the render-filtered graph, reporting warnings for wiring/tagging fidelity bugs (a sourceless op, an orphaned tile, a real activation hidden as a constant).
+description: Run after editing graph-export, block-tree, computation-graph, ast, or shape-inference code (TraceLens/ModelUtils/*, TraceLens/Visualizer/model_explorer_export/*). Rebuilds the merged Model Explorer graph and runs four structural-integrity checks (I1 dead-node, I2 no-source/orphan, I3 constant-soundness, I4 same-name boundary passthrough) on BOTH the built graph and the render-filtered graph, reporting warnings for wiring/tagging fidelity bugs (a sourceless op, an orphaned tile, a real activation hidden as a constant, a redundant same-name @output→@input tile).
 ---
 
 # Structural-integrity check of the merged model graph
 
 Beyond the per-operation operand type-check (`check-graph-types`), the export must
-satisfy three whole-graph structural invariants. `integrity_check_graph_nodes`
+satisfy four whole-graph structural invariants. `integrity_check_graph_nodes`
 (`TraceLens/Visualizer/model_explorer_export/type_check.py`) validates them and
 emits **warnings** (never errors): the export still builds, but a warning flags a
 wiring/tagging fidelity bug. The fix is always upstream — correct the
 extraction/wiring/tagging — never suppress the warning.
 
-The three invariants:
+The four invariants:
 
 - **I1 dead-node** — every non-exempt node's value is consumed by some other
   node. Exempt sinks: synthetic `@input`/`@output` boundaries, `@loop_carried`
@@ -31,6 +31,16 @@ The three invariants:
   from an int64 routing index), or scalar args — never a raw float tensor. A float
   dtype in `input_types` means a real activation is being hidden at render, i.e.
   the node is mistagged.
+- **I4 same-name boundary passthrough** — no `@input`/`@input_mirror`/
+  `@kernel_port_in` tile is fed solely by a same-name `@output`/`@output_mirror`
+  tile. Such a pair is one untransformed tensor rendered as two stacked tiles
+  (e.g. `input_layernorm/@output:hidden_states` → `self_attn/@input:hidden_states`,
+  or `expand_kv/@output:key_states` → the attention key port). The
+  `_collapse_same_name_boundary_passthroughs` merge pass folds every such crossing
+  to one tile; a residual warning means the pass missed one (a name mismatch it
+  should have matched, a producer with an unexpected synthetic tag, or a call-order
+  regression). Fix the collapse pass at source — never suppress a legitimate
+  *rename* crossing (different tensor name), which the pass correctly leaves intact.
 
 Both the built graph and the **render-filtered** graph (constants dropped, via
 `viewer_page._graph_without_constants`) are checked — dropping the constant
@@ -95,5 +105,11 @@ for line in filtered:
   pass (`_tag_weight_only_ops` / `_tag_buffer_only_ops` /
   `_tag_linear_weight_operands` / `_propagate_constant_closure`) so only the
   weight/buffer closure is tagged, never a float activation.
+- **I4 same-name-passthrough** — a redundant boundary tile the collapse pass
+  failed to fold: fix `merge._collapse_same_name_boundary_passthroughs` (a port
+  label the same-name comparison missed via `_source_port_name`/`_port_name`, a
+  producer synthetic tag outside `_OUTPUT_BOUNDARY_SYNTHETIC`, or its call moved
+  out of the build tail after `_collapse_kernel_input_passthroughs`). Never fold a
+  crossing whose name genuinely changes — that is a real rename, not a passthrough.
 
 For root-causing and fixing, use the `graph-integrity-fix` agent.

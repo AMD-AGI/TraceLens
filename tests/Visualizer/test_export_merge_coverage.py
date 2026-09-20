@@ -1059,6 +1059,18 @@ def _input_mirror(node_id, namespace, source, *, label):
     }
 
 
+def _output_tile(node_id, namespace, source, *, label, synth="@output"):
+    return {
+        "id": node_id,
+        "label": label,
+        "namespace": namespace,
+        "attrs": [{"key": "synthetic", "value": synth},
+                  {"key": "port_label", "value": label}],
+        "incomingEdges": [{"sourceNodeId": source, "sourceNodeOutputId": "0",
+                           "targetNodeInputId": "0"}],
+    }
+
+
 def test_collapse_kernel_input_passthrough_drops_redundant_module_input():
     """A kernel port fed only by a same-scope same-name @input tile collapses:
     the untransformed passthrough (cu_seqlens) loses its redundant @input tile."""
@@ -1110,6 +1122,95 @@ def test_collapse_kernel_input_passthrough_keeps_shared_module_input():
     assert "blk/@input:mask" in by_id
     assert [e["sourceNodeId"] for e in by_id["blk/@kernel_in:9:mask"]["incomingEdges"]] == [
         "blk/@input:mask"
+    ]
+
+
+def test_collapse_same_name_boundary_folds_output_into_input():
+    """A same-name ``@output`` -> ``@input`` crossing folds to one tile.
+
+    ``input_layernorm/@output:hidden_states`` feeding
+    ``self_attn/@input:hidden_states`` is one untransformed tensor rendered twice.
+    The consumer ``@input`` tile is dropped and its downstream is repointed onto
+    the surviving producer ``@output`` -- even across the namespace boundary."""
+    nodes = [
+        _plain("real_op", "mod_a", [], shape="[B, S, H] bfloat16"),
+        _output_tile("mod_a/@output:hidden_states", "mod_a", "real_op",
+                     label="hidden_states"),
+        _synthetic_input("mod_b/@input:hidden_states", "mod_b",
+                         "mod_a/@output:hidden_states", label="hidden_states"),
+        _plain("consumer", "mod_b", ["mod_b/@input:hidden_states"]),
+    ]
+    merge._collapse_same_name_boundary_passthroughs(nodes)
+    by_id = {n["id"]: n for n in nodes}
+
+    assert "mod_b/@input:hidden_states" not in by_id
+    assert "mod_a/@output:hidden_states" in by_id
+    assert [e["sourceNodeId"] for e in by_id["consumer"]["incomingEdges"]] == [
+        "mod_a/@output:hidden_states"
+    ]
+
+
+def test_collapse_same_name_boundary_kernel_port_reads_real_op():
+    """A same-name ``@output`` -> ``@kernel_port_in`` reduces to the port reading
+    the real op: the kernel keeps its declared port but now reads ``expand_kv``'s
+    ``Copy`` directly instead of an interposed ``@output`` tile."""
+    nodes = [
+        _plain("copy_op", "attn", [], shape="[Pv, 64] bfloat16"),
+        _output_tile("attn/@output:key_states", "attn", "copy_op", label="key_states"),
+        _kernel_in("attn/@kernel_in:key_states", "attn", "attn/@output:key_states",
+                   label="key_states"),
+        _plain("kernel", "attn", ["attn/@kernel_in:key_states"]),
+    ]
+    merge._collapse_same_name_boundary_passthroughs(nodes)
+    by_id = {n["id"]: n for n in nodes}
+
+    assert "attn/@output:key_states" not in by_id
+    assert "attn/@kernel_in:key_states" in by_id
+    assert [e["sourceNodeId"] for e in by_id["attn/@kernel_in:key_states"]["incomingEdges"]] == [
+        "copy_op"
+    ]
+
+
+def test_collapse_same_name_boundary_reduces_three_tile_chain():
+    """An ``@output`` -> ``@output_mirror`` -> ``@kernel_port_in`` chain of the same
+    name collapses iteratively to a single edge from the real op."""
+    nodes = [
+        _plain("copy_op", "attn", [], shape="[Pv, 64] bfloat16"),
+        _output_tile("attn/@output:value_states", "attn", "copy_op",
+                     label="value_states"),
+        _output_tile("attn/@output:value_states^value_states", "attn",
+                     "attn/@output:value_states", label="value_states",
+                     synth="@output_mirror"),
+        _kernel_in("attn/@kernel_in:value_states", "attn",
+                   "attn/@output:value_states^value_states", label="value_states"),
+        _plain("kernel", "attn", ["attn/@kernel_in:value_states"]),
+    ]
+    merge._collapse_same_name_boundary_passthroughs(nodes)
+    by_id = {n["id"]: n for n in nodes}
+
+    assert "attn/@output:value_states^value_states" not in by_id
+    assert "attn/@output:value_states" not in by_id
+    assert [e["sourceNodeId"] for e in by_id["attn/@kernel_in:value_states"]["incomingEdges"]] == [
+        "copy_op"
+    ]
+
+
+def test_collapse_same_name_boundary_leaves_renamed_crossing_intact():
+    """A boundary where the name genuinely changes (``@output:collapsed`` ->
+    ``@input:hidden_states``) is a real rename, not a passthrough, and is kept."""
+    nodes = [
+        _plain("real_op", "mod_a", [], shape="[B, S, H] bfloat16"),
+        _output_tile("mod_a/@output:collapsed", "mod_a", "real_op", label="collapsed"),
+        _synthetic_input("mod_b/@input:hidden_states", "mod_b",
+                         "mod_a/@output:collapsed", label="hidden_states"),
+        _plain("consumer", "mod_b", ["mod_b/@input:hidden_states"]),
+    ]
+    merge._collapse_same_name_boundary_passthroughs(nodes)
+    by_id = {n["id"]: n for n in nodes}
+
+    assert "mod_b/@input:hidden_states" in by_id
+    assert [e["sourceNodeId"] for e in by_id["consumer"]["incomingEdges"]] == [
+        "mod_b/@input:hidden_states"
     ]
 
 

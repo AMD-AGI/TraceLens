@@ -924,8 +924,32 @@ def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
             for attr in node.get("attrs", [])
         )
     }
-    # Every real sub-module boundary that owns an Output also owns an Input.
-    assert output_namespaces <= input_namespaces
+    # After the same-name boundary collapse a sub-module's @input tile folds away
+    # when it merely renamed a producer's identically-named @output (e.g.
+    # input_layernorm/@output:hidden_states -> self_attn/@input:hidden_states), so a
+    # namespace may own an @output without an @input. Every such @output must still
+    # be consumed across its namespace boundary -- the tensor still leaves the module.
+    consumers = {}
+    for candidate in graph["nodes"]:
+        for edge in candidate.get("incomingEdges", []) or []:
+            consumers.setdefault(edge["sourceNodeId"], []).append(candidate["id"])
+    for namespace in output_namespaces - input_namespaces:
+        outputs = [
+            candidate
+            for candidate in graph["nodes"]
+            if candidate.get("namespace", "") == namespace
+            and any(
+                attr.get("key") == "synthetic" and attr.get("value") == "@output"
+                for attr in candidate.get("attrs", [])
+            )
+        ]
+        for output in outputs:
+            crossing = [
+                cid
+                for cid in consumers.get(output["id"], [])
+                if node_by_id[cid].get("namespace", "") != namespace
+            ]
+            assert crossing, (namespace, output["id"])
 
 
 def test_glm53_decoder_residual_ops_use_return_slot_producers():
@@ -1276,12 +1300,22 @@ def test_glm53_spine_norms_do_not_share_a_namespace():
         }
         assert not both_ways, (norm_ns, both_ways)
 
-    # The real order is attn_hc -> input_layernorm -> self_attn.
+    # The real order is attn_hc -> input_layernorm -> self_attn. The redundant
+    # same-name ``self_attn/@input`` passthrough is collapsed away, so self_attn's
+    # first op reads ``input_layernorm/@output`` directly.
     norm_output = f"{prefix}/input_layernorm/@output"
-    attention_input = next(
-        node for node in graph["nodes"] if node["id"] == f"{prefix}/self_attn/@input"
-    )
-    assert attention_input["incomingEdges"][0]["sourceNodeId"] == norm_output
+    assert f"{prefix}/self_attn/@input" not in namespace_of
+    self_attn_ns = f"{prefix}/self_attn"
+    readers = [
+        node["id"]
+        for node in graph["nodes"]
+        if str(node["id"]).startswith(f"{self_attn_ns}/")
+        and any(
+            edge["sourceNodeId"] == norm_output
+            for edge in node.get("incomingEdges", [])
+        )
+    ]
+    assert readers, norm_output
 
 
 def test_glm53_attention_lora_norms_do_not_share_a_namespace():
@@ -1567,7 +1601,7 @@ def test_glm53_forget_gate_has_real_boundary_nodes():
 
 
 def test_glm53_norm_boundary_connects_directly_to_attention_input():
-    """One-tensor blocks hand off Output to Input without a mirror in between."""
+    """A one-tensor block folds its same-name Output->Input passthrough to one tile."""
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec)
@@ -1582,9 +1616,21 @@ def test_glm53_norm_boundary_connects_directly_to_attention_input():
     assert [item["id"] for item in norm_output["outputsMetadata"]] == ["hidden_states"]
     assert f"{norm_prefix}@output^hidden_states" not in node_by_id
 
-    attention_input = node_by_id[f"{prefix}/self_attn/@input"]
-    assert attention_input["incomingEdges"][0]["sourceNodeId"] == norm_output["id"]
-    assert _has_export_path(graph["nodes"], norm_input["id"], attention_input["id"])
+    # The redundant same-name ``self_attn/@input`` tile is collapsed away, so
+    # self_attn's first op reads ``input_layernorm/@output`` directly.
+    assert f"{prefix}/self_attn/@input" not in node_by_id
+    self_attn_ns = f"{prefix}/self_attn"
+    readers = [
+        node
+        for node in graph["nodes"]
+        if str(node["id"]).startswith(f"{self_attn_ns}/")
+        and any(
+            edge["sourceNodeId"] == norm_output["id"]
+            for edge in node.get("incomingEdges", [])
+        )
+    ]
+    assert readers
+    assert _has_export_path(graph["nodes"], norm_input["id"], readers[0]["id"])
 
 
 def test_glm53_hyper_head_precedes_final_norm():
@@ -1641,8 +1687,9 @@ def test_glm53_vision_attention_resolves_single_kernel_branch():
     attn_nodes = [n for n in nodes if "VisionAttention" in n.get("namespace", "")]
     assert attn_nodes
 
-    # Exactly one attention kernel node, tagged with the resolved implementation.
-    kernels = [n for n in attn_nodes if n.get("label") == "Attention"]
+    # Exactly one attention kernel node, labelled with the resolved kernel (the
+    # config defaults ``_attn_implementation`` to sdpa), tagged with the impl.
+    kernels = [n for n in attn_nodes if n.get("label") == "sdpa"]
     assert len(kernels) == 1, [n["id"] for n in kernels]
     kernel = kernels[0]
     assert any(
@@ -1863,74 +1910,62 @@ def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
 
     _assert_export_is_acyclic(nodes)
 
-    # The rope helper renders like any module call (D3): its own ``@input``
-    # boundary. The ``cos, sin = position_embeddings`` unpack is honoured at the
-    # boundary -- the two tuple slots stay DISTINCT tiles (``@input:cos`` and
-    # ``@input:sin``) named after the rotary block's return slots, rather than
-    # collapsing back onto one ``position_embeddings`` tile that fans ports 0/1.
-    # Each slice feeds its own unsqueeze; neither reads hidden_states.
+    # The rope helper's ``@input:cos``/``@input:sin`` and the vision model's own
+    # ``@input:cos``/``@input:sin`` were same-name passthroughs of the pre-loop
+    # rotary producer's per-slot ``@output:cos``/``@output:sin``, so they collapse
+    # to a single tile each (owner directive: no same-name Output->Input crossing).
+    # The ``cos, sin = position_embeddings`` unpack distinctness survives as the
+    # producer's named output ports -- each block-attention unsqueeze reads its own
+    # slot directly, with no cross-alias and no re-merge onto ``position_embeddings``.
     frame_prefix = "@positional_l1615_apply_rotary_pos_emb_vision:@/@input:"
-    for slot in ("cos", "sin"):
-        assert any(
+    for slot in ("cos", "sin", "position_embeddings"):
+        assert not any(
             n["id"].endswith(frame_prefix + slot) for n in nodes
         ), frame_prefix + slot
-    assert not any(
-        n["id"].endswith(frame_prefix + "position_embeddings") for n in nodes
-    ), "cos/sin must not re-merge onto a position_embeddings tile"
+    for slot in ("cos", "sin"):
+        assert not any(n["id"] == f"visual/@input:{slot}" for n in nodes), slot
 
-    frame_cos_id = next(n["id"] for n in nodes if n["id"].endswith(frame_prefix + "cos"))
-    frame_sin_id = next(n["id"] for n in nodes if n["id"].endswith(frame_prefix + "sin"))
-
-    def _sole_slot_source(node_suffix: str) -> str:
-        node = next(n for n in nodes if n["id"].endswith(node_suffix))
-        assert not any(
-            "hidden_states" in e["sourceNodeId"] for e in node["incomingEdges"]
-        ), node["id"]
-        slot_edges = [
-            e
-            for e in node["incomingEdges"]
-            if e["sourceNodeId"] in {frame_cos_id, frame_sin_id}
-        ]
-        assert len(slot_edges) == 1, node["id"]
-        return slot_edges[0]["sourceNodeId"]
-
-    # cos -> the c15 unsqueeze, sin -> the c42 unsqueeze (per D1 ordinal wiring).
-    assert (
-        _sole_slot_source(
-            "@positional_l1615_apply_rotary_pos_emb_vision:@op_l1574_c15_unsqueeze:2"
-        )
-        == frame_cos_id
-    )
-    assert (
-        _sole_slot_source(
-            "@positional_l1615_apply_rotary_pos_emb_vision:@op_l1574_c42_unsqueeze:4"
-        )
-        == frame_sin_id
-    )
-
-    # Each frame slice traces back across the loop -- through its frame mirror to
-    # the vision model's own ``@input:<slot>`` tile, and on to the pre-loop rotary
-    # producer's distinct per-slot ``@output:<slot>`` (cos -> cos, sin -> sin; no
-    # cross-alias).
     def _sole_source(node_id: str) -> str:
         edges = node_by_id[node_id]["incomingEdges"]
         assert len(edges) == 1, (node_id, edges)
         return edges[0]["sourceNodeId"]
 
-    for slot, frame_id in (("cos", frame_cos_id), ("sin", frame_sin_id)):
-        frame_mirror = _sole_source(frame_id)
-        vision_input = _sole_source(frame_mirror)
-        assert vision_input == f"visual/@input:{slot}", (slot, vision_input)
-        output_mirror = _sole_source(vision_input)
-        producer = _sole_source(output_mirror)
+    def _unsqueeze_source(node_suffix: str) -> str:
+        node = next(n for n in nodes if n["id"].endswith(node_suffix))
+        assert not any(
+            "hidden_states" in e["sourceNodeId"] for e in node["incomingEdges"]
+        ), node["id"]
+        assert len(node["incomingEdges"]) == 1, node["id"]
+        return node["incomingEdges"][0]["sourceNodeId"]
+
+    # cos -> the c15 unsqueeze, sin -> the c42 unsqueeze (per D1 ordinal wiring),
+    # each reading its own slot's producer output (mirror), which traces to the
+    # pre-loop rotary producer's distinct ``@output:<slot>`` (cos -> cos, sin ->
+    # sin; no cross-alias).
+    for slot, suffix in (
+        (
+            "cos",
+            "@positional_l1615_apply_rotary_pos_emb_vision:@op_l1574_c15_unsqueeze:2",
+        ),
+        (
+            "sin",
+            "@positional_l1615_apply_rotary_pos_emb_vision:@op_l1574_c42_unsqueeze:4",
+        ),
+    ):
+        mirror = _unsqueeze_source(suffix)
+        assert mirror == f"visual/sidefeed:2:rotary_pos_emb/@output:{slot}^{slot}", (
+            slot,
+            mirror,
+        )
+        producer = _sole_source(mirror)
         assert producer == f"visual/sidefeed:2:rotary_pos_emb/@output:{slot}", (
             slot,
             producer,
         )
 
         # The crossing carries the vision producer's shape (Pv), not the text
-        # sequence axis, at every hop of the split boundary.
-        for boundary_id in (frame_id, frame_mirror, vision_input):
+        # sequence axis.
+        for boundary_id in (mirror, producer):
             shape = _output_shape(node_by_id[boundary_id])
             assert shape is not None and "Pv" in shape, (boundary_id, shape)
             assert "B, S" not in shape, (boundary_id, shape)
@@ -2498,11 +2533,13 @@ def test_glm53_vision_rotary_frame_has_module_like_boundaries():
     A traced free-function call used to skip boundary injection: its ops docked
     straight onto external producers, so the frame had no @input/@output tiles and
     did not read like a module. The owner rule is that a free-function call renders
-    exactly like any other module call -- so the frame now carries one @input tile
-    per forward argument it reads (``q``, ``k``, and the two ``position_embeddings``
-    tuple slots ``cos``/``sin``, which stay distinct tiles rather than collapsing
-    onto one) and one @output tile per tuple return slot. The boundary set here is
-    what makes the frame a first-class group.
+    exactly like any other module call -- so the frame carries an @input tile per
+    forward argument whose producer *renames* the tensor at the crossing (``q``,
+    ``k`` -- fed by q_norm/k_norm's ``result`` output) and one @output tile per
+    tuple return slot. The ``position_embeddings`` tuple slots ``cos``/``sin`` were
+    same-name passthroughs of the pre-loop rotary producer's ``@output:cos``/
+    ``@output:sin``, so they collapse away (owner: no same-name Output->Input
+    crossing); their distinctness survives on the producer's named output ports.
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -2524,9 +2561,10 @@ def test_glm53_vision_rotary_frame_has_module_like_boundaries():
             if f"/{kind}:" in n["id"] and "_mirror:" not in n["id"]
         }
 
-    # One @input tile per forward argument the helper reads; the position_embeddings
-    # tuple contributes its two distinct slots (cos, sin), not a merged tile.
-    assert _boundary_labels("@input") == {"q", "k", "cos", "sin"}
+    # One @input tile per forward argument whose producer renames the tensor at the
+    # crossing (q, k). The position_embeddings cos/sin slots were same-name
+    # passthroughs of the rotary producer and collapse away.
+    assert _boundary_labels("@input") == {"q", "k"}
     # One @output tile per tuple return slot (q_embed, k_embed) -- a group cannot
     # expose an output without an entry boundary, so the frame has both.
     assert len(_boundary_labels("@output")) == 2
@@ -2742,23 +2780,25 @@ def test_glm53_router_outputs_no_redundant_mirror_passthrough():
             and producer.get("namespace") == node.get("namespace")
         ), node["id"]
 
-    # The experts loop's topk_weights input now reads straight from the router's
-    # output mirror (no interposed @input_mirror), and the gather still consumes it.
-    loop_input = node_by_id[
-        "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/@input:topk_weights"
-    ]
-    sources = [e["sourceNodeId"] for e in loop_input["incomingEdges"]]
-    assert sources == [
+    # The experts loop's ``@input:topk_weights`` tile was itself a same-name
+    # passthrough of the router's ``@output:topk_weights`` mirror, so it collapses
+    # away too (owner: no same-name Output->Input): the gather now reads the
+    # router's output mirror directly.
+    router_mirror = (
         "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/"
         "sideproducer:1:gate:@op_l1/@output:topk_weights^topk_weights"
-    ], sources
-    assert _synth(node_by_id[sources[0]]) == "@output_mirror"
+    )
+    assert (
+        "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/@input:topk_weights"
+        not in node_by_id
+    )
+    assert _synth(node_by_id[router_mirror]) == "@output_mirror"
 
     gather = node_by_id[
         "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/"
         "sidefeed:1:experts:@op_l134_c70_gather:12"
     ]
-    assert loop_input["id"] in {e["sourceNodeId"] for e in gather["incomingEdges"]}
+    assert router_mirror in {e["sourceNodeId"] for e in gather["incomingEdges"]}
     # topk_indices wiring into the experts one-hot is untouched.
     one_hot = node_by_id[
         "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/"
@@ -3209,7 +3249,23 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     # the vision loop-carried boundary and its loop-invariant cos/sin inputs remain.
     vision_in = [n["id"] for n in nodes if "visual/@loop_carried_in:" in n["id"]]
     assert len(vision_in) == 1
-    assert "visual/@input:cos" in by_id and "visual/@input:sin" in by_id
+    # The loop-invariant cos/sin inputs are still wired into the loop body, but after
+    # the same-name boundary collapse they reach the block attention directly from the
+    # rotary producer's @output mirror -- the redundant visual/@input:cos/sin tiles
+    # (which merely renamed the same-named @output) folded away.
+    assert "visual/@input:cos" not in by_id and "visual/@input:sin" not in by_id
+    for slot in ("cos", "sin"):
+        mirror = f"visual/sidefeed:2:rotary_pos_emb/@output:{slot}^{slot}"
+        assert mirror in by_id, slot
+        readers = [
+            n["id"]
+            for n in nodes
+            if n["id"].startswith("visual/seq:")
+            and any(
+                e["sourceNodeId"] == mirror for e in n.get("incomingEdges", []) or []
+            )
+        ]
+        assert readers, slot
 
 
 def test_glm53_vision_attention_qkv_linear_is_restored():
@@ -3375,7 +3431,7 @@ def test_glm53_build_attention_mask_frame_is_not_opaque():
     kernel = next(
         n
         for n in nodes
-        if n.get("label") == "Attention"
+        if n.get("label") == "sdpa"
         and "11x_Glm5NextTextAttention" in n["id"]
         and n["id"].endswith(":@attention:0")
     )
@@ -3394,14 +3450,17 @@ def test_glm53_build_attention_mask_frame_is_not_opaque():
 
 
 def test_glm53_graph_integrity_checks_emit_no_warnings():
-    """I1 dead-node / I2 no-source / I3 constant-soundness are clean on both graphs.
+    """I1 dead-node / I2 no-source / I3 constant-soundness / I4 same-name passthrough
+    are clean on both graphs.
 
     The structural-integrity checks run on the FULL built graph and on the
     render-filtered graph (constants dropped). Dropping the constant closure can
     orphan a survivor that lost its only constant producer, so both views must be
     checked. Zero warnings means every node is consumed (I1), every non-boundary
-    non-constant node has a real source (I2), and no ``constant`` node hides a
-    floating-point activation (I3). A warning is a wiring/tagging fidelity bug.
+    non-constant node has a real source (I2), no ``constant`` node hides a
+    floating-point activation (I3), and no same-name ``@output`` feeds an ``@input``
+    boundary tile (I4 -- the same-name boundary collapse folded them all away). A
+    warning is a wiring/tagging fidelity bug.
     """
     pytest.importorskip("huggingface_hub")
     from TraceLens.Visualizer.model_explorer_export.type_check import (
@@ -3416,10 +3475,57 @@ def test_glm53_graph_integrity_checks_emit_no_warnings():
 
     built = integrity_check_graph_nodes(graph["nodes"], label="built")
     assert built == [], built
+    assert not any("I4" in w for w in built), built
 
     rendered = _graph_without_constants(graph)
     filtered = integrity_check_graph_nodes(rendered["nodes"], label="render-filtered")
     assert filtered == [], filtered
+    assert not any("I4" in w for w in filtered), filtered
+
+
+def test_glm53_attention_nodes_show_real_resolved_kernel():
+    """Every attention leaf shows its real resolved kernel, never the generic word.
+
+    ``Glm5NextTextAttention`` and ``Glm5NextVisionAttention`` both dispatch to
+    ``sdpa`` (the checkpoint leaves ``_attn_implementation`` unset), and
+    ``Glm5NextTextLinearAttention`` runs ``recurrent_kimi_delta_attention``. The
+    label must be the resolved kernel string, falling back to "Attention" only when
+    no kernel is statically knowable -- so no attention kernel node reads the bare
+    word "Attention".
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+
+    attn_kernels = [n for n in nodes if n["id"].endswith(":@attention:0")]
+    assert attn_kernels, "expected attention kernel leaves"
+    labels = {n.get("label") for n in attn_kernels}
+    # The real resolved kernels are present; the generic fallback is not.
+    assert "sdpa" in labels, sorted(labels)
+    assert "recurrent_kimi_delta_attention" in labels, sorted(labels)
+    assert "Attention" not in labels, sorted(labels)
+
+    # The sparse-block attention kernel's expanded key/value ports read a real op
+    # (``expand_kv``'s Copy), not an interposed same-name ``@output`` tile -- the
+    # same-name boundary collapse folded that tile away.
+    node_by_id = {n["id"]: n for n in nodes}
+    sparse_kernel = next(
+        n
+        for n in attn_kernels
+        if n.get("label") == "sdpa" and "11x_Glm5NextTextAttention" in n["id"]
+    )
+    for edge in sparse_kernel["incomingEdges"]:
+        source = node_by_id[edge["sourceNodeId"]]
+        port = source.get("label")
+        if port in ("key_states", "value_states"):
+            # The port tile itself is a kernel port; its own source is the real op,
+            # never an @output/@output_mirror boundary tile.
+            upstream = node_by_id[source["incomingEdges"][0]["sourceNodeId"]]
+            assert _attr_value(upstream, "synthetic") not in (
+                "@output",
+                "@output_mirror",
+            ), (port, upstream["id"])
 
 
 def test_glm53_attn_hc_constant_closure_is_well_formed():

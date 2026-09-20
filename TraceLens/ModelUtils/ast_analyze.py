@@ -6601,12 +6601,22 @@ def is_kernel_pipeline_step(
 
 
 def attention_kernel_label(details: list[str]) -> str:
+    """Label an attention leaf with its real resolved kernel (``sdpa``,
+    ``recurrent_kimi_delta_attention``, …), not the generic word "Attention".
+
+    ``_resolve_dispatched_attention_kernel`` rewrites the dispatch call
+    (``kernel: attention_interface``) into the concrete kernel it selected
+    (``kernel: sdpa``), so by the time we label we usually have the real name --
+    show it raw. Fall back to "Attention" only when no kernel resolves, or when
+    the recorded "kernel" is still an unresolved dispatch *variable* / synthetic
+    wrapper name rather than a kernel that actually runs.
+    """
     kernel = kernel_name_from_step_details(details)
-    if is_standard_attention_kernel(kernel):
+    if not kernel:
         return "Attention"
-    if kernel:
-        return kernel
-    return "Attention"
+    if kernel.lower() in (_ATTENTION_DISPATCH_NAMES | _SYNTHETIC_ATTENTION_NAMES):
+        return "Attention"
+    return kernel
 
 
 def attention_kernel_details(

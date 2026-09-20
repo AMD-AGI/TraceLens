@@ -176,6 +176,26 @@ def _is_loop_carried(node: dict[str, Any]) -> bool:
     return _node_attr_value(node, "synthetic") == "@loop_carried"
 
 
+# Boundary tiles a value flows out of / into at a namespace edge -- mirrors
+# ``merge._OUTPUT_BOUNDARY_SYNTHETIC`` / ``_INPUT_BOUNDARY_SYNTHETIC``.
+_OUTPUT_BOUNDARY_SYNTHETIC = frozenset({"@output", "@output_mirror"})
+_INPUT_BOUNDARY_SYNTHETIC = frozenset({"@input", "@input_mirror", "@kernel_port_in"})
+
+
+def _port_label(node: dict[str, Any]) -> str:
+    return _node_attr_value(node, "port_label") or str(node.get("label", ""))
+
+
+def _source_port_label(source: dict[str, Any], output_id: Any) -> str:
+    """The producer's *specific* output-port label (per port, not tile aggregate)."""
+    for port in source.get("outputsMetadata", []) or []:
+        if str(port.get("id")) == str(output_id):
+            for attr in port.get("attrs", []) or []:
+                if attr.get("key") == "port_label":
+                    return str(attr.get("value"))
+    return _port_label(source)
+
+
 def _has_incoming(node: dict[str, Any]) -> bool:
     return bool(node.get("incomingEdges"))
 
@@ -217,6 +237,14 @@ def integrity_check_graph_nodes(nodes: list[dict[str, Any]], *, label: str = "")
       walk), so it correctly spares weight-selection gathers whose only wired
       operand is an int64 routing index while still catching a float activation
       wrongly folded into the constant closure.
+    - **I4 same-name boundary passthrough** -- no input-family boundary tile
+      (``@input``/``@input_mirror``/``@kernel_port_in``) is fed solely by an
+      output-family boundary tile (``@output``/``@output_mirror``) carrying the
+      *identical* tensor name. Such a pair is one untransformed value rendered as
+      two tiles and should have been folded by
+      ``merge._collapse_same_name_boundary_passthroughs``; a survivor means that
+      pass failed to fire. Renamed crossings (different port labels) are legitimate
+      and never flagged.
     """
     consumed = {
         str(e.get("sourceNodeId"))
@@ -224,6 +252,7 @@ def integrity_check_graph_nodes(nodes: list[dict[str, Any]], *, label: str = "")
         for e in n.get("incomingEdges", []) or []
         if e.get("sourceNodeId") is not None
     }
+    by_id = {str(n.get("id")): n for n in nodes}
     warnings: list[str] = []
     tag = f" [{label}]" if label else ""
 
@@ -272,6 +301,28 @@ def integrity_check_graph_nodes(nodes: list[dict[str, Any]], *, label: str = "")
                     f"activation is being hidden at render -- fix the tagging upstream, "
                     f"not the render."
                 )
+
+        # I4 same-name boundary passthrough (should be folded away).
+        if _node_attr_value(node, "synthetic") in _INPUT_BOUNDARY_SYNTHETIC:
+            incoming = node.get("incomingEdges", []) or []
+            if len(incoming) == 1:
+                source = by_id.get(str(incoming[0].get("sourceNodeId")))
+                if (
+                    source is not None
+                    and _node_attr_value(source, "synthetic")
+                    in _OUTPUT_BOUNDARY_SYNTHETIC
+                ):
+                    name = _port_label(node)
+                    src_name = _source_port_label(
+                        source, incoming[0].get("sourceNodeOutputId", "0")
+                    )
+                    if name == src_name:
+                        warnings.append(
+                            f"I4 same-name-passthrough{tag}: {node_id} "
+                            f"[label={node.get('label')!r}] is fed solely by same-name "
+                            f"output boundary {source.get('id')!r}; collapse the "
+                            f"redundant tile in _collapse_same_name_boundary_passthroughs."
+                        )
 
     for line in warnings:
         _log.warning("graph integrity: %s", line)

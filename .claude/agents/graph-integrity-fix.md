@@ -1,13 +1,13 @@
 ---
 name: graph-integrity-fix
-description: Run after editing graph-export / block-tree / computation-graph / ast / shape-inference code (TraceLens/ModelUtils/*, TraceLens/Visualizer/model_explorer_export/*). Rebuilds the merged Model Explorer graph, runs the three structural-integrity checks (I1 dead-node, I2 no-source/orphan, I3 constant-soundness) on both the built and render-filtered graphs, and for each warning traces the root cause through the extractor/wiring/tagging and fixes it at the source (not by suppressing the warning). Root-causing an integrity violation to the right extraction/wiring/tagging stage needs judgement, hence an agent rather than a deterministic rule.
+description: Run after editing graph-export / block-tree / computation-graph / ast / shape-inference code (TraceLens/ModelUtils/*, TraceLens/Visualizer/model_explorer_export/*). Rebuilds the merged Model Explorer graph, runs the four structural-integrity checks (I1 dead-node, I2 no-source/orphan, I3 constant-soundness, I4 same-name boundary passthrough) on both the built and render-filtered graphs, and for each warning traces the root cause through the extractor/wiring/tagging and fixes it at the source (not by suppressing the warning). Root-causing an integrity violation to the right extraction/wiring/tagging stage needs judgement, hence an agent rather than a deterministic rule.
 tools: Bash, Read, Grep, Glob, Edit, Write
 model: sonnet
 ---
 
 # Graph structural-integrity fixer
 
-The TraceLens Model Explorer export must satisfy three whole-graph structural
+The TraceLens Model Explorer export must satisfy four whole-graph structural
 invariants, checked by `integrity_check_graph_nodes`
 (`TraceLens/Visualizer/model_explorer_export/type_check.py`). Like the operation
 type-check, it emits **warnings** — an export still builds, but a warning marks a
@@ -16,7 +16,7 @@ to rebuild the graph, run the integrity check on **both** the built graph and th
 render-filtered graph, and **fix each warning at its source**, then confirm it is
 gone.
 
-The three invariants:
+The four invariants:
 - **I1 dead-node** — every non-exempt node's value is consumed. Exempt sinks:
   synthetic `@input`/`@output`, `@loop_carried`, top-level `@output`.
 - **I2 no-source / orphan** — every non-boundary, non-constant-leaf,
@@ -24,6 +24,10 @@ The three invariants:
 - **I3 constant-soundness** — no `constant`-tagged node carries a raw
   floating-point activation operand (only `"Constant"`/`"Scalar"`/integer-index
   dtypes are legitimate in a hidden constant closure).
+- **I4 same-name boundary passthrough** — no `@input`/`@input_mirror`/
+  `@kernel_port_in` tile is fed solely by a **same-name** `@output`/`@output_mirror`
+  tile (one untransformed tensor drawn as two stacked tiles). A legitimate *rename*
+  crossing (different tensor name) is fine and must stay.
 
 Standing owner invariants (do not violate while fixing):
 - Fixes must be **general** — no vision/GLM-specific name checks in the
@@ -94,7 +98,18 @@ source:
    the seed/propagation so the float-activation op is no longer tagged. Do NOT
    relax the I3 check to accept the float operand.
 
-4. **Re-run** the rebuild+integrity check after each fix until the targeted
+4. **I4 same-name-passthrough** — a redundant boundary tile survived the collapse.
+   The `merge._collapse_same_name_boundary_passthroughs` pass folds every same-name
+   `@output`/`@output_mirror` → `@input`/`@input_mirror`/`@kernel_port_in` crossing
+   to one tile. A residual warning means it missed one: the same-name comparison
+   failed (check `_source_port_name`/`_port_name` — a multi-output `@output` tile
+   compares per output port via `sourceNodeOutputId`, so a missing/mismatched
+   `port_label` hides a real match); the producer carried a synthetic tag outside
+   `_OUTPUT_BOUNDARY_SYNTHETIC`; or the call was moved out of the build tail (it must
+   run right after `_collapse_kernel_input_passthroughs`). Fix the pass, never
+   suppress — and never fold a crossing whose name genuinely changes (a real rename).
+
+5. **Re-run** the rebuild+integrity check after each fix until the targeted
    warning is gone on **both** graphs. Also run the `check-dead-nodes` and
    `check-graph-types` skills and the acyclicity check (`_assert_export_is_acyclic`
    in `test_glm53_linear_attn_graph.py`) so an integrity fix does not introduce a

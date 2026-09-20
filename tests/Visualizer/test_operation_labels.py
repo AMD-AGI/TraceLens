@@ -267,10 +267,18 @@ def test_glm_attention_expand_kv_assembles_key_states_from_split_and_expand():
     # (The Split reaches its Copy through one of its named slice tiles.)
     assert any(consumes_split_slice(copy, split["id"]) for copy in copies)
     assert any(consumes(copy, expand["id"]) for copy in copies)
-    # The final Copy is what the module returns (reaches the block output).
+    # The final Copy assembles ``key_states`` and now feeds the attention kernel's
+    # key port directly: the redundant same-name ``expand_kv/@output:key_states``
+    # boundary tile was folded into the kernel port by the same-name collapse pass.
+    key_port = next(
+        node
+        for node in graph["nodes"]
+        if synthetic(node) == "@kernel_port_in" and consumes(node, copies[-1]["id"])
+    )
+    assert key_port["label"] == "key_states"
     assert any(
-        synthetic(node) == "@output" and consumes(node, copies[-1]["id"])
-        for node in nodes
+        ":@attention:" in node["id"] and consumes(node, key_port["id"])
+        for node in graph["nodes"]
     )
 
 
@@ -278,21 +286,40 @@ def test_glm_experts_expands_router_boundary_into_named_parameters():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec)
+
+    def synthetic(node):
+        return next(
+            (a["value"] for a in node.get("attrs", []) if a.get("key") == "synthetic"),
+            None,
+        )
+
     # The expert dispatch flattens into the MoE scope, so the router boundary is
-    # expanded into named parameters directly under ``Glm5NextTextMoE``.
-    expert_inputs = [
+    # expanded into the named parameters ``topk_indices``/``topk_weights`` rather
+    # than a single opaque "router" tile. After the same-name boundary collapse the
+    # experts loop's redundant same-name ``@input:topk_*`` tiles fold away, so those
+    # names now surface as the router's ``@output`` ports, still consumed in the MoE.
+    moe_boundaries = [
         node
         for node in graph["nodes"]
         if "Glm5NextTextMoE" in node.get("namespace", "")
-        and any(
-            attr.get("key") == "synthetic" and attr.get("value") == "@input"
-            for attr in node.get("attrs", [])
-        )
+        and synthetic(node) in ("@input", "@output", "@output_mirror")
     ]
-
-    labels = {node["label"] for node in expert_inputs}
+    labels = {node["label"] for node in moe_boundaries}
     assert "router" not in labels
     assert {"topk_indices", "topk_weights"} <= labels
+
+    # Each named router output is really consumed inside the MoE scope.
+    consumers: dict[str, list] = {}
+    for node in graph["nodes"]:
+        for edge in node.get("incomingEdges", []) or []:
+            consumers.setdefault(edge["sourceNodeId"], []).append(node)
+    for name in ("topk_indices", "topk_weights"):
+        producer = next(
+            node
+            for node in moe_boundaries
+            if node["label"] == name and synthetic(node) == "@output"
+        )
+        assert consumers.get(producer["id"]), name
 
 
 def test_merged_graph_uses_operator_labels_not_op_ids():
