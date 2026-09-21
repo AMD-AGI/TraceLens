@@ -28,6 +28,161 @@ _OP_PROBE_BATCH = 2
 _OP_PROBE_SEQ = 137
 
 
+# ── Robust meta-device instantiation ─────────────────────────────────────────
+
+# Bound on the config-attribute repair loop: a model whose modeling code demands
+# a fresh missing attribute on every access can't spin here forever.
+_MAX_CONFIG_ATTR_REPAIRS = 64
+_MISSING_ATTR_RE = re.compile(r"object has no attribute '([^']+)'")
+
+
+def _repair_missing_config_attr(config: Any, attr_name: str) -> bool:
+    """Give a neutral default to a config attribute the modeling code demands
+    but that the loaded config (and its sub-configs) do not define.
+
+    Generic — the attribute name is parsed out of the raised ``AttributeError``,
+    never hardcoded. If any sub-config already defines the attribute its real
+    value is reused (so a genuine vision/text setting is preserved); otherwise a
+    neutral ``1`` is used, a value that is safe wherever such an attribute is
+    read as a size / stride / patch factor and that cannot divide-by-zero. The
+    default is written on the top config and on every sub-config that lacks it,
+    because the failing access may be on either. Returns *True* if anything was
+    patched.
+    """
+    subconfigs = [v for v in vars(config).values() if hasattr(v, "to_dict")]
+    value: Any = 1
+    for candidate in [config, *subconfigs]:
+        if hasattr(candidate, attr_name):
+            value = getattr(candidate, attr_name)
+            break
+    patched = False
+    for target in [config, *subconfigs]:
+        if not hasattr(target, attr_name):
+            setattr(target, attr_name, value)
+            patched = True
+    return patched
+
+
+def _instantiate_meta_robust(checkpoint: str | Path) -> tuple[Any, Any] | None:
+    """Instantiate the model on the ``meta`` device, tolerating the two common
+    ways an otherwise-fine model kills the shape-inference backup.
+
+    The torch backend's :func:`_instantiate_meta` lets an ``AttributeError`` from
+    a config key the modeling code expects but that is absent (e.g. a VLM whose
+    ``temporal_patch_size`` lives in neither the top nor a sub-config), and any
+    ``ImportError`` from a missing *optional* dependency (e.g. ``einops``),
+    propagate — taking the whole backup down. This wrapper instead:
+
+    * retries instantiation, filling a neutral default for each missing config
+      attribute in turn (generically, by parsing the name out of the error —
+      no hardcoded key), and
+    * degrades to *None* (no raise) for a genuinely uninstantiable model, so the
+      caller simply falls back to whatever partial shape info it already has.
+
+    It reuses the importable :func:`_patch_config` / :func:`_resolve_auto_classes`
+    so the Auto-class selection stays identical to :func:`_instantiate_meta`.
+    Returns ``(model, config)`` or *None*.
+    """
+    try:
+        import torch
+        from transformers import AutoConfig
+
+        from TraceLens.ModelUtils.torch_trace import (
+            _instantiate_meta,
+            _patch_config,
+            _resolve_auto_classes,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.info("meta-instantiation prerequisites unavailable: %s", exc)
+        return None
+
+    # Happy path: delegate to the canonical instantiator, which handles the
+    # common case and whose Auto-class selection we want to match exactly. Only
+    # when it raises do we attempt the generic config-attribute repair below, so
+    # a model that already instantiates is completely untouched.
+    try:
+        return _instantiate_meta(checkpoint)
+    except Exception as first_exc:  # noqa: BLE001
+        _log.info(
+            "Standard meta instantiation of %s failed (%s); attempting robust repair",
+            checkpoint,
+            first_exc,
+        )
+
+    try:
+        config = AutoConfig.from_pretrained(str(checkpoint), trust_remote_code=True)
+        _patch_config(config)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("Could not load config for %s: %s", checkpoint, exc)
+        return None
+
+    auto_classes = _resolve_auto_classes(config)
+    repaired: set[str] = set()
+
+    for _attempt in range(_MAX_CONFIG_ATTR_REPAIRS + 1):
+        attr_err: Exception | None = None
+        other_err: Exception | None = None
+        for auto_cls in auto_classes:
+            try:
+                with torch.device("meta"):
+                    model = auto_cls.from_config(config, trust_remote_code=True)
+                model.eval()
+                return model, config
+            except AttributeError as exc:
+                # A missing config attribute — potentially repairable; keep
+                # trying the remaining auto classes first in case one avoids it.
+                attr_err = exc
+                continue
+            except (ValueError, KeyError) as exc:
+                other_err = exc
+                continue
+            except Exception as exc:  # noqa: BLE001
+                # Missing optional dependency or any other non-repairable
+                # failure: this model is genuinely uninstantiable here.
+                _log.warning(
+                    "Could not instantiate %s on meta device: %s", checkpoint, exc
+                )
+                return None
+
+        # No auto class succeeded this pass.
+        if attr_err is None:
+            _log.warning(
+                "Could not instantiate %s on meta device: %s",
+                checkpoint,
+                other_err,
+            )
+            return None
+        match = _MISSING_ATTR_RE.search(str(attr_err))
+        if match is None:
+            _log.warning(
+                "Could not instantiate %s on meta device: %s", checkpoint, attr_err
+            )
+            return None
+        attr_name = match.group(1)
+        if attr_name in repaired or not _repair_missing_config_attr(
+            config, attr_name
+        ):
+            _log.warning(
+                "Could not repair missing config attribute %r for %s: %s",
+                attr_name,
+                checkpoint,
+                attr_err,
+            )
+            return None
+        repaired.add(attr_name)
+        _log.info(
+            "Set a neutral default for missing config attribute %r on %s; retrying",
+            attr_name,
+            checkpoint,
+        )
+
+    _log.warning(
+        "Exhausted config-attribute repairs instantiating %s on meta device",
+        checkpoint,
+    )
+    return None
+
+
 @dataclass(frozen=True)
 class MetaModuleGroup:
     """A repeated ``nn.ModuleList`` read structurally off the instantiated tree.
@@ -80,13 +235,10 @@ def walk_meta_module_tree(checkpoint: str | Path) -> list[MetaModuleGroup] | Non
 
     # Instantiate our own clean model — no shared instance with the forward-based
     # tracers, so an in-place rotary patch there can never contaminate this walk.
-    try:
-        from TraceLens.ModelUtils.torch_trace import _instantiate_meta
-
-        model, _config = _instantiate_meta(checkpoint)
-    except Exception as exc:  # noqa: BLE001
-        _log.warning("Could not instantiate model on meta device: %s", exc)
+    result = _instantiate_meta_robust(checkpoint)
+    if result is None:
         return None
+    model, _config = result
 
     try:
         groups: list[MetaModuleGroup] = []
@@ -147,13 +299,10 @@ def harvest_meta_tensors(checkpoint: str | Path) -> MetaTensorIndex | None:
         )
         return None
 
-    try:
-        from TraceLens.ModelUtils.torch_trace import _instantiate_meta
-
-        model, _config = _instantiate_meta(checkpoint)
-    except Exception as exc:  # noqa: BLE001
-        _log.warning("Could not instantiate model on meta device: %s", exc)
+    result = _instantiate_meta_robust(checkpoint)
+    if result is None:
         return None
+    model, _config = result
 
     def _dtype_name(tensor: Any) -> str:
         return str(tensor.dtype).replace("torch.", "")
@@ -228,16 +377,16 @@ def trace_meta_shapes(
     # card (auto_map / architectures) to pick the right Auto class, so it also
     # handles conditional-generation / VLM configs that AutoModelForCausalLM
     # rejects (e.g. Glm5NextForConditionalGeneration).
+    result = _instantiate_meta_robust(checkpoint)
+    if result is None:
+        return None
+    model, _config = result
     try:
-        from TraceLens.ModelUtils.torch_trace import (
-            _instantiate_meta,
-            _patch_rotary_embeddings,
-        )
+        from TraceLens.ModelUtils.torch_trace import _patch_rotary_embeddings
 
-        model, _config = _instantiate_meta(checkpoint)
         _patch_rotary_embeddings(model)
     except Exception as exc:  # noqa: BLE001
-        _log.warning("Could not instantiate model on meta device: %s", exc)
+        _log.warning("Could not patch rotary embeddings on meta device: %s", exc)
         return None
 
     # ---- register hooks ----------------------------------------------------
@@ -332,16 +481,16 @@ def trace_meta_input_specs(
     except ImportError:
         return None
 
+    result = _instantiate_meta_robust(checkpoint)
+    if result is None:
+        return None
+    model, _config = result
     try:
-        from TraceLens.ModelUtils.torch_trace import (
-            _instantiate_meta,
-            _patch_rotary_embeddings,
-        )
+        from TraceLens.ModelUtils.torch_trace import _patch_rotary_embeddings
 
-        model, _config = _instantiate_meta(checkpoint)
         _patch_rotary_embeddings(model)
     except Exception as exc:  # noqa: BLE001
-        _log.warning("Could not instantiate model on meta device: %s", exc)
+        _log.warning("Could not patch rotary embeddings on meta device: %s", exc)
         return None
 
     import inspect
@@ -491,18 +640,20 @@ def trace_meta_op_shapes(
     except ImportError:
         return None
 
+    result = _instantiate_meta_robust(checkpoint)
+    if result is None:
+        return None
+    model, _config = result
     try:
         from TraceLens.ModelUtils.torch_trace import (
             _fx_trace_module,
-            _instantiate_meta,
             _patch_rotary_embeddings,
             _propagate_fx_node_shapes,
         )
 
-        model, _config = _instantiate_meta(checkpoint)
         _patch_rotary_embeddings(model)
     except Exception as exc:  # noqa: BLE001
-        _log.warning("Could not instantiate model on meta device: %s", exc)
+        _log.warning("Could not patch rotary embeddings on meta device: %s", exc)
         return None
 
     # ---- capture each module's real input shape ----------------------------

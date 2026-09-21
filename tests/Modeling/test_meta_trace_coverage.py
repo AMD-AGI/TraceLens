@@ -354,3 +354,153 @@ def test_walk_meta_module_tree_mixed_signatures(monkeypatch):
     assert layer_group.length == 8
     buckets = Counter(layer_group.signatures)
     assert sorted(buckets.values()) == [3, 5]
+
+
+# ---------------------------------------------------------------------------
+# Robust meta-instantiation: generic missing-config-attr repair + graceful
+# degradation for a genuinely uninstantiable model (missing optional dep).
+# ---------------------------------------------------------------------------
+
+
+def test_repair_missing_config_attr_copies_from_subconfig():
+    """A value already defined on a sub-config is reused, not overwritten with 1."""
+
+    class Cfg:
+        def to_dict(self):
+            return {}
+
+    top = Cfg()
+    sub = Cfg()
+    sub.temporal_patch_size = 2  # real value lives on the sub-config
+    top.vision_config = sub
+
+    assert mt._repair_missing_config_attr(top, "temporal_patch_size") is True
+    assert top.temporal_patch_size == 2  # copied from the sub-config
+
+
+def test_repair_missing_config_attr_neutral_default_on_top_and_subs():
+    """When no config defines the attr, a neutral 1 is set on every config."""
+
+    class Cfg:
+        def to_dict(self):
+            return {}
+
+    top = Cfg()
+    sub = Cfg()
+    top.vision_config = sub
+
+    assert mt._repair_missing_config_attr(top, "mystery_attr") is True
+    assert top.mystery_attr == 1
+    assert sub.mystery_attr == 1
+
+
+def test_repair_missing_config_attr_noop_when_already_present():
+    """Nothing to patch (and no subconfigs) -> returns False."""
+
+    class Cfg:
+        def to_dict(self):
+            return {}
+
+    top = Cfg()
+    top.foo = 5
+    assert mt._repair_missing_config_attr(top, "foo") is False
+
+
+def test_instantiate_meta_robust_happy_path_delegates(monkeypatch):
+    """When the canonical instantiator succeeds, its result is returned as-is."""
+    sentinel = (object(), object())
+    monkeypatch.setattr(tt, "_instantiate_meta", lambda _c: sentinel)
+    assert mt._instantiate_meta_robust("x") is sentinel
+
+
+class _FakeConfig:
+    def to_dict(self):
+        return {}
+
+
+def test_instantiate_meta_robust_repairs_missing_attr(monkeypatch):
+    """A missing config attr is filled in generically, then instantiation succeeds."""
+    import transformers
+
+    fake_cfg = _FakeConfig()
+
+    class FakeModel(nn.Module):
+        def eval(self):
+            return self
+
+    class FakeAuto:
+        @staticmethod
+        def from_config(config, trust_remote_code=False):
+            if not hasattr(config, "needed_attr"):
+                raise AttributeError(
+                    "'PreTrainedConfig' object has no attribute 'needed_attr'"
+                )
+            return FakeModel()
+
+    def _boom(_ckpt):
+        raise AttributeError(
+            "'PreTrainedConfig' object has no attribute 'needed_attr'"
+        )
+
+    monkeypatch.setattr(tt, "_instantiate_meta", _boom)
+    monkeypatch.setattr(tt, "_patch_config", lambda c: None)
+    monkeypatch.setattr(tt, "_resolve_auto_classes", lambda c: [FakeAuto])
+    monkeypatch.setattr(
+        transformers.AutoConfig, "from_pretrained", lambda *a, **k: fake_cfg
+    )
+
+    result = mt._instantiate_meta_robust("some/model")
+    assert result is not None
+    _model, cfg = result
+    assert cfg is fake_cfg
+    assert cfg.needed_attr == 1  # neutral default was applied
+
+
+def test_instantiate_meta_robust_degrades_on_missing_dependency(monkeypatch):
+    """A missing optional dependency (e.g. einops) degrades to None, no raise."""
+    import transformers
+
+    fake_cfg = _FakeConfig()
+
+    class FakeAuto:
+        @staticmethod
+        def from_config(config, trust_remote_code=False):
+            raise ImportError("This modeling file requires einops")
+
+    def _boom(_ckpt):
+        raise ImportError("This modeling file requires einops")
+
+    monkeypatch.setattr(tt, "_instantiate_meta", _boom)
+    monkeypatch.setattr(tt, "_patch_config", lambda c: None)
+    monkeypatch.setattr(tt, "_resolve_auto_classes", lambda c: [FakeAuto])
+    monkeypatch.setattr(
+        transformers.AutoConfig, "from_pretrained", lambda *a, **k: fake_cfg
+    )
+
+    assert mt._instantiate_meta_robust("some/model") is None
+
+
+def test_instantiate_meta_robust_gives_up_on_unrepairable_attr(monkeypatch):
+    """An attr that keeps raising even after a default is set -> bounded, None."""
+    import transformers
+
+    fake_cfg = _FakeConfig()
+
+    class FakeAuto:
+        @staticmethod
+        def from_config(config, trust_remote_code=False):
+            # Raises for the same attr regardless of whether it was set, so the
+            # repair can never satisfy it — the loop must give up, not spin.
+            raise AttributeError("'X' object has no attribute 'stubborn'")
+
+    def _boom(_ckpt):
+        raise AttributeError("'X' object has no attribute 'stubborn'")
+
+    monkeypatch.setattr(tt, "_instantiate_meta", _boom)
+    monkeypatch.setattr(tt, "_patch_config", lambda c: None)
+    monkeypatch.setattr(tt, "_resolve_auto_classes", lambda c: [FakeAuto])
+    monkeypatch.setattr(
+        transformers.AutoConfig, "from_pretrained", lambda *a, **k: fake_cfg
+    )
+
+    assert mt._instantiate_meta_robust("some/model") is None

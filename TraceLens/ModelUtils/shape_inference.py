@@ -739,45 +739,235 @@ def _resolve_op_int(value: Any, dims: dict[str, Any]) -> int | None:
         return resolved if isinstance(resolved, int) else None
 
 
-def _torch_op_split(torch, metas, details, dims):
-    dim = _int_dim(_detail_value(details, "dim") or "0") or 0
-    size = _resolve_op_int(_detail_value(details, "split_size"), dims)
-    if size is None or size <= 0:
+def _resolve_op_arg(raw: str, dims: dict[str, Any]) -> int | list[int] | None:
+    """Resolve a recorded call-argument string to a concrete int or list of ints.
+
+    Handles a single value (``4``, ``-1``, ``head_dim``) via
+    :func:`_resolve_op_int` (config-name lookup included) and a comma-separated
+    tuple/list (``(2, 4)``, ``(head_dim, 4)``) as a list of ints with at most one
+    unresolved ``-1`` placeholder. Anything else (a dtype, an einsum equation, a
+    raw-op name) does not resolve and returns ``None`` -- so a caller can simply
+    resolve *every* detail and keep only the ones that turn into real arguments,
+    with no hand-maintained detail-key allowlist.
+    """
+    if raw is None:
         return None
-    return torch.split(metas[0], size, dim=dim)[0]
-
-
-def _torch_op_chunk(torch, metas, details, dims):
-    dim = _int_dim(_detail_value(details, "dim") or "0") or 0
-    n = _resolve_op_int(
-        _detail_value(details, "split_size") or _detail_value(details, "chunks"), dims
-    )
-    if n is None or n <= 0:
+    value = _resolve_op_int(raw, dims)
+    if value is not None:
+        return value
+    inner = raw.strip().strip("()[]")
+    if "," not in inner:
         return None
-    return torch.chunk(metas[0], n, dim=dim)[0]
-
-
-def _torch_op_unbind(torch, metas, details, dims):
-    dim = _int_dim(_detail_value(details, "dim") or "0") or 0
-    pieces = torch.unbind(metas[0], dim=dim)
-    return pieces[0] if pieces else None
-
-
-def _torch_op_unflatten(torch, metas, details, dims):
-    dim = _int_dim(_detail_value(details, "dim") or "0") or 0
-    sizes_text = _detail_value(details, "sizes") or _detail_value(details, "shape")
-    if not sizes_text:
+    parts = [part.strip() for part in inner.split(",") if part.strip()]
+    if not parts:
         return None
-    sizes: list[int] = []
-    for part in sizes_text.strip().strip("()[]").split(","):
-        part = part.strip()
-        if not part:
+    resolved: list[int] = []
+    for part in parts:
+        item = _resolve_op_int(part, dims)
+        resolved.append(item if item is not None else -1)
+    if resolved.count(-1) > 1:
+        return None
+    return resolved
+
+
+def _op_scalar_detail_args(
+    details: Sequence[str], dims: dict[str, Any]
+) -> list[tuple[str, int | list[int]]]:
+    """Ordered ``(name, value)`` scalar arguments recovered from a node's call
+    details. Each detail line ``key: value`` is resolved with
+    :func:`_resolve_op_arg`; only the lines that resolve to an int / list of ints
+    survive, so descriptive details (``raw_op:``, ``dtype:``, ``mutates:`` …) drop
+    out naturally without a curated key set."""
+    args: list[tuple[str, int | list[int]]] = []
+    for item in details:
+        text = str(item).strip()
+        if ":" not in text:
             continue
-        resolved = _resolve_op_int(part, dims)
-        sizes.append(resolved if resolved is not None else -1)
-    if not sizes or sizes.count(-1) > 1:
+        key, _, raw = text.partition(":")
+        value = _resolve_op_arg(raw.strip(), dims)
+        if value is not None:
+            args.append((key.strip(), value))
+    return args
+
+
+def _resolve_meta_op_callable(torch: Any, name: str) -> Any:
+    """Resolve an op name to a real torch callable, or ``None``.
+
+    Pure attribute lookup across the ``torch`` / ``torch.Tensor`` /
+    ``torch.nn.functional`` namespaces and the aten operator registry -- no
+    per-op allowlist. The name is the one the model itself calls (the ``raw_op``
+    recovered from its forward source, or the op's display label as a fallback),
+    so ``div``/``cumsum``/``split``/``unbind``/... all resolve to the callable
+    whose meta execution gives the ground-truth output shape.
+    """
+    name = str(name or "").strip()
+    if not name:
         return None
-    return torch.unflatten(metas[0], dim, sizes)
+    functional = getattr(getattr(torch, "nn", None), "functional", None)
+    for owner in (torch, torch.Tensor, functional):
+        if owner is None:
+            continue
+        candidate = getattr(owner, name, None)
+        if callable(candidate):
+            return candidate
+    try:
+        packet = getattr(torch.ops.aten, name, None)
+    except Exception:  # noqa: BLE001
+        packet = None
+    if packet is not None and callable(packet):
+        return packet
+    return None
+
+
+def _op_positional_params(
+    torch: Any, fn: Any, name: str
+) -> tuple[list[tuple[str, bool]], bool] | None:
+    """Ordered positional parameters ``(name, has_default)`` of an op, plus a
+    ``has_var_positional`` flag.
+
+    Read from ``inspect.signature`` when available (pure-Python ops such as
+    ``torch.split``); for C-builtins with no introspectable signature
+    (``chunk``/``unbind``/``unflatten``/...) fall back to the op's aten operator
+    schema, which lists ordered argument names and defaults. Returns ``None`` when
+    neither source can describe the op -- the caller then only tries a bare call.
+    This is not an op allowlist: it reads whatever real parameters the resolved
+    callable declares.
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        sig = None
+    if sig is not None:
+        params = [
+            (param.name, param.default is not inspect.Parameter.empty)
+            for param in sig.parameters.values()
+            if param.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        has_var = any(
+            param.kind == inspect.Parameter.VAR_POSITIONAL
+            for param in sig.parameters.values()
+        )
+        if params:
+            return params, has_var
+    try:
+        schemas = torch._C._jit_get_schemas_for_operator(f"aten::{name}")
+    except Exception:  # noqa: BLE001
+        schemas = None
+    if schemas:
+        schema = schemas[0]
+        params = []
+        for arg in getattr(schema, "arguments", []):
+            if getattr(arg, "kwarg_only", False):
+                continue
+            try:
+                has_default = arg.has_default_value()
+            except Exception:  # noqa: BLE001
+                has_default = getattr(arg, "default_value", None) is not None
+            params.append((str(arg.name), bool(has_default)))
+        if params:
+            return params, False
+    return None
+
+
+def _bind_meta_op_args(
+    params: list[tuple[str, bool]],
+    has_var_positional: bool,
+    metas: list[Any],
+    scalar_args: list[tuple[str, int | list[int]]],
+) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
+    """Bind meta tensors + recovered scalar args to an op's positional parameters.
+
+    Tensor operands fill the leading positional parameters in order (torch ops put
+    their tensor operands first); every remaining positional parameter is a scalar
+    slot filled in two passes -- by name first (exact or prefix match, so
+    ``split_size`` binds ``split_size_or_sections``), then positionally from the
+    still-unused scalar values in source order (so a ``chunks`` parameter still
+    receives the recorded count even though the detail key was ``split_size``).
+    Name matching runs globally before positional fallback, so a value that names
+    a later parameter is never stolen by an earlier unnamed one. Returns ``None``
+    when a required parameter cannot be bound -- the caller then falls back to a
+    bare positional call.
+    """
+
+    def _name_matches(param: str, key: str) -> bool:
+        param = param.strip().lower()
+        key = key.strip().lower()
+        return bool(key) and (
+            param == key or param.startswith(key) or key.startswith(param)
+        )
+
+    num_tensor = min(len(metas), len(params))
+    bound: list[Any] = list(metas[:num_tensor])
+    scalar_slots = params[num_tensor:]
+    used = [False] * len(scalar_args)
+    values: list[Any] = [None] * len(scalar_slots)
+    # Pass 1: name match.
+    for slot_index, (pname, _default) in enumerate(scalar_slots):
+        for index, (key, val) in enumerate(scalar_args):
+            if not used[index] and _name_matches(pname, key):
+                values[slot_index], used[index] = val, True
+                break
+    # Pass 2: positional fill for still-unbound scalar slots.
+    for slot_index in range(len(scalar_slots)):
+        if values[slot_index] is not None:
+            continue
+        for index, (_key, val) in enumerate(scalar_args):
+            if not used[index]:
+                values[slot_index], used[index] = val, True
+                break
+    for slot_index, (_pname, has_default) in enumerate(scalar_slots):
+        if values[slot_index] is None:
+            if has_default:
+                # Leave this and every later positional slot to their defaults.
+                break
+            return None
+        bound.append(values[slot_index])
+    leftover = metas[num_tensor:]
+    if leftover:
+        if not has_var_positional:
+            return None
+        bound.extend(leftover)
+    return tuple(bound), {}
+
+
+def _run_meta_op(
+    torch: Any,
+    fn: Any,
+    name: str,
+    metas: list[Any],
+    scalar_args: list[tuple[str, int | list[int]]],
+) -> Any:
+    """Execute ``fn`` on the meta device and return its output, or ``None``.
+
+    Tries a parameter-bound call first (meta tensors + recovered scalar args,
+    from the op's real signature or aten schema), then a bare positional call for
+    element-wise ops that take only their operands. Any failure (data-dependent
+    op, custom kernel, unbindable arg) returns ``None`` so the caller passes
+    through -- meta execution never fabricates a shape it could not really
+    produce.
+    """
+    strategies: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    params = _op_positional_params(torch, fn, name)
+    if params is not None:
+        bound = _bind_meta_op_args(params[0], params[1], metas, scalar_args)
+        if bound is not None:
+            strategies.append(bound)
+    strategies.append((tuple(metas), {}))
+    for args, kwargs in strategies:
+        try:
+            with torch.device("meta"):
+                out = fn(*args, **kwargs)
+        except Exception:  # noqa: BLE001
+            continue
+        if out is not None and _first_tensor_shape(out) is not None:
+            return out
+    return None
 
 
 def _normalize_op_name(name: Any) -> str:
@@ -792,16 +982,6 @@ _LAST_OP_ID_RE = re.compile(
     r"^(?P<prefix>.*):@op_l(?P<line>\d+)_c(?P<col>\d+)_(?P<name>[a-z0-9_]+?)"
     r"(?::(?P<idx>\d+))?$"
 )
-
-
-# Non-parametric shape-transforming ops where torch execution gives the ground
-# truth the symbolic arithmetic often can't resolve. Keyed by normalized label.
-_TORCH_OP_BUILDERS = {
-    "split": _torch_op_split,
-    "chunk": _torch_op_chunk,
-    "unbind": _torch_op_unbind,
-    "unflatten": _torch_op_unflatten,
-}
 
 
 class ShapeInferencer:
@@ -2505,6 +2685,9 @@ class ShapeInferencer:
             fx_spec = self._fx_op_shape(node, inputs)
             if fx_spec is not None:
                 return fx_spec
+            torch_op_spec = self._torch_op_shape(node, inputs)
+            if torch_op_spec is not None:
+                return torch_op_spec
             _log.warning(
                 "No shape inference rule for %s (label=%r, class=%r); "
                 "passing through input shape",
@@ -2603,18 +2786,40 @@ class ShapeInferencer:
             shape, batch_size=_TORCH_PROBE_BATCH, seq_len=_TORCH_PROBE_SEQ
         )
 
+    def _op_callable_candidates(self, node: ModelGraphNode) -> list[str]:
+        """Op names to try resolving to a real callable, most-authoritative first.
+
+        The ``raw_op`` recorded from the model's own forward source is preferred
+        (``div``/``cumsum``/``split``/...); the op's display label is a weak
+        fallback for nodes that carry no ``raw_op``. Neither is a curated op set
+        -- both are names the model itself produced, resolved by attribute lookup.
+        """
+        details = [str(item) for item in node.metadata.get("details", [])]
+        candidates: list[str] = []
+        raw = _detail_value(details, "raw_op")
+        if raw:
+            candidates.append(raw)
+        label = self._torch_op_label(node)
+        if label and label not in candidates:
+            candidates.append(label)
+        return candidates
+
     def _torch_op_shape(
         self, node: ModelGraphNode, inputs: list[TensorSpec]
     ) -> TensorSpec | None:
-        """Run a shape-changing op on the meta device to get its true output
-        shape, when the symbolic arithmetic can't resolve it (e.g. a split
-        whose size is a config-derived name). Best-effort: returns None on any
-        gap (unmapped dim, unknown op, execution error) so the caller falls
-        back to symbolic inference."""
+        """Run the op on the meta device to read its true output shape, when the
+        symbolic arithmetic can't resolve it (e.g. a split whose size is a
+        config-derived name, or an op with no symbolic rule at all).
+
+        Generic: the op's real callable is resolved by attribute lookup from the
+        name the model itself calls (``raw_op`` / display label) across the torch
+        namespaces + aten registry -- there is no per-op builder allowlist. The
+        callable is invoked on meta tensors built from the operand shapes/dtypes,
+        with scalar arguments recovered from the recorded call details. Best-effort:
+        returns None on any gap (unmapped dim, unresolvable callable, data-dependent
+        or custom op that can't run on meta) so the caller passes through, never
+        fabricating a shape a real meta execution wouldn't produce."""
         if not inputs:
-            return None
-        builder = _TORCH_OP_BUILDERS.get(self._torch_op_label(node))
-        if builder is None:
             return None
         try:
             import torch
@@ -2634,17 +2839,19 @@ class ShapeInferencer:
             except Exception:  # noqa: BLE001
                 return None
         details = [str(item) for item in node.metadata.get("details", [])]
-        try:
-            with torch.device("meta"):
-                out = builder(torch, metas, details, self.context.dims)
-        except Exception:  # noqa: BLE001
-            return None
-        if out is None:
-            return None
-        shape = _first_tensor_shape(out)
-        if shape is None:
-            return None
-        return TensorSpec(self._symbolise_concrete(shape), inputs[0].dtype)
+        scalar_args = _op_scalar_detail_args(details, self.context.dims)
+        for name in self._op_callable_candidates(node):
+            fn = _resolve_meta_op_callable(torch, name)
+            if fn is None:
+                continue
+            out = _run_meta_op(torch, fn, name, metas, scalar_args)
+            if out is None:
+                continue
+            shape = _first_tensor_shape(out)
+            if shape is None:
+                continue
+            return TensorSpec(self._symbolise_concrete(shape), inputs[0].dtype)
+        return None
 
     # ------------------------------------------------------------------
     # Per-op FX fallback (ground truth for ops with no symbolic rule)

@@ -77,10 +77,11 @@ from TraceLens.ModelUtils.shape_inference import (
     _resolve_view_shape,
     _symbolic_binop,
     _torch_dtype,
-    _torch_op_chunk,
-    _torch_op_split,
-    _torch_op_unbind,
-    _torch_op_unflatten,
+    _bind_meta_op_args,
+    _op_scalar_detail_args,
+    _resolve_meta_op_callable,
+    _resolve_op_arg,
+    _run_meta_op,
 )
 
 
@@ -268,44 +269,100 @@ def _meta(shape, dtype="float16"):
     return torch.zeros(shape, dtype=torch.float16, device="meta")
 
 
-def test_torch_op_split_builder():
+def test_resolve_meta_op_callable_generic_no_allowlist():
+    import torch
+
+    # Function, Tensor method, and functional names all resolve by attribute
+    # lookup -- no per-op builder dict.
+    assert _resolve_meta_op_callable(torch, "split") is not None
+    assert _resolve_meta_op_callable(torch, "unbind") is not None
+    assert _resolve_meta_op_callable(torch, "cumsum") is not None
+    assert _resolve_meta_op_callable(torch, "div") is not None
+    # A non-op name resolves to nothing.
+    assert _resolve_meta_op_callable(torch, "NotAnOp") is None
+    assert _resolve_meta_op_callable(torch, "") is None
+
+
+def test_resolve_op_arg_int_list_and_non_arg():
+    dims = {"head_dim": 4}
+    assert _resolve_op_arg("4", dims) == 4
+    assert _resolve_op_arg("-1", dims) == -1
+    assert _resolve_op_arg("head_dim", dims) == 4
+    assert _resolve_op_arg("(2, 4)", dims) == [2, 4]
+    assert _resolve_op_arg("(head_dim, 4,)", dims) == [4, 4]
+    # One unresolved entry becomes a single -1 placeholder; two -> None.
+    assert _resolve_op_arg("(nope, 4)", dims) == [-1, 4]
+    assert _resolve_op_arg("(nope, alsono)", dims) is None
+    # Descriptive (non-argument) details resolve to nothing and drop out.
+    assert _resolve_op_arg("torch.float32", dims) is None
+    assert _resolve_op_arg("div", dims) is None
+
+
+def test_op_scalar_detail_args_keeps_only_resolvable():
+    args = _op_scalar_detail_args(
+        ["raw_op: div", "dim: 2", "split_size: 4", "dtype: torch.float32"], {}
+    )
+    assert args == [("dim", 2), ("split_size", 4)]
+
+
+def test_run_meta_op_generic_split_chunk_unbind_unflatten():
     import torch
 
     t = _meta((2, 137, 8))
-    out = _torch_op_split(torch, [t], ["split_size: 4", "dim: 2"], {})
-    assert tuple(out.shape) == (2, 137, 4)
-    # Missing / non-positive size returns None.
-    assert _torch_op_split(torch, [t], ["dim: 2"], {}) is None
+    # split via real detail keys (pure-Python op, inspect signature).
+    out = _run_meta_op(
+        torch, torch.split, "split", [t],
+        _op_scalar_detail_args(["split_size: 4", "dim: 2"], {}),
+    )
+    assert _first_tensor_shape(out) == (2, 137, 4)
+    # chunk: a C-builtin with no inspect signature, described via its aten schema;
+    # the recorded count uses the ``split_size`` key yet still binds to the
+    # ``chunks`` parameter positionally (name mismatch handled generically).
+    out = _run_meta_op(
+        torch, torch.chunk, "chunk", [t],
+        _op_scalar_detail_args(["split_size: 2", "dim: 2"], {}),
+    )
+    assert _first_tensor_shape(out) == (2, 137, 4)
+    # unbind returns a tuple; first element's shape is read.
+    out = _run_meta_op(
+        torch, torch.unbind, "unbind", [_meta((2, 137))],
+        _op_scalar_detail_args(["dim: 0"], {}),
+    )
+    assert _first_tensor_shape(out) == (137,)
+    # unflatten with a sizes list, including an unresolved -1 placeholder.
+    out = _run_meta_op(
+        torch, torch.unflatten, "unflatten", [t],
+        _op_scalar_detail_args(["dim: 2", "sizes: (unknownname, 4)"], {}),
+    )
+    assert _first_tensor_shape(out) == (2, 137, 2, 4)
 
 
-def test_torch_op_chunk_builder():
+def test_run_meta_op_pointwise_broadcasts_without_scalar_args():
+    import torch
+
+    # A pointwise op with two operands and no scalar args runs bare and broadcasts.
+    out = _run_meta_op(torch, torch.div, "div", [_meta((2, 137, 8)), _meta((8,))], [])
+    assert _first_tensor_shape(out) == (2, 137, 8)
+
+
+def test_run_meta_op_returns_none_on_unbindable_or_failing_op():
     import torch
 
     t = _meta((2, 137, 8))
-    out = _torch_op_chunk(torch, [t], ["chunks: 2", "dim: 2"], {})
-    assert tuple(out.shape) == (2, 137, 4)
-    assert _torch_op_chunk(torch, [t], ["dim: 2"], {}) is None
-
-
-def test_torch_op_unbind_builder():
-    import torch
-
-    t = _meta((2, 137))
-    out = _torch_op_unbind(torch, [t], ["dim: 0"], {})
-    assert tuple(out.shape) == (137,)
-
-
-def test_torch_op_unflatten_builder():
-    import torch
-
-    t = _meta((2, 137, 8))
-    out = _torch_op_unflatten(torch, [t], ["dim: 2", "sizes: (2, 4)"], {})
-    assert tuple(out.shape) == (2, 137, 2, 4)
-    # No sizes -> None.
-    assert _torch_op_unflatten(torch, [t], ["dim: 2"], {}) is None
-    # More than one -1 -> None.
+    # A required size arg missing -> can't bind, bare call also fails -> None.
     assert (
-        _torch_op_unflatten(torch, [t], ["dim: 2", "sizes: (-1, -1)"], {}) is None
+        _run_meta_op(
+            torch, torch.split, "split", [t], _op_scalar_detail_args(["dim: 2"], {})
+        )
+        is None
+    )
+    # sizes that don't divide the axis -> torch.unflatten raises -> None.
+    assert (
+        _run_meta_op(
+            torch, torch.unflatten, "unflatten", [t],
+            _op_scalar_detail_args(["dim: 2", "sizes: (3, 3)"], {}),
+        )
+        is None
     )
 
 
@@ -1626,12 +1683,24 @@ def test_registry_records_conv_locals_and_ambiguous_parameters():
 # ---------------------------------------------------------------------------
 
 
-def test_torch_op_unflatten_with_unresolved_dim_uses_negative_one():
-    import torch
+def test_bind_meta_op_args_positional_fallback_for_unnamed_scalar():
+    # ``chunks`` never name-matches the recorded ``split_size`` key, so it must be
+    # bound positionally from the sole remaining scalar value, while ``dim`` binds
+    # by name -- name matching runs globally before positional fallback.
+    params = [("input", False), ("chunks", False), ("dim", True)]
+    args, kwargs = _bind_meta_op_args(
+        params, False, [_meta((2, 137, 8))], [("split_size", 2), ("dim", 5)]
+    )
+    assert args[1] == 2 and args[2] == 5 and kwargs == {}
 
-    t = _meta((2, 137, 8))
-    out = _torch_op_unflatten(torch, [t], ["dim: 2", "sizes: (unknownname, 4)"], {})
-    assert tuple(out.shape) == (2, 137, 2, 4)
+
+def test_bind_meta_op_args_returns_none_when_required_scalar_absent():
+    # ``split_size_or_sections`` is required but only ``dim`` was recorded; its
+    # value must not be stolen for the size slot -> unbindable -> None.
+    params = [("tensor", False), ("split_size_or_sections", False), ("dim", True)]
+    assert (
+        _bind_meta_op_args(params, False, [_meta((2, 137, 8))], [("dim", 2)]) is None
+    )
 
 
 def test_resolve_view_shape_starred_with_slice_and_unresolved():
@@ -1681,8 +1750,12 @@ def test_unflatten_skips_empty_size_entries():
     import torch
 
     t = _meta((2, 137, 8))
-    out = _torch_op_unflatten(torch, [t], ["dim: 2", "sizes: (2, 4,)"], {})
-    assert tuple(out.shape) == (2, 137, 2, 4)
+    # A trailing comma in the recorded sizes list is tolerated.
+    out = _run_meta_op(
+        torch, torch.unflatten, "unflatten", [t],
+        _op_scalar_detail_args(["dim: 2", "sizes: (2, 4,)"], {}),
+    )
+    assert _first_tensor_shape(out) == (2, 137, 2, 4)
 
 
 def test_external_spec_uses_registered_parameter():
