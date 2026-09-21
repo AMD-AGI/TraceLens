@@ -312,11 +312,13 @@ def update_subtree_uids_and_timestamps(
     # Update timestamps
     original_start_ts = subtree_events[0]["ts"]
     ts_offset = new_start_ts - original_start_ts
+    TimeEnd = TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd
     # UID remapping handled when rebuilding the merged capture subtree.
     for event in subtree_events:
         event["ts"] += ts_offset
         event["ts"] = new_start_ts
         event["dur"] = g_root_dur
+        event[TimeEnd] = new_start_ts + g_root_dur
     for i in capture_tree.cpu_root_nodes:
         if i in uid_mapping:
             cpu_root_nodes.append(uid_mapping[i])
@@ -522,6 +524,7 @@ def find_capture_roots(capture_tree):
             "name": "CaptureRoot",
             "ts": ts,
             "dur": te - ts,
+            TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd: te,
             "cat": "cuda_runtime",
             "children": [e[UID] for e in root_events],
             "args": {},

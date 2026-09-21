@@ -114,6 +114,11 @@ class BaseTraceToTree(ABC):
         def event_filter(event):
             cat = self.event_to_category(event)
             event["cat"] = cat
+            # Events without t_end (e.g. instant events, or events injected
+            # by the capture-merge pipeline without end-time computation)
+            # cannot participate in the stack-based tree algorithm.
+            if TraceEventUtils.TraceKeys.TimeEnd not in event:
+                return False
             is_cpu_or_cuda_event = cat in {"cpu_op", "cuda_runtime", "cuda_driver"}
             is_python_event = cat == "python_function"
             return is_cpu_or_cuda_event or (add_python_func and is_python_event)
