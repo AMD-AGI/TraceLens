@@ -262,13 +262,18 @@ def test_patch_rotary_embeddings_children_fallback():
         # apply_rotary_pos_emb replaced with the shape-preserving lambda
         t = torch.zeros(2, 3)
         assert fake_mod.apply_rotary_pos_emb(t) is t
-        # the rotary submodule's forward was replaced with a meta producer
-        out = parent.child.forward(4096)
-        assert out.device.type == "meta"
-        assert out.shape == (4096, 4, 2)
-        # non-int arg -> default max_seq path
-        out2 = parent.child.forward(torch.zeros(1))
-        assert out2.shape == (4096, 4, 2)
+        # the rotary submodule's forward was replaced with a meta producer that
+        # returns the HF ``(cos, sin)`` pair (so callers unpacking two values --
+        # ``cos, sin = self.rotary_emb(...)`` -- survive the meta forward).
+        cos, sin = parent.child.forward(4096)
+        assert cos.device.type == "meta" and sin.device.type == "meta"
+        # no 2-D position_ids tensor -> default (batch=1, seq=128), dim=self.dim
+        assert cos.shape == (1, 128, 8)
+        assert sin.shape == (1, 128, 8)
+        # a real 2-D position_ids picks up its batch/seq
+        cos2, sin2 = parent.child.forward(torch.zeros(3, 5, dtype=torch.long))
+        assert cos2.shape == (3, 5, 8)
+        assert sin2.shape == (3, 5, 8)
     finally:
         sys.modules.pop("fake_rotary_child_mod", None)
 

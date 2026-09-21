@@ -276,6 +276,16 @@ def test_symbolise_meta_shape():
     assert mt.symbolise_meta_shape((7, 9), batch_size=1, seq_len=128) == (7, 9)
 
 
+def test_symbolise_meta_shape_batch2_keeps_size_one():
+    """A genuine size-1 dim (an ``unsqueeze(1)`` head axis) must stay literal 1,
+    not alias onto ``B`` -- the reason ``load_meta_shapes`` traces with
+    ``batch_size=2``. With ``batch_size=1`` a compressor output ``(1, 1, 32, 512)``
+    would print as a nonsensical ``[B, B, 32, 512]``; with ``batch_size=2`` only
+    the true batch dim maps to ``B`` and the singleton axis survives."""
+    out = mt.symbolise_meta_shape((2, 1, 32, 512), batch_size=2, seq_len=128)
+    assert out == ("B", 1, 32, 512)
+
+
 # ---------------------------------------------------------------------------
 # walk_meta_module_tree (forward-free structural ModuleList walk)
 # ---------------------------------------------------------------------------

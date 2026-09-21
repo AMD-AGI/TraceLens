@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from collections import Counter
 from collections.abc import Sequence
 from typing import Any, TYPE_CHECKING
 
@@ -1444,9 +1445,16 @@ class ShapeInferencer:
         checkpoint: str | Path,
         *,
         seq_len: int = 128,
-        batch_size: int = 1,
+        batch_size: int = 2,
     ) -> bool:
         """Run a meta-device forward pass and store per-module shapes.
+
+        ``batch_size`` is 2, not 1, so :func:`symbolise_meta_shape` does not alias
+        a genuine size-1 dim (an ``unsqueeze(1)`` head axis) onto ``B`` -- with
+        ``batch_size == 1`` every singleton dim would print as ``B`` (a compressor
+        output ``(1, 1, 32, 512)`` becoming a nonsensical ``[B, B, 32, 512]``).
+        This mirrors the collision-free trace dims :func:`trace_meta_input_specs`
+        already uses.
 
         Returns *True* when shapes were successfully captured.
         """
@@ -2720,6 +2728,15 @@ class ShapeInferencer:
         if "attention" in node_name:
             return self._activation_spec(dtype)
 
+        # A custom submodule whose forward no symbolic rule or AST simulation
+        # resolved (``compressor`` -- data-dependent windowing, tuple return):
+        # take its real output shape from the meta-traced module instead of
+        # passing the input shape through (which drops the rank/last-dim change).
+        if node.operation == OperationKind.NN_MODULE:
+            meta_module_spec = self._lookup_meta_module_shape(node)
+            if meta_module_spec is not None:
+                return meta_module_spec
+
         # Genuinely unknown op (no symbolic rule): get a ground-truth shape from
         # the per-module FX pass, or by running the op on the meta device,
         # before falling back to passing through / (B, S, H).
@@ -2944,6 +2961,42 @@ class ShapeInferencer:
         for part in node.id.split(":"):
             if part in self._meta_shapes:
                 return self._meta_shapes[part]
+        return None
+
+    def _lookup_meta_module_shape(
+        self, node: ModelGraphNode
+    ) -> TensorSpec | None:
+        """Last-resort shape for a submodule whose ``forward`` no symbolic rule or
+        AST simulation could resolve, taken from the real module's meta-traced
+        output.
+
+        The merged graph collapses every repeated layer onto one representative
+        node, so its id carries only the leaf attribute (``compressor``) with no
+        layer index -- while ``_meta_shapes`` is keyed by full
+        ``named_modules()`` paths (``model.layers.2.self_attn.compressor``). Match
+        every meta path whose trailing attribute segments equal the node's own
+        attribute chain, and (repeated layers differ only in data-dependent dims
+        like a window count) return the single shape they agree on, or the modal
+        one. Purely structural: keyed on the node's attribute name against real
+        module paths, no per-model logic.
+        """
+        if not self._meta_shapes:
+            return None
+        attr = (_node_attr_name(node) or node.id.rsplit("/", 1)[-1].rsplit(":", 1)[-1]).strip()
+        if not attr:
+            return None
+        matches = [
+            spec
+            for path, spec in self._meta_shapes.items()
+            if path.rsplit(".", 1)[-1] == attr
+        ]
+        if not matches:
+            return None
+        counter: Counter[tuple[Any, ...]] = Counter(spec.shape for spec in matches)
+        best_shape, _count = counter.most_common(1)[0]
+        for spec in matches:
+            if spec.shape == best_shape:
+                return spec
         return None
 
     # ------------------------------------------------------------------

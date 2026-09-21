@@ -144,9 +144,28 @@ def _patch_rotary_embeddings(model: torch.nn.Module) -> None:
     """
 
     def _rotary_forward_meta(self, *args, **kwargs):
-        dim = getattr(self, "dim", 64)
-        max_seq = args[0] if args and isinstance(args[0], int) else 4096
-        return torch.empty(max_seq, dim // 2, 2, device="meta", dtype=torch.float32)
+        # HF rotary embeddings return a ``(cos, sin)`` pair -- callers unpack it
+        # directly (``cos, sin = self.rotary_emb(...)``) or store it in a
+        # ``position_embeddings`` mapping the attention later unpacks
+        # (``cos, sin = position_embeddings[layer_type]``). Returning a single
+        # tensor breaks that unpack (``too many values to unpack``), aborting the
+        # whole meta forward at the first attention. Return the conventional pair;
+        # ``apply_rotary_pos_emb`` is patched to identity below, so the pair's exact
+        # shape never reaches downstream math -- only the arity matters.
+        dim = getattr(self, "dim", 64) or 64
+        position_ids = kwargs.get("position_ids")
+        if position_ids is None:
+            for arg in args:
+                if isinstance(arg, torch.Tensor) and arg.dim() >= 2:
+                    position_ids = arg
+                    break
+        if isinstance(position_ids, torch.Tensor):
+            batch, seq = position_ids.shape[0], position_ids.shape[-1]
+        else:
+            batch, seq = 1, 128
+        cos = torch.empty(batch, seq, dim, device="meta", dtype=torch.float32)
+        sin = torch.empty(batch, seq, dim, device="meta", dtype=torch.float32)
+        return cos, sin
 
     for _name, mod in model.named_modules():
         if "rotary" in type(mod).__name__.lower():
