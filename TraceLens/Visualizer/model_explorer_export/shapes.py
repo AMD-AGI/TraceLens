@@ -620,14 +620,20 @@ def fill_missing_node_shapes(
         seeded: TensorSpec | None = None
         if node_id == "@input" or label in {"tokenized text", "input_ids"}:
             seeded = tokens
-        elif label == "logits" or node_id.split("/")[-1] in {"lm_head", "output"}:
-            seeded = logits
         elif connected_boundary:
-            # A real incoming dataflow edge always beats a meta guess: leave it
-            # pending so the edge-propagation pass below inherits the producer's
-            # concrete shape. Meta ground-truth (below) only seeds *leaf*
+            # A real incoming dataflow edge always beats a name or meta guess:
+            # leave it pending so the edge-propagation pass below inherits the
+            # producer's concrete shape. This must precede every name-based
+            # heuristic (``logits``/``lm_head``, ``embedding``, ``norm``,
+            # ``attention``) so a boundary tile that merely *shares a name* with a
+            # computational label -- e.g. a router's local ``logits`` variable
+            # whose real producer is (B*S, num_experts), not the model head's
+            # (B, S, vocab) -- is not stamped with that label's canonical shape
+            # over its own producer. Meta ground-truth (below) only seeds *leaf*
             # boundaries that have no producer to inherit from.
             seeded = None
+        elif label == "logits" or node_id.split("/")[-1] in {"lm_head", "output"}:
+            seeded = logits
         elif meta_boundary is not None:
             seeded = meta_boundary
         elif "embedding" in label or "embed" in node_id:

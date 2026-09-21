@@ -1405,6 +1405,50 @@ def test_shape_fill_and_boundary_multiple_crossings():
     assert store == {"g": ["x"]}
 
 
+def test_connected_boundary_named_logits_inherits_producer_over_head_shape():
+    """A connected ``@input`` tile that merely shares the name ``logits`` with the
+    model head must inherit its producer's real shape, not the ``(B, S, vocab)``
+    head guess. A genuine leaf ``logits`` (no producer) still gets the head shape.
+    """
+    context = ShapeContext({"H": 16, "V": 128}, "bfloat16")
+    nodes = [
+        {
+            "id": "gate/producer",
+            "label": "Linear",
+            "outputsMetadata": [
+                {
+                    "id": "0",
+                    "attrs": [
+                        {"key": "shape", "value": "[BS, 256] bfloat16"},
+                        {"key": "dtype", "value": "bfloat16"},
+                    ],
+                }
+            ],
+        },
+        {
+            # A router's local ``logits`` variable surfaced as a module @input
+            # boundary -- it has a real producer edge and must inherit it.
+            "id": "gate/score_fn/@input",
+            "label": "logits",
+            "attrs": [{"key": "synthetic", "value": "@input"}],
+            "incomingEdges": [_edge("gate/producer")],
+        },
+        {
+            # The model head's own logits leaf: no producer, keeps (B, S, V).
+            "id": "lm_head_logits",
+            "label": "logits",
+        },
+    ]
+    shapes.fill_missing_node_shapes(nodes, context=context)
+    by_id = {node["id"]: node for node in nodes}
+    boundary_spec = shapes._node_spec(by_id["gate/score_fn/@input"])
+    assert boundary_spec is not None
+    assert list(boundary_spec.shape) == ["BS", "256"]
+    head_spec = shapes._node_spec(by_id["lm_head_logits"])
+    assert head_spec is not None
+    assert list(head_spec.shape) == ["B", "S", "128"]
+
+
 def test_group_output_boundary_shape_keeps_dtype():
     """An expandable module's ``output_shape`` layer attribute carries dtype.
 
