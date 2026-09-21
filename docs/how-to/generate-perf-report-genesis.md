@@ -58,6 +58,8 @@ profile_output/<timestamp>/
 
 ## Output files
 
+The tool writes the following output files to the directory specified by `--output-dir`.
+
 - **`genesis_perf_report.xlsx`** — Excel workbook with:
   - GPU timeline (steady-state window only, excluding JIT and build)
   - Kernel summary by physics category (Rigid Body Solver, Collision, Time Integration, etc.)
