@@ -1365,6 +1365,41 @@ class TestTreePerfCollectPhase12:
         collected = analyzer.collect_unified_perf_events()
         assert isinstance(collected, list)
 
+    def test_synthetic_op_registered_in_events_by_uid(self):
+        """Synthetic ops fabricated by collect_unified_perf_events must be
+        registered in tree.events_by_uid, or get_UID2event(synthetic_uid)
+        raises KeyError downstream (e.g. in compute_perf_metrics)."""
+        corr = 900
+        events = [
+            _make_gpu_event(
+                "rt",
+                1000,
+                5,
+                "cuda_runtime",
+                "hipModuleLaunchKernel",
+                args={"correlation": corr},
+            ),
+            _make_gpu_event(
+                "k",
+                1005,
+                10,
+                "kernel",
+                "triton_kernel_0",
+                pid=0,
+                tid=7,
+                args={"correlation": corr, "stream": 7},
+            ),
+            _mk_ac2g(corr, 0, 7, 1005, "s"),
+            _mk_ac2g(corr, 0, 7, 1015, "f"),
+        ]
+        analyzer = _build_analyzer(events)
+        collected = analyzer.collect_unified_perf_events()
+        synthetic_ops = [e for e in collected if "Synthetic Op" in e["name"]]
+        assert synthetic_ops, "expected an orphan-launcher synthetic op to be created"
+        for synthetic_op in synthetic_ops:
+            assert synthetic_op["UID"] in analyzer.tree.events_by_uid
+            analyzer.tree.get_UID2event(synthetic_op["UID"])
+
 
 @pytest.mark.skipif(not os.path.isfile(RESNET_TRACE), reason="resnet trace missing")
 class TestResnetTrace:

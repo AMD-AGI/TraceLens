@@ -1825,6 +1825,7 @@ class TreePerfAnalyzer:
             # climbs all the way to the root).
             if self.add_python_func:
                 synthetic_op["_call_stack"] = []
+            self.tree.events_by_uid[synthetic_op["UID"]] = synthetic_op
             collected.append(synthetic_op)
 
         def _direct_kernels(event):
