@@ -56,10 +56,10 @@ Splitting proceeds in four stages:
 
 ```text
 trace.json.gz
-   └─ 1. Detect iteration roots   detects the iteration markers i.e. where to split
-      └─ 2. Extract               extract the splits. creates traces from splits
-         └─ 3. Find steady state  finds the window of splits that are steady state (peak concurrency/stable runtime)
-            └─ 4. Divide phases   divides splits into prefill/decode/prefilldecode (only for LLM inference)
+   └─ Detect iteration roots   detects the iteration markers i.e. where to split
+      └─ Find steady state  finds the window of splits that are steady state (peak concurrency/stable runtime)
+      └─ Divide phases   divides splits into prefill/decode/prefilldecode (only for LLM inference)
+   └─ Extract extract the splits. creates traces from splits
 ```
 
 Detection and extraction always run. Finding the steady-state region and dividing

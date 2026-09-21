@@ -6,7 +6,7 @@
 
 """Inference trace splitting: execution roots, steady-state windows, extraction."""
 
-from ..utils.detect_utils import ExtractContext, TraceData, TraceIndex
+from ..utils.detect_utils import ExtractContext, TraceData, EventIndex
 from .root_detection import (
     DetectStatus,
     PhaseConfidence,
@@ -38,7 +38,7 @@ from ...util import get_filename
 __all__ = [
     "ExtractContext",
     "TraceData",
-    "TraceIndex",
+    "EventIndex",
     "DetectStatus",
     "PhaseConfidence",
     "RootSet",

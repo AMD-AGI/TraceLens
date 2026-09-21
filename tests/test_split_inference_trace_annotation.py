@@ -75,13 +75,15 @@ def _norm(ordered):
 
 def _maps(events):
     """(gpu_corr_map, flow_corr_map, meta_events) -- was preprocess_trace(events)."""
-    ti = split.TraceIndex(events)
+    ti = split.EventIndex(events)
     return ti.gpu_corr_map, ti.flow_corr_map, ti.meta_events
 
 
 def _detect(events):
-    """find_iteration_roots with the TraceIndex it now requires."""
-    return split.find_iteration_roots(events, trace_index=split.TraceIndex(events))
+    """find_iteration_roots with the EventIndex it now requires."""
+    return split.find_iteration_roots(events, trace_index=split.EventIndex(events))
+
+
 from TraceLens.Trace2Tree import trace_capture_merge_experimental as tcm
 
 # --------------------------------------------------------------------------- #
@@ -769,7 +771,10 @@ def test_find_steady_state_inference_conc_osl_r_num_steps_sufficient(capsys):
 
 # --- shape-based steady state (find_steady_state_inference_from_shapes) ------
 def test_ss_from_shapes_empty_returns_empty():
-    assert split.find_steady_state_inference_from_shapes([], [], num_steps=4) == ([], [])
+    assert split.find_steady_state_inference_from_shapes([], [], num_steps=4) == (
+        [],
+        [],
+    )
     assert split.find_steady_state_inference_from_shapes(
         _plain_roots(4), [], num_steps=4
     ) == ([], [])
@@ -861,11 +866,24 @@ def test_collect_ancestor_events_walks_parent_chain_once():
 def test_extract_and_save_split_generic_naming_folds_in_batch_size(tmp_path):
     # A non-annotation ("generic") extraction: the batch size read from the
     # vllm attention op's Input Dims is folded into the per-iteration name.
-    root = {"name": "generic_root", "cat": "cpu_op", "ts": 100, "dur": 200,
-            "pid": 1, "tid": 1, "args": {}}
-    attn = {"name": "vllm::unified_attention_with_output", "cat": "cpu_op",
-            "ts": 110, "dur": 5, "pid": 1, "tid": 1,
-            "args": {"Input Dims": [[8, 64]], "correlation": 500}}
+    root = {
+        "name": "generic_root",
+        "cat": "cpu_op",
+        "ts": 100,
+        "dur": 200,
+        "pid": 1,
+        "tid": 1,
+        "args": {},
+    }
+    attn = {
+        "name": "vllm::unified_attention_with_output",
+        "cat": "cpu_op",
+        "ts": 110,
+        "dur": 5,
+        "pid": 1,
+        "tid": 1,
+        "args": {"Input Dims": [[8, 64]], "correlation": 500},
+    }
     events = [root, attn]
     gpu_map, flow_map, meta = _maps(events)
     ctx = split.ExtractContext(
@@ -1060,10 +1078,19 @@ def _write_trace(trace, path):
 
 def test_main_no_gpu_work_is_skipped(tmp_path, capsys):
     # A trace with no GPU kernels has nothing to split.
-    trace = {"traceEvents": [
-        {"name": "cpu_only", "cat": "cpu_op", "ts": 0, "dur": 1,
-         "pid": 1, "tid": 1, "args": {}},
-    ]}
+    trace = {
+        "traceEvents": [
+            {
+                "name": "cpu_only",
+                "cat": "cpu_op",
+                "ts": 0,
+                "dur": 1,
+                "pid": 1,
+                "tid": 1,
+                "args": {},
+            },
+        ]
+    }
     out_dir = tmp_path / "out"
     _invoke_main(_write_trace(trace, tmp_path / "t.json"), out_dir)
     assert "No GPU work" in capsys.readouterr().out
@@ -1099,8 +1126,10 @@ def test_main_allow_degraded_splits_a_degraded_trace(tmp_path, monkeypatch):
     _force_status(monkeypatch, trace["traceEvents"], DetectStatus.DEGRADED)
     out_dir = tmp_path / "out"
     _invoke_main(
-        _write_trace(trace, tmp_path / "t.json"), out_dir,
-        "--store-single-iteration", "--allow-degraded",
+        _write_trace(trace, tmp_path / "t.json"),
+        out_dir,
+        "--store-single-iteration",
+        "--allow-degraded",
     )
     # The flag lets a DEGRADED trace through to extraction.
     assert (out_dir / "execution_details.json").exists()
@@ -1111,7 +1140,9 @@ def test_main_never_splits_not_splittable_even_with_flag(tmp_path, capsys, monke
     _force_status(monkeypatch, trace["traceEvents"], DetectStatus.NOT_SPLITTABLE)
     out_dir = tmp_path / "out"
     _invoke_main(
-        _write_trace(trace, tmp_path / "t.json"), out_dir, "--allow-degraded",
+        _write_trace(trace, tmp_path / "t.json"),
+        out_dir,
+        "--allow-degraded",
     )
     assert "enough of the" in capsys.readouterr().out
     assert (out_dir / split.MANIFEST_NAME).exists()
@@ -1122,8 +1153,10 @@ def test_main_no_gap_fill_records_choice(tmp_path):
     trace = _make_trace([VLLM_PRIMARY.format(i=i) for i in range(6)])
     out_dir = tmp_path / "out"
     _invoke_main(
-        _write_trace(trace, tmp_path / "t.json"), out_dir,
-        "--store-single-iteration", "--no-gap-fill",
+        _write_trace(trace, tmp_path / "t.json"),
+        out_dir,
+        "--store-single-iteration",
+        "--no-gap-fill",
     )
     with open(out_dir / split.MANIFEST_NAME) as f:
         assert json.load(f)["gap_fill"] is False
@@ -1136,8 +1169,12 @@ def test_main_llm_inference_without_shapes_falls_back(tmp_path, capsys):
     trace = _make_trace(names)
     out_dir = tmp_path / "out"
     _invoke_main(
-        _write_trace(trace, tmp_path / "t.json"), out_dir,
-        "--find-steady-state", "--num-steps", "4", "--llm-inference",
+        _write_trace(trace, tmp_path / "t.json"),
+        out_dir,
+        "--find-steady-state",
+        "--num-steps",
+        "4",
+        "--llm-inference",
     )
     assert "No cpu_op shapes found" in capsys.readouterr().out
 

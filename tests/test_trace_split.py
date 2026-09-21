@@ -93,7 +93,7 @@ def _find_roots(trace_path):
     """Load trace, find iteration roots. Returns (roots, N) or skips."""
     trace_data = DataLoader.load_data(trace_path)
     events = trace_data["traceEvents"]
-    result = split.find_iteration_roots(events, trace_index=split.TraceIndex(events))
+    result = split.find_iteration_roots(events, trace_index=split.EventIndex(events))
     if result.status.name == "NOT_SPLITTABLE":
         pytest.skip("trace is not splittable")
     roots = result.roots
@@ -110,9 +110,9 @@ def _compare_gz_files(gen_dir, ref_dir, context_label, recursive=False):
     for rel_path in ref_files:
         gen_path = os.path.join(gen_dir, rel_path)
         ref_path = os.path.join(ref_dir, rel_path)
-        assert os.path.exists(gen_path), (
-            f"{context_label}: generated file '{rel_path}' not found in output"
-        )
+        assert os.path.exists(
+            gen_path
+        ), f"{context_label}: generated file '{rel_path}' not found in output"
 
         gen_trace = DataLoader.load_data(gen_path)
         ref_trace = DataLoader.load_data(ref_path)
@@ -124,9 +124,9 @@ def _compare_gz_files(gen_dir, ref_dir, context_label, recursive=False):
             f"{context_label} '{rel_path}': event count mismatch — "
             f"generated {len(gen_events)}, reference {len(ref_events)}"
         )
-        assert gen_events == ref_events, (
-            f"{context_label} '{rel_path}': traceEvents content mismatch"
-        )
+        assert (
+            gen_events == ref_events
+        ), f"{context_label} '{rel_path}': traceEvents content mismatch"
 
 
 def _update_ref_dir(gen_dir, ref_dir, recursive=False):
@@ -159,7 +159,9 @@ def _find_gen_file_for_iter(out_dir, idx, total):
 
 def _compute_targets(roots, N):
     """Compute which iterations to extract: first/middle/last + warmup/wrapup."""
-    non_bookend = [i for i, r in enumerate(roots) if r.get("name") not in _BOOKEND_NAMES]
+    non_bookend = [
+        i for i, r in enumerate(roots) if r.get("name") not in _BOOKEND_NAMES
+    ]
     targets = {}
     if non_bookend:
         targets["first"] = non_bookend[0]
@@ -192,8 +194,11 @@ def test_trace_split(dirpath, trace_gz, tmp_path, update_references):
     out_dir = str(tmp_path / "output")
     os.makedirs(out_dir, exist_ok=True)
     flags = [
-        "--store-single-iteration", "--iterations", "all",
-        "--find-steady-state", "--divide-phases",
+        "--store-single-iteration",
+        "--iterations",
+        "all",
+        "--find-steady-state",
+        "--divide-phases",
     ]
     if is_llm:
         flags.append("--llm-inference")
@@ -204,8 +209,7 @@ def test_trace_split(dirpath, trace_gz, tmp_path, update_references):
     all_top = _list_gz(out_dir)
     ss_gen_files = [f for f in all_top if "steady_state" in f]
     phase_gen_files = [
-        f for f in _list_gz_recursive(out_dir)
-        if os.sep in f or "/" in f
+        f for f in _list_gz_recursive(out_dir) if os.sep in f or "/" in f
     ]
 
     if update_references:
@@ -251,14 +255,14 @@ def test_trace_split(dirpath, trace_gz, tmp_path, update_references):
         for ref_name in ref_gz:
             gen_path = os.path.join(out_dir, ref_name)
             ref_path = os.path.join(split_ref, ref_name)
-            assert os.path.exists(gen_path), (
-                f"Generated file '{ref_name}' not found in output"
-            )
+            assert os.path.exists(
+                gen_path
+            ), f"Generated file '{ref_name}' not found in output"
             gen_trace = DataLoader.load_data(gen_path)
             ref_trace = DataLoader.load_data(ref_path)
-            assert gen_trace["traceEvents"] == ref_trace["traceEvents"], (
-                f"split '{ref_name}': traceEvents content mismatch"
-            )
+            assert (
+                gen_trace["traceEvents"] == ref_trace["traceEvents"]
+            ), f"split '{ref_name}': traceEvents content mismatch"
 
     # --- Compare steady_state_traces ---
     if os.path.isdir(ss_ref) and ss_gen_files:
@@ -339,8 +343,10 @@ def test_trace_split_no_annotations(dirpath, trace_gz, tmp_path):
         # GPU-driven generic detection follows the wrappers and recovers one fewer
         # boundary (9 vs 10), which cascades into window/kernel counts. Known
         # generic-detection limitation, not a splitting bug.
-        pytest.xfail("iterations marked on GPU-less scheduler frames; generic "
-                     "detection recovers one fewer boundary")
+        pytest.xfail(
+            "iterations marked on GPU-less scheduler frames; generic "
+            "detection recovers one fewer boundary"
+        )
 
     stripped_trace = {**trace_data, "traceEvents": _strip_annotations(original_events)}
     stripped_path = str(tmp_path / "stripped.json.gz")
@@ -355,9 +361,7 @@ def test_trace_split_no_annotations(dirpath, trace_gz, tmp_path):
     with open(os.path.join(split_ref, "metadata.json")) as f:
         meta = json.load(f)
     N_ref = meta["total_iterations"]
-    assert N == N_ref, (
-        f"Iteration count mismatch: stripped={N}, annotated={N_ref}"
-    )
+    assert N == N_ref, f"Iteration count mismatch: stripped={N}, annotated={N_ref}"
 
     targets = meta["targets"]
 
@@ -401,6 +405,7 @@ def test_trace_split_no_annotations(dirpath, trace_gz, tmp_path):
 
     # --- find-steady-state: compare window types and kernel counts ---
     if run_ss:
+
         def _ss_window_type(filename):
             # Generic (duration-based) output is "steady_state_<base>.json.gz" with
             # no "<type>_steady_state" prefix, so classify it by the label alone --
@@ -425,9 +430,7 @@ def test_trace_split_no_annotations(dirpath, trace_gz, tmp_path):
             )
             ref_kernels = _kernel_events(
                 _strip_annotations(
-                    DataLoader.load_data(
-                        os.path.join(ss_ref, ref_file)
-                    )["traceEvents"]
+                    DataLoader.load_data(os.path.join(ss_ref, ref_file))["traceEvents"]
                 )
             )
             ss_tolerance = max(1, int(len(ref_kernels) * 0.05))
@@ -439,16 +442,15 @@ def test_trace_split_no_annotations(dirpath, trace_gz, tmp_path):
 
     if run_dp:
         ref_phases = sorted(
-            d for d in os.listdir(dp_ref)
-            if os.path.isdir(os.path.join(dp_ref, d))
+            d for d in os.listdir(dp_ref) if os.path.isdir(os.path.join(dp_ref, d))
         )
         assert ref_phases, f"No phase subdirectories in {dp_ref}"
         for phase_dir in ref_phases:
             gen_phase_path = os.path.join(out, phase_dir)
             ref_phase_path = os.path.join(dp_ref, phase_dir)
-            assert os.path.isdir(gen_phase_path), (
-                f"divide-phases: missing phase directory '{phase_dir}' in output"
-            )
+            assert os.path.isdir(
+                gen_phase_path
+            ), f"divide-phases: missing phase directory '{phase_dir}' in output"
             gen_files = _list_gz(gen_phase_path)
             ref_files = _list_gz(ref_phase_path)
             assert len(gen_files) == len(ref_files), (
@@ -478,7 +480,7 @@ def test_trace_not_splittable(dirpath, trace_gz):
     trace_path = os.path.join(dirpath, trace_gz)
     trace_data = DataLoader.load_data(trace_path)
     events = trace_data["traceEvents"]
-    result = split.find_iteration_roots(events, trace_index=split.TraceIndex(events))
+    result = split.find_iteration_roots(events, trace_index=split.EventIndex(events))
     assert result.status.name == "NOT_SPLITTABLE", (
         f"Expected NOT_SPLITTABLE but got {result.status.name} "
         f"with {len(result.roots) if result.roots else 0} roots"

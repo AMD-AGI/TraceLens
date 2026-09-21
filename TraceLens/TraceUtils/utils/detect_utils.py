@@ -280,7 +280,7 @@ class ExtractContext:
     root_tiles: Optional[dict] = None
 
 
-class TraceIndex:
+class EventIndex:
     """All event categories extracted in a single pass over the trace."""
 
     def __init__(self, events: Iterable[dict]):
@@ -348,7 +348,7 @@ class GpuAttribution:
     STRATEGY_GPU_SPAN = "gpu_span"
     STRATEGY_CORRELATION = "correlation"
 
-    def __init__(self, source: TraceIndex):
+    def __init__(self, source: EventIndex):
         self.annotations = source.annotations
         self.kernels = source.kernels
         self.gpu_annotation_spans = source.gpu_annotation_spans

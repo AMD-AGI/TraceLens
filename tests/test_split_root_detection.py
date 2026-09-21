@@ -20,7 +20,7 @@ from TraceLens.TraceUtils.trace_split import (
     PhaseConfidence,
     RootSet,
     TraceData,
-    TraceIndex,
+    EventIndex,
     build_root_tiles,
     extract_iteration,
     find_iteration_roots,
@@ -40,12 +40,12 @@ from TraceLens.TraceUtils.trace_split.period_detection import (
 
 def collect_annotations(events):
     """The annotation events of a raw trace (was root_detection.collect_annotations)."""
-    return TraceIndex(events).annotations
+    return EventIndex(events).annotations
 
 
 def _trace_data(events):
     """A ``TraceData`` for extraction, built from a raw event list."""
-    ti = TraceIndex(events)
+    ti = EventIndex(events)
     return TraceData(
         events,
         {"traceEvents": events},
@@ -56,8 +56,8 @@ def _trace_data(events):
 
 
 def _detect(events):
-    """find_iteration_roots with the TraceIndex it now requires."""
-    return find_iteration_roots(events, trace_index=TraceIndex(events))
+    """find_iteration_roots with the EventIndex it now requires."""
+    return find_iteration_roots(events, trace_index=EventIndex(events))
 
 VLLM = "execute_{i}_context_3(sq128sk256sqsq1sqsk1)_generation_2(sq1sk300sqsq1sqsk1)"
 
@@ -263,13 +263,13 @@ class TestIntervalIndex:
 class TestGpuAttribution:
     def test_prefers_gpu_annotation_spans_when_present(self):
         events = serving_trace(4, with_gpu_annotation=True)
-        attribution = GpuAttribution(TraceIndex(events))
+        attribution = GpuAttribution(EventIndex(events))
         _, strategy = attribution.attributed_kernels(collect_annotations(events))
         assert strategy == GpuAttribution.STRATEGY_GPU_SPAN
 
     def test_falls_back_to_correlation_without_gpu_annotation_spans(self):
         events = serving_trace(4)
-        attribution = GpuAttribution(TraceIndex(events))
+        attribution = GpuAttribution(EventIndex(events))
         _, strategy = attribution.attributed_kernels(collect_annotations(events))
         assert strategy == GpuAttribution.STRATEGY_CORRELATION
 
@@ -282,7 +282,7 @@ class TestGpuAttribution:
         events = serving_trace(4, with_gpu_annotation=True)
         annotations = collect_annotations(events)
         unannotated = annotation("step[DECODE bs=9]", 90_000, 400)
-        attribution = GpuAttribution(TraceIndex(events + [unannotated]))
+        attribution = GpuAttribution(EventIndex(events + [unannotated]))
         _, strategy = attribution.attributed_kernels(annotations + [unannotated])
         assert strategy == GpuAttribution.STRATEGY_CORRELATION
 
@@ -290,12 +290,12 @@ class TestGpuAttribution:
         """Counting an annotation span as GPU time double-counts the kernels inside."""
         events = serving_trace(4, with_gpu_annotation=True)
         annotations = collect_annotations(events)
-        assert GpuAttribution(TraceIndex(events)).audit(annotations).gpu_busy == 4 * 40
+        assert GpuAttribution(EventIndex(events)).audit(annotations).gpu_busy == 4 * 40
 
     def test_full_coverage_when_every_kernel_is_annotated(self):
         events = serving_trace(8)
         annotations = collect_annotations(events)
-        report = GpuAttribution(TraceIndex(events)).audit(annotations)
+        report = GpuAttribution(EventIndex(events)).audit(annotations)
         assert report.covered_selected == 1.0
         assert report.passes
 
@@ -319,7 +319,7 @@ class TestGpuAttribution:
             corr += 1
 
         roots = collect_annotations(events)
-        report = GpuAttribution(TraceIndex(events)).audit(roots)
+        report = GpuAttribution(EventIndex(events)).audit(roots)
         # A tenth of GPU time is launched after the annotations close.
         assert report.covered_spans == pytest.approx(0.9)
         # The windows reclaim it, bar the final iteration's tail, which falls
@@ -331,7 +331,7 @@ class TestGpuAttribution:
         """Coverage from window extension alone is not root coverage."""
         events = serving_trace(40)
         annotations = collect_annotations(events)
-        report = GpuAttribution(TraceIndex(events)).audit(annotations[::20])
+        report = GpuAttribution(EventIndex(events)).audit(annotations[::20])
         assert report.covered_selected > report.covered_spans
         assert report.span_share < 0.5
         assert not report.passes
@@ -344,7 +344,7 @@ class TestGpuAttribution:
         """
         events = serving_trace(40)
         annotations = collect_annotations(events)
-        attribution = GpuAttribution(TraceIndex(events))
+        attribution = GpuAttribution(EventIndex(events))
         assert attribution.audit(annotations).covered_selected == 1.0
         assert not attribution.audit(annotations[:2]).passes
 
@@ -352,7 +352,7 @@ class TestGpuAttribution:
         events = serving_trace(8)
         # A kernel with no launch site inside any annotation.
         events.append(kernel(1500, 4000, 99999, name="orphan"))
-        attribution = GpuAttribution(TraceIndex(events))
+        attribution = GpuAttribution(EventIndex(events))
         report = attribution.audit(collect_annotations(events))
         assert report.covered_selected < COVERAGE_GATE
 
@@ -360,7 +360,7 @@ class TestGpuAttribution:
         """The signature of roots sitting at the wrong nesting level."""
         events = serving_trace(8)
         annotations = collect_annotations(events)
-        attribution = GpuAttribution(TraceIndex(events))
+        attribution = GpuAttribution(EventIndex(events))
         assert (
             attribution.audit(annotations[:2]).covered_selected
             < attribution.audit(annotations).covered_selected
@@ -368,7 +368,7 @@ class TestGpuAttribution:
 
     def test_family_gpu_time(self):
         events = serving_trace(4)
-        attribution = GpuAttribution(TraceIndex(events))
+        attribution = GpuAttribution(EventIndex(events))
         annotations = collect_annotations(events)
         assert attribution.gpu_time_for_family(annotations) == 4 * 40
 
@@ -775,7 +775,7 @@ class TestCascadeReturns:
 
     def _run(self):
         events = serving_trace(2)
-        return find_iteration_roots(events, trace_index=TraceIndex(events))
+        return find_iteration_roots(events, trace_index=EventIndex(events))
 
     # --- step 4: sibling roots returns when branch descent finds nothing ------
     def test_returns_sibling_roots_when_branch_descent_is_empty(self, monkeypatch):

@@ -63,7 +63,7 @@ from ..utils.annotation_utils import (
 from ..trace_split import (
     ExtractContext,
     TraceData,
-    TraceIndex,
+    EventIndex,
     extract_and_save_split,
     get_filename,
 )
@@ -484,7 +484,7 @@ def load_trace(path: str):
     print(f"\n=== Loading {path} ===")
     trace_json = DataLoader.load_data(get_filename(path))
     events = trace_json.get("traceEvents", [])
-    ti = TraceIndex(events)
+    ti = EventIndex(events)
     gpu_corr_map, flow_corr_map, meta_events = (
         ti.gpu_corr_map,
         ti.flow_corr_map,

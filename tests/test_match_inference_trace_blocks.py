@@ -44,7 +44,7 @@ from TraceLens.TraceUtils.utils.annotation_utils import ITERATION_PATTERNS
 from TraceLens.TraceUtils.trace_split import (
     ExtractContext,
     TraceData,
-    TraceIndex,
+    EventIndex,
     extract_and_save_split,
 )
 
@@ -460,7 +460,7 @@ def test_extraction_of_a_matched_block(tmp_path):
     ``--no-extract`` is the path ``extract_and_save`` actually writes.
     """
     events = A_TRACE["traceEvents"]
-    ti = TraceIndex(events)
+    ti = EventIndex(events)
     block = A_WINDOWS[1]
     label = "decode_only_best_A1_B1_A"
 

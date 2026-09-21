@@ -166,9 +166,12 @@ from ..utils.annotation_utils import (
 )
 
 SERVING_KINDS = {
-    "vllm_detailed", "vllm_native",
-    "sglang_detailed", "sglang_native",
-    "atom_detailed", "atom_native",
+    "vllm_detailed",
+    "vllm_native",
+    "sglang_detailed",
+    "sglang_native",
+    "atom_detailed",
+    "atom_native",
 }
 
 # Re-exports for tests and downstream callers.
@@ -176,7 +179,7 @@ from . import (  # noqa: F401
     DetectStatus,
     ExtractContext,
     TraceData,
-    TraceIndex,
+    EventIndex,
     build_cpu_event_index,
     build_root_tiles,
     classify_phases_from_batch_sizes,
@@ -265,7 +268,7 @@ def _load_and_detect(args):
     """
     trace_json = DataLoader.load_data(get_filename(args.trace_path))
     events = trace_json.get("traceEvents", [])
-    trace_index = TraceIndex(events)
+    trace_index = EventIndex(events)
     print(f"Loaded {len(events)} events")
 
     if sum(k.get("dur", 0) for k in trace_index.kernels) == 0:
@@ -436,7 +439,9 @@ def _divide_phases(working_roots, batch_sizes, has_annotations, ctx, args):
         phase_labels = classify_phases_from_batch_sizes(
             batch_sizes, max_num_seq=args.max_num_seq
         )
-    _, ss_regions = _steady_state(working_roots, batch_sizes, has_annotations, args, "mixed")
+    _, ss_regions = _steady_state(
+        working_roots, batch_sizes, has_annotations, args, "mixed"
+    )
     return divide_phases_and_save(
         working_roots,
         ctx,
@@ -450,9 +455,16 @@ def _find_steady_state_windows(working_roots, batch_sizes, has_annotations, ctx,
     if not (has_annotations or args.llm_inference):
         # Generic path: single duration-based window.
         print("\n--- Finding steady-state window by duration ---")
-        ss_roots, _ = _steady_state(working_roots, batch_sizes, has_annotations, args, "mixed")
+        ss_roots, _ = _steady_state(
+            working_roots, batch_sizes, has_annotations, args, "mixed"
+        )
         return extract_and_save_split(
-            [ss_roots], ctx, "iteration", 0, 1, output_label="steady_state",
+            [ss_roots],
+            ctx,
+            "iteration",
+            0,
+            1,
+            output_label="steady_state",
         )
     # Inference path: three windows (annotation-based or shape-based).
     details = []
@@ -463,10 +475,17 @@ def _find_steady_state_windows(working_roots, batch_sizes, has_annotations, ctx,
     )
     for mode, label, desc in windows:
         print(f"\n--- Finding {desc} steady-state window ---")
-        roots, _ = _steady_state(working_roots, batch_sizes, has_annotations, args, mode)
+        roots, _ = _steady_state(
+            working_roots, batch_sizes, has_annotations, args, mode
+        )
         details.extend(
             extract_and_save_split(
-                [roots], ctx, "iteration", 0, 1, output_label=label,
+                [roots],
+                ctx,
+                "iteration",
+                0,
+                1,
+                output_label=label,
                 llm_inference=True,
             )
         )

@@ -34,7 +34,7 @@ from ..utils.detect_utils import (
     GpuAttribution,
     PhaseConfidence,
     RootSet,
-    TraceIndex,
+    EventIndex,
 )
 from .period_detection import (
     _blocks_by_pattern,
@@ -110,7 +110,6 @@ def _branch_candidate(
     )
 
 
-
 def _bookend_diagnostics(
     blocked: Sequence[dict],
     prefix: Sequence[dict],
@@ -157,11 +156,10 @@ def _periodic_candidate(
         return None
     prefix = list(live[:start])
     blocked_uids = {e.get("UID") for b in unit_blocks for e in b}
-    last_block_end = (
-        unit_blocks[-1][-1]["ts"] + unit_blocks[-1][-1].get("dur", 0)
-    )
+    last_block_end = unit_blocks[-1][-1]["ts"] + unit_blocks[-1][-1].get("dur", 0)
     suffix = [
-        e for e in live
+        e
+        for e in live
         if e["ts"] >= last_block_end and e.get("UID") not in blocked_uids
     ]
     iteration_roots: List[dict] = []
@@ -177,8 +175,13 @@ def _periodic_candidate(
         blocked.extend(block)
     # Blocks own disjoint subtrees, so their GPU times sum without overlap.
     candidate = _branch_candidate(
-        iteration_roots, total_gpu, depth, "period", period,
-        sum(root_gpu_times), root_gpu_times,
+        iteration_roots,
+        total_gpu,
+        depth,
+        "period",
+        period,
+        sum(root_gpu_times),
+        root_gpu_times,
     )
     candidate.diagnostics.update(_bookend_diagnostics(blocked, prefix, suffix))
     return candidate
@@ -218,7 +221,13 @@ def _grouped_candidate(
     root_gpu_times = [_descendant_gpu_time(tree, [e]) for e in instances]
 
     candidate = _branch_candidate(
-        blocked, total_gpu, depth, "frame_family", None, gpu_time, root_gpu_times,
+        blocked,
+        total_gpu,
+        depth,
+        "frame_family",
+        None,
+        gpu_time,
+        root_gpu_times,
     )
     candidate.diagnostics.update(_bookend_diagnostics(blocked, prefix, suffix))
     return candidate
@@ -227,7 +236,9 @@ def _grouped_candidate(
 _GAP_RATIO_THRESHOLD = 10.0
 
 
-def _filter_low_gpu_roots(candidate: RootSet, tree: TraceToTree, total_gpu: float) -> RootSet:
+def _filter_low_gpu_roots(
+    candidate: RootSet, tree: TraceToTree, total_gpu: float
+) -> RootSet:
     """Drop roots whose GPU time falls below a natural cluster gap.
 
     Sorts per-root GPU times, finds the largest multiplicative gap between
@@ -253,7 +264,7 @@ def _filter_low_gpu_roots(candidate: RootSet, tree: TraceToTree, total_gpu: floa
     if max_ratio < _GAP_RATIO_THRESHOLD:
         return candidate
 
-    keep_indices = {idx for idx, _ in indexed[split_at + 1:]}
+    keep_indices = {idx for idx, _ in indexed[split_at + 1 :]}
     if len(keep_indices) < MIN_LABEL_CHILDREN:
         return candidate
 
@@ -308,9 +319,7 @@ def find_pattern(
         if candidate is None:
             continue
         cov = candidate.diagnostics["branch_coverage"]
-        if cov > 0 and (
-            best is None or cov > best.diagnostics["branch_coverage"]
-        ):
+        if cov > 0 and (best is None or cov > best.diagnostics["branch_coverage"]):
             best = candidate
     if best is not None:
         best = _filter_low_gpu_roots(best, tree, total_gpu)
@@ -433,7 +442,8 @@ def _annotation_root_set(
 
 
 def _detect_from_known_annotations(
-    annotations: Sequence[dict], attribution: GpuAttribution,
+    annotations: Sequence[dict],
+    attribution: GpuAttribution,
 ) -> Optional[RootSet]:
     known = find_known_annotations(annotations)
     if not known:
@@ -448,7 +458,8 @@ def _detect_from_known_annotations(
 
 
 def _detect_from_unknown_annotations(
-    annotations: Sequence[dict], attribution: GpuAttribution,
+    annotations: Sequence[dict],
+    attribution: GpuAttribution,
 ) -> Optional[RootSet]:
     grouped: Dict[str, List[dict]] = {}
     for event in annotations:
@@ -574,7 +585,7 @@ def _candidate_coverage(candidate: RootSet) -> float:
 
 def find_iteration_roots(
     events: Sequence[dict],
-    trace_index: TraceIndex = None,
+    trace_index: EventIndex = None,
 ) -> RootSet:
     """Find iteration roots and report how much GPU work they account for.
 
@@ -666,5 +677,7 @@ def find_iteration_roots(
         roots=[],
         method="none",
         status=DetectStatus.NOT_SPLITTABLE,
-        diagnostics={"reason": "no splittable annotations and no repeating call pattern"},
+        diagnostics={
+            "reason": "no splittable annotations and no repeating call pattern"
+        },
     )
