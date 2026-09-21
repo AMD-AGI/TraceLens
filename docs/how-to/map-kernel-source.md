@@ -15,12 +15,17 @@ This topic shows how to resolve a GPU kernel name from a profiler trace to the
 source file and line that defines it, and how TraceLens reports the kernels that
 have no editable source at all.
 
-A profiler records the name of every GPU kernel that ran, but not the location of
-its code. Some kernels are defined in source you can modify, a `.cu`, `.hip`, or
-a Triton `.py`, while others are precompiled library code or generated at
-compile time. Kernel source mapping resolves both cases: for each kernel it
-reports whether an editable definition exists and, when it does, the file and
-line that hold it.
+A [performance report](./generate-perf-report-pytorch.md) ends with a ranked list
+of the kernels that dominate GPU time. Acting on that list means editing the
+kernels it names, and that first requires knowing where each one is defined. A
+profiler records the name of every GPU kernel that ran, but not the location of
+its code.
+
+Some kernels are defined in source you can modify, a `.cu`, `.hip`, or a Triton
+`.py`, while others are precompiled library code or generated at compile time and
+cannot be edited at all. Kernel source mapping resolves both cases: for each
+kernel it reports whether an editable definition exists and, when it does, the
+file and line that hold it.
 
 ## Before you begin
 
@@ -56,10 +61,10 @@ flowchart TD
     E -- "no match" --> G
 ```
 
-Every mapping returns a `ResolveResult` (see
-[Understanding the result](#understanding-the-result)) carrying the verdict, the
-file and line when resolved, and a `method` string identifying the path that
-produced the answer. The stages are described in
+The command line reports every mapping as a `ResolveResult` (see
+[Understanding the result](#understanding-the-result)): the verdict, the file
+and line when resolved, and a `method` string identifying the path that produced
+the answer. The stages are described in
 [Stage 1: The patchability gate](#stage-1-the-patchability-gate) onward.
 
 ## Resolve a kernel from the command line
@@ -82,53 +87,117 @@ TraceLens_resolve_kernel_source \
 | `--kernel` | Device kernel name/symbol (native or plain). |
 | `--search-path` | A directory to search for native sources. Repeatable. When omitted, defaults are auto-discovered. |
 | `--op-name` | Launching op name. The gate uses it only to identify MIOpen convolutions. |
-| `--call-stack-file` | File with one call-stack frame per line (a CLI convenience; integrated callers pass frames through the API). |
-| `--triton-kernel-file` | Resolve a Triton `.py` kernel from this trace `kernel_file` instead of a native symbol. |
+| `--triton-kernel-file` | Resolve a Triton `.py` kernel from the trace event object's kernel_file field instead of a native symbol. |
 
 ## Resolve a kernel from Python
 
+A native kernel takes two calls: run the gate, then resolve the survivors.
+
 ```python
-from TraceLens.TraceUtils.kernel_source import resolve, resolve_triton_source
+from TraceLens.TraceUtils.kernel_source import (
+    classify_patchability,
+    resolve_source_path,
+    resolve_triton_source,
+)
 
-# Native kernel: runs the gate, then the active finder.
-res = resolve("_Z24reshape_and_cache_kernelPfPKf", ["/opt/vllm/csrc"])
-if res.patchable:
-    print(res.source_file, res.line, res.method)  # e.g. .../cache_kernels.hip 84 symbol_index
+kernel = "_Z24reshape_and_cache_kernelPfPKf"
+
+gate = classify_patchability(kernel)
+if gate.patchable is False:
+    print("not patchable:", gate.kind, gate.reason)
 else:
-    print("not patchable:", res.kind, res.reason)
+    loc = resolve_source_path(kernel, ["/opt/vllm/csrc"])
+    if loc is not None:
+        print(loc.source_file, loc.line)  # e.g. .../cache_kernels.hip 84
+```
 
-# Triton kernel from a trace kernel_file:
+A Triton kernel takes one call, because `resolve_triton_source()` applies the
+editability check itself:
+
+```python
 tri = resolve_triton_source("/repo/moe.py:120:grouped_gemm")
 print(tri.source_file, tri.line, tri.method)  # .../moe.py 120 triton_ast
 ```
 
-`resolve()` is the single-call gate-and-resolve entry point for native kernels.
-`resolve_source_path()` performs the index lookup alone, for callers that have
-already run the gate.
+The two entry points return different types. `resolve_source_path()` returns a
+`SourceLocation`, or `None` when nothing matched, so a caller that wants a full
+verdict pairs it with `classify_patchability()` and builds the
+`ResolveResult` itself — this is what the CLI does.
+`resolve_triton_source()` returns a `ResolveResult` directly.
 
 ## Understanding the result
 
-`ResolveResult` carries these fields:
+`ResolveResult` is what the CLI prints and what `resolve_triton_source()`
+returns. It carries these fields:
 
-| Field | Meaning |
+| Field | Type | Meaning |
+|---|---|---|
+| `source_file` | `str` | Resolved file path, or `""` when there is no location. |
+| `line` | `int` or `None` | The line the kernel's definition starts on, numbered from 1 the way an editor shows it. `None` when the line could not be determined. |
+| `framework` | `str` | Discovered package the file came from, for example `vllm`; `""` when not attributed. Held on the nested `SourceLocation` and flattened into the CLI JSON. |
+| `patchable` | `bool` | Whether an editable source exists for this kernel. |
+| `kind` | `str` | Non-patchable category when applicable, as listed in [Stage 1: The patchability gate](#stage-1-the-patchability-gate). Empty when no category applied. |
+| `reason` | `str` | Short human-readable explanation. Empty when there is nothing to explain. |
+| `method` | `str` | How the answer was reached. Always one of the six values below. |
+
+`method` is a single string. It takes one of these values:
+
+| Value | Meaning |
 |---|---|
-| `source_file` | Resolved file path, or `""` when there is no location. |
-| `line` | 1-based definition line when known, else `None`. |
-| `patchable` | Whether an editable source exists for this kernel. |
-| `kind` | Non-patchable category when applicable, as listed in [Stage 1: The patchability gate](#stage-1-the-patchability-gate). |
-| `reason` | Short human-readable explanation. |
-| `method` | How the answer was reached (see below). |
+| `gate_non_patchable` | Rejected before any file was opened, either by the [patchability gate](#stage-1-the-patchability-gate) or because the Triton path pointed into a compile cache. |
+| `symbol_index` | The kernel name was found in the index of kernel names to source files that TraceLens builds over the installed frameworks, and the file was then opened to confirm the name really appears in it. See [Stage 2: Native source resolution](#stage-2-native-source-resolution). |
+| `triton_ast` | The trace supplied a Triton `.py` path, and TraceLens parsed the file to locate the exact `def` line. See [Stage 3: Triton source resolution](#stage-3-triton-source-resolution). |
+| `trace_kernel_file` | The trace supplied a Triton `.py` path, but the `def` line was not pinned by reading the file, so no line is reported. |
+| `triton_symbol_index` | The trace recorded no `kernel_file`, so the kernel name was matched against an index of `@triton.jit` functions in the installed `.py` sources. |
+| `unresolved` | The kernel passed the gate, but no definition for it was found in any discovered source tree. |
 
-The `method` identifies which path produced the answer:
+### Example results
 
-| `method` | Meaning |
-|---|---|
-| `gate_non_patchable` | The gate, or a generated Triton path, ruled it out. |
-| `symbol_index` | Native kernel found via the source index. |
-| `triton_ast` | Triton `.py` found and the definition line pinned from the file. |
-| `trace_kernel_file` | Triton `.py` path from the trace, without a pinned line. |
-| `triton_symbol_index` | Triton `.py` found via the symbol-search fallback (no `kernel_file`). |
-| `unresolved` | No editable source found. |
+Results take one of three shapes. A resolved kernel fills in the location and
+leaves `kind` and `reason` empty, because the gate never rejected it:
+
+```json
+{
+  "source_file": "/opt/vllm/csrc/cache_kernels.hip",
+  "line": 84,
+  "framework": "vllm",
+  "patchable": true,
+  "kind": "",
+  "reason": "",
+  "method": "symbol_index"
+}
+```
+
+A kernel the gate rejected has no location, so `source_file` is empty and `line`
+is `null`. Here `kind` and `reason` carry the category and its explanation:
+
+```json
+{
+  "source_file": "",
+  "line": null,
+  "framework": "",
+  "patchable": false,
+  "kind": "tensile_precompiled",
+  "reason": "Tensile precompiled GEMM (.co assembly)",
+  "method": "gate_non_patchable"
+}
+```
+
+A kernel that passed the gate but matched nothing in the index also has no
+location, but `kind` stays empty because no category applied. Only the `method`
+distinguishes this case from the one above:
+
+```json
+{
+  "source_file": "",
+  "line": null,
+  "framework": "",
+  "patchable": false,
+  "kind": "",
+  "reason": "no live match",
+  "method": "unresolved"
+}
+```
 
 ## Stage 1: The patchability gate
 
@@ -139,12 +208,12 @@ that cannot exist.
 The gate matches on the kernel name and, when supplied, the launching op name and
 the call stack. It rejects these categories:
 
-| Category | How it's recognized | `kind` |
-|---|---|---|
-| Tensile GEMM | name starts with `Cijk_` (precompiled assembly) | `tensile_precompiled` |
-| MIOpen convolution | op name contains `miopen` | `miopen_precompiled` |
-| Inductor Triton | `torch.compile` name (`triton_poi_`, `triton_red_`, …) or a call-stack frame in the inductor cache | `triton_inductor_generated` |
-| Composable Kernel | the `ck::` / `ck_tile::` namespace in the (demangled) name | `aiter_ck` |
+| Category | How it's recognized | Reasoning | Return symbol |
+|---|---|---|---|
+| Tensile GEMM | name starts with `Cijk_` | Ships as prebuilt assembly inside a `.co` code object, so no device source for it exists in the installed tree. | `tensile_precompiled` |
+| MIOpen convolution | op name contains `miopen` | The convolution kernels are compiled into the library ahead of time, so nothing in the source tree defines them. | `miopen_precompiled` |
+| Inductor Triton | `torch.compile` name (`triton_poi_`, `triton_red_`, …) or a call-stack frame in the inductor cache | Written out to a compile cache at run time and regenerated on the next compile, so an edit would not survive. | `triton_inductor_generated` |
+| Composable Kernel | the `ck::` / `ck_tile::` namespace in the (demangled) name | The kernel is a C++ template instantiation, so there is no single `__global__` definition to edit. | `aiter_ck` |
 
 MIOpen is the only category matched on the launching op name, because the device
 kernel names MIOpen emits vary too much to match reliably. Tensile and Composable
@@ -180,15 +249,14 @@ that defines it:
 3. Rank the candidates. When several files define the same name, TraceLens
    prefers a path containing the value of `TRACELENS_TARGET_ARCH`, a
    case-insensitive substring match against the full path, so an architecture
-   directory such as `gfx942` selects the matching variant — and then the
-   shortest path.
+   directory such as `gfx942` selects the matching variant. If there are multiple matches, the shortest path is chosen as a tiebreaker.
 4. Verify the symbol is present. TraceLens opens the top candidate and confirms
    the name appears in the file, guarding against a stale index.
 5. Check editability. The path must be an editable source (see
    [What counts as editable](#what-counts-as-editable)).
 
-On success the result has `method = "symbol_index"` and the resolved file, plus a
-line when known. On a miss the result is `unresolved`.
+On success the result has `method = "symbol_index"` and the resolved file, plus
+the line number when known. On a miss the result is `unresolved`.
 
 ## Stage 3: Triton source resolution
 
@@ -206,9 +274,11 @@ For the full set of Triton trace fields by version, see
 When the field is present, TraceLens:
 
 1. Reads the file path out of that string.
-2. Checks the path is durable source. A path inside a compile cache or under
-   `/tmp` holds generated code with no durable definition, so the result is
-   non-patchable with `method = gate_non_patchable`.
+2. Checks whether the kernel's source is editable (see
+   [What counts as editable](#what-counts-as-editable)). A path inside a compile
+   cache or under `/tmp` holds generated code that is rewritten on the next
+   compile, so the result is non-patchable with
+   `method = gate_non_patchable`.
 3. Pins the definition line. TraceLens parses the `.py` file to locate the
    `@triton.jit` function, so the reported line is the `def` even when the trace
    line number points elsewhere.
@@ -228,7 +298,8 @@ files:
   `triton` are parsed with the AST.
 - Matches are ranked with an exact normalized name match ahead of a partial
   match, and the shortest path ahead of longer ones.
-- Generated Triton paths are excluded by the editability check.
+- Generated and temporary Triton paths are excluded by the editability check
+  (see [What counts as editable](#what-counts-as-editable)).
 
 ## How frameworks are discovered
 
@@ -269,13 +340,19 @@ a change to one does not rebuild the other.
 
 A path is editable when it is:
 
-- Native device code — `.cu`, `.cuh`, `.hip`, `.h`, or `.hpp`.
-- A repository-resident Triton `.py`.
+- Native device code — `.cu`, `.cuh`, `.hip`, `.h`, or `.hpp`. Location does not
+  matter; these are always editable.
+- A Triton `.py` that lives in a repository rather than a cache.
 
-A path is not editable when it is compiler-generated Triton: a file in an
-inductor or compile cache (`torchinductor`, `inductor_cache`,
-`torch_compile_cache`), or any path under `/tmp/`. These are produced at compile
-time and have no durable source to modify.
+A Triton `.py` is not editable when it is:
+
+- inside a `torch.compile` cache, meaning the path contains `torchinductor`,
+  `inductor_cache`, or `torch_compile_cache`, or
+- anywhere under `/tmp/`, whatever produced it.
+
+Both are rewritten on the next compile, so an edit would not survive. For
+example, `/workspace/vllm/vllm/model_executor/layers/fused_moe/fused_moe.py` is
+editable, while `/tmp/torchinductor_root/cx/cabc123.py` is not.
 
 ## Environment variables
 
