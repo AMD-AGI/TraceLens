@@ -284,7 +284,7 @@ time and have no durable source to modify.
 | `TRACELENS_TARGET_ARCH` | Any string matched against candidate paths, typically an architecture directory name such as `gfx942` or `gfx950`. Unset by default. | Prefers candidate files whose path contains this value during native ranking, as a case-insensitive substring match. |
 | `TRACELENS_KSI_CACHE_DIR` | A directory path. | Relocates the on-disk index cache. Defaults to a per-user subdirectory of the system temp directory, for example `/tmp/tracelens_ksi_1000/`. |
 | `TRACELENS_FRAMEWORK_SOURCE_ROOTS` | Comma-separated `name=path` pairs, for example `vllm=/workspace/vllm,aiter=/workspace/aiter`. Each path must be an existing directory. | Points a named framework at an explicit source root. Use it when the source is not under `site-packages`, such as a development checkout or a container mount. An entry takes precedence for that framework; auto-discovery still runs for every other package. |
-| `TRACELENS_DISCOVER_ONLY` | Comma-separated framework names, case-insensitive, for example `vllm,aiter`. The known names are `vllm`, `sglang`, `aiter`, and `atom`; an auto-detected package name is also valid. | Restricts discovery to the listed names. It filters both the known frameworks and the auto-detected packages, so it narrows the discovered set rather than replacing it. Unset means no filtering. |
+| `TRACELENS_DISCOVER_ONLY` | Comma-separated framework names, case-insensitive, for example `vllm,aiter`. The known names are `vllm`, `sglang`, `aiter`, and `atom`; an auto-detected package name is also valid. | Restricts discovery to the listed names. It can only shrink the set of frameworks found, never add to it. Unset means no filtering. |
 
 ## Related topics
 
