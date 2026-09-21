@@ -1398,7 +1398,7 @@ class TestTreePerfCollectPhase12:
         assert synthetic_ops, "expected an orphan-launcher synthetic op to be created"
         for synthetic_op in synthetic_ops:
             assert synthetic_op["UID"] in analyzer.tree.events_by_uid
-            analyzer.tree.get_UID2event(synthetic_op["UID"])
+            assert analyzer.tree.get_UID2event(synthetic_op["UID"]) is synthetic_op
 
 
 @pytest.mark.skipif(not os.path.isfile(RESNET_TRACE), reason="resnet trace missing")
