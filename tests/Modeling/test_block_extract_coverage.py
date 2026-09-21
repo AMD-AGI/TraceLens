@@ -44,7 +44,6 @@ from TraceLens.ModelUtils.block_tree import (
     collect_parallel_gate_wrappers,
     components_from_registry,
     gated_norm_activation,
-    gated_norm_tile_label,
     inline_block_frame_label,
     inline_composite_steps,
     is_basic_op_tile,
@@ -602,19 +601,21 @@ def test_wrapper_labels_comments_and_purpose():
 
 
 def test_gated_norm_and_tile_helpers():
+    from TraceLens.ModelUtils.ast_analyze import GATE_ACTIVATION_DETAIL_PREFIX
+
     gated = node(
         "norm",
         "FusedRMSNormGated",
         role="norm",
         label="Norm",
         basic=False,
-        details=["SiLU"],
+        details=[f"{GATE_ACTIVATION_DETAIL_PREFIX}SiLU"],
     )
-    assert gated_norm_tile_label(gated) == "RMSNorm"
     assert gated_norm_activation(gated) == "SiLU"
+    # No resolved-activation tag -> None (no class-name guess).
     assert (
         gated_norm_activation(node("norm", "SomeNormGated", role="norm", basic=False))
-        == "Sigmoid"
+        is None
     )
     assert is_simple_modeled_tile(gated)
     assert is_basic_op_tile(gated)
@@ -1046,8 +1047,8 @@ def test_bypass_span_detection_and_pipeline_exclusions():
                 ]
             },
             {"g_proj": "SiLU"},
-            "FusedRMSNormGated",
             None,
+            "Sigmoid",
             ["Linear", "SiLU(linear out)", "norm(attn_out) × gate → norm"],
         ),
         (
@@ -1057,9 +1058,21 @@ def test_bypass_span_detection_and_pipeline_exclusions():
                 ]
             },
             {},
-            "FusedRMSNormGated",
+            None,
             "Tanh",
             ["Linear", "Tanh inside norm", "norm(attn_out) × gate"],
+        ),
+        (
+            # A gated-norm class name with no resolved activation is a plain feed.
+            {
+                "norm": [
+                    SideInputSpec("gate", "g", ["g_proj"], source_kind="prior_step")
+                ]
+            },
+            {"g_proj": "SiLU"},
+            "FusedRMSNormGated",
+            None,
+            ["Linear", "SiLU(linear out)", "feeds norm port 'g'"],
         ),
         (
             {

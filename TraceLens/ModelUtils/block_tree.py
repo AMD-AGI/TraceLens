@@ -8,12 +8,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from TraceLens.ModelUtils.ast_analyze import (
     FORWARD_METHOD_INPUT,
+    GATE_ACTIVATION_DETAIL_PREFIX,
     LAYOUT_ONLY_LABELS,
     SYNTHETIC_ATTENTION,
     SYNTHETIC_GATE_ACTIVATION,
@@ -55,6 +57,8 @@ from TraceLens.ModelUtils.blocks import (
     input_sources_from_forward_sequence,
     upstream_input_sources,
 )
+
+_log = logging.getLogger(__name__)
 
 _SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "Buffer", "getattr"})
 
@@ -145,6 +149,10 @@ def block_purpose(node: BlockNode) -> str | None:
             # ``raw_op: <name>`` is machine metadata for the type-check (lifted to
             # its own node attr at export), never a human-facing description.
             and not cleaned.startswith("raw_op:")
+            # ``gate activation: <name>`` is structured metadata resolved at
+            # init time and consumed by ``gated_norm_activation`` to key the
+            # structural gated-norm purpose below; not a human-facing purpose.
+            and not cleaned.startswith(GATE_ACTIVATION_DETAIL_PREFIX)
         ):
             if _FUNCTIONAL_CALL_DETAIL_RE.match(cleaned):
                 continue
@@ -172,8 +180,8 @@ def block_purpose(node: BlockNode) -> str | None:
         match = re.match(r"(?i)si[tl]u", class_name)
         stem = class_name[: match.end()] if match else "SiLU"
         return f"{stem}(gate) × up branch"
-    if class_name == "FusedRMSNormGated":
-        return "RMSNorm, then multiply by gate"
+    if role == "norm" and gated_norm_activation(node):
+        return "Normalize, then multiply by gate"
     if class_name == "Split" or node.attr_name == "split_gate_up":
         return "Split fused gate/up projection"
     if class_name in {"ActivationOp", "SituActivation"}:
@@ -1250,15 +1258,15 @@ def _output_gate_details(
 
     lines: list[str] = ["Linear"]
 
-    if consumer_class == "FusedRMSNormGated" or (
-        consumer and "Gated" in (consumer_class or "")
-    ):
+    # Structural signal, not the consumer's class name: the consumer is a gated
+    # norm exactly when the extractor resolved a gate activation for it. An
+    # unresolved gate is left unlabelled rather than defaulting to a guess.
+    if norm_gate_activation is not None:
         if inline_activation:
             lines.append(f"{inline_activation}(linear out)")
             lines.append(f"norm(attn_out) × gate → {consumer or 'o_norm'}")
         else:
-            activation = norm_gate_activation or "Sigmoid"
-            lines.append(f"{activation} inside {consumer or 'o_norm'}")
+            lines.append(f"{norm_gate_activation} inside {consumer or 'o_norm'}")
             lines.append("norm(attn_out) × gate")
     elif inline_activation:
         lines.append(f"{inline_activation}(linear out)")
@@ -1538,36 +1546,21 @@ def side_producer_has_activation(producer: BlockNode) -> bool:
     return False
 
 
-def is_gated_norm_module(node: BlockNode) -> bool:
-    """True for fused RMS/Layer norms that combine normalization with a gate input."""
-    class_name = node.class_name or ""
-    if class_name == "FusedRMSNormGated":
-        return True
-    return node.role == "norm" and bool(
-        re.search(r"Fused.*Gated|Gated.*Norm|NormGated", class_name, re.I)
-    )
-
-
-def gated_norm_tile_label(node: BlockNode) -> str:
-    """Norm operator label for a gated norm decomposed into norm then multiply."""
-    class_name = node.class_name or ""
-    if "Layer" in class_name and "Norm" in class_name:
-        return "LayerNorm"
-    if "RMS" in class_name or re.search(r"RMSNorm", class_name, re.I):
-        return "RMSNorm"
-    return "RMSNorm"
-
-
 def gated_norm_activation(node: BlockNode) -> str | None:
-    """Return the gate activation applied inside a gated norm module, if known."""
-    known = {"Sigmoid", "SiLU", "GELU", "Tanh", "ReLU", "Silu", "Gelu"}
+    """Return the gate activation applied inside a gated norm module, if resolved.
+
+    The activation is read structurally from the tag the extractor writes once it
+    has resolved the name generically -- from the module's ``activation=`` kwarg or
+    its own ``ACT2FN[self.<x>]`` init/config symbol table (see
+    ``ast_analyze._gated_norm_activation_from_forward``). The class name is never
+    consulted, and an unresolved gate is left ``None`` rather than defaulting to a
+    guessed activation.
+    """
     for detail in node.details:
-        if detail in known:
-            return detail
-    if node.class_name == "FusedRMSNormGated" or re.search(
-        r"NormGated", node.class_name or "", re.I
-    ):
-        return "Sigmoid"
+        if detail.startswith(GATE_ACTIVATION_DETAIL_PREFIX):
+            resolved = detail[len(GATE_ACTIVATION_DETAIL_PREFIX) :].strip()
+            if resolved:
+                return resolved
     return None
 
 
@@ -2140,6 +2133,26 @@ def build_block_node(
     visited = visited or frozenset()
     role = _classify_role(attr_name, class_name)
     label = _label_for_call(attr_name, class_name)
+
+    # A gated norm whose class lives in the registry (its forward is available)
+    # carries a generically-resolved gate activation; surface it as the tagged
+    # detail so a leaf-rendered gated norm reports its activation without any
+    # class-name matching. Modules constructed with an ``activation=`` kwarg
+    # already carry the tag via ``details`` from the parent's init extraction.
+    _registered = registry.get(class_name)
+    if (
+        role == "norm"
+        and _registered is not None
+        and _registered.gate_activation
+        and not any(
+            detail.startswith(GATE_ACTIVATION_DETAIL_PREFIX)
+            for detail in (details or [])
+        )
+    ):
+        details = [
+            *(details or []),
+            f"{GATE_ACTIVATION_DETAIL_PREFIX}{_registered.gate_activation}",
+        ]
 
     if attr_name == SYNTHETIC_ATTENTION:
         step_details = list(details or [])

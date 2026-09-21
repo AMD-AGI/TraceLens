@@ -11,10 +11,13 @@ from __future__ import annotations
 import ast
 import copy
 import importlib.util
+import logging
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
+
+_log = logging.getLogger(__name__)
 
 from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis
 from TraceLens.ModelUtils.config_resolve import apply_config_attribute_aliases
@@ -474,6 +477,27 @@ _ACTIVATION_DISPLAY_NAMES = {
     "linear": "Identity",
 }
 _ACTIVATION_LEAF_CLASS_NAMES = frozenset(_ACTIVATION_DISPLAY_NAMES.values())
+
+# A gated norm's gate activation, once resolved generically from the module's
+# constructor kwarg or its own init/config symbol table, is stored on the node as
+# a tagged detail with this prefix. Consumers read the resolved value structurally
+# from the tag instead of matching detail text against a hardcoded activation set.
+GATE_ACTIVATION_DETAIL_PREFIX = "gate activation: "
+
+
+def _display_activation_name(raw: str) -> str:
+    """Canonical display name for an activation registry key (``silu`` -> ``SiLU``).
+
+    Resolves through the shared activation registry so every path (constructor
+    ``activation=`` kwarg, ``ACT2FN[self.x]`` forward reads) renders the same name;
+    an unknown key title-cases as a best-effort label rather than being dropped.
+    """
+    lowered = raw.strip().lower()
+    if lowered in _ACTIVATION_DISPLAY_NAMES:
+        return _ACTIVATION_DISPLAY_NAMES[lowered]
+    if lowered in _GATE_ACTIVATION_NAMES:
+        return _GATE_ACTIVATION_NAMES[lowered]
+    return raw.strip().replace("_", " ").title().replace(" ", "")
 FORWARD_OPERATION_PREFIX = "@op_"
 # Stands for the value a helper method receives, so operations reading its parameter
 # resolve to whatever feeds the chain the method is inlined into.
@@ -2140,6 +2164,10 @@ class ClassStructure:
     parallel_gates: list[str] = field(default_factory=list)
     input_fed_calls: list[str] = field(default_factory=list)
     gate_activations: dict[str, str] = field(default_factory=dict)
+    # Display name of the gate activation a *gated norm* applies to its gate input
+    # (``normalized * ACT2FN[self.activation](gate)``), resolved generically from
+    # this class's own init/config symbol table. ``None`` for a plain norm.
+    gate_activation: str | None = None
     forward_step_details: dict[str, list[str]] = field(default_factory=dict)
     side_inputs: dict[str, list[SideInputSpec]] = field(default_factory=dict)
     init_assignment_options: dict[str, list[str]] = field(default_factory=dict)
@@ -6366,6 +6394,12 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         }
                     )
 
+        # Structural (never class-name keyed): resolves an activation only when the
+        # forward actually gates the normalized result through an activation
+        # registry; a plain norm returns ``None``.
+        gate_activation = _gated_norm_activation_from_forward(
+            forward_func, init_func, self._config_for_class(node.name)
+        )
         self.classes[node.name] = ClassStructure(
             name=node.name,
             node=node,
@@ -6378,6 +6412,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             parallel_gates=parallel_gates,
             input_fed_calls=input_fed_calls,
             gate_activations=gate_activations,
+            gate_activation=gate_activation,
             forward_step_details=forward_step_details,
             side_inputs=side_inputs,
             forward_input_name=forward_input_name,
@@ -6806,9 +6841,13 @@ def _assignment_details(node: ast.AST, class_name: str) -> list[str]:
                 details.append(f"{keyword.arg}={value}")
         if keyword.arg == "activation" and _is_literal(keyword.value):
             raw = ast.literal_eval(keyword.value)
-            if isinstance(raw, str):
+            if isinstance(raw, str) and raw.strip():
+                # A gate activation selected by a constructor kwarg
+                # (``FusedRMSNormGated(..., activation='sigmoid')``). Tag it so a
+                # consumer recovers the resolved name structurally, without
+                # re-matching the detail text against an activation name set.
                 details.append(
-                    _GATE_ACTIVATION_NAMES.get(raw.lower(), raw.capitalize())
+                    f"{GATE_ACTIVATION_DETAIL_PREFIX}{_display_activation_name(raw)}"
                 )
 
     if re.search(r"SharedExpert|shared", class_name, re.I):
@@ -7917,6 +7956,70 @@ def _parallel_gate_activation(func: ast.FunctionDef, gate_attr: str) -> str | No
                     return activation
             if isinstance(inner, ast.Name) and inner.id in gate_vars:
                 return activation
+    return None
+
+
+def _gated_norm_activation_from_forward(
+    forward: ast.FunctionDef | None,
+    init_func: ast.FunctionDef | None,
+    config: dict[str, Any] | None,
+) -> str | None:
+    """Resolve the gate activation of a *gated norm* module from its forward AST.
+
+    Structural signal (no class-name matching): the forward multiplies its
+    normalized result by a gate argument passed through an activation registry,
+    i.e. ``normalized * ACT2FN[self.<x>](<gate>)``. The activation key ``self.<x>``
+    is resolved generically against the module's own init/config symbol table
+    (``self.activation = "silu"`` or ``self.activation = config.<y>``). Returns the
+    display name, or ``None`` when the module is not a gated norm. When the gate
+    pattern *is* present but the key cannot be resolved, warns rather than guessing.
+    """
+    if forward is None:
+        return None
+    self_values = _self_config_values(init_func, config or {})
+    forward_params = _forward_input_names(forward)
+
+    def _resolve_registry_call(call: ast.Call) -> tuple[bool, str | None]:
+        """(*is_gate_activation_call*, *display_name_or_None*) for ``ACT2FN[...](gate)``."""
+        func_node = call.func
+        if not isinstance(func_node, ast.Subscript):
+            return False, None
+        registry = (_expr_name(func_node.value) or "").rsplit(".", 1)[-1]
+        if registry not in _ACTIVATION_REGISTRY_NAMES:
+            return False, None
+        # The activated tensor must trace back to a forward argument (the gate),
+        # not to the normalized main path -- that is what makes this a *gate*
+        # activation rather than an ordinary activation on the hidden states.
+        if not any(
+            isinstance(name, ast.Name) and name.id in forward_params
+            for arg in call.args
+            for name in ast.walk(arg)
+        ):
+            return False, None
+        resolved = _config_value(func_node.slice, config or {}, self_values)
+        if isinstance(resolved, str) and resolved.strip():
+            return True, _display_activation_name(resolved)
+        return True, None
+
+    pattern_present = False
+    for node in ast.walk(forward):
+        if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult)):
+            continue
+        for operand in (node.left, node.right):
+            if not isinstance(operand, ast.Call):
+                continue
+            is_gate_call, display = _resolve_registry_call(operand)
+            if not is_gate_call:
+                continue
+            if display is not None:
+                return display
+            pattern_present = True
+    if pattern_present:
+        _log.warning(
+            "gated norm %s applies a gate activation whose key could not be "
+            "resolved from its init/config symbol table; leaving it unlabelled",
+            getattr(forward, "name", "forward"),
+        )
     return None
 
 

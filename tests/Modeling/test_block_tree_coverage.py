@@ -41,7 +41,6 @@ from TraceLens.ModelUtils.block_tree import (
     collect_parallel_gate_wrappers,
     components_from_registry,
     gated_norm_activation,
-    gated_norm_tile_label,
     inline_block_frame_label,
     inline_composite_steps,
     is_basic_op_tile,
@@ -405,18 +404,25 @@ def test_side_producer_has_activation_false_for_non_gate():
     assert not bt.side_producer_has_activation(node("x", "Linear"))
 
 
-def test_is_gated_norm_module_variants():
-    assert bt.is_gated_norm_module(node("n", "FusedRMSNormGated", role="norm"))
-    assert bt.is_gated_norm_module(node("n", "SomethingNormGated", role="norm"))
-    assert not bt.is_gated_norm_module(node("n", "RMSNorm", role="norm"))
+def test_gated_norm_activation_reads_resolved_tag():
+    # Resolved generically at extraction and carried on the node as a tag; the
+    # class name is never consulted.
+    from TraceLens.ModelUtils.ast_analyze import GATE_ACTIVATION_DETAIL_PREFIX
+
+    gated = node(
+        "n",
+        "AnyNorm",
+        role="norm",
+        basic=False,
+        details=[f"{GATE_ACTIVATION_DETAIL_PREFIX}SiLU"],
+    )
+    assert bt.gated_norm_activation(gated) == "SiLU"
 
 
-def test_gated_norm_tile_label_layernorm():
-    assert bt.gated_norm_tile_label(node("n", "FusedLayerNormGated", role="norm")) == "LayerNorm"
-    assert bt.gated_norm_tile_label(node("n", "Weird", role="norm")) == "RMSNorm"
-
-
-def test_gated_norm_activation_none():
+def test_gated_norm_activation_none_without_tag():
+    # No resolved activation -> None (no class-name guess / Sigmoid default).
+    assert bt.gated_norm_activation(node("n", "FusedRMSNormGated", role="norm")) is None
+    assert bt.gated_norm_activation(node("n", "SomethingNormGated", role="norm")) is None
     assert bt.gated_norm_activation(node("n", "RMSNorm", role="norm")) is None
 
 
@@ -857,19 +863,21 @@ def test_wrapper_labels_comments_and_purpose():
 
 
 def test_gated_norm_and_tile_helpers():
+    from TraceLens.ModelUtils.ast_analyze import GATE_ACTIVATION_DETAIL_PREFIX
+
     gated = node(
         "norm",
         "FusedRMSNormGated",
         role="norm",
         label="Norm",
         basic=False,
-        details=["SiLU"],
+        details=[f"{GATE_ACTIVATION_DETAIL_PREFIX}SiLU"],
     )
-    assert gated_norm_tile_label(gated) == "RMSNorm"
     assert gated_norm_activation(gated) == "SiLU"
+    # No resolved-activation tag -> None, never a class-name guess.
     assert (
         gated_norm_activation(node("norm", "SomeNormGated", role="norm", basic=False))
-        == "Sigmoid"
+        is None
     )
     assert is_simple_modeled_tile(gated)
     assert is_basic_op_tile(gated)
@@ -1122,12 +1130,19 @@ def test_bypass_span_detection_and_pipeline_exclusions():
     ("side_inputs", "activations", "consumer_class", "norm_activation", "expected"),
     [
         ({}, {}, None, None, ["Linear", "output gate for normalized branch"]),
+        # A gated-norm consumer is recognised structurally: it resolved a gate
+        # activation (``norm_activation``), regardless of its class name.
         ({"norm": [SideInputSpec("gate", "g", ["g_proj"], "prior_step")]},
-         {"g_proj": "SiLU"}, "FusedRMSNormGated", None,
+         {"g_proj": "SiLU"}, None, "Sigmoid",
          ["Linear", "SiLU(linear out)", "norm(attn_out) × gate → norm"]),
         ({"norm": [SideInputSpec("gate", "g", ["g_proj"], "prior_step")]},
-         {}, "FusedRMSNormGated", "Tanh",
+         {}, None, "Tanh",
          ["Linear", "Tanh inside norm", "norm(attn_out) × gate"]),
+        # No resolved norm activation -> treated as a plain gate feed, never a
+        # gated-norm description defaulted from the class name.
+        ({"norm": [SideInputSpec("gate", "g", ["g_proj"], "prior_step")]},
+         {"g_proj": "SiLU"}, "FusedRMSNormGated", None,
+         ["Linear", "SiLU(linear out)", "feeds norm port 'g'"]),
         ({"consumer": [SideInputSpec("gate", "gate", ["g_proj"], "prior_step")]},
          {"g_proj": "Sigmoid"}, "Linear", None,
          ["Linear", "Sigmoid(linear out)", "feeds consumer port 'gate'"]),
@@ -1388,9 +1403,21 @@ def test_detail_tree_builder_skips_method_wrappers_and_non_pipeline_items():
 # --------------------------------------------------------------------------- #
 # Second batch: remaining targeted branches.
 # --------------------------------------------------------------------------- #
-def test_block_purpose_fused_rms_norm_gated():
-    n = node("norm", "FusedRMSNormGated", role="norm", basic=False, details=["method `x()`"])
-    assert bt.block_purpose(n) == "RMSNorm, then multiply by gate"
+def test_block_purpose_gated_norm_is_structural():
+    from TraceLens.ModelUtils.ast_analyze import GATE_ACTIVATION_DETAIL_PREFIX
+
+    # Recognised by the resolved gate-activation tag, not the class name.
+    n = node(
+        "norm",
+        "AnyNorm",
+        role="norm",
+        basic=False,
+        details=[f"{GATE_ACTIVATION_DETAIL_PREFIX}Sigmoid"],
+    )
+    assert bt.block_purpose(n) == "Normalize, then multiply by gate"
+    # A gated-norm class name alone (no resolved activation) is not enough.
+    plain = node("norm", "FusedRMSNormGated", role="norm", basic=False)
+    assert bt.block_purpose(plain) != "Normalize, then multiply by gate"
 
 
 def test_forward_operation_count_and_subgraph_warrants():

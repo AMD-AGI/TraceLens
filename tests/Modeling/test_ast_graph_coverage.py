@@ -1172,10 +1172,13 @@ class BranchBlock:
         "act_fn": "SiLU",
         "proj": "Linear",
     }
+    # The ``activation=`` constructor kwarg is resolved to a display name and
+    # tagged with the gate-activation prefix so a consumer (e.g. a gated norm)
+    # can recover it structurally without re-matching against an activation set.
     assert info.init_details["shared"] == [
         "num_experts=4",
         "top_k=2",
-        "Sigmoid",
+        "gate activation: Sigmoid",
         "shared expert path",
     ]
     # ``proj`` (3 sequential calls) and ``shared`` (2 sequential calls) are
@@ -1200,6 +1203,71 @@ class BranchBlock:
     )
     # ``side_inputs`` is keyed by the base attr (call sites merged).
     assert info.side_inputs["shared"][0].source_kind == "forward_input"
+
+
+def test_gated_norm_activation_resolved_from_init_constant():
+    """A gated norm's activation is recovered generically from its own init.
+
+    Structural signal only: ``normalized * ACT2FN[self.<x>](gate)`` in forward,
+    with ``self.<x>`` bound to a string literal in ``__init__`` -- no class-name
+    matching and no hardcoded activation set.
+    """
+    source = """
+class GatedNorm:
+    def __init__(self, config):
+        self.act = "silu"
+    def forward(self, hidden_states, gate):
+        normed = hidden_states * 2
+        return normed * ACT2FN[self.act](gate)
+"""
+    registry = aa.build_class_registry(source, config={}, all_tensor_ops=True)
+    assert registry["GatedNorm"].gate_activation == "SiLU"
+
+
+def test_gated_norm_activation_resolved_from_config_key():
+    """The activation key may be ``config.<y>``; resolve it via the config map."""
+    source = """
+class GatedNorm:
+    def __init__(self, config):
+        self.act = config.hidden_act
+    def forward(self, hidden_states, gate):
+        return (hidden_states * 2) * ACT2FN[self.act](gate)
+"""
+    registry = aa.build_class_registry(
+        source, config={"hidden_act": "gelu"}, all_tensor_ops=True
+    )
+    assert registry["GatedNorm"].gate_activation == "GELU"
+
+
+def test_gated_norm_activation_unresolved_warns_not_guesses(caplog):
+    """When the gate pattern is present but the key is unresolvable, warn + None.
+
+    No default (e.g. Sigmoid) is invented -- the module is left unlabelled.
+    """
+    source = """
+class GatedNorm:
+    def __init__(self, config):
+        self.act = config.hidden_act
+    def forward(self, hidden_states, gate):
+        return (hidden_states * 2) * ACT2FN[self.act](gate)
+"""
+    with caplog.at_level("WARNING"):
+        registry = aa.build_class_registry(source, config={}, all_tensor_ops=True)
+    assert registry["GatedNorm"].gate_activation is None
+    assert any("could not be resolved" in rec.message for rec in caplog.records)
+
+
+def test_gated_norm_activation_absent_for_plain_norm():
+    """A norm without the gate-multiply pattern has no gate activation."""
+    source = """
+class PlainNorm:
+    def __init__(self, config):
+        self.act = "silu"
+    def forward(self, hidden_states):
+        return hidden_states * 2
+"""
+    registry = aa.build_class_registry(source, config={}, all_tensor_ops=True)
+    assert registry["PlainNorm"].gate_activation is None
 
 
 @pytest.mark.parametrize(
