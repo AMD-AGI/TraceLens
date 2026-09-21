@@ -235,6 +235,7 @@ class TreePerfAnalyzer:
                 capture_trace_filepath,
                 metadata_json_path,
                 profile_filepath,
+                graph_tree=tree,
             )
 
         return TreePerfAnalyzer(
