@@ -46,13 +46,29 @@ RASTERIZE_EVENT = _event(
         [20879001, 3],  # conics
         [20879001, 4],  # colors  -> CDIM=4
         [20879001],  # opacities
-        [], [], [], [], [],
+        [],
+        [],
+        [],
+        [],
+        [],
         [40, 19, 33],  # isect_offsets [C, tile_h, tile_w]
         [41471966],  # flatten_ids [n_isects]
         [],
     ],
-    ["float", "float", "float", "float", "", "", "Scalar", "Scalar", "Scalar",
-     "int", "int", "Scalar"],
+    [
+        "float",
+        "float",
+        "float",
+        "float",
+        "",
+        "",
+        "Scalar",
+        "Scalar",
+        "Scalar",
+        "int",
+        "int",
+        "Scalar",
+    ],
     ["", "", "", "", "", "", "518", "294", "16", "", "", "False"],
 )
 
@@ -69,11 +85,41 @@ PROJ_NAME = (
 )
 PROJ_EVENT = _event(
     PROJ_NAME,
-    [[718850, 3], [], [718850, 4], [718850, 3], [40, 4, 4], [40, 3, 3],
-     [], [], [], [], [], [], [], [], [718850]],
+    [
+        [718850, 3],
+        [],
+        [718850, 4],
+        [718850, 3],
+        [40, 4, 4],
+        [40, 3, 3],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [718850],
+    ],
     ["float", "", "float", "float", "float", "float"] + ["Scalar"] * 8 + ["float"],
-    ["", "", "", "", "", "", "518", "294", "0.3", "0.01", "1e10", "0.",
-     "False", "False", ""],
+    [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "518",
+        "294",
+        "0.3",
+        "0.01",
+        "1e10",
+        "0.",
+        "False",
+        "False",
+        "",
+    ],
 )
 
 INTERSECT_TILE = (
@@ -86,10 +132,15 @@ INTERSECT_OFFSET = (
 
 class TestGsplatResolution:
     def test_rasterize_resolves(self):
-        assert resolve_perf_model_class("_RasterizeToPixels") is gsplat_rasterize_to_pixels
+        assert (
+            resolve_perf_model_class("_RasterizeToPixels") is gsplat_rasterize_to_pixels
+        )
 
     def test_sh_resolves(self):
-        assert resolve_perf_model_class("_SphericalHarmonics") is gsplat_spherical_harmonics
+        assert (
+            resolve_perf_model_class("_SphericalHarmonics")
+            is gsplat_spherical_harmonics
+        )
 
     def test_projection_resolves_via_matcher(self):
         assert resolve_perf_model_class(PROJ_NAME) is gsplat_projection_ewa_packed
@@ -165,7 +216,10 @@ class TestUpsampleBilinear:
     def test_resolves(self):
         from TraceLens.PerfModel.perf_model import aten_upsample_bilinear
 
-        assert resolve_perf_model_class("aten::upsample_bilinear2d") is aten_upsample_bilinear
+        assert (
+            resolve_perf_model_class("aten::upsample_bilinear2d")
+            is aten_upsample_bilinear
+        )
 
     def test_output_shape_and_roofline(self):
         cls = resolve_perf_model_class("aten::upsample_bilinear2d")
@@ -180,4 +234,7 @@ class TestUpsampleBilinear:
         assert m.flops() / m.bytes() < 10
 
     def test_categorized_as_elementwise(self):
-        assert categorize_torch_op({"name": "aten::upsample_bilinear2d", "args": {}}) == "elementwise"
+        assert (
+            categorize_torch_op({"name": "aten::upsample_bilinear2d", "args": {}})
+            == "elementwise"
+        )
