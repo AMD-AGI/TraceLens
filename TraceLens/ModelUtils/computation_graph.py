@@ -3600,6 +3600,33 @@ def build_computation_graph(
                 if port_label:
                     graph.nodes[consumer_index].port_label = port_label
                     graph.nodes[consumer_index].port_style = "inline"
+            elif is_situ_gated_mlp(consumer) and inline_expansion:
+                # A fused SiLU/SiTU-and-multiply MLP handed to a side-feed consumer
+                # (e.g. a MoE block's ``shared_experts``) is a gate/up -> Situ x up
+                # -> down pipeline, not a straight line, so ``inline_composite_steps``
+                # leaves it opaque. Expand it into its visible parts exactly as the
+                # residual-branch and root paths do, wired from the consumer's
+                # resolved primary input.
+                primary_input = _resolve_primary_input(
+                    consumer.attr_name,
+                    root,
+                    attr_last_index,
+                    input_index,
+                    last_index,
+                )
+                chain_indices, chain_tail = _add_situ_gated_mlp_chain(
+                    graph,
+                    consumer,
+                    key_prefix=f"sidefeed:{segment_index}:{consumer.attr_name}",
+                    attr_last_index=attr_last_index,
+                    input_index=primary_input,
+                    last_index=None,
+                    port_label=port_label,
+                    port_style="inline" if port_label else None,
+                    create_outer_frame=True,
+                )
+                entry_index = chain_indices[0] if chain_indices else None
+                consumer_index = chain_tail
             else:
                 # A straight-line consumer expands into its own steps here too, so a
                 # side-fed module is not left as an opaque tile with nothing behind it.

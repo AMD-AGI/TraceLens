@@ -1195,6 +1195,43 @@ def test_build_sidefeed_plain_consumer(monkeypatch):
     assert any(s.block is consumer for s in graph.nodes)
 
 
+def test_build_sidefeed_situ_gated_consumer(monkeypatch):
+    # A fused SiLU/SiTU-and-multiply MLP handed to a side-feed consumer (a MoE
+    # block's ``shared_experts``) is a gate/up -> Situ x up -> down pipeline, not a
+    # straight line, so ``inline_composite_steps`` leaves it opaque. The SideFeed
+    # path must expand it into its visible parts (like the residual-branch/root
+    # paths), keyed on the structural ``is_situ_gated_mlp`` property.
+    gate = _node("gate")
+    up = _node("up")
+    act = _node("act", class_name="Activation")
+    situ = _node("situ", class_name="SituActivation")
+    down = _node("down")
+    consumer = _node(
+        "shared_experts", class_name="SituAndMul", children=[gate, up, down]
+    )
+    side = aa.SideInputSpec("x", "x", [], "forward_input")
+    monkeypatch.setattr(cg, "is_situ_gated_mlp", lambda n: n is consumer)
+    monkeypatch.setattr(
+        bt, "_situ_gated_mlp_parts", lambda _n: (gate, up, act, situ, down)
+    )
+    # If the fix ever regresses, ``inline_composite_steps`` returns the consumer
+    # unexpanded and the ``×`` tile is absent.
+    monkeypatch.setattr(
+        cg, "inline_composite_steps", lambda step, basic_ops=None: ([step], None)
+    )
+    monkeypatch.setattr(
+        cg,
+        "flatten_computation_segments",
+        lambda _r: [SideFeedSegment(consumer, [side])],
+    )
+    graph = cg.build_computation_graph(_node("root", children=[consumer]))
+    labels = [s.label for s in graph.nodes]
+    assert "×" in labels
+    # The opaque consumer tile is gone: it expanded into its down projection tail.
+    assert not any(s.block is consumer for s in graph.nodes)
+    assert any(s.block is down for s in graph.nodes)
+
+
 def test_build_combine_wrapper_side_and_after(monkeypatch):
     main = _node("main")
     side_a = _node("side_a")
