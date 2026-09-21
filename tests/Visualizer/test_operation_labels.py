@@ -230,11 +230,15 @@ def test_glm_attention_expand_kv_assembles_key_states_from_split_and_expand():
     nodes = [node for node in graph["nodes"] if "expand_kv" in node["id"]]
     op_nodes = [node for node in nodes if synthetic(node) is None]
 
-    # ``expand_kv`` splits ``kv_nope`` and expands ``k_rot``, then assembles
-    # ``key_states`` with two in-place ``copy_`` writes into slices. Those copies
-    # are the real consumers of the Split and Expand — without them modelled, both
-    # dangle with no consumer. This makes the block a genuine (branchy) assembly.
+    # ``expand_kv`` projects ``kv_nope`` through ``kv_b_proj``, splits it and
+    # expands ``k_rot``, then assembles ``key_states`` with two in-place
+    # ``copy_`` writes into slices. Those copies are the real consumers of the
+    # Split and Expand — without them modelled, both dangle with no consumer.
+    # This makes the block a genuine (branchy) assembly. ``kv_b_proj`` itself
+    # is a real, materialised submodule call (not a dangling reference), so it
+    # is the block's genuine first step.
     assert [node["label"] for node in op_nodes] == [
+        "Linear",
         "View",
         "Transpose",
         "Split",

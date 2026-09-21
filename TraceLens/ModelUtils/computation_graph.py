@@ -267,6 +267,34 @@ def _build_module_param_ordinal_entries(
     return result
 
 
+def _module_param_entries_for_step(
+    step_node: "BlockNode",
+    block_index_by_id: dict[int, int],
+) -> dict[str, int]:
+    """Map a real recursively-expanded submodule's own params to their entry op.
+
+    :func:`_build_module_param_entries` only indexes ``graph.inline_frames``
+    (a free-function frame or other "linear composite" splice). A genuine
+    submodule (``MiniMaxM3VLExperts``, expanded as its own namespace with real
+    ``@input``/``@output`` boundary tiles, not spliced inline) reads its own
+    secondary forward parameter directly in one of its descendant ops
+    (``F.one_hot(top_k_index, ...)``) with no entry there at all, so that arg
+    would otherwise fall back to the module's generic first entry point
+    (``torch.zeros_like(hidden_states)``) -- misattributing the edge onto an op
+    that never reads it and leaving the real reader orphaned. Walk the
+    module's own descendant ops (mirroring how :func:`_first_graph_index_for_module`
+    finds its single first op) and index every one's ``param_inputs``.
+    """
+    entries: dict[str, int] = {}
+    for step in collect_function_steps(step_node):
+        index = block_index_by_id.get(id(step))
+        if index is None:
+            continue
+        for param in step.param_inputs:
+            entries.setdefault(param, index)
+    return entries
+
+
 def _resolve_primary_input(
     consumer_attr: str,
     root: "BlockNode",
@@ -379,6 +407,52 @@ def _lookup_param_entry(
         if _normalize_param_name(param) == normalized:
             return index
     return default
+
+
+def _positional_alias_for_arg_name(
+    arg_name: str,
+    arg_map: dict[str, str],
+    callee_param_names: list[str],
+) -> str | None:
+    """Resolve a call argument to the callee's own parameter name at that position.
+
+    ``arg_map`` keys are the CALLER's local variable names, in call-site
+    argument order (built positionally, then by keyword, in
+    ``_ForwardOperationExtractor`` / ``ast_analyze.py``). A real submodule call
+    whose own ``forward()`` names a parameter differently
+    (``self.experts(hidden_states, selected_experts, routing_weights)`` calling
+    ``Experts.forward(self, hidden_states, top_k_index, top_k_weights)``)
+    leaves a name-based ``param_entries`` lookup (keyed by the callee's own
+    parameter names) with no match for ``selected_experts``/``routing_weights``.
+    Recover it structurally, by call position, instead of renaming ``arg_map``
+    itself -- other lookups depend on it staying keyed by the caller's own
+    local variable names (e.g. a locally reassigned name such as
+    ``query_states = self.q_norm(query_states)``).
+
+    Requires the call site to pass no MORE arguments than the callee's own
+    forward declares. A caller may legitimately supply fewer than the
+    callee's full parameter list (a trailing defaulted parameter such as
+    ``unsqueeze_dim=1`` is never threaded through ``arg_map`` at all), so
+    positional alignment still holds when ``arg_map`` is shorter. But a
+    caller that threads an EXTRA side value the callee never names as its
+    own parameter (a repeated block group's forward is called with
+    ``hidden_states, cu_seqlens, position_embeddings`` -- 3 declared params
+    -- while ``max_seqlen`` also rides along in ``arg_map`` because it
+    shares a producer with ``cu_seqlens``) has no real positional
+    correspondence at all: aligning by index would walk the extra name onto
+    whichever parameter happens to occupy that slot, misattributing the edge
+    onto an unrelated op instead of leaving it at the module's real entry
+    point.
+    """
+    if len(arg_map) > len(callee_param_names):
+        return None
+    try:
+        position = list(arg_map.keys()).index(arg_name)
+    except ValueError:
+        return None
+    if position < len(callee_param_names):
+        return callee_param_names[position]
+    return None
 
 
 def _lookup_ordinal_entries(
@@ -845,6 +919,10 @@ def _wire_all_predecessor_edges(
             arg_map = pred_arg_maps.get(step_attr, {})
             ordinal_map = pred_ordinal_maps.get(step_attr, {})
             param_entries = module_param_entries.get(step_attr, {})
+            if not param_entries:
+                param_entries = _module_param_entries_for_step(
+                    step_node, block_index_by_id
+                )
             param_ordinal_entries = module_param_ordinal_entries.get(step_attr, {})
             entry_params = _first_op_entry_params(step_node)
             multi = len(preds) >= 2
@@ -898,6 +976,7 @@ def _wire_all_predecessor_edges(
                 # When the predecessor is a multi-return module, resolve the
                 # arg name to the specific return-slot producer so the edge
                 # starts from the correct pipeline node.
+                ordinal_slot_resolved = False
                 if arg_name and source_index is not None:
                     pred_node = steps_by_attr.get(pred)
                     if pred_node is not None and pred_node.forward_return_slots:
@@ -907,6 +986,30 @@ def _wire_all_predecessor_edges(
                             attr_last_index,
                             source_index,
                         )
+                    # ``pred_node.forward_return_slots`` is keyed by the
+                    # CALLEE's own return-tuple variable names (``q_embed``,
+                    # ``k_embed``); ``arg_name`` here is the CALLER's local
+                    # name for the slot it read (``query_states``,
+                    # ``key_states``), so the lookup above misses for an
+                    # inlined free-function frame (``apply_rotary_pos_emb``)
+                    # and ``source_index`` stays the frame's last op (the
+                    # OTHER slot's producer). ``ordinal_map`` already carries
+                    # this call's own caller-side ordinal for ``arg_name``
+                    # (0 for ``query_states``, 1 for ``key_states``); redirect
+                    # onto that ordinal's real internal producer via
+                    # ``forward_step_return_producers`` -- the same per-slot
+                    # map ``operation_predecessor_ports`` consumers use above
+                    # -- instead of every multi-return-slot consumer reading
+                    # the module-call step (the attention kernel, a Select
+                    # phi, ...) collapsing onto one slot.
+                    if source_index == attr_last_index.get(pred) and arg_name in ordinal_map:
+                        return_producers = block.forward_step_return_producers.get(pred)
+                        ordinal = ordinal_map[arg_name]
+                        if return_producers and 0 <= ordinal < len(return_producers):
+                            resolved = attr_last_index.get(return_producers[ordinal])
+                            if resolved is not None:
+                                source_index = resolved
+                                ordinal_slot_resolved = True
                 # A tuple-unpacked side arg (``position_embeddings`` ->
                 # ``cos, sin`` inside an inline-expanded rope frame) feeds one op
                 # per slot. Fan the producer out to each slot's consumer with its
@@ -979,11 +1082,43 @@ def _wire_all_predecessor_edges(
                     continue
                 # Resolve arg-specific target when the predecessor maps to a
                 # named parameter with its own pipeline entry point.
-                target_index = (
-                    _lookup_param_entry(param_entries, arg_name, default_target)
-                    if arg_name
-                    else default_target
-                )
+                if arg_name:
+                    target_index = _lookup_param_entry(
+                        param_entries, arg_name, default_target
+                    )
+                    if (
+                        target_index == default_target
+                        and arg_name not in param_entries
+                        and _normalize_param_name(arg_name)
+                        not in {_normalize_param_name(p) for p in param_entries}
+                        and len(step_node.forward_param_inputs) > 1
+                    ):
+                        # A caller/callee parameter-name mismatch on a genuine
+                        # multi-parameter submodule call (not this frame's own
+                        # inline steps) -- the name-based lookup above never had
+                        # a chance. Fall back to the callee's own parameter name
+                        # at this call position (see
+                        # ``_positional_alias_for_arg_name``). Restricted to
+                        # callees with more than one of their own forward
+                        # parameters: a single-parameter callee (a norm reading
+                        # only ``hidden_states``) has no positional ambiguity to
+                        # resolve -- its sole argument already belongs at
+                        # ``default_target`` regardless of what the caller
+                        # happened to name it, and redirecting onto whatever
+                        # entry ``param_entries`` (built from the callee's own
+                        # descendant ops) happens to key by that single
+                        # parameter name would misattribute the edge onto an
+                        # arbitrary internal op instead of the module's real
+                        # entry point.
+                        alias = _positional_alias_for_arg_name(
+                            arg_name, arg_map, step_node.forward_param_inputs
+                        )
+                        if alias is not None:
+                            target_index = _lookup_param_entry(
+                                param_entries, alias, default_target
+                            )
+                else:
+                    target_index = default_target
                 # A side arg with no dedicated entry point must not be dumped onto
                 # the module's first op when that op does not read it: the norm at
                 # a block's head takes only ``hidden_states``, and binding
@@ -1018,8 +1153,16 @@ def _wire_all_predecessor_edges(
                 # producer (``k_norm(key_states)`` where ``key_states`` is
                 # ordinal 1 of an ``unbind``) tags its edge with that ordinal so
                 # the producer fans out into one port per consumed slot instead
-                # of docking every consumer onto slot 0.
-                if arg_name is not None and arg_name in ordinal_map:
+                # of docking every consumer onto slot 0. Skip the port tag when
+                # the source was already redirected onto the ordinal's own
+                # per-slot producer above: that producer has a single output,
+                # so tagging it with the tuple ordinal would dangle instead of
+                # naming a real port.
+                if (
+                    arg_name is not None
+                    and arg_name in ordinal_map
+                    and not ordinal_slot_resolved
+                ):
                     graph.link_output_ports[link] = str(ordinal_map[arg_name])
                 if multi and link not in graph.link_port_labels and arg_name:
                     graph.link_port_labels[link] = arg_name
@@ -1420,7 +1563,20 @@ def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
     # each slot reaches its own consumer (``position_embeddings`` port0 -> the
     # ``cos`` unsqueeze, port1 -> the ``sin`` unsqueeze) instead of collapsing
     # onto the first consumer of the whole tensor.
-    param_ordinal_consumers: set[tuple[str, int]] = set()
+    #
+    # A free function called from several independent call sites (e.g.
+    # ``apply_rotary_pos_emb(q, cos, sin)`` invoked once for ``q`` and again for
+    # ``kv``) is expanded into its own inline frame per call site, each reading
+    # the *same* shared ``(param, ordinal)`` boundary slot. Scoping the dedup key
+    # by the node's containing frame keeps those call sites independent so each
+    # one docks its own edge, while still deduping repeats of the same param
+    # within one call site's frame (the original ``one_hot(x).permute(...)``
+    # case this set was built for).
+    frame_of_index: dict[int, str] = {}
+    for frame in graph.inline_frames:
+        for frame_node_index in frame.node_indices:
+            frame_of_index[frame_node_index] = frame.frame_id
+    param_ordinal_consumers: set[tuple[str, str, int]] = set()
     for index, spec in enumerate(list(graph.nodes)):
         block = spec.block
         if block is None or not is_forward_operation(block.attr_name):
@@ -1438,25 +1594,30 @@ def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
                 or incoming_count.get(index, 0) > len(block.operation_predecessors)
             ):
                 continue
-            if ordinal is None:
-                # A nested expression can repeat a parameter on each op it is
-                # extracted into (``one_hot(x).permute(...)``): the outer op's
-                # ``param_inputs`` leaks the reference even though the param
-                # already reaches it through the inner op's own edge. An op
-                # that already has a real activation predecessor owns its
-                # input that way, so skip it here rather than docking a
-                # duplicate boundary edge. An op with *no* activation
-                # predecessor is a genuine, independent reader of the
-                # boundary param (e.g. two unrelated statements each read
-                # ``attention_mask`` directly) and must get its own edge from
-                # the shared boundary tile, however many other ops already
-                # read the same param elsewhere.
-                if block.operation_predecessors:
+            # A nested expression can repeat a parameter on each op it is
+            # extracted into (``one_hot(x).permute(...)``, or a reassigned
+            # tuple-unpack slot like ``cos = cos.repeat_interleave(...)``
+            # immediately followed by ``cos.unsqueeze(...)``): the later op's
+            # ``param_inputs`` leaks the original parameter reference even
+            # though the value already reaches it through the earlier op's own
+            # edge. An op that already has a real activation predecessor owns
+            # its input that way, so skip it here rather than docking a
+            # duplicate boundary edge -- this applies whether or not the
+            # parameter carries a tuple-unpack ordinal. An op with *no*
+            # activation predecessor is a genuine, independent reader of the
+            # boundary param (e.g. two unrelated statements each read
+            # ``attention_mask`` directly, or the ``cos``/``sin`` slot's own
+            # true entry point) and must get its own edge from the shared
+            # boundary tile, however many other ops already read the same
+            # param elsewhere.
+            if block.operation_predecessors:
+                continue
+            if ordinal is not None:
+                scope = frame_of_index.get(index, "")
+                dedup_key = (scope, param, ordinal)
+                if dedup_key in param_ordinal_consumers:
                     continue
-            else:
-                if (param, ordinal) in param_ordinal_consumers:
-                    continue
-                param_ordinal_consumers.add((param, ordinal))
+                param_ordinal_consumers.add(dedup_key)
             source = param_index.get(param)
             if source is None:
                 source = _add_node(
@@ -3085,12 +3246,23 @@ def _strip_dangling_leaves(
     kept_sinks = {graph.primary_output_index, graph.output_node_index}
     kept_sinks.update(graph.output_ports.values())
     kept_sinks.update(graph.loop_carried_nodes.values())
-    # Keep attr_output_indices only for attrs that are referenced as return producers.
+    # Keep attr_output_indices only for attrs that are referenced as return producers
+    # -- either read further downstream by the caller (``referenced_return_producers``)
+    # or bound to one of this module's own ``return a, b, ...`` tuple slots
+    # (``forward_return_slots``). A non-primary tuple slot (e.g. the ``cos`` half of
+    # ``return cos.to(...), sin.to(...)``) has no outgoing graph edge of its own at
+    # this point -- its only consumer is the ``@output`` port wiring that
+    # ``add_forward_output`` performs afterwards -- so without this it would be
+    # indistinguishable from a genuinely dangling leaf and get pruned here.
     referenced = (
         root.referenced_return_producers if root is not None else set()
     )
+    return_producers = (
+        set(root.forward_return_slots.values()) if root is not None else set()
+    )
+    protected_attrs = referenced | return_producers
     for attr, index in graph.attr_output_indices.items():
-        if attr in referenced:
+        if attr in protected_attrs:
             kept_sinks.add(index)
     kept_sinks.discard(None)
 

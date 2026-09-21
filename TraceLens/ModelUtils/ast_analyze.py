@@ -1358,6 +1358,9 @@ def _multi_op_forward_methods(
     dict[str, list[ForwardOperation]],
     dict[str, tuple[dict[str, str], list[str], str | None]],
     dict[str, str],
+    dict[str, dict[str, tuple[str, ...]]],
+    dict[str, list[str]],
+    dict[str, dict[str, dict[str, str]]],
 ]:
     """Forward helper methods with enough tensor operations to expand as a subgraph.
 
@@ -1369,6 +1372,24 @@ def _multi_op_forward_methods(
     parameter name so the frame's ``@input`` boundary is labelled after the
     method's own first parameter. General: read off the method's own signature
     and return statement, no class-name checks.
+
+    Also returns, per method, its full ``step_predecessors`` map -- this covers
+    step names the flattened operation list itself has no entry for (a
+    submodule invoked mid-expression inside the method, recorded only as a bare
+    predecessor NAME on whichever op reads its result), so the block tree can
+    still wire that submodule's own input once it resolves the name against the
+    class's submodule registry and builds it a sibling node.
+
+    Also returns, per method, the TRUE EVALUATION ORDER of its steps (ops *and*
+    any submodule call embedded mid-expression), merging the method's own flat
+    op list with such submodule-call names via ``_forward_calls_in_source_order``
+    -- the same general merge a top-level ``forward()`` gets for its own
+    ``forward_calls`` -- so the block tree can place a materialised submodule
+    child (``act_fn``) in its real position instead of arbitrarily first or
+    last, and each per-step ``step_predecessor_args`` map (arg name -> producer)
+    so that child's input edge resolves through the same
+    ``forward_step_predecessor_args`` mechanism an ordinary nested submodule
+    call already relies on (``_submodule_chain_input``).
     """
     method_funcs = {
         item.name: item for item in class_node.body if isinstance(item, ast.FunctionDef)
@@ -1376,6 +1397,9 @@ def _multi_op_forward_methods(
     expanded: dict[str, list[ForwardOperation]] = {}
     returns: dict[str, tuple[dict[str, str], list[str], str | None]] = {}
     inputs: dict[str, str] = {}
+    step_predecessors: dict[str, dict[str, tuple[str, ...]]] = {}
+    step_order: dict[str, list[str]] = {}
+    step_predecessor_args: dict[str, dict[str, dict[str, str]]] = {}
     for call_attr in forward_calls:
         base = base_submodule_attr(call_attr)
         if (
@@ -1400,6 +1424,30 @@ def _multi_op_forward_methods(
             # Keyed by the base method name; two call sites of the same repeated
             # method resolve here through ``base_submodule_attr`` in the block tree.
             expanded[base] = operations.operations
+            if operations.step_predecessors:
+                step_predecessors[base] = dict(operations.step_predecessors)
+            if operations.step_predecessor_args:
+                step_predecessor_args[base] = dict(operations.step_predecessor_args)
+            # Submodule calls embedded mid-expression (``self.act_fn(gate)``) are
+            # recorded in ``step_predecessors`` but have no entry of their own in
+            # ``operations.operations`` (a submodule call is never a labelled
+            # tensor op). Resolve each such name against this class's own
+            # submodule registry and merge it into the method's op list in true
+            # evaluation order, so the block tree can place the materialised
+            # submodule child correctly relative to its producer/consumer ops.
+            op_attrs = {op.attr_name for op in operations.operations}
+            embedded_submodule_calls = [
+                name
+                for name in operations.step_predecessors
+                if name not in op_attrs
+                and base_submodule_attr(name) in init_assignments
+                and init_assignments[base_submodule_attr(name)]
+                not in _SKIP_INIT_CLASS_NAMES
+            ]
+            if embedded_submodule_calls:
+                step_order[base] = _forward_calls_in_source_order(
+                    func, embedded_submodule_calls, operations.operations
+                )
             primary_input = _primary_forward_input_name(func)
             if primary_input is not None:
                 inputs[base] = primary_input
@@ -1414,7 +1462,7 @@ def _multi_op_forward_methods(
                         list(operations.return_order),
                         operations.primary_return_slot,
                     )
-    return expanded, returns, inputs
+    return expanded, returns, inputs, step_predecessors, step_order, step_predecessor_args
 
 
 def _synthetic_call_function_name(call_attr: str) -> str | None:
@@ -1495,6 +1543,7 @@ def _inline_nested_free_functions(
             self_values=self_values,
             all_tensor_ops=all_tensor_ops,
             module_functions=module_functions,
+            is_free_function_body=True,
         )
         nested_ops = _inline_nested_free_functions(
             nested,
@@ -1615,6 +1664,7 @@ def _multi_op_free_functions(
             self_values=self_values,
             all_tensor_ops=all_tensor_ops,
             module_functions=module_functions,
+            is_free_function_body=True,
         )
         operations = _inline_nested_free_functions(
             analysis,
@@ -2032,6 +2082,12 @@ class ForwardOperation:
     # this operation reads (``producer_attr -> ordinal``), so its edge can attach
     # to the matching output port rather than the whole split.
     predecessor_ports: tuple[tuple[str, int], ...] = ()
+    # For a ``param_inputs`` entry that is a tuple-unpacked alias of a secondary
+    # forward parameter (``cos, sin = position_embeddings``), the origin
+    # parameter's unpack ordinal (``position_embeddings`` -> 0 for ``cos``).
+    # Lets the boundary-input pass dock a per-slot edge instead of collapsing
+    # every alias onto the whole tensor's first consumer.
+    param_input_ordinals: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2119,6 +2175,41 @@ class ClassStructure:
     # (``build_attention_mask_from_topk`` -> ``topk_indices``) instead of falling
     # back to the generic ``hidden_states``.
     multi_op_method_inputs: dict[str, str] = field(default_factory=dict)
+    # For an inline-expanded forward *method*: base method name -> {step name ->
+    # predecessor attrs}, covering every step the method's own body extraction
+    # recorded a predecessor for -- including a submodule invoked mid-expression
+    # inside the method (``self.act_fn(gate)`` in ``return self.act_fn(gate) *
+    # up``), which the flattened ``ForwardOperation`` list never carries its own
+    # entry for (the extractor only leaves its bare name on the CONSUMING op's
+    # predecessors). The block tree resolves such a name against this class's own
+    # submodule registry and, when found, builds it a real sibling child; this
+    # map is what tells that child what feeds it, so it does not appear as a
+    # sourceless node when its own gate/branch happens not to be otherwise
+    # consumed.
+    multi_op_method_step_predecessors: dict[
+        str, dict[str, tuple[str, ...]]
+    ] = field(default_factory=dict)
+    # For an inline-expanded forward *method*: base method name -> the TRUE
+    # EVALUATION ORDER of its steps, merging its flat op-attr list with the name
+    # of any submodule call embedded mid-expression (``act_fn`` in the example
+    # above) via ``_forward_calls_in_source_order`` -- the same general merge a
+    # class's own top-level ``forward()`` gets for ``forward_calls``. Only
+    # populated when the method has such an embedded submodule call; lets the
+    # block tree place that call's materialised sibling node in its real
+    # position (after its own producer, before its own consumer) instead of
+    # arbitrarily first or last in the frame's children.
+    multi_op_method_order: dict[str, list[str]] = field(default_factory=dict)
+    # For an inline-expanded forward *method*: base method name -> {step name ->
+    # {arg name -> producer attr}}, the method's own ``step_predecessor_args``.
+    # Set as ``forward_step_predecessor_args`` on the method's frame so a
+    # materialised submodule child's input resolves through
+    # ``_submodule_chain_input`` -- the same mechanism an ordinary nested
+    # submodule call already relies on -- instead of the frame's naive
+    # previous-sibling chaining, which would be wrong once the child is not the
+    # very first step.
+    multi_op_method_step_predecessor_args: dict[
+        str, dict[str, dict[str, str]]
+    ] = field(default_factory=dict)
     # For an inline-expanded free function returning a tuple
     # (``q_embed, k_embed = apply_rotary_pos_emb_vision(...)``): call attr ->
     # ordered internal producer attrs, so a consumer reading a specific return
@@ -2261,6 +2352,7 @@ _HOUSEKEEPING_METHODS = frozenset(
         "type",
         "float",
         "to",
+        "type_as",
         "unsqueeze",
         "squeeze",
         "expand",
@@ -2282,6 +2374,12 @@ _LAYOUT_ONLY_METHOD_LABELS = {
     "type": "Cast",
     "float": "Cast",
     "to": "Cast",
+    # ``x.type_as(y)`` casts ``x`` to ``y``'s dtype -- ``y`` only supplies a dtype
+    # reference (never real data), exactly like ``.to(dtype=...)``. Missing this
+    # entry left the call unrecognized (no label), which fell through to the
+    # generic call fallback and could resolve the reference operand as the
+    # producer instead of the receiver, orphaning the real computation feeding it.
+    "type_as": "Cast",
     "unsqueeze": "Unsqueeze",
     "squeeze": "Squeeze",
     "expand": "Expand",
@@ -2917,10 +3015,22 @@ class _ForwardOperationExtractor:
         module_functions: dict[str, ast.FunctionDef] | None = None,
         repeated_submodule_attrs: frozenset[str] | None = None,
         class_methods: dict[str, ast.FunctionDef] | None = None,
+        is_free_function_body: bool = False,
     ) -> None:
         self.self_values = self_values
         self.all_tensor_ops = all_tensor_ops
         self.config = dict(config or {})
+        # True only when the body being extracted is a module-level free
+        # function's own definition (``apply_rotary_pos_emb``), never a
+        # class's own top-level ``forward`` or a sibling class method. A
+        # free function's non-primary parameter can be sliced with no
+        # producer of its own at all (``k[..., rotary_dim:]`` where ``k`` is
+        # seeded only as a boundary alias) -- that case must still emit a
+        # visible Slice. A class's own forward reading a genuine forward
+        # parameter the same way (``cu_seqlens[1:] - cu_seqlens[:-1]``, pure
+        # host index bookkeeping) must NOT gain a new visible op from this,
+        # so the allowance below is scoped to free-function bodies only.
+        self.is_free_function_body = is_free_function_body
         self.param_names = set(param_names or ())
         # Plain instance methods defined in the SAME class as the forward being
         # traced (``append_visible_tail``, ``get_visible_tokens``, ...), keyed by
@@ -3082,6 +3192,24 @@ class _ForwardOperationExtractor:
         if raw_op:
             emitted_details.append(f"raw_op: {raw_op}")
         predecessor_ports = self._read_output_ports(node)
+        # ``_param_refs`` returns the raw name this expression reads, which may be
+        # a tuple-unpacked alias of a secondary forward parameter (``cos``, ``sin``
+        # aliasing ``position_embeddings``) rather than the boundary's own literal
+        # name. Downstream boundary-input wiring keys strictly on the class's own
+        # forward-parameter names (``root.forward_param_inputs``), so translate
+        # each alias back to its origin here -- the same translation already
+        # applied to a call step's own ``step_boundary_params`` -- and carry the
+        # alias's unpack ordinal alongside it so a per-slot edge can dock onto the
+        # right port instead of every alias colliding on the whole tensor.
+        raw_param_refs = self._param_refs(node)
+        param_inputs = self._dedupe(
+            self.param_alias_origin.get(name, name) for name in raw_param_refs
+        )
+        param_input_ordinals = tuple(
+            (self.param_alias_origin.get(name, name), self.param_alias_ordinal[name])
+            for name in raw_param_refs
+            if name in self.param_alias_ordinal
+        )
         self.operations.append(
             ForwardOperation(
                 attr_name=attr_name,
@@ -3090,8 +3218,9 @@ class _ForwardOperationExtractor:
                 predecessors=self._dedupe_predecessors(predecessors, predecessor_ports),
                 external_inputs=self._dedupe(external_inputs),
                 details=tuple(emitted_details),
-                param_inputs=self._param_refs(node),
+                param_inputs=param_inputs,
                 predecessor_ports=predecessor_ports,
+                param_input_ordinals=param_input_ordinals,
             )
         )
         return attr_name
@@ -3286,9 +3415,19 @@ class _ForwardOperationExtractor:
         inlined body actually keys on. Resolving against the callee's real
         signature — analogous to ``_free_function_param_names`` for module-level
         functions — keeps a caller/callee name mismatch from losing an argument.
-        Returns ``None`` when *method_name* isn't a literal ``def`` in this class
-        (e.g. an ``nn.Module`` submodule attribute), leaving that call's existing
-        caller-local-name behavior untouched.
+
+        Deliberately scoped to a literal same-class sibling ``def`` only (its
+        body is inlined into THIS frame, so the frame's own steps key on the
+        callee's parameter names directly). A genuine ``nn.Module`` submodule
+        attribute is NOT resolved here: that submodule keeps its own separate
+        namespace/boundary, and OTHER machinery in this same extractor
+        (``var_producer``-style lookups for a locally reassigned name such as
+        ``query_states = self.q_norm(query_states)``) depends on the call's
+        ``arg_name_map`` staying keyed by the CALLER's own local variable names.
+        Resolving against the callee's own signature here would rename that key
+        and sever those same-forward lookups. A submodule caller/callee name
+        mismatch is instead resolved downstream, structurally, by ordinal
+        position (see ``_lookup_param_entry`` in ``computation_graph.py``).
         """
         definition = self.class_methods.get(method_name)
         if definition is None:
@@ -3318,17 +3457,35 @@ class _ForwardOperationExtractor:
             return None, [node.attr]
         return None, []
 
-    @staticmethod
-    def _return_element_label(node: ast.AST) -> str | None:
-        """Base name of a return element, seeing through a trailing subscript.
+    def _return_element_label(self, node: ast.AST) -> str | None:
+        """Base name of a return element, seeing through a trailing subscript
+        or a trailing housekeeping method call.
 
-        ``pool_keys[:, keep]`` -> ``pool_keys``; a bare ``pool_keys`` -> ``pool_keys``.
-        Used to name the return slot a subscripted return produces.
+        ``pool_keys[:, keep]`` -> ``pool_keys``; a bare ``pool_keys`` -> ``pool_keys``;
+        ``cos.to(dtype=x.dtype)`` -> ``cos``. Used to name the return slot a
+        subscripted/cast return produces -- without seeing through the call, a
+        tuple return like ``return cos.to(...), sin.to(...)`` (no bare-Name
+        elements) gets no slot names at all, so neither element becomes an
+        output port and its producer looks unconsumed.
         """
         if isinstance(node, ast.Name):
             return node.id
-        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
-            return node.value.id
+        if isinstance(node, ast.Subscript):
+            return self._return_element_label(node.value)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            return self._return_element_label(node.func.value)
+        if isinstance(node, ast.BinOp):
+            # A returned element can be a scaled/combined tensor
+            # (``weights * self.routed_scaling_factor``): one side is the real
+            # local tensor being returned, the other a bare ``self.<attr>``/
+            # literal multiplier that has no base name of its own. See through
+            # to whichever side resolves to a name so this element still gets
+            # a return slot -- without one, ``_live_forward_steps`` never seeds
+            # from whatever produced it, and prunes it (and everything only it
+            # depends on) as if the return statement never read it at all.
+            return self._return_element_label(
+                node.left
+            ) or self._return_element_label(node.right)
         return None
 
     def _is_host_scalar_expr(self, node: ast.AST) -> bool:
@@ -3752,13 +3909,37 @@ class _ForwardOperationExtractor:
                 # real ``Slice`` op, not a silent alias. The bound is symbolic, so
                 # the detail is descriptive only (shape inference cannot size it and
                 # passes the shape through), but the op stays visible in the graph.
-                # Require a real upstream tensor producer: a range slice over a
-                # param/host read with no producer (``cu_seqlens[1:] -
-                # cu_seqlens[:-1]`` index bookkeeping) has nothing to slice and must
-                # stay pass-through, not become an orphan op. Skip host-scalar shape
-                # reads too, as the resize branch does.
+                # Require a real upstream tensor producer OR a genuine param read
+                # (``reads_param``) in one of two shapes: a range slice over a host
+                # read with no producer and no param binding (``cu_seqlens[1:] -
+                # cu_seqlens[:-1]`` index bookkeeping, read directly off a class's
+                # own top-level ``forward`` parameter) has nothing to slice and must
+                # stay pass-through, not become an orphan op -- ``cu_seqlens``
+                # genuinely is a real forward parameter there too, so ``reads_param``
+                # alone cannot tell the two cases apart. Two structural shapes DO
+                # still need the visible ``Slice``, though: (1) a free function's own
+                # non-primary tensor parameter (``k_rot, k_pass = k[..., :rotary_dim],
+                # k[..., rotary_dim:]`` in ``apply_rotary_pos_emb`` when only ``q`` is
+                # seeded as the boundary input) has no producer of its own at this
+                # point either, but IS a real tensor operand; and (2) a *secondary*
+                # forward input's tuple-unpack alias sliced down before being passed
+                # on (``cos, sin = position_embeddings; ... cos[..., :self.head_dim]``,
+                # a smaller rotary width for one submodule) is likewise a real operand
+                # with no producer of its own -- unlike ``cu_seqlens``, its own name
+                # is never itself the function's top-level parameter, only an alias
+                # registered by ``_propagate_param_alias``, which is exactly what
+                # distinguishes it from the index-bookkeeping case. ``is_free_function_body``
+                # covers (1); ``is_param_alias`` covers (2).
+                # Skip host-scalar shape reads too, as the resize branch does.
+                is_param_alias = (
+                    isinstance(node.value, ast.Name)
+                    and node.value.id in self.param_alias_origin
+                )
                 if (
-                    base is not None
+                    (
+                        base is not None
+                        or (reads_param and (self.is_free_function_body or is_param_alias))
+                    )
                     and not self._suppress_slice_resize
                     and not self._is_host_scalar_expr(node)
                     and self._subscript_narrows_range(node.slice)
@@ -4039,7 +4220,15 @@ class _ForwardOperationExtractor:
                             # ``position_embeddings``). Map the callee parameter to
                             # that origin and its unpack ordinal so the inlined
                             # frame fans the boundary input out one port per slot.
+                            # A unary wrapper (``-sin``) is a transparent
+                            # pass-through here too, mirroring ``expression()``'s
+                            # own ``ast.UnaryOp`` handling (which just recurses
+                            # into the operand): the boundary alias underneath is
+                            # still the same tensor, so unwrap it before checking
+                            # whether it is a tracked param alias.
                             arg = node.args[idx]
+                            while isinstance(arg, ast.UnaryOp):
+                                arg = arg.operand
                             if (
                                 isinstance(arg, ast.Name)
                                 and arg.id in self.param_names
@@ -4315,13 +4504,31 @@ class _ForwardOperationExtractor:
         target name as a param alias so ``_param_refs`` attributes it like the
         original forward input. This is general: any secondary forward input renamed
         or unpacked into locals is tracked.
+
+        A forward input keyed by a config value before being unpacked
+        (``cos, sin = position_embeddings[self.rope_layer_type]``, where
+        ``position_embeddings`` is a ``{"main": (cos, sin), "compress": (cos, sin)}``
+        dict from the model) still boils down to the same boundary crossing: the
+        key is a host-side string/attribute read, never itself a tensor operand,
+        so the unpack targets alias the OUTER parameter the same way they would if
+        it had no dict layer at all. Recognize a single-level subscript of a
+        tracked param the same as a bare name.
         """
-        if not (isinstance(value, ast.Name) and value.id in self.param_names):
+        origin_name: str | None = None
+        if isinstance(value, ast.Name) and value.id in self.param_names:
+            origin_name = value.id
+        elif (
+            isinstance(value, ast.Subscript)
+            and isinstance(value.value, ast.Name)
+            and value.value.id in self.param_names
+        ):
+            origin_name = value.value.id
+        if origin_name is None:
             return
         # The RHS may itself be an alias (``pe = position_embeddings; cos, sin = pe``);
         # resolve to the original forward parameter so every unpacked local points
         # back at the caller-visible name.
-        origin = self.param_alias_origin.get(value.id, value.id)
+        origin = self.param_alias_origin.get(origin_name, origin_name)
         for target in targets:
             if isinstance(target, (ast.Tuple, ast.List)):
                 # ``cos, sin = position_embeddings`` -> cos is slot 0, sin slot 1.
@@ -4332,10 +4539,16 @@ class _ForwardOperationExtractor:
                         self.param_alias_ordinal[element.id] = ordinal
             elif isinstance(target, ast.Name):
                 # A plain rename (``pe = position_embeddings``) carries the RHS's
-                # own ordinal forward, if it had one.
+                # own ordinal forward, if it had one. A subscripted RHS
+                # (``pe = position_embeddings[self.rope_layer_type]``) has no
+                # ordinal of its own to inherit.
                 self.param_names.add(target.id)
                 self.param_alias_origin[target.id] = origin
-                inherited = self.param_alias_ordinal.get(value.id)
+                inherited = (
+                    self.param_alias_ordinal.get(origin_name)
+                    if isinstance(value, ast.Name)
+                    else None
+                )
                 if inherited is not None:
                     self.param_alias_ordinal[target.id] = inherited
 
@@ -5132,15 +5345,19 @@ def _return_value_names(value: ast.AST) -> list[str]:
     if isinstance(value, ast.Name):
         return [value.id]
     # ``return BaseModelOutputWithPooling(last_hidden_state=x, pooler_output=y)``
-    # — a HuggingFace ``ModelOutput`` dataclass wrapper. Its positional/keyword
-    # arguments name the real tensor producers; without unwrapping it the forward
-    # looks like it returns nothing, so ``forward_return_slots`` stays empty and
-    # the graph falls back to exporting every dangling node as a spurious output.
+    # — a HuggingFace ``ModelOutput`` dataclass wrapper. Its keyword arguments
+    # name the real tensor producers (dataclass fields are always built by
+    # keyword in this codebase); without unwrapping it the forward looks like it
+    # returns nothing, so ``forward_return_slots`` stays empty and the graph
+    # falls back to exporting every dangling node as a spurious output.
+    # POSITIONAL args are deliberately NOT read as field names here: a plain
+    # method/function call used directly as the return value (``return
+    # output.type_as(x)``, ``return rotate_half(x)``) passes its real operands
+    # positionally, and treating the operand's own name as the return slot's
+    # name would misattribute the module's output to that operand's producer
+    # instead of the call's own result.
     if isinstance(value, ast.Call):
         names: list[str] = []
-        for arg in value.args:
-            if isinstance(arg, ast.Name):
-                names.append(arg.id)
         for keyword in value.keywords:
             if isinstance(keyword.value, ast.Name):
                 names.append(keyword.value.id)
@@ -5621,6 +5838,7 @@ def _forward_operations_from_forward(
     config: dict[str, Any] | None = None,
     module_functions: dict[str, ast.FunctionDef] | None = None,
     class_methods: dict[str, ast.FunctionDef] | None = None,
+    is_free_function_body: bool = False,
 ) -> ForwardAnalysis:
     # The primary parameter is the main path, so only the extra ones can identify
     # which step consumes a side feed.
@@ -5633,6 +5851,7 @@ def _forward_operations_from_forward(
         module_functions=module_functions,
         repeated_submodule_attrs=_repeated_self_call_attrs(func.body),
         class_methods=class_methods,
+        is_free_function_body=is_free_function_body,
     )
     # An operation reading the primary parameter partway through the forward reads the
     # value arriving at the chain, not the previous step. Naming it lets those reads
@@ -5854,6 +6073,13 @@ class _ModelAstVisitor(ast.NodeVisitor):
             str, tuple[dict[str, str], list[str], str | None]
         ] = {}
         multi_op_method_inputs: dict[str, str] = {}
+        multi_op_method_step_predecessors: dict[
+            str, dict[str, tuple[str, ...]]
+        ] = {}
+        multi_op_method_order: dict[str, list[str]] = {}
+        multi_op_method_step_predecessor_args: dict[
+            str, dict[str, dict[str, str]]
+        ] = {}
         forward_step_return_producers: dict[str, list[str]] = {}
         init_func = next(
             (
@@ -5976,6 +6202,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 multi_op_methods,
                 multi_op_method_returns,
                 multi_op_method_inputs,
+                multi_op_method_step_predecessors,
+                multi_op_method_order,
+                multi_op_method_step_predecessor_args,
             ) = _multi_op_forward_methods(
                 node,
                 forward_calls,
@@ -6163,6 +6392,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
             multi_op_methods=multi_op_methods,
             multi_op_method_returns=multi_op_method_returns,
             multi_op_method_inputs=multi_op_method_inputs,
+            multi_op_method_step_predecessors=multi_op_method_step_predecessors,
+            multi_op_method_order=multi_op_method_order,
+            multi_op_method_step_predecessor_args=multi_op_method_step_predecessor_args,
             forward_step_return_producers=forward_step_return_producers,
             forward_return_slots=forward_return_slots,
             forward_return_order=forward_return_order,

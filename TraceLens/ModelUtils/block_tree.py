@@ -1076,14 +1076,34 @@ def _expanded_free_function_node(
         # frame. Rewrite those ops so they read the boundary input by name, and
         # tag the tuple-unpack ordinal so it fans out one port per slot.
         boundary_arg_params = cls.forward_step_boundary_arg_params.get(call_attr, {})
+        # A callee parameter fed from a real, already-computed producer at the
+        # call site (``apply_rotary_pos_emb(query_states, key_states, cos,
+        # sin)`` -- ``q``/``k`` each resolve to their own ``.transpose(...)``
+        # node, not a boundary alias) has no dedicated port mechanism of its
+        # own: unlike the boundary case, nothing renders a synthetic tile for
+        # it, so leaving the raw parameter name in ``param_inputs`` strands the
+        # reference -- the op that reads it never gets an edge, and (for a
+        # multi-return callee like this one) the producer that feeds a
+        # non-primary parameter is left with no consumer at all. Route it as a
+        # normal operation-to-operation edge instead: the producer attr is
+        # already a real node in the caller's graph, so the standard
+        # attr-based predecessor wiring picks it up like any other dataflow
+        # edge once it is on ``operation_predecessors``.
+        producer_arg_params = cls.forward_step_predecessor_args.get(call_attr, {})
         children: list[BlockNode] = []
         for operation_index, operation in enumerate(method_ops):
             translated: list[str] = []
             boundary_name: str | None = None
             boundary_ordinal: int | None = None
+            extra_predecessors: list[str] = []
             for param in operation.param_inputs:
                 mapping = boundary_arg_params.get(param)
                 if mapping is None:
+                    producer_attr = producer_arg_params.get(param)
+                    if producer_attr is not None:
+                        if producer_attr not in extra_predecessors:
+                            extra_predecessors.append(producer_attr)
+                        continue
                     translated.append(param)
                     continue
                 origin, ordinal = mapping
@@ -1096,6 +1116,10 @@ def _expanded_free_function_node(
                 if boundary_name is None:
                     boundary_name = origin
                     boundary_ordinal = ordinal
+            operation_predecessors = list(operation.predecessors)
+            for producer_attr in extra_predecessors:
+                if producer_attr not in operation_predecessors:
+                    operation_predecessors.append(producer_attr)
             children.append(
                 _leaf_node(
                     attr_name=operation.attr_name,
@@ -1111,7 +1135,7 @@ def _expanded_free_function_node(
                     ],
                     label=operation.label,
                     basic=True,
-                    operation_predecessors=list(operation.predecessors),
+                    operation_predecessors=operation_predecessors,
                     output_names=list(operation.output_names),
                     operation_predecessor_ports=_predecessor_ports_dict(operation.predecessor_ports),
                     external_inputs=list(operation.external_inputs),
@@ -1177,6 +1201,27 @@ def _boundary_input_name(
         return mutated
     if operation.param_inputs:
         return operation.param_inputs[0]
+    return None
+
+
+def _boundary_input_ordinal(
+    operation: ForwardOperation,
+    cls: ClassStructure,
+) -> int | None:
+    """The unpack ordinal of the boundary parameter named by ``_boundary_input_name``.
+
+    A tuple-unpacked alias of a secondary forward parameter (``cos``, ``sin``
+    aliasing ``position_embeddings``) carries its slot's ordinal in
+    ``param_input_ordinals`` (keyed by the same origin name ``_boundary_input_name``
+    resolved to). Without this, several aliases of the same tensor collapse onto
+    one boundary edge instead of each reaching its own slot.
+    """
+    name = _boundary_input_name(operation, cls)
+    if name is None:
+        return None
+    for param, ordinal in operation.param_input_ordinals:
+        if param == name:
+            return ordinal
     return None
 
 
@@ -2272,6 +2317,7 @@ def build_block_node(
                     external_inputs=list(operation.external_inputs),
                     param_inputs=list(operation.param_inputs),
                     boundary_input_name=_boundary_input_name(operation, cls),
+                    boundary_input_ordinal=_boundary_input_ordinal(operation, cls),
                 )
             )
             continue
@@ -2339,6 +2385,156 @@ def build_block_node(
                     if m_primary_return and m_return_slots
                     else None
                 )
+                # A submodule invoked mid-expression inside this helper method
+                # (``self.act_fn(gate)`` in ``return self.act_fn(gate) * up``)
+                # is captured by the extractor only as a bare predecessor NAME
+                # on whichever op reads its result -- unlike a call that sits
+                # directly in the class's own ``forward``, it never goes through
+                # the ``child_class = cls.init_assignments.get(base_attr)``
+                # resolution above, so it would otherwise never become a node:
+                # the consumer's edge dangles on a name with no producer, and
+                # anything that fed ONLY that submodule call (the "gate" branch
+                # here) looks unconsumed. Resolve every such name against this
+                # class's own submodule registry here too and materialise it as
+                # a real sibling child (same recursive expansion a top-level
+                # forward call gets), so the pre-existing predecessor name
+                # resolves to it.
+                method_op_attrs = {operation.attr_name for operation in method_ops}
+                submodule_children: list[BlockNode] = []
+                seen_submodule_attrs: set[str] = set()
+                for operation in method_ops:
+                    referenced = {
+                        *operation.predecessors,
+                        *(attr for attr, _ordinal in operation.predecessor_ports),
+                    }
+                    for name in referenced:
+                        if (
+                            name == FORWARD_METHOD_INPUT
+                            or name in method_op_attrs
+                            or name in seen_submodule_attrs
+                        ):
+                            continue
+                        submodule_class = cls.init_assignments.get(name)
+                        if (
+                            submodule_class is None
+                            or submodule_class in _SKIP_INIT_CLASS_NAMES
+                        ):
+                            continue
+                        seen_submodule_attrs.add(name)
+                        submodule_children.append(
+                            build_block_node(
+                                attr_name=name,
+                                class_name=submodule_class,
+                                registry=registry,
+                                basic_ops=basic_ops,
+                                visited=visited | {class_name},
+                                details=cls.init_details.get(name, []),
+                                forward_order=child_order,
+                                infer_init_steps=infer_init_steps,
+                            )
+                        )
+                # The section 1b wiring pass (``forward_step_predecessors`` on the
+                # ENCLOSING composite node) is what actually docks a submodule
+                # child's input edge -- the same mechanism a top-level forward
+                # call's submodule uses. Carrying the extractor's full
+                # ``step_predecessors`` map here (harmless for the ordinary op
+                # steps too: any key that does not match one of this frame's own
+                # children is simply skipped) is what lets the newly
+                # materialised ``submodule_children`` above dock their input.
+                method_step_predecessors = cls.multi_op_method_step_predecessors.get(
+                    base_attr, {}
+                )
+                # This frame's own body is straight-line and inlined at
+                # construction time (``_add_linear_pipeline_chain``), not via the
+                # section-1b wiring pass -- so a materialised submodule child's
+                # input actually resolves through ``_submodule_chain_input``,
+                # which reads ``forward_step_predecessor_args`` (arg name ->
+                # producer), not ``forward_step_predecessors``. Carry the
+                # method's own map here too, the same way a top-level forward's
+                # submodule call already relies on it.
+                method_step_predecessor_args = (
+                    cls.multi_op_method_step_predecessor_args.get(base_attr, {})
+                )
+
+                def _method_op_leaf(operation: ForwardOperation, position: int) -> BlockNode:
+                    return _leaf_node(
+                        attr_name=operation.attr_name,
+                        class_name=operation.class_name,
+                        forward_order=position,
+                        details=[
+                            *operation.details,
+                            *(
+                                detail
+                                for detail in call_context
+                                if detail not in operation.details
+                            ),
+                        ],
+                        label=operation.label,
+                        basic=True,
+                        operation_predecessors=list(operation.predecessors),
+                        output_names=list(operation.output_names),
+                        operation_predecessor_ports=_predecessor_ports_dict(
+                            operation.predecessor_ports
+                        ),
+                        external_inputs=list(operation.external_inputs),
+                        param_inputs=list(operation.param_inputs),
+                    )
+
+                # A submodule call embedded mid-expression (``act_fn``) must sit
+                # in its real evaluation-order position -- after the op that
+                # produces its operand, before the op that consumes its result
+                # -- not merely first or last, or the frame's own straight-line
+                # construction-time wiring (which feeds each step from the
+                # previous sibling by default) docks it to the wrong producer.
+                # ``multi_op_method_order`` (when the method has such an
+                # embedded call) gives that merged true order; fall back to the
+                # unordered submodule-children-first layout otherwise.
+                method_order = cls.multi_op_method_order.get(base_attr)
+                submodule_children_by_attr = {
+                    child.attr_name: child for child in submodule_children
+                }
+                method_ops_by_attr = {
+                    operation.attr_name: operation for operation in method_ops
+                }
+                if method_order:
+                    method_children: list[BlockNode] = []
+                    for position, name in enumerate(method_order):
+                        submodule_child = submodule_children_by_attr.get(name)
+                        if submodule_child is not None:
+                            # Re-stamp to its merged-order position. Its own
+                            # ``forward_order`` still reflects wherever the
+                            # extractor built it (the submodule-call's own,
+                            # generally much larger, source index), which would
+                            # outrank an op step that actually precedes it. A
+                            # sibling wiring pass (``_first_graph_index_for_module``)
+                            # picks this frame's "first" step by ``forward_order``
+                            # to resolve the frame's own entry-point edge, so a
+                            # stale value here misdirects a real predecessor
+                            # edge onto the wrong internal op (e.g. a caller's
+                            # boundary arg landing on the *second* step instead
+                            # of the submodule call that is genuinely first).
+                            submodule_child.forward_order = position
+                            method_children.append(submodule_child)
+                            continue
+                        operation = method_ops_by_attr.get(name)
+                        if operation is not None:
+                            method_children.append(_method_op_leaf(operation, position))
+                    covered = {node.attr_name for node in method_children}
+                    # Safety net: any op the merge failed to place (should not
+                    # happen) still gets rendered, appended in its own order.
+                    method_children.extend(
+                        _method_op_leaf(operation, len(method_children) + index)
+                        for index, operation in enumerate(method_ops)
+                        if operation.attr_name not in covered
+                    )
+                else:
+                    method_children = [
+                        *submodule_children,
+                        *(
+                            _method_op_leaf(operation, operation_index)
+                            for operation_index, operation in enumerate(method_ops)
+                        ),
+                    ]
                 child_nodes.append(
                     BlockNode(
                         attr_name=call_attr,
@@ -2353,31 +2549,9 @@ def build_block_node(
                         primary_return_slot=m_primary_return,
                         primary_output_step=m_primary_output_step,
                         multi_return_module=len(m_return_order) >= 2,
-                        children=[
-                            _leaf_node(
-                                attr_name=operation.attr_name,
-                                class_name=operation.class_name,
-                                forward_order=operation_index,
-                                details=[
-                                    *operation.details,
-                                    *(
-                                        detail
-                                        for detail in call_context
-                                        if detail not in operation.details
-                                    ),
-                                ],
-                                label=operation.label,
-                                basic=True,
-                                operation_predecessors=list(operation.predecessors),
-                                output_names=list(operation.output_names),
-                                operation_predecessor_ports=_predecessor_ports_dict(
-                                    operation.predecessor_ports
-                                ),
-                                external_inputs=list(operation.external_inputs),
-                                param_inputs=list(operation.param_inputs),
-                            )
-                            for operation_index, operation in enumerate(method_ops)
-                        ],
+                        forward_step_predecessors=dict(method_step_predecessors),
+                        forward_step_predecessor_args=dict(method_step_predecessor_args),
+                        children=method_children,
                     )
                 )
                 continue

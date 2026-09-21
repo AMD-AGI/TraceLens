@@ -653,6 +653,51 @@ def test_build_block_node_multi_op_method():
     assert len(method.children) == 2
 
 
+def test_build_block_node_multi_op_method_embedded_submodule_call_order():
+    # A submodule invoked mid-expression inside a helper method (``kv_b_proj``
+    # inside ``expand_kv``) is materialised as a real sibling child, placed by
+    # ``multi_op_method_order`` in its true evaluation-order position (here,
+    # genuinely first -- before the op that consumes its result). Several
+    # unrelated top-level calls precede ``helper`` in ``Owner``'s own forward,
+    # so the embedded call's own (stale) ``child_order`` -- inherited from
+    # wherever ``helper`` itself sits in Owner's forward -- is *larger* than
+    # the merged-order position of the op that follows it inside the method.
+    # A wiring pass that picks a frame's "first" step by ``forward_order``
+    # (``_first_graph_index_for_module``) would misidentify the op as first
+    # unless the embedded call is re-stamped to its true position.
+    dummy_calls = [f"dummy{i}" for i in range(5)]
+    cls = structure(
+        "Owner",
+        assignments={"proj": "Linear", **{name: "Linear" for name in dummy_calls}},
+        calls=[*dummy_calls, "helper"],
+    )
+    view_op = ForwardOperation(
+        attr_name="@op_l1_c0_view",
+        label="View",
+        class_name="View",
+        predecessors=("proj",),
+    )
+    cls.multi_op_methods["helper"] = [view_op]
+    cls.multi_op_method_order["helper"] = ["proj", "@op_l1_c0_view"]
+    cls.multi_op_method_step_predecessor_args["helper"] = {
+        "proj": {"x": aa.FORWARD_METHOD_INPUT},
+    }
+    built = bt.build_block_node(
+        attr_name="owner",
+        class_name="Owner",
+        registry={"Owner": cls},
+        basic_ops=_basic(),
+    )
+    method = built.children[-1]
+    assert [child.attr_name for child in method.children] == [
+        "proj",
+        "@op_l1_c0_view",
+    ]
+    # Re-stamped to the merged-order position, not the stale child_order every
+    # submodule child used to inherit from the enclosing method call.
+    assert [child.forward_order for child in method.children] == [0, 1]
+
+
 def test_build_block_node_single_op_method():
     cls = structure("Owner", calls=["helper"])
     op = ForwardOperation(
