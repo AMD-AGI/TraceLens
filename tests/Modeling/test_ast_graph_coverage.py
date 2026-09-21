@@ -1278,6 +1278,108 @@ def test_operation_tile_labels(label, expected):
     assert cg._operation_tile_label(label) == expected
 
 
+def test_unrecognized_activation_registry_class_expands_to_primitives():
+    """An ``ACT2FN``/``ACT2CLS`` selection outside the curated display-name set
+    is resolved to its real class and expanded into its primitive forward ops,
+    instead of freezing as one opaque, title-cased placeholder leaf.
+
+    Fully structural: the candidate config key is discovered dynamically from
+    the real, installed ``transformers.activations`` registry (whichever key
+    is *not* one of ``_ACTIVATION_DISPLAY_NAMES`` and actually parses to a
+    class with a real ``forward``), so nothing here is keyed on a specific
+    activation's name -- this exercises the same generic path that resolves
+    e.g. a ``sqrtsoftplus`` scoring function, without hardcoding it.
+    """
+    transformers_activations = pytest.importorskip("transformers.activations")
+    act2cls = transformers_activations.ACT2CLS
+
+    source = """
+from transformers.activations import ACT2FN
+
+
+class Router:
+    def __init__(self, config):
+        self.score_fn = ACT2FN[config.scoring_func]
+
+    def forward(self, logits):
+        return self.score_fn(logits)
+"""
+
+    resolved_key = None
+    resolved_class_name = None
+    analysis = None
+    for key in act2cls:
+        if key.lower() in aa._ACTIVATION_DISPLAY_NAMES:
+            continue
+        candidate = aa.analyze_source(
+            source,
+            config={"model_type": "faketype", "scoring_func": key},
+            all_tensor_ops=True,
+        )
+        placeholder = key.replace("_", " ").title().replace(" ", "")
+        router = candidate.class_registry.get("Router")
+        assert router is not None
+        real_class_name = router.init_assignments.get("score_fn")
+        if real_class_name and real_class_name != placeholder:
+            resolved_key = key
+            resolved_class_name = real_class_name
+            analysis = candidate
+            break
+
+    assert resolved_key is not None, (
+        "expected at least one ACT2CLS key outside the curated display-name "
+        "set to resolve to a real, expandable class"
+    )
+
+    # The referencing class's assignment now names the *real* resolved class,
+    # not the generic title-cased placeholder that used to stand in for it.
+    router = analysis.class_registry["Router"]
+    assert router.init_assignments["score_fn"] == resolved_class_name
+    assert resolved_class_name not in aa._ACTIVATION_LEAF_CLASS_NAMES
+
+    # And that real class is registered with its own parseable, multi-step
+    # forward -- an actual composite to expand, not another opaque leaf.
+    resolved = analysis.class_registry[resolved_class_name]
+    assert any(
+        isinstance(item, ast.FunctionDef) and item.name == "forward"
+        for item in resolved.node.body
+    )
+    assert len(resolved.forward_operations) + len(resolved.forward_calls) >= 1
+
+
+def test_unresolvable_activation_registry_key_warns_and_keeps_placeholder(caplog):
+    """A dynamic/unresolvable ``ACT2FN`` key falls back to the opaque leaf and
+    logs a warning, instead of silently mis-rendering or crashing."""
+    source = """
+from transformers.activations import ACT2FN
+
+
+class Router:
+    def __init__(self, config):
+        self.score_fn = ACT2FN[config.scoring_func]
+
+    def forward(self, logits):
+        return self.score_fn(logits)
+"""
+    with caplog.at_level("WARNING"):
+        analysis = aa.analyze_source(
+            source,
+            config={
+                "model_type": "faketype",
+                "scoring_func": "definitely_not_a_real_activation_key",
+            },
+            all_tensor_ops=True,
+        )
+    router = analysis.class_registry["Router"]
+    # No importable class exists for this key, so the placeholder (title-cased
+    # from the config value) is left in place rather than invented/guessed.
+    assert router.init_assignments["score_fn"] == "DefinitelyNotARealActivationKey"
+    assert any(
+        "Could not resolve activation registry entry" in rec.message
+        for rec in caplog.records
+    )
+
+
 def test_source_order_places_positional_synthetic_after_its_operands():
     # A rope helper called on a *later* source line than the reshape/norm ops it
     # consumes must still sort after them. ``positional_synthetic_source_pos``

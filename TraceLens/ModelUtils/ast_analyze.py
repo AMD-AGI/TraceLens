@@ -418,6 +418,189 @@ def _annotate_host_free_functions(
                 cls.forward_step_runs_on_host[attr] = True
 
 
+def _registry_dict_literal(
+    tree: ast.Module, name: str, _seen: set[str] | None = None
+) -> ast.Dict | None:
+    """Locate the dict literal a module-level registry name resolves to.
+
+    Handles one level of indirection (``ACT2FN = ClassInstantier(ACT2CLS)``) by
+    following a wrapper call's first argument back to its own module-level
+    assignment, so a registry alias resolves to the same literal as the name it
+    wraps.
+    """
+    seen = _seen if _seen is not None else set()
+    if name in seen:
+        return None
+    seen.add(name)
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        ):
+            continue
+        value = node.value
+        if isinstance(value, ast.Dict):
+            return value
+        if isinstance(value, ast.Call):
+            for arg in value.args:
+                if isinstance(arg, ast.Name):
+                    found = _registry_dict_literal(tree, arg.id, seen)
+                    if found is not None:
+                        return found
+    return None
+
+
+def _registry_entry_class_name(value: ast.expr) -> str | None:
+    """Return the class name a registry dict entry's value expression names.
+
+    An entry is either a bare class reference (``SqrtSoftplusActivation``,
+    ``nn.Sigmoid``) or a ``(cls, kwargs)`` tuple pairing one with constructor
+    kwargs (``ClassInstantier`` convention); either way only the class name
+    matters here.
+    """
+    if isinstance(value, ast.Name):
+        return value.id
+    if isinstance(value, ast.Attribute):
+        return value.attr
+    if isinstance(value, (ast.Tuple, ast.List)) and value.elts:
+        return _registry_entry_class_name(value.elts[0])
+    return None
+
+
+def _resolve_activation_registry_class(
+    registry_name: str,
+    key: str,
+    import_bindings: dict[str, str],
+    *,
+    all_tensor_ops: bool,
+) -> "ClassStructure | None":
+    """Load the concrete class an unrecognized activation-registry key selects.
+
+    ``self.act = ACT2FN[key]`` (or ``ACT2CLS[key]``) freezes in a real
+    ``nn.Module`` subclass; our curated ``_ACTIVATION_DISPLAY_NAMES`` table only
+    covers the common ones. For any other key: follow the *modeling file's own
+    import* of the registry name to its defining module (no hardcoded module
+    path -- whatever the file actually imports from), read that module's
+    registry-dict literal to find which class the key selects, and parse that
+    class's own source into a :class:`ClassStructure` the same way any other
+    submodule class is parsed, so its forward can be expanded instead of drawn
+    as one opaque box. Returns ``None`` when any step is not resolvable (no
+    import found, no importable source, key/class not found, or class defines
+    no ``forward``); the caller then keeps its title-cased placeholder leaf and
+    logs a warning.
+    """
+    binding = import_bindings.get(registry_name)
+    if not binding:
+        return None
+    module, _, _symbol = binding.partition("#")
+    if not module:
+        return None
+    try:
+        spec = importlib.util.find_spec(module)
+    except (ImportError, AttributeError, ValueError):
+        return None
+    origin = spec.origin if spec is not None else None
+    if not origin or not Path(origin).is_file():
+        return None
+    try:
+        source = Path(origin).read_text(encoding="utf-8")
+        registry_tree = ast.parse(source, filename=origin)
+    except (OSError, SyntaxError, ValueError):
+        return None
+    dict_literal = _registry_dict_literal(registry_tree, registry_name)
+    if dict_literal is None:
+        return None
+    lowered = key.strip().lower()
+    class_name: str | None = None
+    for entry_key, entry_value in zip(dict_literal.keys, dict_literal.values):
+        if (
+            isinstance(entry_key, ast.Constant)
+            and isinstance(entry_key.value, str)
+            and entry_key.value.strip().lower() == lowered
+        ):
+            class_name = _registry_entry_class_name(entry_value)
+            break
+    if not class_name:
+        return None
+    try:
+        external_registry = build_class_registry(
+            source, filename=origin, all_tensor_ops=all_tensor_ops
+        )
+    except (SyntaxError, ValueError):
+        return None
+    resolved = external_registry.get(class_name)
+    if resolved is None or not any(
+        isinstance(item, ast.FunctionDef) and item.name == "forward"
+        for item in resolved.node.body
+    ):
+        return None
+    return resolved
+
+
+def _expand_unresolved_activation_classes(
+    classes: dict[str, "ClassStructure"],
+    tree: ast.AST,
+    config: dict[str, Any] | None,
+    *,
+    all_tensor_ops: bool,
+) -> None:
+    """Route an unrecognized activation-registry submodule through forward-expansion.
+
+    A curated activation (SiLU/GELU/Sigmoid/...) stays an atomic leaf by design.
+    Anything else selected through ``ACT2FN``/``ACT2CLS`` is a real ``nn.Module``
+    whose forward we can read like any other submodule's -- so resolve it
+    (structurally, via the modeling file's own imports; see
+    ``_resolve_activation_registry_class``) and register its class so the normal
+    block-tree expansion path picks it up instead of falling back to an opaque,
+    title-cased ``OperationKind.UNKNOWN`` leaf. When resolution or parsing fails
+    (dynamic key, no importable source, unparseable forward) the referencing
+    class keeps its placeholder name and a warning is logged so the gap stays
+    visible instead of silently mis-rendering.
+    """
+    base_module = _analyzed_base_module(config)
+    if base_module is None:
+        import_bindings: dict[str, str] = {}
+    elif isinstance(tree, ast.Module):
+        import_bindings = _absolute_import_bindings(tree, base_module)
+    else:
+        import_bindings = {}
+    resolved_cache: dict[tuple[str, str], "ClassStructure | None"] = {}
+
+    for cls in list(classes.values()):
+        for attr, (registry_name, key) in list(cls.unresolved_activation_refs.items()):
+            cache_key = (registry_name, key)
+            if cache_key not in resolved_cache:
+                resolved_cache[cache_key] = _resolve_activation_registry_class(
+                    registry_name,
+                    key,
+                    import_bindings,
+                    all_tensor_ops=all_tensor_ops,
+                )
+            resolved = resolved_cache[cache_key]
+            if resolved is None:
+                _log.warning(
+                    "Could not resolve activation registry entry %s[%r] "
+                    "(assigned to %s.%s) to an importable class with a "
+                    "parseable forward; rendering it as an opaque leaf.",
+                    registry_name,
+                    key,
+                    cls.name,
+                    attr,
+                )
+                continue
+            classes[resolved.name] = resolved
+            placeholder = cls.init_assignments.get(attr)
+            cls.init_assignments[attr] = resolved.name
+            options = cls.init_assignment_options.get(attr)
+            if options is not None:
+                cls.init_assignment_options[attr] = [
+                    resolved.name if option == placeholder else option
+                    for option in options
+                ]
+
+
 def functional_synthetic_attr(op_name: str) -> str:
     """Synthetic attr for a torch.nn.functional call (e.g. linear -> @functional_linear)."""
     return f"{FUNCTIONAL_SYNTHETIC_PREFIX}{op_name}"
@@ -2254,6 +2437,12 @@ class ClassStructure:
     # Synthetic free-function/positional call attr -> True when that call (or a
     # function it transitively calls) runs host/CPU work (``.tolist()``/``.item()``).
     forward_step_runs_on_host: dict[str, bool] = field(default_factory=dict)
+    # Submodule attr -> (registry_name, key) for a ``self.attr = ACT2FN[key]``-style
+    # assignment whose key is not one of the curated ``_ACTIVATION_DISPLAY_NAMES``
+    # (so its concrete class is unknown until resolved cross-file). Consumed by
+    # ``_expand_unresolved_activation_classes`` to chase the real class and expand
+    # its forward instead of rendering an opaque, title-cased placeholder leaf.
+    unresolved_activation_refs: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 def stack_entry_dataflow(cls: ClassStructure) -> StackEntryDataflow | None:
@@ -6126,8 +6315,14 @@ class _ModelAstVisitor(ast.NodeVisitor):
             None,
         )
 
+        unresolved_activation_refs: dict[str, tuple[str, str]] = {}
         if init_func is not None:
-            init_assignments, init_details, init_assignment_options = _parse_init(
+            (
+                init_assignments,
+                init_details,
+                init_assignment_options,
+                unresolved_activation_refs,
+            ) = _parse_init(
                 init_func,
                 config=self.config,
                 param_bindings=self.activation_param_bindings.get(node.name),
@@ -6445,6 +6640,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 if forward_func is not None
                 else []
             ),
+            unresolved_activation_refs=unresolved_activation_refs,
         )
         self.generic_visit(node)
 
@@ -6454,10 +6650,16 @@ def _parse_init(
     *,
     config: dict[str, Any] | None = None,
     param_bindings: dict[str, str] | None = None,
-) -> tuple[dict[str, str], dict[str, list[str]], dict[str, list[str]]]:
+) -> tuple[
+    dict[str, str],
+    dict[str, list[str]],
+    dict[str, list[str]],
+    dict[str, tuple[str, str]],
+]:
     assignments: dict[str, str] = {}
     details: dict[str, list[str]] = {}
     options: dict[str, list[str]] = {}
+    unresolved_activations: dict[str, tuple[str, str]] = {}
 
     def record_assignment(attr: str, value: ast.AST) -> None:
         class_names = _assignment_class_names(
@@ -6478,6 +6680,17 @@ def _parse_init(
                 attr_options.append(class_name)
         assignments[attr] = class_names[0]
         details[attr] = _assignment_details(value, class_names[0])
+        # Track a registry-selected key our curated display-name table does not
+        # recognize, so it can be chased to its real class after the fact instead
+        # of staying a permanently opaque, title-cased placeholder leaf. A later
+        # assignment to the same attr that resolves cleanly clears the tracking.
+        lookup = _activation_registry_lookup_for_assignment(
+            value, config, param_bindings
+        )
+        if lookup is not None and lookup[1] not in _ACTIVATION_DISPLAY_NAMES:
+            unresolved_activations[attr] = lookup
+        else:
+            unresolved_activations.pop(attr, None)
 
     for node in ast.walk(func):
         if isinstance(node, ast.Assign):
@@ -6495,7 +6708,7 @@ def _parse_init(
             ):
                 record_assignment(target.attr, node.value)
 
-    return assignments, details, options
+    return assignments, details, options, unresolved_activations
 
 
 def _subscript_index_operands(index: ast.AST) -> list[ast.AST]:
@@ -6684,12 +6897,19 @@ def _inplace_label(method: str) -> str:
     )
 
 
-def _activation_registry_class_name(
+def _activation_registry_lookup(
     node: ast.AST,
     config: dict[str, Any] | None,
     param_bindings: dict[str, str] | None = None,
-) -> str | None:
-    """Resolve an activation-registry lookup to the activation the config selects."""
+) -> tuple[str, str] | None:
+    """Return ``(registry_name, key)`` for an ``ACT2FN[key]``-style subscript.
+
+    Resolves the config/param-bound key to its lowercased string value but does
+    not judge whether that key is one of the curated display names -- callers
+    that only want the display name use :func:`_activation_registry_class_name`;
+    callers that need to chase an *unrecognized* key to its real class (see
+    ``_expand_unresolved_activation_classes``) use this directly.
+    """
     if not isinstance(node, ast.Subscript):
         return None
     registry = (_expr_name(node.value) or "").rsplit(".", 1)[-1]
@@ -6708,10 +6928,52 @@ def _activation_registry_class_name(
         name = (param_bindings or {}).get(key.id)
     if not isinstance(name, str) or not name.strip():
         return None
-    lowered = name.strip().lower()
+    return registry, name.strip().lower()
+
+
+def _activation_registry_class_name(
+    node: ast.AST,
+    config: dict[str, Any] | None,
+    param_bindings: dict[str, str] | None = None,
+) -> str | None:
+    """Resolve an activation-registry lookup to the activation the config selects."""
+    resolved = _activation_registry_lookup(node, config, param_bindings)
+    if resolved is None:
+        return None
+    _registry, lowered = resolved
     if lowered in _ACTIVATION_DISPLAY_NAMES:
         return _ACTIVATION_DISPLAY_NAMES[lowered]
     return lowered.replace("_", " ").title().replace(" ", "")
+
+
+def _activation_registry_lookup_for_assignment(
+    value: ast.AST,
+    config: dict[str, Any] | None,
+    param_bindings: dict[str, str] | None,
+) -> tuple[str, str] | None:
+    """Recover the activation-registry lookup behind an init assignment's value.
+
+    Mirrors just the shapes ``_assignment_class_names`` walks to reach a plain
+    ``ACT2FN[key]`` subscript (a direct assignment, or one arm of a config-switch
+    ``IfExp``/list of candidates) -- enough to let an unrecognized key be chased
+    to its real class after the fact, without re-implementing that whole walk.
+    """
+    if isinstance(value, ast.Subscript):
+        return _activation_registry_lookup(value, config, param_bindings)
+    if isinstance(value, ast.IfExp):
+        return _activation_registry_lookup_for_assignment(
+            value.body, config, param_bindings
+        ) or _activation_registry_lookup_for_assignment(
+            value.orelse, config, param_bindings
+        )
+    if isinstance(value, (ast.List, ast.Tuple)):
+        for item in value.elts:
+            found = _activation_registry_lookup_for_assignment(
+                item, config, param_bindings
+            )
+            if found is not None:
+                return found
+    return None
 
 
 def _collect_activation_param_bindings(
@@ -9054,6 +9316,9 @@ def analyze_source(
     _enrich_kernel_import_details(visitor.classes, external_imports)
     _resolve_dispatched_attention_kernel(visitor.classes, config)
     _flag_unused_interface_inputs(visitor.classes, config)
+    _expand_unresolved_activation_classes(
+        visitor.classes, tree, config, all_tensor_ops=all_tensor_ops
+    )
 
     decoder = _pick_decoder_class(visitor.classes)
     causal_lm = _pick_causal_lm_class(visitor.classes, config)
