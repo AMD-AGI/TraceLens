@@ -666,6 +666,7 @@ def merge_capture_trace_into_graph(
     capture_folder: str = None,
     metadata_json_path: str = None,
     graph_tree_filepath: str = None,
+    graph_tree: "TraceToTree" = None,
 ) -> "TraceToTree":
     """Merge capture trace information into a graph replay trace.
 
@@ -674,12 +675,18 @@ def merge_capture_trace_into_graph(
         metadata_json_path: Path to ``execution_details.json`` metadata
             index.
         graph_tree_filepath: Path to the graph-replay timing trace.
+        graph_tree: Optional pre-built :class:`TraceToTree`.  When provided
+            the expensive file load is skipped and this tree is used
+            directly (after ensuring it is built with ``add_python_func``).
 
     Returns:
         Augmented graph_tree with capture information merged in, or ``None``
         if the merge failed.
     """
-    graph_tree = _load_trace_tree_from_file(graph_tree_filepath, add_python_func=True)
+    if graph_tree is None:
+        graph_tree = _load_trace_tree_from_file(graph_tree_filepath, add_python_func=True)
+    else:
+        graph_tree.build_tree(add_python_func=True)
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
 
     execution_graph_root_map = build_execution_graph_root_map(graph_tree)
