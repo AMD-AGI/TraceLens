@@ -217,6 +217,8 @@ specifically prefill-decode steps and decode-only steps with large context sizes
 
 ### Parameters relevant to inference serving
 
+The following benchmark parameters determine the steady-state region boundaries.
+
 - **NUM_PROMPTS**: typically `10 * CONC`.
 - **CONC**: number of concurrent requests that can be batched together.
 - **R**: random-range ratio used for sampling input and output sequence lengths.

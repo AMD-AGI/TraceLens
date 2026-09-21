@@ -4,15 +4,13 @@ Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
-# Performance report column reference
+# TraceLens performance report column reference
 ```{meta}
 :description: Reference for every sheet and column in a TraceLens performance report, including the gpu_timeline breakdown, operation-analysis sheets, roofline metrics, and collective communication analysis.
 :keywords: TraceLens, performance report, column reference, gpu_timeline, ops, ops_summary, ops_unique_args, roofline, GEMM, SDPA, convolution, NCCL, coll_analysis, GFLOPS, TFLOPS, arithmetic intensity, ROCm, AMD Instinct, MI300X
 ```
 
 This topic explains the columns in each sheet of the TraceLens performance report. The report is an Excel file with multiple sheets, and each sheet analyzes a different aspect of GPU performance. Use it as a lookup while you read a report generated with one of the how-to topics listed under [Related topics](#related-topics).
-
-## Overview
 
 The performance report Excel file contains multiple sheets analyzing different aspects of GPU performance. The core sheets are:
 
@@ -28,11 +26,11 @@ Additional sheets can include operation-specific analysis (GEMM, SDPA_fwd, CONV_
 
 ### Unit conventions
 
-- **Time**: all times from the trace are in microseconds (µs) unless explicitly stated otherwise (for example, `time ms` in `gpu_timeline` is in milliseconds).
+- **Time**: All times from the trace are in microseconds (µs) unless explicitly stated otherwise (for example, `time ms` in `gpu_timeline` is in milliseconds).
 - **Compute**: GFLOPS (billions of FLOPs), TFLOPS/s (trillions of FLOPs per second).
 - **Memory**: MB (megabytes), GB/s (gigabytes per second), TB/s (terabytes per second).
 
-## The gpu_timeline sheet
+## The `gpu_timeline` sheet
 
 The `gpu_timeline` sheet provides a high-level breakdown of GPU time into computation, communication, memory copy, and idle time, accounting for overlaps between different types of operations.
 
@@ -53,10 +51,10 @@ Here's a typical `gpu_timeline` sheet from a distributed training workload:
 
 In this example:
 
-- 99.30% computation time, so the GPU is very efficiently utilized.
+- 99.30% computation time, so the GPU is used efficiently.
 - 0.42% exposed communication, which is excellent. Most communication (30.34% total - 0.42% exposed = 29.92%) overlaps with computation.
 - 0.25% idle time, so there are minimal gaps and good kernel launch efficiency.
-- This workload demonstrates effective computation/communication overlap.
+- This workload demonstrates effective computation and communication overlap.
 
 ### Event classification
 
@@ -84,55 +82,55 @@ GPU Event
 
 ### How time is calculated
 
-*Step 1: merge events by category.* Events of the same category are merged across all GPU streams into non-overlapping intervals.
+1. **Merge events by category**: Events of the same category are merged across all GPU streams into non-overlapping intervals.
 
-Example, merging computation events:
+   Example, merging computation events:
 
-```
-Stream 0: ──[Kernel A]────────[Kernel B]──
-Stream 1: ─────[Kernel C]──[Kernel D]─────
-                ↓
-Merged:   ──[──────────]──[──────────]──
-          (overlapping kernels merged into single intervals)
-```
+   ```
+   Stream 0: ──[Kernel A]────────[Kernel B]──
+   Stream 1: ─────[Kernel C]──[Kernel D]─────
+                   ↓
+   Merged:   ──[──────────]──[──────────]──
+             (overlapping kernels merged into single intervals)
+   ```
 
-*Step 2: create interval sets.* After merging, there are four sets of non-overlapping intervals:
+2. **Create interval sets**: After merging, there are four sets of non-overlapping intervals:
 
-- `COMP` = merged computation intervals
-- `COMM` = merged communication intervals
-- `MEMCPY` = merged memcpy intervals
-- `ALL_GPU` = merged intervals of ALL GPU events (computation + communication + memcpy)
+   - `COMP` = merged computation intervals
+   - `COMM` = merged communication intervals
+   - `MEMCPY` = merged memcpy intervals
+   - `ALL_GPU` = merged intervals of ALL GPU events (computation + communication + memcpy)
 
-*Step 3: apply set arithmetic.* Exposed metrics are calculated by subtracting overlaps:
+3. **Apply set arithmetic**: Exposed metrics are calculated by subtracting overlaps:
 
-```
-exposed_comm intervals     = COMM - COMP
-exposed_memcpy intervals   = MEMCPY - COMP - COMM
-```
+   ```
+   exposed_comm intervals     = COMM - COMP
+   exposed_memcpy intervals   = MEMCPY - COMP - COMM
+   ```
 
-In simple terms:
+   In plain terms:
 
-- Exposed communication is communication time that doesn't overlap with computation.
-- Exposed memcpy is memcpy time that doesn't overlap with computation or communication.
+   - Exposed communication is communication time that doesn't overlap with computation.
+   - Exposed memcpy is memcpy time that doesn't overlap with computation or communication.
 
-*Step 4: sum interval durations.* Time for each metric is the sum of durations of all intervals in that set:
+4. **Sum interval durations**: Time for each metric is the sum of durations of all intervals in that set:
 
-```
-computation_time      = sum of durations in COMP
-exposed_comm_time     = sum of durations in (COMM - COMP)
-exposed_memcpy_time   = sum of durations in (MEMCPY - COMP - COMM)
-busy_time            = sum of durations in ALL_GPU
-idle_time            = total_time - busy_time
-total_comm_time      = sum of durations in COMM
-total_memcpy_time    = sum of durations in MEMCPY
-total_time           = end of last GPU event - start of first GPU event
-```
+   ```
+   computation_time      = sum of durations in COMP
+   exposed_comm_time     = sum of durations in (COMM - COMP)
+   exposed_memcpy_time   = sum of durations in (MEMCPY - COMP - COMM)
+   busy_time            = sum of durations in ALL_GPU
+   idle_time            = total_time - busy_time
+   total_comm_time      = sum of durations in COMM
+   total_memcpy_time    = sum of durations in MEMCPY
+   total_time           = end of last GPU event - start of first GPU event
+   ```
 
-The equation:
+   The resulting equation:
 
-```
-computation_time + exposed_comm_time + exposed_memcpy_time + idle_time = total_time
-```
+   ```
+   computation_time + exposed_comm_time + exposed_memcpy_time + idle_time = total_time
+   ```
 
 ### Columns
 
@@ -145,7 +143,7 @@ computation_time + exposed_comm_time + exposed_memcpy_time + idle_time = total_t
 ### Interpreting results
 
 - High `computation_time` (>80%): workload is efficiently using the GPU.
-- High `exposed_comm_time`: communication isn't overlapped with computation, so optimize with computation/communication overlap.
+- High `exposed_comm_time`: communication isn't overlapped with computation, so optimize with computation and communication overlap.
 - High `exposed_memcpy_time`: memory transfers are blocking work, so optimize data movement.
 - High `idle_time`: the GPU is sitting idle, so check for CPU bottlenecks, kernel launch overhead, or synchronization.
 
@@ -348,7 +346,7 @@ The PyTorch trace has a hierarchical structure (Python → Operations → Runtim
 
 The following three sheets provide different levels of aggregation of the base `ops` data, following a progressive disclosure of complexity.
 
-### The ops_summary_by_category sheet (most aggregated)
+### The `ops_summary_by_category` sheet (most aggregated)
 
 This is the highest-level summary. It groups operations into broad computational categories (GEMM, convolution, attention, and so on). Use it to quickly identify which types of operations dominate your workload.
 
@@ -385,7 +383,7 @@ Use this sheet when you want a high-level answer to "What types of operations ar
 
 Generated by `TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category()`.
 
-### The ops_summary sheet (by operation name)
+### The `ops_summary` sheet (by operation name)
 
 This is a mid-level summary. It groups operations by their name (for example, all `aten::addmm` calls together, all `aten::conv2d` calls together). Use it when you know which category is expensive and want to see which specific operations within that category are the culprits.
 
@@ -412,7 +410,7 @@ Use this sheet when you're asking, "I see GEMM is expensive. Which specific GEMM
 
 Generated by `TreePerfAnalyzer.get_df_kernel_launchers_summary()`.
 
-### The ops_unique_args sheet (most detailed)
+### The `ops_unique_args` sheet (most detailed)
 
 This is the most detailed summary. It groups operations by unique combinations of operation name AND input arguments (shapes, dtypes, strides, concrete inputs). Use it to identify which specific input patterns are causing performance issues.
 
@@ -454,7 +452,7 @@ What this sheet shows:
 
 Use this sheet when you're asking, "I see `aten::addmm` is expensive. Is it slow for all input shapes, or just specific ones? Are there outliers?"
 
-#### Understanding kernel_details_summary
+#### Understanding `kernel_details_summary`
 
 `kernel_details_summary` provides aggregated kernel statistics across all occurrences of an operation+args combination. It shows which kernels are consistently launched and their performance distribution. All durations are in microseconds (µs).
 
@@ -482,7 +480,7 @@ Use this to identify:
 `trunc_kernel_details` provides a shortened version for spreadsheet readability.
 ```
 
-#### Deep-dive with ex_UID
+#### Deep-dive with `ex_UID`
 
 The `ex_UID` column provides a UID of one example event with this operation+arguments combination. You can use it to access the actual event object for deeper analysis:
 
