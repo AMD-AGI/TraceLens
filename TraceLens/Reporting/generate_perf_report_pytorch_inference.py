@@ -183,8 +183,12 @@ def perf_report_sanity_check(
 
 def find_capture_annotation_events(events):
     return sorted(
-        [e for e in events if e.get("cat") == "user_annotation"
-         and CAPTURE_PATTERN.match(e.get("name", ""))],
+        [
+            e
+            for e in events
+            if e.get("cat") == "user_annotation"
+            and CAPTURE_PATTERN.match(e.get("name", ""))
+        ],
         key=lambda x: x.get("ts", 0),
     )
 

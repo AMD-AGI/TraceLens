@@ -383,7 +383,8 @@ def find_known_annotations(annotations: List[dict]) -> List[dict]:
     """
     for patterns in (ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS):
         matches = [
-            e for e in annotations
+            e
+            for e in annotations
             if e.get("cat") == ANNOTATION_CAT
             and any(p.match(e.get("name", "")) for p in patterns)
         ]
@@ -436,14 +437,12 @@ def dominant_cluster(groups: Dict[str, List[str]]) -> Tuple[Optional[str], float
 # --- cached identity ---------------------------------------------------------
 @lru_cache(maxsize=None)
 def parse_annotation(name: str) -> IterationAnnotation:
-    """Memoized parse. Treat the result as read-only; instances are shared.
-    """
+    """Memoized parse. Treat the result as read-only; instances are shared."""
     return IterationAnnotation(name)
 
 
 def is_parseable(name: str) -> bool:
-    """True when a parser recognized the name, so its metadata is real.
-    """
+    """True when a parser recognized the name, so its metadata is real."""
     return parse_annotation(name).matched
 
 

@@ -59,6 +59,7 @@ def _detect(events):
     """find_iteration_roots with the EventIndex it now requires."""
     return find_iteration_roots(events, trace_index=EventIndex(events))
 
+
 VLLM = "execute_{i}_context_3(sq128sk256sqsq1sqsk1)_generation_2(sq1sk300sqsq1sqsk1)"
 
 
@@ -468,10 +469,7 @@ class TestDetectionFlow:
         assert result.status is DetectStatus.SPLITTABLE
         assert result.method == "family:unknown_only"
         assert len(result) == 20
-        assert (
-            result.diagnostics["root_family"]
-            == "scheduler.process_batch_result"
-        )
+        assert result.diagnostics["root_family"] == "scheduler.process_batch_result"
 
     def test_known_annotations_used_when_all_match(self):
         """When every iteration has a known annotation, use them directly."""
@@ -593,12 +591,8 @@ class TestGapFreeExtraction:
         roots = collect_annotations(events)
         tiles, _ = build_root_tiles(roots)
 
-        _, _, dropped, _, _ = extract_iteration(
-            roots, td, gap_fill=False
-        )
-        out, _, kept, _, busy = extract_iteration(
-            roots, td, root_tiles=tiles
-        )
+        _, _, dropped, _, _ = extract_iteration(roots, td, gap_fill=False)
+        out, _, kept, _, busy = extract_iteration(roots, td, root_tiles=tiles)
         assert dropped == 3
         assert kept == 6
         assert busy == 3 * 50
@@ -611,12 +605,7 @@ class TestGapFreeExtraction:
         roots = collect_annotations(events)
         tiles, _ = build_root_tiles(roots)
 
-        per_root = [
-            extract_iteration(
-                [r], td, root_tiles=tiles
-            )[2]
-            for r in roots
-        ]
+        per_root = [extract_iteration([r], td, root_tiles=tiles)[2] for r in roots]
         total_in_trace = sum(1 for e in events if e.get("cat") == "kernel")
         assert sum(per_root) == total_in_trace
 
@@ -635,12 +624,7 @@ class TestGapFreeExtraction:
         roots = collect_annotations(events)
         tiles, _ = build_root_tiles(roots)
 
-        per_root = [
-            extract_iteration(
-                [r], td, root_tiles=tiles
-            )[2]
-            for r in roots
-        ]
+        per_root = [extract_iteration([r], td, root_tiles=tiles)[2] for r in roots]
         total_in_trace = sum(1 for e in events if e.get("cat") == "kernel")
         assert sum(per_root) == total_in_trace - 1
         assert sum(per_root) <= total_in_trace
@@ -663,9 +647,7 @@ class TestGapFreeExtraction:
         td = _trace_data(events)
         roots = collect_annotations(events)
         tiles, _ = build_root_tiles(roots)
-        out, _, _, _, _ = extract_iteration(
-            [roots[0]], td, root_tiles=tiles
-        )
+        out, _, _, _, _ = extract_iteration([roots[0]], td, root_tiles=tiles)
         assert "whole_run" not in {e["name"] for e in out["traceEvents"]}
 
 
@@ -683,7 +665,13 @@ class _FakeTree:
 
 
 def _gpu_node(uid, ts, dur, children=()):
-    return {"UID": uid, "cat": "kernel", "ts": ts, "dur": dur, "children": list(children)}
+    return {
+        "UID": uid,
+        "cat": "kernel",
+        "ts": ts,
+        "dur": dur,
+        "children": list(children),
+    }
 
 
 def _cpu_node(uid, ts, dur, children=()):
@@ -708,8 +696,8 @@ class TestTryBookendEnhancement:
     def test_adds_warmup_and_wrapup_spans_and_grades_coverage(self):
         tree = _FakeTree(
             {
-                1: _gpu_node(1, 0, 100),      # before the iterations
-                2: _gpu_node(2, 900, 50),     # after the iterations
+                1: _gpu_node(1, 0, 100),  # before the iterations
+                2: _gpu_node(2, 900, 50),  # after the iterations
             }
         )
         candidate = self._candidate(
@@ -771,7 +759,9 @@ class TestCascadeReturns:
 
     def _no_annotations(self, monkeypatch):
         monkeypatch.setattr(rd, "_detect_from_known_annotations", lambda a, attr: None)
-        monkeypatch.setattr(rd, "_detect_from_unknown_annotations", lambda a, attr: None)
+        monkeypatch.setattr(
+            rd, "_detect_from_unknown_annotations", lambda a, attr: None
+        )
 
     def _run(self):
         events = serving_trace(2)
@@ -792,22 +782,32 @@ class TestCascadeReturns:
         self._no_annotations(monkeypatch)
         # Branch descent explains > BOOKEND_FLOOR of GPU but is not splittable.
         branch = self._rootset(DetectStatus.DEGRADED, "generic:branch_descent", 0.70)
-        booked = self._rootset(DetectStatus.SPLITTABLE, "generic:branch_descent+bookend", 0.99)
+        booked = self._rootset(
+            DetectStatus.SPLITTABLE, "generic:branch_descent+bookend", 0.99
+        )
         monkeypatch.setattr(rd, "detect_from_branch_descent", lambda *a: branch)
         monkeypatch.setattr(rd, "detect_from_sibling_roots", lambda *a: None)
-        monkeypatch.setattr(rd, "_try_bookend_enhancement", lambda cand, tree, total: booked)
+        monkeypatch.setattr(
+            rd, "_try_bookend_enhancement", lambda cand, tree, total: booked
+        )
 
         result = self._run()
         assert result is booked
         # The cascade audits the promoted candidate before returning it.
         assert result.coverage is not None
 
-    def test_bookend_skipped_below_floor_falls_through_to_best_usable(self, monkeypatch):
+    def test_bookend_skipped_below_floor_falls_through_to_best_usable(
+        self, monkeypatch
+    ):
         # Branch coverage under BOOKEND_FLOOR -> bookend loop skips it, and with no
         # splittable detector the best usable (non-not-splittable) candidate wins.
         degraded = self._rootset(DetectStatus.DEGRADED, "annotation:degraded", 0.80)
-        monkeypatch.setattr(rd, "_detect_from_known_annotations", lambda a, attr: degraded)
-        monkeypatch.setattr(rd, "_detect_from_unknown_annotations", lambda a, attr: None)
+        monkeypatch.setattr(
+            rd, "_detect_from_known_annotations", lambda a, attr: degraded
+        )
+        monkeypatch.setattr(
+            rd, "_detect_from_unknown_annotations", lambda a, attr: None
+        )
         low = self._rootset(DetectStatus.DEGRADED, "generic:branch_descent", 0.10)
         monkeypatch.setattr(rd, "detect_from_branch_descent", lambda *a: low)
         monkeypatch.setattr(rd, "detect_from_sibling_roots", lambda *a: None)
@@ -826,7 +826,9 @@ class TestCascadeReturns:
     def test_tree_build_failure_returns_best_annotation_fallback(self, monkeypatch):
         cand = self._rootset(DetectStatus.DEGRADED, "annotation:degraded", 0.60)
         monkeypatch.setattr(rd, "_detect_from_known_annotations", lambda a, attr: cand)
-        monkeypatch.setattr(rd, "_detect_from_unknown_annotations", lambda a, attr: None)
+        monkeypatch.setattr(
+            rd, "_detect_from_unknown_annotations", lambda a, attr: None
+        )
 
         def _boom(*a, **k):
             raise RuntimeError("synthetic build failure")
@@ -836,7 +838,9 @@ class TestCascadeReturns:
         result = self._run()
         assert result is cand
 
-    def test_tree_build_failure_without_annotations_is_not_splittable(self, monkeypatch):
+    def test_tree_build_failure_without_annotations_is_not_splittable(
+        self, monkeypatch
+    ):
         self._no_annotations(monkeypatch)
 
         def _boom(*a, **k):

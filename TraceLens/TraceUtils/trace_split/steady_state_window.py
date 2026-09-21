@@ -35,14 +35,15 @@ from ..utils.annotation_utils import (
 )
 from .batch_phase import classify_phases_from_batch_sizes
 
-
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
 
 
 def _identify_regions_by_peak(
-    values: list[int], num_steps: int, label: str = "Steady state",
+    values: list[int],
+    num_steps: int,
+    label: str = "Steady state",
     min_run: int = 5,
 ) -> tuple[list[tuple[int, int]], int]:
     """Find contiguous regions where ``values`` are near the global peak.
@@ -110,7 +111,8 @@ def _identify_regions_inference(
 ) -> tuple[list[tuple[int, int]], int]:
     """Detect contiguous steady-state regions based on num_requests proximity to global max."""
     return _identify_regions_by_peak(
-        [t["num_requests"] for t in iter_details], num_steps,
+        [t["num_requests"] for t in iter_details],
+        num_steps,
         label="Steady state",
     )
 
@@ -303,13 +305,18 @@ def find_steady_state_inference(
 
     elif mode in ("decode_only", "max_prefilldecode"):
         phase_labels = [
-            "prefill_bearing" if has_context(d) else "decode"
-            for d in iter_details
+            "prefill_bearing" if has_context(d) else "decode" for d in iter_details
         ]
         target = "decode" if mode == "decode_only" else "prefill_bearing"
         return _select_run_window(
-            iteration_roots, phase_labels, target,
-            largest_start, largest_end, num_steps, regions, mode,
+            iteration_roots,
+            phase_labels,
+            target,
+            largest_start,
+            largest_end,
+            num_steps,
+            regions,
+            mode,
         )
 
     else:
@@ -392,7 +399,9 @@ def _identify_regions_by_decode_baseline(
         return [(0, min(num_steps, n))], 0
 
     decode_regions, global_max = _identify_regions_by_peak(
-        decode_bs, num_steps, label="Steady state (decode baseline)",
+        decode_bs,
+        num_steps,
+        label="Steady state (decode baseline)",
         min_run=1,
     )
 
@@ -432,8 +441,12 @@ def find_steady_state_inference_from_shapes(
     if not batch_sizes or not iteration_roots:
         return [], []
 
-    phase_labels = classify_phases_from_batch_sizes(batch_sizes, max_num_seq=max_num_seq)
-    regions, _ = _identify_regions_by_decode_baseline(batch_sizes, phase_labels, num_steps)
+    phase_labels = classify_phases_from_batch_sizes(
+        batch_sizes, max_num_seq=max_num_seq
+    )
+    regions, _ = _identify_regions_by_decode_baseline(
+        batch_sizes, phase_labels, num_steps
+    )
 
     largest_start, largest_end = max(regions, key=lambda r: r[1] - r[0])
 
@@ -442,7 +455,8 @@ def find_steady_state_inference_from_shapes(
 
     if mode == "mixed":
         total_pf = sum(
-            1 for i in range(largest_start, largest_end)
+            1
+            for i in range(largest_start, largest_end)
             if phase_labels[i] == "prefill_bearing"
         )
         region_size = largest_end - largest_start
@@ -452,31 +466,48 @@ def find_steady_state_inference_from_shapes(
         if (largest_end - largest_start) >= num_steps:
             for s1 in range(largest_start, largest_end - num_steps + 1, step):
                 pf_count = sum(
-                    1 for i in range(s1, s1 + num_steps)
+                    1
+                    for i in range(s1, s1 + num_steps)
                     if phase_labels[i] == "prefill_bearing"
                 )
-                avg_bs = mean(
-                    b for b in batch_sizes[s1 : s1 + num_steps] if b is not None
-                ) if any(b is not None for b in batch_sizes[s1 : s1 + num_steps]) else 0
-                candidates.append({
-                    "start": s1,
-                    "end": s1 + num_steps,
-                    "pf_ratio": pf_count / num_steps,
-                    "avg_bs": avg_bs,
-                })
+                avg_bs = (
+                    mean(b for b in batch_sizes[s1 : s1 + num_steps] if b is not None)
+                    if any(b is not None for b in batch_sizes[s1 : s1 + num_steps])
+                    else 0
+                )
+                candidates.append(
+                    {
+                        "start": s1,
+                        "end": s1 + num_steps,
+                        "pf_ratio": pf_count / num_steps,
+                        "avg_bs": avg_bs,
+                    }
+                )
         else:
             pf_count = sum(
-                1 for i in range(largest_start, largest_end)
+                1
+                for i in range(largest_start, largest_end)
                 if phase_labels[i] == "prefill_bearing"
             )
-            candidates.append({
-                "start": largest_start,
-                "end": largest_end,
-                "pf_ratio": pf_count / region_size if region_size else 0.0,
-                "avg_bs": mean(
-                    b for b in batch_sizes[largest_start:largest_end] if b is not None
-                ) if any(b is not None for b in batch_sizes[largest_start:largest_end]) else 0,
-            })
+            candidates.append(
+                {
+                    "start": largest_start,
+                    "end": largest_end,
+                    "pf_ratio": pf_count / region_size if region_size else 0.0,
+                    "avg_bs": (
+                        mean(
+                            b
+                            for b in batch_sizes[largest_start:largest_end]
+                            if b is not None
+                        )
+                        if any(
+                            b is not None
+                            for b in batch_sizes[largest_start:largest_end]
+                        )
+                        else 0
+                    ),
+                }
+            )
 
         pf_candidates = [c for c in candidates if c["pf_ratio"] > 0]
         if pf_candidates:
@@ -498,8 +529,14 @@ def find_steady_state_inference_from_shapes(
     elif mode in ("decode_only", "max_prefilldecode"):
         target = "decode" if mode == "decode_only" else "prefill_bearing"
         return _select_run_window(
-            iteration_roots, phase_labels, target,
-            largest_start, largest_end, num_steps, regions, f"{mode}/shapes",
+            iteration_roots,
+            phase_labels,
+            target,
+            largest_start,
+            largest_end,
+            num_steps,
+            regions,
+            f"{mode}/shapes",
         )
 
     else:

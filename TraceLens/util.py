@@ -126,7 +126,8 @@ def get_filename(filepath: str) -> str:
             print(f"  Reading {json_file} from zip...")
             return json_file
     return filepath
-    
+
+
 def _load_xplane_converter():
     """Load the optional JAX converter, preserving the legacy profile backend."""
     try:
@@ -1146,19 +1147,37 @@ class PftraceParser:
         return pftrace_data.get("traceEvents", [])
 
 
-_MEMORY_VIEW_OPS = frozenset({
-    "aten::select", "aten::slice", "aten::as_strided", "aten::narrow",
-    "aten::copy_", "aten::_to_copy", "aten::to",
-    "aten::index_put_", "aten::_index_put_impl_",
-    "aten::resize_", "aten::resolve_conj", "aten::resolve_neg",
-    "aten::expand", "aten::permute", "aten::transpose", "aten::contiguous",
-    "aten::view", "aten::reshape", "aten::unsqueeze", "aten::squeeze",
-    "aten::flatten", "aten::unflatten",
-})
+_MEMORY_VIEW_OPS = frozenset(
+    {
+        "aten::select",
+        "aten::slice",
+        "aten::as_strided",
+        "aten::narrow",
+        "aten::copy_",
+        "aten::_to_copy",
+        "aten::to",
+        "aten::index_put_",
+        "aten::_index_put_impl_",
+        "aten::resize_",
+        "aten::resolve_conj",
+        "aten::resolve_neg",
+        "aten::expand",
+        "aten::permute",
+        "aten::transpose",
+        "aten::contiguous",
+        "aten::view",
+        "aten::reshape",
+        "aten::unsqueeze",
+        "aten::squeeze",
+        "aten::flatten",
+        "aten::unflatten",
+    }
+)
 
 
 def most_common_first_dim(
-    events: list[dict], exclude_mem_ops: bool = False,
+    events: list[dict],
+    exclude_mem_ops: bool = False,
 ) -> int | None:
     """Return the most common first dimension across all ``Input Dims`` of cpu_op events.
 

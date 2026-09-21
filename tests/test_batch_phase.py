@@ -115,7 +115,7 @@ def test_infer_most_common_first_dim_in_window():
     events = [
         _cpu(100, 5, 8),
         _cpu(110, 5, 8),
-        _cpu(120, 5, 4),   # 8 is more common than 4
+        _cpu(120, 5, 4),  # 8 is more common than 4
         _cpu(250, 5, 999),  # outside [100, 200) -> excluded
         _cpu(105, 200, 777),  # encloses window (dur > win_dur) -> excluded
     ]
@@ -153,9 +153,14 @@ def test_infer_uses_root_tiles_window_over_root_span():
     # cluster, so the later (larger) cluster is not counted.
     root = {"ts": 0, "dur": 1000, "pid": 0, "tid": 0}
     events = [
-        _cpu(10, 5, 8), _cpu(20, 5, 8), _cpu(30, 5, 8),        # cluster A
-        _cpu(500, 5, 64), _cpu(510, 5, 64),
-        _cpu(520, 5, 64), _cpu(530, 5, 64), _cpu(540, 5, 64),  # cluster B (larger)
+        _cpu(10, 5, 8),
+        _cpu(20, 5, 8),
+        _cpu(30, 5, 8),  # cluster A
+        _cpu(500, 5, 64),
+        _cpu(510, 5, 64),
+        _cpu(520, 5, 64),
+        _cpu(530, 5, 64),
+        _cpu(540, 5, 64),  # cluster B (larger)
     ]
     idx = _index(events)
 

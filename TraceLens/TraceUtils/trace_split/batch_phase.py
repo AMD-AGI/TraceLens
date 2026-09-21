@@ -51,7 +51,8 @@ def infer_batch_sizes_from_shapes(
 
         # Filter to events within the window, excluding enclosing spans
         window_events = [
-            e for e in cpu_events[lo:hi]
+            e
+            for e in cpu_events[lo:hi]
             if win_ts <= e["ts"] < win_end and e["dur"] <= win_dur
         ]
         batch_sizes.append(most_common_first_dim(window_events, exclude_mem_ops=True))

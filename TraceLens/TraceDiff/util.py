@@ -53,5 +53,3 @@ def _is_gpu_path(node):
 def _is_kernel(node):
     """Return True if node is a GPU kernel or memcpy."""
     return node.get(_CATEGORY) in ("kernel", "gpu_memcpy")
-
-

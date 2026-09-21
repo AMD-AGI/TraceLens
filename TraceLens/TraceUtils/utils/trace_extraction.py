@@ -31,8 +31,6 @@ from dataclasses import replace
 from .detect_utils import ExtractContext, TraceData, build_root_tiles
 
 
-
-
 def build_cpu_event_index(
     events: list[dict],
 ) -> tuple[list[dict], list[float]]:
@@ -274,9 +272,7 @@ def extract_and_save_split(
             )
         elif is_annotation and len(root) == 1:
             root_name = root[0]["name"]
-            is_known_annotation = any(
-                pat.match(root_name) for pat in known_patterns
-            )
+            is_known_annotation = any(pat.match(root_name) for pat in known_patterns)
             if is_known_annotation:
                 name_append = (
                     root_name.replace("/", "_")
@@ -302,7 +298,11 @@ def extract_and_save_split(
                 out_path = os.path.join(
                     output_dir, f"{output_label}_{base_name}.json.gz"
                 )
-        elif is_annotation and len(root) == 1 and root[0].get("name") in ("warmup", "wrapup"):
+        elif (
+            is_annotation
+            and len(root) == 1
+            and root[0].get("name") in ("warmup", "wrapup")
+        ):
             out_path = os.path.join(
                 output_dir, f"{base_name}_{root[0]['name']}.json.gz"
             )
@@ -352,7 +352,9 @@ def extract_and_save_single_trace(
         f"as a single trace with ancestor context..."
     )
     iter_trace, _batch_list, num_gpu, gpu_dur, gpu_busy = extract_iteration(
-        roots, ctx.trace, root_tiles=ctx.root_tiles,
+        roots,
+        ctx.trace,
+        root_tiles=ctx.root_tiles,
     )
     ancestors = collect_ancestor_events(roots, uid_map or {})
     existing_events = {id(e) for e in iter_trace["traceEvents"]}
