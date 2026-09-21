@@ -159,24 +159,19 @@ class BaseTraceToTree(ABC):
                 if self._is_nn_module_event(popped_event):
                     nn_module_stack.pop()
 
-            # Handle "event bleed": the event starts inside the stack top
-            # but ends after it.  If the overlap (stack[-1].t_end - event.ts)
-            # is < 1 us, this is a tiny timing overlap (e.g. hipLaunchKernel
-            # starting a few hundred ns before a sibling cpu_op finishes).
-            # Pop the sibling and attach the event under the same parent.
-            # Larger bleeds (>= 1 us) are discarded — these are typically
-            # python_function instrumentation artifacts (e.g. PyCapsule
-            # built-ins whose duration includes GPU sync time).
+            # Event bleed: the event starts inside the stack top but ends
+            # after it. Small bleeds (< tolerance) pop the sibling; larger
+            # ones discard the event.
+            bleed_tolerance_us = 1.0
             if stack and (
                 event[TraceEventUtils.TraceKeys.TimeEnd]
-                > stack[-1][TraceEventUtils.TraceKeys.TimeEnd]
+                > stack[-1][TraceEventUtils.TraceKeys.TimeEnd] + bleed_tolerance_us
             ):
                 overlap_us = (
                     stack[-1][TraceEventUtils.TraceKeys.TimeEnd]
                     - event[TraceEventUtils.TraceKeys.TimeStamp]
                 )
-                overlap_tolerance_us = 1.0
-                if overlap_us < overlap_tolerance_us and len(stack) >= 2:
+                if overlap_us < bleed_tolerance_us and len(stack) >= 2:
                     popped_event = stack.pop()
                     if self.event_to_category(popped_event) == "cpu_op":
                         dict_pidtid2num_cpu_ops[stack_key] -= 1
@@ -1204,27 +1199,25 @@ class TraceToTree(BaseTraceToTree):
         # 1. Get the linking id from the input event
         # 2. Find the corresponding start and end ac2g events for the linking id
         # 3. Find the output event using the pid, tid, and linking id of the end ac2g event
+        # 4. Some runtimes (e.g. hipDrvLaunchKernelEx, hipMemsetAsync) emit only
+        #    the finish half of the ac2g flow, so fall back to an unambiguous
+        #    correlation-id match.
         link_id = input_event.get(TraceEventUtils.TraceKeys.Args, {}).get(
             self.linking_key
         )
         ac2g_start_event = self.ac2g_event_map["start"].get(link_id)
         ac2g_end_event = self.ac2g_event_map["end"].get(link_id)
 
-        if not ac2g_start_event:
+        if ac2g_start_event and ac2g_end_event:
+            pid = ac2g_end_event.get(TraceEventUtils.TraceKeys.PID)
+            tid = ac2g_end_event.get(TraceEventUtils.TraceKeys.TID)
+            end_link_id = ac2g_end_event.get("id")
+            return self.pid_tid_event_map.get((pid, tid, end_link_id))
+        else:
+            gpu_events = self.linking_id_to_gpu_events.get(link_id, [])
+            if len(gpu_events) == 1:
+                return gpu_events[0]
             return None
-
-        if not ac2g_end_event:
-            # print(f"Warning: start ac2g event found for {self.linking_key}={link_id} but no corresponding end ac2g event found.")
-            # print(f"Input event name: {input_event[TraceEventUtils.TraceKeys.Name]}")
-            # print(('-'*64))
-            return None
-
-        pid = ac2g_end_event.get(TraceEventUtils.TraceKeys.PID)
-        tid = ac2g_end_event.get(TraceEventUtils.TraceKeys.TID)
-        link_id = ac2g_end_event.get("id")
-
-        output_event = self.pid_tid_event_map.get((pid, tid, link_id))
-        return output_event
 
     def get_nn_module_children(self, nn_module_event: Dict[str, Any]):
         """

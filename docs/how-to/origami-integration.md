@@ -17,11 +17,15 @@ doesn't install Origami.
 
 ## What Origami does in TraceLens
 
+Origami integrates into TraceLens in the following ways.
+
 - GEMM and SDPA perf models call Origami's Python bindings to predict a duration in microseconds for forward (and SDPA backward where applicable).
 - Results show up in perf reports under columns such as `Origami Time (µs)`, `Origami TFLOPS/s`, `Origami TB/s`, and `Pct Origami` (relative to measured kernel busy time), when simulation uses Origami.
 - Roofline metrics from `--gpu_arch_json_path` are separate; they don't require Origami. Origami adds *simulated* timing on top when enabled.
 
 ## Installation
+
+Origami consists of a Python package and requires a compatible ROCm system environment; install both components before enabling Origami in TraceLens.
 
 ### Python package
 
@@ -76,7 +80,11 @@ analysis.
 
 ## Command-line usage
 
+Pass `--enable-origami` alongside `--gpu_arch_json_path` to any TraceLens report command to activate Origami simulation.
+
 ### PyTorch perf report
+
+Run the following command to generate a PyTorch performance report with Origami simulation enabled.
 
 ```bash
 TraceLens_generate_perf_report_pytorch \
@@ -102,6 +110,8 @@ Same pattern; the entry point mirrors the PyTorch script (`--enable-origami`).
 
 ### JAX perf report
 
+Run the following command to generate a JAX performance report with Origami simulation enabled.
+
 ```bash
 TraceLens_generate_perf_report_jax \
   --profile_path path/to/trace.xplane.pb \
@@ -112,7 +122,7 @@ TraceLens_generate_perf_report_jax \
 
 ### Standalone GEMM/SDPA simulator helper
 
-`TraceLens/PerfModel/run_perf_model.py`:
+Use `TraceLens/PerfModel/run_perf_model.py` to run the GEMM or SDPA simulator directly from the command line.
 
 ```bash
 python -m TraceLens.PerfModel.run_perf_model --op gemm ... --enable_origami
@@ -134,6 +144,8 @@ Reporting helpers such as `generate_perf_report_pytorch` accept
 `enable_origami=True` and forward it to the analyzer.
 
 ## Troubleshooting
+
+Use the following table to diagnose common problems when enabling Origami in TraceLens.
 
 | Symptom | What to check |
 |---------|---------------|

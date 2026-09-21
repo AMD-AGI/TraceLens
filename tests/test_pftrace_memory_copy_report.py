@@ -4,6 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from TraceLens.Reporting.pftrace_utils import derive_pftrace_output_path
+
 import json
 import os
 import tempfile
@@ -184,3 +186,20 @@ class TestGeneratePerfReportPftraceMemoryCopy:
                 assert list(df.columns) == ["copy_bytes", "direction", "count"]
             finally:
                 os.unlink(trace_path)
+
+    def test_generate_default_output_path(self):
+        """No output_xlsx_path/output_csvs_dir given -> auto-derive next to trace_path."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"traceEvents": _make_memory_copy_events()}, f)
+            trace_path = f.name
+        expected_xlsx = derive_pftrace_output_path(
+            trace_path, "_pftrace_memory_copy_report.xlsx"
+        )
+        try:
+            dfs = generate_perf_report_pftrace_memory_copy(trace_path=trace_path)
+            assert "memory_copy_by_copy_bytes" in dfs
+            assert os.path.isfile(expected_xlsx)
+        finally:
+            os.unlink(trace_path)
+            if os.path.isfile(expected_xlsx):
+                os.unlink(expected_xlsx)

@@ -7,7 +7,7 @@ See LICENSE for license information.
 # Inference performance analysis in TraceLens
 ```{meta}
 :description: Understand the concepts behind TraceLens inference analysis - the roofline model for paged attention (prefill and decode), and the steady-state region that trace splitting targets.
-:keywords: TraceLens, inference, roofline, paged attention, prefill, decode, chunked prefill, FLOPS, arithmetic intensity, steady state, vLLM, SGLang, LLM serving, ROCm, MI300X
+:keywords: TraceLens, inference, roofline, paged attention, prefill, decode, chunked prefill, FLOPS, arithmetic intensity, steady state, vLLM, SGLang, ATOM, LLM serving, ROCm, MI300X
 ```
 
 This topic explains the concepts behind TraceLens's inference-serving analysis:
@@ -70,7 +70,7 @@ fall into two categories:
   the current chunk.
 - **Generation (decode) requests** generate new tokens; attention is non-causal
   (queries attend to all past KV tokens). Typically N_Q = 1, but approaches like
-  speculative decoding may produce multiple query tokens per request.
+  speculative decoding might produce multiple query tokens per request.
 
 #### FLOPS: prefill (context) requests
 
@@ -137,7 +137,7 @@ This works because:
 
 Generation requests attend to all cached KV tokens (N_KV = context length so
 far). Typically N_Q = 1 (autoregressive decoding), but techniques like
-speculative decoding may have N_Q > 1. The attention is non-causal:
+speculative decoding might have N_Q > 1. The attention is non-causal:
 
 ```
                      R_G
@@ -216,6 +216,8 @@ specifically prefill-decode steps and decode-only steps with large context sizes
 (towards the end of a request).
 
 ### Parameters relevant to inference serving
+
+The following benchmark parameters determine the steady-state region boundaries.
 
 - **NUM_PROMPTS**: typically `10 * CONC`.
 - **CONC**: number of concurrent requests that can be batched together.

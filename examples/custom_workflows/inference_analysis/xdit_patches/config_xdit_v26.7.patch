@@ -23,7 +23,7 @@ index ddf9abf..e5ffc5e 100644
              "--warmup_calls",
              help="The number of full pipe calls to warmup the model.",
 diff --git a/xfuser/model_executor/models/runner_models/base_model.py b/xfuser/model_executor/models/runner_models/base_model.py
-index de8490e..4952a3e 100644
+index de8490e..46727a6 100644
 --- a/xfuser/model_executor/models/runner_models/base_model.py
 +++ b/xfuser/model_executor/models/runner_models/base_model.py
 @@ -3,6 +3,7 @@ import torch
@@ -43,7 +43,7 @@ index de8490e..4952a3e 100644
  
  
      def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
-@@ -520,14 +521,22 @@ class xFuserModel(abc.ABC):
+@@ -520,16 +521,24 @@ class xFuserModel(abc.ABC):
              active=self.config.profile_active,
          )
          num_repetitions = self.config.profile_wait + self.config.profile_warmup + self.config.profile_active
@@ -51,8 +51,11 @@ index de8490e..4952a3e 100644
 +        batch_size = input_args.get("num_images_per_prompt", 1)
 +        height = input_args.get("height", 0)
 +        width = input_args.get("width", 0)
-+        replay_annotation = f"execute_diffusion_{batch_size}_{height}x{width}"
-
++        if self.config.profile_capture_phase:
++            annotation = f"execute_diffusion_{batch_size}_{height}x{width}"
++        else:
++            annotation = "model_inference"
+ 
          with profile(
              activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
              schedule=schedule,
@@ -62,10 +65,12 @@ index de8490e..4952a3e 100644
          ) as profile_object:
              for iteration in range(num_repetitions):
                  log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
--                out, elapsed_time = self._run_timed_pipe(input_args)
-+                with torch.profiler.record_function(replay_annotation):
-+                    out, elapsed_time = self._run_timed_pipe(input_args)
-@@ -616,6 +626,35 @@ class xFuserModel(abc.ABC):
+-                with record_function("model_inference"):
++                with record_function(annotation):
+                     if self.config.batch_size: # Run in batched mode
+                         output, batch_timings = self._run_pipe_batched(input_args)
+                         timing = sum(batch_timings)
+@@ -616,6 +625,36 @@ class xFuserModel(abc.ABC):
          elapsed_time = start.elapsed_time(end) / 1000  # Convert to seconds
          return out, elapsed_time
  
@@ -124,4 +129,3 @@ index 77b08b9..0858a7a 100644
  
      def save_output(self, output: DiffusionOutput) -> None:
          pipe_args = output.pipe_args
-

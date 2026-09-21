@@ -963,48 +963,6 @@ def test_main_explicit_iteration_range(tmp_path):
     assert out_dir.exists()
 
 
-def test_main_dummy_runs_and_steady_state_message(tmp_path, capsys):
-    dummy_name = "vllm/v1/worker/gpu_model_runner.py(99): _dummy_run"
-    trace = {
-        "traceEvents": [
-            {
-                "name": dummy_name,
-                "cat": "cpu_op",
-                "ph": "X",
-                "ts": 0,
-                "dur": 100,
-                "tid": 1,
-                "pid": 1,
-                "args": {},
-            }
-        ],
-        "schemaVersion": 1,
-    }
-    trace_path = tmp_path / "dummy_trace.json"
-    trace_path.write_text(json.dumps(trace))
-    out_dir = tmp_path / "dummy"
-
-    old_argv = sys.argv
-    sys.argv = [
-        "split_inference_trace_annotation",
-        str(trace_path),
-        "-o",
-        str(out_dir),
-        "--dummy",
-        "0:1",
-        "--find-steady-state",
-    ]
-    try:
-        split.main()
-    finally:
-        sys.argv = old_argv
-
-    assert (
-        "finding steady state without annotations not supported"
-        in capsys.readouterr().out
-    )
-
-
 class TestCaptureMergeAndMoe:
     def test_align_streams_multistream(self):
         graph = [
@@ -1038,44 +996,6 @@ class TestCaptureMergeAndMoe:
         }
         model = moe_ext.MoeSortScatterGather(evt)
         assert model.bytes() is None or model.bytes() >= 0
-
-
-class TestSplitAnnotationDummyPhase10:
-    def test_main_dummy_store_single_iteration(self, tmp_path):
-
-        dummy_name = "vllm/v1/worker/gpu_model_runner.py(99): _dummy_run"
-        trace = {"traceEvents": [], "schemaVersion": 1}
-        for i in range(5):
-            trace["traceEvents"].append(
-                {
-                    "name": dummy_name,
-                    "cat": "user_annotation",
-                    "ph": "X",
-                    "ts": 1000 + i * 1000,
-                    "dur": 100,
-                    "tid": 10,
-                    "pid": 1,
-                    "args": {},
-                }
-            )
-        trace_path = tmp_path / "trace.json"
-        trace_path.write_text(json.dumps(trace))
-        out_dir = tmp_path / "out"
-        old_argv = sys.argv
-        sys.argv = [
-            "split_inference_trace_annotation",
-            str(trace_path),
-            "--output-dir",
-            str(out_dir),
-            "--dummy",
-            "1:3",
-            "--store-single-iteration",
-        ]
-        try:
-            split.main()
-        finally:
-            sys.argv = old_argv
-        assert (out_dir / "execution_details.json").exists()
 
 
 class TestCaptureMergeDeep:

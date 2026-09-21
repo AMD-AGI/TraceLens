@@ -68,26 +68,55 @@ def suppress_native_hlo_logs():
         tmp.close()
 
 
+def merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    """Merge a list of ``(start, end)`` intervals into a union of non-overlapping ones.
+
+    Intervals do not need to be pre-sorted.
+    """
+    if not intervals:
+        return []
+    intervals = sorted(intervals, key=lambda x: x[0])
+    merged = [intervals[0]]
+    for start, end in intervals[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _load_xplane_converter():
+    """Load the optional JAX converter, preserving the legacy profile backend."""
+    try:
+        from xprof.convert import raw_to_tool_data as convert
+
+        return convert, "xprof"
+    except ImportError:
+        try:
+            from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
+        except ImportError as exc:
+            raise ImportError(
+                "JAX XPlane parsing requires the optional JAX dependencies. "
+                "Install TraceLens with the [jax] extra, for example "
+                "`pip install 'TraceLens[jax] @ "
+                "git+https://github.com/AMD-AGI/TraceLens.git'`, "
+                "using a Python version supported by xprof."
+            ) from exc
+        logger.warning(
+            "xprof not available, falling back to tensorboard-plugin-profile "
+            "for trace conversion. Install TraceLens[jax] for JAX 0.8+ support."
+        )
+        return convert, "tensorboard-plugin-profile"
+
+
 # generic data loader class for json, json.gz, or tensorboard pb files
 # tensorboard pb files are useful for Jax in particular because the json.gz traces produced by jax can have incorrect timestamps and missing information
 class DataLoader:
     @staticmethod
     def load_data(filename_path: str, save_preprocessed: bool = False) -> dict:
         if filename_path.endswith("pb"):
-            try:
-                from xprof.convert import raw_to_tool_data as convert
-
-                converter_lib = "xprof"
-            except ImportError:
-                from tensorboard_plugin_profile.convert import (
-                    raw_to_tool_data as convert,
-                )
-
-                converter_lib = "tensorboard-plugin-profile"
-                logger.warning(
-                    "xprof not available, falling back to tensorboard-plugin-profile "
-                    "for trace conversion. Install xprof for JAX 0.8+ support."
-                )
+            convert, converter_lib = _load_xplane_converter()
 
             with suppress_native_hlo_logs():
                 data, _ = convert.xspace_to_tool_data(
@@ -178,12 +207,7 @@ class JaxProfileProcessor:
 
     @staticmethod
     def process_protobuf_file(protobuf_file_name, module_name):
-        try:
-            from xprof.convert import raw_to_tool_data as convert
-        except ImportError:
-            from tensorboard_plugin_profile.convert import (
-                raw_to_tool_data as convert,
-            )
+        convert, _ = _load_xplane_converter()
 
         dir_name = os.path.dirname(os.path.abspath(protobuf_file_name)) + "/"
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
