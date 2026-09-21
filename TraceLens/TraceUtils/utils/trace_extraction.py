@@ -9,20 +9,17 @@
 import gzip
 import json
 import os
-import zipfile
 from bisect import bisect_left, bisect_right
-from collections import Counter
 
 from tqdm import tqdm
 
-from ...util import GPU_EVENT_CATEGORIES, GPU_KERNEL_CATEGORIES
+from ...util import GPU_EVENT_CATEGORIES
 from .annotation_utils import (
     ITERATION_BACKUP_PATTERNS,
     ITERATION_PATTERNS,
     find_phase_from_window,
     has_context,
     has_generation,
-    is_decode_only,
     iteration_details,
 )
 

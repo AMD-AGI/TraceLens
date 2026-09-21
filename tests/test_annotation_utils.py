@@ -22,8 +22,6 @@ both are consumed by key elsewhere and must agree on ``batch_size``.
 import pytest
 
 from TraceLens.TraceUtils.utils.annotation_utils import (
-    ITERATION_BACKUP_PATTERNS,
-    ITERATION_PATTERNS,
     PHASE_DECODE_ONLY,
     PHASE_PREFILL_ONLY,
     PHASE_PREFILLDECODE,

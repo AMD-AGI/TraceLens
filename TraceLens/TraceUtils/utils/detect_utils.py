@@ -20,9 +20,9 @@ from bisect import bisect_left
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from statistics import median
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from ...util import GPU_EVENT_CATEGORIES, GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION
+from ...util import GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION
 
 # Coverage to accept roots outright, and the floor below which a trace is
 # unsplittable rather than degraded.
