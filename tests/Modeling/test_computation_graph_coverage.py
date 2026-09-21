@@ -1564,6 +1564,45 @@ def test_ensure_side_chain_tail_index_variants():
     )
 
 
+def test_ensure_side_chain_tail_index_prefers_real_predecessor_over_input_fed():
+    """A single-step chain reads a *reassigned* variable, not the raw input.
+
+    Mirrors the MiniMax MoE router bug: ``hidden_states = hidden_states.view(...);
+    self.gate(hidden_states)``. The AST's "still reads the pristine input"
+    heuristic (``input_fed_steps``) keeps "gate" listed because a view/reshape
+    reassignment does not clear pristine tracking -- correct for boundary
+    *labeling*, but wrong for *wiring*: ``gate``'s true operand is the view op's
+    output (already materialized earlier in the chain), not the enclosing
+    forward's raw ``@input``. ``_ensure_side_chain_tail_index`` must resolve the
+    step's real predecessor (``_resolve_primary_input``, keyed on
+    ``forward_step_predecessor_args``) rather than blindly forcing the raw input
+    whenever the attr also happens to be in ``input_fed_steps``.
+    """
+    gate_node = _node("gate")
+    side = aa.SideInputSpec("x", "gate", ["gate"])
+    seg = SideFeedSegment(
+        _node("c"),
+        [side],
+        side_producer_chains={"gate": [gate_node]},
+    )
+    gate_child = _node("gate")
+    root = _node(
+        "root",
+        children=[gate_child],
+        input_fed_steps=["gate"],
+        forward_step_predecessor_args={"gate": {"hidden_states": "view_op"}},
+    )
+    graph = cg.ComputationGraph()
+    input_index = cg._add_node(graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT)
+    view_index = cg._add_node(graph, key="view_op")
+    attr_last = {"view_op": view_index}
+    tail = cg._ensure_side_chain_tail_index(
+        graph, seg, side, segment_index=0, input_index=input_index, attr_last_index=attr_last, root=root
+    )
+    assert (view_index, tail) in graph.links
+    assert (input_index, tail) not in graph.links
+
+
 def test_ensure_side_chain_tail_index_multi_step_chain():
     g_a = _node("g_a")
     g_b = _node("g_b")

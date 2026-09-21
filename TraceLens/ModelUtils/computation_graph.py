@@ -42,6 +42,7 @@ from TraceLens.ModelUtils.ast_analyze import (
     is_forward_operation,
 )
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter, keep_detail_graph_node
+from TraceLens.ModelUtils.shape_inference import _operand_ceiling
 
 SYNTHETIC_INPUT = "@input"
 SYNTHETIC_OUTPUT = "@output"
@@ -1388,11 +1389,27 @@ def _operation_source_indices(
     return sources
 
 
+def _raw_op_from_details(details: list[str]) -> str:
+    """The underlying torch op name threaded as a ``raw_op: <name>`` detail.
+
+    Mirrors ``adapter.py``'s own extraction of this detail onto the rendered
+    node's ``raw_op`` attr (the name the type-check keys its arity lookup on) so
+    the wiring pass can ask the same "how many tensor operands does this op
+    really take" question before the node is ever rendered.
+    """
+    for detail in details:
+        name, sep, value = detail.partition(":")
+        if sep and name.strip() == "raw_op":
+            return value.strip()
+    return ""
+
+
 def _reads_only_a_side_parameter(step: BlockNode) -> bool:
     """True when an operation's operands are a side input rather than the chain.
 
-    Two cases have no source among the steps they sit between, so falling back to
-    the previous step would draw a dataflow edge the forward never performs:
+    Three cases have no source among the steps they sit between, so falling back
+    to the previous step (or forking from the enclosing call's input) would draw
+    a dataflow edge the forward never performs:
 
     * a forward parameter read (``param_inputs``); or
     * a *multi-output* op (``output_names``) whose sole operand is a module
@@ -1400,20 +1417,36 @@ def _reads_only_a_side_parameter(step: BlockNode) -> bool:
       ``pre_b, post_b, comb_b = self.base.split(...)`` or
       ``pre_scale, post_scale, comb_scale = self.scale.unbind(0)``. The parameter
       is the receiver being fanned out; there is no chain predecessor.
+    * a *single*-output op whose AST-recorded operands are *only*
+      ``external_inputs`` (no ``param_inputs``, no chain ``operation_predecessors``
+      at all) *and* whose own operand contract has room for only one tensor
+      operand in total — e.g. ``inv_freq_expanded = self.inv_freq[None, :,
+      None].expand(position_ids.shape[0], -1, 1)``: every size argument resolves
+      to a host scalar or a literal, ``expand`` takes exactly one tensor operand
+      (:func:`TraceLens.ModelUtils.shape_inference._operand_ceiling`, resolved
+      from the op's real parameters -- never its name), and that operand is
+      already the buffer, so there is genuinely no room for a chain input.
 
-    The multi-output guard is deliberate: a *single*-output op that reads a
-    ``self.param`` (``x = x * self.weight``) commonly also continues the chain
-    implicitly, and the AST does not always record that predecessor, so treating
-    every external read as a side input would delete real edges.
+    The former single-output restriction (requiring ``output_names``) was a
+    defensive guess against a *different* op shape: a single-output op that
+    reads a ``self.param`` while *also* implicitly continuing the chain
+    (``x = x * self.weight``), where the AST might not record ``x`` as a
+    predecessor. That risk is real for a *binary* op (``mul`` takes two tensor
+    operands) -- an empty ``operation_predecessors`` there may just mean the
+    chain read was missed, so it still falls back to the previous step. It does
+    not apply to a *unary* op (arity ceiling of 1): there is no second tensor
+    slot for an implicit chain operand to occupy.
     """
-    return (
-        is_forward_operation(step.attr_name)
-        and not step.operation_predecessors
-        and (
-            bool(step.param_inputs)
-            or (bool(step.external_inputs) and bool(step.output_names))
-        )
-    )
+    if not is_forward_operation(step.attr_name) or step.operation_predecessors:
+        return False
+    if step.param_inputs:
+        return True
+    if not step.external_inputs:
+        return False
+    if step.output_names:
+        return True
+    ceiling, variadic = _operand_ceiling(_raw_op_from_details(step.details))
+    return ceiling is not None and not variadic and ceiling <= 1
 
 
 def _is_local_operation_port(spec: GraphNodeSpec) -> bool:
@@ -1752,11 +1785,12 @@ def _tag_weight_only_ops(graph: ComputationGraph) -> ComputationGraph:
     render time.
 
     The op and its fan-out closure are tagged ``constant`` (kept in the JSON,
-    dropped by the render filter) rather than pruned. General: roots are
-    sourceless *multi-output* forward ops reading only a ``self.<attr>`` external
-    — mirroring the conservative multi-output guard in
-    :func:`_reads_only_a_side_parameter` (a single-output ``x = x * self.weight``
-    may continue the spine implicitly, so it is left alone). Constant-ness is then
+    dropped by the render filter) rather than pruned. General: roots are every
+    forward op :func:`_reads_only_a_side_parameter` recognizes as reading *only*
+    a side parameter/buffer -- whether it fans out to several names (the
+    ``self.base.split(...)`` case above) or has one plain output (an
+    ``inv_freq_expanded = self.inv_freq[None, :, None].expand(...)`` whose other
+    "operands" are host scalars, not a chain read). Constant-ness is then
     propagated to any op every one of whose operands is itself constant.
     """
     incoming: set[int] = {target for _source, target in graph.links}
@@ -1767,7 +1801,7 @@ def _tag_weight_only_ops(graph: ComputationGraph) -> ComputationGraph:
             continue
         if index in incoming:
             continue
-        if block.external_inputs and block.output_names:
+        if _reads_only_a_side_parameter(block):
             roots.add(index)
     if not roots:
         return graph
@@ -2593,20 +2627,26 @@ def _ensure_side_chain_tail_index(
             continue
 
         if tail_index is None:
-            # A step that literally reads the enclosing forward's still-pristine
-            # input (``input_fed_steps``) genuinely branches from it. Otherwise —
-            # including the historical ``len(chain) == 1`` case — resolve the
-            # step's own primary (non-side) operand the same way a
+            # Resolve the step's own primary (non-side) operand the same way a
             # ``SideFeedSegment`` consumer's primary input is resolved, instead of
-            # assuming a single-step chain is always fed by the raw method input.
-            if attr in root.input_fed_steps:
-                resolved_input = input_index
-                branch_from_input = True
-            else:
-                resolved_input = _resolve_primary_input(
-                    attr, root, attr_last_index, input_index, None
-                )
-                branch_from_input = resolved_input is not None
+            # assuming a chain step is always fed by the raw method input.
+            # ``root.input_fed_steps`` (the AST's "still reads the pristine
+            # method input" heuristic) is deliberately NOT consulted here: it
+            # also holds names that were reassigned by an intervening view/
+            # reshape on the same variable (its own docstring: "reshapes and
+            # views of the input still are the input") -- correct for labeling,
+            # but wrong for wiring when this step's real predecessor is that
+            # view/reshape op rather than the enclosing forward's raw input
+            # (e.g. ``hidden_states = hidden_states.view(...); self.gate(hidden_states)``:
+            # ``gate``'s true operand is the view's output, not the original
+            # boundary tensor). ``_resolve_primary_input`` already answers this
+            # precisely from the step's own recorded predecessor arg, falling
+            # back to the raw input only when the predecessor genuinely *is*
+            # ``FORWARD_METHOD_INPUT`` or is otherwise unresolvable.
+            resolved_input = _resolve_primary_input(
+                attr, root, attr_last_index, input_index, None
+            )
+            branch_from_input = resolved_input is not None
             tail_index = _add_side_producer_index(
                 graph,
                 step,

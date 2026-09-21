@@ -22,154 +22,19 @@ type-checked".
 
 from __future__ import annotations
 
-import functools
-import inspect
 import json
 import logging
 import re
 from typing import Any
 
-from TraceLens.ModelUtils.shape_inference import _normalize_op_name
+from TraceLens.ModelUtils.shape_inference import _normalize_op_name, _operand_ceiling
 
 _log = logging.getLogger(__name__)
 
-
-# --------------------------------------------------------------------------- #
-# Dynamic operand-arity resolution.
-#
-# An operation's tensor-operand contract is read from the op's *real function
-# parameters*, never from a hardcoded op-name list: the raw op name is the one
-# recovered from the model's own forward source (stamped as the ``raw_op`` node
-# attr by the extractor), and its arity comes from introspecting that callable.
-# ``inspect.signature`` is tried first -- it reads any annotated pure-Python op --
-# and the aten operator schema is the fallback for the C-builtin torch ops
-# (``transpose``/``cat``/``view``/``squeeze``/...) that have no introspectable
-# Python signature. An op whose parameters cannot be resolved is simply skipped
-# (no false positives).
-# --------------------------------------------------------------------------- #
-
-# Parameter type strings that denote a single tensor operand vs an unbounded
-# tensor *list* (the variadic ``cat``/``stack`` contract). Matched against both
-# ``inspect`` annotations and aten schema argument types.
-_TENSOR_ARG_TYPES = frozenset({"Tensor", "Optional[Tensor]", "Tensor?"})
-_TENSOR_LIST_ARG_TYPES = frozenset({"List[Tensor]", "Tensor[]"})
-
-
-def _annotation_tensor_kind(annotation: Any) -> str:
-    """Classify an ``inspect`` parameter annotation: ``"tensor"`` / ``"list"`` / ""."""
-    text = (
-        annotation
-        if isinstance(annotation, str)
-        else getattr(annotation, "__name__", None) or str(annotation)
-    )
-    text = text.replace("torch.", "").replace(" ", "")
-    if text in _TENSOR_ARG_TYPES or text == "Tensor":
-        return "tensor"
-    if text in _TENSOR_LIST_ARG_TYPES or (
-        text.startswith(("List[", "Sequence[", "Tuple[", "Iterable[")) and "Tensor" in text
-    ):
-        return "list"
-    if text.startswith("Optional[") and "Tensor" in text and "List" not in text:
-        return "tensor"
-    return ""
-
-
-def _ceiling_via_inspect(name: str) -> tuple[int | None, bool] | None:
-    """``(max_tensor_operands, is_variadic)`` from ``inspect``, or ``None`` if it
-    cannot type the op (unresolvable callable, no signature, or no annotations)."""
-    try:
-        import torch
-    except Exception:  # pragma: no cover - torch always present in the pipeline
-        return None
-    fn = None
-    for owner in (torch.Tensor, torch):
-        candidate = getattr(owner, name, None)
-        if candidate is not None:
-            fn = candidate
-            break
-    if fn is None:
-        return None
-    try:
-        signature = inspect.signature(fn)
-    except (ValueError, TypeError):
-        return None
-    count = 0
-    variadic = False
-    saw_annotation = False
-    for param in signature.parameters.values():
-        if param.kind == inspect.Parameter.VAR_POSITIONAL:
-            variadic = True
-            continue
-        if param.kind in (
-            inspect.Parameter.KEYWORD_ONLY,
-            inspect.Parameter.VAR_KEYWORD,
-        ):
-            continue
-        if param.annotation is inspect.Parameter.empty:
-            continue
-        saw_annotation = True
-        kind = _annotation_tensor_kind(param.annotation)
-        if kind == "list":
-            variadic = True
-        elif kind == "tensor":
-            count += 1
-    if not saw_annotation:
-        # ``inspect`` gave a signature but no types (e.g. ``torch.split``): it
-        # cannot distinguish tensor operands from scalar args -- defer to the schema.
-        return None
-    return (None, True) if variadic else (count, False)
-
-
-def _ceiling_via_aten_schema(name: str) -> tuple[int | None, bool]:
-    """``(max_tensor_operands, is_variadic)`` from the aten operator schema.
-
-    Counts non-``out`` (positional / non-kwarg-only) ``Tensor``/``Optional[Tensor]``
-    arguments; a ``List[Tensor]`` argument marks the op variadic (unbounded, e.g.
-    ``cat``). Unknown ops (custom free functions with no aten schema) return
-    ``(None, False)`` -> skipped by the caller.
-    """
-    try:
-        import torch
-
-        schemas = torch._C._jit_get_schemas_for_operator(f"aten::{name}")
-    except Exception:
-        return None, False
-    if not schemas:
-        return None, False
-    counts: list[int] = []
-    any_variadic = False
-    for schema in schemas:
-        count = 0
-        variadic = False
-        for arg in getattr(schema, "arguments", []):
-            if getattr(arg, "kwarg_only", False):
-                continue
-            arg_type = str(getattr(arg, "type", ""))
-            if arg_type in _TENSOR_LIST_ARG_TYPES:
-                variadic = True
-            elif arg_type in _TENSOR_ARG_TYPES:
-                count += 1
-        if variadic:
-            any_variadic = True
-        else:
-            counts.append(count)
-    if any_variadic:
-        return None, True
-    return (max(counts) if counts else None), False
-
-
-@functools.lru_cache(maxsize=None)
-def _operand_ceiling(raw_op: str) -> tuple[int | None, bool]:
-    """``(max_tensor_operands, is_variadic)`` for an op, resolved from its real
-    parameters. ``(None, False)`` means the arity could not be determined (skip);
-    ``(None, True)`` means an unbounded tensor-list op (``cat``/``stack``)."""
-    name = str(raw_op or "").strip()
-    if not name:
-        return None, False
-    via_inspect = _ceiling_via_inspect(name)
-    if via_inspect is not None:
-        return via_inspect
-    return _ceiling_via_aten_schema(name)
+# ``_operand_ceiling`` (dynamic operand-arity resolution via ``inspect``/aten
+# schema introspection, never a hardcoded op-name list) lives in
+# ``shape_inference.py`` so ``computation_graph.py``'s wiring pass can share it
+# without a Visualizer -> ModelUtils -> Visualizer import cycle.
 
 
 def _load_list(node: dict[str, Any], key: str) -> list[Any] | None:

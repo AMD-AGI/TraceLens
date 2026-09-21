@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import ast
+import functools
+import inspect
 import json
 import logging
 import re
@@ -975,6 +977,147 @@ def _normalize_op_name(name: Any) -> str:
     """Normalize an op name for cross-source matching (must stay identical to
     ``meta_trace._norm_op`` so AST ids and FX node names join)."""
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+# --------------------------------------------------------------------------- #
+# Dynamic operand-arity resolution.
+#
+# An operation's tensor-operand contract is read from the op's *real function
+# parameters*, never from a hardcoded op-name list: the raw op name is the one
+# recovered from the model's own forward source (stamped as the ``raw_op`` node
+# attr/detail by the extractor), and its arity comes from introspecting that
+# callable. ``inspect.signature`` is tried first -- it reads any annotated
+# pure-Python op -- and the aten operator schema is the fallback for the
+# C-builtin torch ops (``transpose``/``cat``/``view``/``squeeze``/...) that have
+# no introspectable Python signature. An op whose parameters cannot be resolved
+# is simply skipped (no false positives). Shared by the type-check pass
+# (``type_check.py``) and the wiring pass (``computation_graph.py``), which both
+# need "how many real tensor operands does this op take" without guessing from
+# the op's name.
+# --------------------------------------------------------------------------- #
+
+# Parameter type strings that denote a single tensor operand vs an unbounded
+# tensor *list* (the variadic ``cat``/``stack`` contract). Matched against both
+# ``inspect`` annotations and aten schema argument types.
+_TENSOR_ARG_TYPES = frozenset({"Tensor", "Optional[Tensor]", "Tensor?"})
+_TENSOR_LIST_ARG_TYPES = frozenset({"List[Tensor]", "Tensor[]"})
+
+
+def _annotation_tensor_kind(annotation: Any) -> str:
+    """Classify an ``inspect`` parameter annotation: ``"tensor"`` / ``"list"`` / ""."""
+    text = (
+        annotation
+        if isinstance(annotation, str)
+        else getattr(annotation, "__name__", None) or str(annotation)
+    )
+    text = text.replace("torch.", "").replace(" ", "")
+    if text in _TENSOR_ARG_TYPES or text == "Tensor":
+        return "tensor"
+    if text in _TENSOR_LIST_ARG_TYPES or (
+        text.startswith(("List[", "Sequence[", "Tuple[", "Iterable[")) and "Tensor" in text
+    ):
+        return "list"
+    if text.startswith("Optional[") and "Tensor" in text and "List" not in text:
+        return "tensor"
+    return ""
+
+
+def _ceiling_via_inspect(name: str) -> tuple[int | None, bool] | None:
+    """``(max_tensor_operands, is_variadic)`` from ``inspect``, or ``None`` if it
+    cannot type the op (unresolvable callable, no signature, or no annotations)."""
+    try:
+        import torch
+    except Exception:  # pragma: no cover - torch always present in the pipeline
+        return None
+    fn = None
+    for owner in (torch.Tensor, torch):
+        candidate = getattr(owner, name, None)
+        if candidate is not None:
+            fn = candidate
+            break
+    if fn is None:
+        return None
+    try:
+        signature = inspect.signature(fn)
+    except (ValueError, TypeError):
+        return None
+    count = 0
+    variadic = False
+    saw_annotation = False
+    for param in signature.parameters.values():
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            variadic = True
+            continue
+        if param.kind in (
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+        if param.annotation is inspect.Parameter.empty:
+            continue
+        saw_annotation = True
+        kind = _annotation_tensor_kind(param.annotation)
+        if kind == "list":
+            variadic = True
+        elif kind == "tensor":
+            count += 1
+    if not saw_annotation:
+        # ``inspect`` gave a signature but no types (e.g. ``torch.split``): it
+        # cannot distinguish tensor operands from scalar args -- defer to the schema.
+        return None
+    return (None, True) if variadic else (count, False)
+
+
+def _ceiling_via_aten_schema(name: str) -> tuple[int | None, bool]:
+    """``(max_tensor_operands, is_variadic)`` from the aten operator schema.
+
+    Counts non-``out`` (positional / non-kwarg-only) ``Tensor``/``Optional[Tensor]``
+    arguments; a ``List[Tensor]`` argument marks the op variadic (unbounded, e.g.
+    ``cat``). Unknown ops (custom free functions with no aten schema) return
+    ``(None, False)`` -> skipped by the caller.
+    """
+    try:
+        import torch
+
+        schemas = torch._C._jit_get_schemas_for_operator(f"aten::{name}")
+    except Exception:
+        return None, False
+    if not schemas:
+        return None, False
+    counts: list[int] = []
+    any_variadic = False
+    for schema in schemas:
+        count = 0
+        variadic = False
+        for arg in getattr(schema, "arguments", []):
+            if getattr(arg, "kwarg_only", False):
+                continue
+            arg_type = str(getattr(arg, "type", ""))
+            if arg_type in _TENSOR_LIST_ARG_TYPES:
+                variadic = True
+            elif arg_type in _TENSOR_ARG_TYPES:
+                count += 1
+        if variadic:
+            any_variadic = True
+        else:
+            counts.append(count)
+    if any_variadic:
+        return None, True
+    return (max(counts) if counts else None), False
+
+
+@functools.lru_cache(maxsize=None)
+def _operand_ceiling(raw_op: str) -> tuple[int | None, bool]:
+    """``(max_tensor_operands, is_variadic)`` for an op, resolved from its real
+    parameters. ``(None, False)`` means the arity could not be determined (skip);
+    ``(None, True)`` means an unbounded tensor-list op (``cat``/``stack``)."""
+    name = str(raw_op or "").strip()
+    if not name:
+        return None, False
+    via_inspect = _ceiling_via_inspect(name)
+    if via_inspect is not None:
+        return via_inspect
+    return _ceiling_via_aten_schema(name)
 
 
 # Trailing ``@op_l{line}_c{col}_{name}[:idx]`` token of a graph node id, with
@@ -2181,21 +2324,43 @@ class ShapeInferencer:
                     if axis is None:
                         continue
                     lower_s, _, upper_s = bounds.partition("|")
-                    dim = _int_dim(str(shape[axis % rank]))
-                    if dim is None:
-                        continue
+                    raw_dim = shape[axis % rank]
+                    dim = _int_dim(raw_dim)
                     lo = _eval_shape_expr(lower_s.strip(), shape)
                     hi = _eval_shape_expr(upper_s.strip(), shape)
-                    if lo is None:
-                        lo = 0
-                    if hi is None:
-                        hi = dim
-                    if lo < 0:
-                        lo += dim
-                    if hi < 0:
-                        hi += dim
-                    size = max(0, min(hi, dim) - max(lo, 0))
-                    shape[axis % rank] = size
+                    if (
+                        dim is not None
+                        and (lo is None or isinstance(lo, int))
+                        and (hi is None or isinstance(hi, int))
+                    ):
+                        # Every bound resolved to a concrete int: fold the slice to
+                        # an exact numeric width, same as before this dim could be
+                        # symbolic.
+                        if lo is None:
+                            lo = 0
+                        if hi is None:
+                            hi = dim
+                        if lo < 0:
+                            lo += dim
+                        if hi < 0:
+                            hi += dim
+                        shape[axis % rank] = max(0, min(hi, dim) - max(lo, 0))
+                        continue
+                    # The axis itself or one of its bounds is symbolic (a named
+                    # dim like ``'S'`` rather than a numeric literal): a floor-div
+                    # or other narrowing can't be folded to an int, but the
+                    # narrowed axis must still end up DISTINCT from the
+                    # unmodified source dim (a rotate_half-style half-width slice
+                    # must not report output_shape == input_shape). Render a
+                    # symbolic expression string instead.
+                    if hi is not None and lo is None:
+                        shape[axis % rank] = hi
+                    elif lo is not None and hi is None:
+                        shape[axis % rank] = f"{raw_dim}-({lo})"
+                    elif lo is not None and hi is not None:
+                        shape[axis % rank] = f"({hi})-({lo})"
+                    # else: neither bound resolved (e.g. a no-op full slice) --
+                    # leave this axis unchanged.
                 return TensorSpec(shape=tuple(shape), dtype=source.dtype)
             return source
 
@@ -2296,8 +2461,23 @@ class ShapeInferencer:
             if not inputs:
                 return TensorSpec(self._active_hidden_shape(), dtype)
             if operation_label == "stack":
+                # ``torch.stack`` inserts a brand-new size-N axis at ``dim``
+                # (default 0) -- NOT always at the front. Blindly prepending it
+                # regardless of the recorded ``dim`` detail (e.g. DeepSeek's
+                # ``rotate_half``: ``torch.stack((-x2, x1), dim=-1)``) plants
+                # the phantom axis at the wrong position; a later
+                # ``.flatten(-2)`` merging "the last two axes" then merges the
+                # WRONG pair, leaving the phantom axis stranded at the front
+                # instead of absorbed.
                 base = inputs[0]
-                return TensorSpec(shape=(len(inputs), *base.shape), dtype=base.dtype)
+                dim_str = _detail_value(details, "dim")
+                dim = _int_dim(dim_str) if dim_str is not None else 0
+                if dim is None:
+                    dim = 0
+                rank_out = len(base.shape) + 1
+                pos = dim % rank_out if rank_out else 0
+                shape = base.shape[:pos] + (len(inputs),) + base.shape[pos:]
+                return TensorSpec(shape=shape, dtype=base.dtype)
             # Concat: the output matches every input except along the concat
             # axis, whose size is the SUM of the inputs' sizes there. torch.cat
             # requires all inputs to share a rank, so a negative dim names the same
@@ -4873,19 +5053,37 @@ def _int_dim(value: Any) -> int | None:
     return None
 
 
-def _eval_shape_expr(expr: str, shape: Sequence[Any]) -> int | None:
-    """Evaluate a slice-bound expression over a ``shape`` symbol to an int, or None.
+_SHAPE_EXPR_OP_SYMBOLS: dict[type, str] = {
+    ast.Add: "+",
+    ast.Sub: "-",
+    ast.Mult: "*",
+    ast.FloorDiv: "//",
+    ast.Div: "//",
+}
+
+
+def _eval_shape_expr(expr: str, shape: Sequence[Any]) -> int | str | None:
+    """Evaluate a slice-bound expression over a ``shape`` symbol.
 
     ``expr`` is emitted by ``ast_analyze._shape_relative_expr`` and references only a
     ``shape`` list, int constants, and ``+ - * // /`` arithmetic (e.g.
-    ``shape[-1] // 2``). Returns ``None`` when the expression is empty, indexes a
-    symbolic (non-int) dim, or contains anything outside that safe grammar — the
-    caller then leaves the axis unchanged.
+    ``shape[-1] // 2``).
+
+    When every referenced dim is a concrete int, this folds to an exact int (the
+    original behavior). When a referenced dim is symbolic (a non-numeric name
+    like ``'S'``), the arithmetic can't be folded to a number, but it must still
+    produce a result DISTINCT from the plain dim name so a narrowing slice over a
+    symbolic axis doesn't look like a no-op to callers -- so this renders a
+    symbolic expression string instead (e.g. ``shape[-1] // 2`` over a symbolic
+    ``'S'`` dim yields ``'S//2'``).
+
+    Returns ``None`` when the expression is empty or contains anything outside
+    that safe grammar — the caller then leaves the axis unchanged.
     """
     if not expr:
         return None
 
-    def _eval(node: ast.AST) -> int | None:
+    def _eval(node: ast.AST) -> int | str | None:
         if isinstance(node, ast.Expression):
             return _eval(node.body)
         if isinstance(node, ast.Constant) and isinstance(node.value, int):
@@ -4894,35 +5092,45 @@ def _eval_shape_expr(expr: str, shape: Sequence[Any]) -> int | None:
             operand = _eval(node.operand)
             if operand is None:
                 return None
-            return -operand if isinstance(node.op, ast.USub) else operand
+            if isinstance(node.op, ast.UAdd):
+                return operand
+            return -operand if isinstance(operand, int) else f"-({operand})"
         if isinstance(node, ast.BinOp):
             left = _eval(node.left)
             right = _eval(node.right)
             if left is None or right is None:
                 return None
-            if isinstance(node.op, ast.Add):
-                return left + right
-            if isinstance(node.op, ast.Sub):
-                return left - right
-            if isinstance(node.op, ast.Mult):
-                return left * right
-            if isinstance(node.op, (ast.FloorDiv, ast.Div)):
+            op_symbol = _SHAPE_EXPR_OP_SYMBOLS.get(type(node.op))
+            if op_symbol is None:
+                return None
+            if isinstance(left, int) and isinstance(right, int):
+                if isinstance(node.op, ast.Add):
+                    return left + right
+                if isinstance(node.op, ast.Sub):
+                    return left - right
+                if isinstance(node.op, ast.Mult):
+                    return left * right
                 if right == 0:
                     return None
                 return left // right
-            return None
+            # At least one operand is a symbolic dim name: render a distinct
+            # symbolic expression instead of failing (which would silently
+            # leave the axis unchanged and hide a real narrowing).
+            return f"{left}{op_symbol}{right}"
         if (
             isinstance(node, ast.Subscript)
             and isinstance(node.value, ast.Name)
             and node.value.id == "shape"
         ):
             idx = _eval(node.slice)
-            if idx is None or not shape:
+            if not isinstance(idx, int) or not shape:
                 return None
             try:
-                return _int_dim(shape[idx])
+                raw = shape[idx]
             except IndexError:
                 return None
+            numeric = _int_dim(raw)
+            return numeric if numeric is not None else str(raw)
         return None
 
     try:

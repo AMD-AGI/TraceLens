@@ -3556,6 +3556,14 @@ class _ForwardOperationExtractor:
             return self._call_step_producer(call, method) is not None
 
         def _visit(current: ast.AST, is_root: bool) -> None:
+            # A host-side shape/size read (``position_ids.shape[0]``) reads a
+            # param only to compute a Python int, not as a tensor operand: the
+            # param it names there must not count as a param this operation
+            # *consumes* (which would wire the param onto the op as a spurious
+            # extra tensor edge downstream). Mirrors the other subtree-ownership
+            # skips below.
+            if not is_root and self._is_host_scalar_expr(current):
+                return
             if (
                 not is_root
                 and isinstance(current, ast.Call)
@@ -4027,6 +4035,18 @@ class _ForwardOperationExtractor:
         if isinstance(node, ast.Constant):
             return None, []
         if isinstance(node, ast.Subscript):
+            # A host-side shape read (``x.shape[i]``) is index bookkeeping, not a
+            # tensor read: it computes a Python int, not data. Without this guard
+            # the fallback below ("preserve the computation behind chained
+            # property access", meant for selectors like ``.topk(...).indices``)
+            # also fires for ``.shape[i]`` and hands back the BASE tensor's own
+            # producer as if the shape read were that tensor itself -- so a
+            # downstream host-int expression built from it (``num_key_blocks =
+            # -(-k_len // self.block_size)``) fails its own host-scalar check and
+            # gets materialized as a real op reading the base tensor as a bogus
+            # operand. Mirrors the ``ast.BinOp`` guard above.
+            if self._is_host_scalar_expr(node):
+                return None, []
             base, base_external = self.expression(node.value)
             # Advanced indexing (``x[idx]`` where ``idx`` is a tensor, e.g.
             # ``pool_indices[batch_idx, selected]`` or a boolean mask) is a gather:
@@ -4272,12 +4292,23 @@ class _ForwardOperationExtractor:
         submodule_call = isinstance(node.func, ast.Attribute) and _is_self_attr(
             node.func, method_name
         )
+        # A tensor-method label (``x.float()`` -> Cast, ``x.sum()`` -> Sum, ...)
+        # only applies to an attribute-style dispatch on some tensor/namespace
+        # value. A bare builtin ``Name`` call that merely shares its name with a
+        # tensor method (``float("-inf")``, a Python scalar cast, not
+        # ``x.float()``) must not be relabelled as that tensor op -- it has no
+        # tensor operand at all, and would otherwise materialize a spurious
+        # zero-input op node.
         label = (
             None
             if submodule_call
             else registry_activation
             or _FUNCTION_LABELS.get(functional_name or call_name)
-            or _TENSOR_METHOD_LABELS.get(call_name)
+            or (
+                _TENSOR_METHOD_LABELS.get(call_name)
+                if isinstance(node.func, ast.Attribute)
+                else None
+            )
         )
         housekeeping = not submodule_call and (
             call_name in _HOUSEKEEPING_METHODS or call_name == "zeros_like"

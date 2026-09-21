@@ -451,6 +451,20 @@ def test_concat_no_inputs_and_stack():
     assert stacked.shape == (2, "B", "S", 8)
 
 
+def test_stack_honours_negative_dim_detail():
+    # ``torch.stack((-x2, x1), dim=-1)`` (DeepSeek's rotate_half) must insert
+    # the new size-N axis at the END, not always prepend it -- otherwise a
+    # later ``.flatten(-2)`` merges the wrong pair of axes and a phantom rank
+    # survives downstream (the DeepSeek concat type-check regression).
+    inf = _make_inferencer(hidden_size=256)
+    a = TensorSpec(("B", "S", 8), "float16")
+    b = TensorSpec(("B", "S", 8), "float16")
+    stacked = inf._infer_node_output(
+        _node("Stack", details=["dim: -1"]), [a, b], root=None
+    )
+    assert stacked.shape == ("B", "S", 8, 2)
+
+
 def test_matmul_single_and_no_inputs():
     inf = _make_inferencer(hidden_size=64)
     single = inf._infer_node_output(_node("MatMul"), [TensorSpec(("B", "S", 8))], root=None)
