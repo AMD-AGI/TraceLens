@@ -10,7 +10,6 @@ Covers the shape-based batch-size inference and the decode/prefill phase
 classification used for LLM-inference traces without parseable annotations.
 """
 
-
 from TraceLens.TraceUtils.trace_split.batch_phase import (
     _GAP_SPLIT_MIN_RATIO,
     classify_phases_from_batch_sizes,
