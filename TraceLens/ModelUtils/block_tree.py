@@ -1098,12 +1098,22 @@ def _expanded_free_function_node(
         # attr-based predecessor wiring picks it up like any other dataflow
         # edge once it is on ``operation_predecessors``.
         producer_arg_params = cls.forward_step_predecessor_args.get(call_attr, {})
+        # Two callee parameters can be fed by the *same* real producer at the
+        # call site (``apply_rotary_pos_emb(x, cos=rotary_emb, sin=rotary_emb)``
+        # -- both trace to one multi-return submodule call). ``extra_predecessors``
+        # then names that one producer for both a ``cos``-reading op and a
+        # ``sin``-reading op alike, with no way to tell them apart downstream.
+        # The call site's own per-arg ordinal (``cos``: 0, ``sin``: 1, from the
+        # producer's own return-tuple order) disambiguates them; carry it onto
+        # the op's own predecessor ports.
+        ordinal_arg_params = cls.forward_step_predecessor_ordinals.get(call_attr, {})
         children: list[BlockNode] = []
         for operation_index, operation in enumerate(method_ops):
             translated: list[str] = []
             boundary_name: str | None = None
             boundary_ordinal: int | None = None
             extra_predecessors: list[str] = []
+            extra_predecessor_ports: list[tuple[str, int]] = []
             for param in operation.param_inputs:
                 mapping = boundary_arg_params.get(param)
                 if mapping is None:
@@ -1111,6 +1121,9 @@ def _expanded_free_function_node(
                     if producer_attr is not None:
                         if producer_attr not in extra_predecessors:
                             extra_predecessors.append(producer_attr)
+                        ordinal = ordinal_arg_params.get(param)
+                        if ordinal is not None:
+                            extra_predecessor_ports.append((producer_attr, ordinal))
                         continue
                     translated.append(param)
                     continue
@@ -1145,7 +1158,9 @@ def _expanded_free_function_node(
                     basic=True,
                     operation_predecessors=operation_predecessors,
                     output_names=list(operation.output_names),
-                    operation_predecessor_ports=_predecessor_ports_dict(operation.predecessor_ports),
+                    operation_predecessor_ports=_predecessor_ports_dict(
+                        tuple(operation.predecessor_ports) + tuple(extra_predecessor_ports)
+                    ),
                     external_inputs=list(operation.external_inputs),
                     param_inputs=translated,
                     boundary_input_name=boundary_name,

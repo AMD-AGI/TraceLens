@@ -3472,6 +3472,16 @@ def _append_section(
             namespace_prefix=nested_namespace,
         )
         section_nodes.extend(nested_nodes)
+        # ``collect_nested_diagrams`` walks arbitrarily deep (a composite nested
+        # inside another non-inline composite, e.g. ``scorer`` inside
+        # ``indexer``), returning one flat, parent-before-child ordered list.
+        # ``tile_ids`` built from the *top* computation only ever covers the
+        # first level, so a doubly-nested entry never finds its real tile and
+        # falls back to a fresh, unwired sibling namespace/diagram instead of
+        # the group its own parent's nested diagram actually produced. Merge
+        # each nested diagram's own tile ids in as it is built so any deeper
+        # entries processed later resolve against it.
+        tile_ids.update(_block_tile_ids(nested_computation, id_prefix=nested_prefix))
         if tile_id is not None:
             nested_exits = _section_exits(
                 nested_computation,

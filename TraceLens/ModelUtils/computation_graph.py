@@ -176,10 +176,46 @@ def _add_method_wrapper_node(
     return _add_node(graph, key=key, block=step, label=label, sublabel=None)
 
 
+def _multi_return_slot_key(attr_name: str, ordinal: int) -> str:
+    """Key under which a multi-return wrapper's per-ordinal producer index is
+    stashed in ``attr_last_index``, alongside its flat (last-write-wins) entry.
+
+    Uses a separator that can never appear in an AST-derived ``attr_name``, so
+    it can share the same flat dict without colliding with any real attr.
+    """
+    return f"{attr_name}\x00slot{ordinal}"
+
+
 def _track_attr_index(
-    attr_last_index: dict[str, int], attr_name: str, index: int
+    attr_last_index: dict[str, int],
+    attr_name: str,
+    index: int,
+    *,
+    block: "BlockNode | None" = None,
 ) -> None:
     attr_last_index[attr_name] = index
+    if block is None:
+        return
+    order = block.forward_return_order
+    if len(order) < 2:
+        return
+    # A fully inline-expanded, multi-return composite (``cos, sin =
+    # self.rotary_emb(...)``) has no node of its own -- ``index`` here is just
+    # whichever of its internal producers happened to build last (the
+    # sequential-fallback tail). A sibling step that names this wrapper as a
+    # predecessor at a *specific* return ordinal (``operation_predecessor_ports``)
+    # must dock onto that slot's own producer, not the tail, else two distinct
+    # return values collapse onto one physical node with fabricated ordinal
+    # ports. Stash each resolved slot's producer index now, while it is still
+    # available in ``attr_last_index``, for ``_operation_source_indices`` to
+    # prefer over the flat (tail) entry.
+    for ordinal in range(len(order)):
+        slot_attr = _return_slot_attr_by_ordinal(block, ordinal)
+        if slot_attr is None:
+            continue
+        slot_index = attr_last_index.get(slot_attr)
+        if slot_index is not None:
+            attr_last_index[_multi_return_slot_key(attr_name, ordinal)] = slot_index
 
 
 def _rebuild_attr_last_index(graph: ComputationGraph) -> dict[str, int]:
@@ -392,6 +428,23 @@ def _resolve_return_slot_source(
             if resolved is not None:
                 return resolved
     return default
+
+
+def _return_slot_attr_by_ordinal(producer: "BlockNode", ordinal: int) -> str | None:
+    """Producer attr for *producer*'s return-tuple slot at position *ordinal*.
+
+    A fully inline-expanded, multi-return submodule (straight-line, so it never
+    materializes a single node of its own) still records its own return-tuple
+    order and per-slot internal producers. A consumer that reads one specific
+    slot (``compressed_kv`` = ordinal 0 of ``compressed_kv, block_bias =
+    self.compressor(...)``) needs the matching slot's producer, not the
+    (nonexistent) module-call node.
+    """
+    order = producer.forward_return_order
+    slots = producer.forward_return_slots
+    if not order or not slots or ordinal < 0 or ordinal >= len(order):
+        return None
+    return slots.get(order[ordinal])
 
 
 def _lookup_param_entry(
@@ -673,6 +726,45 @@ def _has_inline_attention_child(block: BlockNode) -> bool:
     )
 
 
+def _has_multi_return_predecessor_ref(block: BlockNode) -> bool:
+    """True when *block* has a child that names a sibling multi-return
+    submodule call as a predecessor.
+
+    A straight-line child (e.g. ``self.rotary_emb(...)`` returning ``cos,
+    sin``) that is itself fully inline-expanded (no single node of its own)
+    is still named, by attr, as the predecessor of another sibling step --
+    either directly (``operation_predecessors``, an inline op reading it) or
+    through the owning block's own ``forward_step_predecessors`` /
+    ``forward_step_predecessor_args`` (a nested frame call, e.g.
+    ``apply_rotary_pos_emb(x, cos=rotary_emb, sin=rotary_emb)``). Resolving
+    *which* return slot (``cos`` vs ``sin``) the consumer actually wants
+    requires the same per-slot redirect sections 1/1b apply for ``root`` --
+    so this block must be revisited too, exactly like an inline attention
+    owner.
+    """
+    multi_return_attrs = {
+        child.attr_name
+        for child in getattr(block, "children", []) or []
+        if child.attr_name and len(child.forward_return_order) >= 2
+    }
+    if not multi_return_attrs:
+        return False
+    for child in block.children:
+        if child.attr_name in multi_return_attrs:
+            continue
+        if is_forward_operation(child.attr_name) and any(
+            pred in multi_return_attrs for pred in child.operation_predecessors
+        ):
+            return True
+    for preds in block.forward_step_predecessors.values():
+        if any(pred in multi_return_attrs for pred in preds):
+            return True
+    for arg_map in block.forward_step_predecessor_args.values():
+        if any(pred in multi_return_attrs for pred in arg_map.values()):
+            return True
+    return False
+
+
 class DroppedSubmoduleProducerError(RuntimeError):
     """A forward operation references a submodule producer that never emitted a node.
 
@@ -706,11 +798,19 @@ def _leaf_submodule_producers(wiring_blocks: list[BlockNode]) -> set[str]:
 
 
 def _iter_wiring_blocks(root: BlockNode) -> list[BlockNode]:
-    """Return *root* plus descendant blocks that own an inline attention kernel.
+    """Return *root* plus descendant blocks that need re-visiting.
 
     See :func:`_has_inline_attention_child` for why straight-line descendants are
-    deliberately excluded — visiting them would re-wire edges already created at
-    node-construction time.
+    otherwise deliberately excluded — visiting them would re-wire edges already
+    created at node-construction time. The two exceptions
+    (:func:`_has_inline_attention_child`, :func:`_has_multi_return_predecessor_ref`)
+    name a real gap in that node-construction-time wiring: a nested block whose
+    own child reads a *sibling* multi-return submodule call (an inline
+    attention kernel's q/k/v/output, or a per-slot argument such as
+    ``apply_rotary_pos_emb(cos=rotary_emb, sin=rotary_emb)``) needs the same
+    return-slot redirect sections 1/1b apply for ``root`` -- construction time
+    only resolves the single ``@method_input`` case, not a fan-out to a
+    specific return slot of a fully inline-expanded sibling.
     """
     blocks: list[BlockNode] = [root]
     seen: set[int] = {id(root)}
@@ -720,7 +820,9 @@ def _iter_wiring_blocks(root: BlockNode) -> list[BlockNode]:
         if block is None or id(block) in seen:
             continue
         seen.add(id(block))
-        if _has_inline_attention_child(block):
+        if _has_inline_attention_child(block) or _has_multi_return_predecessor_ref(
+            block
+        ):
             blocks.append(block)
         stack.extend(getattr(block, "children", []) or [])
     return blocks
@@ -779,6 +881,7 @@ def _wire_all_predecessor_edges(
 
     # --- 1. Inline-op predecessor edges ---
     for block in wiring_blocks:
+        steps_by_attr = _forward_steps_by_attr(block)
         last_forward_order = max(
             (child.forward_order or 0 for child in block.children), default=0
         )
@@ -808,6 +911,30 @@ def _wire_all_predecessor_edges(
                     source_index = input_index
                 else:
                     source_index = attr_last_index.get(pred)
+                pred_ordinals = child.operation_predecessor_ports.get(pred, ())
+                occurrence = pred_occurrence.get(pred, 0)
+                pred_occurrence[pred] = occurrence + 1
+                consumed_ordinal = (
+                    pred_ordinals[occurrence] if occurrence < len(pred_ordinals) else None
+                )
+                resolved_flattened_slot = False
+                if source_index is None:
+                    # A fully inline-expanded, multi-return submodule (straight-
+                    # line, so it never materializes a single node of its own --
+                    # e.g. ``compressed_kv, block_bias = self.compressor(...)``)
+                    # names itself here but has no ``attr_last_index`` entry.
+                    # Resolve straight to the specific return slot's own
+                    # producer via the callee's own return-tuple metadata instead
+                    # of dropping the edge.
+                    pred_node = steps_by_attr.get(pred)
+                    if pred_node is not None and consumed_ordinal is not None:
+                        slot_attr = _return_slot_attr_by_ordinal(
+                            pred_node, consumed_ordinal
+                        )
+                        if slot_attr is not None:
+                            source_index = attr_last_index.get(slot_attr)
+                            if source_index is not None:
+                                resolved_flattened_slot = True
                 if source_index is None:
                     # A2 recurrence guard: a leaf submodule producer referenced
                     # here must have emitted a node. If it did not, it was silently
@@ -819,12 +946,6 @@ def _wire_all_predecessor_edges(
                             f"producer {pred!r} that was never emitted as a node"
                         )
                     continue
-                pred_ordinals = child.operation_predecessor_ports.get(pred, ())
-                occurrence = pred_occurrence.get(pred, 0)
-                pred_occurrence[pred] = occurrence + 1
-                consumed_ordinal = (
-                    pred_ordinals[occurrence] if occurrence < len(pred_ordinals) else None
-                )
                 # A consumer reading a specific return slot of an inline-expanded
                 # tuple-returning free function (``query_states`` = ordinal 0 of
                 # ``apply_rotary_pos_emb_vision``) must dock onto that slot's
@@ -833,7 +954,27 @@ def _wire_all_predecessor_edges(
                 # per-ordinal producer and skip the port tag — the internal op has
                 # a single output, so no fan-out ordinal applies.
                 return_producers = block.forward_step_return_producers.get(pred)
-                slot_resolved = False
+                if return_producers is None:
+                    # A fully inline-expanded, multi-return SUBMODULE call
+                    # (straight-line, e.g. ``compressed_kv, block_bias =
+                    # self.compressor(...)``) is not a ``multi_op_methods``/free
+                    # function, so it never populates the block's own
+                    # ``forward_step_return_producers``. ``attr_last_index[pred]``
+                    # still resolved above (to the frame's sequential-fallback
+                    # tail), so build the per-ordinal producer list straight from
+                    # the callee's own return-tuple metadata instead.
+                    pred_node = steps_by_attr.get(pred)
+                    if (
+                        pred_node is not None
+                        and len(pred_node.forward_return_order) >= 2
+                    ):
+                        candidate = [
+                            pred_node.forward_return_slots.get(slot)
+                            for slot in pred_node.forward_return_order
+                        ]
+                        if all(attr is not None for attr in candidate):
+                            return_producers = candidate
+                slot_resolved = resolved_flattened_slot
                 if (
                     return_producers
                     and consumed_ordinal is not None
@@ -1368,24 +1509,40 @@ def _operation_source_indices(
     legitimately needs two parallel edges from that one source -- allow up to
     as many repeats as ``operation_predecessor_ports`` records distinct
     ordinals for that predecessor, so the second slice's edge is not dropped.
+
+    When the ordinal instead names a slot of a fully inline-expanded,
+    multi-return *composite* (``cos, sin = self.rotary_emb(...)``), those
+    slots live on two distinct physical nodes, not two ports of one node --
+    ``_track_attr_index`` stashed each slot's own producer index under
+    ``_multi_return_slot_key``, so prefer that over the composite's flat
+    (last-write, tail-node) entry.
     """
     if attr_last_index is None:
         return []
     sources: list[int] = []
-    seen_counts: dict[int, int] = {}
+    seen_counts: dict[str, int] = {}
     ports = step.operation_predecessor_ports
     for predecessor in step.operation_predecessors:
         if predecessor == FORWARD_METHOD_INPUT:
-            source_index = chain_input_index
-        else:
-            source_index = attr_last_index.get(predecessor)
+            if chain_input_index is not None:
+                sources.append(chain_input_index)
+            continue
+        source_index = attr_last_index.get(predecessor)
         if source_index is None:
             continue
-        limit = max(len(ports.get(predecessor, ())), 1)
-        count = seen_counts.get(source_index, 0)
-        if count < limit:
-            sources.append(source_index)
-            seen_counts[source_index] = count + 1
+        ordinals = ports.get(predecessor, ())
+        limit = max(len(ordinals), 1)
+        occurrence = seen_counts.get(predecessor, 0)
+        seen_counts[predecessor] = occurrence + 1
+        if occurrence >= limit:
+            continue
+        if occurrence < len(ordinals):
+            slot_index = attr_last_index.get(
+                _multi_return_slot_key(predecessor, ordinals[occurrence])
+            )
+            if slot_index is not None:
+                source_index = slot_index
+        sources.append(source_index)
     return sources
 
 
@@ -1541,7 +1698,7 @@ def _add_chain(
                 first_index = chain_indices[0]
             previous = tail
             if attr_last_index is not None:
-                _track_attr_index(attr_last_index, wrapper.attr_name, tail)
+                _track_attr_index(attr_last_index, wrapper.attr_name, tail, block=wrapper)
                 _track_attr_index(attr_last_index, step.attr_name, tail)
             continue
 
@@ -1738,6 +1895,130 @@ def _add_submodule_boundary_param_inputs(
             link = (source, first)
             if link not in graph.links:
                 graph.links.append(link)
+
+
+def _iter_all_blocks(root: BlockNode) -> list[BlockNode]:
+    """Every ``BlockNode`` in *root*'s tree, root included, any nesting depth."""
+    blocks: list[BlockNode] = []
+    stack = [root]
+    while stack:
+        block = stack.pop()
+        if block is None:
+            continue
+        blocks.append(block)
+        stack.extend(getattr(block, "children", []) or [])
+    return blocks
+
+
+def _build_parent_attr_map(root: BlockNode) -> dict[int, tuple[BlockNode, str]]:
+    """Map ``id(child) -> (parent, child.attr_name)`` for every descendant of *root*."""
+    parent_of: dict[int, tuple[BlockNode, str]] = {}
+    stack = [root]
+    while stack:
+        block = stack.pop()
+        for child in getattr(block, "children", []) or []:
+            if child is None:
+                continue
+            parent_of[id(child)] = (block, child.attr_name)
+            stack.append(child)
+    return parent_of
+
+
+def _resolve_nested_boundary_param_producer(
+    owner: BlockNode,
+    param: str,
+    parent_of: dict[int, tuple[BlockNode, str]],
+) -> str | None:
+    """Trace a bare pass-through param up through nested submodule calls to a
+    real local producer's attr name, if one exists anywhere in the chain.
+
+    A submodule call (``self.indexer(hidden_states, q_residual, ...)``) only
+    knows ``q_residual`` as one of its own enclosing forward's bare parameters
+    (``forward_step_boundary_params``). When that enclosing module
+    (``compressor``) is itself inline-expanded into an ancestor's graph, the
+    real value (``q_a_norm``'s output, computed at the ancestor's own scope)
+    is recorded only in the ancestor's own ``forward_step_predecessor_args``
+    for *that* call site. Walk up one call site at a time, matching the same
+    parameter name forwarded unchanged, until a real producer is found or the
+    walk reaches root with no local producer (a genuine external input, left
+    for the existing boundary/kwargs-forwarding mechanisms to handle).
+    """
+    current, current_param, seen = owner, param, set()
+    while True:
+        if id(current) in seen:
+            return None
+        seen.add(id(current))
+        parent_info = parent_of.get(id(current))
+        if parent_info is None:
+            return None
+        parent, attr_name = parent_info
+        arg_map = parent.forward_step_predecessor_args.get(attr_name) or {}
+        if current_param in arg_map:
+            source = arg_map[current_param]
+            if source == FORWARD_METHOD_INPUT:
+                current, current_param = parent, _input_label_for(parent)
+                continue
+            return source
+        boundary = parent.forward_step_boundary_params.get(attr_name) or ()
+        if current_param in boundary:
+            current = parent
+            continue
+        return None
+
+
+def _add_nested_submodule_side_producers(graph: ComputationGraph, root: BlockNode) -> None:
+    """Wire a nested submodule's bare boundary param to its real ancestor producer.
+
+    ``_add_submodule_boundary_param_inputs`` only resolves *root*'s own bare
+    forward parameters. When a straight-line composite child (``compressor``)
+    is inline-expanded into *root*'s graph, one of *its own* descendants
+    (``indexer``) can read a param (``q_residual``) that is not a genuine
+    external input at all -- it is a value computed by one of *root*'s other
+    steps (``q_a_norm``) and threaded, unchanged by name, through the
+    composite's own forward signature. That producer edge is never wired by
+    any existing pass: once ``compressor`` is flattened it has no single node
+    of its own, so predecessor wiring keyed on its attr name is skipped
+    entirely, leaving the nested submodule's boundary param unwired.
+
+    General and name-agnostic: driven purely by ``forward_step_predecessor_args``
+    / ``forward_step_boundary_params``, walked up however many nested call
+    sites forwarded the same parameter name unchanged.
+    """
+    parent_of = _build_parent_attr_map(root)
+    attr_last_index = _rebuild_attr_last_index(graph)
+    for owner in _iter_all_blocks(root):
+        boundary = owner.forward_step_boundary_params
+        if not boundary:
+            continue
+        for call_attr, params in boundary.items():
+            target_child = next(
+                (child for child in owner.children if child.attr_name == call_attr),
+                None,
+            )
+            if target_child is None:
+                continue
+            member_indices = {
+                index
+                for index, spec in enumerate(graph.nodes)
+                if spec.block is target_child
+            }
+            if not member_indices:
+                continue
+            for param in params:
+                producer = _resolve_nested_boundary_param_producer(
+                    owner, param, parent_of
+                )
+                if producer is None:
+                    continue
+                source = attr_last_index.get(producer)
+                if source is None:
+                    continue
+                for target in member_indices:
+                    link = (source, target)
+                    if link in graph.links:
+                        continue
+                    graph.links.append(link)
+                    graph.link_port_labels[link] = param
 
 
 def _propagate_constant_closure(graph: ComputationGraph, seed: set[int]) -> None:
@@ -2281,7 +2562,12 @@ def _add_linear_pipeline_chain(
                     _append_inline_frame_node(frame, inner_index)
             if attr_last_index is not None:
                 _track_attr_index(attr_last_index, sub_step.attr_name, inner_tail)
-                _track_attr_index(attr_last_index, inner_wrapper.attr_name, inner_tail)
+                _track_attr_index(
+                    attr_last_index,
+                    inner_wrapper.attr_name,
+                    inner_tail,
+                    block=inner_wrapper,
+                )
             indices.extend(inner_indices)
             chain_last = inner_tail
             continue
@@ -2558,7 +2844,7 @@ def _add_side_producer_index(
             inline_expansion=inline_expansion,
         )
         if tail is not None:
-            _track_attr_index(attr_last_index, wrapper.attr_name, tail)
+            _track_attr_index(attr_last_index, wrapper.attr_name, tail, block=wrapper)
             _track_attr_index(attr_last_index, source_attr, tail)
         return tail
 
@@ -3756,7 +4042,9 @@ def build_computation_graph(
                     branch_from_input_dashed=True,
                     create_outer_frame=True,
                 )
-                _track_attr_index(attr_last_index, module.attr_name, module_tail)
+                _track_attr_index(
+                    attr_last_index, module.attr_name, module_tail, block=module
+                )
             else:
                 expanded_steps, wrapper = _maybe_inline(
                     module, basic_ops=basic_ops, inline_expansion=inline_expansion
@@ -3775,8 +4063,15 @@ def build_computation_graph(
                     )
                     if any(side.side_effect_call for side in segment.sides):
                         graph.side_effect_frame_ids.add(wrapper.attr_name)
-                    _track_attr_index(attr_last_index, wrapper.attr_name, module_tail)
-                    _track_attr_index(attr_last_index, module.attr_name, module_tail)
+                    _track_attr_index(
+                        attr_last_index,
+                        wrapper.attr_name,
+                        module_tail,
+                        block=wrapper,
+                    )
+                    _track_attr_index(
+                        attr_last_index, module.attr_name, module_tail, block=module
+                    )
                 else:
                     module_index = _add_node(
                         graph,
@@ -3785,7 +4080,9 @@ def build_computation_graph(
                     )
                     if input_index is not None:
                         _link_forward_input(graph, input_index, module_index)
-                    _track_attr_index(attr_last_index, module.attr_name, module_index)
+                    _track_attr_index(
+                        attr_last_index, module.attr_name, module_index, block=module
+                    )
                     module_tail = module_index
             combine_index = _add_node(
                 graph,
@@ -4031,7 +4328,9 @@ def build_computation_graph(
                     fork_from_input=fork_from_input,
                     inline_expansion=inline_expansion,
                 )
-                _track_attr_index(attr_last_index, wrapper.attr_name, last_index)
+                _track_attr_index(
+                    attr_last_index, wrapper.attr_name, last_index, block=wrapper
+                )
                 continue
             for sub_index, sub_step in enumerate(expanded_steps):
                 step_index = _add_node(
@@ -4132,6 +4431,7 @@ def build_computation_graph(
     if resolved_include_input:
         _add_forward_param_inputs(graph, root)
         _add_submodule_boundary_param_inputs(graph, root, input_index)
+        _add_nested_submodule_side_producers(graph, root)
     graph = _apply_dead_code_elimination(
         graph,
         root,

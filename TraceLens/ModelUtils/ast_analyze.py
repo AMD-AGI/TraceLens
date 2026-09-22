@@ -601,6 +601,87 @@ def _expand_unresolved_activation_classes(
                 ]
 
 
+def _module_dict_registry_class_refs(tree: ast.AST) -> dict[str, list[str]]:
+    """Module-level ``{key: SomeClass, ...}`` dicts, by name -> class-ref names.
+
+    A registry dict maps runtime keys to *class references* (bare names or dotted
+    attributes), possibly with ``None`` placeholders for keys that construct
+    nothing. Any dict whose non-``None`` value is not a plain reference (a call, a
+    literal, a comprehension) is not a class registry and is skipped, so this only
+    matches the dict-of-classes idiom. Values keep source order; ``None`` entries
+    are dropped.
+    """
+    registries: dict[str, list[str]] = {}
+    if not isinstance(tree, ast.Module):
+        return registries
+    for stmt in tree.body:
+        if not (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and isinstance(stmt.value, ast.Dict)
+        ):
+            continue
+        names: list[str] = []
+        is_class_registry = True
+        for value in stmt.value.values:
+            if isinstance(value, ast.Constant) and value.value is None:
+                continue
+            if not isinstance(value, (ast.Name, ast.Attribute)):
+                is_class_registry = False
+                break
+            name = _expr_name(value)
+            if name is None:
+                is_class_registry = False
+                break
+            names.append(name.split(".")[-1])
+        if is_class_registry and names:
+            registries[stmt.targets[0].id] = list(dict.fromkeys(names))
+    return registries
+
+
+def _resolve_module_dict_registry_classes(
+    classes: dict[str, "ClassStructure"],
+    tree: ast.AST,
+) -> None:
+    """Resolve ``self.x = REGISTRY[key](...)`` submodules to their real classes.
+
+    ``REGISTRY`` is a module-level ``{key: SomeClass}`` dict and the concrete
+    class is chosen at runtime by a config-derived key, so static analysis cannot
+    tell which arm a given layer takes. Register every class the dict can yield as
+    an option (in source order, ``None`` arms skipped) and adopt the first as the
+    attr's class, so the submodule expands into its real forward instead of
+    rendering as an opaque leaf named after the attr. When the dict is not found
+    or names no class we can parse, leave the placeholder and log a warning so the
+    gap stays visible. General: keys purely on the structural shape (module-level
+    dict literal of class references indexed in a constructor); no registry-name
+    or key allow-list.
+    """
+    registries = _module_dict_registry_class_refs(tree)
+    for cls in classes.values():
+        for attr, registry_name in list(cls.unresolved_module_dict_class_refs.items()):
+            candidates = [
+                name
+                for name in registries.get(registry_name, [])
+                if name in classes
+            ]
+            if not candidates:
+                _log.warning(
+                    "Could not resolve module-dict registry %s[...] (assigned to "
+                    "%s.%s) to a parseable class; rendering it as an opaque leaf.",
+                    registry_name,
+                    cls.name,
+                    attr,
+                )
+                continue
+            cls.init_assignments[attr] = candidates[0]
+            existing = cls.init_assignment_options.setdefault(attr, [])
+            for name in candidates:
+                if name not in existing:
+                    existing.append(name)
+            cls.init_details.setdefault(attr, [f"{registry_name}[…]"])
+
+
 def functional_synthetic_attr(op_name: str) -> str:
     """Synthetic attr for a torch.nn.functional call (e.g. linear -> @functional_linear)."""
     return f"{FUNCTIONAL_SYNTHETIC_PREFIX}{op_name}"
@@ -1714,6 +1795,7 @@ def _inline_nested_free_functions(
         return operations
     own = {op.attr_name for op in operations}
     arg_maps = analysis.step_predecessor_args
+    ordinal_maps = analysis.step_predecessor_ordinals
 
     # Synthetic predecessors that name a known free function and have no op yet.
     nested_calls: list[str] = []
@@ -1765,6 +1847,15 @@ def _inline_nested_free_functions(
         params = _free_function_param_list(nested_func)
         primary = params[0] if params else None
         arg_map = arg_maps.get(call_attr, {})
+        # When two callee parameters are both fed by the *same* caller-side
+        # producer (``apply_rotary_pos_emb(x, cos=rotary_emb, sin=rotary_emb)``
+        # -- both trace to one multi-return submodule call), the substitution
+        # below collapses them onto one indistinguishable predecessor name.
+        # The call site's own per-arg ordinal (``cos``: 0, ``sin``: 1, from the
+        # producer's own return-tuple order) is available here; carry it onto
+        # the rewritten op as a predecessor port so downstream wiring can still
+        # tell which slot each op actually reads.
+        arg_ordinal_map = ordinal_maps.get(call_attr, {})
         nested_attrs = {op.attr_name for op in nested_ops}
         return_producer = None
         if nested.primary_return_slot is not None:
@@ -1792,11 +1883,20 @@ def _inline_nested_free_functions(
             # A callee secondary parameter (rare) is fed by a further call arg;
             # turn it into a predecessor when a producer is known, else drop it.
             extra_param_preds: list[str] = []
+            extra_param_ports: list[tuple[str, int]] = []
             remaining_params: list[str] = []
             for param in op.param_inputs:
                 producer = arg_map.get(param)
                 if producer:
                     extra_param_preds.append(producer)
+                    # Two callee params sharing one producer (``cos``/``sin``
+                    # both from the same multi-return submodule call) need
+                    # their own slot ordinal recorded so this op's own
+                    # predecessor port distinguishes which return slot it
+                    # actually reads, instead of every consumer of that
+                    # producer name colliding on its sequential-fallback tail.
+                    if param in arg_ordinal_map:
+                        extra_param_ports.append((producer, arg_ordinal_map[param]))
                 elif param == primary:
                     resolved = arg_map.get(primary) if primary else None
                     if resolved:
@@ -1806,7 +1906,7 @@ def _inline_nested_free_functions(
             ports = tuple(
                 (remap_attr(attr) if attr in nested_attrs else attr, ordinal)
                 for attr, ordinal in op.predecessor_ports
-            )
+            ) + tuple(extra_param_ports)
             rewritten.append(
                 replace(
                     op,
@@ -2449,6 +2549,14 @@ class ClassStructure:
     # ``_expand_unresolved_activation_classes`` to chase the real class and expand
     # its forward instead of rendering an opaque, title-cased placeholder leaf.
     unresolved_activation_refs: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # Submodule attr -> module-level registry dict name for a
+    # ``self.attr = REGISTRY[key](...)`` assignment (``COMPRESSOR_CLASSES[...]``)
+    # whose callable is selected at runtime from a config-derived key, so static
+    # analysis cannot name the concrete class from the assignment alone. Consumed
+    # by ``_resolve_module_dict_registry_classes`` to chase the dict's own
+    # class-reference values and expand the submodule's forward instead of
+    # rendering an opaque leaf named after the attr.
+    unresolved_module_dict_class_refs: dict[str, str] = field(default_factory=dict)
 
 
 def stack_entry_dataflow(cls: ClassStructure) -> StackEntryDataflow | None:
@@ -5161,6 +5269,52 @@ class _ForwardOperationExtractor:
                 # which collapses every target onto it — so ``q`` would wrongly point
                 # at ``k.float()``. Element-wise binding keeps each name's true
                 # source. General: any equal-arity ``a, b = x, y`` assignment.
+                # A slice/index assignment (``new_kv[:, :, ratio:] = chunk_kv[...]``)
+                # mutates the base tensor in place -- semantically identical to
+                # ``new_kv[:, :, ratio:].copy_(chunk_kv[...])`` (the pattern the
+                # ``ast.Expr`` in-place-method handler below already covers), just
+                # spelled with assignment syntax instead of an explicit ``.copy_()``
+                # call. The target is a Subscript, not a Name, so the generic
+                # ``_bind`` path below (which only understands Name/Tuple/List
+                # targets) silently drops it: the RHS operand (``chunk_kv``'s real
+                # producer) gets resolved by ``self.expression`` but is never wired
+                # to anything, and the mutated variable's ``var_producer`` entry is
+                # never rebound, so later reads of it keep resolving to its
+                # original allocation. Emit the mutation as a real "Copy" op reading
+                # [prior base, the target slice's current value, the RHS operand(s)]
+                # and rebind the root name so downstream reads (and the eventual
+                # return) chain through it. General: any single Subscript-target
+                # assignment, no class/name-specific checks.
+                if (
+                    isinstance(stmt, ast.Assign)
+                    and len(targets) == 1
+                    and isinstance(targets[0], ast.Subscript)
+                ):
+                    root = _subscript_root_name(targets[0])
+                    if root is not None:
+                        self._suppress_slice_resize = True
+                        try:
+                            base_producer, base_external = self.expression(targets[0])
+                        finally:
+                            self._suppress_slice_resize = False
+                        rhs_producer, rhs_external = self.expression(value)
+                        producer = self._emit(
+                            stmt,
+                            _inplace_label("copy_"),
+                            [
+                                predecessor
+                                for predecessor in (
+                                    self.var_producer.get(root),
+                                    base_producer,
+                                    rhs_producer,
+                                )
+                                if predecessor
+                            ],
+                            [*base_external, *rhs_external],
+                        )
+                        self.var_producer[root] = producer
+                        self.var_output_ordinal.pop(root, None)
+                        continue
                 if (
                     isinstance(stmt, ast.Assign)
                     and len(targets) == 1
@@ -6411,12 +6565,14 @@ class _ModelAstVisitor(ast.NodeVisitor):
         )
 
         unresolved_activation_refs: dict[str, tuple[str, str]] = {}
+        unresolved_module_dict_class_refs: dict[str, str] = {}
         if init_func is not None:
             (
                 init_assignments,
                 init_details,
                 init_assignment_options,
                 unresolved_activation_refs,
+                unresolved_module_dict_class_refs,
             ) = _parse_init(
                 init_func,
                 config=self.config,
@@ -6736,8 +6892,32 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 else []
             ),
             unresolved_activation_refs=unresolved_activation_refs,
+            unresolved_module_dict_class_refs=unresolved_module_dict_class_refs,
         )
         self.generic_visit(node)
+
+
+def _dict_registry_constructor_name(node: ast.AST) -> str | None:
+    """Registry-dict name for a ``REGISTRY[key](...)`` submodule constructor.
+
+    Matches a call whose callable is looked up from a subscripted bare name
+    (``COMPRESSOR_CLASSES[self.layer_type](config)``), including such a call as
+    one arm of a config switch (``... if cond else None``). Returns the registry
+    name so a post-pass can resolve it against the module's own dict-of-classes
+    literal; ``None`` when the assignment is not of this shape. Purely
+    structural -- no registry-name or key allow-list.
+    """
+    if isinstance(node, ast.IfExp):
+        return _dict_registry_constructor_name(
+            node.body
+        ) or _dict_registry_constructor_name(node.orelse)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Subscript)
+        and isinstance(node.func.value, ast.Name)
+    ):
+        return node.func.value.id
+    return None
 
 
 def _parse_init(
@@ -6750,17 +6930,24 @@ def _parse_init(
     dict[str, list[str]],
     dict[str, list[str]],
     dict[str, tuple[str, str]],
+    dict[str, str],
 ]:
     assignments: dict[str, str] = {}
     details: dict[str, list[str]] = {}
     options: dict[str, list[str]] = {}
     unresolved_activations: dict[str, tuple[str, str]] = {}
+    unresolved_dict_refs: dict[str, str] = {}
 
     def record_assignment(attr: str, value: ast.AST) -> None:
         class_names = _assignment_class_names(
             value, config=config, param_bindings=param_bindings
         )
         if not class_names:
+            # A ``REGISTRY[key](...)`` constructor names no class statically; the
+            # concrete class is resolved later from the module-level dict literal.
+            registry = _dict_registry_constructor_name(value)
+            if registry is not None and attr not in assignments:
+                unresolved_dict_refs.setdefault(attr, registry)
             return
         # A registry lookup is the fallback arm of a config switch whose other arm
         # constructs a real module (`SituAndMul` vs `ACT2FN[...]`), so it must not
@@ -6803,7 +6990,13 @@ def _parse_init(
             ):
                 record_assignment(target.attr, node.value)
 
-    return assignments, details, options, unresolved_activations
+    # A statically-resolved assignment to the same attr wins over a dict-registry
+    # placeholder (a later plain ``self.x = Foo()`` overriding a switch arm).
+    for attr in list(unresolved_dict_refs):
+        if attr in assignments:
+            unresolved_dict_refs.pop(attr, None)
+
+    return assignments, details, options, unresolved_activations, unresolved_dict_refs
 
 
 def _subscript_index_operands(index: ast.AST) -> list[ast.AST]:
@@ -9559,6 +9752,7 @@ def analyze_source(
     _expand_unresolved_activation_classes(
         visitor.classes, tree, config, all_tensor_ops=all_tensor_ops
     )
+    _resolve_module_dict_registry_classes(visitor.classes, tree)
 
     decoder = _pick_decoder_class(visitor.classes)
     causal_lm = _pick_causal_lm_class(visitor.classes, config)

@@ -295,6 +295,42 @@ def forward(self, x):
     assert copies and gather.attr_name in copies[0].predecessors
 
 
+def test_subscript_target_assignment_consumes_rhs_and_rebinds_root():
+    # ``buf[..., :1] = picked`` is semantically identical to
+    # ``buf[..., :1].copy_(picked)`` -- just spelled with assignment syntax
+    # instead of an explicit in-place method call. Regression test for the
+    # DeepSeek-V4-Flash indexer I1 dead-node bug: without a dedicated handler,
+    # ``picked``'s producer is resolved by ``expression()`` but never wired to
+    # anything (the assignment target is a Subscript, not a Name, so the
+    # generic ``_bind`` path silently drops it), and ``buf``'s own producer is
+    # never rebound, so a later read of ``buf`` keeps resolving to its original
+    # allocation instead of chaining through the assignment.
+    func = _function("""
+def forward(self, x):
+    scores = torch.matmul(x, x)
+    selected = scores.topk(4, dim=-1).indices
+    picked = x[selected]
+    buf = x.new_empty(2, 2)
+    buf[..., :1] = picked
+    return buf
+""")
+    analysis = aa._forward_operations_from_forward(
+        func, self_values={}, all_tensor_ops=True
+    )
+    by_label = lambda label: [op for op in analysis.operations if op.label == label]
+
+    gather = by_label("Gather")[0]
+    # The slice-assignment emits a Copy op (same label as the explicit
+    # ``.copy_()`` in-place-mutator path) consuming the assigned RHS operand.
+    copies = by_label("Copy")
+    assert copies and gather.attr_name in copies[0].predecessors
+
+    # ``buf`` is rebound to the mutation op, not left pointing at the original
+    # ``new_empty`` allocation, so a later read of ``buf`` (the ``return``)
+    # chains through the assignment instead of bypassing it.
+    assert analysis.var_producer["buf"] == copies[0].attr_name
+
+
 def test_subscript_index_operands_skips_pure_slicing():
     # ``x[:, None]`` is pure slicing: no tensor index operands.
     plain = ast.parse("x[:, None]", mode="eval").body
@@ -1397,6 +1433,103 @@ class Router:
     assert router.init_assignments["score_fn"] == "DefinitelyNotARealActivationKey"
     assert any(
         "Could not resolve activation registry entry" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_module_dict_registry_constructor_resolves_and_expands():
+    """A ``self.x = REGISTRY[key](config)`` submodule -- whose callable is looked
+    up from a module-level dict-of-classes at runtime -- resolves to the dict's
+    own class references and expands into that class's forward, instead of
+    rendering as an opaque leaf named after the attr.
+
+    Purely structural: keyed on the shape (module-level dict literal of class
+    references indexed in a constructor), so it exercises the same generic path
+    that resolves e.g. DeepSeek's ``COMPRESSOR_CLASSES[self.layer_type](config)``
+    without hardcoding that registry's name or its keys. Every non-``None``
+    candidate is recorded as an option; the first (source order) is adopted.
+    """
+    source = """
+class CompressorA:
+    def __init__(self, config):
+        self.proj = nn.Linear(4, 4)
+
+    def forward(self, hidden_states):
+        return self.proj(hidden_states)
+
+
+class CompressorB:
+    def __init__(self, config):
+        self.proj = nn.Linear(4, 4)
+
+    def forward(self, hidden_states):
+        return self.proj(hidden_states)
+
+
+REGISTRY = {
+    "sliding": None,
+    "variant_a": CompressorA,
+    "variant_b": CompressorB,
+}
+
+
+class Attention:
+    def __init__(self, config):
+        self.layer_type = config.layer_type
+        self.compressor = (
+            REGISTRY[self.layer_type](config)
+            if self.layer_type != "sliding"
+            else None
+        )
+
+    def forward(self, hidden_states):
+        return self.compressor(hidden_states)
+"""
+    analysis = aa.analyze_source(
+        source, config={"model_type": "faketype"}, all_tensor_ops=True
+    )
+    attn = analysis.class_registry["Attention"]
+    # The attr now names a real, parseable class (the first non-None candidate in
+    # the dict's source order), not a placeholder derived from the attr name.
+    assert attn.init_assignments["compressor"] == "CompressorA"
+    # Both constructible variants are recorded as options so downstream grouping
+    # knows the submodule is genuinely heterogeneous across layers.
+    assert attn.init_assignment_options["compressor"] == ["CompressorA", "CompressorB"]
+    # The adopted class is registered with its own parseable forward -- an actual
+    # composite to expand rather than another opaque leaf.
+    resolved = analysis.class_registry["CompressorA"]
+    assert any(
+        isinstance(item, ast.FunctionDef) and item.name == "forward"
+        for item in resolved.node.body
+    )
+
+
+def test_module_dict_registry_unresolvable_warns_and_stays_opaque(caplog):
+    """A ``REGISTRY[key](...)`` constructor whose dict is not a resolvable
+    dict-of-classes (values are not class references) leaves the submodule
+    unresolved and logs a warning, rather than inventing a class."""
+    source = """
+REGISTRY = {"a": 1, "b": 2}
+
+
+class Attention:
+    def __init__(self, config):
+        self.layer_type = config.layer_type
+        self.compressor = REGISTRY[self.layer_type](config)
+
+    def forward(self, hidden_states):
+        return self.compressor(hidden_states)
+"""
+    with caplog.at_level("WARNING"):
+        analysis = aa.analyze_source(
+            source, config={"model_type": "faketype"}, all_tensor_ops=True
+        )
+    attn = analysis.class_registry["Attention"]
+    # No dict-of-classes to resolve against, so the attr stays out of
+    # init_assignments (rendered as an opaque leaf) and the gap is logged.
+    assert "compressor" not in attn.init_assignments
+    assert any(
+        "Could not resolve module-dict registry" in rec.message
         for rec in caplog.records
     )
 
