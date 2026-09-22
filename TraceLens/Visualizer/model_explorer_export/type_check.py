@@ -240,8 +240,79 @@ def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
     warnings: list[str] = []
     for node in nodes:
         warnings.extend(_check_node(node))
+    warnings.extend(_noop_cast_warnings(nodes))
     for line in warnings:
         _log.warning("graph type-check: %s", line)
+    return warnings
+
+
+def _output_dtype(node: dict[str, Any]) -> str | None:
+    """The dtype suffix of a node's ``output_shape`` (``[B, S] float32`` -> ``float32``)."""
+    for attr in node.get("attrs", []):
+        if attr.get("key") == "output_shape":
+            value = attr.get("value")
+            if not isinstance(value, str):
+                return None
+            idx = value.find("]")
+            if idx == -1:
+                return None
+            dtype = value[idx + 1 :].strip()
+            return dtype or None
+    return None
+
+
+def _noop_cast_warnings(nodes: list[dict[str, Any]]) -> list[str]:
+    """Flag every ``Cast`` whose sole operand dtype already equals its output dtype.
+
+    A cast never changes shape, so a ``Cast`` whose output dtype matches the dtype
+    of the tensor feeding it performs no conversion -- a redundant cast the merge
+    no-op-cast elision (``merge._prune_noop_cast_nodes``) should have removed.
+
+    The operand dtype is read from the node's OWN profiler-style annotation
+    (``input_types``/``output_dtype`` attached by ``_annotate_op_input_signatures``)
+    rather than by walking incoming edges. That annotation is stable across the
+    built graph and the render-filtered (constant-dropped) graph, whereas an edge
+    walk is not: a cast whose true operand is a hidden constant (e.g. a learned
+    ``A_log.float()`` bf16->f32 conversion) loses that operand when constants are
+    filtered for rendering, leaving only a spurious spine predecessor whose dtype
+    would spoof a no-op. Reading the annotation avoids that false positive.
+
+    A cast converts exactly one tensor operand, so only an unambiguous
+    single-operand annotation is checked: more than one recorded operand (a
+    spine/among-constant contamination) is ambiguous about which entry is the
+    tensor being cast, and a ``Constant``/``Tensor`` operand carries no concrete
+    dtype to compare -- both are skipped so the check never false-positives on a
+    legitimate conversion.
+    """
+    warnings: list[str] = []
+    for node in nodes:
+        if (
+            str(node.get("label") or "") != "Cast"
+            and _node_attr_value(node, "op_type") != "Cast"
+        ):
+            continue
+        if _is_constant_node(node):
+            continue
+        raw_types = _node_attr_value(node, "input_types")
+        if not raw_types:
+            continue
+        try:
+            input_types = json.loads(raw_types)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(input_types, list) or len(input_types) != 1:
+            continue
+        in_dtype = input_types[0]
+        if not isinstance(in_dtype, str) or in_dtype in ("Constant", "Tensor"):
+            continue
+        out_dtype = _node_attr_value(node, "output_dtype") or _output_dtype(node)
+        if not out_dtype or in_dtype != out_dtype:
+            continue
+        warnings.append(
+            f"{node.get('id')} [cast]: input dtype {in_dtype} already equals its "
+            f"output dtype {out_dtype} -- the cast performs no conversion and should "
+            f"be elided (merge no-op-cast pass missed it)."
+        )
     return warnings
 
 

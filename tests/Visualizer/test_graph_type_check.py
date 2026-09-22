@@ -315,3 +315,75 @@ def test_i2_sourced_namespaced_input_is_clean():
     ]
     warnings = [w for w in integrity_check_graph_nodes([source, node]) if "I2" in w]
     assert warnings == []
+
+
+# --------------------------------------------------------------------------- #
+# No-op cast check: a Cast whose real input dtype already equals its output
+# dtype performs no conversion (a redundant cast the merge elision missed).
+# --------------------------------------------------------------------------- #
+
+
+def _cast_node(node_id, out_dtype, input_types, *, label="Cast", op_type="Cast"):
+    """A ``Cast`` op carrying profiler-style ``input_types``/``output_dtype`` attrs.
+
+    The no-op-cast check reads the operand dtype from the node's own annotation
+    (stable across built and render-filtered graphs), not by walking edges.
+    """
+    attrs = [
+        {"key": "op_type", "value": op_type},
+        {"key": "input_types", "value": json.dumps(input_types)},
+        {"key": "output_dtype", "value": out_dtype},
+        {"key": "output_shape", "value": f"[B, S, 4] {out_dtype}"},
+    ]
+    return {"id": node_id, "label": label, "attrs": attrs}
+
+
+def test_noop_cast_flagged_when_input_dtype_equals_output():
+    nodes = [_cast_node("c", "float32", ["float32"])]
+    warnings = type_check_graph_nodes(nodes)
+    assert any("c [cast]" in w and "performs no conversion" in w for w in warnings)
+
+
+def test_noop_cast_not_flagged_on_real_downcast():
+    nodes = [_cast_node("c", "float32", ["bfloat16"])]
+    warnings = type_check_graph_nodes(nodes)
+    assert not any("c [cast]" in w for w in warnings)
+
+
+def test_noop_cast_not_flagged_when_input_dtype_unknown():
+    # No input_types annotation -> operand dtype unknown -> conservative skip.
+    nodes = [
+        {
+            "id": "c",
+            "label": "Cast",
+            "attrs": [{"key": "output_dtype", "value": "float32"}],
+        }
+    ]
+    warnings = type_check_graph_nodes(nodes)
+    assert not any("c [cast]" in w for w in warnings)
+
+
+def test_noop_cast_not_flagged_on_constant_operand():
+    # A learned-weight/buffer dtype conversion (e.g. ``A_log.float()``) records a
+    # ``Constant`` operand carrying no concrete dtype -> never a spoofed no-op.
+    nodes = [_cast_node("c", "float32", ["Constant"])]
+    warnings = type_check_graph_nodes(nodes)
+    assert not any("c [cast]" in w for w in warnings)
+
+
+def test_noop_cast_not_flagged_when_operand_ambiguous():
+    # A cast with a spurious spine operand alongside its real (constant) operand --
+    # ``["float32", "Constant"]`` from GLM's ``A_log.float()`` -- is ambiguous about
+    # which entry is the tensor being cast, so it must NOT be flagged even though
+    # the (spine) float32 entry matches the float32 output (constant filtered out in
+    # the render graph would otherwise spoof a no-op).
+    nodes = [_cast_node("c", "float32", ["float32", "Constant"])]
+    warnings = type_check_graph_nodes(nodes)
+    assert not any("c [cast]" in w for w in warnings)
+
+
+def test_noop_cast_flagged_when_label_generic_but_op_type_cast():
+    # Detection keys on op_type=Cast even when the display label is not "Cast".
+    nodes = [_cast_node("c", "float32", ["float32"], label="float")]
+    warnings = type_check_graph_nodes(nodes)
+    assert any("c [cast]" in w for w in warnings)

@@ -1371,6 +1371,70 @@ def test_prune_noop_cast_resolves_chained_removals():
     assert by_id["consumer"]["incomingEdges"][0]["sourceNodeId"] == "producer"
 
 
+def test_prune_noop_cast_walks_back_through_synthetic_boundary():
+    """A no-op cast whose immediate source is a synthetic `@input` boundary that
+    itself traces (single-input) to a real same-dtype producer is elided; the
+    consumer rewires to the boundary (kept), not past it — the hc_head pattern
+    where `input_norm`'s `.to(float32)` runs on a pre-`.float()`-ed input."""
+    nodes = [
+        _real_node("real_float", dtype="float32"),
+        {
+            "id": "mod/@input:x",
+            "attrs": [{"key": "synthetic", "value": "@input"}],
+            "incomingEdges": [_edge("real_float")],
+            "outputsMetadata": [
+                {
+                    "id": "0",
+                    "attrs": [
+                        {"key": "shape", "value": "B x S x 4 float32"},
+                        {"key": "dtype", "value": "float32"},
+                    ],
+                }
+            ],
+        },
+        _cast_node("mod/noop_cast", source="mod/@input:x", dtype="float32"),
+        {"id": "mod/square", "incomingEdges": [_edge("mod/noop_cast")]},
+    ]
+
+    merge._prune_noop_cast_nodes(nodes)
+
+    by_id = {node["id"]: node for node in nodes}
+    assert "mod/noop_cast" not in by_id
+    assert "mod/@input:x" in by_id  # module boundary preserved
+    assert by_id["mod/square"]["incomingEdges"][0]["sourceNodeId"] == "mod/@input:x"
+
+
+def test_prune_noop_cast_keeps_cast_when_boundary_traces_to_other_dtype():
+    """A genuine downcast right after a boundary must stay even when the boundary
+    tile's OWN (circularly back-fillable) dtype happens to match the cast's
+    output: the walk-back to the real bfloat16 producer is the ground truth."""
+    nodes = [
+        _real_node("real_bf16", dtype="bfloat16"),
+        {
+            "id": "mod/@input:gate",
+            "attrs": [{"key": "synthetic", "value": "@input"}],
+            "incomingEdges": [_edge("real_bf16")],
+            "outputsMetadata": [
+                {
+                    "id": "0",
+                    "attrs": [
+                        {"key": "shape", "value": "B x S x 4 float32"},
+                        {"key": "dtype", "value": "float32"},
+                    ],
+                }
+            ],
+        },
+        _cast_node("mod/real_cast", source="mod/@input:gate", dtype="float32"),
+        {"id": "mod/consumer", "incomingEdges": [_edge("mod/real_cast")]},
+    ]
+
+    merge._prune_noop_cast_nodes(nodes)
+
+    by_id = {node["id"]: node for node in nodes}
+    assert "mod/real_cast" in by_id
+    assert by_id["mod/consumer"]["incomingEdges"][0]["sourceNodeId"] == "mod/real_cast"
+
+
 def test_shape_fill_and_boundary_multiple_crossings():
     context = ShapeContext({"H": 16, "V": 101}, "float16")
     nodes = [

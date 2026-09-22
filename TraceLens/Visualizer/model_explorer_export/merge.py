@@ -2145,6 +2145,39 @@ def _prune_noop_cast_nodes(nodes: list[dict[str, Any]]) -> None:
     node_by_id = {str(node.get("id")): node for node in nodes}
     redirect: dict[str, tuple[str, str]] = {}
 
+    def _real_dtype_source(
+        source: dict[str, Any], port: str
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Follow single-input synthetic passthrough tiles back to the first real
+        producer, returning ``(real_node, port)`` or ``(None, "")`` when the chain
+        forks/merges or never reaches a real op.
+
+        A non-synthetic source is returned unchanged (the original behaviour). A
+        synthetic boundary/mirror tile carries no independent dtype ground truth --
+        its dtype can be circularly back-filled from a consumer -- so its true
+        upstream dtype is whatever real op ultimately feeds it.
+        """
+        node = source
+        seen: set[str] = set()
+        while node is not None and _is_synthetic(node):
+            nid = str(node.get("id"))
+            if nid in seen:
+                return None, ""
+            seen.add(nid)
+            incoming = [
+                edge
+                for edge in node.get("incomingEdges", []) or []
+                if not _is_loop_back_edge(str(edge.get("sourceNodeId") or ""), nid)
+            ]
+            if len(incoming) != 1:
+                return None, ""
+            edge = incoming[0]
+            port = str(edge.get("sourceNodeOutputId", "0"))
+            node = node_by_id.get(str(edge.get("sourceNodeId") or ""))
+        if node is None:
+            return None, ""
+        return node, port
+
     for node in nodes:
         if str(node.get("label") or "") != "Cast":
             continue
@@ -2163,20 +2196,25 @@ def _prune_noop_cast_nodes(nodes: list[dict[str, Any]]) -> None:
         source_node = node_by_id.get(source_id)
         if not source_id or source_node is None:
             continue
-        if _is_synthetic(source_node):
-            # Boundary/mirror ports (`@input`, `@input:NAME`, `@output`, ...)
-            # can have their OWN dtype back-filled from whatever consumes
-            # them (there's no independent ground truth for a synthetic
-            # port), so comparing against a synthetic predecessor risks a
-            # circular false match — e.g. a genuine `gate.to(torch.float32)`
-            # cast whose `@input:gate` boundary was itself seeded from this
-            # very cast's dtype. Only prune against a REAL producer op.
+        # Compare the cast's dtype against a REAL producer's dtype. Boundary/mirror
+        # ports (`@input`, `@input:NAME`, `@output`, ...) can have their OWN dtype
+        # back-filled from whatever consumes them (no independent ground truth for
+        # a synthetic port), so comparing directly against a synthetic predecessor
+        # risks a circular false match. Instead walk back through pure single-input
+        # synthetic passthrough tiles to the first real producer and use ITS dtype:
+        # a genuine `gate.to(torch.float32)` whose `@input:gate` traces to a
+        # bfloat16 producer correctly stays a real downcast, while an already-
+        # float32 value flowing through a boundary into a `.to(torch.float32)`
+        # (hc_head's pre-`.float()`-ed input_norm) is exposed as the no-op it is.
+        # Consumers still rewire to the immediate source, preserving the boundary.
+        cmp_node, cmp_port = _real_dtype_source(source_node, source_port)
+        if cmp_node is None:
             continue
         own_spec = node_output_spec(node, "0")
-        source_spec = node_output_spec(source_node, source_port)
+        source_spec = node_output_spec(cmp_node, cmp_port)
         if own_spec is None or source_spec is None or not own_spec.dtype:
             continue
-        if own_spec.dtype != source_spec.dtype:
+        if not source_spec.dtype or own_spec.dtype != source_spec.dtype:
             continue
         redirect[str(node.get("id"))] = (source_id, source_port)
 
