@@ -236,6 +236,7 @@ class TreePerfAnalyzer:
                 metadata_json_path,
                 profile_filepath,
             )
+            kwargs["rebuild_tree"] = False
 
         return TreePerfAnalyzer(
             tree,
