@@ -259,6 +259,65 @@ def test_descriptive_slice_detail_never_warns_on_unchanged_shape():
 
 
 # --------------------------------------------------------------------------- #
+# Output-arity check (Task K): a kernel node must not advertise more tensor
+# output ports than its resolved wrapper returns (``outputs: N`` detail, stamped
+# from the wrapper's own ``return`` -- sdpa -> 1, eager -> 2).
+# --------------------------------------------------------------------------- #
+
+
+def _kernel_node(node_id, details, output_ports):
+    return {
+        "id": node_id,
+        "label": "sdpa",
+        "attrs": [
+            {"key": "op_type", "value": "sdpa"},
+            {"key": "details", "value": details},
+        ],
+        "outputsMetadata": [{"id": str(p)} for p in output_ports],
+    }
+
+
+def test_sdpa_one_output_one_port_is_clean():
+    node = _kernel_node(
+        "k:sdpa", "kernel: sdpa; inputs: q,kv,attention_mask; outputs: 1", ["0"]
+    )
+    assert type_check_graph_nodes([node]) == []
+
+
+def test_sdpa_one_output_but_two_ports_warns():
+    # The phantom-slice regression: a one-output kernel advertising two output
+    # ports (an unpacked None slot fanned out as a second tensor).
+    node = _kernel_node("k:sdpa", "kernel: sdpa; outputs: 1", ["0", "1"])
+    warnings = type_check_graph_nodes([node])
+    assert len(warnings) == 1
+    assert "k:sdpa" in warnings[0]
+    assert "phantom output slot" in warnings[0]
+
+
+def test_eager_two_outputs_two_ports_is_clean():
+    # eager attention genuinely returns (attn_output, attn_weights): two ports OK.
+    node = _kernel_node("k:eager", "kernel: eager; outputs: 2", ["0", "1"])
+    assert type_check_graph_nodes([node]) == []
+
+
+def test_output_arity_counts_distinct_consumer_ordinals():
+    # No outputsMetadata, but two consumers read ordinals 0 and 1 off a kernel that
+    # declares a single output -> the distinct-ordinal count exceeds the arity.
+    kernel = {
+        "id": "k:sdpa",
+        "label": "sdpa",
+        "attrs": [
+            {"key": "op_type", "value": "sdpa"},
+            {"key": "details", "value": "kernel: sdpa; outputs: 1"},
+        ],
+    }
+    c0 = {"id": "c0", "incomingEdges": [{"sourceNodeId": "k:sdpa", "sourceNodeOutputId": "0"}]}
+    c1 = {"id": "c1", "incomingEdges": [{"sourceNodeId": "k:sdpa", "sourceNodeOutputId": "1"}]}
+    warnings = type_check_graph_nodes([kernel, c0, c1])
+    assert any("k:sdpa" in w and "phantom output slot" in w for w in warnings)
+
+
+# --------------------------------------------------------------------------- #
 # I2 no-source: a namespaced module ``@input`` boundary must be fed by its real
 # producer; only a *top-level* model-input boundary is a legitimate sourceless
 # graph entry. (Exercises the ``_is_top_level_model_input`` exemption directly.)

@@ -232,6 +232,74 @@ def _check_node(node: dict[str, Any]) -> list[str]:
     return warnings
 
 
+def _detail_tokens(node: dict[str, Any]) -> list[str]:
+    """Individual detail entries, splitting the rendered ``a; b; c`` join as well
+    as newlines (attention kernel details are joined with ``"; "`` onto one line)."""
+    tokens: list[str] = []
+    for line in _details_lines(node):
+        for token in line.split(";"):
+            token = token.strip()
+            if token:
+                tokens.append(token)
+    return tokens
+
+
+def _declared_output_arity(node: dict[str, Any]) -> int | None:
+    """The kernel's real tensor-return count, from an ``outputs: N`` detail.
+
+    Stamped by ``ast_analyze._resolve_dispatched_attention_kernel`` after it reads
+    the resolved attention wrapper's ``return`` from source. Any node may carry it;
+    the check keys on the detail's presence, never on a kernel-name list."""
+    for token in _detail_tokens(node):
+        if token.startswith("outputs:"):
+            try:
+                return int(token.split(":", 1)[1].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def _output_arity_warnings(nodes: list[dict[str, Any]]) -> list[str]:
+    """Flag a kernel node advertising more tensor output ports than it can return.
+
+    A dispatched attention kernel declares how many real tensors it returns
+    (``outputs: N``, introspected from the resolved wrapper's own ``return`` --
+    SDPA's ``(attn_output, None)`` is one, eager's ``(attn_output, attn_weights)``
+    is two). The rendered node must not expose more output ports than that: an
+    extra port means an unpacked ``None``/unused slot was fanned out as a phantom
+    tensor (the ``slice_1``/``slice_2`` class of bug). The advertised count is the
+    larger of the node's own output-port metadata and the distinct output ordinals
+    its consumers read -- either exceeding the declared arity is a real defect.
+    """
+    used_ordinals: dict[str, set[str]] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []) or []:
+            source = edge.get("sourceNodeId")
+            if source is None:
+                continue
+            used_ordinals.setdefault(str(source), set()).add(
+                str(edge.get("sourceNodeOutputId", "0"))
+            )
+    warnings: list[str] = []
+    for node in nodes:
+        declared = _declared_output_arity(node)
+        if declared is None:
+            continue
+        node_id = str(node.get("id", ""))
+        port_count = len(node.get("outputsMetadata", []) or [])
+        ordinal_count = len(used_ordinals.get(node_id, set()))
+        advertised = max(port_count, ordinal_count)
+        if advertised > declared:
+            warnings.append(
+                f"{node_id} [{_op_type(node)}]: advertises {advertised} tensor "
+                f"output port(s) but its resolved kernel returns only {declared} "
+                f"real tensor(s) (outputs: {declared}); a phantom output slot was "
+                f"fanned out -- an unpacked None/unused return was modeled as a "
+                f"tensor. Trim it in _resolve_dispatched_attention_kernel."
+            )
+    return warnings
+
+
 def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
     """Type-check every checkable operation node; return + log warning lines.
 
@@ -241,6 +309,7 @@ def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
     for node in nodes:
         warnings.extend(_check_node(node))
     warnings.extend(_noop_cast_warnings(nodes))
+    warnings.extend(_output_arity_warnings(nodes))
     for line in warnings:
         _log.warning("graph type-check: %s", line)
     return warnings

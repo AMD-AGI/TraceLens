@@ -677,7 +677,23 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
 
 
 def _add_kernel_output_port_nodes(graph: ComputationGraph) -> None:
-    """Insert port nodes for every output on kernel tiles with ≥2 outgoing edges."""
+    """Insert one port node per *distinct* output on kernels with ≥2 outputs.
+
+    A kernel that genuinely returns several tensors (an eager attention handing
+    back both ``attn_output`` and ``attn_weights``) fans each real output — keyed
+    by the output ordinal its edges carry — to its own named port tile.
+
+    A kernel with a *single* output read by several consumers is different: sdpa
+    returns exactly one tensor (``scaled_dot_product_attention`` has one output;
+    its wrapper's second tuple slot is literally ``None``), and that one
+    ``attn_output`` may be read at several downstream sites (e.g. two slices of a
+    following interleaved-RoPE step). All those edges carry the *same* output
+    ordinal. Splitting per outgoing edge would fabricate phantom
+    ``Slice``/``Slice_2`` output ports for a one-output kernel. Group the outgoing
+    edges by output ordinal and only materialize port tiles when the kernel drives
+    more than one distinct output, so a single output stays a single output that
+    simply fans out.
+    """
     kernel_indices = [
         index
         for index, spec in enumerate(graph.nodes)
@@ -685,43 +701,58 @@ def _add_kernel_output_port_nodes(graph: ComputationGraph) -> None:
         and spec.block.class_name in _KERNEL_CLASS_NAMES
     ]
     for kernel_index in kernel_indices:
-        all_outputs: list[tuple[int, str]] = []
-        seen_labels: dict[str, int] = {}
+        # Group this kernel's outgoing edges by the output ordinal each reads. A
+        # missing ordinal is the kernel's sole/primary output ("0").
+        targets_by_ordinal: dict[str, list[int]] = {}
+        ordinal_order: list[str] = []
         for source, target in graph.links:
             if source != kernel_index:
                 continue
-            label = graph.link_port_labels.get((source, target))
+            raw = graph.link_output_ports.get((source, target))
+            ordinal = str(raw) if raw is not None else "0"
+            if ordinal not in targets_by_ordinal:
+                targets_by_ordinal[ordinal] = []
+                ordinal_order.append(ordinal)
+            targets_by_ordinal[ordinal].append(target)
+
+        # One (or zero) distinct output: a single tensor fanned to its consumers —
+        # nothing to split.
+        if len(ordinal_order) < 2:
+            continue
+
+        seen_labels: dict[str, int] = {}
+        for ordinal in ordinal_order:
+            targets = targets_by_ordinal[ordinal]
+            label = None
+            for target in targets:
+                label = graph.link_port_labels.get((kernel_index, target))
+                if label:
+                    break
             if not label:
-                tgt_spec = graph.nodes[target]
-                label = tgt_spec.label or f"output_{len(all_outputs)}"
+                label = graph.nodes[targets[0]].label or f"output_{ordinal}"
             count = seen_labels.get(label, 0)
             seen_labels[label] = count + 1
             if count > 0:
                 label = f"{label}_{count + 1}"
-            all_outputs.append((target, label))
-
-        if len(all_outputs) >= 2:
-            remove_out: set[tuple[int, int]] = {
-                (kernel_index, tgt) for tgt, _ in all_outputs
-            }
+            safe_label = label.replace("/", "_")
+            port_index = _add_node(
+                graph,
+                key=f"@kernel_out:{kernel_index}:{safe_label}",
+                label=label,
+                synthetic=SYNTHETIC_KERNEL_PORT_OUT,
+            )
+            _inherit_kernel_frames(graph, kernel_index, port_index)
+            remove_out = {(kernel_index, target) for target in targets}
             graph.links = [lk for lk in graph.links if lk not in remove_out]
-
-            for target, label in all_outputs:
+            for target in targets:
                 graph.link_port_labels.pop((kernel_index, target), None)
                 graph.link_output_ports.pop((kernel_index, target), None)
-                safe_label = label.replace("/", "_")
-                port_index = _add_node(
-                    graph,
-                    key=f"@kernel_out:{kernel_index}:{safe_label}",
-                    label=label,
-                    synthetic=SYNTHETIC_KERNEL_PORT_OUT,
-                )
-                _inherit_kernel_frames(graph, kernel_index, port_index)
-                graph.links.append((kernel_index, port_index))
+            graph.links.append((kernel_index, port_index))
+            for target in targets:
                 graph.links.append((port_index, target))
-                for port_name, src in list(graph.output_ports.items()):
-                    if src == kernel_index and port_name == label:
-                        graph.output_ports[port_name] = port_index
+            for port_name, src in list(graph.output_ports.items()):
+                if src == kernel_index and port_name == label:
+                    graph.output_ports[port_name] = port_index
 
 
 def _has_inline_attention_child(block: BlockNode) -> bool:

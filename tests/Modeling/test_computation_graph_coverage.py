@@ -443,12 +443,16 @@ def test_add_kernel_port_nodes_unlabeled_no_declared():
 
 
 def test_add_kernel_output_port_nodes():
+    # A genuine multi-output kernel: its two consumers read *distinct* output
+    # ordinals (an eager attention handing back attn_output at 0 and attn_weights
+    # at 1), so each real output fans to its own named port tile.
     kernel = _node("attn", class_name="AttentionMerge")
     t1 = _node("t1")
     t2 = _node("t2")
     graph = cg.ComputationGraph(
         nodes=[_spec(block=kernel, label="Attn"), _spec(block=t1, label="c1"), _spec(block=t2, label="c2")],
         links=[(0, 1), (0, 2)],
+        link_output_ports={(0, 1): "0", (0, 2): "1"},
         output_ports={"c1": 0},
     )
     cg._add_kernel_output_port_nodes(graph)
@@ -456,6 +460,25 @@ def test_add_kernel_output_port_nodes():
     assert len(outs) == 2
     # output_ports remapped to a port node.
     assert graph.output_ports["c1"] != 0
+
+
+def test_add_kernel_output_port_nodes_single_output_fanout_not_split():
+    # A single-output kernel (sdpa: one tensor, its wrapper's 2nd tuple slot is
+    # None) whose one output is read by two downstream consumers. Both edges carry
+    # the same output ordinal, so this is a fan-out of ONE output -- it must NOT be
+    # split into phantom per-consumer output ports (the slice_1/slice_2 bug).
+    kernel = _node("attn", class_name="AttentionMerge")
+    graph = cg.ComputationGraph(
+        nodes=[_spec(block=kernel, label="Attn"), _spec(block=_node("t1"), label="c1"), _spec(block=_node("t2"), label="c2")],
+        links=[(0, 1), (0, 2)],
+        output_ports={"c1": 0},
+    )
+    cg._add_kernel_output_port_nodes(graph)
+    assert not any(
+        s.synthetic == cg.SYNTHETIC_KERNEL_PORT_OUT for s in graph.nodes
+    )
+    # The single output still fans directly to both consumers.
+    assert (0, 1) in graph.links and (0, 2) in graph.links
 
 
 def test_add_kernel_output_port_nodes_single_output_ignored():
@@ -1917,6 +1940,8 @@ def test_prune_computation_nodes_cyclic_removed():
 
 
 def test_add_kernel_output_port_nodes_fallback_labels():
+    # Two distinct outputs (ordinals 0 and 1) whose consumer labels are empty, so
+    # each port tile falls back to its ``output_<ordinal>`` name.
     kernel = _node("attn", class_name="AttentionMerge")
     graph = cg.ComputationGraph(
         nodes=[
@@ -1925,6 +1950,7 @@ def test_add_kernel_output_port_nodes_fallback_labels():
             _spec(block=_node("t2"), label=""),
         ],
         links=[(0, 1), (0, 2)],
+        link_output_ports={(0, 1): "0", (0, 2): "1"},
     )
     cg._add_kernel_output_port_nodes(graph)
     outs = [s.label for s in graph.nodes if s.synthetic == cg.SYNTHETIC_KERNEL_PORT_OUT]

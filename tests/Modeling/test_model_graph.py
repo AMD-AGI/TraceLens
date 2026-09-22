@@ -231,6 +231,110 @@ def test_dispatched_attention_resolves_through_the_checkpoint_config():
     assert kernel_for({"_attn_implementation": "sdpa"}) == "sdpa"
 
 
+def test_max_real_return_arity_drops_none_slots():
+    import ast
+
+    from TraceLens.ModelUtils.ast_analyze import _max_real_return_arity
+
+    one = ast.parse("def f(x):\n    return x, None").body[0]
+    two = ast.parse("def f(x, y):\n    return x, y").body[0]
+    bare = ast.parse("def f(x):\n    return x").body[0]
+    assert _max_real_return_arity(one) == 1
+    assert _max_real_return_arity(two) == 2
+    assert _max_real_return_arity(bare) == 1
+
+
+def test_attention_kernel_return_arity_reads_the_resolved_wrapper():
+    from TraceLens.ModelUtils.ast_analyze import (
+        _HostSourceResolver,
+        _attention_kernel_return_arity,
+    )
+
+    resolver = _HostSourceResolver()
+    config = {"model_type": "deepseek_v4"}
+    # sdpa's wrapper returns ``(attn_output, None)`` -> one real tensor.
+    assert _attention_kernel_return_arity("sdpa", config, resolver) == 1
+    # the model's own eager wrapper returns ``(attn_output, attn_weights)`` -> two.
+    assert _attention_kernel_return_arity("eager", config, resolver) == 2
+
+
+def test_dispatched_attention_stamps_output_arity_detail():
+    """The resolved kernel's real return arity is recorded as an ``outputs:`` detail."""
+    from TraceLens.ModelUtils.ast_analyze import kernel_name_from_step_details
+
+    source = textwrap.dedent("""
+        class Attention(nn.Module):
+            def forward(self, hidden_states):
+                query_states = self.q_proj(hidden_states)
+                attention_interface = eager_attention_forward
+                if self.config._attn_implementation != "eager":
+                    attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+                attn_output, attn_weights = attention_interface(self, query_states, k, v)
+                return attn_output
+        """)
+
+    # sdpa (the default) returns one real tensor -> ``outputs: 1``.
+    analysis = analyze_source(source, config={"model_type": "deepseek_v4"})
+    details = analysis.class_registry["Attention"].forward_step_details[
+        SYNTHETIC_ATTENTION
+    ]
+    assert kernel_name_from_step_details(details) == "sdpa"
+    assert "outputs: 1" in details
+
+    # the model's own eager wrapper returns both tensors -> ``outputs: 2``.
+    analysis_eager = analyze_source(
+        source, config={"model_type": "deepseek_v4", "_attn_implementation": "eager"}
+    )
+    details_eager = analysis_eager.class_registry["Attention"].forward_step_details[
+        SYNTHETIC_ATTENTION
+    ]
+    assert "outputs: 2" in details_eager
+
+
+def test_resolve_dispatched_attention_caps_unpack_names_to_arity():
+    """A one-tensor kernel trims a phantom second unpack name (the None slot)."""
+    import ast
+
+    from TraceLens.ModelUtils.ast_analyze import (
+        ClassStructure,
+        _resolve_dispatched_attention_kernel,
+    )
+
+    def _cls() -> ClassStructure:
+        cls = ClassStructure(
+            name="Attention",
+            node=ast.parse("class Attention:\n    pass").body[0],
+            init_assignments={},
+            init_details={},
+            forward_calls=[],
+            norm_before=[],
+        )
+        cls.forward_step_details[SYNTHETIC_ATTENTION] = ["kernel: attention_interface"]
+        cls.forward_step_output_names[SYNTHETIC_ATTENTION] = [
+            "attn_output",
+            "attn_weights",
+        ]
+        return cls
+
+    # sdpa arity 1: the second (None) unpack name is dropped.
+    sdpa = _cls()
+    _resolve_dispatched_attention_kernel({"Attention": sdpa}, {"model_type": "deepseek_v4"})
+    assert "outputs: 1" in sdpa.forward_step_details[SYNTHETIC_ATTENTION]
+    assert sdpa.forward_step_output_names[SYNTHETIC_ATTENTION] == ["attn_output"]
+
+    # eager arity 2: both output names survive.
+    eager = _cls()
+    _resolve_dispatched_attention_kernel(
+        {"Attention": eager},
+        {"model_type": "deepseek_v4", "_attn_implementation": "eager"},
+    )
+    assert "outputs: 2" in eager.forward_step_details[SYNTHETIC_ATTENTION]
+    assert eager.forward_step_output_names[SYNTHETIC_ATTENTION] == [
+        "attn_output",
+        "attn_weights",
+    ]
+
+
 def test_build_model_graph_matches_computation_graph_topology():
     root = _mla_fixture_root()
     basic = BasicOpFilter.for_detailed()

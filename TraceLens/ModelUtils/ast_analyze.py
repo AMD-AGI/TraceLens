@@ -8016,6 +8016,94 @@ def _ordered_forward_params(func: ast.FunctionDef) -> list[str]:
     ]
 
 
+def _max_real_return_arity(func: ast.FunctionDef) -> int | None:
+    """Count the real (non-``None``) tensor slots the function returns.
+
+    Reads every ``return`` statement's value: a tuple contributes one per element
+    that is not the literal ``None`` (a ``None`` slot is a placeholder the caller
+    unpacks but never uses as a tensor), a bare expression contributes one. The
+    max across returns is the number of tensor outputs the function can hand back.
+    Returns ``None`` when the function has no value-bearing ``return``.
+    """
+    best: int | None = None
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Return) or node.value is None:
+            continue
+        value = node.value
+        if isinstance(value, ast.Tuple):
+            count = sum(
+                0 if (isinstance(elt, ast.Constant) and elt.value is None) else 1
+                for elt in value.elts
+            )
+        else:
+            count = 1
+        best = count if best is None else max(best, count)
+    return best
+
+
+def _attention_wrapper_candidates(
+    kernel: str, config: dict[str, Any] | None
+) -> list[tuple[str, str]]:
+    """(module, function) sites the resolved kernel's wrapper could be defined in.
+
+    ``ALL_ATTENTION_FUNCTIONS`` is the runtime registry transformers dispatches a
+    named implementation (``"sdpa"``, ``"flash_attention_2"``, …) through, so its
+    entry's ``__module__``/``__name__`` point at the exact wrapper the model runs —
+    introspected, never hardcoded. ``"eager"`` is special-cased by transformers and
+    is not in the registry; it runs the analysed modeling file's own
+    ``eager_attention_forward``, so fall back to the base module by the same
+    ``<kernel>_attention_forward`` naming the library uses.
+    """
+    candidates: list[tuple[str, str]] = []
+    try:
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        fn = ALL_ATTENTION_FUNCTIONS[kernel]
+    except Exception:
+        fn = None
+    if fn is not None:
+        module = getattr(fn, "__module__", None)
+        name = getattr(fn, "__name__", None)
+        if module and name:
+            candidates.append((module, name))
+    base = _analyzed_base_module(config)
+    if base:
+        for name in (kernel, f"{kernel}_attention_forward"):
+            candidates.append((base, name))
+    return candidates
+
+
+def _attention_kernel_return_arity(
+    kernel: str,
+    config: dict[str, Any] | None,
+    resolver: "_HostSourceResolver",
+) -> int | None:
+    """Real tensor-return count of the resolved attention wrapper, from source AST.
+
+    The dispatched interface (``attention_interface(...)``) resolves to a wrapper
+    whose return arity is kernel-specific: SDPA's ``sdpa_attention_forward`` returns
+    ``(attn_output, None)`` — one real tensor — while the model's own
+    ``eager_attention_forward`` returns ``(attn_output, attn_weights)`` — two. We
+    read that wrapper's ``return`` from source (never executing it) so the graph
+    advertises exactly the tensor outputs the kernel actually produces, dropping a
+    slot the wrapper fills with ``None``. General: the count comes from whatever
+    wrapper the registry/config selects, with no per-kernel table.
+
+    Returns ``None`` when no wrapper source can be located (arity left unknown).
+    """
+    for module, name in _attention_wrapper_candidates(kernel, config):
+        loaded = resolver._load(module)
+        if loaded is None:
+            continue
+        func = loaded[0].get(name)
+        if func is None:
+            continue
+        arity = _max_real_return_arity(func)
+        if arity is not None:
+            return arity
+    return None
+
+
 def _resolve_dispatched_attention_kernel(
     classes: dict[str, ClassStructure],
     config: dict[str, Any] | None,
@@ -8030,12 +8118,22 @@ def _resolve_dispatched_attention_kernel(
     ``"sdpa"`` — the transformers default when nothing is configured — so a
     dispatched-attention step still names the kernel that actually runs instead
     of leaving the call site's opaque dispatch variable.
+
+    Having named the kernel we introspect *its* wrapper's return arity (SDPA →
+    one tensor, eager → two) and (a) record it as an ``outputs: N`` detail so the
+    type-check can verify the rendered node never advertises more output ports
+    than the kernel really returns, and (b) trim the recorded unpack names to that
+    arity so an ``attn_output, attn_weights = attention_interface(...)`` whose
+    second slot the wrapper fills with ``None`` does not fan out a phantom second
+    output. General: arity comes from the resolved wrapper's own source.
     """
     implementation = (config or {}).get("_attn_implementation")
     if isinstance(implementation, str) and implementation.strip():
         resolved = implementation.strip()
     else:
         resolved = "sdpa"
+    resolver = _HostSourceResolver()
+    arity = _attention_kernel_return_arity(resolved, config, resolver)
     for cls in classes.values():
         details = cls.forward_step_details.get(SYNTHETIC_ATTENTION)
         if not details:
@@ -8043,10 +8141,18 @@ def _resolve_dispatched_attention_kernel(
         kernel = kernel_name_from_step_details(details)
         if kernel is None or kernel.lower() not in _ATTENTION_DISPATCH_NAMES:
             continue
-        cls.forward_step_details[SYNTHETIC_ATTENTION] = [
+        rewritten = [
             f"kernel: {resolved}" if line.startswith("kernel:") else line
             for line in details
+            if not line.startswith("outputs:")
         ]
+        if arity is not None:
+            rewritten.append(f"outputs: {arity}")
+        cls.forward_step_details[SYNTHETIC_ATTENTION] = rewritten
+        if arity is not None:
+            names = cls.forward_step_output_names.get(SYNTHETIC_ATTENTION)
+            if names is not None and len(names) > arity:
+                cls.forward_step_output_names[SYNTHETIC_ATTENTION] = names[:arity]
 
 
 def _kernel_call_detail_lines(call: ast.Call) -> list[str]:
@@ -8233,9 +8339,12 @@ def attention_kernel_details(
             lines.append(f"inputs: {','.join(attention_inputs.keys())}")
         # Interface inputs the module declares but this resolved kernel never reads
         # (e.g. ``max_seqlen`` under sdpa) are surfaced as a distinct flag rather than
-        # a wired input port — see ``_flag_unused_interface_inputs``.
+        # a wired input port — see ``_flag_unused_interface_inputs``. The resolved
+        # wrapper's real tensor-return count (``outputs: N``, stamped by
+        # ``_resolve_dispatched_attention_kernel``) is carried through so the
+        # type-check can verify the node advertises no more output ports than that.
         for line in details:
-            if line.startswith("unused_interface_inputs:"):
+            if line.startswith(("unused_interface_inputs:", "outputs:")):
                 lines.append(line)
         return lines
 
