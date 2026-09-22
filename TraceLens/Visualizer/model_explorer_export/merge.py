@@ -4648,6 +4648,69 @@ def _topologically_order_nodes(nodes: list[dict[str, Any]]) -> None:
     nodes[:] = [nodes[i] for i in order]
 
 
+def _hoist_loop_carried_in_ahead_of_body(nodes: list[dict[str, Any]]) -> None:
+    """Pull each ``@loop_carried_in`` ahead of its loop-body namespace subtree.
+
+    Model Explorer groups by the ``namespace`` field and renders sibling nodes /
+    subgroups in list order, so a loop's ``@loop_carried_in`` should be the first
+    element under its loop scope. The stable topological sort only guarantees a
+    ``@loop_carried_in`` precedes its *direct* dataflow consumers; a loop body's
+    graph sources (hidden-constant closures, per-branch inputs) carry no edge from
+    the loop input, so the sort can legitimately place them ahead of it -- e.g. a
+    repeated decoder block whose per-layer RMSNorm-eps / hyper-connection constants
+    sorted to the very front, pushing the whole layer body above the loop-in tile.
+
+    Every loop scope (a ``{N}x_`` repeat group and an inner ``for`` loop alike) is
+    captured by a dedicated ``namespace`` subtree, so the body of the loop owning a
+    ``@loop_carried_in`` is exactly the nodes whose namespace equals or descends
+    from the boundary's namespace. Move the boundary just ahead of the earliest
+    such node. This is topology-safe: a ``@loop_carried_in`` is a graph source (its
+    only real dependency is the permitted back edge, which is excluded), so nothing
+    it must follow gets pushed after it -- but we still clamp past any genuine seed
+    producer it *does* depend on (an ``@input:<name>`` initial value living inside
+    the loop scope), keeping producer-before-consumer intact.
+    """
+
+    def _namespace(node: dict[str, Any]) -> str:
+        return node.get("namespace") or ""
+
+    # Outermost loops first (shallowest namespace) so an enclosing boundary lands
+    # ahead of a nested one sharing the subtree.
+    carried_ins = sorted(
+        (node for node in nodes if "@loop_carried_in:" in str(node.get("id"))),
+        key=lambda node: _namespace(node).count("/"),
+    )
+    for boundary in carried_ins:
+        cur = nodes.index(boundary)
+        ns = _namespace(boundary)
+        # Earliest node in the boundary's loop-body namespace subtree.
+        earliest = None
+        for i, node in enumerate(nodes):
+            if node is boundary:
+                continue
+            node_ns = _namespace(node)
+            if node_ns == ns or (ns and node_ns.startswith(ns + "/")):
+                earliest = i
+                break
+        if earliest is None or earliest >= cur:
+            continue
+        # Never move ahead of a genuine (non-back-edge) producer of the boundary.
+        producer_ids = {
+            str(edge.get("sourceNodeId"))
+            for edge in boundary.get("incomingEdges", []) or []
+            if not _is_loop_back_edge(
+                str(edge.get("sourceNodeId") or ""), str(boundary.get("id"))
+            )
+        }
+        floor = 0
+        for i in range(cur):
+            if str(nodes[i].get("id")) in producer_ids:
+                floor = i + 1
+        target = max(earliest, floor)
+        if target < cur:
+            nodes.insert(target, nodes.pop(cur))
+
+
 def _stack_primary_input_name(cls: Any) -> str | None:
     """First non-self ``forward`` parameter of a class (its primary input)."""
     forward = next(
@@ -5293,6 +5356,7 @@ def build_merged_model_graph(
     # loop body and each ``@loop_carried_out`` after it.
     _order_model_inputs(nodes)
     _topologically_order_nodes(nodes)
+    _hoist_loop_carried_in_ahead_of_body(nodes)
 
     # Structural-integrity check on the FINAL built graph (after loop-carried
     # synthesis + ordering): I1 dead-node / I2 no-source / I3 constant soundness.

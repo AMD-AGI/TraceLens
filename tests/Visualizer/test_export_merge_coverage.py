@@ -999,6 +999,99 @@ def test_synthesize_loop_boundary_wraps_single_template_container():
     assert sorted(_consumers(nodes, out_id)) == [in_id, "sink"]
 
 
+def _carried_in(node_id, namespace, sources):
+    return {
+        "id": node_id,
+        "namespace": namespace,
+        "label": "Loop in",
+        "attrs": [{"key": "synthetic", "value": "@loop_carried"}],
+        "incomingEdges": [
+            {"sourceNodeId": s, "sourceNodeOutputId": "0", "targetNodeInputId": "0"}
+            for s in sources
+        ],
+    }
+
+
+def test_hoist_loop_carried_in_ahead_of_repeat_group_body():
+    """A repeat-group ``@loop_carried_in`` is pulled ahead of its body subtree.
+
+    The stable topological sort can legitimately place a loop body's graph
+    sources (per-layer constants that carry no edge from the loop input) ahead of
+    the ``@loop_carried_in`` tile, so the whole layer body would render above the
+    loop input. The hoist moves the boundary just after its external seed producer
+    and ahead of every namespace-subtree body node.
+    """
+    out_id = "blk/@loop_carried_out:blk:h"
+    nodes = [
+        _plain("model/seed", "model", [], shape="[B, S, 4096] bfloat16"),
+        # body graph sources sorted ahead of the loop-in tile
+        _plain("blk/sub/eps", "3x_Block/sub", [], shape="[] float32"),
+        _plain("blk/sub/op", "3x_Block/sub", ["blk/sub/eps"]),
+        _carried_in("blk/@loop_carried_in:blk:h", "3x_Block", ["model/seed", out_id]),
+        _plain("blk/body", "3x_Block", ["blk/@loop_carried_in:blk:h"]),
+        {
+            "id": out_id,
+            "namespace": "3x_Block",
+            "label": "Loop out",
+            "attrs": [{"key": "synthetic", "value": "@loop_carried"}],
+            "incomingEdges": [
+                {"sourceNodeId": "blk/body", "sourceNodeOutputId": "0",
+                 "targetNodeInputId": "0"}
+            ],
+        },
+    ]
+    merge._hoist_loop_carried_in_ahead_of_body(nodes)
+    order = [n["id"] for n in nodes]
+    cin = order.index("blk/@loop_carried_in:blk:h")
+    # after the external seed, before every 3x_Block-subtree body node
+    assert order.index("model/seed") < cin
+    assert cin < order.index("blk/sub/eps")
+    assert cin < order.index("blk/sub/op")
+    assert cin < order.index("blk/body")
+
+
+def test_hoist_loop_carried_in_clamped_behind_in_scope_seed():
+    """A ``@loop_carried_in`` never moves ahead of an in-scope seed producer.
+
+    When the loop's initial value (``@input:initial``) lives inside the loop
+    scope and genuinely feeds the accumulator, producer-before-consumer must hold:
+    the seed stays ahead of the ``@loop_carried_in`` even though both share the
+    boundary's namespace subtree.
+    """
+    out_id = "mlp/@loop_carried_out:l:final"
+    nodes = [
+        _synthetic_input("mlp/@input:initial", "Block/Loop", "ext", label="initial"),
+        _carried_in("mlp/@loop_carried_in:l:final", "Block/Loop",
+                    ["mlp/@input:initial", out_id]),
+        _plain("mlp/body", "Block/Loop", ["mlp/@loop_carried_in:l:final"]),
+    ]
+    merge._hoist_loop_carried_in_ahead_of_body(nodes)
+    order = [n["id"] for n in nodes]
+    # the in-scope seed still precedes the accumulator (no illegal hoist)
+    assert order.index("mlp/@input:initial") < order.index("mlp/@loop_carried_in:l:final")
+
+
+def test_hoist_loop_carried_in_nests_outer_ahead_of_inner():
+    """An enclosing loop-in lands ahead of a nested loop-in sharing the subtree."""
+    outer_out = "d/@loop_carried_out:d:h"
+    inner_out = "d/inner/@loop_carried_out:i:c"
+    nodes = [
+        _plain("seed", "", [], shape="[B, S, 8] bfloat16"),
+        _plain("d/inner/eps", "3x_D/inner/Loop", [], shape="[] float32"),
+        _carried_in("d/inner/@loop_carried_in:i:c", "3x_D/inner/Loop",
+                    ["d/inner/eps", inner_out]),
+        _carried_in("d/@loop_carried_in:d:h", "3x_D", ["seed", outer_out]),
+        _plain("d/body", "3x_D", ["d/@loop_carried_in:d:h",
+                                  "d/inner/@loop_carried_in:i:c"]),
+    ]
+    merge._hoist_loop_carried_in_ahead_of_body(nodes)
+    order = [n["id"] for n in nodes]
+    outer = order.index("d/@loop_carried_in:d:h")
+    inner = order.index("d/inner/@loop_carried_in:i:c")
+    assert order.index("seed") < outer < inner
+    assert outer < order.index("d/inner/eps")
+
+
 def test_synthesize_loop_boundary_is_noop_when_already_wrapped():
     """The vision tower's CG-built boundary is left untouched (no double wrap)."""
     nodes = [
