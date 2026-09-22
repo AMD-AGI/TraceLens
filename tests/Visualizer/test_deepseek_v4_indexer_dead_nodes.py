@@ -94,3 +94,87 @@ def test_deepseek_v4_indexer_chunk_kv_and_gate_are_consumed():
     assert indexer_view_and_add, "expected indexer View/Add nodes to still exist"
     dead = [node["id"] for node in indexer_view_and_add if node["id"] not in consumed]
     assert not dead, f"indexer View/Add nodes with no consumer: {dead}"
+
+
+def test_expanded_rope_single_tensor_ops_read_one_operand():
+    """A ``repeat_interleave``/``unsqueeze`` inside an expanded ``apply_rotary_pos_emb``
+    frame reads exactly its one real tensor input.
+
+    Regression guard for the Task-G composite-expansion wiring: a positional
+    free-function inlined inside an expanded submodule composite
+    (``compressor``/``indexer``'s ``apply_rotary_pos_emb``) reassigns its params
+    (``cos = cos.repeat_interleave(...).unsqueeze(...)``) and is fed by a real
+    multi-return producer (``cos, sin = self.rotary_emb(...)``) rather than a
+    boundary alias. The producer-arg wiring over-attached side operands (the
+    other slot, the ``x`` primary, the enclosing module's ``hidden_states``) onto
+    the frame's single-tensor first ops. Assert structurally (by label under an
+    ``apply_rotary_pos_emb`` namespace) that each such op has exactly one incoming
+    tensor edge, mirroring how the same op wires at the top-level Attention call
+    site. Keyed by op label, not by line number / class name.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph = _build_graph()
+    nodes = graph["nodes"]
+
+    offenders: list[tuple[str, int]] = []
+    for node in nodes:
+        if "apply_rotary_pos_emb" not in node["id"]:
+            continue
+        if node.get("label") not in {"Repeat interleave", "Unsqueeze"}:
+            continue
+        incoming = node.get("incomingEdges", []) or []
+        if len(incoming) != 1:
+            offenders.append((node["id"], len(incoming)))
+    assert not offenders, (
+        "expanded-rope single-tensor ops must read exactly one operand; "
+        f"over-attached: {offenders}"
+    )
+
+
+def test_repeated_rope_instances_source_own_return_slot():
+    """Two calls of the same multi-return submodule in one forward
+    (``rotary_emb`` at distinct source lines inside the indexer) each feed their
+    own call site.
+
+    Regression guard for the ``_resolve_return_slot_source`` collision: both
+    inline-expanded ``rotary_emb`` instances share identical internal op
+    attr_names, so a flat ``attr_last_index`` lookup by slot name collapsed both
+    onto whichever instance built last -- the first indexer rope frame then read
+    the *second* frame's ``cos``. Assert the first ``Repeat interleave`` of each
+    distinct indexer ``apply_rotary_pos_emb`` frame sources from a *different*
+    producer chain (per-instance disambiguation), keyed structurally.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph = _build_graph()
+    nodes = graph["nodes"]
+    by_id = {node["id"]: node for node in nodes}
+
+    def _tensor_source(node):
+        # Resolve one hop through the frame's @input tile to the real producer.
+        incoming = node.get("incomingEdges", []) or []
+        assert len(incoming) == 1, node["id"]
+        src_id = incoming[0]["sourceNodeId"]
+        tile = by_id.get(src_id)
+        if tile is not None and "/@input" in src_id:
+            tin = tile.get("incomingEdges", []) or []
+            if tin:
+                return tin[0]["sourceNodeId"]
+        return src_id
+
+    # First repeat_interleave (cos slot) of each distinct indexer rope frame.
+    first_ri: dict[str, str] = {}
+    for node in nodes:
+        nid = node["id"]
+        if ":indexer:" not in nid or "apply_rotary_pos_emb" not in nid:
+            continue
+        if node.get("label") != "Repeat interleave":
+            continue
+        frame = nid.rsplit(":@op", 1)[0]
+        first_ri.setdefault(frame, nid)
+
+    assert len(first_ri) >= 2, f"expected >=2 indexer rope frames, got {first_ri}"
+    sources = {frame: _tensor_source(by_id[op]) for frame, op in first_ri.items()}
+    assert len(set(sources.values())) == len(sources), (
+        "distinct rope frames must source cos from their own rotary_emb instance, "
+        f"not collapse onto one: {sources}"
+    )

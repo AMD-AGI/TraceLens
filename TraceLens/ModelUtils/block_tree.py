@@ -1107,6 +1107,16 @@ def _expanded_free_function_node(
         # producer's own return-tuple order) disambiguates them; carry it onto
         # the op's own predecessor ports.
         ordinal_arg_params = cls.forward_step_predecessor_ordinals.get(call_attr, {})
+        # A callee whose body reassigns a parameter name (``cos =
+        # cos.repeat_interleave(...).unsqueeze(...)``) reads the raw producer only
+        # at the *first* op that consumes that slot; every later op bearing the
+        # same name reads the rebound local through its own internal predecessor.
+        # Attach the producer edge for a given ``(producer, ordinal)`` slot to that
+        # first consumer alone -- mirroring how :func:`_build_module_param_ordinal_entries`
+        # keeps only the first consumer of each boundary slot -- so the raw producer
+        # is not re-wired as a spurious extra tensor operand onto every rebound
+        # re-read (an ``unsqueeze``/``multiply`` that already reads the rebinding).
+        claimed_producer_slots: set[tuple[str, int]] = set()
         children: list[BlockNode] = []
         for operation_index, operation in enumerate(method_ops):
             translated: list[str] = []
@@ -1119,11 +1129,27 @@ def _expanded_free_function_node(
                 if mapping is None:
                     producer_attr = producer_arg_params.get(param)
                     if producer_attr is not None:
-                        if producer_attr not in extra_predecessors:
-                            extra_predecessors.append(producer_attr)
                         ordinal = ordinal_arg_params.get(param)
                         if ordinal is not None:
+                            slot = (producer_attr, ordinal)
+                            if slot in claimed_producer_slots:
+                                # A rebound re-read of this slot; the value already
+                                # flows in through this op's internal predecessor.
+                                continue
+                            claimed_producer_slots.add(slot)
                             extra_predecessor_ports.append((producer_attr, ordinal))
+                            # Expose the callee param as this op's own entry point,
+                            # exactly as a boundary-fed origin lands in ``translated``
+                            # below. Naming the entry point lets the caller resolve
+                            # ``cos``/``sin`` to THIS op (op0/op2) and skip the
+                            # unrelated side args (``x``, the other slot, ...) via the
+                            # ``entry_params`` dump guard -- rather than dumping every
+                            # side arg onto the frame's first op. Scoped to the slot's
+                            # first consumer so a rebound re-read is not re-exposed.
+                            if param not in translated:
+                                translated.append(param)
+                        if producer_attr not in extra_predecessors:
+                            extra_predecessors.append(producer_attr)
                         continue
                     translated.append(param)
                     continue

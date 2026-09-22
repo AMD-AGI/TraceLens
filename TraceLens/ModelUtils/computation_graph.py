@@ -422,8 +422,25 @@ def _resolve_return_slot_source(
     """When *producer* is multi-return, find the graph index of the specific
     return slot that matches *arg_name* (with normalized fallback)."""
     normalized = _normalize_param_name(arg_name)
+    order = producer.forward_return_order or []
     for slot_name, producer_attr in producer.forward_return_slots.items():
         if _normalize_param_name(slot_name) == normalized:
+            # Prefer this producer instance's own per-ordinal slot index over the
+            # flat ``producer_attr`` entry. Two calls of the same multi-return
+            # submodule (``cos, sin = self.rotary_emb(...)`` invoked at l545 and
+            # again at l554) inline-expand into identical internal op attr_names,
+            # so ``attr_last_index[producer_attr]`` collides on whichever instance
+            # built last -- a sibling reading l545's ``cos`` would dock onto
+            # l554's producer. ``_multi_return_slot_key`` is scoped by the call
+            # site's own (suffixed) attr_name, disambiguating the instances -- the
+            # same key ``_operation_source_indices`` uses for a slot named via
+            # ``operation_predecessor_ports``.
+            if slot_name in order:
+                slot_index = attr_last_index.get(
+                    _multi_return_slot_key(producer.attr_name, order.index(slot_name))
+                )
+                if slot_index is not None:
+                    return slot_index
             resolved = attr_last_index.get(producer_attr)
             if resolved is not None:
                 return resolved
