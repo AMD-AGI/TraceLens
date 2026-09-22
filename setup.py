@@ -56,17 +56,23 @@ setup(
         "orjson",
         "PyYAML",
         "matplotlib",
-        "xprof==2.20.1",  # Last version with HLO sidecar generation; supports JAX 0.8+ (with benign INT_MAX warnings)
-        "protobuf>=6.31.1,<7.0.0",  # Required by xprof's grpcio-status dependency
         # 'openpyxl',
         # 'tensorflow',
     ],
     extras_require={
+        "jax": [
+            "xprof==2.20.1",  # Last version with HLO sidecar generation; supports JAX 0.8+.
+            "protobuf>=6.31.1,<7.0.0",
+        ],
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
         ],
+        "kernel_source": [
+            "itanium-demangler>=1.0",
+        ],
         "dev": [
             "pytest",
+            "setuptools",
             "black==26.3.1",
         ],
     },
@@ -92,7 +98,9 @@ setup(
             "TraceLens_generate_perf_report_pftrace_hip_activity = TraceLens.Reporting.generate_perf_report_pftrace_hip_activity:main",
             "TraceLens_generate_perf_report_pftrace_memory_copy = TraceLens.Reporting.generate_perf_report_pftrace_memory_copy:main",
             "TraceLens_generate_perf_report_genesis = TraceLens.Reporting.generate_perf_report_genesis:main",
-            "TraceLens_split_inference_trace = TraceLens.TraceUtils.split_inference_trace_annotation:main",
+            "TraceLens_split_inference_trace = TraceLens.TraceUtils.trace_split.main:main",
+            "TraceLens_resolve_kernel_source = TraceLens.TraceUtils.kernel_source.cli:main",
+            "TraceLens_trace_index = TraceLens.TraceIndex.cli:main",
         ],
     },
 )

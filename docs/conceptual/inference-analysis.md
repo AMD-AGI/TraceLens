@@ -7,7 +7,7 @@ See LICENSE for license information.
 # Inference performance analysis in TraceLens
 ```{meta}
 :description: Understand the concepts behind TraceLens inference analysis - the roofline model for paged attention (prefill and decode), and the steady-state region that trace splitting targets.
-:keywords: TraceLens, inference, roofline, paged attention, prefill, decode, chunked prefill, FLOPS, arithmetic intensity, steady state, vLLM, SGLang, LLM serving, ROCm, MI300X
+:keywords: TraceLens, inference, roofline, paged attention, prefill, decode, chunked prefill, FLOPS, arithmetic intensity, steady state, vLLM, SGLang, ATOM, LLM serving, ROCm, MI300X
 ```
 
 This topic explains the concepts behind TraceLens's inference-serving analysis:
@@ -70,7 +70,7 @@ fall into two categories:
   the current chunk.
 - **Generation (decode) requests** generate new tokens; attention is non-causal
   (queries attend to all past KV tokens). Typically N_Q = 1, but approaches like
-  speculative decoding may produce multiple query tokens per request.
+  speculative decoding might produce multiple query tokens per request.
 
 #### FLOPS: prefill (context) requests
 
@@ -137,7 +137,7 @@ This works because:
 
 Generation requests attend to all cached KV tokens (N_KV = context length so
 far). Typically N_Q = 1 (autoregressive decoding), but techniques like
-speculative decoding may have N_Q > 1. The attention is non-causal:
+speculative decoding might have N_Q > 1. The attention is non-causal:
 
 ```
                      R_G
@@ -217,6 +217,8 @@ specifically prefill-decode steps and decode-only steps with large context sizes
 
 ### Parameters relevant to inference serving
 
+The following benchmark parameters determine the steady-state region boundaries.
+
 - **NUM_PROMPTS**: typically `10 * CONC`.
 - **CONC**: number of concurrent requests that can be batched together.
 - **R**: random-range ratio used for sampling input and output sequence lengths.
@@ -276,8 +278,26 @@ splitter to override the empirically estimated ratio with the analytically
 derived one; see
 [Split inference traces](../how-to/generate-perf-report-pytorch-inference.md#split-inference-traces-optional).
 
+## How trace splitting uses these definitions
+
+Before a steady-state window can be extracted, the splitter first finds the
+*iteration boundaries* -- the repeating unit of work -- with a cascade of
+detectors that adapts to how much information the trace carries: recognized
+serving annotations when present, then the repeating structure of the call tree,
+then periodicity across top-level frames. Each candidate is graded by the share of
+GPU time its per-iteration windows explain. The steady-state region defined above
+is then located over those iterations, and each step is classified as
+prefill-decode-mix or decode-only -- from the parsed annotation when one is
+present, or from the batch size inferred from tensor shapes for annotation-less
+LLM traces.
+
+For the full mechanism -- the detection cascade, gap-free extraction, the three
+steady-state tiers, phase division, and every CLI flag -- see
+[Split traces into iterations, steady state, and phases](../how-to/split-traces.md).
+
 ## Related topics
 
+- [Split traces into iterations, steady state, and phases](../how-to/split-traces.md)
 - [Generate a PyTorch inference performance report](../how-to/generate-perf-report-pytorch-inference.md)
 - [Compare two traces in TraceLens](../how-to/compare-traces.md)
 - [GEMM analysis in TraceLens](./gemm-analysis.md)

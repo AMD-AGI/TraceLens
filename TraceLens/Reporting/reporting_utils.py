@@ -8,6 +8,7 @@ import argparse
 import ast
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 import pandas as pd
+from openpyxl.utils import get_column_letter
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +124,75 @@ def export_data_df(
             if verbose:
                 print(f"Exporting summary statistics to {output_path}")
             data_df.to_csv(output_path, index=False)
+
+
+def _safe_sheet_name(name: str, used: set) -> str:
+    """Truncate *name* to Excel's 31-char limit with collision avoidance.
+
+    If the truncated name already appears in *used*, a numeric suffix
+    (``_1``, ``_2``, ...) is appended while staying within the limit.
+    The final name is added to *used* before returning.
+    """
+    base = name[:31]
+    n = 0
+    while base in used:
+        n += 1
+        suffix = f"_{n}"
+        base = name[: 31 - len(suffix)] + suffix
+    used.add(base)
+    return base
+
+
+def write_report_outputs(
+    dfs: Dict[str, pd.DataFrame],
+    *,
+    xlsx_path: Optional[str] = None,
+    csvs_dir: Optional[str] = None,
+    hide_columns: Optional[Dict[str, List[str]]] = None,
+    skip_empty: bool = False,
+) -> None:
+    """Write report DataFrames to CSV files and/or an Excel workbook.
+
+    Sheet names are truncated to 31 characters (Excel limit) with
+    collision-safe suffixes.
+
+    Args:
+        dfs: Mapping of sheet name -> DataFrame.
+        xlsx_path: If set, write an ``.xlsx`` workbook here.
+        csvs_dir: If set, write one CSV per DataFrame into this directory.
+        hide_columns: Optional mapping of sheet name -> column names to
+            hide in the Excel output. Hidden columns stay in the file;
+            names absent from a DataFrame are ignored.
+        skip_empty: If True, ``None`` or empty DataFrames are omitted from
+            all outputs.
+    """
+    if skip_empty:
+        dfs = {name: df for name, df in dfs.items() if df is not None and not df.empty}
+
+    if csvs_dir:
+        os.makedirs(csvs_dir, exist_ok=True)
+        for sheet_name, df in dfs.items():
+            csv_path = os.path.join(csvs_dir, f"{sheet_name}.csv")
+            df.to_csv(csv_path, index=False)
+            logger.info("Wrote %s (%d rows)", csv_path, len(df))
+
+    if xlsx_path:
+        hide_columns = hide_columns or {}
+        used: set = set()
+        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+            for sheet_name, df in dfs.items():
+                safe = _safe_sheet_name(sheet_name, used)
+                df.to_excel(writer, sheet_name=safe, index=False)
+                cols_to_hide = hide_columns.get(sheet_name, [])
+                if not cols_to_hide:
+                    continue
+                worksheet = writer.book.worksheets[-1]
+                for col in cols_to_hide:
+                    if col not in df.columns:
+                        continue
+                    col_letter = get_column_letter(df.columns.get_loc(col) + 1)
+                    worksheet.column_dimensions[col_letter].hidden = True
+        logger.info("Wrote %s", xlsx_path)
 
 
 def request_install(package_name):
