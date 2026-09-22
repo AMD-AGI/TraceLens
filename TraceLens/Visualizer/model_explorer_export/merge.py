@@ -2658,6 +2658,55 @@ def _op_scalar_details(node: dict[str, Any]) -> list[str]:
     return scalars
 
 
+# The canonical display labels the extractor assigns to a GEMM / contraction op
+# (``torch.matmul`` / ``@`` -> ``MatMul``; ``torch.bmm`` -> ``BatchMatMul``).
+# These are the model-agnostic contraction labels the whole pipeline already
+# keys on (the same pair ``shape_inference`` treats as a matmul); relabeling one
+# of them is a display refinement of an already-classified contraction, not a
+# new op allowlist.
+_GEMM_DISPLAY_LABELS = frozenset({"MatMul", "BatchMatMul"})
+
+
+def _relabel_constant_operand_matmul_as_linear(nodes: list[dict[str, Any]]) -> None:
+    """Relabel a ``MatMul`` / ``BatchMatMul`` node ``Linear`` when it contracts a
+    real activation against a *learned constant* operand.
+
+    A matmul against a learned weight is an affine projection -- semantically an
+    ``nn.Linear`` -- even when the weight reaches the op through intermediate
+    layout ops, as in a grouped-linear ``torch.bmm(x, self.weight.view(...)
+    .transpose(...))``. ``ast_analyze.classify_matmul_label`` only catches the
+    case where the weight is a *direct* operand of the call expression, so it
+    cannot see a weight that flows in through a local variable. Detect it here at
+    the graph level, where the weight's whole producer subgraph is already
+    ``constant``-tagged: an operand whose producer node is a constant is the
+    learned weight, and at least one non-constant operand is the activation.
+
+    Only the display label / ``class_name`` change (so the tile reads ``Linear``
+    and, once the render filter drops the constant weight edge, draws with a
+    single input like every other ``nn.Linear``). The op's ``raw_op`` is left
+    untouched so the downstream type-check still resolves its true operand arity
+    from the real torch op.
+    """
+    node_by_id = {str(node.get("id")): node for node in nodes}
+    for node in nodes:
+        label = node.get("label") or _node_attr(node, "class_name")
+        if label not in _GEMM_DISPLAY_LABELS:
+            continue
+        saw_constant = False
+        saw_activation = False
+        for edge in node.get("incomingEdges", []) or []:
+            source = node_by_id.get(str(edge.get("sourceNodeId") or ""))
+            if source is None:
+                continue
+            if _node_attr(source, "constant") == "true":
+                saw_constant = True
+            else:
+                saw_activation = True
+        if saw_constant and saw_activation:
+            node["label"] = "Linear"
+            _set_node_attr(node, "class_name", "Linear")
+
+
 def _annotate_op_input_signatures(nodes: list[dict[str, Any]]) -> None:
     """Attach PyTorch-profiler-style input descriptions + a machine-readable
     ``op_type`` to every operation node.
@@ -5316,6 +5365,13 @@ def build_merged_model_graph(
     # concatenates nothing -- the windowing is already carried by the kernel's
     # cu_seqlens. Runs after shapes settle so the identity check sees final dims.
     _elide_noop_single_input_concat(nodes)
+
+    # A matmul / bmm that contracts an activation against a learned constant
+    # weight is an affine projection -- relabel it ``Linear`` so it reads (and,
+    # once constants are filtered, draws with one input) like every other
+    # ``nn.Linear``. Runs after the constant closure is tagged and before the
+    # profiler annotation so ``op_type`` follows the new label.
+    _relabel_constant_operand_matmul_as_linear(nodes)
 
     # Describe every operation node's operands PyTorch-profiler-style (op_type +
     # input_shapes/input_types/concrete_inputs, including scalar args that are not
