@@ -73,13 +73,13 @@ console script, or as a direct script invocation:
 
 ```bash
 # As a module
-python -m TraceLens.TraceUtils.trace_split.main trace.json.gz -o ./output [OPTIONS]
+python -m TraceLens.TraceUtils.split_trace.main trace.json.gz -o ./output [OPTIONS]
 
 # As the installed console script
 TraceLens_split_trace trace.json.gz -o ./output [OPTIONS]
 
 # As a direct script invocation
-python TraceLens/TraceUtils/trace_split/main.py trace.json.gz -o ./output [OPTIONS]
+python TraceLens/TraceUtils/split_trace/main.py trace.json.gz -o ./output [OPTIONS]
 ```
 
 `--store-single-iteration`, `--find-steady-state`, and `--divide-phases` can all

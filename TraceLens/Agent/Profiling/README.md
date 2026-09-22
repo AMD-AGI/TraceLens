@@ -157,7 +157,7 @@ For ATOM, the equivalent knobs are the `ATOM_ENABLE_DETAILED_ANNOTATION` environ
 
 ## Trace Splitting and Handoff to Analysis
 
-Step 6 produces split traces in `torch_trace/trace_split/` via `TraceLens.TraceUtils.trace_split.main`. The skill then prints (but does **not** run) a `generate_perf_report_pytorch_inference.py` command that the user can launch to feed the split traces into the [TraceLens Agent](../Analysis/README.md). See [Generate a PyTorch inference performance report](../../../docs/how-to/generate-perf-report-pytorch-inference.md) for splitting heuristics and prefill/decode mix selection.
+Step 6 produces split traces in `torch_trace/trace_split/` via `TraceLens.TraceUtils.split_trace.main`. The skill then prints (but does **not** run) a `generate_perf_report_pytorch_inference.py` command that the user can launch to feed the split traces into the [TraceLens Agent](../Analysis/README.md). See [Generate a PyTorch inference performance report](../../../docs/how-to/generate-perf-report-pytorch-inference.md) for splitting heuristics and prefill/decode mix selection.
 
 ## Bug Reporting
 

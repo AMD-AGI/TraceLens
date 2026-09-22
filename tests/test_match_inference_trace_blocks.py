@@ -41,7 +41,7 @@ import pytest
 
 from TraceLens.TraceUtils.inference_trace_match import main as match
 from TraceLens.TraceUtils.utils.annotation_utils import ITERATION_PATTERNS
-from TraceLens.TraceUtils.trace_split import (
+from TraceLens.TraceUtils.split_trace import (
     ExtractContext,
     TraceData,
     EventIndex,
