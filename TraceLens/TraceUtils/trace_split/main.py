@@ -157,8 +157,8 @@ import os
 
 import pandas as pd
 
-from ...util import DataLoader
-from ..utils.annotation_utils import (
+from TraceLens.util import DataLoader
+from TraceLens.TraceUtils.utils.annotation_utils import (
     ITERATION_BACKUP_PATTERNS,  # noqa: F401
     ITERATION_PATTERNS,  # noqa: F401
     IterationAnnotation,
@@ -174,7 +174,7 @@ SERVING_KINDS = {
 }
 
 # Re-exports for tests and downstream callers.
-from . import (  # noqa: F401
+from TraceLens.TraceUtils.trace_split import (  # noqa: F401
     DetectStatus,
     ExtractContext,
     TraceData,
@@ -196,7 +196,7 @@ from . import (  # noqa: F401
     infer_batch_sizes_from_shapes,
     parse_range,
 )
-from ...util import GPU_KERNEL_CATEGORIES
+from TraceLens.util import GPU_KERNEL_CATEGORIES
 
 MANIFEST_NAME = "split_manifest.json"
 

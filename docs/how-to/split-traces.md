@@ -69,7 +69,7 @@ operate on the iterations found in the first stage.
 ## Split a trace
 
 Invoke the splitter as a module (it is also installed as the
-`TraceLens_split_inference_trace` console script):
+`TraceLens_split_trace` console script):
 
 ```bash
 python -m TraceLens.TraceUtils.trace_split.main trace.json.gz -o ./output [OPTIONS]
