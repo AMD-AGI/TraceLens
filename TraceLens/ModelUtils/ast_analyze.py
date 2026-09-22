@@ -2333,6 +2333,12 @@ class StackEntryDataflow:
 
     operations: tuple[ForwardOperation, ...]
     output_producer: str
+    # Loop-invariant inputs handed to every iteration by keyword
+    # (``layer(hidden_states, position_embeddings=..., attention_mask=...)``):
+    # forward-parameter name the iterated module reads -> producer attr for it.
+    # Only entries whose producer is a materialised source operation are kept, so
+    # the merge can dock each producer onto the repeat group's boundary tile.
+    loop_invariant_inputs: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -2508,8 +2514,23 @@ def stack_entry_dataflow(cls: ClassStructure) -> StackEntryDataflow | None:
         return None
 
     by_name = {operation.attr_name: operation for operation in extractor.operations}
-    live = {output_producer}
-    pending = [output_producer]
+
+    # A backward walk from the primary loop input (``hidden_states``) alone drops
+    # every producer feeding the loop through a keyword argument
+    # (``position_embeddings=``, ``attention_mask=``). Those tensors are read by
+    # every iteration, so seed the live set from each loop keyword-arg name that
+    # resolves to a materialised source operation. Structural (any keyword whose
+    # value names a forward operation), never keyed on a specific parameter name.
+    loop_invariant_inputs: dict[str, str] = {}
+    for keyword in loop_call.keywords:
+        if keyword.arg is None or not isinstance(keyword.value, ast.Name):
+            continue
+        producer = extractor.var_producer.get(keyword.value.id)
+        if producer is not None and is_forward_operation(producer) and producer in by_name:
+            loop_invariant_inputs[keyword.arg] = producer
+
+    live = {output_producer, *loop_invariant_inputs.values()}
+    pending = [output_producer, *loop_invariant_inputs.values()]
     while pending:
         producer = pending.pop()
         operation = by_name.get(producer)
@@ -2522,7 +2543,7 @@ def stack_entry_dataflow(cls: ClassStructure) -> StackEntryDataflow | None:
     operations = tuple(
         operation for operation in extractor.operations if operation.attr_name in live
     )
-    return StackEntryDataflow(operations, output_producer)
+    return StackEntryDataflow(operations, output_producer, loop_invariant_inputs)
 
 
 def infer_forward_steps_from_init(cls: ClassStructure) -> list[str]:
@@ -4222,6 +4243,21 @@ class _ForwardOperationExtractor:
             producers: list[str] = []
             external: list[str] = []
             for item in node.elts:
+                producer, item_external = self.expression(item)
+                if producer:
+                    producers.append(producer)
+                external.extend(item_external)
+            return (producers[-1] if producers else None), external
+        if isinstance(node, ast.Dict):
+            # A tensor value bound inside a dict literal is a real producer just
+            # like a tuple/list element: ``position_embeddings = {'main':
+            # self.rotary_emb(...), 'compress': self.rotary_emb(...)}`` runs the
+            # submodule calls and the dict variable carries their result. Without
+            # this the whole assignment is dropped and any later consumer of the
+            # dict (a decoder layer reading ``position_embeddings``) is sourceless.
+            producers = []
+            external = []
+            for item in node.values:
                 producer, item_external = self.expression(item)
                 if producer:
                     producers.append(producer)
@@ -7677,6 +7713,116 @@ def _flag_unused_interface_inputs(
         ]
 
 
+def _callee_surface_boundary_params(callee: ClassStructure) -> tuple[str, ...]:
+    """Boundary-param names the callee reads at *its own* top level.
+
+    A param a class only passes further down to another submodule
+    (``compressor``'s ``position_ids``) is threaded by that submodule's own
+    boundary handling and never surfaces as a top-level ``@input`` tile; a param
+    an inline/synthetic step reads directly (a rotary helper's
+    ``position_embeddings``, the attention kernel's ``attention_mask``) does. Only
+    the latter need hoisting when a parent forwards them through ``**kwargs``, so
+    keep boundary params attached to steps that are *not* submodule calls.
+    """
+    surface: list[str] = []
+    for step, params in callee.forward_step_boundary_params.items():
+        if base_submodule_attr(step) in callee.init_assignments:
+            continue
+        for name in params:
+            if name not in surface:
+                surface.append(name)
+    return tuple(surface)
+
+
+def _forward_kwargs_boundary_params(classes: dict[str, ClassStructure]) -> None:
+    """Thread a child's boundary inputs that reach it through forwarded ``**kwargs``.
+
+    A module can hand its variadic ``**kwargs`` straight to a child
+    (``self.self_attn(self.input_layernorm(x), **kwargs)``); the child names
+    ``position_embeddings``/``attention_mask`` explicitly and consumes them as its
+    own boundary inputs, but the intermediate module lists neither in its
+    signature, so nothing at the intermediate scope feeds the child's ``@input``
+    tiles and they render sourceless. For every forward that forwards its
+    ``**kwargs`` into a submodule call, add that child's own top-level
+    boundary-param names to this module's ``forward_step_boundary_params`` for the
+    step, so the enclosing caller -- which does supply them by keyword -- reaches
+    the child through the normal boundary-threading machinery. General: keyed on
+    the presence of ``**kwargs`` forwarding and the child's declared params, no
+    model or parameter names baked in.
+    """
+    for cls in classes.values():
+        forward = _forward_func_of(cls.node)
+        if forward is None or forward.args.kwarg is None:
+            continue
+        kwargs_name = forward.args.kwarg.arg
+        boundary_keys = set(cls.forward_step_boundary_params) | set(
+            cls.forward_step_predecessors
+        )
+        for call in ast.walk(forward):
+            if not isinstance(call, ast.Call):
+                continue
+            if not (
+                isinstance(call.func, ast.Attribute)
+                and _is_self_attr(call.func, call.func.attr)
+            ):
+                continue
+            if not any(
+                kw.arg is None
+                and isinstance(kw.value, ast.Name)
+                and kw.value.id == kwargs_name
+                for kw in call.keywords
+            ):
+                continue
+            attr = base_submodule_attr(call.func.attr)
+            callee = classes.get(cls.init_assignments.get(attr, ""))
+            if callee is None:
+                continue
+            surface = _callee_surface_boundary_params(callee)
+            if not surface:
+                continue
+            # A param already satisfied by an explicit positional/keyword argument
+            # at the call site is bound there, not forwarded through ``**kwargs``.
+            callee_forward = _forward_func_of(callee.node)
+            ordered = (
+                _ordered_forward_params(callee_forward)
+                if callee_forward is not None
+                else []
+            )
+            bound = {
+                ordered[idx]
+                for idx in range(len(call.args))
+                if idx < len(ordered)
+            }
+            bound.update(kw.arg for kw in call.keywords if kw.arg)
+            forwarded = [name for name in surface if name not in bound]
+            if not forwarded:
+                continue
+            # The step key the boundary machinery reads matches the call-site attr
+            # (``@l{lineno}``-suffixed for a repeated child); fall back to the plain
+            # attr when the step recorded no suffix.
+            key = next(
+                (
+                    k
+                    for k in boundary_keys
+                    if base_submodule_attr(k) == attr
+                ),
+                attr,
+            )
+            existing = tuple(cls.forward_step_boundary_params.get(key, ()))
+            cls.forward_step_boundary_params[key] = existing + tuple(
+                name for name in forwarded if name not in existing
+            )
+
+
+def _ordered_forward_params(func: ast.FunctionDef) -> list[str]:
+    """Positional forward parameter names in order, excluding ``self``."""
+    return [
+        arg.arg
+        for arg in func.args.posonlyargs + func.args.args
+        if arg.arg != "self"
+    ]
+
+
 def _resolve_dispatched_attention_kernel(
     classes: dict[str, ClassStructure],
     config: dict[str, Any] | None,
@@ -9408,6 +9554,7 @@ def analyze_source(
     _annotate_host_free_functions(visitor.classes, tree, config)
     _enrich_kernel_import_details(visitor.classes, external_imports)
     _resolve_dispatched_attention_kernel(visitor.classes, config)
+    _forward_kwargs_boundary_params(visitor.classes)
     _flag_unused_interface_inputs(visitor.classes, config)
     _expand_unresolved_activation_classes(
         visitor.classes, tree, config, all_tensor_ops=all_tensor_ops

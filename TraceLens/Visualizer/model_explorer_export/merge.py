@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from typing import Any
@@ -15,7 +16,9 @@ from typing import Any
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.ast_analyze import (
     _pick_stack_model_class,
+    base_submodule_attr,
     expand_class_forward_dataflow,
+    FORWARD_METHOD_INPUT,
     stack_entry_dataflow,
 )
 from TraceLens.ModelUtils.block_tree import (
@@ -4607,6 +4610,374 @@ def _topologically_order_nodes(nodes: list[dict[str, Any]]) -> None:
     nodes[:] = [nodes[i] for i in order]
 
 
+def _stack_primary_input_name(cls: Any) -> str | None:
+    """First non-self ``forward`` parameter of a class (its primary input)."""
+    forward = next(
+        (
+            item
+            for item in cls.node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+    if forward is None:
+        return None
+    params = [
+        arg.arg
+        for arg in forward.args.posonlyargs + forward.args.args
+        if arg.arg != "self"
+    ]
+    return params[0] if params else None
+
+
+def _resolve_existing_producer_node(
+    node_by_id: dict[str, dict[str, Any]], attr: str
+) -> str | None:
+    """Node id already materialised for a forward-step producer attr, if any."""
+    if attr in node_by_id:
+        return attr
+    candidate = f"@model_forward/{attr}"
+    if candidate in node_by_id:
+        return candidate
+    return None
+
+
+def _loop_invariant_producer_label(cls: Any, producer_attr: str) -> str:
+    """Readable label for a materialised model-scope loop-invariant producer."""
+    base = base_submodule_attr(producer_attr)
+    class_name = cls.init_assignments.get(base)
+    if class_name:
+        return class_name
+    if base.startswith("@fn_") or base.startswith("@positional_"):
+        # ``@fn_l1303_create_sliding_window_causal_mask`` -> the callee name.
+        tail = base.split("_", 2)[-1] if base.count("_") >= 2 else base
+        return tail
+    return base
+
+
+def _materialize_model_scope_producer(
+    nodes: list[dict[str, Any]],
+    node_by_id: dict[str, dict[str, Any]],
+    *,
+    cls: Any,
+    producer_attr: str,
+) -> str | None:
+    """Emit (or reuse) a model-scope source node for a loop-invariant producer.
+
+    The node is wired from whichever of the producer's own stack-entry
+    predecessors are already materialised. Returns ``None`` when none are, so the
+    caller leaves the boundary unsourced rather than inventing a rootless node.
+    """
+    existing = _resolve_existing_producer_node(node_by_id, producer_attr)
+    if existing is not None:
+        return existing
+    node_id = f"@model_forward/{producer_attr}"
+    incoming: list[dict[str, str]] = []
+    for pred in cls.forward_step_predecessors.get(producer_attr, ()):  # type: ignore[attr-defined]
+        source = _resolve_existing_producer_node(node_by_id, pred)
+        if source is not None:
+            incoming.append(
+                {
+                    "sourceNodeId": source,
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": str(len(incoming)),
+                }
+            )
+    if not incoming:
+        return None
+    node = {
+        "id": node_id,
+        "label": _loop_invariant_producer_label(cls, producer_attr),
+        "namespace": "",
+        "attrs": [{"key": "operation", "value": "source"}],
+        "incomingEdges": incoming,
+    }
+    nodes.append(node)
+    node_by_id[node_id] = node
+    return node_id
+
+
+def _ensure_top_level_input(
+    nodes: list[dict[str, Any]],
+    node_by_id: dict[str, dict[str, Any]],
+    param: str,
+) -> str:
+    """Node id of a top-level model-input boundary for ``param`` (create if new)."""
+    node_id = f"@input:{param}"
+    if node_id not in node_by_id:
+        node = {
+            "id": node_id,
+            "label": param,
+            "namespace": "",
+            "attrs": [{"key": "synthetic", "value": "@input"}],
+            "style": ensure_readable_text(input_port_style()),
+        }
+        nodes.append(node)
+        node_by_id[node_id] = node
+    return node_id
+
+
+def _forward_param_producer_map(cls: Any) -> dict[str, str]:
+    """Map a stack-model forward local ``name`` -> submodule attr producing it.
+
+    Introspects assignments of the form ``name = self.<attr>(...)`` where ``attr``
+    names a known submodule, e.g. ``position_embeddings = self.rotary_emb(...)``.
+    This lets the loop-invariant resolver recover a value's producer structurally
+    even when the extractor left ``forward_step_predecessor_args`` empty (a variant
+    decoder loop the AST recovery could not map to keyword producers).
+    """
+    producers: dict[str, str] = {}
+    forward = next(
+        (
+            item
+            for item in cls.node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+    if forward is None:
+        return producers
+    for stmt in ast.walk(forward):
+        if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+            continue
+        target = stmt.targets[0]
+        call = stmt.value
+        if not isinstance(target, ast.Name) or not isinstance(call, ast.Call):
+            continue
+        func = call.func
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "self"
+            and func.attr in cls.init_assignments
+        ):
+            producers.setdefault(target.id, func.attr)
+    return producers
+
+
+def _resolve_submodule_output_node(
+    node_by_id: dict[str, dict[str, Any]], attr: str
+) -> str | None:
+    """Existing model-scope output node id for a submodule ``attr`` producer."""
+    if attr in node_by_id:
+        return attr
+    prefix = f"{attr}/"
+    outputs = sorted(
+        nid
+        for nid in node_by_id
+        if nid.startswith(prefix) and "/@output" in nid
+    )
+    return outputs[0] if outputs else None
+
+
+def _resolve_loop_invariant_source(
+    nodes: list[dict[str, Any]],
+    node_by_id: dict[str, dict[str, Any]],
+    *,
+    cls: Any,
+    param: str,
+    primary_param: str | None,
+    pred_args: dict[str, str],
+    producer_map: dict[str, str],
+) -> str | None:
+    """Legitimate model-level source id for a loop-invariant decoder input.
+
+    Resolution keys only on structural facts, in priority order:
+    1. The extractor recovered the loop call's exact keyword producer
+       (``forward_step_predecessor_args``) -- honour it (submodule/free-fn call
+       materialised, top-level parameter docked, primary spine input as ``@input``).
+    2. Otherwise (variant loops that leave that map empty) resolve by the input's
+       own name: the primary spine input, a top-level forward parameter, or a value
+       assigned from a ``self.<submodule>(...)`` call in the stack-model forward.
+    """
+    if pred_args and param in pred_args:
+        producer_attr = pred_args[param]
+        if producer_attr == FORWARD_METHOD_INPUT or param == primary_param:
+            return "@input"
+        if param in cls.forward_param_inputs:
+            # A top-level model forward parameter (``attention_mask``): dock onto
+            # its own model-input boundary. The host-side construction feeding it
+            # is a CPU helper the export collapses, so the parameter is the root.
+            return _ensure_top_level_input(nodes, node_by_id, param)
+        return _materialize_model_scope_producer(
+            nodes, node_by_id, cls=cls, producer_attr=producer_attr
+        )
+    if param == primary_param:
+        return "@input"
+    if param in cls.forward_param_inputs:
+        return _ensure_top_level_input(nodes, node_by_id, param)
+    attr = producer_map.get(param)
+    if attr is not None:
+        return _resolve_submodule_output_node(node_by_id, attr)
+    return None
+
+
+def _thread_loop_invariant_inputs(
+    nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+) -> None:
+    """Source a repeat group's loop-invariant ``@input:<param>`` boundaries.
+
+    A decoder layer reads tensors handed to every iteration by keyword
+    (``layer(hidden_states, position_embeddings=..., attention_mask=...)``). The
+    collapsed repeat group surfaces each as an ``@input:<param>`` tile deep inside
+    the body, but -- unlike the primary spine input, threaded by the loop-carried
+    boundary -- nothing sources them, so they float. This pass reconnects each to
+    its legitimate model-level producer, read structurally from the stack model's
+    decoder-loop call arguments (``forward_step_predecessor_args``): a producer
+    that is a submodule / free-function call is materialised (or reused) as a
+    model-scope source node; a producer that is a top-level forward parameter
+    docks onto that model-input boundary.
+
+    Keyed only on structural facts (a floating namespaced ``@input:<param>`` whose
+    name is a decoder-loop argument), never on a specific parameter or class name.
+    """
+    cls = spec.class_registry.get(spec.stack_model_class or "")
+    if cls is None:
+        cls = _pick_stack_model_class(spec.class_registry, None)
+    if cls is None:
+        return
+    loop_attr = next(
+        (
+            attr
+            for attr, name in cls.init_assignments.items()
+            if name == spec.decoder_class
+        ),
+        None,
+    )
+    pred_args = (
+        cls.forward_step_predecessor_args.get(loop_attr, {}) if loop_attr else {}
+    ) or {}
+    primary_param = _stack_primary_input_name(cls)
+    producer_map = _forward_param_producer_map(cls)
+    node_by_id = {node["id"]: node for node in nodes}
+
+    # (1) Floating (unsourced) namespaced ``@input:<param>`` tiles, grouped by
+    # (repeat-group container, id prefix, param). ``container`` is ``None`` for a
+    # boundary outside any repeat group (a model-scope submodule's own input).
+    pending: dict[tuple[str | None, str, str], list[dict[str, Any]]] = {}
+    for node in nodes:
+        match = re.search(r"/@input:([^/^]+)$", node["id"])
+        if match is None or node.get("incomingEdges"):
+            continue
+        container = _repeat_group_container(node.get("namespace", ""))
+        param = match.group(1)
+        prefix = node["id"].split("/", 1)[0]
+        pending.setdefault((container, prefix, param), []).append(node)
+
+    for (container, prefix, param), tiles in pending.items():
+        source = _resolve_loop_invariant_source(
+            nodes,
+            node_by_id,
+            cls=cls,
+            param=param,
+            primary_param=primary_param,
+            pred_args=pred_args,
+            producer_map=producer_map,
+        )
+        if source is None:
+            continue
+        if container is None:
+            # A submodule's own input boundary (``rotary_emb/@input:position_ids``):
+            # wire it straight to the model-level source, no group boundary.
+            for tile in tiles:
+                tile["incomingEdges"] = [
+                    {
+                        "sourceNodeId": source,
+                        "sourceNodeOutputId": "0",
+                        "targetNodeInputId": "0",
+                    }
+                ]
+            continue
+        boundary_id = f"{prefix}/@input:{param}"
+        boundary = node_by_id.get(boundary_id)
+        if boundary is None:
+            boundary = {
+                "id": boundary_id,
+                "label": param,
+                "namespace": container,
+                "attrs": [{"key": "synthetic", "value": "@input"}],
+                "style": ensure_readable_text(input_port_style()),
+            }
+            nodes.append(boundary)
+            node_by_id[boundary_id] = boundary
+        boundary["incomingEdges"] = [
+            {
+                "sourceNodeId": source,
+                "sourceNodeOutputId": "0",
+                "targetNodeInputId": "0",
+            }
+        ]
+        for tile in tiles:
+            if tile["id"] == boundary_id:
+                continue
+            tile["incomingEdges"] = [
+                {
+                    "sourceNodeId": boundary_id,
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "0",
+                }
+            ]
+
+    # (2) Floating bare ``.../@input`` tiles (the primary spine input mirrored deep
+    # into a nested submodule, e.g. an attention indexer): mirror each from the
+    # nearest enclosing already-sourced ``@input`` boundary carrying the same name.
+    for node in nodes:
+        nid = node["id"]
+        if node.get("incomingEdges") or not nid.endswith("/@input"):
+            continue
+        label = node.get("label")
+        ancestor = nid[: -len("/@input")]
+        while "/" in ancestor:
+            ancestor = ancestor.rsplit("/", 1)[0]
+            candidate = f"{ancestor}/@input"
+            enclosing = node_by_id.get(candidate)
+            if (
+                enclosing is not None
+                and enclosing.get("incomingEdges")
+                and enclosing.get("label") == label
+            ):
+                node["incomingEdges"] = [
+                    {
+                        "sourceNodeId": candidate,
+                        "sourceNodeOutputId": "0",
+                        "targetNodeInputId": "0",
+                    }
+                ]
+                break
+
+
+def _prune_dead_stack_entry_sources(nodes: list[dict[str, Any]]) -> None:
+    """Drop model-scope ``@model_forward`` source ops that nothing consumes.
+
+    The stack-entry dataflow materialises the producers feeding the decoder loop
+    by keyword (``position_ids``), but a given model may route that value only
+    through a submodule the collapsed body never re-exposes (a decoder variant's
+    internal rotary). The op then has no consumer. It is a speculative
+    intermediate, not a missing-edge dead node, so remove it (and any predecessor
+    left consumer-less in turn) rather than surface an I1 warning. Confined to the
+    ``@model_forward`` synthetic scope so real module leaves are never touched.
+    """
+    while True:
+        consumed = {
+            edge.get("sourceNodeId")
+            for node in nodes
+            for edge in node.get("incomingEdges", []) or []
+        }
+        dead = [
+            node
+            for node in nodes
+            if node.get("namespace", "") == ""
+            and str(node.get("id", "")).startswith("@model_forward/")
+            and node["id"] not in consumed
+        ]
+        if not dead:
+            return
+        dead_ids = {node["id"] for node in dead}
+        nodes[:] = [node for node in nodes if node["id"] not in dead_ids]
+
+
 def _synthesize_repeat_loop_boundaries(nodes: list[dict[str, Any]]) -> None:
     """Give every ``{N}x_`` repeat group a loop-carried boundary like the vision tower.
 
@@ -4862,6 +5233,17 @@ def build_merged_model_graph(
     # ``{N}x_`` namespaces are final so the no-op guard and container detection see
     # them, and before the count fill below stamps ``· N iterations``.
     _synthesize_repeat_loop_boundaries(nodes)
+
+    # Reconnect the repeat group's loop-invariant ``@input:<param>`` tiles
+    # (``position_embeddings``/``attention_mask``, forwarded to every iteration by
+    # keyword) to their model-level producers. Runs after the loop-carried spine is
+    # synthesized so the extra sourced boundaries do not perturb its single-entry
+    # detection, and before integrity checks so the reconnected tiles read as sourced.
+    _thread_loop_invariant_inputs(nodes, spec=spec)
+
+    # A loop-invariant producer feeding no re-exposed consumer (a decoder variant's
+    # internal-only rotary) leaves its stack-entry prep ops orphaned; drop them.
+    _prune_dead_stack_entry_sources(nodes)
 
     # Fill trip counts on ModuleList loop-carried boundaries (``<var> · repeated``
     # -> ``<var> · N iterations``) from the ``{N}x_`` namespaces just finalized.

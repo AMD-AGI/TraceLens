@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import json
 
-from TraceLens.Visualizer.model_explorer_export.type_check import type_check_graph_nodes
+from TraceLens.Visualizer.model_explorer_export.type_check import (
+    integrity_check_graph_nodes,
+    type_check_graph_nodes,
+)
 
 
 def _op_node(node_id, op_type, input_types, input_shapes, raw_op=None):
@@ -253,3 +256,62 @@ def test_descriptive_slice_detail_never_warns_on_unchanged_shape():
         "[B, 192, S] float32",
     )
     assert type_check_graph_nodes([node]) == []
+
+
+# --------------------------------------------------------------------------- #
+# I2 no-source: a namespaced module ``@input`` boundary must be fed by its real
+# producer; only a *top-level* model-input boundary is a legitimate sourceless
+# graph entry. (Exercises the ``_is_top_level_model_input`` exemption directly.)
+# --------------------------------------------------------------------------- #
+
+
+def _input_boundary(node_id, namespace, label):
+    return {
+        "id": node_id,
+        "label": label,
+        "namespace": namespace,
+        "attrs": [{"key": "synthetic", "value": "@input"}],
+    }
+
+
+def test_i2_flags_floating_namespaced_module_input():
+    # A kwargs-forwarded decoder invariant surfaced as a namespaced ``@input:<param>``
+    # deep in the body: nothing sources it, so it must be flagged like any orphan.
+    node = _input_boundary(
+        "decoder/self_attn/@input:position_embeddings",
+        "43x_DeepseekV4DecoderLayer/DeepseekV4Attention",
+        "position_embeddings",
+    )
+    warnings = [w for w in integrity_check_graph_nodes([node]) if "I2" in w]
+    assert len(warnings) == 1
+    assert "decoder/self_attn/@input:position_embeddings" in warnings[0]
+
+
+def test_i2_exempts_top_level_model_inputs():
+    # Root-scope model inputs are legitimate sourceless entry points: the primary
+    # tokenized-text ``@input`` and a dedicated ``@input:<param>`` parameter
+    # boundary (empty namespace, no ``/`` in the id) must NOT be flagged.
+    primary = {
+        "id": "@input",
+        "label": "Tokenized text",
+        "namespace": "",
+        "attrs": [{"key": "synthetic", "value": "@input"}],
+    }
+    param = _input_boundary("@input:attention_mask", "", "attention_mask")
+    warnings = [w for w in integrity_check_graph_nodes([primary, param]) if "I2" in w]
+    assert warnings == []
+
+
+def test_i2_sourced_namespaced_input_is_clean():
+    # The same namespaced boundary, once wired to its real producer, is clean.
+    source = _input_boundary("@input:attention_mask", "", "attention_mask")
+    node = _input_boundary(
+        "decoder/self_attn/@input:attention_mask",
+        "43x_DeepseekV4DecoderLayer/DeepseekV4Attention",
+        "attention_mask",
+    )
+    node["incomingEdges"] = [
+        {"sourceNodeId": "@input:attention_mask", "sourceNodeOutputId": "0", "targetNodeInputId": "0"}
+    ]
+    warnings = [w for w in integrity_check_graph_nodes([source, node]) if "I2" in w]
+    assert warnings == []

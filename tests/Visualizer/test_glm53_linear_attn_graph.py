@@ -3365,11 +3365,20 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     assert _sources("hc_head") == variant_outputs
     assert _sources("norm/@input") == {"hc_head"}
 
-    # No loop-invariant inputs cross the decoder spine boundary, so none are invented.
-    assert not any(
-        n.get("namespace") == "45x_Glm5NextTextDecoderLayer" and "/@input:" in n["id"]
+    # The hidden_states spine keeps its direct wiring: it is never surfaced as an
+    # invented ``/@input:hidden_states`` group tile. The only loop-invariant input
+    # threaded across the spine boundary is ``attention_mask`` -- a genuine side
+    # input the indexer consumes (``create_recurrent_attention_mask`` -> layers) --
+    # docked onto its top-level model parameter, not the primary data path.
+    spine_invariant_inputs = {
+        n["id"]: {e["sourceNodeId"] for e in n.get("incomingEdges", []) or []}
         for n in nodes
-    )
+        if n.get("namespace") == "45x_Glm5NextTextDecoderLayer" and "/@input:" in n["id"]
+    }
+    assert spine_invariant_inputs == {
+        "decoder/@input:attention_mask": {"@input:attention_mask"}
+    }, spine_invariant_inputs
+    assert not any("hidden_states" in nid for nid in spine_invariant_inputs)
 
     # The vision tower's CG-built boundary (a *uniform* loop) is untouched -- the
     # suppression is targeted at heterogeneous groups only, so a single instance of

@@ -318,6 +318,24 @@ def _has_incoming(node: dict[str, Any]) -> bool:
     return bool(node.get("incomingEdges"))
 
 
+def _is_top_level_model_input(node: dict[str, Any]) -> bool:
+    """True for a genuine top-level model-input boundary (a legitimate graph source).
+
+    A synthetic ``@input`` at the root scope -- ``@input`` (tokenized text),
+    ``@vision_input`` (image patches), the image-placeholder mask, or a dedicated
+    ``@input:<param>`` model parameter boundary -- is an entry point with no
+    producer, so it is exempt from the I2 no-source check. A *namespaced*
+    ``@input`` / ``@input:<param>`` (``decoder/self_attn/@input:position_embeddings``)
+    is a module boundary that must be fed by its real producer; it is NOT exempt.
+    Root scope is identified structurally: empty namespace and no ``/`` in the id.
+    """
+    if not _is_synthetic_input(node):
+        return False
+    if node.get("namespace", ""):
+        return False
+    return "/" not in str(node.get("id", ""))
+
+
 def _is_float_dtype(type_str: Any) -> bool:
     """True for a floating-point tensor dtype (real activation), not an index/mask.
 
@@ -393,9 +411,12 @@ def integrity_check_graph_nodes(nodes: list[dict[str, Any]], *, label: str = "")
                 f"its missing consumer edge upstream (do not prune)."
             )
 
-        # I2 no-source / orphan.
+        # I2 no-source / orphan. A top-level model input is a legitimate graph
+        # source; a namespaced module ``@input:<param>`` boundary is not -- it must
+        # be fed by its real producer, so a floating one (the kwargs-forwarded
+        # decoder invariant that reached no source) is flagged like any orphan.
         exempt_source = (
-            _is_synthetic_input(node)
+            _is_top_level_model_input(node)
             or _is_synthetic_output(node)
             or (is_const and not _has_incoming(node))  # materialized constant leaf
             or "@loop_carried_in:" in node_id  # seeded + back-edge fed
