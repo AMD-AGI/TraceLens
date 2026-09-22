@@ -3308,6 +3308,12 @@ class _ForwardOperationExtractor:
         # reshape target. Record the literal so ``view(hidden_shape)`` expands to
         # its dims rather than the un-resolvable variable name.
         self.shape_tuple_vars: dict[str, ast.Tuple] = {}
+        # ``input_shape = x.shape[:-1]`` — a shape *slice* local (multiple leading
+        # axes) used as a starred prefix (``view(*input_shape, -1, head_dim)`` or
+        # ``hidden_shape = (*input_shape, -1, head_dim)``). Record the resolver
+        # token ``x.shape[:-1]`` so the starred reference expands to the source's
+        # leading dims rather than the un-resolvable variable name.
+        self.shape_slice_tokens: dict[str, str] = {}
         # ``name = expr`` bindings kept as raw AST so a loop's dynamic iterable
         # (``for i in hit:`` where ``hit = ...nonzero()``) can be traced back to
         # a config-resolvable static bound (see ``_loop_iteration_count``).
@@ -4822,6 +4828,9 @@ class _ForwardOperationExtractor:
             token = _single_shape_index_token(value)
             if token is not None:
                 self.shape_unpack_tokens[targets[0].id] = token
+            slice_token = _shape_slice_token(value)
+            if slice_token is not None:
+                self.shape_slice_tokens[targets[0].id] = slice_token
         if isinstance(value, ast.Tuple):
             for target in targets:
                 if isinstance(target, ast.Name):
@@ -4831,14 +4840,33 @@ class _ForwardOperationExtractor:
         """Render ``view``/``reshape``/``expand`` args, expanding shape locals."""
         parts: list[str] = []
         for arg in args:
-            if isinstance(arg, ast.Name) and arg.id in self.shape_tuple_vars:
-                parts.extend(self._expand_shape_tuple(self.shape_tuple_vars[arg.id]))
-            else:
-                parts.append(self._render_shape_dim(arg))
+            parts.extend(self._expand_shape_arg(arg))
         return ", ".join(parts)
 
-    def _expand_shape_tuple(self, tup: ast.Tuple) -> list[str]:
-        return [self._render_shape_dim(elt) for elt in tup.elts]
+    def _expand_shape_arg(self, arg: ast.expr) -> list[str]:
+        """Expand one reshape arg into resolver tokens, unfolding starred and
+        bare shape-tuple / shape-slice locals.
+
+        ``view(*hidden_shape)`` and ``view(hidden_shape)`` both expand the local
+        dim tuple ``hidden_shape = (*input_shape, -1, self.head_dim)``; a starred
+        shape-slice local ``*input_shape`` (``input_shape = x.shape[:-1]``) becomes
+        the resolver's ``*x.shape[:-1]`` prefix. This lets the shape inferencer
+        recover the real 4-D reshape instead of passing the source through when the
+        target tuple is assembled from local variables.
+        """
+        inner = arg.value if isinstance(arg, ast.Starred) else arg
+        if isinstance(inner, ast.Name) and inner.id in self.shape_tuple_vars:
+            out: list[str] = []
+            for elt in self.shape_tuple_vars[inner.id].elts:
+                out.extend(self._expand_shape_arg(elt))
+            return out
+        if (
+            isinstance(arg, ast.Starred)
+            and isinstance(inner, ast.Name)
+            and inner.id in self.shape_slice_tokens
+        ):
+            return ["*" + self.shape_slice_tokens[inner.id]]
+        return [self._render_shape_dim(arg)]
 
     def _render_shape_dim(self, elt: ast.expr) -> str:
         """One reshape dim as a resolver-friendly token.
@@ -6916,6 +6944,40 @@ def _single_shape_index_token(value: ast.AST) -> str | None:
     ):
         return f"{ast.unparse(base.value)}.shape[{index.value}]"
     return None
+
+
+def _shape_slice_token(value: ast.AST) -> str | None:
+    """Leading-axes shape slice bound to a local, as a resolver-friendly token.
+
+    ``input_shape = hidden_states.shape[:-1]`` reads *several* leading axes into a
+    single name that is later spread with a star (``view(*input_shape, -1, D)`` or
+    inside ``hidden_shape = (*input_shape, -1, D)``). Returning
+    ``"hidden_states.shape[:-1]"`` lets the reshape-arg expander emit the starred
+    prefix ``*hidden_states.shape[:-1]``, which the shape inferencer resolves to
+    the source's leading dims. Returns ``None`` unless *value* is exactly a
+    ``<tensor>.shape[:<int>]`` slice with a static integer bound.
+    """
+    if not isinstance(value, ast.Subscript):
+        return None
+    base = value.value
+    if not (
+        isinstance(base, ast.Attribute)
+        and base.attr == "shape"
+        and not _is_self_attr(base, base.attr)
+    ):
+        return None
+    sl = value.slice
+    if (
+        not isinstance(sl, ast.Slice)
+        or sl.lower is not None
+        or sl.step is not None
+        or sl.upper is None
+    ):
+        return None
+    upper_txt = ast.unparse(sl.upper)
+    if not re.fullmatch(r"-?\d+", upper_txt):
+        return None
+    return f"{ast.unparse(base.value)}.shape[:{upper_txt}]"
 
 
 def _inplace_label(method: str) -> str:

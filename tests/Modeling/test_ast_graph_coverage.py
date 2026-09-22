@@ -237,6 +237,27 @@ def forward(self, x, k):
     assert slice_op.attr_name in matmul.predecessors
 
 
+def test_starred_shape_tuple_local_resolves_view_dims():
+    # ``view(*hidden_shape)`` where ``hidden_shape = (*input_shape, -1, D)`` and
+    # ``input_shape = x.shape[:-1]`` must expand to a resolver-friendly detail
+    # (``*x.shape[:-1], -1, <D>``) so the reshape is inferred as a real rank change,
+    # not passed through as a no-op view. Both gaps: a *starred* tuple local, and a
+    # ``x.shape[:-1]`` *slice* local nested inside it. (DeepSeek-V4 attention view.)
+    func = _function("""
+def forward(self, x):
+    input_shape = x.shape[:-1]
+    hidden_shape = (*input_shape, -1, self.head_dim)
+    return x.view(*hidden_shape)
+""")
+    analysis = aa._forward_operations_from_forward(
+        func, self_values={"head_dim": 512}, all_tensor_ops=True
+    )
+    views = [op for op in analysis.operations if op.label == "View"]
+    assert views, [op.label for op in analysis.operations]
+    detail = next(d for d in views[0].details if d.startswith("shape:"))
+    assert detail == "shape: *x.shape[:-1], -1, 512", detail
+
+
 def test_extractor_models_index_bitwise_and_inplace_copy_consumers():
     # Real consumption patterns the tracer must not drop: advanced (tensor) indexing
     # is a gather, bitwise ``&``/``|`` combine two operands, and an in-place ``copy_``
