@@ -35,7 +35,7 @@ Output
 
 Usage
 -----
-    python match_inference_trace_blocks.py <trace_a> <trace_b> -o <out_dir>
+    python -m TraceLens.TraceUtils.inference_trace_match.main <trace_a> <trace_b> -o <out_dir>
                                            [--no-extract]
                                            [--phases decode_only,prefilldecode]
 """
@@ -50,20 +50,22 @@ from typing import List, Optional, Tuple
 import pandas as pd
 
 from TraceLens.util import DataLoader
-from .annotation_utils import (
+from ..utils.annotation_utils import (
     PHASE_DECODE_ONLY,
     PHASE_PREFILLDECODE,
     PHASE_PREFILL_ONLY,
     average_detail,
     classify_phase,
-    find_iteration_roots_by_priority,
+    find_known_annotations,
     find_phase_from_window,
     iteration_details,
 )
-from TraceLens.TraceUtils.split_inference_trace_annotation import (
-    extract_and_save,
+from ..trace_split import (
+    ExtractContext,
+    TraceData,
+    EventIndex,
+    extract_and_save_split,
     get_filename,
-    preprocess_trace,
 )
 
 PER_STEP_KEYS = (
@@ -482,11 +484,15 @@ def load_trace(path: str):
     print(f"\n=== Loading {path} ===")
     trace_json = DataLoader.load_data(get_filename(path))
     events = trace_json.get("traceEvents", [])
-    gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
+    ti = EventIndex(events)
+    gpu_corr_map, flow_corr_map, meta_events = (
+        ti.gpu_corr_map,
+        ti.flow_corr_map,
+        ti.meta_events,
+    )
     print(f"Loaded {len(events)} events from {path}")
     # Detailed patterns take priority over the native patterns.
-    label = f"execution steps (iteration) [{os.path.basename(path)}]"
-    iteration_roots = find_iteration_roots_by_priority(events, label=label)
+    iteration_roots = find_known_annotations(events)
     return {
         "trace_json": trace_json,
         "events": events,
@@ -621,37 +627,47 @@ def main():
             label_base = f"{phase}_best_A{m['a_block_index']}_B{m['b_block_index']}"
 
             print(f"\n--- {phase} best (A) ---")
-            a_summary = extract_and_save(
+            a_summary = extract_and_save_split(
                 [m["a_block"].roots],
-                a["events"],
-                a["trace_json"],
-                phase_dir,
-                base_a,
-                "annotation_iteration",
+                ExtractContext(
+                    TraceData(
+                        a["events"],
+                        a["trace_json"],
+                        a["gpu_corr_map"],
+                        a["flow_corr_map"],
+                        a["meta_events"],
+                    ),
+                    output_dir=phase_dir,
+                    base_name=base_a,
+                ),
+                "iteration",
                 0,
                 1,
-                a["gpu_corr_map"],
-                a["flow_corr_map"],
-                a["meta_events"],
                 output_label=f"{label_base}_A",
+                llm_inference=True,
             )
             if a_summary:
                 m["a_output_path"] = a_summary[0]["output_path"]
 
             print(f"\n--- {phase} best (B) ---")
-            b_summary = extract_and_save(
+            b_summary = extract_and_save_split(
                 [m["b_block"].roots],
-                b["events"],
-                b["trace_json"],
-                phase_dir,
-                base_b,
-                "annotation_iteration",
+                ExtractContext(
+                    TraceData(
+                        b["events"],
+                        b["trace_json"],
+                        b["gpu_corr_map"],
+                        b["flow_corr_map"],
+                        b["meta_events"],
+                    ),
+                    output_dir=phase_dir,
+                    base_name=base_b,
+                ),
+                "iteration",
                 0,
                 1,
-                b["gpu_corr_map"],
-                b["flow_corr_map"],
-                b["meta_events"],
                 output_label=f"{label_base}_B",
+                llm_inference=True,
             )
             if b_summary:
                 m["b_output_path"] = b_summary[0]["output_path"]
