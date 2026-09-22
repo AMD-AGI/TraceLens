@@ -65,6 +65,7 @@ SHEETS_COMPARE_CONFIG = {
     },
     "ops_summary": {
         "keys": ["name"],
+        "optional_keys": ["parent_module", "is_recompute"],
         "diff_cols": ["total_direct_kernel_time_ms", "Count"],
         "cols_to_delete": ["total_direct_kernel_time_sum"],
         "sort_col": "total_direct_kernel_time_ms",
@@ -249,7 +250,10 @@ def process_summary_sheet(
     ):
         config = SHEETS_COMPARE_CONFIG["kernel_summary_legacy"]
 
-    keys = config["keys"]
+    keys = list(config["keys"])
+    for opt_key in config.get("optional_keys", []):
+        if all(opt_key in df.columns for df in dfs):
+            keys.append(opt_key)
     diff_cols = config["diff_cols"]
     cols_to_delete = config["cols_to_delete"]
     sort_col = config["sort_col"]
