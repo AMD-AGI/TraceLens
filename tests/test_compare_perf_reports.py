@@ -385,3 +385,22 @@ def test_ops_summary_merge_without_parent_module(tmp_path):
     result = process_summary_sheet([r1, r2], "ops_summary", ["base", "test"], config)
     assert len(result) == 2
     assert "parent_module" not in result.columns
+
+
+def test_ops_summary_mismatched_parent_module_raises(tmp_path):
+    """Mixing a grouped report with a non-grouped one raises ValueError."""
+    r1 = str(tmp_path / "report1")
+    r2 = str(tmp_path / "report2")
+    _make_ops_summary_csv(
+        r1,
+        [["aten::add", "ModuleA", 100, 0.1, 5, 50.0, 50.0]],
+        has_parent_module=True,
+    )
+    _make_ops_summary_csv(
+        r2,
+        [["aten::add", 200, 0.2, 10, 50.0, 50.0]],
+        has_parent_module=False,
+    )
+    config = SHEETS_COMPARE_CONFIG["ops_summary"]
+    with pytest.raises(ValueError, match="parent_module"):
+        process_summary_sheet([r1, r2], "ops_summary", ["base", "test"], config)

@@ -252,8 +252,14 @@ def process_summary_sheet(
 
     keys = list(config["keys"])
     for opt_key in config.get("optional_keys", []):
-        if all(opt_key in df.columns for df in dfs):
+        present = [opt_key in df.columns for df in dfs]
+        if all(present):
             keys.append(opt_key)
+        elif any(present):
+            raise ValueError(
+                f"Column '{opt_key}' is present in some reports but not all. "
+                f"Cannot compare reports with different grouping granularities."
+            )
     diff_cols = config["diff_cols"]
     cols_to_delete = config["cols_to_delete"]
     sort_col = config["sort_col"]
