@@ -684,7 +684,9 @@ def merge_capture_trace_into_graph(
         if the merge failed.
     """
     if graph_tree is None:
-        graph_tree = _load_trace_tree_from_file(graph_tree_filepath, add_python_func=True)
+        graph_tree = _load_trace_tree_from_file(
+            graph_tree_filepath, add_python_func=True
+        )
     else:
         graph_tree.build_tree(add_python_func=True)
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
