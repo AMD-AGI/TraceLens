@@ -40,7 +40,7 @@ Do NOT re-read it from disk. Key fields:
   default; **do not** add map entries for them.
 - `summary` -- counts for orientation.
 
-## Your job
+## How to decide
 
 Produce a map that unifies names in `only_in_<name_a>` with their counterparts
 in `only_in_<name_b>` when you are **certain** they are the same operation.
@@ -116,8 +116,8 @@ The orchestrator runs:
     --labels-a <dir_a>/semantic_labels.json \
     --labels-b <dir_b>/semantic_labels.json \
     --name-a <name_a> --name-b <name_b> \
-    --map <out_dir>/kernel_unification_map.json \
-    [--raw-to-stem <out_dir>/raw_to_stem.json]   # only if stem preprocessing was used
+    --map <output_dir>/work/kernel_unification_map.json \
+    [--raw-to-stem <output_dir>/work/raw_to_stem.json]   # only if stem preprocessing was used
 ```
 
 This writes the unified name into each kernel's `semantic_block` field (default

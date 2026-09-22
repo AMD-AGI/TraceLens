@@ -261,28 +261,6 @@ This is a **final deliverable** directory for downstream TraceDiff consumers.
 
 ---
 
-## Step 4: Generate Comparison CSV
-
-**Single-region mode:**
-```bash
-<prefix> python3 TraceLens/Agent/Analysis/semantic_analyses/match_and_compare.py \
-    <output_dir>/work/<name_a>/semantic_labels.json \
-    <output_dir>/work/<name_b>/semantic_labels.json \
-    --name-a <name_a> --name-b <name_b> \
-    -o <output_dir>/work/comparison.csv
-```
-
-**Multi-region mode (vLLM):**
-```bash
-<prefix> python3 TraceLens/Agent/Analysis/semantic_analyses/match_and_compare.py \
-    --regions-dir-a <output_dir>/work/<name_a> \
-    --regions-dir-b <output_dir>/work/<name_b> \
-    --name-a <name_a> --name-b <name_b> \
-    -o <output_dir>/work/comparison.csv
-```
-
----
-
 ## Key Principles
 
 1. **Conservative anchors** -- map only certain equivalences; preserve
@@ -294,5 +272,5 @@ This is a **final deliverable** directory for downstream TraceDiff consumers.
 
 ## Final Deliverables
 
-- `<output_dir>/work/` -- per-trace `semantic_labels.json`, the unification/coherence JSON artifacts, `per_kernel_final_<name>.csv`, and `comparison.csv`
+- `<output_dir>/work/` -- per-trace `semantic_labels.json`, the unification/coherence JSON artifacts, `per_kernel_final_<name>.csv`
 - `<output_dir>/tracediff_output/` -- TraceDiff deliverables (see Step 3)

@@ -1,5 +1,5 @@
 <!--
-Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
@@ -119,10 +119,10 @@ The orchestrator runs:
 
 ```bash
 <prefix> python3 TraceLens/Agent/Analysis/semantic_analyses/kernel_coherence.py apply \
-    --context <out_dir>/kernel_coherence_context.json \
-    --decisions <out_dir>/kernel_coherence_decisions.json \
-    --audit-csv-a <out_dir>/per_kernel_final_<name_a>.csv \
-    --audit-csv-b <out_dir>/per_kernel_final_<name_b>.csv
+    --context <output_dir>/work/kernel_coherence_context.json \
+    --decisions <output_dir>/work/kernel_coherence_decisions.json \
+    --audit-csv-a <output_dir>/work/per_kernel_final_<name_a>.csv \
+    --audit-csv-b <output_dir>/work/per_kernel_final_<name_b>.csv
 ```
 
 Rewrites `semantic_block` on both label files, writes per-kernel audit CSVs, and

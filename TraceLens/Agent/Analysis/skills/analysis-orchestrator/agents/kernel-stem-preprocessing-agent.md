@@ -14,27 +14,17 @@ model: claude-opus-4-8
 
 Reduce the number of distinct kernel names to a set small enough for the
 `kernel-unification-agent` to reason over, **without losing information that
-matters**.
+matters**. High-cardinality families (e.g. one logical GEMM appearing as
+thousands of autotuner-id / tile-suffix variants) inflate the unique count;
+collapse those to a **stem**. But **not every varying parameter is noise** --
+keep distinctions a later stage needs (e.g. GEMM tile/grid dims) and drop pure
+noise (profiler markers, one-off setup kernels). Use judgment.
 
 This step runs **only** when `kernel_unification.py prepare-context` reports
 `needs_stem_preprocessing: true` (combined unique names exceed the threshold,
 default 5000). Otherwise skip it entirely.
 
 **Scripts directory:** `TraceLens/Agent/Analysis/semantic_analyses/`
-
-## Why this is needed
-
-High-cardinality name families blow up the unique count. A single logical GEMM
-family can appear as thousands of variants that differ only by an autotuner id
-or embedded shape/tile suffix. These variants are the
-same operation for the purpose of establishing cross-trace anchors, so
-collapsing them to a **stem** (dropping the autotuner id and shape/tile suffix) drastically
-shrinks the set.
-
-But **not every varying parameter is noise.** Some distinctions should be kept
-for later analysis (e.g. GEMM tile / grid dimensions are useful downstream), and
-some names are pure noise that should be dropped (profiler markers, one-off
-setup kernels). Use judgment.
 
 ## Input
 
@@ -45,7 +35,7 @@ setup kernels). Use judgment.
   `trace`, `name`, `perf_categories`, `kernel_count`, `total_dur_us`. Use it to
   discover the naming families; do **not** assume it is exhaustive.
 
-## Your job
+## Workflow
 
 1. **Identify families.** Group the sampled names into families that share a
    structure (same prefix / vendor scheme, varying only in ids or shapes).
@@ -111,9 +101,9 @@ The orchestrator runs:
     --labels-a <dir_a>/semantic_labels.json \
     --labels-b <dir_b>/semantic_labels.json \
     --name-a <name_a> --name-b <name_b> \
-    --rules <out_dir>/stem_rules.json \
-    --raw-to-stem <out_dir>/raw_to_stem.json \
-    -o <out_dir>/kernel_unification_context.json
+    --rules <output_dir>/work/stem_rules.json \
+    --raw-to-stem <output_dir>/work/raw_to_stem.json \
+    -o <output_dir>/work/kernel_unification_context.json
 ```
 
 - Emits `raw_to_stem.json` (used later by `apply-map`) and a **stem-level**
