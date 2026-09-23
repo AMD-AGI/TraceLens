@@ -207,25 +207,23 @@ def resolve_triton_source(
             None, patchable=False, method="unresolved", reason="empty kernel_file"
         )
 
-    # Keep only an editable source path; inductor-generated / ``/tmp`` Triton
-    # has no durable source to rewrite.
-    source = path if is_editable_source(path) else ""
-    if not source:
+    # Inductor-generated / ``/tmp`` Triton has no durable source to rewrite, but
+    # the cache path itself is still known and worth reporting for audit.
+    if not is_editable_source(path):
         return ResolveResult(
-            None,
+            SourceLocation(source_file=path, line=line),
             patchable=False,
             kind="triton_inductor_generated",
             reason="generated/non-editable Triton source",
             method="gate_non_patchable",
         )
-
     ast_line: int | None = None
-    if source.lower().endswith(".py") and os.path.isfile(source):
-        ast_line = triton_def_line(source, func=func, symbol=symbol)
+    if path.lower().endswith(".py") and os.path.isfile(path):
+        ast_line = triton_def_line(path, func=func, symbol=symbol)
     def_line = ast_line if ast_line is not None else line
     method = "triton_ast" if ast_line is not None else "trace_kernel_file"
     return ResolveResult(
-        location=SourceLocation(source_file=source, line=def_line),
+        location=SourceLocation(source_file=path, line=def_line),
         patchable=True,
         method=method,
     )

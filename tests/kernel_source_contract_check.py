@@ -48,10 +48,14 @@ KNOWN_METHODS = frozenset(
     }
 )
 
-# Methods whose entries legitimately carry no source_file.
-_NO_SOURCE_METHODS = frozenset(
-    {contract.METHOD_UNRESOLVED, contract.METHOD_GATE_NON_PATCHABLE}
-)
+# Methods whose entries must never carry a source_file (nothing was found).
+_NO_SOURCE_METHODS = frozenset({contract.METHOD_UNRESOLVED})
+
+# Methods whose entries carry a source_file on a best-effort basis: present
+# when the dispatcher/wrapper (or a generated file's cache path) was found,
+# absent when it wasn't -- either is valid, so these are exempt from both the
+# "must have" and "must not have" source_file checks below.
+_OPTIONAL_SOURCE_METHODS = frozenset({contract.METHOD_GATE_NON_PATCHABLE})
 
 
 def validate_document(doc: Any) -> list[str]:
@@ -81,9 +85,15 @@ def validate_document(doc: Any) -> list[str]:
         if method and method not in KNOWN_METHODS:
             problems.append(f"entries[{i}] has unknown method {method!r}")
         src = str(entry.get("source_file") or "")
+        optional_source = method in _OPTIONAL_SOURCE_METHODS
         if src and method in _NO_SOURCE_METHODS:
             problems.append(f"entries[{i}] has a source_file but method is {method}")
-        if not src and method and method not in _NO_SOURCE_METHODS:
+        if (
+            not src
+            and method
+            and method not in _NO_SOURCE_METHODS
+            and not optional_source
+        ):
             problems.append(f"entries[{i}] has method {method!r} but no source_file")
         confidence = entry.get("confidence")
         if confidence is not None:
