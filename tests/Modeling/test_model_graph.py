@@ -291,6 +291,40 @@ def test_dispatched_attention_stamps_output_arity_detail():
     assert "outputs: 2" in details_eager
 
 
+def test_dispatched_attention_stamps_wrapper_expand_location():
+    """The resolved kernel's wrapper location is recorded for later subtree expansion."""
+    from TraceLens.ModelUtils.ast_analyze import (
+        attention_kernel_details,
+        kernel_name_from_step_details,
+    )
+
+    source = textwrap.dedent("""
+        class Attention(nn.Module):
+            def forward(self, hidden_states):
+                query_states = self.q_proj(hidden_states)
+                attention_interface = eager_attention_forward
+                if self.config._attn_implementation != "eager":
+                    attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+                attn_output, attn_weights = attention_interface(self, query_states, k, v)
+                return attn_output
+        """)
+
+    analysis = analyze_source(source, config={"model_type": "deepseek_v4"})
+    details = analysis.class_registry["Attention"].forward_step_details[
+        SYNTHETIC_ATTENTION
+    ]
+    assert kernel_name_from_step_details(details) == "sdpa"
+    expand = [line for line in details if line.startswith("wrapper_expand:")]
+    # The location points at the registry-resolved sdpa integration wrapper.
+    assert expand and expand[0].endswith("#sdpa_attention_forward")
+    assert "sdpa_attention" in expand[0]
+    # The location is plumbing only -- it must not leak into the rendered leaf.
+    assert not any(
+        line.startswith("wrapper_expand:")
+        for line in attention_kernel_details(details)
+    )
+
+
 def test_resolve_dispatched_attention_caps_unpack_names_to_arity():
     """A one-tensor kernel trims a phantom second unpack name (the None slot)."""
     import ast

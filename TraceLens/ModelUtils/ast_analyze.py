@@ -8073,6 +8073,30 @@ def _attention_wrapper_candidates(
     return candidates
 
 
+def _resolve_attention_wrapper_source(
+    kernel: str,
+    config: dict[str, Any] | None,
+    resolver: "_HostSourceResolver",
+) -> tuple[str, str, ast.FunctionDef] | None:
+    """Locate the resolved kernel's wrapper as ``(module, name, func)`` from source.
+
+    Walks the registry/config-derived candidate sites (never a per-kernel table)
+    and returns the first whose module loads and defines the named wrapper, so a
+    single resolution feeds both the return-arity read and the ``wrapper_expand:``
+    location the graph stamps for subtree expansion. ``None`` when no wrapper source
+    can be located.
+    """
+    for module, name in _attention_wrapper_candidates(kernel, config):
+        loaded = resolver._load(module)
+        if loaded is None:
+            continue
+        func = loaded[0].get(name)
+        if func is None:
+            continue
+        return module, name, func
+    return None
+
+
 def _attention_kernel_return_arity(
     kernel: str,
     config: dict[str, Any] | None,
@@ -8091,17 +8115,10 @@ def _attention_kernel_return_arity(
 
     Returns ``None`` when no wrapper source can be located (arity left unknown).
     """
-    for module, name in _attention_wrapper_candidates(kernel, config):
-        loaded = resolver._load(module)
-        if loaded is None:
-            continue
-        func = loaded[0].get(name)
-        if func is None:
-            continue
-        arity = _max_real_return_arity(func)
-        if arity is not None:
-            return arity
-    return None
+    resolved = _resolve_attention_wrapper_source(kernel, config, resolver)
+    if resolved is None:
+        return None
+    return _max_real_return_arity(resolved[2])
 
 
 def _resolve_dispatched_attention_kernel(
@@ -8133,7 +8150,15 @@ def _resolve_dispatched_attention_kernel(
     else:
         resolved = "sdpa"
     resolver = _HostSourceResolver()
-    arity = _attention_kernel_return_arity(resolved, config, resolver)
+    wrapper = _resolve_attention_wrapper_source(resolved, config, resolver)
+    arity = _max_real_return_arity(wrapper[2]) if wrapper is not None else None
+    # ``wrapper_expand: module#symbol`` records where the resolved kernel's wrapper
+    # is defined so the block tree can expand its real body (``repeat_kv`` →
+    # ``scaled_dot_product_attention`` → ``transpose`` → ``contiguous``) instead of
+    # rendering a single opaque leaf, keeping the primitive itself atomic. The
+    # location comes from the same registry/config resolution as the arity — never a
+    # per-kernel table — and is inert for a kernel with no expandable wrapper source.
+    wrapper_expand = f"{wrapper[0]}#{wrapper[1]}" if wrapper is not None else None
     for cls in classes.values():
         details = cls.forward_step_details.get(SYNTHETIC_ATTENTION)
         if not details:
@@ -8144,10 +8169,12 @@ def _resolve_dispatched_attention_kernel(
         rewritten = [
             f"kernel: {resolved}" if line.startswith("kernel:") else line
             for line in details
-            if not line.startswith("outputs:")
+            if not line.startswith(("outputs:", "wrapper_expand:"))
         ]
         if arity is not None:
             rewritten.append(f"outputs: {arity}")
+        if wrapper_expand is not None:
+            rewritten.append(f"wrapper_expand: {wrapper_expand}")
         cls.forward_step_details[SYNTHETIC_ATTENTION] = rewritten
         if arity is not None:
             names = cls.forward_step_output_names.get(SYNTHETIC_ATTENTION)
