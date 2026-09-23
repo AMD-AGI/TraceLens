@@ -736,6 +736,79 @@ def test_build_block_node_short_convolution_with_activation():
     assert "Depthwise Conv" in labels and "SiLU" in labels
 
 
+# --------------------------------------------------------------------------- #
+# fused-activation guard: registry-conditional expansion
+# --------------------------------------------------------------------------- #
+def _all_descendants(root: BlockNode) -> list[BlockNode]:
+    out: list[BlockNode] = []
+    stack = list(root.children)
+    while stack:
+        n = stack.pop()
+        out.append(n)
+        stack.extend(n.children)
+    return out
+
+
+def test_is_expandable_registered_class_structural():
+    # Keys purely on registry membership + a parseable forward (op list OR
+    # submodule-call list) -- never a class-name allowlist.
+    with_calls = structure("WithCalls", calls=["x"])
+    with_ops = structure("WithOps")
+    with_ops.forward_operations["@op_l1_c0_tanh"] = ForwardOperation(
+        attr_name="@op_l1_c0_tanh", label="Tanh", class_name="Tanh"
+    )
+    empty = structure("Empty")  # no forward_calls, no forward_operations
+    registry = {"WithCalls": with_calls, "WithOps": with_ops, "Empty": empty}
+    assert bt._is_expandable_registered_class(registry, "WithCalls") is True
+    assert bt._is_expandable_registered_class(registry, "WithOps") is True
+    assert bt._is_expandable_registered_class(registry, "Empty") is False
+    assert bt._is_expandable_registered_class(registry, "Missing") is False
+    assert bt._is_expandable_registered_class(registry, None) is False
+    assert bt._is_expandable_registered_class(registry, "") is False
+
+
+def test_build_block_node_unregistered_fused_activation_keeps_synthetic_leaf():
+    # A fused SiLU/mul activation whose source is NOT in the registry (an
+    # external kernel import such as ``SiluAndMul``) keeps the synthetic
+    # SiLU-and-multiply fallback leaf: a ``situ_activation`` + ``elementwise_mul``
+    # under a "Gated multiply" node.
+    parent = structure("Mlp", assignments={"act_fn": "SiluAndMul"}, calls=["act_fn"])
+    built = bt.build_block_node(
+        attr_name="mlp",
+        class_name="Mlp",
+        registry={"Mlp": parent},  # SiluAndMul deliberately absent
+        basic_ops=_basic(),
+    )
+    descendants = _all_descendants(built)
+    assert any(n.attr_name == "situ_activation" for n in descendants)
+    assert any(n.attr_name == "elementwise_mul" for n in descendants)
+
+
+def test_build_block_node_registered_fused_activation_expands_no_synthetic_leaf():
+    # A registered fused activation (its source lives in the modeling file, like
+    # Kimi ``SituAndMul``) has a parseable forward, so the guard falls through to
+    # the normal recursion path and expands into real primitive ops instead of
+    # the synthetic ``situ_activation``/``elementwise_mul`` fallback leaf.
+    situ = structure("SituAndMul", calls=["@op_l1_c0_tanh"])
+    situ.forward_operations["@op_l1_c0_tanh"] = ForwardOperation(
+        attr_name="@op_l1_c0_tanh", label="Tanh", class_name="Tanh"
+    )
+    parent = structure("Mlp", assignments={"act_fn": "SituAndMul"}, calls=["act_fn"])
+    built = bt.build_block_node(
+        attr_name="mlp",
+        class_name="Mlp",
+        registry={"Mlp": parent, "SituAndMul": situ},
+        basic_ops=_basic(),
+    )
+    descendants = _all_descendants(built)
+    # The synthetic fallback markers must NOT appear -- the registered class
+    # expanded through recursion instead.
+    assert not any(n.attr_name == "situ_activation" for n in descendants)
+    assert not any(n.label == "Gated multiply" for n in descendants)
+    # The fused activation is still present as its own (now expandable) frame.
+    assert any(n.class_name == "SituAndMul" for n in descendants)
+
+
 def test_build_block_node_fused_silu_mul_child():
     cls = structure("Owner", assignments={"act_fn": "SiluAndMul"}, calls=["act_fn"])
     built = bt.build_block_node(

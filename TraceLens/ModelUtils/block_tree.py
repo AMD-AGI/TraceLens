@@ -2159,6 +2159,26 @@ def flatten_computation_segments(node: BlockNode) -> list[ComputationSegment]:
     return collect_computation_segments(node)
 
 
+def _is_expandable_registered_class(
+    registry: dict[str, ClassStructure], class_name: str | None
+) -> bool:
+    """True when a class is registered with a parseable forward we can expand.
+
+    Keys on structural facts -- registry membership plus an extracted forward
+    op list / submodule-call list -- never a class-name allowlist. A fused
+    activation whose source lives in the modeling file (e.g. Kimi
+    ``SituAndMul``) is in the registry with populated ``forward_operations``, so
+    it expands into its real primitive ops through the normal recursion path. An
+    unresolved *external* fused activation (``SiluAndMul`` imported from a kernel
+    package) is absent from the registry, so callers keep its synthetic
+    SiLU-and-multiply leaf instead.
+    """
+    if not class_name:
+        return False
+    cls = registry.get(class_name)
+    return cls is not None and bool(cls.forward_operations or cls.forward_calls)
+
+
 def build_block_node(
     *,
     attr_name: str,
@@ -2638,7 +2658,14 @@ def build_block_node(
             )
             continue
 
-        if is_fused_silu_mul_class(child_class):
+        if is_fused_silu_mul_class(child_class) and not _is_expandable_registered_class(
+            registry, child_class
+        ):
+            # Unresolved external fused activation (its source is not in the
+            # registry, e.g. ``SiluAndMul`` imported from a kernel package):
+            # emit the synthetic SiLU-and-multiply leaf. A registered fused
+            # activation (Kimi ``SituAndMul``) falls through to the recursion
+            # path below and expands into its real primitive ops.
             child_nodes.append(
                 _situ_and_mul_block_node(
                     attr_name=call_attr,

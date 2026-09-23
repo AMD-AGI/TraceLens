@@ -2964,6 +2964,15 @@ def _config_value(
             return _UNKNOWN
         if isinstance(node.value, ast.Name) and node.value.id == "self":
             resolved = self_values.get(node.attr, _UNKNOWN)
+            if resolved is _UNKNOWN and node.attr == "config":
+                # HF modeling convention: a module holds its config object as
+                # ``self.config`` even when ``__init__`` never assigns it into the
+                # tracked symbol table (e.g. it reads ``config`` locally). Fall
+                # back to the config passed in so ``self.config.<key>`` predicates
+                # resolve at build time (config-branch liveness pruning). ``config``
+                # is ``{}`` when no config is threaded, which correctly leaves the
+                # predicate unresolved (empty dict → key lookups miss).
+                return config
             # A scalar-typed-but-unresolved attribute carries no usable value for
             # arithmetic/comparison folding; surface it as unknown here so the rest
             # of ``_config_value`` never operates on the sentinel object.
@@ -5476,7 +5485,12 @@ class _ForwardOperationExtractor:
             if isinstance(stmt, ast.If):
                 outcome = self._resolve_flash_request_predicate(stmt.test)
                 if outcome is None:
-                    outcome = _config_value(stmt.test, {}, self.self_values)
+                    # Prune a build-time-resolvable config predicate (e.g.
+                    # ``if self.config.hidden_act == 'situ':``) down to its live
+                    # arm; the dead arm's ops never enter the sequence. Threading
+                    # ``self.config`` (not ``{}``) lets ``self.config.<key>`` resolve
+                    # even when ``__init__`` did not bind ``self.config`` locally.
+                    outcome = _config_value(stmt.test, self.config, self.self_values)
                 if outcome is True:
                     self.statements(stmt.body, condition=condition)
                     if self._statements_terminate(stmt.body):
@@ -6593,6 +6607,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 self_values=_self_config_values(
                     init_func, self._config_for_class(node.name)
                 ),
+                config=self._config_for_class(node.name),
             )
             alternate = _alternate_forward_dispatches(forward_func)
             if alternate:
@@ -8936,6 +8951,7 @@ def _parallel_gate_activations_from_forward(
 def _parse_forward(
     func: ast.FunctionDef,
     self_values: dict | None = None,
+    config: dict | None = None,
 ) -> tuple[
     list[str],
     list[str],
@@ -8952,6 +8968,7 @@ def _parse_forward(
     forward_step_details: dict[str, list[str]] = {}
     forward_input_names = _forward_input_names(func)
     self_values = self_values or {}
+    config = config or {}
     name_value_ast = _collect_name_value_ast(func)
     repeated_attrs = _repeated_self_call_attrs(func.body)
 
@@ -8969,6 +8986,7 @@ def _parse_forward(
             self_values,
             name_value_ast,
             repeated_attrs=repeated_attrs,
+            config=config,
         )
     forward_step_details.update(_positional_step_details(func))
     return (
@@ -8994,6 +9012,7 @@ def _walk_forward_stmt(
     name_value_ast: dict[str, ast.expr] | None = None,
     in_conditional: bool = False,
     repeated_attrs: frozenset[str] = frozenset(),
+    config: dict | None = None,
 ) -> str | None:
     if isinstance(node, ast.Assign):
         stmt_calls: list[str] = []
@@ -9130,8 +9149,23 @@ def _walk_forward_stmt(
         # must not be suppressed (that previously orphaned the op reading its
         # result: the op kept its edge target, but the target node was never
         # built).
-        branch_in_conditional = in_conditional or bool(node.orelse)
-        branch = node.body + node.orelse
+        # A build-time-resolvable config predicate (e.g.
+        # ``if self.config.hidden_act == 'situ':``) selects exactly one arm; walk
+        # only the live arm so the dead arm's calls never enter the flat sequence
+        # (mirrors the forward-operations pruning in ``statements``). When the
+        # predicate is not statically resolvable, both arms are flattened as
+        # before -- a ``self.<attr>`` producer assigned in both is still joined by
+        # a ``Select`` phi downstream, and free-function collisions are suppressed.
+        outcome = _config_value(node.test, config or {}, self_values or {})
+        if outcome is True:
+            branch = list(node.body)
+            branch_in_conditional = in_conditional
+        elif outcome is False:
+            branch = list(node.orelse)
+            branch_in_conditional = in_conditional
+        else:
+            branch = node.body + node.orelse
+            branch_in_conditional = in_conditional or bool(node.orelse)
         for child in branch:
             pending_norm = _walk_forward_stmt(
                 child,
@@ -9147,6 +9181,7 @@ def _walk_forward_stmt(
                 name_value_ast,
                 in_conditional=branch_in_conditional,
                 repeated_attrs=repeated_attrs,
+                config=config,
             )
         return pending_norm
 
@@ -9167,6 +9202,7 @@ def _walk_forward_stmt(
                 name_value_ast,
                 in_conditional=in_conditional,
                 repeated_attrs=repeated_attrs,
+                config=config,
             )
         # Tensor operations are annotated by _ForwardOperationExtractor, but
         # expanded helper calls (for example `_apply_gate()`) are not operations
@@ -9202,6 +9238,7 @@ def _walk_forward_stmt(
                 name_value_ast,
                 in_conditional=in_conditional,
                 repeated_attrs=repeated_attrs,
+                config=config,
             )
         return pending_norm
 

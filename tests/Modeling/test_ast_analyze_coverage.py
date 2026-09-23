@@ -163,6 +163,46 @@ def test_config_value_arithmetic_and_logic():
     assert _config_value(_expr("not config.off"), config, sv) is True
 
 
+def test_config_value_self_config_fallback():
+    # HF convention: ``self.config`` resolves to the passed config even when
+    # ``__init__`` never bound it into the symbol table (self_values empty), so
+    # ``self.config.<key>`` predicates resolve at build time.
+    config = {"hidden_act": "situ"}
+    assert _config_value(_expr("self.config.hidden_act"), config, {}) == "situ"
+    assert _config_value(_expr("self.config.hidden_act == 'situ'"), config, {}) is True
+    # An explicit binding in self_values still wins over the fallback.
+    assert (
+        _config_value(_expr("self.config.hidden_act"), config, {"config": {"hidden_act": "gelu"}})
+        == "gelu"
+    )
+    # No config threaded -> empty dict -> key miss -> unresolved (no false prune).
+    assert _config_value(_expr("self.config.hidden_act"), {}, {}) is aa._UNKNOWN
+    # The fallback is scoped to the ``config`` attribute only; other unresolved
+    # ``self.<attr>`` reads stay unknown.
+    assert _config_value(_expr("self.something"), config, {}) is aa._UNKNOWN
+
+
+def test_parse_forward_prunes_dead_config_branch():
+    # Path A (forward_calls): a build-time-resolvable config predicate selects one
+    # arm; the dead arm's submodule calls never enter the flat call sequence.
+    src = (
+        "def forward(self, x):\n"
+        "    if self.config.hidden_act == 'situ':\n"
+        "        a = self.gate(x)\n"
+        "    else:\n"
+        "        b = self.up(x)\n"
+        "    return a\n"
+    )
+    fn = ast.parse(src).body[0]
+    calls_true = aa._parse_forward(fn, config={"hidden_act": "situ"})[0]
+    assert "gate" in calls_true and "up" not in calls_true
+    calls_false = aa._parse_forward(fn, config={"hidden_act": "gelu"})[0]
+    assert "up" in calls_false and "gate" not in calls_false
+    # Unresolvable predicate (no config) -> both arms flattened (prior behavior).
+    calls_both = aa._parse_forward(fn, config={})[0]
+    assert "gate" in calls_both and "up" in calls_both
+
+
 # --------------------------------------------------------------------------- #
 # attention/norm inference from a decoder structure
 # --------------------------------------------------------------------------- #
