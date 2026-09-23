@@ -65,12 +65,13 @@ SHEETS_COMPARE_CONFIG = {
     },
     "ops_summary": {
         "keys": ["name"],
+        "optional_keys": ["parent_module", "is_recompute"],
         "diff_cols": ["total_direct_kernel_time_ms", "Count"],
         "cols_to_delete": ["total_direct_kernel_time_sum"],
         "sort_col": "total_direct_kernel_time_ms",
     },
     "kernel_summary": {
-        "keys": ["Kernel name"],
+        "keys": ["Kernel name", "Parent op category", "Parent cpu_op"],
         "diff_cols": [
             "Kernel duration (µs)_sum",
             "Kernel duration (µs)_mean",
@@ -79,7 +80,6 @@ SHEETS_COMPARE_CONFIG = {
         "cols_to_delete": [
             "Kernel duration (µs)_min",
             "Kernel duration (µs)_max",
-            "Parent op category",
         ],
         "sort_col": "Kernel duration (µs)_sum",
     },
@@ -249,7 +249,16 @@ def process_summary_sheet(
     ):
         config = SHEETS_COMPARE_CONFIG["kernel_summary_legacy"]
 
-    keys = config["keys"]
+    keys = list(config["keys"])
+    for opt_key in config.get("optional_keys", []):
+        present = [opt_key in df.columns for df in dfs]
+        if all(present):
+            keys.append(opt_key)
+        elif any(present):
+            raise ValueError(
+                f"Column '{opt_key}' is present in some reports but not all. "
+                f"Cannot compare reports with different grouping granularities."
+            )
     diff_cols = config["diff_cols"]
     cols_to_delete = config["cols_to_delete"]
     sort_col = config["sort_col"]
@@ -260,6 +269,17 @@ def process_summary_sheet(
         if i > 0:
             cols_to_drop.append("Cumulative Percentage (%)")
         df.drop(columns=cols_to_drop, inplace=True, errors="ignore")
+
+    # Guard: verify merge keys uniquely identify rows to prevent cross-products.
+    for i, df in enumerate(dfs):
+        dupes = df[df.duplicated(subset=keys, keep=False)]
+        if not dupes.empty:
+            dupe_names = dupes[keys[0]].unique().tolist()[:5]
+            raise ValueError(
+                f"Merge keys {keys} are not unique in report {reports[i]}. "
+                f"Duplicate names (first 5): {dupe_names}. "
+                f"This would produce a cross-product merge."
+            )
 
     # Build comparison dataframe
     result = build_df_dff(
