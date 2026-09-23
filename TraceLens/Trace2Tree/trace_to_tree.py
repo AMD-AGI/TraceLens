@@ -114,6 +114,13 @@ class BaseTraceToTree(ABC):
         def event_filter(event):
             cat = self.event_to_category(event)
             event["cat"] = cat
+            if TraceEventUtils.TraceKeys.TimeEnd not in event:
+                ts = event.get("ts")
+                dur = event.get("dur")
+                if ts is not None and dur is not None:
+                    event[TraceEventUtils.TraceKeys.TimeEnd] = ts + dur
+                else:
+                    return False
             is_cpu_or_cuda_event = cat in {"cpu_op", "cuda_runtime", "cuda_driver"}
             is_python_event = cat == "python_function"
             return is_cpu_or_cuda_event or (add_python_func and is_python_event)

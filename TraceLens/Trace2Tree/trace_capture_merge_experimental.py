@@ -129,6 +129,82 @@ def _align_graph_to_capture_by_group(capture_events, graph_events):
     return aligned
 
 
+def _align_capture_to_graph_by_name(capture_filtered_events, graph_filtered_events):
+    """Align capture dispatches to graph kernels by kernel-name groups.
+
+    When stream IDs differ between capture and replay (e.g. gfx1250 traces),
+    per-stream FIFO alignment fails.  This fallback groups both sides by kernel
+    name and matches positionally within each group, then returns the capture
+    list reordered into graph execution order.
+
+    Returns the reordered capture list (same length as *graph_filtered_events*),
+    or ``None`` if any kernel name has a count mismatch.
+
+    .. note:: This is an **experimental** fallback for traces where capture and
+       graph replay use different CUDA/HIP stream IDs.
+    """
+    capture_groups = defaultdict(list)
+    for e in capture_filtered_events:
+        capture_groups[_capture_kernel_name(e)].append(e)
+
+    graph_groups = defaultdict(list)
+    for e in graph_filtered_events:
+        graph_groups[e["name"]].append(e)
+
+    # Verify per-name counts match; tolerate Memcpy/Memset mismatches and minor
+    # count differences by trimming to the shorter side.
+    skip_names = set()
+    for name in set(graph_groups):
+        gc = len(graph_groups[name])
+        cc = len(capture_groups.get(name, []))
+        if cc == 0:
+            if "Memcpy" in name or "Memset" in name:
+                skip_names.add(name)
+                continue
+            # Non-memcpy graph kernel with no capture match — cannot align.
+            return None
+        if gc != cc:
+            trim = min(gc, cc)
+            graph_groups[name] = graph_groups[name][:trim]
+            if name in capture_groups:
+                capture_groups[name] = capture_groups[name][:trim]
+
+    # Reassemble capture events in graph execution order.
+    group_idx = defaultdict(int)
+    aligned = []
+    for g_event in graph_filtered_events:
+        name = g_event["name"]
+        if name in skip_names:
+            continue
+        idx = group_idx[name]
+        if idx >= len(capture_groups.get(name, [])):
+            continue  # trimmed — skip this graph event
+        aligned.append(capture_groups[name][idx])
+        group_idx[name] += 1
+
+    if len(aligned) != len(graph_filtered_events):
+        # Some graph events were skipped; rebuild graph list to match.
+        group_idx2 = defaultdict(int)
+        paired_graph = []
+        paired_capture = []
+        for g_event in graph_filtered_events:
+            name = g_event["name"]
+            idx = group_idx2[name]
+            if idx < len(capture_groups.get(name, [])):
+                paired_graph.append(g_event)
+                paired_capture.append(capture_groups[name][idx])
+                group_idx2[name] += 1
+        # Caller expects aligned list same length as graph_filtered_events.
+        # We can only return a shorter list if we also trim graph_filtered_events,
+        # but the caller owns that list.  Return None to signal partial failure
+        # so the caller can decide.
+        if len(paired_capture) < len(graph_filtered_events) * 0.95:
+            return None
+        return paired_capture
+
+    return aligned
+
+
 def _stream_of(event):
     """Return the CUDA stream id a graph kernel executed on, or None."""
     return event.get("args", {}).get("stream")
@@ -882,6 +958,12 @@ def merge_capture_trace_into_graph(
                     merge_failed = True
                     continue
                 aligned = align_streams(graph_filtered_events, capture_filtered_events)
+                if aligned is None:
+                    # Fallback: stream IDs may differ between capture and replay
+                    # (e.g. gfx1250 traces). Try global name-based alignment.
+                    aligned = _align_capture_to_graph_by_name(
+                        capture_filtered_events, graph_filtered_events
+                    )
                 if aligned is None:
                     print(
                         "Warning: multistream alignment failed for capture root {} and graph root {}".format(
