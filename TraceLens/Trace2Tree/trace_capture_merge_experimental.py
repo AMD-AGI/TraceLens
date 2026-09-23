@@ -422,6 +422,86 @@ def finalize_non_gpu_paths(graph_tree):
             event.pop("non_gpu_path", None)
 
 
+def _backfill_capture_kernel_names(capture_tree, capture_roots, capture_root_data):
+    """Populate missing ``args.kernel`` on launch events whose kernels ran pre-capture.
+
+    During graph capture on some hardware (e.g. gfx1250), GPU kernel events
+    execute immediately but are recorded as top-level nodes with timestamps
+    *before* the capture window.  Their CPU-side launch events
+    (``hipDrvLaunchKernelEx``) appear inside the capture window but lack the
+    ``args.kernel`` field that downstream alignment relies on.
+
+    This function finds such orphaned kernel events in the full trace, matches
+    them positionally to the in-subtree launches that are missing kernel names,
+    and copies the kernel name across.
+    """
+    # Build a set of all subtree UIDs across all capture roots.
+    all_subtree_uids = set()
+    for cached_events, _ in capture_root_data:
+        all_subtree_uids.update(e[UID] for e in cached_events)
+
+    # Collect kernel events whose parent launch is outside every capture subtree.
+    orphan_kernels_by_parent_name = defaultdict(list)
+    for event in capture_tree.events:
+        if event.get("cat") != "kernel":
+            continue
+        parent_uid = event.get("parent")
+        if parent_uid is None or parent_uid in all_subtree_uids:
+            continue
+        parent = capture_tree.events_by_uid.get(parent_uid)
+        if parent is None:
+            continue
+        orphan_kernels_by_parent_name[parent["name"]].append(event)
+
+    if not orphan_kernels_by_parent_name:
+        return
+
+    # Sort each group by timestamp for positional matching.
+    for lst in orphan_kernels_by_parent_name.values():
+        lst.sort(key=lambda e: e["ts"])
+
+    total_backfilled = 0
+    for c_root, (cached_events, filtered_uids) in zip(capture_roots, capture_root_data):
+        launches_missing = [
+            e
+            for e in cached_events
+            if e[UID] in filtered_uids
+            and "kernel" not in e.get("args", {})
+            and "Memcpy" not in e.get("name", "")
+            and "Memset" not in e.get("name", "")
+        ]
+        if not launches_missing:
+            continue
+
+        # Group missing launches by their runtime name (e.g. hipDrvLaunchKernelEx)
+        # and match positionally against orphan kernels with the same parent name.
+        launches_by_name = defaultdict(list)
+        for lnch in launches_missing:
+            launches_by_name[lnch["name"]].append(lnch)
+
+        for launch_name, launches in launches_by_name.items():
+            orphans = orphan_kernels_by_parent_name.get(launch_name, [])
+            if len(orphans) != len(launches):
+                print(
+                    "Warning: orphan kernel count ({}) != launch count ({}) for {}; "
+                    "skipping kernel-name backfill".format(
+                        len(orphans), len(launches), launch_name
+                    )
+                )
+                continue
+            launches.sort(key=lambda e: e["ts"])
+            for lnch, kern in zip(launches, orphans):
+                lnch.setdefault("args", {})["kernel"] = kern["name"]
+                total_backfilled += 1
+
+    if total_backfilled:
+        print(
+            "Backfilled kernel names on {} capture launch events".format(
+                total_backfilled
+            )
+        )
+
+
 _CAPTURE_TREE_CACHE_MAX_SIZE = 8
 _capture_tree_cache: OrderedDict = OrderedDict()
 
@@ -476,6 +556,8 @@ def _get_cached_capture_tree(key, filepath):
         )
         filtered_uids = {e[UID] for e in capture_filtered_events}
         capture_root_data.append((capture_events, filtered_uids))
+
+    _backfill_capture_kernel_names(capture_tree, capture_roots, capture_root_data)
 
     _capture_tree_cache[key] = (capture_tree, capture_roots, capture_root_data)
     if len(_capture_tree_cache) > _CAPTURE_TREE_CACHE_MAX_SIZE:
