@@ -512,8 +512,10 @@ def find_capture_roots(capture_tree):
         root_events = [
             e
             for e in filtered
-            if e.get("parent", None) not in filtered_uids
-            and e.get("parent", None) is not None
+            if (
+                e.get("parent", None) is None
+                or e.get("parent", None) not in filtered_uids
+            )
             and (e.get("cat", "") == "cpu_op" or e.get("cat", "") == "python_function")
         ]
         new_uid = max(capture_tree.events_by_uid.keys()) + 1
