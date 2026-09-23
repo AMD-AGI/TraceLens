@@ -336,6 +336,90 @@ def harvest_meta_tensors(checkpoint: str | Path) -> MetaTensorIndex | None:
     return MetaTensorIndex(by_qualified=by_qualified, by_class_attr=by_class_attr)
 
 
+def _meta_int_attr(mod: Any, name: str) -> int | None:
+    """Return ``mod.name`` when it is a plain ``int`` (not ``bool``), else *None*."""
+    value = getattr(mod, name, None)
+    if isinstance(value, bool):
+        return None
+    return value if isinstance(value, int) else None
+
+
+def _attention_group_factor(mod: Any) -> int | None:
+    """Grouped-query repeat factor of one module, read off its live attributes.
+
+    Prefers the module's own precomputed ``num_key_value_groups`` (the value
+    ``repeat_kv`` is actually called with). When only the head counts are present,
+    derives ``num_attention_heads // num_key_value_heads`` from *those live
+    attributes* -- never from the static config, whose nominal
+    ``num_key_value_heads`` does not map to a real repeat factor for latent
+    attention. Returns *None* for a module that exposes neither.
+    """
+    factor = _meta_int_attr(mod, "num_key_value_groups")
+    if factor is not None:
+        return factor
+    heads = _meta_int_attr(mod, "num_attention_heads")
+    kv_heads = _meta_int_attr(mod, "num_key_value_heads")
+    if heads is not None and kv_heads:
+        return heads // kv_heads
+    return None
+
+
+def harvest_meta_attention_groups(checkpoint: str | Path) -> dict[str, int] | None:
+    """Read each attention module's grouped-query repeat factor off the meta tree.
+
+    Instantiates the model on the ``meta`` device and walks ``named_modules()``,
+    recording :func:`_attention_group_factor` for every module that exposes one,
+    keyed by the module's class name (the repeat factor is a per-class structural
+    fact). A later attention-wrapper expansion reads this to model ``repeat_kv`` with
+    the real factor instead of guessing from the config.
+
+    Runs **no forward pass** and applies **no rotary patch**, like
+    :func:`walk_meta_module_tree`: building the module tree needs only the reliable
+    instantiation half. Returns *None* when torch/transformers are unavailable or the
+    model cannot be instantiated (graceful degradation -- the caller leaves the factor
+    unstamped).
+    """
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        _log.info(
+            "torch and/or transformers not installed; "
+            "skipping meta-device attention-group walk"
+        )
+        return None
+
+    result = _instantiate_meta_robust(checkpoint)
+    if result is None:
+        return None
+    model, _config = result
+
+    try:
+        groups: dict[str, int] = {}
+        for _path, mod in model.named_modules():
+            factor = _attention_group_factor(mod)
+            if factor is None:
+                continue
+            cls = type(mod).__name__
+            existing = groups.get(cls)
+            if existing is not None and existing != factor:
+                _log.warning(
+                    "attention class %s exposes conflicting num_key_value_groups "
+                    "(%d vs %d); keeping the first",
+                    cls,
+                    existing,
+                    factor,
+                )
+                continue
+            groups.setdefault(cls, factor)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("Meta attention-group harvest failed: %s", exc)
+        return None
+    finally:
+        del model
+
+    return groups
+
+
 def trace_meta_shapes(
     checkpoint: str | Path,
     config: dict[str, Any] | None = None,

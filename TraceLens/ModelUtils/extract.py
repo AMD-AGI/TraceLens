@@ -845,6 +845,49 @@ def reconcile_live_module_groups(
     _finalize_layer_repeat_lines(spec)
 
 
+def reconcile_live_attention_groups(
+    spec: ArchitectureSpec, groups: dict[str, int] | None
+) -> None:
+    """Stamp each attention step's grouped-query repeat factor from the live tree.
+
+    ``groups`` maps an attention module's class name to its live
+    ``num_key_value_groups`` (see
+    :func:`TraceLens.ModelUtils.meta_trace.harvest_meta_attention_groups`). For every
+    class in the registry that carries a synthetic-attention step, record a
+    ``gqa_groups: N`` detail so a later wrapper expansion models ``repeat_kv`` with the
+    real factor instead of guessing from the (latent-attention-unreliable) config.
+
+    Inert for the rendered graph: the detail is not surfaced in the leaf's rendered
+    ``details`` (like ``wrapper_expand:``); it is plumbing a later consumer reads.
+    Leaves the spec untouched when *groups* is *None* (torch unavailable /
+    instantiation failed), mirroring :func:`reconcile_live_module_groups`. Idempotent
+    -- re-running strips any prior stamp first.
+    """
+    if not groups:
+        return
+    from TraceLens.ModelUtils.ast_analyze import SYNTHETIC_ATTENTION
+
+    registry = spec.class_registry or {}
+    for class_name, cls in registry.items():
+        step_details = getattr(cls, "forward_step_details", None)
+        if not step_details:
+            continue
+        details = step_details.get(SYNTHETIC_ATTENTION)
+        if not details:
+            continue
+        stripped = [line for line in details if not line.startswith("gqa_groups:")]
+        factor = groups.get(class_name)
+        if factor is None:
+            _log.info(
+                "no live num_key_value_groups for attention class %s; leaving the "
+                "grouped-query repeat factor unstamped",
+                class_name,
+            )
+        else:
+            stripped.append(f"gqa_groups: {factor}")
+        step_details[SYNTHETIC_ATTENTION] = stripped
+
+
 def _config_moe_layer(layer_idx: int, config: dict[str, Any]) -> bool:
     num_experts = _as_int(
         _get(

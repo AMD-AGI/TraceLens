@@ -15,9 +15,6 @@
 
 from __future__ import annotations
 
-import os
-
-
 import types
 
 import pytest
@@ -364,6 +361,82 @@ def test_walk_meta_module_tree_mixed_signatures(monkeypatch):
     assert layer_group.length == 8
     buckets = Counter(layer_group.signatures)
     assert sorted(buckets.values()) == [3, 5]
+
+
+# ---------------------------------------------------------------------------
+# harvest_meta_attention_groups (forward-free grouped-query repeat-factor walk)
+# ---------------------------------------------------------------------------
+
+
+def test_attention_group_factor_prefers_precomputed_groups():
+    assert (
+        mt._attention_group_factor(types.SimpleNamespace(num_key_value_groups=16)) == 16
+    )
+
+
+def test_attention_group_factor_derives_from_live_head_counts():
+    # No precomputed groups -> derive from the module's own head counts (not config).
+    mod = types.SimpleNamespace(num_attention_heads=64, num_key_value_heads=4)
+    assert mt._attention_group_factor(mod) == 16
+
+
+def test_attention_group_factor_rejects_bool_zero_and_absent():
+    assert (
+        mt._attention_group_factor(types.SimpleNamespace(num_key_value_groups=True))
+        is None
+    )
+    assert (
+        mt._attention_group_factor(
+            types.SimpleNamespace(num_attention_heads=64, num_key_value_heads=0)
+        )
+        is None
+    )
+    assert mt._attention_group_factor(types.SimpleNamespace()) is None
+
+
+def test_harvest_meta_attention_groups_by_class(monkeypatch):
+    class Attn(nn.Module):
+        def __init__(self, groups):
+            super().__init__()
+            self.num_key_value_groups = groups
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([Attn(16) for _ in range(3)])
+            self.other = nn.Linear(4, 4)  # no group attr -> skipped
+
+    monkeypatch.setattr(tt, "_instantiate_meta", lambda _c: (Model(), None))
+    assert mt.harvest_meta_attention_groups("x") == {"Attn": 16}
+
+
+def test_harvest_meta_attention_groups_conflict_keeps_first(monkeypatch):
+    class Attn(nn.Module):
+        def __init__(self, groups):
+            super().__init__()
+            self.num_key_value_groups = groups
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.a = Attn(16)
+            self.b = Attn(8)  # same class, different factor -> keep first
+
+    monkeypatch.setattr(tt, "_instantiate_meta", lambda _c: (Model(), None))
+    assert mt.harvest_meta_attention_groups("x") == {"Attn": 16}
+
+
+def test_harvest_meta_attention_groups_torch_unavailable(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "torch", None)
+    assert mt.harvest_meta_attention_groups("whatever") is None
+
+
+def test_harvest_meta_attention_groups_instantiation_failure(monkeypatch):
+    def _boom(_ckpt):
+        raise RuntimeError("cannot load")
+
+    monkeypatch.setattr(tt, "_instantiate_meta", _boom)
+    assert mt.harvest_meta_attention_groups("bad/checkpoint") is None
 
 
 # ---------------------------------------------------------------------------

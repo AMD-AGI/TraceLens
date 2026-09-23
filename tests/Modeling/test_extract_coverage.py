@@ -691,6 +691,44 @@ def test_reconcile_none_leaves_spec_unchanged():
     assert spec.meta_module_groups == []
 
 
+# ---------------------------------------------------------------------------
+# reconcile_live_attention_groups (grouped-query repeat factor from live tree)
+# ---------------------------------------------------------------------------
+
+
+def _attn_spec(details):
+    from TraceLens.ModelUtils.ast_analyze import SYNTHETIC_ATTENTION
+
+    cls = SimpleNamespace(forward_step_details={SYNTHETIC_ATTENTION: list(details)})
+    spec = ArchitectureSpec(name="x", model_type="x", num_hidden_layers=1)
+    spec.class_registry = {"Attn": cls}
+    return spec, cls, SYNTHETIC_ATTENTION
+
+
+def test_reconcile_live_attention_groups_stamps_and_is_idempotent():
+    spec, cls, key = _attn_spec(["kernel: sdpa", "outputs: 1"])
+    extract.reconcile_live_attention_groups(spec, {"Attn": 16})
+    assert "gqa_groups: 16" in cls.forward_step_details[key]
+    # Re-running with the same mapping does not duplicate the stamp.
+    extract.reconcile_live_attention_groups(spec, {"Attn": 16})
+    assert cls.forward_step_details[key].count("gqa_groups: 16") == 1
+
+
+def test_reconcile_live_attention_groups_omits_and_strips_stale_when_absent():
+    spec, cls, key = _attn_spec(["kernel: sdpa", "gqa_groups: 99"])
+    extract.reconcile_live_attention_groups(spec, {"Other": 4})
+    assert not any(
+        line.startswith("gqa_groups:") for line in cls.forward_step_details[key]
+    )
+
+
+def test_reconcile_live_attention_groups_none_mapping_noop():
+    original = ["kernel: sdpa", "outputs: 1"]
+    spec, cls, key = _attn_spec(original)
+    extract.reconcile_live_attention_groups(spec, None)
+    assert cls.forward_step_details[key] == original
+
+
 def test_reconcile_selects_primary_by_decoder_class_over_longest():
     spec = ArchitectureSpec(name="x", model_type="x", num_hidden_layers=0)
     spec.decoder_class = "TextLayer"
