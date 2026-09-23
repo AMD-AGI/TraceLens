@@ -404,3 +404,27 @@ def test_ops_summary_mismatched_parent_module_raises(tmp_path):
     config = SHEETS_COMPARE_CONFIG["ops_summary"]
     with pytest.raises(ValueError, match="parent_module"):
         process_summary_sheet([r1, r2], "ops_summary", ["base", "test"], config)
+
+
+def test_duplicate_merge_keys_raises(tmp_path):
+    """A grouping column not in the merge keys is caught by the duplicate guard."""
+    r1 = str(tmp_path / "report1")
+    r2 = str(tmp_path / "report2")
+    os.makedirs(r1, exist_ok=True)
+    os.makedirs(r2, exist_ok=True)
+    for path in [r1, r2]:
+        df = pd.DataFrame(
+            {
+                "name": ["aten::add", "aten::add"],
+                "unknown_grouping_col": ["GroupA", "GroupB"],
+                "total_direct_kernel_time_sum": [100, 100],
+                "total_direct_kernel_time_ms": [0.1, 0.1],
+                "Count": [5, 5],
+                "Percentage (%)": [50.0, 50.0],
+                "Cumulative Percentage (%)": [50.0, 100.0],
+            }
+        )
+        df.to_csv(os.path.join(path, "ops_summary.csv"), index=False)
+    config = SHEETS_COMPARE_CONFIG["ops_summary"]
+    with pytest.raises(ValueError, match="not unique"):
+        process_summary_sheet([r1, r2], "ops_summary", ["base", "test"], config)
