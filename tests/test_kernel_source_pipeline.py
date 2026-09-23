@@ -75,6 +75,8 @@ if _ks is None:
 # both import styles above expose the same names to the tests below.
 classify_patchability = _ks.classify_patchability
 is_editable_source = _ks.is_editable_source
+resolve_kernel = _ks.resolve_kernel
+resolve_kernel_source = _ks.resolve_kernel_source
 resolve_source_path = _ks.resolve_source_path
 resolve_triton_source = _ks.resolve_triton_source
 triton_def_line = _ks.triton_def_line
@@ -555,6 +557,68 @@ class TestNativeResolve:
         assert resolve_source_path("real_kernel", [root], index_obj=idx) is None
 
 
+class TestResolveKernel:
+    """``resolve_kernel`` -- the gate-then-resolve sequence as one call."""
+
+    def test_hit_reports_symbol_index(self, framework_tree):
+        res = resolve_kernel(
+            "paged_attention_kernel", search_paths=[framework_tree["root"]]
+        )
+        assert res.patchable is True
+        assert res.method == "symbol_index"
+        assert res.source_file.endswith("attention.cu")
+        assert res.line == framework_tree["paged_line"]
+
+    def test_gate_rejection_with_no_matching_source_reports_none(self, framework_tree):
+        # Tensile is gated non-patchable and has no .cu counterpart in the tree
+        # -> the lookup still runs but reports no source, same as before.
+        res = resolve_kernel(
+            "Cijk_Alik_Bljk_HHS", search_paths=[framework_tree["root"]]
+        )
+        assert res.patchable is False
+        assert res.kind == "tensile_precompiled"
+        assert res.method == "gate_non_patchable"
+        assert res.source_file == ""
+
+    def test_gate_rejection_still_reports_a_matching_source(self, framework_tree):
+        # A non-patchable verdict (via op_name) doesn't block the lookup: the
+        # dispatcher/wrapper source is still surfaced when the symbol matches
+        # something in the index, even though the kernel isn't editable.
+        res = resolve_kernel(
+            "paged_attention_kernel",
+            op_name="aten::miopen_convolution",
+            search_paths=[framework_tree["root"]],
+        )
+        assert res.patchable is False
+        assert res.kind == "miopen_precompiled"
+        assert res.method == "gate_non_patchable"
+        assert res.source_file.endswith("attention.cu")
+        assert res.line == framework_tree["paged_line"]
+
+    def test_gate_rejection_by_op_name(self):
+        res = resolve_kernel("some_conv_kernel", op_name="aten::miopen_convolution")
+        assert res.patchable is False
+        assert res.kind == "miopen_precompiled"
+        assert res.method == "gate_non_patchable"
+
+    def test_miss_reports_unresolved(self, framework_tree):
+        res = resolve_kernel(
+            "definitely_no_such_kernel_xyz", search_paths=[framework_tree["root"]]
+        )
+        assert res.patchable is False
+        assert res.method == "unresolved"
+        assert res.source_file == ""
+
+    def test_mangled_symbol_resolves_like_the_demangled_name(self, framework_tree):
+        res = resolve_kernel(
+            "_Z24reshape_and_cache_kernelPfPKf",
+            search_paths=[framework_tree["root"]],
+        )
+        assert res.patchable is True
+        assert res.method == "symbol_index"
+        assert res.line == framework_tree["reshape_line"]
+
+
 # ===========================================================================
 # Stage 6 -- Triton .py resolution
 # ===========================================================================
@@ -608,17 +672,31 @@ class TestTritonResolve:
         assert res.line == 88
 
     @pytest.mark.parametrize(
-        "kf",
+        "kf,expected_path,expected_line",
         [
-            "/tmp/torchinductor_u/abc/xyz.py:10:triton_poi_fused",
-            "/root/.cache/vllm/torch_compile_cache/h/inductor_cache/uq/c.py",
+            (
+                "/tmp/torchinductor_u/abc/xyz.py:10:triton_poi_fused",
+                "/tmp/torchinductor_u/abc/xyz.py",
+                10,
+            ),
+            (
+                "/root/.cache/vllm/torch_compile_cache/h/inductor_cache/uq/c.py",
+                "/root/.cache/vllm/torch_compile_cache/h/inductor_cache/uq/c.py",
+                None,
+            ),
         ],
     )
-    def test_resolve_triton_generated_is_non_patchable(self, kf):
+    def test_resolve_triton_generated_is_non_patchable(
+        self, kf, expected_path, expected_line
+    ):
+        # Non-patchable (generated, no durable source to rewrite), but the
+        # cache path itself is still known and reported for audit.
         res = resolve_triton_source(kf, symbol="triton_poi_fused_1")
         assert res.patchable is False
         assert res.kind == "triton_inductor_generated"
         assert res.method == "gate_non_patchable"
+        assert res.source_file == expected_path
+        assert res.line == expected_line
 
     def test_resolve_triton_empty(self):
         res = resolve_triton_source("")
@@ -705,6 +783,91 @@ class TestTritonResolve:
         assert res.method == "unresolved"
 
 
+class TestResolveKernelSource:
+    """``resolve_kernel_source`` -- one call, dispatching native vs Triton."""
+
+    def test_native_kernel_routes_to_resolve_kernel(self, framework_tree):
+        # No kernel_file -> native path; behaves exactly like resolve_kernel.
+        res = resolve_kernel_source(
+            "paged_attention_kernel", search_paths=[framework_tree["root"]]
+        )
+        assert res.patchable is True
+        assert res.method == "symbol_index"
+        assert res.source_file.endswith("attention.cu")
+
+    def test_triton_kernel_routes_to_resolve_triton_source(self):
+        # kernel_file set -> Triton path; kernel_name rides along as the symbol hint.
+        res = resolve_kernel_source(
+            "grouped_gemm", kernel_file="/workspace/repo/moe.py:120:grouped_gemm"
+        )
+        assert res.patchable is True
+        assert res.source_file == "/workspace/repo/moe.py"
+        assert res.line == 120
+        assert res.method == "trace_kernel_file"
+
+    def test_non_patchable_native_still_gets_a_source(self, framework_tree):
+        res = resolve_kernel_source(
+            "paged_attention_kernel",
+            op_name="aten::miopen_convolution",
+            search_paths=[framework_tree["root"]],
+        )
+        assert res.patchable is False
+        assert res.kind == "miopen_precompiled"
+        assert res.source_file.endswith("attention.cu")
+
+    def test_generated_triton_still_gets_a_source(self):
+        res = resolve_kernel_source(
+            "triton_poi_fused_1",
+            kernel_file="/tmp/torchinductor_u/abc.py:10:triton_poi_fused",
+        )
+        assert res.patchable is False
+        assert res.kind == "triton_inductor_generated"
+        assert res.source_file == "/tmp/torchinductor_u/abc.py"
+
+    def test_no_kernel_file_defaults_to_native_and_misses_a_triton_symbol(self):
+        # Older-PyTorch trace: no kernel_file recorded at all, and the caller
+        # didn't say it's Triton -> routes native, which can't find a .py def.
+        res = resolve_kernel_source("add_kernel_0d1d2d3de")
+        assert res.patchable is False
+        assert res.method == "unresolved"
+
+    def test_is_triton_flag_recovers_the_symbol_when_kernel_file_is_missing(
+        self, monkeypatch
+    ):
+        # Same older-PyTorch case, but the caller knows (from e.g. a library
+        # tag) that this is Triton -> is_triton routes to the .py fallback,
+        # which finds the def by symbol even with no kernel_file.
+        canned = index_mod.SourceIndex(
+            fingerprint="fp",
+            symbol_index={
+                "add_kernel": [{"file": "/workspace/vllm/moe.py", "line": 5}]
+            },
+        )
+        monkeypatch.setattr(index_mod, "load_or_build_triton", lambda _roots: canned)
+        res = resolve_kernel_source("add_kernel_0d1d2d3de", is_triton=True)
+        assert res.patchable is True
+        assert res.method == "triton_symbol_index"
+        assert res.source_file == "/workspace/vllm/moe.py"
+
+    def test_unknown_kind_falls_back_to_triton_symbol_when_native_misses(
+        self, monkeypatch
+    ):
+        # Caller doesn't know the kernel's kind at all (no kernel_file, no
+        # is_triton) -> native misses, and the automatic fallback still
+        # recovers the symbol via the Triton .py index.
+        canned = index_mod.SourceIndex(
+            fingerprint="fp",
+            symbol_index={
+                "add_kernel": [{"file": "/workspace/vllm/moe.py", "line": 5}]
+            },
+        )
+        monkeypatch.setattr(index_mod, "load_or_build_triton", lambda _roots: canned)
+        res = resolve_kernel_source("add_kernel_0d1d2d3de")
+        assert res.patchable is True
+        assert res.method == "triton_symbol_index"
+        assert res.source_file == "/workspace/vllm/moe.py"
+
+
 # ===========================================================================
 # Stage 7 -- discovery of installed framework trees
 # ===========================================================================
@@ -776,13 +939,28 @@ class TestContract:
         problems = validate_document(doc)
         assert any("unknown method" in p for p in problems)
 
-    def test_source_with_non_patchable_method_flagged(self):
+    def test_source_with_non_patchable_method_is_allowed(self):
+        # A non-editable compute core may still have a known dispatcher/wrapper
+        # source (or a generated file's cache path) -- not a contract violation.
+        entry = contract.make_entry(
+            kernel_id="k1",
+            name="x",
+            gpu_pct=1.0,
+            source_file="/dispatcher/wrapper.cu",
+            method=contract.METHOD_GATE_NON_PATCHABLE,
+        )
+        doc = contract.make_document([entry], generated_by="pytest")
+        assert validate_document(doc) == []
+
+    def test_source_with_unresolved_method_flagged(self):
+        # "unresolved" means nothing was found at all -- a source_file here is
+        # a genuine contract violation, unlike gate_non_patchable.
         entry = contract.make_entry(
             kernel_id="k1",
             name="x",
             gpu_pct=1.0,
             source_file="/should/not/be/here.cu",
-            method=contract.METHOD_GATE_NON_PATCHABLE,
+            method=contract.METHOD_UNRESOLVED,
         )
         doc = contract.make_document([entry], generated_by="pytest")
         problems = validate_document(doc)

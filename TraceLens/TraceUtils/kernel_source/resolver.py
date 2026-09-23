@@ -21,11 +21,12 @@ from pathlib import Path
 from . import index
 from .demangle import base_symbol
 from .editable import is_editable_source
-from .datatypes import SourceLocation
+from .datatypes import ResolveResult, SourceLocation
+from .patchability import classify_patchability
 
 log = logging.getLogger(__name__)
 
-__all__ = ["resolve_source_path"]
+__all__ = ["resolve_source_path", "resolve_kernel"]
 
 # Framework labels inferred from a resolved path, for SourceLocation.framework.
 # Kept in sync with index._KNOWN (the frameworks we locate by name).
@@ -109,3 +110,42 @@ def resolve_source_path(
 
     log.debug("active-finder: no editable/verified source for base %r", base)
     return None
+
+
+def resolve_kernel(
+    kernel_name: str,
+    *,
+    op_name: str = "",
+    search_paths: Sequence[str | Path] | None = None,
+) -> ResolveResult:
+    """Gate then resolve a native kernel in one call -- the sequence ``cli.main`` runs inline.
+
+    The gate verdict never skips the lookup, so a non-patchable kernel can
+    still come back with a resolved ``location``.
+
+    Args:
+        kernel_name: Device kernel symbol from the trace (mangled or plain).
+        op_name: Launching op name, passed to the gate (e.g. MIOpen detection).
+        search_paths: Optional native search roots; defaults to auto-discovery.
+
+    Returns:
+        A :class:`~.datatypes.ResolveResult`.
+    """
+    gate = classify_patchability(kernel_name, op_name=op_name)
+    location = resolve_source_path(kernel_name, search_paths)
+
+    if gate.patchable is False:
+        patchable, method, kind, reason = (
+            False,
+            "gate_non_patchable",
+            gate.kind,
+            gate.reason,
+        )
+    elif location is not None:
+        patchable, method, kind, reason = True, "symbol_index", "", ""
+    else:
+        patchable, method, kind, reason = False, "unresolved", "", "no live match"
+
+    return ResolveResult(
+        location=location, patchable=patchable, kind=kind, reason=reason, method=method
+    )
