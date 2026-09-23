@@ -48,17 +48,13 @@ Mapping runs as a three-stage pipeline, ordered by cost. The name-only gate runs
 first so that kernels with no possible source are rejected before any filesystem
 access.
 
-```mermaid
-flowchart TD
-    A[Kernel name from trace] --> B{Stage 1: Patchability gate<br/>name-only, no file access}
-    B -- "precompiled or generated" --> X[Non-patchable<br/>method = gate_non_patchable]
-    B -- "indeterminate" --> C{Has a Triton kernel_file<br/>or Triton symbol?}
-    C -- "no (native kernel)" --> D[Stage 2: Native resolve<br/>demangle → index → verify]
-    C -- "yes (Triton kernel)" --> E[Stage 3: Triton resolve<br/>kernel_file or .py fallback]
-    D -- "match" --> F[Source file + line<br/>method = symbol_index]
-    D -- "no match" --> G[Unresolved]
-    E -- "match" --> H[Source file + line<br/>method = triton_ast / trace_kernel_file / triton_symbol_index]
-    E -- "no match" --> G
+```text
+kernel name
+    → Stage 1 gate (name only)
+         → known precompiled/generated → not patchable
+         → otherwise
+              → native  → Stage 2 → file+line  or  unresolved
+              → Triton  → Stage 3 → file+line  or  unresolved
 ```
 
 The command line reports every mapping as a `ResolveResult` (see
