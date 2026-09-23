@@ -7560,6 +7560,62 @@ def _map_element_step_attr(node: ast.AST) -> str | None:
     return None
 
 
+def _submodule_rooted_trailing_ops(
+    value: ast.AST, chain: list[str]
+) -> list[str]:
+    """Synthetic op attrs for the trailing inline tensor-method chain of an assignment,
+    but only when that chain wraps the submodule call the provenance chain already ends on.
+
+    A variable produced by ``self.q_b_proj(q_resid).view(shape).transpose(1, 2)`` really
+    ends at the ``transpose`` op, but the submodule-call provenance chain stops at
+    ``q_b_proj`` and drops the ``.view().transpose()`` -- so a consumer that docks on the
+    chain's last node (the attention kernel reading ``query_states``) attaches to the
+    pre-view projection (3-D ``[B, S, H*D]``) instead of the real 4-D ``[B, H, S, D]``
+    result. Walk the outer method-call chain and rebuild the same
+    ``@op_l{line}_c{col}_{slug}`` ids the forward extractor stamps (``_operation_id``), so
+    the provenance chain can be extended to the true final producer.
+
+    Structural guard: the peeled inner base must be a ``self.<submodule>(...)`` call whose
+    attribute is already the tail of ``chain``. This ties the trailing ops to the *same*
+    value the chain represents (the ``x = self.proj(...).view().transpose()`` shape),
+    and excludes a later separate statement that re-derives the variable from a bare name
+    (e.g. vision's ``query_states = query_states.transpose(0, 1).unsqueeze(0)``, whose
+    peeled base is a ``Name`` -- its ports reach the kernel by a declared-input route that
+    must not be perturbed). Keyed on the extractor's own emitted-op table
+    (``_TENSOR_METHOD_LABELS``), not a fix-specific op allow-list. Returned in application
+    order (innermost first); ids for ops the extractor suppressed never match
+    ``attr_last_index`` at docking time and are simply skipped.
+    """
+    if not chain:
+        return []
+    collected: list[str] = []
+    node = value
+    while (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _TENSOR_METHOD_LABELS
+        and not _is_self_attr(node.func, node.func.attr)
+    ):
+        label = _TENSOR_METHOD_LABELS[node.func.attr]
+        slug = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+        line = getattr(node, "lineno", 0)
+        col = getattr(node, "col_offset", 0)
+        collected.append(f"{FORWARD_OPERATION_PREFIX}l{line}_c{col}_{slug}")
+        node = node.func.value
+    if not collected:
+        return []
+    # The peeled base must be the submodule call the chain already terminates on.
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and _is_self_attr(node.func, node.func.attr)
+        and node.func.attr in chain
+    ):
+        return []
+    collected.reverse()
+    return collected
+
+
 def _record_assign_targets(
     node: ast.Assign,
     stmt_calls: list[str],
@@ -8383,8 +8439,20 @@ def _capture_attention_inputs(
     var_chains: dict[str, list[str]],
     attention_inputs: dict[str, list[str]],
     forward_input_names: set[str] | None = None,
+    name_value_ast: dict[str, ast.expr] | None = None,
 ) -> None:
     forward_input_names = forward_input_names or set()
+    name_value_ast = name_value_ast or {}
+
+    def _extended(arg_id: str, chain: list[str]) -> list[str]:
+        rhs = name_value_ast.get(arg_id)
+        if rhs is None:
+            return chain
+        trailing = _submodule_rooted_trailing_ops(rhs, chain)
+        if not trailing:
+            return chain
+        return _dedupe_chain(chain + trailing)
+
     for call in ast.walk(node):
         if not isinstance(call, ast.Call):
             continue
@@ -8403,7 +8471,7 @@ def _capture_attention_inputs(
                 continue
             chain = var_chains.get(arg.id, [])
             if chain:
-                attention_inputs[arg.id] = list(chain)
+                attention_inputs[arg.id] = _extended(arg.id, list(chain))
         # Packed-attention metadata (``cu_seq_lens_q=cu_seqlens``,
         # ``max_length_q=max_seqlen``) reaches the kernel by keyword and is a real
         # kernel input, but it arrives as a forward parameter of the attention
@@ -8947,7 +9015,7 @@ def _walk_forward_stmt(
             forward_step_details,
         )
         _capture_attention_inputs(
-            node, var_chains, attention_inputs, forward_input_names
+            node, var_chains, attention_inputs, forward_input_names, name_value_ast
         )
         _capture_call_side_inputs(
             node, var_chains, forward_input_names, side_inputs, calls
@@ -8971,7 +9039,7 @@ def _walk_forward_stmt(
             forward_step_details,
         )
         _capture_attention_inputs(
-            node, var_chains, attention_inputs, forward_input_names
+            node, var_chains, attention_inputs, forward_input_names, name_value_ast
         )
         _capture_call_side_inputs(
             node, var_chains, forward_input_names, side_inputs, calls
@@ -8995,7 +9063,7 @@ def _walk_forward_stmt(
             forward_step_details,
         )
         _capture_attention_inputs(
-            node, var_chains, attention_inputs, forward_input_names
+            node, var_chains, attention_inputs, forward_input_names, name_value_ast
         )
         _capture_call_side_inputs(
             node, var_chains, forward_input_names, side_inputs, calls
@@ -9038,7 +9106,7 @@ def _walk_forward_stmt(
             forward_step_details,
         )
         _capture_attention_inputs(
-            node, var_chains, attention_inputs, forward_input_names
+            node, var_chains, attention_inputs, forward_input_names, name_value_ast
         )
         _capture_call_side_inputs(
             node, var_chains, forward_input_names, side_inputs, calls

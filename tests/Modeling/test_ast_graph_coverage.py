@@ -493,6 +493,82 @@ class Transformer:
     assert {"model.py", "empty.py"} == set(merged.source_files)
 
 
+def test_attention_input_chain_extends_to_inline_view_transpose():
+    """A query built inline off a submodule (``self.q_proj(x).view(s).transpose(1, 2)``)
+    docks the kernel on its true 4-D producer -- the trailing ``.view().transpose()`` ops
+    -- not on the pre-view 3-D projection. A variable re-derived in a *separate* statement
+    from a bare name (``v = v.transpose(1, 2)``) must NOT be extended: those ops are wired
+    by the declared-input route and appending them would perturb it.
+    """
+    source = """
+def apply_rotary_emb(x, freqs):
+    return x
+
+class FancyAttention:
+    def __init__(self):
+        self.q_proj = Linear()
+        self.k_proj = Linear()
+        self.v_proj = Linear()
+    def forward(self, hidden_states, mask):
+        query_states = self.q_proj(hidden_states).view(shape).transpose(1, 2)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+        value_states = value_states.transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        attn_output, attn_weights = attention_interface(
+            self, query_states, key_states, value_states, mask
+        )
+        return attn_output
+
+class DecoderLayer:
+    def __init__(self, config, layer_idx):
+        self.input_layernorm = RMSNorm()
+        self.self_attn = FancyAttention()
+        self.mlp = GatedMLP()
+    def forward(self, hidden_states, mask):
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.self_attn(hidden_states, mask)
+        hidden_states += self.mlp(residual)
+        return hidden_states
+
+class Transformer:
+    def __init__(self, config):
+        self.embed_tokens = Embedding()
+        self.layers = ModuleList([DecoderLayer(config, i) for i in range(config.depth)])
+        self.norm = RMSNorm()
+        self.lm_head = Linear()
+    def forward(self, input_ids):
+        return self.lm_head(self.norm(self.embed_tokens(input_ids)))
+"""
+    analysis = aa.analyze_source(
+        source,
+        filename="synthetic_inline_qkv.py",
+        config={"depth": 2},
+        all_tensor_ops=True,
+    )
+    attention = analysis.class_registry["FancyAttention"]
+    query_chain = attention.attention_inputs["query_states"]
+    # Chain reaches the true producer: ends on the transpose op, with the view op
+    # immediately before it, both rooted on the ``q_proj`` submodule call.
+    assert query_chain[-1].startswith(aa.FORWARD_OPERATION_PREFIX)
+    assert query_chain[-1].endswith("_transpose")
+    assert query_chain[-2].startswith(aa.FORWARD_OPERATION_PREFIX)
+    assert query_chain[-2].endswith("_view")
+    assert "q_proj" in query_chain
+
+    # A plain submodule projection with no inline post-processing is left as-is.
+    assert attention.attention_inputs["key_states"][-1] == "k_proj"
+
+    # The separate-statement transpose is NOT folded into the chain (guard on the
+    # peeled base being the chain's own submodule call, not a bare name).
+    value_chain = attention.attention_inputs["value_states"]
+    assert not any(
+        attr.startswith(aa.FORWARD_OPERATION_PREFIX) and attr.endswith("_transpose")
+        for attr in value_chain
+    )
+
+
 def test_analyze_sources_ranks_decoder_candidates_across_files():
     """Multimodal repos put the vision tower ahead of the language decoder."""
     vision = """
