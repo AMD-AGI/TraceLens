@@ -433,12 +433,15 @@ def generate_compare_perf_reports_pytorch(
 
     # Perform kernel_summary if specified
     if "kernel_summary" in sheets or "all" in sheets:
-        if "kernel_summary" not in report_sheet_names:
-            raise ValueError(f"kernel_summary sheet not found in {reports[0]}")
-        sheet_to_load = "kernel_summary"
-        config = SHEETS_COMPARE_CONFIG[sheet_to_load]
-        ops = process_summary_sheet(reports, sheet_to_load, tags, config)
-        results[sheet_to_load] = ops
+        if "kernel_summary" in report_sheet_names:
+            config = SHEETS_COMPARE_CONFIG["kernel_summary"]
+            ops = process_summary_sheet(reports, "kernel_summary", tags, config)
+            results["kernel_summary"] = ops
+        elif "kernel_summary" in sheets:
+            raise ValueError(
+                f"kernel_summary sheet not found in {reports[0]}. "
+                "This sheet requires --enable_kernel_summary at report-generation time."
+            )
 
     # ── Ops ALL (split into 3 sheets) ─────────────────────────────────────────
     main_sheets = [
