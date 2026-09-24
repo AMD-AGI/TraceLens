@@ -356,17 +356,21 @@ In addition, `--profile` must be set to enable xDiT profiling.
 ## Split inference traces (optional)
 
 Large traces can be split into steady-state windows or per-step files before
-report generation, using `TraceLens.TraceUtils.split_inference_trace_annotation`.
+report generation, using `TraceLens.TraceUtils.trace_split.main`.
 Splitting assumes vLLM v0.14 or higher (tested through v0.24), SGLang v0.5.9, or
 ATOM 0.1.3 or higher, or use of the provided patches, so that annotations (batch
 size, request counts, and so on) are present in the execution-step metadata.
+Traces without serving annotations (training, diffusion, or graphed inference)
+are split generically -- for the full detection, extraction, steady-state, and
+phase-division mechanism, see
+[Split traces into iterations, steady state, and phases](split-traces.md).
 
 **Find the steady-state region** (highest concurrency) and separate
 prefill-decode from decode-only steps. This is the recommended option for large
 traces where you want a few representative steps extracted automatically:
 
 ```bash
-python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz \
+python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \
     -o ./steady_state_analysis \
     --find-steady-state --num-steps 256
 ```
@@ -398,7 +402,7 @@ and uses it as the reference ratio, overriding the empirical estimate.
 capture a representative mix:
 
 ```bash
-python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz \
+python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \
     -o ./steady_state_analysis \
     --find-steady-state --num-steps 256 \
     --CONC 32 --OSL 1024 --R 0.8
@@ -408,14 +412,14 @@ python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz \
 use when you want to analyze an isolated execution step:
 
 ```bash
-python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz \
+python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \
     -o ./output --store-single-iteration
 ```
 
 **Limit the steady-state search to a window** with `--iterations`:
 
 ```bash
-python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz \
+python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \
     -o ./output --iterations 10:20 --find-steady-state --num-steps 256 \
     --CONC 32 --OSL 1024 --R 0.8
 ```

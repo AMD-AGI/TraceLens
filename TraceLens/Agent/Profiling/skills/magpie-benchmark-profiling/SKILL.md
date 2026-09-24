@@ -37,7 +37,7 @@ Follow **[reference.md](reference.md)** for every step (SSH/conda prompts, `buil
 3. Run: python -m Magpie benchmark --benchmark-config <yaml> (long-running; monitor via docker)
 4. Monitor container / logs on the remote node
 5. Verify trace files and GPU kernel categories in torch_trace/
-6. split_inference_trace_annotation on rank-0 trace; print (do not run) generate_perf_report_pytorch_inference.py command
+6. trace_split.main on rank-0 trace; print (do not run) generate_perf_report_pytorch_inference.py command
 ```
 
 ## Rules
