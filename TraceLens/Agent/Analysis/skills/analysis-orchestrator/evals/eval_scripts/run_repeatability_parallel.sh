@@ -28,7 +28,7 @@ fi
 # Passing 'standalone' or 'comparative' (or COMPARISON_SCOPE=standalone|comparative)
 # restricts the run to that one scope only (gen-ref + repeatability + report
 # over just that scope). Golden references are always regenerated from scratch
-# as local directories under agent_evals/Analysis/analysis_tests/ before the
+# as local directories under TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/ before the
 # repeatability stage, so the repeatability evals compare against the freshly
 # generated references.
 #
@@ -120,7 +120,7 @@ PI_VENV_PREFIX="use venv_tracelens for all commands and tool calls. "
 # Paths (REPO_ROOT may differ from the shell cwd)
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="$REPO_ROOT/TraceLens/Agent/Analysis"
-EVALS_DIR="$REPO_ROOT/agent_evals/Analysis"
+EVALS_DIR="$REPO_ROOT/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GENERATE_REF_SCRIPT="$SCRIPT_DIR/generate_ref.sh"
@@ -191,7 +191,8 @@ expand_archive() {
     local target="$EVALS_DIR/analysis_tests/$name"
     if [[ -f "$archive" ]] && [[ ! -d "$target" ]]; then
         echo "Expanding ${name}.tar.gz..."
-        tar xzf "$archive" -C "$REPO_ROOT"
+        # Archives store paths as agent_evals/Analysis/analysis_tests/...
+        tar xzf "$archive" -C "$EVALS_DIR" --strip-components=2
         echo "Done."
     fi
 }
@@ -407,7 +408,7 @@ _spawn_jobs() {
 #
 # Delegates to generate_ref.sh so the golden references are produced with the
 # exact same flow, written as local analysis_output_ref/ directories under
-# agent_evals/Analysis/analysis_tests/. generate_ref.sh already removes each
+# TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/. generate_ref.sh already removes each
 # case's existing reference before regenerating it.
 # ---------------------------------------------------------------------------
 

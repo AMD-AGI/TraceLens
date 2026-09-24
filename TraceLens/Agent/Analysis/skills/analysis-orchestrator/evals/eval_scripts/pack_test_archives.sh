@@ -10,13 +10,13 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Pack analysis_tests/{unit,e2e}_tests_{standalone,comparative} into tar.gz
 # archives that generate_ref.sh and run_repeatability_parallel.sh extract with:
-#   tar xzf <archive> -C "$REPO_ROOT"
+#   tar xzf <archive> -C "$EVALS_DIR" --strip-components=2
 #
 # Usage (from repo root):
-#   bash agent_evals/Analysis/eval_scripts/pack_test_archives.sh
-#   bash agent_evals/Analysis/eval_scripts/pack_test_archives.sh standalone
-#   bash agent_evals/Analysis/eval_scripts/pack_test_archives.sh unit comparative
-#   bash agent_evals/Analysis/eval_scripts/pack_test_archives.sh unit_tests_standalone
+#   bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/pack_test_archives.sh
+#   bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/pack_test_archives.sh standalone
+#   bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/pack_test_archives.sh unit comparative
+#   bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/pack_test_archives.sh unit_tests_standalone
 # ---------------------------------------------------------------------------
 
 usage() {
@@ -35,13 +35,13 @@ Arguments can be mixed:
   unit_tests_standalone        that archive only (same for the other three names)
 
 Archives are written next to the source directories under
-agent_evals/Analysis/analysis_tests/. Intermediate analysis_output/ trees and
+TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/. Intermediate analysis_output/ trees and
 analysis_stream.ndjson files are excluded; analysis_output_ref/ is kept.
 EOF
 }
 
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-EVALS_DIR="$REPO_ROOT/agent_evals/Analysis"
+EVALS_DIR="$REPO_ROOT/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals"
 TESTS_DIR="$EVALS_DIR/analysis_tests"
 
 ALL_ARCHIVES=(
@@ -107,7 +107,7 @@ pack_one() {
     local name="$1"
     local src="$TESTS_DIR/$name"
     local archive="$TESTS_DIR/${name}.tar.gz"
-    local rel="agent_evals/Analysis/analysis_tests/$name"
+    local rel="analysis_tests/$name"
 
     if [[ ! -d "$src" ]]; then
         echo "ERROR: source directory not found: $src" >&2
@@ -116,11 +116,14 @@ pack_one() {
 
     echo "Packing $rel -> $archive"
 
+    # Archive members keep the legacy agent_evals/Analysis/ prefix, which the
+    # extractors strip and the skill's evals.json prompt refers to.
     tar -czf "$archive" \
         --exclude='analysis_output' \
         --exclude='analysis_stream.ndjson' \
         --exclude='__pycache__' \
-        -C "$REPO_ROOT" \
+        --transform='s,^,agent_evals/Analysis/,' \
+        -C "$EVALS_DIR" \
         "$rel"
 
     ls -lh "$archive"
