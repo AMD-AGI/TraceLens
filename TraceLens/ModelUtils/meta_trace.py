@@ -63,9 +63,198 @@ def _repair_missing_config_attr(config: Any, attr_name: str) -> bool:
     return patched
 
 
-def _instantiate_meta_robust(checkpoint: str | Path) -> tuple[Any, Any] | None:
-    """Instantiate the model on the ``meta`` device, tolerating the two common
-    ways an otherwise-fine model kills the shape-inference backup.
+def _meta_build_with_attr_repair(
+    config: Any, builders: list[Any], checkpoint: str | Path
+) -> Any | None:
+    """Build a model on the ``meta`` device from one of ``builders``, filling a
+    neutral default for each config attribute the modeling code demands but that
+    the config lacks.
+
+    Each entry in ``builders`` is a callable ``config -> model`` (e.g. an
+    ``AutoModel*.from_config`` partial, or a concrete class' ``_from_config``).
+    They are tried in order on each pass; an :class:`AttributeError` naming a
+    missing config attribute triggers a generic repair
+    (:func:`_repair_missing_config_attr`, the name parsed from the error — never
+    hardcoded) and a retry. Returns the built model, or *None* when the model is
+    genuinely uninstantiable here (missing optional dependency, unrepairable
+    attribute, or a non-attribute failure).
+    """
+    import torch
+
+    repaired: set[str] = set()
+    for _attempt in range(_MAX_CONFIG_ATTR_REPAIRS + 1):
+        attr_err: Exception | None = None
+        other_err: Exception | None = None
+        for builder in builders:
+            try:
+                with torch.device("meta"):
+                    model = builder(config)
+                model.eval()
+                return model
+            except AttributeError as exc:
+                # A missing config attribute — potentially repairable; keep
+                # trying the remaining builders first in case one avoids it.
+                attr_err = exc
+                continue
+            except (ValueError, KeyError) as exc:
+                other_err = exc
+                continue
+            except Exception as exc:  # noqa: BLE001
+                # Missing optional dependency or any other non-repairable
+                # failure: this model is genuinely uninstantiable here.
+                _log.warning(
+                    "Could not instantiate %s on meta device: %s", checkpoint, exc
+                )
+                return None
+
+        # No builder succeeded this pass.
+        if attr_err is None:
+            _log.warning(
+                "Could not instantiate %s on meta device: %s",
+                checkpoint,
+                other_err,
+            )
+            return None
+        match = _MISSING_ATTR_RE.search(str(attr_err))
+        if match is None:
+            _log.warning(
+                "Could not instantiate %s on meta device: %s", checkpoint, attr_err
+            )
+            return None
+        attr_name = match.group(1)
+        if attr_name in repaired or not _repair_missing_config_attr(config, attr_name):
+            _log.warning(
+                "Could not repair missing config attribute %r for %s: %s",
+                attr_name,
+                checkpoint,
+                attr_err,
+            )
+            return None
+        repaired.add(attr_name)
+        _log.info(
+            "Set a neutral default for missing config attribute %r on %s; retrying",
+            attr_name,
+            checkpoint,
+        )
+
+    _log.warning(
+        "Exhausted config-attribute repairs instantiating %s on meta device",
+        checkpoint,
+    )
+    return None
+
+
+def _instantiate_text_submodel_meta(
+    config: Any, auto_classes: list[Any], checkpoint: str | Path
+) -> tuple[Any, Any] | None:
+    """Fallback for a composite / multimodal config whose *full* meta build fails
+    inside a non-text sub-tower (e.g. a vision tower reading a config attribute
+    that lives only on its own sub-config, or a rope field the neutral-default
+    repair cannot synthesise).
+
+    Builds only the recognised **text** sub-model, keyed entirely on the config's
+    OWN declared structure — never on a model name or a specific attribute:
+
+    * the text sub-config is taken via the standard
+      :meth:`PreTrainedConfig.get_text_config`; if that is not a *distinct*
+      sub-config (text-only configs return ``self``) there is nothing to fall
+      back to and this returns *None*;
+    * the text model class is the ``*ForCausalLM`` class defined alongside the
+      full model class the top config already resolves to — the conventional
+      home of a multimodal model's text backbone;
+    * the sub-config is re-typed through that model class' declared
+      :attr:`config_class` (``config_class(**sub_config.to_dict())``), so the
+      concrete config ``__init__`` recomputes the *derived, structured* fields the
+      modeling code reads — e.g. ``rope_parameters`` (from ``rope_theta`` /
+      ``rope_scaling``) and the per-layer ``layer_types`` list — which the scalar
+      neutral-default repair cannot synthesise. Any residual missing *scalar*
+      attribute is still covered by that repair.
+
+    Returns ``(text_model, text_config)`` or *None*.
+    """
+    import sys
+
+    from transformers import AutoConfig
+
+    # Reload a *pristine* config: the caller's ``config`` and its shared
+    # sub-configs may already carry neutral ``1`` defaults written by the failed
+    # full-model repair pass, which would defeat the rope normalisation below.
+    try:
+        config = AutoConfig.from_pretrained(str(checkpoint), trust_remote_code=True)
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        text_config = config.get_text_config()
+    except Exception:  # noqa: BLE001
+        return None
+    if text_config is None or text_config is config:
+        return None
+
+    # Locate the full model class the top config resolves to, then its sibling
+    # text ``*ForCausalLM`` class(es) in the same modeling module.
+    full_cls = None
+    for auto_cls in auto_classes:
+        mapping = getattr(auto_cls, "_model_mapping", None)
+        if mapping is None:
+            continue
+        try:
+            if type(config) in mapping:
+                full_cls = mapping[type(config)]
+                break
+        except Exception:  # noqa: BLE001
+            continue
+    if full_cls is None:
+        return None
+    module = sys.modules.get(full_cls.__module__)
+    if module is None:
+        return None
+    text_classes = [
+        obj
+        for name in dir(module)
+        if name.endswith("ForCausalLM")
+        for obj in (getattr(module, name, None),)
+        if isinstance(obj, type)
+    ]
+    if not text_classes:
+        return None
+
+    from TraceLens.ModelUtils.torch_trace import _patch_config
+
+    text_dict = text_config.to_dict()
+    for text_cls in text_classes:
+        # Re-type the sub-config through the model class' own config class so its
+        # __init__ recomputes the derived/structured fields; fall back to the raw
+        # sub-config if that class carries none or construction fails.
+        config_cls = getattr(text_cls, "config_class", None)
+        typed_config = text_config
+        if config_cls is not None:
+            try:
+                typed_config = config_cls(**text_dict)
+            except Exception:  # noqa: BLE001
+                typed_config = text_config
+        _patch_config(typed_config)
+        try:
+            typed_config.standardize_rope_params()
+        except Exception:  # noqa: BLE001
+            pass
+        builder = lambda cfg, cls=text_cls: cls._from_config(cfg)  # noqa: E731
+        model = _meta_build_with_attr_repair(typed_config, [builder], checkpoint)
+        if model is not None:
+            _log.info(
+                "Instantiated TEXT sub-model %s on meta for %s "
+                "(full-model build failed)",
+                type(model).__name__,
+                checkpoint,
+            )
+            return model, typed_config
+    return None
+
+
+def _instantiate_meta_robust(
+    checkpoint: str | Path, *, text_submodel_fallback: bool = False
+) -> tuple[Any, Any] | None:
+    """Instantiate the model on the ``meta`` device, tolerating the common ways an
+    otherwise-fine model kills the shape-inference backup.
 
     The torch backend's :func:`_instantiate_meta` lets an ``AttributeError`` from
     a config key the modeling code expects but that is absent (e.g. a VLM whose
@@ -79,12 +268,19 @@ def _instantiate_meta_robust(checkpoint: str | Path) -> tuple[Any, Any] | None:
     * degrades to *None* (no raise) for a genuinely uninstantiable model, so the
       caller simply falls back to whatever partial shape info it already has.
 
+    When ``text_submodel_fallback`` is set and the *full* build still fails, it
+    additionally retries building only the recognised TEXT sub-model
+    (:func:`_instantiate_text_submodel_meta`) — for a composite / multimodal
+    config whose failure is confined to a non-text sub-tower. This is opt-in
+    because a text-only stand-in is the right harvest target for structural facts
+    like the attention grouping, but would mislead the full-model shape tracers.
+
     It reuses the importable :func:`_patch_config` / :func:`_resolve_auto_classes`
     so the Auto-class selection stays identical to :func:`_instantiate_meta`.
     Returns ``(model, config)`` or *None*.
     """
     try:
-        import torch
+        import torch  # noqa: F401
         from transformers import AutoConfig
 
         from TraceLens.ModelUtils.torch_trace import (
@@ -117,69 +313,19 @@ def _instantiate_meta_robust(checkpoint: str | Path) -> tuple[Any, Any] | None:
         return None
 
     auto_classes = _resolve_auto_classes(config)
-    repaired: set[str] = set()
+    builders = [
+        (lambda cfg, ac=ac: ac.from_config(cfg, trust_remote_code=True))
+        for ac in auto_classes
+    ]
+    model = _meta_build_with_attr_repair(config, builders, checkpoint)
+    if model is not None:
+        return model, config
 
-    for _attempt in range(_MAX_CONFIG_ATTR_REPAIRS + 1):
-        attr_err: Exception | None = None
-        other_err: Exception | None = None
-        for auto_cls in auto_classes:
-            try:
-                with torch.device("meta"):
-                    model = auto_cls.from_config(config, trust_remote_code=True)
-                model.eval()
-                return model, config
-            except AttributeError as exc:
-                # A missing config attribute — potentially repairable; keep
-                # trying the remaining auto classes first in case one avoids it.
-                attr_err = exc
-                continue
-            except (ValueError, KeyError) as exc:
-                other_err = exc
-                continue
-            except Exception as exc:  # noqa: BLE001
-                # Missing optional dependency or any other non-repairable
-                # failure: this model is genuinely uninstantiable here.
-                _log.warning(
-                    "Could not instantiate %s on meta device: %s", checkpoint, exc
-                )
-                return None
-
-        # No auto class succeeded this pass.
-        if attr_err is None:
-            _log.warning(
-                "Could not instantiate %s on meta device: %s",
-                checkpoint,
-                other_err,
-            )
-            return None
-        match = _MISSING_ATTR_RE.search(str(attr_err))
-        if match is None:
-            _log.warning(
-                "Could not instantiate %s on meta device: %s", checkpoint, attr_err
-            )
-            return None
-        attr_name = match.group(1)
-        if attr_name in repaired or not _repair_missing_config_attr(
-            config, attr_name
-        ):
-            _log.warning(
-                "Could not repair missing config attribute %r for %s: %s",
-                attr_name,
-                checkpoint,
-                attr_err,
-            )
-            return None
-        repaired.add(attr_name)
-        _log.info(
-            "Set a neutral default for missing config attribute %r on %s; retrying",
-            attr_name,
-            checkpoint,
-        )
-
-    _log.warning(
-        "Exhausted config-attribute repairs instantiating %s on meta device",
-        checkpoint,
-    )
+    # The full-model build failed. When the caller opts in, retry building only
+    # the recognised TEXT sub-model — for a composite / multimodal config whose
+    # failure is confined to a non-text sub-tower.
+    if text_submodel_fallback:
+        return _instantiate_text_submodel_meta(config, auto_classes, checkpoint)
     return None
 
 
@@ -388,7 +534,7 @@ def harvest_meta_attention_groups(checkpoint: str | Path) -> dict[str, int] | No
         )
         return None
 
-    result = _instantiate_meta_robust(checkpoint)
+    result = _instantiate_meta_robust(checkpoint, text_submodel_fallback=True)
     if result is None:
         return None
     model, _config = result

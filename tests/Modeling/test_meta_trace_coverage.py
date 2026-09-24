@@ -587,3 +587,114 @@ def test_instantiate_meta_robust_gives_up_on_unrepairable_attr(monkeypatch):
     )
 
     assert mt._instantiate_meta_robust("some/model") is None
+
+
+def test_instantiate_meta_robust_text_submodel_fallback(monkeypatch):
+    """A composite/multimodal config whose *full* build fails inside a non-text
+    sub-tower falls back to building only the recognised TEXT sub-model.
+
+    Guards the MiniMax vision-tower regression: the full build dies in the vision
+    tower, so the fallback must (a) take the declared text sub-config via
+    ``get_text_config``, (b) re-type it through the text ``*ForCausalLM`` class'
+    ``config_class`` so derived/structured fields (which a scalar neutral default
+    could not synthesise) are recomputed, and (c) build the text model. It must
+    stay opt-in: without the flag the shared instantiator still returns ``None``.
+    """
+    import sys
+
+    import transformers
+
+    class _RawTextSubConfig:
+        """The degraded sub-config as loaded: lacks the structured field."""
+
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+        def to_dict(self):
+            return dict(self.__dict__)
+
+    class _TypedTextConfig:
+        """The properly-typed text config: its __init__ recomputes a structured
+        (list) field the modeling code indexes — mirrors ``layer_types`` /
+        ``rope_parameters``."""
+
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+            self.derived_structured = [0, 0]
+
+        def to_dict(self):
+            return dict(self.__dict__)
+
+    class _TopConfig:
+        def __init__(self):
+            self._text = _RawTextSubConfig(hidden=8)
+
+        def get_text_config(self):
+            return self._text
+
+        def to_dict(self):
+            return {}
+
+    top_cfg = _TopConfig()
+
+    class FakeTextForCausalLM(nn.Module):
+        config_class = _TypedTextConfig
+
+        def __init__(self, config):
+            super().__init__()
+            # Indexing a scalar neutral default would raise TypeError; only the
+            # typed config supplies a real list here.
+            _ = config.derived_structured[1]
+            self.config = config
+
+        @classmethod
+        def _from_config(cls, config):
+            return cls(config)
+
+        def eval(self):
+            return self
+
+    class FakeConditionalGeneration(nn.Module):
+        """The full (composite) model class, in the same module as the text one."""
+
+    # The text class is defined in this function; expose it at module scope so the
+    # fallback's ``*ForCausalLM`` module scan finds it (monkeypatch auto-reverts).
+    monkeypatch.setattr(
+        sys.modules[__name__], "FakeTextForCausalLM", FakeTextForCausalLM, raising=False
+    )
+
+    class _Mapping:
+        def __contains__(self, key):
+            return key is _TopConfig
+
+        def __getitem__(self, key):
+            return FakeConditionalGeneration
+
+    class FakeAuto:
+        _model_mapping = _Mapping()
+
+        @staticmethod
+        def from_config(config, trust_remote_code=False):
+            raise ValueError("vision sub-tower cannot build on meta")
+
+    def _boom(_ckpt):
+        raise AttributeError(
+            "'PreTrainedConfig' object has no attribute 'temporal_patch_size'"
+        )
+
+    monkeypatch.setattr(tt, "_instantiate_meta", _boom)
+    monkeypatch.setattr(tt, "_patch_config", lambda c: None)
+    monkeypatch.setattr(tt, "_resolve_auto_classes", lambda c: [FakeAuto])
+    monkeypatch.setattr(
+        transformers.AutoConfig, "from_pretrained", lambda *a, **k: top_cfg
+    )
+
+    # Opt-out (the shape tracers' default): no text fallback, stays None.
+    assert mt._instantiate_meta_robust("some/vlm") is None
+
+    # Opt-in (attention-group harvest): the text sub-model builds.
+    result = mt._instantiate_meta_robust("some/vlm", text_submodel_fallback=True)
+    assert result is not None
+    model, cfg = result
+    assert isinstance(model, FakeTextForCausalLM)
+    assert isinstance(cfg, _TypedTextConfig)
