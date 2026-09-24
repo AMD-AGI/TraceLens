@@ -779,6 +779,49 @@ def test_model_graph_helpers_and_classification():
     assert frames == [InlineFrame("f", "Frame", ["node"], "sub")]
 
 
+def test_minimal_metadata_copies_folded_frame_terminal_op_details():
+    # C1 regression lock. DeepSeek's ``rotate_half`` ends in
+    # ``torch.stack((-x2, x1), dim=-1).flatten(-2)``; the trailing rank-reducing
+    # ``.flatten(-2)`` is folded onto the inlined-function frame terminal, so the
+    # node bears the ``@fn_`` frame prefix and ``is_forward_operation`` (which
+    # keys on ``@op_``) rejects it. Its op-level ``details`` (``start_dim``) must
+    # still reach shape inference, or the flatten silently passes rank-5 through
+    # and the rotary ``cat`` mismatches its operands (the six deferred DeepSeek
+    # concat-rank warnings). A basic, childless ``@fn_``-synthetic frame terminal
+    # therefore copies its ``attr_name`` + ``details`` even without a ``raw_op:``
+    # detail -- keyed structurally on the folded-frame shape, not on any op/class
+    # name.
+    folded = GraphNodeSpec(
+        key="rotate_half",
+        block=_block(
+            attr_name="@fn_l349_rotate_half",
+            class_name="Flatten",
+            label="Flatten",
+            is_basic=True,
+            details=["start_dim: -2"],
+        ),
+    )
+    metadata = model_graph._minimal_metadata(folded)
+    assert metadata.get("attr_name") == "@fn_l349_rotate_half"
+    assert metadata.get("details") == ["start_dim: -2"]
+
+    # Contrast: an identical basic leaf that is NOT a folded ``@fn_`` frame
+    # terminal (and carries no ``raw_op:`` detail) does not leak op details onto
+    # its metadata -- proving the folded-frame branch, not a blanket rule, is
+    # what threads the flatten span through.
+    plain = GraphNodeSpec(
+        key="plain",
+        block=_block(
+            attr_name="op",
+            class_name="Flatten",
+            label="Flatten",
+            is_basic=True,
+            details=["start_dim: -2"],
+        ),
+    )
+    assert "details" not in model_graph._minimal_metadata(plain)
+
+
 def test_loader_builds_filters_and_delegates(monkeypatch):
     assert loader.resolve_checkpoint_arg(
         checkpoint=Path("checkpoint"), source="source"
