@@ -64,10 +64,7 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
 OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     (re.compile(r"^triton"), "triton"),
     (re.compile(r"^record_param_comms"), "record_param_comms"),
-    # gsplat 3DGS kernels; op names embed the symbol behind a launcher/synthetic
-    # prefix, so ".*" is needed (patterns use re.match). projection also gets a
-    # full model via _match_gsplat; the intersect kernels are classify-only
-    # (nnz/n_isects live on the sibling _RasterizeToPixels op).
+    # gsplat 3DGS kernels; ".*" matches the symbol behind a launcher/synthetic prefix (re.match).
     (re.compile(r".*gsplat::projection_ewa_3dgs_packed_fwd"), "GaussianSplat"),
     (re.compile(r".*gsplat::intersect_(tile|offset)_kernel"), "GaussianSplat"),
 ]
