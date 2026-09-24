@@ -75,6 +75,18 @@ def _is_constant_node(node: dict[str, Any]) -> bool:
     return False
 
 
+def _is_zero_operand_source(node: dict[str, Any]) -> bool:
+    """True for a tensor-*generating* op that reads no tensor operand.
+
+    ``torch.arange(n)``/``torch.zeros(shape)`` fabricate a tensor from host
+    scalars alone: their operand ceiling -- resolved from the real op parameters,
+    never the display name -- is zero. Such an op is a genuine dataflow source
+    with no producer upstream, so (like a top-level model input) it is exempt from
+    the I2 no-source check rather than being flagged as an orphan."""
+    ceiling, variadic = _operand_ceiling(_raw_op(node))
+    return ceiling == 0 and not variadic
+
+
 # Structured shape-change declarations the extractor stamps on a materialized
 # narrowing/indexing ``Slice`` op: ``select_dim`` drops an axis, ``resize_dim``
 # sets an axis to a folded constant width, ``shape_slice`` narrows an axis by
@@ -179,10 +191,14 @@ def _check_node(node: dict[str, Any]) -> list[str]:
                     f"of equal rank."
                 )
     elif ceiling is not None:
-        if tensor_count == 0:
-            # A bounded op consumes at least one tensor (you cannot ``unsqueeze``
-            # or ``transpose`` nothing). Zero counted tensor operands means the op's
-            # sole activation edge went missing -- an upstream wiring/pruning bug.
+        if ceiling >= 1 and tensor_count == 0:
+            # A bounded op that takes at least one tensor operand (you cannot
+            # ``unsqueeze`` or ``transpose`` nothing) with zero counted tensor
+            # operands means the op's sole activation edge went missing -- an
+            # upstream wiring/pruning bug. A ceiling of zero is a genuine tensor
+            # *source* (``torch.arange(n)``/``torch.zeros(shape)`` fabricate a
+            # tensor from host scalars alone), for which zero wired edges is
+            # correct, so it is not flagged here.
             warnings.append(
                 f"{node_id} [{op}]: its parameters take {ceiling} tensor "
                 f"operand(s), but 0 tensor operands are wired "
@@ -602,6 +618,7 @@ def integrity_check_graph_nodes(nodes: list[dict[str, Any]], *, label: str = "")
             _is_top_level_model_input(node)
             or _is_synthetic_output(node)
             or (is_const and not _has_incoming(node))  # materialized constant leaf
+            or _is_zero_operand_source(node)  # torch.arange/zeros generator source
             or "@loop_carried_in:" in node_id  # seeded + back-edge fed
         )
         if not exempt_source and not _has_incoming(node):

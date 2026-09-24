@@ -694,6 +694,22 @@ _POINTWISE_LABELS = frozenset(
         "scatter add",
     }
 )
+# Display labels (lowercased) for pointwise ops whose *first* operand is the
+# tensor being written into (``Tensor.masked_fill(mask, value)`` and friends).
+# The result is shaped and typed exactly like operand 0; the trailing
+# mask/index/source operands only broadcast or address into it and must never
+# win the ``_broadcast_rank`` vote (a wide bool mask would otherwise turn a
+# float write into a bool tensor of the mask's shape).
+_FIRST_OPERAND_WRITE_LABELS = frozenset(
+    {
+        "masked fill",
+        "masked scatter",
+        "scatter",
+        "scatter add",
+        "index add",
+        "copy",
+    }
+)
 # Display labels (lowercased) for element-wise comparisons. Like a pointwise op
 # they keep the widest operand's shape, but the result dtype is always boolean.
 _COMPARISON_LABELS = frozenset(
@@ -2197,6 +2213,24 @@ class ShapeInferencer:
                 return TensorSpec((experts,), dtype)
             return None
 
+        if operation_label == "arange":
+            # ``torch.arange`` fabricates a 1-D range from host-scalar bounds; it
+            # reads no tensor operand, so it must size its own axis rather than
+            # inherit a neighbour's shape. ``_arange_axis`` folds all-integer
+            # bounds to a concrete length and otherwise keeps the runtime length
+            # (``compressed_len``/``n_windows``) as a symbolic extent.
+            owner = self._owner_class_name(node, root=root) or (
+                root.class_name if root is not None else None
+            )
+            owner_scalars = (
+                self.module_dims.scalar_by_class.get(owner) if owner else None
+            )
+            arange_dims = self.context.dims
+            if owner_scalars:
+                arange_dims = {**self.context.dims, **owner_scalars}
+            length = _arange_axis(details, arange_dims)
+            return TensorSpec(shape=(length,), dtype="int64")
+
         if operation_label == "flatten":
             # Collapse axes ``[start_dim, end_dim]`` (inclusive) into one, per
             # ``torch.flatten``. Defaults: start_dim=0, end_dim=-1. Unlike
@@ -2789,6 +2823,15 @@ class ShapeInferencer:
             or (class_name or "").strip().lower() in _POINTWISE_LABELS
         ):
             if inputs:
+                if operation_label in _FIRST_OPERAND_WRITE_LABELS:
+                    # ``Tensor.masked_fill(mask, value)`` and its sibling in-place
+                    # writes (``masked_scatter``/``scatter``/``scatter_add``/
+                    # ``index_add``/``copy_``) return a tensor shaped and typed like
+                    # operand 0 -- the tensor being written into. The trailing
+                    # mask/index/source operands broadcast or address into it but
+                    # never define the result, so anchor on operand 0 rather than
+                    # letting a wider bool mask win the ``_broadcast_rank`` vote.
+                    return TensorSpec(shape=inputs[0].shape, dtype=inputs[0].dtype)
                 source = max(inputs, key=_broadcast_rank)
                 return TensorSpec(shape=source.shape, dtype=source.dtype)
             return TensorSpec(shape=self._active_hidden_shape(), dtype=dtype)
@@ -3979,6 +4022,52 @@ def _permute_shape(
     if sorted(resolved) != list(range(n)):
         return None
     return tuple(source_shape[a] for a in resolved)
+
+
+def _arange_axis(details: Sequence[str], dims: dict[str, DimExpr]) -> DimExpr:
+    """Length of the 1-D axis produced by ``torch.arange(start, stop, step)``.
+
+    Bounds are the expressions the extractor stamped (``arange_start`` /
+    ``arange_stop`` / ``arange_step``). Each resolves to an ``int`` literal, a
+    config dim, or -- for a runtime length like ``compressed_len``/``n_windows``
+    -- its bare identifier kept as a symbolic extent (never ``?``). When every
+    bound is an int the concrete length ``ceil((stop-start)/step)`` is folded;
+    the common ``arange(N)`` (start 0, step 1) keeps ``N`` exactly.
+    """
+
+    def resolve(token: str | None, default: DimExpr) -> DimExpr:
+        if token is None:
+            return default
+        token = token.strip()
+        as_int = _int_dim(token)
+        if as_int is not None:
+            return as_int
+        val = _resolve_dim_name(token, dims)
+        if val is not None:
+            return val
+        bare = token
+        for prefix in ("self.config.", "config.", "self."):
+            if bare.startswith(prefix):
+                bare = bare[len(prefix):]
+                break
+        return bare
+
+    start = resolve(_detail_value(details, "arange_start"), 0)
+    stop = resolve(_detail_value(details, "arange_stop"), None)
+    step = resolve(_detail_value(details, "arange_step"), 1)
+    if (
+        isinstance(start, int)
+        and isinstance(stop, int)
+        and isinstance(step, int)
+        and step > 0
+    ):
+        return max(0, (stop - start + step - 1) // step)
+    if stop is None:
+        return 0
+    # A symbolic bound: ``arange(N)`` is exactly ``N`` long; keep that extent.
+    if start == 0 and step == 1:
+        return stop
+    return stop
 
 
 def _resolve_view_shape(

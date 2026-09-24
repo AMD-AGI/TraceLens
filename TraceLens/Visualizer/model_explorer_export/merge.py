@@ -38,6 +38,7 @@ from TraceLens.ModelUtils.extract import (
 )
 from TraceLens.ModelUtils.shape_inference import (
     _merge_flatten_dim,
+    _operand_ceiling,
     _permute_shape,
     ShapeInferencer,
     Symbol,
@@ -321,6 +322,19 @@ def _node_attr(node: dict[str, Any], key: str) -> str | None:
             if isinstance(value, str):
                 return value
     return None
+
+
+def _is_generator_source_node(node: dict[str, Any]) -> bool:
+    """True for a tensor-*generating* op (``torch.arange``/``torch.zeros``) that
+    reads no tensor operand.
+
+    Its operand ceiling -- resolved from the real op parameters, never the display
+    name -- is zero, so it fabricates its output from host scalars alone and
+    legitimately carries no incoming edge. It is therefore an *internal* value
+    source of its group, not an activation the group receives from outside, and
+    must not be mistaken for a group entry point."""
+    ceiling, variadic = _operand_ceiling(_node_attr(node, "raw_op") or "")
+    return ceiling == 0 and not variadic
 
 
 def _set_node_attr(node: dict[str, Any], key: str, value: str) -> None:
@@ -1177,6 +1191,13 @@ def _inject_group_inputs(
             # no incoming edge, so without this guard it would be mistaken for an
             # entry point and spawn a spurious ``@input`` boundary.
             if _node_attr(node, "constant") == "true":
+                continue
+            # A pure generator source (``torch.arange``/``torch.zeros``) reads no
+            # operand and so has no incoming edge, but it is an internal value
+            # source, not an activation the group receives from outside. Without
+            # this guard the ``not incoming`` test below would mistake it for an
+            # entry point and spawn a spurious, unwired ``@input`` boundary tile.
+            if _is_generator_source_node(node):
                 continue
             incoming = list(node.get("incomingEdges", []))
             external = [

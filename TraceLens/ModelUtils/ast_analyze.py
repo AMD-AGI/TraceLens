@@ -231,6 +231,14 @@ def _is_emittable_free_function(func: ast.AST, target: str | None) -> bool:
 # into Python objects, which only happens on CPU. A free function using any of
 # these (directly, or via another free function it calls) runs host-side work.
 _HOST_MATERIALIZE_METHODS = frozenset({"tolist", "item", "numpy", "cpu"})
+# Tensor attributes that read pure host metadata (a Python value), never tensor
+# data. Read as ``t.<attr>`` they must not resolve to ``t``'s producer -- they are
+# passed to host arguments (``device=``/``requires_grad=``), not consumed as a
+# tensor operand. ``dtype``/``shape`` are deliberately excluded (chained-selector
+# behaviour relied on elsewhere).
+_HOST_METADATA_ATTRS = frozenset(
+    {"device", "is_cuda", "is_cpu", "requires_grad", "ndim", "nbytes", "itemsize"}
+)
 
 
 def _call_forces_host(call: ast.Call) -> bool:
@@ -2877,6 +2885,13 @@ _FUNCTION_LABELS = {
     "cat": "Concat",
     "outer": "Outer product",
     "polar": "Polar",
+    # ``torch.arange`` builds an index tensor from host-scalar bounds (no tensor
+    # operand). It is a genuine source op -- ``entry_indices = torch.arange(T)``
+    # feeds ``entry_indices.view(...) >= threshold`` -- so it must materialize as a
+    # visible node, or the reader spine-falls onto the wrong producer. As a pure
+    # generator it has no incoming edge (exempted from the I2 no-source check like
+    # any leaf source).
+    "arange": "Arange",
 }
 # Reductions whose axis decides the output shape, so the axis travels with the node.
 _REDUCTION_METHODS = frozenset(
@@ -2912,6 +2927,20 @@ _BINOP_LABELS = {
     ast.BitAnd: "Bitwise and",
     ast.BitOr: "Bitwise or",
     ast.BitXor: "Bitwise xor",
+}
+# Elementwise comparison *operators* (``entry_indices >= threshold``) each build
+# a boolean tensor. Unlike the method form (``a.ge(b)`` -> ``_TENSOR_METHOD_LABELS``)
+# the operator form reaches ``expression`` as an ``ast.Compare``; without a label
+# here it collapses to a pass-through that silently drops the mask it produces and
+# the whole integer/index producer subgraph feeding it (the ``future_mask`` fed to
+# ``masked_fill``). Mirrors the method-form labels above.
+_COMPARE_OP_LABELS = {
+    ast.Gt: "Greater",
+    ast.GtE: "Greater equal",
+    ast.Lt: "Less",
+    ast.LtE: "Less equal",
+    ast.Eq: "Equal",
+    ast.NotEq: "Not equal",
 }
 
 
@@ -4220,6 +4249,20 @@ class _ForwardOperationExtractor:
             producer, external = self._self_attr_input(node)
             if producer is not None or external:
                 return producer, external
+            # A pure host-metadata attribute (``index_scores.device``,
+            # ``x.is_cuda``, ``x.requires_grad``, ``x.ndim``) reads a property of the
+            # tensor, not the tensor's data: it is a Python value handed to a host
+            # argument (``torch.arange(n, device=index_scores.device)``), never a
+            # tensor operand. Falling through to "preserve the computation behind
+            # chained property access" (meant for data selectors like
+            # ``.topk(...).indices``) would hand back the base tensor's producer as
+            # if the metadata read were that tensor -- so ``arange`` would take
+            # ``index_scores`` as a bogus operand and every downstream reader of the
+            # generated indices would dock onto it. Mirrors the ``.shape[i]``
+            # Subscript guard below. ``.dtype``/``.shape`` stay preserved (the
+            # existing chained-selector behaviour relied on elsewhere).
+            if node.attr in _HOST_METADATA_ATTRS:
+                return None, []
             # Preserve the computation behind result selectors such as
             # ``tensor.topk(...).indices`` and chained dtype/shape properties.
             return self.expression(node.value)
@@ -4427,6 +4470,38 @@ class _ForwardOperationExtractor:
                     producers.append(producer)
                 external.extend(item_external)
             return (producers[-1] if producers else None), external
+        if isinstance(node, ast.Compare):
+            # An elementwise comparison operator (``entry_indices.view(...) >=
+            # threshold``) produces a boolean tensor consumed as a real operand of
+            # a downstream tensor op (``index_scores.masked_fill(future_mask,
+            # ...)``). Written as an operator it never reaches the tensor-method
+            # label table (which only covers the ``a.ge(b)`` method form), so
+            # without this branch the whole comparison -- and, once it dead-ends,
+            # its integer/index producer chain (``arange``/``view``/floor-div/
+            # ``unsqueeze``) -- is pruned and the consumer loses its mask operand.
+            # A chained comparison (``a < b < c``) is uncommon in model code; fall
+            # back to a pass-through rather than fabricate an operand for it.
+            label = (
+                _COMPARE_OP_LABELS.get(type(node.ops[0]))
+                if len(node.ops) == 1
+                else None
+            )
+            left, left_external = self.expression(node.left)
+            right, right_external = self.expression(node.comparators[0])
+            if label is None:
+                return right or left, [*left_external, *right_external]
+            # A comparison over only host-scalar operands (index bookkeeping such
+            # as a branch predicate) resolves both sides to no producer; emit
+            # nothing, mirroring the ``ast.BinOp`` empty-operand guard.
+            if not left and not right:
+                return None, [*left_external, *right_external]
+            producer = self._emit(
+                node,
+                label,
+                [value for value in (left, right) if value],
+                [*left_external, *right_external],
+            )
+            return producer, []
         if isinstance(node, ast.BinOp):
             # Host-side integer arithmetic (shape/index math) is not a tensor op.
             if self._is_host_scalar_expr(node):
@@ -4443,7 +4518,29 @@ class _ForwardOperationExtractor:
                 and isinstance(operand.func, ast.Attribute)
                 and _is_self_attr(operand.func, operand.func.attr)
             ]
-            if not left and not right and not direct_module_predecessors:
+            # An arithmetic op that reads a secondary forward parameter as a whole
+            # tensor operand (``causal_threshold = (position_ids + 1) //
+            # self.compress_rate``) is a genuine tensor op even though its operands
+            # have no *internal* producer yet -- the param flows in through the
+            # module's ``@input`` boundary (``param_inputs``), exactly like the
+            # rotary ops that read ``position_ids``. Without this it dead-ends and a
+            # downstream reader (``causal_threshold.unsqueeze(-1)`` -> the
+            # ``future_mask`` comparison) spine-falls onto the wrong producer.
+            # Keyed on a *bare-Name* param read (a full-tensor operand), so a
+            # sliced param used for index bookkeeping (``cu_seqlens[1:] -
+            # cu_seqlens[:-1]``) stays a pass-through and never becomes a spurious op.
+            reads_full_param = any(
+                isinstance(operand, ast.Name)
+                and operand.id in self.param_names
+                and not self.var_producer.get(operand.id)
+                for operand in (node.left, node.right)
+            )
+            if (
+                not left
+                and not right
+                and not direct_module_predecessors
+                and not reads_full_param
+            ):
                 return None, [*left_external, *right_external]
             producer = self._emit(
                 node,
@@ -4795,6 +4892,27 @@ class _ForwardOperationExtractor:
             for keyword in node.keywords:
                 if keyword.arg in {"start_dim", "end_dim"}:
                     details.append(f"{keyword.arg}: {ast.unparse(keyword.value)}")
+        if call_name == "arange":
+            # ``torch.arange(end)`` / ``(start, end)`` / ``(start, end, step)``
+            # fabricates a 1-D range tensor whose length is
+            # ``ceil((end - start) / step)``. Record the bound expressions so shape
+            # inference can size the generated axis (symbolically when a bound is a
+            # runtime length such as ``compressed_len``/``n_windows``) instead of
+            # inheriting a neighbour's shape.
+            positional = list(node.args)
+            if len(positional) == 1:
+                details.append(f"arange_stop: {ast.unparse(positional[0])}")
+            elif len(positional) >= 2:
+                details.append(f"arange_start: {ast.unparse(positional[0])}")
+                details.append(f"arange_stop: {ast.unparse(positional[1])}")
+                if len(positional) >= 3:
+                    details.append(f"arange_step: {ast.unparse(positional[2])}")
+            for keyword in node.keywords:
+                bound = {"start": "arange_start", "end": "arange_stop", "step": "arange_step"}.get(
+                    keyword.arg
+                )
+                if bound is not None:
+                    details.append(f"{bound}: {ast.unparse(keyword.value)}")
         if call_name in _DIM_DETAIL_METHODS:
             if node.args:
                 details.append(f"dim: {ast.unparse(node.args[0])}")

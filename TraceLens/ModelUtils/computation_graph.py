@@ -1477,6 +1477,13 @@ def _wire_all_predecessor_edges(
                     and _normalize_param_name(arg_name) not in entry_params
                 ):
                     continue
+                if _graph_node_takes_no_tensor_operand(graph, target_index):
+                    # A segment's parameter edge defaults onto its first op; when
+                    # that op is a zero-operand generator (``torch.arange(...)``)
+                    # it takes no tensor operand, so this edge is spurious -- the
+                    # parameter's genuine consumer is wired via the inline
+                    # pipeline's own input threading.
+                    continue
                 link = (source_index, target_index)
                 if link not in graph.links:
                     graph.links.append(link)
@@ -1683,6 +1690,31 @@ def _wire_inline_frame_dangling_outputs(graph: ComputationGraph) -> None:
     now remain unconnected, reflecting the actual data flow."""
 
 
+def _graph_node_takes_no_tensor_operand(
+    graph: ComputationGraph, index: int | None
+) -> bool:
+    """True when the node at ``index`` is a pure zero-operand generator.
+
+    ``torch.arange``/``zeros``/``ones``/``full`` and kin fabricate a tensor from
+    host scalars alone -- their operand-arity ceiling is zero, so they take *no*
+    tensor operand. The cross-scope predecessor pass defaults a module/segment's
+    parameter edges onto the segment's first op; when that first op is such a
+    generator (``get_visible_tokens`` opens with
+    ``torch.arange(valid_keys.shape[-1])``), dumping the segment input onto it
+    fabricates a data edge the op never takes -- and the input's real consumer is
+    already wired through the inline pipeline's own input threading. Keyed purely
+    on the operand-ceiling-0 contract (never on the op name), so it drops only
+    definitionally-spurious edges and never a legitimate operand on any model.
+    """
+    if index is None or not (0 <= index < len(graph.nodes)):
+        return False
+    block = graph.nodes[index].block
+    if block is None:
+        return False
+    ceiling, variadic = _operand_ceiling(_raw_op_from_details(block.details))
+    return ceiling == 0 and not variadic
+
+
 def _operation_source_indices(
     step: BlockNode,
     attr_last_index: dict[str, int] | None,
@@ -1820,6 +1852,33 @@ def _reads_only_a_side_parameter(step: BlockNode) -> bool:
         return True
     ceiling, variadic = _operand_ceiling(_raw_op_from_details(step.details))
     return ceiling is not None and not variadic and ceiling <= 1
+
+
+def _is_pure_generator_source(step: BlockNode) -> bool:
+    """True for a forward op that fabricates a tensor from host scalars alone.
+
+    ``torch.arange(n)`` (and kin such as ``torch.zeros(shape)``) read *no* tensor
+    operand -- every argument is a host scalar: a length, a dtype, a device. Such
+    an op is a genuine dataflow *source*, with no predecessor to chain from. The
+    sequential fallback must therefore not draw a spine edge into it: doing so
+    both fabricates a tensor operand the op never takes (tripping the operand
+    arity check) and lets the op inherit the previous step's shape instead of its
+    own generated one.
+
+    The test keys on the op's real operand contract -- an arity ceiling of zero
+    tensor operands, resolved from its actual parameters via
+    :func:`TraceLens.ModelUtils.shape_inference._operand_ceiling` -- never on the
+    op name. It is deliberately narrower than :func:`_reads_only_a_side_parameter`
+    (which reads a *side* parameter and is also consulted for constant-closure
+    roots): a pure generator reads nothing at all, so it must stay a visible,
+    non-constant source rather than be folded into the constant closure.
+    """
+    if not is_forward_operation(step.attr_name) or step.operation_predecessors:
+        return False
+    if step.param_inputs or step.external_inputs:
+        return False
+    ceiling, variadic = _operand_ceiling(_raw_op_from_details(step.details))
+    return ceiling == 0 and not variadic
 
 
 def _is_local_operation_port(spec: GraphNodeSpec) -> bool:
@@ -2877,6 +2936,7 @@ def _add_linear_pipeline_chain(
         if (
             not explicit_sources
             and not _reads_only_a_side_parameter(sub_step)
+            and not _is_pure_generator_source(sub_step)
             and sub_step.attr_name != SYNTHETIC_ATTENTION
         ):
             if sub_index == 0:
@@ -4761,6 +4821,7 @@ def build_computation_graph(
                                 )
                 elif (
                     not _reads_only_a_side_parameter(sub_step)
+                    and not _is_pure_generator_source(sub_step)
                     and not sub_step.operation_predecessors
                     and not root.forward_step_predecessors.get(sub_step.attr_name)
                 ):

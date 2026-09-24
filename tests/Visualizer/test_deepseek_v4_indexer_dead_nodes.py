@@ -353,3 +353,92 @@ def test_repeated_rope_instances_source_own_return_slot():
         "distinct rope frames must source cos from their own rotary_emb instance, "
         f"not collapse onto one: {sources}"
     )
+
+
+def test_deepseek_v4_indexer_masked_fill_two_tensor_operands_and_future_mask_chain():
+    """``DeepseekV4Indexer.forward`` L572
+    ``index_scores = index_scores.masked_fill(future_mask, float("-inf"))``
+    renders with exactly TWO tensor operands and its true result shape/dtype.
+
+    Locks the two coupled fixes:
+
+    * Operand-0 anchoring for first-operand-authoritative writes: a
+      ``Tensor.masked_fill(mask, value)`` returns a tensor shaped and typed like
+      operand 0 (the tensor being written into), so the node keeps
+      ``index_scores``' rank-3 floating shape rather than letting the wider
+      boolean ``future_mask`` win the ``_broadcast_rank`` vote and turn the float
+      write into a bool tensor of the mask's shape.
+    * The ``future_mask`` producer chain (``torch.arange`` -> ``view`` -> ``+ 1``
+      -> ``// compress_rate`` -> ``unsqueeze`` -> ``>=``) is retained as visible
+      ops instead of pruned as integer/index/bool bookkeeping, so the ``>=``
+      boolean producer is a real second operand and the ``float("-inf")`` host
+      scalar is never wired as a spurious third operand.
+
+    Structural throughout -- keyed on op labels, operand count and parsed rank,
+    never on the ``-inf`` literal / param names.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph = _build_graph()
+    nodes = graph["nodes"]
+    by_id = {node["id"]: node for node in nodes}
+
+    masked_fills = [
+        node
+        for node in nodes
+        if node.get("label") == "Masked fill"
+        and "indexer" in str(node.get("id", ""))
+        and "l572" in str(node.get("id", ""))
+    ]
+    assert len(masked_fills) == 1, [n["id"] for n in masked_fills]
+    node = masked_fills[0]
+
+    # Exactly two tensor operands: index_scores + future_mask. The float("-inf")
+    # host scalar must never be wired as a third operand.
+    incoming = node.get("incomingEdges", []) or []
+    assert len(incoming) == 2, [e.get("sourceNodeId") for e in incoming]
+
+    def _shape_str(n) -> str:
+        for out in n.get("outputsMetadata", []) or []:
+            for attr in out.get("attrs", []) or []:
+                if attr.get("key") == "tensor_shape":
+                    return str(attr.get("value", ""))
+        return ""
+
+    # Output keeps operand-0's rank-3 floating shape, not the bool mask's.
+    shape = _shape_str(node)
+    axes = shape.split("]", 1)[0].lstrip("[")
+    rank = len([d for d in axes.split(",") if d.strip()])
+    assert rank == 3, shape
+    assert "bool" not in shape, shape
+    assert "float" in shape.lower(), shape  # bfloat16/float write target
+
+    # One operand is the boolean future_mask producer -- a ``>=`` comparison.
+    src_labels = [
+        (by_id.get(e.get("sourceNodeId")) or {}).get("label") for e in incoming
+    ]
+    assert "Greater equal" in src_labels, src_labels
+
+    # The future_mask chain is materialized: walking upstream from the ``>=``
+    # producer must reach a ``torch.arange`` and the ``// compress_rate`` floor
+    # division -- proof the index/bool producer chain was not pruned.
+    ge_ids = [
+        e.get("sourceNodeId")
+        for e in incoming
+        if (by_id.get(e.get("sourceNodeId")) or {}).get("label") == "Greater equal"
+    ]
+    seen: set[str] = set()
+    frontier = list(ge_ids)
+    found: set[str] = set()
+    while frontier:
+        cur = frontier.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        cur_node = by_id.get(cur)
+        if cur_node is None:
+            continue
+        found.add(cur_node.get("label"))
+        for edge in cur_node.get("incomingEdges", []) or []:
+            frontier.append(edge.get("sourceNodeId"))
+    assert "Arange" in found, sorted(found)
+    assert "Floor divide" in found, sorted(found)
