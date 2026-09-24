@@ -58,8 +58,9 @@ def test_deepseek_v4_attention_invariant_inputs_are_sourced():
     """The two ``DeepseekV4Attention`` boundaries Task A targets gain a real edge.
 
     ``position_embeddings`` resolves through a materialized model-scope rotary
-    producer; ``attention_mask`` docks onto its top-level model-input parameter
-    boundary. Both must have an incoming edge, and no namespaced ``@input`` may float.
+    producer; ``attention_mask`` resolves through the materialized mask-builder
+    free-function producer (see ``test_decoder_attention_mask_docks_mask_builder``).
+    Both must have an incoming edge, and no namespaced ``@input`` may float.
     """
     pytest.importorskip("huggingface_hub")
     graph, by_id = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
@@ -88,6 +89,51 @@ def test_minimax_m3_variant_loop_invariant_inputs_are_sourced():
     pytest.importorskip("huggingface_hub")
     graph, _ = _build_nodes("MiniMaxAI/MiniMax-M3")
     assert _floating_namespaced_inputs(graph["nodes"]) == []
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "moonshotai/Kimi-K3",
+        "zai-org/GLM-5.3-Flash",
+        "MiniMaxAI/MiniMax-M3",
+    ],
+)
+def test_decoder_attention_mask_docks_mask_builder(model_id):
+    """The decoder ``attention_mask`` boundary is fed by the real mask builder.
+
+    The tensor handed to each decoder iteration as ``attention_mask`` is a DERIVED
+    tensor produced by a captured mask-builder free function
+    (``create_*_causal_mask(...)``), reassigned before the loop -- NOT the raw model
+    forward parameter. So no bogus top-level ``@input:attention_mask`` model-input
+    node may exist, and any rendered decoder ``attention_mask`` boundary must dock
+    onto the materialized mask-builder producer (a model-scope ``@fn_l...`` source),
+    resolved structurally (a captured free-function producer reassigned a loop
+    keyword before the loop), never by a hardcoded function/class/param name.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, by_id = _build_nodes(model_id)
+
+    assert "@input:attention_mask" not in by_id, (
+        "bogus top-level @input:attention_mask model-input node must not exist"
+    )
+
+    boundary = by_id.get("decoder/@input:attention_mask")
+    if boundary is None:
+        # A model (MiniMax-M3) whose attention rebuilds the mask internally has no
+        # top-level decoder attention_mask boundary at all; the assertion above
+        # already guards against the fabricated model-input node.
+        return
+    sources = [e.get("sourceNodeId") for e in boundary.get("incomingEdges", [])]
+    assert sources, "decoder attention_mask boundary must be sourced"
+    for source in sources:
+        producer = by_id.get(source)
+        assert producer is not None
+        assert source.startswith("@model_forward/@fn_l"), (
+            f"attention_mask boundary sourced by {source!r}, not a mask-builder node"
+        )
+        assert "create" in producer.get("label", "").lower()
 
 
 @pytest.mark.parametrize(

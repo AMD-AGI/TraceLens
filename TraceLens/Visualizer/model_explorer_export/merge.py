@@ -98,6 +98,7 @@ from TraceLens.Visualizer.model_explorer_export.styles import (
     finalize_graph_node_styles,
     input_port_style,
     is_layout_only_label,
+    operation_tile_style,
     output_port_style,
     spine_tile_style,
 )
@@ -4883,11 +4884,16 @@ def _materialize_model_scope_producer(
             )
     if not incoming:
         return None
+    label = _loop_invariant_producer_label(cls, producer_attr)
     node = {
         "id": node_id,
-        "label": _loop_invariant_producer_label(cls, producer_attr),
+        "label": label,
         "namespace": "",
         "attrs": [{"key": "operation", "value": "source"}],
+        # This producer is materialised after ``finalize_graph_node_styles`` has
+        # already run, so give it the same per-label operation fill that pass
+        # would have assigned -- otherwise it renders style-less.
+        "style": ensure_readable_text(operation_tile_style(label)),
         "incomingEdges": incoming,
     }
     nodes.append(node)
@@ -4953,6 +4959,100 @@ def _forward_param_producer_map(cls: Any) -> dict[str, str]:
     return producers
 
 
+def _loop_param_producer_map(cls: Any) -> dict[str, str]:
+    """Map a decoder-loop boundary ``param`` -> captured free-function producer.
+
+    Recovers, structurally, the case where a boundary tensor handed to every
+    decoder iteration by keyword (``layer(..., attention_mask=causal_mask)``) is
+    NOT the raw forward parameter but a value a captured *free function*
+    reassigned before the loop (a mask builder: ``causal_mask =
+    create_causal_mask(...)``). The extractor leaves such a loop's
+    ``forward_step_predecessor_args`` empty (the keyword value is a renamed local
+    or a subscript it cannot map to a keyword producer), so resolve it here:
+
+    1. Read the decoder loop call's own keyword arguments to learn which local
+       feeds each boundary param (``attention_mask`` <- ``causal_mask``; a
+       non-``Name`` value such as a dict subscript falls back to the param's own
+       same-named local, e.g. GLM's reassigned ``attention_mask``).
+    2. Map each such local to the free function that last produced it before the
+       loop (``name = create_*(...)`` -> ``@fn_l{lineno}_{callee}``), keeping only
+       producers the extractor actually captured (a key in
+       ``forward_step_predecessors``) so the merge can materialise them.
+
+    Keyed only on structure (a captured free-function producer reassigned a
+    loop-keyword local before the loop), never on a specific function or param.
+    """
+    forward = next(
+        (
+            item
+            for item in cls.node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+    if forward is None:
+        return {}
+    loop = next(
+        (
+            stmt
+            for stmt in forward.body
+            if isinstance(stmt, ast.For)
+            and any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id
+                in {n.id for n in ast.walk(stmt.target) if isinstance(n, ast.Name)}
+                and call.args
+                for call in ast.walk(stmt)
+            )
+        ),
+        None,
+    )
+    if loop is None:
+        return {}
+    loop_names = {n.id for n in ast.walk(loop.target) if isinstance(n, ast.Name)}
+    loop_call = next(
+        (
+            call
+            for call in ast.walk(loop)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id in loop_names
+            and call.args
+        ),
+        None,
+    )
+    if loop_call is None:
+        return {}
+    loop_index = forward.body.index(loop)
+    # Local name -> captured free-function producer for its last pre-loop
+    # reassignment (``name = create_*(...)``).
+    var_producers: dict[str, str] = {}
+    for stmt in ast.walk(ast.Module(body=forward.body[:loop_index], type_ignores=[])):
+        if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+            continue
+        target = stmt.targets[0]
+        call = stmt.value
+        if not isinstance(target, ast.Name) or not isinstance(call, ast.Call):
+            continue
+        func = call.func
+        if not isinstance(func, ast.Name):
+            continue
+        producer = f"@fn_l{call.lineno}_{func.id}"
+        if producer in cls.forward_step_predecessors:
+            var_producers[target.id] = producer
+    producers: dict[str, str] = {}
+    for keyword in loop_call.keywords:
+        if keyword.arg is None:
+            continue
+        value = keyword.value
+        local = value.id if isinstance(value, ast.Name) else keyword.arg
+        producer = var_producers.get(local)
+        if producer is not None:
+            producers[keyword.arg] = producer
+    return producers
+
+
 def _resolve_submodule_output_node(
     node_by_id: dict[str, dict[str, Any]], attr: str
 ) -> str | None:
@@ -4977,36 +5077,57 @@ def _resolve_loop_invariant_source(
     primary_param: str | None,
     pred_args: dict[str, str],
     producer_map: dict[str, str],
+    loop_param_producers: dict[str, str],
 ) -> str | None:
     """Legitimate model-level source id for a loop-invariant decoder input.
 
     Resolution keys only on structural facts, in priority order:
     1. The extractor recovered the loop call's exact keyword producer
-       (``forward_step_predecessor_args``) -- honour it (submodule/free-fn call
-       materialised, top-level parameter docked, primary spine input as ``@input``).
-    2. Otherwise (variant loops that leave that map empty) resolve by the input's
-       own name: the primary spine input, a top-level forward parameter, or a value
-       assigned from a ``self.<submodule>(...)`` call in the stack-model forward.
+       (``forward_step_predecessor_args``) -- honour it. The raw method input (or
+       the primary spine) docks as ``@input``; a captured producer (a submodule
+       or free-function call) is materialised as a model-scope source node. Only
+       when that producer cannot be materialised (a bare inline op the export
+       does not surface as its own node) does a top-level forward parameter fall
+       back to its own model-input boundary.
+    2. Otherwise (variant loops that leave that map empty) resolve by structure:
+       the primary spine input; a boundary reassigned before the loop by a
+       captured free function (a mask builder handed to each iteration --
+       materialise it, do NOT fabricate a model-input node); a value from a
+       ``self.<submodule>(...)`` call; else the raw forward-parameter boundary.
     """
     if pred_args and param in pred_args:
         producer_attr = pred_args[param]
         if producer_attr == FORWARD_METHOD_INPUT or param == primary_param:
             return "@input"
-        if param in cls.forward_param_inputs:
-            # A top-level model forward parameter (``attention_mask``): dock onto
-            # its own model-input boundary. The host-side construction feeding it
-            # is a CPU helper the export collapses, so the parameter is the root.
-            return _ensure_top_level_input(nodes, node_by_id, param)
-        return _materialize_model_scope_producer(
+        # A captured producer (submodule / free-function frame) that reassigned
+        # this boundary before the loop: render it. The mask builder handed to
+        # every decoder iteration is a derived tensor, not the raw model input.
+        source = _materialize_model_scope_producer(
             nodes, node_by_id, cls=cls, producer_attr=producer_attr
         )
+        if source is not None:
+            return source
+        # The producer is a bare inline op the export never surfaces as its own
+        # node (``position_ids = cache_position.unsqueeze(0)``): dock the
+        # top-level forward parameter onto its own model-input boundary rather
+        # than leaving it unsourced.
+        if param in cls.forward_param_inputs:
+            return _ensure_top_level_input(nodes, node_by_id, param)
+        return None
     if param == primary_param:
         return "@input"
-    if param in cls.forward_param_inputs:
-        return _ensure_top_level_input(nodes, node_by_id, param)
+    captured = loop_param_producers.get(param)
+    if captured is not None:
+        source = _materialize_model_scope_producer(
+            nodes, node_by_id, cls=cls, producer_attr=captured
+        )
+        if source is not None:
+            return source
     attr = producer_map.get(param)
     if attr is not None:
         return _resolve_submodule_output_node(node_by_id, attr)
+    if param in cls.forward_param_inputs:
+        return _ensure_top_level_input(nodes, node_by_id, param)
     return None
 
 
@@ -5049,6 +5170,7 @@ def _thread_loop_invariant_inputs(
     ) or {}
     primary_param = _stack_primary_input_name(cls)
     producer_map = _forward_param_producer_map(cls)
+    loop_param_producers = _loop_param_producer_map(cls)
     node_by_id = {node["id"]: node for node in nodes}
 
     # (1) Floating (unsourced) namespaced ``@input:<param>`` tiles, grouped by
@@ -5073,6 +5195,7 @@ def _thread_loop_invariant_inputs(
             primary_param=primary_param,
             pred_args=pred_args,
             producer_map=producer_map,
+            loop_param_producers=loop_param_producers,
         )
         if source is None:
             continue

@@ -1522,8 +1522,14 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    # The decoder-input data-movement chain lives under ``@model_forward/@op_``.
+    # A materialized mask-builder producer (``@model_forward/@fn_l...``) also lives
+    # in that scope now (Task A) -- assert it separately below, keep this focused on
+    # the movement chain.
     model_ops = [
-        node for node in graph["nodes"] if node["id"].startswith("@model_forward/")
+        node
+        for node in graph["nodes"]
+        if node["id"].startswith("@model_forward/@op_")
     ]
 
     assert [node["label"] for node in model_ops] == [
@@ -1531,6 +1537,24 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
         "Expand",
         "Contiguous",
     ]
+
+    # Task A: the decoder ``attention_mask`` is the DERIVED mask-builder output
+    # (reassigned before the loop), materialized as a model-scope producer feeding
+    # the decoder boundary -- never a fabricated top-level ``@input:attention_mask``.
+    by_id = {node["id"]: node for node in graph["nodes"]}
+    assert "@input:attention_mask" not in by_id
+    mask_builder = by_id.get(
+        "@model_forward/@fn_l1456_create_recurrent_attention_mask"
+    )
+    assert mask_builder is not None
+    assert mask_builder["label"] == "create_recurrent_attention_mask"
+    assert {e["sourceNodeId"] for e in mask_builder["incomingEdges"]} == {
+        "embed_tokens"
+    }
+    assert {
+        e["sourceNodeId"]
+        for e in by_id["decoder/@input:attention_mask"]["incomingEdges"]
+    } == {"@model_forward/@fn_l1456_create_recurrent_attention_mask"}
     # The decoder consumes the vision/text combine (masked_scatter), not the raw
     # token embeddings — the combine is the true entry to the language stack.
     assert (
@@ -3387,15 +3411,19 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     # The hidden_states spine keeps its direct wiring: it is never surfaced as an
     # invented ``/@input:hidden_states`` group tile. The only loop-invariant input
     # threaded across the spine boundary is ``attention_mask`` -- a genuine side
-    # input the indexer consumes (``create_recurrent_attention_mask`` -> layers) --
-    # docked onto its top-level model parameter, not the primary data path.
+    # input the indexer consumes -- and it docks onto the DERIVED mask-builder
+    # producer (``create_recurrent_attention_mask``, reassigned before the loop),
+    # NOT a fabricated top-level ``@input:attention_mask`` model input.
+    assert "@input:attention_mask" not in by_id
     spine_invariant_inputs = {
         n["id"]: {e["sourceNodeId"] for e in n.get("incomingEdges", []) or []}
         for n in nodes
         if n.get("namespace") == "45x_Glm5NextTextDecoderLayer" and "/@input:" in n["id"]
     }
     assert spine_invariant_inputs == {
-        "decoder/@input:attention_mask": {"@input:attention_mask"}
+        "decoder/@input:attention_mask": {
+            "@model_forward/@fn_l1456_create_recurrent_attention_mask"
+        }
     }, spine_invariant_inputs
     assert not any("hidden_states" in nid for nid in spine_invariant_inputs)
 
