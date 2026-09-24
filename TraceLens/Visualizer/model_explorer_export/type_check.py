@@ -300,6 +300,48 @@ def _output_arity_warnings(nodes: list[dict[str, Any]]) -> list[str]:
     return warnings
 
 
+# Dim tokens that a *resolved* rendered shape never legitimately contains: ``?``
+# (shape inference could not determine the axis at all), ``-1`` (an unfolded
+# reshape/view placeholder that should have been resolved against the operand's
+# real dims), and the empty token (a dropped axis, ``[B, , S]``). Every genuine
+# axis is either a concrete int or a named symbolic dim (``S``, ``Pv/4``,
+# ``B*S*8192``, ``index_head_dim``) -- those are resolved, just symbolic, and are
+# NOT flagged. Mirrors the unresolved half of ``merge._dim_is_weak``'s set (its
+# collapsed-product ``BxS`` notion is deliberately excluded: a merged reshape dim
+# is a real, resolved width).
+_UNRESOLVED_DIM_TOKENS = frozenset({"?", "-1", ""})
+
+
+def _unresolved_shape_warnings(nodes: list[dict[str, Any]]) -> list[str]:
+    """Flag any node whose rendered output shape carries an unresolved dim.
+
+    A ``?``/``-1``/empty axis in an ``output_shape`` means shape inference left a
+    dim undetermined -- a fidelity gap (an unfolded reshape ``-1``, a reduction
+    whose result axis stayed ``?``) to fix upstream in ``shape_inference.py``, not
+    a legitimate shape. Keyed purely on the dim token, so it needs no op-name or
+    class-name list and never fires on a legitimately symbolic dim. Constant nodes
+    (learned weights/buffers, filtered from the drawn graph) are skipped, and a
+    rank-0 scalar (empty bracket ``[]`` -> no dim tokens) is resolved, not flagged.
+    """
+    warnings: list[str] = []
+    for node in nodes:
+        if _is_constant_node(node):
+            continue
+        dims = _output_shape_dims(node)
+        if not dims:
+            continue
+        unresolved = [d for d in dims if d.strip() in _UNRESOLVED_DIM_TOKENS]
+        if unresolved:
+            node_id = node.get("id")
+            warnings.append(
+                f"{node_id} [{_op_type(node)}]: output shape {dims} carries "
+                f"unresolved dim(s) {unresolved} -- shape inference left an axis "
+                f"undetermined (an unfolded reshape -1 / a ? placeholder). Resolve "
+                f"it in shape_inference.py; do not render an unresolved shape."
+            )
+    return warnings
+
+
 def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
     """Type-check every checkable operation node; return + log warning lines.
 
@@ -310,6 +352,7 @@ def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
         warnings.extend(_check_node(node))
     warnings.extend(_noop_cast_warnings(nodes))
     warnings.extend(_output_arity_warnings(nodes))
+    warnings.extend(_unresolved_shape_warnings(nodes))
     for line in warnings:
         _log.warning("graph type-check: %s", line)
     return warnings

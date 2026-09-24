@@ -446,3 +446,73 @@ def test_noop_cast_flagged_when_label_generic_but_op_type_cast():
     nodes = [_cast_node("c", "float32", ["float32"], label="float")]
     warnings = type_check_graph_nodes(nodes)
     assert any("c [cast]" in w for w in warnings)
+
+
+def _shape_node(node_id, output_shape, op_type="View", constant=False):
+    # A node carrying a rendered ``output_shape`` attr (the string form the export
+    # writes, ``[B, S, 4096] bfloat16``) for the unresolved-shape check.
+    attrs = [
+        {"key": "op_type", "value": op_type},
+        {"key": "output_shape", "value": output_shape},
+    ]
+    if constant:
+        attrs.append({"key": "constant", "value": "true"})
+    return {"id": node_id, "label": op_type, "attrs": attrs}
+
+
+def test_resolved_symbolic_shape_is_clean():
+    # Named symbolic dims (S, Pv/4, a collapsed product B*S*8192, index_head_dim)
+    # are resolved -- just not numeric -- and must never be flagged.
+    for shape in (
+        "[B, S, 4096] bfloat16",
+        "[Pv/4, 4096] bfloat16",
+        "[B*S*8192] float32",
+        "[B, index_n_heads, S, index_head_dim] float32",
+        "[B, 1, S + S, 4096] bfloat16",
+    ):
+        assert type_check_graph_nodes([_shape_node("n", shape)]) == [], shape
+
+
+def test_question_mark_dim_warns():
+    warnings = type_check_graph_nodes([_shape_node("n:q", "[B, ?, S] float32")])
+    assert len(warnings) == 1
+    assert "n:q" in warnings[0]
+    assert "unresolved dim" in warnings[0]
+
+
+def test_unfolded_negative_one_dim_warns():
+    # A ``-1`` left in a rendered shape is an unfolded reshape placeholder.
+    warnings = type_check_graph_nodes([_shape_node("n:neg", "[B, S, -1] bfloat16")])
+    assert len(warnings) == 1
+    assert "n:neg" in warnings[0]
+    assert "-1" in warnings[0]
+
+
+def test_empty_axis_token_warns():
+    # A dropped axis renders as an empty token between commas (``[B, , S]``).
+    warnings = type_check_graph_nodes([_shape_node("n:empty", "[B, , S] float32")])
+    assert len(warnings) == 1
+    assert "n:empty" in warnings[0]
+
+
+def test_rank0_scalar_shape_is_clean():
+    # An empty bracket is a rank-0 scalar (resolved), not an unresolved shape.
+    assert type_check_graph_nodes([_shape_node("n:scalar", "[] float32")]) == []
+
+
+def test_constant_node_unresolved_shape_not_flagged():
+    # A learned weight/buffer is filtered from the drawn graph; its shape is not
+    # part of the activation dataflow, so it is skipped even if unresolved.
+    assert (
+        type_check_graph_nodes([_shape_node("n:w", "[?, 4096]", constant=True)]) == []
+    )
+
+
+def test_node_without_output_shape_is_clean():
+    # A boundary/module node with no output_shape attr is not an unresolved op.
+    node = {
+        "id": "n:mod",
+        "label": "Linear",
+        "attrs": [{"key": "op_type", "value": "Linear"}],
+    }
+    assert type_check_graph_nodes([node]) == []
