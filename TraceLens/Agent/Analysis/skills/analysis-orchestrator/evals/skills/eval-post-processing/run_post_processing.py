@@ -36,15 +36,17 @@ from aggregate_repeatability import find_runs, parse_ndjson_stream
 
 REPO_ROOT = "/workspace/TraceLens"
 ANALYSIS_DIR = os.path.join(
-    REPO_ROOT, "TraceLens", "Agent", "Analysis", "skills", "analysis-orchestrator", "evals"
+    REPO_ROOT,
+    "TraceLens",
+    "Agent",
+    "Analysis",
+    "skills",
+    "analysis-orchestrator",
+    "evals",
 )
-RESULTS_ROOT = (
-    "/workspace/TraceLens/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/repeatability_results_combined"
-)
+RESULTS_ROOT = "/workspace/TraceLens/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/repeatability_results_combined"
 REPORT_DIR = "/workspace/TraceLens/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/reports"
-TEST_TRACES_CSV = (
-    "/workspace/TraceLens/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/reports/combined_traces.csv"
-)
+TEST_TRACES_CSV = "/workspace/TraceLens/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/reports/combined_traces.csv"
 SUITE = "eval"
 CONTAINER = ""  # local host, no container
 
