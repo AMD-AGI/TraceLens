@@ -374,7 +374,16 @@ def test_add_chain_wrapper_expansion(monkeypatch):
         graph, [wrap, plain], key_prefix="c", attr_last_index=attr_last
     )
     assert first_index == 0
-    assert attr_last["wrap"] == attr_last["inner_b"]
+    # ``wrap``'s alias resolves to its last internal op (``inner_b``). Its own
+    # internal children stay scope-local to the expansion and are NOT leaked
+    # into the caller's alias map -- ``_add_linear_pipeline_chain`` snapshots
+    # and restores each expanded scope's step names so a nested submodule's
+    # internal name (a ``compressor``'s own ``kv_norm``) cannot collide with an
+    # identically-named sibling instance (see the repeated-rope regression in
+    # tests/Visualizer/test_deepseek_v4_indexer_dead_nodes.py).
+    inner_b_index = next(i for i, n in enumerate(graph.nodes) if n.block is inner_b)
+    assert attr_last["wrap"] == inner_b_index
+    assert "inner_a" not in attr_last and "inner_b" not in attr_last
     assert graph.nodes[tail].block is plain
     assert len(graph.inline_frames) == 1
 
@@ -1435,7 +1444,14 @@ def test_add_linear_pipeline_chain_nested(monkeypatch):
         port_style="inline",
     )
     assert len(chain) == 3
-    assert aliases["nested"] == aliases["inner_b"]
+    # Only the outermost wrapper name propagates to the caller's alias map; the
+    # nested wrapper's own children stay scope-local to their expansion (see the
+    # scope snapshot/restore in ``_add_linear_pipeline_chain``, which keeps a
+    # nested submodule's internal name from leaking out and colliding with an
+    # identically-named sibling instance). Resolving that surviving name lands on
+    # the last op of the flattened chain.
+    assert aliases["outer"] == chain[-1]
+    assert "nested" not in aliases and "inner_b" not in aliases
     assert len(graph.inline_frames) == 2
 
 

@@ -44,6 +44,7 @@ from TraceLens.ModelUtils.shape_inference import ShapeInferencer
 from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
 from TraceLens.Visualizer.model_explorer_export.type_check import (
     integrity_check_graph_nodes,
+    type_check_graph_nodes,
 )
 from TraceLens.Visualizer.model_explorer_export.viewer_page import (
     _graph_without_constants,
@@ -68,6 +69,66 @@ def test_deepseek_v4_flash_integrity_clean_built_and_render_filtered():
         filtered_graph["nodes"], label="render-filtered"
     )
     assert filtered == [], filtered
+
+
+def test_deepseek_v4_flash_type_check_clean():
+    """The whole graph type-checks with zero operand-arity / shape warnings.
+
+    End-to-end guard for the coupled MLA attention wiring fix (the rotary
+    ``rotate_half`` frame-terminal ``flatten(-2)`` now reduces rank instead of
+    passing its shape through, the ``kv = self.kv_norm(...).view(...).transpose``
+    chain stays live through the rotary it feeds, and the ``compressor`` /
+    grouped-linear sub-scopes no longer over-attach a foreign-scope operand):
+    together these previously produced six rotary concat-rank warnings plus two
+    ``view: at most 1 tensor operand but 2 wired`` warnings on the ``kv`` view and
+    the grouped-linear weight view. Assert the whole model is clean rather than
+    counting a fixed number, so a re-regression surfaces as a non-empty list.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph = _build_graph()
+    warnings = type_check_graph_nodes(graph["nodes"])
+    assert warnings == [], warnings
+
+
+def test_deepseek_v4_attention_kernel_q_and_kv_are_rank4():
+    """The attention kernel's ``q`` and ``kv`` inputs are both 4-D ``[B, H, S, D]``.
+
+    Structural guard for the MLA ``kv`` liveness fix: the
+    ``kv = self.kv_norm(...).view(...).transpose(1, 2)`` chain is consumed only by
+    the rotary positional step it feeds (a non-op ``step_predecessor``), so the
+    backward-liveness walk used to prune its ``.view()/.transpose()`` as dead --
+    collapsing ``kv`` back to the rank-3 ``kv_norm`` output and docking the rotary
+    on it (phantom rank-3). With the ``_seed`` bridge the layout ops stay live and
+    the kernel receives a proper 4-D ``kv``. Keyed on the kernel's own input-port
+    labels and the resolved operand rank, not on any line number / class name.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph = _build_graph()
+    nodes = graph["nodes"]
+    by_id = {node["id"]: node for node in nodes}
+
+    def _rank(node) -> int | None:
+        for out in node.get("outputsMetadata", []) or []:
+            for attr in out.get("attrs", []) or []:
+                if attr.get("key") == "tensor_shape":
+                    inner = str(attr.get("value", "")).split("]", 1)[0].lstrip("[")
+                    return len([d for d in inner.split(",") if d.strip()]) if inner else None
+        return None
+
+    # The attention kernel is the node fed by a ``...:kv`` kernel-input port.
+    port_rank: dict[str, int | None] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []) or []:
+            src = edge.get("sourceNodeId", "")
+            if "@kernel_in" not in src:
+                continue
+            port = src.rsplit(":", 1)[-1]
+            if port in {"q", "kv"} and port not in port_rank:
+                port_rank[port] = _rank(by_id.get(src, {}))
+
+    assert {"q", "kv"} <= set(port_rank), f"kernel q/kv ports not found: {port_rank}"
+    assert port_rank["q"] == 4, f"query kernel input must be 4-D, got rank {port_rank['q']}"
+    assert port_rank["kv"] == 4, f"kv kernel input must be 4-D, got rank {port_rank['kv']}"
 
 
 def test_deepseek_v4_indexer_chunk_kv_and_gate_are_consumed():

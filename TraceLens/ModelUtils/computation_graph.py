@@ -928,6 +928,21 @@ def _wire_all_predecessor_edges(
     module_param_ordinal_entries = _build_module_param_ordinal_entries(graph)
 
     # --- 1. Inline-op predecessor edges ---
+    # ``attr_last_index`` is one flat dict shared across the whole recursive
+    # expansion, keyed by bare submodule/local-variable attribute name. Two
+    # unrelated composites can legitimately reuse the same bare name at
+    # different nesting depths (an attention module's own ``kv_norm``
+    # alongside a nested compressor's own, distinct ``kv_norm``); each name
+    # is only correctly resolved from *within its own scope*, at the moment
+    # that scope's own steps are being built. By the time this section
+    # re-derives edges from the final, flat snapshot, an inner scope's
+    # binding may have (correctly, per its own use) shadowed an outer scope's
+    # identically-named one, or vice-versa. A single-tensor-operand op's
+    # sole predecessor was already resolved and wired correctly, in its own
+    # scope, at build time; track which targets already have an edge so a
+    # stale/foreign-scope re-resolution here is never appended as a second,
+    # spurious edge onto an op that can only ever have one tensor operand.
+    prewired_targets = {t for _s, t in graph.links}
     for block in wiring_blocks:
         steps_by_attr = _forward_steps_by_attr(block)
         last_forward_order = max(
@@ -940,6 +955,11 @@ def _wire_all_predecessor_edges(
                 continue
             target_index = attr_last_index.get(child.attr_name)
             if target_index is None:
+                continue
+            if (
+                len(child.operation_predecessors) == 1
+                and target_index in prewired_targets
+            ):
                 continue
             module_preds = [
                 pred
@@ -1028,9 +1048,26 @@ def _wire_all_predecessor_edges(
                     and consumed_ordinal is not None
                     and consumed_ordinal < len(return_producers)
                 ):
+                    # Prefer this call site's own per-ordinal slot index
+                    # (``_multi_return_slot_key``) over the raw producer attr's
+                    # flat entry. The raw attr name is one of *this frame's own*
+                    # internal steps, so a scope-snapshot restore elsewhere
+                    # (``_add_linear_pipeline_chain``'s ``outer_bindings``) pops
+                    # it back out of ``attr_last_index`` once the frame's own
+                    # steps are done building -- by the time this post-hoc
+                    # wiring pass runs, ``attr_last_index.get(raw_attr)`` can
+                    # already be ``None`` (or, for a name reused by another
+                    # scope, someone else's index), silently collapsing every
+                    # ordinal onto the same (wrong) fallback. The slot key is
+                    # synthesized (a separator no real attr name can contain)
+                    # and stashed *before* that restore, so it always survives.
                     resolved = attr_last_index.get(
-                        return_producers[consumed_ordinal]
+                        _multi_return_slot_key(pred, consumed_ordinal)
                     )
+                    if resolved is None:
+                        resolved = attr_last_index.get(
+                            return_producers[consumed_ordinal]
+                        )
                     if resolved is not None and resolved != source_index:
                         # The consumer was chained onto the frame's last op by the
                         # source-order sequential fallback in ``_add_chain`` (a
@@ -1196,7 +1233,19 @@ def _wire_all_predecessor_edges(
                         return_producers = block.forward_step_return_producers.get(pred)
                         ordinal = ordinal_map[arg_name]
                         if return_producers and 0 <= ordinal < len(return_producers):
-                            resolved = attr_last_index.get(return_producers[ordinal])
+                            # Prefer the call site's own per-ordinal slot key
+                            # over the raw producer attr's flat entry -- see the
+                            # matching comment in section 1 above; the raw attr
+                            # is one of this frame's own internal steps and can
+                            # already be popped (or reused by another scope) by
+                            # the time this post-hoc pass runs.
+                            resolved = attr_last_index.get(
+                                _multi_return_slot_key(pred, ordinal)
+                            )
+                            if resolved is None:
+                                resolved = attr_last_index.get(
+                                    return_producers[ordinal]
+                                )
                             if resolved is not None:
                                 source_index = resolved
                                 ordinal_slot_resolved = True
@@ -1607,6 +1656,33 @@ def _raw_op_from_details(details: list[str]) -> str:
         if sep and name.strip() == "raw_op":
             return value.strip()
     return ""
+
+
+def _reads_only_module_constants(step: BlockNode) -> bool:
+    """True when a step's only operand is a module constant/buffer read.
+
+    Used (unlike :func:`_reads_only_a_side_parameter`) to pick a *module's own
+    entry point* rather than to gate a straight-line chain's fallback edge, so
+    it must draw a narrower line: a straight-line composite's leading side
+    computation (a grouped linear's own ``self.weight.view(...)`` — reads only
+    ``self.weight`` via ``external_inputs``, no forward-declared parameter, no
+    chain predecessor) is not a real entry point and must be skipped past. A
+    genuine forward-parameter read (``cos.repeat_interleave(...)`` as the first
+    op of a *multi*-parameter free function such as ``apply_rotary_pos_emb``)
+    reads a real caller-supplied tensor via ``param_inputs`` — it is not a side
+    computation just because it is not whichever parameter a given caller edge
+    happens to be wiring right now, so it must stay eligible to be picked.
+    """
+    if not is_forward_operation(step.attr_name) or step.operation_predecessors:
+        return False
+    if step.param_inputs:
+        return False
+    if not step.external_inputs:
+        return False
+    if step.output_names:
+        return True
+    ceiling, variadic = _operand_ceiling(_raw_op_from_details(step.details))
+    return ceiling is not None and not variadic and ceiling <= 1
 
 
 def _reads_only_a_side_parameter(step: BlockNode) -> bool:
@@ -2581,6 +2657,34 @@ def _add_linear_pipeline_chain(
     chain_last = last_index
     chain_input_index = last_index if last_index is not None else input_index
 
+    # A submodule attribute name (``kv_norm``) is scoped to the forward method
+    # that names it; two unrelated submodules can legitimately reuse the same
+    # bare attribute name at different nesting depths (an attention module's own
+    # ``kv_norm`` alongside a ``compressor`` submodule's own, distinct
+    # ``kv_norm``). ``attr_last_index`` is one flat dict shared across the whole
+    # recursive expansion, so promoting a step's own name into it here (needed
+    # so a *later sibling in this same steps list*, e.g. ``rotary_emb`` reading
+    # ``compressor``'s own ``kv_norm``, can resolve it) would otherwise
+    # permanently overwrite an ancestor scope's identically-named entry once
+    # this call returns -- corrupting an already-correctly-wired earlier
+    # consumer's edge (an attention's own ``kv = self.kv_norm(...).view(...)``)
+    # when ``_wire_all_predecessor_edges`` later re-resolves it from the
+    # now-stale ``graph.attr_output_indices`` snapshot. Snapshot each step's
+    # pre-call binding (or its absence) so it can be restored once this scope's
+    # own steps are done: the promotion stays visible within this call and
+    # anything nested under it, but does not leak into the caller's scope.
+    outer_bindings: dict[str, int] = {}
+    shadowed_absent: set[str] = set()
+    if attr_last_index is not None:
+        for sub_step in steps:
+            name = sub_step.attr_name
+            if name in outer_bindings or name in shadowed_absent:
+                continue
+            if name in attr_last_index:
+                outer_bindings[name] = attr_last_index[name]
+            else:
+                shadowed_absent.add(name)
+
     for sub_index, sub_step in enumerate(steps):
         inner_steps, inner_wrapper = _maybe_inline(sub_step, inline_expansion=inline_expansion)
         if inner_wrapper is not None:
@@ -2704,6 +2808,27 @@ def _add_linear_pipeline_chain(
         )
 
         indices.append(step_index)
+
+    if attr_last_index is not None and wrapper is not None and indices:
+        # Publish this composite's own multi-return slot producers (``cos``,
+        # ``sin``) into ``attr_last_index`` *before* the scope restore below
+        # pops this call's own step bindings. The caller (the recursive-call
+        # site above) also does this once control returns to it, but by then
+        # this call's own internal producer names (``@op_l157_..._multiply``)
+        # have already been popped/reverted -- too late for
+        # ``_track_attr_index`` to resolve each return ordinal's real
+        # producer, silently collapsing every slot onto the same (wrong,
+        # tail) one. Do it here, one level down, while those bindings are
+        # still live. The stashed slot keys use a separator that can never
+        # collide with a real attr name, so they are untouched by (and
+        # survive) the restore below.
+        _track_attr_index(attr_last_index, wrapper.attr_name, indices[-1], block=wrapper)
+
+    if attr_last_index is not None:
+        for name, value in outer_bindings.items():
+            attr_last_index[name] = value
+        for name in shadowed_absent:
+            attr_last_index.pop(name, None)
 
     return indices, indices[-1]
 
@@ -3129,7 +3254,60 @@ def _first_graph_index_for_module(
     # same source line (every RMSNorm's ``Cast``) otherwise collapse onto whichever
     # was emitted last. Resolving by identity keeps the same target op — no earlier
     # node is chosen — so wiring stays acyclic while the collision is removed.
-    first = min(steps, key=lambda step: step.forward_order or 0)
+    #
+    # The literal first-by-forward-order op is not always a genuine entry point:
+    # a straight-line composite may open with a *chain* of module-constant-only
+    # ops (a grouped linear's own ``self.weight.view(...).transpose(...)`` — no
+    # forward-param read anywhere in the chain, only a constant/buffer operand
+    # and host-scalar axis args, each op merely feeding the next by name) before
+    # its first op that actually consumes a caller argument. Docking a caller's
+    # real edge on any op in that closure would fabricate a tensor operand it
+    # never takes; ``_reads_only_module_constants`` alone only recognizes the
+    # closure's own root (empty ``operation_predecessors``), not a later link in
+    # the same chain (whose own operand is a *local sibling* op, not directly a
+    # module constant) — so walk each candidate's operand closure, following
+    # only predecessors that are this module's own steps, and treat it as a
+    # non-entry point when every leaf the closure bottoms out at is itself
+    # constant-only. Skip past any such leading closure; fall back to the
+    # literal first when every step in the module qualifies (nothing to skip
+    # to).
+    ordered = sorted(steps, key=lambda step: step.forward_order or 0)
+    by_attr = {step.attr_name: step for step in ordered}
+    memo: dict[str, bool] = {}
+
+    def _fed_only_by_module_constants(step: "BlockNode", stack: set[str]) -> bool:
+        name = step.attr_name
+        cached = memo.get(name)
+        if cached is not None:
+            return cached
+        if name in stack:
+            # A cycle within this module's own steps should not occur; treat it
+            # as inconclusive rather than infinitely recursing.
+            return True
+        if _reads_only_module_constants(step):
+            memo[name] = True
+            return True
+        if not step.operation_predecessors:
+            memo[name] = False
+            return False
+        stack.add(name)
+        result = True
+        for pred in step.operation_predecessors:
+            if pred == FORWARD_METHOD_INPUT:
+                result = False
+                break
+            pred_step = by_attr.get(pred)
+            if pred_step is None or not _fed_only_by_module_constants(pred_step, stack):
+                result = False
+                break
+        stack.discard(name)
+        memo[name] = result
+        return result
+
+    first = next(
+        (step for step in ordered if not _fed_only_by_module_constants(step, set())),
+        ordered[0],
+    )
     if block_index_by_id is not None and id(first) in block_index_by_id:
         return block_index_by_id[id(first)]
     return attr_last_index.get(first.attr_name)

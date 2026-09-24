@@ -23,6 +23,7 @@ from typing import Any, TYPE_CHECKING
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter, introspect_is_modeling_operation
 from TraceLens.ModelUtils.ast_analyze import (
     is_forward_operation,
+    is_function_synthetic,
     is_functional_synthetic,
     is_torch_native_attention_kernel,
     kernel_name_from_step_details,
@@ -293,7 +294,24 @@ def _minimal_metadata(spec: GraphNodeSpec) -> dict[str, Any]:
         and block.class_name not in {spec.label, block.label}
     ):
         metadata["class_name"] = block.class_name
-    if block is not None and is_forward_operation(block.attr_name):
+    # A free-function frame whose terminal op is also its return producer folds
+    # that op onto the frame-attr node: ``@fn_l349_rotate_half`` *is* the
+    # ``.flatten(-2)`` at the tail of ``rotate_half`` (see
+    # ``_inline_nested_free_functions``). The node then bears the ``@fn_`` frame
+    # prefix -- so ``is_forward_operation`` (which keys on the ``@op_`` prefix)
+    # rejects it -- yet it is a genuine leaf tensor op whose op-level metadata
+    # (``start_dim``/``raw_op``) must still reach shape inference and the
+    # type-check, or the rank-changing op silently passes its input through
+    # (leaving phantom rank downstream, e.g. the rotary concat rank mismatch).
+    is_folded_frame_terminal_op = (
+        block is not None
+        and is_function_synthetic(block.attr_name)
+        and block.is_basic
+        and not block.children
+    )
+    if block is not None and (
+        is_forward_operation(block.attr_name) or is_folded_frame_terminal_op
+    ):
         metadata["attr_name"] = block.attr_name
         if block.details:
             metadata["details"] = list(block.details)

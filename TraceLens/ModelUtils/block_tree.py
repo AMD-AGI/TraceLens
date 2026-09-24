@@ -1067,6 +1067,23 @@ def _expanded_free_function_node(
     method_ops = cls.multi_op_methods.get(call_attr)
     output_names = cls.forward_step_output_names.get(call_attr)
     runs_on_host = cls.forward_step_runs_on_host.get(call_attr, False)
+    # A tuple-returning free function (``q_embed, k_embed =
+    # apply_rotary_pos_emb_vision(...)``) carries its return slots the same way
+    # a ``self.<method>()`` call's own expansion does below, so a consumer
+    # reading one specific ordinal docks onto that slot's own internal
+    # producer instead of every ordinal collapsing onto the frame's last op
+    # (``_track_attr_index``/``_return_slot_attr_by_ordinal`` key off *this*
+    # node's own ``forward_return_order``, not the caller's
+    # ``forward_step_return_producers``).
+    method_returns = cls.multi_op_method_returns.get(call_attr)
+    fn_return_slots, fn_return_order, fn_primary_return = (
+        method_returns if method_returns else ({}, [], None)
+    )
+    fn_primary_output_step = (
+        fn_return_slots.get(fn_primary_return)
+        if fn_primary_return and fn_return_slots
+        else None
+    )
     # A host-only helper (``get_vision_position_ids``) builds integer index
     # bookkeeping whose per-op shapes are not meaningfully inferable (advanced
     # indexing / host arithmetic), so expanding it only surfaces wrong inner
@@ -1116,7 +1133,15 @@ def _expanded_free_function_node(
         # keeps only the first consumer of each boundary slot -- so the raw producer
         # is not re-wired as a spurious extra tensor operand onto every rebound
         # re-read (an ``unsqueeze``/``multiply`` that already reads the rebinding).
-        claimed_producer_slots: set[tuple[str, int]] = set()
+        claimed_producer_slots: set[tuple[str, int | None]] = set()
+        # The callee's own primary (first) parameter (``q``) never appears in any
+        # op's ``param_inputs`` -- it is excluded from the callee's own tracked
+        # param names at extraction time (see ``_param_refs``), since it is
+        # resolved like any ordinary chain input via ``FORWARD_METHOD_INPUT``
+        # instead. The op that reads it raw therefore never enters the
+        # ``param_inputs`` loop below, so it needs its own boundary label named
+        # after this same primary parameter here.
+        primary_param = cls.multi_op_method_inputs.get(call_attr)
         children: list[BlockNode] = []
         for operation_index, operation in enumerate(method_ops):
             translated: list[str] = []
@@ -1130,24 +1155,38 @@ def _expanded_free_function_node(
                     producer_attr = producer_arg_params.get(param)
                     if producer_attr is not None:
                         ordinal = ordinal_arg_params.get(param)
+                        # A single-value producer arg (``k`` fed by ``k_norm``'s
+                        # result, no tuple-unpack ordinal) is claimed the same way
+                        # an ordinal-tagged one is: only the slot's first consumer
+                        # names the entry point and claims the boundary label,
+                        # mirroring the ordinal branch below. Without this, every
+                        # op that (redundantly) re-reads the same rebound name
+                        # would re-claim it, and — since only a *first* consumer
+                        # ever named the entry point before this fix — a plain
+                        # (non-ordinal) param never named one at all, leaving its
+                        # boundary crossing to fall back to the frame's generic
+                        # default label instead of the callee's own parameter name.
+                        slot = (producer_attr, ordinal)
+                        if slot in claimed_producer_slots:
+                            # A rebound re-read of this slot; the value already
+                            # flows in through this op's internal predecessor.
+                            continue
+                        claimed_producer_slots.add(slot)
                         if ordinal is not None:
-                            slot = (producer_attr, ordinal)
-                            if slot in claimed_producer_slots:
-                                # A rebound re-read of this slot; the value already
-                                # flows in through this op's internal predecessor.
-                                continue
-                            claimed_producer_slots.add(slot)
                             extra_predecessor_ports.append((producer_attr, ordinal))
-                            # Expose the callee param as this op's own entry point,
-                            # exactly as a boundary-fed origin lands in ``translated``
-                            # below. Naming the entry point lets the caller resolve
-                            # ``cos``/``sin`` to THIS op (op0/op2) and skip the
-                            # unrelated side args (``x``, the other slot, ...) via the
-                            # ``entry_params`` dump guard -- rather than dumping every
-                            # side arg onto the frame's first op. Scoped to the slot's
-                            # first consumer so a rebound re-read is not re-exposed.
-                            if param not in translated:
-                                translated.append(param)
+                        # Expose the callee param as this op's own entry point,
+                        # exactly as a boundary-fed origin lands in ``translated``
+                        # below. Naming the entry point lets the caller resolve
+                        # ``cos``/``sin``/``k`` to THIS op and skip the unrelated
+                        # side args (``x``, the other slot, ...) via the
+                        # ``entry_params`` dump guard -- rather than dumping every
+                        # side arg onto the frame's first op. Scoped to the slot's
+                        # first consumer so a rebound re-read is not re-exposed.
+                        if param not in translated:
+                            translated.append(param)
+                        if boundary_name is None:
+                            boundary_name = param
+                            boundary_ordinal = ordinal
                         if producer_attr not in extra_predecessors:
                             extra_predecessors.append(producer_attr)
                         continue
@@ -1163,6 +1202,12 @@ def _expanded_free_function_node(
                 if boundary_name is None:
                     boundary_name = origin
                     boundary_ordinal = ordinal
+            if (
+                boundary_name is None
+                and primary_param is not None
+                and FORWARD_METHOD_INPUT in operation.predecessors
+            ):
+                boundary_name = primary_param
             operation_predecessors = list(operation.predecessors)
             for producer_attr in extra_predecessors:
                 if producer_attr not in operation_predecessors:
@@ -1206,6 +1251,17 @@ def _expanded_free_function_node(
             forward_order=child_order,
             details=[f"function `{name}()`", *call_context],
             output_names=list(output_names or []),
+            # The callee's own primary (first) parameter name (``q`` for
+            # ``apply_rotary_pos_emb_vision``), the same way a ``self.<method>()``
+            # expansion's frame is labelled via ``multi_op_method_inputs`` --
+            # without it, ``_input_label_for`` falls back to the generic
+            # ``hidden_states`` default for the primary-parameter crossing.
+            input_label=cls.multi_op_method_inputs.get(call_attr),
+            forward_return_slots=dict(fn_return_slots),
+            forward_return_order=list(fn_return_order),
+            primary_return_slot=fn_primary_return,
+            primary_output_step=fn_primary_output_step,
+            multi_return_module=len(fn_return_order) >= 2,
             children=children,
             runs_on_host=runs_on_host,
         )

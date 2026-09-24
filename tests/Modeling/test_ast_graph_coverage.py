@@ -1054,8 +1054,14 @@ def test_nested_linear_wrapper_tracks_frames_and_aliases(monkeypatch):
     )
     assert len(chain) == 3
     assert tail == chain[-1]
-    assert aliases["nested"] == aliases["inner_b"]
-    assert aliases["tail"] == tail
+    # Only the outermost wrapper name propagates to the caller's alias map; the
+    # nested wrapper's own children (and the plain ``tail`` step) stay scope-local
+    # to the expansion (see the scope snapshot/restore in
+    # ``_add_linear_pipeline_chain``, which keeps a nested submodule's internal
+    # name from leaking out and colliding with an identically-named sibling
+    # instance). The surviving wrapper name resolves to the last op of the chain.
+    assert aliases["outer"] == chain[-1]
+    assert "nested" not in aliases and "inner_b" not in aliases and "tail" not in aliases
     assert len(graph.inline_frames) == 2
     assert set(graph.inline_frames[0].node_indices) == set(chain)
     assert graph.nodes[chain[0]].port_label == "aux"

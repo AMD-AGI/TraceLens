@@ -1943,7 +1943,12 @@ def _multi_op_free_functions(
     *,
     self_values: dict[str, Any],
     all_tensor_ops: bool,
-) -> tuple[dict[str, list[ForwardOperation]], dict[str, list[str]]]:
+) -> tuple[
+    dict[str, list[ForwardOperation]],
+    dict[str, list[str]],
+    dict[str, tuple[dict[str, str], list[str], str | None]],
+    dict[str, str],
+]:
     """Traced free-function calls whose body expands into a visible sub-pipeline.
 
     Keyed by the synthetic call attr (``@positional_l1615_...``) so the block
@@ -1956,9 +1961,29 @@ def _multi_op_free_functions(
     ``apply_rotary_pos_emb_vision``) can dock onto the matching internal op
     instead of the frame's last op. General: derived from the helper's own
     ``return_order``/``return_slots``, no class-name checks.
+
+    The third dict mirrors ``multi_op_method_returns``'s own
+    ``(return_slots, return_order, primary_return_slot)`` shape for a
+    ``self.<method>()`` call, so a free-function call's own rendered
+    ``BlockNode`` (``_expanded_free_function_node``) can carry the same
+    ``forward_return_slots``/``forward_return_order`` metadata a method call's
+    does. Without it, ``_track_attr_index``/``_return_slot_attr_by_ordinal``
+    (which key off a *node's own* ``forward_return_order``, not the parent's
+    ``forward_step_return_producers``) have nothing to stash a per-ordinal slot
+    index from, so every consumer reading a specific return ordinal collapses
+    onto the frame's last op instead of its own slot's producer.
+
+    The fourth dict mirrors ``multi_op_method_inputs``'s own per-``self.method()``
+    entries: call attr -> the callee's own primary (first) parameter name, so the
+    free function's rendered frame is labelled after its own signature
+    (``apply_rotary_pos_emb_vision`` -> ``q``) instead of the class-level
+    ``forward_input_name`` fallback (``hidden_states``) that every frame's
+    ``@input`` resolution defaults to when nothing more specific is known.
     """
     expanded: dict[str, list[ForwardOperation]] = {}
     return_producers: dict[str, list[str]] = {}
+    method_returns: dict[str, tuple[dict[str, str], list[str], str | None]] = {}
+    primary_params: dict[str, str] = {}
     for call_attr in forward_calls:
         name = _synthetic_call_function_name(call_attr)
         if name is None:
@@ -1982,6 +2007,9 @@ def _multi_op_free_functions(
         )
         if len(operations) > 1:
             expanded[call_attr] = operations
+            primary = _primary_forward_input_name(func)
+            if primary:
+                primary_params[call_attr] = primary
             if len(analysis.return_order) >= 2:
                 op_attrs = {op.attr_name for op in operations}
                 producers = [
@@ -1992,7 +2020,12 @@ def _multi_op_free_functions(
                 # survived inlining (else fall back to the default last-op wiring).
                 if all(p is not None and p in op_attrs for p in producers):
                     return_producers[call_attr] = [p for p in producers if p]
-    return expanded, return_producers
+                    method_returns[call_attr] = (
+                        dict(analysis.return_slots),
+                        list(analysis.return_order),
+                        analysis.primary_return_slot,
+                    )
+    return expanded, return_producers, method_returns, primary_params
 
 
 def _register_forward_calls(
@@ -3723,7 +3756,21 @@ class _ForwardOperationExtractor:
             ):
                 return
             if isinstance(current, ast.Name) and current.id in self.param_names:
-                names.append(current.id)
+                # A rebound re-read (``k`` after ``q, k = q.float(), k.float()``)
+                # already flows into this op through ``predecessors`` -- the
+                # reassignment's own producer is resolved via ``var_producer``
+                # the same way any local variable is. Counting it *again* here
+                # as a raw param read wires a second, spurious edge straight
+                # from the caller's true external producer for ``k`` onto every
+                # op that re-reads the rebound name, alongside the (already
+                # correct) internal edge from the reassignment op itself. Only
+                # a name with no local producer yet -- the true first read of
+                # the raw parameter value, such as the reassignment statement's
+                # own RHS -- establishes the boundary read. General: keyed on
+                # whether this specific occurrence has already been resolved to
+                # a local producer, not on any name/class.
+                if not self.var_producer.get(current.id):
+                    names.append(current.id)
             for child in ast.iter_child_nodes(current):
                 _visit(child, False)
 
@@ -6005,8 +6052,18 @@ def _live_forward_steps(
         if operation is None:
             continue
         for pred in operation.predecessors:
-            if pred in operations and pred not in live_ops:
-                pending.append(pred)
+            # A predecessor that is not itself an op is a non-op step -- a
+            # positional/functional synthetic call (an inlined ``apply_rotary``
+            # frame) or a submodule -- whose real tensor input is recorded in
+            # ``step_predecessors``, not in this op's ``predecessors``. Bridge
+            # through it with ``_seed`` so the ops feeding that step stay live.
+            # Without this, an op consumed *only* by such a step (e.g. the
+            # ``.view().transpose()`` that a rotary reads) is wrongly pruned as
+            # dead, and its dangling ``step_predecessors`` reference then docks
+            # the consumer on the preceding submodule instead (phantom rank).
+            for seeded in _seed(pred):
+                if seeded not in live_ops:
+                    pending.append(seeded)
     live = set(live_ops)
     for step in live_ops:
         operation = operations.get(step)
@@ -6705,7 +6762,12 @@ class _ModelAstVisitor(ast.NodeVisitor):
             # module-level definition. Keys are synthetic attrs (``@positional_``/
             # ``@function_``), disjoint from method names, so they share the same
             # ``multi_op_methods`` rendering path in the block tree.
-            free_fn_methods, free_fn_return_producers = _multi_op_free_functions(
+            (
+                free_fn_methods,
+                free_fn_return_producers,
+                free_fn_method_returns,
+                free_fn_primary_params,
+            ) = _multi_op_free_functions(
                 self.module_functions,
                 forward_calls,
                 self_values=_self_config_values(
@@ -6715,6 +6777,16 @@ class _ModelAstVisitor(ast.NodeVisitor):
             )
             multi_op_methods.update(free_fn_methods)
             forward_step_return_producers.update(free_fn_return_producers)
+            # Same shape as ``multi_op_method_returns``'s own per-``self.method()``
+            # entries -- merging here lets ``_expanded_free_function_node`` read a
+            # free function's return-slot metadata off the same dict a method
+            # call's expansion already does (see ``_multi_op_free_functions``).
+            multi_op_method_returns.update(free_fn_method_returns)
+            # Same shape as ``multi_op_method_inputs``'s own per-``self.method()``
+            # entries -- merging here lets the free-function frame carry its own
+            # primary parameter name as its ``input_label`` the same way a
+            # ``self.<method>()`` expansion's frame already does.
+            multi_op_method_inputs.update(free_fn_primary_params)
             # A tuple-returning *method* expanded inline (``pool_keys,
             # pool_indices, pool_valid = self.get_pooled_states(...)``) exposes
             # the same ordinal→producer mapping as a free function: publish its
