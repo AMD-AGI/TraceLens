@@ -1725,6 +1725,28 @@ def test_resolve_view_shape_starred_with_slice_and_unresolved():
     assert _resolve_view_shape("*x.shape[:-1], nope", src, {}) is None
 
 
+def test_resolve_view_shape_collapses_head_block_when_star_ref_lower_rank():
+    """``reshape(*hidden_states.shape[:-1], -1)`` on the 4-D attention core is a
+    real head-collapse, not a no-op.
+
+    The attention epilogue reshapes the ``[B, S, heads, head_dim]`` core back to
+    ``[B, S, heads*head_dim]`` via ``*hidden_states.shape[:-1], -1`` -- but the
+    referenced ``hidden_states`` is 3-D, so the naive ``source.shape[:-1]`` keeps
+    ``[B, S, heads]`` and the lone ``-1`` would span only ``head_dim`` (a rank-4
+    no-op). When the star is followed by exactly one ``-1``, extra leading dims are
+    dropped so the ``-1`` merges the whole trailing feature block (``heads *
+    head_dim``). Keyed on the reshape-target structure, not a model/line.
+    """
+    core = TensorSpec(("B", "S", 64, 128), "float16")
+    out = _resolve_view_shape("*hidden_states.shape[:-1], -1", core, {})
+    assert out == ("B", "S", 64 * 128)
+
+    # A rank-2 source (last axis already stands alone) keeps rank: the guard only
+    # collapses when there is a genuine multi-dim tail to merge.
+    flat = TensorSpec(("B", 128), "float16")
+    assert _resolve_view_shape("*x.shape[:-1], -1", flat, {}) == ("B", 128)
+
+
 def test_parse_split_sizes_nested_and_failure():
     assert _parse_split_sizes("[a, (b)]", {"a": 1, "b": 2}) == [1, 2]
     assert _parse_split_sizes("a, unknown", {"a": 1}) is None
