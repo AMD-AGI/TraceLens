@@ -1687,10 +1687,11 @@ class ShapeInferencer:
 
         for node_id in order:
             node = node_by_id[node_id]
-            input_specs = self._gather_input_specs(graph, node_id)
+            input_specs, input_labels = self._gather_input_specs(graph, node_id)
             seeded = self._vision_position_ids_input(node)
             if seeded is not None:
                 input_specs = seeded
+                input_labels = [""] * len(seeded)
                 # The rotary op reads position_ids from a dedicated host producer
                 # (``get_vision_position_ids``); its host index-bookkeeping cannot
                 # be shape-inferred, so it carries a bogus shape that the merged
@@ -1702,7 +1703,9 @@ class ShapeInferencer:
                         continue
                     if consumers_of.get(edge.source) == [node_id]:
                         self._tensor_specs[edge.source] = seeded[0]
-            output = self._infer_node_output(node, input_specs, root=root)
+            output = self._infer_node_output(
+                node, input_specs, root=root, input_labels=input_labels
+            )
             self._tensor_specs[node_id] = output
             if node.metadata.get("synthetic") == "@input":
                 self._forward_input_specs.add(id(output))
@@ -2003,15 +2006,32 @@ class ShapeInferencer:
                 return TensorSpec(shape=tuple(axes), dtype=widest.dtype)
         return inputs[0]
 
-    def _gather_input_specs(self, graph: ModelGraph, node_id: str) -> list[TensorSpec]:
+    def _gather_input_specs(
+        self, graph: ModelGraph, node_id: str
+    ) -> tuple[list[TensorSpec], list[str]]:
+        """Ordered input specs feeding ``node_id`` and their port labels.
+
+        The label is the port role a producer feeds through -- read from a
+        ``@kernel_in:<idx>:<label>`` port node's id (the attention kernel names its
+        query/key/value/mask ports there) and otherwise from the edge's own label.
+        It lets a shape rule that needs to tell operands apart (the ``sdpa`` output
+        rule reads *query* and *value* by role) do so without trusting raw edge
+        order. Parallel to the spec list: index ``i``'s label describes spec ``i``.
+        """
         specs: list[TensorSpec] = []
+        labels: list[str] = []
         for edge in graph.edges:
             if edge.target != node_id:
                 continue
             source_spec = self._tensor_specs.get(edge.source)
-            if source_spec is not None:
-                specs.append(source_spec)
-        return specs
+            if source_spec is None:
+                continue
+            specs.append(source_spec)
+            if "@kernel_in:" in edge.source:
+                labels.append(edge.source.rsplit(":", 1)[-1])
+            else:
+                labels.append(edge.label or "")
+        return specs, labels
 
     def _vision_position_ids_input(
         self, node: ModelGraphNode
@@ -2047,6 +2067,7 @@ class ShapeInferencer:
         inputs: list[TensorSpec],
         *,
         root: BlockNode | None,
+        input_labels: list[str] | None = None,
     ) -> TensorSpec:
         dtype = self.context.dtype
         synthetic = node.metadata.get("synthetic")
@@ -2545,6 +2566,44 @@ class ShapeInferencer:
                 if a.shape and b.shape:
                     out_shape = (*a.shape[:-1], b.shape[-1])
                     return TensorSpec(shape=out_shape, dtype=a.dtype)
+            if inputs:
+                return inputs[0]
+            return TensorSpec(self._active_hidden_shape(), dtype)
+
+        # Scaled-dot-product attention's compiled core: the output keeps the
+        # query's leading axes ``[..., S_q]`` and takes its last dim from the value
+        # head dim, ``out = query.shape[:-1] + (value.shape[-1],)``. This is
+        # shape-correct for grouped-query attention (repeat_kv expands the query
+        # head *count*, not value's head dim) and for latent attention where
+        # ``v_head_dim != qk_head_dim`` (value's own last dim carries it). Query and
+        # value are told apart by their kernel-input port role (``query``/``value``
+        # -> leading ``q``/``v``), not by operand order, so a swapped edge order
+        # never mis-picks. Scoped to a wrapper-expanded core (``@attn_pipeline``) so
+        # a non-expanded atomic attention leaf keeps its prior section-shape output.
+        if ("@attn_pipeline" in str(node.id)) and (
+            "sdpa" in operation_label or "scaled_dot_product" in operation_label
+        ):
+            labels = input_labels or []
+            query_spec: TensorSpec | None = None
+            value_spec: TensorSpec | None = None
+            for spec, label in zip(inputs, labels):
+                roles = str(label).lower().split("/")
+                if query_spec is None and any(r.startswith("q") for r in roles):
+                    query_spec = spec
+                if value_spec is None and any(r.startswith("v") for r in roles):
+                    value_spec = spec
+            if query_spec is None and inputs:
+                query_spec = inputs[0]
+            if value_spec is None:
+                value_spec = query_spec
+            if (
+                query_spec is not None
+                and value_spec is not None
+                and query_spec.shape
+                and value_spec.shape
+            ):
+                out_shape = (*query_spec.shape[:-1], value_spec.shape[-1])
+                return TensorSpec(shape=out_shape, dtype=query_spec.dtype)
             if inputs:
                 return inputs[0]
             return TensorSpec(self._active_hidden_shape(), dtype)
@@ -3948,6 +4007,21 @@ def _resolve_view_shape(
         if m:
             cut = int(m.group(1))
             leading = source.shape[:cut] if cut < 0 else source.shape[:cut]
+            # ``cut`` indexes the *referenced* tensor's rank (``X`` in
+            # ``*X.shape[:cut]``), but ``source`` here can be higher-rank than
+            # ``X``: the attention epilogue ``reshape(*hidden_states.shape[:-1],
+            # -1)`` runs on the 4-D attn core ``[B, S, heads, head_dim]`` while
+            # ``hidden_states`` is 3-D, so ``source.shape[:-1]`` keeps one axis
+            # too many and the lone trailing ``-1`` would collapse a single dim
+            # -- a no-op reshape the source never intends. When the star is
+            # followed by exactly one ``-1`` (merge the whole trailing feature
+            # block into one axis), drop extra leading dims so the ``-1`` spans a
+            # real (>=2-dim) block. Unaffected when the naive cut already leaves a
+            # multi-dim tail (rank(source) == rank(X)) or when explicit trailing
+            # dims follow the star (the head-split view, which is not a no-op).
+            if parts[1:] == ["-1"] and len(source.shape) > 2:
+                while len(leading) >= 1 and len(source.shape[len(leading) :]) < 2:
+                    leading = source.shape[: len(leading) - 1]
         else:
             leading = source.shape
         trailing_start = 1

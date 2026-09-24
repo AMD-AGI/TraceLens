@@ -131,6 +131,75 @@ def test_deepseek_v4_attention_kernel_q_and_kv_are_rank4():
     assert port_rank["kv"] == 4, f"kv kernel input must be 4-D, got rank {port_rank['kv']}"
 
 
+def test_deepseek_v4_attention_kernel_ports_carry_correct_distinct_shapes():
+    """The kernel's ``q`` / ``kv`` / ``attention_mask`` ports keep their *own*
+    shapes -- they are not rotated onto each other.
+
+    Regression guard for the wrapper-pipeline core port rotation: the sdpa core
+    leaf lacked an ``inputs:`` declaration, so the attention-provenance pass
+    routed every port through provenance chains (merging the compressed-KV
+    ``kv`` and ``attention_mask`` onto one source), and the ``KernelPipeline``
+    core -- unlike the atomic leaf -- was spine-chained from the preceding
+    ``Select`` in ``_add_linear_pipeline_chain``, prepending a spurious first
+    edge that stole the ``q`` declared-port name and rotated every input off its
+    true source (``q`` received the mask's ``[B, 1, S, S]``, etc.). The existing
+    rank-4 guard above does not catch this because every port stayed rank 4.
+
+    Asserted structurally (parsed shape axes, keyed on port label), never on
+    literal head-count / head-dim numbers:
+
+    * ``q`` is a genuine multi-head query -- its head axis (axis 1) is > 1 and
+      its last two axes are *not* equal (not the square attention mask).
+    * ``attention_mask`` is head-broadcast (axis 1 == 1) and spatially square
+      (its last two axes are equal).
+    * the three port shapes are mutually distinct.
+
+    A rotation that swaps ``q`` and ``attention_mask`` makes ``q`` square with a
+    unit head axis (and the mask non-square), tripping these assertions.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph = _build_graph()
+    nodes = graph["nodes"]
+    by_id = {node["id"]: node for node in nodes}
+
+    def _axes(node) -> list[str] | None:
+        for out in node.get("outputsMetadata", []) or []:
+            for attr in out.get("attrs", []) or []:
+                if attr.get("key") == "tensor_shape":
+                    inner = str(attr.get("value", "")).split("]", 1)[0].lstrip("[")
+                    return [d.strip() for d in inner.split(",") if d.strip()] or None
+        return None
+
+    port_axes: dict[str, list[str] | None] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []) or []:
+            src = edge.get("sourceNodeId", "")
+            if "@kernel_in" not in src:
+                continue
+            port = src.rsplit(":", 1)[-1]
+            if port in {"q", "kv", "attention_mask"} and port not in port_axes:
+                port_axes[port] = _axes(by_id.get(src, {}))
+
+    assert {"q", "kv", "attention_mask"} <= set(port_axes), (
+        f"kernel q/kv/attention_mask ports not all found: {port_axes}"
+    )
+    q, kv, mask = port_axes["q"], port_axes["kv"], port_axes["attention_mask"]
+    assert q and kv and mask, port_axes
+
+    # q is a real multi-head query, not the head-broadcast square mask.
+    assert len(q) == 4 and q[1] != "1", f"query head axis must be multi-head: {q}"
+    assert q[-1] != q[-2], f"query must not be square (mask-shaped): {q}"
+
+    # attention_mask is head-broadcast and spatially square.
+    assert len(mask) == 4 and mask[1] == "1", f"mask must be head-broadcast: {mask}"
+    assert mask[-1] == mask[-2], f"attention mask must be square: {mask}"
+
+    # No two ports collapsed onto the same shape (the fragmentation/merge bug).
+    assert len({tuple(q), tuple(kv), tuple(mask)}) == 3, (
+        f"q/kv/mask ports must carry distinct shapes: {port_axes}"
+    )
+
+
 def test_deepseek_v4_indexer_chunk_kv_and_gate_are_consumed():
     """``chunk_kv``'s View and ``chunk_gate``'s Add feed the ``new_kv``/``new_gate``
     slice-assignment chain instead of dead-ending.

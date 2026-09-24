@@ -309,8 +309,23 @@ def _minimal_metadata(spec: GraphNodeSpec) -> dict[str, Any]:
         and block.is_basic
         and not block.children
     )
+    # A basic op leaf that records its torch op via a ``raw_op:`` detail is a
+    # genuine tensor operation whatever synthetic namespace it lives in -- e.g.
+    # an attention wrapper's ``@attn_tail:transpose``/``:contiguous`` layout ops,
+    # which key on neither the ``@op_`` nor the ``@fn_`` prefix. Its call details
+    # (``dim0``/``dim1``/``start_dim`` ...) must reach shape inference or the op
+    # silently passes its input through (a ``transpose(1, 2)`` would fall back to
+    # the ``-2, -1`` default and scramble the head/sequence axes).
+    is_basic_op_leaf = (
+        block is not None
+        and block.is_basic
+        and not block.children
+        and any(str(detail).startswith("raw_op:") for detail in block.details)
+    )
     if block is not None and (
-        is_forward_operation(block.attr_name) or is_folded_frame_terminal_op
+        is_forward_operation(block.attr_name)
+        or is_folded_frame_terminal_op
+        or is_basic_op_leaf
     ):
         metadata["attr_name"] = block.attr_name
         if block.details:

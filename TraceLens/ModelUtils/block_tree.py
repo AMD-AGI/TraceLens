@@ -38,6 +38,7 @@ from TraceLens.ModelUtils.ast_analyze import (
     operation_display_label,
     positional_display_label,
     _synthetic_call_function_name,
+    is_attention_wrapper_expandable,
     is_kernel_pipeline_step,
     kernel_kwarg_ports,
     kernel_name_from_step_details,
@@ -1381,6 +1382,122 @@ def _output_gate_details(
     return lines
 
 
+def _attention_wrapper_block_nodes(
+    *,
+    forward_order: int | None,
+    details: list[str],
+    cls_node,
+    attention_inputs: dict[str, list[str]] | None = None,
+) -> BlockNode | None:
+    """Expand a dispatched attention wrapper into a visible op pipeline.
+
+    The wrapper (SDPA's ``sdpa_attention_forward``) is not a kernel: it calls the
+    compiled ``scaled_dot_product_attention`` primitive, then transposes and makes
+    the result contiguous. This renders that as a ``<kernel> -> transpose ->
+    contiguous`` pipeline whose only atomic leaf is the compiled primitive, so the
+    post-kernel layout ops the opaque leaf used to hide become visible.
+
+    The tail method chain (with each method's literal int args, e.g. a
+    ``transpose(1, 2)``'s two dims) is read from source AST by
+    :func:`introspect_attention_wrapper` -- no op/param/class allow-list. Returns
+    ``None`` when the wrapper cannot be resolved, so the caller keeps the atomic
+    leaf it built before. (The grouped-query ``repeat_kv`` the wrapper may run
+    before the kernel is deliberately not materialised here -- see the body.)
+    """
+    from TraceLens.ModelUtils.attention_wrapper import introspect_attention_wrapper
+
+    plan = introspect_attention_wrapper(details, cls_node)
+    if plan is None:
+        return None
+    inputs = dict(attention_inputs or {})
+
+    # The atomic compiled primitive is the pipeline entry: it keeps the
+    # ``SYNTHETIC_ATTENTION`` attr so the caller's provenance edges (query / key /
+    # value / mask) dock onto it through the existing attention-provenance pass and
+    # its ``@kernel_in`` ports are named exactly as before. Because sdpa genuinely
+    # receives every one of those tensors, a single dock target for all of them is
+    # faithful -- unlike a leading ``repeat_kv`` node, which would need only the
+    # key/value port routed through it (grouped-query head expansion) while query
+    # and mask bypass it. That per-port interception is not expressible through the
+    # linear-inline docking a nested pipeline goes through, so the grouped-query
+    # ``repeat_kv`` (and its expand/reshape primitives) stays deferred; expanding
+    # the wrapper's post-kernel tail here is the general, cycle-free win. The core
+    # leaf's own output shape is inferred by the ``sdpa`` rule
+    # (``query.shape[:-1] + (value.shape[-1],)``), shape-correct for GQA and MLA.
+    core_attr = SYNTHETIC_ATTENTION
+    # Declare the core's tensor-input ports exactly as the atomic-leaf path does
+    # (``attention_kernel_details`` stamps ``inputs: q,kv,attention_mask`` from the
+    # step's ``attention_inputs`` keys). Without this declaration the attention-
+    # provenance pass (``_wire_*`` section 2) treats the core as having no declared
+    # ports and routes *every* input through provenance chains -- which, for a
+    # compressed-KV kernel (DeepSeek MLA) whose ``kv`` and ``attention_mask`` trace
+    # to the same producer, merges them into one ``kv/attention_mask`` port and
+    # fabricates ``Select`` ports from the split's output ordinals. Declaring the
+    # ports makes that pass skip them so they dock by normal predecessor tracking,
+    # yielding the same clean ``q``/``kv``/``attention_mask`` ports as the leaf.
+    core_details = attention_kernel_details(details, inputs)
+    if not core_details:
+        core_details = [f"kernel: {plan.kernel}", "outputs: 1"]
+    children: list[BlockNode] = [
+        _leaf_node(
+            attr_name=core_attr,
+            class_name="AttentionOp",
+            forward_order=0,
+            label=plan.kernel,
+            details=core_details,
+            basic=False,
+        )
+    ]
+
+    # Post-kernel tail (``attn_output.transpose(1, 2).contiguous()``), each method a
+    # visible op reading the previous one. A ``transpose``'s two literal dims are
+    # stamped as ``dim0``/``dim1`` details so its shape rule permutes the right axes
+    # (the compiled kernel returns ``[B, H, S, D]``; the wrapper transposes heads
+    # and sequence back to ``[B, S, H, D]`` before returning). The last tail op is
+    # the pipeline's real output, which downstream steps reading the attention
+    # result resolve to via the ``_reroute_wrapper_kernel_output_edges`` pass.
+    prev_attr = core_attr
+    for order, (method, int_args) in enumerate(plan.tail_ops, start=1):
+        attr = f"@attn_tail:{method}"
+        # Each tail is an ordinary layout op, represented exactly as the same
+        # method called anywhere else in the model (``basic`` leaf, canonical
+        # ``Transpose``/``Contiguous`` label, ``raw_op`` detail carrying the torch
+        # name for the type-check's operand-arity resolution). Keeping it a plain
+        # op -- not a bespoke node kind -- means every existing shape rule
+        # (``transpose`` reads ``dim0``/``dim1``; ``contiguous`` is a no-op),
+        # detail-graph filter, and renderer treats it with no special-casing. The
+        # explicit ``operation_predecessors`` chain (core -> transpose ->
+        # contiguous) gives each its single real dataflow edge.
+        display = operation_display_label(method)
+        tail_details = [f"raw_op: {method}"]
+        if method == "transpose" and len(int_args) >= 2:
+            tail_details += [f"dim0: {int_args[0]}", f"dim1: {int_args[1]}"]
+        children.append(
+            _leaf_node(
+                attr_name=attr,
+                class_name=display,
+                forward_order=order,
+                label=display,
+                details=tail_details,
+                basic=True,
+                operation_predecessors=[prev_attr],
+            )
+        )
+        prev_attr = attr
+
+    return BlockNode(
+        attr_name="@attn_pipeline",
+        class_name="KernelPipeline",
+        role="attention",
+        label=f"{plan.kernel} attention",
+        forward_order=forward_order,
+        details=[f"attention wrapper · {plan.kernel}"],
+        is_basic=False,
+        children=children,
+        attention_inputs=inputs,
+    )
+
+
 def _kernel_pipeline_block_nodes(
     *,
     forward_order: int | None,
@@ -2387,6 +2504,36 @@ def build_block_node(
                 and not cls.attention_inputs
             ):
                 continue
+            has_boundary_input = any(
+                not chain for chain in cls.attention_inputs.values()
+            )
+            if (
+                is_attention_wrapper_expandable(child_details)
+                and cls.attention_inputs
+                and not has_boundary_input
+            ):
+                # A dispatched attention interface (``sdpa_attention_forward``) is a
+                # Python wrapper, not a kernel: expand it into its visible ops
+                # (``sdpa -> transpose -> contiguous``) with the compiled primitive
+                # as the only atomic leaf. Falls through to the atomic-leaf path
+                # when the wrapper source cannot be resolved.
+                #
+                # A *boundary* attention input -- a kernel tensor with an empty
+                # provenance chain, fed straight from an enclosing scope (varlen
+                # attention's ``cu_seqlens``) -- needs the dedicated ``param_inputs``
+                # kernel entry the atomic-leaf else-branch below declares; this
+                # single-entry pipeline can't reproduce that per-input docking and
+                # would leave the boundary producer (and the rotary / unbind ops the
+                # kernel consumes) dangling. Defer those to the proven leaf path.
+                wrapper_node = _attention_wrapper_block_nodes(
+                    forward_order=child_order,
+                    details=child_details,
+                    cls_node=cls.node,
+                    attention_inputs=cls.attention_inputs,
+                )
+                if wrapper_node is not None:
+                    child_nodes.append(wrapper_node)
+                    continue
             if is_kernel_pipeline_step(child_details, cls.attention_inputs):
                 pipeline_node, output_node = _kernel_pipeline_block_nodes(
                     forward_order=child_order,

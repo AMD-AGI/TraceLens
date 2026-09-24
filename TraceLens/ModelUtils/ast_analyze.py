@@ -6433,6 +6433,58 @@ def _forward_operations_from_forward(
             return_slots[label] = producer
             if label not in return_order:
                 return_order.append(label)
+    # The name-based pass keeps only bare-``Name`` tuple elements, so a submodule
+    # call used directly as a return element (``return self.o_proj(attn_output),
+    # attn_weights``) is recovered by the loop above but APPENDED out of position
+    # and never chosen as the primary (its base label ``self`` is not a recognised
+    # main-output name, so the primary fell through to the weak last-element
+    # default -- the side output ``attn_weights``). Re-derive the order from the
+    # return statement's real element sequence so a positional consumer (a decoder
+    # unpacking ``attn_output, attn_weights``) reads the right slot, and when the
+    # primary was only that weak fallback, promote the first returned submodule
+    # call: an inlined ``self.<proj>(...)`` return element IS the module's computed
+    # output, whereas a bare-``Name`` sibling is a side output.
+    return_stmt = next(
+        (
+            stmt
+            for stmt in reversed(func.body)
+            if isinstance(stmt, ast.Return) and stmt.value is not None
+        ),
+        None,
+    )
+    if return_stmt is not None and isinstance(return_stmt.value, ast.Tuple):
+        source_order = [
+            extractor._return_element_label(elt) for elt in return_stmt.value.elts
+        ]
+        reordered = [label for label in source_order if label in return_slots]
+        # Only trust the reordering when it accounts for exactly the recorded
+        # slots, so a partially-parsed return can't silently drop one.
+        if set(reordered) == set(return_order):
+            return_order = reordered
+        input_name = _primary_forward_input_name(func)
+        main_names = {
+            "hidden_states",
+            "hidden_state",
+            "attn_output",
+            "output",
+            "result",
+        }
+        primary_is_strong = (
+            primary_return_slot in main_names or primary_return_slot == input_name
+        )
+        if not primary_is_strong:
+            submodule_call_slot = next(
+                (
+                    extractor._return_element_label(elt)
+                    for elt in return_stmt.value.elts
+                    if isinstance(elt, ast.Call)
+                    and isinstance(elt.func, ast.Attribute)
+                    and extractor._return_element_label(elt) in return_slots
+                ),
+                None,
+            )
+            if submodule_call_slot is not None:
+                primary_return_slot = submodule_call_slot
     if primary_return_slot is None and return_order:
         primary_return_slot = return_order[-1]
     return ForwardAnalysis(
@@ -8473,6 +8525,44 @@ def is_kernel_pipeline_step(
     )
     inputs = attention_inputs or {}
     return len(inputs) >= 2 or kwarg_tensors >= 2
+
+
+def is_attention_wrapper_expandable(details: list[str] | None) -> bool:
+    """True when a dispatched attention step records an expandable wrapper location.
+
+    ``_resolve_dispatched_attention_kernel`` stamps ``wrapper_expand: module#symbol``
+    onto a step whose resolved kernel is a real Python wrapper (SDPA's
+    ``sdpa_attention_forward``) whose body can be introspected into its live ops
+    (``repeat_kv`` -> ``scaled_dot_product_attention`` -> ``transpose`` ->
+    ``contiguous``). A kernel with no such source (a fused library kernel, an
+    unresolved dispatch variable, or a non-attention output constructor) never
+    carries the marker, so the block tree keeps rendering it as an atomic leaf.
+    """
+    if not details:
+        return False
+    return any(line.startswith("wrapper_expand:") for line in details)
+
+
+def attention_wrapper_expand_location(details: list[str]) -> tuple[str, str] | None:
+    """Split a ``wrapper_expand: module#symbol`` detail into ``(module, symbol)``."""
+    for line in details:
+        if line.startswith("wrapper_expand:"):
+            value = line.split(":", 1)[1].strip()
+            module, _, symbol = value.partition("#")
+            if module and symbol:
+                return module, symbol
+    return None
+
+
+def attention_wrapper_gqa_groups(details: list[str]) -> int | None:
+    """Read the ``gqa_groups: N`` repeat factor stamped onto a wrapper step."""
+    for line in details:
+        if line.startswith("gqa_groups:"):
+            try:
+                return int(line.split(":", 1)[1].strip())
+            except ValueError:
+                return None
+    return None
 
 
 def attention_kernel_label(details: list[str]) -> str:

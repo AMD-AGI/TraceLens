@@ -876,6 +876,74 @@ def _iter_wiring_blocks(root: BlockNode) -> list[BlockNode]:
     return blocks
 
 
+def _attn_pipeline_container(key: str) -> str | None:
+    """Return the ``@attn_pipeline`` container prefix of a node key, or ``None``.
+
+    Two nodes belong to the same expanded attention pipeline iff their keys
+    share this prefix.
+    """
+    marker = "@attn_pipeline"
+    index = key.rfind(marker)
+    if index == -1:
+        return None
+    return key[: index + len(marker)]
+
+
+def _reroute_wrapper_kernel_output_edges(graph: ComputationGraph) -> None:
+    """Move a wrapper-expanded attention kernel's output edges onto its tail.
+
+    A dispatched attention wrapper (``sdpa_attention_forward``) is expanded into
+    a ``<kernel> -> transpose -> contiguous`` pipeline whose ENTRY keeps
+    ``SYNTHETIC_ATTENTION`` so the caller's query/key/value/mask provenance docks
+    onto the compiled primitive. Its real *result*, though, is the pipeline tail
+    (the post-kernel layout ops). A consumer OUTSIDE the pipeline that named the
+    attention call as its predecessor resolves to that entry, leaving the layout
+    ops with no consumer (dead). Reroute every such entry->external edge to the
+    tail; edges to nodes INSIDE the same pipeline (the tail chain itself) are
+    left untouched, and a wrapper with no post-kernel tail (entry == tail) is a
+    no-op. Rerouting (rather than adding) keeps each consumer's single operand
+    edge single.
+    """
+    containers: dict[str, list[int]] = {}
+    for index, spec in enumerate(graph.nodes):
+        container = _attn_pipeline_container(spec.key)
+        if container is not None:
+            containers.setdefault(container, []).append(index)
+
+    for member_indices in containers.values():
+        members = set(member_indices)
+        entry = next(
+            (
+                i
+                for i in member_indices
+                if graph.nodes[i].block is not None
+                and graph.nodes[i].block.attr_name == SYNTHETIC_ATTENTION
+            ),
+            None,
+        )
+        if entry is None:
+            continue
+        # The tail is the one pipeline member consumed by nothing else inside the
+        # pipeline. Only reroute when exactly one such sink exists and it is not
+        # the entry itself (i.e. there really are post-kernel ops to keep alive).
+        consumed_internally = {
+            src for src, dst in graph.links if src in members and dst in members
+        }
+        sinks = [i for i in member_indices if i not in consumed_internally]
+        if len(sinks) != 1 or sinks[0] == entry:
+            continue
+        tail = sinks[0]
+        for position, (src, dst) in enumerate(graph.links):
+            if src != entry or dst in members:
+                continue
+            new_link = (tail, dst)
+            graph.links[position] = new_link
+            for meta in (graph.link_port_labels, graph.link_output_ports):
+                if (src, dst) in meta:
+                    value = meta.pop((src, dst))
+                    meta.setdefault(new_link, value)
+
+
 def _wire_all_predecessor_edges(
     graph: ComputationGraph,
     root: BlockNode,
@@ -2772,7 +2840,21 @@ def _add_linear_pipeline_chain(
                         graph.link_output_ports.get(link), port_str
                     )
 
-        if not explicit_sources and not _reads_only_a_side_parameter(sub_step):
+        # An attention kernel core (``SYNTHETIC_ATTENTION``) never takes a raw
+        # spine operand: its query/key/value/mask edges are supplied by the
+        # attention-provenance and ``forward_step_predecessor`` passes, keyed by
+        # its declared input ports. Spine-chaining it from the preceding step
+        # (a compressed-KV attention's last ``Select``) would fabricate a first
+        # unlabeled edge that then claims the first declared port name in
+        # ``_add_kernel_port_nodes`` — rotating every kernel input off its true
+        # source. The atomic-leaf path skips this same edge via its
+        # ``forward_step_predecessors`` guard; mirror it here for the wrapper
+        # pipeline core so both dock identical, correctly-ordered ports.
+        if (
+            not explicit_sources
+            and not _reads_only_a_side_parameter(sub_step)
+            and sub_step.attr_name != SYNTHETIC_ATTENTION
+        ):
             if sub_index == 0:
                 if branch_from_input_dashed and input_index is not None:
                     _link_forward_input(graph, input_index, step_index)
@@ -4640,6 +4722,7 @@ def build_computation_graph(
         skip_forward_links=skip_fwd,
         exclude_carried_from=exclude_carried_from,
     )
+    _reroute_wrapper_kernel_output_edges(graph)
     if root.primary_output_step:
         for index, spec in enumerate(graph.nodes):
             if (
