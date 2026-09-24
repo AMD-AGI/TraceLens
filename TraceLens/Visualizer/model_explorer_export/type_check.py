@@ -97,6 +97,53 @@ def _is_zero_operand_source(node: dict[str, Any]) -> bool:
 # size it and legitimately passes the shape through.
 _SHAPE_CHANGE_DETAIL_PREFIXES = ("select_dim:", "resize_dim:", "shape_slice:")
 
+# The ``shape:`` detail a ``view``/``reshape``/``expand`` stamps carries its
+# declared target shape (``ast_analyze`` renders the reshape args here, and only
+# these ops emit it). Unlike the narrowing details above, a reshape does NOT
+# guarantee a shape change -- a contiguous-forcing ``x.reshape(x.shape)`` is a
+# legitimate same-shape reshape -- so an output that equals the input is only a
+# defect when the DECLARED target provably differs. That proof is only available
+# when the declared target is a *fully concrete* shape (see ``_concrete_int_dims``).
+_RESHAPE_SHAPE_DETAIL_PREFIX = "shape:"
+
+
+def _concrete_int_dims(tokens: list[str] | None) -> list[int] | None:
+    """The tokens as a fully concrete shape (all non-negative int literals), or None.
+
+    A concrete shape has every axis a plain non-negative integer. Any symbolic dim
+    (``B*S``, ``self.head_dim``, ``number_of_pools``), a ``-1`` reshape placeholder,
+    a starred prefix (``*orig_shape``), an arithmetic expression, or an empty token
+    makes the shape non-concrete -- shape inference may then legitimately resolve it
+    to the operand's own shape, so a no-op there is not provably a defect. Returning
+    None for any such shape keeps the reshape no-op check free of false positives.
+    """
+    if not tokens:
+        return None
+    out: list[int] = []
+    for token in tokens:
+        token = str(token).strip()
+        if not token:
+            return None
+        try:
+            value = int(token)
+        except ValueError:
+            return None
+        if value < 0:  # excludes the ``-1`` unfolded-axis placeholder
+            return None
+        out.append(value)
+    return out
+
+
+def _declared_reshape_dims(node: dict[str, Any]) -> list[str] | None:
+    """The declared target-shape tokens of a ``view``/``reshape``/``expand``'s
+    ``shape:`` detail (``shape: -1, 6144`` -> ``["-1", "6144"]``), or None if the
+    node carries no such detail."""
+    for line in _details_lines(node):
+        if line.startswith(_RESHAPE_SHAPE_DETAIL_PREFIX):
+            body = line[len(_RESHAPE_SHAPE_DETAIL_PREFIX) :].strip()
+            return [tok.strip() for tok in body.split(",")]
+    return None
+
 
 def _details_lines(node: dict[str, Any]) -> list[str]:
     for attr in node.get("attrs", []):
@@ -218,6 +265,19 @@ def _check_node(node: dict[str, Any]) -> list[str]:
                 f"kept off the edges."
             )
 
+    # Shape-change no-op checks. Both compare the op's resolved OUTPUT shape to its
+    # single tensor INPUT shape; a match means the declared reshaping did not take
+    # effect. Compute the shared operands once.
+    out_dims = _output_shape_dims(node)
+    tensor_inputs = [
+        shapes[i]
+        for i, t in enumerate(input_types)
+        if i < len(shapes)
+        and isinstance(shapes[i], list)
+        and _operand_is_tensor(t, shapes[i])
+    ]
+    single_tensor_in = tensor_inputs[0] if len(tensor_inputs) == 1 else None
+
     # A shape-changing slice/select/resize op whose output shape still equals its
     # input shape did not actually change the shape -- the declared narrowing was
     # dropped in shape inference (the ``rotate_half`` no-op slice class of bug).
@@ -226,24 +286,43 @@ def _check_node(node: dict[str, Any]) -> list[str]:
         for line in _details_lines(node)
         if line.startswith(_SHAPE_CHANGE_DETAIL_PREFIXES)
     ]
-    if change_details:
-        out_dims = _output_shape_dims(node)
-        tensor_inputs = [
-            shapes[i]
-            for i, t in enumerate(input_types)
-            if i < len(shapes)
-            and isinstance(shapes[i], list)
-            and _operand_is_tensor(t, shapes[i])
-        ]
-        if out_dims is not None and len(tensor_inputs) == 1:
-            in_dims = [str(dim) for dim in tensor_inputs[0]]
-            if in_dims == out_dims:
-                warnings.append(
-                    f"{node_id} [{op}]: declares a shape change "
-                    f"({'; '.join(change_details)}) but its output shape {out_dims} "
-                    f"equals its input shape {in_dims} -- the narrowing was lost; "
-                    f"shape inference did not apply the declared slice/select."
-                )
+    if change_details and out_dims is not None and single_tensor_in is not None:
+        in_dims = [str(dim) for dim in single_tensor_in]
+        if in_dims == out_dims:
+            warnings.append(
+                f"{node_id} [{op}]: declares a shape change "
+                f"({'; '.join(change_details)}) but its output shape {out_dims} "
+                f"equals its input shape {in_dims} -- the narrowing was lost; "
+                f"shape inference did not apply the declared slice/select."
+            )
+
+    # A ``view``/``reshape``/``expand`` declaring a FULLY CONCRETE target shape
+    # (every axis a non-negative int literal -- no ``-1`` placeholder, symbolic dim,
+    # starred prefix, or arithmetic) is unconditionally resolvable: shape inference
+    # needs no operand symbols to apply it, so the op's true output IS that declared
+    # shape. If the resolved output instead equals a (likewise fully concrete) input
+    # shape that DIFFERS from the declared target, the reshape was dropped and the
+    # source passed through -- the reshape analogue of the no-op slice. A
+    # contiguous-forcing reshape declares the SAME shape (declared == input, not
+    # flagged), and a symbolic/``-1``/starred target -- including the deliberately
+    # merged-product ``B*S`` reshape -- is non-concrete and conservatively skipped,
+    # since shape inference may legitimately resolve it to the operand's own shape.
+    declared = _concrete_int_dims(_declared_reshape_dims(node))
+    if declared is not None and out_dims is not None and single_tensor_in is not None:
+        in_concrete = _concrete_int_dims([str(dim) for dim in single_tensor_in])
+        out_concrete = _concrete_int_dims(out_dims)
+        if (
+            in_concrete is not None
+            and out_concrete is not None
+            and in_concrete == out_concrete
+            and declared != in_concrete
+        ):
+            warnings.append(
+                f"{node_id} [{op}]: declares a concrete reshape to {declared} but its "
+                f"output shape {out_concrete} equals its input shape {in_concrete} -- "
+                f"the reshape was lost; shape inference passed the source through "
+                f"instead of applying the declared target shape."
+            )
 
     return warnings
 

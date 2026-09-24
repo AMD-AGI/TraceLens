@@ -260,6 +260,106 @@ def test_descriptive_slice_detail_never_warns_on_unchanged_shape():
 
 
 # --------------------------------------------------------------------------- #
+# Reshape no-op check (Task M): a ``view``/``reshape``/``expand`` declaring a
+# FULLY CONCRETE target shape whose resolved output still equals its (concrete)
+# input shape dropped the declared reshape -- the reshape analogue of the no-op
+# slice. Non-concrete targets (symbolic / ``-1`` / starred, incl. merged ``B*S``)
+# and contiguous-forcing reshapes (declared == input) must never fire.
+# --------------------------------------------------------------------------- #
+
+
+def _reshape_node(node_id, shape_detail, input_shape, output_shape, op_type="Reshape"):
+    return {
+        "id": node_id,
+        "label": op_type,
+        "attrs": [
+            {"key": "op_type", "value": op_type},
+            {"key": "details", "value": f"shape: {shape_detail}"},
+            {"key": "input_types", "value": json.dumps(["float32"])},
+            {"key": "input_shapes", "value": json.dumps([input_shape])},
+            {"key": "output_shape", "value": output_shape},
+        ],
+    }
+
+
+def test_concrete_reshape_that_did_not_change_shape_warns():
+    # The regression this guards: a fully concrete ``reshape(2, 16)`` on a [4, 8]
+    # operand must yield [2, 16]; an output still equal to the [4, 8] input means the
+    # declared reshape was dropped and the source passed through.
+    node = _reshape_node(
+        "n:noop_reshape",
+        "2, 16",
+        ["4", "8"],
+        "[4, 8] float32",
+    )
+    warnings = type_check_graph_nodes([node])
+    assert len(warnings) == 1
+    assert "n:noop_reshape" in warnings[0]
+    assert "reshape was lost" in warnings[0]
+
+
+def test_concrete_reshape_that_changed_shape_is_clean():
+    # A genuine concrete reshape whose output reflects the declared target does not
+    # fire (output != input).
+    node = _reshape_node(
+        "n:real_reshape",
+        "2, 16",
+        ["4", "8"],
+        "[2, 16] float32",
+    )
+    assert type_check_graph_nodes([node]) == []
+
+
+def test_contiguous_forcing_reshape_to_same_shape_is_clean():
+    # ``x.reshape(x.shape)`` declares the SAME concrete shape as its input; an output
+    # equal to the input is correct (declared == input), so it must NOT fire.
+    node = _reshape_node(
+        "n:contig_reshape",
+        "4, 8",
+        ["4", "8"],
+        "[4, 8] float32",
+    )
+    assert type_check_graph_nodes([node]) == []
+
+
+def test_symbolic_reshape_target_never_warns_on_unchanged_shape():
+    # A symbolic declared target (``bsz * seq_len, -1`` on a [B*S, 896] operand) is
+    # non-concrete; shape inference may legitimately resolve it to the operand's own
+    # shape, so an unchanged output must NOT fire.
+    node = _reshape_node(
+        "n:symbolic_reshape",
+        "bsz * seq_len, -1",
+        ["B*S", "896"],
+        "[B*S, 896] float32",
+    )
+    assert type_check_graph_nodes([node]) == []
+
+
+def test_reshape_with_negative_one_placeholder_never_warns():
+    # A ``-1`` axis is an unfolded placeholder, not a concrete dim; even with an
+    # otherwise-concrete input the target is non-concrete and must NOT fire.
+    node = _reshape_node(
+        "n:neg_one_reshape",
+        "-1, 1, 288",
+        ["8", "1"],
+        "[8, 1] float32",
+    )
+    assert type_check_graph_nodes([node]) == []
+
+
+def test_merged_product_reshape_is_not_flagged():
+    # The deliberately-excluded merged-product case: a starred restore
+    # ``*orig_shape`` (or a symbolic merge) is non-concrete -> conservatively skipped.
+    node = _reshape_node(
+        "n:merged_reshape",
+        "*orig_shape",
+        ["B*S", "33792"],
+        "[B*S, 33792] float32",
+    )
+    assert type_check_graph_nodes([node]) == []
+
+
+# --------------------------------------------------------------------------- #
 # Output-arity check (Task K): a kernel node must not advertise more tensor
 # output ports than its resolved wrapper returns (``outputs: N`` detail, stamped
 # from the wrapper's own ``return`` -- sdpa -> 1, eager -> 2).
