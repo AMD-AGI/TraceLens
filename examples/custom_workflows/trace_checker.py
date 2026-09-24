@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from TraceLens import GPUEventAnalyser
-from TraceLens.util import DataLoader
+from TraceLens.util import DataLoader, merge_intervals
 
 logger = logging.getLogger(__name__)
 
@@ -243,13 +243,6 @@ def gcd_of_counts(counts: Iterable[int]) -> int:
     if not positives:
         return 0
     return functools.reduce(math.gcd, positives)
-
-
-def merge_intervals(intervals):
-    """Merge overlapping ``(start, end)`` intervals."""
-    if not intervals:
-        return []
-    return GPUEventAnalyser.merge_intervals(list(intervals))
 
 
 def busy_idle_from_events(events: Sequence[dict]) -> Dict[str, float]:

@@ -77,7 +77,7 @@ Environment variables:
 | `MAX_PARALLEL` | 5 | Max concurrent jobs |
 | `NUM_REPEATS` | 5 | Repeats per test case |
 | `SLEEP_BETWEEN` | 30 | Seconds between Phase 1 and Phase 2 |
-| `TEST_TRACES_CSV` | `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/combined_traces.csv` | Path to the trace CSV to use |
+| `TEST_TRACES_CSV` | `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv` | Path to the trace CSV to use |
 | `RESULTS_ROOT` | `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/repeatability_results` | Where per-run results are written |
 | `REPORT_DIR` | `<RESULTS_ROOT>/../reports` | Where reports and reproducers are written |
 | `SUITE_NAME` | `eval` | Suite label used in reports (e.g. `unit`, `e2e`) |
@@ -105,7 +105,7 @@ SKIP_POST_PROCESSING=1 CONTAINER=my_container \
 
 ### Generate Golden References
 
-Generates `analysis_output_ref/` for test cases listed in `analysis_tests/combined_traces.csv`. Runs analysis, copies the output as the reference, and strips intermediate files (keeps only `analysis.md` and `perf_report_csvs/`). Runs in parallel with `MAX_PARALLEL`. Skips test cases with missing trace files.
+Generates `analysis_output_ref/` for test cases listed in `analysis_tests/combined_traces_standalone.csv` / `combined_traces_comparative.csv`. Runs analysis, copies the output as the reference, and strips intermediate files (keeps only `analysis.md` and `perf_report_csvs/`). Runs in parallel with `MAX_PARALLEL`. Skips test cases with missing trace files.
 
 ```bash
 CONTAINER=my_container bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/generate_ref.sh
@@ -116,6 +116,23 @@ Or with more parallelism:
 ```bash
 MAX_PARALLEL=5 CONTAINER=my_container bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/generate_ref.sh
 ```
+
+### Stopping Eval Jobs
+
+Kills every process `generate_ref.sh` or `run_repeatability_parallel.sh` may have spawned. Processes are identified by the `TRACELENS_EVAL_JOB=1` environment variable marker.
+
+```bash
+bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/kill_eval_jobs.sh
+```
+
+| Invocation | Behavior |
+|---|---|
+| (no args) | SIGTERM, then SIGKILL if processes are still alive |
+| `--list` | List eval processes without killing anything |
+| `-9` | SIGKILL from the first pass |
+| `-h` / `--help` | Show usage |
+
+Exit code is 0 if all jobs are cleared (or none were found), 1 if any remain after the maximum passes (e.g., stuck in uninterruptible I/O).
 
 ### Individual Manual Runs
 
@@ -171,7 +188,7 @@ Example:
 ```bash
 cd TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals
 agent --model claude-opus-4-8-thinking-medium --print --force --trust \
-    "Run eval post processing on results_root=TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_reports/my_run/results/repeatability_results suite=eval test_traces_csv=TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/combined_traces.csv report_dir=TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_reports/my_run/reports container=modular_evals"
+    "Run eval post processing on results_root=TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_reports/my_run/results/repeatability_results suite=eval test_traces_csv=TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/combined_traces_standalone.csv report_dir=TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_reports/my_run/reports container=modular_evals"
 ```
 
 ### Error handling
@@ -184,12 +201,12 @@ agent --model claude-opus-4-8-thinking-medium --print --force --trust \
 
 ### 1. Create the test case directory
 
-Each test case lives under `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/unit_tests/<category>/` and must contain:
+Each test case lives under `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/<unit_tests_standalone|unit_tests_comparative|e2e_tests_standalone|e2e_tests_comparative>/<test_id>/` and must contain:
 
 - The profiling trace JSON file.
 - `analysis_output_ref/` -- a reference analysis output to compare against (used by quality evals). Should include `analysis.md` and `perf_report_csvs/`. Generate this with `generate_ref.sh`.
 
-### 2. Add a row to `analysis_tests/combined_traces.csv`
+### 2. Add a row to `analysis_tests/combined_traces_standalone.csv` (or `combined_traces_comparative.csv`)
 
 The CSV has the following columns:
 
@@ -204,7 +221,7 @@ The CSV has the following columns:
 Example row:
 
 ```
-gemm_01_compute_few_tiles,gemm,TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/unit_tests/gemm/gemm_01_compute_few_tiles_analysis_output/gemm_01_compute_few_tiles.json,TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/unit_tests/gemm/gemm_01_compute_few_tiles_analysis_output/analysis_output_ref,MI300X
+gemm_01_compute_few_tiles,gemm,TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/unit_tests_standalone/gemm_01_compute_few_tiles/gemm_01_compute_few_tiles.json,TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/unit_tests_standalone/gemm_01_compute_few_tiles/analysis_output_ref,MI300X
 ```
 
 ## Eval Pipeline Summary

@@ -8,6 +8,9 @@
 # TraceLens package changes require Adeem, Gabe, Deval, or Tharun review
 /TraceLens/                   @ajassani @gabeweisz @devalshahamd @tsrikris
 
+# Kernel source mapping utility requires Ahmed review
+/TraceLens/TraceUtils/kernel_source/   @Ahmedhasssan-aig
+
 # Agent code and evals require area owner review
 /TraceLens/Agent/             @tsrikris
 /TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/ @Ahmedhasssan-aig @tsrikris
