@@ -119,7 +119,7 @@ Any agentic CLI runner that supports skill-file discovery and headless (print/no
     "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode <default|inference>, [execution mode <eager|graph replay + capture>, capture folder <path_to_capture_folder>,] node <node>, container <container>, output to <output_dir>"
 ```
 
-Set `analysis mode inference` for vLLM/SGLang/ATOM traces (and include the `execution mode` / `capture folder` fields when using graph replay + capture); use `analysis mode default` for training and non-vLLM/SGLang eager inference. Passing all parameters inline avoids interactive prompts, which is useful for batch runs and CI pipelines (see `agent_evals/Analysis/eval_scripts/generate_ref.sh` for an example).
+Set `analysis mode inference` for vLLM/SGLang/ATOM traces (and include the `execution mode` / `capture folder` fields when using graph replay + capture); use `analysis mode default` for training and non-vLLM/SGLang eager inference. Passing all parameters inline avoids interactive prompts, which is useful for batch runs and CI pipelines (see `skills/analysis-orchestrator/evals/eval_scripts/generate_ref.sh` for an example).
 
 ---
 
