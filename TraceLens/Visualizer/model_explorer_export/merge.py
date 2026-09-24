@@ -54,6 +54,7 @@ from TraceLens.Visualizer.model_explorer_export.adapter import (
 )
 from TraceLens.Visualizer.model_explorer_export.fact_sheet import build_fact_sheet_group_attributes
 from TraceLens.Visualizer.model_explorer_export.type_check import (
+    group_cycle_check_graph_nodes,
     integrity_check_graph_nodes,
     type_check_graph_nodes,
 )
@@ -3493,8 +3494,24 @@ def _append_section(
             nested_output_names[nested_prefix] = nested_name
         if any(node["id"].startswith(f"{nested_prefix}/") for node in section_nodes):
             continue
+        # A nested diagram replaces a collapsed tile in ``section_nodes``. That
+        # tile already carries the correct box namespace of the module scope it
+        # sits in -- including any *intermediate* inline-expanded frame between
+        # the section root and this block (a ``scorer`` collapsed inside an
+        # inline-expanded ``indexer`` sits at ``.../Indexer``, not at the bare
+        # section prefix). Deriving the group namespace from the section prefix
+        # alone drops those intermediate segments, hoisting the group up to a
+        # sibling of its real parent and creating a rendered box-level cycle.
+        # Inherit the replaced tile's own namespace as the parent instead.
+        tile_namespace = namespace_prefix
+        if tile_id is not None:
+            tile_node = next(
+                (node for node in section_nodes if node["id"] == tile_id), None
+            )
+            if tile_node is not None:
+                tile_namespace = tile_node.get("namespace", namespace_prefix)
         nested_namespace = _join_namespace(
-            namespace_prefix,
+            tile_namespace,
             _nested_group_segment(
                 nested_block,
                 nested_label,
@@ -5429,6 +5446,12 @@ def build_merged_model_graph(
     # Warnings only -- an offender is a wiring/extraction fidelity bug to fix
     # upstream. The render-filtered graph is checked separately in the viewer.
     integrity_check_graph_nodes(nodes, label="built")
+
+    # H group-cycle check: the node-level acyclic check passes on a graph whose
+    # rendered boxes nonetheless form an illegal cycle (two sibling boxes feeding
+    # each other through boundary tiles). Runs on the final built graph, mirrored
+    # on the render-filtered graph in the viewer. Warnings only.
+    group_cycle_check_graph_nodes(nodes, label="built")
 
     graph_attributes: dict[str, dict[str, str]] = {
         "": model_attrs,

@@ -653,3 +653,158 @@ def integrity_check_graph_nodes(nodes: list[dict[str, Any]], *, label: str = "")
     for line in warnings:
         _log.warning("graph integrity: %s", line)
     return warnings
+
+
+def _immediate_child_unit(node_id: str, ns: str, box: str) -> str:
+    """The unit *node_id* contracts to among the immediate children of *box*.
+
+    A leaf lying directly in *box* (``ns == box``) is its own unit (its id). A
+    node nested inside a sub-box is contracted to that immediate sub-box's
+    namespace (``box/<next-segment>``), so a whole rendered sub-box collapses to a
+    single super-node -- exactly the granularity at which an illegal rendered
+    cycle between two sibling boxes shows up.
+    """
+    if ns == box:
+        return node_id
+    rest = ns[len(box) + 1 :] if box else ns
+    segment = rest.split("/", 1)[0]
+    return f"{box}/{segment}" if box else segment
+
+
+def _tarjan_nontrivial_sccs(
+    adjacency: dict[str, set[str]],
+) -> list[list[str]]:
+    """Iterative Tarjan SCC; return only SCCs with more than one member.
+
+    Self-loops are already excluded by the caller (a unit never links to itself),
+    so a multi-member SCC is the only cycle signal.
+    """
+    index_of: dict[str, int] = {}
+    low: dict[str, int] = {}
+    on_stack: set[str] = set()
+    stack: list[str] = []
+    counter = 0
+    result: list[list[str]] = []
+
+    for start in adjacency:
+        if start in index_of:
+            continue
+        # (node, iterator over successors) work stack for iterative DFS.
+        work: list[tuple[str, list[str]]] = [(start, list(adjacency.get(start, ())))]
+        index_of[start] = low[start] = counter
+        counter += 1
+        stack.append(start)
+        on_stack.add(start)
+        while work:
+            node, successors = work[-1]
+            advanced = False
+            while successors:
+                succ = successors.pop()
+                if succ not in index_of:
+                    index_of[succ] = low[succ] = counter
+                    counter += 1
+                    stack.append(succ)
+                    on_stack.add(succ)
+                    work.append((succ, list(adjacency.get(succ, ()))))
+                    advanced = True
+                    break
+                if succ in on_stack:
+                    low[node] = min(low[node], index_of[succ])
+            if advanced:
+                continue
+            if low[node] == index_of[node]:
+                component: list[str] = []
+                while True:
+                    member = stack.pop()
+                    on_stack.discard(member)
+                    component.append(member)
+                    if member == node:
+                        break
+                if len(component) > 1:
+                    result.append(component)
+            work.pop()
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+    return result
+
+
+def group_cycle_check_graph_nodes(
+    nodes: list[dict[str, Any]], *, label: str = ""
+) -> list[str]:
+    """H check -- detect cycles at the collapsed-namespace-GROUP (rendered box) level.
+
+    The node-level acyclic check misses a cycle that only exists once nodes are
+    contracted into their rendered boxes: two sibling boxes (e.g. an attention's
+    ``kv_norm`` and its ``CSACompressor``) can each feed the other through
+    boundary tiles, drawing an illegal 2-cycle between the two rendered boxes even
+    though the underlying node graph is acyclic.
+
+    For each namespace box, its child *units* are (a) every immediate sub-box,
+    contracted to a single super-node, and (b) every leaf node lying directly in
+    the box, each its own unit (direct leaves are NOT merged). An edge whose two
+    endpoints fall in different child units of the same box contributes an edge
+    between those units; a nontrivial Tarjan SCC among a box's child units is an
+    illegal rendered cycle. Contraction is done per box (immediate children only),
+    not by globally contracting every node to its full namespace -- the global
+    approach false-positives because parent<->child boundary tiles legitimately
+    cross a box boundary in both directions.
+
+    The one sanctioned back edge per loop -- a ``@loop_carried_out`` producer
+    feeding a ``@loop_carried_in`` seed -- is excluded.
+    """
+    tag = f" [{label}]" if label else ""
+    ns_of: dict[str, str] = {
+        str(n.get("id", "")): str(n.get("namespace", "") or "") for n in nodes
+    }
+
+    # box -> {unit: set(successor units)} among that box's immediate children.
+    box_adjacency: dict[str, dict[str, set[str]]] = {}
+
+    for node in nodes:
+        target_id = str(node.get("id", ""))
+        ns_t = ns_of.get(target_id, "")
+        for edge in node.get("incomingEdges", []) or []:
+            source_id = str(edge.get("sourceNodeId", ""))
+            if source_id not in ns_of:
+                continue
+            # Sanctioned loop back edge: the single carried value that closes a
+            # repeat group's iteration boundary.
+            if "@loop_carried_out" in source_id and "@loop_carried_in" in target_id:
+                continue
+            ns_s = ns_of[source_id]
+            # The box that owns this edge is the deepest namespace containing both
+            # endpoints -- the longest common segment prefix. The two endpoints
+            # diverge (or one is a direct leaf) there, so it is the only box where
+            # they map to different immediate-child units.
+            s_segments = ns_s.split("/") if ns_s else []
+            t_segments = ns_t.split("/") if ns_t else []
+            common: list[str] = []
+            for a, b in zip(s_segments, t_segments):
+                if a != b:
+                    break
+                common.append(a)
+            box = "/".join(common)
+            unit_s = _immediate_child_unit(source_id, ns_s, box)
+            unit_t = _immediate_child_unit(target_id, ns_t, box)
+            if unit_s == unit_t:
+                continue
+            adjacency = box_adjacency.setdefault(box, {})
+            adjacency.setdefault(unit_s, set()).add(unit_t)
+            adjacency.setdefault(unit_t, set())
+
+    warnings: list[str] = []
+    for box, adjacency in box_adjacency.items():
+        for component in _tarjan_nontrivial_sccs(adjacency):
+            members = ", ".join(sorted(component))
+            box_label = box or "<root>"
+            warnings.append(
+                f"H group-cycle{tag}: rendered box {box_label!r} contains an "
+                f"illegal cycle between its child boxes/leaves {{{members}}}; the "
+                f"boxes feed each other through boundary tiles -- fix the spurious "
+                f"cross-box edge upstream (do not suppress)."
+            )
+
+    for line in warnings:
+        _log.warning("graph group-cycle: %s", line)
+    return warnings

@@ -18,6 +18,7 @@ from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
     with_generated_timestamp,
 )
 from TraceLens.Visualizer.model_explorer_export.type_check import (
+    group_cycle_check_graph_nodes,
     integrity_check_graph_nodes,
 )
 
@@ -139,6 +140,7 @@ def _graph_without_constants(graph: dict[str, Any]) -> dict[str, Any]:
     # is exactly where I1/I2 catch a mistagged/under-propagated constant closure
     # (the attn_hc slice-tile regression). Warnings only.
     integrity_check_graph_nodes(kept_nodes, label="render-filtered")
+    group_cycle_check_graph_nodes(kept_nodes, label="render-filtered")
     return new_graph
 
 

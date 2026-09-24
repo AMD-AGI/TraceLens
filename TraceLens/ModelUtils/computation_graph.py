@@ -1264,6 +1264,32 @@ def _wire_all_predecessor_edges(
                     source_index = input_index
                 else:
                     source_index = attr_last_index.get(pred)
+                    # Scope-aware correction. ``attr_last_index`` is flat and
+                    # last-write-wins across the whole recursive expansion, so a
+                    # bare producer name that also exists inside a *sibling*
+                    # submodule (this attention's own ``kv_proj`` vs a nested
+                    # compressor's identically-named ``kv_proj``) can resolve to
+                    # the foreign scope's instance -- fabricating a spurious
+                    # cross-box edge (compressor output -> this module's input)
+                    # and, with it, an illegal rendered group cycle. When ``pred``
+                    # names one of THIS block's own direct forward steps, its
+                    # producer is definitionally in that step's subtree; if the
+                    # flat pick landed outside it, redirect onto this instance's
+                    # own output node.
+                    sibling = steps_by_attr.get(pred)
+                    if sibling is not None and source_index is not None:
+                        src_block = (
+                            graph.nodes[source_index].block
+                            if source_index < len(graph.nodes)
+                            else None
+                        )
+                        in_scope = src_block is not None and _is_in_subtree(
+                            src_block, sibling
+                        )
+                        if not in_scope:
+                            scoped = _scoped_producer_index(sibling, graph)
+                            if scoped is not None:
+                                source_index = scoped
                 if source_index is None:
                     continue
                 # When the predecessor is a multi-return module, resolve the
@@ -3318,6 +3344,61 @@ def _build_block_index_map(graph: ComputationGraph) -> dict[int, int]:
         if spec.block is not None:
             index_by_id.setdefault(id(spec.block), index)
     return index_by_id
+
+
+def _is_in_subtree(candidate: BlockNode, root: BlockNode) -> bool:
+    """True when *candidate* is *root* itself or any descendant of it (by identity)."""
+    target = id(candidate)
+    stack = [root]
+    seen: set[int] = set()
+    while stack:
+        block = stack.pop()
+        if block is None or id(block) in seen:
+            continue
+        if id(block) == target:
+            return True
+        seen.add(id(block))
+        stack.extend(getattr(block, "children", []) or [])
+    return False
+
+
+def _scoped_producer_index(
+    module: BlockNode,
+    graph: ComputationGraph,
+) -> int | None:
+    """Last graph-node index produced *within this module instance's own subtree*.
+
+    ``attr_last_index`` is one flat, last-write-wins map keyed by bare
+    ``attr_name``. Two unrelated submodules can legitimately reuse the same bare
+    name at different nesting depths (an attention module's own ``kv_proj``
+    alongside a nested compressor's own, distinct ``kv_proj``). When a consumer
+    names such a bare producer, the flat lookup can resolve to whichever instance
+    was emitted *last* -- a sibling submodule's inner node in a foreign scope,
+    not this consumer's own sibling. Given the intended producer's own
+    ``BlockNode`` (looked up by identity among the consumer's direct forward
+    steps), return its real output node: the last graph node whose block lies in
+    that producer's own subtree (preferring one carrying the producer's own
+    ``attr_name``, mirroring the flat map's "last write for this attr" semantics,
+    scoped to this instance). Identity-scoped, so it never crosses into another
+    same-named instance.
+    """
+    subtree_ids: set[int] = set()
+    stack = [module]
+    while stack:
+        block = stack.pop()
+        if block is None or id(block) in subtree_ids:
+            continue
+        subtree_ids.add(id(block))
+        stack.extend(getattr(block, "children", []) or [])
+    best_named: int | None = None
+    best_any: int | None = None
+    for index, spec in enumerate(graph.nodes):
+        if spec.block is None or id(spec.block) not in subtree_ids:
+            continue
+        best_any = index
+        if spec.block.attr_name == module.attr_name:
+            best_named = index
+    return best_named if best_named is not None else best_any
 
 
 def _first_graph_index_for_module(

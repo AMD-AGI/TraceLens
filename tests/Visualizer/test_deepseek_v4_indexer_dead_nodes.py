@@ -43,6 +43,7 @@ from TraceLens.ModelUtils.loader import load_model_spec
 from TraceLens.ModelUtils.shape_inference import ShapeInferencer
 from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
 from TraceLens.Visualizer.model_explorer_export.type_check import (
+    group_cycle_check_graph_nodes,
     integrity_check_graph_nodes,
     type_check_graph_nodes,
 )
@@ -69,6 +70,50 @@ def test_deepseek_v4_flash_integrity_clean_built_and_render_filtered():
         filtered_graph["nodes"], label="render-filtered"
     )
     assert filtered == [], filtered
+
+
+def test_deepseek_v4_flash_group_cycle_clean_and_kv_norm_single_input():
+    """No rendered group-level cycle survives, and the attention ``kv_norm`` Cast
+    reads exactly one operand.
+
+    The compressor and the attention's own ``kv_norm`` share the bare submodule
+    names ``kv_proj``/``kv_norm``. A flat, last-write-wins predecessor resolver
+    threaded the compressor's output into the attention ``kv_norm``'s first Cast
+    as a spurious second ``hidden_states`` operand, drawing an illegal 2-cycle
+    between the ``kv_norm`` and ``DeepseekV4CSACompressor`` rendered boxes. The
+    node-level acyclic check misses it (the underlying node graph stays acyclic);
+    the group-level H check is the guardrail. Assert both the H check is silent
+    and the Cast has a single incoming edge, on the built and render-filtered
+    graphs.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph = _build_graph()
+
+    built = group_cycle_check_graph_nodes(graph["nodes"], label="built")
+    assert built == [], built
+    filtered_graph = _graph_without_constants(graph)
+    filtered = group_cycle_check_graph_nodes(
+        filtered_graph["nodes"], label="render-filtered"
+    )
+    assert filtered == [], filtered
+
+    # The attention (not the compressor's own) kv_norm first op is a `.to()` Cast
+    # that takes one tensor; it must have exactly one incoming edge and no
+    # cross-scope compressor operand.
+    casts = [
+        node
+        for node in graph["nodes"]
+        if str(node.get("namespace", "")).endswith("DeepseekV4Attention/kv_norm")
+        and node.get("label") == "Cast"
+        and ":@op_l57" in str(node.get("id", ""))
+    ]
+    assert casts, "attention kv_norm Cast node not found"
+    for cast in casts:
+        incoming = cast.get("incomingEdges", []) or []
+        sources = [str(e.get("sourceNodeId", "")) for e in incoming]
+        assert len(incoming) == 1, (cast["id"], sources)
+        assert not any("compressor" in s for s in sources), sources
+        assert not any("result_3" in s for s in sources), sources
 
 
 def test_deepseek_v4_flash_type_check_clean():

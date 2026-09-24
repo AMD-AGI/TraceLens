@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 
 from TraceLens.Visualizer.model_explorer_export.type_check import (
+    group_cycle_check_graph_nodes,
     integrity_check_graph_nodes,
     type_check_graph_nodes,
 )
@@ -516,3 +517,93 @@ def test_node_without_output_shape_is_clean():
         "attrs": [{"key": "op_type", "value": "Linear"}],
     }
     assert type_check_graph_nodes([node]) == []
+
+
+# --- H group-cycle check (collapsed-namespace-GROUP level) -------------------
+
+
+def _grp_node(node_id, namespace, sources=()):
+    return {
+        "id": node_id,
+        "namespace": namespace,
+        "incomingEdges": [{"sourceNodeId": s} for s in sources],
+    }
+
+
+def test_h_group_cycle_fires_on_sibling_box_2cycle():
+    # The DeepSeek compressor<->kv_norm shape: two sibling sub-boxes of one
+    # attention box each feed the other (the spurious back edge closes a rendered
+    # 2-cycle) even though the underlying node graph is perfectly acyclic -- the
+    # node-level check would miss it. Model it minimally.
+    p = "L/Attn"
+    nodes = [
+        _grp_node(f"{p}/kv_norm:cast", f"{p}/kv_norm", sources=[f"{p}/kv_proj:0"]),
+        _grp_node(f"{p}/kv_proj:0", f"{p}", sources=[]),
+        # forward edge: kv_norm output feeds the compressor's rotary input.
+        _grp_node(
+            f"{p}/Compressor:rotary", f"{p}/Compressor", sources=[f"{p}/kv_norm:cast"]
+        ),
+        # spurious back edge: the compressor's output feeds kv_norm's cast.
+        _grp_node(
+            f"{p}/kv_norm:cast2",
+            f"{p}/kv_norm",
+            sources=[f"{p}/Compressor:out"],
+        ),
+        _grp_node(f"{p}/Compressor:out", f"{p}/Compressor", sources=[f"{p}/Compressor:rotary"]),
+    ]
+    warnings = group_cycle_check_graph_nodes(nodes)
+    assert len(warnings) == 1
+    assert "L/Attn" in warnings[0]
+    assert "kv_norm" in warnings[0]
+    assert "Compressor" in warnings[0]
+
+
+def test_h_group_cycle_clean_when_boxes_do_not_feed_each_other():
+    # Same two sibling boxes, but only kv_norm -> compressor (no back edge): a
+    # legitimate straight-line dependency, no rendered cycle.
+    p = "L/Attn"
+    nodes = [
+        _grp_node(f"{p}/kv_norm:cast", f"{p}/kv_norm", sources=[f"{p}/kv_proj:0"]),
+        _grp_node(f"{p}/kv_proj:0", f"{p}", sources=[]),
+        _grp_node(
+            f"{p}/Compressor:rotary", f"{p}/Compressor", sources=[f"{p}/kv_norm:cast"]
+        ),
+        _grp_node(f"{p}/Compressor:out", f"{p}/Compressor", sources=[f"{p}/Compressor:rotary"]),
+    ]
+    assert group_cycle_check_graph_nodes(nodes) == []
+
+
+def test_h_group_cycle_excludes_sanctioned_loop_carried_back_edge():
+    # A repeat group's loop boundary is intentionally cyclic: the carried value's
+    # @loop_carried_out feeds the next iteration's @loop_carried_in. That single
+    # sanctioned back edge must never be flagged.
+    p = "decoder/43x_Layer"
+    nodes = [
+        # seed, fed only by the sanctioned back edge below.
+        _grp_node(
+            f"{p}/@loop_carried_in:hs", f"{p}", sources=[f"{p}/@loop_carried_out:hs"]
+        ),
+        # body reads the seed and produces the iteration output.
+        _grp_node(f"{p}/body:out", f"{p}/body", sources=[f"{p}/@loop_carried_in:hs"]),
+        # the iteration output exits as the carried-out tile.
+        _grp_node(f"{p}/@loop_carried_out:hs", f"{p}", sources=[f"{p}/body:out"]),
+    ]
+    # The lone back edge (@loop_carried_out -> @loop_carried_in) is sanctioned, so
+    # the group-level check is silent even though the graph is cyclic through it.
+    assert group_cycle_check_graph_nodes(nodes) == []
+
+
+def test_h_group_cycle_ignores_legitimate_parent_child_tile_crossings():
+    # A parent box's input tile feeds INTO a child box, and the child box feeds
+    # a SEPARATE parent output tile back OUT -- boundary tiles legitimately cross
+    # a box boundary in both directions. The naive "contract every node to its
+    # full namespace globally" approach would draw parent<->child as a 2-cycle
+    # (false positive); the per-box immediate-children contraction keeps the two
+    # distinct parent tiles as separate leaf units, so there is no cycle.
+    p = "L/Attn"
+    nodes = [
+        _grp_node(f"{p}/@input:hs", f"{p}", sources=[]),
+        _grp_node(f"{p}/Norm:op", f"{p}/Norm", sources=[f"{p}/@input:hs"]),  # down
+        _grp_node(f"{p}/@output:out", f"{p}", sources=[f"{p}/Norm:op"]),  # up
+    ]
+    assert group_cycle_check_graph_nodes(nodes) == []
