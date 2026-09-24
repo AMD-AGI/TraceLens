@@ -581,6 +581,20 @@ def _kernel_port_split(spec: NodeSpec) -> dict[str, list[str]]:
     return out
 
 
+def _kernel_port_repeats(
+    spec: NodeSpec,
+) -> dict[str, list[tuple[str, tuple[str, ...]]]]:
+    """Per-port head-repeat op chains a wrapper-expanded kernel records.
+
+    A grouped-query attention core carries, per repeated key/value port label, the
+    introspected ``repeat_kv`` shape ops (unsqueeze/expand/reshape) to interpose
+    between that port's producer and the port. Read straight off the core block's
+    structured field; empty for every non-repeating kernel."""
+    if spec.block is None:
+        return {}
+    return dict(getattr(spec.block, "kernel_port_repeats", {}) or {})
+
+
 def _inherit_kernel_frames(
     graph: ComputationGraph, kernel_index: int, port_index: int
 ) -> None:
@@ -684,6 +698,7 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
                     expanded.append((source, label))
             all_inputs = expanded
 
+        repeat_map = _kernel_port_repeats(kernel_spec)
         if all_inputs:
             remove_in: set[tuple[int, int]] = {
                 (src, kernel_index) for src, _ in all_inputs
@@ -699,6 +714,42 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
                 # to slice 0.
                 source_port = graph.link_output_ports.get((source, kernel_index))
                 safe_label = label.replace("/", "_")
+
+                # A grouped-query key/value port interposes the wrapper's introspected
+                # ``repeat_kv`` shape ops between its producer and the port: the head
+                # expansion (``[B, kv, S, D] -> [B, kv*n, S, D]``) the opaque wrapper
+                # hid becomes visible unsqueeze/expand/reshape nodes on THIS branch
+                # only (query / mask carry no chain). Each op is a real block node so
+                # the existing shape rules grow the head axis; the last op then feeds
+                # the port, which keeps its role label and drives the kernel.
+                feed_source = source
+                feed_port = source_port
+                for op_pos, (op_label, op_details) in enumerate(
+                    repeat_map.get(label.strip().lower(), [])
+                ):
+                    op_block = BlockNode(
+                        attr_name=f"@kernel_repeat:{safe_label}:{op_pos}",
+                        class_name=op_label,
+                        role="operation",
+                        label=op_label,
+                        details=list(op_details),
+                        is_basic=True,
+                    )
+                    op_index = _add_node(
+                        graph,
+                        key=f"@kernel_in:{kernel_index}:{safe_label}:repeat{op_pos}:{op_label}",
+                        block=op_block,
+                        label=op_label,
+                    )
+                    _inherit_kernel_frames(graph, kernel_index, op_index)
+                    graph.links.append((feed_source, op_index))
+                    if feed_port is not None:
+                        graph.link_output_ports[(feed_source, op_index)] = feed_port
+                    feed_source = op_index
+                    # After the first op the chain is a plain single-output tensor;
+                    # the producer-ordinal only applied to the original edge.
+                    feed_port = None
+
                 port_index = _add_node(
                     graph,
                     key=f"@kernel_in:{kernel_index}:{safe_label}",
@@ -706,9 +757,9 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
                     synthetic=SYNTHETIC_KERNEL_PORT_IN,
                 )
                 _inherit_kernel_frames(graph, kernel_index, port_index)
-                graph.links.append((source, port_index))
-                if source_port is not None:
-                    graph.link_output_ports[(source, port_index)] = source_port
+                graph.links.append((feed_source, port_index))
+                if feed_port is not None:
+                    graph.link_output_ports[(feed_source, port_index)] = feed_port
                 graph.links.append((port_index, kernel_index))
 
 

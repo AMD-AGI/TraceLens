@@ -714,6 +714,26 @@ def collect_parallel_gate_wrappers(
     return wrappers
 
 
+@dataclass(frozen=True)
+class RepeatContext:
+    """Deferred grouped-query head-repeat derivation context for an attention core.
+
+    The block tree is built at load time -- before the live grouped-query factor is
+    stamped onto the attention step (``reconcile_live_attention_groups`` runs later,
+    in the export build). The ``repeat_kv`` shape ops therefore cannot be derived
+    yet, so this records everything a post-reconcile pass
+    (:func:`TraceLens.ModelUtils.extract.apply_live_attention_repeats`) needs to
+    resolve the callee and fill :attr:`BlockNode.kernel_port_repeats` with the real
+    factor: the host module + symbol of the repeat callee, the kernel-input port
+    labels that repeat (key/value roles), and the owning attention class whose live
+    ``gqa_groups`` supplies the factor. Purely structural -- no op/param/class gate."""
+
+    module: str
+    callee: str
+    port_labels: tuple[str, ...]
+    owner_class: str
+
+
 @dataclass
 class BlockNode:
     """One node in a recursive block diagram."""
@@ -734,6 +754,20 @@ class BlockNode:
     input_label: str | None = None
     input_source: str | None = None
     kernel_tensor_ports: dict[str, str] = field(default_factory=dict)
+    # For a wrapper-expanded attention core: kernel-input port label -> the ordered
+    # head-repeat shape ops (``repeat_kv`` -> unsqueeze/expand/reshape) to interpose
+    # between that port's producer and the port. Each op is a ``(label, details)``
+    # pair (:data:`attention_wrapper.RepeatOp`) the graph pass materialises as a
+    # visible node so the grouped-query head expansion is not hidden. Empty for
+    # every non-repeating kernel and every non-repeated port.
+    kernel_port_repeats: dict[str, list[tuple[str, tuple[str, ...]]]] = field(
+        default_factory=dict
+    )
+    # Deferred derivation context when the live grouped-query factor is not yet
+    # known at block-tree build time (see :class:`RepeatContext`). A post-reconcile
+    # pass reads this to populate ``kernel_port_repeats``; ``None`` for every core
+    # that never repeats heads.
+    pending_repeat_context: "RepeatContext | None" = None
     tensor_input_labels: list[str] = field(default_factory=list)
     tensor_step_targets: dict[str, str] = field(default_factory=dict)
     kernel_predecessors: list[str] = field(default_factory=list)
@@ -1401,8 +1435,10 @@ def _attention_wrapper_block_nodes(
     ``transpose(1, 2)``'s two dims) is read from source AST by
     :func:`introspect_attention_wrapper` -- no op/param/class allow-list. Returns
     ``None`` when the wrapper cannot be resolved, so the caller keeps the atomic
-    leaf it built before. (The grouped-query ``repeat_kv`` the wrapper may run
-    before the kernel is deliberately not materialised here -- see the body.)
+    leaf it built before. When the live grouped-query factor is >1 the wrapper's
+    ``repeat_kv`` is materialised too: its introspected unsqueeze/expand/reshape ops
+    are recorded per repeated key/value port (``kernel_port_repeats``) so the graph
+    pass interposes them between that port's producer and the kernel.
     """
     from TraceLens.ModelUtils.attention_wrapper import introspect_attention_wrapper
 
@@ -1416,13 +1452,12 @@ def _attention_wrapper_block_nodes(
     # value / mask) dock onto it through the existing attention-provenance pass and
     # its ``@kernel_in`` ports are named exactly as before. Because sdpa genuinely
     # receives every one of those tensors, a single dock target for all of them is
-    # faithful -- unlike a leading ``repeat_kv`` node, which would need only the
-    # key/value port routed through it (grouped-query head expansion) while query
-    # and mask bypass it. That per-port interception is not expressible through the
-    # linear-inline docking a nested pipeline goes through, so the grouped-query
-    # ``repeat_kv`` (and its expand/reshape primitives) stays deferred; expanding
-    # the wrapper's post-kernel tail here is the general, cycle-free win. The core
-    # leaf's own output shape is inferred by the ``sdpa`` rule
+    # faithful. The grouped-query ``repeat_kv`` (which grows ONLY the key/value head
+    # axis, while query and mask bypass it) is materialised as its own per-port
+    # interception at the kernel-port pass -- recorded here on the core leaf via
+    # ``kernel_port_repeats`` (see below) rather than as a leading pipeline node,
+    # exactly because only the key/value branch routes through it. The core leaf's
+    # own output shape is inferred by the ``sdpa`` rule
     # (``query.shape[:-1] + (value.shape[-1],)``), shape-correct for GQA and MLA.
     core_attr = SYNTHETIC_ATTENTION
     # Declare the core's tensor-input ports exactly as the atomic-leaf path does
@@ -1468,16 +1503,61 @@ def _attention_wrapper_block_nodes(
     # check keys on this dedicated attr instead.
     if plan.kernel_primitive:
         core_details.append(f"kernel_primitive: {plan.kernel_primitive}")
-    children: list[BlockNode] = [
-        _leaf_node(
-            attr_name=core_attr,
-            class_name="AttentionOp",
-            forward_order=0,
-            label=plan.kernel,
-            details=core_details,
-            basic=False,
-        )
-    ]
+    core_leaf = _leaf_node(
+        attr_name=core_attr,
+        class_name="AttentionOp",
+        forward_order=0,
+        label=plan.kernel,
+        details=core_details,
+        basic=False,
+    )
+
+    # A grouped-query wrapper re-materialises key/value heads before the kernel
+    # (``key = repeat_kv(key, n)``). When the live factor is >1 the wrapper's repeat
+    # callee introspects into visible shape ops (unsqueeze/expand/reshape) that must
+    # sit between the key/value producer and the kernel port -- the head expansion
+    # the opaque wrapper used to hide. Map each REPEATED wrapper param to the port
+    # label it drives so the kernel-port pass can interpose those ops on that branch
+    # only (query / mask are untouched). The port label is the param's ROLE after a
+    # shared-caller split (``key``/``value`` <- one ``kv``) or the caller var itself
+    # when the interface already passes distinct key/value tensors. Derived purely
+    # from the plan (repeat params + port_map + the callee body), no param-name gate.
+    #
+    # The live grouped-query factor that sizes the expand/reshape is stamped onto the
+    # attention step only later (``reconcile_live_attention_groups`` runs in the
+    # export build, AFTER this block tree is constructed), so ``plan.repeat_ops`` is
+    # still empty here for the real pipeline. Record the derivation context (callee +
+    # repeated port labels + owning class, all factor-independent) and let the
+    # post-reconcile pass ``apply_live_attention_repeats`` resolve the callee and fill
+    # ``kernel_port_repeats`` with the real factor. Keyed lower-case to match how the
+    # kernel-port pass looks the label up (``label.strip().lower()``).
+    if plan.repeat_params:
+        port_labels: list[str] = []
+        for param, caller_var in plan.port_map:
+            if param not in plan.repeat_params:
+                continue
+            shared = len(caller_to_params.get(caller_var, [])) > 1
+            port_label = param if shared else caller_var
+            key = port_label.strip().lower()
+            if key not in port_labels:
+                port_labels.append(key)
+        owner_class = getattr(cls_node, "name", None)
+        if port_labels and plan.repeat_module and plan.repeat_callee and owner_class:
+            core_leaf.pending_repeat_context = RepeatContext(
+                module=plan.repeat_module,
+                callee=plan.repeat_callee,
+                port_labels=tuple(port_labels),
+                owner_class=owner_class,
+            )
+        # If the live factor was already known when the plan was built (a direct
+        # build that stamped ``gqa_groups`` up front), fill the map immediately so
+        # the deferred pass is a no-op.
+        if plan.repeat_ops and port_labels:
+            core_leaf.kernel_port_repeats = {
+                key: list(plan.repeat_ops) for key in port_labels
+            }
+
+    children: list[BlockNode] = [core_leaf]
 
     # Post-kernel tail (``attn_output.transpose(1, 2).contiguous()``), each method a
     # visible op reading the previous one. A ``transpose``'s two literal dims are

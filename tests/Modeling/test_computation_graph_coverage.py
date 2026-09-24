@@ -451,6 +451,68 @@ def test_add_kernel_port_nodes_unlabeled_no_declared():
     assert labels == ["input_0"]
 
 
+def test_add_kernel_port_nodes_interposes_repeat_ops_on_kv_only():
+    # A grouped-query attention core records ``repeat_kv`` shape ops per repeated
+    # key/value port: the kernel-port pass must materialise them as a visible
+    # unsqueeze -> expand -> reshape chain between each port's producer and the
+    # port, and touch neither the query nor any non-repeated branch.
+    repeat_ops = [
+        ("Unsqueeze", ("raw_op: unsqueeze", "dim: 2")),
+        ("Expand", ("raw_op: expand", "shape: -1, -1, 64, -1, -1")),
+        ("Reshape", ("raw_op: reshape", "shape: x.shape[0], -1, x.shape[3], x.shape[4]")),
+    ]
+    kernel = _node(
+        "attn",
+        class_name="AttentionOp",
+        details=["inputs: q, key, value"],
+        kernel_port_repeats={"key": list(repeat_ops), "value": list(repeat_ops)},
+    )
+    src_q = _node("src_q")
+    src_k = _node("src_k")
+    src_v = _node("src_v")
+    graph = cg.ComputationGraph(
+        nodes=[
+            _spec(block=src_q, label="q_src"),
+            _spec(block=src_k, label="k_src"),
+            _spec(block=src_v, label="v_src"),
+            _spec(block=kernel, label="Attention"),
+        ],
+        links=[(0, 3), (1, 3), (2, 3)],
+        link_port_labels={(0, 3): "q", (1, 3): "key", (2, 3): "value"},
+    )
+    cg._add_kernel_port_nodes(graph)
+
+    rep_labels = [s.label for s in graph.nodes if ":repeat" in s.key]
+    # Three ops per repeated port, for both key and value (but not q).
+    assert rep_labels.count("Unsqueeze") == 2
+    assert rep_labels.count("Expand") == 2
+    assert rep_labels.count("Reshape") == 2
+
+    def _index(pred):
+        return next(i for i, s in enumerate(graph.nodes) if pred(s))
+
+    # The ``key`` port reads the Reshape (chain tail), which chains back through
+    # Expand and Unsqueeze to the original ``src_k`` producer.
+    key_port = _index(
+        lambda s: s.synthetic == cg.SYNTHETIC_KERNEL_PORT_IN and s.label == "key"
+    )
+    preds = {t: src for src, t in graph.links}
+    reshape_idx = preds[key_port]
+    assert graph.nodes[reshape_idx].label == "Reshape"
+    expand_idx = preds[reshape_idx]
+    assert graph.nodes[expand_idx].label == "Expand"
+    unsqueeze_idx = preds[expand_idx]
+    assert graph.nodes[unsqueeze_idx].label == "Unsqueeze"
+    # The chain head reads the original key producer ``src_k`` (node index 1).
+    assert graph.nodes[preds[unsqueeze_idx]].block is src_k
+
+    # The ``q`` port reads its producer directly -- no repeat op interposed.
+    q_port = _index(
+        lambda s: s.synthetic == cg.SYNTHETIC_KERNEL_PORT_IN and s.label == "q"
+    )
+    assert graph.nodes[preds[q_port]].block is src_q
+
+
 def test_add_kernel_output_port_nodes():
     # A genuine multi-output kernel: its two consumers read *distinct* output
     # ordinals (an eager attention handing back attn_output at 0 and attn_weights

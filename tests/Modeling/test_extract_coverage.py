@@ -729,6 +729,106 @@ def test_reconcile_live_attention_groups_none_mapping_noop():
     assert cls.forward_step_details[key] == original
 
 
+# ---------------------------------------------------------------------------
+# apply_live_attention_repeats (derive repeat_kv ops with the live factor)
+# ---------------------------------------------------------------------------
+
+
+def _repeat_ctx_spec(details, *, port_labels=("key", "value"), callee="repeat_kv"):
+    """Spec with an attention core leaf carrying deferred repeat context.
+
+    The core leaf mirrors what ``_attention_wrapper_block_nodes`` records at load
+    time: a :class:`RepeatContext` naming the real HF ``repeat_kv`` callee, the
+    key/value ports that repeat, and the owning class ``Attn`` whose stamped
+    ``gqa_groups`` supplies the factor.
+    """
+    from TraceLens.ModelUtils.block_tree import BlockNode, RepeatContext
+
+    spec, cls, key = _attn_spec(details)
+    core = BlockNode(
+        attr_name="@attention",
+        class_name="AttentionOp",
+        role="operation",
+        label="sdpa",
+        pending_repeat_context=RepeatContext(
+            module="transformers.integrations.sdpa_attention",
+            callee=callee,
+            port_labels=tuple(port_labels),
+            owner_class="Attn",
+        ),
+    )
+    root = BlockNode(
+        attr_name="self_attn", class_name="Attn", role="module", label="Attn",
+        children=[core],
+    )
+    spec.export_block_trees = [("Attn", root)]
+    return spec, core
+
+
+def test_apply_live_attention_repeats_fills_ports_with_factor():
+    spec, core = _repeat_ctx_spec(["kernel: sdpa", "gqa_groups: 16"])
+    extract.apply_live_attention_repeats(spec)
+    assert set(core.kernel_port_repeats) == {"key", "value"}
+    for ops in core.kernel_port_repeats.values():
+        labels = [label for label, _details in ops]
+        assert labels == ["Unsqueeze", "Expand", "Reshape"]
+        expand_details = dict(
+            d.split(":", 1) for d in ops[1][1]
+        )
+        # The grown factor is read from the callee body's expand argument.
+        assert "16" in expand_details.get("shape", "")
+
+
+def test_apply_live_attention_repeats_factor_one_is_noop():
+    # ``repeat_kv`` short-circuits at n_rep == 1 (GLM): a factor of 1 stamps no
+    # ``gqa_groups`` >1, so the context is left unfilled and no op node is added.
+    spec, core = _repeat_ctx_spec(["kernel: sdpa", "gqa_groups: 1"])
+    extract.apply_live_attention_repeats(spec)
+    assert core.kernel_port_repeats == {}
+
+
+def test_apply_live_attention_repeats_no_stamp_is_noop():
+    spec, core = _repeat_ctx_spec(["kernel: sdpa", "outputs: 1"])
+    extract.apply_live_attention_repeats(spec)
+    assert core.kernel_port_repeats == {}
+
+
+def test_derive_repeat_ops_from_real_repeat_kv():
+    # Lock the derived chain for the real HF ``repeat_kv`` body
+    # (``x[:, :, None, :, :].expand(...).reshape(...)``): the None-index unsqueeze
+    # is on axis 2, the expand grows that axis by the factor, and the reshape folds
+    # it back via ``x.shape[i]`` refs -- the grown axis + factor read from the
+    # body's own arguments, not assumed.
+    from TraceLens.ModelUtils.attention_wrapper import (
+        _derive_repeat_ops,
+        _resolve_wrapper_def,
+    )
+
+    callee = _resolve_wrapper_def(
+        "transformers.integrations.sdpa_attention", "repeat_kv"
+    )
+    if callee is None:
+        pytest.skip("transformers sdpa_attention.repeat_kv not importable")
+    ops = _derive_repeat_ops(callee, 64)
+    labels = [label for label, _ in ops]
+    assert labels == ["Unsqueeze", "Expand", "Reshape"]
+    details = {label: det for label, det in ops}
+    assert "dim: 2" in details["Unsqueeze"]
+    assert "shape: -1, -1, 64, -1, -1" in details["Expand"]
+    assert any(d.startswith("shape:") for d in details["Reshape"])
+
+
+def test_apply_live_attention_repeats_unresolvable_callee_warns(caplog):
+    spec, core = _repeat_ctx_spec(
+        ["kernel: sdpa", "gqa_groups: 16"], callee="not_a_real_symbol_xyz"
+    )
+    with caplog.at_level("WARNING"):
+        extract.apply_live_attention_repeats(spec)
+    # Bare port kept (no ops) and the un-introspectable repeat is reported.
+    assert core.kernel_port_repeats == {}
+    assert any("repeat callee" in rec.message for rec in caplog.records)
+
+
 def test_reconcile_selects_primary_by_decoder_class_over_longest():
     spec = ArchitectureSpec(name="x", model_type="x", num_hidden_layers=0)
     spec.decoder_class = "TextLayer"
