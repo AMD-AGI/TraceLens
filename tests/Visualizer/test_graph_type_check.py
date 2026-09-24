@@ -707,3 +707,107 @@ def test_h_group_cycle_ignores_legitimate_parent_child_tile_crossings():
         _grp_node(f"{p}/@output:out", f"{p}", sources=[f"{p}/Norm:op"]),  # up
     ]
     assert group_cycle_check_graph_nodes(nodes) == []
+
+
+# --------------------------------------------------------------------------- #
+# Kernel operand-arity coverage (Task J): a wrapper-expanded kernel must carry a
+# DISTINCT tensor input port per required operand of its resolved primitive
+# (``kernel_primitive`` attr). sdpa requires query/key/value (the optional
+# attn_mask is excluded); a single combined ``kv`` port feeding both key and value
+# covers fewer roles than required -- the combined-input defect this check flags.
+# The required count is resolved structurally from the primitive's aten schema,
+# never a hardcoded op-name -> count table.
+# --------------------------------------------------------------------------- #
+
+
+def _kernel_port(port_id, label):
+    return {
+        "id": port_id,
+        "label": label,
+        "attrs": [
+            {"key": "synthetic", "value": "@kernel_port_in"},
+            {"key": "port_label", "value": label},
+        ],
+    }
+
+
+def _sdpa_core_with_ports(core_id, port_labels, primitive="scaled_dot_product_attention"):
+    """An sdpa core node fed by one ``@kernel_port_in`` per label, plus those ports."""
+    ports = [_kernel_port(f"{core_id}/port:{i}", lbl) for i, lbl in enumerate(port_labels)]
+    core = {
+        "id": core_id,
+        "label": "sdpa",
+        "attrs": [
+            {"key": "op_type", "value": "sdpa"},
+            {"key": "kernel_primitive", "value": primitive},
+        ],
+        "incomingEdges": [{"sourceNodeId": p["id"]} for p in ports],
+    }
+    return [core, *ports]
+
+
+def test_sdpa_combined_kv_port_flags_missing_operand_coverage():
+    # The DeepSeek pre-fix defect: key and value both read one combined ``kv`` port.
+    # sdpa requires three distinct tensor operands (query/key/value); ``kv`` covers
+    # neither key nor value, so only the query operand is covered -> a warning.
+    nodes = _sdpa_core_with_ports("k:sdpa", ["q", "kv", "attention_mask"])
+    warnings = type_check_graph_nodes(nodes)
+    assert len(warnings) == 1
+    assert "k:sdpa" in warnings[0]
+    assert "distinct tensor operand" in warnings[0]
+    assert "combined input port" in warnings[0]
+
+
+def test_sdpa_distinct_key_value_ports_is_clean():
+    # The post-fix graph: the combined ``kv`` producer fanned into distinct ``key``
+    # and ``value`` role ports. All three required operands are now covered.
+    nodes = _sdpa_core_with_ports("k:sdpa", ["q", "key", "value", "attention_mask"])
+    assert type_check_graph_nodes(nodes) == []
+
+
+def test_sdpa_distinct_caller_var_ports_is_clean():
+    # Models whose interface already passes distinct key/value caller vars
+    # (``query_states``/``key_states``/``value_states``) cover every required
+    # operand by prefix match and never needed the split.
+    nodes = _sdpa_core_with_ports(
+        "k:sdpa", ["query_states", "key_states", "value_states", "attention_mask"]
+    )
+    assert type_check_graph_nodes(nodes) == []
+
+
+def test_sdpa_forwarded_extra_kwarg_port_does_not_break_coverage():
+    # A wrapper that forwards an extra non-operand kwarg tensor (MiniMax's
+    # ``block_indices``, which the standard sdpa wrapper never passes to the
+    # primitive) still covers all three required operands; the extra port must not
+    # make the coverage check fire. (The primitive is stamped as ``kernel_primitive``,
+    # NOT ``raw_op``, precisely so the generic over-arity ceiling never miscounts it.)
+    nodes = _sdpa_core_with_ports(
+        "k:sdpa",
+        ["query_states", "key_states", "value_states", "attention_mask", "block_indices"],
+    )
+    assert type_check_graph_nodes(nodes) == []
+
+
+def test_kernel_primitive_absent_skips_coverage_check():
+    # Without a ``kernel_primitive`` attr there is no resolved contract, so the
+    # coverage check cannot false-positive on an ordinary node.
+    nodes = _sdpa_core_with_ports("k:sdpa", ["q", "kv"])
+    nodes[0]["attrs"] = [a for a in nodes[0]["attrs"] if a["key"] != "kernel_primitive"]
+    assert type_check_graph_nodes(nodes) == []
+
+
+def test_coverage_check_ignores_non_kernel_port_sources():
+    # A node carrying a ``kernel_primitive`` but fed by ordinary (non
+    # ``@kernel_port_in``) edges is not a materialized kernel with declared ports,
+    # so the coverage check skips it (leaving it to the ordinary per-op checks).
+    core = {
+        "id": "k:sdpa",
+        "label": "sdpa",
+        "attrs": [
+            {"key": "op_type", "value": "sdpa"},
+            {"key": "kernel_primitive", "value": "scaled_dot_product_attention"},
+        ],
+        "incomingEdges": [{"sourceNodeId": "some_op"}],
+    }
+    plain = {"id": "some_op", "label": "Add", "attrs": []}
+    assert type_check_graph_nodes([core, plain]) == []

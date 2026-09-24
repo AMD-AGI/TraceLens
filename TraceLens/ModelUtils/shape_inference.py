@@ -1136,6 +1136,113 @@ def _operand_ceiling(raw_op: str) -> tuple[int | None, bool]:
     return _ceiling_via_aten_schema(name)
 
 
+def _required_names_via_aten_schema(name: str) -> tuple[str, ...] | None:
+    """Ordered names of the REQUIRED positional tensor args of an aten op's schema.
+
+    A ``Tensor``/``Optional[Tensor]`` positional argument that carries **no**
+    default is required (sdpa's ``query``/``key``/``value``); one with a default
+    (``attn_mask=None``) is optional and excluded. A ``List[Tensor]`` argument
+    (``cat``) is variadic -- no fixed required-name set -- so that schema is
+    skipped. ``None`` when the op has no aten schema."""
+    try:
+        import torch
+
+        schemas = torch._C._jit_get_schemas_for_operator(f"aten::{name}")
+    except Exception:
+        return None
+    if not schemas:
+        return None
+    best: tuple[str, ...] | None = None
+    for schema in schemas:
+        names: list[str] = []
+        variadic = False
+        for arg in getattr(schema, "arguments", []):
+            if getattr(arg, "kwarg_only", False):
+                continue
+            arg_type = str(getattr(arg, "type", ""))
+            if arg_type in _TENSOR_LIST_ARG_TYPES:
+                variadic = True
+                break
+            if arg_type in _TENSOR_ARG_TYPES:
+                has_default = (
+                    arg.has_default_value()
+                    if hasattr(arg, "has_default_value")
+                    else False
+                )
+                if not has_default:
+                    arg_name = str(getattr(arg, "name", "")).strip()
+                    if arg_name:
+                        names.append(arg_name)
+        if variadic:
+            continue
+        cand = tuple(names)
+        if best is None or len(cand) > len(best):
+            best = cand
+    return best
+
+
+def _required_names_via_inspect(name: str) -> tuple[str, ...] | None:
+    """Ordered names of the REQUIRED (no-default, annotated tensor) positional
+    parameters of an annotated pure-Python torch op, or ``None`` if it cannot be
+    typed (unresolvable callable, no signature, or unannotated)."""
+    try:
+        import torch
+    except Exception:  # pragma: no cover - torch always present in the pipeline
+        return None
+    fn = None
+    for owner in (torch.Tensor, torch):
+        candidate = getattr(owner, name, None)
+        if candidate is not None:
+            fn = candidate
+            break
+    if fn is None:
+        return None
+    try:
+        signature = inspect.signature(fn)
+    except (ValueError, TypeError):
+        return None
+    names: list[str] = []
+    saw_annotation = False
+    for param in signature.parameters.values():
+        if param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+        if param.annotation is inspect.Parameter.empty:
+            continue
+        saw_annotation = True
+        if (
+            _annotation_tensor_kind(param.annotation) == "tensor"
+            and param.default is inspect.Parameter.empty
+        ):
+            names.append(param.name)
+    if not saw_annotation:
+        return None
+    return tuple(names)
+
+
+@functools.lru_cache(maxsize=None)
+def _required_tensor_operand_names(raw_op: str) -> tuple[str, ...]:
+    """Ordered names of an op's REQUIRED (no-default) positional tensor operands.
+
+    Resolved from the op's real function parameters -- ``inspect`` for an
+    annotated pure-Python op, else the aten operator schema for a C-builtin torch
+    op -- never a hardcoded op-name -> operand map. Used by the type-check's
+    kernel operand-arity coverage check to learn how many DISTINCT tensor operands
+    a kernel structurally requires (sdpa: ``query``/``key``/``value``; the optional
+    ``attn_mask`` is excluded). Empty tuple when the op has no resolvable signature
+    (a custom free function), so the caller skips the check (no false positive)."""
+    name = str(raw_op or "").strip()
+    if not name:
+        return ()
+    via_inspect = _required_names_via_inspect(name)
+    if via_inspect is not None:
+        return via_inspect
+    return _required_names_via_aten_schema(name) or ()
+
+
 # Trailing ``@op_l{line}_c{col}_{name}[:idx]`` token of a graph node id, with
 # everything before it captured as the block-instance prefix.
 _LAST_OP_ID_RE = re.compile(

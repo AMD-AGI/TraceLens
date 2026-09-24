@@ -56,6 +56,14 @@ class WrapperExpansion:
     # after the atomic kernel; the literal int args (a ``transpose``'s two dims)
     # are carried so the op's shape rule permutes the correct axes.
     tail_ops: tuple[tuple[str, tuple[int, ...]], ...]
+    # The atomic torch primitive the wrapper calls to produce its result
+    # (``scaled_dot_product_attention``), read structurally from the body as the
+    # free-function/callable whose result becomes the returned var before the tail
+    # method chain. Carried so the core leaf can stamp it as its ``raw_op``, letting
+    # the type-check resolve the primitive's real required tensor-operand contract
+    # (query/key/value) from its aten schema -- never a kernel-name allow-list.
+    # ``None`` when the primitive call cannot be identified from the body.
+    kernel_primitive: str | None = None
 
 
 def _resolve_wrapper_def(module: str, symbol: str) -> ast.FunctionDef | None:
@@ -141,6 +149,62 @@ def _int_call_args(call: ast.Call) -> tuple[int, ...]:
     return tuple(args)
 
 
+def _wrapper_returned_name(func: ast.FunctionDef) -> str | None:
+    """The variable the wrapper returns (first element of ``return (x, ...)`` or a
+    bare ``return x``), or ``None``."""
+    for stmt in ast.walk(func):
+        if not isinstance(stmt, ast.Return) or stmt.value is None:
+            continue
+        expr = stmt.value
+        if isinstance(expr, ast.Tuple) and expr.elts:
+            expr = expr.elts[0]
+        if isinstance(expr, ast.Name):
+            return expr.id
+        break
+    return None
+
+
+def _wrapper_kernel_primitive(func: ast.FunctionDef) -> str | None:
+    """The atomic torch primitive the wrapper calls to produce its result.
+
+    The returned var (``attn_output``) is assigned twice: once from the primitive
+    call (``attn_output = F.scaled_dot_product_attention(...)``) and once from the
+    tail method chain rooted on itself (``attn_output = attn_output.transpose(...)``
+    -- handled by :func:`_wrapper_tail_ops`). This returns the callee name of the
+    FIRST assignment whose value is a call NOT rooted on the returned name -- the
+    primitive that feeds the tail. Structural: the tail chain (whose call base
+    resolves back to the returned name) is skipped, so a layout re-materialisation
+    is never mistaken for the primitive. ``None`` when no such call is found.
+    """
+    returned = _wrapper_returned_name(func)
+    if returned is None:
+        return None
+    for stmt in ast.walk(func):
+        if (
+            not isinstance(stmt, ast.Assign)
+            or len(stmt.targets) != 1
+            or not isinstance(stmt.targets[0], ast.Name)
+            or stmt.targets[0].id != returned
+            or not isinstance(stmt.value, ast.Call)
+        ):
+            continue
+        call = stmt.value
+        base = call.func
+        while isinstance(base, ast.Attribute):
+            base = base.value
+        if isinstance(base, ast.Name) and base.id == returned:
+            # The tail re-materialisation (``attn_output.transpose(...)...``); the
+            # primitive is a different assignment to the same name.
+            continue
+        func_node = call.func
+        if isinstance(func_node, ast.Attribute):
+            return func_node.attr
+        if isinstance(func_node, ast.Name):
+            return func_node.id
+        return None
+    return None
+
+
 def _wrapper_tail_ops(func: ast.FunctionDef) -> tuple[tuple[str, tuple[int, ...]], ...]:
     """Ordered ``(method, int_args)`` tensor methods applied to the kernel result.
 
@@ -152,16 +216,7 @@ def _wrapper_tail_ops(func: ast.FunctionDef) -> tuple[tuple[str, tuple[int, ...]
     chain must be the returned name itself, so an unrelated assignment is never
     mistaken for the output post-processing.
     """
-    returned: str | None = None
-    for stmt in ast.walk(func):
-        if not isinstance(stmt, ast.Return) or stmt.value is None:
-            continue
-        expr = stmt.value
-        if isinstance(expr, ast.Tuple) and expr.elts:
-            expr = expr.elts[0]
-        if isinstance(expr, ast.Name):
-            returned = expr.id
-        break
+    returned = _wrapper_returned_name(func)
     if returned is None:
         return ()
 
@@ -263,4 +318,5 @@ def introspect_attention_wrapper(
         port_map=port_map,
         repeat_params=_wrapper_repeat_params(func),
         tail_ops=_wrapper_tail_ops(func),
+        kernel_primitive=_wrapper_kernel_primitive(func),
     )

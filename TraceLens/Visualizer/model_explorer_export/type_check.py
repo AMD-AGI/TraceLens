@@ -27,7 +27,11 @@ import logging
 import re
 from typing import Any
 
-from TraceLens.ModelUtils.shape_inference import _normalize_op_name, _operand_ceiling
+from TraceLens.ModelUtils.shape_inference import (
+    _normalize_op_name,
+    _operand_ceiling,
+    _required_tensor_operand_names,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -437,6 +441,79 @@ def _unresolved_shape_warnings(nodes: list[dict[str, Any]]) -> list[str]:
     return warnings
 
 
+def _role_covers(param: str, label: str) -> bool:
+    """Whether a kernel input port ``label`` supplies the required operand ``param``.
+
+    Both are normalized to alphanumerics (``attention_mask`` -> ``attentionmask``)
+    and matched by equality or shared prefix in either direction, so a role label
+    covers its param under the naming the wrapper actually uses (``query`` <- ``q``,
+    ``key`` <- ``key``, ``value`` <- ``value``, ``query`` <- ``query_states``)
+    while a merged ``kv`` port covers neither ``key`` nor ``value`` (no shared
+    prefix) -- exactly the combined-input defect the check must catch."""
+    p = re.sub(r"[^a-z0-9]", "", str(param).lower())
+    lbl = re.sub(r"[^a-z0-9]", "", str(label).lower())
+    if not p or not lbl:
+        return False
+    return p == lbl or p.startswith(lbl) or lbl.startswith(p)
+
+
+def _kernel_operand_arity_warnings(nodes: list[dict[str, Any]]) -> list[str]:
+    """Flag a kernel that carries fewer distinct tensor input ports than its
+    resolved function requires as distinct tensor operands.
+
+    A kernel node's real primitive (its ``kernel_primitive`` attr, e.g.
+    ``scaled_dot_product_attention``) requires a fixed set of DISTINCT tensor
+    operands -- sdpa needs three (``query``/``key``/``value``); the optional
+    ``attn_mask`` is excluded. The count is resolved structurally from the
+    primitive's aten/inspect signature (never an op-name -> count table). Each of
+    those operands must be supplied by its own kernel input port. When two required
+    operands are wired through one shared port (DeepSeek's combined ``kv`` feeding
+    both key and value before the split fix), fewer roles are covered than required
+    -- a real fidelity defect: the graph shows one edge where the kernel reads two
+    distinct tensors.
+
+    Scoped to nodes actually fed by kernel input ports (``@kernel_port_in``
+    sources); a plain op reaching its operands by ordinary edges is left to
+    ``_check_node``. Single-required-operand ops are covered by that pass's
+    zero-operand floor, so only multi-operand kernels are checked here.
+    """
+    by_id = {str(n.get("id")): n for n in nodes}
+    warnings: list[str] = []
+    for node in nodes:
+        primitive = _node_attr_value(node, "kernel_primitive")
+        if not primitive:
+            continue
+        required = _required_tensor_operand_names(primitive)
+        if len(required) < 2:
+            continue
+        port_labels: list[str] = []
+        for edge in node.get("incomingEdges", []) or []:
+            source = by_id.get(str(edge.get("sourceNodeId")))
+            if source is None:
+                continue
+            if _node_attr_value(source, "synthetic") != "@kernel_port_in":
+                continue
+            port_labels.append(_port_label(source))
+        if not port_labels:
+            continue
+        covered = sum(
+            1
+            for param in required
+            if any(_role_covers(param, lbl) for lbl in port_labels)
+        )
+        if covered < len(required):
+            node_id = node.get("id")
+            warnings.append(
+                f"{node_id} [{_op_type(node)}]: its resolved function requires "
+                f"{len(required)} distinct tensor operand(s) {list(required)}, but "
+                f"only {covered} are covered by its input ports {port_labels} -- two "
+                f"required operands share one combined input port where the kernel "
+                f"reads distinct tensors. Split the port so each required operand "
+                f"reads its own edge."
+            )
+    return warnings
+
+
 def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
     """Type-check every checkable operation node; return + log warning lines.
 
@@ -447,6 +524,7 @@ def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
         warnings.extend(_check_node(node))
     warnings.extend(_noop_cast_warnings(nodes))
     warnings.extend(_output_arity_warnings(nodes))
+    warnings.extend(_kernel_operand_arity_warnings(nodes))
     warnings.extend(_unresolved_shape_warnings(nodes))
     for line in warnings:
         _log.warning("graph type-check: %s", line)

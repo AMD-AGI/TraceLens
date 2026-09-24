@@ -2097,3 +2097,32 @@ def test_merge_flatten_dim_conservation_and_fallback():
     assert _merge_flatten_dim(("B", 7), ["3"]) is None
     # A target symbol with no source match -> None.
     assert _merge_flatten_dim(("B", "S"), ["Z"]) is None
+
+
+# --------------------------------------------------------------------------- #
+# Required tensor-operand name resolution (Task J): the required-operand COVERAGE
+# check resolves how many DISTINCT tensor operands a kernel structurally needs
+# from the primitive's real signature (aten schema / inspect), never a hardcoded
+# op-name -> count table. sdpa needs query/key/value; its optional ``attn_mask``
+# (a defaulted ``Optional[Tensor]``) is excluded.
+# --------------------------------------------------------------------------- #
+
+
+def test_required_tensor_operand_names_sdpa_excludes_optional_mask():
+    from TraceLens.ModelUtils.shape_inference import _required_tensor_operand_names
+
+    assert _required_tensor_operand_names("scaled_dot_product_attention") == (
+        "query",
+        "key",
+        "value",
+    )
+
+
+def test_required_tensor_operand_names_variadic_and_unknown_are_empty():
+    from TraceLens.ModelUtils.shape_inference import _required_tensor_operand_names
+
+    # ``cat(List[Tensor], dim)`` is variadic -> no fixed required-name set.
+    assert _required_tensor_operand_names("cat") == ()
+    # A custom free function with no aten/inspect signature -> empty (check skipped).
+    assert _required_tensor_operand_names("some_custom_kernel_xyz") == ()
+    assert _required_tensor_operand_names("") == ()

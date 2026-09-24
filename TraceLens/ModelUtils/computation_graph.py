@@ -559,6 +559,28 @@ def _kernel_input_names(spec: NodeSpec) -> list[str]:
     return []
 
 
+def _kernel_port_split(spec: NodeSpec) -> dict[str, list[str]]:
+    """Map a shared input label to the distinct kernel-param ports it fans into.
+
+    A wrapper-expanded attention kernel stamps ``port_split: kv=key,value`` when its
+    interface feeds two kernel parameters (``key``/``value``) from one caller tensor
+    (``kv``). The single ``kv`` producer must then dock onto TWO role-labeled ports
+    -- sdpa reads key and value as separate operands -- so this returns
+    ``{"kv": ["key", "value"]}``. Empty when the kernel declares no split. Keyed
+    structurally on the stamped detail, never on a param-name allow-list."""
+    if spec.block is None:
+        return {}
+    out: dict[str, list[str]] = {}
+    for detail in spec.block.details:
+        if detail.startswith("port_split:"):
+            body = detail.split(":", 1)[1].strip()
+            caller, _, roles = body.partition("=")
+            role_list = [r.strip() for r in roles.split(",") if r.strip()]
+            if caller.strip() and role_list:
+                out[caller.strip().lower()] = role_list
+    return out
+
+
 def _inherit_kernel_frames(
     graph: ComputationGraph, kernel_index: int, port_index: int
 ) -> None:
@@ -644,6 +666,23 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
             if count > 0:
                 label = f"{label}_{count + 1}"
             all_inputs.append((source, label))
+
+        # Fan a shared producer into its distinct role ports: a ``kv`` input that
+        # feeds both the ``key`` and ``value`` kernel parameters becomes two
+        # parallel edges from the one producer, each to its own role-labeled port.
+        # This is the only place a single source legitimately drives several input
+        # ports, so it is done here (after positional/labelled naming) rather than
+        # fabricated upstream.
+        split_map = _kernel_port_split(kernel_spec)
+        if split_map:
+            expanded: list[tuple[int, str]] = []
+            for source, label in all_inputs:
+                roles = split_map.get(label.strip().lower())
+                if roles:
+                    expanded.extend((source, role) for role in roles)
+                else:
+                    expanded.append((source, label))
+            all_inputs = expanded
 
         if all_inputs:
             remove_in: set[tuple[int, int]] = {

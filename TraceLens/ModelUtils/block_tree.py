@@ -1438,6 +1438,36 @@ def _attention_wrapper_block_nodes(
     core_details = attention_kernel_details(details, inputs)
     if not core_details:
         core_details = [f"kernel: {plan.kernel}", "outputs: 1"]
+
+    # A grouped-query / compressed-KV wrapper feeds two distinct kernel parameters
+    # (``key`` and ``value``) from ONE caller tensor (``kv``): the port_map then
+    # carries two entries sharing a caller var. sdpa genuinely reads key and value
+    # as separate operands, so the shared caller var must fan into two distinct
+    # role-labeled ports rather than one merged ``kv`` port. Derive that split
+    # purely from the port_map's structure -- a caller var mapped by >1 wrapper
+    # param -- and stamp it so the kernel-port pass (``_add_kernel_port_nodes``)
+    # emits one port per role from the single producer. No param-name/class allow
+    # list: any wrapper whose interface passes one tensor to several params splits.
+    caller_to_params: dict[str, list[str]] = {}
+    for param, caller_var in plan.port_map:
+        caller_to_params.setdefault(caller_var, []).append(param)
+    for caller_var, params in caller_to_params.items():
+        if len(params) > 1:
+            core_details.append(f"port_split: {caller_var}={','.join(params)}")
+
+    # Stamp the atomic primitive as a dedicated ``kernel_primitive`` detail
+    # (promoted to its own attr by the adapter). The type-check resolves the
+    # primitive's real REQUIRED tensor-operand contract (sdpa: query/key/value) from
+    # its aten schema to verify the kernel carries a distinct input port per required
+    # operand -- catching a combined ``kv`` port that hides two required operands
+    # behind one edge. It is deliberately NOT stamped as ``raw_op``: the primitive's
+    # operand *ceiling* is not the wrapper node's ceiling (the wrapper legitimately
+    # receives forwarded non-operand kwargs -- MiniMax's ``block_indices`` -- that
+    # the primitive never reads), so overloading ``raw_op`` would make the generic
+    # over-arity check miscount those forwarded inputs. The required-operand COVERAGE
+    # check keys on this dedicated attr instead.
+    if plan.kernel_primitive:
+        core_details.append(f"kernel_primitive: {plan.kernel_primitive}")
     children: list[BlockNode] = [
         _leaf_node(
             attr_name=core_attr,

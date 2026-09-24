@@ -117,15 +117,31 @@ def _node_attrs(spec) -> list[dict[str, str]]:
         # -- keyed on the name the model itself calls, never a static op list. Lift
         # it to its own ``raw_op`` attr and keep it out of the visible details.
         raw_op = ""
+        kernel_primitive = ""
         visible_details: list[str] = []
         for detail in block.details:
             name, sep, value = detail.partition(":")
             if sep and name.strip() == "raw_op":
                 raw_op = value.strip()
                 continue
+            # The atomic primitive a wrapper-expanded kernel calls
+            # (``scaled_dot_product_attention``). Promoted to its own attr for the
+            # type-check's required-operand COVERAGE check -- kept distinct from
+            # ``raw_op`` so it never feeds the generic over-arity ceiling (the
+            # wrapper receives forwarded non-operand kwargs the primitive ignores).
+            if sep and name.strip() == "kernel_primitive":
+                kernel_primitive = value.strip()
+                continue
+            # ``port_split`` is an internal wiring directive consumed by the
+            # kernel-port pass (fans one shared producer into per-role ports); it is
+            # not a user-facing operand fact, so keep it out of the visible details.
+            if sep and name.strip() == "port_split":
+                continue
             visible_details.append(detail)
         if raw_op:
             attrs.append(_kv("raw_op", raw_op))
+        if kernel_primitive:
+            attrs.append(_kv("kernel_primitive", kernel_primitive))
         if visible_details:
             attrs.append(_kv("details", "; ".join(visible_details)))
     if block is not None and block.runs_on_host:
