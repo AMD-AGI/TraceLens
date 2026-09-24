@@ -44,6 +44,9 @@ setup(
             "Agent/Analysis/utils/arch/*.json",
         ],
     },
+    exclude_package_data={
+        "TraceLens": ["Agent/Analysis/skills/analysis-orchestrator/evals/*"],
+    },
     install_requires=[
         "pandas",
         "tqdm",

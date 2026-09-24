@@ -1,0 +1,45 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+# Run skillscope on evals.json (same intake criteria as amd/skills)
+
+name: AMD Skills Checks
+
+on:
+  pull_request:
+    paths:
+      - "TraceLens/Agent/Analysis/skills/**"
+      - ".github/workflows/skill-evals.yml"
+  workflow_dispatch:
+    inputs:
+      structural:
+        description: Structural Tests
+        type: boolean
+        default: true
+      routing:
+        description: Routing Tests
+        type: boolean
+        default: false
+      behavioral:
+        description: Behavioral Tests
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    name: AMD Skills Checks
+    uses: amd/skillscope/.github/workflows/reusable.yml@main
+    secrets:
+      api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+    with:
+      skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
+      # Each step can be set to `required`, `optional`, or `off`.
+      structural: ${{ github.event_name != 'workflow_dispatch' && 'required' || inputs.structural && 'required' || 'off' }}
+      routing: ${{ github.event_name == 'workflow_dispatch' && inputs.routing && 'required' || 'off' }}
+      behavioral: ${{ github.event_name == 'workflow_dispatch' && inputs.behavioral && 'required' || 'off' }}

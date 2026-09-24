@@ -224,7 +224,7 @@ if [[ -n "$HF_CACHE_DIR" ]]; then
 fi
 
 CONTAINER_REPO="/workspace/$REPO_BASENAME"
-HARNESS="$TRACELENS_ROOT/agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh"
+HARNESS="$TRACELENS_ROOT/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/run_repeatability_parallel.sh"
 if [[ ! -f "$HARNESS" ]]; then
     die "Eval harness not found: $HARNESS"
 fi
@@ -572,7 +572,7 @@ if [[ "$SKIP_EVAL" == "1" ]]; then
     exit 0
 fi
 
-HARNESS="$CONTAINER_REPO/agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh"
+HARNESS="$CONTAINER_REPO/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/run_repeatability_parallel.sh"
 [[ -f "$HARNESS" ]] || die "Harness not found in container: $HARNESS"
 
 export REPO_ROOT="$CONTAINER_REPO"
@@ -583,7 +583,7 @@ INNER
 
 echo ""
 echo "Eval run finished. Results are under:"
-echo "  $WORK_DIR/$REPO_BASENAME/agent_evals/Analysis/"
+echo "  $WORK_DIR/$REPO_BASENAME/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/"
 echo ""
 echo "Inference server log inside container: /workspace/inference_server.log"
 echo "pi config: $WORK_DIR/.pi/agent/models.json"

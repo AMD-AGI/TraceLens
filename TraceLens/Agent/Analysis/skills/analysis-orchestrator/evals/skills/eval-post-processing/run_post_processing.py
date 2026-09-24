@@ -35,14 +35,18 @@ if _EVAL_UTILS_DIR not in sys.path:
 from aggregate_repeatability import find_runs, parse_ndjson_stream
 
 REPO_ROOT = "/workspace/TraceLens"
-ANALYSIS_DIR = os.path.join(REPO_ROOT, "agent_evals", "Analysis")
-RESULTS_ROOT = (
-    "/workspace/TraceLens/agent_evals/Analysis/repeatability_results_combined"
+ANALYSIS_DIR = os.path.join(
+    REPO_ROOT,
+    "TraceLens",
+    "Agent",
+    "Analysis",
+    "skills",
+    "analysis-orchestrator",
+    "evals",
 )
-REPORT_DIR = "/workspace/TraceLens/agent_evals/Analysis/reports"
-TEST_TRACES_CSV = (
-    "/workspace/TraceLens/agent_evals/Analysis/reports/combined_traces.csv"
-)
+RESULTS_ROOT = "/workspace/TraceLens/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/repeatability_results_combined"
+REPORT_DIR = "/workspace/TraceLens/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/reports"
+TEST_TRACES_CSV = "/workspace/TraceLens/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/reports/combined_traces.csv"
 SUITE = "eval"
 CONTAINER = ""  # local host, no container
 
@@ -547,7 +551,7 @@ def top_reproducers_table(
         container_kv = f'CONTAINER="{container}"' if container else 'CONTAINER=""'
         cmd = (
             f'{container_kv} TEST_IDS="{tid}" TEST_TRACES_CSV="{test_traces_csv_rel}" '
-            f"bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh"
+            f"bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/run_repeatability_parallel.sh"
         )
         rows.append(f"| {tid} | {fcount} | {platform} | `{cmd}` |\n")
     return "".join(rows)
@@ -902,7 +906,7 @@ def main():
         container_kv = f'CONTAINER="{CONTAINER}"' if CONTAINER else 'CONTAINER=""'
         repro_cmd = (
             f'{container_kv} TEST_IDS="{worst_trace}" TEST_TRACES_CSV="{test_traces_csv_rel}" '
-            f"bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh"
+            f"bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/run_repeatability_parallel.sh"
         )
         readme.append("\n## Reproducer command (worst-affected trace)\n\n```bash\n")
         readme.append(repro_cmd + "\n```\n\n")
