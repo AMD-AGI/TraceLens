@@ -352,8 +352,6 @@ def _resolve_primary_input(
 
     # Build the set of param names that have dedicated pipeline entry points.
     # The primary input is the arg NOT in this set.
-    from TraceLens.ModelUtils.block_tree import BlockNode as _BN
-
     child = next(
         (c for c in root.children if c.attr_name == consumer_attr), None
     )
@@ -3533,7 +3531,6 @@ def _add_loop_carried_nodes(
         )
 
         rewired: list[tuple[int, int]] = []
-        in_feeds_member = False
         for source, target in graph.links:
             if source == updated_index and target not in member_indices:
                 # Route outgoing edges from the loop's updated value through
@@ -3552,7 +3549,6 @@ def _add_loop_carried_nodes(
                 port = graph.link_port_labels.pop((source, target), None)
                 if port:
                     graph.link_port_labels[(in_node_index, target)] = port
-                in_feeds_member = True
             else:
                 rewired.append((source, target))
         graph.links = rewired

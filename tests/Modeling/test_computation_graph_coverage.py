@@ -832,7 +832,7 @@ def test_add_forward_output_multi_exit_and_primary_index():
         ],
         links=[(0, 1), (0, 2)],
     )
-    idx = cg.add_forward_output(graph)
+    cg.add_forward_output(graph)
     assert set(graph.output_ports) == {"result_1", "result_2"}
 
 
@@ -1466,7 +1466,6 @@ def test_add_linear_pipeline_chain_empty():
 
 def test_add_linear_pipeline_chain_kernel_second_operand(monkeypatch):
     monkeypatch.setattr(cg, "inline_composite_steps", lambda step, basic_ops=None: ([step], None))
-    prev = _node("prev")
     step = _node("out", class_name="KernelOutput", kernel_second_operand="input")
     graph = cg.ComputationGraph()
     input_index = cg._add_node(graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT)

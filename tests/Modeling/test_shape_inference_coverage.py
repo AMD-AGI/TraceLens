@@ -19,8 +19,6 @@ import json
 import logging
 from pathlib import Path
 
-import pytest
-
 from TraceLens.ModelUtils.ast_analyze import analyze_source
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.block_tree import BlockNode, build_block_node
@@ -865,7 +863,6 @@ def test_parse_split_sizes():
 
 def test_infer_einsum_shape_failure_paths():
     a = TensorSpec(("B", "S", 8))
-    b = TensorSpec((8, 16))
     assert _infer_einsum_shape("bij", [a]) is None  # no '->'
     assert _infer_einsum_shape("ij,jk->ik", [a]) is None  # arity mismatch
     assert _infer_einsum_shape("ij->i", [a]) is None  # sub len != shape rank
