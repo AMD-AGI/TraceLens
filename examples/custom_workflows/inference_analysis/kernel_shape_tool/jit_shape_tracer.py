@@ -103,6 +103,11 @@ _SPANS_ON = _env_on("TRACELENS_SHAPE_SPANS")
 # Also annotate the calling Python launcher as a dispatcher op.
 _LAUNCHER_OPS_ON = _env_on("TRACELENS_SHAPE_LAUNCHER_OPS")
 
+# Debug only: drop into breakpoint() at each hooked launch. "1"/"all" breaks on
+# every hook; otherwise a comma-separated list of hook-id prefixes, e.g.
+# "triton", "flydsl", "triton.autotuner". Honours PYTHONBREAKPOINT.
+_BREAK_SPEC = os.environ.get("TRACELENS_SHAPE_BREAK", "").strip().lower()
+
 # Module prefixes that belong to the JIT machinery itself. A frame in one of
 # these is never "the launcher" -- notably Triton's own KernelInterface
 # __getitem__ lambda sits between the caller and .run().
@@ -120,6 +125,7 @@ _libs: Dict[str, Library] = {}  # namespace -> Library
 _ops: Dict[tuple, Any] = {}  # (namespace, name, arity) -> op callable / _BROKEN
 _taken: Dict[str, Set[str]] = {}  # namespace -> op names already defined
 _installed: Dict[str, str] = {}  # hook id -> what was patched
+_break_hooks: Set[str] = set()  # hook ids that call breakpoint(); clear() to stop
 _launches = 0
 _window_start = 0  # value of _launches when the current window opened
 
@@ -407,6 +413,9 @@ def _wrap_launch(
             # Keep this call in this frame: _calling_launcher() walks out from
             # here to find the caller.
             launcher = _calling_launcher() if _LAUNCHER_OPS_ON else None
+            if hook_id in _break_hooks:
+                # Inspect: hook_id, name, launcher, tensors, args, kwargs, self.
+                breakpoint()
             if not _SPANS_ON:
                 _record_launch(name, launcher, tensors)
                 return original(self, *args, **kwargs)
@@ -419,7 +428,17 @@ def _wrap_launch(
     setattr(cls, method, traced)
     setattr(cls, sentinel, True)
     _installed[hook_id] = f"{cls.__module__}.{cls.__qualname__}.{method}"
+    if _should_break(hook_id):
+        _break_hooks.add(hook_id)
     return True
+
+
+def _should_break(hook_id: str) -> bool:
+    if _BREAK_SPEC in ("", "0", "false", "no", "off"):
+        return False
+    if _BREAK_SPEC in ("1", "true", "yes", "on", "all"):
+        return True
+    return any(hook_id.startswith(p.strip()) for p in _BREAK_SPEC.split(",") if p.strip())
 
 
 def install_triton_hooks() -> bool:
