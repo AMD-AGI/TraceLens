@@ -136,6 +136,96 @@ def test_decoder_attention_mask_docks_mask_builder(model_id):
         assert "create" in producer.get("label", "").lower()
 
 
+def _node_attr(node, key: str):
+    for attr in node.get("attrs", []) or []:
+        if attr.get("key") == key:
+            return attr.get("value")
+    return None
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "zai-org/GLM-5.3-Flash",
+    ],
+)
+def test_decoder_position_ids_not_fabricated_when_derived(model_id):
+    """A DERIVED ``position_ids`` never fabricates a top-level model input (Task B).
+
+    Both models compute ``position_ids`` internally before the decoder loop
+    (``position_ids = cache_position.unsqueeze(0)`` / ``arange(...).unsqueeze(0)``),
+    so it is NOT a value the caller handed the model. Rendering a bogus top-level
+    ``@input:position_ids`` model-input node (as the exporter did before this fix)
+    misrepresents a derived tensor as a graph entry point, so that node must never
+    exist for a model that derives it.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, by_id = _build_nodes(model_id)
+
+    assert "@input:position_ids" not in by_id, (
+        "bogus top-level @input:position_ids model-input node must not exist "
+        "when the model derives position_ids internally"
+    )
+
+
+def test_deepseek_decoder_position_ids_docks_derived_producer():
+    """DeepSeek's decoder ``position_ids`` boundary docks its derived producer.
+
+    DeepSeek surfaces a ``decoder/@input:position_ids`` boundary and derives the
+    tensor before the loop from a generator-rooted op chain
+    (``torch.arange(...) + ... -> unsqueeze(0)``). That chain is materialised at
+    model scope, so the boundary must dock onto the terminal derived op source (a
+    ``@model_forward/@op_l...`` node carrying a real ``raw_op``), resolved
+    structurally from the captured pre-loop op chain -- never a fabricated
+    ``@input:position_ids``.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, by_id = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
+
+    assert "@input:position_ids" not in by_id
+
+    boundary = by_id.get("decoder/@input:position_ids")
+    assert boundary is not None, "expected a decoder position_ids boundary"
+    sources = [e.get("sourceNodeId") for e in boundary.get("incomingEdges", [])]
+    assert sources, "decoder position_ids boundary must be sourced"
+    for source in sources:
+        producer = by_id.get(source)
+        assert producer is not None, f"missing producer {source!r}"
+        assert source.startswith("@model_forward/@op_l"), (
+            f"position_ids boundary sourced by {source!r}, not a derived op producer"
+        )
+        assert source.endswith("_unsqueeze"), (
+            f"expected the terminal unsqueeze of the derived chain, got {source!r}"
+        )
+        # A materialised op source (not a fabricated @input) carries the underlying
+        # torch op as a top-level raw_op attr.
+        assert _node_attr(producer, "raw_op") is not None, (
+            f"{source!r} is not a materialised op source"
+        )
+
+
+def test_minimax_m3_position_ids_pre_existing_limitation():
+    """MiniMax-M3 still fabricates ``@input:position_ids`` -- a documented limitation.
+
+    MiniMax also derives ``position_ids`` (``cache_position.unsqueeze(0)``), but the
+    tensor is derived inside a loop whose primary spine input is an untransformed
+    passthrough (``hidden_states = inputs_embeds``); the stack-entry dataflow does
+    not traverse that passthrough loop, so the exporter falls back to a top-level
+    ``@input:position_ids``. This is a pre-existing behaviour left unchanged by the
+    Task B fix (reaching it regressed the ``position_embeddings`` wiring). This test
+    pins the current state so a future dataflow improvement that removes the
+    fabricated node fails loudly and is updated alongside the fix.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, by_id = _build_nodes("MiniMaxAI/MiniMax-M3")
+
+    boundary = by_id.get("decoder/@input:position_ids")
+    assert boundary is not None
+    sources = [e.get("sourceNodeId") for e in boundary.get("incomingEdges", [])]
+    assert sources == ["@input:position_ids"], sources
+
+
 @pytest.mark.parametrize(
     "model_id",
     ["deepseek-ai/DeepSeek-V4-Flash", "MiniMaxAI/MiniMax-M3"],

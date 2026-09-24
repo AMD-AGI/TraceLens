@@ -230,15 +230,30 @@ def _append_stack_entry_dataflow(
             if predecessor in refs
         ]
         sources = [source for _predecessor, source in source_pairs]
-        if not sources:
+        if not sources and not _is_generator_operation(operation):
+            # No materialised predecessor and the op needs a tensor operand: it is
+            # a partial fragment we cannot wire, so skip it. A *generator* source op
+            # (``torch.arange`` seeding a derived ``position_ids``) legitimately
+            # reads no tensor operand -- its operand ceiling is zero -- so it heads
+            # its own chain and must materialise even with no incoming edge, exactly
+            # as an in-body ``arange`` renders sourceless. Without this the whole
+            # derived chain (``arange -> add -> unsqueeze``) is dropped and the
+            # loop-invariant boundary it feeds falls back to a fabricated
+            # ``@input:<param>`` model input.
             continue
         node_id = _merge_node_id("@model_forward", operation.attr_name)
+        raw_op = _operation_detail(operation, "raw_op")
         node: dict[str, Any] = {
             "id": node_id,
             "label": operation.label,
             "namespace": "",
             "attrs": [
                 {"key": "operation", "value": "source"},
+                # Stamp the underlying torch op name as a top-level attr (mirroring
+                # an in-body op node) so the integrity check's zero-operand
+                # generator exemption recognises a sourceless ``torch.arange`` head
+                # of a derived chain instead of flagging it as an I2 orphan.
+                *([{"key": "raw_op", "value": raw_op}] if raw_op else []),
                 *[
                     {"key": "detail", "value": str(detail)}
                     for detail in operation.details
@@ -248,7 +263,7 @@ def _append_stack_entry_dataflow(
                 _source_edge(source, str(index)) for index, source in enumerate(sources)
             ],
         }
-        if shape_inferencer is not None:
+        if shape_inferencer is not None and source_pairs:
             predecessor, source = source_pairs[0]
             source_spec = ref_specs.get(predecessor)
             if source_spec is None:
@@ -335,6 +350,19 @@ def _is_generator_source_node(node: dict[str, Any]) -> bool:
     source of its group, not an activation the group receives from outside, and
     must not be mistaken for a group entry point."""
     ceiling, variadic = _operand_ceiling(_node_attr(node, "raw_op") or "")
+    return ceiling == 0 and not variadic
+
+
+def _is_generator_operation(operation: Any) -> bool:
+    """True for a stack-entry ``ForwardOperation`` that generates a tensor from host
+    scalars alone (``torch.arange``), so it reads no tensor operand.
+
+    Mirrors ``_is_generator_source_node`` but reads the op's ``raw_op`` from its
+    recorded ``details`` (the merge node it becomes has that only as a ``detail``
+    attr). Such an op heads its own dataflow chain and legitimately carries no
+    incoming edge; it must materialise even when none of its predecessors resolved
+    to an already-materialised source."""
+    ceiling, variadic = _operand_ceiling(_operation_detail(operation, "raw_op") or "")
     return ceiling == 0 and not variadic
 
 
