@@ -86,3 +86,20 @@ def ensure_trace_json(trace_path: str, traceconv_path: Optional[str] = None) -> 
     raise ValueError(
         f"Unsupported trace format: {trace_path}. Use .json, .json.gz, or .pftrace."
     )
+
+
+def derive_pftrace_output_path(trace_path: str, report_suffix: str) -> str:
+    """Derive a default output xlsx path from a pftrace input path.
+
+    Strips ``.pftrace``, ``.json.gz``, or other extensions from
+    *trace_path* and appends *report_suffix* (e.g.
+    ``"_pftrace_activity_report.xlsx"``).
+    """
+    base = Path(trace_path).resolve()
+    if base.suffix.lower() == ".pftrace":
+        base = base.with_suffix("")
+    elif base.suffix.lower() == ".gz" and base.name.endswith(".json.gz"):
+        base = base.parent / base.name.replace(".json.gz", "")
+    else:
+        base = base.with_suffix("")
+    return str(base) + report_suffix

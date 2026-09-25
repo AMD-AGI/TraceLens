@@ -10,7 +10,7 @@ This file is the detailed specification for the TraceLens **magpie-benchmark-pro
 
 ## Workflow overview
 
-Steps **0–6**: collect SSH/conda details, read the Magpie YAML, optionally build a TraceLens-patched inference Docker image, enable and tune the PyTorch profiler (targeted steady-state vs full run), run `python -m Magpie benchmark` on the remote node, verify trace quality, then split rank-0 traces with `split_inference_trace_annotation` and print the suggested `generate_perf_report_pytorch_inference.py` command for downstream analysis.
+Steps **0–6**: collect SSH/conda details, read the Magpie YAML, optionally build a TraceLens-patched inference Docker image, enable and tune the PyTorch profiler (targeted steady-state vs full run), run `python -m Magpie benchmark` on the remote node, verify trace quality, then split rank-0 traces with `split_trace.main` and print the suggested `generate_perf_report_pytorch_inference.py` command for downstream analysis.
 
 ---
 
@@ -217,7 +217,7 @@ benchmark:
 ```
 
 - `--profiler-config.capture_torch_profiler True` — enables graph-capture tracing. vLLM writes separate traces for the CUDA graph capture phases into `<torch_profiler_dir>/capture_traces` (i.e. `/workspace/torch_trace/capture_traces` under Magpie's container mount), which are needed for downstream TraceLens analysis of graph-replayed operations.
-- `--profiler-config.detailed_trace_annotation True` — enables detailed annotations in the trace (iteration boundaries, phase labels, scheduling metadata). These annotations are required by `split_inference_trace_annotation` for accurate trace splitting.
+- `--profiler-config.detailed_trace_annotation True` — enables detailed annotations in the trace (iteration boundaries, phase labels, scheduling metadata). These annotations are required by `split_trace.main` for accurate trace splitting.
 
 Both flags take the same form on every supported version: they come from the TraceLens patch on vLLM **v0.14-v0.25** and from upstream vLLM on **v0.26.0 and later**.
 
@@ -283,7 +283,7 @@ benchmark:
 ```
 
 - `ATOM_PROFILER_MORE: "1"` — records call stacks and tensor shapes, required for roofline analysis and kernel attribution.
-- `ATOM_ENABLE_DETAILED_ANNOTATION: "1"` — appends the roofline aggregates (`sqsq`, `sqsk`, `sk`) to the `prefill[]` / `decode[]` step annotations that `split_inference_trace_annotation` consumes. The aggregates are computed only while the profiler is running.
+- `ATOM_ENABLE_DETAILED_ANNOTATION: "1"` — appends the roofline aggregates (`sqsq`, `sqsk`, `sk`) to the `prefill[]` / `decode[]` step annotations that `split_trace.main` consumes. The aggregates are computed only while the profiler is running.
 
 **2. Add the graph-capture flag as `EXTRA_ATOM_ARGS` in the user's YAML config.**
 
@@ -407,7 +407,7 @@ ATOM has **no server-side equivalent** to vLLM's `delay_iterations` / `max_itera
 Two consequences worth stating to the user before the run:
 
 - **The `benchmark_lib.sh` `num_prompts` patch is not needed.** The built-in ATOM runner script already defaults `NUM_PROMPTS` to `CONC * 10`, so the benchmark is long enough to reach steady state without patching. Do not apply the sed used for vLLM and SGLang.
-- **The window cannot be narrowed to a fixed iteration count.** The trace covers the whole profiled request phase, so it will be larger than a comparable vLLM or SGLang targeted window. Use Step 6's `split_inference_trace_annotation --find-steady-state` to extract the steady-state region on the host afterwards.
+- **The window cannot be narrowed to a fixed iteration count.** The trace covers the whole profiled request phase, so it will be larger than a comparable vLLM or SGLang targeted window. Use Step 6's `split_trace.main --find-steady-state` to extract the steady-state region on the host afterwards.
 
 ---
 
@@ -558,7 +558,7 @@ Run trace preprocessing on the rank-0 trace file:
 ```bash
 ssh <node> "source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> && \
   cd <TraceLens_repo> && \
-  python -m TraceLens.TraceUtils.split_inference_trace_annotation \
+  python -m TraceLens.TraceUtils.split_trace.main \
     <workspace>/torch_trace/<rank-0-trace>.pt.trace.json.gz \
     -o <workspace>/torch_trace/trace_split \
     --find-steady-state --num-steps 32 \

@@ -6,6 +6,8 @@ omit =
     TraceLens/PerfModel/benchmarking/*
     TraceLens/PerfModel/origami_helper.py
     TraceLens/PerfModel/run_perf_model.py
+    TraceLens/Agent/*/skills/*/evals/*
+    TraceLens/TraceUtils/kernel_shape_tool/*
 
 [paths]
 source =

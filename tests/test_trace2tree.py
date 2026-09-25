@@ -11,10 +11,13 @@ from __future__ import annotations
 import pytest
 from copy import deepcopy
 from typing import Dict, List
-from TraceLens.Trace2Tree.inference_iteration_roots import (
-    _detect_iteration_roots_from_tree,
-    _find_repeating_period,
-    find_iteration_roots_generic,
+from TraceLens.util import GPU_KERNEL_CATEGORIES
+from TraceLens.Trace2Tree.util import (
+    _entry_roots,
+    _reattach_worker_threads,
+)
+from TraceLens.TraceUtils.split_trace.root_detection import (
+    detect_from_branch_descent,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _align_capture_to_graph,
@@ -68,6 +71,15 @@ from TraceLens.Trace2Tree.extensions.v4_paged_decode_pseudo_ops import (
     create_pseudo_ops_v4_paged_decode,
 )
 from TraceLens.Trace2Tree import trace_to_tree as ttt
+
+
+def _total_gpu(tree):
+    """Total GPU kernel time in the tree (was root_detection._total_gpu_time)."""
+    return sum(
+        e.get("dur", 0)
+        for e in tree.events_by_uid.values()
+        if e.get("cat") in GPU_KERNEL_CATEGORIES
+    )
 
 
 def _mk_event(
@@ -146,33 +158,20 @@ def _add_gpu_chain(
 
 
 class TestInferenceIterationRoots:
-    def test_find_repeating_period_skips_prefix(self):
-        names = ["setup", "fwd", "bwd", "fwd", "bwd", "fwd", "bwd"]
-        period, pattern, start = _find_repeating_period(names)
-        assert period == 2
-        assert pattern == ["fwd", "bwd"]
-        assert start == 1
-
-    def test_find_repeating_period_no_match(self):
-        period, pattern, start = _find_repeating_period(["a", "b", "c", "d"])
-        assert period is None
-        assert pattern is None
-        assert start is None
-
     def test_find_iteration_roots_from_synthetic_tree(self):
         events: List[Dict] = []
         loop = _mk_event(
             "cpu_op",
             "training_loop",
             ts=0,
-            dur=7000,
+            dur=20000,
             pid=1,
             tid=1,
             args={"Sequence number": 0},
         )
         events.append(loop)
         corr = 100
-        for iteration in range(3):
+        for iteration in range(8):
             base_ts = 100 + iteration * 2000
             for step_name, offset in [("step_fwd", 0), ("step_bwd", 400)]:
                 op = _mk_event(
@@ -195,27 +194,26 @@ class TestInferenceIterationRoots:
                 corr += 1
 
         tree = _build_tree(events)
-        loop_evt = next(e for e in tree.events if e["name"] == "training_loop")
-        roots = _detect_iteration_roots_from_tree(tree, loop_evt)
-        assert roots is not None
-        assert len(roots) == 3
-        assert all(root["dur"] > 0 for root in roots)
+        result = detect_from_branch_descent(tree, _entry_roots(tree), _total_gpu(tree))
+        assert result is not None
+        assert len(result.roots) == 8
+        assert all(root["dur"] > 0 for root in result.roots)
 
-    def test_find_iteration_roots_generic_end_to_end(self):
+    def test_branch_descent_end_to_end(self):
         events: List[Dict] = []
         events.append(
             _mk_event(
                 "cpu_op",
                 "training_loop",
                 ts=0,
-                dur=7000,
+                dur=20000,
                 pid=1,
                 tid=1,
                 args={"Sequence number": 0},
             )
         )
         corr = 200
-        for iteration in range(3):
+        for iteration in range(8):
             base_ts = 100 + iteration * 2000
             for step_name, offset in [("iter_fwd", 0), ("iter_bwd", 400)]:
                 op = _mk_event(
@@ -237,9 +235,11 @@ class TestInferenceIterationRoots:
                 )
                 corr += 1
 
-        roots = find_iteration_roots_generic(events)
-        assert roots is not None
-        assert len(roots) >= 1
+        tree = _build_tree(events)
+        _reattach_worker_threads(tree)
+        result = detect_from_branch_descent(tree, _entry_roots(tree), _total_gpu(tree))
+        assert result is not None
+        assert len(result.roots) >= 1
 
 
 class TestPseudoOpsUtils:
@@ -633,6 +633,74 @@ class TestTraceToTreeUtilities:
         cpu_only = next(e for e in tree.events if e["name"] == "cpu_only")
         assert "non_gpu_path" not in gpu_op_evt
         assert cpu_only.get("non_gpu_path") is True
+
+    def test_links_kernel_when_ac2g_start_is_missing(self):
+        def _launch_events(corr, gpu_events, launcher="hipDrvLaunchKernelEx"):
+            events = [
+                _mk_event("cpu_op", "aten::mm", ts=0, dur=100, pid=1, tid=1, args={}),
+                _mk_event(
+                    "cuda_runtime",
+                    launcher,
+                    ts=5,
+                    dur=5,
+                    pid=1,
+                    tid=1,
+                    args={"correlation": corr},
+                ),
+            ]
+            for idx, (cat, name) in enumerate(gpu_events):
+                events.append(
+                    _mk_event(
+                        cat,
+                        name,
+                        ts=20 + idx * 20,
+                        dur=10,
+                        pid=0,
+                        tid=7,
+                        args={"correlation": corr, "stream": 7},
+                    )
+                )
+            events.append(_mk_ac2g(corr, pid=0, tid=7, ts=20, phase="f"))
+            return events
+
+        # A single unambiguous kernel is recovered from the correlation id.
+        unique = _build_tree(_launch_events(26391, [("kernel", "Cijk_Alik_Bljk")]))
+        mm = next(e for e in unique.events if e["name"] == "aten::mm")
+        gpu_events = unique.get_gpu_events(mm)
+        assert len(gpu_events) == 1
+        assert gpu_events[0]["name"] == "Cijk_Alik_Bljk"
+
+        # Several kernels share the correlation id, so the match is ambiguous.
+        ambiguous = _build_tree(
+            _launch_events(42, [("kernel", "kernel_a"), ("kernel", "kernel_b")])
+        )
+        mm = next(e for e in ambiguous.events if e["name"] == "aten::mm")
+        assert ambiguous.get_gpu_events(mm) == []
+
+        # Unique memsets with only the ac2g finish event are linked too.
+        # Real traces also contain kernel launches, which is how linking_key
+        # is set to "correlation"; a memset-only trace would fall back to
+        # "External id" and never take this path.
+        memset_events = _launch_events(
+            43, [("gpu_memset", "Memset (Device)")], launcher="hipMemsetAsync"
+        )
+        memset_events.insert(
+            1,
+            _mk_event(
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=1,
+                dur=1,
+                pid=1,
+                tid=1,
+                args={"correlation": 1},
+            ),
+        )
+        memset = _build_tree(memset_events)
+        mm = next(e for e in memset.events if e["name"] == "aten::mm")
+        gpu_events = memset.get_gpu_events(mm)
+        assert len(gpu_events) == 1
+        assert gpu_events[0]["name"] == "Memset (Device)"
 
     def test_linking_key_uses_correlation_when_present(self):
         events = [
