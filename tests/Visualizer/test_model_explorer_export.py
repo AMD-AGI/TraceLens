@@ -672,17 +672,14 @@ def test_inject_group_inputs_treats_nested_ops_as_internal():
 
 
 def test_kimi_layer_variants_export_three_decoder_splits():
-    from huggingface_hub import try_to_load_from_cache
-
-    # Resolve the cached Kimi-K3 modeling source under any snapshot hash via the
-    # Hugging Face cache resolver (honours HF_HOME); skip only if truly absent.
-    hit = try_to_load_from_cache("moonshotai/Kimi-K3", "modeling_kimi_linear.py")
-    if not isinstance(hit, str):
-        pytest.skip("Kimi-K3 modeling file not cached locally")
-    code_path = Path(hit)
+    # The Kimi-K3 KimiLinearForCausalLM backbone (config + modeling source) is
+    # vendored under tests/fixtures/kimi_k3 so this runs source-only, without a
+    # cached Hugging Face snapshot or any download.
+    fixture = FIXTURES / "kimi_k3"
+    code_path = fixture / "modeling_kimi_linear.py"
 
     spec = load_architecture(
-        "moonshotai/Kimi-K3",
+        fixture,
         code_path=code_path,
         detailed=True,
         basic_ops=BasicOpFilter.for_detailed(),

@@ -29,18 +29,19 @@ _FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "kda_kernel"
 
 
 def _kimi_code_path() -> Path | None:
-    """Resolve the cached Kimi-K3 modeling source under any snapshot hash.
+    """Return the vendored Kimi-K3 modeling source shipped as a test fixture.
 
-    Uses the Hugging Face cache resolver (honours ``HF_HOME``) instead of a
-    pinned snapshot directory, so the file is found wherever the model was
-    downloaded and the tests skip only when it is genuinely absent.
+    The KimiLinearForCausalLM backbone modeling file is checked in under
+    ``tests/fixtures/kimi_k3`` so these source-only AST tests run without a
+    cached Hugging Face snapshot (no download, no ``HF_HOME`` dependence).
     """
-    from huggingface_hub import try_to_load_from_cache
-
-    hit = try_to_load_from_cache(
-        "moonshotai/Kimi-K3", "modeling_kimi_linear.py"
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "kimi_k3"
+        / "modeling_kimi_linear.py"
     )
-    return Path(hit) if isinstance(hit, str) else None
+    return path if path.is_file() else None
 
 
 def _load_chunk_kda_pipeline():
@@ -49,7 +50,7 @@ def _load_chunk_kda_pipeline():
 
     code_path = _kimi_code_path()
     if code_path is None:
-        pytest.skip("Kimi-K3 modeling file not cached locally")
+        pytest.skip("Kimi-K3 modeling fixture not found")
 
     basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
     analysis = analyze_source(
@@ -133,7 +134,7 @@ def test_parse_kernel_call_flags_reads_modeling_kwargs():
 def test_analyze_source_attaches_kernel_import_for_kda():
     code_path = _kimi_code_path()
     if code_path is None:
-        pytest.skip("Kimi-K3 modeling file not cached locally")
+        pytest.skip("Kimi-K3 modeling fixture not found")
 
     analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
     assert analysis.external_imports["chunk_kda"] == "fla.ops.kda#chunk_kda"
