@@ -697,6 +697,34 @@ def test_gather_single_int_index_without_dim_stays_on_legacy_path():
     assert result.shape == ("B", 4)
 
 
+def test_index_select_leading_axis_advanced_index_keeps_tail():
+    # ``index_first_axis(x, indices): return x[indices]`` -- a bare advanced index
+    # whose index operand is a tensor parameter -- is captured as a dedicated
+    # ``Index select`` op (never the overloaded ``gather`` label). Its int64 index
+    # replaces the leading axis of the base and the trailing base axes are kept:
+    # ``[nnz] ++ base.shape[1:]`` -> ``[nnz, H]``.
+    inf = _make_inferencer()
+    base = TensorSpec(shape=("B*S", 7168), dtype="bfloat16")
+    indices = TensorSpec(shape=("nnz",), dtype="int64")
+    node = _node("Index select")
+    result = inf._infer_node_output(node, [base, indices], root=None)
+    assert result.shape == ("nnz", 7168)
+    assert result.dtype == "bfloat16"
+
+
+def test_index_select_falls_back_to_base_when_index_not_int_typed():
+    # Interim state (before the index producer is introspected to int64): the index
+    # operand carries no integer shape, so the rule passes the base shape through
+    # rather than inventing one -- and never raises or warns.
+    inf = _make_inferencer()
+    base = TensorSpec(shape=("B", "S", 7168), dtype="bfloat16")
+    opaque_index = TensorSpec(shape=("B", "S", 7168), dtype="bfloat16")
+    node = _node("Index select")
+    result = inf._infer_node_output(node, [base, opaque_index], root=None)
+    assert result.shape == ("B", "S", 7168)
+    assert result.dtype == "bfloat16"
+
+
 def test_transpose_shape_inference():
     inf = _make_inferencer()
     inp = TensorSpec(shape=("B", "S", 32, 128), dtype="float16")

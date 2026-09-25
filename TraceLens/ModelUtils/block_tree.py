@@ -1119,6 +1119,28 @@ def _expanded_free_function_node(
         if fn_primary_return and fn_return_slots
         else None
     )
+    # A device helper whose body reduces to a *single* traced op
+    # (``index_first_axis``: ``return x[indices]`` -> one ``Index select``) is
+    # inlined at the call site: the call's own leaf carries that op's real label,
+    # class, and details instead of the opaque function name, so it renders as the
+    # actual operation (with a shape rule) while keeping the exact tensor wiring the
+    # caller already established for the call (base + index operands land on
+    # ``call_attr`` regardless of how the leaf is labelled). Multi-op helpers still
+    # open into their frame below; a host helper stays the opaque ``device: cpu``
+    # tile handled by the fallback.
+    if method_ops and not runs_on_host and len(method_ops) == 1:
+        single_op = method_ops[0]
+        return _leaf_node(
+            attr_name=call_attr,
+            class_name=single_op.class_name,
+            forward_order=child_order,
+            details=[*child_details, *single_op.details],
+            label=single_op.label,
+            basic=True,
+            output_names=output_names,
+            param_inputs=fallback_param_inputs,
+            runs_on_host=runs_on_host,
+        )
     # A host-only helper (``get_vision_position_ids``) builds integer index
     # bookkeeping whose per-op shapes are not meaningfully inferable (advanced
     # indexing / host arithmetic), so expanding it only surfaces wrong inner

@@ -2013,7 +2013,13 @@ def _multi_op_free_functions(
             all_tensor_ops=all_tensor_ops,
             _seen=frozenset({name}),
         )
-        if len(operations) > 1:
+        # A free function whose body reduces to a *single* traced op (``index_first_axis``:
+        # ``return x[indices]`` -> one ``Index select``) still expands: rendering it as its
+        # underlying op is strictly better than an opaque ``@fn_..._index_first_axis`` tile
+        # that hides a real gather. Multi-op helpers already expanded; the threshold is
+        # ``>= 1`` so a lone real op is not the one case left opaque. (A body that traces to
+        # zero ops -- a pure pass-through -- still has nothing to expand and is skipped.)
+        if len(operations) >= 1:
             expanded[call_attr] = operations
             primary = _primary_forward_input_name(func)
             if primary:
@@ -4299,6 +4305,44 @@ class _ForwardOperationExtractor:
                     "Gather",
                     [value for value in (base, *index_producers) if value],
                     [*base_external, *index_external],
+                )
+                return producer, []
+            # Advanced indexing whose index operand is a tensor-valued *parameter*
+            # with no internal producer of its own -- ``index_first_axis(x,
+            # indices): return x[indices]``, where ``indices`` is the free
+            # function's own secondary tensor parameter. The internal-producer
+            # ``Gather`` path above cannot fire (a parameter names no upstream op),
+            # yet this is a genuine gather, not a slice: emit it as a dedicated
+            # ``Index select`` op with its own shape rule -- never the overloaded
+            # ``gather`` label, which single-index/no-``dim`` uses for many
+            # non-row-gather shapes. Structural discriminator, mirroring the
+            # free-function / param-alias tensor-operand handling the narrows-range
+            # ``Slice`` branch below already relies on: an index operand that reads
+            # a parameter (``_param_refs``), is not a literal integer select, and is
+            # not a host scalar; the base is a real tensor operand; and the context
+            # is one where an unproduced parameter genuinely IS a tensor value (a
+            # free-function body, or a secondary-input tuple-unpack alias).
+            subscript_is_param_alias = (
+                isinstance(node.value, ast.Name)
+                and node.value.id in self.param_alias_origin
+            )
+            if (
+                isinstance(node.ctx, ast.Load)
+                and (base is not None or base_external)
+                and (self.is_free_function_body or subscript_is_param_alias)
+                and any(
+                    not _is_int_index(operand)
+                    and not self._is_host_scalar_expr(operand)
+                    and self._param_refs(operand)
+                    for operand in _subscript_index_operands(node.slice)
+                )
+            ):
+                self._materialized_subscripts.add(id(node))
+                producer = self._emit(
+                    node,
+                    "Index select",
+                    [base] if base else [],
+                    base_external,
                 )
                 return producer, []
             # A pure slice that selects a single index along a non-sole axis

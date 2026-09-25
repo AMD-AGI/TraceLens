@@ -2869,6 +2869,28 @@ class ShapeInferencer:
                 shape=_replace_last_dim(source.shape, top_k), dtype="int64"
             )
 
+        if operation_label == "index select":
+            # ``base[index]`` advanced indexing whose index operand is a tensor
+            # parameter (``index_first_axis(x, indices): return x[indices]``). The
+            # integer index operand(s) replace the *leading* axes of ``base`` and
+            # the trailing base axes are kept: ``out = broadcast(index shapes) ++
+            # base.shape[num_index_operands:]``. A dedicated label -- never the
+            # overloaded ``gather`` branch below, which single-index/no-``dim`` uses
+            # for many non-row-gather shapes. When the index has no resolved integer
+            # shape yet (an upstream still-opaque producer), pass the base shape
+            # through rather than inventing one; never emit a warning.
+            int_indices = [item for item in inputs if item.dtype == "int64"]
+            base = next(
+                (item for item in inputs if item.dtype not in {"int64", "bool"}), None
+            )
+            if base is not None and int_indices:
+                idx_shape = _broadcast_shapes([item.shape for item in int_indices])
+                tail = tuple(base.shape[len(int_indices) :])
+                return TensorSpec(shape=tuple(idx_shape) + tail, dtype=base.dtype)
+            if base is not None:
+                return base
+            return inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
+
         if operation_label == "gather":
             has_dim = _detail_value(details, "dim") is not None
             int_indices = [item for item in inputs if item.dtype == "int64"]
