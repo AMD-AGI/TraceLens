@@ -2561,8 +2561,15 @@ def _elide_noop_single_input_concat(nodes: list[dict[str, Any]]) -> None:
     General and guarded: fires only when a node is labeled ``Concat`` and has
     exactly one incoming edge -- ``torch.cat`` over a single tensor is that tensor,
     so it necessarily preserves shape. When both endpoints' dims are recorded and
-    *differ*, the node is left untouched: that is a replication (``cat([x, x])``,
-    already relabeled ``Tile`` upstream), not an identity.
+    the output *grows* against its one input, the node is not an identity: it is a
+    loop-collapsed replication (``torch.cat(pos_list, dim=0)`` where ``pos_list`` is
+    a ``for``-loop accumulator whose per-iteration block the tracer collapses to one
+    representative, so the whole concat reads a single ``[k, ...]`` block and grows
+    it to the accumulated ``[N*k, ...]``). Concatenating N copies of that block
+    along the cat axis *is* a repeat, so the node is relabeled ``Tile`` rather than
+    left as a forbidden single-input ``Concat`` -- discharging the owner invariant
+    that every ``Concat`` has more than one input while keeping the grown output
+    shape the downstream consumer depends on.
     """
     node_by_id = {str(node.get("id")): node for node in nodes}
 
@@ -2582,7 +2589,14 @@ def _elide_noop_single_input_concat(nodes: list[dict[str, Any]]) -> None:
         out_dims = _node_output_dims(node, "0")
         in_dims = _node_output_dims(producer, source_port)
         if out_dims is not None and in_dims is not None and out_dims != in_dims:
-            continue  # shape-changing replication -- not a provable identity
+            # A single-input concat whose output grew is a loop-collapsed
+            # replication along the cat dim, not an identity: relabel it a Tile
+            # (single-input, shape-growing) so no forbidden single-input Concat
+            # survives, and preserve its already-inferred grown output shape.
+            node["label"] = "Tile"
+            _set_node_attr(node, "class_name", "Tile")
+            _set_node_attr(node, "op_type", "Tile")
+            continue
         redirect[str(node.get("id"))] = (source_id, source_port)
 
     if not redirect:

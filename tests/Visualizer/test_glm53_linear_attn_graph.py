@@ -1942,19 +1942,23 @@ def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
 
     node_by_id = {node["id"]: node for node in nodes}
 
-    # ``get_vision_attention_seqlens`` is a host-only helper: its integer
-    # index-bookkeeping (the nested ``get_vision_cu_seqlens``: Repeat interleave ->
-    # Cumulative sum -> Pad) has no meaningfully inferable per-op shapes, so it
-    # renders as a single opaque ``device: cpu`` node rather than expanding. That
-    # single producer node is the visible ``cu_seqlens`` source (not stripped) that
-    # must still reach the kernel.
+    # ``get_vision_attention_seqlens`` expands (per-op host-ness, model-wide): its
+    # nested ``get_vision_cu_seqlens`` (``F.pad(seqlens.cumsum(...), (1, 0))``)
+    # surfaces as real device ops, and the helper's ``@output`` (the cu_seqlens
+    # result) is the visible producer that must still reach the kernel across the
+    # block-loop boundary.
     producer_id = (
         "visual/seq:0:@fn_l1840_get_vision_attention_seqlens:"
-        "@fn_l1840_get_vision_attention_seqlens:0"
+        "@fn_l76_get_vision_cu_seqlens/@output"
     )
     assert producer_id in node_by_id
-    # It stays collapsed: no expanded cu_seqlens math leaks into the graph.
-    assert not any("@fn_l76_get_vision_cu_seqlens" in node["id"] for node in nodes)
+    # The cu_seqlens math is now visible, not boxed into one opaque cpu leaf.
+    cu_labels = {
+        node.get("label")
+        for node in nodes
+        if "@fn_l76_get_vision_cu_seqlens" in node["id"]
+    }
+    assert {"Cumulative sum", "Pad"} <= cu_labels, cu_labels
 
     # Its output crosses the block-loop boundary named after the tensor it feeds
     # (``cu_seqlens``), not a generic ``hidden_states_2`` fallback.
@@ -2844,56 +2848,46 @@ def test_glm53_vision_rotary_frame_named_after_source_function():
     )
 
 
-def test_glm53_vision_index_helpers_labelled_cpu_ops():
-    """Host-side index helpers carry a ``device: cpu`` label; tensor ops do not.
+def test_glm53_vision_index_helpers_expand_to_device_ops():
+    """The vision index helpers expand into their real device ops -- no cpu leaf.
 
-    ``get_vision_position_ids`` materialises grid metadata into Python
-    (``grid_thw.tolist()`` + a loop) and ``get_vision_attention_seqlens`` reaches a
-    ``.item()`` through ``get_max_seqlen`` -- both run on the host. The label is
-    derived generally by AST-introspecting the transformers callables (following
-    cross-file imports and callees), not from a hardcoded name list, so the rope
-    helper ``apply_rotary_pos_emb_vision`` -- which has no host-materialisation idiom
-    -- stays unlabelled.
+    Host-ness is now a *per-op* property, model-wide: a resolvable helper always
+    expands into its ops, and an op is tagged ``device: cpu`` only when it is itself
+    a tensor->host materialisation (``.item()``/``.tolist()``/``.cpu()``). Those
+    materialisations collapse to a Python scalar and are never traced as a visible
+    op, so ``get_vision_position_ids`` (``grid_thw.tolist()`` + a per-image loop) and
+    ``get_vision_attention_seqlens`` (nested ``get_vision_cu_seqlens``) expand into
+    the device index math they actually run -- and *no* ``device: cpu`` tile is left
+    behind anywhere. (Replaces the retired whole-helper host collapse, which used to
+    box each helper into one opaque ``device: cpu`` leaf.)
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
-    def _attr_name(node: dict) -> str:
-        return str(_attr_value(node, "attr_name") or "")
-
-    def _find_all(fragment: str) -> list[dict]:
+    def _labels(fragment: str) -> set[str]:
         matches = [n for n in nodes if fragment in str(n.get("id", ""))]
         assert matches, fragment
-        return matches
+        return {str(n.get("label")) for n in matches}
 
-    # Each host helper stays collapsed as a single opaque leaf (its per-op index
-    # bookkeeping shapes are not meaningfully inferable), and that leaf keeps the
-    # ``device: cpu`` label so the host provenance is still visible.
-    for fragment in ("get_vision_position_ids", "get_vision_attention_seqlens"):
-        ops = [
-            n
-            for n in _find_all(fragment)
-            if _attr_value(n, "device") is not None
-        ]
-        assert ops, fragment
-        assert all(_attr_value(n, "device") == "cpu" for n in ops), fragment
+    # ``get_vision_position_ids`` expands into its real meshgrid/index math: the
+    # per-image block layout (Reshape/Transpose/Flatten), the arange seeds, and the
+    # loop-accumulated ``torch.cat`` -- collapsed to one representative iteration --
+    # surfaced as a shape-growing single-input Tile (never a forbidden 1-input Concat).
+    pos_labels = _labels("get_vision_position_ids")
+    assert {"Arange", "Reshape", "Transpose", "Flatten", "Stack"} <= pos_labels, pos_labels
+    assert "Tile" in pos_labels, pos_labels
 
-    # The label is targeted, not blanket: only ops under the two genuine host
-    # helpers carry it. The pure-tensor rope helper (``apply_rotary_pos_emb_vision``),
-    # which has no host-materialisation idiom, is absent from this set -- proving it
-    # is not mislabelled.
+    # ``get_vision_attention_seqlens`` expands its nested ``get_vision_cu_seqlens``
+    # (``F.pad(seqlens.cumsum(...), (1, 0))``) into real device ops.
+    seq_labels = _labels("get_vision_attention_seqlens")
+    assert {"Repeat interleave", "Cumulative sum", "Pad"} <= seq_labels, seq_labels
+
+    # No previously-collapsed host helper leaves a ``device: cpu`` tile behind: the
+    # only host crossings (``.tolist()``/``.item()``) are untraced scalar reads.
     cpu_nodes = [n for n in nodes if _attr_value(n, "device") == "cpu"]
-    assert cpu_nodes
-    assert all(
-        "get_vision_position_ids" in str(n.get("id", ""))
-        or "get_vision_attention_seqlens" in str(n.get("id", ""))
-        for n in cpu_nodes
-    )
-    assert not any(
-        "apply_rotary_pos_emb_vision" in str(n.get("id", "")) for n in cpu_nodes
-    )
+    assert cpu_nodes == [], [n["id"] for n in cpu_nodes]
 
     # Host ops render pale purple (not the gray GPU-op fill) so they read as
     # distinct in the viewer.

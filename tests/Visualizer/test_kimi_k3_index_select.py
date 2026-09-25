@@ -42,15 +42,17 @@ def test_kimi_index_select_reads_base_and_indices_and_feeds_unsqueeze():
     assert selects, "expected at least one Index select node"
 
     node = selects[0]
-    # Two real tensor operands: the rearranged base and the gathered indices.
-    producers = {
-        edge["metadata"].get("port_label"): by_id.get(edge["sourceNodeId"], {}).get(
-            "label"
-        )
+    # Two real tensor operands: the rearranged base and the gathered indices. The
+    # ``indices`` operand now flows from the *expanded* ``get_unpad_data`` body
+    # (its ``torch.nonzero(...).flatten()`` int64 ``[nnz]`` result) rather than the
+    # former opaque ``Get unpad data`` tile.
+    edges = {
+        edge["metadata"].get("port_label"): edge
         for edge in (node.get("incomingEdges") or [])
     }
-    assert producers.get("x") == "Rearrange"
-    assert producers.get("indices") == "Get unpad data"
+    assert by_id.get(edges["x"]["sourceNodeId"], {}).get("label") == "Rearrange"
+    indices_src = by_id.get(edges["indices"]["sourceNodeId"], {})
+    assert "get_unpad_data" in indices_src.get("id", "")
 
     # The ``.unsqueeze(0)`` chained on the call result reconnects to the op (no
     # orphaned consumer left behind by the inlining).

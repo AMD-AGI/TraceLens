@@ -19,6 +19,7 @@ from TraceLens.ModelUtils.ast_analyze import (
     LAYOUT_ONLY_LABELS,
     SYNTHETIC_ATTENTION,
     SYNTHETIC_GATE_ACTIVATION,
+    _HOST_MATERIALIZE_METHODS,
     ClassStructure,
     ForwardOperation,
     LoopCarriedSpec,
@@ -1081,6 +1082,27 @@ def _leaf_node(
     )
 
 
+def _operation_runs_on_host(operation: ForwardOperation) -> bool:
+    """True when this single op is itself a tensor->host materialisation.
+
+    Host-ness is a *per-op* property: a helper that ends in ``lens.max().item()``
+    runs its ``Nonzero``/``Max``/``Flatten`` on the device; only the materialising
+    call (``.item()``/``.tolist()``/``.cpu()``/``.numpy()``) crosses to the host.
+    A materialising call collapses to a Python scalar and is not itself traced as a
+    visible op, so in practice every op that *does* survive into a helper's body is
+    device work -- but this keeps the tag structural (a ``raw_op:`` matching the
+    materialise set) rather than inheriting the whole helper's boolean, so a helper
+    is no longer collapsed to one opaque ``device: cpu`` tile just because a scalar
+    read happens somewhere inside it.
+    """
+    for detail in operation.details:
+        if detail.startswith("raw_op: ") and (
+            detail[len("raw_op: ") :] in _HOST_MATERIALIZE_METHODS
+        ):
+            return True
+    return False
+
+
 def _expanded_free_function_node(
     call_attr: str,
     cls: ClassStructure,
@@ -1119,16 +1141,18 @@ def _expanded_free_function_node(
         if fn_primary_return and fn_return_slots
         else None
     )
-    # A device helper whose body reduces to a *single* traced op
-    # (``index_first_axis``: ``return x[indices]`` -> one ``Index select``) is
-    # inlined at the call site: the call's own leaf carries that op's real label,
-    # class, and details instead of the opaque function name, so it renders as the
-    # actual operation (with a shape rule) while keeping the exact tensor wiring the
-    # caller already established for the call (base + index operands land on
-    # ``call_attr`` regardless of how the leaf is labelled). Multi-op helpers still
-    # open into their frame below; a host helper stays the opaque ``device: cpu``
-    # tile handled by the fallback.
-    if method_ops and not runs_on_host and len(method_ops) == 1:
+    # A helper whose body reduces to a *single* traced op (``index_first_axis``:
+    # ``return x[indices]`` -> one ``Index select``) is inlined at the call site:
+    # the call's own leaf carries that op's real label, class, and details instead
+    # of the opaque function name, so it renders as the actual operation (with a
+    # shape rule) while keeping the exact tensor wiring the caller already
+    # established for the call (base + index operands land on ``call_attr``
+    # regardless of how the leaf is labelled). Multi-op helpers open into their
+    # frame below. Host-ness is now per-op: a helper that ends in a scalar
+    # ``.item()`` still expands (its ``Nonzero``/``Max`` run on the device), and
+    # only a genuine materialising op is tagged ``device: cpu`` -- rather than the
+    # whole helper collapsing to one opaque ``device: cpu`` tile.
+    if method_ops and len(method_ops) == 1:
         single_op = method_ops[0]
         return _leaf_node(
             attr_name=call_attr,
@@ -1139,14 +1163,14 @@ def _expanded_free_function_node(
             basic=True,
             output_names=output_names,
             param_inputs=fallback_param_inputs,
-            runs_on_host=runs_on_host,
+            runs_on_host=_operation_runs_on_host(single_op),
         )
-    # A host-only helper (``get_vision_position_ids``) builds integer index
-    # bookkeeping whose per-op shapes are not meaningfully inferable (advanced
-    # indexing / host arithmetic), so expanding it only surfaces wrong inner
-    # shapes. Keep it a single opaque leaf (still ``device: cpu`` labelled); only
-    # device-side helpers (rope math) expand into their visible tensor ops.
-    if method_ops and not runs_on_host:
+    # A multi-op helper -- device math (``apply_rotary_pos_emb_vision``) or host
+    # index bookkeeping (``get_unpad_data``, ``get_vision_position_ids``) alike --
+    # expands into its visible tensor ops. Each op is tagged ``device: cpu`` only
+    # if it is itself a materialisation (see ``_operation_runs_on_host``); the
+    # device-side gather/arange/nonzero work is shown as the device ops it is.
+    if method_ops:
         name = _synthetic_call_function_name(call_attr) or call_attr
         call_context = [
             detail
@@ -1293,11 +1317,12 @@ def _expanded_free_function_node(
                     param_inputs=translated,
                     boundary_input_name=boundary_name,
                     boundary_input_ordinal=boundary_ordinal,
-                    # A host helper (``get_vision_position_ids``) expands into its
-                    # index-bookkeeping ops; each one still runs on the host, so the
-                    # ``device: cpu`` label/style propagates onto every child rather
-                    # than being lost when the single opaque tile opens up.
-                    runs_on_host=runs_on_host,
+                    # Host-ness is per-op: a helper's ``Nonzero``/``Arange``/
+                    # ``Floor divide`` index bookkeeping runs on the device; only a
+                    # genuine materialising op (``.item()``/``.cpu()``) is tagged
+                    # ``device: cpu``. So the tag is derived from this op alone, not
+                    # inherited from the whole helper's boolean.
+                    runs_on_host=_operation_runs_on_host(operation),
                 )
             )
         return BlockNode(
@@ -1320,7 +1345,11 @@ def _expanded_free_function_node(
             primary_output_step=fn_primary_output_step,
             multi_return_module=len(fn_return_order) >= 2,
             children=children,
-            runs_on_host=runs_on_host,
+            # The expanded frame is a device container: its ``device: cpu`` colour
+            # is carried by whichever child ops are genuine materialisations, not by
+            # the frame as a whole (which would re-collapse the host tag onto every
+            # device op inside it).
+            runs_on_host=any(_operation_runs_on_host(op) for op in method_ops),
         )
     return _leaf_node(
         attr_name=call_attr,

@@ -239,6 +239,23 @@ _HOST_MATERIALIZE_METHODS = frozenset({"tolist", "item", "numpy", "cpu"})
 _HOST_METADATA_ATTRS = frozenset(
     {"device", "is_cuda", "is_cpu", "requires_grad", "ndim", "nbytes", "itemsize"}
 )
+# Reserved torch keyword arguments that control a result's *type/placement*, never
+# supply tensor data. ``seqlens.cumsum(dim=0, dtype=dtype)`` passes ``dtype`` (a
+# ``grid_thw.dtype`` read that resolves back to ``grid_thw``) purely as a dtype
+# spec: wiring its value as a tensor operand fabricates a phantom second edge onto
+# a single-operand op. These names are never a tensor input on any torch call, so
+# a keyword bearing one carries no dataflow edge regardless of what it resolves to.
+_NON_TENSOR_OP_KWARGS = frozenset(
+    {
+        "dtype",
+        "device",
+        "layout",
+        "requires_grad",
+        "pin_memory",
+        "memory_format",
+        "non_blocking",
+    }
+)
 
 
 def _call_forces_host(call: ast.Call) -> bool:
@@ -4732,6 +4749,11 @@ class _ForwardOperationExtractor:
                     arg_name_map[name] = producers[0]
                     _record_arg_ordinal(name, producers[0], arg)
             for keyword in node.keywords:
+                # A reserved type/placement keyword (``dtype=``/``device=``) never
+                # supplies tensor data: ``cumsum(dim=0, dtype=grid_thw.dtype)`` must
+                # not wire ``grid_thw`` as a second operand onto a single-operand op.
+                if keyword.arg in _NON_TENSOR_OP_KWARGS:
+                    continue
                 # Likewise skip a host-scalar keyword (``kv_length=key_states.shape[2]``):
                 # mapping it to the shape's base tensor producer fabricates a phantom
                 # @input port on the callee frame (the "key_states" defect).

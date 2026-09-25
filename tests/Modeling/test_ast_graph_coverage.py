@@ -237,6 +237,27 @@ def forward(self, x, k):
     assert slice_op.attr_name in matmul.predecessors
 
 
+def test_dtype_kwarg_does_not_fabricate_a_second_tensor_operand():
+    # ``seqlens.cumsum(dim=0, dtype=grid_thw.dtype)`` (GLM vision cu-seqlens) reads a
+    # tensor *attribute* through a reserved type keyword. ``dtype=``/``device=`` never
+    # supply tensor data, so the keyword's base tensor must NOT be wired as a second
+    # operand -- doing so fabricates a phantom edge that trips the >1-operand axis-op
+    # type-check on a single-operand reduction.
+    func = _function("""
+def forward(self, x):
+    y = x.cumsum(dim=0, dtype=x.dtype)
+    return y.matmul(x)
+""")
+    analysis = aa._forward_operations_from_forward(
+        func, self_values={}, all_tensor_ops=True
+    )
+    cumsum = [op for op in analysis.operations if op.label == "Cumulative sum"]
+    assert cumsum, [op.label for op in analysis.operations]
+    # Exactly one tensor operand -- the receiver ``x``. The ``dtype=x.dtype`` keyword
+    # contributes no producer, so ``x`` is not double-wired.
+    assert cumsum[0].predecessors == ("@method_input",), cumsum[0].predecessors
+
+
 def test_starred_shape_tuple_local_resolves_view_dims():
     # ``view(*hidden_shape)`` where ``hidden_shape = (*input_shape, -1, D)`` and
     # ``input_shape = x.shape[:-1]`` must expand to a resolver-friendly detail
