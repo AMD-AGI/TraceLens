@@ -23,4 +23,4 @@ See **[reference.md](reference.md)** for inputs, file list, per-eval scoring gui
 
 ## Skill location
 
-`agent_evals/Analysis/skills/quality-llm-eval/`
+`TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/skills/quality-llm-eval/`
