@@ -4526,6 +4526,47 @@ def _copy_carried_shape(dst: dict[str, Any], src: dict[str, Any] | None) -> None
     dst["outputsMetadata"] = [{"id": "0", "attrs": port_attrs}]
 
 
+def _carried_value_is_multistream_residual(
+    exit_edges: list[tuple[dict[str, Any], dict[str, Any]]],
+    node_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    """True when the loop's carried value is a HyperConnection multi-stream residual.
+
+    An ordinary decoder threads a rank-3 ``[B, S, H]`` hidden state across its
+    iterations. A HyperConnection decoder instead threads a rank>3
+    ``[B, S, streams, H]`` residual with an extra "streams" axis, which a mandatory
+    external post-loop head (``hc_head``: flatten -> linear -> gate -> sum over the
+    streams axis) reduces back to ``[B, S, H]`` before the final norm. That head is
+    a visible node that already renders the cross-iteration merge, so an added
+    container-level ``@loop_carried`` boundary is redundant: the recurrence reads
+    from the ``{N}x_`` repeat badge plus the visible collapse head -- exactly the
+    way the heterogeneous multi-variant decoder (GLM's ``45x_`` group, which trips
+    the multiple-exit-source guard) already renders without one.
+
+    A carried rank > 3 IS the HyperConnection signature -- a multi-stream residual
+    only arises from that mechanism, and it can never reach the model output without
+    an external collapse head. Keys purely on the carried tensor's rank read from
+    the interior exit source(s); never on a module / class / param name. Returns
+    ``False`` whenever the carried shape is unknown (all exit sources must agree on a
+    known rank > 3), so an unresolved build keeps its loop-carried boundary rather
+    than losing it silently. Plain rank<=3 decoders keep their synthesized boundary.
+    """
+    carried_rank: int | None = None
+    for _consumer, edge in exit_edges:
+        source = node_by_id.get(edge.get("sourceNodeId"))
+        if source is None:
+            return False
+        dims = _node_output_dims(source, str(edge.get("sourceNodeOutputId", "0")))
+        if not dims:
+            return False
+        rank = len(dims)
+        if carried_rank is None:
+            carried_rank = rank
+        elif rank != carried_rank:
+            return False
+    return carried_rank is not None and carried_rank > 3
+
+
 def _wrap_container_loop_carried(nodes: list[dict[str, Any]], container: str) -> None:
     """Wrap one ``{N}x_`` repeat group with a ``@loop_carried`` in/out boundary.
 
@@ -4600,6 +4641,17 @@ def _wrap_container_loop_carried(nodes: list[dict[str, Any]], container: str) ->
         return
 
     node_by_id = {node["id"]: node for node in nodes}
+
+    # HyperConnection uniform decoder: the carried value is a rank>3 multi-stream
+    # residual that a mandatory external post-loop head collapses back to [B, S, H].
+    # That head already renders the cross-iteration merge, so a container-level
+    # @loop_carried box is redundant. Suppress synthesis and leave the direct
+    # producer->body->head wiring (no back edge) -- rendering the same way the
+    # heterogeneous multi-variant decoder above does. See
+    # _carried_value_is_multistream_residual for the structural predicate.
+    if _carried_value_is_multistream_residual(exit_edges, node_by_id):
+        return
+
     id_prefix = carried_targets[0][0]["id"].split("/", 1)[0]
     in_id = f"{id_prefix}/@loop_carried_in:{id_prefix}:{variable}"
     out_id = f"{id_prefix}/@loop_carried_out:{id_prefix}:{variable}"

@@ -999,6 +999,52 @@ def test_synthesize_loop_boundary_wraps_single_template_container():
     assert sorted(_consumers(nodes, out_id)) == [in_id, "sink"]
 
 
+def test_synthesize_loop_boundary_suppressed_for_externally_collapsed_stream():
+    """A uniform single-template decoder whose carried value is a HyperConnection
+    multi-stream collapsed by an external post-loop head is NOT wrapped.
+
+    A HyperConnection decoder (DeepSeek's ``43x_DeepseekV4DecoderLayer``) has a
+    single exit source -- so it passes the heterogeneous guard -- but its carried
+    residual is a rank>3 ``[B, S, streams, H]`` stream that an external head
+    (``hc_head``) reduces back to ``[B, S, H]``. That collapse head already renders
+    the cross-iteration merge, so no container-level ``@loop_carried`` boundary is
+    synthesized: the body ``@input`` still reads the external producer and the head
+    still reads the body ``@output`` directly, exactly the way the heterogeneous
+    (multi-variant) decoder -- GLM's ``45x_Glm5NextTextDecoderLayer`` -- renders.
+    No ``@loop_carried`` tile and no back edge. Keyed on carried-tensor rank +
+    external rank-reduction only, never a class/param name.
+    """
+    nodes = [
+        _plain("src", "", [], shape="[B, S, 4, 4096] bfloat16"),
+        _synthetic_input("dec/@input", "43x_Dec", "src"),
+        {
+            "id": "dec/@output",
+            "label": "Output",
+            "namespace": "43x_Dec",
+            "attrs": [
+                {"key": "synthetic", "value": "@output"},
+                {"key": "output_shape", "value": "[B, S, 4, 4096] bfloat16"},
+            ],
+            "incomingEdges": [{"sourceNodeId": "dec/@input",
+                               "sourceNodeOutputId": "result",
+                               "targetNodeInputId": "0"}],
+        },
+        # external post-loop head that collapses the rank-4 stream to rank-3
+        _plain("hc_head", "", ["dec/@output"], shape="[B, S, 4096] bfloat16"),
+        _plain("norm", "", ["hc_head"]),
+    ]
+    merge._synthesize_repeat_loop_boundaries(nodes)
+    by_id = {n["id"]: n for n in nodes}
+
+    # No loop-carried tile and no back edge were synthesized.
+    assert not [n for n in nodes if "@loop_carried" in n["id"]]
+    # Direct GLM-style wiring preserved: body @input reads the raw source, and the
+    # collapse head reads the body @output directly.
+    assert _lc_in_edges(by_id["dec/@input"]) == [("src", None)]
+    assert [e["sourceNodeId"] for e in by_id["hc_head"]["incomingEdges"]] == [
+        "dec/@output"]
+
+
 def _carried_in(node_id, namespace, sources):
     return {
         "id": node_id,

@@ -595,3 +595,55 @@ def test_deepseek_v4_model_scope_rotary_emb_expands_not_opaque_leaf():
         if "/@output" not in node["id"] and node["id"] not in consumed
     ]
     assert not dead, f"expanded rotary section has dead nodes: {dead}"
+
+
+def test_deepseek_v4_main_decoder_has_no_loop_carried_boundary():
+    """DeepSeek's uniform main decoder renders like GLM's -- no container-level
+    ``@loop_carried`` in/out tiles on the ``43x_DeepseekV4DecoderLayer`` group.
+
+    Both decoders thread a HyperConnection multi-stream residual (rank>3
+    ``[B, S, streams, H]``) that an external post-loop head (``hc_head``) collapses
+    back to ``[B, S, H]``. That collapse head already renders the cross-iteration
+    merge as a visible node, so a synthesized container-level loop-carried boundary
+    is redundant -- GLM's heterogeneous ``45x_Glm5NextTextDecoderLayer`` already
+    renders without one (its parallel variant branches trip the multiple-exit-source
+    guard). The uniform single-template DeepSeek decoder previously slipped past that
+    guard and synthesized the boundary; the externally-collapsed-stream predicate now
+    suppresses it too, so the two decoders render consistently.
+
+    The ban is on the *outer* decoder-spine boundary only: inner hyperconnection /
+    MoE loop-carried tiles live at deeper namespaces
+    (``.../attn_hc/Loop_...``, ``.../ffn_hc/Loop_...``,
+    ``.../DeepseekV4SparseMoeBlock/loop_...``) and remain legitimate.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph = _build_graph()
+    nodes = graph["nodes"]
+
+    # No container-level loop-carried tile on the main decoder repeat group. The
+    # synthesized boundary lives at the container namespace exactly; deeper inner
+    # loops keep theirs.
+    container_lc = [
+        node["id"]
+        for node in nodes
+        if "@loop_carried" in str(node.get("id", ""))
+        and str(node.get("namespace", "")) == "43x_DeepseekV4DecoderLayer"
+    ]
+    assert not container_lc, (
+        "uniform main decoder must render like GLM's -- no container-level "
+        f"loop-carried boundary: {container_lc}"
+    )
+
+    # Removing the boundary left no orphan: the decoder body @output still flows
+    # directly to its external consumer (the hyper-connection collapse head), and
+    # that consumer is a real node, not a loop-carried tile.
+    out_id = "decoder/@output"
+    assert any(node.get("id") == out_id for node in nodes), "decoder body @output missing"
+    consumers = [
+        node["id"]
+        for node in nodes
+        for edge in node.get("incomingEdges", []) or []
+        if edge.get("sourceNodeId") == out_id
+    ]
+    assert consumers, "decoder @output orphaned after boundary removal"
+    assert all("@loop_carried" not in c for c in consumers), consumers
