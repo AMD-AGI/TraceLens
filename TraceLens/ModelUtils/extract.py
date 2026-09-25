@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 from TraceLens.ModelUtils.ast_analyze import analyze_sources, dump_ast
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.block_tree import (
+    SUBMODULE_OMITTED,
     BlockNode,
     build_block_node,
     build_full_detailed_block_trees,
@@ -800,19 +801,228 @@ def _reconcile_layer_variants(spec: ArchitectureSpec, primary: MetaModuleGroup) 
         return
 
     # Cardinality disagrees (AST produced none or a different number): synthesize
-    # from the live signatures. Labels degrade to the discriminating child-class
-    # string, but the counts stay correct and the grouping stays acyclic.
-    variants: list[LayerVariant] = []
-    for signature in ordered_sigs:
-        variants.append(
-            LayerVariant(
-                label=f"{primary.element_class} {signature}",
-                count=buckets[signature],
-                attention_label=primary.element_class,
-                layer_indices=list(indices_by_sig[signature]),
+    # directly from the live signatures. When the walk supplied full descriptors we can
+    # locate *which* nested submodule paths diverge and render each variant's own subtree;
+    # otherwise (e.g. unit fixtures with shallow signatures only) we fall back to a
+    # discriminating child-class label. Either way the counts stay authoritative.
+    spec.layer_variants = _synthesize_variants_from_signatures(
+        spec, primary, ordered_sigs, buckets, indices_by_sig
+    )
+
+
+# Sentinel: a submodule path present in some buckets but absent in this one.
+_DESC_MISSING = object()
+# Component roles whose divergence is described on the FFN side of a variant's label.
+_FFN_ROLES = frozenset({"ffn", "moe", "router"})
+
+
+def _synthesize_variants_from_signatures(
+    spec: ArchitectureSpec,
+    primary: MetaModuleGroup,
+    ordered_sigs: list[str],
+    buckets: "Counter[str]",
+    indices_by_sig: dict[str, list[int]],
+) -> list[LayerVariant]:
+    """Build one :class:`LayerVariant` per live signature bucket.
+
+    Where the walk supplied full nested descriptors, diff the buckets to find the
+    shallowest submodule paths whose class differs, and give each variant its own
+    per-component subtree (with those nested class swaps / omissions applied) plus a
+    concise label naming the divergence — all read structurally off the meta tree, with
+    no class/config/attr allowlist.
+    """
+    # One representative descriptor (path -> class map) per bucket, when available.
+    sig_to_desc: dict[str, dict[str, str]] = {}
+    if primary.descriptors and len(primary.descriptors) == len(primary.signatures):
+        for signature, descriptor in zip(primary.signatures, primary.descriptors):
+            sig_to_desc.setdefault(signature, dict(descriptor))
+
+    divergent_paths: list[str] = []
+    label_prefix = ""
+    if len(sig_to_desc) == len(buckets):
+        divergent_paths = _shallowest_divergent_paths(sig_to_desc)
+        # Longest common prefix of the divergent class names ACROSS ALL buckets — computed
+        # once so a variant that carries only one of them still strips the shared model
+        # prefix ("DeepseekV4") rather than eating its whole discriminating name.
+        label_prefix = _common_class_prefix(
+            sorted(
+                {
+                    desc[path]
+                    for desc in sig_to_desc.values()
+                    for path in divergent_paths
+                    if desc.get(path)
+                }
             )
         )
-    spec.layer_variants = variants
+
+    variants: list[LayerVariant] = []
+    for signature in ordered_sigs:
+        desc = sig_to_desc.get(signature, {})
+        variant = LayerVariant(
+            label=f"{primary.element_class} {signature}",
+            count=buckets[signature],
+            attention_label=primary.element_class,
+            layer_indices=list(indices_by_sig[signature]),
+        )
+        if divergent_paths:
+            _apply_variant_divergence(
+                spec, variant, divergent_paths, desc, label_prefix
+            )
+        variants.append(variant)
+    return variants
+
+
+def _shallowest_divergent_paths(sig_to_desc: dict[str, dict[str, str]]) -> list[str]:
+    """Submodule paths whose class differs across buckets, minus deeper descendants.
+
+    A path is kept only when no proper ancestor path also diverges, so a per-layer
+    ``self_attn.compressor`` swap is reported once (not once per descendant the swapped
+    compressor's own subtree also differs at).
+    """
+    all_paths: set[str] = set()
+    for desc in sig_to_desc.values():
+        all_paths.update(desc)
+    divergent = {
+        path
+        for path in all_paths
+        if len({desc.get(path, _DESC_MISSING) for desc in sig_to_desc.values()}) > 1
+    }
+    shallow = [
+        path
+        for path in divergent
+        if not any(
+            ".".join(path.split(".")[:cut]) in divergent
+            for cut in range(1, path.count(".") + 1)
+        )
+    ]
+    return sorted(shallow)
+
+
+def _apply_variant_divergence(
+    spec: ArchitectureSpec,
+    variant: LayerVariant,
+    divergent_paths: list[str],
+    desc: dict[str, str],
+    prefix: str,
+) -> None:
+    """Give *variant* per-component subtrees + a concise label from its divergent paths."""
+    from TraceLens.ModelUtils.ast_analyze import _classify_role
+
+    basic_ops = spec.basic_ops or BasicOpFilter.for_detailed()
+    components = {comp.attr_name: comp for comp in spec.block_components}
+
+    # Group divergent paths by their top-level component attr (``self_attn``/``mlp``).
+    by_component: dict[str, dict[str, Any]] = {}
+    for path in divergent_paths:
+        comp_attr, _, rel = path.partition(".")
+        by_component.setdefault(comp_attr, {})[rel] = desc.get(path, SUBMODULE_OMITTED)
+
+    attn_bits: list[str] = []
+    ffn_bits: list[str] = []
+    for comp_attr, rel_overrides in sorted(by_component.items()):
+        comp = components.get(comp_attr)
+        comp_class = desc.get(comp_attr)
+        role = _classify_role(
+            comp_attr, comp_class or (comp.class_name if comp else "")
+        )
+
+        # Describe each divergent leaf: its class short name, or "no <leaf>" when omitted.
+        bits = []
+        for rel, value in sorted(rel_overrides.items()):
+            leaf = rel.split(".")[-1] if rel else comp_attr
+            if value is SUBMODULE_OMITTED:
+                bits.append(f"no {leaf}")
+            else:
+                bits.append(_strip_prefix(value, prefix))
+        (ffn_bits if role in _FFN_ROLES else attn_bits).extend(bits)
+
+        tree = _build_variant_component_tree(
+            spec, comp, comp_attr, comp_class, rel_overrides, basic_ops
+        )
+        if tree is not None:
+            variant.component_trees[comp_attr] = tree
+
+    if attn_bits:
+        variant.attention_label = " + ".join(attn_bits)
+    if ffn_bits:
+        variant.ffn_label = " + ".join(ffn_bits)
+    variant.label = " / ".join(
+        filter(None, [" + ".join(attn_bits), " + ".join(ffn_bits)])
+    )
+    if not variant.label:
+        variant.label = variant.attention_label
+
+
+def _build_variant_component_tree(
+    spec: ArchitectureSpec,
+    comp: BlockComponent | None,
+    comp_attr: str,
+    comp_class: str | None,
+    rel_overrides: dict[str, Any],
+    basic_ops: BasicOpFilter,
+) -> tuple[str, BlockNode] | None:
+    """Build one ``(title, BlockNode)`` for *comp_attr* with this variant's nested swaps.
+
+    ``rel_overrides`` is keyed relative to the component (``"compressor"``), so it is
+    threaded straight into :func:`build_block_node`. A ``rel == ""`` entry means the whole
+    component class itself differs for this variant; that class becomes the tree root.
+    """
+    # A bare "" key overrides the component's own class; the rest are nested submodules.
+    root_class = comp_class
+    nested = dict(rel_overrides)
+    if "" in nested:
+        whole = nested.pop("")
+        if whole is SUBMODULE_OMITTED:
+            return None  # component absent in this variant — nothing to render
+        root_class = whole
+    if root_class is None or root_class not in spec.class_registry:
+        return None
+
+    forward_order = comp.forward_order if comp is not None else None
+    details = list(comp.details) if comp is not None else []
+    title = comp.label if comp is not None else comp_attr
+
+    tree = build_block_node(
+        attr_name=comp_attr,
+        class_name=root_class,
+        registry=spec.class_registry,
+        basic_ops=basic_ops,
+        details=details,
+        forward_order=forward_order,
+        infer_init_steps=True,
+        class_overrides=nested or None,
+    )
+    if is_method_wrapper(tree):
+        return None
+    cls_info = spec.class_registry.get(root_class)
+    tree.input_label = (
+        cls_info.forward_input_name
+        if cls_info and cls_info.forward_input_name
+        else "hidden_states"
+    )
+    return (title, tree)
+
+
+def _common_class_prefix(names: list[str]) -> str:
+    """Longest common prefix of the class names, trimmed at a CamelCase boundary."""
+    if not names:
+        return ""
+    prefix = names[0]
+    for name in names[1:]:
+        while not name.startswith(prefix):
+            prefix = prefix[:-1]
+            if not prefix:
+                return ""
+    # Keep the prefix at an upper-case boundary so we strip "DeepseekV4" but not
+    # the leading capital of the discriminating suffix ("CSACompressor").
+    while prefix and not (prefix[-1].islower() or prefix[-1].isdigit()):
+        prefix = prefix[:-1]
+    return prefix
+
+
+def _strip_prefix(name: str, prefix: str) -> str:
+    """Drop *prefix* from *name* when present, else return *name* unchanged."""
+    return name[len(prefix) :] if prefix and name.startswith(prefix) else name
 
 
 def reconcile_live_module_groups(

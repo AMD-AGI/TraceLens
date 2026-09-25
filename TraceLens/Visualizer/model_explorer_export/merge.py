@@ -3302,6 +3302,14 @@ def _resolve_section_tree_for_component(
     basic_ops: BasicOpFilter,
 ) -> tuple[str, BlockNode] | None:
     if variant is not None:
+        # A variant whose divergence is nested (identical top-level component classes but
+        # a differing deep submodule) carries a pre-built per-component subtree — with its
+        # own compressor/gate class swap or omission already applied. Prefer it directly;
+        # the by-class resolution below only sees top-level classes and would render every
+        # such variant identically.
+        prebuilt = variant.component_trees.get(component.attr_name)
+        if prebuilt is not None:
+            return prebuilt
         if _component_uses_variant_attention_class(component, variant):
             resolved = _resolve_section_tree_by_class(
                 spec,

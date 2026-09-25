@@ -333,27 +333,55 @@ def _instantiate_meta_robust(
 class MetaModuleGroup:
     """A repeated ``nn.ModuleList`` read structurally off the instantiated tree.
 
-    ``signatures`` holds one structural signature per element (ordered tuple of the
-    element's immediate child class names), so callers can bucket the elements into
-    sub-variants with ``collections.Counter(signatures)``.
+    ``signatures`` holds one structural signature per element (the full nested
+    ``(dotted_path:class)`` descriptor rendered as a stable string), so callers can
+    bucket the elements into sub-variants with ``collections.Counter(signatures)``.
+    ``descriptors`` carries the same information pre-parsed — one
+    ``((dotted_path, class_name), ...)`` tuple per element — so a caller can diff the
+    buckets to find *which* nested submodule paths diverge (feeds per-variant subtree
+    overrides) without re-parsing the signature string.
     """
 
     path: str
     length: int
     element_class: str
     signatures: tuple[str, ...]
+    descriptors: tuple[tuple[tuple[str, str], ...], ...] = ()
+
+
+def _element_descriptor(element: Any) -> tuple[tuple[str, str], ...]:
+    """Full structural descriptor of a ModuleList element.
+
+    One ``(dotted_path, class_name)`` pair per *descendant* module, relative to the
+    element root — the empty-name root (the element itself) is omitted. ``named_modules``
+    visits depth-first in a stable order, so two elements with the same nested submodule
+    layout produce identical descriptors and bucket together, while a nested divergence
+    (a per-layer ``compressor``/``gate`` submodule class swap that the immediate children
+    hide) makes the descriptors differ and splits them apart. The dotted paths let a
+    caller locate the divergence precisely (e.g. ``self_attn.compressor``).
+    """
+    return tuple(
+        (name, type(child).__name__) for name, child in element.named_modules() if name
+    )
 
 
 def _element_signature(element: Any) -> str:
-    """Structural signature of a ModuleList element.
+    """Stable structural signature of a ModuleList element.
 
-    The ordered tuple of the element's immediate child module class names, rendered
-    as a stable string. This separates e.g. an MoE-bearing decoder layer from a dense
-    one (different ``mlp`` child class) without descending the whole subtree. Tuning
-    knob: deepen one level if this under-splits a model's variants.
+    Derived from the full nested :func:`_element_descriptor`, so
+    ``collections.Counter(signatures)`` separates elements that differ anywhere in their
+    submodule tree — not only in their immediate children. This splits a decoder layer
+    whose per-layer ``compressor``/``gate`` submodule class differs deep inside the
+    ``self_attn``/``mlp`` subtree, a divergence an immediate-children-only signature
+    collapses into one uniform group.
     """
-    child_classes = [type(child).__name__ for _, child in element.named_children()]
-    return "(" + ",".join(child_classes) + ")"
+    return (
+        "("
+        + ",".join(
+            f"{path}:{class_name}" for path, class_name in _element_descriptor(element)
+        )
+        + ")"
+    )
 
 
 def walk_meta_module_tree(checkpoint: str | Path) -> list[MetaModuleGroup] | None:
@@ -397,6 +425,7 @@ def walk_meta_module_tree(checkpoint: str | Path) -> list[MetaModuleGroup] | Non
                     length=len(mod),
                     element_class=type(mod[0]).__name__,
                     signatures=tuple(_element_signature(element) for element in mod),
+                    descriptors=tuple(_element_descriptor(element) for element in mod),
                 )
             )
     finally:

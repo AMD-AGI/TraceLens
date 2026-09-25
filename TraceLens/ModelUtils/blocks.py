@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from TraceLens.ModelUtils.ast_analyze import ClassStructure
@@ -29,6 +29,14 @@ class LayerVariant:
     # 0-based decoder-layer indices that use this template, in ascending order.
     # Feeds the fact sheet's "(layers 0-30, 44)" range annotation.
     layer_indices: list[int] = field(default_factory=list)
+    # Per-component pre-built subtrees for variants whose divergence is *nested* — the
+    # decoder layer's top-level submodule classes are identical across variants but a
+    # deeper submodule (a per-layer ``compressor``/``gate``) differs. Keyed by the
+    # component attr name (``"self_attn"``/``"mlp"``); the value is a
+    # ``(title, BlockNode)`` tree already carrying that variant's nested class overrides.
+    # ``Any`` avoids a blocks->block_tree import cycle. When empty (the common case) the
+    # variant renders via the normal top-level class resolution.
+    component_trees: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

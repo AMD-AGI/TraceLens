@@ -360,6 +360,52 @@ def test_walk_meta_module_tree_mixed_signatures(monkeypatch):
     assert sorted(buckets.values()) == [3, 5]
 
 
+def test_walk_meta_module_tree_splits_on_nested_divergence(monkeypatch):
+    """Layers with identical immediate children but a differing GRANDCHILD split apart.
+
+    A shallow immediate-children signature would collapse these into one uniform group;
+    the full nested descriptor separates them and records the diverging path so a caller
+    can render each variant's own subtree.
+    """
+    from collections import Counter
+
+    class Attn(nn.Module):
+        def __init__(self, compressor):
+            super().__init__()
+            self.q = nn.Linear(4, 4)
+            if compressor is not None:
+                self.compressor = compressor
+
+    class Layer(nn.Module):
+        def __init__(self, compressor):
+            super().__init__()
+            self.self_attn = Attn(compressor)  # same immediate class either way
+            self.mlp = nn.Linear(4, 4)
+
+    class Stack(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList(
+                [Layer(None), Layer(None)]  # no nested compressor
+                + [Layer(nn.Linear(4, 4)) for _ in range(3)]  # nested compressor
+            )
+
+    monkeypatch.setattr(tt, "_instantiate_meta", lambda _c: (Stack(), None))
+    groups = mt.walk_meta_module_tree("x")
+    layer_group = next(g for g in groups if g.path == "layers")
+    # Immediate children are identical (self_attn=Attn, mlp=Linear) for all 5 layers.
+    immediate = {
+        tuple(cls for path, cls in desc if "." not in path)
+        for desc in layer_group.descriptors
+    }
+    assert len(immediate) == 1
+    # But the full signature splits 2 (no compressor) vs 3 (compressor present).
+    assert sorted(Counter(layer_group.signatures).values()) == [2, 3]
+    # The divergent path is discoverable from the descriptors.
+    paths = {path for desc in layer_group.descriptors for path, _ in desc}
+    assert "self_attn.compressor" in paths
+
+
 # ---------------------------------------------------------------------------
 # harvest_meta_attention_groups (forward-free grouped-query repeat-factor walk)
 # ---------------------------------------------------------------------------

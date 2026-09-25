@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field, replace
-from typing import Literal
+from typing import Any, Literal
 
 from TraceLens.ModelUtils.ast_analyze import (
     FORWARD_METHOD_INPUT,
@@ -63,6 +63,13 @@ from TraceLens.ModelUtils.blocks import (
 _log = logging.getLogger(__name__)
 
 _SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "Buffer", "getattr"})
+
+# Sentinel for ``build_block_node(class_overrides=...)``: a submodule a per-layer variant
+# omits entirely (its conditional ``__init__`` leaves the attribute ``None``), so the
+# child — and any node that would only expand it — is skipped for that variant.
+SUBMODULE_OMITTED = object()
+# Distinguishes "no override supplied for this attr" from a real ``None`` value.
+_NO_SUBMODULE_OVERRIDE = object()
 
 
 def is_method_wrapper(node: BlockNode) -> bool:
@@ -2515,6 +2522,53 @@ def _is_expandable_registered_class(
     return cls is not None and bool(cls.forward_operations or cls.forward_calls)
 
 
+def _condition_requires_presence(expr: str, attr: str) -> bool:
+    """True when *expr* is the ``self.<attr> is not None`` *presence* branch.
+
+    A ``not (self.<attr> is not None)`` wrapper is the *absence* branch — live when the
+    submodule is omitted — so it does not mark the guarded ops dead.
+    """
+    if f"self.{attr} is not None" not in expr:
+        return False
+    return not expr.strip().startswith("not ")
+
+
+def _dead_forward_steps(
+    cls: ClassStructure, omitted_attrs: frozenset[str]
+) -> frozenset[str]:
+    """Forward-op steps to drop when *omitted_attrs* submodules are absent this variant.
+
+    Seeds from the omitted submodules plus any op whose ``condition:`` detail asserts one
+    of them is present (a statically-false guard), then removes, to a fixpoint, every op
+    whose predecessors are ALL dead. An op keeping ≥1 live predecessor (a phi/select over
+    a pruned branch) survives; ops reading only external inputs (no predecessors) survive.
+    Returns only ``@op`` step keys — the omitted submodule calls are skipped separately.
+    """
+    ops = cls.forward_operations
+    if not ops:
+        return frozenset()
+    dead: set[str] = set(omitted_attrs)
+    for key, op in ops.items():
+        for detail in op.details:
+            if not detail.startswith("condition:"):
+                continue
+            expr = detail[len("condition:") :].strip()
+            if any(_condition_requires_presence(expr, attr) for attr in omitted_attrs):
+                dead.add(key)
+                break
+    changed = True
+    while changed:
+        changed = False
+        for key, op in ops.items():
+            if key in dead:
+                continue
+            preds = op.predecessors
+            if preds and all(pred in dead for pred in preds):
+                dead.add(key)
+                changed = True
+    return frozenset(dead - omitted_attrs)
+
+
 def build_block_node(
     *,
     attr_name: str,
@@ -2525,8 +2579,17 @@ def build_block_node(
     details: list[str] | None = None,
     forward_order: int | None = None,
     infer_init_steps: bool = False,
+    class_overrides: dict[str, Any] | None = None,
 ) -> BlockNode:
-    """Expand one submodule into a recursive block tree using forward-pass order."""
+    """Expand one submodule into a recursive block tree using forward-pass order.
+
+    ``class_overrides`` maps a submodule attr (relative to *this* class, dotted for
+    deeper descendants) to either a replacement class name or the :data:`SUBMODULE_OMITTED`
+    sentinel. It lets a per-layer variant render its *own* nested submodule (e.g. a
+    specific ``compressor``/``gate`` class), or drop a submodule a conditional ``__init__``
+    leaves unset for that variant, without any class/config allowlist — the divergence is
+    read structurally off the live meta tree by the caller.
+    """
     visited = visited or frozenset()
     role = _classify_role(attr_name, class_name)
     label = _label_for_call(attr_name, class_name)
@@ -2641,7 +2704,22 @@ def build_block_node(
     )
     child_nodes: list[BlockNode] = []
 
+    # A variant that omits a submodule (its conditional ``__init__`` leaves it unset)
+    # also drops the forward ops that submodule feeds: the ops directly guarded by its
+    # presence, and transitively every strict op left with no live producer. A phi/select
+    # spanning the pruned branch survives and collapses onto its surviving input.
+    omitted_attrs = frozenset(
+        attr
+        for attr, val in (class_overrides or {}).items()
+        if val is SUBMODULE_OMITTED and "." not in attr
+    )
+    dead_steps = (
+        _dead_forward_steps(cls, omitted_attrs) if omitted_attrs else frozenset()
+    )
+
     for index, call_attr in enumerate(forward_steps):
+        if call_attr in dead_steps:
+            continue
         child_order = order_map.get(call_attr, index)
         # A repeated submodule/method call carries a call-site ``@l{lineno}`` suffix
         # so its wiring stays distinct (``recomposition_frequencies@l1773`` vs
@@ -2801,7 +2879,22 @@ def build_block_node(
             child_nodes.append(expanded)
             continue
 
-        child_class = cls.init_assignments.get(base_attr)
+        # A per-layer variant may swap this submodule's class or omit it outright; the
+        # override is keyed by the base attr relative to this class. A direct swap routes
+        # straight to the recursive build below (bypassing the method-op fallback);
+        # ``SUBMODULE_OMITTED`` drops the child (and anything only it would produce).
+        override = (
+            class_overrides.get(base_attr, _NO_SUBMODULE_OVERRIDE)
+            if class_overrides
+            else _NO_SUBMODULE_OVERRIDE
+        )
+        if override is SUBMODULE_OMITTED:
+            continue
+        child_class = (
+            override
+            if override is not _NO_SUBMODULE_OVERRIDE
+            else cls.init_assignments.get(base_attr)
+        )
         if child_class is None or child_class in _SKIP_INIT_CLASS_NAMES:
             if child_class in _SKIP_INIT_CLASS_NAMES:
                 continue
@@ -3063,6 +3156,16 @@ def build_block_node(
                 )
                 continue
 
+        # Pass down any overrides addressed at descendants of this child, stripping the
+        # child's own ``base_attr.`` prefix so they are relative to the child class.
+        child_overrides = None
+        if class_overrides:
+            descended = {
+                key[len(base_attr) + 1 :]: val
+                for key, val in class_overrides.items()
+                if key.startswith(base_attr + ".")
+            }
+            child_overrides = descended or None
         child_nodes.append(
             build_block_node(
                 attr_name=call_attr,
@@ -3073,6 +3176,7 @@ def build_block_node(
                 details=child_details,
                 forward_order=child_order,
                 infer_init_steps=infer_init_steps,
+                class_overrides=child_overrides,
             )
         )
 

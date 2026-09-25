@@ -619,13 +619,24 @@ def test_load_architecture_local_checkpoint_detailed(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _group(path, length, element_class, signatures):
+def _group(path, length, element_class, signatures, descriptors=None):
     return MetaModuleGroup(
         path=path,
         length=length,
         element_class=element_class,
         signatures=tuple(signatures),
+        descriptors=tuple(descriptors) if descriptors is not None else (),
     )
+
+
+def _descriptor(mapping):
+    """Build a ``((path, class), ...)`` descriptor tuple from a path->class dict."""
+    return tuple(sorted(mapping.items()))
+
+
+def _sig_of(descriptor):
+    """Render a descriptor to the stable signature string ``walk_meta_module_tree`` uses."""
+    return "(" + ",".join(f"{p}:{c}" for p, c in descriptor) + ")"
 
 
 def test_reconcile_live_count_overrides_config():
@@ -653,6 +664,53 @@ def test_reconcile_synthesizes_variants_from_signatures():
     assert spec.num_hidden_layers == 14
     counts = sorted(v.count for v in spec.layer_variants)
     assert counts == [3, 11]
+
+
+def test_reconcile_synthesizes_nested_variants_from_descriptors():
+    # Four buckets that share their top-level submodule classes (self_attn/mlp) but
+    # diverge NESTED: a per-layer compressor present/absent and the router class. The
+    # immediate-children signature would collapse all four; the full descriptor splits
+    # them and drives concise labels stripping the shared "Deepseek" prefix.
+    spec = ArchitectureSpec(name="x", model_type="x", num_hidden_layers=6)
+    spec.decoder_class = "Blk"
+    per_layer = (
+        [  # 2× sliding: no compressor + hash router
+            {"self_attn": "Attn", "mlp": "MoE", "mlp.gate": "DeepseekHashRouter"}
+        ]
+        * 2
+        + [  # 1× CSA + hash
+            {
+                "self_attn": "Attn",
+                "self_attn.compressor": "DeepseekCSACompressor",
+                "mlp": "MoE",
+                "mlp.gate": "DeepseekHashRouter",
+            }
+        ]
+        + [  # 3× HCA + topk
+            {
+                "self_attn": "Attn",
+                "self_attn.compressor": "DeepseekHCACompressor",
+                "mlp": "MoE",
+                "mlp.gate": "DeepseekTopKRouter",
+            }
+        ]
+        * 3
+    )
+    descriptors = [_descriptor(m) for m in per_layer]
+    signatures = [_sig_of(d) for d in descriptors]
+    reconcile_live_module_groups(
+        spec, [_group("layers", 6, "Blk", signatures, descriptors)]
+    )
+    by_count = {v.count: v for v in spec.layer_variants}
+    assert set(by_count) == {2, 1, 3}
+    # Concise labels: shared "Deepseek" prefix stripped; omitted compressor named.
+    assert by_count[2].attention_label == "no compressor"
+    assert by_count[2].ffn_label == "HashRouter"
+    assert by_count[3].attention_label == "HCACompressor"
+    assert by_count[3].ffn_label == "TopKRouter"
+    assert by_count[1].attention_label == "CSACompressor"
+    # Layer indices track each bucket's positions.
+    assert by_count[2].layer_indices == [0, 1]
 
 
 def test_reconcile_overrides_counts_on_matching_cardinality():
