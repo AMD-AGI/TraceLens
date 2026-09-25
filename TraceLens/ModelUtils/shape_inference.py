@@ -2870,11 +2870,26 @@ class ShapeInferencer:
             )
 
         if operation_label == "gather":
-            source = next(
-                (item for item in inputs if item.dtype != "int64"),
-                inputs[0] if inputs else None,
+            has_dim = _detail_value(details, "dim") is not None
+            int_indices = [item for item in inputs if item.dtype == "int64"]
+            base = next(
+                (item for item in inputs if item.dtype not in {"int64", "bool"}), None
             )
-            index = next((item for item in inputs if item.dtype == "int64"), None)
+            # Integer advanced indexing ``base[i, j, ...]`` is a ``Subscript`` /
+            # ``__getitem__`` and -- unlike ``torch.gather`` -- carries no ``dim``
+            # detail. With two or more integer index operands it indexes the
+            # *leading* axes: the broadcast of the index operands replaces those
+            # axes and the trailing base axes are kept. ``torch.gather`` (always a
+            # single index operand with a ``dim``) and boolean-mask indexing are
+            # left on the path below, so every real ``torch.gather`` is unchanged.
+            if not has_dim and base is not None and len(int_indices) >= 2:
+                idx_shape = _broadcast_shapes(
+                    [item.shape for item in int_indices]
+                )
+                tail = tuple(base.shape[len(int_indices) :])
+                return TensorSpec(shape=tuple(idx_shape) + tail, dtype=base.dtype)
+            source = base if base is not None else (inputs[0] if inputs else None)
+            index = int_indices[0] if int_indices else None
             if source is None:
                 source = TensorSpec(self._active_hidden_shape(), dtype)
             shape = (
@@ -4351,6 +4366,30 @@ def _replace_dim(
     if 0 <= dim < len(lst):
         lst[dim] = value
     return tuple(lst)
+
+
+def _broadcast_shapes(shapes: list[tuple[DimExpr, ...]]) -> tuple[DimExpr, ...]:
+    """Right-aligned NumPy-style broadcast of several shapes.
+
+    A concrete size-1 axis yields to a larger sibling; otherwise the first
+    non-``1`` axis (concrete or symbolic) is kept. Mismatched concrete non-1 axes
+    are a modeling error we do not try to reconcile -- the first is kept. Used to
+    size the index part of an integer advanced index ``base[i, j, ...]``.
+    """
+    if not shapes:
+        return ()
+    rank = max(len(shape) for shape in shapes)
+    result: list[DimExpr] = []
+    for offset in range(1, rank + 1):
+        dim: DimExpr = 1
+        for shape in shapes:
+            if offset > len(shape):
+                continue
+            value = shape[-offset]
+            if dim == 1:
+                dim = value
+        result.append(dim)
+    return tuple(reversed(result))
 
 
 def _sum_dim_sizes(sizes: list[DimExpr]) -> DimExpr:

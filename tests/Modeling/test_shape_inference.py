@@ -641,6 +641,62 @@ def test_concat_shape_inference():
     assert result.shape == ("B", "S", 3072)
 
 
+def test_gather_torch_gather_output_equals_index_shape():
+    # ``torch.gather(input, dim, index)`` records a ``dim`` detail and a single
+    # int64 index operand; its output is shaped exactly like the index. This is
+    # the pre-existing behaviour and must stay byte-identical.
+    inf = _make_inferencer()
+    base = TensorSpec(shape=("B", "S", 4096), dtype="float16")
+    index = TensorSpec(shape=("B", "S", 8), dtype="int64")
+    node = _node("Gather", details=["dim: -1"])
+    result = inf._infer_node_output(node, [base, index], root=None)
+    assert result.shape == ("B", "S", 8)
+    assert result.dtype == "float16"
+
+
+def test_gather_integer_advanced_index_broadcasts_indices_and_keeps_tail():
+    # ``base[i, j]`` (a Subscript / ``__getitem__``, no ``dim`` detail) with two
+    # integer index operands indexes the two leading axes: the broadcast of the
+    # index shapes replaces them and the trailing base axes are kept. Without this
+    # rule the op collapsed to a single index operand's shape (rank-1), breaking
+    # every downstream rank check (the GLM indexer ``pool_indices[batch_idx,
+    # selected]`` bug).
+    inf = _make_inferencer()
+    base = TensorSpec(shape=(10, 20, 8), dtype="bfloat16")
+    i = TensorSpec(shape=(4,), dtype="int64")
+    j = TensorSpec(shape=(4,), dtype="int64")
+    node = _node("Gather")  # no ``dim`` detail -> advanced index, not torch.gather
+    result = inf._infer_node_output(node, [base, i, j], root=None)
+    assert result.shape == (4, 8)
+    assert result.dtype == "bfloat16"
+
+
+def test_gather_integer_advanced_index_broadcasts_unequal_index_ranks():
+    # Broadcasting the index operands is right-aligned NumPy-style: a ``[4, 1]``
+    # and a ``[1, 5]`` index yield a ``[4, 5]`` selection over the two leading
+    # axes, with the base's trailing axis preserved.
+    inf = _make_inferencer()
+    base = TensorSpec(shape=("B", "S", 128), dtype="float16")
+    i = TensorSpec(shape=(4, 1), dtype="int64")
+    j = TensorSpec(shape=(1, 5), dtype="int64")
+    node = _node("Gather")
+    result = inf._infer_node_output(node, [base, i, j], root=None)
+    assert result.shape == (4, 5, 128)
+
+
+def test_gather_single_int_index_without_dim_stays_on_legacy_path():
+    # A single int64 index operand and no ``dim`` detail does NOT trigger the
+    # advanced-index broadcast (it needs two or more index operands); the legacy
+    # ``index.shape`` result is preserved, keeping the change conservatively
+    # scoped to the multi-index pattern.
+    inf = _make_inferencer()
+    base = TensorSpec(shape=("B", "S", 4096), dtype="float16")
+    index = TensorSpec(shape=("B", 4), dtype="int64")
+    node = _node("Gather")
+    result = inf._infer_node_output(node, [base, index], root=None)
+    assert result.shape == ("B", 4)
+
+
 def test_transpose_shape_inference():
     inf = _make_inferencer()
     inp = TensorSpec(shape=("B", "S", 32, 128), dtype="float16")

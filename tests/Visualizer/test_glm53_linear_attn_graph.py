@@ -3523,26 +3523,70 @@ def test_glm53_vision_rotary_unsqueeze_single_tensor_operand():
     assert json.loads(attrs["concrete_inputs"]) == ["", "-1"]
 
 
-def test_glm53_graph_type_check_no_axis_op_violations():
-    """The type-check pass runs over the full export and flags no axis-op misuse.
+def test_glm53_graph_type_check_clean():
+    """The type-check pass runs over the full export and flags nothing.
 
     ``type_check_graph_nodes`` emits warnings (never errors) for operations whose
-    operand contract is violated. The owner-flagged class -- axis ops
-    (``unsqueeze``/``squeeze``/``select``) receiving a second *tensor* operand
-    where a scalar ``dim`` belongs -- must be clean after the wiring fix. (Two
-    known ``concat`` rank warnings from the documented advanced-index phantom-rank
-    legs may remain; they are tracked separately and are warnings by design.)
+    operand contract is violated. Two classes of defect used to surface here:
+
+    * axis ops (``unsqueeze``/``squeeze``/``select``) receiving a second *tensor*
+      operand where a scalar ``dim`` belongs (fixed by the earlier wiring fix); and
+    * the ``Glm5NextTextIndexer`` ``append_visible_tail`` ``torch.cat`` joining a
+      rank-1 and a rank-3 operand, because the integer advanced index
+      ``pool_indices[batch_idx, selected]`` collapsed to a single index operand's
+      rank-1 shape. The advanced-index shape rule now broadcasts the index
+      operands and keeps the trailing base axes, so ``topk_indices`` reaches its
+      real rank and the concat's operands agree.
+
+    The whole GLM export is now type-check clean; hold it there.
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     warnings = type_check_graph_nodes(graph["nodes"])
+    assert warnings == [], warnings
 
-    axis_op_warnings = [
-        w for w in warnings if any(f"[{op}]" in w for op in ("unsqueeze", "squeeze", "select"))
+
+def test_glm53_indexer_append_visible_tail_concat_operands_rank_consistent():
+    """The indexer's ``append_visible_tail`` ``torch.cat`` joins equal-rank operands.
+
+    ``torch.cat([topk_indices, tail_indices], dim=-1)`` must receive two operands
+    of the same rank. ``topk_indices`` flows through the integer advanced index
+    ``pool_indices[batch_idx, selected]`` -> ``flatten(-2)``; before the
+    advanced-index shape rule that gather collapsed to a rank-1 ``[batch_size]``
+    tensor, leaving the concat joining rank-1 against the rank-3 ``tail_indices``.
+    Pin that both incoming operands now share rank.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    by_id = {n["id"]: n for n in nodes}
+
+    def _rank(node) -> int | None:
+        for port in node.get("outputsMetadata") or []:
+            for attr in port.get("attrs", []):
+                if attr.get("key") == "shape":
+                    text = str(attr.get("value"))
+                    inner = text[text.index("[") + 1 : text.index("]")]
+                    return len([p for p in inner.split(",") if p.strip()])
+        return None
+
+    concats = [
+        n
+        for n in nodes
+        if "append_visible_tail" in n["id"]
+        and str(n.get("label", "")).lower() == "concat"
     ]
-    assert axis_op_warnings == [], axis_op_warnings
-    assert not any("l1766" in w for w in warnings)
+    assert concats, "append_visible_tail concat node not found"
+    for concat in concats:
+        ranks = []
+        for edge in concat.get("incomingEdges", []) or []:
+            src = by_id.get(edge.get("sourceNodeId"))
+            if src is not None:
+                ranks.append(_rank(src))
+        ranks = [r for r in ranks if r is not None]
+        assert len(set(ranks)) == 1, (concat["id"], ranks)
 
 
 def test_glm53_build_attention_mask_frame_is_not_opaque():
