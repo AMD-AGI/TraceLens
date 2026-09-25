@@ -36,6 +36,12 @@ MIN_SPAN_SHARE = 0.5
 # Fewer roots than this usually means only a warmup loop matched.
 MIN_ROOTS = 4
 
+# Names given to the synthetic warmup/wrapup roots that bookend enhancement
+# (root_detection._try_bookend_enhancement) adds around a branch/sibling
+# candidate. Not real iterations, so callers that reason about the iteration
+# body exclude them.
+BOOKEND_NAMES = {"warmup", "wrapup"}
+
 
 # --- result contract --------------------------------------------------------
 class DetectStatus(IntEnum):
@@ -52,6 +58,15 @@ class PhaseConfidence(str, Enum):
     HIGH = "high"  # parsed from a recognized annotation
     LOW = "low"  # inherited onto a synthetic root
     UNKNOWN = "unknown"  # derived from kernel or python-frame periodicity
+
+
+def grade_coverage(coverage: float) -> DetectStatus:
+    """SPLITTABLE at or above the gate, DEGRADED above the floor, else NOT_SPLITTABLE."""
+    if coverage >= COVERAGE_GATE:
+        return DetectStatus.SPLITTABLE
+    if coverage >= COVERAGE_FLOOR:
+        return DetectStatus.DEGRADED
+    return DetectStatus.NOT_SPLITTABLE
 
 
 @dataclass

@@ -28,13 +28,13 @@ from ..utils.annotation_utils import (
 )
 from ..utils.detect_utils import (
     COVERAGE_FLOOR,
-    COVERAGE_GATE,
     MIN_ROOTS,
     DetectStatus,
     GpuAttribution,
     PhaseConfidence,
     RootSet,
     EventIndex,
+    grade_coverage,
 )
 from .period_detection import (
     _blocks_by_pattern,
@@ -55,14 +55,6 @@ BOOKEND_FLOOR = 0.50
 
 
 # --- steps ------------------------------------------------------------------
-def _grade(coverage: float) -> DetectStatus:
-    if coverage >= COVERAGE_GATE:
-        return DetectStatus.SPLITTABLE
-    if coverage >= COVERAGE_FLOOR:
-        return DetectStatus.DEGRADED
-    return DetectStatus.NOT_SPLITTABLE
-
-
 def _child_groups(tree: TraceToTree, ordered: Sequence[dict], norm: Dict) -> tuple:
     """Children grouped by normalized name, with the GPU time under each group.
 
@@ -105,7 +97,7 @@ def _branch_candidate(
         roots=roots,
         method="generic:branch_descent",
         phase_confidence=PhaseConfidence.UNKNOWN,
-        status=_grade(cov),
+        status=grade_coverage(cov),
         diagnostics=diagnostics,
     )
 
@@ -283,7 +275,7 @@ def _filter_low_gpu_roots(
         roots=new_roots,
         method=candidate.method,
         phase_confidence=candidate.phase_confidence,
-        status=_grade(cov),
+        status=grade_coverage(cov),
         diagnostics=diag,
     )
 
@@ -567,7 +559,7 @@ def _try_bookend_enhancement(
         roots=roots,
         method=candidate.method,
         phase_confidence=candidate.phase_confidence,
-        status=_grade(coverage),
+        status=grade_coverage(coverage),
         diagnostics=diagnostics,
     )
 

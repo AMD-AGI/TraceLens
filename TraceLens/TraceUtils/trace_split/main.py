@@ -163,6 +163,8 @@ from ..utils.annotation_utils import (
     ITERATION_PATTERNS,  # noqa: F401
     IterationAnnotation,
 )
+from ..utils.detect_utils import BOOKEND_NAMES
+from .startup_transient import trim_startup_transient
 
 SERVING_KINDS = {
     "vllm_detailed",
@@ -249,10 +251,6 @@ def _conservation(events: list, per_iteration_details: list | None, args) -> dic
     return report
 
 
-# Bookend roots are the warmup/wrapup spans, excluded from the analysis window.
-_BOOKEND_NAMES = {"warmup", "wrapup"}
-
-
 def _base_name(trace_path: str) -> str:
     name = os.path.basename(trace_path)
     return name.replace(".pt.trace", "").replace(".json.gz", "").replace(".json", "")
@@ -275,6 +273,7 @@ def _load_and_detect(args):
         return None
 
     detection = find_iteration_roots(events, trace_index=trace_index)
+    detection = trim_startup_transient(detection, trace_index)
     print(
         f"\nDetection: {detection.method} -> {len(detection.roots)} roots, "
         f"status={detection.status.name}, phase_confidence="
@@ -371,7 +370,7 @@ def _working_roots(iteration_roots, args, start, end):
         source = iteration_roots[start:end]
     else:
         source = iteration_roots
-    return [r for r in source if r.get("name") not in _BOOKEND_NAMES]
+    return [r for r in source if r.get("name") not in BOOKEND_NAMES]
 
 
 def _has_serving_annotations(working_roots) -> bool:

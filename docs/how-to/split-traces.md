@@ -174,6 +174,24 @@ The detector that fires depends on what the trace contains:
 | Branch descent | There are no usable annotations, but the call tree has a frame whose children repeat | Training loops, diffusion denoise, `torch.compile` workloads |
 | Sibling roots | Branch descent finds no repeating children, but the top-level frames repeat | Workloads with sparse call-stack information |
 
+### Profiler-start transient trim
+
+In tensor-parallel serving, every rank starts its profiler independently, so the
+rank(s) that reach the first collective op earliest wait for the slowest rank —
+and that wait is booked against the collective kernel's duration, inflating
+iteration 0's collective-op time. After the cascade above picks a candidate,
+the splitter compares iteration 0's per-kernel-name GPU duration against the
+median of the same kernel in later iterations, separately for collective ops
+(all-reduce, all-gather, reduce-scatter, all-to-all, broadcast, NCCL/RCCL) and
+everything else. Iteration 0 is dropped only when a collective op's inflation
+both clears an absolute floor and dwarfs the worst inflation seen among
+non-collective ops in the same trace — the run's own noise ceiling. This keeps
+ordinary variance, which touches all op types alike, from ever qualifying, and
+needs no arbitrary sample-count or outlier-count safeguards: the collective vs.
+non-collective comparison is itself the confidence check. Coverage is
+re-audited after the drop, so the manifest's `status` reflects the trimmed
+root set.
+
 ## Extraction and the split manifest
 
 Once the roots are known, each iteration is given a *tile*. A tile is the span between one root
@@ -193,6 +211,10 @@ result. Its key fields are:
 | `gpu_event_retention` | The fraction of GPU kernels that survived extraction. This should be `1.0`, meaning every kernel is accounted for across the slices. |
 | `gpu_events_duplicated` | Whether any kernel was claimed by more than one slice, which indicates a tiling error. |
 | `gap_fill` | Whether tiling was used. |
+| `startup_transient_trimmed` | Whether iteration 0 was dropped as a profiler-start transient. |
+| `startup_transient_kernel` | The collective kernel name whose inflation triggered the trim, when trimmed. |
+| `startup_transient_collective_ratio` | Iteration 0's duration for that kernel, divided by its median over later iterations. |
+| `startup_transient_noise_ratio` | The worst same-ratio seen among non-collective kernels, i.e. the noise ceiling the collective ratio had to clear. |
 
 A per-iteration `execution_details` file records the same accounting for each
 slice.
