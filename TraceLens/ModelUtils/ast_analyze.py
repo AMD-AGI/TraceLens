@@ -1234,7 +1234,7 @@ def _extract_self_calls_ordered(
         # once per tuple element (see ``_expand_map_lambda_tuple``); every clone
         # shares BODY's original source position, so the discriminator stamped on
         # the clone is what keeps their synthetic keys from colliding (mirrors
-        # ``_call_step_producer``/``_map_element_step_attr``).
+        # ``_call_step_producer``).
         discriminator = getattr(node, "_tracelens_map_discriminator", None)
         if target and _is_positional_function_call(func, target):
             # Rope helpers live at module level, so the block that applies them is
@@ -4995,6 +4995,7 @@ class _ForwardOperationExtractor:
         if producer is None:
             return
         for name in self._target_names(stmt):
+            previous_producer = self.var_producer.get(name)
             self.var_producer[name] = producer
             # A reassignment drops any stale tuple-unpack ordinal: ``up`` bound to
             # chunk slice 1 by ``gate, up = x.chunk(2)`` becomes a fresh single-
@@ -5002,8 +5003,17 @@ class _ForwardOperationExtractor:
             # read of ``up`` would still dock onto slice 1 of the chunk and the
             # real (reassigned) producer's edge would carry a dangling port.
             # ``_record_output_unpack`` re-stamps genuine unpack targets right
-            # after this. General: any single-name reassignment.
-            self.var_output_ordinal.pop(name, None)
+            # after this. General: any single-name reassignment -- EXCEPT when the
+            # resolved producer is the exact same step this name already pointed
+            # to (a pure housekeeping pass-through: ``k_rot = k_rot.view(...)``
+            # resolves straight back to its own base producer when the view/expand
+            # itself is elided under ``all_tensor_ops=False``, see the
+            # ``housekeeping`` short-circuit in ``expression()``). That rebind
+            # still reads the exact same multi-output slot as before, so clearing
+            # the ordinal here would misroute a later consumer onto ordinal 0 of
+            # the shared producer instead of the slot this name actually names.
+            if producer != previous_producer:
+                self.var_output_ordinal.pop(name, None)
 
     _MULTI_OUTPUT_LABELS = frozenset({"Split", "Chunk", "Unbind"})
 
@@ -7796,27 +7806,6 @@ def _tuple_source_names(value: ast.AST) -> list[str] | None:
     return None
 
 
-def _map_element_step_attr(node: ast.AST) -> str | None:
-    """Synthetic step key for one expanded ``map(lambda x: BODY(x), ...)`` element.
-
-    Mirrors the relevant subset of ``_ForwardOperationExtractor._call_step_producer``
-    (positional/free-function synthetic naming, including the per-element
-    discriminator ``_expand_map_lambda_tuple`` stamps on each clone) for this
-    module-level provenance tracker, which runs independently of that class and
-    otherwise never sees inside a lambda body.
-    """
-    if not isinstance(node, ast.Call):
-        return None
-    func = node.func
-    target = _expr_name(func)
-    discriminator = getattr(node, "_tracelens_map_discriminator", None)
-    if target and _is_positional_function_call(func, target):
-        return positional_synthetic_attr(target, node.lineno, discriminator)
-    if _is_emittable_free_function(func, target):
-        return function_synthetic_attr(target, node.lineno, discriminator)
-    return None
-
-
 def _submodule_rooted_trailing_ops(
     value: ast.AST, chain: list[str]
 ) -> list[str]:
@@ -7912,13 +7901,25 @@ def _record_assign_targets(
                     zipped = False
                     break
                 source_chain = list(var_chains.get(source_name, []))
-                for call in stmt_calls:
-                    if call not in source_chain:
-                        source_chain.append(call)
                 if expanded_elements is not None:
-                    own_step = _map_element_step_attr(expanded_elements[index])
-                    if own_step and own_step not in source_chain:
-                        source_chain.append(own_step)
+                    # ``stmt_calls`` is built from the WHOLE expanded tuple (every
+                    # clone's calls flattened into one shared list), so blanket
+                    # -appending it here would cross-contaminate each element's
+                    # chain with its sibling's own clone call (``q``'s chain
+                    # picking up ``k``'s discriminated rearrange id, and vice
+                    # versa). Extract only this element's own clone subtree's
+                    # calls instead -- each clone is keyed on its own stamped
+                    # discriminator, so this stays distinct per element even when
+                    # the lambda body itself nests more than one call.
+                    own_calls: list[str] = []
+                    _extract_self_calls_ordered(expanded_elements[index], own_calls)
+                    for call in own_calls:
+                        if call not in source_chain:
+                            source_chain.append(call)
+                else:
+                    for call in stmt_calls:
+                        if call not in source_chain:
+                            source_chain.append(call)
                 assign_one(elt, source_chain or list(stmt_calls))
             if zipped:
                 return

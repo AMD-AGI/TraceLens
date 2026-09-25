@@ -559,6 +559,27 @@ def _kernel_input_names(spec: NodeSpec) -> list[str]:
     return []
 
 
+def _prefer_activation_followup(
+    attr_last_index: dict[str, int], attr: str, index: int
+) -> int:
+    """Prefer a split-out activation follow-up node over its base step.
+
+    Some block-tree expansions (``_short_convolution_block_node`` and friends in
+    ``block_tree.py``) split one semantic forward call into two back-to-back
+    sibling graph nodes: the base step tracked under its own ``attr`` and an
+    activation follow-up tracked under the structural ``f"{attr}_activation"``
+    name. A provenance chain captured at the AST level only ever names the
+    original call (the source only has one call node), so resolving straight
+    through ``attr_last_index`` would wire onto the base step and leave the
+    activation follow-up looking unconsumed. When a later node is tracked
+    under the ``_activation``-suffixed name, prefer it as the true producer.
+    """
+    follow_index = attr_last_index.get(f"{attr}_activation")
+    if follow_index is not None and follow_index > index:
+        return follow_index
+    return index
+
+
 def _kernel_port_split(spec: NodeSpec) -> dict[str, list[str]]:
     """Map a shared input label to the distinct kernel-param ports it fans into.
 
@@ -1380,6 +1401,16 @@ def _wire_all_predecessor_edges(
                             scoped = _scoped_producer_index(sibling, graph)
                             if scoped is not None:
                                 source_index = scoped
+                    # An activation follow-up (``_short_convolution_block_node``
+                    # and friends) is a sibling *leaf* right after ``pred``'s own
+                    # step, not inside its subtree, so the scope check above
+                    # always resolves onto the base step; only after settling on
+                    # the right instance do we redirect onto its activation
+                    # follow-up when one exists.
+                    if source_index is not None:
+                        source_index = _prefer_activation_followup(
+                            attr_last_index, pred, source_index
+                        )
                 if source_index is None:
                     continue
                 # When the predecessor is a multi-return module, resolve the
@@ -1618,14 +1649,17 @@ def _wire_all_predecessor_edges(
 
                 # Follow the provenance chain (actual data-flow from AST
                 # analysis) to find the last graph node in the chain.
-                source_index = next(
-                    (
-                        attr_last_index[attr]
-                        for attr in reversed(chain)
-                        if attr in attr_last_index
-                    ),
+                matched_attr = next(
+                    (attr for attr in reversed(chain) if attr in attr_last_index),
                     None,
                 )
+                source_index = (
+                    attr_last_index[matched_attr] if matched_attr is not None else None
+                )
+                if source_index is not None:
+                    source_index = _prefer_activation_followup(
+                        attr_last_index, matched_attr, source_index
+                    )
                 if source_index is None or source_index == target_index:
                     continue
                 ports_by_source.setdefault(source_index, []).append(port)
@@ -1841,6 +1875,9 @@ def _operation_source_indices(
         source_index = attr_last_index.get(predecessor)
         if source_index is None:
             continue
+        source_index = _prefer_activation_followup(
+            attr_last_index, predecessor, source_index
+        )
         ordinals = ports.get(predecessor, ())
         limit = max(len(ordinals), 1)
         occurrence = seen_counts.get(predecessor, 0)
@@ -3474,7 +3511,17 @@ def _forward_steps_by_attr(root: BlockNode) -> dict[str, BlockNode]:
     # on the real materialized node instead of being silently dropped.
     if SYNTHETIC_ATTENTION not in by_attr:
         pipeline = by_attr.get("@attn_pipeline")
-        if pipeline is not None:
+        # Only fall back to this alias when the pipeline has no labeled tensor
+        # ports of its own. A pipeline that exposes ``tensor_input_labels`` is
+        # already wired port-by-port (each of q/k/v/gate/beta docked onto the
+        # specific substep that consumes it) by ``_add_tensor_ports_segment``;
+        # aliasing this key onto it here would additionally dump every one of
+        # those same producer edges onto whichever node happens to be the
+        # pipeline's first materialized descendant (typically its first
+        # kernel substep), duplicating -- and for every port but that one,
+        # misrouting -- the very edges the per-port pass already placed
+        # correctly.
+        if pipeline is not None and not pipeline.tensor_input_labels:
             by_attr[SYNTHETIC_ATTENTION] = pipeline
     return by_attr
 
@@ -4247,7 +4294,20 @@ def _add_tensor_ports_segment(
                 attr_last_index=attr_last_index,
                 inline_expansion=inline_expansion,
             )
-            step_attr_indices[step.attr_name] = attr_last_index
+            # ``_add_linear_pipeline_chain`` treats ``attr_last_index`` as a
+            # scope-tracking dict shared across nested recursive calls: any
+            # name it didn't already hold before this call is popped again on
+            # return (so a submodule's own attribute names don't leak into an
+            # unrelated sibling scope). That scrubs out exactly the substep
+            # bindings (``..._sub_3``) this lookup needs, since the dict was
+            # fresh/empty going in. Rebuild the mapping straight from the
+            # positional ``sub_indices`` this call returned instead -- each
+            # non-inlined child in ``step.children`` contributes exactly one
+            # index, in order, so this survives the scope restore above.
+            step_attr_indices[step.attr_name] = {
+                child.attr_name: index
+                for child, index in zip(step.children, sub_indices)
+            }
             step_indices[step.attr_name] = (
                 sub_tail if sub_tail is not None else sub_indices[-1]
             )
@@ -4815,6 +4875,71 @@ def build_computation_graph(
 
         if isinstance(segment, SeqSegment):
             step = segment.step
+            if is_kernel_pipeline_tree(step) and step.tensor_input_labels:
+                # A kernel-pipeline step normally arrives as its own
+                # ``TensorPortsSegment`` (root itself is the pipeline) or as a
+                # ``FanOutSegment`` merge (>=2 clean q/k/v/... prep branches).
+                # When neither shape matches -- e.g. incomplete branch
+                # provenance keeps ``collect_computation_segments`` from
+                # splitting the pre-merge steps into named branches -- the
+                # pipeline still lands here as a plain ``SeqSegment`` step.
+                # Falling through to the generic ``_maybe_inline`` /
+                # ``_add_linear_pipeline_chain`` path below would treat its
+                # labeled q/k/v/g/beta ports as an ordinary flat op chain,
+                # losing the per-label routing entirely (every kernel-internal
+                # substep then gets no explicit predecessor and either spine-
+                # chains onto whatever step precedes it, or -- if it names no
+                # predecessor -- picks up nothing). Route it through the same
+                # tensor-ports wiring the other two shapes use instead.
+                provenance = step.attention_inputs or root.attention_inputs or {}
+                frame = _start_inline_frame(graph, step)
+                start_index = len(graph.nodes)
+                pipeline_key_prefix = f"seq:{segment_index}:{step.attr_name}"
+                pipeline_tail = _add_tensor_ports_segment(
+                    graph,
+                    TensorPortsSegment(
+                        labels=list(step.tensor_input_labels),
+                        targets=dict(step.tensor_step_targets),
+                        steps=list(step.children),
+                    ),
+                    key_prefix=pipeline_key_prefix,
+                    port_sublabels=_tensor_port_input_sublabels(provenance),
+                    inline_expansion=inline_expansion,
+                )
+                for index in range(start_index, len(graph.nodes)):
+                    _append_inline_frame_node(frame, index)
+                port_index_by_label = {
+                    spec.label: index
+                    for index, spec in enumerate(graph.nodes)
+                    if spec.synthetic == SYNTHETIC_TENSOR
+                    and spec.key.startswith(f"{pipeline_key_prefix}:tensor:")
+                }
+                for label, chain in provenance.items():
+                    port_index = port_index_by_label.get(label)
+                    if port_index is None:
+                        continue
+                    matched_attr = next(
+                        (attr for attr in reversed(chain) if attr in attr_last_index),
+                        None,
+                    )
+                    source_index = (
+                        attr_last_index[matched_attr]
+                        if matched_attr is not None
+                        else None
+                    )
+                    if source_index is not None:
+                        source_index = _prefer_activation_followup(
+                            attr_last_index, matched_attr, source_index
+                        )
+                    if source_index is None or source_index == port_index:
+                        continue
+                    link_key = (source_index, port_index)
+                    graph.links.append(link_key)
+                    graph.link_port_labels[link_key] = label
+                last_index = pipeline_tail
+                if pipeline_tail is not None:
+                    _track_attr_index(attr_last_index, step.attr_name, pipeline_tail)
+                continue
             fork_from_input = (
                 _should_fork_main_path_from_input(
                     segments,

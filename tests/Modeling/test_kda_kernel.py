@@ -26,22 +26,34 @@ from TraceLens.ModelUtils.kernel_pipeline import (
 )
 
 _FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "kda_kernel"
-_KIMI_CODE_PATH = (
-    Path.home()
-    / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
-)
+
+
+def _kimi_code_path() -> Path | None:
+    """Resolve the cached Kimi-K3 modeling source under any snapshot hash.
+
+    Uses the Hugging Face cache resolver (honours ``HF_HOME``) instead of a
+    pinned snapshot directory, so the file is found wherever the model was
+    downloaded and the tests skip only when it is genuinely absent.
+    """
+    from huggingface_hub import try_to_load_from_cache
+
+    hit = try_to_load_from_cache(
+        "moonshotai/Kimi-K3", "modeling_kimi_linear.py"
+    )
+    return Path(hit) if isinstance(hit, str) else None
 
 
 def _load_chunk_kda_pipeline():
     from TraceLens.ModelUtils.basic_ops import BasicOpFilter
     from TraceLens.ModelUtils.block_tree import build_block_node
 
-    if not _KIMI_CODE_PATH.exists():
+    code_path = _kimi_code_path()
+    if code_path is None:
         pytest.skip("Kimi-K3 modeling file not cached locally")
 
     basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
     analysis = analyze_source(
-        _KIMI_CODE_PATH.read_text(), filename="modeling_kimi_linear.py"
+        code_path.read_text(), filename="modeling_kimi_linear.py"
     )
     attn = build_block_node(
         attr_name="self_attn",
@@ -119,11 +131,8 @@ def test_parse_kernel_call_flags_reads_modeling_kwargs():
 
 
 def test_analyze_source_attaches_kernel_import_for_kda():
-    code_path = (
-        Path.home()
-        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
-    )
-    if not code_path.exists():
+    code_path = _kimi_code_path()
+    if code_path is None:
         pytest.skip("Kimi-K3 modeling file not cached locally")
 
     analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
