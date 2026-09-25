@@ -521,3 +521,77 @@ def test_deepseek_v4_indexer_masked_fill_two_tensor_operands_and_future_mask_cha
             frontier.append(edge.get("sourceNodeId"))
     assert "Arange" in found, sorted(found)
     assert "Floor divide" in found, sorted(found)
+
+
+def test_deepseek_v4_model_scope_rotary_emb_expands_not_opaque_leaf():
+    """The model-scope ``position_embeddings = {"main": self.rotary_emb(...), ...}``
+    call renders as its real op subgraph, not a single opaque ``rotary_emb@l1313``
+    leaf.
+
+    ``DeepseekV4Model.forward`` assigns the rotary call as a dict-literal *value*
+    threaded into the decoder loop as a loop-invariant. The loop-invariant
+    materializer stamped it as one flat model-scope leaf, hiding the whole tensor
+    computation (the dynamic ``inv_freq`` buffer expand, the ``@`` matmul against
+    ``position_ids``, the transpose, and the ``cos``/``sin`` split). It must expand
+    exactly like the same class does at its nested (compressor/indexer) call sites:
+    the positional pre-module is un-skipped and run through the shared section
+    machinery, then its real ``@output`` ports are docked into the decoder's
+    ``position_embeddings`` boundary. Keyed structurally on op labels and the
+    section's own output ports, never on a line number / class name.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph = _build_graph()
+    nodes = graph["nodes"]
+
+    # No opaque flat model-scope rotary leaf survives.
+    opaque = [
+        node
+        for node in nodes
+        if str(node.get("id", "")).endswith("rotary_emb@l1313")
+        or str(node.get("id", "")).endswith("rotary_emb@l1312")
+        or str(node.get("id", "")) == "@model_forward/rotary_emb"
+    ]
+    assert not opaque, (
+        "model-scope rotary_emb must expand, not remain an opaque leaf: "
+        f"{[n.get('id') for n in opaque]}"
+    )
+
+    # The top-level rotary section is expanded into its real op chain.
+    section = [
+        node
+        for node in nodes
+        if str(node.get("id", "")).startswith("rotary_emb/")
+    ]
+    labels = {node.get("label") for node in section}
+    assert {"MatMul", "Cosine", "Sine"} <= labels, sorted(labels)
+
+    # position_embeddings = (cos, sin): BOTH tuple ports are consumed by the
+    # decoder loop boundary (neither slice left dead).
+    boundary = next(
+        (
+            node
+            for node in nodes
+            if str(node.get("id", "")) == "decoder/@input:position_embeddings"
+        ),
+        None,
+    )
+    assert boundary is not None, "decoder position_embeddings boundary missing"
+    sources = {
+        str(edge.get("sourceNodeId", ""))
+        for edge in boundary.get("incomingEdges", []) or []
+    }
+    assert "rotary_emb/@output:cos" in sources, sources
+    assert "rotary_emb/@output:sin" in sources, sources
+
+    # No dead node inside the expanded rotary section.
+    consumed = {
+        edge.get("sourceNodeId")
+        for node in nodes
+        for edge in node.get("incomingEdges", []) or []
+    }
+    dead = [
+        node["id"]
+        for node in section
+        if "/@output" not in node["id"] and node["id"] not in consumed
+    ]
+    assert not dead, f"expanded rotary section has dead nodes: {dead}"

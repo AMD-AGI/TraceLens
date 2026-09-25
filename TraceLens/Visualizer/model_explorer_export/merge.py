@@ -2976,8 +2976,18 @@ def _write_port_shape(
             attr["value"] = f"{tensor} {dtype}" if dtype else tensor
 
 
-def _prune_unconsumed_outputs(nodes: list[dict[str, Any]]) -> None:
-    """Strip unused boundary ports, then remove their dead producer subgraphs."""
+def _prune_unconsumed_outputs(
+    nodes: list[dict[str, Any]],
+    *,
+    keep_output_ids: frozenset[str] = frozenset(),
+) -> None:
+    """Strip unused boundary ports, then remove their dead producer subgraphs.
+
+    ``keep_output_ids`` names section ``@output`` boundaries whose consumer is
+    wired only in a later pass (a model-scope positional producer feeding a
+    decoder loop-invariant, threaded after this prune): keep them and their
+    producer subgraph intact so the deferred consumer still has something to dock.
+    """
     outgoing_ports: dict[str, set[str]] = {}
     for node in nodes:
         for edge in node.get("incomingEdges", []):
@@ -2988,6 +2998,8 @@ def _prune_unconsumed_outputs(nodes: list[dict[str, Any]]) -> None:
     dead_candidates: set[str] = set()
     for node in nodes:
         if not _is_synthetic_output(node) or node.get("id") == "@output":
+            continue
+        if str(node.get("id")) in keep_output_ids:
             continue
         used = outgoing_ports.get(str(node.get("id")), set())
         if not used:
@@ -4898,6 +4910,15 @@ def _materialize_model_scope_producer(
     existing = _resolve_existing_producer_node(node_by_id, producer_attr)
     if existing is not None:
         return existing
+    # A submodule call whose own forward was already expanded as a model-scope
+    # section (``rotary_emb = self.rotary_emb(...)`` feeding ``position_embeddings``):
+    # dock onto that section's real output instead of stamping a second flat leaf
+    # that would duplicate -- and leave dead -- the expanded op subgraph.
+    section_output = _resolve_submodule_output_node(
+        node_by_id, base_submodule_attr(producer_attr)
+    )
+    if section_output is not None:
+        return section_output
     node_id = f"@model_forward/{producer_attr}"
     incoming: list[dict[str, str]] = []
     for pred in cls.forward_step_predecessors.get(producer_attr, ()):  # type: ignore[attr-defined]
@@ -5081,19 +5102,51 @@ def _loop_param_producer_map(cls: Any) -> dict[str, str]:
     return producers
 
 
-def _resolve_submodule_output_node(
+def _resolve_submodule_output_nodes(
     node_by_id: dict[str, dict[str, Any]], attr: str
-) -> str | None:
-    """Existing model-scope output node id for a submodule ``attr`` producer."""
+) -> list[str]:
+    """Every model-scope output node id for a submodule ``attr`` producer.
+
+    A section may expose more than one output port (the rotary block returns
+    ``position_embeddings = (cos, sin)`` as ``@output:cos`` / ``@output:sin``);
+    return them all so a tuple-valued producer wires every slice into its consumer
+    rather than dropping the tail slices as dead.
+    """
     if attr in node_by_id:
-        return attr
+        return [attr]
     prefix = f"{attr}/"
-    outputs = sorted(
+    return sorted(
         nid
         for nid in node_by_id
         if nid.startswith(prefix) and "/@output" in nid
     )
+
+
+def _resolve_submodule_output_node(
+    node_by_id: dict[str, dict[str, Any]], attr: str
+) -> str | None:
+    """Existing model-scope output node id for a submodule ``attr`` producer."""
+    outputs = _resolve_submodule_output_nodes(node_by_id, attr)
     return outputs[0] if outputs else None
+
+
+def _section_output_sibling_ports(
+    node_by_id: dict[str, dict[str, Any]], source_id: str
+) -> list[str]:
+    """All sibling ``@output`` ports of the section a resolved source belongs to.
+
+    A single tuple-valued producer resolves to one port (``rotary_emb/@output:cos``);
+    its consumer must read the whole tuple, so return every sibling port of that
+    section (``cos`` and ``sin``). A source that is not a section output port (a flat
+    model-scope op or a mask-builder leaf) is returned unchanged.
+    """
+    marker = "/@output"
+    index = source_id.find(marker)
+    if index == -1:
+        return [source_id]
+    prefix = source_id[:index]
+    siblings = _resolve_submodule_output_nodes(node_by_id, prefix)
+    return siblings or [source_id]
 
 
 def _resolve_loop_invariant_source(
@@ -5157,6 +5210,44 @@ def _resolve_loop_invariant_source(
     if param in cls.forward_param_inputs:
         return _ensure_top_level_input(nodes, node_by_id, param)
     return None
+
+
+def _decoder_loop_pred_args(spec: ArchitectureSpec, cls: Any) -> dict[str, str]:
+    """The decoder loop call's ``{param -> producer attr}`` map for a stack model.
+
+    ``forward_step_predecessor_args`` for the ``self.layers`` ModuleList call: the
+    keyword producer the extractor recovered for each tensor the loop hands every
+    iteration (``position_embeddings -> rotary_emb@l1313``). Empty when the loop
+    takes no keyword-sourced tensor or the extractor could not map one.
+    """
+    if cls is None:
+        return {}
+    loop_attr = next(
+        (
+            attr
+            for attr, name in cls.init_assignments.items()
+            if name == spec.decoder_class
+        ),
+        None,
+    )
+    return (cls.forward_step_predecessor_args.get(loop_attr, {}) if loop_attr else {}) or {}
+
+
+def _loop_invariant_producer_base_attrs(
+    spec: ArchitectureSpec, cls: Any
+) -> set[str]:
+    """Base submodule attrs that produce a tensor the decoder loop reads by keyword.
+
+    ``rotary_emb`` for a decoder that receives ``position_embeddings=
+    self.rotary_emb(...)``. Structural: read straight from the loop call's recovered
+    keyword producers, so a positional pre-module that feeds the loop (rather than
+    sitting on the hidden-state spine) can still be expanded at model scope.
+    """
+    return {
+        base_submodule_attr(producer)
+        for producer in _decoder_loop_pred_args(spec, cls).values()
+        if producer
+    }
 
 
 def _thread_loop_invariant_inputs(
@@ -5227,16 +5318,21 @@ def _thread_loop_invariant_inputs(
         )
         if source is None:
             continue
+        # A tuple-valued producer (the rotary block's ``(cos, sin)``) is one section
+        # with several ``@output`` ports; the boundary aggregates every port so no
+        # tail slice is left dead. A scalar producer stays a single edge.
+        sources = _section_output_sibling_ports(node_by_id, source)
         if container is None:
             # A submodule's own input boundary (``rotary_emb/@input:position_ids``):
             # wire it straight to the model-level source, no group boundary.
             for tile in tiles:
                 tile["incomingEdges"] = [
                     {
-                        "sourceNodeId": source,
+                        "sourceNodeId": src,
                         "sourceNodeOutputId": "0",
-                        "targetNodeInputId": "0",
+                        "targetNodeInputId": str(index),
                     }
+                    for index, src in enumerate(sources)
                 ]
             continue
         boundary_id = f"{prefix}/@input:{param}"
@@ -5253,10 +5349,11 @@ def _thread_loop_invariant_inputs(
             node_by_id[boundary_id] = boundary
         boundary["incomingEdges"] = [
             {
-                "sourceNodeId": source,
+                "sourceNodeId": src,
                 "sourceNodeOutputId": "0",
-                "targetNodeInputId": "0",
+                "targetNodeInputId": str(index),
             }
+            for index, src in enumerate(sources)
         ]
         for tile in tiles:
             if tile["id"] == boundary_id:
@@ -5389,12 +5486,23 @@ def build_merged_model_graph(
     stack_cls = spec.class_registry.get(spec.stack_model_class or "")
     if stack_cls is None:
         stack_cls = _pick_stack_model_class(spec.class_registry, None)
+    # Positional pre-modules that feed the decoder loop by keyword rather than
+    # sitting on the hidden-state spine (``position_embeddings =
+    # self.rotary_emb(...)``, threaded as a loop-invariant) are still expanded at
+    # model scope -- their real op subgraph belongs in the diagram, not a flat
+    # opaque leaf. Distinguishes this from a positional module used only inside a
+    # nested submodule (a vision rotary the text stack never calls), which the loop
+    # does not read and so must stay skipped.
+    loop_invariant_positional_attrs = _loop_invariant_producer_base_attrs(
+        spec, stack_cls
+    )
 
     for component in _stack_pre_components(spec):
         if (
             component.role == "positional"
             and stack_cls is not None
             and component.attr_name not in stack_cls.forward_calls
+            and component.attr_name not in loop_invariant_positional_attrs
         ):
             continue
         expands = component_has_detail_section(component, spec)
@@ -5506,7 +5614,19 @@ def build_merged_model_graph(
                 ports=root_ports,
             )
         )
-    _prune_unconsumed_outputs(nodes)
+    # Model-scope positional producers (``rotary_emb`` feeding ``position_embeddings``)
+    # are expanded as sections here but only wired to their decoder loop-invariant
+    # consumer in ``_thread_loop_invariant_inputs`` below. Shield their output (and
+    # subgraph) from the unconsumed-output prune so that deferred wiring survives.
+    _prune_keep_output_ids: set[str] = set()
+    _node_by_id_prune = {str(node.get("id")): node for node in nodes}
+    for _attr in _loop_invariant_producer_base_attrs(spec, stack_cls):
+        _prune_keep_output_ids.update(
+            _resolve_submodule_output_nodes(_node_by_id_prune, _attr)
+        )
+    _prune_unconsumed_outputs(
+        nodes, keep_output_ids=frozenset(_prune_keep_output_ids)
+    )
     _label_boundary_outputs_by_port(nodes)
     _mirror_boundary_inputs(nodes)
     _mirror_boundary_outputs(nodes)
