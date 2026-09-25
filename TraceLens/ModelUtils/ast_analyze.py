@@ -8629,6 +8629,26 @@ def kernel_name_from_step_details(details: list[str]) -> str | None:
     return None
 
 
+# Attention coloring markers (the ONLY surviving marker use).
+#
+# Keep-atomic, return-arity, and the display label are all derived structurally
+# now: the keep-atomic gate resolves the kernel through ``ALL_ATTENTION_FUNCTIONS``
+# and introspects the wrapper AST (``_resolve_dispatched_attention_kernel``),
+# arity comes from the wrapper's own return statement (``_max_real_return_arity``),
+# and the label is the resolved callee qualname (``attention_kernel_label``). None
+# of those read a marker list any more.
+#
+# The one thing left keyed on a list is cosmetic node COLORING in
+# ``classify_operation`` (model_graph.py): whether an AttentionOp is painted as a
+# plain torch functional op or as an outside fused GPU kernel. A robustly-general
+# structural test can classify the kernels every model actually uses (sdpa is a
+# direct ``torch.nn.functional`` call → native; flash/recurrent bottom out at an
+# external compiled kernel → not native), but ``flex_attention`` only reaches its
+# torch op through a ``torch.compile`` singleton selected by a conditional import,
+# which no AST walk can follow without fragile guesswork. Rather than ship that
+# fragility (or silently flip an unused kernel's color), the coloring stays on
+# these two small, stable name lists.
+#
 # Attention that torch itself provides: SDPA, torch.nn.attention, and the plain
 # matmul/softmax eager path.
 _TORCH_NATIVE_ATTENTION_MARKERS = (
@@ -8653,28 +8673,14 @@ _LIBRARY_ATTENTION_MARKERS = (
     "paged_attention",
     "xformers",
 )
-_STANDARD_ATTENTION_MARKERS = (
-    *_TORCH_NATIVE_ATTENTION_MARKERS,
-    *_LIBRARY_ATTENTION_MARKERS,
-    "attention_interface",
-)
-
-
-def is_standard_attention_kernel(kernel: str | None) -> bool:
-    """True for kernels that delegate to a common attention library (SDPA, Flash, TE, …)."""
-    if not kernel:
-        return False
-    lowered = kernel.lower()
-    if lowered in _SYNTHETIC_ATTENTION_NAMES:
-        return True
-    return any(marker in lowered for marker in _STANDARD_ATTENTION_MARKERS)
 
 
 def is_torch_native_attention_kernel(kernel: str | None) -> bool:
     """True only for attention torch ships itself, as opposed to a library kernel.
 
     Flash-attn, xformers and Transformer Engine are recognizable attention, but they
-    are still outside fused kernels rather than torch operations.
+    are still outside fused kernels rather than torch operations. This drives node
+    coloring only; see the marker-list comment above.
     """
     if not kernel:
         return False
@@ -8684,10 +8690,6 @@ def is_torch_native_attention_kernel(kernel: str | None) -> bool:
     if lowered in {"eager_attention_forward", "sdpa_attention_forward"}:
         return True
     return any(marker in lowered for marker in _TORCH_NATIVE_ATTENTION_MARKERS)
-
-
-def is_standard_attention_step(details: list[str]) -> bool:
-    return is_standard_attention_kernel(kernel_name_from_step_details(details))
 
 
 def is_kernel_pipeline_step(

@@ -87,11 +87,13 @@ def test_public_name_role_and_kernel_helpers_cover_fallbacks():
     assert aa.displays_as_pointwise_leaf("act", "GELU")
     assert not aa.displays_as_pointwise_leaf("block", None)
 
-    for kernel in ("sdpa", "flash_attn_func", "attention_interface"):
-        assert aa.is_standard_attention_kernel(kernel)
-    assert not aa.is_standard_attention_kernel(None)
+    # Coloring classifier (the only surviving marker use): torch-shipped attention
+    # is native; an outside fused library kernel is not.
     assert aa.is_torch_native_attention_kernel("torch.nn.attention.flex_attention")
+    assert aa.is_torch_native_attention_kernel("sdpa_attention_forward")
     assert not aa.is_torch_native_attention_kernel("xformers_attention")
+    assert not aa.is_torch_native_attention_kernel("flash_attn_func")
+    assert not aa.is_torch_native_attention_kernel(None)
     assert aa.attention_kernel_label(["kernel: custom_delta"]) == "custom_delta"
     assert aa.attention_kernel_label([]) == "Attention"
     # A concrete resolved kernel shows its real name (not the generic "Attention").
