@@ -60,7 +60,7 @@ from ..utils.annotation_utils import (
     find_phase_from_window,
     iteration_details,
 )
-from ..trace_split import (
+from ..split_trace import (
     ExtractContext,
     TraceData,
     EventIndex,

@@ -18,7 +18,7 @@ This enables efficient performance analysis and comparison without processing ma
 
 BASIC USAGE
 ───────────────────────────────────────────────────────────────────────────────
-    python -m TraceLens.TraceUtils.trace_split.main <trace_path> -o <output_dir> [OPTIONS]
+    python -m TraceLens.TraceUtils.split_trace.main <trace_path> -o <output_dir> [OPTIONS]
 
 REQUIRED ARGUMENTS
 ───────────────────────────────────────────────────────────────────────────────
@@ -64,7 +64,7 @@ QUICK EXAMPLES
 
 1. EXTRACT ALL ITERATIONS SEPARATELY
 
-   $ python -m TraceLens.TraceUtils.trace_split.main trace.json.gz -o ./output --store-single-iteration
+   $ python -m TraceLens.TraceUtils.split_trace.main trace.json.gz -o ./output --store-single-iteration
 
    → One trace file per iteration in ./output/
 
@@ -72,7 +72,7 @@ QUICK EXAMPLES
 
 2. EXTRACT SPECIFIC ITERATION RANGE (combined)
 
-   $ python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \\
+   $ python -m TraceLens.TraceUtils.split_trace.main trace.json.gz \\
      -o ./output \\
      --iterations 10:20
 
@@ -82,7 +82,7 @@ QUICK EXAMPLES
 
 3. FIND AND EXTRACT STEADY STATE REGION (recommended)
 
-   $ python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \\
+   $ python -m TraceLens.TraceUtils.split_trace.main trace.json.gz \\
      -o ./steady_state_analysis \\
      --find-steady-state
 
@@ -99,7 +99,7 @@ QUICK EXAMPLES
 
 4. SPLIT STEADY-STATE STEPS BY PHASE
 
-   $ python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \\
+   $ python -m TraceLens.TraceUtils.split_trace.main trace.json.gz \\
      -o ./phase_split \\
      --divide-phases
 
@@ -157,8 +157,8 @@ import os
 
 import pandas as pd
 
-from ...util import DataLoader
-from ..utils.annotation_utils import (
+from TraceLens.util import DataLoader
+from TraceLens.TraceUtils.utils.annotation_utils import (
     ITERATION_BACKUP_PATTERNS,  # noqa: F401
     ITERATION_PATTERNS,  # noqa: F401
     IterationAnnotation,
@@ -174,7 +174,7 @@ SERVING_KINDS = {
 }
 
 # Re-exports for tests and downstream callers.
-from . import (  # noqa: F401
+from TraceLens.TraceUtils.split_trace import (  # noqa: F401
     DetectStatus,
     ExtractContext,
     TraceData,
@@ -196,7 +196,7 @@ from . import (  # noqa: F401
     infer_batch_sizes_from_shapes,
     parse_range,
 )
-from ...util import GPU_KERNEL_CATEGORIES
+from TraceLens.util import GPU_KERNEL_CATEGORIES
 
 MANIFEST_NAME = "split_manifest.json"
 
