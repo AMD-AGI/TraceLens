@@ -302,36 +302,29 @@ def _absolute_import_bindings(
     return bindings
 
 
-class _HostSourceResolver:
-    """Detects whether a free function runs host/CPU work by reading source ASTs.
+_ParsedModule = tuple[dict[str, ast.FunctionDef], dict[str, str]]
 
-    Locates each callee's defining file with ``importlib.util.find_spec`` (no module
-    execution — spec.origin + ``ast.parse`` only) and walks it for host-materialisation
-    idioms, recursing into the free functions it calls. The analysed modeling file is
-    seeded directly so its local helpers resolve without a spec lookup. General across
-    models: any helper doing host-side index building is flagged, none are hardcoded.
+
+class _ParsedModuleRegistry:
+    """Single authoritative store of parsed module symbols for one analysis.
+
+    Parses each importable module's source file at most once
+    (``importlib.util.find_spec`` origin + ``ast.parse``, no execution) and caches
+    ``(name -> ast.FunctionDef, absolute import bindings)``. The imported-free-function
+    resolver and the host-source resolver share one instance, so a sibling file is
+    read and parsed a single time per analysis instead of once per consumer. Seeded
+    trees — the analysed modeling file, whose source can differ from the installed
+    module — are held per-resolver rather than here, so sharing the spec-parse cache
+    is behaviour-preserving.
     """
 
     def __init__(self) -> None:
-        # module -> ({func_name: FunctionDef}, {imported_name: "module#symbol"}) | None
-        self._modules: dict[str, tuple[dict[str, ast.FunctionDef], dict[str, str]] | None] = {}
+        self._modules: dict[str, _ParsedModule | None] = {}
 
-    def seed(self, module: str | None, tree: ast.AST) -> None:
-        if not module or not isinstance(tree, ast.Module):
-            return
-        funcs = {
-            node.name: node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef)
-        }
-        self._modules[module] = (funcs, _absolute_import_bindings(tree, module))
-
-    def _load(
-        self, module: str
-    ) -> tuple[dict[str, ast.FunctionDef], dict[str, str]] | None:
+    def load(self, module: str) -> _ParsedModule | None:
         if module in self._modules:
             return self._modules[module]
-        result: tuple[dict[str, ast.FunctionDef], dict[str, str]] | None = None
+        result: _ParsedModule | None = None
         origin: str | None = None
         try:
             spec = importlib.util.find_spec(module)
@@ -352,6 +345,41 @@ class _HostSourceResolver:
                 result = (funcs, _absolute_import_bindings(tree, module))
         self._modules[module] = result
         return result
+
+
+class _HostSourceResolver:
+    """Detects whether a free function runs host/CPU work by reading source ASTs.
+
+    Locates each callee's defining file with ``importlib.util.find_spec`` (no module
+    execution — spec.origin + ``ast.parse`` only) and walks it for host-materialisation
+    idioms, recursing into the free functions it calls. The analysed modeling file is
+    seeded directly so its local helpers resolve without a spec lookup. General across
+    models: any helper doing host-side index building is flagged, none are hardcoded.
+
+    Spec-resolved sibling modules are parsed through a shared
+    :class:`_ParsedModuleRegistry`; ``seed``-ed trees stay private to this resolver.
+    """
+
+    def __init__(self, registry: "_ParsedModuleRegistry | None" = None) -> None:
+        self._registry = registry if registry is not None else _ParsedModuleRegistry()
+        # Seeded trees (analysed file source, which may differ from the installed
+        # module) are private, so sharing the registry changes nothing observable.
+        self._seeds: dict[str, _ParsedModule | None] = {}
+
+    def seed(self, module: str | None, tree: ast.AST) -> None:
+        if not module or not isinstance(tree, ast.Module):
+            return
+        funcs = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        self._seeds[module] = (funcs, _absolute_import_bindings(tree, module))
+
+    def _load(self, module: str) -> _ParsedModule | None:
+        if module in self._seeds:
+            return self._seeds[module]
+        return self._registry.load(module)
 
     def runs_on_host(
         self, module: str, name: str, _seen: set[tuple[str, str]] | None = None
@@ -407,6 +435,7 @@ def _annotate_host_free_functions(
     classes: dict[str, "ClassStructure"],
     tree: ast.AST,
     config: dict[str, Any] | None,
+    registry: "_ParsedModuleRegistry | None" = None,
 ) -> None:
     """Flag each traced free-function call that runs host/CPU work.
 
@@ -416,7 +445,7 @@ def _annotate_host_free_functions(
     Rope helpers (``apply_rotary_pos_emb_vision``) carry no such idiom -> stay False.
     """
     base_module = _analyzed_base_module(config)
-    resolver = _HostSourceResolver()
+    resolver = _HostSourceResolver(registry)
     resolver.seed(base_module, tree)
     cache: dict[str, bool] = {}
     for cls in classes.values():
@@ -952,7 +981,9 @@ def _free_function_call_targets(funcs: dict[str, ast.FunctionDef]) -> set[str]:
 
 
 def _imported_forward_functions(
-    tree: ast.AST, base_module: str | None
+    tree: ast.AST,
+    base_module: str | None,
+    registry: "_ParsedModuleRegistry | None" = None,
 ) -> dict[str, ast.FunctionDef]:
     """Resolve imported free functions' definitions from their defining files.
 
@@ -962,41 +993,11 @@ def _imported_forward_functions(
     Locating the source (``importlib.util.find_spec`` + ``ast.parse``, no module
     execution) lets the export inline the helper's computation like a local free
     function. General: every imported name is followed to its module, none are
-    hardcoded.
+    hardcoded. Sibling files are parsed once through the shared registry.
     """
     if not base_module or not isinstance(tree, ast.Module):
         return {}
-    # module -> ({func_name: FunctionDef}, {imported_name: "module#symbol"}) | None
-    module_cache: dict[
-        str, tuple[dict[str, ast.FunctionDef], dict[str, str]] | None
-    ] = {}
-
-    def _load(
-        module: str,
-    ) -> tuple[dict[str, ast.FunctionDef], dict[str, str]] | None:
-        if module in module_cache:
-            return module_cache[module]
-        value: tuple[dict[str, ast.FunctionDef], dict[str, str]] | None = None
-        origin: str | None = None
-        try:
-            spec = importlib.util.find_spec(module)
-            origin = spec.origin if spec is not None else None
-        except (ImportError, AttributeError, ValueError):
-            origin = None
-        if origin and Path(origin).is_file():
-            try:
-                mod_tree = ast.parse(Path(origin).read_text(encoding="utf-8"))
-            except (OSError, SyntaxError, ValueError):
-                mod_tree = None
-            if isinstance(mod_tree, ast.Module):
-                funcs = {
-                    node.name: node
-                    for node in mod_tree.body
-                    if isinstance(node, ast.FunctionDef)
-                }
-                value = (funcs, _absolute_import_bindings(mod_tree, module))
-        module_cache[module] = value
-        return value
+    reg = registry if registry is not None else _ParsedModuleRegistry()
 
     resolved: dict[str, ast.FunctionDef] = {}
     seen_modules: set[str] = set()
@@ -1005,7 +1006,7 @@ def _imported_forward_functions(
         dest, _, symbol = binding.partition("#")
         if not dest:
             return
-        loaded = _load(dest)
+        loaded = reg.load(dest)
         if loaded is None:
             return
         funcs, _ = loaded
@@ -1021,7 +1022,7 @@ def _imported_forward_functions(
         if depth <= 0 or module in seen_modules:
             return
         seen_modules.add(module)
-        loaded = _load(module)
+        loaded = reg.load(module)
         if loaded is None:
             return
         funcs, bindings = loaded
@@ -1050,7 +1051,9 @@ def _imported_forward_functions(
 
 
 def _module_forward_functions(
-    tree: ast.AST, config: dict[str, Any] | None = None
+    tree: ast.AST,
+    config: dict[str, Any] | None = None,
+    registry: "_ParsedModuleRegistry | None" = None,
 ) -> dict[str, ast.FunctionDef]:
     """Module-level ``def``s keyed by name, for expanding traced free-function calls.
 
@@ -1067,7 +1070,7 @@ def _module_forward_functions(
         if isinstance(node, ast.FunctionDef):
             functions.setdefault(node.name, node)
     for name, func in _imported_forward_functions(
-        tree, _analyzed_base_module(config)
+        tree, _analyzed_base_module(config), registry
     ).items():
         functions.setdefault(name, func)
     return functions
@@ -10322,6 +10325,9 @@ def analyze_source(
     external_imports = _collect_external_imports(tree)
     activation_param_bindings = _collect_activation_param_bindings(tree, config)
     vision_scoped = _vision_scoped_class_names(tree, config)
+    # One authoritative parsed-symbol store shared by every source resolver in this
+    # analysis, so each sibling file is read and parsed exactly once.
+    parsed_registry = _ParsedModuleRegistry()
     visitor = _ModelAstVisitor(
         config=config,
         all_tensor_ops=all_tensor_ops,
@@ -10330,11 +10336,11 @@ def analyze_source(
         vision_config=(config or {}).get("vision_config")
         if isinstance(config, dict)
         else None,
-        module_functions=_module_forward_functions(tree, config),
+        module_functions=_module_forward_functions(tree, config, parsed_registry),
     )
     visitor.visit(tree)
     finalize_class_registry(visitor.classes)
-    _annotate_host_free_functions(visitor.classes, tree, config)
+    _annotate_host_free_functions(visitor.classes, tree, config, parsed_registry)
     _enrich_kernel_import_details(visitor.classes, external_imports)
     _resolve_dispatched_attention_kernel(visitor.classes, config)
     _forward_kwargs_boundary_params(visitor.classes)
