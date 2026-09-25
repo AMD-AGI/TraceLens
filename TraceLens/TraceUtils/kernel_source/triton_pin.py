@@ -88,13 +88,22 @@ def _normalize_symbol(symbol: str) -> str:
     return core.strip("_").lower()
 
 
-def triton_def_line(py_path: str, *, func: str = "", symbol: str = "") -> int | None:
+def triton_def_line(
+    py_path: str,
+    *,
+    func: str = "",
+    symbol: str = "",
+    require_name_match: bool = False,
+) -> int | None:
     """Find a Triton kernel's ``def`` line in a ``.py`` via AST (no import).
 
     Matching precedence: (1) exact ``func`` name; (2) a ``@triton.jit`` def whose
     name matches the normalized device ``symbol`` (exact then substring); (3) the
     sole ``@triton.jit`` def in the file when unambiguous. Returns ``None`` when
     the file is unreadable/unparseable or no confident match is found.
+
+    ``require_name_match`` skips step (3). A file that happens to contain one
+    ``@triton.jit`` def must not claim an unrelated symbol.
     """
     try:
         tree = ast.parse(Path(py_path).read_text(encoding="utf-8"))
@@ -122,7 +131,7 @@ def triton_def_line(py_path: str, *, func: str = "", symbol: str = "") -> int | 
             if core in low or low in core:
                 return line
 
-    if len(jit_defs) == 1:
+    if not require_name_match and len(jit_defs) == 1:
         return next(iter(jit_defs.values()))
     return None
 
