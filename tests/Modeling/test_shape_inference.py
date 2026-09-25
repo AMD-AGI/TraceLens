@@ -233,7 +233,10 @@ def test_subgraph_warrants_export_filters_opaque_single_ops():
 
 
 def test_build_operator_export_deduplicates_same_shape_subgraphs():
-    from TraceLens.ModelUtils.shape_inference import ShapeInferencer, subgraph_boundary_signature
+    from TraceLens.ModelUtils.shape_inference import (
+        ShapeInferencer,
+        subgraph_boundary_signature,
+    )
 
     spec = load_architecture(
         FIXTURES / "custom_model",
@@ -594,23 +597,31 @@ def _make_inferencer(**dims: int) -> ShapeInferencer:
     return ShapeInferencer(spec, context=ctx)
 
 
-def _node(label: str, *, details: list[str] | None = None,
-          external_inputs: list[str] | None = None,
-          operation: OperationKind = OperationKind.TORCH_FUNCTIONAL) -> ModelGraphNode:
+def _node(
+    label: str,
+    *,
+    details: list[str] | None = None,
+    external_inputs: list[str] | None = None,
+    operation: OperationKind = OperationKind.TORCH_FUNCTIONAL,
+) -> ModelGraphNode:
     meta: dict = {"class_name": label}
     if details:
         meta["details"] = details
     if external_inputs:
         meta["external_inputs"] = external_inputs
-    return ModelGraphNode(id="n1", kind=NodeKind.LEAF, label=label,
-                          operation=operation, metadata=meta)
+    return ModelGraphNode(
+        id="n1", kind=NodeKind.LEAF, label=label, operation=operation, metadata=meta
+    )
 
 
 def test_split_shape_inference_with_split_size():
     inf = _make_inferencer(qkv_dim=2730)
     inp = TensorSpec(shape=("B", "S", 8192), dtype="float16")
-    node = _node("Split", details=["split_size: [self.qkv_dim] * 3", "dim: -1"],
-                 external_inputs=["qkv_dim"])
+    node = _node(
+        "Split",
+        details=["split_size: [self.qkv_dim] * 3", "dim: -1"],
+        external_inputs=["qkv_dim"],
+    )
     result = inf._infer_node_output(node, [inp], root=None)
     assert result.shape == ("B", "S", 2730)
 
@@ -894,11 +905,15 @@ def test_synthetic_kernel_port_passthrough_no_warning(caplog):
     inf = _make_inferencer()
     inp = TensorSpec(shape=("B", "S", 4096), dtype="float16")
     node = ModelGraphNode(
-        id="@kernel_in:1:query", kind=NodeKind.LEAF, label="query",
+        id="@kernel_in:1:query",
+        kind=NodeKind.LEAF,
+        label="query",
         operation=OperationKind.SYNTHETIC,
         metadata={"synthetic": "@kernel_port_in"},
     )
-    with caplog.at_level(logging.WARNING, logger="TraceLens.ModelUtils.shape_inference"):
+    with caplog.at_level(
+        logging.WARNING, logger="TraceLens.ModelUtils.shape_inference"
+    ):
         result = inf._infer_node_output(node, [inp], root=None)
     assert result.shape == ("B", "S", 4096)
     assert "No shape inference" not in caplog.text
@@ -932,13 +947,17 @@ def test_introspect_forward_shape_simulates_ops():
     )
 
     spec = ArchitectureSpec(
-        name="Test", model_type="test", hidden_size=4096,
+        name="Test",
+        model_type="test",
+        hidden_size=4096,
         raw_config={"hidden_size": 4096},
         class_registry={"Dummy": structure},
     )
     inf = ShapeInferencer(spec)
     node = ModelGraphNode(
-        id="test", kind=NodeKind.LEAF, label="Dummy",
+        id="test",
+        kind=NodeKind.LEAF,
+        label="Dummy",
         operation=OperationKind.NN_MODULE,
         metadata={"class_name": "Dummy"},
     )
@@ -950,6 +969,7 @@ def test_introspect_forward_shape_simulates_ops():
 
 
 # ── Meta-device shape utilities ──────────────────────────────────────────────
+
 
 def test_symbolise_meta_shape_replaces_batch_and_seq():
     shape = (1, 128, 4096)
@@ -969,7 +989,9 @@ def test_meta_shape_lookup_uses_attr_name():
     from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
 
     spec = ArchitectureSpec(
-        name="Test", model_type="test", hidden_size=4096,
+        name="Test",
+        model_type="test",
+        hidden_size=4096,
         raw_config={"hidden_size": 4096},
     )
     inf = ShapeInferencer(spec)
@@ -977,7 +999,9 @@ def test_meta_shape_lookup_uses_attr_name():
         shape=("B", "S", 512), dtype="float16"
     )
     node = ModelGraphNode(
-        id="test:q", kind=NodeKind.LEAF, label="Linear",
+        id="test:q",
+        kind=NodeKind.LEAF,
+        label="Linear",
         operation=OperationKind.NN_MODULE,
         metadata={"attr_name": "model.layers.0.self_attn.q_proj"},
     )

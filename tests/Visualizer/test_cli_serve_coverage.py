@@ -155,7 +155,9 @@ def test_file_created_at_uses_stat(tmp_path: Path):
         assert cli.file_created_at(src) == datetime(2026, 1, 2, 3, 4, 5)
 
 
-def test_cli_from_payload_renders_html_with_file_create_date(tmp_path, capsys, monkeypatch):
+def test_cli_from_payload_renders_html_with_file_create_date(
+    tmp_path, capsys, monkeypatch
+):
     import os
     import time
 
@@ -215,7 +217,9 @@ def test_cli_from_payload_serves(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(cli, "open_viewer", opened)
     monkeypatch.setattr(cli, "serve_viewer", served)
 
-    assert cli.main(["--from-payload", str(src), "--open", "--serve", "--port", "42"]) == 0
+    assert (
+        cli.main(["--from-payload", str(src), "--open", "--serve", "--port", "42"]) == 0
+    )
     opened.assert_called_once_with("url:42")
     served.assert_called_once()
     assert "Open viewer: url:42" in capsys.readouterr().out
@@ -304,9 +308,7 @@ def test_cli_uses_embedded_operator_export_and_default_output(monkeypatch, tmp_p
     monkeypatch.setattr(cli, "write_optional_output", write_output)
     monkeypatch.setattr(cli, "build_operator_export_payload", fallback)
 
-    assert (
-        cli.main(["org/model", "--operators-json", "ops.json"]) == 0
-    )
+    assert cli.main(["org/model", "--operators-json", "ops.json"]) == 0
     save_operators.assert_called_once_with({"embedded": True}, Path("ops.json"))
     fallback.assert_not_called()
     assert write_output.call_args.args[1] == tmp_path / "org_model.html"
@@ -359,10 +361,7 @@ def test_cli_serves_opens_and_handles_server_error(monkeypatch, capsys):
     monkeypatch.setattr(cli, "open_viewer", opened)
     monkeypatch.setattr(cli, "serve_viewer", served)
 
-    assert (
-        cli.main(["org/model", "--open", "--serve", "--port", "42"])
-        == 0
-    )
+    assert cli.main(["org/model", "--open", "--serve", "--port", "42"]) == 0
     opened.assert_called_once_with("url:42")
     served.assert_called_once_with(
         payload=_payload(), port=42, block=True, drop_constants=True

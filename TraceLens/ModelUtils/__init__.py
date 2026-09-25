@@ -47,6 +47,7 @@ from TraceLens.ModelUtils.shape_inference import (
     build_operator_export,
     save_operator_export,
 )
+
 __all__ = [
     "ArchitectureSpec",
     "BlockComponent",

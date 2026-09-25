@@ -20,7 +20,9 @@ from TraceLens.ModelUtils.extract import ArchitectureSpec
 
 
 def test_hf_model_id_extracts_owner_name():
-    assert hf_model_id("hf://zai-org/GLM-5.3-Flash/config.json") == "zai-org/GLM-5.3-Flash"
+    assert (
+        hf_model_id("hf://zai-org/GLM-5.3-Flash/config.json") == "zai-org/GLM-5.3-Flash"
+    )
     assert hf_model_id("hf://owner/model") == "owner/model"
     # Non-HF / malformed labels have no HF id.
     assert hf_model_id("/local/path/config.json") is None

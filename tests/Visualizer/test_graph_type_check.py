@@ -412,8 +412,14 @@ def test_output_arity_counts_distinct_consumer_ordinals():
             {"key": "details", "value": "kernel: sdpa; outputs: 1"},
         ],
     }
-    c0 = {"id": "c0", "incomingEdges": [{"sourceNodeId": "k:sdpa", "sourceNodeOutputId": "0"}]}
-    c1 = {"id": "c1", "incomingEdges": [{"sourceNodeId": "k:sdpa", "sourceNodeOutputId": "1"}]}
+    c0 = {
+        "id": "c0",
+        "incomingEdges": [{"sourceNodeId": "k:sdpa", "sourceNodeOutputId": "0"}],
+    }
+    c1 = {
+        "id": "c1",
+        "incomingEdges": [{"sourceNodeId": "k:sdpa", "sourceNodeOutputId": "1"}],
+    }
     warnings = type_check_graph_nodes([kernel, c0, c1])
     assert any("k:sdpa" in w and "phantom output slot" in w for w in warnings)
 
@@ -471,7 +477,11 @@ def test_i2_sourced_namespaced_input_is_clean():
         "attention_mask",
     )
     node["incomingEdges"] = [
-        {"sourceNodeId": "@input:attention_mask", "sourceNodeOutputId": "0", "targetNodeInputId": "0"}
+        {
+            "sourceNodeId": "@input:attention_mask",
+            "sourceNodeOutputId": "0",
+            "targetNodeInputId": "0",
+        }
     ]
     warnings = [w for w in integrity_check_graph_nodes([source, node]) if "I2" in w]
     assert warnings == []
@@ -649,7 +659,9 @@ def test_h_group_cycle_fires_on_sibling_box_2cycle():
             f"{p}/kv_norm",
             sources=[f"{p}/Compressor:out"],
         ),
-        _grp_node(f"{p}/Compressor:out", f"{p}/Compressor", sources=[f"{p}/Compressor:rotary"]),
+        _grp_node(
+            f"{p}/Compressor:out", f"{p}/Compressor", sources=[f"{p}/Compressor:rotary"]
+        ),
     ]
     warnings = group_cycle_check_graph_nodes(nodes)
     assert len(warnings) == 1
@@ -668,7 +680,9 @@ def test_h_group_cycle_clean_when_boxes_do_not_feed_each_other():
         _grp_node(
             f"{p}/Compressor:rotary", f"{p}/Compressor", sources=[f"{p}/kv_norm:cast"]
         ),
-        _grp_node(f"{p}/Compressor:out", f"{p}/Compressor", sources=[f"{p}/Compressor:rotary"]),
+        _grp_node(
+            f"{p}/Compressor:out", f"{p}/Compressor", sources=[f"{p}/Compressor:rotary"]
+        ),
     ]
     assert group_cycle_check_graph_nodes(nodes) == []
 
@@ -731,9 +745,13 @@ def _kernel_port(port_id, label):
     }
 
 
-def _sdpa_core_with_ports(core_id, port_labels, primitive="scaled_dot_product_attention"):
+def _sdpa_core_with_ports(
+    core_id, port_labels, primitive="scaled_dot_product_attention"
+):
     """An sdpa core node fed by one ``@kernel_port_in`` per label, plus those ports."""
-    ports = [_kernel_port(f"{core_id}/port:{i}", lbl) for i, lbl in enumerate(port_labels)]
+    ports = [
+        _kernel_port(f"{core_id}/port:{i}", lbl) for i, lbl in enumerate(port_labels)
+    ]
     core = {
         "id": core_id,
         "label": "sdpa",
@@ -783,7 +801,13 @@ def test_sdpa_forwarded_extra_kwarg_port_does_not_break_coverage():
     # NOT ``raw_op``, precisely so the generic over-arity ceiling never miscounts it.)
     nodes = _sdpa_core_with_ports(
         "k:sdpa",
-        ["query_states", "key_states", "value_states", "attention_mask", "block_indices"],
+        [
+            "query_states",
+            "key_states",
+            "value_states",
+            "attention_mask",
+            "block_indices",
+        ],
     )
     assert type_check_graph_nodes(nodes) == []
 

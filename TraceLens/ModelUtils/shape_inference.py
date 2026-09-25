@@ -32,7 +32,10 @@ from TraceLens.ModelUtils.ast_analyze import (
     is_forward_operation,
     operation_display_label,
 )
-from TraceLens.ModelUtils.kernel_pipeline import parse_kernel_import, _find_symbol_definition
+from TraceLens.ModelUtils.kernel_pipeline import (
+    parse_kernel_import,
+    _find_symbol_definition,
+)
 from TraceLens.ModelUtils.model_graph import (
     ModelGraph,
     ModelGraphNode,
@@ -207,9 +210,9 @@ class ShapeContext:
     # ``(kernel_size, stride, padding)`` as concrete-int tuples. Populated when the
     # module registry is built so the render-time fallback (which has no access to
     # the inferencer's ModuleConvSpec registry) can reduce spatial extents too.
-    conv_geometry: dict[str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] = (
-        field(default_factory=dict)
-    )
+    conv_geometry: dict[
+        str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]
+    ] = field(default_factory=dict)
     # Weight storage dtype for quantized checkpoints (e.g. ``fp8_e4m3``); ``None``
     # when the model is not quantized. ``not_convert`` holds the normalized
     # ``modules_to_not_convert`` patterns (kept at the compute dtype).
@@ -462,13 +465,21 @@ class ModuleDimRegistry:
             if isinstance(stmt, ast.Assign):
                 for target in stmt.targets:
                     self._record_assignment(
-                        class_name, target, stmt.value,
-                        config=config, local_vars=local_vars, context=context,
+                        class_name,
+                        target,
+                        stmt.value,
+                        config=config,
+                        local_vars=local_vars,
+                        context=context,
                     )
             elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
                 self._record_assignment(
-                    class_name, stmt.target, stmt.value,
-                    config=config, local_vars=local_vars, context=context,
+                    class_name,
+                    stmt.target,
+                    stmt.value,
+                    config=config,
+                    local_vars=local_vars,
+                    context=context,
                 )
             elif isinstance(stmt, ast.If):
                 # Evaluate the condition against config and local_vars.
@@ -477,34 +488,52 @@ class ModuleDimRegistry:
                 )
                 if branch is True:
                     self._walk_init_body(
-                        stmt.body, class_name=class_name,
-                        config=config, local_vars=local_vars, context=context,
+                        stmt.body,
+                        class_name=class_name,
+                        config=config,
+                        local_vars=local_vars,
+                        context=context,
                     )
                 elif branch is False:
                     self._walk_init_body(
-                        stmt.orelse, class_name=class_name,
-                        config=config, local_vars=local_vars, context=context,
+                        stmt.orelse,
+                        class_name=class_name,
+                        config=config,
+                        local_vars=local_vars,
+                        context=context,
                     )
                 else:
                     # Cannot evaluate condition — process both branches so
                     # we don't miss assignments.  Later branch wins.
                     self._walk_init_body(
-                        stmt.body, class_name=class_name,
-                        config=config, local_vars=local_vars, context=context,
+                        stmt.body,
+                        class_name=class_name,
+                        config=config,
+                        local_vars=local_vars,
+                        context=context,
                     )
                     self._walk_init_body(
-                        stmt.orelse, class_name=class_name,
-                        config=config, local_vars=local_vars, context=context,
+                        stmt.orelse,
+                        class_name=class_name,
+                        config=config,
+                        local_vars=local_vars,
+                        context=context,
                     )
             elif isinstance(stmt, (ast.For, ast.While, ast.With)):
                 self._walk_init_body(
-                    stmt.body, class_name=class_name,
-                    config=config, local_vars=local_vars, context=context,
+                    stmt.body,
+                    class_name=class_name,
+                    config=config,
+                    local_vars=local_vars,
+                    context=context,
                 )
             elif isinstance(stmt, ast.Try):
                 self._walk_init_body(
-                    stmt.body, class_name=class_name,
-                    config=config, local_vars=local_vars, context=context,
+                    stmt.body,
+                    class_name=class_name,
+                    config=config,
+                    local_vars=local_vars,
+                    context=context,
                 )
 
     def _record_assignment(
@@ -1030,7 +1059,8 @@ def _annotation_tensor_kind(annotation: Any) -> str:
     if text in _TENSOR_ARG_TYPES or text == "Tensor":
         return "tensor"
     if text in _TENSOR_LIST_ARG_TYPES or (
-        text.startswith(("List[", "Sequence[", "Tuple[", "Iterable[")) and "Tensor" in text
+        text.startswith(("List[", "Sequence[", "Tuple[", "Iterable["))
+        and "Tensor" in text
     ):
         return "list"
     if text.startswith("Optional[") and "Tensor" in text and "List" not in text:
@@ -1335,9 +1365,7 @@ class ShapeInferencer:
                     shape=(Symbol.VISION_PATCH.value, axis), dtype="int64"
                 )
                 self._vision_posid_seed = (
-                    TensorSpec(
-                        shape=(Symbol.VISION_PATCH.value, axis), dtype="int64"
-                    ),
+                    TensorSpec(shape=(Symbol.VISION_PATCH.value, axis), dtype="int64"),
                     start_line,
                     end_line,
                 )
@@ -1678,7 +1706,9 @@ class ShapeInferencer:
             return
         global_specs, class_specs = input_specs
         for param, (shape, dtype) in global_specs.items():
-            self._meta_input_specs.setdefault(param, TensorSpec(shape=shape, dtype=dtype))
+            self._meta_input_specs.setdefault(
+                param, TensorSpec(shape=shape, dtype=dtype)
+            )
         for (class_name, param), (shape, dtype) in class_specs.items():
             self._meta_input_specs_by_class.setdefault(
                 (class_name, param), TensorSpec(shape=shape, dtype=dtype)
@@ -1737,9 +1767,7 @@ class ShapeInferencer:
         # Globally-consistent forward-parameter input shapes (own collision-free
         # trace dims; see ``trace_meta_input_specs``). Seeds ``@input`` boundaries
         # that would otherwise take the generic activation default.
-        input_specs = trace_meta_input_specs(
-            checkpoint, config=self.spec.raw_config
-        )
+        input_specs = trace_meta_input_specs(checkpoint, config=self.spec.raw_config)
         # This eager fill supersedes the lazy ``_ensure_meta_input_specs`` trace.
         self._meta_input_specs_loaded = True
         if input_specs:
@@ -2347,8 +2375,7 @@ class ShapeInferencer:
             source = (
                 inputs[0]
                 if inputs
-                else external_spec()
-                or TensorSpec(self._active_hidden_shape(), dtype)
+                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
             )
             shape = source.shape
             if not shape:
@@ -2380,8 +2407,7 @@ class ShapeInferencer:
             source = (
                 inputs[0]
                 if inputs
-                else external_spec()
-                or TensorSpec(self._active_hidden_shape(), dtype)
+                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
             )
             shape_detail = next(
                 (
@@ -2434,8 +2460,7 @@ class ShapeInferencer:
             source = (
                 inputs[0]
                 if inputs
-                else external_spec()
-                or TensorSpec(self._active_hidden_shape(), dtype)
+                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
             )
             select_str = _detail_value(details, "select_dim")
             drop: set[int] = set()
@@ -2533,16 +2558,14 @@ class ShapeInferencer:
             return (
                 inputs[0]
                 if inputs
-                else external_spec()
-                or TensorSpec(self._active_hidden_shape(), dtype)
+                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
             )
 
         if operation_label == "tile":
             source = (
                 inputs[0]
                 if inputs
-                else external_spec()
-                or TensorSpec(self._active_hidden_shape(), dtype)
+                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
             )
             repeat_str = _detail_value(details, "repeat")
             dim_str = _detail_value(details, "dim")
@@ -2678,9 +2701,7 @@ class ShapeInferencer:
 
         if operation_label in {"transpose", "permute"}:
             source = (
-                inputs[0]
-                if inputs
-                else TensorSpec(self._active_hidden_shape(), dtype)
+                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
             )
             if operation_label == "transpose" and len(source.shape) >= 2:
                 dim0_str = _detail_value(details, "dim0")
@@ -2761,18 +2782,14 @@ class ShapeInferencer:
 
         if operation_label == "nonzero":
             source = (
-                inputs[0]
-                if inputs
-                else TensorSpec(self._active_hidden_shape(), dtype)
+                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
             )
             ndim = len(source.shape) if source.shape else 1
             return TensorSpec(shape=("nnz", ndim), dtype="int64")
 
         if operation_label == "one hot":
             source = (
-                inputs[0]
-                if inputs
-                else TensorSpec(self._active_hidden_shape(), dtype)
+                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
             )
             num_classes = self.context.dims.get(
                 Symbol.EXPERTS.value, Symbol.EXPERTS.value
@@ -2794,8 +2811,7 @@ class ShapeInferencer:
             source = (
                 inputs[0]
                 if inputs
-                else external_spec()
-                or TensorSpec(self._active_hidden_shape(), dtype)
+                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
             )
             cast_dtype = source.dtype
             if operation_label == "cast":
@@ -2813,8 +2829,7 @@ class ShapeInferencer:
             source = (
                 inputs[0]
                 if inputs
-                else external_spec()
-                or TensorSpec(self._active_hidden_shape(), dtype)
+                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
             )
             shape = source.shape
             if not shape:
@@ -2845,22 +2860,17 @@ class ShapeInferencer:
             source = (
                 inputs[0]
                 if inputs
-                else external_spec()
-                or TensorSpec(self._active_hidden_shape(), dtype)
+                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
             )
             shape_detail = _detail_value(details, "shape") or ""
-            resolved = _resolve_expand_shape(
-                shape_detail, source, self.context.dims
-            )
+            resolved = _resolve_expand_shape(shape_detail, source, self.context.dims)
             if resolved is not None:
                 return TensorSpec(shape=resolved, dtype=source.dtype)
             return source
 
         if operation_label == "topk":
             source = (
-                inputs[0]
-                if inputs
-                else TensorSpec(self._active_hidden_shape(), dtype)
+                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
             )
             top_k = self.context.dims.get(
                 Symbol.EXPERTS_PER_TOK.value, Symbol.EXPERTS_PER_TOK.value
@@ -2889,7 +2899,9 @@ class ShapeInferencer:
                 return TensorSpec(shape=tuple(idx_shape) + tail, dtype=base.dtype)
             if base is not None:
                 return base
-            return inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
+            return (
+                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
+            )
 
         if operation_label == "gather":
             has_dim = _detail_value(details, "dim") is not None
@@ -2905,9 +2917,7 @@ class ShapeInferencer:
             # single index operand with a ``dim``) and boolean-mask indexing are
             # left on the path below, so every real ``torch.gather`` is unchanged.
             if not has_dim and base is not None and len(int_indices) >= 2:
-                idx_shape = _broadcast_shapes(
-                    [item.shape for item in int_indices]
-                )
+                idx_shape = _broadcast_shapes([item.shape for item in int_indices])
                 tail = tuple(base.shape[len(int_indices) :])
                 return TensorSpec(shape=tuple(idx_shape) + tail, dtype=base.dtype)
             source = base if base is not None else (inputs[0] if inputs else None)
@@ -2928,9 +2938,7 @@ class ShapeInferencer:
 
         if operation_label in _REDUCTION_LABELS:
             source = (
-                inputs[0]
-                if inputs
-                else TensorSpec(self._active_hidden_shape(), dtype)
+                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
             )
             index_reduction = operation_label in {"argmax", "argmin"}
             reduced_dim = _detail_value(details, "dim")
@@ -3043,9 +3051,7 @@ class ShapeInferencer:
         conv_spec = self._lookup_conv_spec(node, root=root)
         if conv_spec is not None or _is_conv(node):
             source = (
-                inputs[0]
-                if inputs
-                else TensorSpec(self._active_hidden_shape(), dtype)
+                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
             )
             out_channels = (
                 conv_spec.out_channels
@@ -3096,24 +3102,18 @@ class ShapeInferencer:
             "KernelOutput",
             "AttentionMerge",
         }:
-            introspected = self._introspect_forward_shape(
-                node, inputs, root=root
-            )
+            introspected = self._introspect_forward_shape(node, inputs, root=root)
             if introspected is not None:
                 return introspected
             return self._activation_spec(dtype)
 
         if _is_router(block_class, node):
             experts = self.context.dims.get(Symbol.EXPERTS.value, Symbol.EXPERTS.value)
-            in_shape = (
-                inputs[0].shape if inputs else self._active_hidden_shape()
-            )
+            in_shape = inputs[0].shape if inputs else self._active_hidden_shape()
             return TensorSpec(shape=_replace_last_dim(in_shape, experts), dtype=dtype)
 
         if node.operation == OperationKind.TORCH_FUNCTIONAL:
-            introspected = self._introspect_forward_shape(
-                node, inputs, root=root
-            )
+            introspected = self._introspect_forward_shape(node, inputs, root=root)
             if introspected is not None:
                 return introspected
             fx_spec = self._fx_op_shape(node, inputs)
@@ -3141,9 +3141,7 @@ class ShapeInferencer:
                 return inputs[0]
             return self._activation_spec(dtype)
 
-        introspected = self._introspect_forward_shape(
-            node, inputs, root=root
-        )
+        introspected = self._introspect_forward_shape(node, inputs, root=root)
         if introspected is not None:
             return introspected
 
@@ -3326,9 +3324,7 @@ class ShapeInferencer:
                 counter[key] = occ + 1
                 self._op_line_occ[node_id] = occ
 
-    def _op_line_key(
-        self, node: ModelGraphNode
-    ) -> tuple[int, str, int] | None:
+    def _op_line_key(self, node: ModelGraphNode) -> tuple[int, str, int] | None:
         match = _LAST_OP_ID_RE.match(node.id)
         if match is None:
             return None
@@ -3374,9 +3370,7 @@ class ShapeInferencer:
         dtype = inputs[0].dtype if inputs else self.context.dtype
         return TensorSpec(tuple(shape), dtype)
 
-    def _lookup_meta_shape(
-        self, node: ModelGraphNode
-    ) -> TensorSpec | None:
+    def _lookup_meta_shape(self, node: ModelGraphNode) -> TensorSpec | None:
         """Return meta-traced shape if available for this node's module."""
         if not self._meta_shapes:
             return None
@@ -3389,9 +3383,7 @@ class ShapeInferencer:
                 return self._meta_shapes[part]
         return None
 
-    def _lookup_meta_module_shape(
-        self, node: ModelGraphNode
-    ) -> TensorSpec | None:
+    def _lookup_meta_module_shape(self, node: ModelGraphNode) -> TensorSpec | None:
         """Last-resort shape for a submodule whose ``forward`` no symbolic rule or
         AST simulation could resolve, taken from the real module's meta-traced
         output.
@@ -3408,7 +3400,9 @@ class ShapeInferencer:
         """
         if not self._meta_shapes:
             return None
-        attr = (_node_attr_name(node) or node.id.rsplit("/", 1)[-1].rsplit(":", 1)[-1]).strip()
+        attr = (
+            _node_attr_name(node) or node.id.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+        ).strip()
         if not attr:
             return None
         matches = [
@@ -3488,18 +3482,14 @@ class ShapeInferencer:
         # Try introspecting inline function definitions in parent classes'
         # __init__ (e.g. ``self.activation_func = swiglu`` where swiglu is
         # defined as a nested function).
-        inline_result = self._introspect_inline_function(
-            class_name, inputs, root=root
-        )
+        inline_result = self._introspect_inline_function(class_name, inputs, root=root)
         if inline_result is not None:
             return inline_result
 
         # class_name may be a method name (e.g. "get_pooled_states") rather
         # than a class.  Search the registry for a class that owns this method
         # and parse the method body for shape-bearing operations.
-        method_result = self._introspect_method_shape(
-            class_name, inputs, root=root
-        )
+        method_result = self._introspect_method_shape(class_name, inputs, root=root)
         if method_result is not None:
             return method_result
 
@@ -3507,9 +3497,7 @@ class ShapeInferencer:
         details = [str(d) for d in node.metadata.get("details", [])]
         kernel_import = parse_kernel_import(details)
         if kernel_import is not None:
-            return self._introspect_kernel_source(
-                kernel_import, inputs, root=root
-            )
+            return self._introspect_kernel_source(kernel_import, inputs, root=root)
         return None
 
     def _fuzzy_registry_lookup(self, name: str):
@@ -3549,24 +3537,19 @@ class ShapeInferencer:
             _ForwardOperationExtractor,
             _extract_forward_return_metadata,
         )
+
         guard = f"inline:{attr_name}"
         if guard in self._introspecting:
             return None
 
         for _cls_name, structure in self.spec.class_registry.items():
-            func_node = self._find_init_inline_function(
-                structure.node, attr_name
-            )
+            func_node = self._find_init_inline_function(structure.node, attr_name)
             if func_node is None:
                 continue
             # Parse the inline function body using the same approach as
             # _introspect_method_shape.
             try:
-                input_name = (
-                    func_node.args.args[0].arg
-                    if func_node.args.args
-                    else "x"
-                )
+                input_name = func_node.args.args[0].arg if func_node.args.args else "x"
                 extractor = _ForwardOperationExtractor(
                     self_values=structure.init_assignments,
                     all_tensor_ops=True,
@@ -3644,6 +3627,7 @@ class ShapeInferencer:
             _ForwardOperationExtractor,
             _extract_forward_return_metadata,
         )
+
         guard = f"method:{method_name}"
         if guard in self._introspecting:
             return None
@@ -3702,8 +3686,8 @@ class ShapeInferencer:
         self._introspecting.add(guard_name)
         try:
             dtype = self.context.dtype
-            input_spec = inputs[0] if inputs else TensorSpec(
-                self._active_hidden_shape(), dtype
+            input_spec = (
+                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
             )
             op_shapes: dict[str, TensorSpec] = {}
             input_name = structure.forward_input_name
@@ -4037,7 +4021,7 @@ def _resolve_dim_name(name: str, dims: dict[str, DimExpr]) -> DimExpr | None:
     bare = name
     for prefix in ("self.config.", "config.", "self."):
         if bare.startswith(prefix):
-            bare = bare[len(prefix):]
+            bare = bare[len(prefix) :]
             break
     if bare != name:
         val = dims.get(bare)
@@ -4192,7 +4176,7 @@ def _arange_axis(details: Sequence[str], dims: dict[str, DimExpr]) -> DimExpr:
         bare = token
         for prefix in ("self.config.", "config.", "self."):
             if bare.startswith(prefix):
-                bare = bare[len(prefix):]
+                bare = bare[len(prefix) :]
                 break
         return bare
 
@@ -4359,9 +4343,8 @@ def _looks_valid(result: TensorSpec, inputs: list[TensorSpec]) -> bool:
         isinstance(d, str) and "B" in str(d) for d in result.shape
     )
     input_has_batch = any(
-        Symbol.BATCH.value in inp.shape or any(
-            isinstance(d, str) and "B" in str(d) for d in inp.shape
-        )
+        Symbol.BATCH.value in inp.shape
+        or any(isinstance(d, str) and "B" in str(d) for d in inp.shape)
         for inp in inputs
     )
     if input_has_batch and not has_batch:
@@ -4503,9 +4486,7 @@ def _split_top_level_commas(text: str) -> list[str]:
     return parts
 
 
-def _parse_split_sizes(
-    text: str, dims: dict[str, DimExpr]
-) -> list[DimExpr] | None:
+def _parse_split_sizes(text: str, dims: dict[str, DimExpr]) -> list[DimExpr] | None:
     """Resolve a split_size_or_sections detail to concrete sizes.
 
     Handles ``[qkv_dim] * 3``, ``2048``, and — critically — a list of arbitrary
@@ -4648,7 +4629,9 @@ def _collect_init_scalar_attrs(
                     if branch is not True:
                         _walk(stmt.orelse)
                     continue
-                elif isinstance(stmt, (_pyast.For, _pyast.While, _pyast.With, _pyast.Try)):
+                elif isinstance(
+                    stmt, (_pyast.For, _pyast.While, _pyast.With, _pyast.Try)
+                ):
                     _walk(stmt.body)
                     continue
                 for target, value in targets:
@@ -4948,7 +4931,9 @@ def _call_class_name(node: ast.Call) -> str | None:
     return None
 
 
-def _function_ast_locals(func: ast.FunctionDef) -> dict[str, tuple[ast.AST, int | None]]:
+def _function_ast_locals(
+    func: ast.FunctionDef,
+) -> dict[str, tuple[ast.AST, int | None]]:
     """Map local names to ``(value_expr, tuple_index)`` for a function's assignments.
 
     ``a = expr`` -> ``a: (expr, None)``; ``a, b = expr`` -> ``a: (expr, 0)``,
@@ -4987,7 +4972,10 @@ def _resolved_scalar_locals(
             for target in stmt.targets:
                 if isinstance(target, ast.Name):
                     resolved = _resolve_dim_expr(
-                        stmt.value, config=config, local_vars=local_vars, context=context
+                        stmt.value,
+                        config=config,
+                        local_vars=local_vars,
+                        context=context,
                     )
                     if resolved is not None:
                         local_vars[target.id] = resolved
@@ -5070,9 +5058,14 @@ def _resolve_buffer_length(
         value, tuple_index = bound
         next_index = index if index is not None else tuple_index
         return _resolve_buffer_length(
-            value, class_node=class_node, config=config, context=context,
-            ast_locals=ast_locals, dim_locals=dim_locals,
-            index=next_index, depth=depth + 1,
+            value,
+            class_node=class_node,
+            config=config,
+            context=context,
+            ast_locals=ast_locals,
+            dim_locals=dim_locals,
+            index=next_index,
+            depth=depth + 1,
         )
     if isinstance(node, ast.Call):
         func = node.func
@@ -5087,7 +5080,11 @@ def _resolve_buffer_length(
             method_name = func.attr
         elif isinstance(func, ast.Name):
             alias = ast_locals.get(func.id)
-            if alias is not None and isinstance(alias[0], ast.Attribute) and _is_self_attr(alias[0]):
+            if (
+                alias is not None
+                and isinstance(alias[0], ast.Attribute)
+                and _is_self_attr(alias[0])
+            ):
                 method_name = alias[0].attr
         if method_name is not None:
             method = _find_method(class_node, method_name)
@@ -5098,32 +5095,60 @@ def _resolve_buffer_length(
                 return None
             target = returned
             selector = index
-            if isinstance(returned, ast.Tuple) and index is not None and index < len(returned.elts):
+            if (
+                isinstance(returned, ast.Tuple)
+                and index is not None
+                and index < len(returned.elts)
+            ):
                 target = returned.elts[index]
                 selector = None
             return _resolve_buffer_length(
-                target, class_node=class_node, config=config, context=context,
+                target,
+                class_node=class_node,
+                config=config,
+                context=context,
                 ast_locals=_function_ast_locals(method),
-                dim_locals=_resolved_scalar_locals(method, config=config, context=context),
-                index=selector, depth=depth + 1,
+                dim_locals=_resolved_scalar_locals(
+                    method, config=config, context=context
+                ),
+                index=selector,
+                depth=depth + 1,
             )
         if fname == "Buffer" and node.args:
             return _resolve_buffer_length(
-                node.args[0], class_node=class_node, config=config, context=context,
-                ast_locals=ast_locals, dim_locals=dim_locals, index=None, depth=depth + 1,
+                node.args[0],
+                class_node=class_node,
+                config=config,
+                context=context,
+                ast_locals=ast_locals,
+                dim_locals=dim_locals,
+                index=None,
+                depth=depth + 1,
             )
         # Length-preserving tensor method, e.g. `inv_freq.to(device)` / `.float()`.
         if isinstance(func, ast.Attribute):
             return _resolve_buffer_length(
-                func.value, class_node=class_node, config=config, context=context,
-                ast_locals=ast_locals, dim_locals=dim_locals, index=index, depth=depth + 1,
+                func.value,
+                class_node=class_node,
+                config=config,
+                context=context,
+                ast_locals=ast_locals,
+                dim_locals=dim_locals,
+                index=index,
+                depth=depth + 1,
             )
         return None
     if isinstance(node, (ast.BinOp, ast.UnaryOp)):
         for child in ast.iter_child_nodes(node):
             length = _resolve_buffer_length(
-                child, class_node=class_node, config=config, context=context,
-                ast_locals=ast_locals, dim_locals=dim_locals, index=None, depth=depth + 1,
+                child,
+                class_node=class_node,
+                config=config,
+                context=context,
+                ast_locals=ast_locals,
+                dim_locals=dim_locals,
+                index=None,
+                depth=depth + 1,
             )
             if length is not None:
                 return length
@@ -5173,9 +5198,7 @@ def _eval_config_condition(
         and isinstance(test.comparators[0], ast.Constant)
         and test.comparators[0].value is None
     ):
-        return _eval_config_condition(
-            test.left, config=config, local_vars=local_vars
-        )
+        return _eval_config_condition(test.left, config=config, local_vars=local_vars)
     return None
 
 
@@ -5354,8 +5377,10 @@ def _detail_value(details: Sequence[str], key: str) -> str | None:
 
 def _ast_const_int(node: ast.AST) -> int | None:
     """The non-negative int a constant subscript index carries (``freq[:, 1]``)."""
-    if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(
-        node.value, bool
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, int)
+        and not isinstance(node.value, bool)
     ):
         return node.value if node.value >= 0 else None
     return None
@@ -5523,7 +5548,9 @@ def _parse_module_ctor(
     config: dict[str, Any],
     local_vars: dict[str, DimExpr],
     context: ShapeContext,
-) -> ModuleLinearSpec | ModuleConvSpec | ModuleEmbeddingSpec | ModuleParameterSpec | None:
+) -> (
+    ModuleLinearSpec | ModuleConvSpec | ModuleEmbeddingSpec | ModuleParameterSpec | None
+):
     if isinstance(node, ast.IfExp):
         # Conditional module assignment, e.g.
         # ``self.q_a_proj = nn.Linear(...) if q_lora_rank is not None else nn.Identity()``.

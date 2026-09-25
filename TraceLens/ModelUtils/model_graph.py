@@ -20,7 +20,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
-from TraceLens.ModelUtils.basic_ops import BasicOpFilter, introspect_is_modeling_operation
+from TraceLens.ModelUtils.basic_ops import (
+    BasicOpFilter,
+    introspect_is_modeling_operation,
+)
 from TraceLens.ModelUtils.ast_analyze import (
     is_forward_operation,
     is_function_synthetic,
@@ -70,7 +73,17 @@ _REDUCED_OPERATION_KINDS = frozenset(
 )
 
 _SYNTHETIC_KEYS = frozenset(
-    {"@input", "@output", "@loop_carried", "@hidden_states", "@tensor", "@combine", "@kernel_port", "@kernel_port_in", "@kernel_port_out"}
+    {
+        "@input",
+        "@output",
+        "@loop_carried",
+        "@hidden_states",
+        "@tensor",
+        "@combine",
+        "@kernel_port",
+        "@kernel_port_in",
+        "@kernel_port_out",
+    }
 )
 _COMBINE_LABELS = frozenset({"×", "+", "Elementwise ×", "Multiply", "Add"})
 _KERNEL_CLASS_NAMES = frozenset(

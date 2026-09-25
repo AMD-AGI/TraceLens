@@ -252,7 +252,10 @@ def forward_operation_count(
 ) -> int:
     """Return forward ops represented by a block tree's computation graph."""
     from TraceLens.ModelUtils.basic_ops import BasicOpFilter as _BasicOpFilter
-    from TraceLens.ModelUtils.computation_graph import SYNTHETIC_INPUT, build_computation_graph
+    from TraceLens.ModelUtils.computation_graph import (
+        SYNTHETIC_INPUT,
+        build_computation_graph,
+    )
 
     resolved = basic_ops or _BasicOpFilter.for_detailed()
     graph = build_computation_graph(node, basic_ops=resolved)
@@ -780,7 +783,9 @@ class BlockNode:
     # producer (``torch.cat((q_pass, q_rot), dim=-1)``) reads two, so the value is
     # an ordered tuple rather than a single int. Both empty for ordinary ops.
     output_names: list[str] = field(default_factory=list)
-    operation_predecessor_ports: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    operation_predecessor_ports: dict[str, tuple[int, ...]] = field(
+        default_factory=dict
+    )
     kernel_second_operand: str | None = None
     external_inputs: list[str] = field(default_factory=list)
     param_inputs: list[str] = field(default_factory=list)
@@ -798,9 +803,7 @@ class BlockNode:
     referenced_return_producers: set[str] = field(default_factory=set)
     loop_carried: list[LoopCarriedSpec] = field(default_factory=list)
     multi_return_module: bool = False
-    forward_step_predecessors: dict[str, tuple[str, ...]] = field(
-        default_factory=dict
-    )
+    forward_step_predecessors: dict[str, tuple[str, ...]] = field(default_factory=dict)
     forward_step_predecessor_args: dict[str, dict[str, str]] = field(
         default_factory=dict
     )
@@ -811,9 +814,7 @@ class BlockNode:
     # internal producer attrs (ordinal -> producer), so a consumer reading a
     # specific return slot docks onto the matching internal op, not the frame's
     # last op. Empty for single-return helpers.
-    forward_step_return_producers: dict[str, list[str]] = field(
-        default_factory=dict
-    )
+    forward_step_return_producers: dict[str, list[str]] = field(default_factory=dict)
     # Submodule call attr -> secondary forward params it reads directly as bare
     # boundary args (``q = self.wq_b(q_resid)`` -> ``{'wq_b': ('q_resid',)}``).
     # A secondary param handed straight to a plain submodule has no internal
@@ -1311,7 +1312,8 @@ def _expanded_free_function_node(
                     operation_predecessors=operation_predecessors,
                     output_names=list(operation.output_names),
                     operation_predecessor_ports=_predecessor_ports_dict(
-                        tuple(operation.predecessor_ports) + tuple(extra_predecessor_ports)
+                        tuple(operation.predecessor_ports)
+                        + tuple(extra_predecessor_ports)
                     ),
                     external_inputs=list(operation.external_inputs),
                     param_inputs=translated,
@@ -2716,9 +2718,7 @@ def build_block_node(
                 # norm (which the guard in section 1b would then skip, leaving
                 # the producer dangling and stripped).
                 boundary_inputs = [
-                    port
-                    for port, chain in cls.attention_inputs.items()
-                    if not chain
+                    port for port, chain in cls.attention_inputs.items() if not chain
                 ]
                 child_nodes.append(
                     _leaf_node(
@@ -2751,7 +2751,9 @@ def build_block_node(
                     basic=True,
                     operation_predecessors=list(operation.predecessors),
                     output_names=list(operation.output_names),
-                    operation_predecessor_ports=_predecessor_ports_dict(operation.predecessor_ports),
+                    operation_predecessor_ports=_predecessor_ports_dict(
+                        operation.predecessor_ports
+                    ),
                     external_inputs=list(operation.external_inputs),
                     param_inputs=list(operation.param_inputs),
                     boundary_input_name=_boundary_input_name(operation, cls),
@@ -2894,7 +2896,9 @@ def build_block_node(
                     cls.multi_op_method_step_predecessor_args.get(base_attr, {})
                 )
 
-                def _method_op_leaf(operation: ForwardOperation, position: int) -> BlockNode:
+                def _method_op_leaf(
+                    operation: ForwardOperation, position: int
+                ) -> BlockNode:
                     return _leaf_node(
                         attr_name=operation.attr_name,
                         class_name=operation.class_name,
@@ -2988,7 +2992,9 @@ def build_block_node(
                         primary_output_step=m_primary_output_step,
                         multi_return_module=len(m_return_order) >= 2,
                         forward_step_predecessors=dict(method_step_predecessors),
-                        forward_step_predecessor_args=dict(method_step_predecessor_args),
+                        forward_step_predecessor_args=dict(
+                            method_step_predecessor_args
+                        ),
                         children=method_children,
                     )
                 )
@@ -3006,7 +3012,9 @@ def build_block_node(
                         basic=True,
                         operation_predecessors=list(single_op.predecessors),
                         output_names=list(single_op.output_names),
-                        operation_predecessor_ports=_predecessor_ports_dict(single_op.predecessor_ports),
+                        operation_predecessor_ports=_predecessor_ports_dict(
+                            single_op.predecessor_ports
+                        ),
                         external_inputs=list(single_op.external_inputs),
                         param_inputs=list(single_op.param_inputs),
                     )
@@ -3105,9 +3113,7 @@ def build_block_node(
         multi_return_module=len(cls.forward_return_order) >= 2,
         forward_step_predecessors=dict(cls.forward_step_predecessors),
         forward_step_predecessor_args=dict(cls.forward_step_predecessor_args),
-        forward_step_predecessor_ordinals=dict(
-            cls.forward_step_predecessor_ordinals
-        ),
+        forward_step_predecessor_ordinals=dict(cls.forward_step_predecessor_ordinals),
         forward_step_return_producers=dict(cls.forward_step_return_producers),
         forward_step_boundary_params=dict(cls.forward_step_boundary_params),
     )

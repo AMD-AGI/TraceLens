@@ -102,9 +102,7 @@ def _graph_without_constants(graph: dict[str, Any]) -> dict[str, Any]:
     are pruned so an empty group frame is not drawn. The input is not mutated.
     """
     dropped_ids = {
-        node.get("id")
-        for node in graph.get("nodes", [])
-        if _node_is_constant(node)
+        node.get("id") for node in graph.get("nodes", []) if _node_is_constant(node)
     }
     if not dropped_ids:
         return graph

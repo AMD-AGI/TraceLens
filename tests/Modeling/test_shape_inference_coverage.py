@@ -82,7 +82,6 @@ from TraceLens.ModelUtils.shape_inference import (
     _run_meta_op,
 )
 
-
 # ---------------------------------------------------------------------------
 # Local helpers (mirrors the patterns in test_shape_inference.py)
 # ---------------------------------------------------------------------------
@@ -174,7 +173,10 @@ def test_walk_init_body_evaluates_conditionals_loops_and_try():
     config = {"hidden_size": 8, "flag_true": 1, "flag_false": 0}
     analysis = analyze_source(INIT_BRANCH_SRC, config=config)
     spec = ArchitectureSpec(
-        name="m", model_type="t", hidden_size=8, raw_config=config,
+        name="m",
+        model_type="t",
+        hidden_size=8,
+        raw_config=config,
         class_registry=analysis.class_registry,
     )
     ctx = ShapeContext.from_spec(spec)
@@ -209,7 +211,10 @@ def test_walk_init_body_self_attr_not_and_isnotnone_conditions():
     config = {"hidden_size": 8, "zero_flag": 0, "maybe": 5}
     analysis = analyze_source(INIT_COND_SRC, config=config)
     spec = ArchitectureSpec(
-        name="n", model_type="t", hidden_size=8, raw_config=config,
+        name="n",
+        model_type="t",
+        hidden_size=8,
+        raw_config=config,
         class_registry=analysis.class_registry,
     )
     ctx = ShapeContext.from_spec(spec)
@@ -309,7 +314,10 @@ def test_run_meta_op_generic_split_chunk_unbind_unflatten():
     t = _meta((2, 137, 8))
     # split via real detail keys (pure-Python op, inspect signature).
     out = _run_meta_op(
-        torch, torch.split, "split", [t],
+        torch,
+        torch.split,
+        "split",
+        [t],
         _op_scalar_detail_args(["split_size: 4", "dim: 2"], {}),
     )
     assert _first_tensor_shape(out) == (2, 137, 4)
@@ -317,19 +325,28 @@ def test_run_meta_op_generic_split_chunk_unbind_unflatten():
     # the recorded count uses the ``split_size`` key yet still binds to the
     # ``chunks`` parameter positionally (name mismatch handled generically).
     out = _run_meta_op(
-        torch, torch.chunk, "chunk", [t],
+        torch,
+        torch.chunk,
+        "chunk",
+        [t],
         _op_scalar_detail_args(["split_size: 2", "dim: 2"], {}),
     )
     assert _first_tensor_shape(out) == (2, 137, 4)
     # unbind returns a tuple; first element's shape is read.
     out = _run_meta_op(
-        torch, torch.unbind, "unbind", [_meta((2, 137))],
+        torch,
+        torch.unbind,
+        "unbind",
+        [_meta((2, 137))],
         _op_scalar_detail_args(["dim: 0"], {}),
     )
     assert _first_tensor_shape(out) == (137,)
     # unflatten with a sizes list, including an unresolved -1 placeholder.
     out = _run_meta_op(
-        torch, torch.unflatten, "unflatten", [t],
+        torch,
+        torch.unflatten,
+        "unflatten",
+        [t],
         _op_scalar_detail_args(["dim: 2", "sizes: (unknownname, 4)"], {}),
     )
     assert _first_tensor_shape(out) == (2, 137, 2, 4)
@@ -357,7 +374,10 @@ def test_run_meta_op_returns_none_on_unbindable_or_failing_op():
     # sizes that don't divide the axis -> torch.unflatten raises -> None.
     assert (
         _run_meta_op(
-            torch, torch.unflatten, "unflatten", [t],
+            torch,
+            torch.unflatten,
+            "unflatten",
+            [t],
             _op_scalar_detail_args(["dim: 2", "sizes: (3, 3)"], {}),
         )
         is None
@@ -387,9 +407,7 @@ def test_torch_op_shape_returns_none_when_dim_unresolved():
 def test_torch_op_shape_no_inputs_or_unknown_builder():
     inf = _make_inferencer()
     assert inf._torch_op_shape(_node("Split"), []) is None
-    assert (
-        inf._torch_op_shape(_node("NotAnOp"), [TensorSpec(("B", "S", 8))]) is None
-    )
+    assert inf._torch_op_shape(_node("NotAnOp"), [TensorSpec(("B", "S", 8))]) is None
 
 
 def test_concrete_dim_and_shape_helpers():
@@ -411,7 +429,9 @@ def test_concrete_dim_and_shape_helpers():
 def test_meta_shape_takes_priority():
     inf = _make_inferencer()
     inf._meta_shapes["q_proj"] = TensorSpec(("B", "S", 512), "float16")
-    node = _node("Linear", operation=OperationKind.NN_MODULE, meta={"attr_name": "q_proj"})
+    node = _node(
+        "Linear", operation=OperationKind.NN_MODULE, meta={"attr_name": "q_proj"}
+    )
     out = inf._infer_node_output(node, [TensorSpec(("B", "S", 4096))], root=None)
     assert out.shape == ("B", "S", 512)
 
@@ -465,7 +485,9 @@ def test_stack_honours_negative_dim_detail():
 
 def test_matmul_single_and_no_inputs():
     inf = _make_inferencer(hidden_size=64)
-    single = inf._infer_node_output(_node("MatMul"), [TensorSpec(("B", "S", 8))], root=None)
+    single = inf._infer_node_output(
+        _node("MatMul"), [TensorSpec(("B", "S", 8))], root=None
+    )
     assert single.shape == ("B", "S", 8)
     empty = inf._infer_node_output(_node("MatMul"), [], root=None)
     assert empty.shape == ("B", "S", 64)
@@ -478,7 +500,9 @@ def test_einsum_fallbacks():
     out = inf._infer_node_output(node, [TensorSpec(("B", "S", 8))], root=None)
     assert out.shape == ("B", "S", 8)
     # No inputs -> default hidden.
-    empty = inf._infer_node_output(_node("Einsum", details=["equation: ij,jk->ik"]), [], root=None)
+    empty = inf._infer_node_output(
+        _node("Einsum", details=["equation: ij,jk->ik"]), [], root=None
+    )
     assert empty.shape == ("B", "S", 32)
 
 
@@ -534,7 +558,9 @@ def test_norm_without_inputs():
 
 def test_gpu_kernel_falls_back_to_hidden_when_no_introspection():
     inf = _make_inferencer(hidden_size=64)
-    node = _node("flash_attn", operation=OperationKind.GPU_KERNEL, class_name="KernelOp")
+    node = _node(
+        "flash_attn", operation=OperationKind.GPU_KERNEL, class_name="KernelOp"
+    )
     out = inf._infer_node_output(node, [], root=None)
     assert out.shape == ("B", "S", 64)
 
@@ -542,7 +568,9 @@ def test_gpu_kernel_falls_back_to_hidden_when_no_introspection():
 def test_torch_functional_unknown_warns_and_passes_through(caplog):
     inf = _make_inferencer(hidden_size=64)
     node = _node("frobnicate", operation=OperationKind.TORCH_FUNCTIONAL)
-    with caplog.at_level(logging.WARNING, logger="TraceLens.ModelUtils.shape_inference"):
+    with caplog.at_level(
+        logging.WARNING, logger="TraceLens.ModelUtils.shape_inference"
+    ):
         out = inf._infer_node_output(node, [TensorSpec(("B", "S", 8))], root=None)
     assert out.shape == ("B", "S", 8)
     assert "No shape inference rule" in caplog.text
@@ -595,7 +623,9 @@ def test_unknown_op_with_inputs_passes_through(caplog):
         kind=NodeKind.LEAF,
         meta={"attr_name": "mystery"},
     )
-    with caplog.at_level(logging.WARNING, logger="TraceLens.ModelUtils.shape_inference"):
+    with caplog.at_level(
+        logging.WARNING, logger="TraceLens.ModelUtils.shape_inference"
+    ):
         out = inf._infer_node_output(node, [TensorSpec(("B", "S", 5))], root=None)
     assert out.shape == ("B", "S", 5)
 
@@ -660,8 +690,13 @@ def test_lookup_meta_shape_empty_returns_none():
 
 def test_introspect_forward_shape_no_class_name_returns_none():
     inf = _make_inferencer()
-    node = ModelGraphNode(id="n1", kind=NodeKind.LEAF, label="", operation=None, metadata={})
-    assert inf._introspect_forward_shape(node, [TensorSpec(("B", "S", 8))], root=None) is None
+    node = ModelGraphNode(
+        id="n1", kind=NodeKind.LEAF, label="", operation=None, metadata={}
+    )
+    assert (
+        inf._introspect_forward_shape(node, [TensorSpec(("B", "S", 8))], root=None)
+        is None
+    )
 
 
 FUZZY_SRC = """
@@ -691,7 +726,10 @@ class SwiGlu(nn.Module):
 def _fuzzy_inferencer() -> ShapeInferencer:
     analysis = analyze_source(FUZZY_SRC, config={"hidden_size": 8})
     spec = ArchitectureSpec(
-        name="f", model_type="t", hidden_size=8, raw_config={"hidden_size": 8},
+        name="f",
+        model_type="t",
+        hidden_size=8,
+        raw_config={"hidden_size": 8},
         class_registry=analysis.class_registry,
     )
     return ShapeInferencer(spec)
@@ -699,7 +737,9 @@ def _fuzzy_inferencer() -> ShapeInferencer:
 
 def test_fuzzy_attention_lookup_returns_bsh():
     inf = _fuzzy_inferencer()
-    node = _node("core_attention", operation=OperationKind.NN_MODULE, class_name="core_attention")
+    node = _node(
+        "core_attention", operation=OperationKind.NN_MODULE, class_name="core_attention"
+    )
     out = inf._introspect_forward_shape(node, [TensorSpec(("B", "S", 4))], root=None)
     assert out is not None
     assert out.shape == ("B", "S", 8)
@@ -738,7 +778,10 @@ class MLP(nn.Module):
 def test_introspect_inline_function():
     analysis = analyze_source(INLINE_SRC, config={"hidden_size": 8})
     spec = ArchitectureSpec(
-        name="i", model_type="t", hidden_size=8, raw_config={"hidden_size": 8},
+        name="i",
+        model_type="t",
+        hidden_size=8,
+        raw_config={"hidden_size": 8},
         class_registry=analysis.class_registry,
     )
     inf = ShapeInferencer(spec)
@@ -768,11 +811,16 @@ class Pooler(nn.Module):
 def test_introspect_method_shape():
     analysis = analyze_source(METHOD_SRC, config={"hidden_size": 8})
     spec = ArchitectureSpec(
-        name="p", model_type="t", hidden_size=8, raw_config={"hidden_size": 8},
+        name="p",
+        model_type="t",
+        hidden_size=8,
+        raw_config={"hidden_size": 8},
         class_registry=analysis.class_registry,
     )
     inf = ShapeInferencer(spec)
-    out = inf._introspect_method_shape("get_pooled", [TensorSpec(("B", "S", 8))], root=None)
+    out = inf._introspect_method_shape(
+        "get_pooled", [TensorSpec(("B", "S", 8))], root=None
+    )
     assert out is not None
     assert out.shape[-1] == 8
 
@@ -780,13 +828,21 @@ def test_introspect_method_shape():
 def test_simulate_forward_ops_no_operations_returns_none():
     analysis = analyze_source(FUZZY_SRC, config={"hidden_size": 8})
     spec = ArchitectureSpec(
-        name="f", model_type="t", hidden_size=8, raw_config={"hidden_size": 8},
+        name="f",
+        model_type="t",
+        hidden_size=8,
+        raw_config={"hidden_size": 8},
         class_registry=analysis.class_registry,
     )
     inf = ShapeInferencer(spec)
     core = analysis.class_registry["CoreAttention"]
     # CoreAttention.forward just returns x -> no shape-bearing operations.
-    assert inf._simulate_forward_ops(core, [TensorSpec(("B", "S", 8))], root=None, guard_name="g") is None
+    assert (
+        inf._simulate_forward_ops(
+            core, [TensorSpec(("B", "S", 8))], root=None, guard_name="g"
+        )
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -867,7 +923,9 @@ def test_infer_einsum_shape_failure_paths():
     assert _infer_einsum_shape("ij,jk->ik", [a]) is None  # arity mismatch
     assert _infer_einsum_shape("ij->i", [a]) is None  # sub len != shape rank
     assert _infer_einsum_shape("ij->ik", [TensorSpec((4, 5))]) is None  # k unknown
-    assert _infer_einsum_shape("ij,jk->ik", [TensorSpec((4, 5)), TensorSpec((5, 6))]) == (4, 6)
+    assert _infer_einsum_shape(
+        "ij,jk->ik", [TensorSpec((4, 5)), TensorSpec((5, 6))]
+    ) == (4, 6)
 
 
 def test_config_dtype():
@@ -885,13 +943,18 @@ def test_call_class_name():
 
 
 def _ctx() -> ShapeContext:
-    return ShapeContext.from_spec(ArchitectureSpec(name="t", model_type="t", raw_config={}))
+    return ShapeContext.from_spec(
+        ArchitectureSpec(name="t", model_type="t", raw_config={})
+    )
 
 
 def test_resolve_dim_expr_binops_and_symbolic():
     ctx = _ctx()
     sub = _ast.parse("config.hidden_size - 2", mode="eval").body
-    assert _resolve_dim_expr(sub, config={"hidden_size": 8}, local_vars={}, context=ctx) == 6
+    assert (
+        _resolve_dim_expr(sub, config={"hidden_size": 8}, local_vars={}, context=ctx)
+        == 6
+    )
     unresolved = _ast.parse("unknown_name - 2", mode="eval").body
     assert _resolve_dim_expr(unresolved, config={}, local_vars={}, context=ctx) is None
     # Symbolic: B is a string dim, so the binop renders as algebra.
@@ -921,7 +984,9 @@ def test_parse_module_ctor_parameter():
 
 def test_parse_tensor_ctor_shape_unresolved_returns_none():
     call = _ast.parse("torch.empty(unknown_name)").body[0].value
-    assert _parse_tensor_ctor_shape(call, config={}, local_vars={}, context=_ctx()) is None
+    assert (
+        _parse_tensor_ctor_shape(call, config={}, local_vars={}, context=_ctx()) is None
+    )
 
 
 def test_output_tensor_name_synthetic_input():
@@ -941,29 +1006,45 @@ def test_operator_name_synthetic_and_elementwise():
 
 
 def test_export_operation_kind_none():
-    node = ModelGraphNode(id="n", kind=NodeKind.LEAF, label="x", operation=None, metadata={})
+    node = ModelGraphNode(
+        id="n", kind=NodeKind.LEAF, label="x", operation=None, metadata={}
+    )
     assert _export_operation_kind(node) == "unknown"
 
 
 def test_low_level_computation_variants():
     gpu = ModelGraphNode(
-        id="n", kind=NodeKind.LEAF, label="flash", operation=OperationKind.GPU_KERNEL, metadata={}
+        id="n",
+        kind=NodeKind.LEAF,
+        label="flash",
+        operation=OperationKind.GPU_KERNEL,
+        metadata={},
     )
     assert _low_level_computation(gpu) == "flash"
     inp = ModelGraphNode(
-        id="n", kind=NodeKind.LEAF, label="x", operation=OperationKind.SYNTHETIC,
+        id="n",
+        kind=NodeKind.LEAF,
+        label="x",
+        operation=OperationKind.SYNTHETIC,
         metadata={"synthetic": "@input"},
     )
     assert _low_level_computation(inp) == "input"
-    add = ModelGraphNode(id="n", kind=NodeKind.LEAF, label="+", operation=None, metadata={})
+    add = ModelGraphNode(
+        id="n", kind=NodeKind.LEAF, label="+", operation=None, metadata={}
+    )
     assert _low_level_computation(add) == "elementwise_add"
-    mul = ModelGraphNode(id="n", kind=NodeKind.LEAF, label="×", operation=None, metadata={})
+    mul = ModelGraphNode(
+        id="n", kind=NodeKind.LEAF, label="×", operation=None, metadata={}
+    )
     assert _low_level_computation(mul) == "elementwise_mul"
 
 
 def test_is_embedding_by_role():
     node = ModelGraphNode(
-        id="n", kind=NodeKind.LEAF, label="", operation=OperationKind.NN_MODULE,
+        id="n",
+        kind=NodeKind.LEAF,
+        label="",
+        operation=OperationKind.NN_MODULE,
         metadata={"role": "embedding"},
     )
     assert _is_embedding("", node) is True
@@ -1138,7 +1219,9 @@ def test_kimi_gate_export_integration():
         "moe_renormalize": True,
         "routed_scaling_factor": 1.0,
     }
-    analysis = analyze_source((FIXTURES / "kimi_moe_gate.py").read_text(), config=config)
+    analysis = analyze_source(
+        (FIXTURES / "kimi_moe_gate.py").read_text(), config=config
+    )
     basic = BasicOpFilter.for_detailed()
     gate = build_block_node(
         attr_name="gate",
@@ -1176,7 +1259,9 @@ def test_subgraph_boundary_signature_variants():
     assert subgraph_boundary_signature([inp]) is None
 
     # With an input op present.
-    comp = OperatorRecord("proj", "Linear", "nn_module", ["input"], TensorSpec(("B", "S", 16)))
+    comp = OperatorRecord(
+        "proj", "Linear", "nn_module", ["input"], TensorSpec(("B", "S", 16))
+    )
     sig = subgraph_boundary_signature([inp, comp], class_name="Block")
     assert sig is not None and sig[0] == "Block"
 
@@ -1191,7 +1276,9 @@ def test_subgraph_boundary_signature_variants():
 
 
 def test_model_output_operator_none_without_vocab():
-    spec = ArchitectureSpec(name="t", model_type="t", hidden_size=8, raw_config={"hidden_size": 8})
+    spec = ArchitectureSpec(
+        name="t", model_type="t", hidden_size=8, raw_config={"hidden_size": 8}
+    )
     inf = ShapeInferencer(spec)
     assert inf.model_output_operator() is None
 
@@ -1217,7 +1304,11 @@ def test_load_meta_shapes_returns_false_when_unavailable():
 
 
 def test_parse_module_ctor_conv_keyword_channels():
-    call = _ast.parse("nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3)").body[0].value
+    call = (
+        _ast.parse("nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3)")
+        .body[0]
+        .value
+    )
     spec = _parse_module_ctor(call, config={}, local_vars={}, context=_ctx())
     assert isinstance(spec, ModuleConvSpec)
     assert spec.in_channels == 3
@@ -1249,29 +1340,42 @@ def _synth(label, synthetic, *, port_label=None, class_name=None, node_id="n1"):
     if class_name is not None:
         meta["class_name"] = class_name
     return ModelGraphNode(
-        id=node_id, kind=NodeKind.LEAF, label=label,
-        operation=OperationKind.SYNTHETIC, metadata=meta,
+        id=node_id,
+        kind=NodeKind.LEAF,
+        label=label,
+        operation=OperationKind.SYNTHETIC,
+        metadata=meta,
     )
 
 
 def test_tensor_synthetic_weight_bias_scalar_and_parameter():
     inf = _make_inferencer(hidden_size=32)
     inf.context.dims[Symbol.EXPERTS.value] = 8
-    w = inf._infer_node_output(_synth("w", "@tensor", port_label="expert_weight"), [], root=None)
+    w = inf._infer_node_output(
+        _synth("w", "@tensor", port_label="expert_weight"), [], root=None
+    )
     # Unquantized fixture: weight storage dtype resolves to the model dtype.
     assert w.shape == (8, 32) and w.dtype == "float16"
-    b = inf._infer_node_output(_synth("b", "@tensor", port_label="gate_bias"), [], root=None)
+    b = inf._infer_node_output(
+        _synth("b", "@tensor", port_label="gate_bias"), [], root=None
+    )
     assert b.shape == (8,)
-    s = inf._infer_node_output(_synth("s", "@tensor", port_label="scalar"), [], root=None)
+    s = inf._infer_node_output(
+        _synth("s", "@tensor", port_label="scalar"), [], root=None
+    )
     assert s.shape == ()
     inf.module_dims.parameter_by_attr["myp"] = ModuleParameterSpec((3, 4))
-    p = inf._infer_node_output(_synth("myp", "@tensor", port_label="myp"), [], root=None)
+    p = inf._infer_node_output(
+        _synth("myp", "@tensor", port_label="myp"), [], root=None
+    )
     assert p.shape == (3, 4)
 
 
 def test_elementwise_and_catchall_synthetic():
     inf = _make_inferencer(hidden_size=64)
-    add = inf._infer_node_output(_node("+", operation=OperationKind.SYNTHETIC), [], root=None)
+    add = inf._infer_node_output(
+        _node("+", operation=OperationKind.SYNTHETIC), [], root=None
+    )
     assert add.shape == ("B", "S", 64)
     # catch-all synthetic with inputs passes through inputs[0].
     node = _synth("x", "@kernel_port_in")
@@ -1300,7 +1404,9 @@ def test_view_resolved_flatten_and_fallback():
     r = inf._infer_node_output(_node("view", details=["shape: 4, 8"]), [src], root=None)
     assert r.shape == (4, 8)
     # -1 marker -> collapse leading dims.
-    m = inf._infer_node_output(_node("reshape", details=["shape: -1, unknownname"]), [src], root=None)
+    m = inf._infer_node_output(
+        _node("reshape", details=["shape: -1, unknownname"]), [src], root=None
+    )
     assert m.shape == ("B*S", 16)
     # Bare flatten (no captured start/end span) passes through rather than
     # guessing a full collapse from missing extraction info.
@@ -1315,7 +1421,9 @@ def test_view_resolved_flatten_and_fallback():
 
 def test_unsqueeze_adds_leading_axis():
     inf = _make_inferencer()
-    out = inf._infer_node_output(_node("unsqueeze"), [TensorSpec(("B", "S"))], root=None)
+    out = inf._infer_node_output(
+        _node("unsqueeze"), [TensorSpec(("B", "S"))], root=None
+    )
     assert out.shape == (1, "B", "S")
 
 
@@ -1327,7 +1435,9 @@ def test_split_with_explicit_size_and_external_fallback():
     )
     assert sized.shape == ("B", "S", 2048)
     ext = inf._infer_node_output(
-        _node("split", details=["dim: -1"], external_inputs=["qkv_dim"]), [src], root=None
+        _node("split", details=["dim: -1"], external_inputs=["qkv_dim"]),
+        [src],
+        root=None,
     )
     assert ext.shape == ("B", "S", 2730)
 
@@ -1336,22 +1446,30 @@ def test_concat_with_inputs_and_symbolic_fallback():
     inf = _make_inferencer()
     a = TensorSpec(("B", "S", 1024), "float16")
     b = TensorSpec(("B", "S", 2048), "float16")
-    out = inf._infer_node_output(_node("concat", details=["dim: -1"]), [a, b], root=None)
+    out = inf._infer_node_output(
+        _node("concat", details=["dim: -1"]), [a, b], root=None
+    )
     assert out.shape == ("B", "S", 3072)
     # Symbolic last dims -> sum the concatenated axis symbolically.
     c = TensorSpec(("B", "S", "H"), "float16")
     d = TensorSpec(("B", "S", "H"), "float16")
-    out2 = inf._infer_node_output(_node("concat", details=["dim: -1"]), [c, d], root=None)
+    out2 = inf._infer_node_output(
+        _node("concat", details=["dim: -1"]), [c, d], root=None
+    )
     assert out2.shape == ("B", "S", "H + H")
 
 
 def test_transpose_and_permute():
     inf = _make_inferencer()
     src = TensorSpec(("B", "S", 32, 128), "float16")
-    t = inf._infer_node_output(_node("transpose", details=["dim0: 1", "dim1: 2"]), [src], root=None)
+    t = inf._infer_node_output(
+        _node("transpose", details=["dim0: 1", "dim1: 2"]), [src], root=None
+    )
     assert t.shape == ("B", 32, "S", 128)
     # With captured dims, permute reorders the source axes.
-    p = inf._infer_node_output(_node("permute", details=["dims: 0, 2, 1, 3"]), [src], root=None)
+    p = inf._infer_node_output(
+        _node("permute", details=["dims: 0, 2, 1, 3"]), [src], root=None
+    )
     assert p.shape == ("B", 32, "S", 128)
 
 
@@ -1359,7 +1477,9 @@ def test_permute_negative_dims_reorders():
     inf = _make_inferencer()
     src = TensorSpec(("B", "S", 32, 128), "float16")
     # Negative axes normalize against the source rank.
-    p = inf._infer_node_output(_node("permute", details=["dims: 0, -1, 1, 2"]), [src], root=None)
+    p = inf._infer_node_output(
+        _node("permute", details=["dims: 0, -1, 1, 2"]), [src], root=None
+    )
     assert p.shape == ("B", 128, "S", 32)
 
 
@@ -1367,7 +1487,9 @@ def test_permute_bad_dims_falls_back_without_corrupting_rank():
     inf = _make_inferencer()
     src = TensorSpec(("B", "S", 32, 128), "float16")
     # Wrong axis count -> not a genuine permutation -> pass through unchanged.
-    short = inf._infer_node_output(_node("permute", details=["dims: 0, 2, 1"]), [src], root=None)
+    short = inf._infer_node_output(
+        _node("permute", details=["dims: 0, 2, 1"]), [src], root=None
+    )
     assert short.shape == ("B", "S", 32, 128)
     # Unparseable/parenthesized dims also fall back safely.
     parens = inf._infer_node_output(
@@ -1375,7 +1497,9 @@ def test_permute_bad_dims_falls_back_without_corrupting_rank():
     )
     assert parens.shape == ("B", "S", 32, 128)
     # A non-permutation (repeated axis) is rejected rather than duplicating dims.
-    dup = inf._infer_node_output(_node("permute", details=["dims: 0, 0, 1, 2"]), [src], root=None)
+    dup = inf._infer_node_output(
+        _node("permute", details=["dims: 0, 0, 1, 2"]), [src], root=None
+    )
     assert dup.shape == ("B", "S", 32, 128)
 
 
@@ -1391,14 +1515,18 @@ def test_einsum_success_via_node():
     inf = _make_inferencer()
     a = TensorSpec((4, 5), "float16")
     b = TensorSpec((5, 6), "float16")
-    out = inf._infer_node_output(_node("einsum", details=["equation: ij,jk->ik"]), [a, b], root=None)
+    out = inf._infer_node_output(
+        _node("einsum", details=["equation: ij,jk->ik"]), [a, b], root=None
+    )
     assert out.shape == (4, 6)
 
 
 def test_nonzero_and_one_hot():
     inf = _make_inferencer()
     inf.context.dims[Symbol.EXPERTS.value] = 8
-    nz = inf._infer_node_output(_node("nonzero"), [TensorSpec(("B", "S", 4))], root=None)
+    nz = inf._infer_node_output(
+        _node("nonzero"), [TensorSpec(("B", "S", 4))], root=None
+    )
     assert nz.shape == ("nnz", 3) and nz.dtype == "int64"
     nz_empty = inf._infer_node_output(_node("nonzero"), [], root=None)
     assert nz_empty.shape[0] == "nnz"
@@ -1408,14 +1536,18 @@ def test_nonzero_and_one_hot():
 
 def test_causal_conv1d_passthrough():
     inf = _make_inferencer()
-    out = inf._infer_node_output(_node("causal conv1d"), [TensorSpec(("B", "S", 16))], root=None)
+    out = inf._infer_node_output(
+        _node("causal conv1d"), [TensorSpec(("B", "S", 16))], root=None
+    )
     assert out.shape == ("B", "S", 16)
 
 
 def test_cast_contiguous_squeeze_expand():
     inf = _make_inferencer()
     src = TensorSpec(("B", "S", 16), "float16")
-    casted = inf._infer_node_output(_node("cast", details=["dtype: float32"]), [src], root=None)
+    casted = inf._infer_node_output(
+        _node("cast", details=["dtype: float32"]), [src], root=None
+    )
     assert casted.dtype == "float32"
     squeezed = inf._infer_node_output(_node("squeeze"), [src], root=None)
     assert squeezed.shape == ("B", "S", 16)
@@ -1435,11 +1567,15 @@ def test_squeeze_drops_named_and_negative_size_one_axis():
     assert pos.shape == ("B", "S", 1)
 
     # Negative dim -1 == axis 3 (size 1) -> dropped.
-    neg = inf._infer_node_output(_node("squeeze", details=["dim: -1"]), [src], root=None)
+    neg = inf._infer_node_output(
+        _node("squeeze", details=["dim: -1"]), [src], root=None
+    )
     assert neg.shape == ("B", 1, "S")
 
     # Negative dim pointing at a non-1 axis is a torch no-op (passthrough).
-    noop = inf._infer_node_output(_node("squeeze", details=["dim: -2"]), [src], root=None)
+    noop = inf._infer_node_output(
+        _node("squeeze", details=["dim: -2"]), [src], root=None
+    )
     assert noop.shape == ("B", 1, "S", 1)
 
     # Bare squeeze drops every size-1 axis.
@@ -1479,7 +1615,9 @@ def test_conv_reduces_concrete_spatial_with_kernel_stride():
         stride=(2, 2),
         padding=(0, 0),
     )
-    node = _node("Conv2d", operation=OperationKind.NN_MODULE, meta={"attr_name": "downsample"})
+    node = _node(
+        "Conv2d", operation=OperationKind.NN_MODULE, meta={"attr_name": "downsample"}
+    )
     out = inf._infer_node_output(node, [TensorSpec(("B*S/4", 4096, 2, 2))], root=None)
     assert out.shape == ("B*S/4", 4096, 1, 1)
 
@@ -1567,7 +1705,9 @@ def test_resolve_int_tuple_rejects_symbolic_elements():
 def test_router_module_output():
     inf = _make_inferencer()
     inf.context.dims[Symbol.EXPERTS.value] = 8
-    node = _node("TopKRouter", operation=OperationKind.NN_MODULE, class_name="TopKRouter")
+    node = _node(
+        "TopKRouter", operation=OperationKind.NN_MODULE, class_name="TopKRouter"
+    )
     out = inf._infer_node_output(node, [TensorSpec(("B", "S", 16))], root=None)
     assert out.shape == ("B", "S", 8)
 
@@ -1597,12 +1737,18 @@ def test_infer_block_tree():
     analysis = analyze_source(HYPERCONNECTION_SOURCE, config=config)
     basic = BasicOpFilter.for_detailed()
     block = build_block_node(
-        attr_name="hc", class_name="HyperConnection",
-        registry=analysis.class_registry, basic_ops=basic,
+        attr_name="hc",
+        class_name="HyperConnection",
+        registry=analysis.class_registry,
+        basic_ops=basic,
     )
     spec = ArchitectureSpec(
-        name="hc", model_type="test", hidden_size=4096, raw_config=config,
-        class_registry=analysis.class_registry, basic_ops=basic,
+        name="hc",
+        model_type="test",
+        hidden_size=4096,
+        raw_config=config,
+        class_registry=analysis.class_registry,
+        basic_ops=basic,
         export_block_trees=[("HyperConnection", block)],
     )
     specs = ShapeInferencer(spec).infer_block_tree(block, title="HyperConnection")
@@ -1636,7 +1782,10 @@ def test_shape_context_folds_forward_local_scalars_and_nested_aliases():
     }
     analysis = analyze_source(FORWARD_LOCAL_SRC, config=config)
     spec = ArchitectureSpec(
-        name="a", model_type="t", hidden_size=4096, raw_config=config,
+        name="a",
+        model_type="t",
+        hidden_size=4096,
+        raw_config=config,
         class_registry=analysis.class_registry,
     )
     ctx = ShapeContext.from_spec(spec)
@@ -1673,11 +1822,16 @@ def test_registry_records_conv_locals_and_ambiguous_parameters():
     config = {"hidden_size": 8}
     analysis = analyze_source(REGISTRY_SRC, config=config)
     spec = ArchitectureSpec(
-        name="r", model_type="t", hidden_size=8, raw_config=config,
+        name="r",
+        model_type="t",
+        hidden_size=8,
+        raw_config=config,
         class_registry=analysis.class_registry,
     )
     ctx = ShapeContext.from_spec(spec)
-    reg = ModuleDimRegistry.from_registry(analysis.class_registry, config=config, context=ctx)
+    reg = ModuleDimRegistry.from_registry(
+        analysis.class_registry, config=config, context=ctx
+    )
     assert reg.conv_by_attr["cv"].out_channels == 16
     # 'weight' declared with differing shapes across classes -> ambiguous.
     assert "weight" in reg.ambiguous_parameters
@@ -1709,9 +1863,7 @@ def test_bind_meta_op_args_returns_none_when_required_scalar_absent():
     # ``split_size_or_sections`` is required but only ``dim`` was recorded; its
     # value must not be stolen for the size slot -> unbindable -> None.
     params = [("tensor", False), ("split_size_or_sections", False), ("dim", True)]
-    assert (
-        _bind_meta_op_args(params, False, [_meta((2, 137, 8))], [("dim", 2)]) is None
-    )
+    assert _bind_meta_op_args(params, False, [_meta((2, 137, 8))], [("dim", 2)]) is None
 
 
 def test_resolve_view_shape_starred_with_slice_and_unresolved():
@@ -1754,12 +1906,20 @@ def test_resolve_dim_expr_subscript_int_and_symbolic_paren():
     # config.sub["head_dim"] nested subscript.
     sub = _ast.parse('config.linear_attn_config["head_dim"]', mode="eval").body
     val = _resolve_dim_expr(
-        sub, config={"linear_attn_config": {"head_dim": 128}}, local_vars={}, context=ctx
+        sub,
+        config={"linear_attn_config": {"head_dim": 128}},
+        local_vars={},
+        context=ctx,
     )
     assert val == 128
     # int(config.hidden_size) call wrapper.
     intcall = _ast.parse("int(config.hidden_size)", mode="eval").body
-    assert _resolve_dim_expr(intcall, config={"hidden_size": 8}, local_vars={}, context=ctx) == 8
+    assert (
+        _resolve_dim_expr(
+            intcall, config={"hidden_size": 8}, local_vars={}, context=ctx
+        )
+        == 8
+    )
     # Symbolic algebra requiring parenthesisation.
     paren = _ast.parse("(B + 1) * 2", mode="eval").body
     assert _resolve_dim_expr(paren, config={}, local_vars={}, context=ctx) == "(B+1)*2"
@@ -1785,7 +1945,10 @@ def test_unflatten_skips_empty_size_entries():
     t = _meta((2, 137, 8))
     # A trailing comma in the recorded sizes list is tolerated.
     out = _run_meta_op(
-        torch, torch.unflatten, "unflatten", [t],
+        torch,
+        torch.unflatten,
+        "unflatten",
+        [t],
         _op_scalar_detail_args(["dim: 2", "sizes: (2, 4,)"], {}),
     )
     assert _first_tensor_shape(out) == (2, 137, 2, 4)
@@ -1822,8 +1985,12 @@ def test_fx_op_shape_returns_prebuilt_shape():
 def test_introspect_direct_registry_class_and_id_parts():
     inf = _fuzzy_inferencer()
     # Exact class name in registry -> simulate its forward.
-    node = _node("SwiGlu", operation=OperationKind.NN_MODULE, class_name="SwiGlu",
-                 node_id="a:b:SwiGlu")
+    node = _node(
+        "SwiGlu",
+        operation=OperationKind.NN_MODULE,
+        class_name="SwiGlu",
+        node_id="a:b:SwiGlu",
+    )
     out = inf._introspect_forward_shape(node, [TensorSpec(("B", "S", 8))], root=None)
     assert out is not None
     assert out.shape[-1] == 4
@@ -1848,16 +2015,30 @@ class Passthrough(nn.Module):
 def test_introspect_method_without_operations_returns_none():
     analysis = analyze_source(METHOD_NOOP_SRC, config={"hidden_size": 8})
     spec = ArchitectureSpec(
-        name="p", model_type="t", hidden_size=8, raw_config={"hidden_size": 8},
+        name="p",
+        model_type="t",
+        hidden_size=8,
+        raw_config={"hidden_size": 8},
         class_registry=analysis.class_registry,
     )
     inf = ShapeInferencer(spec)
-    assert inf._introspect_method_shape("get_x", [TensorSpec(("B", "S", 8))], root=None) is None
+    assert (
+        inf._introspect_method_shape("get_x", [TensorSpec(("B", "S", 8))], root=None)
+        is None
+    )
 
 
 def test_owner_class_name_from_node_id_path():
-    child = BlockNode(attr_name="gate", class_name="Router", role="other", label="Router")
-    root = BlockNode(attr_name="blk", class_name="Block", role="other", label="Block", children=[child])
+    child = BlockNode(
+        attr_name="gate", class_name="Router", role="other", label="Router"
+    )
+    root = BlockNode(
+        attr_name="blk",
+        class_name="Block",
+        role="other",
+        label="Block",
+        children=[child],
+    )
     inf = _make_inferencer()
     node = _node("linear", node_id="blk:0:gate:@op_l1_c1_linear:0")
     assert inf._owner_class_name(node, root) == "Router"
@@ -1878,14 +2059,22 @@ def test_eval_config_condition_self_attr_absent():
 def test_resolve_dim_expr_name_in_locals_and_add():
     ctx = _ctx()
     name = _ast.parse("local_dim", mode="eval").body
-    assert _resolve_dim_expr(name, config={}, local_vars={"local_dim": 12}, context=ctx) == 12
+    assert (
+        _resolve_dim_expr(name, config={}, local_vars={"local_dim": 12}, context=ctx)
+        == 12
+    )
     add = _ast.parse("config.hidden_size + 2", mode="eval").body
-    assert _resolve_dim_expr(add, config={"hidden_size": 8}, local_vars={}, context=ctx) == 10
+    assert (
+        _resolve_dim_expr(add, config={"hidden_size": 8}, local_vars={}, context=ctx)
+        == 10
+    )
 
 
 def test_operator_name_forward_op_display_label():
     node = ModelGraphNode(
-        id="n", kind=NodeKind.LEAF, label="View",
+        id="n",
+        kind=NodeKind.LEAF,
+        label="View",
         operation=OperationKind.TORCH_FUNCTIONAL,
         metadata={"attr_name": "@op_l1_c1_view", "class_name": "View"},
     )
@@ -1894,12 +2083,20 @@ def test_operator_name_forward_op_display_label():
 
 
 def test_low_level_computation_fallback_label():
-    node = ModelGraphNode(id="n", kind=NodeKind.LEAF, label="Custom", operation=None, metadata={})
+    node = ModelGraphNode(
+        id="n", kind=NodeKind.LEAF, label="Custom", operation=None, metadata={}
+    )
     assert _low_level_computation(node) == "Custom"
 
 
 def test_is_embedding_by_name_and_label():
-    node = ModelGraphNode(id="n", kind=NodeKind.LEAF, label="Embedding", operation=OperationKind.NN_MODULE, metadata={})
+    node = ModelGraphNode(
+        id="n",
+        kind=NodeKind.LEAF,
+        label="Embedding",
+        operation=OperationKind.NN_MODULE,
+        metadata={},
+    )
     assert _is_embedding("Embedding", node) is True
 
 
@@ -1913,7 +2110,11 @@ def test_torch_op_shape_builder_returns_none_when_size_missing():
 def test_torch_op_shape_returns_none_on_builder_exception():
     inf = _make_inferencer()
     # sizes (3, 3) = 9 don't divide the size-8 axis -> torch.unflatten raises.
-    node = _node("Unflatten", details=["dim: 2", "sizes: (3, 3)"], operation=OperationKind.NN_MODULE)
+    node = _node(
+        "Unflatten",
+        details=["dim: 2", "sizes: (3, 3)"],
+        operation=OperationKind.NN_MODULE,
+    )
     inp = TensorSpec(("B", "S", 8), "float16")
     assert inf._torch_op_shape(node, [inp]) is None
 
@@ -1953,12 +2154,18 @@ def test_infer_model_graph_merges_subgraph_specs_without_clobbering():
 
     top_input = _synth("x", "@input", node_id="top_in")
     sub_a = ModelGraphNode(
-        id="sub_a", kind=NodeKind.SUBGRAPH, label="A",
-        operation=None, metadata={"subgraph_key": "A"},
+        id="sub_a",
+        kind=NodeKind.SUBGRAPH,
+        label="A",
+        operation=None,
+        metadata={"subgraph_key": "A"},
     )
     sub_b = ModelGraphNode(
-        id="sub_b", kind=NodeKind.SUBGRAPH, label="B",
-        operation=None, metadata={"subgraph_key": "B"},
+        id="sub_b",
+        kind=NodeKind.SUBGRAPH,
+        label="B",
+        operation=None,
+        metadata={"subgraph_key": "B"},
     )
     graph = ModelGraph(
         title="top",
@@ -2034,9 +2241,7 @@ def test_normalize_module_patterns_strips_prefix_and_indices():
 
 
 def test_module_path_segments_and_matches():
-    segs = _module_path_segments(
-        "decoder/45x_Layer/self_attn/seq:0:q_proj:q_proj:0"
-    )
+    segs = _module_path_segments("decoder/45x_Layer/self_attn/seq:0:q_proj:q_proj:0")
     assert segs == ["decoder", "self_attn", "q_proj"]
     assert _module_path_matches(segs, ("self_attn", "q_proj"))
     assert not _module_path_matches(segs, ("mlp", "gate"))
@@ -2065,8 +2270,7 @@ def test_weight_dtype_fp8_experts_vs_bf16_not_convert():
     # MoE routed + shared experts stay quantized.
     assert ctx.weight_dtype("d/L/mlp/sidefeed:1:experts:@op_bmm:2") == "fp8_e4m3"
     assert (
-        ctx.weight_dtype("d/L/mlp/sidefeed:3:shared_experts:down_proj:6")
-        == "fp8_e4m3"
+        ctx.weight_dtype("d/L/mlp/sidefeed:3:shared_experts:down_proj:6") == "fp8_e4m3"
     )
     # Everything in modules_to_not_convert keeps the compute dtype.
     assert ctx.weight_dtype("d/L/self_attn/seq:0:q_proj:q_proj:0") == "bfloat16"

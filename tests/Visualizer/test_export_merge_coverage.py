@@ -14,7 +14,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from TraceLens.Visualizer.model_explorer_export import labels, merge, overview, shapes, styles
+from TraceLens.Visualizer.model_explorer_export import (
+    labels,
+    merge,
+    overview,
+    shapes,
+    styles,
+)
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.block_tree import BlockNode
 from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant
@@ -879,13 +885,19 @@ def test_fill_repeated_loop_counts_from_repeat_namespace():
 
     nodes = [
         # ModuleList loop (no static range bound) inside a 24× repeat group.
-        _lc("visual/@loop_carried_in:l1:hidden_states",
-            "visual/24x_Glm5NextVisionBlock", "hidden_states · repeated"),
+        _lc(
+            "visual/@loop_carried_in:l1:hidden_states",
+            "visual/24x_Glm5NextVisionBlock",
+            "hidden_states · repeated",
+        ),
         # Nearest (deepest) repeat segment wins when nested.
         _lc("d/@loop_carried_in:l2:h", "45x_Decoder/2x_Inner", "h · repeated"),
         # Already-counted inner loop is left untouched.
-        _lc("d/@loop_carried_in:l3:comb", "45x_Decoder/Loop_19_iterations",
-            "comb · 19 iterations"),
+        _lc(
+            "d/@loop_carried_in:l3:comb",
+            "45x_Decoder/Loop_19_iterations",
+            "comb · 19 iterations",
+        ),
         # A loop-carried boundary with no enclosing repeat group stays "repeated".
         _lc("x/@loop_carried_in:l4:y", "x", "y · repeated"),
     ]
@@ -907,8 +919,13 @@ def _synthetic_input(node_id, namespace, source, *, label="hidden_states"):
         "label": label,
         "namespace": namespace,
         "attrs": [{"key": "synthetic", "value": "@input"}],
-        "incomingEdges": [{"sourceNodeId": source, "sourceNodeOutputId": "0",
-                           "targetNodeInputId": "0"}],
+        "incomingEdges": [
+            {
+                "sourceNodeId": source,
+                "sourceNodeOutputId": "0",
+                "targetNodeInputId": "0",
+            }
+        ],
     }
 
 
@@ -918,28 +935,45 @@ def _synthetic_output(node_id, namespace, source):
         "label": "Output",
         "namespace": namespace,
         "attrs": [{"key": "synthetic", "value": "@output"}],
-        "incomingEdges": [{"sourceNodeId": source, "sourceNodeOutputId": "result",
-                           "targetNodeInputId": "0"}],
+        "incomingEdges": [
+            {
+                "sourceNodeId": source,
+                "sourceNodeOutputId": "result",
+                "targetNodeInputId": "0",
+            }
+        ],
     }
 
 
 def _plain(node_id, namespace, sources, *, shape=None):
-    node = {"id": node_id, "namespace": namespace, "attrs": [],
-            "incomingEdges": [{"sourceNodeId": s, "sourceNodeOutputId": "0",
-                               "targetNodeInputId": str(i)} for i, s in enumerate(sources)]}
+    node = {
+        "id": node_id,
+        "namespace": namespace,
+        "attrs": [],
+        "incomingEdges": [
+            {"sourceNodeId": s, "sourceNodeOutputId": "0", "targetNodeInputId": str(i)}
+            for i, s in enumerate(sources)
+        ],
+    }
     if shape is not None:
         node["attrs"].append({"key": "output_shape", "value": shape})
     return node
 
 
 def _lc_in_edges(node):
-    return [(e["sourceNodeId"], e.get("metadata", {}).get("port_label"))
-            for e in node["incomingEdges"]]
+    return [
+        (e["sourceNodeId"], e.get("metadata", {}).get("port_label"))
+        for e in node["incomingEdges"]
+    ]
 
 
 def _consumers(nodes, node_id):
-    return [n["id"] for n in nodes for e in n.get("incomingEdges", [])
-            if e["sourceNodeId"] == node_id]
+    return [
+        n["id"]
+        for n in nodes
+        for e in n.get("incomingEdges", [])
+        if e["sourceNodeId"] == node_id
+    ]
 
 
 def test_synthesize_loop_boundary_suppressed_for_heterogeneous_container():
@@ -969,15 +1003,16 @@ def test_synthesize_loop_boundary_suppressed_for_heterogeneous_container():
     # No loop-carried tiles are synthesized for the heterogeneous container.
     assert "dec/@loop_carried_in:dec:hidden_states" not in by_id
     assert "dec/@loop_carried_out:dec:hidden_states" not in by_id
-    assert not any(
-        merge._node_attr(n, "synthetic") == "@loop_carried" for n in nodes)
+    assert not any(merge._node_attr(n, "synthetic") == "@loop_carried" for n in nodes)
 
     # Direct wiring is preserved: both variant @inputs still read the raw source,
     # and the post-container head still reads the variant @outputs directly.
     assert _lc_in_edges(by_id["dec/3x_A/@input"]) == [("src", None)]
     assert _lc_in_edges(by_id["dec/2x_B/@input"]) == [("src", None)]
     assert [e["sourceNodeId"] for e in by_id["head"]["incomingEdges"]] == [
-        "dec/3x_A/@output", "dec/2x_B/@output"]
+        "dec/3x_A/@output",
+        "dec/2x_B/@output",
+    ]
 
 
 def test_synthesize_loop_boundary_wraps_single_template_container():
@@ -993,7 +1028,10 @@ def test_synthesize_loop_boundary_wraps_single_template_container():
     in_id = "dec/@loop_carried_in:dec:hidden_states"
     out_id = "dec/@loop_carried_out:dec:hidden_states"
 
-    assert set(_lc_in_edges(by_id[in_id])) == {("src", None), (out_id, "next iteration")}
+    assert set(_lc_in_edges(by_id[in_id])) == {
+        ("src", None),
+        (out_id, "next iteration"),
+    }
     assert _consumers(nodes, in_id) == ["dec/@input"]
     assert set(_lc_in_edges(by_id[out_id])) == {("dec/@output", "updated")}
     assert sorted(_consumers(nodes, out_id)) == [in_id, "sink"]
@@ -1025,9 +1063,13 @@ def test_synthesize_loop_boundary_suppressed_for_externally_collapsed_stream():
                 {"key": "synthetic", "value": "@output"},
                 {"key": "output_shape", "value": "[B, S, 4, 4096] bfloat16"},
             ],
-            "incomingEdges": [{"sourceNodeId": "dec/@input",
-                               "sourceNodeOutputId": "result",
-                               "targetNodeInputId": "0"}],
+            "incomingEdges": [
+                {
+                    "sourceNodeId": "dec/@input",
+                    "sourceNodeOutputId": "result",
+                    "targetNodeInputId": "0",
+                }
+            ],
         },
         # external post-loop head that collapses the rank-4 stream to rank-3
         _plain("hc_head", "", ["dec/@output"], shape="[B, S, 4096] bfloat16"),
@@ -1042,7 +1084,8 @@ def test_synthesize_loop_boundary_suppressed_for_externally_collapsed_stream():
     # collapse head reads the body @output directly.
     assert _lc_in_edges(by_id["dec/@input"]) == [("src", None)]
     assert [e["sourceNodeId"] for e in by_id["hc_head"]["incomingEdges"]] == [
-        "dec/@output"]
+        "dec/@output"
+    ]
 
 
 def _carried_in(node_id, namespace, sources):
@@ -1081,8 +1124,11 @@ def test_hoist_loop_carried_in_ahead_of_repeat_group_body():
             "label": "Loop out",
             "attrs": [{"key": "synthetic", "value": "@loop_carried"}],
             "incomingEdges": [
-                {"sourceNodeId": "blk/body", "sourceNodeOutputId": "0",
-                 "targetNodeInputId": "0"}
+                {
+                    "sourceNodeId": "blk/body",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "0",
+                }
             ],
         },
     ]
@@ -1107,14 +1153,17 @@ def test_hoist_loop_carried_in_clamped_behind_in_scope_seed():
     out_id = "mlp/@loop_carried_out:l:final"
     nodes = [
         _synthetic_input("mlp/@input:initial", "Block/Loop", "ext", label="initial"),
-        _carried_in("mlp/@loop_carried_in:l:final", "Block/Loop",
-                    ["mlp/@input:initial", out_id]),
+        _carried_in(
+            "mlp/@loop_carried_in:l:final", "Block/Loop", ["mlp/@input:initial", out_id]
+        ),
         _plain("mlp/body", "Block/Loop", ["mlp/@loop_carried_in:l:final"]),
     ]
     merge._hoist_loop_carried_in_ahead_of_body(nodes)
     order = [n["id"] for n in nodes]
     # the in-scope seed still precedes the accumulator (no illegal hoist)
-    assert order.index("mlp/@input:initial") < order.index("mlp/@loop_carried_in:l:final")
+    assert order.index("mlp/@input:initial") < order.index(
+        "mlp/@loop_carried_in:l:final"
+    )
 
 
 def test_hoist_loop_carried_in_nests_outer_ahead_of_inner():
@@ -1124,11 +1173,15 @@ def test_hoist_loop_carried_in_nests_outer_ahead_of_inner():
     nodes = [
         _plain("seed", "", [], shape="[B, S, 8] bfloat16"),
         _plain("d/inner/eps", "3x_D/inner/Loop", [], shape="[] float32"),
-        _carried_in("d/inner/@loop_carried_in:i:c", "3x_D/inner/Loop",
-                    ["d/inner/eps", inner_out]),
+        _carried_in(
+            "d/inner/@loop_carried_in:i:c",
+            "3x_D/inner/Loop",
+            ["d/inner/eps", inner_out],
+        ),
         _carried_in("d/@loop_carried_in:d:h", "3x_D", ["seed", outer_out]),
-        _plain("d/body", "3x_D", ["d/@loop_carried_in:d:h",
-                                  "d/inner/@loop_carried_in:i:c"]),
+        _plain(
+            "d/body", "3x_D", ["d/@loop_carried_in:d:h", "d/inner/@loop_carried_in:i:c"]
+        ),
     ]
     merge._hoist_loop_carried_in_ahead_of_body(nodes)
     order = [n["id"] for n in nodes]
@@ -1146,11 +1199,19 @@ def test_synthesize_loop_boundary_is_noop_when_already_wrapped():
             "id": "visual/@loop_carried_in:l1:hidden_states",
             "namespace": "visual/24x_Block",
             "attrs": [{"key": "synthetic", "value": "@loop_carried"}],
-            "incomingEdges": [{"sourceNodeId": "src", "sourceNodeOutputId": "0",
-                               "targetNodeInputId": "0"}],
+            "incomingEdges": [
+                {
+                    "sourceNodeId": "src",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "0",
+                }
+            ],
         },
-        _synthetic_output("visual/@output", "visual/24x_Block",
-                          "visual/@loop_carried_in:l1:hidden_states"),
+        _synthetic_output(
+            "visual/@output",
+            "visual/24x_Block",
+            "visual/@loop_carried_in:l1:hidden_states",
+        ),
         _plain("sink", "", ["visual/@output"]),
     ]
     before = len(nodes)
@@ -1181,8 +1242,13 @@ def _kernel_in(node_id, namespace, source, *, label):
         "label": label,
         "namespace": namespace,
         "attrs": [{"key": "synthetic", "value": "@kernel_port_in"}],
-        "incomingEdges": [{"sourceNodeId": source, "sourceNodeOutputId": "0",
-                           "targetNodeInputId": "0"}],
+        "incomingEdges": [
+            {
+                "sourceNodeId": source,
+                "sourceNodeOutputId": "0",
+                "targetNodeInputId": "0",
+            }
+        ],
     }
 
 
@@ -1191,10 +1257,17 @@ def _input_mirror(node_id, namespace, source, *, label):
         "id": node_id,
         "label": label,
         "namespace": namespace,
-        "attrs": [{"key": "synthetic", "value": "@input_mirror"},
-                  {"key": "port_label", "value": label}],
-        "incomingEdges": [{"sourceNodeId": source, "sourceNodeOutputId": label,
-                           "targetNodeInputId": label}],
+        "attrs": [
+            {"key": "synthetic", "value": "@input_mirror"},
+            {"key": "port_label", "value": label},
+        ],
+        "incomingEdges": [
+            {
+                "sourceNodeId": source,
+                "sourceNodeOutputId": label,
+                "targetNodeInputId": label,
+            }
+        ],
     }
 
 
@@ -1203,10 +1276,17 @@ def _output_tile(node_id, namespace, source, *, label, synth="@output"):
         "id": node_id,
         "label": label,
         "namespace": namespace,
-        "attrs": [{"key": "synthetic", "value": synth},
-                  {"key": "port_label", "value": label}],
-        "incomingEdges": [{"sourceNodeId": source, "sourceNodeOutputId": "0",
-                           "targetNodeInputId": "0"}],
+        "attrs": [
+            {"key": "synthetic", "value": synth},
+            {"key": "port_label", "value": label},
+        ],
+        "incomingEdges": [
+            {
+                "sourceNodeId": source,
+                "sourceNodeOutputId": "0",
+                "targetNodeInputId": "0",
+            }
+        ],
     }
 
 
@@ -1216,19 +1296,35 @@ def test_collapse_kernel_input_passthrough_drops_redundant_module_input():
     attn = "blk/Attn"
     nodes = [
         _plain("producer", "", [], shape="[Pv, 1176] bfloat16"),
-        _input_mirror("blk/@input_mirror:cu_seqlens^cu_seqlens", "blk", "producer",
-                      label="cu_seqlens"),
-        _synthetic_input("blk/@input:cu_seqlens", attn,
-                         "blk/@input_mirror:cu_seqlens^cu_seqlens", label="cu_seqlens"),
-        _kernel_in("blk/@kernel_in:9:cu_seqlens", attn, "blk/@input:cu_seqlens",
-                   label="cu_seqlens"),
+        _input_mirror(
+            "blk/@input_mirror:cu_seqlens^cu_seqlens",
+            "blk",
+            "producer",
+            label="cu_seqlens",
+        ),
+        _synthetic_input(
+            "blk/@input:cu_seqlens",
+            attn,
+            "blk/@input_mirror:cu_seqlens^cu_seqlens",
+            label="cu_seqlens",
+        ),
+        _kernel_in(
+            "blk/@kernel_in:9:cu_seqlens",
+            attn,
+            "blk/@input:cu_seqlens",
+            label="cu_seqlens",
+        ),
         # Control: a real kernel input (query_states) fed by a computation, not an
         # @input tile -- must be left untouched (the apply_rotary reference shape).
         _plain("rotary_q", attn, [], shape="[Pv, 64] bfloat16"),
-        _kernel_in("blk/@kernel_in:9:query_states", attn, "rotary_q",
-                   label="query_states"),
-        _plain("kernel", attn, ["blk/@kernel_in:9:cu_seqlens",
-                                 "blk/@kernel_in:9:query_states"]),
+        _kernel_in(
+            "blk/@kernel_in:9:query_states", attn, "rotary_q", label="query_states"
+        ),
+        _plain(
+            "kernel",
+            attn,
+            ["blk/@kernel_in:9:cu_seqlens", "blk/@kernel_in:9:query_states"],
+        ),
     ]
     merge._collapse_kernel_input_passthroughs(nodes)
     by_id = {n["id"]: n for n in nodes}
@@ -1259,9 +1355,9 @@ def test_collapse_kernel_input_passthrough_keeps_shared_module_input():
     by_id = {n["id"]: n for n in nodes}
     # Shared input tile survives; the kernel port still reads it.
     assert "blk/@input:mask" in by_id
-    assert [e["sourceNodeId"] for e in by_id["blk/@kernel_in:9:mask"]["incomingEdges"]] == [
-        "blk/@input:mask"
-    ]
+    assert [
+        e["sourceNodeId"] for e in by_id["blk/@kernel_in:9:mask"]["incomingEdges"]
+    ] == ["blk/@input:mask"]
 
 
 def test_collapse_same_name_boundary_keeps_cross_module_crossing():
@@ -1275,10 +1371,15 @@ def test_collapse_same_name_boundary_keeps_cross_module_crossing():
     keeps both tiles and leaves the consumer reading its own ``@input``."""
     nodes = [
         _plain("real_op", "mod_a", [], shape="[B, S, H] bfloat16"),
-        _output_tile("mod_a/@output:hidden_states", "mod_a", "real_op",
-                     label="hidden_states"),
-        _synthetic_input("mod_b/@input:hidden_states", "mod_b",
-                         "mod_a/@output:hidden_states", label="hidden_states"),
+        _output_tile(
+            "mod_a/@output:hidden_states", "mod_a", "real_op", label="hidden_states"
+        ),
+        _synthetic_input(
+            "mod_b/@input:hidden_states",
+            "mod_b",
+            "mod_a/@output:hidden_states",
+            label="hidden_states",
+        ),
         _plain("consumer", "mod_b", ["mod_b/@input:hidden_states"]),
     ]
     merge._collapse_same_name_boundary_passthroughs(nodes)
@@ -1300,10 +1401,15 @@ def test_collapse_same_name_boundary_folds_same_namespace_pair():
     ``@input`` tile is dropped and repointed onto the surviving ``@output``."""
     nodes = [
         _plain("mod/real_op", "mod", [], shape="[B, S, H] bfloat16"),
-        _output_tile("mod/@output:hidden_states", "mod", "mod/real_op",
-                     label="hidden_states"),
-        _synthetic_input("mod/@input:hidden_states", "mod",
-                         "mod/@output:hidden_states", label="hidden_states"),
+        _output_tile(
+            "mod/@output:hidden_states", "mod", "mod/real_op", label="hidden_states"
+        ),
+        _synthetic_input(
+            "mod/@input:hidden_states",
+            "mod",
+            "mod/@output:hidden_states",
+            label="hidden_states",
+        ),
         _plain("mod/consumer", "mod", ["mod/@input:hidden_states"]),
     ]
     merge._collapse_same_name_boundary_passthroughs(nodes)
@@ -1323,8 +1429,12 @@ def test_collapse_same_name_boundary_kernel_port_reads_real_op():
     nodes = [
         _plain("copy_op", "attn", [], shape="[Pv, 64] bfloat16"),
         _output_tile("attn/@output:key_states", "attn", "copy_op", label="key_states"),
-        _kernel_in("attn/@kernel_in:key_states", "attn", "attn/@output:key_states",
-                   label="key_states"),
+        _kernel_in(
+            "attn/@kernel_in:key_states",
+            "attn",
+            "attn/@output:key_states",
+            label="key_states",
+        ),
         _plain("kernel", "attn", ["attn/@kernel_in:key_states"]),
     ]
     merge._collapse_same_name_boundary_passthroughs(nodes)
@@ -1332,9 +1442,9 @@ def test_collapse_same_name_boundary_kernel_port_reads_real_op():
 
     assert "attn/@output:key_states" not in by_id
     assert "attn/@kernel_in:key_states" in by_id
-    assert [e["sourceNodeId"] for e in by_id["attn/@kernel_in:key_states"]["incomingEdges"]] == [
-        "copy_op"
-    ]
+    assert [
+        e["sourceNodeId"] for e in by_id["attn/@kernel_in:key_states"]["incomingEdges"]
+    ] == ["copy_op"]
 
 
 def test_collapse_same_name_boundary_reduces_three_tile_chain():
@@ -1342,13 +1452,22 @@ def test_collapse_same_name_boundary_reduces_three_tile_chain():
     name collapses iteratively to a single edge from the real op."""
     nodes = [
         _plain("copy_op", "attn", [], shape="[Pv, 64] bfloat16"),
-        _output_tile("attn/@output:value_states", "attn", "copy_op",
-                     label="value_states"),
-        _output_tile("attn/@output:value_states^value_states", "attn",
-                     "attn/@output:value_states", label="value_states",
-                     synth="@output_mirror"),
-        _kernel_in("attn/@kernel_in:value_states", "attn",
-                   "attn/@output:value_states^value_states", label="value_states"),
+        _output_tile(
+            "attn/@output:value_states", "attn", "copy_op", label="value_states"
+        ),
+        _output_tile(
+            "attn/@output:value_states^value_states",
+            "attn",
+            "attn/@output:value_states",
+            label="value_states",
+            synth="@output_mirror",
+        ),
+        _kernel_in(
+            "attn/@kernel_in:value_states",
+            "attn",
+            "attn/@output:value_states^value_states",
+            label="value_states",
+        ),
         _plain("kernel", "attn", ["attn/@kernel_in:value_states"]),
     ]
     merge._collapse_same_name_boundary_passthroughs(nodes)
@@ -1356,9 +1475,10 @@ def test_collapse_same_name_boundary_reduces_three_tile_chain():
 
     assert "attn/@output:value_states^value_states" not in by_id
     assert "attn/@output:value_states" not in by_id
-    assert [e["sourceNodeId"] for e in by_id["attn/@kernel_in:value_states"]["incomingEdges"]] == [
-        "copy_op"
-    ]
+    assert [
+        e["sourceNodeId"]
+        for e in by_id["attn/@kernel_in:value_states"]["incomingEdges"]
+    ] == ["copy_op"]
 
 
 def test_collapse_same_name_boundary_leaves_renamed_crossing_intact():
@@ -1367,8 +1487,12 @@ def test_collapse_same_name_boundary_leaves_renamed_crossing_intact():
     nodes = [
         _plain("real_op", "mod_a", [], shape="[B, S, H] bfloat16"),
         _output_tile("mod_a/@output:collapsed", "mod_a", "real_op", label="collapsed"),
-        _synthetic_input("mod_b/@input:hidden_states", "mod_b",
-                         "mod_a/@output:collapsed", label="hidden_states"),
+        _synthetic_input(
+            "mod_b/@input:hidden_states",
+            "mod_b",
+            "mod_a/@output:collapsed",
+            label="hidden_states",
+        ),
         _plain("consumer", "mod_b", ["mod_b/@input:hidden_states"]),
     ]
     merge._collapse_same_name_boundary_passthroughs(nodes)
@@ -1380,7 +1504,9 @@ def test_collapse_same_name_boundary_leaves_renamed_crossing_intact():
     ]
 
 
-def _cast_node(node_id: str, *, source: str, dtype: str, shape: str = "B x S x 4") -> dict:
+def _cast_node(
+    node_id: str, *, source: str, dtype: str, shape: str = "B x S x 4"
+) -> dict:
     """A `Cast` node with one incoming edge and its own inferred output dtype."""
     return {
         "id": node_id,
@@ -1733,9 +1859,7 @@ def test_fill_missing_node_shapes_cast_resolves_downcast_dtype():
 def test_fallback_node_spec_cast_without_detail_keeps_source_dtype():
     source = TensorSpec(("B", "S", 4), "float32")
     node = {"id": "@op_cast", "label": "Cast"}
-    result = shapes._fallback_node_spec(
-        node, [("0", source)], working_dtype="float16"
-    )
+    result = shapes._fallback_node_spec(node, [("0", source)], working_dtype="float16")
     assert result.dtype == "float32"
     assert result.shape == ("B", "S", 4)
 
@@ -1775,10 +1899,18 @@ def test_fallback_node_spec_conv_without_geometry_passes_through():
 
 def test_fallback_node_spec_unsqueeze_non_integer_dim_defaults_to_zero():
     source = TensorSpec(("B", "S", 4), "float16")
-    node = {"id": "u", "label": "Unsqueeze", "attrs": [{"key": "detail", "value": "dim: -1"}]}
+    node = {
+        "id": "u",
+        "label": "Unsqueeze",
+        "attrs": [{"key": "detail", "value": "dim: -1"}],
+    }
     # A negative dim resolves against rank; a non-integer would default to 0.
     assert shapes._fallback_node_spec(node, [("0", source)]).shape == ("B", "S", 4, 1)
-    bad = {"id": "u", "label": "Unsqueeze", "attrs": [{"key": "detail", "value": "dim: n"}]}
+    bad = {
+        "id": "u",
+        "label": "Unsqueeze",
+        "attrs": [{"key": "detail", "value": "dim: n"}],
+    }
     assert shapes._fallback_node_spec(bad, [("0", source)]).shape == (1, "B", "S", 4)
 
 
@@ -2598,7 +2730,9 @@ def test_find_vision_tower_none_without_vision_config():
     # `vision_config` block the checkpoint is treated as text-only.
     registry = {
         "TextModel": _class_structure("TextModel"),
-        "FooVisionModel": _class_structure("FooVisionModel", {"patch_embed": "PatchEmbed"}),
+        "FooVisionModel": _class_structure(
+            "FooVisionModel", {"patch_embed": "PatchEmbed"}
+        ),
     }
     spec = _spec(class_registry=registry, stack_model_class="TextModel")
     assert find_vision_tower(spec) is None
@@ -2771,8 +2905,12 @@ def _vision_merge_monkeypatch(monkeypatch, *, embed, vision):
 def test_merge_graph_emits_vision_group_and_visual_language_edge(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    embed = _component("embed_tokens", "embedding", class_name="Embedding", label="Embedding")
-    vision = _component("visual", "vision", class_name="VisionModel", label="Vision Tower", order=0)
+    embed = _component(
+        "embed_tokens", "embedding", class_name="Embedding", label="Embedding"
+    )
+    vision = _component(
+        "visual", "vision", class_name="VisionModel", label="Vision Tower", order=0
+    )
     spec = _spec(stack_pre=[embed], stack_tail=[], block_components=[])
     _vision_merge_monkeypatch(monkeypatch, embed=embed, vision=vision)
 
@@ -2784,7 +2922,10 @@ def test_merge_graph_emits_vision_group_and_visual_language_edge(
     monkeypatch.setattr(
         merge,
         "_resolve_section_tree_for_component",
-        lambda *a, **k: ("Vision Tower", BlockNode("visual", "VisionModel", "vision", "Vision Tower")),
+        lambda *a, **k: (
+            "Vision Tower",
+            BlockNode("visual", "VisionModel", "vision", "Vision Tower"),
+        ),
     )
     monkeypatch.setattr(merge, "is_transparent_inline_expansion", lambda tree: False)
     monkeypatch.setattr(
@@ -2794,18 +2935,27 @@ def test_merge_graph_emits_vision_group_and_visual_language_edge(
     def fake_append(nodes, **kw):
         prefix, namespace = kw["id_prefix"], kw["namespace_prefix"]
         if prefix == "visual":
-            nodes.append({"id": "visual/patch", "label": "PatchEmbed", "namespace": "visual"})
-            nodes.append({"id": "visual/@output", "label": "result", "namespace": "visual"})
+            nodes.append(
+                {"id": "visual/patch", "label": "PatchEmbed", "namespace": "visual"}
+            )
+            nodes.append(
+                {"id": "visual/@output", "label": "result", "namespace": "visual"}
+            )
             group_attrs = kw.get("group_node_attributes")
             if group_attrs is not None:
-                group_attrs["visual"] = {"label": "Vision Tower", "operation": "VisionModel"}
+                group_attrs["visual"] = {
+                    "label": "Vision Tower",
+                    "operation": "VisionModel",
+                }
             return [("visual/@output", "result")]
         nodes.append(
             {
                 "id": prefix,
                 "label": "Embedding",
                 "namespace": namespace,
-                "incomingEdges": [merge._source_edge(s, "0") for s in kw["previous_exits"]],
+                "incomingEdges": [
+                    merge._source_edge(s, "0") for s in kw["previous_exits"]
+                ],
             }
         )
         return [prefix]
@@ -2836,27 +2986,44 @@ def test_merge_graph_emits_vision_group_and_visual_language_edge(
 
 def _build_vision_graph_with_raw_config(monkeypatch, raw_config):
     """Build a merged vision graph under the standard vision monkeypatch."""
-    embed = _component("embed_tokens", "embedding", class_name="Embedding", label="Embedding")
-    vision = _component("visual", "vision", class_name="VisionModel", label="Vision Tower", order=0)
-    spec = _spec(stack_pre=[embed], stack_tail=[], block_components=[], raw_config=raw_config)
+    embed = _component(
+        "embed_tokens", "embedding", class_name="Embedding", label="Embedding"
+    )
+    vision = _component(
+        "visual", "vision", class_name="VisionModel", label="Vision Tower", order=0
+    )
+    spec = _spec(
+        stack_pre=[embed], stack_tail=[], block_components=[], raw_config=raw_config
+    )
     _vision_merge_monkeypatch(monkeypatch, embed=embed, vision=vision)
     monkeypatch.setattr(
-        merge, "component_has_detail_section",
+        merge,
+        "component_has_detail_section",
         lambda component, spec: component.attr_name == "visual",
     )
     monkeypatch.setattr(
-        merge, "_resolve_section_tree_for_component",
-        lambda *a, **k: ("Vision Tower", BlockNode("visual", "VisionModel", "vision", "Vision Tower")),
+        merge,
+        "_resolve_section_tree_for_component",
+        lambda *a, **k: (
+            "Vision Tower",
+            BlockNode("visual", "VisionModel", "vision", "Vision Tower"),
+        ),
     )
     monkeypatch.setattr(merge, "is_transparent_inline_expansion", lambda tree: False)
-    monkeypatch.setattr(merge, "expand_block_tree_inplace", lambda tree, basic_ops=None: tree)
+    monkeypatch.setattr(
+        merge, "expand_block_tree_inplace", lambda tree, basic_ops=None: tree
+    )
 
     def fake_append(nodes, **kw):
         prefix = kw["id_prefix"]
         if prefix == "visual":
-            nodes.append({"id": "visual/@output", "label": "result", "namespace": "visual"})
+            nodes.append(
+                {"id": "visual/@output", "label": "result", "namespace": "visual"}
+            )
             return [("visual/@output", "result")]
-        nodes.append({"id": prefix, "label": "Embedding", "namespace": kw["namespace_prefix"]})
+        nodes.append(
+            {"id": prefix, "label": "Embedding", "namespace": kw["namespace_prefix"]}
+        )
         return [prefix]
 
     monkeypatch.setattr(merge, "_append_section", fake_append)
@@ -2903,10 +3070,14 @@ def test_merge_graph_text_only_spec_has_no_vision_section(
 ):
     # (c) a non-VLM spec is untouched: no vision input, group, or edge, and the
     # tokenized-text input is still the first node.
-    embed = _component("embed_tokens", "embedding", class_name="Embedding", label="Embedding")
+    embed = _component(
+        "embed_tokens", "embedding", class_name="Embedding", label="Embedding"
+    )
     spec = _spec(stack_pre=[embed], stack_tail=[], block_components=[])
     _vision_merge_monkeypatch(monkeypatch, embed=embed, vision=None)
-    monkeypatch.setattr(merge, "component_has_detail_section", lambda component, spec: False)
+    monkeypatch.setattr(
+        merge, "component_has_detail_section", lambda component, spec: False
+    )
 
     graph = merge.build_merged_model_graph(spec)
     node_ids = {node["id"] for node in graph["nodes"]}
@@ -2955,8 +3126,12 @@ class FooVisionModel:
     )
     _build_export_block_trees(spec, BasicOpFilter.for_detailed())
 
-    vision = [tree for _title, tree in spec.export_block_trees if tree.attr_name == "visual"]
-    assert vision, "vision tower detail tree should be appended alongside the text spine"
+    vision = [
+        tree for _title, tree in spec.export_block_trees if tree.attr_name == "visual"
+    ]
+    assert (
+        vision
+    ), "vision tower detail tree should be appended alongside the text spine"
     assert vision[0].class_name == "FooVisionModel"
 
 
@@ -3018,7 +3193,9 @@ def test_merge_data_movement_reshape_flatten_and_expand():
     assert out.shape == ("B*S", 4096)
     assert "-1" not in [str(d) for d in out.shape]
     # Expand keeps the source dim at its ``-1`` slot (broadcast, not flatten).
-    exp = merge._data_movement_shape(_op("Expand", "-1, 8"), TensorSpec((4, 1)), spec=spec)
+    exp = merge._data_movement_shape(
+        _op("Expand", "-1, 8"), TensorSpec((4, 1)), spec=spec
+    )
     assert exp.shape == (4, 8)
 
 
@@ -3072,7 +3249,9 @@ def test_rename_namespace_prefix_rewrites_nodes_attrs_and_configs():
         "visual/PatchEmbed",
     }
     assert configs[0]["namespaceRegex"] == f"^{_re.escape('visual/24x_VisionBlock')}$"
-    assert configs[1]["namespaceRegex"] == f"^{_re.escape('visual/24x_VisionBlock/Attn')}$"
+    assert (
+        configs[1]["namespaceRegex"] == f"^{_re.escape('visual/24x_VisionBlock/Attn')}$"
+    )
     assert configs[2]["namespaceRegex"] == f"^{_re.escape('visual/PatchEmbed')}$"
 
 
@@ -3190,7 +3369,11 @@ def test_annotate_op_input_signatures_records_tensor_and_scalar_inputs():
             {"key": "output_shape", "value": "[Pv, 2, 1] int64"},
         ],
         "incomingEdges": [
-            {"sourceNodeId": "prod", "sourceNodeOutputId": "0", "targetNodeInputId": "0"}
+            {
+                "sourceNodeId": "prod",
+                "sourceNodeOutputId": "0",
+                "targetNodeInputId": "0",
+            }
         ],
     }
     merge._annotate_op_input_signatures([producer, unsqueeze])
@@ -3268,7 +3451,9 @@ def test_graph_without_constants_does_not_mutate_input():
     graph = _sample_graph()
     before = copy.deepcopy(graph)
     viewer_page._graph_without_constants(graph)
-    assert graph == before, "filter must not mutate the source graph (JSON stays complete)"
+    assert (
+        graph == before
+    ), "filter must not mutate the source graph (JSON stays complete)"
 
 
 def test_graph_without_constants_prunes_now_empty_group():

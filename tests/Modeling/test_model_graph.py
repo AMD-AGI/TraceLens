@@ -320,8 +320,7 @@ def test_dispatched_attention_stamps_wrapper_expand_location():
     assert "sdpa_attention" in expand[0]
     # The location is plumbing only -- it must not leak into the rendered leaf.
     assert not any(
-        line.startswith("wrapper_expand:")
-        for line in attention_kernel_details(details)
+        line.startswith("wrapper_expand:") for line in attention_kernel_details(details)
     )
 
 
@@ -352,7 +351,9 @@ def test_resolve_dispatched_attention_caps_unpack_names_to_arity():
 
     # sdpa arity 1: the second (None) unpack name is dropped.
     sdpa = _cls()
-    _resolve_dispatched_attention_kernel({"Attention": sdpa}, {"model_type": "deepseek_v4"})
+    _resolve_dispatched_attention_kernel(
+        {"Attention": sdpa}, {"model_type": "deepseek_v4"}
+    )
     assert "outputs: 1" in sdpa.forward_step_details[SYNTHETIC_ATTENTION]
     assert sdpa.forward_step_output_names[SYNTHETIC_ATTENTION] == ["attn_output"]
 

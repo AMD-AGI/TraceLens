@@ -24,7 +24,6 @@ import torch.nn as nn
 from TraceLens.ModelUtils import meta_trace as mt
 from TraceLens.ModelUtils import torch_trace as tt
 
-
 # ---------------------------------------------------------------------------
 # Tiny Llama checkpoint fixture
 # ---------------------------------------------------------------------------
@@ -182,9 +181,7 @@ def test_fx_source_line_variants():
     assert mt._fx_source_line(make({"stack_trace": "nope"}), "/mod.py") is None
     # frame in a different file
     assert (
-        mt._fx_source_line(
-            make({"stack_trace": 'File "/other.py", line 5'}), "/mod.py"
-        )
+        mt._fx_source_line(make({"stack_trace": 'File "/other.py", line 5'}), "/mod.py")
         is None
     )
     # matching frame -> returns the line number
@@ -521,9 +518,7 @@ def test_instantiate_meta_robust_repairs_missing_attr(monkeypatch):
             return FakeModel()
 
     def _boom(_ckpt):
-        raise AttributeError(
-            "'PreTrainedConfig' object has no attribute 'needed_attr'"
-        )
+        raise AttributeError("'PreTrainedConfig' object has no attribute 'needed_attr'")
 
     monkeypatch.setattr(tt, "_instantiate_meta", _boom)
     monkeypatch.setattr(tt, "_patch_config", lambda c: None)

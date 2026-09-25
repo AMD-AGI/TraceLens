@@ -53,9 +53,7 @@ def _load_chunk_kda_pipeline():
         pytest.skip("Kimi-K3 modeling fixture not found")
 
     basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
-    analysis = analyze_source(
-        code_path.read_text(), filename="modeling_kimi_linear.py"
-    )
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
     attn = build_block_node(
         attr_name="self_attn",
         class_name="KimiDeltaAttention",

@@ -98,7 +98,10 @@ def test_kernel_input_names():
 
 def test_reads_only_a_side_parameter():
     reader = _node(
-        "@op_l1_c0_add", class_name="Add", param_inputs=["aux"], operation_predecessors=[]
+        "@op_l1_c0_add",
+        class_name="Add",
+        param_inputs=["aux"],
+        operation_predecessors=[],
     )
     assert cg._reads_only_a_side_parameter(reader)
     assert not cg._reads_only_a_side_parameter(_node("plain"))
@@ -114,7 +117,9 @@ def test_reads_only_a_side_parameter():
 def test_is_local_operation_port():
     ext = _spec(synthetic=cg.SYNTHETIC_TENSOR, key="foo:external:scale")
     assert cg._is_local_operation_port(ext)
-    assert not cg._is_local_operation_port(_spec(synthetic=cg.SYNTHETIC_TENSOR, key="x"))
+    assert not cg._is_local_operation_port(
+        _spec(synthetic=cg.SYNTHETIC_TENSOR, key="x")
+    )
 
 
 def test_condition_detail():
@@ -230,16 +235,24 @@ def test_forward_steps_by_attr():
 
 def test_append_step_link_variants():
     g = cg.ComputationGraph(nodes=[_spec(), _spec(), _spec()])
-    cg._append_step_link(g, input_index=0, last_index=1, step_index=2, fork_from_input=True)
+    cg._append_step_link(
+        g, input_index=0, last_index=1, step_index=2, fork_from_input=True
+    )
     assert g.links == [(0, 2)]
     g2 = cg.ComputationGraph(nodes=[_spec(), _spec(), _spec()])
-    cg._append_step_link(g2, input_index=0, last_index=1, step_index=2, fork_from_input=False)
+    cg._append_step_link(
+        g2, input_index=0, last_index=1, step_index=2, fork_from_input=False
+    )
     assert g2.links == [(1, 2)]
     g3 = cg.ComputationGraph(nodes=[_spec(), _spec()])
-    cg._append_step_link(g3, input_index=0, last_index=None, step_index=1, fork_from_input=False)
+    cg._append_step_link(
+        g3, input_index=0, last_index=None, step_index=1, fork_from_input=False
+    )
     assert g3.links == [(0, 1)]
     g4 = cg.ComputationGraph(nodes=[_spec()])
-    cg._append_step_link(g4, input_index=None, last_index=None, step_index=0, fork_from_input=True)
+    cg._append_step_link(
+        g4, input_index=None, last_index=None, step_index=0, fork_from_input=True
+    )
     assert g4.links == []
 
 
@@ -254,7 +267,9 @@ def test_append_operand_link_dedup():
 # Resolution helpers
 # --------------------------------------------------------------------------- #
 def test_resolve_return_slot_source():
-    producer = _node("gate", forward_return_slots={"weights": "w_attr", "index": "i_attr"})
+    producer = _node(
+        "gate", forward_return_slots={"weights": "w_attr", "index": "i_attr"}
+    )
     attr_last = {"w_attr": 5, "i_attr": 7}
     assert cg._resolve_return_slot_source(producer, "weights", attr_last, 0) == 5
     # Normalized fuzzy match: "indices" normalizes to the same as slot "index".
@@ -289,9 +304,7 @@ def test_resolve_primary_input():
     root3 = _node(
         "root",
         children=[child],
-        forward_step_predecessor_args={
-            "c": {"weights": "gate", "hidden": "prev"}
-        },
+        forward_step_predecessor_args={"c": {"weights": "gate", "hidden": "prev"}},
     )
     attr_last = {"prev": 8}
     assert cg._resolve_primary_input("c", root3, attr_last, 1, 2) == 8
@@ -316,7 +329,9 @@ def test_resolve_primary_input():
 def test_build_module_param_entries():
     reader = _node("@op_add", param_inputs=["aux"])
     other = _node("plain")
-    graph = cg.ComputationGraph(nodes=[_spec(block=reader), _spec(block=other), _spec(block=None)])
+    graph = cg.ComputationGraph(
+        nodes=[_spec(block=reader), _spec(block=other), _spec(block=None)]
+    )
     graph.inline_frames.append(
         cg.InlineFrameSpec(frame_id="mod", label="Mod", node_indices=[0, 1, 2])
     )
@@ -426,7 +441,11 @@ def test_add_kernel_port_nodes_fallback_and_duplicate_labels():
     a = _node("a")
     b = _node("b")
     graph = cg.ComputationGraph(
-        nodes=[_spec(block=a, label="in"), _spec(block=b, label="in"), _spec(block=kernel)],
+        nodes=[
+            _spec(block=a, label="in"),
+            _spec(block=b, label="in"),
+            _spec(block=kernel),
+        ],
         links=[(0, 2), (1, 2)],
         link_port_labels={(0, 2): "gate", (1, 2): "gate"},
     )
@@ -459,7 +478,10 @@ def test_add_kernel_port_nodes_interposes_repeat_ops_on_kv_only():
     repeat_ops = [
         ("Unsqueeze", ("raw_op: unsqueeze", "dim: 2")),
         ("Expand", ("raw_op: expand", "shape: -1, -1, 64, -1, -1")),
-        ("Reshape", ("raw_op: reshape", "shape: x.shape[0], -1, x.shape[3], x.shape[4]")),
+        (
+            "Reshape",
+            ("raw_op: reshape", "shape: x.shape[0], -1, x.shape[3], x.shape[4]"),
+        ),
     ]
     kernel = _node(
         "attn",
@@ -521,7 +543,11 @@ def test_add_kernel_output_port_nodes():
     t1 = _node("t1")
     t2 = _node("t2")
     graph = cg.ComputationGraph(
-        nodes=[_spec(block=kernel, label="Attn"), _spec(block=t1, label="c1"), _spec(block=t2, label="c2")],
+        nodes=[
+            _spec(block=kernel, label="Attn"),
+            _spec(block=t1, label="c1"),
+            _spec(block=t2, label="c2"),
+        ],
         links=[(0, 1), (0, 2)],
         link_output_ports={(0, 1): "0", (0, 2): "1"},
         output_ports={"c1": 0},
@@ -540,14 +566,16 @@ def test_add_kernel_output_port_nodes_single_output_fanout_not_split():
     # split into phantom per-consumer output ports (the slice_1/slice_2 bug).
     kernel = _node("attn", class_name="AttentionMerge")
     graph = cg.ComputationGraph(
-        nodes=[_spec(block=kernel, label="Attn"), _spec(block=_node("t1"), label="c1"), _spec(block=_node("t2"), label="c2")],
+        nodes=[
+            _spec(block=kernel, label="Attn"),
+            _spec(block=_node("t1"), label="c1"),
+            _spec(block=_node("t2"), label="c2"),
+        ],
         links=[(0, 1), (0, 2)],
         output_ports={"c1": 0},
     )
     cg._add_kernel_output_port_nodes(graph)
-    assert not any(
-        s.synthetic == cg.SYNTHETIC_KERNEL_PORT_OUT for s in graph.nodes
-    )
+    assert not any(s.synthetic == cg.SYNTHETIC_KERNEL_PORT_OUT for s in graph.nodes)
     # The single output still fans directly to both consumers.
     assert (0, 1) in graph.links and (0, 2) in graph.links
 
@@ -559,9 +587,7 @@ def test_add_kernel_output_port_nodes_single_output_ignored():
         links=[(0, 1)],
     )
     cg._add_kernel_output_port_nodes(graph)
-    assert not any(
-        s.synthetic == cg.SYNTHETIC_KERNEL_PORT_OUT for s in graph.nodes
-    )
+    assert not any(s.synthetic == cg.SYNTHETIC_KERNEL_PORT_OUT for s in graph.nodes)
 
 
 # --------------------------------------------------------------------------- #
@@ -570,8 +596,18 @@ def test_add_kernel_output_port_nodes_single_output_ignored():
 def test_add_conditional_alternative_links():
     graph = cg.ComputationGraph(
         nodes=[
-            _spec(block=_node("if", details=["condition: enabled"], operation_predecessors=["x"])),
-            _spec(block=_node("else", details=["condition: not (enabled)"], operation_predecessors=["x"])),
+            _spec(
+                block=_node(
+                    "if", details=["condition: enabled"], operation_predecessors=["x"]
+                )
+            ),
+            _spec(
+                block=_node(
+                    "else",
+                    details=["condition: not (enabled)"],
+                    operation_predecessors=["x"],
+                )
+            ),
         ]
     )
     cg._add_conditional_alternative_links(graph)
@@ -580,7 +616,11 @@ def test_add_conditional_alternative_links():
 
 def test_live_node_indices_to_fixpoint():
     graph = cg.ComputationGraph(
-        nodes=[_spec(block=_node("a")), _spec(block=_node("b")), _spec(block=_node("c"))],
+        nodes=[
+            _spec(block=_node("a")),
+            _spec(block=_node("b")),
+            _spec(block=_node("c")),
+        ],
         links=[(0, 1), (1, 2)],
     )
     assert cg._live_node_indices_to_fixpoint(graph, [2]) == {0, 1, 2}
@@ -597,7 +637,11 @@ def test_prune_computation_nodes_bridges():
     b = _node("b")
     c = _node("c")
     graph = cg.ComputationGraph(
-        nodes=[_spec(block=a, key="a"), _spec(block=b, key="drop"), _spec(block=c, key="c")],
+        nodes=[
+            _spec(block=a, key="a"),
+            _spec(block=b, key="drop"),
+            _spec(block=c, key="c"),
+        ],
         links=[(0, 1), (1, 2)],
         link_port_labels={(0, 1): "gate"},
         link_output_ports={(1, 2): "out"},
@@ -633,7 +677,11 @@ def test_prune_computation_nodes_preserves_multi_ordinal_duplicate_link():
     b = _node("b")
     c = _node("c")
     graph = cg.ComputationGraph(
-        nodes=[_spec(block=a, key="a"), _spec(block=b, key="b"), _spec(block=c, key="drop")],
+        nodes=[
+            _spec(block=a, key="a"),
+            _spec(block=b, key="b"),
+            _spec(block=c, key="drop"),
+        ],
         links=[(0, 1), (0, 1), (1, 2)],
         link_output_ports={(0, 1): ["0", "1"]},
     )
@@ -670,7 +718,12 @@ def test_dead_node_indices_and_dce():
 
     # No primary output → empty.
     empty_root = _node("r")
-    assert cg._dead_node_indices(cg.ComputationGraph(), empty_root, strip_unused_return_branches=True) == set()
+    assert (
+        cg._dead_node_indices(
+            cg.ComputationGraph(), empty_root, strip_unused_return_branches=True
+        )
+        == set()
+    )
     # Not stripping → empty.
     assert (
         cg._dead_node_indices(graph, root, strip_unused_return_branches=False) == set()
@@ -680,7 +733,9 @@ def test_dead_node_indices_and_dce():
 def test_apply_dead_code_elimination_disabled():
     graph = cg.ComputationGraph(nodes=[_spec()])
     root = _node("r", multi_return_module=False)
-    out = cg._apply_dead_code_elimination(graph, root, strip_unused_return_branches=False)
+    out = cg._apply_dead_code_elimination(
+        graph, root, strip_unused_return_branches=False
+    )
     assert out is graph
     assert out.dead_node_indices == set()
 
@@ -704,7 +759,9 @@ def test_apply_dead_code_elimination_active():
         links=[(0, 2)],
         primary_output_index=2,
     )
-    out = cg._apply_dead_code_elimination(graph, root, strip_unused_return_branches=True)
+    out = cg._apply_dead_code_elimination(
+        graph, root, strip_unused_return_branches=True
+    )
     assert all(spec.block is not dead for spec in out.nodes)
 
 
@@ -758,7 +815,11 @@ def test_add_loop_frames():
     b = _node("b", details=["loop: 4 iterations"])
     c = _node("c")
     graph = cg.ComputationGraph(
-        nodes=[_spec(block=a, key="a"), _spec(block=b, key="b"), _spec(block=c, key="c")]
+        nodes=[
+            _spec(block=a, key="a"),
+            _spec(block=b, key="b"),
+            _spec(block=c, key="c"),
+        ]
     )
     cg._add_loop_frames(graph)
     assert any(f.frame_id.startswith("loop:") for f in graph.inline_frames)
@@ -805,9 +866,7 @@ def test_add_loop_carried_nodes_repeated_and_frame():
     root = _node(
         "root",
         children=[op, op2],
-        loop_carried=[
-            aa.LoopCarriedSpec("l1", None, "x", "init", "op", ("op", "op2"))
-        ],
+        loop_carried=[aa.LoopCarriedSpec("l1", None, "x", "init", "op", ("op", "op2"))],
     )
     graph = cg.ComputationGraph(
         nodes=[
@@ -974,7 +1033,9 @@ def test_add_situ_gated_mlp_chain_dashed(monkeypatch):
         bt, "_situ_gated_mlp_parts", lambda _n: (gate, up, act, situ, down)
     )
     graph = cg.ComputationGraph()
-    input_index = cg._add_node(graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT)
+    input_index = cg._add_node(
+        graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT
+    )
     indices, tail = cg._add_situ_gated_mlp_chain(
         graph,
         _node("root"),
@@ -994,7 +1055,9 @@ def test_build_seq_and_method_wrapper_prefix(monkeypatch):
     ordinary = _node("ordinary")
     method = _node("m", details=["method `m()`"], label="M")
     seq_step = _node("seq_step")
-    monkeypatch.setattr(cg, "flatten_computation_segments", lambda _r: [SeqSegment(seq_step)])
+    monkeypatch.setattr(
+        cg, "flatten_computation_segments", lambda _r: [SeqSegment(seq_step)]
+    )
     graph = cg.build_computation_graph(
         _node("root", children=[ordinary, seq_step]),
         prefix_steps=[ordinary, method],
@@ -1005,7 +1068,9 @@ def test_build_seq_and_method_wrapper_prefix(monkeypatch):
 
 def test_build_seq_method_wrapper_segment(monkeypatch):
     method = _node("mw", details=["method `mw()`"], label="MW")
-    monkeypatch.setattr(cg, "flatten_computation_segments", lambda _r: [SeqSegment(method)])
+    monkeypatch.setattr(
+        cg, "flatten_computation_segments", lambda _r: [SeqSegment(method)]
+    )
     graph = cg.build_computation_graph(_node("root", children=[method]))
     assert "MW" in [s.label for s in graph.nodes]
 
@@ -1020,7 +1085,9 @@ def test_build_seq_expanded_operation_sources(monkeypatch):
     )
     root = _node("root", children=[left, op])
     monkeypatch.setattr(
-        cg, "flatten_computation_segments", lambda _r: [SeqSegment(left), SeqSegment(op)]
+        cg,
+        "flatten_computation_segments",
+        lambda _r: [SeqSegment(left), SeqSegment(op)],
     )
     graph = cg.build_computation_graph(root)
     assert "Add" in [s.label for s in graph.nodes]
@@ -1035,7 +1102,9 @@ def test_build_seq_side_parameter_only(monkeypatch):
         boundary_input_name="aux",
     )
     root = _node("root", children=[reader], forward_param_inputs=["aux"])
-    monkeypatch.setattr(cg, "flatten_computation_segments", lambda _r: [SeqSegment(reader)])
+    monkeypatch.setattr(
+        cg, "flatten_computation_segments", lambda _r: [SeqSegment(reader)]
+    )
     graph = cg.build_computation_graph(root)
     assert any(s.label == "aux" for s in graph.nodes)
 
@@ -1127,11 +1196,7 @@ def test_build_fanout_kernel_tensor_pipeline_merge(monkeypatch):
     monkeypatch.setattr(
         cg,
         "flatten_computation_segments",
-        lambda _r: [
-            FanOutSegment(
-                [Branch("q", [left]), Branch("k", [right])], merge
-            )
-        ],
+        lambda _r: [FanOutSegment([Branch("q", [left]), Branch("k", [right])], merge)],
     )
     graph = cg.build_computation_graph(_node("root", children=[left, right, merge]))
     ports = [s for s in graph.nodes if s.synthetic == cg.SYNTHETIC_TENSOR]
@@ -1166,7 +1231,9 @@ def test_build_sidecombine_moe_and_ordinary(monkeypatch):
     monkeypatch.setattr(
         cg,
         "flatten_computation_segments",
-        lambda _r: [SideCombineSegment(combine, [forward_side, empty_side, weighted], "×")],
+        lambda _r: [
+            SideCombineSegment(combine, [forward_side, empty_side, weighted], "×")
+        ],
     )
     ordinary = cg.build_computation_graph(_node("root2", children=[combine]))
     assert "Multiply" in [s.label for s in ordinary.nodes]
@@ -1219,7 +1286,9 @@ def test_build_residual_situ_gated(monkeypatch):
     module = _node("mlp", class_name="SituAndMul", children=[gate, up, down])
     main = _node("main")
     monkeypatch.setattr(cg, "is_situ_gated_mlp", lambda n: n is module)
-    monkeypatch.setattr(bt, "_situ_gated_mlp_parts", lambda _n: (gate, up, act, situ, down))
+    monkeypatch.setattr(
+        bt, "_situ_gated_mlp_parts", lambda _n: (gate, up, act, situ, down)
+    )
     monkeypatch.setattr(
         cg,
         "flatten_computation_segments",
@@ -1231,9 +1300,13 @@ def test_build_residual_situ_gated(monkeypatch):
 
 def test_build_sidefeed_wrapper_consumer(monkeypatch):
     source_a = _node("source_a")
-    consume_aux = _node("@op_add", class_name="Add", param_inputs=["aux"], operation_predecessors=[])
+    consume_aux = _node(
+        "@op_add", class_name="Add", param_inputs=["aux"], operation_predecessors=[]
+    )
     consume_main = _node("@op_mul", class_name="Multiply")
-    consumer = _node("consumer", class_name="Consumer", children=[consume_aux, consume_main])
+    consumer = _node(
+        "consumer", class_name="Consumer", children=[consume_aux, consume_main]
+    )
     side = aa.SideInputSpec("aux", "aux", ["source_a"], "prior_step")
 
     def expand(step, basic_ops=None):
@@ -1267,9 +1340,7 @@ def test_build_sidefeed_method_wrapper_consumer(monkeypatch):
         "flatten_computation_segments",
         lambda _r: [
             SeqSegment(producer),
-            SideFeedSegment(
-                consumer, [side], side_producer_nodes={"router": producer}
-            ),
+            SideFeedSegment(consumer, [side], side_producer_nodes={"router": producer}),
         ],
     )
     graph = cg.build_computation_graph(_node("root", children=[producer, consumer]))
@@ -1279,7 +1350,9 @@ def test_build_sidefeed_method_wrapper_consumer(monkeypatch):
 def test_build_sidefeed_plain_consumer(monkeypatch):
     consumer = _node("consumer", class_name="Opaque")
     side = aa.SideInputSpec("x", "x", [], "forward_input")
-    monkeypatch.setattr(cg, "inline_composite_steps", lambda step, basic_ops=None: ([step], None))
+    monkeypatch.setattr(
+        cg, "inline_composite_steps", lambda step, basic_ops=None: ([step], None)
+    )
     monkeypatch.setattr(
         cg,
         "flatten_computation_segments",
@@ -1345,7 +1418,9 @@ def test_build_combine_wrapper_side_and_after(monkeypatch):
         "flatten_computation_segments",
         lambda _r: [
             SeqSegment(main),
-            CombineSegment(side, after=[after], side_port_label="gate", side_source="forward_input"),
+            CombineSegment(
+                side, after=[after], side_port_label="gate", side_source="forward_input"
+            ),
         ],
     )
     graph = cg.build_computation_graph(_node("root", children=[main, side, after]))
@@ -1372,7 +1447,9 @@ def test_build_combine_method_wrapper_side(monkeypatch):
 def test_build_combine_plain_side_no_last(monkeypatch):
     # No preceding SeqSegment → last_index None → combine short-circuits after side.
     side = _node("side", class_name="Opaque")
-    monkeypatch.setattr(cg, "inline_composite_steps", lambda step, basic_ops=None: ([step], None))
+    monkeypatch.setattr(
+        cg, "inline_composite_steps", lambda step, basic_ops=None: ([step], None)
+    )
     monkeypatch.setattr(
         cg,
         "flatten_computation_segments",
@@ -1440,7 +1517,9 @@ def test_fanout_merge_key_prefix():
 # Kernel pipeline merge chain / linear pipeline chain
 # --------------------------------------------------------------------------- #
 def test_add_kernel_pipeline_merge_chain_two_steps():
-    pipeline = _node("pipeline", class_name="KernelPipeline", children=[_node("a"), _node("b")])
+    pipeline = _node(
+        "pipeline", class_name="KernelPipeline", children=[_node("a"), _node("b")]
+    )
     output = _node("output", class_name="KernelOutput", kernel_predecessors=["b"])
     graph = cg.ComputationGraph()
     attr_indices: dict[str, int] = {}
@@ -1466,7 +1545,9 @@ def test_add_kernel_pipeline_merge_chain_empty():
 
 def test_add_kernel_pipeline_merge_chain_pipeline_tail_link():
     # output_step with no kernel_predecessors → links from pipeline tail.
-    pipeline = _node("pipeline", class_name="KernelPipeline", children=[_node("a"), _node("b")])
+    pipeline = _node(
+        "pipeline", class_name="KernelPipeline", children=[_node("a"), _node("b")]
+    )
     output = _node("output", class_name="KernelOutput")
     graph = cg.ComputationGraph()
     merged, tail = cg._add_kernel_pipeline_merge_chain(
@@ -1492,7 +1573,9 @@ def test_add_linear_pipeline_chain_nested(monkeypatch):
 
     monkeypatch.setattr(cg, "inline_composite_steps", expand)
     graph = cg.ComputationGraph()
-    input_index = cg._add_node(graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT)
+    input_index = cg._add_node(
+        graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT
+    )
     aliases: dict[str, int] = {}
     chain, tail = cg._add_linear_pipeline_chain(
         graph,
@@ -1527,21 +1610,34 @@ def test_add_linear_pipeline_chain_empty():
 
 
 def test_add_linear_pipeline_chain_kernel_second_operand(monkeypatch):
-    monkeypatch.setattr(cg, "inline_composite_steps", lambda step, basic_ops=None: ([step], None))
+    monkeypatch.setattr(
+        cg, "inline_composite_steps", lambda step, basic_ops=None: ([step], None)
+    )
     step = _node("out", class_name="KernelOutput", kernel_second_operand="input")
     graph = cg.ComputationGraph()
-    input_index = cg._add_node(graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT)
+    input_index = cg._add_node(
+        graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT
+    )
     chain, tail = cg._add_linear_pipeline_chain(
-        graph, [step], wrapper=None, key_prefix="k", input_index=input_index, last_index=input_index
+        graph,
+        [step],
+        wrapper=None,
+        key_prefix="k",
+        input_index=input_index,
+        last_index=input_index,
     )
     assert tail is not None
 
 
 def test_add_linear_pipeline_chain_branch_from_input_dashed(monkeypatch):
-    monkeypatch.setattr(cg, "inline_composite_steps", lambda step, basic_ops=None: ([step], None))
+    monkeypatch.setattr(
+        cg, "inline_composite_steps", lambda step, basic_ops=None: ([step], None)
+    )
     step = _node("s")
     graph = cg.ComputationGraph()
-    input_index = cg._add_node(graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT)
+    input_index = cg._add_node(
+        graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT
+    )
     chain, tail = cg._add_linear_pipeline_chain(
         graph,
         [step],
@@ -1557,12 +1653,21 @@ def test_add_linear_pipeline_chain_branch_from_input_dashed(monkeypatch):
 # Kernel second-operand resolution
 # --------------------------------------------------------------------------- #
 def test_resolve_kernel_second_operand_index():
-    assert cg._resolve_kernel_second_operand_index(_node("n"), {}, chain_input_index=1) is None
+    assert (
+        cg._resolve_kernel_second_operand_index(_node("n"), {}, chain_input_index=1)
+        is None
+    )
     step = _node("n", kernel_second_operand="input")
     assert cg._resolve_kernel_second_operand_index(step, {}, chain_input_index=7) == 7
     step2 = _node("n", kernel_second_operand="prev")
-    assert cg._resolve_kernel_second_operand_index(step2, None, chain_input_index=7) is None
-    assert cg._resolve_kernel_second_operand_index(step2, {"prev": 3}, chain_input_index=7) == 3
+    assert (
+        cg._resolve_kernel_second_operand_index(step2, None, chain_input_index=7)
+        is None
+    )
+    assert (
+        cg._resolve_kernel_second_operand_index(step2, {"prev": 3}, chain_input_index=7)
+        == 3
+    )
 
 
 def test_append_kernel_second_operand_link_none():
@@ -1589,7 +1694,9 @@ def test_add_side_producer_index_wrapper(monkeypatch):
 
     monkeypatch.setattr(cg, "inline_composite_steps", expand)
     graph = cg.ComputationGraph()
-    input_index = cg._add_node(graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT)
+    input_index = cg._add_node(
+        graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT
+    )
     attr_last: dict[str, int] = {}
     tail = cg._add_side_producer_index(
         graph,
@@ -1607,7 +1714,9 @@ def test_add_side_producer_index_wrapper(monkeypatch):
 def test_add_side_producer_index_leaf():
     producer = _node("gate")
     graph = cg.ComputationGraph()
-    input_index = cg._add_node(graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT)
+    input_index = cg._add_node(
+        graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT
+    )
     attr_last: dict[str, int] = {}
     tail = cg._add_side_producer_index(
         graph,
@@ -1630,7 +1739,13 @@ def test_ensure_side_chain_tail_index_variants():
     graph = cg.ComputationGraph()
     assert (
         cg._ensure_side_chain_tail_index(
-            graph, seg, side_empty, segment_index=0, input_index=None, attr_last_index={}, root=root
+            graph,
+            seg,
+            side_empty,
+            segment_index=0,
+            input_index=None,
+            attr_last_index={},
+            root=root,
         )
         is None
     )
@@ -1639,7 +1754,13 @@ def test_ensure_side_chain_tail_index_variants():
     side = aa.SideInputSpec("x", "x", ["g_a"])
     assert (
         cg._ensure_side_chain_tail_index(
-            graph, seg, side, segment_index=0, input_index=None, attr_last_index={"g_a": 4}, root=root
+            graph,
+            seg,
+            side,
+            segment_index=0,
+            input_index=None,
+            attr_last_index={"g_a": 4},
+            root=root,
         )
         == 4
     )
@@ -1648,9 +1769,17 @@ def test_ensure_side_chain_tail_index_variants():
     producer = _node("g_a")
     seg2 = SideFeedSegment(_node("c"), [side], side_producer_nodes={"g_a": producer})
     graph2 = cg.ComputationGraph()
-    input_index = cg._add_node(graph2, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT)
+    input_index = cg._add_node(
+        graph2, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT
+    )
     tail = cg._ensure_side_chain_tail_index(
-        graph2, seg2, side, segment_index=0, input_index=input_index, attr_last_index={}, root=root
+        graph2,
+        seg2,
+        side,
+        segment_index=0,
+        input_index=input_index,
+        attr_last_index={},
+        root=root,
     )
     assert tail is not None
 
@@ -1658,7 +1787,13 @@ def test_ensure_side_chain_tail_index_variants():
     seg3 = SideFeedSegment(_node("c"), [side])
     assert (
         cg._ensure_side_chain_tail_index(
-            cg.ComputationGraph(), seg3, side, segment_index=0, input_index=None, attr_last_index={}, root=root
+            cg.ComputationGraph(),
+            seg3,
+            side,
+            segment_index=0,
+            input_index=None,
+            attr_last_index={},
+            root=root,
         )
         is None
     )
@@ -1693,11 +1828,19 @@ def test_ensure_side_chain_tail_index_prefers_real_predecessor_over_input_fed():
         forward_step_predecessor_args={"gate": {"hidden_states": "view_op"}},
     )
     graph = cg.ComputationGraph()
-    input_index = cg._add_node(graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT)
+    input_index = cg._add_node(
+        graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT
+    )
     view_index = cg._add_node(graph, key="view_op")
     attr_last = {"view_op": view_index}
     tail = cg._ensure_side_chain_tail_index(
-        graph, seg, side, segment_index=0, input_index=input_index, attr_last_index=attr_last, root=root
+        graph,
+        seg,
+        side,
+        segment_index=0,
+        input_index=input_index,
+        attr_last_index=attr_last,
+        root=root,
     )
     assert (view_index, tail) in graph.links
     assert (input_index, tail) not in graph.links
@@ -1714,10 +1857,18 @@ def test_ensure_side_chain_tail_index_multi_step_chain():
     )
     root = _node("root", input_fed_steps=["g_a"])
     graph = cg.ComputationGraph()
-    input_index = cg._add_node(graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT)
+    input_index = cg._add_node(
+        graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT
+    )
     attr_last: dict[str, int] = {}
     tail = cg._ensure_side_chain_tail_index(
-        graph, seg, side, segment_index=0, input_index=input_index, attr_last_index=attr_last, root=root
+        graph,
+        seg,
+        side,
+        segment_index=0,
+        input_index=input_index,
+        attr_last_index=attr_last,
+        root=root,
     )
     assert attr_last["g_b"] == tail
     assert attr_last["g_a"] != tail
@@ -1738,7 +1889,13 @@ def test_ensure_side_chain_tail_index_chain_with_cached_step():
     a_index = cg._add_node(graph, key="a", block=g_a)
     attr_last = {"g_a": a_index}
     tail = cg._ensure_side_chain_tail_index(
-        graph, seg, side, segment_index=0, input_index=None, attr_last_index=attr_last, root=root
+        graph,
+        seg,
+        side,
+        segment_index=0,
+        input_index=None,
+        attr_last_index=attr_last,
+        root=root,
     )
     assert (a_index, tail) in graph.links
 
@@ -1747,21 +1904,30 @@ def test_ensure_side_chain_tail_index_chain_with_cached_step():
 # Upcoming side-combine / fork helpers
 # --------------------------------------------------------------------------- #
 def test_upcoming_side_combine_and_fork():
-    combine = SideCombineSegment(_node("c"), [aa.SideInputSpec("x", "router", ["router"], "prior_step")], "+")
+    combine = SideCombineSegment(
+        _node("c"), [aa.SideInputSpec("x", "router", ["router"], "prior_step")], "+"
+    )
     segments = [SeqSegment(_node("a")), combine]
     assert cg._upcoming_side_combine(segments, 0) is combine
     assert cg._upcoming_side_combine(segments, 1) is None
-    assert cg._upcoming_side_combine([SeqSegment(_node("a")), SeqSegment(_node("b"))], 0) is None
+    assert (
+        cg._upcoming_side_combine([SeqSegment(_node("a")), SeqSegment(_node("b"))], 0)
+        is None
+    )
 
     attr_last = {"router": 7}
     assert cg._side_source_tail_index(combine, attr_last) == 7
     # side kind not prior_step → None.
-    fwd = SideCombineSegment(_node("c"), [aa.SideInputSpec("x", "r", [], "forward_input")], "+")
+    fwd = SideCombineSegment(
+        _node("c"), [aa.SideInputSpec("x", "r", [], "forward_input")], "+"
+    )
     assert cg._side_source_tail_index(fwd, attr_last) is None
 
     assert cg._should_fork_main_path_from_input(segments, 0, 7, attr_last)
     assert not cg._should_fork_main_path_from_input(segments, 0, None, attr_last)
-    assert not cg._should_fork_main_path_from_input([SeqSegment(_node("a"))], 0, 7, attr_last)
+    assert not cg._should_fork_main_path_from_input(
+        [SeqSegment(_node("a"))], 0, 7, attr_last
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1875,7 +2041,12 @@ def test_wire_inline_op_predecessor_multi_input(monkeypatch):
     monkeypatch.setattr(
         cg,
         "flatten_computation_segments",
-        lambda _r: [SeqSegment(left), SeqSegment(right), SeqSegment(op), SeqSegment(tail)],
+        lambda _r: [
+            SeqSegment(left),
+            SeqSegment(right),
+            SeqSegment(op),
+            SeqSegment(tail),
+        ],
     )
     graph = cg.build_computation_graph(root)
     target = next(i for i, s in enumerate(graph.nodes) if s.block is op)
@@ -1910,7 +2081,9 @@ def test_wire_multi_input_op_forward_links(monkeypatch):
 # Operation source indices
 # --------------------------------------------------------------------------- #
 def test_operation_source_indices():
-    step = _node("@op", operation_predecessors=["a", aa.FORWARD_METHOD_INPUT, "missing"])
+    step = _node(
+        "@op", operation_predecessors=["a", aa.FORWARD_METHOD_INPUT, "missing"]
+    )
     sources = cg._operation_source_indices(step, {"a": 3}, chain_input_index=1)
     assert 3 in sources and 1 in sources
     assert cg._operation_source_indices(step, None) == []
@@ -1940,7 +2113,12 @@ def test_operation_source_indices_multi_ordinal_repeat():
 def test_build_inline_expansion_false():
     linear = _node("linear", is_basic=True)
     sigmoid = _node("sigmoid", is_basic=True)
-    gate = _node("g_proj", class_name="StraightLine", children=[linear, sigmoid], label="Output gate")
+    gate = _node(
+        "g_proj",
+        class_name="StraightLine",
+        children=[linear, sigmoid],
+        label="Output gate",
+    )
     root = _node("root", class_name="Root", children=[gate])
     collapsed = cg.build_computation_graph(root, inline_expansion=False)
     labels = [s.label for s in collapsed.nodes if not s.synthetic]
@@ -1954,7 +2132,11 @@ def test_build_basic_only_filter():
     graph = cg.build_computation_graph(root, basic_ops=BasicOpFilter.for_detailed())
     assert isinstance(graph, cg.ComputationGraph)
     basic_only = BasicOpFilter.for_detailed()
-    object.__setattr__(basic_only, "basic_only", True) if hasattr(basic_only, "__dict__") else None
+    (
+        object.__setattr__(basic_only, "basic_only", True)
+        if hasattr(basic_only, "__dict__")
+        else None
+    )
 
 
 def test_build_strip_unused_return_branches(monkeypatch):
@@ -1984,7 +2166,9 @@ def test_build_strip_unused_return_branches(monkeypatch):
 def test_build_primary_output_step_fallback(monkeypatch):
     step = _node("s")
     root = _node("root", children=[step], primary_output_step="nonexistent")
-    monkeypatch.setattr(cg, "flatten_computation_segments", lambda _r: [SeqSegment(step)])
+    monkeypatch.setattr(
+        cg, "flatten_computation_segments", lambda _r: [SeqSegment(step)]
+    )
     graph = cg.build_computation_graph(root)
     # primary_output_step not found among nodes → falls back to last_index.
     assert graph.primary_output_index is not None
@@ -2121,7 +2305,9 @@ def test_strip_dangling_leaves_keeps_referenced_and_frame_fed():
 
 
 def test_tensor_ports_segment_kernel_predecessors(monkeypatch):
-    monkeypatch.setattr(cg, "inline_composite_steps", lambda step, basic_ops=None: ([step], None))
+    monkeypatch.setattr(
+        cg, "inline_composite_steps", lambda step, basic_ops=None: ([step], None)
+    )
     # Two pipeline steps, second with a child pipeline referencing the first.
     inner_a = _node("inner_a")
     inner_b = _node("inner_b", kernel_second_operand="input")

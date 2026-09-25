@@ -169,8 +169,10 @@ def _int_call_args(call: ast.Call) -> tuple[int, ...]:
     """
     args: list[int] = []
     for arg in call.args:
-        if isinstance(arg, ast.Constant) and isinstance(arg.value, int) and not isinstance(
-            arg.value, bool
+        if (
+            isinstance(arg, ast.Constant)
+            and isinstance(arg.value, int)
+            and not isinstance(arg.value, bool)
         ):
             args.append(arg.value)
         else:
@@ -274,7 +276,9 @@ def _interface_call_args(cls_node: ast.AST) -> list[str] | None:
         if not isinstance(call, ast.Call):
             continue
         func = call.func
-        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        name = (
+            func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        )
         if name not in _SYNTHETIC_ATTENTION_NAMES:
             continue
         start = (
@@ -479,7 +483,10 @@ def _derive_repeat_ops(callee: ast.FunctionDef, factor: int) -> tuple[RepeatOp, 
                 if merged > 1:
                     return False
                 ops.append(
-                    (method.capitalize(), (f"raw_op: {method}", f"shape: {', '.join(parts)}"))
+                    (
+                        method.capitalize(),
+                        (f"raw_op: {method}", f"shape: {', '.join(parts)}"),
+                    )
                 )
             else:
                 return False

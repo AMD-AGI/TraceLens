@@ -163,7 +163,11 @@ def test_deepseek_v4_attention_kernel_q_key_value_are_rank4():
             for attr in out.get("attrs", []) or []:
                 if attr.get("key") == "tensor_shape":
                     inner = str(attr.get("value", "")).split("]", 1)[0].lstrip("[")
-                    return len([d for d in inner.split(",") if d.strip()]) if inner else None
+                    return (
+                        len([d for d in inner.split(",") if d.strip()])
+                        if inner
+                        else None
+                    )
         return None
 
     # The attention kernel is the node fed by the named kernel-input ports.
@@ -177,14 +181,18 @@ def test_deepseek_v4_attention_kernel_q_key_value_are_rank4():
             if port in {"q", "key", "value"} and port not in port_rank:
                 port_rank[port] = _rank(by_id.get(src, {}))
 
-    assert {"q", "key", "value"} <= set(port_rank), (
-        f"kernel q/key/value ports not found: {port_rank}"
-    )
-    assert port_rank["q"] == 4, f"query kernel input must be 4-D, got rank {port_rank['q']}"
-    assert port_rank["key"] == 4, f"key kernel input must be 4-D, got rank {port_rank['key']}"
-    assert port_rank["value"] == 4, (
-        f"value kernel input must be 4-D, got rank {port_rank['value']}"
-    )
+    assert {"q", "key", "value"} <= set(
+        port_rank
+    ), f"kernel q/key/value ports not found: {port_rank}"
+    assert (
+        port_rank["q"] == 4
+    ), f"query kernel input must be 4-D, got rank {port_rank['q']}"
+    assert (
+        port_rank["key"] == 4
+    ), f"key kernel input must be 4-D, got rank {port_rank['key']}"
+    assert (
+        port_rank["value"] == 4
+    ), f"value kernel input must be 4-D, got rank {port_rank['value']}"
 
 
 def test_deepseek_v4_attention_kernel_ports_carry_correct_distinct_shapes():
@@ -233,12 +241,15 @@ def test_deepseek_v4_attention_kernel_ports_carry_correct_distinct_shapes():
             if "@kernel_in" not in src:
                 continue
             port = src.rsplit(":", 1)[-1]
-            if port in {"q", "key", "value", "attention_mask"} and port not in port_axes:
+            if (
+                port in {"q", "key", "value", "attention_mask"}
+                and port not in port_axes
+            ):
                 port_axes[port] = _axes(by_id.get(src, {}))
 
-    assert {"q", "key", "value", "attention_mask"} <= set(port_axes), (
-        f"kernel q/key/value/attention_mask ports not all found: {port_axes}"
-    )
+    assert {"q", "key", "value", "attention_mask"} <= set(
+        port_axes
+    ), f"kernel q/key/value/attention_mask ports not all found: {port_axes}"
     q = port_axes["q"]
     key = port_axes["key"]
     value = port_axes["value"]
@@ -255,15 +266,15 @@ def test_deepseek_v4_attention_kernel_ports_carry_correct_distinct_shapes():
 
     # Task J: ``key`` and ``value`` are distinct sdpa operand ports fanned out
     # from the one compressed-KV producer, so they carry the *same* shape.
-    assert tuple(key) == tuple(value), (
-        f"key/value ports share the one kv producer's shape: {port_axes}"
-    )
+    assert tuple(key) == tuple(
+        value
+    ), f"key/value ports share the one kv producer's shape: {port_axes}"
 
     # q, the shared key/value shape, and the mask are mutually distinct (no port
     # collapsed onto another -- the fragmentation/merge bug).
-    assert len({tuple(q), tuple(key), tuple(mask)}) == 3, (
-        f"q/key(=value)/mask ports must carry distinct shapes: {port_axes}"
-    )
+    assert (
+        len({tuple(q), tuple(key), tuple(mask)}) == 3
+    ), f"q/key(=value)/mask ports must carry distinct shapes: {port_axes}"
 
 
 def test_deepseek_v4_attention_kernel_splits_kv_into_key_and_value_ports():
@@ -283,7 +294,6 @@ def test_deepseek_v4_attention_kernel_splits_kv_into_key_and_value_ports():
     pytest.importorskip("huggingface_hub")
     graph = _build_graph()
     nodes = graph["nodes"]
-    by_id = {node["id"]: node for node in nodes}
 
     def _attr(node, key):
         for attr in node.get("attrs", []) or []:
@@ -297,9 +307,9 @@ def test_deepseek_v4_attention_kernel_splits_kv_into_key_and_value_ports():
 
     for core in cores:
         prim = _attr(core, "kernel_primitive")
-        assert "scaled_dot_product_attention" in str(prim), (
-            f"unexpected kernel_primitive on sdpa core: {prim!r}"
-        )
+        assert "scaled_dot_product_attention" in str(
+            prim
+        ), f"unexpected kernel_primitive on sdpa core: {prim!r}"
         port_sources: dict[str, str] = {}
         for edge in core.get("incomingEdges", []) or []:
             src = edge.get("sourceNodeId", "")
@@ -308,12 +318,12 @@ def test_deepseek_v4_attention_kernel_splits_kv_into_key_and_value_ports():
             port_sources[src.rsplit(":", 1)[-1]] = src
 
         # Distinct key + value ports present; the combined ``kv`` port is gone.
-        assert "key" in port_sources and "value" in port_sources, (
-            f"sdpa core must expose distinct key/value ports: {sorted(port_sources)}"
-        )
-        assert "kv" not in port_sources, (
-            f"combined ``kv`` port must be split away: {sorted(port_sources)}"
-        )
+        assert (
+            "key" in port_sources and "value" in port_sources
+        ), f"sdpa core must expose distinct key/value ports: {sorted(port_sources)}"
+        assert (
+            "kv" not in port_sources
+        ), f"combined ``kv`` port must be split away: {sorted(port_sources)}"
         # Both roles are fed by the one shared kv producer (same source node,
         # differing only by the trailing port-role segment).
         key_root = port_sources["key"].rsplit(":", 1)[0]
@@ -558,9 +568,7 @@ def test_deepseek_v4_model_scope_rotary_emb_expands_not_opaque_leaf():
 
     # The top-level rotary section is expanded into its real op chain.
     section = [
-        node
-        for node in nodes
-        if str(node.get("id", "")).startswith("rotary_emb/")
+        node for node in nodes if str(node.get("id", "")).startswith("rotary_emb/")
     ]
     labels = {node.get("label") for node in section}
     assert {"MatMul", "Cosine", "Sine"} <= labels, sorted(labels)
@@ -638,7 +646,9 @@ def test_deepseek_v4_main_decoder_has_no_loop_carried_boundary():
     # directly to its external consumer (the hyper-connection collapse head), and
     # that consumer is a real node, not a loop-carried tile.
     out_id = "decoder/@output"
-    assert any(node.get("id") == out_id for node in nodes), "decoder body @output missing"
+    assert any(
+        node.get("id") == out_id for node in nodes
+    ), "decoder body @output missing"
     consumers = [
         node["id"]
         for node in nodes

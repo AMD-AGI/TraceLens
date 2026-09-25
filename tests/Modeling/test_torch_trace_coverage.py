@@ -16,8 +16,6 @@
 
 from __future__ import annotations
 
-import os
-
 
 import sys
 import types
@@ -29,7 +27,6 @@ import transformers
 from transformers.activations import ACT2FN
 
 from TraceLens.ModelUtils import torch_trace as tt
-
 
 # ---------------------------------------------------------------------------
 # Module-level test modules.  They MUST live at module scope in a real .py
@@ -309,8 +306,7 @@ def test_fx_trace_act2fn_fallback():
     assert graph is not None
     # the mirror's forward (with self.act_fn substituted) traced to real ops
     assert any(
-        n.op in ("call_module", "call_function", "call_method")
-        for n in graph.nodes
+        n.op in ("call_module", "call_function", "call_method") for n in graph.nodes
     )
 
 
@@ -348,9 +344,7 @@ def test_propagate_none_input_returns_empty():
 def test_propagate_success_with_model_dtype():
     lin = nn.Linear(8, 8).to("meta")
     graph = tt._fx_trace_module(lin)
-    res = tt._propagate_fx_node_shapes(
-        lin, graph, (2, 8), model_dtype=torch.float32
-    )
+    res = tt._propagate_fx_node_shapes(lin, graph, (2, 8), model_dtype=torch.float32)
     assert res  # non-empty
     # the linear output node keeps the (2, 8) shape
     shapes = {shape for shape, _dtype in res.values()}

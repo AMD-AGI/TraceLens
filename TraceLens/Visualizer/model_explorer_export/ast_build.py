@@ -20,7 +20,9 @@ from TraceLens.ModelUtils.shape_inference import (
     serialize_dim,
 )
 
-from TraceLens.Visualizer.model_explorer_export.fact_sheet import build_fact_sheet_viewer
+from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
+    build_fact_sheet_viewer,
+)
 from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
 
 
@@ -62,7 +64,9 @@ def build_model_explorer_payload(
             walk_meta_module_tree,
         )
 
-        reconcile_live_module_groups(spec, walk_meta_module_tree(meta_shapes_checkpoint))
+        reconcile_live_module_groups(
+            spec, walk_meta_module_tree(meta_shapes_checkpoint)
+        )
         # Record each attention module's live grouped-query repeat factor
         # (``num_key_value_groups``) so a later wrapper expansion models ``repeat_kv``
         # with the real factor rather than the config's latent-attention-unreliable

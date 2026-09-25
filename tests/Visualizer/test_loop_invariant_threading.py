@@ -115,9 +115,9 @@ def test_decoder_attention_mask_docks_mask_builder(model_id):
     pytest.importorskip("huggingface_hub")
     graph, by_id = _build_nodes(model_id)
 
-    assert "@input:attention_mask" not in by_id, (
-        "bogus top-level @input:attention_mask model-input node must not exist"
-    )
+    assert (
+        "@input:attention_mask" not in by_id
+    ), "bogus top-level @input:attention_mask model-input node must not exist"
 
     boundary = by_id.get("decoder/@input:attention_mask")
     if boundary is None:
@@ -130,9 +130,9 @@ def test_decoder_attention_mask_docks_mask_builder(model_id):
     for source in sources:
         producer = by_id.get(source)
         assert producer is not None
-        assert source.startswith("@model_forward/@fn_l"), (
-            f"attention_mask boundary sourced by {source!r}, not a mask-builder node"
-        )
+        assert source.startswith(
+            "@model_forward/@fn_l"
+        ), f"attention_mask boundary sourced by {source!r}, not a mask-builder node"
         assert "create" in producer.get("label", "").lower()
 
 
@@ -192,17 +192,17 @@ def test_deepseek_decoder_position_ids_docks_derived_producer():
     for source in sources:
         producer = by_id.get(source)
         assert producer is not None, f"missing producer {source!r}"
-        assert source.startswith("@model_forward/@op_l"), (
-            f"position_ids boundary sourced by {source!r}, not a derived op producer"
-        )
-        assert source.endswith("_unsqueeze"), (
-            f"expected the terminal unsqueeze of the derived chain, got {source!r}"
-        )
+        assert source.startswith(
+            "@model_forward/@op_l"
+        ), f"position_ids boundary sourced by {source!r}, not a derived op producer"
+        assert source.endswith(
+            "_unsqueeze"
+        ), f"expected the terminal unsqueeze of the derived chain, got {source!r}"
         # A materialised op source (not a fabricated @input) carries the underlying
         # torch op as a top-level raw_op attr.
-        assert _node_attr(producer, "raw_op") is not None, (
-            f"{source!r} is not a materialised op source"
-        )
+        assert (
+            _node_attr(producer, "raw_op") is not None
+        ), f"{source!r} is not a materialised op source"
 
 
 def test_minimax_m3_position_ids_pre_existing_limitation():
@@ -239,7 +239,11 @@ def test_loop_invariant_threading_i2_clean(model_id):
 
     graph, _ = _build_nodes(model_id)
 
-    built = [w for w in integrity_check_graph_nodes(graph["nodes"], label="built") if "I2" in w]
+    built = [
+        w
+        for w in integrity_check_graph_nodes(graph["nodes"], label="built")
+        if "I2" in w
+    ]
     assert built == [], built
 
     rendered = _graph_without_constants(graph)

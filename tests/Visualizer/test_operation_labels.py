@@ -110,16 +110,16 @@ class Rotary(torch.nn.Module):
     tree = ast.parse(source)
     cls = tree.body[-1]
     forward = next(
-        item for item in cls.body
+        item
+        for item in cls.body
         if isinstance(item, ast.FunctionDef) and item.name == "forward"
     )
     init = next(
-        item for item in cls.body
+        item
+        for item in cls.body
         if isinstance(item, ast.FunctionDef) and item.name == "__init__"
     )
-    method_names = {
-        item.name for item in cls.body if isinstance(item, ast.FunctionDef)
-    }
+    method_names = {item.name for item in cls.body if isinstance(item, ast.FunctionDef)}
 
     forward_calls = ["recompose"]
     init_assignments = {}
@@ -136,7 +136,10 @@ class Rotary(torch.nn.Module):
         forward, self_values=_self_config_values(init, {}), all_tensor_ops=False
     )
     _calls, operations, *_ = _apply_forward_analysis(
-        forward, analysis, forward_calls=forward_calls, init_assignments=init_assignments
+        forward,
+        analysis,
+        forward_calls=forward_calls,
+        init_assignments=init_assignments,
     )
     # The inline multiplies survive pruning even though the returned values are
     # produced by the sibling call.
@@ -155,9 +158,7 @@ def test_sibling_method_delegation_rejects_submodule_and_free_calls():
         ["sub"], {"sub": "SubModule"}, method_names
     )
     # An unknown free call is not a recognized sibling method.
-    assert not _forward_delegates_only_to_sibling_methods(
-        ["mystery"], {}, method_names
-    )
+    assert not _forward_delegates_only_to_sibling_methods(["mystery"], {}, method_names)
     # No calls at all is handled by _forward_delegates_to_nothing, not here.
     assert not _forward_delegates_only_to_sibling_methods([], {}, method_names)
 
@@ -246,7 +247,6 @@ def test_glm_attention_expand_kv_assembles_key_states_from_split_and_expand():
         "Copy",
         "Copy",
     ]
-    by_id = {node["id"]: node for node in graph["nodes"]}
     split = next(node for node in op_nodes if node["label"] == "Split")
     expand = next(node for node in op_nodes if node["label"] == "Expand")
     copies = [node for node in op_nodes if node["label"] == "Copy"]
@@ -286,8 +286,7 @@ def test_glm_attention_expand_kv_assembles_key_states_from_split_and_expand():
     out_mirror = next(
         node
         for node in graph["nodes"]
-        if synthetic(node) == "@output_mirror"
-        and consumes(node, out_boundary["id"])
+        if synthetic(node) == "@output_mirror" and consumes(node, out_boundary["id"])
     )
     key_port = next(
         node

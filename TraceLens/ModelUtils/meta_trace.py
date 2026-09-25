@@ -634,6 +634,7 @@ def trace_meta_shapes(
                             break
             except Exception:
                 pass
+
         return hook
 
     handles = []
@@ -642,9 +643,7 @@ def trace_meta_shapes(
 
     # ---- run forward pass --------------------------------------------------
     try:
-        dummy = torch.zeros(
-            batch_size, seq_len, dtype=torch.long, device="meta"
-        )
+        dummy = torch.zeros(batch_size, seq_len, dtype=torch.long, device="meta")
         with torch.no_grad():
             model(dummy)
     except Exception:
@@ -656,9 +655,7 @@ def trace_meta_shapes(
             handle.remove()
 
     if shapes:
-        _log.info(
-            "Meta-device tracing captured shapes for %d modules", len(shapes)
-        )
+        _log.info("Meta-device tracing captured shapes for %d modules", len(shapes))
     else:
         _log.warning("Meta-device tracing captured no shapes")
         return None
@@ -893,10 +890,9 @@ def trace_meta_op_shapes(
         def hook(_module, inputs):
             for item in inputs:
                 if isinstance(item, torch.Tensor):
-                    input_shapes.setdefault(
-                        name, tuple(int(d) for d in item.shape)
-                    )
+                    input_shapes.setdefault(name, tuple(int(d) for d in item.shape))
                     break
+
         return hook
 
     modules = dict(model.named_modules())

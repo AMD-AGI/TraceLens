@@ -30,7 +30,11 @@ from TraceLens.ModelUtils.config_resolve import (
     apply_config_attribute_aliases,
     load_checkpoint_config,
 )
-from TraceLens.ModelUtils.github import fetch_github_source, github_config_path, parse_github_url
+from TraceLens.ModelUtils.github import (
+    fetch_github_source,
+    github_config_path,
+    parse_github_url,
+)
 from TraceLens.ModelUtils.source import read_sources, resolve_source_files
 
 _log = logging.getLogger(__name__)
@@ -611,7 +615,11 @@ def _infer_layer_variants(
         return
 
     from collections import Counter
-    from TraceLens.ModelUtils.ast_analyze import _classify_role, _label_for, ffn_role_for_class
+    from TraceLens.ModelUtils.ast_analyze import (
+        _classify_role,
+        _label_for,
+        ffn_role_for_class,
+    )
 
     attn_rules = [
         (cls, cond) for attr, cls, cond in conditionals if attr in _ATTENTION_ATTRS
@@ -646,7 +654,9 @@ def _infer_layer_variants(
     )
 
     buckets: Counter[tuple[str, str | None, str, str | None, str | None]] = Counter()
-    indices_by_key: dict[tuple[str, str | None, str, str | None, str | None], list[int]] = {}
+    indices_by_key: dict[
+        tuple[str, str | None, str, str | None, str | None], list[int]
+    ] = {}
     for layer_idx in range(num_layers):
         attn_class = (
             _resolve_conditional_class(layer_idx, attn_rules, config)
@@ -758,9 +768,7 @@ def _select_primary_group(
     return max(groups, key=lambda group: group.length)
 
 
-def _reconcile_layer_variants(
-    spec: ArchitectureSpec, primary: MetaModuleGroup
-) -> None:
+def _reconcile_layer_variants(spec: ArchitectureSpec, primary: MetaModuleGroup) -> None:
     """Drive sub-variant counts from the live per-element structural signatures."""
     from collections import Counter
 
@@ -966,9 +974,7 @@ def apply_live_attention_repeats(spec: ArchitectureSpec) -> None:
                     ctx.owner_class,
                 )
                 continue
-            node.kernel_port_repeats = {
-                label: list(ops) for label in ctx.port_labels
-            }
+            node.kernel_port_repeats = {label: list(ops) for label in ctx.port_labels}
 
 
 def _config_moe_layer(layer_idx: int, config: dict[str, Any]) -> bool:
@@ -1205,7 +1211,9 @@ def _finalize_layer_repeat_lines(spec: ArchitectureSpec) -> None:
                 lines.append(line)
                 existing.add(line)
     if spec.raw_config:
-        from TraceLens.ModelUtils.layer_repeat_simplify import simplify_layer_repeat_lines
+        from TraceLens.ModelUtils.layer_repeat_simplify import (
+            simplify_layer_repeat_lines,
+        )
 
         lines = simplify_layer_repeat_lines(lines, spec.raw_config)
     spec.layer_repeat_lines = lines
@@ -1274,7 +1282,10 @@ def _merge_code_analysis(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None
 
 def _code_rotates_positions(analysis: CodeAnalysis) -> bool:
     """True when the modeling source shows positions being rotated somewhere."""
-    from TraceLens.ModelUtils.ast_analyze import POSITIONAL_CLASS_RE, is_positional_synthetic
+    from TraceLens.ModelUtils.ast_analyze import (
+        POSITIONAL_CLASS_RE,
+        is_positional_synthetic,
+    )
 
     if analysis.positional_helpers:
         return True
@@ -1324,7 +1335,9 @@ def _model_type_to_pascal(model_type: str) -> str:
     ``_``-separated part is upper-cased, so digits and existing casing inside a
     part are preserved (``glm5 -> Glm5``), matching HF's own class naming.
     """
-    return "".join(part[:1].upper() + part[1:] for part in model_type.split("_") if part)
+    return "".join(
+        part[:1].upper() + part[1:] for part in model_type.split("_") if part
+    )
 
 
 def _vision_tower_class_from_config(model_type: str, registry: dict) -> str | None:

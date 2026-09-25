@@ -29,7 +29,10 @@ from TraceLens.ModelUtils.block_tree import (
     subgraph_warrants_json_export,
 )
 from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant
-from TraceLens.ModelUtils.computation_graph import ComputationGraph, build_computation_graph
+from TraceLens.ModelUtils.computation_graph import (
+    ComputationGraph,
+    build_computation_graph,
+)
 from TraceLens.ModelUtils.extract import (
     ArchitectureSpec,
     architecture_section_trees,
@@ -53,7 +56,9 @@ from TraceLens.Visualizer.model_explorer_export.adapter import (
     _output_port_metadata,
     _sanitize_namespace_segment,
 )
-from TraceLens.Visualizer.model_explorer_export.fact_sheet import build_fact_sheet_group_attributes
+from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
+    build_fact_sheet_group_attributes,
+)
 from TraceLens.Visualizer.model_explorer_export.type_check import (
     group_cycle_check_graph_nodes,
     integrity_check_graph_nodes,
@@ -1509,11 +1514,7 @@ def _inject_group_outputs(
                     if len(slots) == 1:
                         slot = slots[0]
                     else:
-                        idx = (
-                            int(source_port)
-                            if str(source_port).isdigit()
-                            else None
-                        )
+                        idx = int(source_port) if str(source_port).isdigit() else None
                         if idx is None or idx >= len(slots):
                             idx = producer_cursor.get(source, 0)
                         slot = slots[idx] if idx < len(slots) else None
@@ -1532,8 +1533,7 @@ def _inject_group_outputs(
         if len(ports) <= 1:
             # Single output → one Output node.
             port_by_source = {
-                (source, source_port): port
-                for port, source, source_port in ports
+                (source, source_port): port for port, source, source_port in ports
             }
             for _target, edge in outgoing:
                 source = (
@@ -1571,9 +1571,7 @@ def _inject_group_outputs(
                     edge.get("sourceNodeOutputId", "0"),
                 )
                 per_port_id = source_to_port_id[source]
-                port_label = next(
-                    p for p, s, sp in ports if (s, sp) == source
-                )
+                port_label = next(p for p, s, sp in ports if (s, sp) == source)
                 edge["sourceNodeId"] = per_port_id
                 edge["sourceNodeOutputId"] = port_label
 
@@ -2188,6 +2186,7 @@ def _prune_noop_cast_nodes(nodes: list[dict[str, Any]]) -> None:
     a data transformation that never actually happens; downstream consumers
     are rewired straight through to the real predecessor instead.
     """
+
     def _is_synthetic(candidate: dict[str, Any]) -> bool:
         return any(
             attr.get("key") == "synthetic" for attr in candidate.get("attrs", [])
@@ -3057,7 +3056,10 @@ def _prune_unconsumed_outputs(
         ):
             continue
         node = node_by_id[node_id]
-        if _is_synthetic_input(node) or _node_attr(node, "synthetic") == "@loop_carried":
+        if (
+            _is_synthetic_input(node)
+            or _node_attr(node, "synthetic") == "@loop_carried"
+        ):
             continue
         dead.add(node_id)
         for edge in node.get("incomingEdges", []):
@@ -3702,6 +3704,7 @@ def _append_section(
         skip_namespaces=frozenset(inject_skip),
         resolve_slot_label=_return_slot_label,
     )
+
     def _resolve_slot_names_for_prefix(prefix: str) -> dict[str, list[str]] | None:
         """Map source attr_names → return slot names for multi-return children.
 
@@ -3712,14 +3715,10 @@ def _append_section(
         outputs get distinct ids/labels instead of colliding onto one.
         """
         attr = _tile_prefix_attr_name(prefix)
-        child = next(
-            (c for c in block_tree.children if c.attr_name == attr), None
-        )
+        child = next((c for c in block_tree.children if c.attr_name == attr), None)
         if child is None or not child.forward_return_slots:
             return None
-        order = child.forward_return_order or list(
-            child.forward_return_slots.keys()
-        )
+        order = child.forward_return_order or list(child.forward_return_slots.keys())
         result: dict[str, list[str]] = {}
         for slot in order:
             producer = child.forward_return_slots.get(slot)
@@ -4360,9 +4359,18 @@ def _attach_vision_language_combine(
             _source_edge(vision_exit, "image_embeds"),
         ],
         "inputsMetadata": [
-            {"id": "inputs_embeds", "attrs": [{"key": "port_label", "value": "inputs_embeds"}]},
-            {"id": "image_mask", "attrs": [{"key": "port_label", "value": "image_mask"}]},
-            {"id": "image_embeds", "attrs": [{"key": "port_label", "value": "image_embeds"}]},
+            {
+                "id": "inputs_embeds",
+                "attrs": [{"key": "port_label", "value": "inputs_embeds"}],
+            },
+            {
+                "id": "image_mask",
+                "attrs": [{"key": "port_label", "value": "image_mask"}],
+            },
+            {
+                "id": "image_embeds",
+                "attrs": [{"key": "port_label", "value": "image_embeds"}],
+            },
         ],
     }
     if shape_inferencer is not None:
@@ -4370,9 +4378,7 @@ def _attach_vision_language_combine(
         hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
         apply_shape_attrs(
             node,
-            TensorSpec(
-                (Symbol.BATCH.value, Symbol.SEQ.value, hidden), context.dtype
-            ),
+            TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value, hidden), context.dtype),
         )
     nodes.append(node)
     return [(combine_id, "0")]
@@ -4392,10 +4398,12 @@ def _rename_namespace_prefix(
     for node in nodes:
         ns = node.get("namespace", "")
         if ns == old or ns.startswith(old + "/"):
-            node["namespace"] = new + ns[len(old):]
+            node["namespace"] = new + ns[len(old) :]
     for key in list(group_node_attributes.keys()):
         if key == old or key.startswith(old + "/"):
-            group_node_attributes[new + key[len(old):]] = group_node_attributes.pop(key)
+            group_node_attributes[new + key[len(old) :]] = group_node_attributes.pop(
+                key
+            )
     esc_old, esc_new = re.escape(old), re.escape(new)
     for config in group_node_configs:
         regex = config.get("namespaceRegex")
@@ -4480,7 +4488,9 @@ def _fill_repeated_loop_counts(nodes: list[dict[str, Any]]) -> None:
         sublabel_attr = next(
             (a for a in node.get("attrs", []) if a.get("key") == "sublabel"), None
         )
-        if sublabel_attr is None or not sublabel_attr.get("value", "").endswith("· repeated"):
+        if sublabel_attr is None or not sublabel_attr.get("value", "").endswith(
+            "· repeated"
+        ):
             continue
         # Nearest (deepest) enclosing repeat group owns this loop's trip count.
         count = next(
@@ -5182,9 +5192,7 @@ def _resolve_submodule_output_nodes(
         return [attr]
     prefix = f"{attr}/"
     return sorted(
-        nid
-        for nid in node_by_id
-        if nid.startswith(prefix) and "/@output" in nid
+        nid for nid in node_by_id if nid.startswith(prefix) and "/@output" in nid
     )
 
 
@@ -5296,12 +5304,12 @@ def _decoder_loop_pred_args(spec: ArchitectureSpec, cls: Any) -> dict[str, str]:
         ),
         None,
     )
-    return (cls.forward_step_predecessor_args.get(loop_attr, {}) if loop_attr else {}) or {}
+    return (
+        cls.forward_step_predecessor_args.get(loop_attr, {}) if loop_attr else {}
+    ) or {}
 
 
-def _loop_invariant_producer_base_attrs(
-    spec: ArchitectureSpec, cls: Any
-) -> set[str]:
+def _loop_invariant_producer_base_attrs(spec: ArchitectureSpec, cls: Any) -> set[str]:
     """Base submodule attrs that produce a tensor the decoder loop reads by keyword.
 
     ``rotary_emb`` for a decoder that receives ``position_embeddings=
@@ -5690,9 +5698,7 @@ def build_merged_model_graph(
         _prune_keep_output_ids.update(
             _resolve_submodule_output_nodes(_node_by_id_prune, _attr)
         )
-    _prune_unconsumed_outputs(
-        nodes, keep_output_ids=frozenset(_prune_keep_output_ids)
-    )
+    _prune_unconsumed_outputs(nodes, keep_output_ids=frozenset(_prune_keep_output_ids))
     _label_boundary_outputs_by_port(nodes)
     _mirror_boundary_inputs(nodes)
     _mirror_boundary_outputs(nodes)

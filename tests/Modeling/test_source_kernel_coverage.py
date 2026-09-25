@@ -322,9 +322,7 @@ def test_versioned_transformers_fetch_missing_tag_is_none(monkeypatch):
         raise RuntimeError("no such tag")
 
     monkeypatch.setattr(source, "fetch_github_source", boom)
-    assert (
-        source._fetch_versioned_transformers_file(("glm5_next",), "0.0.0") is None
-    )
+    assert source._fetch_versioned_transformers_file(("glm5_next",), "0.0.0") is None
     source._fetch_versioned_transformers_file.cache_clear()
 
 

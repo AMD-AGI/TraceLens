@@ -57,7 +57,9 @@ def test_fetch_github_source_allows_whitelisted_repo(monkeypatch, tmp_path: Path
         modeling.write_text("class Block: pass\n", encoding="utf-8")
         return cache_dir
 
-    monkeypatch.setattr("TraceLens.ModelUtils.github._fetch_archive", fake_fetch_archive)
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.github._fetch_archive", fake_fetch_archive
+    )
 
     ref = parse_github_url("github:acme/custom@main")
     root = fetch_github_source(ref, cache_root=tmp_path / "cache")

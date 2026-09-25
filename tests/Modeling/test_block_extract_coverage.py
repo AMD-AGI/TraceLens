@@ -368,7 +368,9 @@ def test_remote_config_discovery_ranks_downloaded_candidates(monkeypatch, tmp_pa
         target.write_text(json.dumps(payloads[path]), encoding="utf-8")
         return target
 
-    monkeypatch.setattr("TraceLens.ModelUtils.config_resolve._download_config", fake_download)
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.config_resolve._download_config", fake_download
+    )
     monkeypatch.setattr(
         "TraceLens.ModelUtils.config_resolve._list_repo_config_paths",
         lambda _model_id: ["config.json", "text_encoder/config.json"],
@@ -385,7 +387,8 @@ def test_remote_config_discovery_errors(monkeypatch):
         lambda *_args: (_ for _ in ()).throw(OSError("offline")),
     )
     monkeypatch.setattr(
-        "TraceLens.ModelUtils.config_resolve._list_repo_config_paths", lambda _model_id: []
+        "TraceLens.ModelUtils.config_resolve._list_repo_config_paths",
+        lambda _model_id: [],
     )
     with pytest.raises(FileNotFoundError, match="Could not load any config.json"):
         discover_remote_config("org/empty")

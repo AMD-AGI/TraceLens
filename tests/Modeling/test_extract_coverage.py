@@ -660,10 +660,20 @@ def test_reconcile_overrides_counts_on_matching_cardinality():
     spec.decoder_class = "Blk"
     # AST produced two rich variants but with wrong counts.
     spec.layer_variants = [
-        LayerVariant(label="full", count=7, attention_label="Full",
-                     attention_class="FullAttn", ffn_class="MLP"),
-        LayerVariant(label="lin", count=7, attention_label="Lin",
-                     attention_class="LinAttn", ffn_class="MLP"),
+        LayerVariant(
+            label="full",
+            count=7,
+            attention_label="Full",
+            attention_class="FullAttn",
+            ffn_class="MLP",
+        ),
+        LayerVariant(
+            label="lin",
+            count=7,
+            attention_label="Lin",
+            attention_class="LinAttn",
+            ffn_class="MLP",
+        ),
     ]
     sigs = ["(FullAttn,MLP)"] * 11 + ["(LinAttn,MLP)"] * 3
     reconcile_live_module_groups(spec, [_group("layers", 14, "Blk", sigs)])
@@ -758,7 +768,10 @@ def _repeat_ctx_spec(details, *, port_labels=("key", "value"), callee="repeat_kv
         ),
     )
     root = BlockNode(
-        attr_name="self_attn", class_name="Attn", role="module", label="Attn",
+        attr_name="self_attn",
+        class_name="Attn",
+        role="module",
+        label="Attn",
         children=[core],
     )
     spec.export_block_trees = [("Attn", root)]
@@ -772,9 +785,7 @@ def test_apply_live_attention_repeats_fills_ports_with_factor():
     for ops in core.kernel_port_repeats.values():
         labels = [label for label, _details in ops]
         assert labels == ["Unsqueeze", "Expand", "Reshape"]
-        expand_details = dict(
-            d.split(":", 1) for d in ops[1][1]
-        )
+        expand_details = dict(d.split(":", 1) for d in ops[1][1])
         # The grown factor is read from the callee body's expand argument.
         assert "16" in expand_details.get("shape", "")
 
@@ -873,9 +884,12 @@ def test_image_placeholder_token_id_reads_general_keys():
     # LLaVA convention.
     assert extract.image_placeholder_token_id({"image_token_index": 32000}) == 32000
     # Precedence order follows _IMAGE_TOKEN_CONFIG_KEYS (id before index).
-    assert extract.image_placeholder_token_id(
-        {"image_token_index": 1, "image_token_id": 2}
-    ) == 2
+    assert (
+        extract.image_placeholder_token_id(
+            {"image_token_index": 1, "image_token_id": 2}
+        )
+        == 2
+    )
 
 
 def test_image_placeholder_token_id_absent_or_invalid_is_none():

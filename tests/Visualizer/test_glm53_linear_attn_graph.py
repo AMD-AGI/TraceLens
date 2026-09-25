@@ -14,7 +14,10 @@ import pytest
 
 from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
 from TraceLens.Visualizer.model_explorer_export.type_check import type_check_graph_nodes
-from TraceLens.ModelUtils.computation_graph import add_forward_output, build_computation_graph
+from TraceLens.ModelUtils.computation_graph import (
+    add_forward_output,
+    build_computation_graph,
+)
 from TraceLens.ModelUtils.loader import load_model_spec
 from TraceLens.ModelUtils.shape_inference import ShapeInferencer
 
@@ -149,9 +152,7 @@ def _assert_no_dead_nodes(nodes) -> None:
     )
 
     consumed = {
-        edge["sourceNodeId"]
-        for node in nodes
-        for edge in node.get("incomingEdges", [])
+        edge["sourceNodeId"] for node in nodes for edge in node.get("incomingEdges", [])
     }
 
     def _exempt(node) -> bool:
@@ -162,9 +163,7 @@ def _assert_no_dead_nodes(nodes) -> None:
         return node.get("id") == "@output"
 
     dead = [
-        node["id"]
-        for node in nodes
-        if node["id"] not in consumed and not _exempt(node)
+        node["id"] for node in nodes if node["id"] not in consumed and not _exempt(node)
     ]
     assert not dead, f"dead (unconsumed) nodes: {dead}"
 
@@ -589,7 +588,6 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
     # visible Slice between the conv and the Select. The Select then feeds
     # transpose -> split into query/key/value -- both convs reach the split only
     # through the single Select join.
-    links = set(graph.links)
     assert _has_computation_path(
         graph, key_to_index[concat_key], key_to_index[conv_update_key]
     )
@@ -598,7 +596,9 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
     )
     # Prefill: conv -> Slice -> Select; decode: conv_update -> Select.
     assert _has_computation_path(graph, key_to_index[conv_key], key_to_index[slice_key])
-    assert _has_computation_path(graph, key_to_index[slice_key], key_to_index[select_key])
+    assert _has_computation_path(
+        graph, key_to_index[slice_key], key_to_index[select_key]
+    )
     assert _has_computation_path(
         graph, key_to_index[conv_update_key], key_to_index[select_key]
     )
@@ -611,9 +611,7 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
     )
     # The block input reaches the forget gate through the now-visible
     # ``apply_mask_to_padding_states`` op (C4b), rather than a direct edge.
-    assert _has_computation_path(
-        graph, input_index, key_to_index[forget_entry_key]
-    )
+    assert _has_computation_path(graph, input_index, key_to_index[forget_entry_key])
     assert key_to_index[branch_mul_key] in sources
     assert key_to_index[branch_add_key] in sources
 
@@ -705,9 +703,7 @@ def test_glm53_linear_attention_branch_select_and_slice_in_merged_graph():
         type_warnings = type_check_graph_nodes(g_nodes)
         unexpected = [w for w in type_warnings if not _is_known_pool_concat_warning(w)]
         assert unexpected == [], (label, unexpected)
-        i4 = [
-            w for w in integrity_check_graph_nodes(g_nodes) if "I4" in w
-        ]
+        i4 = [w for w in integrity_check_graph_nodes(g_nodes) if "I4" in w]
         assert i4 == [], (label, i4)
         _assert_no_dead_nodes(g_nodes)
 
@@ -754,9 +750,10 @@ def test_glm53_linear_attention_projections_are_parallel_off_masked_input():
         source_key = graph.nodes[incoming[0]].key
         # The one producer is the masked-input op, never a sibling projection.
         assert "apply_mask_to_padding_states" in source_key, (proj, source_key)
-        assert not any(
-            f":{sibling}:" in source_key for sibling in proj_indices
-        ), (proj, source_key)
+        assert not any(f":{sibling}:" in source_key for sibling in proj_indices), (
+            proj,
+            source_key,
+        )
 
 
 def test_glm53_flinear_weight_operand_is_hidden():
@@ -792,7 +789,10 @@ def test_glm53_flinear_weight_operand_is_hidden():
     for node in linear_nodes:
         incoming = node.get("incomingEdges", [])
         activation = [e for e in incoming if e.get("sourceNodeId") not in constant_ids]
-        assert len(activation) == 1, (node["id"], [e.get("sourceNodeId") for e in incoming])
+        assert len(activation) == 1, (
+            node["id"],
+            [e.get("sourceNodeId") for e in incoming],
+        )
 
     # After the render-time constant filter, every ``Linear`` has a single input.
     rendered = _graph_without_constants(graph)
@@ -800,7 +800,10 @@ def test_glm53_flinear_weight_operand_is_hidden():
     for node in linear_nodes:
         drawn = rendered_by_id[node["id"]]
         incoming = drawn.get("incomingEdges", [])
-        assert len(incoming) == 1, (node["id"], [e.get("sourceNodeId") for e in incoming])
+        assert len(incoming) == 1, (
+            node["id"],
+            [e.get("sourceNodeId") for e in incoming],
+        )
 
 
 def test_glm53_hyperconnection_linear_keeps_activation_drops_weight():
@@ -889,7 +892,9 @@ def test_glm53_dead_code_elimination_is_idempotent_for_hyperconnection():
 
 def test_glm53_ffn_hc_input_norm_precedes_linear():
     pytest.importorskip("huggingface_hub")
-    from TraceLens.Visualizer.model_explorer_export.merge import _resolve_section_tree_for_component
+    from TraceLens.Visualizer.model_explorer_export.merge import (
+        _resolve_section_tree_for_component,
+    )
     from TraceLens.ModelUtils.basic_ops import BasicOpFilter
     from TraceLens.ModelUtils.block_tree import build_block_node
 
@@ -1097,8 +1102,12 @@ def test_glm53_decoder_residual_ops_use_return_slot_producers():
 
 def test_glm53_ffn_hc_expands_hyperconnection_not_moe():
     pytest.importorskip("huggingface_hub")
-    from TraceLens.Visualizer.model_explorer_export.merge import _resolve_section_tree_for_component
-    from TraceLens.Visualizer.model_explorer_export.overview import component_has_detail_section
+    from TraceLens.Visualizer.model_explorer_export.merge import (
+        _resolve_section_tree_for_component,
+    )
+    from TraceLens.Visualizer.model_explorer_export.overview import (
+        component_has_detail_section,
+    )
     from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -1527,9 +1536,7 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
     # in that scope now (Task A) -- assert it separately below, keep this focused on
     # the movement chain.
     model_ops = [
-        node
-        for node in graph["nodes"]
-        if node["id"].startswith("@model_forward/@op_")
+        node for node in graph["nodes"] if node["id"].startswith("@model_forward/@op_")
     ]
 
     assert [node["label"] for node in model_ops] == [
@@ -1543,9 +1550,7 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
     # the decoder boundary -- never a fabricated top-level ``@input:attention_mask``.
     by_id = {node["id"]: node for node in graph["nodes"]}
     assert "@input:attention_mask" not in by_id
-    mask_builder = by_id.get(
-        "@model_forward/@fn_l1456_create_recurrent_attention_mask"
-    )
+    mask_builder = by_id.get("@model_forward/@fn_l1456_create_recurrent_attention_mask")
     assert mask_builder is not None
     assert mask_builder["label"] == "create_recurrent_attention_mask"
     assert {e["sourceNodeId"] for e in mask_builder["incomingEdges"]} == {
@@ -1558,15 +1563,12 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
     # The decoder consumes the vision/text combine (masked_scatter), not the raw
     # token embeddings — the combine is the true entry to the language stack.
     assert (
-        model_ops[0]["incomingEdges"][0]["sourceNodeId"]
-        == "@vision_language_combine"
+        model_ops[0]["incomingEdges"][0]["sourceNodeId"] == "@vision_language_combine"
     )
     combine = next(
         node for node in graph["nodes"] if node["id"] == "@vision_language_combine"
     )
-    combine_sources = {
-        edge["sourceNodeId"] for edge in combine["incomingEdges"]
-    }
+    combine_sources = {edge["sourceNodeId"] for edge in combine["incomingEdges"]}
     assert combine_sources == {"embed_tokens", "@image_mask", "visual/@output"}
     assert model_ops[1]["incomingEdges"][0]["sourceNodeId"] == model_ops[0]["id"]
     assert model_ops[2]["incomingEdges"][0]["sourceNodeId"] == model_ops[1]["id"]
@@ -1590,11 +1592,7 @@ def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
     # The graph must never ship a cycle even with the vision loop inlined.
     _assert_export_is_acyclic(nodes)
 
-    lc_in = next(
-        node
-        for node in nodes
-        if "visual/@loop_carried_in:" in node["id"]
-    )
+    lc_in = next(node for node in nodes if "visual/@loop_carried_in:" in node["id"])
     # Wiring: the loop-carried-in must actually feed the loop body (mirroring the
     # decoder LC nodes), not sit dead like ``patch_embed/@output``-only.
     consumers = [
@@ -1628,7 +1626,11 @@ def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
 
 def _output_shape(node) -> str | None:
     return next(
-        (attr["value"] for attr in node.get("attrs", []) if attr["key"] == "output_shape"),
+        (
+            attr["value"]
+            for attr in node.get("attrs", [])
+            if attr["key"] == "output_shape"
+        ),
         None,
     )
 
@@ -1688,11 +1690,7 @@ def test_glm53_vision_tower_carries_patch_axis_not_text_seq():
     assert len(combine.get("incomingEdges", [])) == 3
 
     # Decoder path is untouched: the text RMSNorm still speaks [B, S, H].
-    text_norm = next(
-        n
-        for n in nodes
-        if "kv_a_layernorm:@op_l78_c24_cast" in n["id"]
-    )
+    text_norm = next(n for n in nodes if "kv_a_layernorm:@op_l78_c24_cast" in n["id"])
     assert "Pv" not in (_output_shape(text_norm) or "")
     assert (_output_shape(text_norm) or "").startswith("[B, S,")
 
@@ -1836,7 +1834,6 @@ def test_glm53_vision_attention_resolves_single_kernel_branch():
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec)
     nodes = graph["nodes"]
-    node_by_id = {node["id"]: node for node in nodes}
 
     _assert_export_is_acyclic(nodes)
 
@@ -1867,8 +1864,7 @@ def test_glm53_vision_attention_resolves_single_kernel_branch():
     concats = [
         n
         for n in attn_nodes
-        if n.get("label") == "Concat"
-        and "apply_rotary_pos_emb_vision" not in n["id"]
+        if n.get("label") == "Concat" and "apply_rotary_pos_emb_vision" not in n["id"]
     ]
     assert concats == [], [n["id"] for n in concats]
 
@@ -1899,7 +1895,6 @@ def test_glm53_vision_attention_flags_impl_dead_interface_input():
 
     _assert_export_is_acyclic(nodes)
 
-    node_by_id = {node["id"]: node for node in nodes}
     kernel = _export_node(nodes, "visual/seq:3:blocks:attn:@attention:")
     details = next(
         attr["value"]
@@ -1975,8 +1970,7 @@ def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
     cu_port = next(
         n
         for n in nodes
-        if n["id"].startswith("visual/@kernel_in:")
-        and n["id"].endswith(":cu_seqlens")
+        if n["id"].startswith("visual/@kernel_in:") and n["id"].endswith(":cu_seqlens")
     )
     assert [e["sourceNodeId"] for e in cu_port["incomingEdges"]] == [
         "visual/@input_mirror:cu_seqlens^cu_seqlens"
@@ -2005,7 +1999,6 @@ def test_glm53_vision_attention_kernel_reads_all_qkv_no_orphans():
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
-    node_by_id = {node["id"]: node for node in nodes}
 
     _assert_export_is_acyclic(nodes)
 
@@ -2080,8 +2073,7 @@ def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
     # an explicit boundary chain per slot, routing cos->cos and sin->sin with no
     # cross-alias and no re-merge onto ``position_embeddings``.
     frame_pref = (
-        "visual/seq:3:blocks:attn:"
-        "@positional_l1615_apply_rotary_pos_emb_vision:@"
+        "visual/seq:3:blocks:attn:" "@positional_l1615_apply_rotary_pos_emb_vision:@"
     )
     for slot in ("cos", "sin"):
         assert f"{frame_pref}/@input:{slot}" in node_by_id, slot
@@ -2278,18 +2270,18 @@ def test_glm53_vision_rotary_recomposition_slice_concat_tile_widths():
         concat_sources = {edge["sourceNodeId"] for edge in _incoming(concat)}
         assert len(_incoming(concat)) == 2, sorted(concat_sources)
         assert concat_sources == {n["id"] for n in slices}, concat_sources
-        assert str(_attr_value(concat, "output_shape")).startswith("[Pv, 32]"), (
-            _attr_value(concat, "output_shape")
-        )
+        assert str(_attr_value(concat, "output_shape")).startswith(
+            "[Pv, 32]"
+        ), _attr_value(concat, "output_shape")
 
         # CAT #2: the self-concat becomes a single-input Tile [Pv, 32] -> [Pv, 64].
         assert len(tiles) == 1, [n["id"] for n in tiles]
         tile = tiles[0]
         assert len(_incoming(tile)) == 1, [e["sourceNodeId"] for e in _incoming(tile)]
         assert _incoming(tile)[0]["sourceNodeId"] == concat["id"]
-        assert str(_attr_value(tile, "output_shape")).startswith("[Pv, 64]"), (
-            _attr_value(tile, "output_shape")
-        )
+        assert str(_attr_value(tile, "output_shape")).startswith(
+            "[Pv, 64]"
+        ), _attr_value(tile, "output_shape")
 
     # The rotary outputs carry the vision head_dim [Pv, 64], not the patch width.
     for slot in ("cos", "sin"):
@@ -2413,7 +2405,9 @@ def test_glm53_rotary_multiply_has_inv_freq_constant_operand():
                 # is what explains the [Pv, 2, 1] -> [Pv, 2, 16] shape jump.
                 shapes = _attr_value(mul, "input_shapes")
                 assert shapes is not None and "16" in shapes, shapes
-    assert saw_inv_freq_const, "inv_freq [16] constant operand not wired to rotary Multiply"
+    assert (
+        saw_inv_freq_const
+    ), "inv_freq [16] constant operand not wired to rotary Multiply"
 
 
 def test_glm53_harvest_meta_tensors_resolves_inv_freq_and_a_weight():
@@ -2446,7 +2440,8 @@ def test_glm53_harvest_meta_tensors_resolves_inv_freq_and_a_weight():
 
     # At least one 2-D learned weight is present.
     two_d_weights = [
-        spec for name, spec in index.by_qualified.items()
+        spec
+        for name, spec in index.by_qualified.items()
         if name.endswith(".weight") and len(spec.shape) == 2
     ]
     assert two_d_weights, "no 2-D weight harvested"
@@ -2491,11 +2486,7 @@ def test_glm53_every_constant_node_has_a_consumer():
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
-    consumed = {
-        e["sourceNodeId"]
-        for n in nodes
-        for e in n.get("incomingEdges", [])
-    }
+    consumed = {e["sourceNodeId"] for n in nodes for e in n.get("incomingEdges", [])}
     orphan_constants = [
         n["id"]
         for n in nodes
@@ -2520,7 +2511,6 @@ def test_glm53_no_single_input_concat_survives_anywhere():
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
-    node_by_id = {node["id"]: node for node in nodes}
 
     _assert_export_is_acyclic(nodes)
 
@@ -2563,8 +2553,7 @@ def test_glm53_multi_input_concat_sums_operand_widths_not_identity():
     concat = next(
         node
         for node in nodes
-        if node.get("label") == "Concat"
-        and "append_visible_tail" in node["id"]
+        if node.get("label") == "Concat" and "append_visible_tail" in node["id"]
         # Anchor on the stable line/col of the ``torch.cat`` call; the trailing
         # per-scope emission ordinal shifts whenever a sibling op becomes visible.
         and "@op_l1027_c15_concat" in node["id"]
@@ -2668,8 +2657,8 @@ def test_glm53_vision_apply_rotary_tuple_returns_dock_per_ordinal():
     def _one(suffix: str) -> dict:
         return next(n for n in nodes if n["id"].endswith(suffix))
 
-    q_embed = _export_node(nodes, ":@op_l1577_c14_cast:")   # rotary tuple slot 0
-    k_embed = _export_node(nodes, ":@op_l1578_c14_cast:")   # rotary tuple slot 1
+    q_embed = _export_node(nodes, ":@op_l1577_c14_cast:")  # rotary tuple slot 0
+    k_embed = _export_node(nodes, ":@op_l1578_c14_cast:")  # rotary tuple slot 1
 
     # Each tuple slot exits through its own frame @output tile, backed by that
     # slot's internal producer.
@@ -2690,9 +2679,7 @@ def test_glm53_vision_apply_rotary_tuple_returns_dock_per_ordinal():
     assert [e["sourceNodeId"] for e in k_transpose["incomingEdges"]] == [k_out_mirror]
 
     # ``q_embed`` (ordinal-0 slot) is consumed, not orphaned.
-    all_sources = {
-        e["sourceNodeId"] for n in nodes for e in n.get("incomingEdges", [])
-    }
+    all_sources = {e["sourceNodeId"] for n in nodes for e in n.get("incomingEdges", [])}
     assert q_embed["id"] in all_sources
 
 
@@ -2718,10 +2705,16 @@ def test_glm53_vision_rotary_frame_has_module_like_boundaries():
 
     _assert_export_is_acyclic(nodes)
 
-    frame_ns = "visual/Glm5NextVisionBlock/Glm5NextVisionAttention/apply_rotary_pos_emb_vision"
+    frame_ns = (
+        "visual/Glm5NextVisionBlock/Glm5NextVisionAttention/apply_rotary_pos_emb_vision"
+    )
     frame_nodes = [n for n in nodes if n.get("namespace", "") == frame_ns]
     assert frame_nodes, sorted(
-        {n.get("namespace", "") for n in nodes if "apply_rotary" in n.get("namespace", "")}
+        {
+            n.get("namespace", "")
+            for n in nodes
+            if "apply_rotary" in n.get("namespace", "")
+        }
     )
 
     def _boundary_labels(kind: str) -> set[str]:
@@ -2830,15 +2823,12 @@ def test_glm53_vision_rotary_frame_named_after_source_function():
 
     # The clean function name appears as a namespace segment...
     segments = {
-        part
-        for node in nodes
-        for part in str(node.get("namespace", "")).split("/")
+        part for node in nodes for part in str(node.get("namespace", "")).split("/")
     }
     assert "apply_rotary_pos_emb_vision" in segments
     # ...and the ugly synthetic-attr segment never does.
     assert not any(
-        seg.startswith("_positional_l") or seg.startswith("_fn_l")
-        for seg in segments
+        seg.startswith("_positional_l") or seg.startswith("_fn_l") for seg in segments
     ), sorted(s for s in segments if "positional" in s or s.startswith("_fn_l"))
 
     # The raw synthetic attr is still embedded in the frame's op ids (id-stable).
@@ -2876,7 +2866,13 @@ def test_glm53_vision_index_helpers_expand_to_device_ops():
     # loop-accumulated ``torch.cat`` -- collapsed to one representative iteration --
     # surfaced as a shape-growing single-input Tile (never a forbidden 1-input Concat).
     pos_labels = _labels("get_vision_position_ids")
-    assert {"Arange", "Reshape", "Transpose", "Flatten", "Stack"} <= pos_labels, pos_labels
+    assert {
+        "Arange",
+        "Reshape",
+        "Transpose",
+        "Flatten",
+        "Stack",
+    } <= pos_labels, pos_labels
     assert "Tile" in pos_labels, pos_labels
 
     # ``get_vision_attention_seqlens`` expands its nested ``get_vision_cu_seqlens``
@@ -2968,9 +2964,7 @@ def test_glm53_router_outputs_no_redundant_mirror_passthrough():
         "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/"
         "sidefeed:1:experts:@op_l126_c19_one_hot:1"
     ]
-    assert any(
-        "topk_indices" in e["sourceNodeId"] for e in one_hot["incomingEdges"]
-    )
+    assert any("topk_indices" in e["sourceNodeId"] for e in one_hot["incomingEdges"])
 
 
 def _attr_value(node: dict, key: str) -> str | None:
@@ -3140,9 +3134,7 @@ def test_glm53_view_split_stays_visible_with_named_slice_tiles():
     qkv_split = next(
         n
         for n in nodes
-        if n["id"].endswith(
-            "self_attn/seq:13:@op_l688_c28_split:@op_l688_c28_split:0"
-        )
+        if n["id"].endswith("self_attn/seq:13:@op_l688_c28_split:@op_l688_c28_split:0")
     )
     qkv_tiles = _slice_tiles(qkv_split)
     assert {port: tile.get("label") for port, tile in qkv_tiles.items()} == {
@@ -3163,9 +3155,7 @@ def test_glm53_view_split_stays_visible_with_named_slice_tiles():
     # --- The F.linear-fed pre_w/post_w/comb_w split also stays, with its tiles,
     # and its Linear producer is left single-port.
     fn_split = next(
-        n
-        for n in nodes
-        if "comb_w" in (_attr_value(n, "output_names") or "")
+        n for n in nodes if "comb_w" in (_attr_value(n, "output_names") or "")
     )
     fn_tiles = _slice_tiles(fn_split)
     assert len(fn_tiles) == 3, fn_tiles
@@ -3257,9 +3247,7 @@ def test_glm53_hyperconnection_weight_only_ops_are_hidden():
     # (non-constant) node with its three named output ports, still in the drawn
     # graph, and a real edge still feeds its consumers.
     fn_split = [
-        n
-        for n in attn_hc
-        if "comb_w" in (_attr_value(n, "output_names") or "")
+        n for n in attn_hc if "comb_w" in (_attr_value(n, "output_names") or "")
     ]
     assert fn_split, "expected the pre_w/post_w/comb_w activation split to survive"
     assert not any(_node_is_constant(n) for n in fn_split), [n["id"] for n in fn_split]
@@ -3337,7 +3325,9 @@ def test_glm53_vision_block_renders_as_secondary_nx_group():
         n.get("namespace", "").split("/")[-1] == "Glm5NextVisionBlock" for n in nodes
     )
     attrs = graph["groupNodeAttributes"]
-    assert attrs["visual/24x_Glm5NextVisionBlock"]["repeat"] == "24x_Glm5NextVisionBlock"
+    assert (
+        attrs["visual/24x_Glm5NextVisionBlock"]["repeat"] == "24x_Glm5NextVisionBlock"
+    )
     # The decoder's own N× banner is unaffected (its element class is the primary).
     assert "45x_Glm5NextTextDecoderLayer" in attrs
     # Node ids stay stable (edges intact) — only the namespace field was rewritten.
@@ -3412,7 +3402,8 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     spine_invariant_inputs = {
         n["id"]: {e["sourceNodeId"] for e in n.get("incomingEdges", []) or []}
         for n in nodes
-        if n.get("namespace") == "45x_Glm5NextTextDecoderLayer" and "/@input:" in n["id"]
+        if n.get("namespace") == "45x_Glm5NextTextDecoderLayer"
+        and "/@input:" in n["id"]
     }
     assert spine_invariant_inputs == {
         "decoder/@input:attention_mask": {
@@ -3500,9 +3491,7 @@ def test_glm53_vision_rotary_unsqueeze_single_tensor_operand():
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
-    unsqueeze = next(
-        n for n in nodes if "@op_l1766_c32_unsqueeze" in n["id"]
-    )
+    unsqueeze = next(n for n in nodes if "@op_l1766_c32_unsqueeze" in n["id"])
     # Exactly one incoming edge, from the position_ids boundary -- no hidden_states.
     assert len(unsqueeze.get("incomingEdges", [])) == 1
     source = unsqueeze["incomingEdges"][0]["sourceNodeId"]
@@ -3650,12 +3639,14 @@ def test_glm53_build_attention_mask_frame_is_not_opaque():
     )
     node_by_id = {n["id"]: n for n in nodes}
     port_labels = {
-        node_by_id[e["sourceNodeId"]].get("label")
-        for e in kernel["incomingEdges"]
+        node_by_id[e["sourceNodeId"]].get("label") for e in kernel["incomingEdges"]
     }
-    assert {"query_states", "key_states", "value_states", "attention_mask"} <= port_labels, (
-        sorted(port_labels)
-    )
+    assert {
+        "query_states",
+        "key_states",
+        "value_states",
+        "attention_mask",
+    } <= port_labels, sorted(port_labels)
 
     # The mask the frame produces must actually reach the kernel's mask port
     # (proving the chain is consumed, hence not pruned).
@@ -3783,7 +3774,8 @@ def test_glm53_attn_hc_constant_closure_is_well_formed():
     # Root parameter leaves are materialized, constant, and sourceless.
     for name in ("base", "scale", "fn"):
         leaves = [
-            n for n in nodes
+            n
+            for n in nodes
             if n["id"].endswith(f":const:{name}")
             and _attr_value(n, "constant") == "true"
         ]
@@ -3793,7 +3785,8 @@ def test_glm53_attn_hc_constant_closure_is_well_formed():
 
     # Every slice tile fanned out of a constant split is itself constant.
     const_split_ids = {
-        n["id"] for n in nodes
+        n["id"]
+        for n in nodes
         if n.get("label") in {"Split", "Unbind", "Chunk"}
         and _attr_value(n, "constant") == "true"
     }
@@ -3801,13 +3794,11 @@ def test_glm53_attn_hc_constant_closure_is_well_formed():
     for node in nodes:
         if _attr_value(node, "synthetic") != "@slice_out":
             continue
-        parent = {
-            e["sourceNodeId"] for e in node.get("incomingEdges", []) or []
-        }
+        parent = {e["sourceNodeId"] for e in node.get("incomingEdges", []) or []}
         if parent & const_split_ids:
-            assert _attr_value(node, "constant") == "true", (
-                f"slice tile {node['id']} of a constant split must be constant"
-            )
+            assert (
+                _attr_value(node, "constant") == "true"
+            ), f"slice tile {node['id']} of a constant split must be constant"
 
     # After the render filter drops the whole closure, nothing is left orphaned or
     # dead: the constant slice tiles and their consumers (comb_b.view, ...) all go.

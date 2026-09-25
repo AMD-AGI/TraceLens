@@ -21,7 +21,6 @@ from TraceLens.ModelUtils.computation_graph import ComputationGraph, GraphNodeSp
 from TraceLens.ModelUtils.extract import ArchitectureSpec
 from TraceLens.ModelUtils.shape_inference import ShapeContext, TensorSpec
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers (mirroring test_export_merge_coverage.py conventions)
 # ---------------------------------------------------------------------------
@@ -235,8 +234,16 @@ def test_apply_labeled_entry_ports_single_empty_label_continues():
 
 
 def test_apply_labeled_entry_ports_relabels_only_matching_edge():
-    external = {"sourceNodeId": "outside", "sourceNodeOutputId": "0", "targetNodeInputId": "0"}
-    other = {"sourceNodeId": "elsewhere", "sourceNodeOutputId": "0", "targetNodeInputId": "0"}
+    external = {
+        "sourceNodeId": "outside",
+        "sourceNodeOutputId": "0",
+        "targetNodeInputId": "0",
+    }
+    other = {
+        "sourceNodeId": "elsewhere",
+        "sourceNodeOutputId": "0",
+        "targetNodeInputId": "0",
+    }
     internal = _edge("inside", "1")
     target = {
         "id": "t",
@@ -247,8 +254,7 @@ def test_apply_labeled_entry_ports_relabels_only_matching_edge():
     ports = [("q", external, target)]
     assert merge._apply_labeled_external_entry_ports(ports, {"inside"})
     labels = [
-        edge.get("metadata", {}).get("port_label")
-        for edge in target["incomingEdges"]
+        edge.get("metadata", {}).get("port_label") for edge in target["incomingEdges"]
     ]
     # internal kept, matching external relabeled, unrelated external kept as-is
     assert labels == [None, "q", None]
@@ -284,7 +290,10 @@ def test_replace_tile_with_group_single_unresolved_takes_all_unclaimed():
 
 def test_section_exits_uses_output_node_when_present():
     computation = ComputationGraph(
-        nodes=[GraphNodeSpec(key="a", label="A"), GraphNodeSpec(key="@output", label="O")],
+        nodes=[
+            GraphNodeSpec(key="a", label="A"),
+            GraphNodeSpec(key="@output", label="O"),
+        ],
         links=[(0, 1)],
         output_node_index=1,
         primary_output_port="result",
@@ -402,8 +411,16 @@ def test_inject_group_outputs_shared_producer_ordinal_slots():
             "id": "consumer",
             "namespace": "",
             "incomingEdges": [
-                {"sourceNodeId": "ns/rot", "sourceNodeOutputId": "0", "targetNodeInputId": "0"},
-                {"sourceNodeId": "ns/rot", "sourceNodeOutputId": "1", "targetNodeInputId": "1"},
+                {
+                    "sourceNodeId": "ns/rot",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "0",
+                },
+                {
+                    "sourceNodeId": "ns/rot",
+                    "sourceNodeOutputId": "1",
+                    "targetNodeInputId": "1",
+                },
             ],
         },
     ]
@@ -448,9 +465,7 @@ def test_mirror_boundary_inputs_creates_parent_mirrors():
     ]
     merge._mirror_boundary_inputs(nodes)
     mirrors = [
-        node
-        for node in nodes
-        if merge._node_attr(node, "synthetic") == "@input_mirror"
+        node for node in nodes if merge._node_attr(node, "synthetic") == "@input_mirror"
     ]
     assert len(mirrors) == 1
     mirror = mirrors[0]
@@ -491,8 +506,16 @@ def test_flatten_transparent_group_inputs_rewires_single_and_multi():
         {
             "id": "consumer",
             "incomingEdges": [
-                {"sourceNodeId": "g/@input", "sourceNodeOutputId": "0", "targetNodeInputId": "3"},
-                {"sourceNodeId": "single/@input", "sourceNodeOutputId": "0", "targetNodeInputId": "0"},
+                {
+                    "sourceNodeId": "g/@input",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "3",
+                },
+                {
+                    "sourceNodeId": "single/@input",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "0",
+                },
                 _edge("kept"),
             ],
         },
@@ -527,16 +550,32 @@ def test_rename_generic_output_ports_partial():
             {"id": "keep", "attrs": _attrs(port_label="keep")},
         ],
         "incomingEdges": [
-            {"sourceNodeId": "a", "sourceNodeOutputId": "0", "targetNodeInputId": "result",
-             "metadata": {"port_label": "result"}},
-            {"sourceNodeId": "b", "sourceNodeOutputId": "0", "targetNodeInputId": "keep"},
+            {
+                "sourceNodeId": "a",
+                "sourceNodeOutputId": "0",
+                "targetNodeInputId": "result",
+                "metadata": {"port_label": "result"},
+            },
+            {
+                "sourceNodeId": "b",
+                "sourceNodeOutputId": "0",
+                "targetNodeInputId": "keep",
+            },
         ],
     }
     downstream = {
         "id": "consumer",
         "incomingEdges": [
-            {"sourceNodeId": "blk/@output", "sourceNodeOutputId": "result", "targetNodeInputId": "0"},
-            {"sourceNodeId": "blk/@output", "sourceNodeOutputId": "keep", "targetNodeInputId": "1"},
+            {
+                "sourceNodeId": "blk/@output",
+                "sourceNodeOutputId": "result",
+                "targetNodeInputId": "0",
+            },
+            {
+                "sourceNodeId": "blk/@output",
+                "sourceNodeOutputId": "keep",
+                "targetNodeInputId": "1",
+            },
         ],
     }
     nodes = [output, downstream]
@@ -564,20 +603,36 @@ def test_remove_transparent_root_output_selects_primary_port():
         {
             "id": "p/@output",
             "incomingEdges": [
-                {"sourceNodeId": "a", "sourceNodeOutputId": "0", "targetNodeInputId": "result"},
-                {"sourceNodeId": "b", "sourceNodeOutputId": "1", "targetNodeInputId": "other"},
+                {
+                    "sourceNodeId": "a",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "result",
+                },
+                {
+                    "sourceNodeId": "b",
+                    "sourceNodeOutputId": "1",
+                    "targetNodeInputId": "other",
+                },
             ],
         }
     ]
-    ref = merge._remove_transparent_root_output(nodes, id_prefix="p", primary_port="other")
+    ref = merge._remove_transparent_root_output(
+        nodes, id_prefix="p", primary_port="other"
+    )
     assert ref == ("b", "1")
     assert not nodes
 
 
 def test_remove_transparent_root_output_none_and_empty():
-    assert merge._remove_transparent_root_output([], id_prefix="p", primary_port=None) is None
+    assert (
+        merge._remove_transparent_root_output([], id_prefix="p", primary_port=None)
+        is None
+    )
     nodes = [{"id": "p/@output", "incomingEdges": []}]
-    assert merge._remove_transparent_root_output(nodes, id_prefix="p", primary_port=None) is None
+    assert (
+        merge._remove_transparent_root_output(nodes, id_prefix="p", primary_port=None)
+        is None
+    )
     assert not nodes
 
 
@@ -588,9 +643,17 @@ def test_remove_transparent_root_output_none_and_empty():
 
 def test_wrap_actual_group_boundary_no_inputs_returns_outputs():
     outputs = [("x", "0")]
-    assert merge._wrap_actual_group_boundary(
-        [], namespace="ns", id_prefix="ns", inputs=[], outputs=outputs, first_node_index=0
-    ) == outputs
+    assert (
+        merge._wrap_actual_group_boundary(
+            [],
+            namespace="ns",
+            id_prefix="ns",
+            inputs=[],
+            outputs=outputs,
+            first_node_index=0,
+        )
+        == outputs
+    )
 
 
 def test_wrap_actual_group_boundary_rewires_and_skips_outside():
@@ -637,12 +700,20 @@ def test_mirror_boundary_outputs_skips_empty_port_and_unconsumed():
             "id": "consumer",
             "namespace": "",
             "incomingEdges": [
-                {"sourceNodeId": "g/@output", "sourceNodeOutputId": "a", "targetNodeInputId": "0"}
+                {
+                    "sourceNodeId": "g/@output",
+                    "sourceNodeOutputId": "a",
+                    "targetNodeInputId": "0",
+                }
             ],
         },
     ]
     merge._mirror_boundary_outputs(nodes)
-    mirror_ids = {node["id"] for node in nodes if merge._node_attr(node, "synthetic") == "@output_mirror"}
+    mirror_ids = {
+        node["id"]
+        for node in nodes
+        if merge._node_attr(node, "synthetic") == "@output_mirror"
+    }
     # Only the consumed port "a" gets a mirror; "" and unconsumed "b" do not.
     assert mirror_ids == {"g/@output^a"}
     consumer = next(node for node in nodes if node["id"] == "consumer")
@@ -676,7 +747,11 @@ def test_prune_unconsumed_outputs_keeps_synthetic_input_producer():
             "inputsMetadata": [{"id": "unused"}],
             "outputsMetadata": [{"id": "unused"}],
             "incomingEdges": [
-                {"sourceNodeId": "g/@input", "sourceNodeOutputId": "0", "targetNodeInputId": "unused"}
+                {
+                    "sourceNodeId": "g/@input",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "unused",
+                }
             ],
         },
     ]
@@ -697,7 +772,9 @@ def test_nested_group_segment_variants():
     regular = BlockNode("child", "Child", "other", "Child")
 
     assert (
-        merge._nested_group_segment(pipeline, "Chunk pipe", has_tile=False, duplicate_labels=set())
+        merge._nested_group_segment(
+            pipeline, "Chunk pipe", has_tile=False, duplicate_labels=set()
+        )
         == "Chunk_pipe"
     )
     assert (
@@ -705,11 +782,15 @@ def test_nested_group_segment_variants():
         == "shared_attr"
     )
     assert (
-        merge._nested_group_segment(regular, "Title", has_tile=True, duplicate_labels=set())
+        merge._nested_group_segment(
+            regular, "Title", has_tile=True, duplicate_labels=set()
+        )
         == "Title"
     )
     assert (
-        merge._nested_group_segment(regular, "Ignored", has_tile=False, duplicate_labels=set())
+        merge._nested_group_segment(
+            regular, "Ignored", has_tile=False, duplicate_labels=set()
+        )
         == "child"
     )
 
@@ -776,7 +857,8 @@ def test_group_node_label_norm_and_other():
     spec = _spec(norm_type="LayerNorm")
     assert merge._group_node_label(spec, _component("n", "norm")) == "LayerNorm"
     assert (
-        merge._group_node_label(spec, _component("x", "other", label="Custom")) == "Custom"
+        merge._group_node_label(spec, _component("x", "other", label="Custom"))
+        == "Custom"
     )
 
 
@@ -813,8 +895,9 @@ def _patch_section_pipeline(
 
 def test_append_section_summary_single_op_collapse(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(merge, "component_has_detail_section", lambda *a: False)
-    tree = BlockNode("mlp", "Mlp", "other", "Mlp",
-                     children=[BlockNode("c", "C", "other", "C")])
+    tree = BlockNode(
+        "mlp", "Mlp", "other", "Mlp", children=[BlockNode("c", "C", "other", "C")]
+    )
     prepared = BlockNode("mlp", "Gelu", "other", "Gelu")  # childless after prep
     monkeypatch.setattr(
         merge, "_resolve_section_tree_for_component", lambda *a, **k: ("T", tree)
@@ -837,8 +920,13 @@ def test_append_section_summary_single_op_collapse(monkeypatch: pytest.MonkeyPat
 
 
 def test_append_section_wrapper_around_single_op(monkeypatch: pytest.MonkeyPatch):
-    root = BlockNode("hc_head", "Wrapper", "other", "Wrapper",
-                     children=[BlockNode("c", "C", "other", "C")])
+    root = BlockNode(
+        "hc_head",
+        "Wrapper",
+        "other",
+        "Wrapper",
+        children=[BlockNode("c", "C", "other", "C")],
+    )
     prepared = BlockNode("hc_head", "Mean", "other", "Mean")  # childless
     _patch_section_pipeline(monkeypatch, root=root, prepared=prepared)
     nodes: list[dict[str, object]] = []
@@ -902,8 +990,9 @@ def test_append_section_triggers_kernel_pipeline_step(monkeypatch: pytest.Monkey
 
 
 def test_append_section_transparent_inline_expansion(monkeypatch: pytest.MonkeyPatch):
-    root = BlockNode("blk", "Blk", "other", "Blk",
-                     children=[BlockNode("c", "C", "other", "C")])
+    root = BlockNode(
+        "blk", "Blk", "other", "Blk", children=[BlockNode("c", "C", "other", "C")]
+    )
     computation = ComputationGraph(
         nodes=[
             GraphNodeSpec("@input", label="input", synthetic="@input"),
@@ -940,8 +1029,13 @@ def test_append_section_transparent_inline_expansion(monkeypatch: pytest.MonkeyP
 
 
 def test_append_section_custom_norm_group_attributes(monkeypatch: pytest.MonkeyPatch):
-    root = BlockNode("custom_norm", "RMSNorm", "norm", "Norm",
-                     children=[BlockNode("c", "C", "other", "C")])
+    root = BlockNode(
+        "custom_norm",
+        "RMSNorm",
+        "norm",
+        "Norm",
+        children=[BlockNode("c", "C", "other", "C")],
+    )
     computation = ComputationGraph(
         nodes=[
             GraphNodeSpec("@input", label="input", synthetic="@input"),
@@ -974,8 +1068,9 @@ def test_append_section_custom_norm_group_attributes(monkeypatch: pytest.MonkeyP
 
 
 def test_append_section_skip_variant_root_input(monkeypatch: pytest.MonkeyPatch):
-    root = BlockNode("blk", "Blk", "other", "Blk",
-                     children=[BlockNode("c", "C", "other", "C")])
+    root = BlockNode(
+        "blk", "Blk", "other", "Blk", children=[BlockNode("c", "C", "other", "C")]
+    )
     computation = ComputationGraph(
         nodes=[
             GraphNodeSpec("@input", label="input", synthetic="@input"),
@@ -1050,7 +1145,9 @@ def test_append_variant_layer_hyperconnection_residual_mix(
 
     monkeypatch.setattr(merge, "_append_section", fake_append)
 
-    variant = LayerVariant("v", 2, "Attn", "VariantAttn", "FFN", "VariantFFN", "experts")
+    variant = LayerVariant(
+        "v", 2, "Attn", "VariantAttn", "FFN", "VariantFFN", "experts"
+    )
     merged: list[dict[str, object]] = []
     exits = merge._append_variant_layer(
         merged,
@@ -1154,7 +1251,9 @@ def test_append_source_decoder_layer_primary_return_slot(
         primary_return_slot="ret",
         forward_return_slots={"ret": "op_ok"},
     )
-    spec = _spec(decoder_class="Dec", class_registry={"Dec": decoder}, block_components=[])
+    spec = _spec(
+        decoder_class="Dec", class_registry={"Dec": decoder}, block_components=[]
+    )
     monkeypatch.setattr(merge, "_append_section", lambda *a, **k: ["x"])
     exits = merge._append_source_decoder_layer(
         [],
@@ -1235,7 +1334,9 @@ def test_append_decoder_layers_variant_uses_source_layer(
 
     def fake_source(merged_nodes, **kwargs):
         seen.append(kwargs["namespace_prefix"])
-        merged_nodes.append({"id": f'{kwargs["id_prefix"]}/x', "namespace": kwargs["namespace_prefix"]})
+        merged_nodes.append(
+            {"id": f'{kwargs["id_prefix"]}/x', "namespace": kwargs["namespace_prefix"]}
+        )
         return [f'{kwargs["id_prefix"]}/x']
 
     monkeypatch.setattr(merge, "_append_source_decoder_layer", fake_source)
@@ -1305,7 +1406,10 @@ def test_append_decoder_layers_non_variant_source_path(
     assert "decoder/@input" in ids
     assert "decoder/@output" in ids
     # attention role produced a group config entry.
-    assert any("attention" in cfg.get("namespaceRegex", "").lower() for cfg in configs) or configs
+    assert (
+        any("attention" in cfg.get("namespaceRegex", "").lower() for cfg in configs)
+        or configs
+    )
     assert exits
 
 
@@ -1321,7 +1425,10 @@ def test_append_vision_section_appends_group_config(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         merge,
         "_resolve_section_tree_for_component",
-        lambda *a, **k: ("Vision", BlockNode("visual", "VisionModel", "attention", "Vision")),
+        lambda *a, **k: (
+            "Vision",
+            BlockNode("visual", "VisionModel", "attention", "Vision"),
+        ),
     )
     monkeypatch.setattr(merge, "expand_block_tree_inplace", lambda tree, **k: tree)
     monkeypatch.setattr(merge, "is_transparent_inline_expansion", lambda tree: False)

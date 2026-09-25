@@ -352,9 +352,7 @@ def _resolve_primary_input(
 
     # Build the set of param names that have dedicated pipeline entry points.
     # The primary input is the arg NOT in this set.
-    child = next(
-        (c for c in root.children if c.attr_name == consumer_attr), None
-    )
+    child = next((c for c in root.children if c.attr_name == consumer_attr), None)
     if child is None:
         return last_index if last_index is not None else input_index
 
@@ -539,9 +537,7 @@ def _lookup_ordinal_entries(
     return None
 
 
-_KERNEL_CLASS_NAMES = frozenset(
-    {"AttentionOp", "KernelOp", "AttentionMerge"}
-)
+_KERNEL_CLASS_NAMES = frozenset({"AttentionOp", "KernelOp", "AttentionMerge"})
 
 SYNTHETIC_KERNEL_PORT = "@kernel_port"
 SYNTHETIC_KERNEL_PORT_IN = "@kernel_port_in"
@@ -648,8 +644,7 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
     kernel_indices = [
         index
         for index, spec in enumerate(graph.nodes)
-        if spec.block is not None
-        and spec.block.class_name in _KERNEL_CLASS_NAMES
+        if spec.block is not None and spec.block.class_name in _KERNEL_CLASS_NAMES
     ]
     for kernel_index in kernel_indices:
         kernel_spec = graph.nodes[kernel_index]
@@ -676,9 +671,7 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
                 used_names.add(lbl.strip().lower())
 
         # Remaining declared names, in declaration order, for unlabeled edges.
-        remaining = [
-            name for name in declared_names if name.lower() not in used_names
-        ]
+        remaining = [name for name in declared_names if name.lower() not in used_names]
 
         all_inputs: list[tuple[int, str]] = []
         seen_labels: dict[str, int] = {}
@@ -784,7 +777,6 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
                 graph.links.append((port_index, kernel_index))
 
 
-
 def _add_kernel_output_port_nodes(graph: ComputationGraph) -> None:
     """Insert one port node per *distinct* output on kernels with ≥2 outputs.
 
@@ -806,8 +798,7 @@ def _add_kernel_output_port_nodes(graph: ComputationGraph) -> None:
     kernel_indices = [
         index
         for index, spec in enumerate(graph.nodes)
-        if spec.block is not None
-        and spec.block.class_name in _KERNEL_CLASS_NAMES
+        if spec.block is not None and spec.block.class_name in _KERNEL_CLASS_NAMES
     ]
     for kernel_index in kernel_indices:
         # Group this kernel's outgoing edges by the output ordinal each reads. A
@@ -1160,7 +1151,9 @@ def _wire_all_predecessor_edges(
                 occurrence = pred_occurrence.get(pred, 0)
                 pred_occurrence[pred] = occurrence + 1
                 consumed_ordinal = (
-                    pred_ordinals[occurrence] if occurrence < len(pred_ordinals) else None
+                    pred_ordinals[occurrence]
+                    if occurrence < len(pred_ordinals)
+                    else None
                 )
                 resolved_flattened_slot = False
                 if source_index is None:
@@ -1354,9 +1347,7 @@ def _wire_all_predecessor_edges(
                 # module with a complete arg_map (vision attention) or an empty
                 # one (linear attention) is unaffected.
                 covered = set(arg_map.values())
-                pairs.extend(
-                    (pred, None) for pred in preds if pred not in covered
-                )
+                pairs.extend((pred, None) for pred in preds if pred not in covered)
             else:
                 pairs = [(pred, None) for pred in preds]
 
@@ -1442,7 +1433,10 @@ def _wire_all_predecessor_edges(
                     # -- instead of every multi-return-slot consumer reading
                     # the module-call step (the attention kernel, a Select
                     # phi, ...) collapsing onto one slot.
-                    if source_index == attr_last_index.get(pred) and arg_name in ordinal_map:
+                    if (
+                        source_index == attr_last_index.get(pred)
+                        and arg_name in ordinal_map
+                    ):
                         return_producers = block.forward_step_return_producers.get(pred)
                         ordinal = ordinal_map[arg_name]
                         if return_producers and 0 <= ordinal < len(return_producers):
@@ -1496,8 +1490,7 @@ def _wire_all_predecessor_edges(
                     distinct_slot_producers = False
                     if pred_node is not None and pred_node.forward_return_slots:
                         producer_ids = {
-                            pred_node.forward_return_slots.get(s)
-                            for s in slot_order
+                            pred_node.forward_return_slots.get(s) for s in slot_order
                         }
                         producer_ids.discard(None)
                         distinct_slot_producers = len(producer_ids) > 1
@@ -1529,7 +1522,11 @@ def _wire_all_predecessor_edges(
                         if slot_link not in graph.links:
                             graph.links.append(slot_link)
                         graph.link_output_ports[slot_link] = slot_port
-                        if multi and arg_name and slot_link not in graph.link_port_labels:
+                        if (
+                            multi
+                            and arg_name
+                            and slot_link not in graph.link_port_labels
+                        ):
                             graph.link_port_labels[slot_link] = arg_name
                     continue
                 # Resolve arg-specific target when the predecessor maps to a
@@ -1631,8 +1628,7 @@ def _wire_all_predecessor_edges(
         targets = [
             index
             for index, spec in enumerate(graph.nodes)
-            if spec.block is not None
-            and spec.block.attr_name == SYNTHETIC_ATTENTION
+            if spec.block is not None and spec.block.attr_name == SYNTHETIC_ATTENTION
         ]
         for target_index in targets:
             # If the kernel declares its own ``inputs:`` list, its edges
@@ -1771,9 +1767,7 @@ def _inline_frame_exit_index(
     return dangling[-1] if dangling else None
 
 
-def _link_output_port_recorded(
-    existing: str | list[str] | None, port: str
-) -> bool:
+def _link_output_port_recorded(existing: str | list[str] | None, port: str) -> bool:
     """True when ``port`` is already the (or one of the) recorded output port(s)
     of a graph link.
 
@@ -2082,7 +2076,9 @@ def _add_chain(
             previous = node_index
             continue
 
-        expanded_steps, wrapper = _maybe_inline(step, basic_ops=basic_ops, inline_expansion=inline_expansion)
+        expanded_steps, wrapper = _maybe_inline(
+            step, basic_ops=basic_ops, inline_expansion=inline_expansion
+        )
         if wrapper is not None:
             chain_indices, tail = _add_linear_pipeline_chain(
                 graph,
@@ -2100,7 +2096,9 @@ def _add_chain(
                 first_index = chain_indices[0]
             previous = tail
             if attr_last_index is not None:
-                _track_attr_index(attr_last_index, wrapper.attr_name, tail, block=wrapper)
+                _track_attr_index(
+                    attr_last_index, wrapper.attr_name, tail, block=wrapper
+                )
                 _track_attr_index(attr_last_index, step.attr_name, tail)
             continue
 
@@ -2368,7 +2366,9 @@ def _resolve_nested_boundary_param_producer(
         return None
 
 
-def _add_nested_submodule_side_producers(graph: ComputationGraph, root: BlockNode) -> None:
+def _add_nested_submodule_side_producers(
+    graph: ComputationGraph, root: BlockNode
+) -> None:
     """Wire a nested submodule's bare boundary param to its real ancestor producer.
 
     ``_add_submodule_boundary_param_inputs`` only resolves *root*'s own bare
@@ -2832,7 +2832,9 @@ def _add_kernel_pipeline_merge_chain(
         )
 
     pipeline_step, output_step = merge_steps
-    inner_steps, pipeline_wrapper = _maybe_inline(pipeline_step, inline_expansion=inline_expansion)
+    inner_steps, pipeline_wrapper = _maybe_inline(
+        pipeline_step, inline_expansion=inline_expansion
+    )
     pipeline_indices, pipeline_tail = _add_linear_pipeline_chain(
         graph,
         inner_steps,
@@ -2964,7 +2966,9 @@ def _add_linear_pipeline_chain(
                 shadowed_absent.add(name)
 
     for sub_index, sub_step in enumerate(steps):
-        inner_steps, inner_wrapper = _maybe_inline(sub_step, inline_expansion=inline_expansion)
+        inner_steps, inner_wrapper = _maybe_inline(
+            sub_step, inline_expansion=inline_expansion
+        )
         if inner_wrapper is not None:
             sibling_input = (
                 chain_last
@@ -3115,7 +3119,9 @@ def _add_linear_pipeline_chain(
         # still live. The stashed slot keys use a separator that can never
         # collide with a real attr name, so they are untouched by (and
         # survive) the restore below.
-        _track_attr_index(attr_last_index, wrapper.attr_name, indices[-1], block=wrapper)
+        _track_attr_index(
+            attr_last_index, wrapper.attr_name, indices[-1], block=wrapper
+        )
 
     if attr_last_index is not None:
         for name, value in outer_bindings.items():
@@ -3294,7 +3300,9 @@ def _add_side_producer_index(
     inline_expansion: bool = True,
 ) -> int | None:
     """Add a side-path producer, inlining straight-line output gates when possible."""
-    expanded_steps, wrapper = _maybe_inline(producer, basic_ops=basic_ops, inline_expansion=inline_expansion)
+    expanded_steps, wrapper = _maybe_inline(
+        producer, basic_ops=basic_ops, inline_expansion=inline_expansion
+    )
     if wrapper is not None:
         chain_indices, tail = _add_linear_pipeline_chain(
             graph,
@@ -3784,9 +3792,7 @@ def _add_loop_carried_nodes(
         # is not statically known, fall back to a symbolic ``N`` rather than a bare
         # count so the loop still reads as bounded by some iteration variable.
         count_token = (
-            str(carried.iteration_count)
-            if carried.iteration_count is not None
-            else "N"
+            str(carried.iteration_count) if carried.iteration_count is not None else "N"
         )
         iter_sublabel = (
             f"{carried.variable} · {carried.iteration_count} iterations"
@@ -4162,9 +4168,7 @@ def _strip_dangling_leaves(
     # this point -- its only consumer is the ``@output`` port wiring that
     # ``add_forward_output`` performs afterwards -- so without this it would be
     # indistinguishable from a genuinely dangling leaf and get pruned here.
-    referenced = (
-        root.referenced_return_producers if root is not None else set()
-    )
+    referenced = root.referenced_return_producers if root is not None else set()
     return_producers = (
         set(root.forward_return_slots.values()) if root is not None else set()
     )
@@ -4960,7 +4964,9 @@ def build_computation_graph(
                 last_index = step_index
                 _track_attr_index(attr_last_index, step.attr_name, step_index)
                 continue
-            expanded_steps, wrapper = _maybe_inline(step, basic_ops=basic_ops, inline_expansion=inline_expansion)
+            expanded_steps, wrapper = _maybe_inline(
+                step, basic_ops=basic_ops, inline_expansion=inline_expansion
+            )
             if wrapper is not None:
                 # The inlined body's ``@method_input`` must bind to this step's
                 # primary (hidden_states) argument, not to whatever chain step
@@ -5017,7 +5023,10 @@ def build_computation_graph(
                     # further untagged duplicates on top of them.
                     port_by_source: dict[int, list[int]] = {}
                     if sub_step.operation_predecessor_ports:
-                        for pred_attr, ordinals in sub_step.operation_predecessor_ports.items():
+                        for (
+                            pred_attr,
+                            ordinals,
+                        ) in sub_step.operation_predecessor_ports.items():
                             pred_index = attr_last_index.get(pred_attr)
                             if pred_index is not None:
                                 port_by_source[pred_index] = list(ordinals)

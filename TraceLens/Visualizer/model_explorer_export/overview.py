@@ -117,7 +117,10 @@ def _forward_step_display_label(
     if component is not None:
         return _display_label(component, spec)
 
-    from TraceLens.ModelUtils.ast_analyze import classify_matmul_label, operation_display_label
+    from TraceLens.ModelUtils.ast_analyze import (
+        classify_matmul_label,
+        operation_display_label,
+    )
 
     decoder = spec.class_registry.get(spec.decoder_class or "")
     if decoder is not None:
@@ -196,7 +199,9 @@ def _section_namespace_segment(
     *,
     variant: LayerVariant | None = None,
 ) -> str:
-    from TraceLens.Visualizer.model_explorer_export.adapter import _sanitize_namespace_segment
+    from TraceLens.Visualizer.model_explorer_export.adapter import (
+        _sanitize_namespace_segment,
+    )
 
     if component.role == "norm":
         # Every norm shares one class name, so keying the namespace on the class

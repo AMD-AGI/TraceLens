@@ -24,7 +24,14 @@ from TraceLens.Visualizer.model_explorer_export.cli import parse_input_shape
 
 def _sample_inventory():
     return [
-        FxNodeInfo(name="x", op="placeholder", label="x", inputs=[], shape=(2, 128), dtype="float32"),
+        FxNodeInfo(
+            name="x",
+            op="placeholder",
+            label="x",
+            inputs=[],
+            shape=(2, 128),
+            dtype="float32",
+        ),
         FxNodeInfo(
             name="linear",
             op="call_module",

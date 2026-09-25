@@ -820,8 +820,7 @@ def test_kimi_layer_variants_export_three_decoder_splits():
                 if node is None:
                     continue
                 nxt.extend(
-                    edge["sourceNodeId"]
-                    for edge in node.get("incomingEdges", []) or []
+                    edge["sourceNodeId"] for edge in node.get("incomingEdges", []) or []
                 )
             frontier = nxt
         return any(needle in nid for nid in frontier)

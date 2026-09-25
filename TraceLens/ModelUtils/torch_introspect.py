@@ -272,7 +272,9 @@ def fx_module_inventory(
         # grouping we want.
         namespace = _module_namespace(node)
         if node.op == "call_module" and namespace == str(node.target):
-            namespace = str(node.target).rsplit(".", 1)[0] if "." in str(node.target) else ""
+            namespace = (
+                str(node.target).rsplit(".", 1)[0] if "." in str(node.target) else ""
+            )
         inventory.append(
             FxNodeInfo(
                 name=node.name,
@@ -302,9 +304,7 @@ def build_torch_module_payload(
     for an image. Shapes are filled in by an FX ``ShapeProp`` pass.
     """
     resolved_name = name or type(module).__name__
-    inventory = fx_module_inventory(
-        module, tuple(input_shape), model_dtype=model_dtype
-    )
+    inventory = fx_module_inventory(module, tuple(input_shape), model_dtype=model_dtype)
     return payload_from_fx_inventory(
         inventory, name=resolved_name, include_shapes=include_shapes
     )

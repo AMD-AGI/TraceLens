@@ -49,6 +49,7 @@ from TraceLens.Visualizer.model_explorer_export.viewer_page import (
     save_viewer_html,
 )
 
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="visualize-model-in-explorer",
@@ -284,9 +285,7 @@ def write_optional_output(
     return saved
 
 
-def _run_from_payload(
-    args: argparse.Namespace, parser: argparse.ArgumentParser
-) -> int:
+def _run_from_payload(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     """Render a viewer HTML from an existing Model Explorer payload JSON."""
     source = args.from_payload
     if not source.exists():
@@ -403,7 +402,9 @@ def parse_input_shape(text: str) -> tuple[int, ...]:
     try:
         return tuple(int(dim) for dim in dims)
     except ValueError as exc:  # noqa: TRY003
-        raise ValueError(f"--input-shape must be comma-separated integers: {text!r}") from exc
+        raise ValueError(
+            f"--input-shape must be comma-separated integers: {text!r}"
+        ) from exc
 
 
 def _load_torch_module(target: str):  # pragma: no cover

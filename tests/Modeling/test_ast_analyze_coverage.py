@@ -68,14 +68,10 @@ def test_assign_target_variants():
 
 
 def test_if_has_competing_assigns():
-    competing = ast.parse(
-        "if flag:\n    y = a()\nelse:\n    y = b()\n"
-    ).body[0]
+    competing = ast.parse("if flag:\n    y = a()\nelse:\n    y = b()\n").body[0]
     assert _if_has_competing_assigns(competing) is True
 
-    distinct = ast.parse(
-        "if flag:\n    y = a()\nelse:\n    z = b()\n"
-    ).body[0]
+    distinct = ast.parse("if flag:\n    y = a()\nelse:\n    z = b()\n").body[0]
     assert _if_has_competing_assigns(distinct) is False
 
 
@@ -172,7 +168,9 @@ def test_config_value_self_config_fallback():
     assert _config_value(_expr("self.config.hidden_act == 'situ'"), config, {}) is True
     # An explicit binding in self_values still wins over the fallback.
     assert (
-        _config_value(_expr("self.config.hidden_act"), config, {"config": {"hidden_act": "gelu"}})
+        _config_value(
+            _expr("self.config.hidden_act"), config, {"config": {"hidden_act": "gelu"}}
+        )
         == "gelu"
     )
     # No config threaded -> empty dict -> key miss -> unresolved (no false prune).
@@ -280,7 +278,10 @@ def test_pick_model_class_by_structure_and_stack():
     assert picked is not None and picked.name == "PlainTransformer"
 
     # nothing has an embedding -> None
-    assert _pick_model_class_by_structure({"X": _cls("X", assignments={"p": "Linear"})}) is None
+    assert (
+        _pick_model_class_by_structure({"X": _cls("X", assignments={"p": "Linear"})})
+        is None
+    )
 
     # causal-lm delegates to its `transformer` attr
     causal = _cls("GPTForCausalLM", assignments={"transformer": "PlainTransformer"})
@@ -332,7 +333,7 @@ def test_expand_conditional_block_components():
 # full-source analysis with a layer_idx-conditional decoder + module list loop
 # --------------------------------------------------------------------------- #
 
-_COND_SOURCE = '''
+_COND_SOURCE = """
 def apply_rotary_emb(x, freqs):
     return x
 
@@ -425,7 +426,7 @@ class TextForCausalLM:
         self.lm_head = Linear()
     def forward(self, input_ids):
         return self.lm_head(self.model(input_ids))
-'''
+"""
 
 
 def test_conditional_decoder_source_analysis():
@@ -498,7 +499,9 @@ def test_config_value_false_and_unsupported_branches():
     assert _config_value(_expr("config.hidden > 99"), config, sv) is False  # 1440
     assert _config_value(_expr("config.hidden >= 99"), config, sv) is False  # 1442
     assert _config_value(_expr("config.hidden <= 5"), config, sv) is False  # 1446
-    assert _config_value(_expr("config.flag is config.off"), config, sv) is False  # 1448
+    assert (
+        _config_value(_expr("config.flag is config.off"), config, sv) is False
+    )  # 1448
     assert (
         _config_value(_expr("config.flag is not config.flag"), config, sv) is False
     )  # 1450
@@ -534,7 +537,9 @@ def test_expand_conditional_components_extra_ffn_option():
     from TraceLens.ModelUtils.blocks import BlockComponent
 
     # No mlp/moe component in the spine, but options exist -> second loop (4665-4670)
-    decoder = _cls("Dec", assignments={"self_attn": "FullAttention"}, calls=["self_attn"])
+    decoder = _cls(
+        "Dec", assignments={"self_attn": "FullAttention"}, calls=["self_attn"]
+    )
     decoder.init_assignment_options = {
         "block_sparse_moe": ["SparseMoeBlock", "AltMoeBlock"],
     }

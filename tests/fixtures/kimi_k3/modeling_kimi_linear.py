@@ -1,15 +1,21 @@
 # Vendored test fixture: modeling source for moonshotai/Kimi-K3
 # (`modeling_kimi_linear.py`, KimiLinearForCausalLM backbone).
 #
-# Checked in verbatim so the source-only AST tests in
+# Checked in so the source-only AST tests in
 # tests/Modeling/test_kda_kernel.py and
 # tests/Visualizer/test_model_explorer_export.py run without a cached HF
 # snapshot. TraceLens only AST-parses this file (it is never imported or
 # executed), so the third-party runtime imports (einops, transformers,
 # .configuration_kimi_k3) need not be installed.
 #
+# Vendored from the upstream snapshot, then reformatted with the repo's Black
+# config and had one unused import (``auto_docstring``) pruned so this fixture
+# passes the same CI lint gate (Black + Ruff F401) as the rest of the tree; the
+# class/function structure the tests parse is otherwise byte-for-byte upstream.
+#
 # Source: https://huggingface.co/moonshotai/Kimi-K3 (Apache-2.0). Do not edit
-# by hand; re-vendor from the upstream snapshot if the tests need refreshing.
+# by hand; re-vendor from the upstream snapshot (then re-apply Black/Ruff) if
+# the tests need refreshing.
 
 # coding=utf-8
 # Copyright 2025-2026 The Moonshot AI Team, DeepSeek-AI, and HuggingFace Inc. team. All rights reserved.
@@ -49,16 +55,20 @@ from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
+)
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
-from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
+from transformers.utils import TransformersKwargs, can_return_tuple, logging
 from transformers.utils.generic import OutputRecorder, check_model_inputs
 
 try:
     from fla.modules import FusedRMSNormGated, ShortConvolution
     from fla.ops.kda import chunk_kda, fused_recurrent_kda
+
     # from fla.ops.kda.gate import fused_kda_gate  # deprecated, gate is now computed inside chunk_kda/fused_recurrent_kda
     from fla.ops.utils.index import prepare_cu_seqlens_from_mask, prepare_lens_from_mask
     from fla.utils import tensor_cache
@@ -67,8 +77,9 @@ except ImportError:
 
 from .configuration_kimi_k3 import KimiLinearConfig
 
-assert version.parse(transformers.__version__) >= version.parse("4.56.0"), \
-    "Please upgrade transformers to >= 4.56.0"
+assert version.parse(transformers.__version__) >= version.parse(
+    "4.56.0"
+), "Please upgrade transformers to >= 4.56.0"
 
 logger = logging.get_logger(__name__)
 
@@ -135,6 +146,7 @@ class KimiDynamicCache:
     Dynamic cache for Kimi model.
     Inspired by Qwen3-Next
     """
+
     is_compileable = False
 
     def __init__(self, config: KimiLinearConfig):
@@ -152,11 +164,16 @@ class KimiDynamicCache:
             self.layer_types = ["full_attention"] * config.num_hidden_layers
 
         self.transformer_layers = [
-            i for i in range(config.num_hidden_layers) if self.layer_types[i] == "full_attention"
+            i
+            for i in range(config.num_hidden_layers)
+            if self.layer_types[i] == "full_attention"
         ]
 
-        linear_layers = [i for i in range(
-            config.num_hidden_layers) if self.layer_types[i] == "linear_attention"]
+        linear_layers = [
+            i
+            for i in range(config.num_hidden_layers)
+            if self.layer_types[i] == "linear_attention"
+        ]
         self.last_linear_layer = linear_layers[-1] if linear_layers else -1
 
         self.conv_states = [None for _ in range(config.num_hidden_layers)]
@@ -179,9 +196,11 @@ class KimiDynamicCache:
             self.value_cache[layer_idx] = value_states
         else:
             self.key_cache[layer_idx] = torch.cat(
-                [self.key_cache[layer_idx], key_states], dim=2)
+                [self.key_cache[layer_idx], key_states], dim=2
+            )
             self.value_cache[layer_idx] = torch.cat(
-                [self.value_cache[layer_idx], value_states], dim=2)
+                [self.value_cache[layer_idx], value_states], dim=2
+            )
 
         return self.key_cache[layer_idx], self.value_cache[layer_idx]
 
@@ -192,9 +211,11 @@ class KimiDynamicCache:
                 device = self.key_cache[layer_idx].device
                 beam_idx = beam_idx.to(device)
                 self.key_cache[layer_idx] = self.key_cache[layer_idx].index_select(
-                    0, beam_idx)
+                    0, beam_idx
+                )
                 self.value_cache[layer_idx] = self.value_cache[layer_idx].index_select(
-                    0, beam_idx)
+                    0, beam_idx
+                )
 
             if self.conv_states[layer_idx] is not None:
                 device = self.conv_states[layer_idx][0].device
@@ -205,18 +226,25 @@ class KimiDynamicCache:
                     k_conv.index_select(0, beam_idx),
                     v_conv.index_select(0, beam_idx),
                 )
-                self.recurrent_states[layer_idx] = self.recurrent_states[layer_idx].index_select(
-                    0, beam_idx)
+                self.recurrent_states[layer_idx] = self.recurrent_states[
+                    layer_idx
+                ].index_select(0, beam_idx)
 
     def get_seq_length(self, layer_idx: int | None = 0) -> int:
         """Returns the sequence length of the cached states. A layer index can be optionally passed."""
         # take any layer that contains cache and not empty tensor
-        layer_idx = self.transformer_layers[0] if layer_idx not in self.transformer_layers else layer_idx
+        layer_idx = (
+            self.transformer_layers[0]
+            if layer_idx not in self.transformer_layers
+            else layer_idx
+        )
         if len(self.key_cache) <= layer_idx or self.key_cache[layer_idx] is None:
             return 0
         return self.key_cache[layer_idx].shape[-2]
 
-    def get_mask_sizes(self, cache_position: torch.Tensor, layer_idx: int) -> tuple[int, int]:
+    def get_mask_sizes(
+        self, cache_position: torch.Tensor, layer_idx: int
+    ) -> tuple[int, int]:
         """
         Return a tuple (kv_length, kv_offset) corresponding to the length and offset that will be returned for
         the given layer at `layer_idx`.
@@ -253,15 +281,19 @@ ALL_LAYERNORM_LAYERS.append(KimiRMSNorm)
 
 
 class KimiBlockSparseMLP(nn.Module):
-    def __init__(self, config: KimiLinearConfig, hidden_size=None, intermediate_size=None):
+    def __init__(
+        self, config: KimiLinearConfig, hidden_size=None, intermediate_size=None
+    ):
         super().__init__()
         self.config = config
-        self.ffn_dim = config.intermediate_size if intermediate_size is None else intermediate_size
+        self.ffn_dim = (
+            config.intermediate_size if intermediate_size is None else intermediate_size
+        )
         self.hidden_dim = config.hidden_size if hidden_size is None else hidden_size
 
-        self.w1 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)   # gate
-        self.w2 = nn.Linear(self.ffn_dim, self.hidden_dim, bias=False)   # down
-        self.w3 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)   # up
+        self.w1 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)  # gate
+        self.w2 = nn.Linear(self.ffn_dim, self.hidden_dim, bias=False)  # down
+        self.w3 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)  # up
 
         if config.hidden_act == "situ":
             beta, linear_beta = _get_situ_activation_params(config)
@@ -274,27 +306,31 @@ class KimiBlockSparseMLP(nn.Module):
 
     def forward(self, hidden_states):
         if self.config.hidden_act == "situ":
-            gate_up = torch.cat([self.w1(hidden_states), self.w3(hidden_states)], dim=-1)
+            gate_up = torch.cat(
+                [self.w1(hidden_states), self.w3(hidden_states)], dim=-1
+            )
             current_hidden_states = self.act_fn(gate_up)
         else:
-            current_hidden_states = self.act_fn(
-                self.w1(hidden_states)) * self.w3(hidden_states)
+            current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(
+                hidden_states
+            )
         current_hidden_states = self.w2(current_hidden_states)
         return current_hidden_states
 
 
 class KimiMLP(nn.Module):
-    def __init__(self, config: KimiLinearConfig, hidden_size=None, intermediate_size=None):
+    def __init__(
+        self, config: KimiLinearConfig, hidden_size=None, intermediate_size=None
+    ):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size if hidden_size is None else hidden_size
-        self.intermediate_size = config.intermediate_size if intermediate_size is None else intermediate_size
-        self.gate_proj = nn.Linear(
-            self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(
-            self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(
-            self.intermediate_size, self.hidden_size, bias=False)
+        self.intermediate_size = (
+            config.intermediate_size if intermediate_size is None else intermediate_size
+        )
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         if config.hidden_act == "situ":
             beta, linear_beta = _get_situ_activation_params(config)
             self.act_fn = SituAndMul(
@@ -309,8 +345,7 @@ class KimiMLP(nn.Module):
             gate_up = torch.cat([self.gate_proj(x), self.up_proj(x)], dim=-1)
             down_proj = self.down_proj(self.act_fn(gate_up))
         else:
-            down_proj = self.down_proj(self.act_fn(
-                self.gate_proj(x)) * self.up_proj(x))
+            down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
 
@@ -372,11 +407,14 @@ class KimiMLAAttention(nn.Module):
             self.scaling = self.q_head_dim ** (-0.5)
         except Exception as e:
             raise ValueError(
-                f"Kimi MLA config is not found or not properly formatted: {e}")
+                f"Kimi MLA config is not found or not properly formatted: {e}"
+            )
 
         if self.q_lora_rank is not None:
             self.q_a_proj = nn.Linear(
-                self.hidden_size, self.q_lora_rank, bias=False,
+                self.hidden_size,
+                self.q_lora_rank,
+                bias=False,
             )
             self.q_a_layernorm = KimiRMSNorm(self.q_lora_rank)
             self.q_b_proj = nn.Linear(
@@ -386,7 +424,9 @@ class KimiMLAAttention(nn.Module):
             )
         else:
             self.q_proj = nn.Linear(
-                self.hidden_size, self.num_heads * self.q_head_dim, bias=False,
+                self.hidden_size,
+                self.num_heads * self.q_head_dim,
+                bias=False,
             )
         self.kv_a_proj_with_mqa = nn.Linear(
             self.hidden_size,
@@ -425,8 +465,12 @@ class KimiMLAAttention(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         batch_size, seq_length = hidden_states.shape[:-1]
         query_shape = (batch_size, seq_length, -1, self.q_head_dim)
-        key_shape = (batch_size, seq_length, -1,
-                     self.qk_nope_head_dim + self.v_head_dim)
+        key_shape = (
+            batch_size,
+            seq_length,
+            -1,
+            self.qk_nope_head_dim + self.v_head_dim,
+        )
 
         if self.q_lora_rank is not None:
             q_states = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states)))
@@ -434,16 +478,20 @@ class KimiMLAAttention(nn.Module):
             q_states = self.q_proj(hidden_states)
         q_states = q_states.view(query_shape).transpose(1, 2)
         q_pass, q_rot = torch.split(
-            q_states, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            q_states, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
 
         compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
         k_pass, k_rot = torch.split(
-            compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
 
-        k_pass = self.kv_b_proj(self.kv_a_layernorm(
-            k_pass)).view(key_shape).transpose(1, 2)
+        k_pass = (
+            self.kv_b_proj(self.kv_a_layernorm(k_pass)).view(key_shape).transpose(1, 2)
+        )
         k_pass, value_states = torch.split(
-            k_pass, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k_pass, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
 
         k_rot = k_rot.view(batch_size, 1, seq_length, self.qk_rope_head_dim)
 
@@ -454,15 +502,20 @@ class KimiMLAAttention(nn.Module):
 
         if past_key_values is not None:
             key_states, value_states = past_key_values.update(
-                key_states, value_states, self.layer_idx)
+                key_states, value_states, self.layer_idx
+            )
 
-        if self.config._attn_implementation == "flash_attention_2" and self.q_head_dim != self.v_head_dim:
-            value_states = F.pad(
-                value_states, [0, self.q_head_dim - self.v_head_dim])
+        if (
+            self.config._attn_implementation == "flash_attention_2"
+            and self.q_head_dim != self.v_head_dim
+        ):
+            value_states = F.pad(value_states, [0, self.q_head_dim - self.v_head_dim])
 
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+            attention_interface = ALL_ATTENTION_FUNCTIONS[
+                self.config._attn_implementation
+            ]
 
         attn_output, _ = attention_interface(
             self,
@@ -475,11 +528,13 @@ class KimiMLAAttention(nn.Module):
             **kwargs,
         )
 
-        if self.config._attn_implementation == "flash_attention_2" and self.q_head_dim != self.v_head_dim:
+        if (
+            self.config._attn_implementation == "flash_attention_2"
+            and self.q_head_dim != self.v_head_dim
+        ):
             attn_output = attn_output[:, :, :, : self.v_head_dim]
 
-        attn_output = attn_output.reshape(
-            batch_size, seq_length, -1).contiguous()
+        attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
         if self.use_output_gate:
             g = self.g_proj(hidden_states).sigmoid()
             attn_output = attn_output * g
@@ -503,45 +558,47 @@ class KimiDeltaAttention(nn.Module):
         self.layer_idx = layer_idx
 
         assert self.mode in [
-            'chunk', 'fused_recurrent'], f"Not supported mode `{self.mode}`."
+            "chunk",
+            "fused_recurrent",
+        ], f"Not supported mode `{self.mode}`."
 
         projection_k_size = self.head_k_dim * self.num_k_heads
         projection_size = self.head_dim * self.num_heads
 
-        self.q_proj = nn.Linear(
-            self.hidden_size, projection_k_size, bias=False)
-        self.k_proj = nn.Linear(
-            self.hidden_size, projection_k_size, bias=False)
+        self.q_proj = nn.Linear(self.hidden_size, projection_k_size, bias=False)
+        self.k_proj = nn.Linear(self.hidden_size, projection_k_size, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, projection_size, bias=False)
 
         self.q_conv1d = ShortConvolution(
             hidden_size=projection_k_size,
             kernel_size=self.conv_size,
-            activation='silu',
+            activation="silu",
         )
         self.k_conv1d = ShortConvolution(
             hidden_size=projection_k_size,
             kernel_size=self.conv_size,
-            activation='silu',
+            activation="silu",
         )
         self.v_conv1d = ShortConvolution(
             hidden_size=projection_size,
             kernel_size=self.conv_size,
-            activation='silu',
+            activation="silu",
         )
 
-        self.A_log = torch.nn.Parameter(torch.log(torch.empty(
-            self.num_heads, dtype=torch.float32).uniform_(1, 16)))
+        self.A_log = torch.nn.Parameter(
+            torch.log(torch.empty(self.num_heads, dtype=torch.float32).uniform_(1, 16))
+        )
 
         self.f_a_proj = nn.Linear(self.hidden_size, self.head_dim, bias=False)
         self.f_b_proj = nn.Linear(self.head_dim, projection_size, bias=False)
 
-        self.dt_bias = nn.Parameter(
-            torch.empty(projection_size, dtype=torch.float32))
+        self.dt_bias = nn.Parameter(torch.empty(projection_size, dtype=torch.float32))
 
         self.b_proj = nn.Linear(self.hidden_size, self.num_heads, bias=False)
 
-        self.use_full_rank_gate = config.linear_attn_config.get("use_full_rank_gate", False)
+        self.use_full_rank_gate = config.linear_attn_config.get(
+            "use_full_rank_gate", False
+        )
         self.gate_lower_bound = config.linear_attn_config.get("gate_lower_bound", None)
         if self.use_full_rank_gate:
             self.g_proj = nn.Linear(self.hidden_size, projection_size, bias=False)
@@ -550,7 +607,8 @@ class KimiDeltaAttention(nn.Module):
             self.g_b_proj = nn.Linear(self.head_dim, projection_size, bias=False)
 
         self.o_norm = FusedRMSNormGated(
-            self.head_dim, eps=config.rms_norm_eps, activation='sigmoid')
+            self.head_dim, eps=config.rms_norm_eps, activation="sigmoid"
+        )
         self.o_proj = nn.Linear(projection_size, self.hidden_size, bias=False)
 
     def forward(
@@ -571,23 +629,25 @@ class KimiDeltaAttention(nn.Module):
                 )
         use_cache = cache_params is not None
         batch_size, q_len, _ = hidden_states.shape
-        mode = 'fused_recurrent' if use_cache and q_len == 1 else self.mode
+        mode = "fused_recurrent" if use_cache and q_len == 1 else self.mode
         if self.training:
-            assert mode == 'chunk', "Only chunk mode is supported in training."
+            assert mode == "chunk", "Only chunk mode is supported in training."
 
-        cu_seqlens = kwargs.get('cu_seqlens')
+        cu_seqlens = kwargs.get("cu_seqlens")
         indices = None
         if attention_mask is not None:
             indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(
-                rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+                rearrange(hidden_states, "b s ... -> (b s) ..."), indices
+            ).unsqueeze(0)
 
         conv_state_q, conv_state_k, conv_state_v = None, None, None
         recurrent_state = None
         if cache_params is not None:
             if cache_params.conv_states[self.layer_idx] is not None:
                 conv_state_q, conv_state_k, conv_state_v = cache_params.conv_states[
-                    self.layer_idx]
+                    self.layer_idx
+                ]
             recurrent_state = cache_params.recurrent_states[self.layer_idx]
 
         q_proj_states = self.q_proj(hidden_states)
@@ -612,14 +672,15 @@ class KimiDeltaAttention(nn.Module):
             cu_seqlens=cu_seqlens,
         )
         g = self.f_b_proj(self.f_a_proj(hidden_states))
-        g = rearrange(g, '... (h d) -> ... h d', d=self.head_dim)
+        g = rearrange(g, "... (h d) -> ... h d", d=self.head_dim)
         beta = self.b_proj(hidden_states).float()
 
-        q, k = map(lambda x: rearrange(
-            x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
-        v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
+        q, k = map(
+            lambda x: rearrange(x, "... (h d) -> ... h d", d=self.head_k_dim), (q, k)
+        )
+        v = rearrange(v, "... (h d) -> ... h d", d=self.head_dim)
 
-        if mode == 'chunk':
+        if mode == "chunk":
             o, recurrent_state = chunk_kda(
                 q=q,
                 k=k,
@@ -659,16 +720,19 @@ class KimiDeltaAttention(nn.Module):
         if cache_params is not None:
             cache_params.recurrent_states[self.layer_idx] = recurrent_state
             cache_params.conv_states[self.layer_idx] = (
-                conv_state_q, conv_state_k, conv_state_v)
+                conv_state_q,
+                conv_state_k,
+                conv_state_v,
+            )
 
         if self.use_full_rank_gate:
             g = self.g_proj(hidden_states)
         else:
             g = self.g_b_proj(self.g_a_proj(hidden_states))
-        g = rearrange(g, '... (h d) -> ... h d', d=self.head_dim)
+        g = rearrange(g, "... (h d) -> ... h d", d=self.head_dim)
         o = self.o_norm(o, g)
 
-        o = rearrange(o, 'b t h d -> b t (h d)')
+        o = rearrange(o, "b t h d -> b t (h d)")
         o = self.o_proj(o)
         if attention_mask is not None:
             o = pad_input(o.squeeze(0), indices, batch_size, q_len)
@@ -718,8 +782,9 @@ class KimiMoEGate(nn.Module):
         # compute gating score
         hidden_states = hidden_states.view(-1, h)
         logits = F.linear(
-            hidden_states.type(torch.float32), self.weight.type(
-                torch.float32), None,
+            hidden_states.type(torch.float32),
+            self.weight.type(torch.float32),
+            None,
         )
         if self.moe_router_activation_func == "sigmoid":
             scores = logits.sigmoid()
@@ -736,11 +801,15 @@ class KimiMoEGate(nn.Module):
         scores_for_choice = scores + self.e_score_correction_bias.unsqueeze(0)
         if self.num_expert_group > 1 and self.num_expert_group > self.topk_group:
             group_scores = (
-                scores_for_choice.view(
-                    bsz * seq_len, self.num_expert_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
+                scores_for_choice.view(bsz * seq_len, self.num_expert_group, -1)
+                .topk(2, dim=-1)[0]
+                .sum(dim=-1)
             )  # [n, num_expert_group]
             group_idx = torch.topk(
-                group_scores, k=self.topk_group, dim=-1, sorted=False,
+                group_scores,
+                k=self.topk_group,
+                dim=-1,
+                sorted=False,
             )[
                 1
             ]  # [n, top_k_group]
@@ -749,16 +818,22 @@ class KimiMoEGate(nn.Module):
             score_mask = (
                 group_mask.unsqueeze(-1)
                 .expand(
-                    bsz * seq_len, self.num_expert_group, self.num_experts // self.num_expert_group,
+                    bsz * seq_len,
+                    self.num_expert_group,
+                    self.num_experts // self.num_expert_group,
                 )
                 .reshape(bsz * seq_len, -1)
             )  # [n, e]
             tmp_scores = scores_for_choice.masked_fill(
-                ~score_mask.bool(), float("-inf"))  # [n, e]
+                ~score_mask.bool(), float("-inf")
+            )  # [n, e]
         else:
             tmp_scores = scores_for_choice
         _, topk_idx = torch.topk(
-            tmp_scores, k=self.top_k, dim=-1, sorted=False,
+            tmp_scores,
+            k=self.top_k,
+            dim=-1,
+            sorted=False,
         )
         topk_weight = scores.gather(1, topk_idx)
 
@@ -786,10 +861,13 @@ class KimiSparseMoeBlock(nn.Module):
         self.top_k = config.num_experts_per_token
         self.moe_renormalize = config.moe_renormalize
 
-        self.use_latent_moe = getattr(config, "routed_expert_hidden_size", None) is not None
+        self.use_latent_moe = (
+            getattr(config, "routed_expert_hidden_size", None) is not None
+        )
         self.moe_hidden_size = (
             config.routed_expert_hidden_size
-            if self.use_latent_moe else config.hidden_size
+            if self.use_latent_moe
+            else config.hidden_size
         )
         self.latent_moe_use_norm = getattr(config, "latent_moe_use_norm", False)
 
@@ -810,19 +888,25 @@ class KimiSparseMoeBlock(nn.Module):
         if config.num_shared_experts is not None:
             intermediate_size = config.moe_intermediate_size * config.num_shared_experts
             self.shared_experts = KimiMLP(
-                config=config, intermediate_size=intermediate_size,
+                config=config,
+                intermediate_size=intermediate_size,
             )
 
         if self.use_latent_moe:
             self.routed_expert_down_proj = nn.Linear(
-                config.hidden_size, self.moe_hidden_size, bias=False,
+                config.hidden_size,
+                self.moe_hidden_size,
+                bias=False,
             )
             self.routed_expert_up_proj = nn.Linear(
-                self.moe_hidden_size, config.hidden_size, bias=False,
+                self.moe_hidden_size,
+                config.hidden_size,
+                bias=False,
             )
             if self.latent_moe_use_norm:
                 self.routed_expert_norm = KimiRMSNorm(
-                    self.moe_hidden_size, eps=config.rms_norm_eps,
+                    self.moe_hidden_size,
+                    eps=config.rms_norm_eps,
                 )
 
     def forward(self, hidden_states):
@@ -837,7 +921,9 @@ class KimiSparseMoeBlock(nn.Module):
         if not self.training:
             y = self.moe_infer(hidden_states, topk_idx, topk_weight)
         else:
-            raise NotImplementedError("Training mode is not supported in KimiSparseMoeBlock")
+            raise NotImplementedError(
+                "Training mode is not supported in KimiSparseMoeBlock"
+            )
 
         if self.use_latent_moe:
             if self.latent_moe_use_norm:
@@ -872,8 +958,7 @@ class KimiSparseMoeBlock(nn.Module):
             outputs.append(expert_out)
             start_idx = end_idx
 
-        outs = torch.cat(outputs, dim=0) if len(
-            outputs) else sorted_tokens.new_empty(0)
+        outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
 
         new_x = torch.empty_like(outs)
         new_x[idxs] = outs
@@ -895,12 +980,10 @@ class KimiDecoderLayer(nn.Module):
         self.layer_idx = layer_idx
         if config.is_kda_layer(layer_idx):
             self.is_linear_attn = True
-            self.self_attn = KimiDeltaAttention(
-                config=config, layer_idx=layer_idx)
+            self.self_attn = KimiDeltaAttention(config=config, layer_idx=layer_idx)
         elif config.is_mla:
             self.is_linear_attn = False
-            self.self_attn = KimiMLAAttention(
-                config=config, layer_idx=layer_idx)
+            self.self_attn = KimiMLAAttention(config=config, layer_idx=layer_idx)
         else:
             raise NotImplementedError
         if (
@@ -911,23 +994,23 @@ class KimiDecoderLayer(nn.Module):
             self.block_sparse_moe = KimiSparseMoeBlock(config)
         else:
             self.mlp = KimiMLP(config)
-        self.input_layernorm = KimiRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = KimiRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = KimiRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps)
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
         # Attention residual
-        self.use_attn_residuals = getattr(config, "attn_res_block_size", None) is not None
+        self.use_attn_residuals = (
+            getattr(config, "attn_res_block_size", None) is not None
+        )
         if self.use_attn_residuals:
             self.attn_res_block_size = config.attn_res_block_size
             self.self_attention_res_norm = KimiRMSNorm(
-                config.hidden_size, eps=config.rms_norm_eps)
-            self.mlp_res_norm = KimiRMSNorm(
-                config.hidden_size, eps=config.rms_norm_eps)
-            self.self_attention_res_proj = nn.Linear(
-                config.hidden_size, 1, bias=False)
-            self.mlp_res_proj = nn.Linear(
-                config.hidden_size, 1, bias=False)
+                config.hidden_size, eps=config.rms_norm_eps
+            )
+            self.mlp_res_norm = KimiRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.self_attention_res_proj = nn.Linear(config.hidden_size, 1, bias=False)
+            self.mlp_res_proj = nn.Linear(config.hidden_size, 1, bias=False)
 
     def forward(
         self,
@@ -942,9 +1025,15 @@ class KimiDecoderLayer(nn.Module):
     ):
         if self.use_attn_residuals:
             return self._forward_attn_residual(
-                hidden_states, attention_mask, position_ids,
-                past_key_values, output_attentions, use_cache,
-                block_residual, **kwargs)
+                hidden_states,
+                attention_mask,
+                position_ids,
+                past_key_values,
+                output_attentions,
+                use_cache,
+                block_residual,
+                **kwargs,
+            )
 
         residual = hidden_states
 
@@ -1007,7 +1096,8 @@ class KimiDecoderLayer(nn.Module):
 
         if self.layer_idx % self.attn_res_block_size == 0:
             block_residual = torch.cat(
-                [block_residual, prefix_sum.view(-1, hidden_size).unsqueeze(1)], dim=1)
+                [block_residual, prefix_sum.view(-1, hidden_size).unsqueeze(1)], dim=1
+            )
             prefix_sum = None
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -1100,6 +1190,7 @@ def _apply_attn_res(prefix_sum, block_residual, proj, norm):
     hidden_states = torch.matmul(probs, v_float).squeeze(1)
     return hidden_states.to(v.dtype)
 
+
 class KimiLinearModel(KimiPreTrainedModel):
     def __init__(self, config: KimiLinearConfig):
         super().__init__(config)
@@ -1107,23 +1198,30 @@ class KimiLinearModel(KimiPreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(
-            config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([KimiDecoderLayer(
-            config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
-        self.norm = KimiRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps)
+            config.vocab_size, config.hidden_size, self.padding_idx
+        )
+        self.layers = nn.ModuleList(
+            [
+                KimiDecoderLayer(config, layer_idx)
+                for layer_idx in range(config.num_hidden_layers)
+            ]
+        )
+        self.norm = KimiRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        self.use_attn_residuals = getattr(config, "attn_res_block_size", None) is not None
+        self.use_attn_residuals = (
+            getattr(config, "attn_res_block_size", None) is not None
+        )
         if self.use_attn_residuals:
             self.output_attn_res_norm = KimiRMSNorm(
-                config.hidden_size, eps=config.rms_norm_eps)
-            self.output_attn_res_proj = nn.Linear(
-                config.hidden_size, 1, bias=False)
+                config.hidden_size, eps=config.rms_norm_eps
+            )
+            self.output_attn_res_proj = nn.Linear(config.hidden_size, 1, bias=False)
 
         if getattr(config, "_attn_implementation", None) is not None:
             if config._attn_implementation != "flash_attention_2":
                 logger.warning_once(
-                    f"Ignoring the provided attention implementation {config._attn_implementation}")
+                    f"Ignoring the provided attention implementation {config._attn_implementation}"
+                )
                 logger.warning_once("Using flash_attention_2 backend instead.")
                 config._attn_implementation = "flash_attention_2"
         else:
@@ -1142,7 +1240,9 @@ class KimiLinearModel(KimiPreTrainedModel):
             2. Attending to all inputs
         """
         linear_attn_mask = attention_mask
-        if cache_position[0] > 0 or (attention_mask is not None and torch.all(attention_mask == 1)):
+        if cache_position[0] > 0 or (
+            attention_mask is not None and torch.all(attention_mask == 1)
+        ):
             linear_attn_mask = None
         return linear_attn_mask
 
@@ -1164,7 +1264,8 @@ class KimiLinearModel(KimiPreTrainedModel):
 
         if (input_ids is None) and (inputs_embeds is None):
             raise ValueError(
-                "You must specify exactly one of input_ids or inputs_embeds")
+                "You must specify exactly one of input_ids or inputs_embeds"
+            )
 
         # Get inputs_embeds
         if inputs_embeds is None:
@@ -1174,10 +1275,13 @@ class KimiLinearModel(KimiPreTrainedModel):
             past_key_values = KimiDynamicCache(config=self.config)
 
         if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length(
-            ) if past_key_values is not None else 0
+            past_seen_tokens = (
+                past_key_values.get_seq_length() if past_key_values is not None else 0
+            )
             cache_position: torch.Tensor = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device,
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
             )
 
         if position_ids is None:
@@ -1191,8 +1295,7 @@ class KimiLinearModel(KimiPreTrainedModel):
             past_key_values=past_key_values,
             position_ids=position_ids,
         )
-        linear_attn_mask = self._update_linear_attn_mask(
-            attention_mask, cache_position)
+        linear_attn_mask = self._update_linear_attn_mask(attention_mask, cache_position)
 
         hidden_states = inputs_embeds
         if past_key_values is not None:
@@ -1201,11 +1304,15 @@ class KimiLinearModel(KimiPreTrainedModel):
         block_residual = None
         if self.use_attn_residuals:
             block_residual = hidden_states.new_zeros(
-                hidden_states.shape[0] * hidden_states.shape[1], 0,
-                hidden_states.shape[2])
+                hidden_states.shape[0] * hidden_states.shape[1],
+                0,
+                hidden_states.shape[2],
+            )
 
         for decoder_layer in self.layers:
-            layer_mask = linear_attn_mask if decoder_layer.is_linear_attn else causal_mask
+            layer_mask = (
+                linear_attn_mask if decoder_layer.is_linear_attn else causal_mask
+            )
 
             if self.use_attn_residuals:
                 hidden_states, block_residual = decoder_layer(
@@ -1226,8 +1333,7 @@ class KimiLinearModel(KimiPreTrainedModel):
                 )
 
         if self.use_attn_residuals:
-            hidden_states = self._apply_output_attn_res(
-                hidden_states, block_residual)
+            hidden_states = self._apply_output_attn_res(hidden_states, block_residual)
 
         hidden_states = self.norm(hidden_states)
 
@@ -1257,8 +1363,7 @@ class KimiLinearForCausalLM(KimiPreTrainedModel, GenerationMixin):
         super().__init__(config)
         self.model = KimiLinearModel(config)
         self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(
-            config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1289,11 +1394,19 @@ class KimiLinearForCausalLM(KimiPreTrainedModel, GenerationMixin):
                 (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
         """
 
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         outputs = self.model(
             input_ids=input_ids,
@@ -1315,8 +1428,7 @@ class KimiLinearForCausalLM(KimiPreTrainedModel, GenerationMixin):
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(
-                logits, labels, self.vocab_size, **kwargs)
+            loss = self.loss_function(logits, labels, self.vocab_size, **kwargs)
 
         return CausalLMOutputWithPast(
             loss=loss,

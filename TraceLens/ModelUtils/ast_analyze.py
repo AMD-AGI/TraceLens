@@ -77,9 +77,7 @@ _POSITIONAL_SOURCE_POS_RE = re.compile(
 # The forward still runs real computation there, so it must render as its own node
 # rather than vanishing; the line number keeps repeated call sites distinct.
 FUNCTION_SYNTHETIC_PREFIX = "@fn_"
-_FUNCTION_SOURCE_POS_RE = re.compile(
-    rf"^{re.escape(FUNCTION_SYNTHETIC_PREFIX)}l(\d+)_"
-)
+_FUNCTION_SOURCE_POS_RE = re.compile(rf"^{re.escape(FUNCTION_SYNTHETIC_PREFIX)}l(\d+)_")
 # Trailing per-element discriminator appended by ``function_synthetic_attr`` /
 # ``positional_synthetic_attr`` / ``submodule_callsite_attr`` when one call site
 # is cloned across a ``map(lambda x: ..., (a, b))`` tuple -- both clones share the
@@ -90,12 +88,50 @@ _MAP_DISCRIMINATOR_RE = re.compile(r"@m\d+$")
 # a tensor the diagram should show as a computation node.
 _NON_TENSOR_BUILTINS = frozenset(
     {
-        "len", "int", "float", "bool", "str", "range", "enumerate", "zip",
-        "super", "print", "isinstance", "issubclass", "getattr", "setattr",
-        "hasattr", "delattr", "type", "min", "max", "sum", "abs", "round",
-        "list", "tuple", "dict", "set", "frozenset", "sorted", "reversed",
-        "map", "filter", "any", "all", "repr", "format", "iter", "next",
-        "id", "hash", "vars", "dir", "callable", "slice", "object",
+        "len",
+        "int",
+        "float",
+        "bool",
+        "str",
+        "range",
+        "enumerate",
+        "zip",
+        "super",
+        "print",
+        "isinstance",
+        "issubclass",
+        "getattr",
+        "setattr",
+        "hasattr",
+        "delattr",
+        "type",
+        "min",
+        "max",
+        "sum",
+        "abs",
+        "round",
+        "list",
+        "tuple",
+        "dict",
+        "set",
+        "frozenset",
+        "sorted",
+        "reversed",
+        "map",
+        "filter",
+        "any",
+        "all",
+        "repr",
+        "format",
+        "iter",
+        "next",
+        "id",
+        "hash",
+        "vars",
+        "dir",
+        "callable",
+        "slice",
+        "object",
     }
 )
 
@@ -272,9 +308,7 @@ def _call_forces_host(call: ast.Call) -> bool:
     return False
 
 
-def _absolute_import_bindings(
-    tree: ast.AST, current_module: str
-) -> dict[str, str]:
+def _absolute_import_bindings(tree: ast.AST, current_module: str) -> dict[str, str]:
     """Map imported names to ``absolute.module#symbol`` for one module's AST.
 
     Resolves relative imports (``from ...vision_utils import x``) to their absolute
@@ -289,7 +323,9 @@ def _absolute_import_bindings(
         if isinstance(stmt, ast.ImportFrom):
             if stmt.level:
                 base = parts[: -stmt.level] if len(parts) >= stmt.level else []
-                module = ".".join(base + (stmt.module.split(".") if stmt.module else []))
+                module = ".".join(
+                    base + (stmt.module.split(".") if stmt.module else [])
+                )
             else:
                 module = stmt.module or ""
             for alias in stmt.names:
@@ -370,9 +406,7 @@ class _HostSourceResolver:
         if not module or not isinstance(tree, ast.Module):
             return
         funcs = {
-            node.name: node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef)
+            node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
         }
         self._seeds[module] = (funcs, _absolute_import_bindings(tree, module))
 
@@ -715,9 +749,7 @@ def _resolve_module_dict_registry_classes(
     for cls in classes.values():
         for attr, registry_name in list(cls.unresolved_module_dict_class_refs.items()):
             candidates = [
-                name
-                for name in registries.get(registry_name, [])
-                if name in classes
+                name for name in registries.get(registry_name, []) if name in classes
             ]
             if not candidates:
                 _log.warning(
@@ -816,6 +848,8 @@ def _display_activation_name(raw: str) -> str:
     if lowered in _GATE_ACTIVATION_NAMES:
         return _GATE_ACTIVATION_NAMES[lowered]
     return raw.strip().replace("_", " ").title().replace(" ", "")
+
+
 FORWARD_OPERATION_PREFIX = "@op_"
 # Stands for the value a helper method receives, so operations reading its parameter
 # resolve to whatever feeds the chain the method is inlined into.
@@ -1232,7 +1266,9 @@ def _extract_self_calls_ordered(
         for arg in node.args:
             _extract_self_calls_ordered(arg, out, skip_free_fn, repeated_attrs)
         for keyword in node.keywords:
-            _extract_self_calls_ordered(keyword.value, out, skip_free_fn, repeated_attrs)
+            _extract_self_calls_ordered(
+                keyword.value, out, skip_free_fn, repeated_attrs
+            )
 
         func = node.func
         if isinstance(func, ast.Attribute) and _is_self_attr(func, func.attr):
@@ -1778,7 +1814,14 @@ def _multi_op_forward_methods(
                         list(operations.return_order),
                         operations.primary_return_slot,
                     )
-    return expanded, returns, inputs, step_predecessors, step_order, step_predecessor_args
+    return (
+        expanded,
+        returns,
+        inputs,
+        step_predecessors,
+        step_order,
+        step_predecessor_args,
+    )
 
 
 def _synthetic_call_function_name(call_attr: str) -> str | None:
@@ -2047,8 +2090,7 @@ def _multi_op_free_functions(
             if len(analysis.return_order) >= 2:
                 op_attrs = {op.attr_name for op in operations}
                 producers = [
-                    analysis.return_slots.get(slot)
-                    for slot in analysis.return_order
+                    analysis.return_slots.get(slot) for slot in analysis.return_order
                 ]
                 # Only publish the map when every slot resolves to an op that
                 # survived inlining (else fall back to the default last-op wiring).
@@ -2144,7 +2186,9 @@ def _call_uses_vision_config(call: ast.Call) -> bool:
     return False
 
 
-def _vision_scoped_class_names(tree: ast.AST, config: dict[str, Any] | None) -> set[str]:
+def _vision_scoped_class_names(
+    tree: ast.AST, config: dict[str, Any] | None
+) -> set[str]:
     """Local classes constructed under the vision tower (built with ``vision_config``).
 
     A HF vision-language model instantiates its vision tower with the nested
@@ -2158,7 +2202,9 @@ def _vision_scoped_class_names(tree: ast.AST, config: dict[str, Any] | None) -> 
     ``RMSNorm`` used in both towers is included only through the vision subtree here,
     and callers overlay the sub-config for those instances alone.
     """
-    if not isinstance(config, dict) or not isinstance(config.get("vision_config"), dict):
+    if not isinstance(config, dict) or not isinstance(
+        config.get("vision_config"), dict
+    ):
         return set()
     class_defs: dict[str, ast.ClassDef] = {
         node.name: node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
@@ -2540,9 +2586,9 @@ class ClassStructure:
     forward_step_boundary_params: dict[str, tuple[str, ...]] = field(
         default_factory=dict
     )
-    forward_step_boundary_arg_params: dict[
-        str, dict[str, tuple[str, int | None]]
-    ] = field(default_factory=dict)
+    forward_step_boundary_arg_params: dict[str, dict[str, tuple[str, int | None]]] = (
+        field(default_factory=dict)
+    )
     single_op_methods: dict[str, ForwardOperation] = field(default_factory=dict)
     multi_op_methods: dict[str, list[ForwardOperation]] = field(default_factory=dict)
     # For an inline-expanded forward *method* returning a tuple
@@ -2550,9 +2596,9 @@ class ClassStructure:
     # ``(return_slots, return_order, primary_return_slot)``, so the method frame
     # exposes every return slot as its own output port and consumers dock onto
     # the matching slot instead of collapsing onto the frame tail.
-    multi_op_method_returns: dict[
-        str, tuple[dict[str, str], list[str], str | None]
-    ] = field(default_factory=dict)
+    multi_op_method_returns: dict[str, tuple[dict[str, str], list[str], str | None]] = (
+        field(default_factory=dict)
+    )
     # For an inline-expanded forward *method*: base method name -> its primary
     # (first non-``self``) parameter name, so the method frame's ``@input``
     # boundary is labelled after the method's own parameter
@@ -2570,9 +2616,9 @@ class ClassStructure:
     # map is what tells that child what feeds it, so it does not appear as a
     # sourceless node when its own gate/branch happens not to be otherwise
     # consumed.
-    multi_op_method_step_predecessors: dict[
-        str, dict[str, tuple[str, ...]]
-    ] = field(default_factory=dict)
+    multi_op_method_step_predecessors: dict[str, dict[str, tuple[str, ...]]] = field(
+        default_factory=dict
+    )
     # For an inline-expanded forward *method*: base method name -> the TRUE
     # EVALUATION ORDER of its steps, merging its flat op-attr list with the name
     # of any submodule call embedded mid-expression (``act_fn`` in the example
@@ -2591,9 +2637,9 @@ class ClassStructure:
     # submodule call already relies on -- instead of the frame's naive
     # previous-sibling chaining, which would be wrong once the child is not the
     # very first step.
-    multi_op_method_step_predecessor_args: dict[
-        str, dict[str, dict[str, str]]
-    ] = field(default_factory=dict)
+    multi_op_method_step_predecessor_args: dict[str, dict[str, dict[str, str]]] = field(
+        default_factory=dict
+    )
     # For an inline-expanded free function returning a tuple
     # (``q_embed, k_embed = apply_rotary_pos_emb_vision(...)``): call attr ->
     # ordered internal producer attrs, so a consumer reading a specific return
@@ -2701,7 +2747,11 @@ def stack_entry_dataflow(cls: ClassStructure) -> StackEntryDataflow | None:
         if keyword.arg is None or not isinstance(keyword.value, ast.Name):
             continue
         producer = extractor.var_producer.get(keyword.value.id)
-        if producer is not None and is_forward_operation(producer) and producer in by_name:
+        if (
+            producer is not None
+            and is_forward_operation(producer)
+            and producer in by_name
+        ):
             loop_invariant_inputs[keyword.arg] = producer
 
     live = {output_producer, *loop_invariant_inputs.values()}
@@ -3573,9 +3623,7 @@ class _ForwardOperationExtractor:
         # (``position_embeddings``) and, for a tuple-unpacked boundary
         # (``cos, sin = position_embeddings``), the ordinal so the boundary input
         # fans out one port per slot (port0->cos-op, port1->sin-op).
-        self.step_boundary_arg_params: dict[
-            str, dict[str, tuple[str, int | None]]
-        ] = {}
+        self.step_boundary_arg_params: dict[str, dict[str, tuple[str, int | None]]] = {}
         # unpacked-local -> the forward parameter it aliases
         # (``cos``/``sin`` -> ``position_embeddings``). Populated as
         # ``_propagate_param_alias`` registers the alias.
@@ -3954,9 +4002,9 @@ class _ForwardOperationExtractor:
             # a return slot -- without one, ``_live_forward_steps`` never seeds
             # from whatever produced it, and prunes it (and everything only it
             # depends on) as if the return statement never read it at all.
-            return self._return_element_label(
-                node.left
-            ) or self._return_element_label(node.right)
+            return self._return_element_label(node.left) or self._return_element_label(
+                node.right
+            )
         return None
 
     def _is_host_scalar_expr(self, node: ast.AST) -> bool:
@@ -3972,7 +4020,9 @@ class _ForwardOperationExtractor:
         if isinstance(node, ast.Constant):
             return isinstance(node.value, int) and not isinstance(node.value, bool)
         if isinstance(node, ast.Name):
-            return node.id in self.shape_unpack_tokens or node.id in self.host_scalar_vars
+            return (
+                node.id in self.shape_unpack_tokens or node.id in self.host_scalar_vars
+            )
         if isinstance(node, ast.Attribute):
             value = _config_value(node, self.config, self.self_values)
             return isinstance(value, int) and not isinstance(value, bool)
@@ -4473,7 +4523,10 @@ class _ForwardOperationExtractor:
                 if (
                     (
                         base is not None
-                        or (reads_param and (self.is_free_function_body or is_param_alias))
+                        or (
+                            reads_param
+                            and (self.is_free_function_body or is_param_alias)
+                        )
                     )
                     and not self._suppress_slice_resize
                     and not self._is_host_scalar_expr(node)
@@ -4819,8 +4872,7 @@ class _ForwardOperationExtractor:
                 # pass can route producers onto the matching per-parameter entry of
                 # the inlined pipeline (``q``->query_states, ``k``->key_states).
                 if not arg_name_map and (
-                    is_positional_synthetic(own_step)
-                    or is_function_synthetic(own_step)
+                    is_positional_synthetic(own_step) or is_function_synthetic(own_step)
                 ):
                     param_names = self._free_function_param_names(node)
                     boundary_arg_map: dict[str, tuple[str, int | None]] = {}
@@ -4849,10 +4901,7 @@ class _ForwardOperationExtractor:
                             arg = node.args[idx]
                             while isinstance(arg, ast.UnaryOp):
                                 arg = arg.operand
-                            if (
-                                isinstance(arg, ast.Name)
-                                and arg.id in self.param_names
-                            ):
+                            if isinstance(arg, ast.Name) and arg.id in self.param_names:
                                 boundary_arg_map[callee_param] = (
                                     self.param_alias_origin.get(arg.id, arg.id),
                                     self.param_alias_ordinal.get(arg.id),
@@ -4932,9 +4981,7 @@ class _ForwardOperationExtractor:
             # ``permute`` accepts either varargs (``x.permute(0, 2, 1, 3)``) or a
             # single tuple/list (``x.permute((0, 2, 1, 3))``); flatten both to a
             # comma-joined dims spec so shape inference can reorder the axes.
-            if len(dims_args) == 1 and isinstance(
-                dims_args[0], (ast.Tuple, ast.List)
-            ):
+            if len(dims_args) == 1 and isinstance(dims_args[0], (ast.Tuple, ast.List)):
                 dims_args = list(dims_args[0].elts)
             if dims_args:
                 details.append(
@@ -4977,9 +5024,11 @@ class _ForwardOperationExtractor:
                 if len(positional) >= 3:
                     details.append(f"arange_step: {ast.unparse(positional[2])}")
             for keyword in node.keywords:
-                bound = {"start": "arange_start", "end": "arange_stop", "step": "arange_step"}.get(
-                    keyword.arg
-                )
+                bound = {
+                    "start": "arange_start",
+                    "end": "arange_stop",
+                    "step": "arange_step",
+                }.get(keyword.arg)
                 if bound is not None:
                     details.append(f"{bound}: {ast.unparse(keyword.value)}")
         if call_name in _DIM_DETAIL_METHODS:
@@ -5004,9 +5053,7 @@ class _ForwardOperationExtractor:
         if label in {"Concat", "Stack"}:
             # The assembly axis drives the output width; record it so shape
             # inference sums (concat) or tiles along the right dim.
-            dim_arg = next(
-                (kw.value for kw in node.keywords if kw.arg == "dim"), None
-            )
+            dim_arg = next((kw.value for kw in node.keywords if kw.arg == "dim"), None)
             if dim_arg is None and len(node.args) > 1:
                 dim_arg = node.args[1]
             if dim_arg is not None:
@@ -5141,9 +5188,7 @@ class _ForwardOperationExtractor:
             for ordinal, name in enumerate(names):
                 self.var_output_ordinal[name] = ordinal
 
-    def _propagate_param_alias(
-        self, targets: list[ast.expr], value: ast.AST
-    ) -> None:
+    def _propagate_param_alias(self, targets: list[ast.expr], value: ast.AST) -> None:
         """Carry a secondary forward-input's param status onto unpacked locals.
 
         ``cos, sin = position_embeddings`` (and the plain ``x = position_embeddings``
@@ -5203,9 +5248,7 @@ class _ForwardOperationExtractor:
                 if inherited is not None:
                     self.param_alias_ordinal[target.id] = inherited
 
-    def _track_shape_assignment(
-        self, targets: list[ast.expr], value: ast.AST
-    ) -> None:
+    def _track_shape_assignment(self, targets: list[ast.expr], value: ast.AST) -> None:
         """Record shape-derived locals so reshape args resolve to real axes.
 
         Two patterns feed reshape targets: unpacking a tensor's shape
@@ -5638,9 +5681,7 @@ class _ForwardOperationExtractor:
                     and stmt.target.id not in self.var_producer
                     and self._is_host_scalar_expr(stmt.value)
                 ):
-                    combined = ast.BinOp(
-                        left=stmt.target, op=stmt.op, right=stmt.value
-                    )
+                    combined = ast.BinOp(left=stmt.target, op=stmt.op, right=stmt.value)
                     self._record_host_scalar(stmt.target, combined)
                     self.host_scalar_vars.add(stmt.target.id)
                     continue
@@ -5682,7 +5723,10 @@ class _ForwardOperationExtractor:
                             self._suppress_slice_resize = False
                         operand_producers: list[str] = []
                         operand_external: list[str] = []
-                        for operand in (*value.args, *(kw.value for kw in value.keywords)):
+                        for operand in (
+                            *value.args,
+                            *(kw.value for kw in value.keywords),
+                        ):
                             operand_producer, ext = self.expression(operand)
                             if operand_producer:
                                 operand_producers.append(operand_producer)
@@ -6237,9 +6281,7 @@ def _live_forward_steps(
         return seeds
 
     live_ops: set[str] = set()
-    pending = [
-        seed for producer in return_slots.values() for seed in _seed(producer)
-    ]
+    pending = [seed for producer in return_slots.values() for seed in _seed(producer)]
     while pending:
         step = pending.pop()
         if step in live_ops:
@@ -6605,8 +6647,7 @@ def _forward_operations_from_forward(
     # pass-through params (never reassigned) need the seed.
     reassigned = _ForwardOperationExtractor._assigned_names(func.body)
     for name in (
-        _traced_free_function_arg_names(func)
-        & _forward_input_names(func)
+        _traced_free_function_arg_names(func) & _forward_input_names(func)
     ) - reassigned:
         extractor.var_producer.setdefault(name, FORWARD_METHOD_INPUT)
     extractor.statements(func.body)
@@ -6732,9 +6773,7 @@ def expand_class_forward_dataflow(
         None,
     )
     class_methods = {
-        item.name: item
-        for item in cls.node.body
-        if isinstance(item, ast.FunctionDef)
+        item.name: item for item in cls.node.body if isinstance(item, ast.FunctionDef)
     }
     analysis = _forward_operations_from_forward(
         forward,
@@ -6859,13 +6898,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
             str, tuple[dict[str, str], list[str], str | None]
         ] = {}
         multi_op_method_inputs: dict[str, str] = {}
-        multi_op_method_step_predecessors: dict[
-            str, dict[str, tuple[str, ...]]
-        ] = {}
+        multi_op_method_step_predecessors: dict[str, dict[str, tuple[str, ...]]] = {}
         multi_op_method_order: dict[str, list[str]] = {}
-        multi_op_method_step_predecessor_args: dict[
-            str, dict[str, dict[str, str]]
-        ] = {}
+        multi_op_method_step_predecessor_args: dict[str, dict[str, dict[str, str]]] = {}
         forward_step_return_producers: dict[str, list[str]] = {}
         init_func = next(
             (
@@ -6942,7 +6977,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 if isinstance(item, ast.FunctionDef)
             }
             if _is_moe_gate_class(node.name, forward_calls):
-                values = _self_config_values(init_func, self._config_for_class(node.name))
+                values = _self_config_values(
+                    init_func, self._config_for_class(node.name)
+                )
                 analysis = _forward_operations_from_forward(
                     resolved_forward_func,
                     self_values=values,
@@ -6958,9 +6995,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         analysis.step_predecessor_ordinals
                     )
                     forward_step_output_names = dict(analysis.step_output_names)
-                    forward_step_boundary_params = dict(
-                        analysis.step_boundary_params
-                    )
+                    forward_step_boundary_params = dict(analysis.step_boundary_params)
                     forward_step_boundary_arg_params = dict(
                         analysis.step_boundary_arg_params
                     )
@@ -6990,7 +7025,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 node,
                 forward_calls,
                 init_assignments,
-                self_values=_self_config_values(init_func, self._config_for_class(node.name)),
+                self_values=_self_config_values(
+                    init_func, self._config_for_class(node.name)
+                ),
                 all_tensor_ops=self.all_tensor_ops,
             )
             (
@@ -7004,7 +7041,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 node,
                 forward_calls,
                 init_assignments,
-                self_values=_self_config_values(init_func, self._config_for_class(node.name)),
+                self_values=_self_config_values(
+                    init_func, self._config_for_class(node.name)
+                ),
                 all_tensor_ops=self.all_tensor_ops,
             )
             # Traced free-function calls (rope helpers, ...) expand from their
@@ -7056,9 +7095,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     )
             delegates_inline = _forward_delegates_to_nothing(node.name, forward_calls)
             method_names = {
-                item.name
-                for item in node.body
-                if isinstance(item, ast.FunctionDef)
+                item.name for item in node.body if isinstance(item, ast.FunctionDef)
             }
             delegates_to_siblings = _forward_delegates_only_to_sibling_methods(
                 forward_calls, init_assignments, method_names
@@ -7068,7 +7105,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 or delegates_inline
                 or delegates_to_siblings
             ):
-                values = _self_config_values(init_func, self._config_for_class(node.name))
+                values = _self_config_values(
+                    init_func, self._config_for_class(node.name)
+                )
                 analysis = _forward_operations_from_forward(
                     resolved_forward_func,
                     self_values=values,
@@ -7084,9 +7123,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         analysis.step_predecessor_ordinals
                     )
                     forward_step_output_names = dict(analysis.step_output_names)
-                    forward_step_boundary_params = dict(
-                        analysis.step_boundary_params
-                    )
+                    forward_step_boundary_params = dict(analysis.step_boundary_params)
                     forward_step_boundary_arg_params = dict(
                         analysis.step_boundary_arg_params
                     )
@@ -7120,7 +7157,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         }
                     )
             elif forward_func is not None:
-                values = _self_config_values(init_func, self._config_for_class(node.name))
+                values = _self_config_values(
+                    init_func, self._config_for_class(node.name)
+                )
                 probed = _forward_operations_from_forward(
                     resolved_forward_func,
                     self_values=values,
@@ -7140,9 +7179,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         probed.step_predecessor_ordinals
                     )
                     forward_step_output_names = dict(probed.step_output_names)
-                    forward_step_boundary_params = dict(
-                        probed.step_boundary_params
-                    )
+                    forward_step_boundary_params = dict(probed.step_boundary_params)
                     forward_step_boundary_arg_params = dict(
                         probed.step_boundary_arg_params
                     )
@@ -7408,9 +7445,7 @@ def _subscript_select_dims(index: ast.AST) -> list[int]:
 def _subscript_inserts_axis(index: ast.AST) -> bool:
     """True when a subscript inserts a size-1 axis via ``None`` (``x[..., None]``)."""
     elts = index.elts if isinstance(index, ast.Tuple) else [index]
-    return any(
-        isinstance(elt, ast.Constant) and elt.value is None for elt in elts
-    )
+    return any(isinstance(elt, ast.Constant) and elt.value is None for elt in elts)
 
 
 def _none_insert_dim(index: ast.AST) -> int | None:
@@ -7430,8 +7465,7 @@ def _none_insert_dim(index: ast.AST) -> int | None:
         return None
     pos = none_positions[0]
     has_ellipsis_before = any(
-        isinstance(elt, ast.Constant) and elt.value is Ellipsis
-        for elt in elts[:pos]
+        isinstance(elt, ast.Constant) and elt.value is Ellipsis for elt in elts[:pos]
     )
     if has_ellipsis_before:
         return -1
@@ -7875,9 +7909,7 @@ def _tuple_source_names(value: ast.AST) -> list[str] | None:
     return None
 
 
-def _submodule_rooted_trailing_ops(
-    value: ast.AST, chain: list[str]
-) -> list[str]:
+def _submodule_rooted_trailing_ops(value: ast.AST, chain: list[str]) -> list[str]:
     """Synthetic op attrs for the trailing inline tensor-method chain of an assignment,
     but only when that chain wraps the submodule call the provenance chain already ends on.
 
@@ -7961,7 +7993,9 @@ def _record_assign_targets(
         # any other value unchanged.
         expanded = _expand_map_lambda_tuple(node.value)
         expanded_elements = (
-            expanded.elts if isinstance(expanded, ast.Tuple) and expanded is not node.value else None
+            expanded.elts
+            if isinstance(expanded, ast.Tuple) and expanded is not node.value
+            else None
         )
         if source_names is not None and len(source_names) == len(target.elts):
             zipped = True
@@ -8185,7 +8219,9 @@ def _resolve_flash_predicate(
     if _expr_name(node.func) not in _FLASH_REQUEST_PREDICATES:
         return None
     impl = (config or {}).get("_attn_implementation")
-    resolved = impl.strip().lower() if isinstance(impl, str) and impl.strip() else "sdpa"
+    resolved = (
+        impl.strip().lower() if isinstance(impl, str) and impl.strip() else "sdpa"
+    )
     is_flash = resolved in _FLASH_IMPL_NAMES
     return (not is_flash) if negate else is_flash
 
@@ -8365,9 +8401,7 @@ def _forward_kwargs_boundary_params(classes: dict[str, ClassStructure]) -> None:
                 else []
             )
             bound = {
-                ordered[idx]
-                for idx in range(len(call.args))
-                if idx < len(ordered)
+                ordered[idx] for idx in range(len(call.args)) if idx < len(ordered)
             }
             bound.update(kw.arg for kw in call.keywords if kw.arg)
             forwarded = [name for name in surface if name not in bound]
@@ -8377,11 +8411,7 @@ def _forward_kwargs_boundary_params(classes: dict[str, ClassStructure]) -> None:
             # (``@l{lineno}``-suffixed for a repeated child); fall back to the plain
             # attr when the step recorded no suffix.
             key = next(
-                (
-                    k
-                    for k in boundary_keys
-                    if base_submodule_attr(k) == attr
-                ),
+                (k for k in boundary_keys if base_submodule_attr(k) == attr),
                 attr,
             )
             existing = tuple(cls.forward_step_boundary_params.get(key, ()))
@@ -8393,9 +8423,7 @@ def _forward_kwargs_boundary_params(classes: dict[str, ClassStructure]) -> None:
 def _ordered_forward_params(func: ast.FunctionDef) -> list[str]:
     """Positional forward parameter names in order, excluding ``self``."""
     return [
-        arg.arg
-        for arg in func.args.posonlyargs + func.args.args
-        if arg.arg != "self"
+        arg.arg for arg in func.args.posonlyargs + func.args.args if arg.arg != "self"
     ]
 
 
@@ -9376,7 +9404,10 @@ def _walk_forward_stmt(
         # Every other consumer of ``node.value`` still reads the untouched map()
         # call -- only call *extraction* needs the expanded shape.
         _extract_self_calls_ordered(
-            _expand_map_lambda_tuple(node.value), stmt_calls, in_conditional, repeated_attrs
+            _expand_map_lambda_tuple(node.value),
+            stmt_calls,
+            in_conditional,
+            repeated_attrs,
         )
         _inject_kernel_merge(
             node.value,
@@ -9562,9 +9593,7 @@ def _walk_forward_stmt(
         # their expanded children remain inside the source loop. Resolve the same
         # static trip count the extractor uses so the helper ops share the loop's
         # `Loop_N_iterations` frame instead of fragmenting into `Loop_repeated`.
-        count = _loop_iteration_count_of(
-            node, self_values or {}, name_value_ast or {}
-        )
+        count = _loop_iteration_count_of(node, self_values or {}, name_value_ast or {})
         loop_detail = (
             f"loop: {count} iterations" if count is not None else "loop: repeated"
         )
@@ -10333,9 +10362,9 @@ def analyze_source(
         all_tensor_ops=all_tensor_ops,
         activation_param_bindings=activation_param_bindings,
         vision_scoped_classes=vision_scoped,
-        vision_config=(config or {}).get("vision_config")
-        if isinstance(config, dict)
-        else None,
+        vision_config=(
+            (config or {}).get("vision_config") if isinstance(config, dict) else None
+        ),
         module_functions=_module_forward_functions(tree, config, parsed_registry),
     )
     visitor.visit(tree)

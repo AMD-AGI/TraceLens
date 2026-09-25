@@ -36,12 +36,7 @@ def _font_safe(dim: Any, *, star: str = "x") -> str:
     ``tensor_shape`` form uses ``"x"`` (Model-Explorer-native); the human display
     form keeps ``"*"`` so a merged reshape dim reads ``B*S``.
     """
-    text = (
-        str(dim)
-        .replace("\u00d7", star)
-        .replace("\u2217", star)
-        .replace("*", star)
-    )
+    text = str(dim).replace("\u00d7", star).replace("\u2217", star).replace("*", star)
     return "".join(char if 32 <= ord(char) < 127 else "" for char in text)
 
 
@@ -106,7 +101,6 @@ def _apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
     display_text = format_shape_with_dtype(spec)
     if not display_text:
         return
-    shape_text = format_shape(spec)
     tensor_shape = format_shape_tensor(spec)
     attrs = [
         item
@@ -197,9 +191,7 @@ def _apply_multi_port_shape_attrs(
     ports: list[dict[str, Any]] = []
     for ordinal in sorted(port_specs):
         port_spec = port_specs[ordinal]
-        label = (
-            output_names[ordinal] if ordinal < len(output_names) else str(ordinal)
-        )
+        label = output_names[ordinal] if ordinal < len(output_names) else str(ordinal)
         ports.append(
             {
                 "id": str(ordinal),
@@ -361,8 +353,9 @@ def _fallback_node_spec(
     *,
     working_dtype: str = "float16",
     dims: dict[str, DimExpr] | None = None,
-    conv_geometry: dict[str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]]
-    | None = None,
+    conv_geometry: (
+        dict[str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] | None
+    ) = None,
 ) -> TensorSpec:
     """Infer merge-only synthetic ops that have no block-tree shape record."""
     specs = [spec for _target_port, spec in sources]
@@ -472,9 +465,7 @@ def _fallback_node_spec(
             return source
         if dim_detail is None:
             # Bare squeeze drops every size-1 axis.
-            return TensorSpec(
-                tuple(size for size in shape if size != 1), source.dtype
-            )
+            return TensorSpec(tuple(size for size in shape if size != 1), source.dtype)
         try:
             dim = int(dim_detail)
         except ValueError:

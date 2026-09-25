@@ -18,7 +18,6 @@ from TraceLens.ModelUtils import ast_analyze as aa
 from TraceLens.ModelUtils.ast_analyze import (
     ClassStructure,
     ForwardOperation,
-    LoopCarriedSpec,
     SideInputSpec,
 )
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
@@ -175,7 +174,9 @@ def test_expand_block_tree_straight_line_single_step_input_source(monkeypatch):
     inner = node("inner")
     wrapper = node("wrap", "Wrapper", basic=False, children=[inner])
     wrapper.input_source = "Residual"
-    monkeypatch.setattr(bt, "_is_substitutable_single_op_subgraph", lambda *a, **k: False)
+    monkeypatch.setattr(
+        bt, "_is_substitutable_single_op_subgraph", lambda *a, **k: False
+    )
     monkeypatch.setattr(bt, "is_straight_line_module", lambda n: n.attr_name == "wrap")
     monkeypatch.setattr(bt, "straight_line_steps", lambda n: [inner])
     out = bt.expand_block_tree_inplace(wrapper)
@@ -254,10 +255,11 @@ def test_inline_block_frame_sublabel_none():
 # inline_composite_steps branches
 # --------------------------------------------------------------------------- #
 def test_inline_composite_steps_not_straight_line_returns_self():
-    n = node("x", "X", basic=False, children=[node("a"), node("b"), node("c")])
     # Make it not straight line by giving conflicting side inputs -> just use kernel merge
     merge = node("@attention", "AttentionOp", basic=False)
-    branchy = node("y", "Y", basic=False, children=[node("q_proj"), node("k_proj"), merge])
+    branchy = node(
+        "y", "Y", basic=False, children=[node("q_proj"), node("k_proj"), merge]
+    )
     branchy.attention_inputs = {"q": ["q_proj"], "k": ["k_proj"]}
     steps, wrapper = bt.inline_composite_steps(branchy)
     assert steps == [branchy]
@@ -311,9 +313,7 @@ def test_segment_for_step_method_wrapper_without_prior_side():
 def test_segment_for_step_method_wrapper_residual_only_side():
     method = node("combine", "combine", details=["method `combine()`"])
     parent = node("p", "P", basic=False, children=[method])
-    parent.side_inputs = {
-        "combine": [SideInputSpec("res", "res", [], "forward_input")]
-    }
+    parent.side_inputs = {"combine": [SideInputSpec("res", "res", [], "forward_input")]}
     # has_residual_side True, no prior -> ResidualAddSegment unless explicit add.
     seg = bt._segment_for_step(parent, method)
     assert isinstance(seg, ResidualAddSegment)
@@ -342,9 +342,7 @@ def test_label_for_call_variants():
 # output gate details consumer else / kernel pipeline nodes
 # --------------------------------------------------------------------------- #
 def test_output_gate_details_consumer_only_no_activation():
-    side_inputs = {
-        "norm": [SideInputSpec("gate", "gate", ["g_proj"], "prior_step")]
-    }
+    side_inputs = {"norm": [SideInputSpec("gate", "gate", ["g_proj"], "prior_step")]}
     lines = bt._output_gate_details(
         "g_proj",
         side_inputs=side_inputs,
@@ -371,7 +369,12 @@ def test_kernel_pipeline_block_nodes_multi_input_step(monkeypatch):
     sub = type(
         "S",
         (),
-        {"attr_name": "c", "class_name": "Mul", "label": "×", "second_operand": "input"},
+        {
+            "attr_name": "c",
+            "class_name": "Mul",
+            "label": "×",
+            "second_operand": "input",
+        },
     )()
     step = type(
         "St",
@@ -422,7 +425,9 @@ def test_gated_norm_activation_reads_resolved_tag():
 def test_gated_norm_activation_none_without_tag():
     # No resolved activation -> None (no class-name guess / Sigmoid default).
     assert bt.gated_norm_activation(node("n", "FusedRMSNormGated", role="norm")) is None
-    assert bt.gated_norm_activation(node("n", "SomethingNormGated", role="norm")) is None
+    assert (
+        bt.gated_norm_activation(node("n", "SomethingNormGated", role="norm")) is None
+    )
     assert bt.gated_norm_activation(node("n", "RMSNorm", role="norm")) is None
 
 
@@ -516,8 +521,6 @@ def test_partition_named_branches_prefix_clusters():
 def test_parallel_side_port_label_uses_first_step():
     side = node("gate", "Linear", basic=False, children=[node("inner", label="Inner")])
     assert bt._parallel_side_port_label(side) == "Inner"
-    # no function steps -> fall back to label
-    empty = node("g", "OutputGate", role="gate", basic=False, label="G")
 
 
 # --------------------------------------------------------------------------- #
@@ -994,14 +997,18 @@ def test_kernel_and_fused_inline_frame_labels_ported():
 
 
 def test_computation_segments_for_sequence_tensor_ports_and_fanout():
-    sequential = node("parent", "Parent", basic=False, children=[node("one"), node("two")])
+    sequential = node(
+        "parent", "Parent", basic=False, children=[node("one"), node("two")]
+    )
     assert all(
         isinstance(segment, SeqSegment)
         for segment in collect_computation_segments(sequential)
     )
 
     tensor = node(
-        "kernel", "KernelPipeline", basic=False,
+        "kernel",
+        "KernelPipeline",
+        basic=False,
         children=[node("stage", "KernelOp", basic=False)],
     )
     tensor.tensor_input_labels = ["q", "k"]
@@ -1068,7 +1075,10 @@ def test_method_and_parallel_gate_collection():
     assert collect_parallel_gate_wrappers(root) == [gate]
 
     wrapped_gate = node(
-        "gate", "OutputGate", role="gate", basic=False,
+        "gate",
+        "OutputGate",
+        role="gate",
+        basic=False,
         children=[node("@gate_activation", "ActivationOp", basic=False)],
     )
     assert side_producer_has_activation(wrapped_gate)
@@ -1087,7 +1097,10 @@ def test_build_block_node_handles_registry_leaf_recursion_and_methods():
     registry["Parent"].forward_step_details["helper"] = ["custom detail"]
 
     built = build_block_node(
-        attr_name="layer", class_name="Parent", registry=registry, basic_ops=basic_filter
+        attr_name="layer",
+        class_name="Parent",
+        registry=registry,
+        basic_ops=basic_filter,
     )
 
     assert [child.attr_name for child in built.children] == ["proj", "helper", "child"]
@@ -1096,8 +1109,10 @@ def test_build_block_node_handles_registry_leaf_recursion_and_methods():
     assert built.children[2].children[0].details == ["recursive reference"]
     assert (
         build_block_node(
-            attr_name="external", class_name="External",
-            registry=registry, basic_ops=basic_filter,
+            attr_name="external",
+            class_name="External",
+            registry=registry,
+            basic_ops=basic_filter,
         ).is_basic
         is False
     )
@@ -1123,23 +1138,63 @@ def test_graph_segments_and_spine_labels():
 @pytest.mark.parametrize(
     ("candidate", "expected"),
     [
-        (node("@attention", "AttentionOp", basic=False, details=["delta rule recurrence"]),
-         "delta rule recurrence"),
+        (
+            node(
+                "@attention",
+                "AttentionOp",
+                basic=False,
+                details=["delta rule recurrence"],
+            ),
+            "delta rule recurrence",
+        ),
         (node("gate", "OutputGate", role="gate", basic=False), None),
-        (node("gate", "OutputGate", role="gate", basic=False, details=["Linear", "Sigmoid"]),
-         "Sigmoid"),
-        (node("pipeline", "KernelPipeline", basic=False, details=["kernel pipeline · scan"]),
-         "kernel pipeline · scan"),
-        (node("conv", "ShortConvolution", label="Short Conv", basic=False, details=["depthwise conv"]),
-         "depthwise conv"),
-        (node("merge", "AttentionMerge", basic=False, details=["ports:q,k,v"]),
-         "ports:q,k,v"),
+        (
+            node(
+                "gate",
+                "OutputGate",
+                role="gate",
+                basic=False,
+                details=["Linear", "Sigmoid"],
+            ),
+            "Sigmoid",
+        ),
+        (
+            node(
+                "pipeline",
+                "KernelPipeline",
+                basic=False,
+                details=["kernel pipeline · scan"],
+            ),
+            "kernel pipeline · scan",
+        ),
+        (
+            node(
+                "conv",
+                "ShortConvolution",
+                label="Short Conv",
+                basic=False,
+                details=["depthwise conv"],
+            ),
+            "depthwise conv",
+        ),
+        (
+            node("merge", "AttentionMerge", basic=False, details=["ports:q,k,v"]),
+            "ports:q,k,v",
+        ),
         (node("op", "KernelOp", basic=False), None),
         (node("lm_head", "Linear", role="head"), "Project to vocabulary logits"),
-        (node("router", "Router", role="router", basic=False), "Score and route tokens to experts"),
-        (node("split_gate_up", "Split", basic=False, label="Split"),
-         "Split fused gate/up projection"),
-        (node("mul", "Multiply", basic=False, label="×"), "Multiply gate and up activations"),
+        (
+            node("router", "Router", role="router", basic=False),
+            "Score and route tokens to experts",
+        ),
+        (
+            node("split_gate_up", "Split", basic=False, label="Split"),
+            "Split fused gate/up projection",
+        ),
+        (
+            node("mul", "Multiply", basic=False, label="×"),
+            "Multiply gate and up activations",
+        ),
     ],
 )
 def test_block_purpose_specialized_branches(candidate, expected):
@@ -1173,7 +1228,10 @@ def test_single_op_subgraph_substitution_preserves_outer_input(monkeypatch):
     assert bt.expand_block_tree_inplace(wrapper).attr_name == "inner"
 
     norm = node(
-        "norm", "RMSNorm", role="norm", basic=False,
+        "norm",
+        "RMSNorm",
+        role="norm",
+        basic=False,
         children=[node("helper", "helper", details=["method `helper()`"])],
     )
     assert bt.expand_block_tree_inplace(norm).children == []
@@ -1186,7 +1244,9 @@ def test_bypass_span_detection_and_pipeline_exclusions():
     four = node("four")
     three.operation_predecessors = ["one"]
     four.operation_predecessors = ["two"]
-    crossing = node("crossing", "Crossing", basic=False, children=[one, two, three, four])
+    crossing = node(
+        "crossing", "Crossing", basic=False, children=[one, two, three, four]
+    )
 
     assert bt._bypass_spans(crossing) == [(0, 2), (1, 3)]
     assert bt._has_overlapping_bypass_spans(crossing)
@@ -1205,20 +1265,36 @@ def test_bypass_span_detection_and_pipeline_exclusions():
         ({}, {}, None, None, ["Linear", "output gate for normalized branch"]),
         # A gated-norm consumer is recognised structurally: it resolved a gate
         # activation (``norm_activation``), regardless of its class name.
-        ({"norm": [SideInputSpec("gate", "g", ["g_proj"], "prior_step")]},
-         {"g_proj": "SiLU"}, None, "Sigmoid",
-         ["Linear", "SiLU(linear out)", "norm(attn_out) × gate → norm"]),
-        ({"norm": [SideInputSpec("gate", "g", ["g_proj"], "prior_step")]},
-         {}, None, "Tanh",
-         ["Linear", "Tanh inside norm", "norm(attn_out) × gate"]),
+        (
+            {"norm": [SideInputSpec("gate", "g", ["g_proj"], "prior_step")]},
+            {"g_proj": "SiLU"},
+            None,
+            "Sigmoid",
+            ["Linear", "SiLU(linear out)", "norm(attn_out) × gate → norm"],
+        ),
+        (
+            {"norm": [SideInputSpec("gate", "g", ["g_proj"], "prior_step")]},
+            {},
+            None,
+            "Tanh",
+            ["Linear", "Tanh inside norm", "norm(attn_out) × gate"],
+        ),
         # No resolved norm activation -> treated as a plain gate feed, never a
         # gated-norm description defaulted from the class name.
-        ({"norm": [SideInputSpec("gate", "g", ["g_proj"], "prior_step")]},
-         {"g_proj": "SiLU"}, "FusedRMSNormGated", None,
-         ["Linear", "SiLU(linear out)", "feeds norm port 'g'"]),
-        ({"consumer": [SideInputSpec("gate", "gate", ["g_proj"], "prior_step")]},
-         {"g_proj": "Sigmoid"}, "Linear", None,
-         ["Linear", "Sigmoid(linear out)", "feeds consumer port 'gate'"]),
+        (
+            {"norm": [SideInputSpec("gate", "g", ["g_proj"], "prior_step")]},
+            {"g_proj": "SiLU"},
+            "FusedRMSNormGated",
+            None,
+            ["Linear", "SiLU(linear out)", "feeds norm port 'g'"],
+        ),
+        (
+            {"consumer": [SideInputSpec("gate", "gate", ["g_proj"], "prior_step")]},
+            {"g_proj": "Sigmoid"},
+            "Linear",
+            None,
+            ["Linear", "Sigmoid(linear out)", "feeds consumer port 'gate'"],
+        ),
     ],
 )
 def test_output_gate_detail_variants(
@@ -1239,9 +1315,7 @@ def test_output_gate_detail_variants(
 def test_output_gate_wrapping_and_short_convolution_helpers():
     linear = node("g_proj")
     consumer = node("norm", "FusedRMSNormGated", role="norm", basic=False)
-    side_inputs = {
-        "norm": [SideInputSpec("gate", "gate", ["g_proj"], "prior_step")]
-    }
+    side_inputs = {"norm": [SideInputSpec("gate", "gate", ["g_proj"], "prior_step")]}
     wrapped = bt._wrap_parallel_gate_children(
         [linear, consumer], ["g_proj"], {"g_proj": "Sigmoid"}, side_inputs
     )
@@ -1271,7 +1345,8 @@ def test_tile_display_label_branches(monkeypatch):
     )
     assert tile_display_labels(basic, in_inline_frame=True) == ("Projection", None)
     assert tile_display_labels(basic, port_label="q", port_style="inline") == (
-        "Projection", None
+        "Projection",
+        None,
     )
     assert tile_display_labels(kernel) == ("display:chunk_scan", None)
     assert tile_display_labels(activation) == ("SiLU", None)
@@ -1280,7 +1355,9 @@ def test_tile_display_label_branches(monkeypatch):
 
 def test_collect_nested_diagrams_assigns_source_and_deduplicates(monkeypatch):
     nested = node(
-        "nested", "NestedBlock", basic=False,
+        "nested",
+        "NestedBlock",
+        basic=False,
         children=[node("producer"), node("consumer")],
     )
     nested.side_inputs = {
@@ -1319,8 +1396,10 @@ def test_build_block_node_functional_positional_and_skipped_calls():
     )
     cls.forward_step_details["@positional_l12_apply_rotary_emb"] = ["RoPE helper"]
     built = build_block_node(
-        attr_name="ops", class_name="Operations",
-        registry={"Operations": cls}, basic_ops=BasicOpFilter.for_detailed(),
+        attr_name="ops",
+        class_name="Operations",
+        registry={"Operations": cls},
+        basic_ops=BasicOpFilter.for_detailed(),
     )
 
     assert [child.label for child in built.children] == ["Softmax", "Apply rotary emb"]
@@ -1328,18 +1407,26 @@ def test_build_block_node_functional_positional_and_skipped_calls():
 
 
 def test_build_block_node_infers_init_steps_and_empty_class():
-    inferred = structure("Inferred", assignments={"proj": "Linear", "dropout": "Dropout"})
+    inferred = structure(
+        "Inferred", assignments={"proj": "Linear", "dropout": "Dropout"}
+    )
     empty = structure("Empty")
     registry = {"Inferred": inferred, "Empty": empty}
     basic_filter = BasicOpFilter.for_detailed()
 
     built = build_block_node(
-        attr_name="inferred", class_name="Inferred", registry=registry,
-        basic_ops=basic_filter, infer_init_steps=True,
+        attr_name="inferred",
+        class_name="Inferred",
+        registry=registry,
+        basic_ops=basic_filter,
+        infer_init_steps=True,
     )
     assert [child.attr_name for child in built.children] == ["proj", "dropout"]
     assert build_block_node(
-        attr_name="empty", class_name="Empty", registry=registry, basic_ops=basic_filter,
+        attr_name="empty",
+        class_name="Empty",
+        registry=registry,
+        basic_ops=basic_filter,
     ).is_basic
 
 
@@ -1354,11 +1441,15 @@ def test_stack_tree_builders_cover_registry_and_leaf_paths():
     assert bt.build_stack_component_tree(known, registry, basic_filter).children
     assert not bt.build_stack_component_tree(external, registry, basic_filter).is_basic
     pipeline = bt.build_pipeline_block_trees(
-        stack_pre=[external, norm], registry=registry, basic_ops=basic_filter,
+        stack_pre=[external, norm],
+        registry=registry,
+        basic_ops=basic_filter,
         include_norms=True,
     )
     head = bt.build_head_block_trees(
-        stack_tail=[known], registry=registry, basic_ops=basic_filter,
+        stack_tail=[known],
+        registry=registry,
+        basic_ops=basic_filter,
     )
     assert [tree.attr_name for _, tree in pipeline] == ["norm", "external"]
     assert head[0][1].attr_name == "known"
@@ -1372,8 +1463,13 @@ def test_additional_block_purpose_fallbacks():
     assert block_purpose(node("@attention", "AttentionOp", basic=False)) is None
     assert (
         block_purpose(
-            node("conv", "ShortConvolution", label="Depthwise Conv", basic=False,
-                 details=["SiLU"])
+            node(
+                "conv",
+                "ShortConvolution",
+                label="Depthwise Conv",
+                basic=False,
+                details=["SiLU"],
+            )
         )
         is None
     )
@@ -1385,7 +1481,9 @@ def test_additional_block_purpose_fallbacks():
         == "Gather rows by token id"
     )
     assert (
-        block_purpose(node("gate_activation", "ActivationOp", label="SiLU", basic=False))
+        block_purpose(
+            node("gate_activation", "ActivationOp", label="SiLU", basic=False)
+        )
         is None
     )
 
@@ -1428,7 +1526,8 @@ def test_nested_diagram_filters_non_candidates(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        bt, "subgraph_warrants_export",
+        bt,
+        "subgraph_warrants_export",
         lambda candidate, **_k: candidate is not too_small,
     )
     assert bt.collect_nested_diagrams(root) == []
@@ -1444,18 +1543,24 @@ def test_decoder_and_full_tree_builders_order_filter_and_deduplicate():
     unknown_order = BlockComponent("unknown", "Registered", "ffn", "Unknown", None)
 
     trees = bt.build_decoder_block_trees(
-        [duplicate, unknown_order, known, norm], registry, basic_filter,
+        [duplicate, unknown_order, known, norm],
+        registry,
+        basic_filter,
         include_norms=True,
     )
     assert [tree.attr_name for _, tree in trees] == ["norm", "known"]
     assert trees[1][1].input_label == "hidden_states"
 
     all_trees = bt.build_full_detailed_block_trees(
-        components=[known], registry=registry, basic_ops=basic_filter,
-        positional_encoding="RoPE", norm_type="RMSNorm",
+        components=[known],
+        registry=registry,
+        basic_ops=basic_filter,
+        positional_encoding="RoPE",
+        norm_type="RMSNorm",
         stack_pre=[BlockComponent("embed", "Embedding", "embedding", "Embed", 0)],
         stack_tail=[BlockComponent("head", "Linear", "head", "Head", 3)],
-        partition=False, include_norms=True,
+        partition=False,
+        include_norms=True,
     )
     assert [tree.attr_name for _, tree in all_trees] == ["embed", "known", "head"]
 
@@ -1536,7 +1641,9 @@ def test_expand_block_tree_multi_step_keeps_wrapper(monkeypatch):
     a = node("a")
     b = node("b")
     wrapper = node("wrap", "Wrapper", basic=False, children=[a, b])
-    monkeypatch.setattr(bt, "_is_substitutable_single_op_subgraph", lambda *x, **k: False)
+    monkeypatch.setattr(
+        bt, "_is_substitutable_single_op_subgraph", lambda *x, **k: False
+    )
     monkeypatch.setattr(bt, "is_straight_line_module", lambda n: n.attr_name == "wrap")
     monkeypatch.setattr(bt, "straight_line_steps", lambda n: [a, b])
     out = bt.expand_block_tree_inplace(wrapper)
@@ -1559,11 +1666,16 @@ def test_inline_composite_single_inner_op_non_gate_returns_none(monkeypatch):
 
 def test_show_single_function_displays_as_linear():
     # non embed_tokens single function whose class displays as linear
-    assert bt._show_single_function_in_diagram(node("q_proj", "Linear")) in (True, False)
+    assert bt._show_single_function_in_diagram(node("q_proj", "Linear")) in (
+        True,
+        False,
+    )
 
 
 def test_partition_detail_trees_keeps_and_drops_single_function():
-    embed = node("embed_tokens", "Embedding", basic=False, children=[node("gather", "Gather")])
+    embed = node(
+        "embed_tokens", "Embedding", basic=False, children=[node("gather", "Gather")]
+    )
     # embed_tokens single function -> _show_single_function True -> dropped (continue)
     kept = bt.partition_detail_trees([("Embed", embed)])
     assert kept == []
@@ -1615,7 +1727,9 @@ def test_situ_gated_mlp_collect_segments_no_merge():
     situ = node("s", "SiluActivation", basic=False)
     act = node("act_fn", "SiluAndMul", basic=False, children=[situ])
     n = node(
-        "n", "N", basic=False,
+        "n",
+        "N",
+        basic=False,
         children=[act, node("gate_proj"), node("up_proj"), node("down_proj")],
     )
     segments = bt.collect_computation_segments(n)
@@ -1628,7 +1742,9 @@ def test_collect_segments_post_merge_side_skip():
     merge = node("@attention", "AttentionOp", basic=False)
     producer = node("gate", "Linear")
     consumer = node("o_norm", "RMSNorm", role="norm")
-    n = node("attn", "Attention", basic=False, children=[q, k, merge, producer, consumer])
+    n = node(
+        "attn", "Attention", basic=False, children=[q, k, merge, producer, consumer]
+    )
     n.attention_inputs = {"q": ["q_proj"], "k": ["k_proj"]}
     n.side_inputs = {"o_norm": [SideInputSpec("gate", "gate", ["gate"], "prior_step")]}
     segments = bt.collect_computation_segments(n)
@@ -1644,7 +1760,10 @@ def test_is_simple_modeled_tile_false_for_method_and_composite():
 
 
 def test_tile_display_labels_basic_plain():
-    assert bt.tile_display_labels(node("proj", label="Projection")) == ("Projection", None)
+    assert bt.tile_display_labels(node("proj", label="Projection")) == (
+        "Projection",
+        None,
+    )
 
 
 def test_tile_display_labels_activation_and_spec_label():
@@ -1698,7 +1817,9 @@ def test_boundary_input_name_variants():
     cls = structure("Owner")
     cls.forward_input_name = "hidden_states"
     op_input = ForwardOperation(
-        attr_name="@op_x", label="Add", class_name="Add",
+        attr_name="@op_x",
+        label="Add",
+        class_name="Add",
         predecessors=(aa.FORWARD_METHOD_INPUT,),
     )
     assert bt._boundary_input_name(op_input, cls) == "hidden_states"
@@ -1709,14 +1830,20 @@ def test_boundary_input_name_variants():
     assert bt._boundary_input_name(op_zeros, cls) == "hidden_states"
 
     op_mut = ForwardOperation(
-        attr_name="@op_m", label="Copy", class_name="Copy",
-        predecessors=("x",), details=("mutates: cache",),
+        attr_name="@op_m",
+        label="Copy",
+        class_name="Copy",
+        predecessors=("x",),
+        details=("mutates: cache",),
     )
     assert bt._boundary_input_name(op_mut, cls) == "cache"
 
     op_param = ForwardOperation(
-        attr_name="@op_p", label="Add", class_name="Add",
-        predecessors=("x",), param_inputs=("weight",),
+        attr_name="@op_p",
+        label="Add",
+        class_name="Add",
+        predecessors=("x",),
+        param_inputs=("weight",),
     )
     assert bt._boundary_input_name(op_param, cls) == "weight"
 
@@ -1730,13 +1857,17 @@ def test_build_block_node_forward_operation_child():
     cls = structure("Owner", calls=["@op_l0_c0_add"])
     cls.forward_input_name = "hidden_states"
     op = ForwardOperation(
-        attr_name="@op_l0_c0_add", label="Add", class_name="Add",
+        attr_name="@op_l0_c0_add",
+        label="Add",
+        class_name="Add",
         predecessors=(aa.FORWARD_METHOD_INPUT,),
     )
     cls.forward_operations["@op_l0_c0_add"] = op
     built = build_block_node(
-        attr_name="owner", class_name="Owner",
-        registry={"Owner": cls}, basic_ops=BasicOpFilter.for_detailed(),
+        attr_name="owner",
+        class_name="Owner",
+        registry={"Owner": cls},
+        basic_ops=BasicOpFilter.for_detailed(),
     )
     child = built.children[0]
     assert child.class_name == "Add"
@@ -1749,8 +1880,10 @@ def test_build_block_node_primary_output_step():
     cls.forward_return_slots = {"out": "proj"}
     cls.forward_return_order = ["out", "aux"]
     built = build_block_node(
-        attr_name="owner", class_name="Owner",
-        registry={"Owner": cls}, basic_ops=BasicOpFilter.for_detailed(),
+        attr_name="owner",
+        class_name="Owner",
+        registry={"Owner": cls},
+        basic_ops=BasicOpFilter.for_detailed(),
     )
     assert built.primary_output_step == "proj"
     assert built.multi_return_module
@@ -1758,13 +1891,17 @@ def test_build_block_node_primary_output_step():
 
 def test_build_block_node_top_level_kernel_pipeline(monkeypatch):
     monkeypatch.setattr(bt, "is_kernel_pipeline_step", lambda details: True)
-    sentinel = node("@attn_pipeline", "KernelPipeline", basic=False, children=[node("s")])
+    sentinel = node(
+        "@attn_pipeline", "KernelPipeline", basic=False, children=[node("s")]
+    )
     monkeypatch.setattr(
         bt, "_kernel_pipeline_block_nodes", lambda **k: (sentinel, None)
     )
     built = build_block_node(
-        attr_name=aa.SYNTHETIC_ATTENTION, class_name="C",
-        registry={}, basic_ops=BasicOpFilter.for_detailed(),
+        attr_name=aa.SYNTHETIC_ATTENTION,
+        class_name="C",
+        registry={},
+        basic_ops=BasicOpFilter.for_detailed(),
         details=["kernel: scan"],
     )
     assert built is sentinel
@@ -1775,12 +1912,18 @@ def test_build_block_node_forward_attention_kernel_pipeline(monkeypatch):
     cls.forward_step_details[aa.SYNTHETIC_ATTENTION] = ["kernel: scan"]
     cls.attention_inputs = {"q": ["q_proj"], "k": ["k_proj"]}
     monkeypatch.setattr(bt, "is_kernel_pipeline_step", lambda details, inputs: True)
-    pipeline = node("@attn_pipeline", "KernelPipeline", basic=False, children=[node("s")])
+    pipeline = node(
+        "@attn_pipeline", "KernelPipeline", basic=False, children=[node("s")]
+    )
     output = node("@attn_output", "KernelOutput", basic=False)
-    monkeypatch.setattr(bt, "_kernel_pipeline_block_nodes", lambda **k: (pipeline, output))
+    monkeypatch.setattr(
+        bt, "_kernel_pipeline_block_nodes", lambda **k: (pipeline, output)
+    )
     built = build_block_node(
-        attr_name="owner", class_name="Owner",
-        registry={"Owner": cls}, basic_ops=BasicOpFilter.for_detailed(),
+        attr_name="owner",
+        class_name="Owner",
+        registry={"Owner": cls},
+        basic_ops=BasicOpFilter.for_detailed(),
     )
     attrs = [c.attr_name for c in built.children]
     assert "@attn_pipeline" in attrs and "@attn_output" in attrs
@@ -1790,8 +1933,12 @@ def test_kernel_pipeline_block_nodes_single_child_step(monkeypatch):
     from TraceLens.ModelUtils import kernel_pipeline as kp
 
     step = SimpleNamespace(
-        attr_name="stage", class_name="KernelOp", label="stage",
-        call_name="stage_fwd", children=[], predecessors=[],
+        attr_name="stage",
+        class_name="KernelOp",
+        label="stage",
+        call_name="stage_fwd",
+        children=[],
+        predecessors=[],
     )
     monkeypatch.setattr(kp, "introspect_kernel_pipeline", lambda d: ([step], []))
     pipeline, output = bt._kernel_pipeline_block_nodes(
@@ -1805,14 +1952,24 @@ def test_kernel_pipeline_block_nodes_with_output_step(monkeypatch):
     from TraceLens.ModelUtils import kernel_pipeline as kp
 
     step = SimpleNamespace(
-        attr_name="stage", class_name="KernelOp", label="stage",
-        call_name="stage_fwd", children=[], predecessors=[],
+        attr_name="stage",
+        class_name="KernelOp",
+        label="stage",
+        call_name="stage_fwd",
+        children=[],
+        predecessors=[],
     )
     out_step = SimpleNamespace(
-        attr_name="out", class_name="KernelOutput", label="out",
-        call_name="combine", children=[], predecessors=["stage"],
+        attr_name="out",
+        class_name="KernelOutput",
+        label="out",
+        call_name="combine",
+        children=[],
+        predecessors=["stage"],
     )
-    monkeypatch.setattr(kp, "introspect_kernel_pipeline", lambda d: ([step], [out_step]))
+    monkeypatch.setattr(
+        kp, "introspect_kernel_pipeline", lambda d: ([step], [out_step])
+    )
     pipeline, output = bt._kernel_pipeline_block_nodes(
         forward_order=0, details=["kernel: scan"]
     )
@@ -1873,9 +2030,16 @@ def test_components_from_registry_present():
 # Third batch: final reachable branches.
 # --------------------------------------------------------------------------- #
 def test_subgraph_expands_on_export_composite_only(monkeypatch):
-    fanout = node("attn", "Attention", basic=False,
-                  children=[node("q_proj"), node("k_proj"),
-                            node("@attention", "AttentionOp", basic=False)])
+    fanout = node(
+        "attn",
+        "Attention",
+        basic=False,
+        children=[
+            node("q_proj"),
+            node("k_proj"),
+            node("@attention", "AttentionOp", basic=False),
+        ],
+    )
     fanout.attention_inputs = {"q": ["q_proj"], "k": ["k_proj"]}
     monkeypatch.setattr(bt, "is_inline_expandable_module", lambda n: False)
     assert bt.subgraph_expands_on_export(fanout)
@@ -1888,16 +2052,25 @@ def test_subgraph_warrants_export_zero_ops(monkeypatch):
 
 
 def test_is_substitutable_single_op_non_straightline(monkeypatch):
-    fanout = node("attn", "Attention", basic=False,
-                  children=[node("q_proj"), node("k_proj"),
-                            node("@attention", "AttentionOp", basic=False)])
+    fanout = node(
+        "attn",
+        "Attention",
+        basic=False,
+        children=[
+            node("q_proj"),
+            node("k_proj"),
+            node("@attention", "AttentionOp", basic=False),
+        ],
+    )
     fanout.attention_inputs = {"q": ["q_proj"], "k": ["k_proj"]}
     monkeypatch.setattr(bt, "forward_operation_count", lambda *a, **k: 1)
     assert bt._is_substitutable_single_op_subgraph(fanout)
 
 
 def test_partition_detail_trees_drops_single_function_shown(monkeypatch):
-    tree = node("q_proj", "Linear", basic=False, children=[node("op", "Op", basic=False)])
+    tree = node(
+        "q_proj", "Linear", basic=False, children=[node("op", "Op", basic=False)]
+    )
     monkeypatch.setattr(bt, "is_straight_line_module", lambda n: False)
     monkeypatch.setattr(bt, "is_single_function_tree", lambda n: True)
     monkeypatch.setattr(bt, "_show_single_function_in_diagram", lambda n: True)
@@ -1908,9 +2081,7 @@ def test_segment_for_step_method_wrapper_with_explicit_add():
     method = node("combine", "combine", details=["method `combine()`"])
     add = node("add", "Add", label="Add", operation_predecessors=["combine"])
     parent = node("p", "P", basic=False, children=[method, add])
-    parent.side_inputs = {
-        "combine": [SideInputSpec("res", "res", [], "forward_input")]
-    }
+    parent.side_inputs = {"combine": [SideInputSpec("res", "res", [], "forward_input")]}
     seg = bt._segment_for_step(parent, method)
     assert isinstance(seg, SideCombineSegment)
 
@@ -1918,9 +2089,7 @@ def test_segment_for_step_method_wrapper_with_explicit_add():
 def test_forward_side_combine_producers_missing_producer_node():
     consumer = node("combine", "combine", details=["method `combine()`"])
     parent = node("p", "P", basic=False, children=[consumer])
-    parent.side_inputs = {
-        "combine": [SideInputSpec("g", "g", ["ghost"], "prior_step")]
-    }
+    parent.side_inputs = {"combine": [SideInputSpec("g", "g", ["ghost"], "prior_step")]}
     assert bt._forward_side_combine_producers(parent) == set()
 
 
@@ -1954,8 +2123,11 @@ def test_build_block_node_infer_init_with_forward_operations():
         attr_name="@op_l0_c0_add", label="Add", class_name="Add", predecessors=("x",)
     )
     built = build_block_node(
-        attr_name="owner", class_name="Owner", registry={"Owner": cls},
-        basic_ops=BasicOpFilter.for_detailed(), infer_init_steps=True,
+        attr_name="owner",
+        class_name="Owner",
+        registry={"Owner": cls},
+        basic_ops=BasicOpFilter.for_detailed(),
+        infer_init_steps=True,
     )
     assert built.children[0].class_name == "Add"
 
@@ -1963,17 +2135,24 @@ def test_build_block_node_infer_init_with_forward_operations():
 def test_build_block_node_infer_init_uses_init_modules():
     cls = structure("Owner", assignments={"proj": "Linear"}, calls=["proj"])
     built = build_block_node(
-        attr_name="owner", class_name="Owner", registry={"Owner": cls},
-        basic_ops=BasicOpFilter.for_detailed(), infer_init_steps=True,
+        attr_name="owner",
+        class_name="Owner",
+        registry={"Owner": cls},
+        basic_ops=BasicOpFilter.for_detailed(),
+        infer_init_steps=True,
     )
     assert built.children[0].attr_name == "proj"
 
 
 def test_build_block_node_missing_forward_operation_skipped():
-    cls = structure("Owner", assignments={"proj": "Linear"}, calls=["@op_ghost", "proj"])
+    cls = structure(
+        "Owner", assignments={"proj": "Linear"}, calls=["@op_ghost", "proj"]
+    )
     # @op_ghost is a forward operation attr but not registered in forward_operations
     built = build_block_node(
-        attr_name="owner", class_name="Owner", registry={"Owner": cls},
+        attr_name="owner",
+        class_name="Owner",
+        registry={"Owner": cls},
         basic_ops=BasicOpFilter.for_detailed(),
     )
     assert [c.attr_name for c in built.children] == ["proj"]

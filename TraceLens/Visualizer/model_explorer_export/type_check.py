@@ -707,7 +707,9 @@ def _is_float_dtype(type_str: Any) -> bool:
     return any(token in lowered for token in ("float", "bfloat", "half", "double"))
 
 
-def integrity_check_graph_nodes(nodes: list[dict[str, Any]], *, label: str = "") -> list[str]:
+def integrity_check_graph_nodes(
+    nodes: list[dict[str, Any]], *, label: str = ""
+) -> list[str]:
     """Check three structural invariants; return + log warning lines. Never raises.
 
     - **I1 dead-node** -- every non-exempt node's value is consumed by some other

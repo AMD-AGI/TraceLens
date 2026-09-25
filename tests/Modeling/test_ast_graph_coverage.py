@@ -198,9 +198,9 @@ def forward(self, x, flag):
     assert len(selects) == 1, [op.label for op in analysis.operations]
     select = selects[0]
     # The Select carries the branch condition and joins the two branch producers.
-    assert any(detail.startswith("select: ") for detail in select.details), (
-        select.details
-    )
+    assert any(
+        detail.startswith("select: ") for detail in select.details
+    ), select.details
     reshape = by_label("Reshape")[0]
     cast = by_label("Cast")[0]
     assert set(select.predecessors) == {reshape.attr_name, cast.attr_name}
@@ -361,9 +361,9 @@ def test_subscript_index_operands_skips_pure_slicing():
     assert aa._subscript_index_operands(plain.slice) == []
     # ``x[idx]`` keeps ``idx`` as a candidate tensor index.
     indexed = ast.parse("x[idx]", mode="eval").body
-    assert [getattr(op, "id", None) for op in aa._subscript_index_operands(indexed.slice)] == [
-        "idx"
-    ]
+    assert [
+        getattr(op, "id", None) for op in aa._subscript_index_operands(indexed.slice)
+    ] == ["idx"]
     # ``x[~mask]`` (UnaryOp) is a candidate — boolean-mask indexing is a gather.
     inverted = ast.parse("x[~mask]", mode="eval").body
     assert len(aa._subscript_index_operands(inverted.slice)) == 1
@@ -1084,7 +1084,9 @@ def test_nested_linear_wrapper_tracks_frames_and_aliases(monkeypatch):
     # name from leaking out and colliding with an identically-named sibling
     # instance). The surviving wrapper name resolves to the last op of the chain.
     assert aliases["outer"] == chain[-1]
-    assert "nested" not in aliases and "inner_b" not in aliases and "tail" not in aliases
+    assert (
+        "nested" not in aliases and "inner_b" not in aliases and "tail" not in aliases
+    )
     assert len(graph.inline_frames) == 2
     assert set(graph.inline_frames[0].node_indices) == set(chain)
     assert graph.nodes[chain[0]].port_label == "aux"
@@ -1357,12 +1359,8 @@ class BranchBlock:
     }
     assert "left" in forward_calls and "right" in forward_calls
     assert "proj" not in forward_calls and "shared" not in forward_calls
-    assert (
-        len({c for c in forward_calls if aa.base_submodule_attr(c) == "proj"}) == 3
-    )
-    assert (
-        len({c for c in forward_calls if aa.base_submodule_attr(c) == "shared"}) == 2
-    )
+    assert len({c for c in forward_calls if aa.base_submodule_attr(c) == "proj"}) == 3
+    assert len({c for c in forward_calls if aa.base_submodule_attr(c) == "shared"}) == 2
     # ``side_inputs`` is keyed by the base attr (call sites merged).
     assert info.side_inputs["shared"][0].source_kind == "forward_input"
 
@@ -1648,10 +1646,10 @@ def test_source_order_places_positional_synthetic_after_its_operands():
     # (apply_rotary -> reshape -> ... -> q_norm -> apply_rotary).
     func = _function(
         "def forward(self, hidden_states):\n"
-        "    q = hidden_states.reshape(2, -1)\n"       # line 2
-        "    q = self.q_norm(q)\n"                      # line 3
-        "    q = apply_rotary_emb(q, self.freqs)\n"     # line 4
-        "    return self.proj(q)\n"                     # line 5
+        "    q = hidden_states.reshape(2, -1)\n"  # line 2
+        "    q = self.q_norm(q)\n"  # line 3
+        "    q = apply_rotary_emb(q, self.freqs)\n"  # line 4
+        "    return self.proj(q)\n"  # line 5
     )
     rope = aa.positional_synthetic_attr("apply_rotary_emb", 4)
     reshape = aa.ForwardOperation("@op_l2_c8_reshape", "Reshape", "Reshape")

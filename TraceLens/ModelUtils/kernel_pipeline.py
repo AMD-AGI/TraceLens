@@ -20,7 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from TraceLens.ModelUtils.ast_analyze import kernel_kwarg_ports, kernel_name_from_step_details
+from TraceLens.ModelUtils.ast_analyze import (
+    kernel_kwarg_ports,
+    kernel_name_from_step_details,
+)
 
 _KERNEL_SOURCE_CACHE = Path.home() / ".cache" / "tracelens" / "kernel_sources"
 _KERNEL_FIXTURE_ROOT = os.environ.get("TRACELENS_KERNEL_FIXTURE_ROOT")
