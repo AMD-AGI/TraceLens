@@ -10098,17 +10098,77 @@ def _infer_attention_type_from_class(
     return None
 
 
-def _infer_norm_from_ast(decoder: ClassStructure) -> tuple[str | None, str | None]:
+def _norm_kind_from_forward(structure: "ClassStructure | None") -> str | None:
+    """RMSNorm vs LayerNorm read from what the forward actually computes.
+
+    A LayerNorm CENTRES its input -- it subtracts a mean before scaling. An
+    RMSNorm never does: it divides by the root mean square only. That difference
+    lives in the forward body, so it identifies the norm without sniffing the
+    class name. Returns *None* for a norm with no readable Python forward (a
+    torch builtin), which the caller resolves by its exact torch identity rather
+    than by a substring guess.
+    """
+    node = getattr(structure, "node", None)
+    if node is None:
+        return None
+    forward = next(
+        (
+            item
+            for item in getattr(node, "body", [])
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+    if forward is None:
+        return None
+
+    def _is_mean(expr: ast.AST) -> bool:
+        return any(
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr == "mean"
+            for inner in ast.walk(expr)
+        )
+
+    saw_mean = False
+    for sub in ast.walk(forward):
+        if (
+            isinstance(sub, ast.BinOp)
+            and isinstance(sub.op, ast.Sub)
+            and _is_mean(sub.right)
+        ):
+            return "LayerNorm"
+        if _is_mean(sub) if isinstance(sub, ast.Call) else False:
+            saw_mean = True
+    return "RMSNorm" if saw_mean else None
+
+
+def _infer_norm_from_ast(
+    decoder: ClassStructure,
+    classes: dict[str, ClassStructure] | None = None,
+) -> tuple[str | None, str | None]:
     norm_classes = [
         cls
         for attr, cls in decoder.init_assignments.items()
         if _classify_role(attr, cls) == "norm"
     ]
+    # Read each norm's own forward; fall back to torch's exact module identity for
+    # a builtin that has no Python body. Neither path sniffs a substring of the
+    # class name.
+    kinds = {
+        kind
+        for cls in norm_classes
+        for kind in (
+            _norm_kind_from_forward((classes or {}).get(cls))
+            or {"LayerNorm": "LayerNorm", "RMSNorm": "RMSNorm"}.get(cls),
+        )
+        if kind
+    }
     norm_type = None
-    if any("RMS" in cls for cls in norm_classes):
+    if len(kinds) == 1:
+        norm_type = next(iter(kinds))
+    elif "RMSNorm" in kinds:
         norm_type = "RMSNorm"
-    elif norm_classes:
-        norm_type = "LayerNorm"
 
     placement = None
     if decoder.norm_before:
@@ -10560,7 +10620,7 @@ def analyze_source(
         if comp.role == "other":
             analysis.custom_blocks.append(comp.class_name)
 
-    norm_type, norm_placement = _infer_norm_from_ast(decoder)
+    norm_type, norm_placement = _infer_norm_from_ast(decoder, visitor.classes)
     analysis.norm_type = norm_type
     analysis.norm_placement = norm_placement
 

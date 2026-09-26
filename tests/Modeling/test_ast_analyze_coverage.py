@@ -580,3 +580,69 @@ def test_find_positional_module_skips_parameter_class():
         calls=["rotary_emb"],
     )
     assert _find_positional_module({"Model": stack}, stack, None) is None
+
+
+# ---------------------------------------------------------------------------
+# Norm kind read from the forward body, not the class name
+# ---------------------------------------------------------------------------
+
+
+def _structure_for(source: str, class_name: str):
+    from TraceLens.ModelUtils.ast_analyze import analyze_source
+
+    return analyze_source(source).class_registry[class_name]
+
+
+def test_norm_kind_reads_rms_forward_without_the_class_name():
+    """An RMS norm divides by the root mean square and never centres its input."""
+    from TraceLens.ModelUtils.ast_analyze import _norm_kind_from_forward
+
+    source = """
+import torch
+from torch import nn
+
+class OddlyNamedNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, hidden_states):
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
+        return self.weight * hidden_states
+"""
+    assert (
+        _norm_kind_from_forward(_structure_for(source, "OddlyNamedNorm")) == "RMSNorm"
+    )
+
+
+def test_norm_kind_reads_a_centring_forward_as_layernorm():
+    """Subtracting a mean is what makes it a LayerNorm, whatever it is called."""
+    from TraceLens.ModelUtils.ast_analyze import _norm_kind_from_forward
+
+    source = """
+import torch
+from torch import nn
+
+class AlsoOddlyNamed(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, hidden_states):
+        centred = hidden_states - hidden_states.mean(-1, keepdim=True)
+        variance = centred.pow(2).mean(-1, keepdim=True)
+        return self.weight * centred * torch.rsqrt(variance + self.eps)
+"""
+    assert (
+        _norm_kind_from_forward(_structure_for(source, "AlsoOddlyNamed")) == "LayerNorm"
+    )
+
+
+def test_norm_kind_is_unresolved_without_a_forward():
+    """A torch builtin has no readable body; the caller resolves it by identity."""
+    from TraceLens.ModelUtils.ast_analyze import _norm_kind_from_forward
+
+    assert _norm_kind_from_forward(None) is None
