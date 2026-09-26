@@ -2598,8 +2598,13 @@ def test_glm53_multi_input_concat_sums_operand_widths_not_identity():
             symbolic_terms.append(dim)
     if int_total or not symbolic_terms:
         symbolic_terms.append(str(int_total))
-    expected = " + ".join(symbolic_terms)
-    assert _last_dim(out_shape) == expected, (out_shape, in_last_dims)
+    # Compare the TERMS, not the rendered string: a sum of two symbolic widths has
+    # no canonical order, and the edge iteration order here need not match the
+    # order the inferencer combined the operands in. Sorting keeps the assertion
+    # exact (same multiset of contributors, nothing dropped or invented) without
+    # making it depend on that ordering.
+    actual_terms = sorted(term.strip() for term in _last_dim(out_shape).split("+"))
+    assert actual_terms == sorted(symbolic_terms), (out_shape, in_last_dims)
 
 
 def test_glm53_vision_rotary_output_edges_reference_real_producer_ports():

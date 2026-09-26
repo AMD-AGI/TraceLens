@@ -2485,7 +2485,28 @@ class ShapeInferencer:
                     operands.append(TensorSpec(shape=parameter.shape, dtype=dtype))
             if operands:
                 if node.label in {"+", "Add"}:
-                    return max(operands, key=_broadcast_rank)
+                    widest = max(operands, key=_broadcast_rank)
+                    # Rank alone picks the operand with the most axes, which can
+                    # still carry a placeholder 1 in the axis a sibling actually
+                    # sizes: ``tail_start[..., None] + tail_offsets`` is [B, 1, 1]
+                    # plus [max_tail_width] and must keep the offsets' width, or
+                    # the concat consuming it reports a single-element tail.
+                    # Deliberately only a trailing literal 1, and only when one
+                    # sibling width is in play, so rank, dtype and every other
+                    # axis are untouched.
+                    shape = widest.shape
+                    if shape and shape[-1] == 1:
+                        widths = {
+                            item.shape[-1]
+                            for item in operands
+                            if item.shape and item.shape[-1] != 1
+                        }
+                        if len(widths) == 1:
+                            return TensorSpec(
+                                shape=(*shape[:-1], next(iter(widths))),
+                                dtype=widest.dtype,
+                            )
+                    return widest
                 return self._elementwise_operand(operands)
             return self._activation_spec(dtype)
 

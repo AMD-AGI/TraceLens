@@ -1069,3 +1069,39 @@ def test_strided_slice_leaves_a_symbolic_axis_alone():
         _node("Slice", details=["step_dim: -1=0:2"]), [inp], root=None
     )
     assert result.shape == ("B", "S", "head_dim")
+
+
+def test_add_promotes_a_trailing_placeholder_axis():
+    """``tail_start[..., None] + tail_offsets`` keeps the offsets' width.
+
+    Picking the highest-rank operand alone returns [B, 1, 1], which reports a
+    single-element tail and shrinks the concat that consumes it.
+    """
+    inf = _make_inferencer()
+    base = TensorSpec(shape=("B", 1, 1), dtype="int64")
+    offsets = TensorSpec(shape=("max_tail_width",), dtype="int64")
+    result = inf._infer_node_output(_node("Add"), [base, offsets], root=None)
+    assert result.shape == ("B", 1, "max_tail_width")
+    assert result.dtype == "int64"
+
+
+def test_add_leaves_an_unambiguous_shape_alone():
+    """Only a trailing literal 1 with exactly one sibling width is promoted."""
+    inf = _make_inferencer()
+    # No placeholder: the widest operand already carries a real width.
+    wide = TensorSpec(shape=("B", "S", 4096), dtype="float32")
+    other = TensorSpec(shape=(4096,), dtype="float32")
+    assert inf._infer_node_output(_node("Add"), [wide, other], root=None).shape == (
+        "B",
+        "S",
+        4096,
+    )
+    # Two different sibling widths identify nothing, so nothing is promoted.
+    base = TensorSpec(shape=("B", 1, 1), dtype="int64")
+    a = TensorSpec(shape=(3,), dtype="int64")
+    b = TensorSpec(shape=(5,), dtype="int64")
+    assert inf._infer_node_output(_node("Add"), [base, a, b], root=None).shape == (
+        "B",
+        1,
+        1,
+    )
