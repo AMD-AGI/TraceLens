@@ -2544,6 +2544,27 @@ class ShapeInferencer:
                     ),
                     dtype=source.dtype,
                 )
+            # A strided range-slice (``x[..., 0::2]``) thins the axis rather than
+            # bounding it: interleaved RoPE takes every other element, so the axis
+            # holds ceil((dim - start) / step). A symbolic axis is left alone --
+            # the stride is only applied to a width we can actually divide.
+            step_str = _detail_value(details, "step_dim")
+            if step_str and source.shape:
+                shape = list(source.shape)
+                rank = len(shape)
+                for token in step_str.split(","):
+                    axis_str, _, spec_str = token.strip().partition("=")
+                    start_str, _, stride_str = spec_str.partition(":")
+                    axis = _int_dim(axis_str.strip())
+                    start = _int_dim(start_str.strip())
+                    stride = _int_dim(stride_str.strip())
+                    if axis is None or start is None or not stride or stride <= 1:
+                        continue
+                    dim = _int_dim(shape[axis % rank])
+                    if dim is None:
+                        continue
+                    shape[axis % rank] = max(0, -(-(dim - start) // stride))
+                return TensorSpec(shape=tuple(shape), dtype=source.dtype)
             # A bounded range-slice to a config-derived constant
             # (``topk_indices[..., :output_width]``) resizes that axis to the
             # folded width, overriding whatever the source axis held (it may have

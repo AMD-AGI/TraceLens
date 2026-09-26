@@ -1039,3 +1039,33 @@ def test_topk_without_literal_k_is_unchanged():
     bare = inf._infer_node_output(_node("TopK", details=["dim: -1"]), [inp], root=None)
     assert symbolic.shape == bare.shape
     assert symbolic.shape[-1] != 288  # still narrowed, just not by a literal
+
+
+def test_strided_slice_thins_the_axis():
+    """``x[..., 0::2]`` takes every other element, halving the axis.
+
+    Interleaved RoPE slices a tensor this way; without the stride the axis passed
+    through at full width and the following stack/flatten reported twice the real
+    interleave width.
+    """
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", 1, "S", 4096), dtype="bfloat16")
+    even = inf._infer_node_output(
+        _node("Slice", details=["step_dim: -1=0:2"]), [inp], root=None
+    )
+    odd = inf._infer_node_output(
+        _node("Slice", details=["step_dim: -1=1:2"]), [inp], root=None
+    )
+    assert even.shape == ("B", 1, "S", 2048)
+    assert odd.shape == ("B", 1, "S", 2048)
+    assert even.dtype == "bfloat16"
+
+
+def test_strided_slice_leaves_a_symbolic_axis_alone():
+    """A stride is only applied to a width that can actually be divided."""
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", "head_dim"), dtype="float32")
+    result = inf._infer_node_output(
+        _node("Slice", details=["step_dim: -1=0:2"]), [inp], root=None
+    )
+    assert result.shape == ("B", "S", "head_dim")

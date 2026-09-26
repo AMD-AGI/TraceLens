@@ -4460,6 +4460,27 @@ class _ForwardOperationExtractor:
                 # by proven data-dependent internals upstream. Skip a host-scalar
                 # shape read (``hidden_states.shape[:2]``): it is index bookkeeping
                 # and must emit no tensor op.
+                step_dims = (
+                    []
+                    if self._is_host_scalar_expr(node)
+                    else _subscript_step_dims(node.slice)
+                )
+                if step_dims:
+                    self._materialized_subscripts.add(id(node))
+                    producer = self._emit(
+                        node,
+                        "Slice",
+                        base_predecessors,
+                        base_external,
+                        details=[
+                            "step_dim: "
+                            + ", ".join(
+                                f"{axis}={start}:{step}"
+                                for axis, start, step in step_dims
+                            )
+                        ],
+                    )
+                    return producer, []
                 resize_dims = (
                     []
                     if self._suppress_slice_resize or self._is_host_scalar_expr(node)
@@ -7465,6 +7486,49 @@ def _is_int_index(node: ast.AST) -> bool:
         and isinstance(node.value, int)
         and not isinstance(node.value, bool)
     )
+
+
+def _subscript_step_dims(index: ast.AST) -> list[tuple[int, int, int]]:
+    """Axes a *strided* range-slice (``x[..., 0::2]``) thins, as (axis, start, step).
+
+    Interleaved RoPE halves a tensor with ``x[..., 0::2]`` / ``x[..., 1::2]``.
+    ``_subscript_resize_dims`` deliberately skips any slice carrying a step, so
+    without this the axis passed through at full width and the following
+    ``stack``/``flatten`` pair reported twice the real interleave width.
+
+    Only a statically known step over an unbounded range is reported -- enough
+    for the interleave idiom -- and axes after an ``Ellipsis`` are numbered from
+    the end, matching the sibling helpers.
+    """
+    elts = index.elts if isinstance(index, ast.Tuple) else [index]
+    ellipsis_at = next(
+        (
+            pos
+            for pos, elt in enumerate(elts)
+            if isinstance(elt, ast.Constant) and elt.value is Ellipsis
+        ),
+        None,
+    )
+    steps: list[tuple[int, int, int]] = []
+    for pos, elt in enumerate(elts):
+        if not isinstance(elt, ast.Slice) or elt.step is None:
+            continue
+        if elt.upper is not None:
+            continue
+        step = elt.step.value if isinstance(elt.step, ast.Constant) else None
+        if not isinstance(step, int) or step <= 1:
+            continue
+        if elt.lower is None:
+            start = 0
+        elif isinstance(elt.lower, ast.Constant) and isinstance(elt.lower.value, int):
+            start = elt.lower.value
+        else:
+            continue
+        if start < 0:
+            continue
+        axis = pos if ellipsis_at is None or pos < ellipsis_at else pos - len(elts)
+        steps.append((axis, start, step))
+    return steps
 
 
 def _subscript_select_dims(index: ast.AST) -> list[int]:
