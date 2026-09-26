@@ -5053,6 +5053,24 @@ class _ForwardOperationExtractor:
             for keyword in node.keywords:
                 if keyword.arg in {"dim", "keepdim"}:
                     details.append(f"{keyword.arg}: {ast.unparse(keyword.value)}")
+        if call_name == "topk":
+            # ``x.topk(k, dim=...)`` / ``torch.topk(x, k, dim=...)``: this call's own
+            # k sets the output width. A MoE gate picks experts-per-token with one
+            # topk and, on the way there, takes a different k over the expert groups
+            # (``.view(-1, n_group, per_group).topk(2, dim=-1)``), so the model-wide
+            # experts-per-token is the right default but the wrong answer here.
+            is_method = isinstance(node.func, ast.Attribute) and not (
+                isinstance(node.func.value, ast.Name) and node.func.value.id == "torch"
+            )
+            k_value = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "k"), None
+            )
+            if k_value is None:
+                k_index = 0 if is_method else 1
+                if len(node.args) > k_index:
+                    k_value = node.args[k_index]
+            if k_value is not None:
+                details.append(f"k: {ast.unparse(k_value)}")
         if call_name in {"type", "float", "to", "type_as"}:
             # ``x.type_as(y)`` names its target dtype indirectly, via the tensor
             # ``y`` it copies the dtype from. Recording that reference expression

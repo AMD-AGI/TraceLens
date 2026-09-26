@@ -2941,6 +2941,16 @@ class ShapeInferencer:
             top_k = self.context.dims.get(
                 Symbol.EXPERTS_PER_TOK.value, Symbol.EXPERTS_PER_TOK.value
             )
+            # Honour this call's own k when it is a concrete literal. The
+            # experts-per-token default is right for the gate's final expert pick
+            # but wrong for a group-scoring ``.topk(2, dim=-1)`` on the way there,
+            # which would otherwise report the expert width. A non-literal k (a
+            # config-derived attr) keeps the default rather than being guessed at.
+            k_detail = _detail_value(details, "k")
+            if k_detail is not None:
+                text = str(k_detail).strip()
+                if text.isdigit() and int(text) > 0:
+                    top_k = int(text)
             return TensorSpec(
                 shape=_replace_last_dim(source.shape, top_k), dtype="int64"
             )

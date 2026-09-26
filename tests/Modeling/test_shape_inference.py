@@ -1008,3 +1008,34 @@ def test_meta_shape_lookup_uses_attr_name():
     result = inf._lookup_meta_shape(node)
     assert result is not None
     assert result.shape == ("B", "S", 512)
+
+
+def test_topk_honours_its_own_literal_k():
+    """``.topk(2, dim=-1)`` narrows to 2, not the model-wide experts-per-token.
+
+    A MoE gate scores expert GROUPS with a small literal k on the way to picking
+    experts-per-token, so the experts-per-token default is the wrong answer there.
+    """
+    inf = _make_inferencer(experts_per_tok=8)
+    inp = TensorSpec(shape=("B*S", 1, 288), dtype="float32")
+    node = _node("TopK", details=["k: 2", "dim: -1"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B*S", 1, 2)
+    assert result.dtype == "int64"
+
+
+def test_topk_without_literal_k_is_unchanged():
+    """A config-derived k (``self.top_k``) is not guessed at.
+
+    Such a node must resolve exactly as it did before k was captured at all, so
+    the existing experts-per-token behaviour is preserved for every gate that
+    spells its k as a config attribute.
+    """
+    inf = _make_inferencer(experts_per_tok=8)
+    inp = TensorSpec(shape=("B*S", 288), dtype="float32")
+    symbolic = inf._infer_node_output(
+        _node("TopK", details=["k: self.top_k", "dim: -1"]), [inp], root=None
+    )
+    bare = inf._infer_node_output(_node("TopK", details=["dim: -1"]), [inp], root=None)
+    assert symbolic.shape == bare.shape
+    assert symbolic.shape[-1] != 288  # still narrowed, just not by a literal
