@@ -1393,6 +1393,7 @@ class ShapeInferencer:
         # ``_entry_spec_for`` seed/override. A root-less subgraph recursion must
         # not clobber these with its default activation spec (see infer_model_graph).
         self._entry_seeded_ids: set[str] = set()
+        self._module_resolved_ids: set[str] = set()
         self._tensor_names: dict[str, str] = {}
         self._tensor_specs: dict[str, TensorSpec] = {}
         self._owner_classes: dict[int, dict[str, str]] = {}
@@ -1889,6 +1890,7 @@ class ShapeInferencer:
         self._tensor_specs = {}
         self._forward_input_specs = set()
         self._entry_seeded_ids = set()
+        self._module_resolved_ids: set[str] = set()
         order = _topological_order(graph)
         node_by_id = {node.id: node for node in graph.nodes}
         # Consumers per source, for redocking the dedicated position_ids producer.
@@ -1966,7 +1968,11 @@ class ShapeInferencer:
         # parent-seeded one (e.g. the vision patch-embed @input = [Pv, C*T*P*P]),
         # the parent's in-context spec must win rather than be clobbered by the
         # root-less default (which would stamp the generic [Pv, hidden]).
-        seeded = set(self._entry_seeded_ids)
+        # Also protect nodes this graph sized from a module's constructor
+        # dimensions: that lookup needs the class context ``root`` supplies,
+        # and the recursion below deliberately runs without one, so its
+        # class-less result for the same id is strictly less informed.
+        seeded = set(self._entry_seeded_ids) | set(self._module_resolved_ids)
         for node in graph.nodes:
             if node.kind == NodeKind.SUBGRAPH:
                 subgraph_key = node.metadata.get("subgraph_key")
@@ -3049,6 +3055,12 @@ class ShapeInferencer:
             return TensorSpec(shape=self._active_hidden_shape(), dtype=dtype)
 
         linear_spec = self._lookup_linear_spec(node, root=root)
+        if linear_spec is not None:
+            # Resolved from the owning module's own constructor dimensions,
+            # which needs the class context ``root`` carries. Remember it so a
+            # later root-less subgraph pass cannot overwrite it with a
+            # class-less guess.
+            self._module_resolved_ids.add(node.id)
         if linear_spec is not None or _is_linear(node):
             hidden_dim = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
             activation_input = next(
