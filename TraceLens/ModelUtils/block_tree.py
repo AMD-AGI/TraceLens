@@ -1008,7 +1008,11 @@ def _segment_for_step(node: BlockNode, step: BlockNode) -> ComputationSegment:
     )
 
 
-def _label_for_call(attr_name: str, class_name: str | None) -> str:
+def _label_for_call(
+    attr_name: str,
+    class_name: str | None,
+    classes: "dict[str, ClassStructure] | None" = None,
+) -> str:
     if attr_name == SYNTHETIC_ATTENTION:
         return "Attention kernel"
     if class_name == "ShortConvolution":
@@ -1017,7 +1021,7 @@ def _label_for_call(attr_name: str, class_name: str | None) -> str:
         return "Linear"
     if class_name:
         role = _classify_role(attr_name, class_name)
-        return _label_for(role, class_name, attr_name)
+        return _label_for(role, class_name, attr_name, classes)
     readable = attr_name.replace("_", " ")
     return readable[:24]
 
@@ -2592,7 +2596,7 @@ def build_block_node(
     """
     visited = visited or frozenset()
     role = _classify_role(attr_name, class_name)
-    label = _label_for_call(attr_name, class_name)
+    label = _label_for_call(attr_name, class_name, registry)
 
     # A gated norm whose class lives in the registry (its forward is available)
     # carries a generically-resolved gate activation; surface it as the tagged

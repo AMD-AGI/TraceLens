@@ -646,3 +646,66 @@ def test_norm_kind_is_unresolved_without_a_forward():
     from TraceLens.ModelUtils.ast_analyze import _norm_kind_from_forward
 
     assert _norm_kind_from_forward(None) is None
+
+
+def test_norm_tile_label_comes_from_the_forward_not_the_spelling():
+    """A norm class not spelled "RMS" is still labelled RMSNorm when it is one."""
+    from TraceLens.ModelUtils.ast_analyze import _label_for
+
+    source = """
+import torch
+from torch import nn
+
+class WeirdlyNamed(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        return self.weight * x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)
+"""
+    from TraceLens.ModelUtils.ast_analyze import analyze_source
+
+    classes = analyze_source(source).class_registry
+    assert _label_for("norm", "WeirdlyNamed", "input_layernorm", classes) == "RMSNorm"
+
+
+def test_norm_tile_label_resolves_a_torch_builtin_by_identity():
+    """``nn.LayerNorm`` has no Python forward; its exact identity still names it."""
+    from TraceLens.ModelUtils.ast_analyze import _label_for
+
+    assert _label_for("norm", "LayerNorm", "norm1", {}) == "LayerNorm"
+    assert _label_for("norm", "RMSNorm", "norm1", {}) == "RMSNorm"
+
+
+def test_structural_reading_wins_over_the_class_name():
+    """A class named "...RMSNorm" that actually CENTRES its input reads LayerNorm.
+
+    The name is only a last resort for a class with no readable forward, so a
+    misleading name never overrides what the code does.
+    """
+    from TraceLens.ModelUtils.ast_analyze import _label_for, analyze_source
+
+    source = """
+import torch
+from torch import nn
+
+class MisleadingRMSNorm(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        centred = x - x.mean(-1, keepdim=True)
+        return self.weight * centred * torch.rsqrt(centred.pow(2).mean(-1) + 1e-6)
+"""
+    classes = analyze_source(source).class_registry
+    assert _label_for("norm", "MisleadingRMSNorm", "norm1", classes) == "LayerNorm"
+
+
+def test_norm_with_no_readable_forward_falls_back_to_its_name():
+    """A stub or unparsed third-party norm has no forward; the name is all there is."""
+    from TraceLens.ModelUtils.ast_analyze import _label_for
+
+    assert _label_for("norm", "CustomRMSNorm", "norm1", {}) == "RMSNorm"
+    assert _label_for("norm", "Anonymous", "norm1", {}) == "Norm"

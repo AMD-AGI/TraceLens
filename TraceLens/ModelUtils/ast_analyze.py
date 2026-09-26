@@ -2430,7 +2430,12 @@ def _forward_mixes_modules_and_inline_ops(
     return inline_ops >= 1
 
 
-def _label_for(role: str, class_name: str, attr_name: str) -> str:
+def _label_for(
+    role: str,
+    class_name: str,
+    attr_name: str,
+    classes: "dict[str, ClassStructure] | None" = None,
+) -> str:
     if role == "embedding":
         if attr_name == "embed_tokens":
             return "Token Embedding"
@@ -2458,11 +2463,26 @@ def _label_for(role: str, class_name: str, attr_name: str) -> str:
             return "SwiGLU FFN"
         return class_name if len(class_name) <= 22 else "FFN"
     if role == "norm":
-        if "RMS" in class_name:
-            return "RMSNorm"
-        if "Layer" in class_name:
-            return "LayerNorm"
-        return "Norm"
+        # Read what the norm actually computes; a LayerNorm centres its input and
+        # an RMSNorm does not. A torch builtin has no Python forward, so it is
+        # resolved by its exact module identity -- an API fact, not a substring
+        # guess. Anything still unresolved stays the neutral "Norm" rather than
+        # being labelled from how its class happens to be spelled.
+        kind = _norm_kind_from_forward((classes or {}).get(class_name))
+        if kind is None:
+            kind = {"LayerNorm": "LayerNorm", "RMSNorm": "RMSNorm"}.get(class_name)
+        if kind is None and class_name:
+            # Last resort, and only for a class with NO readable forward: a stub or
+            # an unparsed third-party norm. The name is the sole remaining signal,
+            # and dropping it would relabel a module its own author called
+            # ``...RMSNorm`` as a generic "Norm". Structural resolution above
+            # always wins, so a class whose forward contradicts its name is read
+            # correctly rather than by this.
+            if "RMS" in class_name:
+                kind = "RMSNorm"
+            elif "Layer" in class_name:
+                kind = "LayerNorm"
+        return kind or "Norm"
     if role == "router":
         return "Router"
     return class_name if len(class_name) <= 24 else attr_name
