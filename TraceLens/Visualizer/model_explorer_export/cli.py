@@ -126,6 +126,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    parser.add_argument(
+        "--auto-venv",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Re-run in a per-model virtual environment when this checkpoint's "
+            "modeling code cannot be imported by the current transformers "
+            "(default: on). The need is detected at run time -- a checkpoint that "
+            "imports fine here is untouched -- and the environment is cached and "
+            "reused. Use --no-auto-venv to always stay in the current interpreter."
+        ),
+    )
+
     ast_group = parser.add_argument_group("model source options")
     ast_group.add_argument(
         "--github",
@@ -503,6 +516,18 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             "Provide a Hugging Face checkpoint (SOURCE or --checkpoint) and/or --github"
         )
+
+    if args.auto_venv and checkpoint is not None:
+        # Only re-executes for a checkpoint whose own modeling code fails to
+        # import here; returns None (and we carry on in-process) otherwise.
+        from TraceLens.ModelUtils.model_env import reexec_in_model_env
+
+        status = reexec_in_model_env(
+            checkpoint, list(sys.argv[1:] if argv is None else argv)
+        )
+        if status is not None:
+            return status
+
     try:
         spec = _load_ast_spec(checkpoint, args)
     except Exception as exc:  # noqa: BLE001
