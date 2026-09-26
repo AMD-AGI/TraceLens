@@ -6888,6 +6888,23 @@ class _ModelAstVisitor(ast.NodeVisitor):
             return {**self.config, **apply_config_attribute_aliases(self.text_config)}
         return self.config
 
+    def _init_config_for_class(self, class_name: str) -> dict[str, Any]:
+        """Config an ``__init__`` body resolves ``config.<attr>`` against.
+
+        Applies the VISION overlay only. A vision-tower class is handed the
+        nested ``vision_config`` at runtime, so its ``ACT2FN[config.hidden_act]``
+        must read the vision value, not the text tower's -- reading the wrong
+        scope renders a bogus activation as an opaque leaf.
+
+        Every other class keeps the raw config: :func:`_parse_init` already
+        searches the nested sub-configs itself, so flattening ``text_config``
+        over the top level here would change which scope wins for a key present
+        in BOTH. Narrower than :meth:`_config_for_class` on purpose.
+        """
+        if class_name in self.vision_scoped_classes and self.vision_config:
+            return {**self.config, **apply_config_attribute_aliases(self.vision_config)}
+        return self.config
+
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         init_assignments: dict[str, str] = {}
         init_details: dict[str, list[str]] = {}
@@ -6953,7 +6970,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 unresolved_module_dict_class_refs,
             ) = _parse_init(
                 init_func,
-                config=self.config,
+                config=self._init_config_for_class(node.name),
                 param_bindings=self.activation_param_bindings.get(node.name),
             )
         if forward_func is not None:
