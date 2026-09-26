@@ -1281,6 +1281,26 @@ _LAST_OP_ID_RE = re.compile(
 )
 
 
+def _owning_attr_candidates(node: Any, root: Any) -> list[str]:
+    """Submodule attrs that could own a constant leaf, nearest first.
+
+    A constant reached through an inline submodule frame names that submodule in
+    its own id (``seq:2:q_norm:@op_...:const:weight``). One reached directly in a
+    section body does not -- there the owning attr is the section being inferred,
+    which only ``root`` knows (``input_layernorm``). Both are offered, id segments
+    first, and the caller keeps a candidate only when it resolves unambiguously,
+    so the non-module segments this inevitably includes simply match nothing.
+    """
+    candidates: list[str] = []
+    for segment in reversed(re.split(r"[:/]", str(getattr(node, "id", "")))):
+        if segment and not segment.startswith("@") and segment not in candidates:
+            candidates.append(segment)
+    root_attr = getattr(root, "attr_name", None)
+    if root_attr and str(root_attr) not in candidates:
+        candidates.append(str(root_attr))
+    return candidates
+
+
 class ShapeInferencer:
     """Infer symbolic/concrete tensor shapes for every node in a model graph."""
 
@@ -1446,6 +1466,26 @@ class ShapeInferencer:
         """
         index = self._ensure_meta_tensor_index()
         if index is not None:
+            # Qualify the constant with the submodule that OWNS it before trying
+            # anything class-wide. ``by_class_attr`` keeps one entry per
+            # (class, attr), so a norm class instantiated at several widths -- a
+            # head-dim ``q_norm`` at 128 and an ``input_layernorm`` at 6144 --
+            # collapses to whichever width was harvested, and then every instance
+            # reports that one. The owning attr separates them, and repeated
+            # decoder layers all agree, so matching many entries is fine as long
+            # as they concur on shape and dtype.
+            for attr in _owning_attr_candidates(node, root):
+                for name in names:
+                    leaf = str(name).split(".")[-1].strip()
+                    qualified = f"{attr}.{leaf}"
+                    agreed = {
+                        (tuple(spec.shape), spec.dtype)
+                        for full, spec in index.by_qualified.items()
+                        if full == qualified or full.endswith("." + qualified)
+                    }
+                    if len(agreed) == 1:
+                        shape, dtype = next(iter(agreed))
+                        return TensorSpec(shape=shape, dtype=dtype)
             owner = self._owner_class_name(node, root)
             for name in names:
                 leaf = str(name).split(".")[-1].strip()
