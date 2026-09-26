@@ -93,6 +93,48 @@ def _resolve_auto_classes(config) -> list[type]:
     return [transformers.AutoModel]
 
 
+def _resolve_architecture_class(config, checkpoint: str | Path, *, remote: bool):
+    """Resolve the concrete model class the checkpoint itself declares.
+
+    A checkpoint names its own class in the HF config's ``architectures`` field,
+    so the class is *detected*, never looked up in a maintained model table. Each
+    declared name is resolved by introspection, in the order the config lists it:
+
+    * against the installed ``transformers`` namespace (a natively supported
+      architecture), and
+    * when the repo ships its own modeling code, against the ``auto_map`` entry
+      whose target class has that same name, loaded through the standard dynamic
+      module loader.
+
+    Returns the class, or *None* when the declaration is absent or unresolvable
+    (the caller then falls back to Auto-class resolution).
+    """
+    for arch in getattr(config, "architectures", None) or []:
+        native = getattr(transformers, arch, None)
+        if native is not None:
+            return native
+        if not remote:
+            continue
+        auto_map = getattr(config, "auto_map", None) or {}
+        ref = next(
+            (v for v in auto_map.values() if str(v).rsplit(".", 1)[-1] == arch),
+            None,
+        )
+        if ref is None:
+            continue
+        try:
+            from transformers.dynamic_module_utils import (
+                get_class_from_dynamic_module,
+            )
+
+            return get_class_from_dynamic_module(ref, str(checkpoint))
+        except Exception as exc:  # noqa: BLE001
+            _log.info(
+                "Dynamic resolution of %s for %s failed: %s", ref, checkpoint, exc
+            )
+    return None
+
+
 def _instantiate_meta(checkpoint: str | Path) -> tuple[Any, Any]:
     """Load config and instantiate model on meta device.
 
@@ -107,11 +149,46 @@ def _instantiate_meta(checkpoint: str | Path) -> tuple[Any, Any]:
     _tf_logger.setLevel(logging.ERROR)
 
     try:
+        last_err: Exception | None = None
+
+        # Prefer the class the checkpoint declares, and load the config from the
+        # SAME source that supplies the modeling code. The pairing matters: a repo
+        # that vendors its own config can predate the architecture's arrival in
+        # transformers, so its config may omit attributes the now-native
+        # ``__init__`` reads — and conversely a remote-code model needs its own
+        # config. Native is attempted first so a natively supported checkpoint is
+        # never built from a stale vendored config.
+        for remote in (False, True):
+            try:
+                cfg = AutoConfig.from_pretrained(
+                    str(checkpoint), trust_remote_code=remote
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                continue
+            _patch_config(cfg)
+            declared = _resolve_architecture_class(cfg, checkpoint, remote=remote)
+            if declared is None:
+                continue
+            try:
+                _log.info(
+                    "Trying declared architecture %s for %s (remote=%s)",
+                    declared.__name__,
+                    checkpoint,
+                    remote,
+                )
+                with torch.device("meta"):
+                    model = declared._from_config(cfg)
+                model.eval()
+                _log.info("Instantiated with declared %s", declared.__name__)
+                return model, cfg
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+
         config = AutoConfig.from_pretrained(str(checkpoint), trust_remote_code=True)
         _patch_config(config)
 
         auto_classes = _resolve_auto_classes(config)
-        last_err: Exception | None = None
 
         for auto_cls in auto_classes:
             try:

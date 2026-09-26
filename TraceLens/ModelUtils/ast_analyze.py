@@ -2731,7 +2731,23 @@ def stack_entry_dataflow(cls: ClassStructure) -> StackEntryDataflow | None:
     loop_index = forward.body.index(decoder_loop)
     extractor.statements(forward.body[:loop_index])
     output_producer = extractor.var_producer.get(input_name)
-    if output_producer is None or not is_forward_operation(output_producer):
+    if output_producer is None:
+        return None
+    # A model whose hidden-state chain is a pure passthrough of a submodule call
+    # (``hidden_states = inputs_embeds``; ``inputs_embeds = self.embed_tokens(...)``,
+    # with no intervening tensor op) resolves ``output_producer`` to the bare
+    # submodule attr name (``embed_tokens``) rather than a synthesized ``@op_``
+    # id -- there is no extra dataflow to materialise, but the producer is still
+    # a legitimate, already-tracked source (the caller's ``module_sources`` map is
+    # keyed by exactly these submodule attrs). Accepting it here lets the caller
+    # correctly re-source the decoder loop's primary input; rejecting it (the
+    # previous behaviour) made this function return ``None``, which left the
+    # loop's primary input wrongly pinned to whatever OTHER stack-pre component
+    # (e.g. a loop-invariant positional embedding) happened to run last.
+    if (
+        not is_forward_operation(output_producer)
+        and output_producer not in cls.init_assignments
+    ):
         return None
 
     by_name = {operation.attr_name: operation for operation in extractor.operations}
@@ -5037,7 +5053,14 @@ class _ForwardOperationExtractor:
             for keyword in node.keywords:
                 if keyword.arg in {"dim", "keepdim"}:
                     details.append(f"{keyword.arg}: {ast.unparse(keyword.value)}")
-        if call_name in {"type", "float", "to"}:
+        if call_name in {"type", "float", "to", "type_as"}:
+            # ``x.type_as(y)`` names its target dtype indirectly, via the tensor
+            # ``y`` it copies the dtype from. Recording that reference expression
+            # is enough: a non-concrete dtype expr resolves to the module's
+            # working precision, which is exactly what the "compute in float32,
+            # cast back" idiom (`return output.type_as(x)`) restores. Without
+            # this the downcast carries no dtype and float32 leaks downstream,
+            # which in turn makes a genuine later upcast look like a no-op.
             dtype = (
                 ast.unparse(node.args[0])
                 if node.args

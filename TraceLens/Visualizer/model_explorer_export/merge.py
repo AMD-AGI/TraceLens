@@ -5332,6 +5332,57 @@ def _loop_invariant_producer_base_attrs(spec: ArchitectureSpec, cls: Any) -> set
     }
 
 
+def _pending_loop_invariant_param_names(nodes: list[dict[str, Any]]) -> set[str]:
+    """Names of still-unsourced namespaced ``@input:<param>`` boundary tiles.
+
+    Mirrors the pattern ``_thread_loop_invariant_inputs`` matches to find the
+    floating loop-invariant boundaries it will reconnect later in the pipeline.
+    """
+    names: set[str] = set()
+    for node in nodes:
+        if node.get("incomingEdges"):
+            continue
+        match = re.search(r"/@input:([^/^]+)$", node["id"])
+        if match is not None:
+            names.add(match.group(1))
+    return names
+
+
+def _loop_invariant_shield_attrs(
+    nodes: list[dict[str, Any]], spec: ArchitectureSpec, cls: Any
+) -> set[str]:
+    """Base submodule attrs a *pending* loop-invariant boundary will resolve to.
+
+    ``_thread_loop_invariant_inputs`` reconnects a floating ``@input:<param>``
+    tile to a model-scope producer only after the unconsumed-output prune has
+    already run, so that producer's own output section must be shielded from
+    the prune first or the deferred wiring finds nothing left to attach to.
+    Reads the exact same structural sources that resolver consults --
+    ``forward_step_predecessor_args``, the ``self.<attr>(...)`` producer scan,
+    and the pre-loop captured free-function producers -- restricted to the
+    param names that are *actually* still floating right now, so this never
+    over-shields an attr no pending boundary needs.
+    """
+    if cls is None:
+        return set()
+    pending = _pending_loop_invariant_param_names(nodes)
+    if not pending:
+        return set()
+    pred_args = _decoder_loop_pred_args(spec, cls)
+    producer_map = _forward_param_producer_map(cls)
+    loop_param_producers = _loop_param_producer_map(cls)
+    attrs: set[str] = set()
+    for param in pending:
+        producer = (
+            pred_args.get(param)
+            or loop_param_producers.get(param)
+            or producer_map.get(param)
+        )
+        if producer:
+            attrs.add(base_submodule_attr(producer))
+    return attrs
+
+
 def _thread_loop_invariant_inputs(
     nodes: list[dict[str, Any]],
     *,
@@ -5702,7 +5753,10 @@ def build_merged_model_graph(
     # subgraph) from the unconsumed-output prune so that deferred wiring survives.
     _prune_keep_output_ids: set[str] = set()
     _node_by_id_prune = {str(node.get("id")): node for node in nodes}
-    for _attr in _loop_invariant_producer_base_attrs(spec, stack_cls):
+    _shield_attrs = _loop_invariant_producer_base_attrs(
+        spec, stack_cls
+    ) | _loop_invariant_shield_attrs(nodes, spec, stack_cls)
+    for _attr in _shield_attrs:
         _prune_keep_output_ids.update(
             _resolve_submodule_output_nodes(_node_by_id_prune, _attr)
         )

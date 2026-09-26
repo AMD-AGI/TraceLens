@@ -3289,10 +3289,25 @@ def test_glm53_live_meta_tree_is_authoritative_for_grouping():
     }
 
     # The vision tower is captured as an independent repeated group (Deliverable D).
-    by_path = {g.path: g for g in spec.meta_module_groups}
-    assert by_path["visual.blocks"].length == 24
-    assert by_path["visual.blocks"].element_class == "Glm5NextVisionBlock"
-    assert set(Counter(by_path["language_model.layers"].signatures).values()) == {
+    # Match on the path SUFFIX: the checkpoint is instantiated as the class it
+    # declares in ``config.architectures``, and a ``...ForConditionalGeneration``
+    # wrapper nests the towers one level deeper (``model.visual.blocks``) than the
+    # bare base model does (``visual.blocks``). The grouping itself is unaffected,
+    # so anchoring on the absolute prefix would assert the wrapper, not the group.
+    def _group_ending(suffix: str):
+        matches = [
+            g
+            for g in spec.meta_module_groups
+            if g.path == suffix or g.path.endswith("." + suffix)
+        ]
+        assert (
+            len(matches) == 1
+        ), f"expected exactly one {suffix!r} group, got {matches}"
+        return matches[0]
+
+    assert _group_ending("visual.blocks").length == 24
+    assert _group_ending("visual.blocks").element_class == "Glm5NextVisionBlock"
+    assert set(Counter(_group_ending("language_model.layers").signatures).values()) == {
         3,
         11,
         31,
