@@ -12,6 +12,7 @@ import ast
 import functools
 import inspect
 import json
+import copy
 import logging
 import re
 from dataclasses import dataclass, field
@@ -311,12 +312,68 @@ class ShapeContext:
         )
 
 
+def _called_class_name(func: ast.AST) -> str | None:
+    """Class name a constructor call names (``SubClass(...)`` / ``mod.SubClass(...)``)."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _ctor_argument_bindings(
+    init_func: ast.FunctionDef,
+    call: ast.Call,
+    *,
+    config: dict[str, Any],
+    local_vars: dict[str, DimExpr],
+    context: ShapeContext,
+) -> dict[str, DimExpr]:
+    """Constructor parameters this call site pins to a resolvable value.
+
+    Maps the call's positional and keyword arguments onto ``init_func``'s parameter
+    names and resolves each expression against the OWNER's config and locals, since
+    that is the scope the expression is written in. Only arguments that resolve are
+    returned; a parameter left to its default is absent, so the submodule's own
+    ``__init__`` still decides it.
+    """
+    params = [arg.arg for arg in init_func.args.args if arg.arg != "self"]
+    bound: dict[str, ast.AST] = {}
+    for index, value in enumerate(call.args):
+        if index < len(params):
+            bound[params[index]] = value
+    for keyword in call.keywords:
+        if keyword.arg in params:
+            bound[keyword.arg] = keyword.value
+    resolved: dict[str, DimExpr] = {}
+    for name, value in bound.items():
+        dim = _resolve_dim_expr(
+            value, config=config, local_vars=local_vars, context=context
+        )
+        if dim is not None:
+            resolved[name] = dim
+    return resolved
+
+
 @dataclass
 class ModuleDimRegistry:
     """Linear and embedding constructor dimensions parsed from modeling AST."""
 
     linear: dict[tuple[str, str], ModuleLinearSpec] = field(default_factory=dict)
     linear_by_attr: dict[str, ModuleLinearSpec] = field(default_factory=dict)
+    #: ``(owner_class, owner_attr, linear_attr) -> spec`` for a submodule whose
+    #: constructor ARGUMENTS override what its own ``__init__`` would read from
+    #: config. The same class built two ways has two different right answers, so
+    #: these cannot live in the per-class table above.
+    linear_by_owner: dict[tuple[str, str], ModuleLinearSpec] = field(
+        default_factory=dict
+    )
+    #: ``(owner_attr, linear_attr)`` pairs two owners disagree on, which therefore
+    #: identify nothing and must not answer.
+    linear_owner_ambiguous: set[tuple[str, str]] = field(default_factory=set)
+    #: Resolved ``__init__`` locals per class, kept so a construction site can
+    #: resolve its argument expressions against the OWNER's symbols.
+    class_locals: dict[str, dict[str, DimExpr]] = field(default_factory=dict)
     embedding: dict[tuple[str, str], ModuleEmbeddingSpec] = field(default_factory=dict)
     embedding_by_attr: dict[str, ModuleEmbeddingSpec] = field(default_factory=dict)
     parameter: dict[tuple[str, str], ModuleParameterSpec] = field(default_factory=dict)
@@ -377,12 +434,77 @@ class ModuleDimRegistry:
                 local_vars=local_vars,
                 context=context,
             )
+            registry.class_locals[class_name] = dict(local_vars)
             registry._capture_buffer_shapes(
                 class_name,
                 structure.node,
                 config=class_config,
                 context=context,
             )
+
+        # Second pass: a submodule built with constructor-argument overrides has
+        # different dimensions per INSTANTIATION. ``Glm5NextTextMLP`` is built once
+        # bare (its own ``config.intermediate_size``) and once as ``shared_experts``
+        # with ``intermediate_size=moe_intermediate_size * n_shared_experts``; a
+        # table keyed only by class must report one of those for both. Re-read the
+        # submodule's ``__init__`` with the call site's arguments bound and file the
+        # result under the owner, leaving the per-class table untouched.
+        for parent, structure in class_registry.items():
+            init_func = _find_init_function(structure.node)
+            if init_func is None:
+                continue
+            parent_config = (
+                vision_config
+                if vision_scoped and vision_config and parent in vision_scoped
+                else config
+            )
+            parent_locals = registry.class_locals.get(parent, {})
+            for stmt in ast.walk(init_func):
+                if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+                    continue
+                target = stmt.targets[0]
+                call = stmt.value
+                if not (
+                    isinstance(target, ast.Attribute)
+                    and _is_self_attr(target)
+                    and isinstance(call, ast.Call)
+                ):
+                    continue
+                sub_name = _called_class_name(call.func)
+                sub_structure = class_registry.get(sub_name or "")
+                if sub_structure is None:
+                    continue
+                sub_init = _find_init_function(sub_structure.node)
+                if sub_init is None:
+                    continue
+                bindings = _ctor_argument_bindings(
+                    sub_init,
+                    call,
+                    config=parent_config,
+                    local_vars=parent_locals,
+                    context=context,
+                )
+                if not bindings:
+                    continue
+                scoped = cls()
+                # Walk into a THROWAWAY context: this extra pass exists only to
+                # read dimensions, and must not publish conv geometry or other
+                # side effects into the context the real passes share.
+                scoped._walk_init_body(
+                    sub_init.body,
+                    class_name=sub_name,
+                    config=parent_config,
+                    local_vars=dict(bindings),
+                    context=copy.deepcopy(context),
+                )
+                for (owner_cls, attr), spec in scoped.linear.items():
+                    if owner_cls != sub_name:
+                        continue
+                    key = (target.attr, attr)
+                    previous = registry.linear_by_owner.get(key)
+                    if previous is not None and previous != spec:
+                        registry.linear_owner_ambiguous.add(key)
+                    registry.linear_by_owner[key] = spec
         return registry
 
     def _capture_buffer_shapes(
@@ -3938,6 +4060,19 @@ class ShapeInferencer:
         if not attr:
             return None
         candidates = self._module_class_candidates(node, root)
+        # An instantiation-specific spec wins over the per-class one: the same
+        # class built with different constructor arguments has different widths,
+        # and only the owner (class + the attr it was assigned to) says which.
+        if self.module_dims.linear_by_owner:
+            for segment in re.split(r"[:/]", str(node.id)):
+                if not segment or segment.startswith("@") or segment == attr:
+                    continue
+                key = (segment, attr)
+                if key in self.module_dims.linear_owner_ambiguous:
+                    continue
+                spec = self.module_dims.linear_by_owner.get(key)
+                if spec is not None:
+                    return spec
         for class_name in candidates:
             spec = self.module_dims.linear.get((class_name, attr))
             if spec is not None:
