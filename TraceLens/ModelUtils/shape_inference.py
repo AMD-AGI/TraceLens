@@ -1455,9 +1455,29 @@ class ShapeInferencer:
                         return TensorSpec(shape=tuple(spec.shape), dtype=spec.dtype)
             for name in names:
                 qualified = str(name).strip()
-                for full, spec in index.by_qualified.items():
-                    if full == qualified or full.endswith("." + qualified):
-                        return TensorSpec(shape=tuple(spec.shape), dtype=spec.dtype)
+                matches = [
+                    spec
+                    for full, spec in index.by_qualified.items()
+                    if full == qualified or full.endswith("." + qualified)
+                ]
+                # A suffix match only identifies a tensor when it lands on exactly
+                # one. A bare leaf like ``weight`` suffix-matches EVERY parameter in
+                # the model, so taking the first would hand a text RMSNorm whichever
+                # ``*.weight`` happened to be enumerated first -- e.g. the vision
+                # patch-embed conv's [1280, 3, 2, 14, 14]. Ambiguity falls through to
+                # the parameter lookup below, which resolves the owning module's own
+                # dimensions instead of guessing.
+                if len(matches) == 1:
+                    spec = matches[0]
+                    return TensorSpec(shape=tuple(spec.shape), dtype=spec.dtype)
+                if len(matches) > 1:
+                    _log.debug(
+                        "%r suffix-matches %d meta tensors; resolving %s from its "
+                        "owning module instead",
+                        qualified,
+                        len(matches),
+                        node.id,
+                    )
         parameter = self._lookup_parameter_spec(node, root=root, names=names)
         if parameter is not None:
             has_weight = any("weight" in str(n).lower() for n in names)
