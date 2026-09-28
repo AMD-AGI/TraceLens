@@ -52,6 +52,7 @@ setup(
         "tqdm",
         'backports.strenum;python_version<"3.11"',
         'StrEnum;python_version<"3.11"',
+        'typing_extensions;python_version<"3.11"',
         "openpyxl",
         "office365-rest-python-client",
         "msal",

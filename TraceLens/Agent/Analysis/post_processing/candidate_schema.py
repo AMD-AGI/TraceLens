@@ -12,7 +12,13 @@ consumer of ``analysis.json``. Additive-only: a drifted field surfaces as a
 tier only; no fusion/system task currnetly``.
 """
 
-from typing import NotRequired, Optional, TypedDict
+import sys
+from typing import Optional
+
+if sys.version_info >= (3, 11):
+    from typing import NotRequired, TypedDict
+else:
+    from typing_extensions import NotRequired, TypedDict
 
 
 class Impact(TypedDict):
