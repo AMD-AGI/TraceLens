@@ -237,7 +237,7 @@ _BASIC_DETAIL_LABELS = frozenset({"Linear", "RMSNorm", "LayerNorm", "Embedding"}
 
 _DETAIL_OPERATION_LABELS = _BASIC_DETAIL_LABELS | frozenset(
     {
-        "Depthwise Conv",
+        "Causal depthwise conv",
         "SiLU",
         "Silu",
         "Sigmoid",

@@ -142,12 +142,12 @@ def block_purpose(node: BlockNode) -> str | None:
         return node.details[0] if node.details else None
 
     if node.class_name == "ShortConvolution":
-        if node.label == "Depthwise Conv":
+        if node.label == "Causal depthwise conv":
             return None
         if node.details and node.details[0] == "depthwise conv":
             return "depthwise conv"
         if _short_conv_activation(node.details) and len(node.details) == 1:
-            return "depthwise conv"
+            return "causal depthwise conv"
 
     for detail in node.details:
         cleaned = detail.strip()
@@ -175,7 +175,7 @@ def block_purpose(node: BlockNode) -> str | None:
         return "Output gate — scales normalized output"
     if class_name == "ShortConvolution":
         activation = node.details[0] if node.details else None
-        return f"depthwise conv" + (f" · {activation}" if activation else "")
+        return "causal depthwise conv" + (f" · {activation}" if activation else "")
     if class_name == "AttentionMerge":
         for detail in node.details:
             if detail.startswith("ports:"):
@@ -1016,7 +1016,11 @@ def _label_for_call(
     if attr_name == SYNTHETIC_ATTENTION:
         return "Attention kernel"
     if class_name == "ShortConvolution":
-        return "Depthwise Conv"
+        # Depthwise AND causal: the class builds an ``nn.Conv1d`` with
+        # ``groups=hidden_size`` and ``padding=kernel_size - 1``, then dispatches to
+        # ``causal_conv1d``. Labelling it only "Depthwise Conv" drops the causality,
+        # which is the property that makes it usable for autoregressive decoding.
+        return "Causal depthwise conv"
     if displays_as_linear(attr_name, class_name):
         return "Linear"
     if class_name:
@@ -2041,7 +2045,7 @@ def _short_convolution_block_node(
             attr_name=attr_name,
             class_name="ShortConvolution",
             forward_order=base_order,
-            label="Depthwise Conv",
+            label="Causal depthwise conv",
             details=[],
             basic=False,
         ),

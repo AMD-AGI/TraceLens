@@ -118,7 +118,7 @@ def test_wrapper_bullet_label_matches_attr_returns_label():
 # --------------------------------------------------------------------------- #
 def test_block_purpose_short_conv_activation_single_detail():
     conv = node("conv", "ShortConvolution", basic=False, details=["SiLU"])
-    assert bt.block_purpose(conv) == "depthwise conv"
+    assert bt.block_purpose(conv) == "causal depthwise conv"
 
 
 def test_block_purpose_output_gate_details_only_linear_returns_none():
@@ -332,7 +332,7 @@ def test_segment_for_step_method_wrapper_no_prior_no_residual():
 
 def test_label_for_call_variants():
     assert bt._label_for_call(aa.SYNTHETIC_ATTENTION, None) == "Attention kernel"
-    assert bt._label_for_call("conv", "ShortConvolution") == "Depthwise Conv"
+    assert bt._label_for_call("conv", "ShortConvolution") == "Causal depthwise conv"
     assert bt._label_for_call("really_long_attribute_name_here", None).startswith(
         "really long"
     )
@@ -736,7 +736,7 @@ def test_build_block_node_short_convolution_with_activation():
         basic_ops=_basic(),
     )
     labels = [c.label for c in built.children]
-    assert "Depthwise Conv" in labels and "SiLU" in labels
+    assert "Causal depthwise conv" in labels and "SiLU" in labels
 
 
 # --------------------------------------------------------------------------- #
@@ -1331,7 +1331,7 @@ def test_output_gate_wrapping_and_short_convolution_helpers():
     conv_steps = bt._short_convolution_block_node(
         attr_name="conv", forward_order=4, activation="SiLU"
     )
-    assert [step.label for step in conv_steps] == ["Depthwise Conv", "SiLU"]
+    assert [step.label for step in conv_steps] == ["Causal depthwise conv", "SiLU"]
 
 
 def test_tile_display_label_branches(monkeypatch):
@@ -1466,7 +1466,7 @@ def test_additional_block_purpose_fallbacks():
             node(
                 "conv",
                 "ShortConvolution",
-                label="Depthwise Conv",
+                label="Causal depthwise conv",
                 basic=False,
                 details=["SiLU"],
             )
@@ -1474,7 +1474,8 @@ def test_additional_block_purpose_fallbacks():
         is None
     )
     assert (
-        block_purpose(node("conv", "ShortConvolution", basic=False)) == "depthwise conv"
+        block_purpose(node("conv", "ShortConvolution", basic=False))
+        == "causal depthwise conv"
     )
     assert (
         block_purpose(node("embedding", "Embedding", role="embedding"))

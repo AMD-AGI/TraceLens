@@ -1129,7 +1129,7 @@ def test_output_gate_wrapping_and_short_convolution_helpers():
     conv_steps = bt._short_convolution_block_node(
         attr_name="conv", forward_order=4, activation="SiLU"
     )
-    assert [step.label for step in conv_steps] == ["Depthwise Conv", "SiLU"]
+    assert [step.label for step in conv_steps] == ["Causal depthwise conv", "SiLU"]
 
 
 def test_tile_display_label_branches(monkeypatch):
@@ -1465,7 +1465,7 @@ def test_additional_block_purpose_fallbacks():
             node(
                 "conv",
                 "ShortConvolution",
-                label="Depthwise Conv",
+                label="Causal depthwise conv",
                 basic=False,
                 details=["SiLU"],
             )
@@ -1473,7 +1473,8 @@ def test_additional_block_purpose_fallbacks():
         is None
     )
     assert (
-        block_purpose(node("conv", "ShortConvolution", basic=False)) == "depthwise conv"
+        block_purpose(node("conv", "ShortConvolution", basic=False))
+        == "causal depthwise conv"
     )
     assert (
         block_purpose(node("embedding", "Embedding", role="embedding"))
