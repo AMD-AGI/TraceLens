@@ -86,16 +86,6 @@ _SYNTHETIC_KEYS = frozenset(
     }
 )
 _COMBINE_LABELS = frozenset({"×", "+", "Elementwise ×", "Multiply", "Add"})
-_KERNEL_CLASS_NAMES = frozenset(
-    {
-        "KernelOp",
-        "KernelSubOp",
-        "KernelOutput",
-        "AttentionOp",
-        "KernelPipeline",
-        "AttentionMerge",
-    }
-)
 _TORCH_FUNCTIONAL_RE = re.compile(
     r"(?i)(?:^F\.|torch\.nn\.functional\.|functional\.|@functional_)"
 )
@@ -246,9 +236,11 @@ def classify_operation(
     ):
         return OperationKind.TORCH_FUNCTIONAL
 
-    if block.class_name in _KERNEL_CLASS_NAMES or any(
-        line.lower().startswith("kernel:") for line in details
-    ):
+    # Kernel-ness is DETECTED where the node is built -- an attention plan that
+    # resolved one, or a kernel pipeline parsed out of the call -- and recorded on
+    # the node as a ``kernel:`` detail. Recognising the class name here would only
+    # re-derive, from a string we ourselves stamped, what detection established.
+    if any(line.lower().startswith(("kernel:", "kernel_stage:")) for line in details):
         return OperationKind.GPU_KERNEL
 
     if block.is_basic or _NN_MODULE_CLASS_RE.match(block.class_name or ""):

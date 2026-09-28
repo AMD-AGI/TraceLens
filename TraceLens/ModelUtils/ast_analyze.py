@@ -9216,7 +9216,11 @@ def attention_kernel_details(
                 lines.append(line)
         return lines
 
-    return []
+    # The kernel could not be named, but this step IS an attention kernel -- that
+    # much the extraction established. Say so, so the graph does not have to fall
+    # back to recognising the class name, and so an unresolved attention is not
+    # quietly assumed to be a torch call.
+    return ["kernel: attention"]
 
 
 def _capture_attention_inputs(

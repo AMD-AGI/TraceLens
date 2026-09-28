@@ -42,11 +42,27 @@ def _node(
     children: list[BlockNode] | None = None,
     **kwargs,
 ) -> BlockNode:
+    label = kwargs.pop("label", class_name)
+    # Mirror what the builder records: a node built for a detected kernel carries
+    # a ``kernel:`` detail, which is how the graph recognises it. Without this the
+    # stub would describe a node the builder never produces.
+    if class_name in {
+        "AttentionOp",
+        "KernelOp",
+        "KernelSubOp",
+        "KernelOutput",
+        "KernelPipeline",
+        "AttentionMerge",
+    }:
+        existing = list(kwargs.get("details") or [])
+        if not any(str(line).lower().startswith("kernel:") for line in existing):
+            existing.insert(0, f"kernel: {label}")
+        kwargs["details"] = existing
     return BlockNode(
         attr_name=name,
         class_name=class_name,
         role=kwargs.pop("role", "other"),
-        label=kwargs.pop("label", class_name),
+        label=label,
         children=children or [],
         **kwargs,
     )

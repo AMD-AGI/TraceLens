@@ -104,6 +104,9 @@ def test_classify_operation_kinds():
         class_name="KernelSubOp",
         role="other",
         label="tl.dot",
+        # A kernel's internal stage records what it belongs to, the same way the
+        # pipeline builder records it.
+        details=["kernel_stage: tl.dot"],
     )
     assert classify_operation(kernel_subop) == OperationKind.GPU_KERNEL
 
@@ -128,6 +131,7 @@ def test_classify_operation_kinds():
         class_name="KernelOp",
         role="other",
         label="Fused beta sigmoid",
+        details=["kernel: Fused beta sigmoid"],
     )
     assert classify_operation(fused_sigmoid) == OperationKind.GPU_KERNEL
 
@@ -136,6 +140,7 @@ def test_classify_operation_kinds():
         class_name="KernelOp",
         role="other",
         label="Intra-chunk WY",
+        details=["kernel: chunk_kda_fwd_intra"],
     )
     assert classify_operation(intra_chunk) == OperationKind.GPU_KERNEL
 
@@ -191,11 +196,17 @@ def test_library_attention_is_a_kernel_but_torch_attention_is_not():
     ):
         assert classify_operation(attention(kernel)) == OperationKind.GPU_KERNEL, kernel
 
+    # Built the way the extractor builds it, so this checks the real contract:
+    # an attention step whose kernel could not be named still RECORDS that it is
+    # a kernel, rather than relying on anyone recognising its class name.
+    from TraceLens.ModelUtils.ast_analyze import attention_kernel_details
+
     unresolved = BlockNode(
         attr_name="@attention",
         class_name="AttentionOp",
         role="attention",
         label="Attention",
+        details=attention_kernel_details([]),
     )
     assert (
         classify_operation(unresolved) == OperationKind.GPU_KERNEL

@@ -1081,7 +1081,9 @@ def _extract_pipeline_from_function(
                 attr_name=attr_name,
                 class_name="KernelOp",
                 label=call_name,
-                details=[],
+                # Recorded where the kernel was DETECTED, so nothing downstream
+                # has to recognise it by the class name we just stamped on it.
+                details=[f"kernel: {call_name}"],
                 condition=condition,
                 tensor_inputs=effective_ports,
                 computation=computation or call_name,
@@ -1416,7 +1418,10 @@ def introspect_kernel_op_substeps(
                 attr_name=f"{parent_attr}_sub_{index}",
                 class_name="KernelSubOp",
                 label=op.label,
-                details=[],
+                # A STAGE inside a kernel, not a kernel call of its own: it is
+                # kernel work for classification, but it has no call boundary and
+                # so must not have kernel input/output ports synthesised for it.
+                details=[f"kernel_stage: {op.label}"],
                 second_operand=second_operand,
             )
         )

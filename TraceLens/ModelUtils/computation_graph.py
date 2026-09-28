@@ -537,7 +537,18 @@ def _lookup_ordinal_entries(
     return None
 
 
-_KERNEL_CLASS_NAMES = frozenset({"AttentionOp", "KernelOp", "AttentionMerge"})
+def _is_kernel_block(block: Any) -> bool:
+    """True when the node was built from a kernel detected in the code.
+
+    The builder records that as a ``kernel:`` detail; reading it here keeps this
+    pass from having to recognise the class names the builder happens to use.
+    """
+    if block is None:
+        return False
+    return any(
+        str(line).lower().startswith("kernel:") for line in (block.details or [])
+    )
+
 
 SYNTHETIC_KERNEL_PORT = "@kernel_port"
 SYNTHETIC_KERNEL_PORT_IN = "@kernel_port_in"
@@ -642,9 +653,7 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
     already claimed by a labeled edge is assigned in order.
     """
     kernel_indices = [
-        index
-        for index, spec in enumerate(graph.nodes)
-        if spec.block is not None and spec.block.class_name in _KERNEL_CLASS_NAMES
+        index for index, spec in enumerate(graph.nodes) if _is_kernel_block(spec.block)
     ]
     for kernel_index in kernel_indices:
         kernel_spec = graph.nodes[kernel_index]
@@ -796,9 +805,7 @@ def _add_kernel_output_port_nodes(graph: ComputationGraph) -> None:
     simply fans out.
     """
     kernel_indices = [
-        index
-        for index, spec in enumerate(graph.nodes)
-        if spec.block is not None and spec.block.class_name in _KERNEL_CLASS_NAMES
+        index for index, spec in enumerate(graph.nodes) if _is_kernel_block(spec.block)
     ]
     for kernel_index in kernel_indices:
         # Group this kernel's outgoing edges by the output ordinal each reads. A

@@ -373,6 +373,7 @@ def test_kernel_pipeline_block_nodes_multi_input_step(monkeypatch):
             "attr_name": "c",
             "class_name": "Mul",
             "label": "×",
+            "details": ["kernel: ×"],
             "second_operand": "input",
         },
     )()
@@ -384,6 +385,7 @@ def test_kernel_pipeline_block_nodes_multi_input_step(monkeypatch):
             "class_name": "KernelOp",
             "label": "stage",
             "call_name": "stage_fwd",
+            "details": ["kernel: stage_fwd"],
             "children": [sub, sub],
             "predecessors": [],
         },
@@ -1938,6 +1940,7 @@ def test_kernel_pipeline_block_nodes_single_child_step(monkeypatch):
         class_name="KernelOp",
         label="stage",
         call_name="stage_fwd",
+        details=["kernel: stage_fwd"],
         children=[],
         predecessors=[],
     )
@@ -1957,6 +1960,7 @@ def test_kernel_pipeline_block_nodes_with_output_step(monkeypatch):
         class_name="KernelOp",
         label="stage",
         call_name="stage_fwd",
+        details=["kernel: stage_fwd"],
         children=[],
         predecessors=[],
     )

@@ -1762,7 +1762,7 @@ def _kernel_pipeline_block_nodes(
                     class_name=child.class_name,
                     forward_order=sub_index,
                     label=child.label,
-                    details=[],
+                    details=list(child.details or []),
                     basic=False,
                     kernel_second_operand=child.second_operand,
                 )
@@ -1775,7 +1775,7 @@ def _kernel_pipeline_block_nodes(
                     role="other",
                     label=step.call_name,
                     forward_order=index,
-                    details=[],
+                    details=list(step.details or []),
                     is_basic=False,
                     children=sub_children,
                     kernel_predecessors=list(step.predecessors),
@@ -1788,7 +1788,7 @@ def _kernel_pipeline_block_nodes(
                     class_name=step.class_name,
                     forward_order=index,
                     label=step.call_name,
-                    details=[],
+                    details=list(step.details or []),
                     basic=False,
                     kernel_predecessors=list(step.predecessors),
                 )
@@ -1835,7 +1835,7 @@ def _kernel_pipeline_block_nodes(
             class_name="KernelOutput",
             forward_order=(forward_order or 0) + 1,
             label=output.call_name,
-            details=[],
+            details=[f"kernel: {output.call_name}"],
             basic=False,
             kernel_predecessors=list(output.predecessors),
         )
