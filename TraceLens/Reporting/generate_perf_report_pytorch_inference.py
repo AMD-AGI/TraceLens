@@ -536,7 +536,7 @@ def generate_perf_report_pytorch(
     # precomputed diff_stats.csv (e.g. from the semantic comparison path); when
     # set, the internal TraceDiff is skipped and this CSV is used as-is to
     # enrich the report. Mutually exclusive with comparison_json_path.
-    precomputed_diff_stats_csv: Optional[str] = None,
+    precomputed_diff_stats: Optional[str] = None,
     comparison_augmented_tree: Optional[TraceToTree] = None,
     extension_file: Optional[str] = None,
     # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
@@ -954,8 +954,8 @@ def generate_perf_report_pytorch(
             td = TraceDiff(perf_analyzer.tree, perf_analyzer2.tree)
             td.generate_tracediff_report()
             _tracediff_diff_stats = td.diff_stats_df
-        elif precomputed_diff_stats_csv and not df_unified_perf.empty:
-            _tracediff_diff_stats = pd.read_csv(precomputed_diff_stats_csv)
+        elif precomputed_diff_stats and not df_unified_perf.empty:
+            _tracediff_diff_stats = pd.read_csv(precomputed_diff_stats)
 
         if not df_unified_perf.empty:
             df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
@@ -1313,16 +1313,15 @@ def main():
     )
 
     parser.add_argument(
-        "--precomputed_diff_stats_csv",
+        "--precomputed_diff_stats",
         type=str,
         default=None,
         help=(
-            "Path to a precomputed TraceDiff-schema diff_stats.csv (e.g. from "
-            "the semantic comparison path). When set, the internal TraceDiff "
-            "is skipped and this CSV is used to enrich unified_perf_summary "
-            "and emit the diff_stats sheet. Mutually exclusive with "
-            "--comparison_json_path; unlike --comparison_json_path it may be "
-            "combined with --capture_folder."
+            "Path to precomputed TraceDiff output (diff_stats.csv). When set, "
+            "the internal TraceDiff is skipped and this CSV is used to enrich "
+            "unified_perf_summary and emit the diff_stats sheet. Mutually "
+            "exclusive with --comparison_json_path, but may be combined with "
+            "--capture_folder."
         ),
     )
 
@@ -1381,12 +1380,12 @@ def main():
     )
 
     args = parser.parse_args()
-    if args.comparison_json_path and args.precomputed_diff_stats_csv:
+    if args.comparison_json_path and args.precomputed_diff_stats:
         parser.error(
-            "--comparison_json_path and --precomputed_diff_stats_csv cannot be "
+            "--comparison_json_path and --precomputed_diff_stats cannot be "
             "used together; provide only one comparison diff_stats source."
         )
-    # NOTE: --capture_folder + --precomputed_diff_stats_csv IS allowed: the
+    # NOTE: --capture_folder + --precomputed_diff_stats IS allowed: the
     # precomputed (e.g. semantic) diff_stats does not run the internal
     # TraceDiff, so graph capture traces can be compared via this path.
     if args.comparison_capture_folder and not args.comparison_json_path:
@@ -1430,7 +1429,7 @@ def main():
         topk_ops=args.topk_ops,
         topk_roofline_ops=args.topk_roofline_ops,
         comparison_json_path=args.comparison_json_path,
-        precomputed_diff_stats_csv=args.precomputed_diff_stats_csv,
+        precomputed_diff_stats=args.precomputed_diff_stats,
         comparison_augmented_tree=comparison_graph_tree,
         extension_file=args.extension_file,
         python_path=args.python_path,

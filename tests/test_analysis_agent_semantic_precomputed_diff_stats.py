@@ -7,7 +7,7 @@
 """Integration test for the semantic->report handoff via precomputed diff_stats.
 
 The semantic comparison path emits a TraceDiff-schema ``diff_stats.csv`` and
-feeds it to the perf-report generators through ``precomputed_diff_stats_csv``.
+feeds it to the perf-report generators through ``precomputed_diff_stats``.
 When set (and no ``comparison_json_path``), the generator skips the internal
 TraceDiff and loads the CSV as-is, then enriches the report and emits a
 ``diff_stats`` sheet. These tests exercise that branch for both the training
@@ -46,7 +46,7 @@ def _write_trace(tmp_path, specs):
     return str(path)
 
 
-def test_precomputed_diff_stats_csv_is_used_pytorch(tmp_path):
+def test_precomputed_diff_stats_is_used_pytorch(tmp_path):
     trace = _write_trace(
         tmp_path,
         [("aten::mm", "gemm_kernel", 100), ("aten::relu", "relu_kernel", 20)],
@@ -55,7 +55,7 @@ def test_precomputed_diff_stats_csv_is_used_pytorch(tmp_path):
         profile_json_path=trace,
         output_csvs_dir=str(tmp_path / "csvs"),
         collective_analysis=False,
-        precomputed_diff_stats_csv=_DIFF_STATS_CSV,
+        precomputed_diff_stats=_DIFF_STATS_CSV,
     )
     # The elif branch loaded the CSV and emitted the diff_stats sheet without
     # running the internal TraceDiff (no comparison_json_path was supplied).
@@ -63,13 +63,13 @@ def test_precomputed_diff_stats_csv_is_used_pytorch(tmp_path):
     assert not result["diff_stats"].empty
 
 
-def test_precomputed_diff_stats_csv_is_used_inference(tmp_path):
+def test_precomputed_diff_stats_is_used_inference(tmp_path):
     trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)])
     result = generate_inference_report(
         profile_json_path=trace,
         output_csvs_dir=str(tmp_path / "csvs"),
         collective_analysis=False,
-        precomputed_diff_stats_csv=_DIFF_STATS_CSV,
+        precomputed_diff_stats=_DIFF_STATS_CSV,
     )
     assert "diff_stats" in result
     assert not result["diff_stats"].empty

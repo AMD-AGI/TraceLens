@@ -22,7 +22,7 @@ beside it (give them a new value in the `workflow` column of
 ```
 partial_tests/
 ├── run_partial_tests.sh              # the runner
-├── generate_updated_semantic_gold.sh # OPTIONAL, rare: regenerate gold
+├── generate_gold_ref.sh # OPTIONAL, rare: regenerate gold
 ├── partial_test_cases.csv            # manifest (id,workflow,trace_a,trace_b,reference_dir,platform_a,platform_b)
 ├── eval_utils/
 │   ├── semantic_partition_scripted_evals.py   # per-run purity metrics (informational)
@@ -69,7 +69,7 @@ NUM_REPEATS=5 bash agent_evals/Analysis/partial_tests/run_partial_tests.sh
 
 Env knobs: `NUM_REPEATS` (default 1), `TEST_IDS` (space-separated whitelist),
 `MAX_PARALLEL` (default 3), `CONTAINER` (docker container to exec python in),
-`AGENT_MODEL`. Results land under `partial_tests/partial_results/<id>/run_*/`.
+`AGENT_MODEL`. Results land under `partial_tests/results/<id>/run_*/`.
 
 ## Semantic-purity quality gate
 
@@ -107,7 +107,7 @@ the top of the script; edit them to point at wherever you keep the traces. The
 script fails with a clear "missing source" error if they aren't present.
 
 ```bash
-bash agent_evals/Analysis/partial_tests/generate_updated_semantic_gold.sh
+bash agent_evals/Analysis/partial_tests/generate_gold_ref.sh
 ```
 
 It runs the with-capture perf-report / TraceDiff path on the DECODE pair, writes

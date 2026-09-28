@@ -8,8 +8,7 @@
 
 semantic_partition_scripted_evals.py records per-run LCA-partition purity
 metrics but does not gate on them (see that module's docstring) -- the
-semantic-bucketing method has real run-to-run variance (observed on
-Qwen3-30B-A3B), so a single run is not a reliable regression signal.
+semantic-bucketing method has real run-to-run variance, so a single run is not a reliable regression signal.
 
 This script is the actual gate. For each semantic-purity test case it:
   1. Scans results_root/<test_id>/run_*/semantic_purity_results.csv,

@@ -41,7 +41,7 @@ ANALYSIS_DIR="$REPO_ROOT/TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/agent_evals/Analysis"
 PARTIAL_DIR="$EVALS_DIR/partial_tests"
 TEST_CASES_CSV="${TEST_CASES_CSV:-$PARTIAL_DIR/partial_test_cases.csv}"
-RESULTS_ROOT="${RESULTS_ROOT:-$PARTIAL_DIR/partial_results}"
+RESULTS_ROOT="${RESULTS_ROOT:-$PARTIAL_DIR/results}"
 
 if [[ -n "$CONTAINER" ]]; then
     DEXEC=(docker exec -w "$REPO_ROOT" "$CONTAINER")

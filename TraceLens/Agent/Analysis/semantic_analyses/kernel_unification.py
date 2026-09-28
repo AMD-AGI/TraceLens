@@ -80,10 +80,6 @@ DEFAULT_SAMPLE_SIZE = 300
 # ===========================================================================
 
 
-def _load(path):
-    return load_json(path)
-
-
 def _dims_repr(dims, limit=160):
     """Compact, length-capped string form of an input_dims value."""
     if not dims:
@@ -208,8 +204,8 @@ def _sample_names(agg_a, agg_b, name_a, name_b, sample_size):
 
 
 def cmd_prepare_context(args):  # pragma: no cover
-    labels_a = _load(args.labels_a)
-    labels_b = _load(args.labels_b)
+    labels_a = load_json(args.labels_a)
+    labels_b = load_json(args.labels_b)
     agg_a = aggregate_names(labels_a)
     agg_b = aggregate_names(labels_b)
 
@@ -330,9 +326,9 @@ def stem_for(name, compiled):
 
 
 def cmd_apply_stem_rules(args):  # pragma: no cover
-    labels_a = _load(args.labels_a)
-    labels_b = _load(args.labels_b)
-    rules_doc = _load(args.rules)
+    labels_a = load_json(args.labels_a)
+    labels_b = load_json(args.labels_b)
+    rules_doc = load_json(args.rules)
     rules = rules_doc["rules"] if isinstance(rules_doc, dict) else rules_doc
     compiled = _compile_rules(rules)
 
@@ -446,10 +442,10 @@ def _apply_side(labels, unified_map, raw_to_stem):
 
 
 def cmd_apply_map(args):  # pragma: no cover
-    labels_a = _load(args.labels_a)
-    labels_b = _load(args.labels_b)
-    map_doc = _load(args.map)
-    raw_to_stem = _load(args.raw_to_stem) if args.raw_to_stem else None
+    labels_a = load_json(args.labels_a)
+    labels_b = load_json(args.labels_b)
+    map_doc = load_json(args.map)
+    raw_to_stem = load_json(args.raw_to_stem) if args.raw_to_stem else None
 
     map_a = _load_map_side(map_doc, "a", args.name_a)
     map_b = _load_map_side(map_doc, "b", args.name_b)

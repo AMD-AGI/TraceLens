@@ -425,7 +425,7 @@ def generate_perf_report_pytorch(
     # precomputed diff_stats.csv (e.g. from the semantic comparison path); when
     # set, the internal TraceDiff is skipped and this CSV is used as-is to
     # enrich the report. Mutually exclusive with comparison_json_path.
-    precomputed_diff_stats_csv: Optional[str] = None,
+    precomputed_diff_stats: Optional[str] = None,
     extension_file: Optional[str] = None,
     # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
     python_path: Optional[str] = None,
@@ -822,8 +822,8 @@ def generate_perf_report_pytorch(
             td = TraceDiff(perf_analyzer.tree, perf_analyzer2.tree)
             td.generate_tracediff_report()
             _tracediff_diff_stats = td.diff_stats_df
-        elif precomputed_diff_stats_csv and not df_unified_perf.empty:
-            _tracediff_diff_stats = pd.read_csv(precomputed_diff_stats_csv)
+        elif precomputed_diff_stats and not df_unified_perf.empty:
+            _tracediff_diff_stats = pd.read_csv(precomputed_diff_stats)
 
         if not df_unified_perf.empty:
             df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
@@ -1166,7 +1166,7 @@ def main():
     )
 
     parser.add_argument(
-        "--precomputed_diff_stats_csv",
+        "--precomputed_diff_stats",
         type=str,
         default=None,
         help=(
@@ -1242,9 +1242,9 @@ def main():
     )
 
     args = parser.parse_args()
-    if args.comparison_json_path and args.precomputed_diff_stats_csv:
+    if args.comparison_json_path and args.precomputed_diff_stats:
         parser.error(
-            "--comparison_json_path and --precomputed_diff_stats_csv cannot be "
+            "--comparison_json_path and --precomputed_diff_stats cannot be "
             "used together; provide only one comparison diff_stats source."
         )
     generate_perf_report_pytorch(
@@ -1265,7 +1265,7 @@ def main():
         topk_ops=args.topk_ops,
         topk_roofline_ops=args.topk_roofline_ops,
         comparison_json_path=args.comparison_json_path,
-        precomputed_diff_stats_csv=args.precomputed_diff_stats_csv,
+        precomputed_diff_stats=args.precomputed_diff_stats,
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,

@@ -9,7 +9,7 @@
 Self-gating: only test cases whose reference_dir contains a
 ``semantic_purity_gold_diff_stats.csv`` (which ships pre-baked in each
 partial-test fixture; regenerated only rarely by
-``generate_updated_semantic_gold.sh``) are scored. Any other test case
+``generate_gold_ref.sh``) are scored. Any other test case
 produces zero rows here, so this eval is inert unless a gold reference is
 present.
 

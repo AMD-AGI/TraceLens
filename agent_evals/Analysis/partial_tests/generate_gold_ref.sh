@@ -22,7 +22,7 @@ set -uo pipefail
 # has no capture data), writes the refreshed CSV into each fixture's
 # analysis_output_ref/, and rebuilds the fixture tarball so gold stays shipped.
 #
-# Usage: bash generate_updated_semantic_gold.sh [test_id ...]   (default: all)
+# Usage: bash generate_gold_ref.sh [test_id ...]   (default: all)
 # ---------------------------------------------------------------------------
 
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"

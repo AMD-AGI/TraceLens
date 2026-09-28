@@ -2,7 +2,6 @@
 # Only the tarballs under fixtures/ are committed (matches the e2e_tests_* convention).
 /semantic_purity_deepseek_r1/
 /semantic_purity_qwen3_30b_a3b/
-# Run outputs and scratch
-/partial_results/
+# Run scratch (results dir is ignored a level up, in evals .gitignore)
 _gold_scratch_*/
 eval_utils/__pycache__/

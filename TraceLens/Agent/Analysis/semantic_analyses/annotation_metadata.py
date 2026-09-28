@@ -27,7 +27,7 @@ FILENAME_TP_RE = re.compile(r"tp(\d+)", re.I)
 def parse_filename_metadata(filepath: str) -> Dict[str, Any]:
     """
     Parse isl, osl, conc, tp from trace filename.
-    Example: mi355_tp1_isl1024_osl8_conc4_opt_asm64x256.pt.trace.json.gz
+    Example: trace_filename.pt.trace.json.gz
     """
     basename = filepath.split("/")[-1] if "/" in filepath else filepath
     result = {}
