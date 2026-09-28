@@ -946,9 +946,19 @@ def _register_imported_classes(
         if resolved.name in classes:
             continue
         if _dispatches_to_imported_kernel(resolved, module_tree):
-            _log.debug(
-                "%s dispatches to an imported kernel; keeping it a leaf", resolved.name
-            )
+            # Not registered -- opening it would replace working wiring with an
+            # empty frame. But say what it IS, on the attribute that builds it, so
+            # it renders as the GPU kernel it is instead of an unknown module.
+            # ``kernel:`` is the marker the graph classifier already reads; this
+            # just supplies it for a third-party kernel the same way TraceLens
+            # supplies it for the ones it synthesises itself.
+            for owner in classes.values():
+                for attr, assigned in owner.init_assignments.items():
+                    if str(assigned).strip() != name:
+                        continue
+                    existing = owner.init_details.setdefault(attr, [])
+                    if not any(line.lower().startswith("kernel:") for line in existing):
+                        existing.append(f"kernel: {resolved.name}")
             continue
         classes[resolved.name] = resolved
 
