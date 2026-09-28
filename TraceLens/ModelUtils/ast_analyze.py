@@ -319,7 +319,32 @@ def _absolute_import_bindings(tree: ast.AST, current_module: str) -> dict[str, s
     bindings: dict[str, str] = {}
     if not isinstance(tree, ast.Module):
         return bindings
-    for stmt in tree.body:
+
+    def _module_level(body: list[ast.stmt]) -> list[ast.stmt]:
+        """Module-level statements, seeing inside ``try``/``if`` wrappers.
+
+        An optional dependency is conventionally imported under ``try: ... except
+        ImportError:`` (or behind an ``if is_x_available():``), which is exactly
+        how a modeling file pulls in its kernel library. Reading only the bare
+        ``tree.body`` misses those, so the symbols they bind look unresolvable and
+        the classes they name never get parsed. Function bodies are NOT descended
+        into: a deferred import inside a forward is a different question.
+        """
+        flattened: list[ast.stmt] = []
+        for stmt in body:
+            flattened.append(stmt)
+            if isinstance(stmt, ast.Try):
+                flattened.extend(_module_level(stmt.body))
+                for handler in stmt.handlers:
+                    flattened.extend(_module_level(handler.body))
+                flattened.extend(_module_level(stmt.orelse))
+                flattened.extend(_module_level(stmt.finalbody))
+            elif isinstance(stmt, ast.If):
+                flattened.extend(_module_level(stmt.body))
+                flattened.extend(_module_level(stmt.orelse))
+        return flattened
+
+    for stmt in _module_level(tree.body):
         if isinstance(stmt, ast.ImportFrom):
             if stmt.level:
                 base = parts[: -stmt.level] if len(parts) >= stmt.level else []
@@ -4837,13 +4862,26 @@ class _ForwardOperationExtractor:
             callee_param_names = (
                 self._class_method_param_names(method_name)
                 if submodule_call and method_name is not None
-                else None
+                else self._free_function_param_names(node)
             )
             for idx, arg in enumerate(node.args):
                 # A host-scalar positional (``key_states.shape[2]``) is an int size
                 # read, not a tensor operand: it must contribute no producer, or the
                 # shape's base tensor is fabricated as a data dependency / @input.
                 if self._is_host_scalar_expr(arg):
+                    positional_producers.append([])
+                    continue
+                # The same reserved type/placement argument the keyword path skips,
+                # passed POSITIONALLY: ``prepare_cu_seqlens_from_lens(lens, dtype)``
+                # binds its second argument to a ``dtype`` parameter, which carries a
+                # ``torch.dtype`` and never tensor data. Wiring it would put a second
+                # operand on the single-operand ``cumsum``/``pad`` inside that callee.
+                bound_param = None
+                if callee_param_names is not None and idx >= start:
+                    offset = idx - start
+                    if offset < len(callee_param_names):
+                        bound_param = callee_param_names[offset]
+                if bound_param in _NON_TENSOR_OP_KWARGS:
                     positional_producers.append([])
                     continue
                 producers, arg_external = _collect_call_arg_producers(arg)

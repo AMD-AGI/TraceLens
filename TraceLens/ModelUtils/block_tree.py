@@ -1115,6 +1115,54 @@ def _operation_runs_on_host(operation: ForwardOperation) -> bool:
     return False
 
 
+def _ops_feeding_only_discarded_slots(
+    method_ops: list[Any],
+    output_names: list[str] | None,
+    fn_return_order: list[str],
+    fn_return_slots: dict[str, str],
+) -> set[str]:
+    """Ops that exist only to build a return value the caller throws away.
+
+    ``indices, cu_seqlens, _ = get_unpad_data(mask)`` discards the third slot, so
+    the ``max()`` that computes it has no consumer anywhere -- it is not a broken
+    edge to repair but real code whose result the model genuinely drops. Walk the
+    frame's own predecessor graph back from the discarded slots and from the kept
+    ones, and return the ops reachable ONLY from the discarded side; anything a
+    surviving slot also needs is kept.
+
+    Only a discarded SUFFIX is honoured, so the kept slots keep their ordinals and
+    no consumer is re-indexed.
+    """
+    if not method_ops or not output_names or not fn_return_order:
+        return set()
+    trailing = 0
+    for name in reversed(output_names):
+        if name != "_":
+            break
+        trailing += 1
+    if not trailing or trailing >= len(output_names):
+        return set()
+    if len(output_names) != len(fn_return_order):
+        return set()
+    discarded = fn_return_order[len(fn_return_order) - trailing :]
+    kept = fn_return_order[: len(fn_return_order) - trailing]
+
+    by_attr = {op.attr_name: op for op in method_ops}
+
+    def _upstream(names: list[str]) -> set[str]:
+        seen: set[str] = set()
+        stack = [fn_return_slots.get(name) for name in names]
+        while stack:
+            attr = stack.pop()
+            if not attr or attr in seen or attr not in by_attr:
+                continue
+            seen.add(attr)
+            stack.extend(by_attr[attr].predecessors)
+        return seen
+
+    return _upstream(discarded) - _upstream(kept)
+
+
 def _expanded_free_function_node(
     call_attr: str,
     cls: ClassStructure,
@@ -1153,6 +1201,15 @@ def _expanded_free_function_node(
         if fn_primary_return and fn_return_slots
         else None
     )
+    # Drop the ops that only feed a return slot the call site discards, before
+    # anything downstream can treat their output as an unconsumed value.
+    if method_ops:
+        _discarded = _ops_feeding_only_discarded_slots(
+            method_ops, output_names, fn_return_order, fn_return_slots
+        )
+        if _discarded:
+            method_ops = [op for op in method_ops if op.attr_name not in _discarded]
+            output_names = [name for name in output_names if name != "_"]
     # A helper whose body reduces to a *single* traced op (``index_first_axis``:
     # ``return x[indices]`` -> one ``Index select``) is inlined at the call site:
     # the call's own leaf carries that op's real label, class, and details instead
