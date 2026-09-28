@@ -37,8 +37,6 @@ _MODELING_CLASS_PATTERNS: tuple[str, ...] = (
     r"(?i)AttentionOp",
     r"(?i)ActivationOp",
     r"(?i)si[tl]u_?and_?mul",
-    r"(?i)Split",
-    r"(?i)Multiply",
 )
 
 # Submodule attribute names observed in modeling forwards (conv paths, etc.).
