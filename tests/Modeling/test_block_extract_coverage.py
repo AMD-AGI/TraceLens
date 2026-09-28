@@ -22,7 +22,6 @@ from TraceLens.ModelUtils.ast_analyze import ClassStructure, SideInputSpec
 from TraceLens.ModelUtils.basic_ops import (
     BasicOpFilter,
     introspect_is_modeling_operation,
-    is_fused_silu_mul_class,
     keep_detail_graph_node,
     resolve_is_basic,
     show_in_detail_graph,
@@ -200,8 +199,6 @@ def test_basic_op_resolution_and_detail_visibility():
     method = node("helper", "helper", details=["method `helper()`"])
     modeled = node("scan", "KernelOp", basic=False)
 
-    assert is_fused_silu_mul_class("FusedSiluAndMul")
-    assert not is_fused_silu_mul_class(None)
     assert resolve_is_basic("Linear", "proj", basic_filter, in_registry=True)
     assert not resolve_is_basic("KernelOp", "scan", basic_filter)
     assert show_in_detail_graph(linear, basic_only=True)
@@ -666,11 +663,13 @@ def test_kernel_and_fused_inline_frame_labels():
         basic=False,
         children=[node("stage", "KernelOp", basic=False)],
     )
+    # A frame holding several steps is named by the class that implements it;
+    # nothing about the class name itself selects that rule.
     fused = node(
         "act_fn",
         "SituAndMul",
         basic=False,
-        children=[node("activation")],
+        children=[node("activation"), node("mul")],
     )
     assert inline_block_frame_label(kernel) == "KDA pipeline"
     assert inline_block_frame_label(fused) == "SituAndMul"
@@ -929,7 +928,7 @@ def test_graph_segments_and_spine_labels():
         ),
         (
             node(
-                "split_gate_up",
+                "gate_up_split",
                 "Split",
                 basic=False,
                 label="Split",
@@ -952,6 +951,8 @@ def test_block_purpose_specialized_branches(candidate, expected):
 
 
 def test_block_purpose_skips_functional_details_and_formats_fused_ops():
+    # The fused module gets no hand-written description: what it does is read
+    # off its expanded steps, not guessed from its class name.
     fused = node(
         "act_fn",
         "SiluAndMul",
@@ -965,7 +966,7 @@ def test_block_purpose_skips_functional_details_and_formats_fused_ops():
         basic=False,
     )
 
-    assert block_purpose(fused) == "Silu(gate) × up branch"
+    assert block_purpose(fused) is None
     assert block_purpose(activation) == "Apply GELU to gate half"
     assert bt.wrapper_module_comment(node("embed_tokens", "Embedding")) is None
     assert bt.inline_wrapper_step_label(fused, activation, 0) == "GELU"

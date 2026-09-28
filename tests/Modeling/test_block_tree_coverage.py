@@ -133,11 +133,6 @@ def test_block_purpose_attention_merge_none():
     assert bt.block_purpose(plain) is None
 
 
-def test_block_purpose_fused_silu_stem():
-    fused = node("f", "SiTUAndMul", basic=False, details=["method `x()`"])
-    assert bt.block_purpose(fused) == "SiTU(gate) × up branch"
-
-
 def test_block_purpose_kernel_op_and_kernel_output_none():
     assert bt.block_purpose(node("k", "KernelOutput", basic=False)) is None
 
@@ -432,43 +427,12 @@ def test_gated_norm_activation_none_without_tag():
 # --------------------------------------------------------------------------- #
 # situ-and-mul / nested input source
 # --------------------------------------------------------------------------- #
-def test_situ_and_mul_block_node_adds_split_when_no_upstream():
-    built = bt._situ_and_mul_block_node(
-        attr_name="act_fn",
-        forward_order=2,
-        class_name="SiluAndMul",
-    )
-    labels = [c.label for c in built.children]
-    assert labels[0] == "Linear"  # split_gate_up inserted
-    assert "Silu" in labels
-    assert "×" in labels
-
-
-def test_situ_and_mul_block_node_skips_split_with_upstream_gate_up():
-    prior = [
-        node("gate_proj", "Linear"),
-        node("up_proj", "Linear"),
-    ]
-    built = bt._situ_and_mul_block_node(
-        attr_name="act_fn",
-        forward_order=2,
-        class_name="SiluAndMul",
-        prior_steps=prior,
-    )
-    labels = [c.label for c in built.children]
-    assert labels[0] != "Linear" or "×" in labels
-    assert not any(c.attr_name == "split_gate_up" for c in built.children)
-
-
 def test_nested_input_source_branches():
     parent_moe = node("moe", "SparseMoe", role="moe", basic=False)
     child_ffn = node("mlp", "MLP", role="ffn", basic=False)
     assert "Linear in" in bt._nested_input_source(parent_moe, child_ffn)
 
     parent = node("p", "Parent", basic=False)
-    fused = node("act", "SiluAndMul", basic=False)
-    assert "gate_up in" in bt._nested_input_source(parent, fused)
-
     labeled = node("c", "C", basic=False, input_label="residual")
     assert "residual in" in bt._nested_input_source(parent, labeled)
 
@@ -523,38 +487,6 @@ def test_parallel_side_port_label_uses_first_step():
 def test_forward_side_combine_producers_empty_without_chains():
     n = node("n", "N", basic=False, children=[node("a")])
     assert bt._forward_side_combine_producers(n) == set()
-
-
-def test_situ_gated_mlp_parts_none_cases():
-    assert bt._situ_gated_mlp_parts(node("x", "X")) is None
-    # act_fn present but not fused
-    act = node("act_fn", "NotFused", basic=False)
-    n = node("n", "N", basic=False, children=[act])
-    assert bt._situ_gated_mlp_parts(n) is None
-
-
-def test_situ_gated_mlp_parts_missing_situ():
-    act = node("act_fn", "SiluAndMul", basic=False, children=[node("plain", "Plain")])
-    gate = node("gate_proj", "Linear")
-    up = node("up_proj", "Linear")
-    down = node("down_proj", "Linear")
-    n = node("n", "N", basic=False, children=[act, gate, up, down])
-    assert bt._situ_gated_mlp_parts(n) is None
-
-
-def test_situ_gated_mlp_parts_success_and_segments():
-    situ = node("s", "SiluActivation", basic=False)
-    act = node("act_fn", "SiluAndMul", basic=False, children=[situ])
-    gate = node("gate_proj", "Linear")
-    up = node("up_proj", "Linear")
-    down = node("down_proj", "Linear")
-    n = node("n", "N", basic=False, children=[act, gate, up, down])
-    parts = bt._situ_gated_mlp_parts(n)
-    assert parts is not None
-    assert bt.is_situ_gated_mlp(n)
-    segments = bt._situ_gated_mlp_segments(n)
-    assert isinstance(segments[-1], CombineSegment)
-    assert bt._situ_gated_mlp_segments(node("plain", "Plain")) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -749,41 +681,6 @@ def _all_descendants(root: BlockNode) -> list[BlockNode]:
         out.append(n)
         stack.extend(n.children)
     return out
-
-
-def test_is_expandable_registered_class_structural():
-    # Keys purely on registry membership + a parseable forward (op list OR
-    # submodule-call list) -- never a class-name allowlist.
-    with_calls = structure("WithCalls", calls=["x"])
-    with_ops = structure("WithOps")
-    with_ops.forward_operations["@op_l1_c0_tanh"] = ForwardOperation(
-        attr_name="@op_l1_c0_tanh", label="Tanh", class_name="Tanh"
-    )
-    empty = structure("Empty")  # no forward_calls, no forward_operations
-    registry = {"WithCalls": with_calls, "WithOps": with_ops, "Empty": empty}
-    assert bt._is_expandable_registered_class(registry, "WithCalls") is True
-    assert bt._is_expandable_registered_class(registry, "WithOps") is True
-    assert bt._is_expandable_registered_class(registry, "Empty") is False
-    assert bt._is_expandable_registered_class(registry, "Missing") is False
-    assert bt._is_expandable_registered_class(registry, None) is False
-    assert bt._is_expandable_registered_class(registry, "") is False
-
-
-def test_build_block_node_unregistered_fused_activation_keeps_synthetic_leaf():
-    # A fused SiLU/mul activation whose source is NOT in the registry (an
-    # external kernel import such as ``SiluAndMul``) keeps the synthetic
-    # SiLU-and-multiply fallback leaf: a ``situ_activation`` + ``elementwise_mul``
-    # under a "Gated multiply" node.
-    parent = structure("Mlp", assignments={"act_fn": "SiluAndMul"}, calls=["act_fn"])
-    built = bt.build_block_node(
-        attr_name="mlp",
-        class_name="Mlp",
-        registry={"Mlp": parent},  # SiluAndMul deliberately absent
-        basic_ops=_basic(),
-    )
-    descendants = _all_descendants(built)
-    assert any(n.attr_name == "situ_activation" for n in descendants)
-    assert any(n.attr_name == "elementwise_mul" for n in descendants)
 
 
 def test_build_block_node_registered_fused_activation_expands_no_synthetic_leaf():
@@ -989,7 +886,11 @@ def test_kernel_and_fused_inline_frame_labels_ported():
         basic=False,
         children=[node("stage", "KernelOp", basic=False)],
     )
-    fused = node("act_fn", "SituAndMul", basic=False, children=[node("activation")])
+    # A frame holding several steps is named by the class that implements it;
+    # nothing about the class name itself selects that rule.
+    fused = node(
+        "act_fn", "SituAndMul", basic=False, children=[node("activation"), node("mul")]
+    )
     assert inline_block_frame_label(kernel) == "KDA pipeline"
     assert inline_block_frame_label(fused) == "SituAndMul"
     assert inline_composite_steps(kernel) == ([kernel.children[0]], kernel)
@@ -1201,10 +1102,12 @@ def test_block_purpose_specialized_branches(candidate, expected):
 
 
 def test_block_purpose_skips_functional_details_and_formats_fused_ops():
+    # The fused module gets no hand-written description: what it does is read
+    # off its expanded steps, not guessed from its class name.
     fused = node("act_fn", "SiluAndMul", basic=False, details=["F.silu(...)"])
     activation = node("activation", "ActivationOp", label="GELU", basic=False)
 
-    assert block_purpose(fused) == "Silu(gate) × up branch"
+    assert block_purpose(fused) is None
     assert block_purpose(activation) == "Apply GELU to gate half"
     assert bt.wrapper_module_comment(node("embed_tokens", "Embedding")) is None
     assert bt.inline_wrapper_step_label(fused, activation, 0) == "GELU"
@@ -1696,19 +1599,6 @@ def test_forward_side_combine_producers_intermediate_and_missing():
     assert "prod" in result
 
 
-def test_situ_gated_mlp_collect_segments_no_merge():
-    situ = node("s", "SiluActivation", basic=False)
-    act = node("act_fn", "SiluAndMul", basic=False, children=[situ])
-    n = node(
-        "n",
-        "N",
-        basic=False,
-        children=[act, node("gate_proj"), node("up_proj"), node("down_proj")],
-    )
-    segments = bt.collect_computation_segments(n)
-    assert isinstance(segments[-1], CombineSegment)
-
-
 def test_collect_segments_post_merge_side_skip():
     q = node("q_proj")
     k = node("k_proj")
@@ -2081,14 +1971,6 @@ def test_forward_side_combine_producers_producer_not_seq():
     }
     result = bt._forward_side_combine_producers(parent)
     assert "prod" not in result
-
-
-def test_situ_gated_mlp_parts_missing_projection():
-    situ = node("s", "SiluActivation", basic=False)
-    act = node("act_fn", "SiluAndMul", basic=False, children=[situ])
-    # no gate_proj/up_proj/down_proj -> returns None at gate/up/down check
-    n = node("n", "N", basic=False, children=[act])
-    assert bt._situ_gated_mlp_parts(n) is None
 
 
 def test_build_block_node_infer_init_with_forward_operations():

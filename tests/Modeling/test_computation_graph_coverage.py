@@ -17,7 +17,6 @@ import pytest
 
 from TraceLens.ModelUtils import ast_analyze as aa
 from TraceLens.ModelUtils import computation_graph as cg
-from TraceLens.ModelUtils import block_tree as bt
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.block_tree import (
     BlockNode,
@@ -1014,56 +1013,6 @@ def test_build_basic_root_no_input():
     assert graph.output_node_index is None
 
 
-def test_build_situ_gated_root(monkeypatch):
-    gate = _node("gate")
-    up = _node("up")
-    act = _node("act", class_name="Activation")
-    situ = _node("situ", class_name="SituActivation")
-    down = _node("down")
-    root = _node("root", class_name="SituAndMul", children=[gate, up, down])
-    monkeypatch.setattr(cg, "is_situ_gated_mlp", lambda node: node is root)
-    monkeypatch.setattr(
-        bt, "_situ_gated_mlp_parts", lambda _n: (gate, up, act, situ, down)
-    )
-    graph = cg.build_computation_graph(root)
-    assert "×" in [s.label for s in graph.nodes]
-
-
-def test_add_situ_gated_mlp_chain_none(monkeypatch):
-    monkeypatch.setattr(bt, "_situ_gated_mlp_parts", lambda _n: None)
-    graph = cg.ComputationGraph()
-    indices, tail = cg._add_situ_gated_mlp_chain(
-        graph, _node("x"), key_prefix="g", last_index=3
-    )
-    assert indices == []
-    assert tail == 3
-
-
-def test_add_situ_gated_mlp_chain_dashed(monkeypatch):
-    gate = _node("gate")
-    up = _node("up")
-    act = _node("act", class_name="Activation")
-    situ = _node("situ", class_name="SituActivation")
-    down = _node("down")
-    monkeypatch.setattr(
-        bt, "_situ_gated_mlp_parts", lambda _n: (gate, up, act, situ, down)
-    )
-    graph = cg.ComputationGraph()
-    input_index = cg._add_node(
-        graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT
-    )
-    indices, tail = cg._add_situ_gated_mlp_chain(
-        graph,
-        _node("root"),
-        key_prefix="g",
-        input_index=input_index,
-        branch_from_input_dashed=True,
-        create_outer_frame=True,
-    )
-    assert len(indices) == 5
-    assert graph.nodes[tail].block is down
-
-
 # --------------------------------------------------------------------------- #
 # build_computation_graph: segment-driven via monkeypatch
 # --------------------------------------------------------------------------- #
@@ -1269,7 +1218,6 @@ def test_build_residual_wrapper_and_plain(monkeypatch):
         return [step], None
 
     monkeypatch.setattr(cg, "inline_composite_steps", expand)
-    monkeypatch.setattr(cg, "is_situ_gated_mlp", lambda n: False)
     monkeypatch.setattr(
         cg,
         "flatten_computation_segments",
@@ -1283,7 +1231,6 @@ def test_build_residual_wrapper_and_plain(monkeypatch):
 def test_build_residual_plain_module(monkeypatch):
     module = _node("mlp", class_name="MLP")
     main = _node("main")
-    monkeypatch.setattr(cg, "is_situ_gated_mlp", lambda n: False)
     monkeypatch.setattr(
         cg,
         "flatten_computation_segments",
@@ -1291,27 +1238,6 @@ def test_build_residual_plain_module(monkeypatch):
     )
     graph = cg.build_computation_graph(_node("root", children=[main, module]))
     assert "Add" in [s.label for s in graph.nodes]
-
-
-def test_build_residual_situ_gated(monkeypatch):
-    gate = _node("gate")
-    up = _node("up")
-    act = _node("act", class_name="Activation")
-    situ = _node("situ", class_name="SituActivation")
-    down = _node("down")
-    module = _node("mlp", class_name="SituAndMul", children=[gate, up, down])
-    main = _node("main")
-    monkeypatch.setattr(cg, "is_situ_gated_mlp", lambda n: n is module)
-    monkeypatch.setattr(
-        bt, "_situ_gated_mlp_parts", lambda _n: (gate, up, act, situ, down)
-    )
-    monkeypatch.setattr(
-        cg,
-        "flatten_computation_segments",
-        lambda _r: [SeqSegment(main), ResidualAddSegment(module, [])],
-    )
-    graph = cg.build_computation_graph(_node("root", children=[main, module]))
-    assert "×" in [s.label for s in graph.nodes]
 
 
 def test_build_sidefeed_wrapper_consumer(monkeypatch):
@@ -1376,43 +1302,6 @@ def test_build_sidefeed_plain_consumer(monkeypatch):
     )
     graph = cg.build_computation_graph(_node("root", children=[consumer]))
     assert any(s.block is consumer for s in graph.nodes)
-
-
-def test_build_sidefeed_situ_gated_consumer(monkeypatch):
-    # A fused SiLU/SiTU-and-multiply MLP handed to a side-feed consumer (a MoE
-    # block's ``shared_experts``) is a gate/up -> Situ x up -> down pipeline, not a
-    # straight line, so ``inline_composite_steps`` leaves it opaque. The SideFeed
-    # path must expand it into its visible parts (like the residual-branch/root
-    # paths), keyed on the structural ``is_situ_gated_mlp`` property.
-    gate = _node("gate")
-    up = _node("up")
-    act = _node("act", class_name="Activation")
-    situ = _node("situ", class_name="SituActivation")
-    down = _node("down")
-    consumer = _node(
-        "shared_experts", class_name="SituAndMul", children=[gate, up, down]
-    )
-    side = aa.SideInputSpec("x", "x", [], "forward_input")
-    monkeypatch.setattr(cg, "is_situ_gated_mlp", lambda n: n is consumer)
-    monkeypatch.setattr(
-        bt, "_situ_gated_mlp_parts", lambda _n: (gate, up, act, situ, down)
-    )
-    # If the fix ever regresses, ``inline_composite_steps`` returns the consumer
-    # unexpanded and the ``×`` tile is absent.
-    monkeypatch.setattr(
-        cg, "inline_composite_steps", lambda step, basic_ops=None: ([step], None)
-    )
-    monkeypatch.setattr(
-        cg,
-        "flatten_computation_segments",
-        lambda _r: [SideFeedSegment(consumer, [side])],
-    )
-    graph = cg.build_computation_graph(_node("root", children=[consumer]))
-    labels = [s.label for s in graph.nodes]
-    assert "×" in labels
-    # The opaque consumer tile is gone: it expanded into its down projection tail.
-    assert not any(s.block is consumer for s in graph.nodes)
-    assert any(s.block is down for s in graph.nodes)
 
 
 def test_build_combine_wrapper_side_and_after(monkeypatch):

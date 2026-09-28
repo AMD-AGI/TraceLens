@@ -51,7 +51,6 @@ from TraceLens.ModelUtils.ast_analyze import (
 from TraceLens.ModelUtils.basic_ops import (
     BasicOpFilter,
     introspect_is_modeling_operation,
-    is_fused_silu_mul_class,
     resolve_is_basic,
 )
 from TraceLens.ModelUtils.blocks import (
@@ -174,16 +173,12 @@ def block_purpose(node: BlockNode) -> str | None:
         return node.details[0]
     if class_name in {"KernelOp", "KernelOutput"}:
         return None
-    if is_fused_silu_mul_class(class_name):
-        match = re.match(r"(?i)si[tl]u", class_name)
-        stem = class_name[: match.end()] if match else "SiLU"
-        return f"{stem}(gate) × up branch"
     if role == "norm" and gated_norm_activation(node):
         return "Normalize, then multiply by gate"
-    if class_name == "Split" or node.attr_name == "split_gate_up":
+    if class_name == "Split":
         return "Split fused gate/up projection"
-    if class_name in {"ActivationOp", "SituActivation"}:
-        if class_name == "ActivationOp" and node.attr_name.endswith("_activation"):
+    if class_name == "ActivationOp":
+        if node.attr_name.endswith("_activation"):
             return None
         return f"Apply {node.label} to gate half"
     if class_name == "Multiply" or node.label in {"×", "Elementwise ×"}:
@@ -457,8 +452,8 @@ def is_straight_line_module(node: BlockNode) -> bool:
 
 
 def is_linear_pipeline_block(node: BlockNode) -> bool:
-    """True for straight-line composites and Situ-gated MLPs that expand inline."""
-    return is_straight_line_module(node) or is_situ_gated_mlp(node)
+    """True for straight-line composites that expand inline."""
+    return is_straight_line_module(node)
 
 
 def is_inline_expandable_module(node: BlockNode) -> bool:
@@ -579,8 +574,6 @@ def inline_block_frame_label(block: BlockNode) -> str:
         return kernel_label
     if block.class_name == "KernelOp" and block.children:
         return block.label
-    if is_fused_silu_mul_class(block.class_name):
-        return block.class_name
     # A traced free-function frame carries the raw synthetic call attr as both its
     # class_name and attr_name (``@positional_l1615_apply_rotary_pos_emb_vision``).
     # Name the frame after the source function so it reads like any module call
@@ -1996,88 +1989,11 @@ def gated_norm_activation(node: BlockNode) -> str | None:
     return None
 
 
-def _gate_up_linear_attr_names() -> frozenset[str]:
-    return frozenset({"gate_proj", "up_proj", "w1", "w3"})
-
-
-def _has_upstream_gate_up_linears(prior_steps: list[BlockNode]) -> bool:
-    """True when separate gate/up projection linears already precede act_fn."""
-    found = {
-        step.attr_name
-        for step in prior_steps
-        if displays_as_linear(step.attr_name, step.class_name)
-        and step.attr_name in _gate_up_linear_attr_names()
-    }
-    return {"gate_proj", "up_proj"}.issubset(found) or {"w1", "w3"}.issubset(found)
-
-
-def _situ_and_mul_block_node(
-    *,
-    attr_name: str,
-    forward_order: int | None,
-    details: list[str] | None = None,
-    role: str = "ffn",
-    prior_steps: list[BlockNode] | None = None,
-    class_name: str = "SituAndMul",
-) -> BlockNode:
-    """Expand a fused SiLU/SiTU-and-multiply module into a small internal pipeline."""
-    prior_steps = list(prior_steps or [])
-    children: list[BlockNode] = []
-    step_order = 0
-    if not _has_upstream_gate_up_linears(prior_steps):
-        children.append(
-            _leaf_node(
-                attr_name="split_gate_up",
-                class_name="Linear",
-                forward_order=step_order,
-                label="Linear",
-                details=[],
-            )
-        )
-        step_order += 1
-    match = re.match(r"(?i)si[tl]u", class_name)
-    stem = class_name[: match.end()] if match else "SiLU"
-    purpose = f"{stem}(gate) × up branch"
-    children.extend(
-        [
-            _leaf_node(
-                attr_name="situ_activation",
-                class_name=f"{stem}Activation",
-                forward_order=step_order,
-                label=stem,
-                details=["activation on gate half"],
-                basic=False,
-            ),
-            _leaf_node(
-                attr_name="elementwise_mul",
-                class_name="Multiply",
-                forward_order=step_order + 1,
-                label="×",
-                details=["gate × up"],
-                basic=False,
-            ),
-        ]
-    )
-    return BlockNode(
-        attr_name=attr_name,
-        class_name=class_name,
-        role=role,
-        label="Gated multiply",
-        forward_order=forward_order,
-        details=list(details or [purpose]),
-        is_basic=False,
-        input_label="gate_up",
-        children=children,
-    )
-
-
 def _nested_input_source(parent: BlockNode, child: BlockNode) -> str:
     """Describe where a nested block's primary input comes from."""
     parent_cls = parent.class_name or parent.label
     if child.role == "ffn" and parent.role == "moe":
         return f"Linear in {parent_cls}"
-    if is_fused_silu_mul_class(child.class_name):
-        return f"gate_up in {parent_cls}"
     if child.input_label and child.input_label not in {"hidden_states", "x"}:
         return f"{child.input_label} in {parent_cls}"
     return f"{parent_cls}"
@@ -2210,58 +2126,6 @@ def _forward_side_combine_producers(node: BlockNode) -> set[str]:
     return producers
 
 
-def _situ_gated_mlp_parts(
-    node: BlockNode,
-) -> tuple[BlockNode, BlockNode, BlockNode, BlockNode, BlockNode] | None:
-    """Return (gate, up, act_fn, situ, down) when ``node`` is a Situ-gated MLP."""
-    if not node.children:
-        return None
-    by_attr = {child.attr_name: child for child in node.children}
-    act_fn = by_attr.get("act_fn")
-    if act_fn is None or not is_fused_silu_mul_class(act_fn.class_name):
-        return None
-    gate = by_attr.get("gate_proj") or by_attr.get("w1")
-    up = by_attr.get("up_proj") or by_attr.get("w3")
-    down = by_attr.get("down_proj") or by_attr.get("w2")
-    if gate is None or up is None or down is None:
-        return None
-    situ = next(
-        (
-            child
-            for child in act_fn.children
-            if re.search(r"(?i)si[tl]uactivation", child.class_name)
-        ),
-        None,
-    )
-    if situ is None:
-        return None
-    return gate, up, act_fn, situ, down
-
-
-def is_situ_gated_mlp(node: BlockNode) -> bool:
-    """True when a block is a gate/up projection pair feeding a fused SiLU-and-multiply."""
-    return _situ_gated_mlp_parts(node) is not None
-
-
-def _situ_gated_mlp_segments(node: BlockNode) -> list[ComputationSegment] | None:
-    """Model Situ-gated MLPs as gate → Situ combined with a parallel up branch."""
-    parts = _situ_gated_mlp_parts(node)
-    if parts is None:
-        return None
-    gate, up, _act_fn, situ, down = parts
-    return [
-        SeqSegment(step=gate),
-        SeqSegment(step=situ),
-        CombineSegment(
-            side=up,
-            after=[down],
-            side_port_label="up",
-            side_port_style="inline",
-            op="×",
-        ),
-    ]
-
-
 def _is_attention_merge_node(child: BlockNode) -> bool:
     if child.attr_name == SYNTHETIC_ATTENTION:
         return True
@@ -2296,9 +2160,6 @@ def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
         None,
     )
     if merge_idx is None:
-        situ_segments = _situ_gated_mlp_segments(node)
-        if situ_segments is not None:
-            return situ_segments
         side_chain_attrs = _side_feed_chain_attrs(node)
         side_combine_producers = _forward_side_combine_producers(node)
         return [
@@ -2501,26 +2362,6 @@ def collect_nested_diagrams(
 def flatten_computation_segments(node: BlockNode) -> list[ComputationSegment]:
     """Prepare top-level segments for graph export, keeping composite blocks intact."""
     return collect_computation_segments(node)
-
-
-def _is_expandable_registered_class(
-    registry: dict[str, ClassStructure], class_name: str | None
-) -> bool:
-    """True when a class is registered with a parseable forward we can expand.
-
-    Keys on structural facts -- registry membership plus an extracted forward
-    op list / submodule-call list -- never a class-name allowlist. A fused
-    activation whose source lives in the modeling file (e.g. Kimi
-    ``SituAndMul``) is in the registry with populated ``forward_operations``, so
-    it expands into its real primitive ops through the normal recursion path. An
-    unresolved *external* fused activation (``SiluAndMul`` imported from a kernel
-    package) is absent from the registry, so callers keep its synthetic
-    SiLU-and-multiply leaf instead.
-    """
-    if not class_name:
-        return False
-    cls = registry.get(class_name)
-    return cls is not None and bool(cls.forward_operations or cls.forward_calls)
 
 
 def _condition_requires_presence(expr: str, attr: str) -> bool:
@@ -3120,26 +2961,6 @@ def build_block_node(
                     class_name=base_attr,
                     forward_order=child_order,
                     details=child_details or [f"method `{base_attr}()`"],
-                )
-            )
-            continue
-
-        if is_fused_silu_mul_class(child_class) and not _is_expandable_registered_class(
-            registry, child_class
-        ):
-            # Unresolved external fused activation (its source is not in the
-            # registry, e.g. ``SiluAndMul`` imported from a kernel package):
-            # emit the synthetic SiLU-and-multiply leaf. A registered fused
-            # activation (Kimi ``SituAndMul``) falls through to the recursion
-            # path below and expands into its real primitive ops.
-            child_nodes.append(
-                _situ_and_mul_block_node(
-                    attr_name=call_attr,
-                    forward_order=child_order,
-                    details=child_details,
-                    role=role,
-                    prior_steps=child_nodes,
-                    class_name=child_class,
                 )
             )
             continue

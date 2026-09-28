@@ -933,36 +933,6 @@ def test_fanout_residual_gated_and_kernel_graph_branches(monkeypatch):
     assert len([link for link in graph.links if link[1] == merge_index]) == 2
     assert "Add" in {spec.label for spec in graph.nodes}
 
-    gate = _node("gate")
-    up = _node("up")
-    activation = _node("act", class_name="Activation", children=[_node("inner")])
-    situ = _node("situ", class_name="SituActivation")
-    down = _node("down")
-    gated = _node("gated", class_name="SituAndMul", children=[gate, up, down])
-    import TraceLens.ModelUtils.block_tree as block_tree
-
-    original_parts = block_tree._situ_gated_mlp_parts
-    monkeypatch.setattr(
-        block_tree,
-        "_situ_gated_mlp_parts",
-        lambda _node: (gate, up, activation, situ, down),
-    )
-    gated_graph = cg.ComputationGraph()
-    input_index = cg._add_node(
-        gated_graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT
-    )
-    indices, tail = cg._add_situ_gated_mlp_chain(
-        gated_graph,
-        gated,
-        key_prefix="gated",
-        input_index=input_index,
-        create_outer_frame=True,
-    )
-    assert len(indices) == 5
-    assert gated_graph.nodes[tail].block is down
-    multiply = next(i for i, spec in enumerate(gated_graph.nodes) if spec.label == "×")
-    assert len([link for link in gated_graph.links if link[1] == multiply]) == 2
-
     pipeline = _node(
         "pipeline",
         class_name="KernelPipeline",
@@ -988,7 +958,6 @@ def test_fanout_residual_gated_and_kernel_graph_branches(monkeypatch):
     )
     assert fallback and fallback_tail is not None
 
-    monkeypatch.setattr(block_tree, "_situ_gated_mlp_parts", original_parts)
     norm = _node(
         "norm",
         class_name="FusedRMSNormGated",

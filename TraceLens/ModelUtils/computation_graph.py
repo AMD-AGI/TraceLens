@@ -29,7 +29,6 @@ from TraceLens.ModelUtils.block_tree import (
     inline_composite_steps,
     inline_wrapper_step_label,
     is_kernel_pipeline_tree,
-    is_situ_gated_mlp,
     is_straight_line_module,
     is_transparent_inline_expansion,
     is_transparent_loop_wrapper,
@@ -3139,108 +3138,6 @@ def _add_linear_pipeline_chain(
     return indices, indices[-1]
 
 
-def _add_situ_gated_mlp_chain(
-    graph: ComputationGraph,
-    node: BlockNode,
-    *,
-    key_prefix: str,
-    attr_last_index: dict[str, int] | None = None,
-    input_index: int | None = None,
-    last_index: int | None = None,
-    branch_from_input_dashed: bool = False,
-    port_label: str | None = None,
-    port_style: PortStyle | None = None,
-    create_outer_frame: bool = False,
-) -> tuple[list[int], int | None]:
-    """Expand gate/up → Situ × up → down with both multiply inputs visible."""
-    from TraceLens.ModelUtils.block_tree import _situ_gated_mlp_parts
-
-    parts = _situ_gated_mlp_parts(node)
-    if parts is None:
-        return [], last_index
-    gate, up, act_fn, situ, down = parts
-
-    outer_frame = _start_inline_frame(graph, node) if create_outer_frame else None
-    indices: list[int] = []
-
-    def _track(node_block: BlockNode, index: int | None) -> None:
-        if attr_last_index is not None and index is not None:
-            _track_attr_index(attr_last_index, node_block.attr_name, index)
-
-    def _append_outer(index: int) -> None:
-        if outer_frame is not None:
-            _append_inline_frame_node(outer_frame, index)
-
-    gate_index = _add_node(
-        graph,
-        key=f"{key_prefix}:gate_proj",
-        block=gate,
-        port_label=port_label,
-        port_style=port_style,
-    )
-    if branch_from_input_dashed and input_index is not None:
-        _link_forward_input(graph, input_index, gate_index)
-    else:
-        _append_step_link(
-            graph,
-            input_index=input_index,
-            last_index=last_index,
-            step_index=gate_index,
-            fork_from_input=last_index is None and input_index is not None,
-        )
-    _track(gate, gate_index)
-    _append_outer(gate_index)
-    indices.append(gate_index)
-
-    up_index = _add_node(
-        graph,
-        key=f"{key_prefix}:up_proj",
-        block=up,
-        port_label="up",
-        port_style="inline",
-    )
-    if input_index is not None:
-        _link_forward_input(graph, input_index, up_index)
-    _track(up, up_index)
-    indices.append(up_index)
-
-    act_frame = _start_inline_frame(graph, act_fn)
-    situ_index = _add_node(
-        graph,
-        key=f"{key_prefix}:situ",
-        block=situ,
-    )
-    graph.links.append((gate_index, situ_index))
-    _append_inline_frame_node(act_frame, situ_index)
-    _track(situ, situ_index)
-    _append_outer(situ_index)
-    indices.append(situ_index)
-
-    mult_index = _add_node(
-        graph,
-        key=f"{key_prefix}:mul",
-        label="×",
-    )
-    graph.links.append((situ_index, mult_index))
-    graph.links.append((up_index, mult_index))
-    _append_inline_frame_node(act_frame, mult_index)
-    _track(act_fn, mult_index)
-    _append_outer(mult_index)
-    indices.append(mult_index)
-
-    down_index = _add_node(
-        graph,
-        key=f"{key_prefix}:down_proj",
-        block=down,
-    )
-    graph.links.append((mult_index, down_index))
-    _track(down, down_index)
-    _append_outer(down_index)
-    indices.append(down_index)
-
-    return indices, down_index
-
-
 def _resolve_kernel_second_operand_index(
     step: BlockNode,
     attr_last_index: dict[str, int] | None,
@@ -4425,20 +4322,6 @@ def build_computation_graph(
         last_index = step_index
         _track_attr_index(attr_last_index, step.attr_name, step_index)
 
-    if is_situ_gated_mlp(root):
-        _, last_index = _add_situ_gated_mlp_chain(
-            graph,
-            root,
-            key_prefix=root.attr_name,
-            attr_last_index=attr_last_index,
-            input_index=input_index,
-            last_index=last_index,
-            create_outer_frame=False,
-        )
-        graph.primary_output_index = last_index
-        add_forward_output(graph, root=root)
-        return graph
-
     for segment_index, segment in enumerate(segments):
         if isinstance(segment, TensorPortsSegment):
             tail = _add_tensor_ports_segment(
@@ -4637,59 +4520,44 @@ def build_computation_graph(
 
         if isinstance(segment, ResidualAddSegment):
             module = segment.module
-            if is_situ_gated_mlp(module):
-                _branch_indices, module_tail = _add_situ_gated_mlp_chain(
+            expanded_steps, wrapper = _maybe_inline(
+                module, basic_ops=basic_ops, inline_expansion=inline_expansion
+            )
+            if wrapper is not None:
+                _branch_indices, module_tail = _add_linear_pipeline_chain(
                     graph,
-                    module,
+                    expanded_steps,
+                    wrapper=wrapper,
                     key_prefix=f"residual_branch:{segment_index}:{module.attr_name}",
                     attr_last_index=attr_last_index,
                     input_index=input_index,
                     last_index=None,
                     branch_from_input_dashed=True,
-                    create_outer_frame=True,
+                    inline_expansion=inline_expansion,
+                )
+                if any(side.side_effect_call for side in segment.sides):
+                    graph.side_effect_frame_ids.add(wrapper.attr_name)
+                _track_attr_index(
+                    attr_last_index,
+                    wrapper.attr_name,
+                    module_tail,
+                    block=wrapper,
                 )
                 _track_attr_index(
                     attr_last_index, module.attr_name, module_tail, block=module
                 )
             else:
-                expanded_steps, wrapper = _maybe_inline(
-                    module, basic_ops=basic_ops, inline_expansion=inline_expansion
+                module_index = _add_node(
+                    graph,
+                    key=f"residual_branch:{segment_index}:{module.attr_name}",
+                    block=module,
                 )
-                if wrapper is not None:
-                    _branch_indices, module_tail = _add_linear_pipeline_chain(
-                        graph,
-                        expanded_steps,
-                        wrapper=wrapper,
-                        key_prefix=f"residual_branch:{segment_index}:{module.attr_name}",
-                        attr_last_index=attr_last_index,
-                        input_index=input_index,
-                        last_index=None,
-                        branch_from_input_dashed=True,
-                        inline_expansion=inline_expansion,
-                    )
-                    if any(side.side_effect_call for side in segment.sides):
-                        graph.side_effect_frame_ids.add(wrapper.attr_name)
-                    _track_attr_index(
-                        attr_last_index,
-                        wrapper.attr_name,
-                        module_tail,
-                        block=wrapper,
-                    )
-                    _track_attr_index(
-                        attr_last_index, module.attr_name, module_tail, block=module
-                    )
-                else:
-                    module_index = _add_node(
-                        graph,
-                        key=f"residual_branch:{segment_index}:{module.attr_name}",
-                        block=module,
-                    )
-                    if input_index is not None:
-                        _link_forward_input(graph, input_index, module_index)
-                    _track_attr_index(
-                        attr_last_index, module.attr_name, module_index, block=module
-                    )
-                    module_tail = module_index
+                if input_index is not None:
+                    _link_forward_input(graph, input_index, module_index)
+                _track_attr_index(
+                    attr_last_index, module.attr_name, module_index, block=module
+                )
+                module_tail = module_index
             combine_index = _add_node(
                 graph,
                 key=f"residual_add:{segment_index}",
@@ -4715,33 +4583,6 @@ def build_computation_graph(
                 if port_label:
                     graph.nodes[consumer_index].port_label = port_label
                     graph.nodes[consumer_index].port_style = "inline"
-            elif is_situ_gated_mlp(consumer) and inline_expansion:
-                # A fused SiLU/SiTU-and-multiply MLP handed to a side-feed consumer
-                # (e.g. a MoE block's ``shared_experts``) is a gate/up -> Situ x up
-                # -> down pipeline, not a straight line, so ``inline_composite_steps``
-                # leaves it opaque. Expand it into its visible parts exactly as the
-                # residual-branch and root paths do, wired from the consumer's
-                # resolved primary input.
-                primary_input = _resolve_primary_input(
-                    consumer.attr_name,
-                    root,
-                    attr_last_index,
-                    input_index,
-                    last_index,
-                )
-                chain_indices, chain_tail = _add_situ_gated_mlp_chain(
-                    graph,
-                    consumer,
-                    key_prefix=f"sidefeed:{segment_index}:{consumer.attr_name}",
-                    attr_last_index=attr_last_index,
-                    input_index=primary_input,
-                    last_index=None,
-                    port_label=port_label,
-                    port_style="inline" if port_label else None,
-                    create_outer_frame=True,
-                )
-                entry_index = chain_indices[0] if chain_indices else None
-                consumer_index = chain_tail
             else:
                 # A straight-line consumer expands into its own steps here too, so a
                 # side-fed module is not left as an opaque tile with nothing behind it.
