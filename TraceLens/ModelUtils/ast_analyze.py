@@ -320,6 +320,15 @@ def _absolute_import_bindings(tree: ast.AST, current_module: str) -> dict[str, s
     bindings: dict[str, str] = {}
     if not isinstance(tree, ast.Module):
         return bindings
+    # ``from . import x`` resolves differently depending on what the current
+    # module IS. Inside a package's ``__init__`` the current package is that
+    # module itself, so ``from .short_conv import X`` in ``fla.modules.conv``
+    # means ``fla.modules.conv.short_conv``; inside a plain module it is the
+    # parent package. Treating every file as a plain module walked one level too
+    # far up and silently lost the symbol.
+    origin = _module_origin(current_module)
+    if not (origin and Path(origin).name == "__init__.py"):
+        parts = parts[:-1]
 
     def _module_level(body: list[ast.stmt]) -> list[ast.stmt]:
         """Module-level statements, seeing inside ``try``/``if`` wrappers.
@@ -348,7 +357,8 @@ def _absolute_import_bindings(tree: ast.AST, current_module: str) -> dict[str, s
     for stmt in _module_level(tree.body):
         if isinstance(stmt, ast.ImportFrom):
             if stmt.level:
-                base = parts[: -stmt.level] if len(parts) >= stmt.level else []
+                drop = stmt.level - 1
+                base = parts[: len(parts) - drop] if len(parts) >= drop else []
                 module = ".".join(
                     base + (stmt.module.split(".") if stmt.module else [])
                 )

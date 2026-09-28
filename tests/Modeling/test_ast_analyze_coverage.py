@@ -709,3 +709,56 @@ def test_norm_with_no_readable_forward_falls_back_to_its_name():
 
     assert _label_for("norm", "CustomRMSNorm", "norm1", {}) == "RMSNorm"
     assert _label_for("norm", "Anonymous", "norm1", {}) == "Norm"
+
+
+# ---------------------------------------------------------------------------
+# Relative imports resolve against the right package
+# ---------------------------------------------------------------------------
+
+
+def test_relative_import_inside_a_package_init_resolves_to_that_package(
+    tmp_path, monkeypatch
+):
+    """``from .sub import X`` in ``pkg/__init__.py`` means ``pkg.sub``.
+
+    Treating a package ``__init__`` like a plain module walks one level too far
+    up (``pkg.sub`` becomes a sibling of ``pkg``), so the symbol is never found
+    and the class it names stays unparsed.
+    """
+    import ast as _ast
+    import sys as _sys
+
+    from TraceLens.ModelUtils.ast_analyze import _absolute_import_bindings
+
+    pkg = tmp_path / "demopkg" / "inner"
+    pkg.mkdir(parents=True)
+    (tmp_path / "demopkg" / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "__init__.py").write_text("from .leaf import Thing\n", encoding="utf-8")
+    (pkg / "leaf.py").write_text("class Thing:\n    pass\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    tree = _ast.parse((pkg / "__init__.py").read_text(encoding="utf-8"))
+    bindings = _absolute_import_bindings(tree, "demopkg.inner")
+    assert bindings["Thing"] == "demopkg.inner.leaf#Thing"
+    assert "demopkg.leaf" not in bindings["Thing"]
+    assert str(tmp_path) in _sys.path
+
+
+def test_relative_import_inside_a_plain_module_resolves_to_its_parent(
+    tmp_path, monkeypatch
+):
+    """``from .sib import Y`` in ``pkg/mod.py`` means ``pkg.sib`` -- unchanged."""
+    import ast as _ast
+
+    from TraceLens.ModelUtils.ast_analyze import _absolute_import_bindings
+
+    pkg = tmp_path / "demopkg2"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "mod.py").write_text("from .sib import Y\n", encoding="utf-8")
+    (pkg / "sib.py").write_text("class Y:\n    pass\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    tree = _ast.parse((pkg / "mod.py").read_text(encoding="utf-8"))
+    bindings = _absolute_import_bindings(tree, "demopkg2.mod")
+    assert bindings["Y"] == "demopkg2.sib#Y"
