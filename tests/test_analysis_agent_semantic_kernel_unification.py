@@ -17,14 +17,14 @@ sys.path.insert(0, SEM)
 import kernel_unification  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# _load / _dims_repr
+# load_json / _dims_repr
 # ---------------------------------------------------------------------------
 
 
 def test_load_reads_json(tmp_path):
     p = tmp_path / "doc.json"
     p.write_text(json.dumps({"a": 1, "b": [2, 3]}))
-    assert kernel_unification._load(str(p)) == {"a": 1, "b": [2, 3]}
+    assert kernel_unification.load_json(str(p)) == {"a": 1, "b": [2, 3]}
 
 
 def test_dims_repr_empty():
