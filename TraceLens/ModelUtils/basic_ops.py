@@ -27,17 +27,6 @@ COMMON_LEAF_PATTERNS: tuple[str, ...] = (
     r"(?i)^Parameter$",
 )
 
-# Class names produced by AST/block-tree expansion for modeled composite ops.
-_MODELING_CLASS_PATTERNS: tuple[str, ...] = (
-    r"(?i)OutputGate",
-    r"(?i)KernelPipeline",
-    r"(?i)AttentionMerge",
-    r"(?i)KernelOp",
-    r"(?i)KernelOutput",
-    r"(?i)AttentionOp",
-    r"(?i)ActivationOp",
-    r"(?i)si[tl]u_?and_?mul",
-)
 
 # Submodule attribute names observed in modeling forwards (conv paths, etc.).
 _MODELING_ATTR_PATTERNS: tuple[str, ...] = (
@@ -163,8 +152,6 @@ def introspect_is_modeling_operation(
         return True
     if attr_name.startswith("@"):
         return not _is_functional_synthetic_basic(attr_name)
-    if _matches_any(class_name, _MODELING_CLASS_PATTERNS):
-        return True
     if _matches_any(attr_name, _MODELING_ATTR_PATTERNS):
         return True
     if _matches_any(attr_name, _OUTPUT_GATE_ATTR_PATTERNS):

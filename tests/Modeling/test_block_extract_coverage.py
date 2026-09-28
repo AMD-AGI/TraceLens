@@ -174,7 +174,13 @@ def test_basic_op_filter_cli_and_patterns():
 @pytest.mark.parametrize(
     ("class_name", "attr_name", "details", "expected"),
     [
-        ("SituAndMul", "act", None, True),
+        # A fused activation is no longer a modeled op BY NAME. Whether it opens
+        # is decided by whether its source resolves: one whose forward is
+        # available expands into its real SiLU-and-multiply ops, and one that
+        # carries a recorded kernel detail is covered by the ``kernel:`` case
+        # below.
+        ("SituAndMul", "act", None, False),
+        ("SituAndMul", "act", ["kernel: silu_and_mul"], True),
         ("Anything", "@functional_relu", None, False),
         ("Anything", "@attention", None, True),
         ("Linear", "g_proj", None, False),
