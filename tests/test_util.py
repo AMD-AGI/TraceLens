@@ -725,6 +725,46 @@ def test_dataloader_load_json_gz(tmp_path):
     assert DataLoader.load_data(str(trace_path)) == payload
 
 
+@pytest.mark.parametrize("compressed", [False, True])
+def test_json_loading_does_not_import_jax_dependencies(
+    tmp_path, monkeypatch, compressed
+):
+    real_import = __import__
+
+    def reject_converter_import(name, *args, **kwargs):
+        if name.split(".", 1)[0] in {"xprof", "tensorboard_plugin_profile"}:
+            raise AssertionError("JSON loading must not import a JAX converter")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", reject_converter_import)
+    payload = {"traceEvents": [{"name": "kernel", "cat": "kernel"}]}
+    trace_path = tmp_path / ("trace.json.gz" if compressed else "trace.json")
+    if compressed:
+        with gzip.open(trace_path, "wt", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+    else:
+        trace_path.write_text(json.dumps(payload))
+
+    assert DataLoader.load_data(str(trace_path)) == payload
+
+
+@pytest.mark.parametrize("hlo_metadata", [False, True])
+def test_protobuf_loading_requires_jax_extra(monkeypatch, hlo_metadata):
+    real_import = __import__
+
+    def reject_converter_import(name, *args, **kwargs):
+        if name.split(".", 1)[0] in {"xprof", "tensorboard_plugin_profile"}:
+            raise ModuleNotFoundError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", reject_converter_import)
+    with pytest.raises(ImportError, match=r"TraceLens\[jax\]"):
+        if hlo_metadata:
+            JaxProfileProcessor.process_protobuf_file("trace.xplane.pb", "main")
+        else:
+            DataLoader.load_data("trace.xplane.pb")
+
+
 def test_dataloader_save_preprocessed_json(tmp_path):
     payload = {"events": [1, 2, 3]}
     trace_path = tmp_path / "trace.json"

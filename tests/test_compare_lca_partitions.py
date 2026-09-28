@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Fast, no-agent unit tests for agent_evals/Analysis/eval_utils/compare_lca_partitions.py.
+"""Fast, no-agent unit tests for TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_utils/compare_lca_partitions.py.
 
 Uses small synthetic diff_stats.csv fixtures (no traces, no LLM) to pin down
 the purity/strict-consistency metric semantics.
@@ -21,8 +21,12 @@ sys.path.insert(
     os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "..",
-        "agent_evals",
+        "TraceLens",
+        "Agent",
         "Analysis",
+        "skills",
+        "analysis-orchestrator",
+        "evals",
         "eval_utils",
     ),
 )

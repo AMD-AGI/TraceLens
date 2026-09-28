@@ -1,0 +1,87 @@
+--- a/python/sglang/srt/managers/scheduler_components/profiler_manager.py
++++ b/python/sglang/srt/managers/scheduler_components/profiler_manager.py
+@@ -16,6 +16,7 @@
+ 
+ import torch
+ 
++import sglang.srt.utils.kernel_shape_profiler as kernel_shape_profiler
+ from sglang.srt.environ import envs
+ from sglang.srt.managers.io_struct import ProfileReq, ProfileReqOutput, ProfileReqType
+ from sglang.srt.model_executor.forward_batch_info import ForwardMode
+@@ -78,6 +79,7 @@
+ 
+         self.profile_by_stage: bool = False
+         self.profile_in_progress: bool = False
++        self.shape_discovery: bool = False
+         self.merge_profiles = False
+         self.detailed_annotations: bool = False
+ 
+@@ -97,6 +99,7 @@
+         merge_profiles: bool = False,
+         profile_prefix: str = "",
+         detailed_annotations: bool = False,
++        shape_discovery: bool = False,
+         profile_stages: Optional[List[str]] = None,
+     ) -> ProfileReqOutput:
+         if envs.SGLANG_PROFILE_V2.get():
+@@ -114,6 +117,7 @@
+                 profile_prefix=profile_prefix,
+                 profile_stages=profile_stages,
+                 detailed_annotations=detailed_annotations,
++                shape_discovery=shape_discovery,
+             )
+ 
+         if self.profile_in_progress:
+@@ -134,6 +138,7 @@
+         self.torch_profiler_with_stack = with_stack
+         self.torch_profiler_record_shapes = record_shapes
+         self.profiler_activities = activities
++        self.shape_discovery = shape_discovery
+         self.profile_id = profile_id
+         self.profile_prefix = profile_prefix
+         self.detailed_annotations = detailed_annotations
+@@ -257,9 +262,16 @@
+                     )
+                 ),
+             )
++            # Activate shape discovery before the profiler starts so the first
++            # recorded launch already carries kernel metadata.
++            if record_shapes and self.shape_discovery:
++                kernel_shape_profiler.enable()
++
+             try:
+                 self.torch_profiler.start()
+             except RuntimeError as e:
++                if record_shapes and self.shape_discovery:
++                    kernel_shape_profiler.disable()
+                 self.torch_profiler = None
+                 return ProfileReqOutput(success=False, message=str(e))
+             self.profile_in_progress = True
+@@ -399,6 +411,9 @@
+             self.torch_profiler = None
+             gc.collect()
+ 
++        if self.torch_profiler_record_shapes and self.shape_discovery:
++            kernel_shape_profiler.disable()
++
+         self.profile_in_progress = False
+         self.profiler_start_forward_ct = None
+ 
+@@ -460,7 +475,8 @@
+                     recv_req.merge_profiles,
+                     recv_req.profile_prefix,
+                     recv_req.detailed_annotations,
+-                    recv_req.profile_stages,
++                    shape_discovery=recv_req.shape_discovery,
++                    profile_stages=recv_req.profile_stages,
+                 )
+             else:
+                 self._init_profile(
+@@ -475,6 +491,7 @@
+                     recv_req.merge_profiles,
+                     recv_req.profile_prefix,
+                     recv_req.detailed_annotations,
++                    shape_discovery=recv_req.shape_discovery,
+                 )
+                 return self._start_profile()
+         else:

@@ -164,3 +164,15 @@ def test_load_trace_reads_plain_json(tmp_path):
     p.write_text(json.dumps({"traceEvents": [{"name": "a"}]}))
     out = tsa._load_trace(str(p))
     assert out == {"traceEvents": [{"name": "a"}]}
+
+
+def test_split_vllm_trace_unavailable_backend_degrades_gracefully(monkeypatch, capsys):
+    """When splitting is unavailable, degrade to whole-trace (return None)
+    with a single notice rather than raising."""
+    monkeypatch.setattr(tsa, "_splitter_available", lambda: False)
+    monkeypatch.setattr(tsa, "_splitter_warned", False)
+    assert tsa.split_vllm_trace("/no/such/trace.json.gz") is None
+    assert tsa.split_vllm_trace("/no/such/trace2.json.gz") is None
+    err = capsys.readouterr().err
+    assert "pre-split or small traces" in err
+    assert err.count("pre-split or small traces") == 1

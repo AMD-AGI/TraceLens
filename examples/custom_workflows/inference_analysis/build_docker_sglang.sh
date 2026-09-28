@@ -59,8 +59,8 @@ Base images:
   0.5.16 MI355X : lmsysorg/sglang:v0.5.16-rocm720-mi35x
   0.5.17 MI300X : lmsysorg/sglang:v0.5.17-rocm720-mi30x
   0.5.17 MI355X : lmsysorg/sglang:v0.5.17-rocm720-mi35x
-  0.5.18 MI300X : lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260824
-  0.5.18 MI355X : lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260824
+  0.5.18 MI300X : lmsysorg/sglang:v0.5.18-rocm720-mi30x
+  0.5.18 MI355X : lmsysorg/sglang:v0.5.18-rocm720-mi35x
 
 Note:
   On a ROCm 7.2.4 base the build also overwrites the HIP and roctracer copies
@@ -71,9 +71,14 @@ Note:
   hipGraphLaunch. This is skipped on 7.2.0 and 7.0 bases.
 
 Note:
-  SGLang 0.5.18 carries the detailed-annotation and per-batch-size graph-capture
-  work upstream, so its patch set only adds the kernel shape profiler and the
-  shape_discovery plumbing that reaches it.
+  SGLang 0.5.18 carries the per-batch-size graph-capture and step-span work
+  upstream, so its patch set only adds the kernel shape profiler and the
+  shape_discovery plumbing that reaches it. There are two 0.5.18 sets: the
+  default sglang_0_5_18/ targets the tagged release images above, and
+  --patch-dir sglang_0_5_18_sgldev targets the rocm/sgl-dev images that track
+  main. They differ because detailed_annotations landed after the release
+  branch was cut, so the shape-discovery edits to io_struct, profile_utils and
+  profiler_manager sit at different anchors. The sets are not interchangeable.
 
 Note:
   On SGLang 0.5.13 and 0.5.14 the kernel-shape wrapping is incompatible with the
@@ -252,10 +257,10 @@ resolve_base_image() {
             echo "lmsysorg/sglang:v0.5.17-rocm720-mi35x"
             ;;
         0.5.18:mi300)
-            echo "lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260824"
+            echo "lmsysorg/sglang:v0.5.18-rocm720-mi30x"
             ;;
         0.5.18:mi350|0.5.18:mi355)
-            echo "lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260824"
+            echo "lmsysorg/sglang:v0.5.18-rocm720-mi35x"
             ;;
         *)
             echo ""

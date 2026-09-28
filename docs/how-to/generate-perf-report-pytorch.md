@@ -21,10 +21,48 @@ Before generating a report, confirm you have the following:
 - [TraceLens installed](../install/install.md).
 - A `torch.profiler` Chrome trace (`.json` or `.json.gz`).
 
-```{note}
-If you don't have a trace yet, see the
+If you don't have a trace yet, capture one as shown below. The
 [PyTorch profiling walkthrough](https://github.com/AMD-AGI/TraceLens/blob/main/notebooks/torch-profiling.ipynb)
-for instructions on capturing one with `torch.profiler`.
+walks through it end to end.
+
+## Collect a trace
+
+The quality of the TraceLens Analysis report depends on
+the quality of the trace. 
+
+```python
+import torch
+
+def export(prof):
+    prof.export_chrome_trace("trace.json")
+
+with torch.profiler.profile(
+    activities=[
+        torch.profiler.ProfilerActivity.CPU,
+        torch.profiler.ProfilerActivity.CUDA,
+    ],
+    schedule=torch.profiler.schedule(wait=1, warmup=1, active=2),
+    on_trace_ready=export,
+    record_shapes=True,
+    with_stack=True,
+) as prof:
+    for _ in range(num_steps):   # num_steps >= 4 to cover wait + warmup + active
+        model(inputs)
+        torch.cuda.synchronize()
+        prof.step()
+```
+
+Two flags on `torch.profiler.profile` change what TraceLens can report.
+
+| Flag | What it captures | Why TraceLens needs it |
+|---|---|---|
+| `record_shapes=True` | Input argument shapes and dtypes for each operator | Roofline and compute modeling need shapes to compute FLOPs, bytes, and arithmetic intensity. Without them, per-operator efficiency metrics are unavailable. |
+| `with_stack=True` | The Python call stack above each operator | Required for the call-stack views — GPU time grouped by `nn.Module` or by the line of Python that launched the work. Reports run with `--include_call_stack` need it. |
+
+```{note}
+Inference frameworks that run in HIP graph mode (vLLM, SGLang, ATOM, xDiT)
+need a different capture path. See
+[Generate a PyTorch inference performance report](./generate-perf-report-pytorch-inference.md).
 ```
 
 ## Generate the report

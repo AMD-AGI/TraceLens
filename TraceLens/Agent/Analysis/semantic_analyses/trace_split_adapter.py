@@ -19,6 +19,7 @@ Usage:
             key = get_steady_state_key(metadata)
 """
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -119,6 +120,31 @@ def _iter_type_key(phase: dict) -> str:
     return f"empty_{bs}"
 
 
+_SPLITTER_MODULE = "TraceLens.TraceUtils.split_inference_trace_annotation"
+_splitter_warned = False
+
+
+def _splitter_available() -> bool:
+    """True if the trace-splitting backend is importable."""
+    try:
+        return importlib.util.find_spec(_SPLITTER_MODULE) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _warn_splitter_unavailable() -> None:
+    """Emit a single clear notice that vLLM splitting is disabled."""
+    global _splitter_warned
+    if _splitter_warned:
+        return
+    _splitter_warned = True
+    print(
+        "[trace_split_adapter] semantic analysis is currently supported on "
+        "pre-split or small traces only.",
+        file=sys.stderr,
+    )
+
+
 def split_vllm_trace(
     trace_path: str,
 ) -> Optional[List[Tuple[dict, dict]]]:  # pragma: no cover
@@ -130,9 +156,13 @@ def split_vllm_trace(
     group.  This matches the reference analysis style of showing per-step
     averages rather than multi-step totals.
 
-    Returns None if no annotation iterations are found (caller should fall back
-    to full trace).
+    Returns None if no annotation iterations are found, or if trace splitting
+    is unavailable (caller falls back to whole-trace extraction).
     """
+    if not _splitter_available():
+        _warn_splitter_unavailable()
+        return None
+
     with tempfile.TemporaryDirectory(prefix="trace_split_") as tmpdir:
         cmd = [
             sys.executable,

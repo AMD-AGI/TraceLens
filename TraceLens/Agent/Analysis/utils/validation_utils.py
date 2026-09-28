@@ -8,15 +8,15 @@
 
 Three validation levels, each at the boundary where issues are still fixable:
 
-Level 1 — validate_findings_file (Steps 6-7, within each sub-agent)
+Level 1 — validate_findings_file (Steps 7-8, within each sub-agent)
     Structural check on a single findings file, including marker structure
     via MarkerValidator (pairing, kind attributes, per-kind required attrs,
     mandatory p_item). Sub-agent retries on failure.
 
-Level 2 — validate_subagent_outputs (Step 8, batch)
+Level 2 — validate_subagent_outputs (Step 9, batch)
     Cross-cutting checks that need all files: time sanity, coverage, priority.
 
-Level 3 — validate_report (Step 11.1, after report assembly)
+Level 3 — validate_report (Step 12.1, after report assembly)
     Final analysis.md structure: headers, metrics table, placeholders,
     and report-level marker structure via MarkerValidator (pairing, kind
     attributes, mandatory top_ops).
@@ -25,6 +25,7 @@ Level 3 — validate_report (Step 11.1, after report assembly)
 import json
 import os
 import re
+from collections import Counter
 
 from .report_utils import load_manifest, _scan_findings_dir
 
@@ -436,7 +437,7 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
     return errors
 
 
-# Level 2: cross-cutting batch checks (called at Step 8)
+# Level 2: cross-cutting batch checks (called at Step 9)
 
 
 def validate_subagent_outputs(output_dir):
@@ -523,9 +524,9 @@ def _check_priority_consistency(output_dir, manifest):
     """Verify priority_data.json invariants: findings sort, rank contiguity,
     and per-category rollup of priorities[].impact_score vs findings[] sum.
 
-    Non-blocking: returns WARN on any violation (preserves Step 8 semantics
+    Non-blocking: returns WARN on any violation (preserves Step 9 semantics
     matching _check_time_sanity / _check_coverage). manifest is accepted for
-    call-site symmetry with the other Step 8 checks.
+    call-site symmetry with the other Step 9 checks.
     """
     del manifest  # unused; kept for signature symmetry with sibling checks
     pd_path = os.path.join(output_dir, "priority_data.json")
@@ -592,7 +593,7 @@ def _check_priority_consistency(output_dir, manifest):
     return {"status": status, "messages": messages}
 
 
-# Level 3: final report validation (called at Step 11.1)
+# Level 3: final report validation (called at Step 12.1)
 
 
 def validate_report(output_dir, comparison_scope=None):
@@ -608,7 +609,7 @@ def validate_report(output_dir, comparison_scope=None):
       required attrs, mandatory kind=top_ops
 
     Findings files are validated separately by validate_findings_file
-    (Level 1, called within each sub-agent at Steps 6-7), which also
+    (Level 1, called within each sub-agent at Steps 7-8), which also
     enforces per-file marker structure.
 
     Args:
@@ -737,7 +738,7 @@ def _validate_report_args_column(content, output_dir):
     """Level-3 check: every Args cell in analysis.md must match some
     operations[].args verbatim across all category metrics JSONs.
 
-    Catches LLM reformatting introduced by the Step 11 orchestrator when it
+    Catches LLM reformatting introduced by the Step 12 orchestrator when it
     pastes per-category Detailed Analysis tables into the final report.
     """
     cat_data_dir = os.path.join(output_dir, "category_data")
@@ -768,7 +769,7 @@ def _validate_report_priority_consistency(content, output_dir):
     R3: Each marker's low/mid/high attrs match findings[N-1] impact_score_low / impact_score / impact_score_high.
     R4: Top Operations marker rows == len(priorities).
 
-    Silently skips when priority_data.json is absent (Step 8 already warns).
+    Silently skips when priority_data.json is absent (Step 9 already warns).
     Numeric attrs are compared as 2-decimal strings to match the writer's
     rounding in generate_priority_data. Every compute-tier finding now carries
     a numeric impact_score (quantified or heuristic estimate), so p_item
@@ -929,60 +930,113 @@ class MarkerValidator:
     END_RE = re.compile(r"<!--\s*impact-end\s*-->")
     KIND_ATTR_RE = re.compile(r"\bkind=(\w+)\b")
     ATTR_RE = re.compile(r"\b(\w+)=([^\s]+)")
+    OP_ROW_IMPACTS_RE = re.compile(r"impacts=(\S.*?)(?:\s+\w+=|\s*-->|\s*$)")
 
-    KNOWN_KINDS = {"p_item", "detail_estimate", "top_ops"}
+    # Report-level marker family
+    REPORT_BEGIN_RE = re.compile(r"<!--\s*report-begin\s+([^>]*?)-->", re.DOTALL)
+    REPORT_END_RE = re.compile(r"<!--\s*report-end\s*-->")
+    KNOWN_REPORT_KINDS = {"report_mode", "warning"}
+    REPORT_REQUIRED_ATTRS = {"report_mode": ("mode",), "warning": ()}
+    _WARNINGS_SECTION_RE = re.compile(r"^##\s+Warnings\b", re.MULTILINE)
+
+    KNOWN_KINDS = {"p_item", "detail_estimate", "top_ops", "op_row"}
     REQUIRED_ATTRS_BY_KIND = {
         "p_item": ("low", "mid", "high"),
         "detail_estimate": ("low", "high"),
+        "op_row": ("rank", "impacts"),
     }
     # Compute findings files that do NOT need a p_item marker.
     COMPUTE_NO_P_ITEM: set = set()
 
     @classmethod
+    def _scan_family(
+        cls,
+        text,
+        rel,
+        *,
+        begin_re,
+        end_re,
+        known_kinds,
+        required_attrs,
+        pairing_label,
+        begin_label,
+        kind_noun,
+        extra_check=None,
+    ):
+        """Shared paired-marker scan for a `<verb>-begin`/`<verb>-end` family.
+
+        Checks pairing, presence of kind=, kind ∈ known_kinds, and per-kind
+        required attrs, reusing KIND_ATTR_RE / ATTR_RE on the inner blob. The
+        `*_label`/`kind_noun` args carry the family's error wording; families
+        stay separate so their pairing counts never cross. `extra_check(kind,
+        attrs)` returns an extra per-marker error string (sans `rel` prefix) or
+        None. Returns (errors, kind_counts).
+        """
+        errors = []
+        begins = begin_re.findall(text)
+        n_end = len(end_re.findall(text))
+        if len(begins) != n_end:
+            errors.append(
+                f"{rel}: {pairing_label} pairing mismatch "
+                f"({len(begins)} begin vs {n_end} end)"
+            )
+
+        kind_counts = Counter()
+        for inner in begins:
+            kind_m = cls.KIND_ATTR_RE.search(inner)
+            if not kind_m:
+                errors.append(
+                    f"{rel}: {begin_label} missing kind= attribute: {inner.strip()}"
+                )
+                continue
+            kind = kind_m.group(1)
+            kind_counts[kind] += 1
+            if kind not in known_kinds:
+                errors.append(f"{rel}: unknown {kind_noun}={kind}")
+                continue
+            attrs = dict(cls.ATTR_RE.findall(inner))
+            for required in required_attrs.get(kind, ()):
+                if required not in attrs:
+                    errors.append(
+                        f"{rel}: {kind_noun}={kind} missing required attr {required}"
+                    )
+            if extra_check is not None:
+                extra = extra_check(kind, attrs)
+                if extra:
+                    errors.append(f"{rel}: {extra}")
+        return errors, kind_counts
+
+    @staticmethod
+    def _impact_null_numeric_check(kind, attrs):
+        """Impact-family rule: low/mid/high must be all-null or all-numeric."""
+        nums = [attrs.get(a) for a in ("low", "mid", "high") if a in attrs]
+        if nums:
+            null_ct = sum(1 for v in nums if v == "null")
+            if 0 < null_ct < len(nums):
+                return f"kind={kind} mixes null and numeric values in low/mid/high"
+        return None
+
+    @classmethod
     def scan(cls, text, rel):
-        """Common per-file marker scan.
+        """Common per-file impact-marker scan.
 
         Checks marker pairing, presence of kind= attribute, kind ∈
         KNOWN_KINDS, per-kind required attrs, and no mixed null/numeric
         values in low/mid/high. Returns (errors, seen_kinds).
         """
-        errors = []
-        begins = cls.BEGIN_RE.findall(text)
-        n_end = len(cls.END_RE.findall(text))
-        if len(begins) != n_end:
-            errors.append(
-                f"{rel}: marker pairing mismatch ({len(begins)} begin vs {n_end} end)"
-            )
-
-        seen_kinds = set()
-        for inner in begins:
-            kind_m = cls.KIND_ATTR_RE.search(inner)
-            if not kind_m:
-                errors.append(
-                    f"{rel}: impact-begin missing kind= attribute: {inner.strip()}"
-                )
-                continue
-            kind = kind_m.group(1)
-            seen_kinds.add(kind)
-            if kind not in cls.KNOWN_KINDS:
-                errors.append(f"{rel}: unknown kind={kind}")
-                continue
-            attrs = dict(cls.ATTR_RE.findall(inner))
-            for required in cls.REQUIRED_ATTRS_BY_KIND.get(kind, ()):
-                if required not in attrs:
-                    errors.append(
-                        f"{rel}: kind={kind} missing required attr {required}"
-                    )
-            nums = [attrs.get(a) for a in ("low", "mid", "high") if a in attrs]
-            if nums:
-                null_ct = sum(1 for v in nums if v == "null")
-                if 0 < null_ct < len(nums):
-                    errors.append(
-                        f"{rel}: kind={kind} mixes null and numeric values "
-                        f"in low/mid/high"
-                    )
-
-        return errors, seen_kinds
+        errors, kind_counts = cls._scan_family(
+            text,
+            rel,
+            begin_re=cls.BEGIN_RE,
+            end_re=cls.END_RE,
+            known_kinds=cls.KNOWN_KINDS,
+            required_attrs=cls.REQUIRED_ATTRS_BY_KIND,
+            pairing_label="marker",
+            begin_label="impact-begin",
+            kind_noun="kind",
+            extra_check=cls._impact_null_numeric_check,
+        )
+        return errors, set(kind_counts)
 
     @classmethod
     def check_findings_file(cls, path, file_class, *, skip_p_item_required=False):
@@ -1012,6 +1066,37 @@ class MarkerValidator:
                 f"{rel}: {n_headings} ### P<N>: headings but {n_markers} kind=p_item markers"
             )
         errors.extend(cls._check_detail_estimate_per_candidate(text, rel))
+        errors.extend(cls._check_op_row_csv_count(text, rel))
+        return errors
+
+    @classmethod
+    def _check_op_row_csv_count(cls, text, rel):
+        """Each compute candidate's kind=op_row marker must carry one CSV
+        impact per data-table row (alignment is the reader's job, not this).
+        """
+        lines = text.splitlines()
+        errors = []
+        for start, end in _iter_compute_candidate_blocks(text):
+            table = _find_data_table(lines, start, end)
+            if table is None:
+                continue
+            n_rows = sum(1 for _ in table[2])
+            block = "\n".join(lines[start:end])
+            for m in cls.BEGIN_RE.finditer(block):
+                inner = m.group(1)
+                km = cls.KIND_ATTR_RE.search(inner)
+                if not km or km.group(1) != "op_row":
+                    continue
+                im = cls.OP_ROW_IMPACTS_RE.search(inner)
+                impacts = im.group(1).strip() if im else ""
+                n_csv = (
+                    len([v for v in impacts.split(",") if v.strip()]) if impacts else 0
+                )
+                if n_csv != n_rows:
+                    errors.append(
+                        f"{rel}: kind=op_row has {n_csv} impacts but "
+                        f"the Data table has {n_rows} rows"
+                    )
         return errors
 
     @classmethod
@@ -1042,10 +1127,35 @@ class MarkerValidator:
         return errors
 
     @classmethod
+    def scan_report(cls, text, rel):
+        """Report-marker scan for the report-begin/report-end family.
+
+        Checks pairing (report-begin count == report-end count), kind=
+        present, kind ∈ KNOWN_REPORT_KINDS, and per-kind required attrs.
+        Reuses KIND_ATTR_RE / ATTR_RE on the inner blob without touching the
+        impact-family pairing math. Returns (errors, kind_counts) so callers
+        can enforce per-kind cardinality without re-scanning.
+        """
+        return cls._scan_family(
+            text,
+            rel,
+            begin_re=cls.REPORT_BEGIN_RE,
+            end_re=cls.REPORT_END_RE,
+            known_kinds=cls.KNOWN_REPORT_KINDS,
+            required_attrs=cls.REPORT_REQUIRED_ATTRS,
+            pairing_label="report-marker",
+            begin_label="report-begin",
+            kind_noun="report kind",
+        )
+
+    @classmethod
     def check_report(cls, path):
         """Marker checks for the assembled analysis.md.
 
-        Adds the report-only "top_ops required" check on top of `scan`.
+        Adds the report-only "top_ops required" check on top of `scan`, plus
+        the report-marker family: exactly one kind=report_mode, and no legacy
+        mid-document ## Warnings section (Option A: warning prose moves to top
+        kind=warning markers, so the two must not coexist).
         """
         rel = os.path.basename(path)
         with open(path) as f:
@@ -1053,4 +1163,17 @@ class MarkerValidator:
         errors, seen_kinds = cls.scan(text, rel)
         if "top_ops" not in seen_kinds:
             errors.append(f"{rel}: missing required kind=top_ops")
+
+        report_errors, report_counts = cls.scan_report(text, rel)
+        errors.extend(report_errors)
+        n_mode = report_counts["report_mode"]
+        if n_mode != 1:
+            errors.append(
+                f"{rel}: expected exactly one kind=report_mode marker, found {n_mode}"
+            )
+        if cls._WARNINGS_SECTION_RE.search(text):
+            errors.append(
+                f"{rel}: legacy mid-document ## Warnings section present; move the "
+                f"warning prose to top-of-report kind=warning markers"
+            )
         return errors

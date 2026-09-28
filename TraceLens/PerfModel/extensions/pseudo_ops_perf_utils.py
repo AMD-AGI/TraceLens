@@ -15,6 +15,7 @@ from . import (
     perf_model_extensions,
     rmsnorm_perf_model_extensions,
     custom_collectives_perf_model_extensions,
+    gsplat_perf_model_extensions,
 )
 
 
@@ -149,6 +150,10 @@ def get_pseudo_op_mappings():
         "aiter::rmsnorm_quant": rmsnorm_perf_model_extensions.aiter_rmsnorm_quant,
         ## AITER GroupNorm (same math as aten::group_norm, different event layout)
         "aiter::_groupnorm_run": _core_perf_model.GroupNorm,
+        ## gsplat 3DGS autograd ops (carry tensor shapes in the trace);
+        # projection/intersect kernels are matched by substring in torch_op_mapping.
+        "_SphericalHarmonics": gsplat_perf_model_extensions.gsplat_spherical_harmonics,
+        "_RasterizeToPixels": gsplat_perf_model_extensions.gsplat_rasterize_to_pixels,
     }
 
     return pseudo_op_mappings
