@@ -29,7 +29,6 @@ COMMON_LEAF_PATTERNS: tuple[str, ...] = (
 
 # Class names produced by AST/block-tree expansion for modeled composite ops.
 _MODELING_CLASS_PATTERNS: tuple[str, ...] = (
-    r"(?i)ShortConv",
     r"(?i)OutputGate",
     r"(?i)KernelPipeline",
     r"(?i)AttentionMerge",
@@ -38,11 +37,8 @@ _MODELING_CLASS_PATTERNS: tuple[str, ...] = (
     r"(?i)AttentionOp",
     r"(?i)ActivationOp",
     r"(?i)si[tl]u_?and_?mul",
-    r"(?i)si[tl]uactivation",
     r"(?i)Split",
     r"(?i)Multiply",
-    r"(?i)FusedRMSNormGated",
-    r"(?i)Fused.*Norm.*Gated",
 )
 
 # Submodule attribute names observed in modeling forwards (conv paths, etc.).
