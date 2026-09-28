@@ -13,6 +13,7 @@ import copy
 import importlib.util
 import logging
 import re
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -363,6 +364,40 @@ def _absolute_import_bindings(tree: ast.AST, current_module: str) -> dict[str, s
     return bindings
 
 
+def _module_origin(module: str) -> str | None:
+    """File defining *module*, located WITHOUT importing it or its parents.
+
+    ``importlib.util.find_spec`` has to import every parent package to read its
+    ``__path__``, so asking it for ``fla.modules`` executes ``fla/__init__.py``,
+    which pulls in a GPU kernel compiler. We only ever want to READ the file --
+    nothing here introspects a Triton kernel -- so walking ``sys.path`` for the
+    dotted name gets the source without running a line of third-party code.
+
+    Falls back to ``find_spec`` for anything a plain path walk cannot express
+    (namespace packages, zip imports), which is rare and keeps prior behaviour.
+    """
+    parts = module.split(".")
+    if not parts or not all(parts):
+        return None
+    for entry in sys.path:
+        base = Path(entry) if entry else Path.cwd()
+        try:
+            candidate = base.joinpath(*parts)
+        except (TypeError, ValueError):
+            continue
+        package_init = candidate / "__init__.py"
+        if package_init.is_file():
+            return str(package_init)
+        module_file = candidate.with_suffix(".py")
+        if module_file.is_file():
+            return str(module_file)
+    try:
+        spec = importlib.util.find_spec(module)
+    except (ImportError, ValueError, ModuleNotFoundError, AttributeError):
+        return None
+    return spec.origin if spec is not None else None
+
+
 _ParsedModule = tuple[dict[str, ast.FunctionDef], dict[str, str]]
 
 
@@ -388,8 +423,7 @@ class _ParsedModuleRegistry:
         result: _ParsedModule | None = None
         origin: str | None = None
         try:
-            spec = importlib.util.find_spec(module)
-            origin = spec.origin if spec is not None else None
+            origin = _module_origin(module)
         except (ImportError, AttributeError, ValueError):
             origin = None
         if origin and Path(origin).is_file():
@@ -610,11 +644,7 @@ def _resolve_activation_registry_class(
     module, _, _symbol = binding.partition("#")
     if not module:
         return None
-    try:
-        spec = importlib.util.find_spec(module)
-    except (ImportError, AttributeError, ValueError):
-        return None
-    origin = spec.origin if spec is not None else None
+    origin = _module_origin(module)
     if not origin or not Path(origin).is_file():
         return None
     try:

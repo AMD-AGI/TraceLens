@@ -4,10 +4,10 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Per-model environment detection.
+"""Per-model dependency detection.
 
-These cover the decision logic only -- nothing here creates a virtualenv,
-installs a package, or reaches the network.
+These cover the decision logic only -- nothing here installs a package, writes a
+dependency directory, or reaches the network.
 """
 
 from __future__ import annotations
@@ -122,14 +122,28 @@ def test_env_path_is_slugged_per_checkpoint_and_version(tmp_path):
 @pytest.mark.parametrize(
     "output, expected",
     [
-        ("ImportError: Plese run `pip install -U fla-core`", "fla-core"),
-        ("ModuleNotFoundError: No module named 'einops'", "einops"),
-        ("ModuleNotFoundError: No module named 'triton.ops'", "triton"),
-        ("some unrelated failure", None),
+        ("ImportError: Plese run `pip install -U fla-core`", ["fla-core"]),
+        ("ModuleNotFoundError: No module named 'einops'", ["einops"]),
+        ("ModuleNotFoundError: No module named 'triton.ops'", ["triton"]),
+        ("some unrelated failure", []),
     ],
 )
 def test_missing_requirement_parsing(output, expected):
-    assert model_env._missing_requirement(output) == expected
+    assert model_env._missing_requirements(output) == expected
+
+
+def test_masked_import_error_still_offers_the_real_cause():
+    """fla-core raises its own message when ``triton`` is what is missing.
+
+    Following the friendly hint alone reinstalls the wrapper forever, so the
+    chained original must stay in the candidate list behind it.
+    """
+    output = (
+        "ModuleNotFoundError: No module named 'triton'\n"
+        "During handling of the above exception, another exception occurred:\n"
+        "ImportError: Plese run `pip install -U fla-core`"
+    )
+    assert model_env._missing_requirements(output) == ["fla-core", "triton"]
 
 
 def test_child_process_never_reprovisions(monkeypatch):
@@ -158,5 +172,5 @@ def test_no_reexec_when_config_names_no_version(monkeypatch):
     def _unexpected(*_args, **_kwargs):
         raise AssertionError("must not provision without a version to pin")
 
-    monkeypatch.setattr(model_env, "ensure_model_venv", _unexpected)
+    monkeypatch.setattr(model_env, "ensure_model_dependencies", _unexpected)
     assert model_env.reexec_in_model_env("some/checkpoint", []) is None

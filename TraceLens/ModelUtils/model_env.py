@@ -158,115 +158,184 @@ def env_path_for(
     return (root or default_env_root()) / f"{slug}-transformers-{version}"
 
 
-def _venv_python(env_dir: Path) -> Path:
-    return env_dir / ("Scripts" if os.name == "nt" else "bin") / "python"
+def _pip_install(target: Path, packages: list[str], *, deps: bool) -> tuple[bool, str]:
+    """Install into a directory that will be put on ``PYTHONPATH``.
 
-
-def _pip_install(python: Path, packages: list[str]) -> tuple[bool, str]:
-    result = subprocess.run(
-        [str(python), "-m", "pip", "install", "--disable-pip-version-check", *packages],
-        capture_output=True,
-        text=True,
-    )
+    ``--target`` keeps each model's pinned code in its own directory instead of a
+    whole second interpreter, so torch -- by far the largest dependency -- is
+    shared from the environment already running rather than duplicated per model.
+    """
+    command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--target",
+        str(target),
+        "--upgrade",
+    ]
+    if not deps:
+        command.append("--no-deps")
+    result = subprocess.run([*command, *packages], capture_output=True, text=True)
     return result.returncode == 0, (result.stdout or "") + (result.stderr or "")
 
 
-def _missing_requirement(output: str) -> str | None:
-    """Third-party package a failed model import is asking for.
+def _missing_requirements(output: str) -> list[str]:
+    """Packages a failed model import points at, best candidate first.
 
-    Model code commonly wraps its own optional imports and re-raises with the
-    install command spelled out, so prefer that explicit instruction; otherwise
-    fall back to the module name Python reported. Returns ``None`` when the text
-    names nothing installable, which ends the discovery loop.
+    Model code conventionally catches its own ImportError and re-raises a friendly
+    ``pip install -U <pkg>`` message, which is the right thing to try first. But
+    that message NAMES THE WRAPPER, not what was actually missing: fla-core raises
+    it when ``triton`` is absent, so following it alone reinstalls fla-core
+    forever. Python prints the chained original, so every ``No module named 'x'``
+    in the traceback is also a candidate -- the caller walks this list and skips
+    anything it already installed, which lets the real cause surface on the next
+    round.
     """
+    candidates: list[str] = []
     explicit = re.search(
         r"pip install (?:-U\s+|--upgrade\s+)?([A-Za-z0-9._-]+)", output
     )
     if explicit is not None:
-        return explicit.group(1)
-    missing = re.search(r"No module named '([A-Za-z0-9._]+)'", output)
-    if missing is not None:
-        return missing.group(1).split(".", 1)[0]
-    return None
+        candidates.append(explicit.group(1))
+    for match in re.finditer(r"No module named '([A-Za-z0-9._]+)'", output):
+        name = match.group(1).split(".", 1)[0]
+        if name not in candidates:
+            candidates.append(name)
+    return candidates
 
 
-def ensure_model_venv(
+def _is_model_named(package: str, candidates: list[str]) -> bool:
+    """True when the model's own code asked for this package by name.
+
+    ``_missing_requirements`` puts the package a modeling file spells out in its
+    own ``pip install ...`` message first, ahead of module names recovered from
+    the chained traceback. Only the former is something the checkpoint declares a
+    need for; the rest are that library's own runtime imports.
+    """
+    return bool(candidates) and package == candidates[0]
+
+
+def _probe_command(checkpoint: str | Path) -> list[str]:
+    """Ask the model to import its own declared class, and nothing more."""
+    return [
+        sys.executable,
+        "-c",
+        (
+            "import sys;"
+            "from transformers import AutoConfig;"
+            "from transformers.dynamic_module_utils import "
+            "get_class_from_dynamic_module as g;"
+            "c=AutoConfig.from_pretrained(sys.argv[1],trust_remote_code=True);"
+            "a=list(getattr(c,'architectures',None) or []);"
+            "m=getattr(c,'auto_map',None) or {};"
+            "r=next((v for v in m.values() "
+            "if str(v).rsplit('.',1)[-1] in a),None);"
+            "g(str(r),sys.argv[1]) if r else None"
+        ),
+        str(checkpoint),
+    ]
+
+
+def ensure_model_dependencies(
     checkpoint: str | Path,
     version: str,
     *,
     root: Path | None = None,
     probe: bool = True,
 ) -> Path | None:
-    """Create (or reuse) an environment able to import ``checkpoint``'s code.
+    """Directory holding the code ``checkpoint`` needs, for ``PYTHONPATH``.
 
-    Installs the pinned ``transformers``, torch and TraceLens' own runtime
-    requirements, then -- when ``probe`` is set -- repeatedly asks the model to
-    import itself, installing whatever third-party package each failure names,
-    until the import succeeds or nothing further is named. Returns the child
-    interpreter, or ``None`` if the environment could not be made to work.
+    Installs the pinned ``transformers`` (with its own dependencies, so the
+    tokenizers/hub versions that release expects travel with it), then -- when
+    ``probe`` is set -- repeatedly asks the model to import itself and installs
+    whatever package each failure names. Those follow-up installs are made
+    WITHOUT dependencies: the heavy shared ones (torch and friends) are already
+    importable from the running environment, and anything genuinely absent simply
+    shows up as the next failure and gets installed in turn.
+
+    Returns the directory to prepend to ``PYTHONPATH``, or *None* if it could not
+    be made to import the model.
     """
-    env_dir = env_path_for(checkpoint, version, root)
-    python = _venv_python(env_dir)
-    if not python.exists():
-        env_dir.parent.mkdir(parents=True, exist_ok=True)
-        created = subprocess.run(
-            [sys.executable, "-m", "venv", str(env_dir)],
-            capture_output=True,
-            text=True,
-        )
-        if created.returncode != 0 or not python.exists():
-            _log.warning("Could not create %s: %s", env_dir, created.stderr.strip())
-            return None
-        ok, output = _pip_install(
-            python,
-            [f"transformers=={version}", "torch", *_TRACELENS_RUNTIME_REQUIREMENTS],
-        )
+    target = env_path_for(checkpoint, version, root)
+    stamp = target / ".tracelens-transformers"
+    if not stamp.is_file() or stamp.read_text(encoding="utf-8").strip() != version:
+        target.mkdir(parents=True, exist_ok=True)
+        ok, output = _pip_install(target, [f"transformers=={version}"], deps=True)
         if not ok:
-            _log.warning("Base install failed for %s: %s", env_dir, output[-800:])
-            return None
-
-    if not probe:
-        return python
-
-    for _ in range(_MAX_DEPENDENCY_ROUNDS):
-        result = subprocess.run(
-            [
-                str(python),
-                "-c",
-                (
-                    "import sys;"
-                    "from transformers import AutoConfig;"
-                    "from transformers.dynamic_module_utils import "
-                    "get_class_from_dynamic_module as g;"
-                    "c=AutoConfig.from_pretrained(sys.argv[1],trust_remote_code=True);"
-                    "a=list(getattr(c,'architectures',None) or []);"
-                    "m=getattr(c,'auto_map',None) or {};"
-                    "r=next((v for v in m.values() "
-                    "if str(v).rsplit('.',1)[-1] in a),None);"
-                    "g(str(r),sys.argv[1]) if r else None"
-                ),
-                str(checkpoint),
-            ],
-            capture_output=True,
-            text=True,
-            env={**os.environ, REEXEC_ENV_FLAG: "1"},
-        )
-        if result.returncode == 0:
-            return python
-        package = _missing_requirement((result.stdout or "") + (result.stderr or ""))
-        if package is None:
             _log.warning(
-                "%s still cannot import %s and names no installable package",
-                env_dir,
-                checkpoint,
+                "Installing transformers==%s failed: %s", version, output[-800:]
             )
             return None
-        _log.info("Installing %s into %s", package, env_dir)
-        ok, output = _pip_install(python, [package])
+        stamp.write_text(version, encoding="utf-8")
+
+    if not probe:
+        return target
+
+    attempted: set[str] = set()
+    for _ in range(_MAX_DEPENDENCY_ROUNDS):
+        result = subprocess.run(
+            _probe_command(checkpoint),
+            capture_output=True,
+            text=True,
+            env=_child_env(target),
+        )
+        if result.returncode == 0:
+            return target
+        candidates = _missing_requirements(
+            (result.stdout or "") + (result.stderr or "")
+        )
+        package = next((name for name in candidates if name not in attempted), None)
+        if package is None:
+            # Nothing new to fetch. The pinned sources are still installed and
+            # that is what the analysis reads, so hand the directory back rather
+            # than throwing away work: only a live meta-device instantiation
+            # needs the model to actually import.
+            _log.info(
+                "%s is not importable here (%s); its sources are installed and "
+                "will still be read, but meta-device shapes are unavailable",
+                checkpoint,
+                candidates or "no further packages named",
+            )
+            return target
+        if not _is_model_named(package, candidates):
+            # A module surfaced only by a deeper chained failure -- a kernel
+            # compiler a library imports at load time, say. Reading a class's
+            # source never runs that code, so installing it buys nothing the
+            # analysis uses and can cost hundreds of megabytes.
+            _log.info(
+                "Not installing %s: it is a transitive runtime import, not "
+                "something %s itself asks for",
+                package,
+                checkpoint,
+            )
+            return target
+        attempted.add(package)
+        _log.info("Installing %s into %s", package, target)
+        # With dependencies: pip resolves against the environment already running,
+        # so a shared heavyweight like torch is not copied in again.
+        ok, output = _pip_install(target, [package], deps=True)
         if not ok:
             _log.warning("Installing %s failed: %s", package, output[-800:])
-            return None
-    return None
+            return target
+    return target
+
+
+def _child_env(target: Path) -> dict[str, str]:
+    """Environment putting *target* ahead of the interpreter's own packages.
+
+    ``PYTHONPATH`` entries are inserted before ``site-packages``, so the pinned
+    copy wins over whatever the running environment has installed.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    existing = os.environ.get("PYTHONPATH", "")
+    parts = [str(target), str(repo_root), *([existing] if existing else [])]
+    return {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(parts),
+        REEXEC_ENV_FLAG: "1",
+    }
 
 
 def reexec_in_model_env(
@@ -300,13 +369,13 @@ def reexec_in_model_env(
         return None
 
     _log.warning(
-        "%s cannot be imported here (%s); using a transformers==%s environment",
+        "%s cannot be imported here (%s); using pinned transformers==%s",
         checkpoint,
         reason,
         version,
     )
-    python = ensure_model_venv(checkpoint, version, root=root)
-    if python is None:
+    target = ensure_model_dependencies(checkpoint, version, root=root)
+    if target is None:
         _log.warning(
             "Could not provision a transformers==%s environment for %s; "
             "continuing in the current environment",
@@ -315,11 +384,9 @@ def reexec_in_model_env(
         )
         return None
 
-    child_env = {**os.environ, REEXEC_ENV_FLAG: "1"}
-    # Run the in-tree TraceLens from the child interpreter rather than installing
-    # a second copy of it into every per-model environment.
-    repo_root = Path(__file__).resolve().parents[2]
-    child_env["PYTHONPATH"] = os.pathsep.join(
-        part for part in (str(repo_root), child_env.get("PYTHONPATH", "")) if part
-    )
-    return subprocess.run([str(python), "-m", module, *argv], env=child_env).returncode
+    # Same interpreter, with the pinned copy ahead of its own packages. A fresh
+    # process is still required: ``transformers`` is already imported here and a
+    # module cannot be swapped underneath a running one.
+    return subprocess.run(
+        [sys.executable, "-m", module, *argv], env=_child_env(target)
+    ).returncode
