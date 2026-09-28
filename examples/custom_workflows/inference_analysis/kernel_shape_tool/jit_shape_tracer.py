@@ -108,6 +108,10 @@ _LAUNCHER_OPS_ON = _env_on("TRACELENS_SHAPE_LAUNCHER_OPS")
 # "triton", "flydsl", "triton.autotuner". Honours PYTHONBREAKPOINT.
 _BREAK_SPEC = os.environ.get("TRACELENS_SHAPE_BREAK", "").strip().lower()
 
+# Debug only: restrict the breakpoint to one torch.distributed rank, so a TP=N
+# server stops in a single process instead of N.
+_BREAK_RANK = os.environ.get("TRACELENS_SHAPE_BREAK_RANK", "").strip()
+
 # Module prefixes that belong to the JIT machinery itself. A frame in one of
 # these is never "the launcher" -- notably Triton's own KernelInterface
 # __getitem__ lambda sits between the caller and .run().
@@ -413,7 +417,7 @@ def _wrap_launch(
             # Keep this call in this frame: _calling_launcher() walks out from
             # here to find the caller.
             launcher = _calling_launcher() if _LAUNCHER_OPS_ON else None
-            if hook_id in _break_hooks:
+            if hook_id in _break_hooks and _break_rank_matches():
                 # Inspect: hook_id, name, launcher, tensors, args, kwargs, self.
                 breakpoint()
             if not _SPANS_ON:
@@ -439,6 +443,18 @@ def _should_break(hook_id: str) -> bool:
     if _BREAK_SPEC in ("1", "true", "yes", "on", "all"):
         return True
     return any(hook_id.startswith(p.strip()) for p in _BREAK_SPEC.split(",") if p.strip())
+
+
+def _break_rank_matches() -> bool:
+    if not _BREAK_RANK:
+        return True
+    try:
+        dist = torch.distributed
+        if dist.is_available() and dist.is_initialized():
+            return str(dist.get_rank()) == _BREAK_RANK
+    except Exception:
+        pass
+    return os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")) == _BREAK_RANK
 
 
 def install_triton_hooks() -> bool:
