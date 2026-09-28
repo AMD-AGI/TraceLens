@@ -793,6 +793,166 @@ def _module_dict_registry_class_refs(tree: ast.AST) -> dict[str, list[str]]:
     return registries
 
 
+def _class_from_module_chain(
+    module: str,
+    symbol: str,
+    *,
+    all_tensor_ops: bool,
+    hops: int = 4,
+) -> "tuple[ClassStructure, ast.AST] | None":
+    """Follow a package's re-exports to the file that really defines *symbol*.
+
+    A library surfaces public names through ``__init__`` chains
+    (``fla.modules`` -> ``fla.modules.convolution`` -> ``fla.modules.conv`` ->
+    ``short_conv``), so the first file an import names usually only points
+    onward. Walk that chain -- bounded, and without importing anything -- until
+    the definition itself appears.
+    """
+    seen: set[tuple[str, str]] = set()
+    for _ in range(hops):
+        if (module, symbol) in seen:
+            return None
+        seen.add((module, symbol))
+        origin = _module_origin(module)
+        if not origin or not Path(origin).is_file():
+            return None
+        try:
+            source = Path(origin).read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            registry = build_class_registry(
+                source, filename=origin, all_tensor_ops=all_tensor_ops
+            )
+        except (SyntaxError, ValueError):
+            registry = {}
+        try:
+            module_tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            return None
+        resolved = registry.get(symbol)
+        if resolved is not None:
+            return resolved, module_tree
+        onward = _absolute_import_bindings(module_tree, module)
+        target = onward.get(symbol)
+        if not target:
+            return None
+        module, _, next_symbol = target.partition("#")
+        symbol = next_symbol or symbol
+    return None
+
+
+def _dispatches_to_imported_kernel(
+    structure: "ClassStructure", module_tree: ast.AST | None
+) -> bool:
+    """True when the class's forward hands its work to an imported callable.
+
+    Neither ``ShortConvolution.forward`` nor ``FusedRMSNormGated.forward`` builds
+    anything itself: one calls ``causal_conv1d``, the other ``rms_norm_gated``,
+    and both select a Triton or CUDA kernel. There is no tensor math to recover
+    by opening such a class, and expanding it strands the wiring its caller
+    already established -- so it is a KERNEL BOUNDARY and stays a leaf, the same
+    treatment a fused attention kernel gets.
+
+    The import can sit inside the forward OR at the top of the defining file, so
+    both are considered. A class whose forward does its own arithmetic is
+    expanded normally.
+    """
+    node = getattr(structure, "node", None)
+    if node is None:
+        return False
+    forward = next(
+        (
+            item
+            for item in getattr(node, "body", [])
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+    if forward is None:
+        return False
+    # A forward that is nothing but ``return <call>(...)`` performs no arithmetic
+    # of its own -- it names the routine that does the work, which for a kernel
+    # library is a compiled entry point (``FusedRMSNormGated`` delegates straight
+    # to ``rms_norm_gated``). Opening it yields a frame with no ops in it.
+    body = [
+        item
+        for item in forward.body
+        if not (isinstance(item, ast.Expr) and isinstance(item.value, ast.Constant))
+    ]
+    if (
+        len(body) == 1
+        and isinstance(body[0], ast.Return)
+        and isinstance(body[0].value, ast.Call)
+    ):
+        return True
+
+    imported: set[str] = set()
+    for scope in (module_tree, forward):
+        if scope is None:
+            continue
+        for stmt in ast.walk(scope):
+            if isinstance(stmt, ast.ImportFrom):
+                imported.update(alias.asname or alias.name for alias in stmt.names)
+    if not imported:
+        return False
+    for stmt in ast.walk(forward):
+        if isinstance(stmt, ast.Call) and isinstance(stmt.func, ast.Name):
+            if stmt.func.id in imported:
+                return True
+    return False
+
+
+def _register_imported_classes(
+    classes: dict[str, "ClassStructure"],
+    tree: ast.AST,
+    config: dict[str, Any] | None,
+    *,
+    all_tensor_ops: bool,
+) -> None:
+    """Parse submodule classes a modeling file imports from another package.
+
+    A decoder can build a submodule from a class it imports rather than defines
+    (``from fla.modules import FusedRMSNormGated``). Only imported FUNCTIONS were
+    resolved, so such a class stayed unknown and was described from its name. Its
+    source is on disk like any other, and is read without importing it -- which
+    matters precisely here, since these are kernel libraries whose package import
+    pulls in a GPU compiler we never need in order to read a class.
+
+    A class that merely dispatches to an imported kernel is deliberately NOT
+    registered: it is a boundary, not a composite, and opening it would replace
+    working wiring with an empty frame.
+    """
+    base_module = _analyzed_base_module(config)
+    if base_module is None or not isinstance(tree, ast.Module):
+        return
+    bindings = _absolute_import_bindings(tree, base_module)
+    if not bindings:
+        return
+    wanted: set[str] = set()
+    for cls in list(classes.values()):
+        for assigned in cls.init_assignments.values():
+            name = str(assigned).strip()
+            if name and name not in classes and name in bindings:
+                wanted.add(name)
+    for name in sorted(wanted):
+        module, _, symbol = bindings[name].partition("#")
+        found = _class_from_module_chain(
+            module, symbol or name, all_tensor_ops=all_tensor_ops
+        )
+        if found is None:
+            continue
+        resolved, module_tree = found
+        if resolved.name in classes:
+            continue
+        if _dispatches_to_imported_kernel(resolved, module_tree):
+            _log.debug(
+                "%s dispatches to an imported kernel; keeping it a leaf", resolved.name
+            )
+            continue
+        classes[resolved.name] = resolved
+
+
 def _resolve_module_dict_registry_classes(
     classes: dict[str, "ClassStructure"],
     tree: ast.AST,
@@ -10655,6 +10815,9 @@ def analyze_source(
     _forward_kwargs_boundary_params(visitor.classes)
     _flag_unused_interface_inputs(visitor.classes, config)
     _expand_unresolved_activation_classes(
+        visitor.classes, tree, config, all_tensor_ops=all_tensor_ops
+    )
+    _register_imported_classes(
         visitor.classes, tree, config, all_tensor_ops=all_tensor_ops
     )
     _resolve_module_dict_registry_classes(visitor.classes, tree)

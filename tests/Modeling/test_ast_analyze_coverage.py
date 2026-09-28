@@ -762,3 +762,115 @@ def test_relative_import_inside_a_plain_module_resolves_to_its_parent(
     tree = _ast.parse((pkg / "mod.py").read_text(encoding="utf-8"))
     bindings = _absolute_import_bindings(tree, "demopkg2.mod")
     assert bindings["Y"] == "demopkg2.sib#Y"
+
+
+# ---------------------------------------------------------------------------
+# Classes imported from another package
+# ---------------------------------------------------------------------------
+
+
+def _write_library(tmp_path, body: str, *, module: str = "leaf") -> None:
+    """A small installable package whose public name is a re-export."""
+    pkg = tmp_path / "vendorlib" / "inner"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "vendorlib" / "__init__.py").write_text(
+        "from vendorlib.inner import Widget\n", encoding="utf-8"
+    )
+    (pkg / "__init__.py").write_text(
+        f"from .{module} import Widget\n", encoding="utf-8"
+    )
+    (pkg / f"{module}.py").write_text(body, encoding="utf-8")
+
+
+def _registry_for_model(tmp_path, monkeypatch):
+    from TraceLens.ModelUtils.ast_analyze import analyze_source
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    model = """
+import torch
+from torch import nn
+from vendorlib import Widget
+
+class DemoDecoderLayer(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.widget = Widget(config.hidden_size)
+
+    def forward(self, hidden_states):
+        return self.widget(hidden_states)
+"""
+    return analyze_source(model, config={"model_type": "demo"}).class_registry
+
+
+def test_imported_class_doing_its_own_math_is_registered(tmp_path, monkeypatch):
+    """A composite reached through a package re-export chain gets parsed."""
+    _write_library(
+        tmp_path,
+        """
+import torch
+from torch import nn
+
+class Widget(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        scaled = x * self.weight
+        return scaled + x
+""",
+    )
+    assert "Widget" in _registry_for_model(tmp_path, monkeypatch)
+
+
+def test_class_that_only_delegates_stays_a_kernel_boundary(tmp_path, monkeypatch):
+    """``return kernel(...)`` performs no arithmetic of its own -- keep it a leaf.
+
+    This is the fla shape: ``FusedRMSNormGated.forward`` returns
+    ``rms_norm_gated(...)``, a compiled entry point. Opening it would replace
+    working wiring with an empty frame.
+    """
+    _write_library(
+        tmp_path,
+        """
+import torch
+from torch import nn
+
+def fused_kernel(x, w):
+    return x * w
+
+class Widget(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        return fused_kernel(x, self.weight)
+""",
+    )
+    assert "Widget" not in _registry_for_model(tmp_path, monkeypatch)
+
+
+def test_class_calling_an_imported_kernel_stays_a_boundary(tmp_path, monkeypatch):
+    """The ShortConvolution shape: forward calls a routine imported from elsewhere."""
+    _write_library(
+        tmp_path,
+        """
+import torch
+from torch import nn
+from vendorlib.inner.kernels import run_kernel
+
+class Widget(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        y = x * 2
+        return run_kernel(y, self.weight)
+""",
+    )
+    (tmp_path / "vendorlib" / "inner" / "kernels.py").write_text(
+        "def run_kernel(x, w):\n    return x * w\n", encoding="utf-8"
+    )
+    assert "Widget" not in _registry_for_model(tmp_path, monkeypatch)
