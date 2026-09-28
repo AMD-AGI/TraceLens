@@ -153,29 +153,6 @@ def build_group_node_configs(
                 }
             )
             continue
-        segment = namespace.rsplit("/", 1)[-1]
-        if segment in {"KimiSparseMoeBlock", "KimiMoEGate"} or attrs.get(
-            "label", ""
-        ).endswith("MoEGate"):
-            configs.append(
-                {
-                    "namespaceRegex": _exact_namespace_regex(namespace),
-                    "backgroundColor": _GPU_KERNEL,
-                    "textColor": _DARK_TEXT,
-                    "borderColor": _GPU_KERNEL_BORDER,
-                    "layoutDirection": "TOP_BOTTOM",
-                }
-            )
-            continue
-        if segment in {"KimiDeltaAttention", "KimiMLAAttention"}:
-            configs.append(
-                {
-                    "namespaceRegex": _exact_namespace_regex(namespace),
-                    "backgroundColor": _ATTENTION,
-                    "textColor": _WHITE_TEXT,
-                    "layoutDirection": "TOP_BOTTOM",
-                }
-            )
 
     anchored_role_configs: list[dict[str, Any]] = []
     for config in role_configs:

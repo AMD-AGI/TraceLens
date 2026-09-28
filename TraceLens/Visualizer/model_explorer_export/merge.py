@@ -1017,12 +1017,9 @@ def _infer_group_input_label(
         for attr in node.get("attrs", []):
             if attr.get("key") == "port_label" and attr.get("value"):
                 return str(attr["value"])
-    segment = namespace.rsplit("/", 1)[-1]
     port_label = tensor_port_input_label(namespace)
     if port_label is not None:
         return port_label
-    if segment in {"KimiMLP", "KimiMoEGate"}:
-        return "x" if segment == "KimiMLP" else "hidden_states"
     return "hidden_states"
 
 

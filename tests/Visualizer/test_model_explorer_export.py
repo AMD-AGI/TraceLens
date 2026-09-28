@@ -642,7 +642,7 @@ def test_inject_group_inputs_treats_nested_ops_as_internal():
     _inject_group_inputs(section_nodes)
 
     mlp_input_node = next(node for node in section_nodes if node["id"] == mlp_input)
-    assert mlp_input_node["label"] == "x"
+    assert mlp_input_node["label"] == "hidden_states"
     assert mlp_input_node["incomingEdges"] == [
         {
             "sourceNodeId": moe_input,

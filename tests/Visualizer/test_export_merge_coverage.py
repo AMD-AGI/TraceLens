@@ -329,8 +329,9 @@ def test_merge_prefix_namespace_and_group_label_helpers():
     assert not merge._namespace_is_descendant("ab", "a")
 
     assert merge._infer_group_input_label([], "root/l2norm_fwd_q") == "q"
-    assert merge._infer_group_input_label([], "root/KimiMLP") == "x"
-    assert merge._infer_group_input_label([], "root/KimiMoEGate") == "hidden_states"
+    # A group with no port evidence falls back to the generic name; the class
+    # it happens to be is not consulted.
+    assert merge._infer_group_input_label([], "root/KimiMLP") == "hidden_states"
     assert (
         merge._infer_group_input_label(
             [{"attrs": _attrs(port_label="attr")}], "root/other"
@@ -605,10 +606,11 @@ def test_styles_readability_finalization_and_group_config_ordering():
     assert nodes[5]["style"]["backgroundColor"] == "#ffffff"
     assert nodes[6]["style"]["backgroundColor"] == "#ffffff"
 
+    # Only what a group *is* (its operation) styles it here; role colouring for
+    # everything else arrives through ``role_configs``.
     attrs = {
-        "decoder/KimiMoEGate": {"label": "Gate"},
         "decoder/Attention": {"operation": "gpu_kernel"},
-        "decoder/KimiDeltaAttention": {"label": "Attention"},
+        "decoder/Gate": {"label": "Gate"},
         "": {"title": "model"},
     }
     configs = styles.build_group_node_configs(
@@ -616,15 +618,10 @@ def test_styles_readability_finalization_and_group_config_ordering():
         group_node_attributes=attrs,
         role_configs=[{"namespaceRegex": "role", "backgroundColor": "#fff"}],
     )
-    assert configs[0]["namespaceRegex"].startswith("^decoder/")
+    assert configs[0]["namespaceRegex"] == "^decoder/Attention$"
+    assert not any("decoder/Gate" in item["namespaceRegex"] for item in configs)
     assert any(item["namespaceRegex"] == "^role$" for item in configs)
     assert configs[-1]["namespaceRegex"] == "^decoder$"
-    assert (
-        next(item for item in configs if "KimiMoEGate" in item["namespaceRegex"])[
-            "borderColor"
-        ]
-        == "#d98888"
-    )
 
 
 def test_output_port_style_matches_input_blue():
