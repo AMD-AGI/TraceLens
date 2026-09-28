@@ -1111,7 +1111,7 @@ def test_output_gate_detail_variants(
     )
 
 
-def test_output_gate_wrapping_and_short_convolution_helpers():
+def test_output_gate_wrapping():
     linear = node("g_proj")
     consumer = node("norm", "FusedRMSNormGated", role="norm", basic=False)
     side_inputs = {
@@ -1125,17 +1125,6 @@ def test_output_gate_wrapping_and_short_convolution_helpers():
     )
     assert wrapped[0].class_name == "OutputGate"
     assert [child.label for child in wrapped[0].children] == ["Linear", "Sigmoid"]
-    assert (
-        bt._short_conv_activation(
-            ["method `forward()`", "kernel: conv", "activation=silu", "SiLU"]
-        )
-        == "SiLU"
-    )
-    assert bt._short_conv_activation([]) is None
-    conv_steps = bt._short_convolution_block_node(
-        attr_name="conv", forward_order=4, activation="SiLU"
-    )
-    assert [step.label for step in conv_steps] == ["Causal depthwise conv", "SiLU"]
 
 
 def test_tile_display_label_branches(monkeypatch):
@@ -1466,22 +1455,6 @@ def test_safe_condition_decider_operations(expression, layer, expected):
 
 def test_additional_block_purpose_fallbacks():
     assert block_purpose(node("@attention", "AttentionOp", basic=False)) is None
-    assert (
-        block_purpose(
-            node(
-                "conv",
-                "ShortConvolution",
-                label="Causal depthwise conv",
-                basic=False,
-                details=["SiLU"],
-            )
-        )
-        is None
-    )
-    assert (
-        block_purpose(node("conv", "ShortConvolution", basic=False))
-        == "causal depthwise conv"
-    )
     assert (
         block_purpose(node("embedding", "Embedding", role="embedding"))
         == "Gather rows by token id"

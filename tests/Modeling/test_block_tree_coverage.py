@@ -116,11 +116,6 @@ def test_wrapper_bullet_label_matches_attr_returns_label():
 # --------------------------------------------------------------------------- #
 # block_purpose specialized branches
 # --------------------------------------------------------------------------- #
-def test_block_purpose_short_conv_activation_single_detail():
-    conv = node("conv", "ShortConvolution", basic=False, details=["SiLU"])
-    assert bt.block_purpose(conv) == "causal depthwise conv"
-
-
 def test_block_purpose_output_gate_details_only_linear_returns_none():
     gate = node("g", "OutputGate", role="gate", basic=False, details=["Linear"])
     # OutputGate branch: only "Linear" detail is skipped -> returns None.
@@ -332,7 +327,8 @@ def test_segment_for_step_method_wrapper_no_prior_no_residual():
 
 def test_label_for_call_variants():
     assert bt._label_for_call(aa.SYNTHETIC_ATTENTION, None) == "Attention kernel"
-    assert bt._label_for_call("conv", "ShortConvolution") == "Causal depthwise conv"
+    # A fused kernel shows the class it actually is, not a hand-written pretty name.
+    assert bt._label_for_call("conv", "ShortConvolution") == "ShortConvolution"
     assert bt._label_for_call("really_long_attribute_name_here", None).startswith(
         "really long"
     )
@@ -431,10 +427,6 @@ def test_gated_norm_activation_none_without_tag():
         bt.gated_norm_activation(node("n", "SomethingNormGated", role="norm")) is None
     )
     assert bt.gated_norm_activation(node("n", "RMSNorm", role="norm")) is None
-
-
-def test_short_conv_activation_returns_none_when_all_skipped():
-    assert bt._short_conv_activation(["method `f()`", "kernel: k", "a=b"]) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -728,7 +720,12 @@ def test_build_block_node_single_op_method():
     assert built.children[0].class_name == "Add"
 
 
-def test_build_block_node_short_convolution_with_activation():
+def test_build_block_node_fused_conv_is_one_node_not_split_apart():
+    """A fused causal-conv-plus-activation kernel stays one node.
+
+    It used to be split into a fabricated conv leaf and a separate activation
+    leaf, which described a decomposition the kernel does not perform.
+    """
     cls = structure("Owner", assignments={"conv": "ShortConvolution"}, calls=["conv"])
     cls.init_details["conv"] = ["SiLU"]
     built = bt.build_block_node(
@@ -738,7 +735,7 @@ def test_build_block_node_short_convolution_with_activation():
         basic_ops=_basic(),
     )
     labels = [c.label for c in built.children]
-    assert "Causal depthwise conv" in labels and "SiLU" in labels
+    assert labels == ["ShortConvolution"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1323,17 +1320,6 @@ def test_output_gate_wrapping_and_short_convolution_helpers():
     )
     assert wrapped[0].class_name == "OutputGate"
     assert [child.label for child in wrapped[0].children] == ["Linear", "Sigmoid"]
-    assert (
-        bt._short_conv_activation(
-            ["method `forward()`", "kernel: conv", "activation=silu", "SiLU"]
-        )
-        == "SiLU"
-    )
-    assert bt._short_conv_activation([]) is None
-    conv_steps = bt._short_convolution_block_node(
-        attr_name="conv", forward_order=4, activation="SiLU"
-    )
-    assert [step.label for step in conv_steps] == ["Causal depthwise conv", "SiLU"]
 
 
 def test_tile_display_label_branches(monkeypatch):
@@ -1463,22 +1449,6 @@ def test_stack_tree_builders_cover_registry_and_leaf_paths():
 
 def test_additional_block_purpose_fallbacks():
     assert block_purpose(node("@attention", "AttentionOp", basic=False)) is None
-    assert (
-        block_purpose(
-            node(
-                "conv",
-                "ShortConvolution",
-                label="Causal depthwise conv",
-                basic=False,
-                details=["SiLU"],
-            )
-        )
-        is None
-    )
-    assert (
-        block_purpose(node("conv", "ShortConvolution", basic=False))
-        == "causal depthwise conv"
-    )
     assert (
         block_purpose(node("embedding", "Embedding", role="embedding"))
         == "Gather rows by token id"

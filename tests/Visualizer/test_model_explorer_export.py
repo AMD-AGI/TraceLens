@@ -800,7 +800,7 @@ def test_kimi_layer_variants_export_three_decoder_splits():
         assert tensor["incomingEdges"][0]["metadata"] == {"port_label": label}
     # q's provenance runs through the real ``rearrange`` node emitted for
     # ``q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d'), (q, k))``:
-    # the conv activation is reached one hop upstream of that Rearrange rather
+    # the short convolution is reached one hop upstream of that Rearrange rather
     # than being q's immediate predecessor, so assert reachability through the
     # chain instead of literal adjacency.
     _by_id = {node["id"]: node for node in graph["nodes"]}
@@ -825,7 +825,7 @@ def test_kimi_layer_variants_export_three_decoder_splits():
             frontier = nxt
         return any(needle in nid for nid in frontier)
 
-    assert _reaches_source(q_tensor, "q_conv1d_activation")
+    assert _reaches_source(q_tensor, "q_conv1d")
     l2norm_ns = f"{pipeline_ns}/l2norm_fwd_q"
     l2norm_labels = {
         node["label"]

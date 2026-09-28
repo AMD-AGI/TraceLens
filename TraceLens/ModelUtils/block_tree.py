@@ -141,14 +141,6 @@ def block_purpose(node: BlockNode) -> str | None:
     if node.class_name == "KernelPipeline":
         return node.details[0] if node.details else None
 
-    if node.class_name == "ShortConvolution":
-        if node.label == "Causal depthwise conv":
-            return None
-        if node.details and node.details[0] == "depthwise conv":
-            return "depthwise conv"
-        if _short_conv_activation(node.details) and len(node.details) == 1:
-            return "causal depthwise conv"
-
     for detail in node.details:
         cleaned = detail.strip()
         if (
@@ -173,9 +165,6 @@ def block_purpose(node: BlockNode) -> str | None:
 
     if class_name == "OutputGate" or role == "gate":
         return "Output gate — scales normalized output"
-    if class_name == "ShortConvolution":
-        activation = node.details[0] if node.details else None
-        return "causal depthwise conv" + (f" · {activation}" if activation else "")
     if class_name == "AttentionMerge":
         for detail in node.details:
             if detail.startswith("ports:"):
@@ -1015,12 +1004,6 @@ def _label_for_call(
 ) -> str:
     if attr_name == SYNTHETIC_ATTENTION:
         return "Attention kernel"
-    if class_name == "ShortConvolution":
-        # Depthwise AND causal: the class builds an ``nn.Conv1d`` with
-        # ``groups=hidden_size`` and ``padding=kernel_size - 1``, then dispatches to
-        # ``causal_conv1d``. Labelling it only "Depthwise Conv" drops the causality,
-        # which is the property that makes it usable for autoregressive decoding.
-        return "Causal depthwise conv"
     if displays_as_linear(attr_name, class_name):
         return "Linear"
     if class_name:
@@ -2011,53 +1994,6 @@ def gated_norm_activation(node: BlockNode) -> str | None:
             if resolved:
                 return resolved
     return None
-
-
-def _short_conv_activation(details: list[str] | None) -> str | None:
-    """Return the init-time activation name for a ShortConvolution, if any."""
-    if not details:
-        return None
-    for detail in details:
-        cleaned = detail.strip()
-        if (
-            not cleaned
-            or cleaned.startswith("method `")
-            or cleaned.startswith("kernel:")
-        ):
-            continue
-        if "=" in cleaned:
-            continue
-        return cleaned
-    return None
-
-
-def _short_convolution_block_node(
-    *,
-    attr_name: str,
-    forward_order: int | None,
-    activation: str,
-    details: list[str] | None = None,
-) -> list[BlockNode]:
-    """Expand ShortConvolution + activation into separate conv and act steps."""
-    base_order = forward_order or 0
-    return [
-        _leaf_node(
-            attr_name=attr_name,
-            class_name="ShortConvolution",
-            forward_order=base_order,
-            label="Causal depthwise conv",
-            details=[],
-            basic=False,
-        ),
-        _leaf_node(
-            attr_name=f"{attr_name}_activation",
-            class_name="ActivationOp",
-            forward_order=base_order + 1,
-            label=activation,
-            details=[],
-            basic=False,
-        ),
-    ]
 
 
 def _gate_up_linear_attr_names() -> frozenset[str]:
@@ -3207,19 +3143,6 @@ def build_block_node(
                 )
             )
             continue
-
-        if child_class == "ShortConvolution":
-            activation = _short_conv_activation(child_details)
-            if activation:
-                child_nodes.extend(
-                    _short_convolution_block_node(
-                        attr_name=call_attr,
-                        forward_order=child_order,
-                        activation=activation,
-                        details=child_details,
-                    )
-                )
-                continue
 
         # Pass down any overrides addressed at descendants of this child, stripping the
         # child's own ``base_attr.`` prefix so they are relative to the child class.
