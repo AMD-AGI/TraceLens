@@ -83,10 +83,10 @@ def resolve_kernel_source(
         result = resolve_kernel(kernel_name, op_name=op_name, search_paths=search_paths)
         if result.method != "unresolved":
             return result
+        # Not Triton and no launcher: don't guess via the Triton name index.
+        return result
 
     triton_result = resolve_triton_source(
         kernel_file, symbol=kernel_name, search_paths=search_paths
     )
-    if kernel_file or is_triton or triton_result.patchable:
-        return triton_result
-    return result
+    return triton_result

@@ -314,6 +314,23 @@ class TestDemangle:
     def test_whitespace_padded_input_is_stripped(self):
         assert base_symbol("  paged_attention_kernel  ") == "paged_attention_kernel"
 
+    def test_truncated_template_symbol_recovers_bare_name(self):
+        # Long templated names get clipped upstream with a trailing "...", leaving
+        # an unclosed "<". The bare name must survive rather than the "::" rsplit
+        # landing inside the template args and returning garbage.
+        assert (
+            base_symbol(
+                "void aiter::add_rmsnorm_quant_kernel<std::bfloat16_t, std::bfloat16_t, 256,..."
+            )
+            == "add_rmsnorm_quant_kernel"
+        )
+        assert (
+            base_symbol(
+                "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v2<..."
+            )
+            == "opus_moe_sorting_entry"
+        )
+
     def test_unbalanced_brackets_left_unchanged_not_corrupted(self):
         # _rstrip_balanced must leave a string with no matching open bracket alone,
         # rather than guessing and truncating a legitimate name.
@@ -849,12 +866,13 @@ class TestResolveKernelSource:
         assert res.method == "triton_symbol_index"
         assert res.source_file == "/workspace/vllm/moe.py"
 
-    def test_unknown_kind_falls_back_to_triton_symbol_when_native_misses(
+    def test_unknown_kind_native_miss_does_not_speculate_via_triton_symbol(
         self, monkeypatch
     ):
-        # Caller doesn't know the kernel's kind at all (no kernel_file, no
-        # is_triton) -> native misses, and the automatic fallback still
-        # recovers the symbol via the Triton .py index.
+        # Caller gave no signal (no kernel_file, no is_triton). The kernel is not
+        # Triton, so a fuzzy @triton.jit name match is not evidence: a native miss
+        # must stay unresolved rather than promote a speculative .py hit and hand
+        # the caller a confident wrong file.
         canned = index_mod.SourceIndex(
             fingerprint="fp",
             symbol_index={
@@ -863,9 +881,8 @@ class TestResolveKernelSource:
         )
         monkeypatch.setattr(index_mod, "load_or_build_triton", lambda _roots: canned)
         res = resolve_kernel_source("add_kernel_0d1d2d3de")
-        assert res.patchable is True
-        assert res.method == "triton_symbol_index"
-        assert res.source_file == "/workspace/vllm/moe.py"
+        assert res.patchable is False
+        assert res.method == "unresolved"
 
 
 # ===========================================================================
