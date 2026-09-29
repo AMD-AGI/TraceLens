@@ -139,6 +139,8 @@ def triton_def_line(
 def _resolve_triton_by_symbol(
     symbol: str,
     search_paths: Sequence[str | Path] | None = None,
+    *,
+    exact: bool = False,
 ) -> SourceLocation | None:
     """Find a Triton ``.py`` def by symbol name via the cached ``.py`` index.
 
@@ -146,6 +148,11 @@ def _resolve_triton_by_symbol(
     symbol, look it up against the indexed ``@triton.jit`` def names (exact match
     preferred, else substring), and pick the shortest editable path. Returns
     ``None`` when nothing matches confidently.
+
+    ``exact`` drops the substring tier entirely: only a rank-0 exact
+    normalized-name match counts. This keeps the lookup a definite answer rather
+    than a guess, so it is safe to run on a native ``unresolved`` miss where a
+    mangled symbol could otherwise substring-match an unrelated ``.py`` def.
     """
     core = _normalize_symbol(symbol)
     if not core:
@@ -159,9 +166,12 @@ def _resolve_triton_by_symbol(
     best: tuple[int, int, str, int | None] | None = None
     for name, records in idx.symbol_index.items():
         low = name.lower()
-        if low == core:
+        # Rank 0 compares normalized identities on both sides: a Triton def name
+        # keeps its leading ``_`` in the index, while ``core`` had it stripped, so
+        # a raw ``low == core`` would miss genuine ``_..._kernel`` defs.
+        if _normalize_symbol(name) == core:
             rank = 0
-        elif core in low or low in core:
+        elif not exact and (core in low or low in core):
             rank = 1
         else:
             continue
@@ -185,6 +195,7 @@ def resolve_triton_source(
     *,
     symbol: str = "",
     search_paths: Sequence[str | Path] | None = None,
+    exact: bool = False,
 ) -> ResolveResult:
     """Resolve a trace ``kernel_file`` to an editable Triton ``.py`` + def line.
 
@@ -196,6 +207,8 @@ def resolve_triton_source(
             when ``kernel_file`` is empty, to drive the ``.py`` search fallback.
         search_paths: Optional roots for the fallback ``.py`` search; defaults to
             the discovered framework package roots.
+        exact: When the empty-``kernel_file`` symbol fallback runs, require an
+            exact normalized-name match (drop the substring tier).
 
     Returns:
         A :class:`~.datatypes.ResolveResult`. ``method`` is ``"triton_ast"`` (path +
@@ -207,7 +220,11 @@ def resolve_triton_source(
     if not path:
         # No usable ``kernel_file`` from the trace. If we know the symbol, fall
         # back to searching the framework ``.py`` sources for a matching kernel.
-        location = _resolve_triton_by_symbol(symbol, search_paths) if symbol else None
+        location = (
+            _resolve_triton_by_symbol(symbol, search_paths, exact=exact)
+            if symbol
+            else None
+        )
         if location is not None:
             return ResolveResult(
                 location=location, patchable=True, method="triton_symbol_index"

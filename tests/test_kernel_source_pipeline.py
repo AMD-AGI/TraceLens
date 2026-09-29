@@ -866,13 +866,13 @@ class TestResolveKernelSource:
         assert res.method == "triton_symbol_index"
         assert res.source_file == "/workspace/vllm/moe.py"
 
-    def test_unknown_kind_native_miss_does_not_speculate_via_triton_symbol(
-        self, monkeypatch
-    ):
-        # Caller gave no signal (no kernel_file, no is_triton). The kernel is not
-        # Triton, so a fuzzy @triton.jit name match is not evidence: a native miss
-        # must stay unresolved rather than promote a speculative .py hit and hand
-        # the caller a confident wrong file.
+    def test_unknown_kind_native_miss_recovers_exact_triton_symbol(self, monkeypatch):
+        # Caller gave no signal (no kernel_file, no is_triton) and native resolve
+        # missed, but the symbol normalizes to an EXACT @triton.jit def name in the
+        # index. An exact name match is a lookup with a definite answer, not a fuzzy
+        # guess, so the fallback recovers the real .py: a genuine Triton kernel
+        # whose trace simply never carried a kernel_file no longer leaks out of the
+        # routable set.
         canned = index_mod.SourceIndex(
             fingerprint="fp",
             symbol_index={
@@ -881,6 +881,25 @@ class TestResolveKernelSource:
         )
         monkeypatch.setattr(index_mod, "load_or_build_triton", lambda _roots: canned)
         res = resolve_kernel_source("add_kernel_0d1d2d3de")
+        assert res.patchable is True
+        assert res.method == "triton_symbol_index"
+        assert res.source_file == "/workspace/vllm/moe.py"
+
+    def test_unknown_kind_native_miss_does_not_speculate_by_substring(
+        self, monkeypatch
+    ):
+        # The anti-wrong-file guard survives for the fuzzy case: a native miss
+        # whose normalized core only SUBSTRING-matches a @triton.jit def (never an
+        # exact match) must stay unresolved rather than promote a speculative .py
+        # hit. Exact mode drops the substring tier, so no confident wrong file.
+        canned = index_mod.SourceIndex(
+            fingerprint="fp",
+            symbol_index={
+                "add_kernel": [{"file": "/workspace/vllm/moe.py", "line": 5}]
+            },
+        )
+        monkeypatch.setattr(index_mod, "load_or_build_triton", lambda _roots: canned)
+        res = resolve_kernel_source("add_kernel_variant_0d1d2d3de")
         assert res.patchable is False
         assert res.method == "unresolved"
 
