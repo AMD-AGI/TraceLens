@@ -327,10 +327,20 @@ def _minimal_metadata(spec: GraphNodeSpec) -> dict[str, Any]:
         and not block.children
         and any(str(detail).startswith("raw_op:") for detail in block.details)
     )
+    # A stage decomposed from a Triton kernel is the same case one level down: it
+    # is not "basic" (it lives inside a kernel pipeline rather than the model's
+    # own forward), but it does record the operation it performs, and that is the
+    # only identity it has -- its label is a glyph. Without the detail, shape
+    # inference sees an unnamed node, cannot resolve a callable for "x scale",
+    # and passes the input shape through with a warning.
+    is_kernel_stage_op = block is not None and any(
+        str(detail).startswith("triton_op:") for detail in block.details
+    )
     if block is not None and (
         is_forward_operation(block.attr_name)
         or is_folded_frame_terminal_op
         or is_basic_op_leaf
+        or is_kernel_stage_op
     ):
         metadata["attr_name"] = block.attr_name
         if block.details:

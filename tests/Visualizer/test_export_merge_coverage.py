@@ -3507,3 +3507,199 @@ def test_compose_viewer_html_flag_controls_constant_visibility():
     # The constant node id appears in the shown-constants HTML, not the default.
     assert "w:const" not in dropped
     assert "w:const" in kept
+
+
+# --------------------------------------------------------------------------- #
+# Merge-only shape fallbacks: squeeze / expand / broadcast
+# --------------------------------------------------------------------------- #
+def _shape_node(label: str, details: list[str] | None = None) -> dict:
+    node: dict = {"id": f"@op_{label.lower()}", "label": label}
+    if details:
+        node["attrs"] = [{"key": "details", "value": "; ".join(details)}]
+    return node
+
+
+def test_fallback_squeeze_without_a_dim_drops_every_unit_axis():
+    source = TensorSpec((1, "B", 1, "S"), "float16")
+    result = shapes._fallback_node_spec(_shape_node("Squeeze"), [("0", source)])
+    assert result.shape == ("B", "S")
+
+
+def test_fallback_squeeze_with_a_dim_drops_only_that_axis():
+    source = TensorSpec((1, "B", 1, "S"), "float16")
+    result = shapes._fallback_node_spec(
+        _shape_node("Squeeze", ["dim: 0"]), [("0", source)]
+    )
+    assert result.shape == ("B", 1, "S")
+
+
+def test_fallback_squeeze_accepts_a_negative_dim():
+    source = TensorSpec(("B", "S", 1), "float16")
+    result = shapes._fallback_node_spec(
+        _shape_node("Squeeze", ["dim: -1"]), [("0", source)]
+    )
+    assert result.shape == ("B", "S")
+
+
+def test_fallback_squeeze_leaves_a_non_unit_axis_alone():
+    """Squeezing a real axis is a no-op in torch; it must not silently shrink."""
+    source = TensorSpec(("B", "S", 4), "float16")
+    result = shapes._fallback_node_spec(
+        _shape_node("Squeeze", ["dim: 2"]), [("0", source)]
+    )
+    assert result.shape == ("B", "S", 4)
+
+
+def test_fallback_squeeze_with_an_unparseable_dim_passes_through():
+    source = TensorSpec(("B", "S", 1), "float16")
+    result = shapes._fallback_node_spec(
+        _shape_node("Squeeze", ["dim: self.axis"]), [("0", source)]
+    )
+    assert result.shape == ("B", "S", 1)
+
+
+def test_fallback_squeeze_of_a_scalar_passes_through():
+    source = TensorSpec((), "float16")
+    result = shapes._fallback_node_spec(_shape_node("Squeeze"), [("0", source)])
+    assert result.shape == ()
+
+
+def test_fallback_expand_without_a_resolvable_shape_passes_through():
+    source = TensorSpec(("B", 1, "S"), "float16")
+    result = shapes._fallback_node_spec(
+        _shape_node("Expand", ["shape: self.mystery"]), [("0", source)]
+    )
+    assert result.shape == ("B", 1, "S")
+
+
+def test_fallback_elementwise_broadcasts_to_the_widest_operand():
+    lhs = TensorSpec(("B", "S", 4), "float16")
+    rhs = TensorSpec((4,), "float16")
+    result = shapes._fallback_node_spec(
+        _shape_node("Multiply"), [("0", lhs), ("1", rhs)]
+    )
+    assert len(result.shape) == 3
+
+
+# --------------------------------------------------------------------------- #
+# Folding a trailing slice op onto the layout-only op that produced it
+# --------------------------------------------------------------------------- #
+def _slice_graph(
+    *,
+    producer_label: str = "Permute",
+    split_label: str = "Unbind",
+    n_incoming: int = 1,
+    producer_ports: int = 1,
+    extra_consumer: bool = False,
+    producer_synthetic: bool = False,
+    output_names: str | None = '["q", "k", "v"]',
+) -> list[dict]:
+    producer: dict = {
+        "id": "permute",
+        "label": producer_label,
+        "attrs": [],
+        "outputsMetadata": [{"id": str(i)} for i in range(producer_ports)],
+        "incomingEdges": [],
+    }
+    if producer_synthetic:
+        producer["attrs"].append({"key": "synthetic", "value": "@input"})
+    split: dict = {
+        "id": "unbind",
+        "label": split_label,
+        "attrs": (
+            [{"key": "output_names", "value": output_names}] if output_names else []
+        ),
+        "outputsMetadata": [
+            {"id": "0", "name": "query_states"},
+            {"id": "1", "name": "key_states"},
+        ],
+        "incomingEdges": [{"sourceNodeId": "permute", "sourceNodeOutputId": "0"}]
+        * n_incoming,
+    }
+    consumer = {
+        "id": "q_norm",
+        "label": "RMSNorm",
+        "attrs": [],
+        "incomingEdges": [{"sourceNodeId": "unbind", "sourceNodeOutputId": "0"}],
+    }
+    nodes = [producer, split, consumer]
+    if extra_consumer:
+        nodes.append(
+            {
+                "id": "other",
+                "label": "RMSNorm",
+                "attrs": [],
+                "incomingEdges": [
+                    {"sourceNodeId": "permute", "sourceNodeOutputId": "0"}
+                ],
+            }
+        )
+    return nodes
+
+
+def test_view_split_folds_onto_its_layout_only_producer():
+    nodes = _slice_graph()
+    merge._elide_view_split_onto_producer(nodes)
+    ids = [n["id"] for n in nodes]
+    assert "unbind" not in ids  # the redundant hop is gone
+    producer = next(n for n in nodes if n["id"] == "permute")
+    # every slice stays visible, re-homed as named ports on the producer
+    assert [p.get("name") for p in producer["outputsMetadata"]] == [
+        "query_states",
+        "key_states",
+    ]
+    assert merge._node_attr(producer, "output_names") == '["q", "k", "v"]'
+    # the downstream consumer now reads from the producer directly
+    consumer = next(n for n in nodes if n["id"] == "q_norm")
+    assert consumer["incomingEdges"][0]["sourceNodeId"] == "permute"
+
+
+def test_view_split_keeps_its_tile_when_the_producer_computes_values():
+    """A fused-weight split's producer genuinely transforms values."""
+    nodes = _slice_graph(producer_label="Linear")
+    merge._elide_view_split_onto_producer(nodes)
+    assert "unbind" in [n["id"] for n in nodes]
+
+
+def test_view_split_keeps_its_tile_when_the_producer_fans_out():
+    """Re-labelling a shared port as slices would corrupt the other consumer."""
+    nodes = _slice_graph(extra_consumer=True)
+    merge._elide_view_split_onto_producer(nodes)
+    assert "unbind" in [n["id"] for n in nodes]
+
+
+def test_view_split_keeps_its_tile_when_the_producer_is_multi_port():
+    nodes = _slice_graph(producer_ports=2)
+    merge._elide_view_split_onto_producer(nodes)
+    assert "unbind" in [n["id"] for n in nodes]
+
+
+def test_view_split_keeps_its_tile_when_the_producer_is_synthetic():
+    nodes = _slice_graph(producer_synthetic=True)
+    merge._elide_view_split_onto_producer(nodes)
+    assert "unbind" in [n["id"] for n in nodes]
+
+
+def test_view_split_keeps_its_tile_without_exactly_one_producer():
+    nodes = _slice_graph(n_incoming=2)
+    merge._elide_view_split_onto_producer(nodes)
+    assert "unbind" in [n["id"] for n in nodes]
+
+
+def test_view_split_ignores_ops_that_are_not_slices():
+    nodes = _slice_graph(split_label="Multiply")
+    merge._elide_view_split_onto_producer(nodes)
+    assert "unbind" in [n["id"] for n in nodes]
+
+
+def test_view_split_without_output_names_still_folds():
+    nodes = _slice_graph(output_names=None)
+    merge._elide_view_split_onto_producer(nodes)
+    assert "unbind" not in [n["id"] for n in nodes]
+
+
+def test_view_split_on_a_missing_producer_is_a_no_op():
+    nodes = _slice_graph()
+    nodes[1]["incomingEdges"] = [{"sourceNodeId": "absent", "sourceNodeOutputId": "0"}]
+    merge._elide_view_split_onto_producer(nodes)
+    assert "unbind" in [n["id"] for n in nodes]

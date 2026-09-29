@@ -5,6 +5,11 @@ tools: Bash, Read, Grep, Glob, Edit, Write
 model: sonnet
 ---
 
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
 # Graph operation type-check fixer
 
 Every operation node in the TraceLens Model Explorer export carries a

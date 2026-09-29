@@ -5,6 +5,11 @@ tools: Bash, Read, Grep, Glob
 model: sonnet
 ---
 
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
 # Opaque computation-node audit
 
 A standing owner invariant for the TraceLens Model Explorer export is: **no

@@ -34,6 +34,30 @@ MOE_CLASS_RE = re.compile(r"(MoE|Moe|Expert|SparseMoe|SharedExpert)", re.IGNOREC
 FFN_CLASS_RE = re.compile(r"(MLP|Mlp|FeedForward|FFN|SwiGLU|GatedMLP)", re.IGNORECASE)
 NORM_CLASS_RE = re.compile(r"(RMSNorm|LayerNorm|Norm)", re.IGNORECASE)
 
+# Attribute-name conventions that say what part a submodule plays in a
+# transformer block. These are naming conventions, not facts read out of the
+# code, so they are a last-resort signal and deliberately scoped.
+#
+# WHY THEY ARE NEEDED AT ALL -- the overview diagram:
+#   The overview is a hand-drawn-style summary of the architecture: an embedding,
+#   a repeated block of (norm -> attention -> norm -> FFN), a final norm, a head.
+#   Drawing it requires knowing which submodule is the attention and which is the
+#   feed-forward, so each can be placed on the spine, paired with the norm that
+#   feeds it, and coloured. That is a question about the ROLE a module plays in a
+#   conventional transformer, and a checkpoint answers it only by what it names
+#   things: nothing in the code distinguishes "the attention" from "the MLP"
+#   beyond the shapes and the names. Where the overview also has to invent a
+#   component the source never declares (a final norm implied by ``norm_type``, a
+#   head implied by ``vocab_size``), the role IS the only identity it has.
+#
+# WHY THE DETAILED GRAPH SHOULD NOT NEED THEM:
+#   The detailed graph draws what the forward actually does. Every node, edge and
+#   shape there is recovered from the AST and the live meta module tree, so a
+#   guess from an attribute name can only overrule evidence we already have. Role
+#   still leaks into that path today (grouping, namespace choice, a few
+#   structural filters); each such use is a place the renderer is trusting a name
+#   where it could be reading the code. Treat a new role test in the detailed
+#   path as a defect to be justified, not a pattern to copy.
 ATTR_ROLE_HINTS: dict[str, str] = {
     "embed_tokens": "embedding",
     "word_embeddings": "embedding",
@@ -2501,6 +2525,18 @@ _MOE_BLOCK_CLASS_RE = re.compile(
 
 
 def _classify_role(attr_name: str, class_name: str) -> str:
+    """What part this submodule plays in a transformer block.
+
+    Answered from naming convention -- see :data:`ATTR_ROLE_HINTS` for why that
+    is the only thing available and which diagram actually needs the answer.
+    The layers below run most-specific first: an explicit attribute hint, then
+    tokens within the attribute name, then the class name. ``norm`` is tested
+    ahead of the other tokens on purpose (``attn_norm`` is a norm, not an
+    attention).
+
+    Returns ``"other"`` when nothing matches; callers must treat that as "not
+    known", never as a role of its own.
+    """
     attr_key = attr_name.lower()
     if _MOE_BLOCK_CLASS_RE.search(class_name):
         return "moe"

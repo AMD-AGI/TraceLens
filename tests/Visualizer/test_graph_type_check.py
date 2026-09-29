@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 
+from TraceLens.Visualizer.model_explorer_export import type_check as _tc
 from TraceLens.Visualizer.model_explorer_export.type_check import (
     group_cycle_check_graph_nodes,
     integrity_check_graph_nodes,
@@ -835,3 +836,61 @@ def test_coverage_check_ignores_non_kernel_port_sources():
     }
     plain = {"id": "some_op", "label": "Add", "attrs": []}
     assert type_check_graph_nodes([core, plain]) == []
+
+
+# --------------------------------------------------------------------------- #
+# Attribute readers: malformed input must yield "unknown", never a bad answer
+# --------------------------------------------------------------------------- #
+def _attr_node(**attrs) -> dict:
+    return {
+        "id": "n",
+        "attrs": [{"key": k, "value": v} for k, v in attrs.items()],
+    }
+
+
+def test_load_list_rejects_a_non_string_value():
+    assert _tc._load_list({"attrs": [{"key": "k", "value": 5}]}, "k") is None
+
+
+def test_load_list_rejects_unparseable_json():
+    assert _tc._load_list(_attr_node(k="not json"), "k") is None
+
+
+def test_load_list_rejects_json_that_is_not_a_list():
+    assert _tc._load_list(_attr_node(k='{"a": 1}'), "k") is None
+
+
+def test_load_list_returns_the_parsed_list():
+    assert _tc._load_list(_attr_node(k="[1, 2]"), "k") == [1, 2]
+
+
+def test_load_list_missing_key_is_none():
+    assert _tc._load_list(_attr_node(other="[]"), "k") is None
+
+
+def test_output_shape_dims_handles_missing_and_malformed_values():
+    assert _tc._output_shape_dims({"attrs": []}) is None
+    assert (
+        _tc._output_shape_dims({"attrs": [{"key": "output_shape", "value": 3}]}) is None
+    )
+    assert _tc._output_shape_dims(_attr_node(output_shape="no brackets")) is None
+    assert _tc._output_shape_dims(_attr_node(output_shape="[] float32")) == []
+    assert _tc._output_shape_dims(_attr_node(output_shape="[B, S] float32")) == [
+        "B",
+        "S",
+    ]
+
+
+def test_concrete_int_dims_rejects_symbolic_or_empty_tokens():
+    assert _tc._concrete_int_dims(None) is None
+    assert _tc._concrete_int_dims(["4", ""]) is None
+    assert _tc._concrete_int_dims(["4", "B"]) is None
+    assert _tc._concrete_int_dims(["4", "8"]) == [4, 8]
+
+
+def test_output_dtype_reads_the_suffix_and_tolerates_junk():
+    assert _tc._output_dtype(_attr_node(output_shape="[B, S] float32")) == "float32"
+    assert _tc._output_dtype(_attr_node(output_shape="[B, S]")) is None
+    assert _tc._output_dtype(_attr_node(output_shape="no bracket")) is None
+    assert _tc._output_dtype({"attrs": [{"key": "output_shape", "value": 1}]}) is None
+    assert _tc._output_dtype({"attrs": []}) is None

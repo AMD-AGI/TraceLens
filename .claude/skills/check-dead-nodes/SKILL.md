@@ -3,6 +3,11 @@ name: check-dead-nodes
 description: Run after editing graph-export, block-tree, computation-graph, or shape-inference code (TraceLens/ModelUtils/*, TraceLens/Visualizer/model_explorer_export/*). Rebuilds the merged Model Explorer graph and fails if any node has no consumer (a "dead" node), which signals a wiring regression.
 ---
 
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
 # Check for dead nodes in the merged model graph
 
 A **dead node** is a graph node whose id is never referenced as the

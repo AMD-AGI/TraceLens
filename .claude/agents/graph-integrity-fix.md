@@ -5,6 +5,11 @@ tools: Bash, Read, Grep, Glob, Edit, Write
 model: sonnet
 ---
 
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
 # Graph structural-integrity fixer
 
 The TraceLens Model Explorer export must satisfy four whole-graph structural

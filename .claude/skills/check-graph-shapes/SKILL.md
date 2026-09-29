@@ -3,6 +3,11 @@ name: check-graph-shapes
 description: Run after editing graph-export, block-tree, computation-graph, ast, or shape-inference code (TraceLens/ModelUtils/*, TraceLens/Visualizer/model_explorer_export/*). Rebuilds the merged Model Explorer graph and flags every node whose rendered output shape carries an unresolved dim (a `?` placeholder, an unfolded reshape `-1`, or a dropped/empty axis), reporting a shape-inference fidelity gap to fix upstream.
 ---
 
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
 # Check for unresolved output shapes in the merged model graph
 
 Every operation node in the export carries a rendered `output_shape` attr (the

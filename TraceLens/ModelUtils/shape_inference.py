@@ -3368,6 +3368,9 @@ class ShapeInferencer:
             torch_op_spec = self._torch_op_shape(node, inputs)
             if torch_op_spec is not None:
                 return torch_op_spec
+            triton_spec = self._triton_op_shape(node, inputs)
+            if triton_spec is not None:
+                return triton_spec
             _log.warning(
                 "No shape inference rule for %s (label=%r, class=%r); "
                 "passing through input shape",
@@ -3486,10 +3489,42 @@ class ShapeInferencer:
         raw = _detail_value(details, "raw_op")
         if raw:
             candidates.append(raw)
+        # A stage decomposed from a Triton kernel records the operation it
+        # performs; its display label is a glyph that resolves to nothing.
+        triton_op = _detail_value(details, "triton_op")
+        if triton_op and triton_op not in candidates:
+            candidates.append(triton_op)
         label = self._torch_op_label(node)
         if label and label not in candidates:
             candidates.append(label)
         return candidates
+
+    def _triton_op_shape(
+        self, node: ModelGraphNode, inputs: list[TensorSpec]
+    ) -> TensorSpec | None:
+        """Output shape of a stage decomposed from a Triton kernel.
+
+        For these two families the Triton language fixes the result shape
+        regardless of how the call was written, so it resolves without running
+        anything: elementwise ops broadcast their operands, and the associative
+        scans return their input unchanged. The torch fallbacks cannot help
+        here -- ``tl.cumsum``'s axis is a kernel-launch detail we never
+        recorded, so a meta execution of ``torch.cumsum`` has no ``dim`` to
+        pass and simply fails.
+
+        Returns *None* for anything else (a reduction, say) so the caller keeps
+        looking rather than inventing a shape.
+        """
+        details = [str(item) for item in node.metadata.get("details", [])]
+        triton_op = _detail_value(details, "triton_op")
+        if not triton_op or not inputs:
+            return None
+        if triton_op in _TRITON_SCAN_OPS:
+            return inputs[0]
+        if triton_op in _TRITON_ELEMENTWISE_OPS:
+            shape = _broadcast_shapes([item.shape for item in inputs])
+            return TensorSpec(shape=shape, dtype=inputs[0].dtype)
+        return None
 
     def _torch_op_shape(
         self, node: ModelGraphNode, inputs: list[TensorSpec]
@@ -4630,6 +4665,29 @@ def _replace_dim(
     if 0 <= dim < len(lst):
         lst[dim] = value
     return tuple(lst)
+
+
+# Shape behaviour of the Triton-language operations the kernel decomposer emits.
+# Sanctioned as a shape-inference table: it records what each operation does to a
+# shape, which is exactly the kind of knowledge shape inference is allowed to
+# hold. It is NOT a list of recognised kernels or a display-name map -- nothing
+# here decides whether something is a kernel or what it is called.
+_TRITON_ELEMENTWISE_OPS = frozenset(
+    {
+        "add",
+        "sub",
+        "mul",
+        "div",
+        "pow",
+        "sigmoid",
+        "sqrt",
+        "exp",
+        "exp2",
+        "softplus",
+    }
+)
+# Associative scans: same shape in, same shape out.
+_TRITON_SCAN_OPS = frozenset({"cumsum", "cumprod"})
 
 
 def _broadcast_shapes(shapes: list[tuple[DimExpr, ...]]) -> tuple[DimExpr, ...]:

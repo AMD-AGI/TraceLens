@@ -1,3 +1,12 @@
 torch
 transformers
 huggingface_hub>=0.20
+# Some checkpoints reach their modules through a kernel library whose package
+# __init__ imports its Triton kernels eagerly (fla-core, as used by Kimi-K3).
+# Such a library cannot be imported at all without Triton present, which means
+# the model class cannot be built on the meta device and every meta-derived
+# shape silently vanishes from the diagram. The visualizer never runs a Triton
+# kernel -- it only needs the import to succeed -- but the import has to work.
+# Declared once here rather than fetched into each per-model dependency
+# directory, where it would cost ~900 MB per model.
+triton; platform_system == "Linux" and platform_machine == "x86_64"

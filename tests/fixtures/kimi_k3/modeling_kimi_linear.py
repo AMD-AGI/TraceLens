@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 # Vendored test fixture: modeling source for moonshotai/Kimi-K3
 # (`modeling_kimi_linear.py`, KimiLinearForCausalLM backbone).
 #

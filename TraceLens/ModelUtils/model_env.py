@@ -206,17 +206,6 @@ def _missing_requirements(output: str) -> list[str]:
     return candidates
 
 
-def _is_model_named(package: str, candidates: list[str]) -> bool:
-    """True when the model's own code asked for this package by name.
-
-    ``_missing_requirements`` puts the package a modeling file spells out in its
-    own ``pip install ...`` message first, ahead of module names recovered from
-    the chained traceback. Only the former is something the checkpoint declares a
-    need for; the rest are that library's own runtime imports.
-    """
-    return bool(candidates) and package == candidates[0]
-
-
 def _probe_command(checkpoint: str | Path) -> list[str]:
     """Ask the model to import its own declared class, and nothing more."""
     return [
@@ -250,10 +239,17 @@ def ensure_model_dependencies(
     Installs the pinned ``transformers`` (with its own dependencies, so the
     tokenizers/hub versions that release expects travel with it), then -- when
     ``probe`` is set -- repeatedly asks the model to import itself and installs
-    whatever package each failure names. Those follow-up installs are made
-    WITHOUT dependencies: the heavy shared ones (torch and friends) are already
-    importable from the running environment, and anything genuinely absent simply
-    shows up as the next failure and gets installed in turn.
+    whatever package each failure names, in the order
+    :func:`_missing_requirements` ranks them.
+
+    That includes a package named only by a deeper chained failure -- a kernel
+    compiler some library imports at module scope, say. It is tempting to skip
+    those on the grounds that reading source never runs the kernels, and this
+    function used to. That was wrong: a library whose ``__init__`` imports its
+    kernels eagerly cannot be imported at all without them, and the model class
+    cannot be built on the meta device, so every meta-derived shape silently
+    disappears from the diagram while the run still looks successful. The
+    package can be large (hundreds of megabytes); a wrong diagram is worse.
 
     Returns the directory to prepend to ``PYTHONPATH``, or *None* if it could not
     be made to import the model.
@@ -289,26 +285,14 @@ def ensure_model_dependencies(
         package = next((name for name in candidates if name not in attempted), None)
         if package is None:
             # Nothing new to fetch. The pinned sources are still installed and
-            # that is what the analysis reads, so hand the directory back rather
-            # than throwing away work: only a live meta-device instantiation
-            # needs the model to actually import.
+            # AST analysis reads those directly, so hand the directory back
+            # rather than throwing away work -- but say plainly that the
+            # meta-device pass is the part that will be missing.
             _log.info(
                 "%s is not importable here (%s); its sources are installed and "
                 "will still be read, but meta-device shapes are unavailable",
                 checkpoint,
                 candidates or "no further packages named",
-            )
-            return target
-        if not _is_model_named(package, candidates):
-            # A module surfaced only by a deeper chained failure -- a kernel
-            # compiler a library imports at load time, say. Reading a class's
-            # source never runs that code, so installing it buys nothing the
-            # analysis uses and can cost hundreds of megabytes.
-            _log.info(
-                "Not installing %s: it is a transitive runtime import, not "
-                "something %s itself asks for",
-                package,
-                checkpoint,
             )
             return target
         attempted.add(package)

@@ -158,6 +158,13 @@ class KernelPipelineStep:
 class ComputationOp:
     label: str
     second_operand: int | Literal["input"] | None = None
+    # The Triton-language operation this stage performs, recorded at decomposition
+    # time. The display label is a glyph chosen for the diagram ("x scale", a
+    # division sign) and carries no op identity, so shape inference cannot look a
+    # glyph up in any torch namespace -- it used to give up and pass the input
+    # shape through with a warning. Naming the op here lets shape inference apply
+    # Triton's own shape rule instead of guessing from the label.
+    triton_op: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1140,17 +1147,17 @@ def _decompose_computation_expr(expr: ast.AST) -> list[ComputationOp]:
         callee = _call_name(expr)
         arg_ops = _flatten_ops([_decompose_computation_expr(arg) for arg in expr.args])
         if callee == "sigmoid":
-            return arg_ops + [ComputationOp("Sigmoid")]
+            return arg_ops + [ComputationOp("Sigmoid", triton_op="sigmoid")]
         if callee == "sum":
-            return arg_ops + [ComputationOp("Sum")]
+            return arg_ops + [ComputationOp("Sum", triton_op="sum")]
         if callee == "sqrt":
-            return arg_ops + [ComputationOp("Sqrt")]
+            return arg_ops + [ComputationOp("Sqrt", triton_op="sqrt")]
         if callee == "cumsum":
-            return arg_ops + [ComputationOp("CumSum")]
+            return arg_ops + [ComputationOp("CumSum", triton_op="cumsum")]
         if callee in {"exp", "exp2"}:
-            return arg_ops + [ComputationOp("Exp")]
+            return arg_ops + [ComputationOp("Exp", triton_op=callee)]
         if callee == "softplus":
-            return arg_ops + [ComputationOp("Softplus")]
+            return arg_ops + [ComputationOp("Softplus", triton_op="softplus")]
         if callee == "load":
             return arg_ops
         return arg_ops
@@ -1163,42 +1170,44 @@ def _decompose_computation_expr(expr: ast.AST) -> list[ComputationOp]:
             if left_name and left_name == right_name:
                 return []
             if _is_scale_reference(expr.left) or _is_scale_reference(expr.right):
-                return left_ops + right_ops + [ComputationOp("× scale")]
+                return (
+                    left_ops + right_ops + [ComputationOp("× scale", triton_op="mul")]
+                )
             second_operand = _multiply_second_operand(expr, left_ops, right_ops)
             return (
                 left_ops
                 + right_ops
-                + [ComputationOp("×", second_operand=second_operand)]
+                + [ComputationOp("×", second_operand=second_operand, triton_op="mul")]
             )
         if isinstance(expr.op, ast.Div):
             if isinstance(expr.left, ast.Constant) and expr.left.value in {1, 1.0}:
-                return right_ops + [ComputationOp("÷")]
+                return right_ops + [ComputationOp("÷", triton_op="div")]
             second_operand = len(left_ops) - 1 if left_ops else None
             return (
                 left_ops
                 + right_ops
-                + [ComputationOp("÷", second_operand=second_operand)]
+                + [ComputationOp("÷", second_operand=second_operand, triton_op="div")]
             )
         if isinstance(expr.op, ast.Add):
             second_operand = len(left_ops) - 1 if left_ops and right_ops else None
             return (
                 left_ops
                 + right_ops
-                + [ComputationOp("+", second_operand=second_operand)]
+                + [ComputationOp("+", second_operand=second_operand, triton_op="add")]
             )
         if isinstance(expr.op, ast.Sub):
             second_operand = len(left_ops) - 1 if left_ops and right_ops else None
             return (
                 left_ops
                 + right_ops
-                + [ComputationOp("−", second_operand=second_operand)]
+                + [ComputationOp("−", second_operand=second_operand, triton_op="sub")]
             )
         if isinstance(expr.op, ast.Pow):
             second_operand = len(left_ops) - 1 if left_ops and right_ops else None
             return (
                 left_ops
                 + right_ops
-                + [ComputationOp("^", second_operand=second_operand)]
+                + [ComputationOp("^", second_operand=second_operand, triton_op="pow")]
             )
     if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.USub):
         return _decompose_computation_expr(expr.operand)
@@ -1421,7 +1430,10 @@ def introspect_kernel_op_substeps(
                 # A STAGE inside a kernel, not a kernel call of its own: it is
                 # kernel work for classification, but it has no call boundary and
                 # so must not have kernel input/output ports synthesised for it.
-                details=[f"kernel_stage: {op.label}"],
+                details=[
+                    f"kernel_stage: {op.label}",
+                    *([f"triton_op: {op.triton_op}"] if op.triton_op else []),
+                ],
                 second_operand=second_operand,
             )
         )

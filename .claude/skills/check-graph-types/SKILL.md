@@ -3,6 +3,11 @@ name: check-graph-types
 description: Run after editing graph-export, block-tree, computation-graph, ast, or shape-inference code (TraceLens/ModelUtils/*, TraceLens/Visualizer/model_explorer_export/*). Rebuilds the merged Model Explorer graph and type-checks every operation node whose operand contract is known, reporting warnings for mis-wired/mis-typed inputs (e.g. an axis op fed a second tensor operand where a scalar dim belongs).
 ---
 
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
 # Type-check operation nodes in the merged model graph
 
 Every operation node in the export carries a PyTorch-profiler-style operand

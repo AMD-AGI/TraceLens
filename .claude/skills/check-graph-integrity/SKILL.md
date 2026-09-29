@@ -3,6 +3,11 @@ name: check-graph-integrity
 description: Run after editing graph-export, block-tree, computation-graph, ast, or shape-inference code (TraceLens/ModelUtils/*, TraceLens/Visualizer/model_explorer_export/*). Rebuilds the merged Model Explorer graph and runs four structural-integrity checks (I1 dead-node, I2 no-source/orphan, I3 constant-soundness, I4 same-name boundary passthrough) on BOTH the built graph and the render-filtered graph, reporting warnings for wiring/tagging fidelity bugs (a sourceless op, an orphaned tile, a real activation hidden as a constant, a redundant same-name @output→@input tile).
 ---
 
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
 # Structural-integrity check of the merged model graph
 
 Beyond the per-operation operand type-check (`check-graph-types`), the export must
