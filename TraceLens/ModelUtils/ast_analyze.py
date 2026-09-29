@@ -1806,6 +1806,40 @@ def _submodule_method_step_details(
     return details
 
 
+def named_method_operations(
+    cls: "ClassStructure", method_name: str
+) -> list[ForwardOperation]:
+    """Tensor ops of a NAMED method of *cls*, for a call made from another class.
+
+    ``multi_op_methods`` only covers ``self.<method>()`` calls a class makes on
+    itself. When one module calls a method on a CHILD module
+    (``self.indexer.build_block_mask(...)``) the callee lives in a different
+    class, so its body is never expanded and the call renders as one opaque box.
+    Parse it here from the child's own class AST; returns ``[]`` when the method
+    is absent or traces to nothing.
+    """
+    node = getattr(cls, "node", None)
+    if node is None:
+        return []
+    func = next(
+        (
+            item
+            for item in node.body
+            if isinstance(item, ast.FunctionDef) and item.name == method_name
+        ),
+        None,
+    )
+    if func is None:
+        return []
+    try:
+        analysis = _forward_operations_from_forward(
+            func, self_values={}, all_tensor_ops=True
+        )
+    except Exception:  # noqa: BLE001 - a helper we cannot trace stays a leaf
+        return []
+    return list(analysis.operations)
+
+
 def _invoked_submodule_attrs(body: list[ast.stmt]) -> frozenset[str]:
     """Self attributes this forward calls as a module (``self.<attr>(...)``).
 
@@ -3988,6 +4022,7 @@ class _ForwardOperationExtractor:
         config: dict[str, Any] | None = None,
         module_functions: dict[str, ast.FunctionDef] | None = None,
         repeated_submodule_attrs: frozenset[str] | None = None,
+        submodule_attrs: frozenset[str] | None = None,
         class_methods: dict[str, ast.FunctionDef] | None = None,
         is_free_function_body: bool = False,
     ) -> None:
@@ -4021,6 +4056,10 @@ class _ForwardOperationExtractor:
         # (rotary ``recomposition_frequencies(cos)`` then ``(sin)``) keep distinct
         # predecessors/producer bindings instead of the second overwriting the first.
         self.repeated_submodule_attrs = frozenset(repeated_submodule_attrs or ())
+        # Child modules this forward invokes, so a method called ON one
+        # (``self.indexer.build_block_mask(...)``) is recognised as that child's
+        # call rather than an untracked tensor-method chain link.
+        self.submodule_attrs = frozenset(submodule_attrs or ())
         # Module-level free functions (``apply_rotary_pos_emb_vision``, ...) keyed
         # by name, so a traced synthetic call can map its positional args to the
         # callee's parameter names and route each to the producer feeding it.
@@ -4374,6 +4413,17 @@ class _ForwardOperationExtractor:
             if method_name in self.repeated_submodule_attrs:
                 return submodule_callsite_attr(method_name, node.lineno)
             return method_name
+        # ``self.<sub>.<method>(...)`` produces a value just as the child's own
+        # call does; without this the extractor records no producer for it, so
+        # the call's arguments are never captured and whatever it returns
+        # appears to come from nowhere.
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Attribute)
+            and _is_self_attr(func.value, func.value.attr)
+            and func.value.attr in self.submodule_attrs
+        ):
+            return submodule_callsite_attr(func.value.attr, node.lineno)
         target = _expr_name(func)
         if target and (
             target in _SYNTHETIC_ATTENTION_NAMES
@@ -7191,6 +7241,7 @@ def _forward_operations_from_forward(
         config=config,
         module_functions=module_functions,
         repeated_submodule_attrs=_repeated_self_call_attrs(func.body),
+        submodule_attrs=_invoked_submodule_attrs(func.body),
         class_methods=class_methods,
         is_free_function_body=is_free_function_body,
     )

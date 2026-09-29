@@ -2280,17 +2280,39 @@ def _add_submodule_boundary_param_inputs(
     primary = _input_label_for(root)
     param_index: dict[str, int] = {}
     for call_attr, params in boundary.items():
-        # A submodule with a real primary predecessor already reads its true input.
-        if root.forward_step_predecessors.get(call_attr):
-            continue
-        if root.forward_step_predecessor_args.get(call_attr):
-            continue
+        recorded_args = root.forward_step_predecessor_args.get(call_attr) or {}
         secondary = [
             param
             for param in params
             if param != primary and param in root.forward_param_inputs
+            # A param the extractor already resolved to a producer reads that
+            # producer, not a boundary.
+            and param not in recorded_args
         ]
         if len(secondary) != 1:
+            continue
+        has_predecessors = bool(root.forward_step_predecessors.get(call_attr))
+        # A method invoked on a child module (``self.indexer.build_block_mask(
+        # block_indices, attention_mask, ...)``) reads the caller's parameter IN
+        # ADDITION to its own operands, so its boundary is added alongside them
+        # rather than replacing a forward-input edge. Every other call keeps the
+        # original rule -- the bare param must be its SOLE operand -- because
+        # relaxing it there invents boundaries nothing can source.
+        is_submodule_method = any(
+            spec.block is not None
+            and spec.block.attr_name == call_attr
+            and any(
+                str(detail).startswith("method:")
+                for detail in (spec.block.details or ())
+            )
+            for spec in graph.nodes
+        )
+        if has_predecessors and not is_submodule_method:
+            continue
+        if (
+            root.forward_step_predecessor_args.get(call_attr)
+            and not is_submodule_method
+        ):
             continue
         param = secondary[0]
         member_indices = {
@@ -2310,7 +2332,7 @@ def _add_submodule_boundary_param_inputs(
             )
             param_index[param] = source
         redirected = False
-        if input_index is not None:
+        if input_index is not None and not has_predecessors:
             for target in sorted(member_indices):
                 stale = (input_index, target)
                 if stale not in graph.links:

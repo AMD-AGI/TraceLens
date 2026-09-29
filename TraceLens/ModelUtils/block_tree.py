@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from TraceLens.ModelUtils.ast_analyze import (
+    named_method_operations,
     FORWARD_METHOD_INPUT,
     GATE_ACTIVATION_DETAIL_PREFIX,
     LAYOUT_ONLY_LABELS,
@@ -2756,17 +2757,56 @@ def build_block_node(
             None,
         )
         if invoked_method and child_class is not None:
+            # Expand the method's own body. It lives in the CHILD's class, so
+            # ``multi_op_methods`` -- which only covers a class's calls on
+            # itself -- never holds it; parse it from that class directly,
+            # otherwise the call renders as one box hiding real tensor work.
+            method_child = registry.get(child_class) if registry else None
+            method_ops = (
+                named_method_operations(method_child, invoked_method)
+                if method_child is not None
+                else []
+            )
+            # The ``method:`` detail is kept either way: it marks this node as a
+            # composite (a named method of a child module) rather than a
+            # primitive, so the opaque-leaf check can tell when an unexpanded one
+            # is still hiding real work.
+            if method_ops:
+                child_nodes.append(
+                    BlockNode(
+                        attr_name=call_attr,
+                        class_name=child_class,
+                        role="other",
+                        label=invoked_method,
+                        forward_order=child_order,
+                        details=list(child_details),
+                        is_basic=False,
+                        children=[
+                            _leaf_node(
+                                attr_name=operation.attr_name,
+                                class_name=operation.class_name,
+                                forward_order=position,
+                                details=list(operation.details),
+                                # Carry the extractor's real dataflow: without
+                                # it the ops chain in source order and a value
+                                # consumed further down (the block-keep mask
+                                # feeding the final ``&``) is left dead.
+                                operation_predecessors=list(operation.predecessors),
+                                param_inputs=list(operation.param_inputs),
+                                external_inputs=list(operation.external_inputs),
+                            )
+                            for position, operation in enumerate(method_ops)
+                        ],
+                    )
+                )
+                continue
             child_nodes.append(
                 _leaf_node(
                     attr_name=call_attr,
                     class_name=child_class,
                     forward_order=child_order,
                     label=invoked_method,
-                    details=[
-                        detail
-                        for detail in child_details
-                        if not detail.startswith("method:")
-                    ],
+                    details=list(child_details),
                     basic=False,
                 )
             )
