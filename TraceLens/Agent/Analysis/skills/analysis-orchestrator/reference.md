@@ -312,6 +312,10 @@ print(f'GRAPH_REPLAY_FRACTION={coverage.graph_replay_fraction}')
 
 **`STATUS=OK`:** Proceed
 **`STATUS=GRAPH_UNDER_RECORDED`:**
+If <inference_exec_mode> = graph_replay_only and <comparison_scope> = comparative, i.e. <comparison_method> = semantic, skip the rest of this step and proceed with Steps 3-6.
+
+Otherwise,
+
 1. Emit `[DIAG:trace_quality:GRAPH_UNDER_RECORDED]`: Deterministic fallback report
 2. Run the deterministic fallback writer on `<unified_perf_csv>`:
    ```bash
