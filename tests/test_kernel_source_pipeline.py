@@ -82,6 +82,7 @@ resolve_triton_source = _ks.resolve_triton_source
 triton_def_line = _ks.triton_def_line
 contract = importlib.import_module(_ks.__name__ + ".contract")
 index_mod = importlib.import_module(_ks.__name__ + ".index")
+library_artifact = importlib.import_module(_ks.__name__ + ".library_artifact")
 _demangle = importlib.import_module(_ks.__name__ + ".demangle")
 base_symbol = _demangle.base_symbol
 
@@ -634,6 +635,90 @@ class TestResolveKernel:
         assert res.patchable is True
         assert res.method == "symbol_index"
         assert res.line == framework_tree["reshape_line"]
+
+
+# ===========================================================================
+# Stage 5b -- precompiled Tensile library artifact (audit breadcrumb)
+# ===========================================================================
+class TestLibraryArtifact:
+    """A precompiled ``Cijk_*`` kernel points at the ``.dat`` logic file it lives in."""
+
+    _TILE = "MT256x192x64"
+
+    def _name(self, tile=_TILE):
+        return f"Cijk_Alik_Bljk_BBS_BH_SAV_UserArgs_{tile}_MI16x16x1_SN"
+
+    @pytest.fixture
+    def rocm_library(self, tmp_path):
+        """A fake rocBLAS library dir with per-dtype/arch Tensile logic files."""
+        lib = tmp_path / "rocblas" / "library"
+        lib.mkdir(parents=True)
+        body = f"...{self._TILE}...".encode()
+        # Right dtype (BB=bf16), layout, arch, and it lists the tile.
+        (
+            lib / "TensileLibrary_Type_BB_HPA_l_Alik_Bljk_Cijk_Dijk_gfx942.dat"
+        ).write_bytes(body)
+        # Same tile but wrong dtype (HH) -> must lose to the BB file.
+        (
+            lib / "TensileLibrary_Type_HH_HPA_l_Alik_Bljk_Cijk_Dijk_gfx942.dat"
+        ).write_bytes(body)
+        # Same tile but wrong arch -> must be skipped entirely.
+        (
+            lib / "TensileLibrary_Type_BB_HPA_l_Alik_Bljk_Cijk_Dijk_gfx90a.dat"
+        ).write_bytes(body)
+        return lib
+
+    def test_resolves_dat_by_tile_layout_dtype_arch(self, rocm_library):
+        loc = library_artifact.resolve_library_artifact(
+            self._name(), dirs=[rocm_library], arch="gfx942"
+        )
+        assert loc is not None
+        assert loc.source_file.endswith("Type_BB_HPA_l_Alik_Bljk_Cijk_Dijk_gfx942.dat")
+        assert loc.framework == "rocblas"
+
+    def test_no_tile_token_returns_none(self, rocm_library):
+        # A name with no macro-tile token can't be pinned to a solution file.
+        assert (
+            library_artifact.resolve_library_artifact(
+                "Cijk_Alik_Bljk_HHS_BH", dirs=[rocm_library], arch="gfx942"
+            )
+            is None
+        )
+
+    def test_tile_absent_from_files_returns_none(self, rocm_library):
+        assert (
+            library_artifact.resolve_library_artifact(
+                self._name("MT999x999x999"), dirs=[rocm_library], arch="gfx942"
+            )
+            is None
+        )
+
+    def test_other_arch_only_is_not_used(self, tmp_path):
+        # The tile exists only in a gfx90a file; a gfx942 request must miss it.
+        lib = tmp_path / "rocblas" / "library"
+        lib.mkdir(parents=True)
+        (
+            lib / "TensileLibrary_Type_BB_HPA_l_Alik_Bljk_Cijk_Dijk_gfx90a.dat"
+        ).write_bytes(f"...{self._TILE}...".encode())
+        assert (
+            library_artifact.resolve_library_artifact(
+                self._name(), dirs=[lib], arch="gfx942"
+            )
+            is None
+        )
+
+    def test_resolve_kernel_attaches_breadcrumb(
+        self, rocm_library, framework_tree, monkeypatch
+    ):
+        # End-to-end: a precompiled Tensile kernel stays non-patchable, but now
+        # carries the library file as a breadcrumb instead of an empty location.
+        monkeypatch.setenv("TRACELENS_ROCM_LIBRARY_DIRS", str(rocm_library))
+        monkeypatch.setenv("TRACELENS_TARGET_ARCH", "gfx942")
+        res = resolve_kernel(self._name(), search_paths=[framework_tree["root"]])
+        assert res.patchable is False
+        assert res.kind == "tensile_precompiled"
+        assert res.method == "gate_non_patchable"
+        assert res.source_file.endswith("gfx942.dat")
 
 
 # ===========================================================================

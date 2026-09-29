@@ -22,6 +22,7 @@ from . import index
 from .demangle import base_symbol
 from .editable import is_editable_source
 from .datatypes import ResolveResult, SourceLocation
+from .library_artifact import resolve_library_artifact
 from .patchability import classify_patchability
 
 log = logging.getLogger(__name__)
@@ -135,6 +136,10 @@ def resolve_kernel(
     location = resolve_source_path(kernel_name, search_paths)
 
     if gate.patchable is False:
+        if location is None and gate.kind == "tensile_precompiled":
+            # No editable source, but the precompiled solution lives in a known
+            # library file -- surface it as an audit breadcrumb (still not patchable).
+            location = resolve_library_artifact(kernel_name)
         patchable, method, kind, reason = (
             False,
             "gate_non_patchable",
