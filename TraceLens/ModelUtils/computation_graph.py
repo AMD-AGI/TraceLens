@@ -1637,17 +1637,43 @@ def _wire_all_predecessor_edges(
             if spec.block is not None and spec.block.attr_name == SYNTHETIC_ATTENTION
         ]
         for target_index in targets:
-            # If the kernel declares its own ``inputs:`` list, its edges
-            # are already wired by normal predecessor tracking; skip all
-            # provenance edges for declared ports.
+            # A kernel that declares its own ``inputs:`` list normally has its
+            # edges wired by predecessor tracking, so a declared port is skipped
+            # here to avoid double-wiring. But that tracking is positional: when
+            # a port's value comes from a call the extractor recorded provenance
+            # for, positional order can attach the wrong tensor entirely (an
+            # attention mask built by ``self.indexer.build_block_mask(...)`` was
+            # wired to the neighbouring position-ids expand). Provenance is the
+            # model's own dataflow, so when the chain resolves to a real node it
+            # wins; a declared port with no resolvable chain still falls through
+            # to predecessor tracking exactly as before.
             kernel_declared = {
                 n.lower() for n in _kernel_input_names(graph.nodes[target_index])
             }
 
+            # A producer that feeds nothing is about to be pruned as unreachable,
+            # taking this port's real source with it and leaving the port to be
+            # wired positionally to a neighbouring op instead.
+            linked_sources = {source for source, _target in graph.links}
+
             ports_by_source: dict[int, list[str]] = {}
             for port, chain in root.attention_inputs.items():
                 if kernel_declared and port.lower() in kernel_declared:
-                    continue
+                    resolved = next(
+                        (
+                            attr_last_index[attr]
+                            for attr in reversed(chain)
+                            if attr in attr_last_index
+                        ),
+                        None,
+                    )
+                    # Declared ports are normally wired by predecessor tracking,
+                    # and overriding that would re-merge ports which were
+                    # deliberately split. Step in only when this port's recorded
+                    # producer is an orphan -- nothing consumes it -- because
+                    # that is the case predecessor tracking cannot get right.
+                    if resolved is None or resolved in linked_sources:
+                        continue
 
                 # Follow the provenance chain (actual data-flow from AST
                 # analysis) to find the last graph node in the chain.

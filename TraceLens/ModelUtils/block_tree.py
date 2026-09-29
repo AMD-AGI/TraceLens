@@ -2742,6 +2742,35 @@ def build_block_node(
             if override is not _NO_SUBMODULE_OVERRIDE
             else cls.init_assignments.get(base_attr)
         )
+        # ``self.<sub>.<method>(...)`` runs a NAMED method of the child, not its
+        # forward. Expanding the forward here would emit a second frame identical
+        # to the child's own call -- the two then collapse, and the step's output
+        # disappears, leaving whatever consumed it to fall back on an unrelated
+        # neighbouring op. Render it as the operation it is instead.
+        invoked_method = next(
+            (
+                detail.split(":", 1)[1].strip()
+                for detail in child_details
+                if detail.startswith("method:")
+            ),
+            None,
+        )
+        if invoked_method and child_class is not None:
+            child_nodes.append(
+                _leaf_node(
+                    attr_name=call_attr,
+                    class_name=child_class,
+                    forward_order=child_order,
+                    label=invoked_method,
+                    details=[
+                        detail
+                        for detail in child_details
+                        if not detail.startswith("method:")
+                    ],
+                    basic=False,
+                )
+            )
+            continue
         if child_class is None or child_class in _SKIP_INIT_CLASS_NAMES:
             if child_class in _SKIP_INIT_CLASS_NAMES:
                 continue

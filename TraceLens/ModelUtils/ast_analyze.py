@@ -1555,6 +1555,7 @@ def _extract_self_calls_ordered(
     out: list[str],
     skip_free_fn: bool = False,
     repeated_attrs: frozenset[str] = frozenset(),
+    module_attrs: frozenset[str] = frozenset(),
 ) -> None:
     """Collect self.module(...) calls in approximate evaluation order (inner-first).
 
@@ -1572,10 +1573,12 @@ def _extract_self_calls_ordered(
     node = _unwrap_expr(node)
     if isinstance(node, ast.Call):
         for arg in node.args:
-            _extract_self_calls_ordered(arg, out, skip_free_fn, repeated_attrs)
+            _extract_self_calls_ordered(
+                arg, out, skip_free_fn, repeated_attrs, module_attrs
+            )
         for keyword in node.keywords:
             _extract_self_calls_ordered(
-                keyword.value, out, skip_free_fn, repeated_attrs
+                keyword.value, out, skip_free_fn, repeated_attrs, module_attrs
             )
 
         func = node.func
@@ -1584,6 +1587,24 @@ def _extract_self_calls_ordered(
             if attr in repeated_attrs:
                 attr = submodule_callsite_attr(attr, node.lineno)
             _append_forward_call(out, attr)
+            return
+        # ``self.<submodule>.<method>(...)`` -- a named method on a child module
+        # (``self.indexer.build_block_mask(...)``). The receiver is the submodule,
+        # not ``self``, so the test above never saw it and the call vanished: its
+        # result then had no recorded producer, and whatever read that result fell
+        # back to the op that happened to precede it -- wiring an attention
+        # kernel's mask port to an unrelated positional tensor. The call site
+        # disambiguates it from the module's own forward call.
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Attribute)
+            and isinstance(func.value.value, ast.Name)
+            and func.value.value.id == "self"
+            and func.value.attr in module_attrs
+        ):
+            _append_forward_call(
+                out, submodule_callsite_attr(func.value.attr, node.lineno)
+            )
             return
         functional_op = _functional_call_name(func)
         if functional_op:
@@ -1625,32 +1646,50 @@ def _extract_self_calls_ordered(
         # visited above, so a producer passed as a method argument is not dropped
         # either. Free-function calls (``func`` is an ``ast.Name``) don't reach here.
         if isinstance(func, ast.Attribute):
-            _extract_self_calls_ordered(func.value, out, skip_free_fn, repeated_attrs)
+            _extract_self_calls_ordered(
+                func.value, out, skip_free_fn, repeated_attrs, module_attrs
+            )
         return
 
     if isinstance(node, ast.BinOp):
-        _extract_self_calls_ordered(node.left, out, skip_free_fn, repeated_attrs)
-        _extract_self_calls_ordered(node.right, out, skip_free_fn, repeated_attrs)
+        _extract_self_calls_ordered(
+            node.left, out, skip_free_fn, repeated_attrs, module_attrs
+        )
+        _extract_self_calls_ordered(
+            node.right, out, skip_free_fn, repeated_attrs, module_attrs
+        )
         return
 
     if isinstance(node, (ast.List, ast.Tuple)):
         for elt in node.elts:
-            _extract_self_calls_ordered(elt, out, skip_free_fn, repeated_attrs)
+            _extract_self_calls_ordered(
+                elt, out, skip_free_fn, repeated_attrs, module_attrs
+            )
         return
 
     if isinstance(node, ast.IfExp):
-        _extract_self_calls_ordered(node.body, out, skip_free_fn, repeated_attrs)
-        _extract_self_calls_ordered(node.orelse, out, skip_free_fn, repeated_attrs)
+        _extract_self_calls_ordered(
+            node.body, out, skip_free_fn, repeated_attrs, module_attrs
+        )
+        _extract_self_calls_ordered(
+            node.orelse, out, skip_free_fn, repeated_attrs, module_attrs
+        )
         return
 
     if isinstance(node, ast.Subscript):
-        _extract_self_calls_ordered(node.value, out, skip_free_fn, repeated_attrs)
+        _extract_self_calls_ordered(
+            node.value, out, skip_free_fn, repeated_attrs, module_attrs
+        )
         return
 
     if isinstance(node, ast.Compare):
-        _extract_self_calls_ordered(node.left, out, skip_free_fn, repeated_attrs)
+        _extract_self_calls_ordered(
+            node.left, out, skip_free_fn, repeated_attrs, module_attrs
+        )
         for comparator in node.comparators:
-            _extract_self_calls_ordered(comparator, out, skip_free_fn, repeated_attrs)
+            _extract_self_calls_ordered(
+                comparator, out, skip_free_fn, repeated_attrs, module_attrs
+            )
         return
 
 
@@ -1658,12 +1697,20 @@ def _self_call_sites_in_expr(node: ast.AST) -> dict[str, set[int]]:
     """Distinct source linenos calling each ``self.<attr>`` inside an expression."""
     sites: dict[str, set[int]] = {}
     for inner in ast.walk(node):
-        if (
-            isinstance(inner, ast.Call)
-            and isinstance(inner.func, ast.Attribute)
-            and _is_self_attr(inner.func, inner.func.attr)
-        ):
+        if not isinstance(inner, ast.Call) or not isinstance(inner.func, ast.Attribute):
+            continue
+        if _is_self_attr(inner.func, inner.func.attr):
             sites.setdefault(inner.func.attr, set()).add(inner.lineno)
+            continue
+        # ``self.<sub>.<method>(...)`` is another call site of ``<sub>``: it runs
+        # that child's code just as its forward call does. Counting it keeps the
+        # two uses distinct steps (each gets an ``@l{lineno}`` key) instead of one
+        # silently shadowing the other.
+        receiver = inner.func.value
+        if isinstance(receiver, ast.Attribute) and _is_self_attr(
+            receiver, receiver.attr
+        ):
+            sites.setdefault(receiver.attr, set()).add(inner.lineno)
     return sites
 
 
@@ -1729,6 +1776,53 @@ def _path_max_self_call_sites(stmts: list[ast.stmt]) -> dict[str, set[int]]:
             stmt_sites = _self_call_sites_in_expr(stmt)
         result = _merge_sequential_sites(result, stmt_sites)
     return result
+
+
+def _submodule_method_step_details(
+    body: list[ast.stmt], module_attrs: frozenset[str]
+) -> dict[str, list[str]]:
+    """Record WHICH method a ``self.<sub>.<method>(...)`` step invokes.
+
+    The step key names the child module (so its class still resolves), but the
+    call runs a NAMED method, not that child's ``forward``. Without this the
+    renderer expands the child's forward for both uses, producing two identical
+    frames -- one of which is then dropped, taking the step's output with it.
+    """
+    details: dict[str, list[str]] = {}
+    for stmt in body:
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Call) or not isinstance(
+                node.func, ast.Attribute
+            ):
+                continue
+            receiver = node.func.value
+            if (
+                isinstance(receiver, ast.Attribute)
+                and _is_self_attr(receiver, receiver.attr)
+                and receiver.attr in module_attrs
+            ):
+                key = submodule_callsite_attr(receiver.attr, node.lineno)
+                details.setdefault(key, []).append(f"method: {node.func.attr}")
+    return details
+
+
+def _invoked_submodule_attrs(body: list[ast.stmt]) -> frozenset[str]:
+    """Self attributes this forward calls as a module (``self.<attr>(...)``).
+
+    Used to tell a child MODULE apart from any other object hanging off ``self``
+    when a method is invoked on it (``self.indexer.build_block_mask(...)`` vs
+    ``self.config.get(...)``). Structural: an attribute this same forward already
+    invokes is a module by demonstration, so no name list is needed and a
+    non-module attribute can never be mistaken for one.
+    """
+    found: set[str] = set()
+    for stmt in body:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Call) and _is_self_attr(
+                node.func, getattr(node.func, "attr", "")
+            ):
+                found.add(node.func.attr)  # type: ignore[union-attr]
+    return frozenset(found)
 
 
 def _repeated_self_call_attrs(body: list[ast.stmt]) -> frozenset[str]:
@@ -9890,6 +9984,7 @@ def _parse_forward(
     config = config or {}
     name_value_ast = _collect_name_value_ast(func)
     repeated_attrs = _repeated_self_call_attrs(func.body)
+    module_attrs = _invoked_submodule_attrs(func.body)
 
     for node in func.body:
         pending_norm = _walk_forward_stmt(
@@ -9905,9 +10000,14 @@ def _parse_forward(
             self_values,
             name_value_ast,
             repeated_attrs=repeated_attrs,
+            module_attrs=module_attrs,
             config=config,
         )
     forward_step_details.update(_positional_step_details(func))
+    for _key, _detail in _submodule_method_step_details(
+        func.body, module_attrs
+    ).items():
+        forward_step_details.setdefault(_key, []).extend(_detail)
     return (
         _dedupe_kernel_merge_calls(calls),
         norm_before,
@@ -9931,6 +10031,7 @@ def _walk_forward_stmt(
     name_value_ast: dict[str, ast.expr] | None = None,
     in_conditional: bool = False,
     repeated_attrs: frozenset[str] = frozenset(),
+    module_attrs: frozenset[str] = frozenset(),
     config: dict | None = None,
 ) -> str | None:
     if isinstance(node, ast.Assign):
@@ -9947,6 +10048,7 @@ def _walk_forward_stmt(
             stmt_calls,
             in_conditional,
             repeated_attrs,
+            module_attrs,
         )
         _inject_kernel_merge(
             node.value,
@@ -9970,7 +10072,7 @@ def _walk_forward_stmt(
     if isinstance(node, ast.AnnAssign) and node.value is not None:
         stmt_calls = []
         _extract_self_calls_ordered(
-            node.value, stmt_calls, in_conditional, repeated_attrs
+            node.value, stmt_calls, in_conditional, repeated_attrs, module_attrs
         )
         _inject_kernel_merge(
             node.value,
@@ -9994,7 +10096,7 @@ def _walk_forward_stmt(
     if isinstance(node, ast.Expr):
         stmt_calls = []
         _extract_self_calls_ordered(
-            node.value, stmt_calls, in_conditional, repeated_attrs
+            node.value, stmt_calls, in_conditional, repeated_attrs, module_attrs
         )
         _inject_kernel_merge(
             node.value,
@@ -10014,7 +10116,7 @@ def _walk_forward_stmt(
     if isinstance(node, ast.AugAssign):
         stmt_calls = []
         _extract_self_calls_ordered(
-            node.value, stmt_calls, in_conditional, repeated_attrs
+            node.value, stmt_calls, in_conditional, repeated_attrs, module_attrs
         )
         _inject_kernel_merge(
             node.value,
@@ -10037,7 +10139,7 @@ def _walk_forward_stmt(
     if isinstance(node, ast.Return) and node.value is not None:
         stmt_calls = []
         _extract_self_calls_ordered(
-            node.value, stmt_calls, in_conditional, repeated_attrs
+            node.value, stmt_calls, in_conditional, repeated_attrs, module_attrs
         )
         _inject_kernel_merge(
             node.value,
@@ -10112,6 +10214,7 @@ def _walk_forward_stmt(
                 name_value_ast,
                 in_conditional=branch_in_conditional,
                 repeated_attrs=repeated_attrs,
+                module_attrs=module_attrs,
                 config=config,
             )
         return pending_norm
@@ -10133,6 +10236,7 @@ def _walk_forward_stmt(
                 name_value_ast,
                 in_conditional=in_conditional,
                 repeated_attrs=repeated_attrs,
+                module_attrs=module_attrs,
                 config=config,
             )
         # Tensor operations are annotated by _ForwardOperationExtractor, but
@@ -10167,6 +10271,7 @@ def _walk_forward_stmt(
                 name_value_ast,
                 in_conditional=in_conditional,
                 repeated_attrs=repeated_attrs,
+                module_attrs=module_attrs,
                 config=config,
             )
         return pending_norm
