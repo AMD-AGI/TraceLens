@@ -98,4 +98,11 @@ def resolve_kernel_source(
     triton_result = resolve_triton_source(
         kernel_file, symbol=kernel_name, search_paths=search_paths
     )
-    return triton_result
+    # Only ``unresolved`` means the launcher gave no Triton verdict at all -- a
+    # native/precompiled kernel dispatched through a ``triton``-named wrapper with
+    # no ``@triton.jit`` def. A patchable def or a generated-Triton gate is a real
+    # verdict (with its own location/breadcrumb) and is returned as-is.
+    if triton_result.method != "unresolved":
+        return triton_result
+    native = resolve_kernel(kernel_name, op_name=op_name, search_paths=search_paths)
+    return native if native.method != "unresolved" else triton_result
