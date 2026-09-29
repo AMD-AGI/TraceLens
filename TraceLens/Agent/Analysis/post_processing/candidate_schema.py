@@ -12,7 +12,12 @@ consumer of ``analysis.json``. Additive-only: a drifted field surfaces as a
 tier only; no fusion/system task currnetly``.
 """
 
-from typing import NotRequired, Optional, TypedDict
+from typing import Optional, TypedDict
+
+try:  # NotRequired landed in typing in 3.11; earlier versions get it from typing_extensions.
+    from typing import NotRequired
+except ImportError:
+    from typing_extensions import NotRequired
 
 
 class Impact(TypedDict):

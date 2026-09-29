@@ -59,6 +59,7 @@ setup(
         "orjson",
         "PyYAML",
         "matplotlib",
+        "typing_extensions>=4.0; python_version < '3.11'",
         # 'openpyxl',
         # 'tensorflow',
     ],
