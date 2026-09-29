@@ -136,6 +136,26 @@ def triton_def_line(
     return None
 
 
+def _triton_jit_defs(py_path: str) -> dict[str, int]:
+    """Map every ``@triton.jit``/``@gluon.jit`` def name to its line in a ``.py``.
+
+    A single AST parse (no import) using the shared :func:`_is_triton_kernel_def`
+    detector (``@gluon.jit`` matches because the attribute name is ``jit``).
+    Empty when the file is unreadable/unparseable or defines no Triton kernel --
+    the signal that a launcher ``.py`` is a native dispatcher, not editable Triton.
+    """
+    try:
+        tree = ast.parse(Path(py_path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+        return {}
+    defs: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if _is_triton_kernel_def(node):
+                defs.setdefault(node.name, node.lineno)
+    return defs
+
+
 def _resolve_triton_by_symbol(
     symbol: str,
     search_paths: Sequence[str | Path] | None = None,
@@ -217,9 +237,10 @@ def resolve_triton_source(
         Triton), or ``"unresolved"`` (empty/unusable input with no fallback hit).
     """
     path, line, func = _parse_launcher_form(kernel_file)
-    if not path:
-        # No usable ``kernel_file`` from the trace. If we know the symbol, fall
-        # back to searching the framework ``.py`` sources for a matching kernel.
+
+    def _symbol_fallback(reason: str) -> ResolveResult:
+        # No usable launcher source. If we know the symbol, search the framework
+        # ``.py`` sources for a matching kernel; else report unresolved.
         location = (
             _resolve_triton_by_symbol(symbol, search_paths, exact=exact)
             if symbol
@@ -229,13 +250,19 @@ def resolve_triton_source(
             return ResolveResult(
                 location=location, patchable=True, method="triton_symbol_index"
             )
-        return ResolveResult(
-            None, patchable=False, method="unresolved", reason="empty kernel_file"
-        )
+        return ResolveResult(None, patchable=False, method="unresolved", reason=reason)
+
+    if not path:
+        return _symbol_fallback("empty kernel_file")
 
     # Inductor-generated / ``/tmp`` Triton has no durable source to rewrite, but
-    # the cache path itself is still known and worth reporting for audit.
+    # the cache path itself is still known and worth reporting for audit. Gate
+    # this on the launcher actually looking like a generated ``.py``: a
+    # non-``.py`` sentinel (e.g. ``"AITER (vendor)"``) carries no source at all,
+    # so it drives the symbol-name fallback like an absent launcher.
     if not is_editable_source(path):
+        if not path.lower().endswith(".py"):
+            return _symbol_fallback("non-path launcher sentinel")
         return ResolveResult(
             SourceLocation(source_file=path, line=line),
             patchable=False,
@@ -245,6 +272,17 @@ def resolve_triton_source(
         )
     ast_line: int | None = None
     if path.lower().endswith(".py") and os.path.isfile(path):
+        if not _triton_jit_defs(path):
+            # An editable launcher ``.py`` with zero ``@triton.jit``/``@gluon.jit``
+            # defs is a native dispatcher (e.g. a CK/Tensile GEMM behind a
+            # ``triton``-named wrapper), not editable Triton. Signal unresolved so
+            # the caller can fall back to native classification.
+            return ResolveResult(
+                None,
+                patchable=False,
+                method="unresolved",
+                reason="launcher .py defines no triton jit kernel",
+            )
         ast_line = triton_def_line(path, func=func, symbol=symbol)
     def_line = ast_line if ast_line is not None else line
     method = "triton_ast" if ast_line is not None else "trace_kernel_file"
