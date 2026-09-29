@@ -119,3 +119,88 @@ def test_resolve_triton_empty_input():
     result = resolve_triton_source("")
     assert result.patchable is False
     assert result.method == "unresolved"
+
+
+# --- symbol-index fallback (exact-name Triton rescue) ------------------------
+# A trace that recorded only the bare device symbol (no kernel_file, is_triton
+# unset) must still recover a genuine ``@triton.jit`` / ``@gluon.jit`` def via an
+# EXACT normalized-name lookup, without ever guessing a wrong file by substring.
+_FALLBACK_PY = """
+import triton
+import triton.language as tl
+
+@triton.jit
+def _fused_real_kernel(x_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    tl.store(x_ptr + pid, pid)
+
+def moe_dispatch(a, b):
+    # plain Python dispatch wrapper, not a @triton.jit kernel
+    return _fused_real_kernel[(1,)](a, b, 128)
+"""
+
+
+def _fallback_fixture(tmp_path, monkeypatch):
+    """Write a crafted kernels file and force it editable (tmp_path is /tmp)."""
+    from TraceLens.TraceUtils.kernel_source import triton_pin
+    from TraceLens.TraceUtils.kernel_source.index import reset_index_cache
+
+    monkeypatch.setattr(triton_pin, "is_editable_source", lambda *a, **k: True)
+    reset_index_cache()
+    py = tmp_path / "real_kernels.py"
+    py.write_text(_FALLBACK_PY, encoding="utf-8")
+    return str(tmp_path), py
+
+
+def test_symbol_fallback_exact_resolves_real_jit_def(tmp_path, monkeypatch):
+    root, py = _fallback_fixture(tmp_path, monkeypatch)
+    # Leading underscore + autotune suffix that the normalizer strips off.
+    result = resolve_triton_source(
+        "", symbol="_fused_real_kernel_0d1d2d", search_paths=[root], exact=True
+    )
+    assert result.patchable is True
+    assert result.method == "triton_symbol_index"
+    assert result.source_file == str(py)
+    assert (
+        py.read_text()
+        .splitlines()[result.line - 1]
+        .strip()
+        .startswith("def _fused_real_kernel")
+    )
+
+
+def test_symbol_fallback_exact_rejects_substring_only(tmp_path, monkeypatch):
+    root, _py = _fallback_fixture(tmp_path, monkeypatch)
+    # "fused_real" is a substring of the def name but not an exact normalized
+    # match: exact mode must NOT guess a file (the anti-wrong-file guard).
+    exact = resolve_triton_source(
+        "", symbol="fused_real", search_paths=[root], exact=True
+    )
+    assert exact.method == "unresolved"
+    # Sanity: the substring tier (exact=False) still finds it, proving the symbol
+    # is a genuine substring and only the exact gate suppressed the guess.
+    loose = resolve_triton_source(
+        "", symbol="fused_real", search_paths=[root], exact=False
+    )
+    assert loose.method == "triton_symbol_index"
+
+
+def test_symbol_fallback_ignores_non_jit_wrapper(tmp_path, monkeypatch):
+    root, _py = _fallback_fixture(tmp_path, monkeypatch)
+    # A plain (non-@triton.jit) dispatch wrapper is not in the Triton index, so
+    # even an exact name match returns nothing.
+    result = resolve_triton_source(
+        "", symbol="moe_dispatch", search_paths=[root], exact=True
+    )
+    assert result.method == "unresolved"
+
+
+def test_resolve_kernel_source_falls_back_to_exact_triton(tmp_path, monkeypatch):
+    from TraceLens.TraceUtils.kernel_source import resolve_kernel_source
+
+    root, py = _fallback_fixture(tmp_path, monkeypatch)
+    # No kernel_file, is_triton=False: native resolve misses (no native index),
+    # then the exact-name Triton fallback rescues the genuine jit kernel.
+    result = resolve_kernel_source("_fused_real_kernel", search_paths=[root])
+    assert result.method == "triton_symbol_index"
+    assert result.source_file == str(py)

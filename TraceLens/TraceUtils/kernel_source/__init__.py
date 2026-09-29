@@ -83,7 +83,16 @@ def resolve_kernel_source(
         result = resolve_kernel(kernel_name, op_name=op_name, search_paths=search_paths)
         if result.method != "unresolved":
             return result
-        # Not Triton and no launcher: don't guess via the Triton name index.
+        # Native plain miss: a bare device symbol may still be a real
+        # ``@triton.jit`` / ``@gluon.jit`` def the trace never tagged as Triton.
+        # Consult the Triton symbol index by EXACT normalized name only -- a
+        # lookup with a definite answer, not a fuzzy guess -- so a mangled native
+        # symbol can't speculate a wrong ``.py``. Miss -> keep native unresolved.
+        triton_result = resolve_triton_source(
+            "", symbol=kernel_name, search_paths=search_paths, exact=True
+        )
+        if triton_result.method != "unresolved":
+            return triton_result
         return result
 
     triton_result = resolve_triton_source(
