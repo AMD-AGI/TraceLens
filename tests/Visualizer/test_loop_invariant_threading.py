@@ -213,25 +213,32 @@ def test_deepseek_decoder_position_ids_docks_derived_producer():
         ), f"{source!r} is not a materialised op source"
 
 
-def test_minimax_m3_position_ids_pre_existing_limitation():
-    """MiniMax-M3 still fabricates ``@input:position_ids`` -- a documented limitation.
+def test_minimax_m3_position_ids_docks_its_real_derivation():
+    """MiniMax-M3 ``position_ids`` reaches the decoder from the ops that build it.
 
-    MiniMax also derives ``position_ids`` (``cache_position.unsqueeze(0)``), but the
-    tensor is derived inside a loop whose primary spine input is an untransformed
-    passthrough (``hidden_states = inputs_embeds``); the stack-entry dataflow does
-    not traverse that passthrough loop, so the exporter falls back to a top-level
-    ``@input:position_ids``. This is a pre-existing behaviour left unchanged by the
-    Task B fix (reaching it regressed the ``position_embeddings`` wiring). This test
-    pins the current state so a future dataflow improvement that removes the
-    fabricated node fails loudly and is updated alongside the fix.
+    This used to fabricate a top-level ``@input:position_ids``. The cause was not
+    the passthrough spine it was long attributed to: MiniMax iterates
+    ``self.layers[: self.config.num_hidden_layers]``, and the module-alias
+    resolver only understood a bare ``self.<attr>`` (optionally wrapped in
+    ``enumerate``/``reversed``), so a SLICED ModuleList left the loop body's call
+    bound to no submodule at all -- and with it every producer the loop hands each
+    iteration. Unwrapping the subscript recovers them, so the boundary now docks
+    onto the real ``arange -> add -> unsqueeze`` chain at model scope.
     """
     pytest.importorskip("huggingface_hub")
     graph, by_id = _build_nodes("MiniMaxAI/MiniMax-M3")
 
+    assert (
+        "@input:position_ids" not in by_id
+    ), "position_ids is derived, not a raw model input"
     boundary = by_id.get("decoder/@input:position_ids")
     assert boundary is not None
     sources = [e.get("sourceNodeId") for e in boundary.get("incomingEdges", [])]
-    assert sources == ["@input:position_ids"], sources
+    assert len(sources) == 1, sources
+    assert sources[0].startswith("@model_forward/"), sources
+    # ...and that producer is the tail of the real derivation, not a bare tile.
+    producer = by_id[sources[0]]
+    assert producer.get("label") == "Unsqueeze", producer.get("label")
 
 
 @pytest.mark.parametrize(

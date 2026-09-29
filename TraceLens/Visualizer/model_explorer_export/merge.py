@@ -5413,6 +5413,19 @@ def _resolve_loop_invariant_source(
         )
         if source is not None:
             return source
+        # The exact recorded producer is not renderable -- it can be an inline
+        # expression rather than a node, e.g. a per-layer pick out of a mask dict
+        # (``causal_mask_mapping[self.config.layer_types[i]]``). The value still
+        # came from somewhere real, so fall back to the structural capture before
+        # giving up; jumping straight to a model-input boundary here fabricated a
+        # top-level ``@input:attention_mask`` for a tensor the model derives.
+        captured = loop_param_producers.get(param)
+        if captured is not None and captured != producer_attr:
+            source = _materialize_model_scope_producer(
+                nodes, node_by_id, cls=cls, producer_attr=captured
+            )
+            if source is not None:
+                return source
         # The producer is a bare inline op the export never surfaces as its own
         # node (``position_ids = cache_position.unsqueeze(0)``): dock the
         # top-level forward parameter onto its own model-input boundary rather

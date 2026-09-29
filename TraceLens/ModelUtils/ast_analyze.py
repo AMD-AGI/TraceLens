@@ -1788,6 +1788,14 @@ def _resolve_local_module_alias_calls(func: ast.FunctionDef) -> ast.FunctionDef:
                 and iterable.args
             ):
                 iterable = iterable.args[0]
+            # ``for layer in self.layers[: self.config.num_hidden_layers]`` walks
+            # a slice of the ModuleList. Slicing selects which entries run, not
+            # which module they are, so unwrap to the attribute -- otherwise the
+            # loop body's call resolves to no submodule at all and every tensor
+            # the loop hands each iteration (the attention mask, position ids)
+            # loses its recorded producer.
+            while isinstance(iterable, ast.Subscript):
+                iterable = iterable.value
             attr = _self_attr_name(iterable)
             if attr is None:
                 continue
