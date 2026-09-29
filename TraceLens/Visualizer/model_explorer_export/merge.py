@@ -2539,6 +2539,54 @@ def _node_output_dims(node: dict[str, Any], port: str) -> list[str] | None:
     return None
 
 
+def _drop_unconsumed_input_boundaries(nodes: list[dict[str, Any]]) -> None:
+    """Remove a frame ``@input`` tile that nothing inside the frame reads.
+
+    An input boundary exists to show where a tensor enters a frame. When no node
+    consumes it, it draws a wire into empty space and, worse, asserts an input
+    the body never uses -- ``get_vision_position_ids`` is driven entirely by host
+    data recovered from ``grid_thw.tolist()``, so its body has no tensor operand
+    at all, and an HF rotary's ``x`` parameter is read only for ``.device`` /
+    ``.dtype``.
+
+    Only unconsumed boundaries go; the top-level model inputs are kept, since
+    those legitimately terminate at the model edge and are how the diagram states
+    its own signature.
+    """
+    while True:
+        consumed = {
+            str(edge.get("sourceNodeId"))
+            for node in nodes
+            for edge in node.get("incomingEdges", []) or []
+        }
+        doomed = {
+            str(node["id"])
+            for node in nodes
+            if str(node["id"]) not in consumed
+            # A frame boundary, or the mirror tile whose only purpose is to feed
+            # one: dropping the boundary strands its mirror, which would then
+            # trip the dead-node check in the boundary's place.
+            and (
+                _is_synthetic_input(node)
+                or _node_attr(node, "synthetic") == "@input_mirror"
+            )
+            # A top-level boundary (``@input``/``@input:position_ids``) names the
+            # model's own signature -- keep it even when the render filters left
+            # it without a consumer.
+            and "/" in str(node["id"])
+        }
+        if not doomed:
+            return
+        nodes[:] = [node for node in nodes if str(node["id"]) not in doomed]
+        for node in nodes:
+            edges = node.get("incomingEdges")
+            if not edges:
+                continue
+            kept = [e for e in edges if str(e.get("sourceNodeId")) not in doomed]
+            if len(kept) != len(edges):
+                node["incomingEdges"] = kept
+
+
 def _elide_noop_single_input_concat(nodes: list[dict[str, Any]]) -> None:
     """Fold a single-input ``Concat`` whose output shape equals its input shape
     onto its producer.
@@ -4975,6 +5023,88 @@ def _loop_invariant_producer_label(cls: Any, producer_attr: str) -> str:
     return base
 
 
+def _expand_model_scope_producer_ops(
+    nodes: list[dict[str, Any]],
+    node_by_id: dict[str, dict[str, Any]],
+    *,
+    cls: Any,
+    producer_attr: str,
+    label: str,
+    incoming: list[dict[str, str]],
+) -> str | None:
+    """Render a model-scope producer as the ops its callee actually performs.
+
+    ``multi_op_methods`` already holds the expansion for a traced free-function
+    call (the per-class analysis records it for every class, including the
+    top-level model). Only the model-scope render path never consulted it, so a
+    mask builder called before the decoder loop collapsed to a single opaque
+    tile while the same helper expanded correctly everywhere else.
+
+    Each op becomes a node inside a frame named after the callee. An op's
+    recorded predecessors are used when they name a sibling in this same
+    expansion; the first op inherits the producer's external predecessors.
+    Returns the id of the op that produces the callee's result, or *None* when
+    there is no expansion to render.
+    """
+    operations = list(
+        (getattr(cls, "multi_op_methods", None) or {}).get(producer_attr, ())
+    )
+    if not operations:
+        return None
+    namespace = _sanitize_namespace_segment(label)
+    own_ids: dict[str, str] = {}
+    last_id: str | None = None
+    for index, operation in enumerate(operations):
+        op_id = f"@model_forward/{producer_attr}:{operation.attr_name}"
+        edges: list[dict[str, str]] = []
+        for pred in operation.predecessors:
+            source = own_ids.get(pred)
+            if source is not None:
+                edges.append(
+                    {
+                        "sourceNodeId": source,
+                        "sourceNodeOutputId": "0",
+                        "targetNodeInputId": str(len(edges)),
+                    }
+                )
+        if not edges:
+            # No sibling feeds this op: the first op reads what the call site
+            # passed in; a later one that names no sibling follows the chain so
+            # it is never left rootless.
+            edges = (
+                [dict(edge) for edge in incoming]
+                if index == 0 or last_id is None
+                else [
+                    {
+                        "sourceNodeId": last_id,
+                        "sourceNodeOutputId": "0",
+                        "targetNodeInputId": "0",
+                    }
+                ]
+            )
+        node = {
+            "id": op_id,
+            "label": operation.label,
+            "namespace": namespace,
+            "attrs": [
+                {"key": "operation", "value": "torch_functional"},
+                {"key": "attr_name", "value": operation.attr_name},
+                *(
+                    [{"key": "details", "value": "; ".join(operation.details)}]
+                    if operation.details
+                    else []
+                ),
+            ],
+            "style": ensure_readable_text(operation_tile_style(operation.label)),
+            "incomingEdges": edges,
+        }
+        nodes.append(node)
+        node_by_id[op_id] = node
+        own_ids[operation.attr_name] = op_id
+        last_id = op_id
+    return last_id
+
+
 def _materialize_model_scope_producer(
     nodes: list[dict[str, Any]],
     node_by_id: dict[str, dict[str, Any]],
@@ -5015,6 +5145,22 @@ def _materialize_model_scope_producer(
     if not incoming:
         return None
     label = _loop_invariant_producer_label(cls, producer_attr)
+    # The callee's body may already be expanded into real ops -- a mask builder
+    # imported from ``transformers.masking_utils`` is analysed like any other
+    # free function and lands in ``multi_op_methods``. Render those ops instead
+    # of one flat tile named after the callee: the tile hides genuine tensor
+    # work (a Slice/Contiguous, a Gather plus Selects) behind a box, which is
+    # exactly what the expansion exists to prevent.
+    expanded = _expand_model_scope_producer_ops(
+        nodes,
+        node_by_id,
+        cls=cls,
+        producer_attr=producer_attr,
+        label=label,
+        incoming=incoming,
+    )
+    if expanded is not None:
+        return expanded
     node = {
         "id": node_id,
         "label": label,
@@ -5805,6 +5951,11 @@ def build_merged_model_graph(
     # concatenates nothing -- the windowing is already carried by the kernel's
     # cu_seqlens. Runs after shapes settle so the identity check sees final dims.
     _elide_noop_single_input_concat(nodes)
+
+    # Drop frame input boundaries nothing consumes. Runs after every wiring pass
+    # so a tile is only removed once its last chance of gaining a consumer has
+    # passed; iterates because removing one tile can strand the mirror feeding it.
+    _drop_unconsumed_input_boundaries(nodes)
 
     # A matmul / bmm that contracts an activation against a learned constant
     # weight is an affine projection -- relabel it ``Linear`` so it reads (and,

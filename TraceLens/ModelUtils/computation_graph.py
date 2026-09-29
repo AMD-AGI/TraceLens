@@ -3661,13 +3661,21 @@ def _add_loop_carried_nodes(
         None,
     )
     for carried in all_carried:
+        # ``initial_producer is None`` marks an accumulator seeded by an empty
+        # literal: there is no node outside the loop to wire from, and the
+        # carried-in boundary is itself the origin.
+        seeded_empty = carried.initial_producer is None
         initial_index = (
-            input_index
-            if carried.initial_producer == FORWARD_METHOD_INPUT
-            else attr_last_index.get(carried.initial_producer)
+            None
+            if seeded_empty
+            else (
+                input_index
+                if carried.initial_producer == FORWARD_METHOD_INPUT
+                else attr_last_index.get(carried.initial_producer)
+            )
         )
         updated_index = attr_last_index.get(carried.updated_producer)
-        if initial_index is None or updated_index is None:
+        if updated_index is None or (initial_index is None and not seeded_empty):
             continue
         member_indices = {
             index
@@ -3740,8 +3748,9 @@ def _add_loop_carried_nodes(
             else:
                 rewired.append((source, target))
         graph.links = rewired
-        graph.links.append((initial_index, in_node_index))
-        graph.link_port_labels[(initial_index, in_node_index)] = "initial"
+        if initial_index is not None:
+            graph.links.append((initial_index, in_node_index))
+            graph.link_port_labels[(initial_index, in_node_index)] = "initial"
         graph.links.append((updated_index, out_node_index))
         graph.link_port_labels[(updated_index, out_node_index)] = "updated"
         graph.links.append((out_node_index, in_node_index))

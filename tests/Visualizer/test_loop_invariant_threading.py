@@ -133,7 +133,15 @@ def test_decoder_attention_mask_docks_mask_builder(model_id):
         assert source.startswith(
             "@model_forward/@fn_l"
         ), f"attention_mask boundary sourced by {source!r}, not a mask-builder node"
-        assert "create" in producer.get("label", "").lower()
+        # The builder is expanded into the ops it actually performs, so the
+        # boundary docks onto the op that produces its result rather than onto a
+        # tile named after the callee. Identity comes from the id (which carries
+        # the ``@fn_..._create_*_mask`` call attr) and from the namespace the
+        # expansion renders under.
+        assert "create" in source.lower() and "mask" in source.lower(), source
+        assert "create" in (producer.get("namespace") or "").lower(), producer.get(
+            "namespace"
+        )
 
 
 def _node_attr(node, key: str):

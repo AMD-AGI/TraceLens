@@ -1550,16 +1550,21 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
     # the decoder boundary -- never a fabricated top-level ``@input:attention_mask``.
     by_id = {node["id"]: node for node in graph["nodes"]}
     assert "@input:attention_mask" not in by_id
-    mask_builder = by_id.get("@model_forward/@fn_l1456_create_recurrent_attention_mask")
-    assert mask_builder is not None
-    assert mask_builder["label"] == "create_recurrent_attention_mask"
-    assert {e["sourceNodeId"] for e in mask_builder["incomingEdges"]} == {
+    # The builder is expanded into the ops it performs rather than drawn as one
+    # tile named after the callee, so look for its op subgraph.
+    prefix = "@model_forward/@fn_l1456_create_recurrent_attention_mask"
+    builder_ops = [node for node in graph["nodes"] if node["id"].startswith(prefix)]
+    assert builder_ops, "mask builder must be rendered"
+    assert [node["label"] for node in builder_ops] == ["Slice", "Contiguous"]
+    # Its first op reads what the call site passed in.
+    assert {e["sourceNodeId"] for e in builder_ops[0]["incomingEdges"]} == {
         "embed_tokens"
     }
+    # ...and the decoder boundary docks onto the op producing the builder's result.
     assert {
         e["sourceNodeId"]
         for e in by_id["decoder/@input:attention_mask"]["incomingEdges"]
-    } == {"@model_forward/@fn_l1456_create_recurrent_attention_mask"}
+    } == {builder_ops[-1]["id"]}
     # The decoder consumes the vision/text combine (masked_scatter), not the raw
     # token embeddings — the combine is the true entry to the language stack.
     assert (
@@ -1592,7 +1597,15 @@ def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
     # The graph must never ship a cycle even with the vision loop inlined.
     _assert_export_is_acyclic(nodes)
 
-    lc_in = next(node for node in nodes if "visual/@loop_carried_in:" in node["id"])
+    # The vision tower has more than one loop now (a helper that accumulates a
+    # list across iterations carries a value too), so name the block loop rather
+    # than taking whichever tile happens to come first.
+    lc_in = next(
+        node
+        for node in nodes
+        if "visual/@loop_carried_in:" in node["id"]
+        and node["id"].endswith(":hidden_states")
+    )
     # Wiring: the loop-carried-in must actually feed the loop body (mirroring the
     # decoder LC nodes), not sit dead like ``patch_embed/@output``-only.
     consumers = [
@@ -3425,18 +3438,29 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
         if n.get("namespace") == "45x_Glm5NextTextDecoderLayer"
         and "/@input:" in n["id"]
     }
-    assert spine_invariant_inputs == {
-        "decoder/@input:attention_mask": {
-            "@model_forward/@fn_l1456_create_recurrent_attention_mask"
-        }
-    }, spine_invariant_inputs
+    # The mask builder renders as its real ops, so the boundary is fed by the op
+    # that produces the builder's result, not by a tile named after the callee.
+    assert set(spine_invariant_inputs) == {"decoder/@input:attention_mask"}
+    (mask_sources,) = spine_invariant_inputs.values()
+    assert len(mask_sources) == 1
+    assert next(iter(mask_sources)).startswith(
+        "@model_forward/@fn_l1456_create_recurrent_attention_mask:"
+    ), spine_invariant_inputs
     assert not any("hidden_states" in nid for nid in spine_invariant_inputs)
 
     # The vision tower's CG-built boundary (a *uniform* loop) is untouched -- the
     # suppression is targeted at heterogeneous groups only, so a single instance of
     # the vision loop-carried boundary and its loop-invariant cos/sin inputs remain.
-    vision_in = [n["id"] for n in nodes if "visual/@loop_carried_in:" in n["id"]]
-    assert len(vision_in) == 1
+    # The block loop keeps exactly one boundary. (A position-ids helper in the
+    # same tower accumulates a list across its own loop and therefore carries a
+    # value too, so match the block loop by its carried variable rather than
+    # assuming the tower has only one loop.)
+    vision_in = [
+        n["id"]
+        for n in nodes
+        if "visual/@loop_carried_in:" in n["id"] and n["id"].endswith(":hidden_states")
+    ]
+    assert len(vision_in) == 1, vision_in
     # The loop-invariant cos/sin inputs are still wired into the loop body. Each
     # crossing enters a module (the rotary producer -> the visual block section),
     # so the hierarchy-aware same-name collapse KEEPS the visual/@input:cos/sin

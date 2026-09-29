@@ -1400,6 +1400,11 @@ def _expanded_free_function_node(
             # the frame as a whole (which would re-collapse the host tag onto every
             # device op inside it).
             runs_on_host=any(_operation_runs_on_host(op) for op in method_ops),
+            # The callee may itself carry a value across a loop (a helper that
+            # appends to a list and concatenates afterwards). Publish its specs on
+            # the frame so the computation graph gives that loop the same
+            # carried-in/out boundary a class forward's loop gets.
+            loop_carried=list(cls.multi_op_method_loop_carried.get(call_attr, ())),
         )
     return _leaf_node(
         attr_name=call_attr,

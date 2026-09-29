@@ -288,6 +288,55 @@ def _is_emittable_free_function(func: ast.AST, target: str | None) -> bool:
     )
 
 
+def _loop_list_accumulators(body: list[ast.stmt]) -> dict[str, ast.expr | None]:
+    """Names grown by ``name.append(x)`` / ``name.extend(x)`` inside a loop body.
+
+    A loop that builds a list and concatenates it afterwards
+    (``chunks = []`` / ``for ...: chunks.append(f(x))`` / ``torch.cat(chunks)``)
+    carries a value across iterations exactly as ``h = blk(h)`` does, but neither
+    of the usual signals fires: the seed is a list literal (no tensor producer)
+    and ``.append`` is a method call, not an assignment. Detect it structurally so
+    the loop still renders with a carried-in/out boundary instead of a body whose
+    ops appear to come from nowhere.
+
+    Maps the accumulator name to the appended expression (``None`` when the call
+    takes no single argument), so the caller can resolve what it carries.
+    """
+    found: dict[str, ast.expr | None] = {}
+    for stmt in body:
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr in {"append", "extend"}
+                and isinstance(func.value, ast.Name)
+            ):
+                found.setdefault(
+                    func.value.id, node.args[0] if len(node.args) == 1 else None
+                )
+    return found
+
+
+def _arm_emits_free_function(stmts: list[ast.stmt]) -> bool:
+    """True when this branch arm contains a bare free-function call we would draw.
+
+    Used to decide whether the two arms of an ``if`` could produce colliding
+    ``@fn_`` nodes. Mirrors the gate in ``_extract_self_calls_ordered``: a call
+    to a module-level function that is not a builtin/scalar constructor.
+    """
+    for stmt in stmts:
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            target = func.id if isinstance(func, ast.Name) else None
+            if _is_emittable_free_function(func, target):
+                return True
+    return False
+
+
 # Tensor methods that force a host round-trip: they materialise tensor contents
 # into Python objects, which only happens on CPU. A free function using any of
 # these (directly, or via another free function it calls) runs host-side work.
@@ -2278,6 +2327,7 @@ def _multi_op_free_functions(
     dict[str, list[str]],
     dict[str, tuple[dict[str, str], list[str], str | None]],
     dict[str, str],
+    dict[str, list[LoopCarriedSpec]],
 ]:
     """Traced free-function calls whose body expands into a visible sub-pipeline.
 
@@ -2314,6 +2364,7 @@ def _multi_op_free_functions(
     return_producers: dict[str, list[str]] = {}
     method_returns: dict[str, tuple[dict[str, str], list[str], str | None]] = {}
     primary_params: dict[str, str] = {}
+    loop_carried: dict[str, list[LoopCarriedSpec]] = {}
     for call_attr in forward_calls:
         name = _synthetic_call_function_name(call_attr)
         if name is None:
@@ -2343,6 +2394,16 @@ def _multi_op_free_functions(
         # zero ops -- a pure pass-through -- still has nothing to expand and is skipped.)
         if len(operations) >= 1:
             expanded[call_attr] = operations
+            op_names = {op.attr_name for op in operations}
+            # Keep only the specs whose loop body survived inlining, so a carried
+            # boundary is never synthesised around ops that are not rendered.
+            surviving = [
+                spec
+                for spec in analysis.loop_carried
+                if spec.updated_producer in op_names
+            ]
+            if surviving:
+                loop_carried[call_attr] = surviving
             primary = _primary_forward_input_name(func)
             if primary:
                 primary_params[call_attr] = primary
@@ -2360,7 +2421,7 @@ def _multi_op_free_functions(
                         list(analysis.return_order),
                         analysis.primary_return_slot,
                     )
-    return expanded, return_producers, method_returns, primary_params
+    return expanded, return_producers, method_returns, primary_params, loop_carried
 
 
 def _register_forward_calls(
@@ -2808,7 +2869,10 @@ class LoopCarriedSpec:
     loop_id: str
     iteration_count: int | None
     variable: str
-    initial_producer: str
+    # ``None`` for an accumulator seeded by an empty literal (``chunks = []``):
+    # nothing outside the loop produces the initial value, so the carried-in
+    # boundary IS the origin and simply has no incoming edge.
+    initial_producer: str | None
     updated_producer: str
     operation_ids: tuple[str, ...]
 
@@ -2896,6 +2960,14 @@ class ClassStructure:
     # (``build_attention_mask_from_topk`` -> ``topk_indices``) instead of falling
     # back to the generic ``hidden_states``.
     multi_op_method_inputs: dict[str, str] = field(default_factory=dict)
+    # Loop-carried values recovered from an expanded free function's own body,
+    # keyed by its call attr. A helper that builds a list across a loop carries
+    # a value exactly as a class forward does, but its specs live on the
+    # callee's analysis -- without publishing them here the expanded frame
+    # renders the loop body with no carried-in/out boundary.
+    multi_op_method_loop_carried: dict[str, list[LoopCarriedSpec]] = field(
+        default_factory=dict
+    )
     # For an inline-expanded forward *method*: base method name -> {step name ->
     # predecessor attrs}, covering every step the method's own body extraction
     # recorded a predecessor for -- including a submodule invoked mid-expression
@@ -6259,6 +6331,31 @@ class _ForwardOperationExtractor:
                     operation.attr_name for operation in self.operations[before:]
                 )
                 loop_id = f"loop_l{stmt.lineno}_c{stmt.col_offset}"
+                # A list grown with ``.append`` carries across iterations even
+                # though nothing rebinds the name: register it so the loop gets
+                # the same carried-in/out boundary a reassigned tensor gets.
+                for variable, appended in _loop_list_accumulators(stmt.body).items():
+                    if variable in before_env or not operation_ids:
+                        # Already a tracked tensor producer -- the reassignment
+                        # path below handles it and would otherwise double-count.
+                        continue
+                    updated = None
+                    if isinstance(appended, ast.Name):
+                        updated = self.var_producer.get(appended.id)
+                    if updated is None:
+                        # The appended value is an expression, so the last op the
+                        # body produced is what this iteration contributes.
+                        updated = operation_ids[-1]
+                    self.loop_carried.append(
+                        LoopCarriedSpec(
+                            loop_id=loop_id,
+                            iteration_count=iteration_count,
+                            variable=variable,
+                            initial_producer=None,
+                            updated_producer=updated,
+                            operation_ids=operation_ids,
+                        )
+                    )
                 for variable in sorted(self._assigned_names(stmt.body)):
                     initial = before_env.get(variable)
                     updated = self.var_producer.get(variable)
@@ -7281,6 +7378,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             str, tuple[dict[str, str], list[str], str | None]
         ] = {}
         multi_op_method_inputs: dict[str, str] = {}
+        multi_op_method_loop_carried: dict[str, list[LoopCarriedSpec]] = {}
         multi_op_method_step_predecessors: dict[str, dict[str, tuple[str, ...]]] = {}
         multi_op_method_order: dict[str, list[str]] = {}
         multi_op_method_step_predecessor_args: dict[str, dict[str, dict[str, str]]] = {}
@@ -7438,6 +7536,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 free_fn_return_producers,
                 free_fn_method_returns,
                 free_fn_primary_params,
+                free_fn_loop_carried,
             ) = _multi_op_free_functions(
                 self.module_functions,
                 forward_calls,
@@ -7458,6 +7557,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             # primary parameter name as its ``input_label`` the same way a
             # ``self.<method>()`` expansion's frame already does.
             multi_op_method_inputs.update(free_fn_primary_params)
+            multi_op_method_loop_carried.update(free_fn_loop_carried)
             # A tuple-returning *method* expanded inline (``pool_keys,
             # pool_indices, pool_valid = self.get_pooled_states(...)``) exposes
             # the same ordinal→producer mapping as a free function: publish its
@@ -7629,6 +7729,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             multi_op_methods=multi_op_methods,
             multi_op_method_returns=multi_op_method_returns,
             multi_op_method_inputs=multi_op_method_inputs,
+            multi_op_method_loop_carried=multi_op_method_loop_carried,
             multi_op_method_step_predecessors=multi_op_method_step_predecessors,
             multi_op_method_order=multi_op_method_order,
             multi_op_method_step_predecessor_args=multi_op_method_step_predecessor_args,
@@ -9978,7 +10079,16 @@ def _walk_forward_stmt(
             branch_in_conditional = in_conditional
         else:
             branch = node.body + node.orelse
-            branch_in_conditional = in_conditional or bool(node.orelse)
+            # Only a genuine collision justifies dropping the ``@fn_`` node: that
+            # needs BOTH arms to contain a free-function call. When just one arm
+            # does (``if isinstance(mask, dict): ... else: mask = build(...)``),
+            # it is exactly one condition-tagged block, no different from a
+            # single-armed ``if`` -- suppressing it there left the call rendered
+            # as one opaque tile named after the callee, hiding its real ops.
+            colliding_free_fns = _arm_emits_free_function(
+                node.body
+            ) and _arm_emits_free_function(node.orelse)
+            branch_in_conditional = in_conditional or colliding_free_fns
         for child in branch:
             pending_norm = _walk_forward_stmt(
                 child,
