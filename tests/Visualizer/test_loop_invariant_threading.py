@@ -455,3 +455,67 @@ def test_a_data_independent_range_is_not_drawn_as_compute():
             continue
         survivors = [e for e in node["incomingEdges"] if e["sourceNodeId"] in kept]
         assert survivors, f"{node['id']} lost every input when constants are dropped"
+
+
+def _group_namespaces(nodes) -> set[str]:
+    return {str(n.get("namespace") or "") for n in nodes if n.get("namespace")}
+
+
+def test_every_tensor_entering_a_multi_input_module_is_named():
+    """DeepSeek's expert loop names the routed index it used to let in silently.
+
+    The loop names its three ``hidden_states`` slices and then let the routed
+    token index cross on a bare op-to-op edge, so the reader could not tell
+    which tensor was which. Each unnamed entrant now gets its own tile.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, _ = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
+    nodes = graph["nodes"]
+    expert_groups = [
+        ns
+        for ns in _group_namespaces(nodes)
+        if "loop_sidefeed" in ns and "gather" in ns
+    ]
+    assert expert_groups, "expected the expert-loop groups"
+    for namespace in expert_groups:
+        members = [
+            n
+            for n in nodes
+            if str(n.get("namespace") or "") == namespace
+            or str(n.get("namespace") or "").startswith(namespace + "/")
+        ]
+        ids = {n["id"] for n in members}
+        entering = {
+            str(e["sourceNodeId"])
+            for n in members
+            for e in n.get("incomingEdges", []) or []
+            if str(e["sourceNodeId"]) not in ids
+        }
+        named = {
+            str(e["sourceNodeId"])
+            for n in members
+            if _node_attr(n, "synthetic")
+            in {"@input", "@input_mirror", "@kernel_port_in"}
+            for e in n.get("incomingEdges", []) or []
+        }
+        assert entering <= named, (namespace, sorted(entering - named))
+
+
+def test_a_module_is_not_split_from_its_own_nested_dataflow():
+    """A tensor flowing from a child namespace to its parent is not an entrant.
+
+    Keying a module's membership on its exact namespace makes its own nested
+    children look external, which put a boundary in the middle of one module's
+    dataflow -- it split GLM's ``expand_kv`` from the projection feeding it, and
+    the projection stopped being the block's first step.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, _ = _build_nodes("zai-org/GLM-5.3-Flash")
+    block = [
+        node
+        for node in graph["nodes"]
+        if "expand_kv" in node["id"] and _node_attr(node, "synthetic") is None
+    ]
+    assert [node["label"] for node in block][:2] == ["Linear", "View"], [
+        node["label"] for node in block
+    ]

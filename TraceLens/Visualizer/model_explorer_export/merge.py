@@ -2194,6 +2194,97 @@ _OUTPUT_BOUNDARY_SYNTHETIC = frozenset({"@output", "@output_mirror"})
 _INPUT_BOUNDARY_SYNTHETIC = frozenset({"@input", "@input_mirror", "@kernel_port_in"})
 
 
+_NAMED_INPUT_SYNTHETIC = frozenset({"@input", "@input_mirror", "@kernel_port_in"})
+
+
+def _name_unnamed_group_inputs(nodes: list[dict[str, Any]]) -> None:
+    """Give every tensor entering a multi-input module a boundary that names it.
+
+    A module taking one tensor reads fine with a bare edge. Taking several, it
+    does not: the reader cannot tell which is which. Most entering tensors
+    already arrive on a named boundary, but a module can also be entered by a
+    plain op-to-op edge -- DeepSeek's expert loop names its three
+    ``hidden_states`` slices and then lets the routed token index cross
+    unannounced -- and that tensor is invisible in the render.
+
+    A module's members are itself AND everything nested under it: a tensor
+    flowing from a child namespace to its parent never left the module, so it
+    is not entering anything. Treating those as entrants puts a boundary in the
+    middle of one module's own dataflow (it split GLM's ``expand_kv`` from the
+    projection feeding it).
+    """
+    by_id = {str(n["id"]): n for n in nodes}
+    namespaces = {
+        str(n.get("namespace") or "") for n in nodes if str(n.get("namespace") or "")
+    }
+
+    additions: list[dict[str, Any]] = []
+    for namespace in sorted(namespaces):
+        if _REPEAT_SEGMENT_RE.match(namespace.split("/")[-1]):
+            # A repeat wrapper groups variants; it is not a module of its own.
+            continue
+        members = [
+            n
+            for n in nodes
+            if str(n.get("namespace") or "") == namespace
+            or str(n.get("namespace") or "").startswith(namespace + "/")
+        ]
+        member_ids = {str(n["id"]) for n in members}
+        entering: dict[str, list[dict[str, Any]]] = {}
+        for node in members:
+            for edge in node.get("incomingEdges", []) or []:
+                source = str(edge.get("sourceNodeId"))
+                if source not in member_ids:
+                    entering.setdefault(source, []).append(node)
+        if len(entering) < 2:
+            continue
+        named = {
+            str(edge.get("sourceNodeId"))
+            for node in members
+            if _node_attr(node, "synthetic") in _NAMED_INPUT_SYNTHETIC
+            for edge in node.get("incomingEdges", []) or []
+        }
+        unnamed = [source for source in entering if source not in named]
+        if not unnamed or len(unnamed) == len(entering):
+            # Nothing named yet means this module has no boundary convention
+            # here at all; inventing one is a different change from completing
+            # a partial one, so leave it rather than guess.
+            continue
+        used = {
+            str(n.get("label") or "")
+            for n in members
+            if _node_attr(n, "synthetic") in _NAMED_INPUT_SYNTHETIC
+        }
+        for source in sorted(unnamed):
+            producer = by_id.get(source)
+            if producer is None:
+                continue
+            base = str(producer.get("label") or "input").strip() or "input"
+            label = base
+            suffix = 2
+            while label in used or f"{namespace}/@input:{label}" in by_id:
+                label = f"{base}_{suffix}"
+                suffix += 1
+            used.add(label)
+            tile_id = f"{namespace}/@input:{label}"
+            additions.append(
+                {
+                    "id": tile_id,
+                    "label": label,
+                    "namespace": namespace,
+                    "attrs": [{"key": "synthetic", "value": "@input"}],
+                    "style": ensure_readable_text(input_port_style()),
+                    "incomingEdges": [_source_edge(source, "0")],
+                }
+            )
+            for consumer in entering[source]:
+                for edge in consumer.get("incomingEdges", []) or []:
+                    if str(edge.get("sourceNodeId")) == source:
+                        edge["sourceNodeId"] = tile_id
+                        edge["sourceNodeOutputId"] = "0"
+    nodes.extend(additions)
+
+
 def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
     """Give every module an entering tensor crosses its own boundary tile.
 
@@ -6359,6 +6450,7 @@ def build_merged_model_graph(
     # Runs after threading, which is what connects an outer boundary to its deep
     # consumer: only then is the skipped path visible to walk.
     _insert_missing_boundary_levels(nodes)
+    _name_unnamed_group_inputs(nodes)
 
     # A loop-invariant producer feeding no re-exposed consumer (a decoder variant's
     # internal-only rotary) leaves its stack-entry prep ops orphaned; drop them.
