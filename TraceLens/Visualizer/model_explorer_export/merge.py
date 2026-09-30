@@ -5406,6 +5406,52 @@ def _expand_model_scope_producer_ops(
     if not operations:
         return None
     namespace = _sanitize_namespace_segment(label)
+    # The frame is a module in the render, and a module handed several tensors
+    # must name them: the mask builders take the mask and the position tensor
+    # and showed neither, so two bare edges arrived at the first op with nothing
+    # to tell them apart. Give each entrant its own boundary and let the body
+    # read from those.
+    if len(incoming) > 1:
+        named_incoming: list[dict[str, str]] = []
+        used: set[str] = set()
+        for edge in incoming:
+            producer = node_by_id.get(str(edge.get("sourceNodeId", "")))
+            base = str((producer or {}).get("label") or "input").strip() or "input"
+            name = base
+            suffix = 2
+            while name in used:
+                name = f"{base}_{suffix}"
+                suffix += 1
+            used.add(name)
+            tile_id = f"@model_forward/{producer_attr}:@input:{name}"
+            tile = {
+                "id": tile_id,
+                "label": name,
+                "namespace": namespace,
+                "attrs": [{"key": "synthetic", "value": "@input"}],
+                "style": ensure_readable_text(input_port_style()),
+                "incomingEdges": [dict(edge)],
+            }
+            # A boundary carries the tensor through unchanged, so it must report
+            # the producer's shape -- the body is sized from its operands, and a
+            # blank boundary would blank every op below it.
+            carried = (
+                node_output_spec(producer, str(edge.get("sourceNodeOutputId", "0")))
+                if producer is not None
+                else None
+            )
+            if carried is not None:
+                apply_shape_attrs(tile, carried)
+            nodes.append(tile)
+            node_by_id[tile_id] = tile
+            named_incoming.append(
+                {
+                    "sourceNodeId": tile_id,
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": str(len(named_incoming)),
+                }
+            )
+        incoming = named_incoming
     own_ids: dict[str, str] = {}
     last_id: str | None = None
     for index, operation in enumerate(operations):

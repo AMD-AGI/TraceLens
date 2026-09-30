@@ -519,3 +519,35 @@ def test_a_module_is_not_split_from_its_own_nested_dataflow():
     assert [node["label"] for node in block][:2] == ["Linear", "View"], [
         node["label"] for node in block
     ]
+
+
+@pytest.mark.parametrize(
+    "model_id", ["MiniMaxAI/MiniMax-M3", "deepseek-ai/DeepSeek-V4-Flash"]
+)
+def test_model_scope_mask_frame_names_its_inputs_and_keeps_shapes(model_id):
+    """The mask frame names both tensors it takes, and the body stays sized.
+
+    The frame is a module in the render, and it is handed the mask and the
+    position tensor -- two bare edges arriving at the first op with nothing to
+    tell them apart. Each entrant now has its own boundary, and each boundary
+    reports the shape it carries: the body is sized from its operands, so a
+    blank boundary would blank every op below it.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, _ = _build_nodes(model_id)
+    tiles = [
+        node
+        for node in graph["nodes"]
+        if "_causal_mask:@input:" in node["id"]
+        and _node_attr(node, "synthetic") == "@input"
+    ]
+    assert len(tiles) >= 2, [t["id"] for t in tiles]
+    labels = [str(t["label"]) for t in tiles]
+    assert len(labels) == len(set(labels)), labels
+    for tile in tiles:
+        assert _shape_of(tile), f"{tile['id']} carries no shape"
+
+    body = [node for node in graph["nodes"] if "_causal_mask:@op_" in node["id"]]
+    assert body, "expected the expanded mask body"
+    for node in body:
+        assert _shape_of(node), f"{node['id']} left unsized"
