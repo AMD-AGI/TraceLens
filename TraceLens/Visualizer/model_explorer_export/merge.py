@@ -2126,6 +2126,117 @@ _OUTPUT_BOUNDARY_SYNTHETIC = frozenset({"@output", "@output_mirror"})
 _INPUT_BOUNDARY_SYNTHETIC = frozenset({"@input", "@input_mirror", "@kernel_port_in"})
 
 
+def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
+    """Give every module an entering tensor crosses its own boundary tile.
+
+    A tensor handed to a nested module used to jump from an outer boundary
+    straight to its deep consumer, skipping the modules in between: GLM's
+    attention mask went from the decoder wrapper directly into the indexer,
+    so neither the attention variant nor the attention module showed the input
+    they plainly take. Walk each entering edge and materialise an
+    ``@input:<param>`` tile at every module level along the way, chaining them
+    outermost-first.
+
+    The outermost ``{N}x_`` level is the LOOP wrapper -- a grouping of variants
+    rather than a module -- so it holds no tile of its own; its boundary moves
+    down to the variant that actually consumes the tensor.
+    """
+    by_id = {str(n["id"]): n for n in nodes}
+    created: dict[tuple[str, str], str] = {}
+    additions: list[dict[str, Any]] = []
+
+    def boundary_param(node: dict[str, Any]) -> str | None:
+        if _node_attr(node, "synthetic") != "@input":
+            return None
+        match = re.search(r"/@input:([^/^]+)$", str(node["id"]))
+        return match.group(1) if match else None
+
+    def is_loop_wrapper(namespace: str) -> bool:
+        parts = [p for p in namespace.split("/") if p]
+        return len(parts) == 1 and bool(_REPEAT_SEGMENT_RE.match(parts[0]))
+
+    for node in list(nodes):
+        param = boundary_param(node)
+        if param is None:
+            continue
+        target_ns = str(node.get("namespace") or "")
+        for edge in list(node.get("incomingEdges", []) or []):
+            source = by_id.get(str(edge.get("sourceNodeId")))
+            if source is None:
+                continue
+            source_ns = str(source.get("namespace") or "")
+            if target_ns == source_ns or not target_ns.startswith(
+                (source_ns + "/") if source_ns else ""
+            ):
+                continue
+            tail = target_ns[len(source_ns) :].strip("/") if source_ns else target_ns
+            segments = [p for p in tail.split("/") if p]
+            if len(segments) < 2:
+                continue  # already lands one level in: nothing skipped
+            upstream = str(edge["sourceNodeId"])
+            prefix = source_ns
+            for segment in segments[:-1]:
+                prefix = f"{prefix}/{segment}" if prefix else segment
+                if is_loop_wrapper(prefix):
+                    continue
+                key = (prefix, param)
+                existing = created.get(key)
+                if existing is None:
+                    existing = next(
+                        (
+                            str(other["id"])
+                            for other in nodes
+                            if str(other.get("namespace") or "") == prefix
+                            and boundary_param(other) == param
+                        ),
+                        None,
+                    )
+                if existing is None:
+                    tile_id = f"{prefix}/@input:{param}"
+                    tile = {
+                        "id": tile_id,
+                        "label": param,
+                        "namespace": prefix,
+                        "attrs": [{"key": "synthetic", "value": "@input"}],
+                        "style": ensure_readable_text(input_port_style()),
+                        "incomingEdges": [_source_edge(upstream, "0")],
+                    }
+                    additions.append(tile)
+                    created[key] = tile_id
+                    existing = tile_id
+                upstream = existing
+            # Re-point THIS edge at the innermost tile just created.
+            original = str(edge["sourceNodeId"])
+            for candidate in node.get("incomingEdges", []) or []:
+                if str(candidate.get("sourceNodeId")) == original:
+                    candidate["sourceNodeId"] = upstream
+                    break
+    nodes.extend(additions)
+
+    # The loop wrapper groups variants; it is not a module and takes no input of
+    # its own. Now that each variant carries its own tile, drop the wrapper's and
+    # let those read straight from whatever fed it.
+    by_id = {str(n["id"]): n for n in nodes}
+    doomed: dict[str, str] = {}
+    for node in nodes:
+        if boundary_param(node) is None:
+            continue
+        if not is_loop_wrapper(str(node.get("namespace") or "")):
+            continue
+        incoming = node.get("incomingEdges", []) or []
+        if len(incoming) != 1:
+            continue
+        doomed[str(node["id"])] = str(incoming[0].get("sourceNodeId"))
+    if not doomed:
+        return
+    for node in nodes:
+        for edge in node.get("incomingEdges", []) or []:
+            replacement = doomed.get(str(edge.get("sourceNodeId")))
+            if replacement is not None:
+                edge["sourceNodeId"] = replacement
+    nodes[:] = [n for n in nodes if str(n["id"]) not in doomed]
+
+
 def _collapse_same_name_boundary_passthroughs(nodes: list[dict[str, Any]]) -> None:
     """Collapse every same-name ``@output``->``@input`` boundary passthrough to one tile.
 
@@ -6094,6 +6205,10 @@ def build_merged_model_graph(
     # synthesized so the extra sourced boundaries do not perturb its single-entry
     # detection, and before integrity checks so the reconnected tiles read as sourced.
     _thread_loop_invariant_inputs(nodes, spec=spec)
+
+    # Runs after threading, which is what connects an outer boundary to its deep
+    # consumer: only then is the skipped path visible to walk.
+    _insert_missing_boundary_levels(nodes)
 
     # A loop-invariant producer feeding no re-exposed consumer (a decoder variant's
     # internal-only rotary) leaves its stack-entry prep ops orphaned; drop them.

@@ -1561,10 +1561,24 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
         "embed_tokens"
     }
     # ...and the decoder boundary docks onto the op producing the builder's result.
-    assert {
-        e["sourceNodeId"]
-        for e in by_id["decoder/@input:attention_mask"]["incomingEdges"]
-    } == {builder_ops[-1]["id"]}
+    # The wrapper groups loop variants and carries no input of its own; the
+    # boundary lives on the variant that consumes the mask.
+    mask_boundary = next(
+        node
+        for node_id, node in by_id.items()
+        if node_id.endswith("/@input:attention_mask")
+        and "@model_forward" not in node_id
+        and node_id.count("/")
+        == min(
+            other.count("/")
+            for other in by_id
+            if other.endswith("/@input:attention_mask")
+            and "@model_forward" not in other
+        )
+    )
+    assert {e["sourceNodeId"] for e in mask_boundary["incomingEdges"]} == {
+        builder_ops[-1]["id"]
+    }
     # The decoder consumes the vision/text combine (masked_scatter), not the raw
     # token embeddings — the combine is the true entry to the language stack.
     assert (
@@ -3435,12 +3449,16 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     spine_invariant_inputs = {
         n["id"]: {e["sourceNodeId"] for e in n.get("incomingEdges", []) or []}
         for n in nodes
-        if n.get("namespace") == "45x_Glm5NextTextDecoderLayer"
+        # The wrapper itself carries no input; a loop-invariant tensor surfaces
+        # on the variant that consumes it, one level in.
+        if (n.get("namespace") or "").startswith("45x_Glm5NextTextDecoderLayer/")
+        and (n.get("namespace") or "").count("/") == 1
         and "/@input:" in n["id"]
     }
     # The mask builder renders as its real ops, so the boundary is fed by the op
     # that produces the builder's result, not by a tile named after the callee.
-    assert set(spine_invariant_inputs) == {"decoder/@input:attention_mask"}
+    assert len(spine_invariant_inputs) == 1
+    assert next(iter(spine_invariant_inputs)).endswith("/@input:attention_mask")
     (mask_sources,) = spine_invariant_inputs.values()
     assert len(mask_sources) == 1
     assert next(iter(mask_sources)).startswith(

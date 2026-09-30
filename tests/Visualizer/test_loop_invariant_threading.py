@@ -119,7 +119,7 @@ def test_decoder_attention_mask_docks_mask_builder(model_id):
         "@input:attention_mask" not in by_id
     ), "bogus top-level @input:attention_mask model-input node must not exist"
 
-    boundary = by_id.get("decoder/@input:attention_mask")
+    boundary = _param_boundary(by_id, "attention_mask")
     if boundary is None:
         # A model (MiniMax-M3) whose attention rebuilds the mask internally has no
         # top-level decoder attention_mask boundary at all; the assertion above
@@ -142,6 +142,24 @@ def test_decoder_attention_mask_docks_mask_builder(model_id):
         assert "create" in (producer.get("namespace") or "").lower(), producer.get(
             "namespace"
         )
+
+
+def _param_boundary(by_id, param):
+    """The boundary tile for *param*, wherever the hierarchy puts it.
+
+    The loop wrapper groups variants and carries no input of its own, so a
+    tensor handed to each iteration surfaces on the VARIANT that consumes it
+    (``45x_Decoder/11x_Attention_MoE/@input:attention_mask``), not on the
+    wrapper. Match on the trailing boundary name and take the outermost.
+    """
+    matches = [
+        node
+        for node_id, node in by_id.items()
+        if node_id.endswith(f"/@input:{param}") and "@model_forward" not in node_id
+    ]
+    if not matches:
+        return None
+    return min(matches, key=lambda node: str(node["id"]).count("/"))
 
 
 def _node_attr(node, key: str):
@@ -180,7 +198,7 @@ def test_decoder_position_ids_not_fabricated_when_derived(model_id):
 def test_deepseek_decoder_position_ids_docks_derived_producer():
     """DeepSeek's decoder ``position_ids`` boundary docks its derived producer.
 
-    DeepSeek surfaces a ``decoder/@input:position_ids`` boundary and derives the
+    DeepSeek surfaces a decoder ``position_ids`` boundary and derives the
     tensor before the loop from a generator-rooted op chain
     (``torch.arange(...) + ... -> unsqueeze(0)``). That chain is materialised at
     model scope, so the boundary must dock onto the terminal derived op source (a
@@ -193,7 +211,7 @@ def test_deepseek_decoder_position_ids_docks_derived_producer():
 
     assert "@input:position_ids" not in by_id
 
-    boundary = by_id.get("decoder/@input:position_ids")
+    boundary = _param_boundary(by_id, "position_ids")
     assert boundary is not None, "expected a decoder position_ids boundary"
     sources = [e.get("sourceNodeId") for e in boundary.get("incomingEdges", [])]
     assert sources, "decoder position_ids boundary must be sourced"
@@ -231,7 +249,7 @@ def test_minimax_m3_position_ids_docks_its_real_derivation():
     assert (
         "@input:position_ids" not in by_id
     ), "position_ids is derived, not a raw model input"
-    boundary = by_id.get("decoder/@input:position_ids")
+    boundary = _param_boundary(by_id, "position_ids")
     assert boundary is not None
     sources = [e.get("sourceNodeId") for e in boundary.get("incomingEdges", [])]
     assert len(sources) == 1, sources
