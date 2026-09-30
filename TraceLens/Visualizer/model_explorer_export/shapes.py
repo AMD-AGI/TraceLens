@@ -673,6 +673,17 @@ def fill_missing_node_shapes(
             break
 
     for node in pending:
+        # A node still unresolved here has no spec of its own and nothing usable
+        # feeding it. Stamping the model's activation shape on a boundary or a
+        # summary tile is a reasonable default -- they carry the hidden stream.
+        # Stamping it on a COMPUTATION with no inputs is not: it asserts a shape
+        # the op cannot have (a sourceless ``torch.arange`` reported
+        # ``[B, S, hidden]`` when it produces a 1-D index range). Leave those
+        # alone so the gap is visible and gets fixed at the source instead of
+        # being papered over with a plausible-looking wrong answer.
+        if _node_synthetic(node) or not node.get("incomingEdges"):
+            if not _node_synthetic(node):
+                continue
         _apply_shape_attrs(node, activation)
 
 

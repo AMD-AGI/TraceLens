@@ -1409,15 +1409,23 @@ def test_fill_missing_node_shapes_seeds_and_propagates():
             if attr["key"] == "shape"
         )
         for node in nodes
+        if node.get("outputsMetadata")
     }
     assert shapes == {
         "@input": "[B, S] int64",
         "embed_tokens": "[B, S, 4096] float16",
         "decoder/norm": "[B, S, 4096] float16",
         "mlp": "[B, S, 4096] float16",
+        # Seeded from its own label, not from a predecessor.
         "lm_head": "[B, S, 32000] float16",
-        "orphan": "[B, S, 4096] float16",
     }
+    # A computation with nothing feeding it gets NO shape. It used to be stamped
+    # with the model's activation shape, which asserted a shape the op cannot
+    # have -- a sourceless ``torch.arange`` claimed [B, S, hidden] when it makes
+    # a 1-D index range. Leaving it unset keeps the gap visible so it is fixed
+    # where it starts instead of being papered over.
+    orphan = next(node for node in nodes if node["id"] == "orphan")
+    assert not orphan.get("outputsMetadata")
 
 
 def test_merged_graph_includes_output_shape_attrs():

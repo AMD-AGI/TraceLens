@@ -3043,6 +3043,11 @@ class StackEntryDataflow:
     # Only entries whose producer is a materialised source operation are kept, so
     # the merge can dock each producer onto the repeat group's boundary tile.
     loop_invariant_inputs: dict[str, str] = field(default_factory=dict)
+    # Local forward variable -> the producer that made it. A generator op reads
+    # its extent from a tensor's shape (``torch.arange(inputs_embeds.shape[1])``),
+    # which is a real dependency even though no tensor flows along it; the merge
+    # needs this map to turn that name back into the node to draw an edge from.
+    var_producers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -3283,7 +3288,14 @@ def stack_entry_dataflow(cls: ClassStructure) -> StackEntryDataflow | None:
     operations = tuple(
         operation for operation in extractor.operations if operation.attr_name in live
     )
-    return StackEntryDataflow(operations, output_producer, loop_invariant_inputs)
+    live_producers = {
+        name: producer
+        for name, producer in extractor.var_producer.items()
+        if producer in live or producer in cls.init_assignments
+    }
+    return StackEntryDataflow(
+        operations, output_producer, loop_invariant_inputs, live_producers
+    )
 
 
 def infer_forward_steps_from_init(cls: ClassStructure) -> list[str]:

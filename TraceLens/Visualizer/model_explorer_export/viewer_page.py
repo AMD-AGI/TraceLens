@@ -167,6 +167,28 @@ def _payload_without_constants(payload: dict[str, Any]) -> dict[str, Any]:
     return dict(payload, graphCollections=new_collections)
 
 
+def _payload_model_name(payload: dict[str, Any] | None) -> str | None:
+    """Model identity carried by the payload, for the page title.
+
+    Prefers the graph collection's label (the architecture class the export was
+    built from); falls back to the root group's ``title`` attribute.
+    """
+    if not isinstance(payload, dict):
+        return None
+    collections = payload.get("graphCollections") or []
+    if collections and isinstance(collections[0], dict):
+        label = collections[0].get("label")
+        if isinstance(label, str) and label.strip():
+            return label.strip()
+        graphs = collections[0].get("graphs") or []
+        if graphs and isinstance(graphs[0], dict):
+            root = (graphs[0].get("groupNodeAttributes") or {}).get("") or {}
+            title = root.get("title")
+            if isinstance(title, str) and title.strip():
+                return title.strip()
+    return None
+
+
 def compose_viewer_html(
     payload: dict[str, Any] | None = None,
     *,
@@ -184,6 +206,16 @@ def compose_viewer_html(
     """
     shell = (VIEWER_DIR / "index.html").read_text(encoding="utf-8")
     app_js = (VIEWER_DIR / "app.js").read_text(encoding="utf-8")
+
+    # Name the model in the page title so a browser tab / bookmark identifies
+    # WHICH model is open -- several are usually up at once.
+    model_name = _payload_model_name(payload)
+    if model_name:
+        shell = shell.replace(
+            "<title>TraceLens Model Visualizer</title>",
+            f"<title>TraceLens Model Visualizer - {model_name}</title>",
+            1,
+        )
 
     replacement_parts: list[str] = []
     if payload is not None:

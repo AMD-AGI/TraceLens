@@ -235,6 +235,28 @@ def _append_stack_entry_dataflow(
             if predecessor in refs
         ]
         sources = [source for _predecessor, source in source_pairs]
+        if not sources and _is_generator_operation(operation):
+            # A generator reads no tensor OPERAND, but its extent comes from one:
+            # ``torch.arange(inputs_embeds.shape[1])`` is only as long as that
+            # tensor's sequence axis. Drawing it rootless hides that dependency
+            # (and left the node with no basis for a shape). Recover the tensor
+            # from the recorded bound expressions and wire the edge.
+            for detail in operation.details:
+                text = str(detail)
+                if not text.startswith(
+                    ("arange_start:", "arange_stop:", "arange_step:")
+                ):
+                    continue
+                expression = text.split(":", 1)[1].strip()
+                base = expression.split(".shape", 1)[0].strip()
+                if not base or ".shape" not in expression:
+                    continue
+                producer = dataflow.var_producers.get(base)
+                bound_source = refs.get(producer) if producer else None
+                if bound_source is None and producer in refs:
+                    bound_source = refs[producer]
+                if bound_source is not None and bound_source not in sources:
+                    sources.append(bound_source)
         if not sources and not _is_generator_operation(operation):
             # No materialised predecessor and the op needs a tensor operand: it is
             # a partial fragment we cannot wire, so skip it. A *generator* source op
@@ -268,6 +290,20 @@ def _append_stack_entry_dataflow(
                 _source_edge(source, str(index)) for index, source in enumerate(sources)
             ],
         }
+        if shape_inferencer is not None and _is_generator_operation(operation):
+            # Size a generator from its own recorded bounds, not from whatever it
+            # was wired to: ``torch.arange(inputs_embeds.shape[1])`` is a 1-D
+            # int64 range, not a copy of the embedding's [B, S, hidden].
+            generated = _generator_shape(
+                operation, sources, node_by_id, shape_inferencer
+            )
+            if generated is not None:
+                apply_shape_attrs(node, generated)
+                ref_specs[operation.attr_name] = generated
+                nodes.append(node)
+                node_by_id[node_id] = node
+                refs[operation.attr_name] = node_id
+                continue
         if shape_inferencer is not None and source_pairs:
             predecessor, source = source_pairs[0]
             source_spec = ref_specs.get(predecessor)
@@ -356,6 +392,53 @@ def _is_generator_source_node(node: dict[str, Any]) -> bool:
     must not be mistaken for a group entry point."""
     ceiling, variadic = _operand_ceiling(_node_attr(node, "raw_op") or "")
     return ceiling == 0 and not variadic
+
+
+def _generator_shape(
+    operation: Any,
+    sources: list[str],
+    node_by_id: dict[str, dict[str, Any]],
+    shape_inferencer: Any,
+) -> Any:
+    """Shape of a range generator, from its bounds rather than its operand.
+
+    The inferencer sizes ``arange`` from the recorded bound expressions, which
+    leaves a dim like ``inputs_embeds.shape[1]``. That names an axis of the very
+    tensor the op is wired to, so resolve it there and the range reports the
+    real sequence length instead of an unreadable expression.
+    """
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+    from TraceLens.ModelUtils.shape_inference import TensorSpec
+
+    graph_node = ModelGraphNode(
+        id=str(operation.attr_name),
+        kind=NodeKind.LEAF,
+        label=str(operation.label),
+        operation=OperationKind.TORCH_FUNCTIONAL,
+        metadata={"details": list(operation.details), "attr_name": operation.attr_name},
+    )
+    try:
+        inferred = shape_inferencer._infer_node_output(graph_node, [], root=None)
+    except Exception:  # noqa: BLE001 - an unresolvable generator keeps no shape
+        return None
+    if inferred is None:
+        return None
+    source_spec = None
+    if sources:
+        source_id, source_port = _source_parts(sources[0])
+        source_node = node_by_id.get(source_id)
+        if source_node is not None:
+            source_spec = node_output_spec(source_node, source_port)
+    resolved = []
+    for dim in inferred.shape:
+        match = re.fullmatch(r"(.+)\.shape\[(\d+)\]", str(dim))
+        if match is not None and source_spec is not None:
+            index = int(match.group(2))
+            if index < len(source_spec.shape):
+                resolved.append(source_spec.shape[index])
+                continue
+        resolved.append(dim)
+    return TensorSpec(shape=tuple(resolved), dtype=inferred.dtype)
 
 
 def _is_generator_operation(operation: Any) -> bool:
