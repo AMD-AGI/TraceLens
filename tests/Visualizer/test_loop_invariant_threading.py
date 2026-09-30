@@ -357,3 +357,55 @@ def test_rope_frame_names_its_query_and_position_inputs_apart():
             ]
             if any(str(s.get("label")) == "q" for s in sources):
                 assert "position" not in str(tile["label"]), tile["id"]
+
+
+def _shape_of(node) -> str | None:
+    for attr in node.get("attrs", []) or []:
+        if attr.get("key") == "output_shape":
+            return str(attr.get("value"))
+    return None
+
+
+def test_model_scope_frame_expansion_ops_are_sized():
+    """Every op of a model-scope frame expansion carries a real shape.
+
+    The mask builders are expanded into the ops they perform, but that builder
+    runs outside the per-section inference pass, so nothing ever sized them --
+    and because each op asks its operands, one unsized head blanked the whole
+    chain. They are now sized from the inferencer's own rule per op, and the
+    dims it reports as the expression that computes them
+    (``inputs_embeds.shape[1]``) are resolved against the named tensor.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, _ = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
+    ops = [
+        node
+        for node in graph["nodes"]
+        if "create_sliding_window_causal_mask:@op_" in node["id"]
+    ]
+    assert len(ops) >= 5, len(ops)
+    for node in ops:
+        shape = _shape_of(node)
+        assert shape, f"{node['id']} left unsized"
+        assert ".shape[" not in shape, f"{node['id']} kept an unresolved dim: {shape}"
+
+
+def test_a_declared_narrowing_that_changed_nothing_reports_no_shape():
+    """An op whose declared slice did not apply keeps no shape rather than a wrong one.
+
+    GLM's recurrent mask builder slices ``(:, -S:)`` but is wired to the
+    embedding, so the rule hands the operand straight back and the "mask" would
+    report the embedding's ``[B, S, 4096]``. A missing shape is honest; an
+    activation shape on an attention mask is not.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, _ = _build_nodes("zai-org/GLM-5.3-Flash")
+    sliced = [
+        node
+        for node in graph["nodes"]
+        if "create_recurrent_attention_mask:@op_" in node["id"]
+        and str(node.get("label")) == "Slice"
+    ]
+    assert sliced, "expected the GLM mask builder's slice op"
+    for node in sliced:
+        assert not _shape_of(node), (node["id"], _shape_of(node))

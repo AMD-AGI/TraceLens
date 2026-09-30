@@ -298,6 +298,7 @@ def _append_stack_entry_dataflow(
                 operation, sources, node_by_id, shape_inferencer
             )
             if generated is not None:
+                generated = _resolve_named_shape_dims(generated, dataflow, ref_specs)
                 apply_shape_attrs(node, generated)
                 ref_specs[operation.attr_name] = generated
                 nodes.append(node)
@@ -317,6 +318,9 @@ def _append_stack_entry_dataflow(
                 )
             operation_spec = _data_movement_shape(operation, source_spec, spec=spec)
             if operation_spec is not None:
+                operation_spec = _resolve_named_shape_dims(
+                    operation_spec, dataflow, ref_specs
+                )
                 apply_shape_attrs(node, operation_spec)
                 ref_specs[operation.attr_name] = operation_spec
         nodes.append(node)
@@ -439,6 +443,40 @@ def _generator_shape(
                 continue
         resolved.append(dim)
     return TensorSpec(shape=tuple(resolved), dtype=inferred.dtype)
+
+
+def _resolve_named_shape_dims(
+    spec: Any,
+    dataflow: Any,
+    ref_specs: dict[str, Any],
+) -> Any:
+    """Replace a ``<tensor>.shape[i]`` dim with that tensor's real extent.
+
+    A rule that sizes an op from a recorded expression reports the expression
+    when it cannot evaluate it, so ``torch.arange(inputs_embeds.shape[1])``
+    reports ``[inputs_embeds.shape[1]]`` -- the source line, not the length the
+    reader wanted, and every op downstream inherits it. The name is a local in
+    this same dataflow, so look up its producer's spec and read the axis off it.
+    """
+    from TraceLens.ModelUtils.shape_inference import TensorSpec
+
+    producers = getattr(dataflow, "var_producers", None) or {}
+    resolved = []
+    changed = False
+    for dim in spec.shape:
+        match = re.fullmatch(r"(.+)\.shape\[(-?\d+)\]", str(dim))
+        if match is not None:
+            operand = ref_specs.get(producers.get(match.group(1)))
+            if operand is not None:
+                index = int(match.group(2))
+                if -len(operand.shape) <= index < len(operand.shape):
+                    resolved.append(operand.shape[index])
+                    changed = True
+                    continue
+        resolved.append(dim)
+    if not changed:
+        return spec
+    return TensorSpec(shape=tuple(resolved), dtype=spec.dtype)
 
 
 def _is_generator_operation(operation: Any) -> bool:
@@ -5255,6 +5293,7 @@ def _expand_model_scope_producer_ops(
     producer_attr: str,
     label: str,
     incoming: list[dict[str, str]],
+    shape_inferencer: Any = None,
 ) -> str | None:
     """Render a model-scope producer as the ops its callee actually performs.
 
@@ -5322,11 +5361,75 @@ def _expand_model_scope_producer_ops(
             "style": ensure_readable_text(operation_tile_style(operation.label)),
             "incomingEdges": edges,
         }
+        # Size the op from whatever now feeds it. This expansion renders real
+        # tensor work -- a mask builder opens with a gather and narrows through
+        # several selects -- and it is built outside the per-section inference
+        # pass, so nothing else ever sized it. Leaving the head unsized blanks
+        # every op downstream of it too, because each one asks its operands.
+        _apply_expansion_shape(node, edges, node_by_id, operation, shape_inferencer)
         nodes.append(node)
         node_by_id[op_id] = node
         own_ids[operation.attr_name] = op_id
         last_id = op_id
     return last_id
+
+
+def _apply_expansion_shape(
+    node: dict[str, Any],
+    edges: list[dict[str, str]],
+    node_by_id: dict[str, dict[str, Any]],
+    operation: Any,
+    shape_inferencer: Any,
+) -> None:
+    """Give one op of a model-scope frame expansion its output shape.
+
+    Resolves each incoming edge to its producer's spec and asks the inferencer,
+    which already carries a rule per op. Silent when an operand is still unsized
+    or the op has no rule -- reporting no shape is honest, inventing one is not.
+    """
+    if shape_inferencer is None or not edges:
+        return
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+
+    input_specs = []
+    for edge in edges:
+        source = node_by_id.get(str(edge.get("sourceNodeId", "")))
+        spec = (
+            node_output_spec(source, str(edge.get("sourceNodeOutputId", "0")))
+            if source is not None
+            else None
+        )
+        if spec is None:
+            return
+        input_specs.append(spec)
+    graph_node = ModelGraphNode(
+        id=str(operation.attr_name),
+        kind=NodeKind.LEAF,
+        label=str(operation.label),
+        operation=OperationKind.TORCH_FUNCTIONAL,
+        metadata={"details": list(operation.details), "attr_name": operation.attr_name},
+    )
+    try:
+        inferred = shape_inferencer._infer_node_output(
+            graph_node, input_specs, root=None
+        )
+    except Exception:  # noqa: BLE001 - an op with no rule simply keeps no shape
+        return
+    if inferred is None:
+        return
+    if (
+        len(input_specs) == 1
+        and tuple(inferred.shape) == tuple(input_specs[0].shape)
+        and any(str(detail).startswith("slice:") for detail in operation.details)
+    ):
+        # The op declares a narrowing and the rule handed back its operand
+        # unchanged, which means the narrowing was not applied -- usually because
+        # the operand is not the tensor the slice was written against. GLM's
+        # recurrent mask builder slices ``(:, -S:)`` but is wired to the
+        # embedding, so accepting this would report a ``[B, S, 4096]`` attention
+        # mask. No shape is honest here; the echoed one is not.
+        return
+    apply_shape_attrs(node, inferred)
 
 
 def _materialize_model_scope_producer(
@@ -5335,6 +5438,7 @@ def _materialize_model_scope_producer(
     *,
     cls: Any,
     producer_attr: str,
+    shape_inferencer: Any = None,
 ) -> str | None:
     """Emit (or reuse) a model-scope source node for a loop-invariant producer.
 
@@ -5382,6 +5486,7 @@ def _materialize_model_scope_producer(
         producer_attr=producer_attr,
         label=label,
         incoming=incoming,
+        shape_inferencer=shape_inferencer,
     )
     if expanded is not None:
         return expanded
@@ -5608,6 +5713,7 @@ def _resolve_loop_invariant_source(
     pred_args: dict[str, str],
     producer_map: dict[str, str],
     loop_param_producers: dict[str, str],
+    shape_inferencer: Any = None,
 ) -> str | None:
     """Legitimate model-level source id for a loop-invariant decoder input.
 
@@ -5633,7 +5739,11 @@ def _resolve_loop_invariant_source(
         # this boundary before the loop: render it. The mask builder handed to
         # every decoder iteration is a derived tensor, not the raw model input.
         source = _materialize_model_scope_producer(
-            nodes, node_by_id, cls=cls, producer_attr=producer_attr
+            nodes,
+            node_by_id,
+            cls=cls,
+            producer_attr=producer_attr,
+            shape_inferencer=shape_inferencer,
         )
         if source is not None:
             return source
@@ -5646,7 +5756,11 @@ def _resolve_loop_invariant_source(
         captured = loop_param_producers.get(param)
         if captured is not None and captured != producer_attr:
             source = _materialize_model_scope_producer(
-                nodes, node_by_id, cls=cls, producer_attr=captured
+                nodes,
+                node_by_id,
+                cls=cls,
+                producer_attr=captured,
+                shape_inferencer=shape_inferencer,
             )
             if source is not None:
                 return source
@@ -5662,7 +5776,11 @@ def _resolve_loop_invariant_source(
     captured = loop_param_producers.get(param)
     if captured is not None:
         source = _materialize_model_scope_producer(
-            nodes, node_by_id, cls=cls, producer_attr=captured
+            nodes,
+            node_by_id,
+            cls=cls,
+            producer_attr=captured,
+            shape_inferencer=shape_inferencer,
         )
         if source is not None:
             return source
@@ -5767,6 +5885,7 @@ def _thread_loop_invariant_inputs(
     nodes: list[dict[str, Any]],
     *,
     spec: ArchitectureSpec,
+    shape_inferencer: Any = None,
 ) -> None:
     """Source a repeat group's loop-invariant ``@input:<param>`` boundaries.
 
@@ -5828,6 +5947,7 @@ def _thread_loop_invariant_inputs(
             pred_args=pred_args,
             producer_map=producer_map,
             loop_param_producers=loop_param_producers,
+            shape_inferencer=shape_inferencer,
         )
         if source is None:
             continue
@@ -6234,7 +6354,7 @@ def build_merged_model_graph(
     # keyword) to their model-level producers. Runs after the loop-carried spine is
     # synthesized so the extra sourced boundaries do not perturb its single-entry
     # detection, and before integrity checks so the reconnected tiles read as sourced.
-    _thread_loop_invariant_inputs(nodes, spec=spec)
+    _thread_loop_invariant_inputs(nodes, spec=spec, shape_inferencer=shape_inferencer)
 
     # Runs after threading, which is what connects an outer boundary to its deep
     # consumer: only then is the skipped path visible to walk.
