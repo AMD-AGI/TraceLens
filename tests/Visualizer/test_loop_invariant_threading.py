@@ -286,3 +286,29 @@ def test_loop_invariant_threading_i2_clean(model_id):
         if "I2" in w
     ]
     assert filtered == [], filtered
+
+
+def _arange_nodes(nodes):
+    return [n for n in nodes if str(n.get("label", "")).lower() == "arange"]
+
+
+def _sources(node) -> list[str]:
+    return [str(e["sourceNodeId"]) for e in node.get("incomingEdges", []) or []]
+
+
+def test_deepseek_in_body_arange_docks_the_tensor_its_extent_reads():
+    """An in-body ``torch.arange`` is wired to the tensor whose extent sizes it.
+
+    DeepSeek's compressors size their index ranges from a *local*
+    (``torch.arange(n_windows)``, ``torch.arange(compressed_len)``) that was
+    itself computed from a tensor's shape. The generator takes no tensor
+    *operand*, so nothing docked onto it and it rendered rootless -- asserting
+    the range is independent of the model's data when it is not. Resolving the
+    bound through its defining expression recovers the real dependency.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, _ = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
+    aranges = _arange_nodes(graph["nodes"])
+    assert aranges, "expected in-body arange nodes"
+    rootless = [n["id"] for n in aranges if not _sources(n)]
+    assert rootless == [], rootless

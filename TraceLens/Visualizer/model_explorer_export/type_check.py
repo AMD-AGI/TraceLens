@@ -213,6 +213,12 @@ def _check_node(node: dict[str, Any]) -> list[str]:
         for i, t in enumerate(input_types)
         if _operand_is_tensor(t, shapes[i] if i < len(shapes) else None)
     )
+    # A generator reads a tensor's EXTENT, not its content: ``torch.arange(
+    # valid_keys.shape[-1])`` genuinely depends on ``valid_keys`` and is drawn
+    # with that edge, but ``arange``'s parameters take no tensor operand at all.
+    # Counting the extent edge as an operand would report every such generator
+    # as a mis-wired argument, so discount the edges the extractor marked.
+    tensor_count = max(0, tensor_count - _extent_input_count(node))
     node_id = node.get("id")
     warnings: list[str] = []
 
@@ -329,6 +335,22 @@ def _check_node(node: dict[str, Any]) -> list[str]:
             )
 
     return warnings
+
+
+def _extent_input_count(node: dict[str, Any]) -> int:
+    """How many of the node's wired edges carry an extent rather than an operand.
+
+    Stamped by the extractor as ``extent_inputs: N`` when it recovers the tensors
+    a generator's size arguments read (``torch.arange(n_windows)`` where
+    ``n_windows`` came from ``compressed.shape[1]``).
+    """
+    for token in _detail_tokens(node):
+        if token.startswith("extent_inputs:"):
+            try:
+                return int(token.split(":", 1)[1].strip())
+            except ValueError:
+                return 0
+    return 0
 
 
 def _detail_tokens(node: dict[str, Any]) -> list[str]:

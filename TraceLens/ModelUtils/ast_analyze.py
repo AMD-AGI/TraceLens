@@ -3516,6 +3516,12 @@ _REDUCTION_METHODS = frozenset(
     }
 )
 _DIM_DETAIL_METHODS = _REDUCTION_METHODS | {"unsqueeze", "squeeze", "gather"}
+
+# How far ``_extent_source_producers`` chases a generator bound through
+# intermediate host-scalar locals (``n_windows = compressed.shape[1] //
+# self.block`` is two hops). Bounded so a self-referential or deeply chained
+# assignment cannot spin; real extent chains in the models are 1-3 hops.
+_EXTENT_RESOLVE_DEPTH = 12
 _BINOP_LABELS = {
     ast.Add: "Add",
     ast.Sub: "Subtract",
@@ -4550,6 +4556,65 @@ class _ForwardOperationExtractor:
             )
         return None
 
+    def _extent_source_producers(self, bounds: list[ast.AST]) -> list[str]:
+        """Producers of the tensors whose extent a generator's size arguments read.
+
+        ``torch.arange(n_windows)`` reads no tensor *operand*, so it draws as a
+        rootless node -- but its length is a tensor's: ``n_windows`` was computed
+        from ``compressed.shape[1]``. Leaving the edge out asserts the range is
+        independent of the model's data when it is not, and leaves shape
+        inference nothing to resolve the generated axis against (GLM's
+        ``torch.arange(valid_keys.shape[-1])`` reported a literal
+        ``[valid_keys.shape[-1]]``).
+
+        Walk each recorded bound expression, resolving a plain name through the
+        shape-unpack tokens and through its own defining expression, and return
+        the producer of every tensor whose ``.shape`` (or ``len``) the extent
+        reads. A bound built only from config scalars and literals yields
+        nothing -- that range really is constant.
+        """
+        producers: list[str] = []
+        visited: set[str] = set()
+
+        def record(base: str) -> None:
+            producer = self.var_producer.get(base)
+            if producer and producer not in producers:
+                producers.append(producer)
+
+        def walk(node: ast.AST, depth: int) -> None:
+            if depth > _EXTENT_RESOLVE_DEPTH:
+                return
+            base = _shape_read_base(node)
+            if base is not None:
+                record(base)
+                return
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name) and func.id == "len" and node.args:
+                    record(ast.unparse(node.args[0]))
+                    return
+                for argument in node.args:
+                    walk(argument, depth + 1)
+                return
+            if isinstance(node, ast.Name):
+                if node.id in visited:
+                    return
+                visited.add(node.id)
+                token = self.shape_unpack_tokens.get(node.id)
+                if token is not None:
+                    record(token.split(".shape", 1)[0])
+                defining = self._name_value_ast.get(node.id)
+                if defining is not None:
+                    walk(defining, depth + 1)
+                return
+            for child in ast.iter_child_nodes(node):
+                walk(child, depth + 1)
+
+        for bound in bounds:
+            if bound is not None:
+                walk(bound, 0)
+        return producers
+
     def _is_host_scalar_expr(self, node: ast.AST) -> bool:
         """A pure host-side integer expression (shape math / index bookkeeping).
 
@@ -5514,6 +5579,9 @@ class _ForwardOperationExtractor:
             )
 
         details: list[str] = []
+        # Size arguments of a generator call, kept as AST so the tensors their
+        # extent reads can be recovered as real predecessors below.
+        extent_bounds: list[ast.AST] = []
         if call_name == "linear" and any(
             isinstance(item, ast.Call)
             and isinstance(item.func, ast.Attribute)
@@ -5595,9 +5663,11 @@ class _ForwardOperationExtractor:
             positional = list(node.args)
             if len(positional) == 1:
                 details.append(f"arange_stop: {ast.unparse(positional[0])}")
+                extent_bounds.append(positional[0])
             elif len(positional) >= 2:
                 details.append(f"arange_start: {ast.unparse(positional[0])}")
                 details.append(f"arange_stop: {ast.unparse(positional[1])}")
+                extent_bounds.extend(positional[:2])
                 if len(positional) >= 3:
                     details.append(f"arange_step: {ast.unparse(positional[2])}")
             for keyword in node.keywords:
@@ -5608,6 +5678,8 @@ class _ForwardOperationExtractor:
                 }.get(keyword.arg)
                 if bound is not None:
                     details.append(f"{bound}: {ast.unparse(keyword.value)}")
+                    if bound != "arange_step":
+                        extent_bounds.append(keyword.value)
         if call_name in _DIM_DETAIL_METHODS:
             if node.args:
                 details.append(f"dim: {ast.unparse(node.args[0])}")
@@ -5663,6 +5735,19 @@ class _ForwardOperationExtractor:
         emit_predecessors = [
             value for value in (base_producer, *arg_producers) if value
         ]
+        if extent_bounds and not emit_predecessors:
+            # A generator takes its size, not its content, from a tensor, so it
+            # has no operand to dock onto and would otherwise render rootless --
+            # hiding a real dependency and leaving the generated axis
+            # unresolvable. Recover the tensors its extent reads.
+            extent_producers = self._extent_source_producers(extent_bounds)
+            if extent_producers:
+                emit_predecessors.extend(extent_producers)
+                # These edges carry an EXTENT, not an operand: ``arange``'s
+                # parameters take no tensor at all, so the operand-arity check
+                # must discount them rather than read them as mis-wired
+                # arguments. Record how many of the wired edges are extent-only.
+                details.append(f"extent_inputs: {len(extent_producers)}")
         if label == "Concat" and len(emit_predecessors) >= 2:
             # ``cat([freq_hw, freq_hw])`` concatenates one tensor with itself: the
             # deduped edge would collapse to a single-input concat that looks

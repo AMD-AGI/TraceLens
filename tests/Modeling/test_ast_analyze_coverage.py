@@ -874,3 +874,63 @@ class Widget(nn.Module):
         "def run_kernel(x, w):\n    return x * w\n", encoding="utf-8"
     )
     assert "Widget" not in _registry_for_model(tmp_path, monkeypatch)
+
+
+_EXTENT_SOURCE = """
+import torch
+class Compressor(torch.nn.Module):
+    def forward(self, compressed, idx_q):
+        n_windows = compressed.shape[1] // 4
+        positions = torch.arange(n_windows, device=compressed.device)
+        k_len = idx_q.shape[-1]
+        k_positions = torch.arange(k_len, device=idx_q.device)
+        constant_range = torch.arange(self.local_blocks, device=idx_q.device)
+        return positions + k_positions + constant_range
+"""
+
+
+def test_generator_extent_docks_the_tensor_its_size_reads():
+    """``torch.arange(<local>)`` reaches the tensor whose size the local holds.
+
+    The generator takes no tensor *operand*, so nothing docked onto it and it
+    rendered rootless -- asserting the range is independent of the model's data
+    when it is not. The bound is now resolved through its own defining
+    expression (``n_windows = compressed.shape[1] // 4``) back to the tensor,
+    one hop or several, and the recovered edge is marked as carrying an EXTENT
+    so the operand-arity check does not read it as a mis-wired argument.
+
+    A bound that reads a forward parameter's shape directly reaches it through
+    the parameter channel instead, and a bound built only from config scalars
+    stays unwired: that range really is constant.
+    """
+    analysis = analyze_sources(
+        {Path("modeling_extent.py"): _EXTENT_SOURCE},
+        config={"local_blocks": 8},
+        all_tensor_ops=True,
+    )
+    operations = analysis.class_registry["Compressor"].forward_operations
+    by_bound = {}
+    for op in operations.values():
+        if op.label.lower() != "arange":
+            continue
+        bound = next(
+            str(d).split(":", 1)[1].strip()
+            for d in op.details
+            if str(d).startswith("arange_stop:")
+        )
+        by_bound[bound] = op
+    assert sorted(by_bound) == ["k_len", "n_windows", "self.local_blocks"]
+
+    # Resolved through a local assignment to the producer of ``compressed``.
+    windows = by_bound["n_windows"]
+    assert windows.predecessors, "n_windows arange left rootless"
+    assert "extent_inputs: 1" in [str(d) for d in windows.details]
+
+    # ``k_len = idx_q.shape[-1]`` reads a forward PARAMETER, which reaches the
+    # op through ``param_inputs`` (its boundary tile), not a local producer.
+    assert by_bound["k_len"].param_inputs == ("idx_q",)
+
+    # A pure config bound is genuinely constant -- no fabricated extent edge.
+    constant = by_bound["self.local_blocks"]
+    assert not constant.predecessors
+    assert not any(str(d).startswith("extent_inputs:") for d in constant.details)
