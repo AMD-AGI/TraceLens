@@ -1415,6 +1415,15 @@ def _owning_attr_candidates(node: Any, root: Any) -> list[str]:
     """
     candidates: list[str] = []
     for segment in reversed(re.split(r"[:/]", str(getattr(node, "id", "")))):
+        # A purely numeric segment is a POSITION in the id (``seq:7``, the ``:0``
+        # ordinal of an op), not the attribute of an owning module. It must not
+        # be offered: ``0`` is also a real ModuleList entry name, so ``0.weight``
+        # suffix-matches some list member's parameter and -- being a single,
+        # unambiguous hit -- wins over the actual owner further along. That is
+        # how every Kimi ``input_layernorm`` weight came to report a square
+        # [4096, 4096] instead of its own [7168].
+        if segment.isdigit():
+            continue
         if segment and not segment.startswith("@") and segment not in candidates:
             candidates.append(segment)
     root_attr = getattr(root, "attr_name", None)
@@ -4736,7 +4745,41 @@ def _sum_dim_sizes(sizes: list[DimExpr]) -> DimExpr:
             parts.append(str(size))
     if total:
         parts.append(str(total))
+    parts = _cancel_subtracted_terms(parts)
+    if not parts:
+        return total if total else 0
+    if len(parts) == 1 and str(parts[0]).isdigit():
+        return int(parts[0])
     return " + ".join(parts) if parts else 0
+
+
+def _cancel_subtracted_terms(parts: list[str]) -> list[str]:
+    """Cancel a term against its own subtrahend: ``A-(B)`` summed with ``B`` is ``A``.
+
+    ``rotate_half`` concatenates ``x[..., :d//2]`` with ``x[..., d//2:]``, whose
+    widths are ``d//2`` and ``d-(d//2)``. Their sum is exactly ``d``, but with a
+    symbolic ``d`` the two halves are strings, so the axis rendered as
+    ``index_head_dim-(index_head_dim//2) + index_head_dim//2`` -- correct, and
+    unreadable. This is ordinary cancellation, not simplification of arbitrary
+    arithmetic: a part is dropped only when another part is *character for
+    character* the thing it subtracts.
+    """
+    remaining = list(parts)
+    for index, part in enumerate(remaining):
+        match = re.fullmatch(r"(.+?)\s*-\s*\((.+)\)", str(part))
+        if match is None:
+            continue
+        minuend, subtrahend = match.group(1), match.group(2)
+        for other, candidate in enumerate(remaining):
+            if other == index or str(candidate) != subtrahend:
+                continue
+            reduced = [
+                value
+                for position, value in enumerate(remaining)
+                if position not in {index, other}
+            ]
+            return _cancel_subtracted_terms([minuend, *reduced])
+    return remaining
 
 
 def _eval_dim_expr(node: Any, dims: dict[str, DimExpr]) -> int | None:
