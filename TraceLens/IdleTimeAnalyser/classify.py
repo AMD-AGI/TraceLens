@@ -8,37 +8,59 @@ import bisect
 from collections import defaultdict
 
 from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
+from TraceLens.util import merge_intervals
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 SYNC_RUNTIME_NAMES = {
-    "hipDeviceSynchronize", "cudaDeviceSynchronize",
-    "hipStreamSynchronize", "cudaStreamSynchronize",
-    "hipEventSynchronize", "cudaEventSynchronize",
+    "hipDeviceSynchronize",
+    "cudaDeviceSynchronize",
+    "hipStreamSynchronize",
+    "cudaStreamSynchronize",
+    "hipEventSynchronize",
+    "cudaEventSynchronize",
 }
 MEMCPY_RUNTIME_NAMES = {
-    "hipMemcpyDtoH", "cudaMemcpyDtoH",
-    "hipMemcpyAsync", "cudaMemcpyAsync",
-    "hipMemcpy", "cudaMemcpy",
-    "hipMemcpyWithStream", "cudaMemcpyWithStream",
-    "hipMemcpy2DAsync", "cudaMemcpy2DAsync",
+    "hipMemcpyDtoH",
+    "cudaMemcpyDtoH",
+    "hipMemcpyAsync",
+    "cudaMemcpyAsync",
+    "hipMemcpy",
+    "cudaMemcpy",
+    "hipMemcpyWithStream",
+    "cudaMemcpyWithStream",
+    "hipMemcpy2DAsync",
+    "cudaMemcpy2DAsync",
 }
 ALLOC_FREE_NAMES = {
-    "hipMalloc", "cudaMalloc", "hipFree", "cudaFree",
-    "hipMallocAsync", "cudaMallocAsync", "hipFreeAsync", "cudaFreeAsync",
-    "hipHostMalloc", "cudaHostAlloc", "hipHostFree", "cudaFreeHost",
+    "hipMalloc",
+    "cudaMalloc",
+    "hipFree",
+    "cudaFree",
+    "hipMallocAsync",
+    "cudaMallocAsync",
+    "hipFreeAsync",
+    "cudaFreeAsync",
+    "hipHostMalloc",
+    "cudaHostAlloc",
+    "hipHostFree",
+    "cudaFreeHost",
 }
 LAUNCH_NAMES = {
-    "hipLaunchKernel", "cudaLaunchKernel",
-    "hipExtModuleLaunchKernel", "cuLaunchKernel",
+    "hipLaunchKernel",
+    "cudaLaunchKernel",
+    "hipExtModuleLaunchKernel",
+    "cuLaunchKernel",
     "cudaLaunchKernelExC",
-    "hipGraphLaunch", "cudaGraphLaunch",
+    "hipGraphLaunch",
+    "cudaGraphLaunch",
 }
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def classify_sync_event(event, preceding_gpu_event=None):
     """Classify a CPU runtime event as a sync type, or return None.
@@ -49,8 +71,10 @@ def classify_sync_event(event, preceding_gpu_event=None):
     """
     name = event.get("name", "")
     if name in SYNC_RUNTIME_NAMES:
-        return "DEVICE_SYNC" if "Device" in name else (
-            "STREAM_SYNC" if "Stream" in name else "EVENT_SYNC"
+        return (
+            "DEVICE_SYNC"
+            if "Device" in name
+            else ("STREAM_SYNC" if "Stream" in name else "EVENT_SYNC")
         )
     if name in MEMCPY_RUNTIME_NAMES:
         # Determine direction from the kind field. The runtime event uses
@@ -66,11 +90,6 @@ def classify_sync_event(event, preceding_gpu_event=None):
             return "H2D_COPY"
         return None
     return None
-
-
-def is_memcpy_with_kind(event, kind_substring):
-    """Check if a memcpy runtime event has a specific kind."""
-    return kind_substring in event.get("args", {}).get("kind", "")
 
 
 def classify_runtime_event(event):
@@ -89,13 +108,14 @@ def classify_runtime_event(event):
 # Core classification
 # ---------------------------------------------------------------------------
 
+
 def extract_idle_intervals(gpu_events):
     """
     Given a list of GPU event dicts (with 'ts' and 't_end'),
     merge them into a busy timeline and return idle gaps as (start, end) tuples.
     """
     intervals = [(e["ts"], e["t_end"]) for e in gpu_events]
-    merged = GPUEventAnalyser.merge_intervals(intervals)
+    merged = merge_intervals(intervals)
     if len(merged) < 2:
         return []
     idle = []
@@ -154,15 +174,17 @@ def compute_self_times(overlapping_events, gap_start, gap_end):
         ce = min(orig_e, gap_end)
         if ce <= cs:
             continue
-        intervals.append({
-            "name": evt.get("name", "?"),
-            "orig_s": orig_s,
-            "orig_e": orig_e,
-            "cs": cs,
-            "ce": ce,
-            "clipped_dur": ce - cs,
-            "children_time": 0.0,
-        })
+        intervals.append(
+            {
+                "name": evt.get("name", "?"),
+                "orig_s": orig_s,
+                "orig_e": orig_e,
+                "cs": cs,
+                "ce": ce,
+                "clipped_dur": ce - cs,
+                "children_time": 0.0,
+            }
+        )
 
     # O(n^2) -- n is typically < 50 events per gap.
     # Use original boundaries for containment to handle events that both
@@ -175,23 +197,20 @@ def compute_self_times(overlapping_events, gap_start, gap_end):
             # j is a child of i if i's original span contains j's original span
             # (strict on at least one side to avoid mutual containment of identical events)
             i_contains_j = (
-                intervals[i]["orig_s"] <= intervals[j]["orig_s"] and
-                intervals[i]["orig_e"] >= intervals[j]["orig_e"] and
-                (intervals[i]["orig_s"] < intervals[j]["orig_s"] or
-                 intervals[i]["orig_e"] > intervals[j]["orig_e"])
+                intervals[i]["orig_s"] <= intervals[j]["orig_s"]
+                and intervals[i]["orig_e"] >= intervals[j]["orig_e"]
+                and (
+                    intervals[i]["orig_s"] < intervals[j]["orig_s"]
+                    or intervals[i]["orig_e"] > intervals[j]["orig_e"]
+                )
             )
             if i_contains_j:
                 child_intervals.append((intervals[j]["cs"], intervals[j]["ce"]))
 
         if child_intervals:
-            child_intervals.sort()
-            merged = [child_intervals[0]]
-            for s, e in child_intervals[1:]:
-                if s <= merged[-1][1]:
-                    merged[-1] = (merged[-1][0], max(merged[-1][1], e))
-                else:
-                    merged.append((s, e))
-            intervals[i]["children_time"] = sum(e - s for s, e in merged)
+            intervals[i]["children_time"] = sum(
+                e - s for s, e in merge_intervals(child_intervals)
+            )
 
     self_times = defaultdict(float)
     for iv in intervals:
@@ -212,6 +231,7 @@ class OverlapIndex:
 
     def __init__(self, sorted_events):
         import numpy as np
+
         self._events = sorted_events
         if sorted_events:
             self._ts = np.array([e["ts"] for e in sorted_events], dtype=np.float64)
@@ -223,6 +243,7 @@ class OverlapIndex:
     def query(self, interval_start, interval_end):
         """Return events overlapping [interval_start, interval_end]."""
         import numpy as np
+
         if len(self._events) == 0:
             return []
         right = int(np.searchsorted(self._ts, interval_end, side="left"))
@@ -279,31 +300,7 @@ def find_launch_for_kernel(tree, kernel_event):
     return None
 
 
-def compute_median_launch_latency(tree, gpu_events_sorted):
-    """Compute the median launch-to-execution latency across individually-launched kernels.
-
-    Excludes graph launches (hipGraphLaunch/cudaGraphLaunch) since they batch many
-    kernels and have fundamentally different latency characteristics.
-    """
-    latencies = []
-    for kernel in gpu_events_sorted:
-        launch = find_launch_for_kernel(tree, kernel)
-        if launch is None:
-            continue
-        launch_name = launch.get("name", "")
-        if "GraphLaunch" in launch_name or "graphLaunch" in launch_name:
-            continue
-        launch_end = launch["ts"] + launch.get("dur", 0)
-        latency = kernel["ts"] - launch_end
-        if 0 <= latency < 1000:  # cap at 1ms to exclude clear outliers
-            latencies.append(latency)
-    if not latencies:
-        return 5.0
-    latencies.sort()
-    return latencies[len(latencies) // 2]
-
-
-def classify_idle_intervals(tree, micro_thresh_us=5.0, anomaly_multiplier=10.0):  # anomaly_multiplier kept for API compat, unused
+def classify_idle_intervals(tree, micro_thresh_us=5.0):
     """
     Main classification function. Returns a list of dicts, one per idle interval:
     {
@@ -311,15 +308,16 @@ def classify_idle_intervals(tree, micro_thresh_us=5.0, anomaly_multiplier=10.0):
         'label_noise': bool,
         'drain_type': str,  # 'starved' | 'sync_drain'
         'sync_type': str or None,
-        'cpu_during_gap': str,  # LAUNCH_ANOMALY | LAUNCH_OVERHEAD_ONLY | RUNTIME_DOMINATED | CPU_DOMINATED
+        'cpu_during_gap': str,  # LAUNCH_ANOMALY | LAUNCH_OVERHEAD_ONLY | RUNTIME_DOMINATED
+                                # | CPU_DOMINATED | CPU_UNTRACED
         'cpu_during_gap_detail': str or None,
         'dominant_op': str or None,
         'preceding_gpu_event': str or None,
         'following_gpu_event': str or None,
         'following_launch_name': str or None,
         'launch_to_exec_us': float or None,
-        'dispatch_delay_us': float or None,
         'kernel_prequeued': bool or None,
+        ...  # plus sync_event_* and *_uid fields for cross-referencing
     }
     """
     # Build GPU event analyzer to get gpu event lists
@@ -343,16 +341,11 @@ def classify_idle_intervals(tree, micro_thresh_us=5.0, anomaly_multiplier=10.0):
     gpu_sorted = build_gpu_kernel_map(tree)
     gpu_ts_list = [e["ts"] for e in gpu_sorted]
 
-    TYPICAL_LAUNCH_LATENCY = 8.0  # µs — empirical baseline for individual kernel launches
+    # µs — empirical baseline for individual kernel launches
+    TYPICAL_LAUNCH_LATENCY = 8.0
     print(f"Launch latency baseline: {TYPICAL_LAUNCH_LATENCY:.1f} µs")
 
-    # Build merged intervals to find bounding GPU events for each gap
-    all_gpu_intervals = [(e["ts"], e["t_end"]) for e in all_gpu]
-    merged_busy = GPUEventAnalyser.merge_intervals(all_gpu_intervals)
-    # Map: for gap between merged_busy[i] and merged_busy[i+1],
-    # preceding busy interval ends at merged_busy[i][1], next starts at merged_busy[i+1][0]
-    # We need the actual GPU event at those boundaries for reporting.
-    # Build a quick lookup: ts -> gpu event name (for the event ending at that ts)
+    # Lookups from gap boundary timestamps to the GPU event names bounding each gap
     gpu_event_by_tend = {}
     gpu_event_by_tstart = {}
     for e in all_gpu:
@@ -371,7 +364,7 @@ def classify_idle_intervals(tree, micro_thresh_us=5.0, anomaly_multiplier=10.0):
         return None
 
     results = []
-    for (gap_start, gap_end) in idle_intervals:
+    for gap_start, gap_end in idle_intervals:
         duration = gap_end - gap_start
         rec = {
             "start": gap_start,
@@ -409,7 +402,13 @@ def classify_idle_intervals(tree, micro_thresh_us=5.0, anomaly_multiplier=10.0):
         preceding_gpu_evt = None
         if 0 <= idx_prec < len(gpu_sorted):
             candidate = gpu_sorted[idx_prec]
-            if abs(candidate.get("t_end", candidate["ts"] + candidate.get("dur", 0)) - gap_start) < 2.0:
+            if (
+                abs(
+                    candidate.get("t_end", candidate["ts"] + candidate.get("dur", 0))
+                    - gap_start
+                )
+                < 2.0
+            ):
                 preceding_gpu_evt = candidate
 
         idx = bisect.bisect_left(gpu_ts_list, gap_end - 0.001)
@@ -439,7 +438,9 @@ def classify_idle_intervals(tree, micro_thresh_us=5.0, anomaly_multiplier=10.0):
         # GPU event — that proves the CPU was blocked on the sync and could not
         # launch the next kernel until the sync returned.
         window_before_start = gap_start - 2000
-        nearby_runtime = get_overlapping_events(rt_index, window_before_start, gap_start + 1)
+        nearby_runtime = get_overlapping_events(
+            rt_index, window_before_start, gap_start + 1
+        )
         for rt_evt in reversed(nearby_runtime):
             rt_end = rt_evt["ts"] + rt_evt.get("dur", 0)
             if rt_end >= gap_start - 2 and rt_evt["ts"] < gap_start:
@@ -451,38 +452,49 @@ def classify_idle_intervals(tree, micro_thresh_us=5.0, anomaly_multiplier=10.0):
                     rec["sync_type"] = sync_type
                     rec["sync_event_name"] = rt_evt.get("name")
                     rec["sync_event_uid"] = rt_evt.get("UID")
-                    rec["sync_event_correlation"] = rt_evt.get("args", {}).get("External id",
-                        rt_evt.get("args", {}).get("correlation"))
+                    rec["sync_event_correlation"] = rt_evt.get("args", {}).get(
+                        "External id", rt_evt.get("args", {}).get("correlation")
+                    )
                     rec["sync_event_dur"] = rt_evt.get("dur")
                     # Did this sync actually drain the queue, or was GPU already idle?
                     DRAIN_OVERLAP_THRESH = 5.0  # µs
                     drains = False
                     if preceding_gpu_evt is not None:
-                        gpu_end = preceding_gpu_evt.get("t_end",
-                            preceding_gpu_evt["ts"] + preceding_gpu_evt.get("dur", 0))
+                        gpu_end = preceding_gpu_evt.get(
+                            "t_end",
+                            preceding_gpu_evt["ts"] + preceding_gpu_evt.get("dur", 0),
+                        )
                         overlap = gpu_end - rt_evt["ts"]
                         drains = overlap > DRAIN_OVERLAP_THRESH
                     rec["drain_type"] = "sync_drain" if drains else "starved"
                     break
 
         # --- Pass 2: CPU during gap classification ---
-        LAUNCH_ANOMALY_THRESH_NONPREQUEUED = 10.0   # µs — typical launch-to-exec is 7-8µs
-        LAUNCH_ANOMALY_THRESH_PREQUEUED = 5.0        # µs — gap should be ~0 if kernel was already queued
+        # µs — typical launch-to-exec is 7-8µs
+        LAUNCH_ANOMALY_THRESH_NONPREQUEUED = 10.0
+        # µs — gap should be ~0 if kernel was already queued
+        LAUNCH_ANOMALY_THRESH_PREQUEUED = 5.0
         launch_to_exec = rec.get("launch_to_exec_us")
         prequeued = rec.get("kernel_prequeued")
 
         LAUNCH_ANOMALY_MIN_FRACTION = 0.25  # launch_to_exec must explain ≥25% of gap
         if prequeued is not None and launch_to_exec is not None:
-            if (not prequeued
-                    and launch_to_exec > LAUNCH_ANOMALY_THRESH_NONPREQUEUED
-                    and launch_to_exec > LAUNCH_ANOMALY_MIN_FRACTION * duration):
+            if (
+                not prequeued
+                and launch_to_exec > LAUNCH_ANOMALY_THRESH_NONPREQUEUED
+                and launch_to_exec > LAUNCH_ANOMALY_MIN_FRACTION * duration
+            ):
                 rec["cpu_during_gap"] = "LAUNCH_ANOMALY"
-                rec["cpu_during_gap_detail"] = f"launch_to_exec={launch_to_exec:.1f}µs (launched_during_gap)"
+                rec["cpu_during_gap_detail"] = (
+                    f"launch_to_exec={launch_to_exec:.1f}µs (launched_during_gap)"
+                )
                 results.append(rec)
                 continue
             if prequeued and duration > LAUNCH_ANOMALY_THRESH_PREQUEUED:
                 rec["cpu_during_gap"] = "LAUNCH_ANOMALY"
-                rec["cpu_during_gap_detail"] = f"gap={duration:.1f}µs, launch_to_exec={launch_to_exec:.1f}µs (prequeued)"
+                rec["cpu_during_gap_detail"] = (
+                    f"gap={duration:.1f}µs, launch_to_exec={launch_to_exec:.1f}µs (prequeued)"
+                )
                 results.append(rec)
                 continue
 
@@ -491,7 +503,9 @@ def classify_idle_intervals(tree, micro_thresh_us=5.0, anomaly_multiplier=10.0):
             app_overhead = duration - launch_to_exec
             if app_overhead < APP_OVERHEAD_THRESH:
                 rec["cpu_during_gap"] = "LAUNCH_OVERHEAD_ONLY"
-                rec["cpu_during_gap_detail"] = f"app_overhead={app_overhead:.1f}µs, launch_to_exec={launch_to_exec:.1f}µs"
+                rec["cpu_during_gap_detail"] = (
+                    f"app_overhead={app_overhead:.1f}µs, launch_to_exec={launch_to_exec:.1f}µs"
+                )
                 results.append(rec)
                 continue
 
@@ -536,17 +550,23 @@ def classify_idle_intervals(tree, micro_thresh_us=5.0, anomaly_multiplier=10.0):
                 if coverage < CPU_UNTRACED_THRESH:
                     rec["cpu_during_gap"] = "CPU_UNTRACED"
                     rec["dominant_op"] = max(self_times, key=self_times.get)
-                    rec["cpu_during_gap_detail"] = f"self_time_coverage={coverage:.0%} of gap"
+                    rec["cpu_during_gap_detail"] = (
+                        f"self_time_coverage={coverage:.0%} of gap"
+                    )
                 else:
                     rec["cpu_during_gap"] = "CPU_DOMINATED"
                     rec["dominant_op"] = max(self_times, key=self_times.get)
                     top_ops = sorted(self_times.items(), key=lambda x: -x[1])[:3]
-                    detail_parts = [f"{name}: {t/duration*100:.0f}%" for name, t in top_ops]
+                    detail_parts = [
+                        f"{name}: {t/duration*100:.0f}%" for name, t in top_ops
+                    ]
                     rec["cpu_during_gap_detail"] = ", ".join(detail_parts)
             else:
                 rec["cpu_during_gap"] = "CPU_UNTRACED"
                 rec["dominant_op"] = "(no_cpu_op_overlap)"
-                rec["cpu_during_gap_detail"] = "no cpu_op/python_function events overlap this gap"
+                rec["cpu_during_gap_detail"] = (
+                    "no cpu_op/python_function events overlap this gap"
+                )
 
         results.append(rec)
 
@@ -556,6 +576,7 @@ def classify_idle_intervals(tree, micro_thresh_us=5.0, anomaly_multiplier=10.0):
 # ---------------------------------------------------------------------------
 # Augmented trace generation
 # ---------------------------------------------------------------------------
+
 
 def assign_idle_ids(classified):
     """Assign stable idle_id: macro intervals get 0-indexed positive IDs, noise gets negative."""
@@ -583,36 +604,60 @@ def make_annotation_events(classified, gpu_pid):
     annotation_events = []
 
     # Thread name metadata
-    annotation_events.append({
-        "ph": "M", "name": "thread_name",
-        "pid": gpu_pid, "tid": TID_NOISE_MACRO,
-        "args": {"name": "Idle: Noise/Macro"}
-    })
-    annotation_events.append({
-        "ph": "M", "name": "thread_sort_index",
-        "pid": gpu_pid, "tid": TID_NOISE_MACRO,
-        "args": {"sort_index": TID_NOISE_MACRO}
-    })
-    annotation_events.append({
-        "ph": "M", "name": "thread_name",
-        "pid": gpu_pid, "tid": TID_DRAIN,
-        "args": {"name": "Idle: Drain Type"}
-    })
-    annotation_events.append({
-        "ph": "M", "name": "thread_sort_index",
-        "pid": gpu_pid, "tid": TID_DRAIN,
-        "args": {"sort_index": TID_DRAIN}
-    })
-    annotation_events.append({
-        "ph": "M", "name": "thread_name",
-        "pid": gpu_pid, "tid": TID_CPU_GAP,
-        "args": {"name": "Idle: CPU During Gap"}
-    })
-    annotation_events.append({
-        "ph": "M", "name": "thread_sort_index",
-        "pid": gpu_pid, "tid": TID_CPU_GAP,
-        "args": {"sort_index": TID_CPU_GAP}
-    })
+    annotation_events.append(
+        {
+            "ph": "M",
+            "name": "thread_name",
+            "pid": gpu_pid,
+            "tid": TID_NOISE_MACRO,
+            "args": {"name": "Idle: Noise/Macro"},
+        }
+    )
+    annotation_events.append(
+        {
+            "ph": "M",
+            "name": "thread_sort_index",
+            "pid": gpu_pid,
+            "tid": TID_NOISE_MACRO,
+            "args": {"sort_index": TID_NOISE_MACRO},
+        }
+    )
+    annotation_events.append(
+        {
+            "ph": "M",
+            "name": "thread_name",
+            "pid": gpu_pid,
+            "tid": TID_DRAIN,
+            "args": {"name": "Idle: Drain Type"},
+        }
+    )
+    annotation_events.append(
+        {
+            "ph": "M",
+            "name": "thread_sort_index",
+            "pid": gpu_pid,
+            "tid": TID_DRAIN,
+            "args": {"sort_index": TID_DRAIN},
+        }
+    )
+    annotation_events.append(
+        {
+            "ph": "M",
+            "name": "thread_name",
+            "pid": gpu_pid,
+            "tid": TID_CPU_GAP,
+            "args": {"name": "Idle: CPU During Gap"},
+        }
+    )
+    annotation_events.append(
+        {
+            "ph": "M",
+            "name": "thread_sort_index",
+            "pid": gpu_pid,
+            "tid": TID_CPU_GAP,
+            "args": {"sort_index": TID_CPU_GAP},
+        }
+    )
 
     for rec in classified:
         ts = rec["start"]
@@ -624,13 +669,18 @@ def make_annotation_events(classified, gpu_pid):
             label = "noise"
         else:
             label = f"idle#{idle_id}"
-        annotation_events.append({
-            "ph": "X", "cat": "idle_classification",
-            "name": label,
-            "pid": gpu_pid, "tid": TID_NOISE_MACRO,
-            "ts": ts, "dur": dur,
-            "args": {"idle_id": idle_id, "duration_us": f"{dur:.2f}"},
-        })
+        annotation_events.append(
+            {
+                "ph": "X",
+                "cat": "idle_classification",
+                "name": label,
+                "pid": gpu_pid,
+                "tid": TID_NOISE_MACRO,
+                "ts": ts,
+                "dur": dur,
+                "args": {"idle_id": idle_id, "duration_us": f"{dur:.2f}"},
+            }
+        )
 
         if rec["label_noise"]:
             continue
@@ -641,34 +691,44 @@ def make_annotation_events(classified, gpu_pid):
             drain_label = f"idle#{idle_id} sync_drain: {rec['sync_type']}"
         else:
             drain_label = f"idle#{idle_id} starved"
-        annotation_events.append({
-            "ph": "X", "cat": "idle_classification",
-            "name": drain_label,
-            "pid": gpu_pid, "tid": TID_DRAIN,
-            "ts": ts, "dur": dur,
-            "args": {
-                "idle_id": idle_id,
-                "drain_type": drain,
-                "sync_type": rec["sync_type"] or "none",
-            },
-        })
+        annotation_events.append(
+            {
+                "ph": "X",
+                "cat": "idle_classification",
+                "name": drain_label,
+                "pid": gpu_pid,
+                "tid": TID_DRAIN,
+                "ts": ts,
+                "dur": dur,
+                "args": {
+                    "idle_id": idle_id,
+                    "drain_type": drain,
+                    "sync_type": rec["sync_type"] or "none",
+                },
+            }
+        )
 
         # Track 3: CPU during gap
         cpu_label = rec["cpu_during_gap"]
         if rec["cpu_during_gap_detail"]:
             cpu_label = f"{rec['cpu_during_gap']}: {rec['cpu_during_gap_detail']}"
         cpu_label = f"idle#{idle_id} {cpu_label}"
-        annotation_events.append({
-            "ph": "X", "cat": "idle_classification",
-            "name": cpu_label,
-            "pid": gpu_pid, "tid": TID_CPU_GAP,
-            "ts": ts, "dur": dur,
-            "args": {
-                "idle_id": idle_id,
-                "cpu_during_gap": rec["cpu_during_gap"],
-                "detail": rec["cpu_during_gap_detail"] or "",
-            },
-        })
+        annotation_events.append(
+            {
+                "ph": "X",
+                "cat": "idle_classification",
+                "name": cpu_label,
+                "pid": gpu_pid,
+                "tid": TID_CPU_GAP,
+                "ts": ts,
+                "dur": dur,
+                "args": {
+                    "idle_id": idle_id,
+                    "cpu_during_gap": rec["cpu_during_gap"],
+                    "detail": rec["cpu_during_gap_detail"] or "",
+                },
+            }
+        )
 
     return annotation_events
 
@@ -676,8 +736,10 @@ def make_annotation_events(classified, gpu_pid):
 def find_gpu_pid(events):
     """Find the GPU process ID that has the most kernel/memcpy/memset events."""
     from collections import Counter
+
     kernel_pids = Counter(
-        e["pid"] for e in events
+        e["pid"]
+        for e in events
         if e.get("cat") in ("kernel", "gpu_memcpy", "gpu_memset") and e.get("ph") == "X"
     )
     if kernel_pids:

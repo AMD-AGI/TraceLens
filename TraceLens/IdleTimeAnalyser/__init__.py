@@ -28,6 +28,7 @@ class IdleTimeAnalyser:
     def classify(self):
         """Run classification. Returns list of interval dicts."""
         from .classify import classify_idle_intervals, assign_idle_ids
+
         if self._classified is None:
             self._classified = classify_idle_intervals(
                 self._tree, micro_thresh_us=self._micro_thresh_us
@@ -38,11 +39,13 @@ class IdleTimeAnalyser:
     def get_dataframes(self, gpu_busy_time_us=None):
         """Return {"idle_overview": df, "idle_summary": df, "idle_intervals": df}."""
         from .report import build_idle_dataframes
+
         classified = self.classify()
         return build_idle_dataframes(classified, gpu_busy_time_us=gpu_busy_time_us)
 
     def get_augmented_events(self, gpu_pid):
         """Return Chrome trace annotation events for Perfetto visualization."""
         from .classify import make_annotation_events
+
         classified = self.classify()
         return make_annotation_events(classified, gpu_pid)
