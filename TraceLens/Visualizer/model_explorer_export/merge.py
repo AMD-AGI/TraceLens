@@ -1232,16 +1232,27 @@ def _entry_bucket_label(
             )
             if label:
                 return label
+    # The consuming step records which forward parameter it reads, which names the
+    # boundary more reliably than anything recoverable from the edge. A step that
+    # reads several parameters can carry a stale one, though, so take the name this
+    # bucket's steps agree on rather than whichever happens to come first:
+    # DeepSeek's rope query entered on a step still stamped ``position_embeddings``
+    # while its two sibling steps named the helper's real parameter, and following
+    # the first drew the query under the position tensor's name.
+    parameters: list[str] = []
     for node in entries:
-        # The consuming step records which forward parameter it reads, which names
-        # the boundary more reliably than anything recoverable from the edge.
         parameter = _node_attr(node, "boundary_input")
         external_count = sum(
             edge["sourceNodeId"] not in internal_ids
             for edge in node.get("incomingEdges", [])
         )
         if parameter and external_count == 1:
-            return parameter
+            parameters.append(str(parameter))
+    if parameters:
+        return max(
+            parameters,
+            key=lambda name: (parameters.count(name), -parameters.index(name)),
+        )
     # A kernel input port (``@kernel_port_in``) names the exact tensor it
     # carries into the kernel (``cu_seqlens``). When such a port is the group's
     # entry for an outside producer, that label names the boundary far better
@@ -1366,9 +1377,28 @@ def _inject_group_inputs(
                 }
                 if len(inferred) == 1:
                     label = inferred.pop()
-            key: tuple[str, object] = (
-                ("label", label) if label else ("sources", sources)
+            # Merging is for one parameter whose edges were introduced
+            # separately, so it may only join buckets that actually share a
+            # source. Two DISJOINT producers are two different tensors: the step
+            # attr that names a bucket records the parameter the consuming step
+            # reads, and a step reading several of them reports the same name for
+            # each, which collapsed DeepSeek's rope query onto the
+            # ``position_embeddings`` tile and drew ``q`` under that name.
+            shared = next(
+                (
+                    existing
+                    for existing in merged_order
+                    if existing[0] == "label"
+                    and existing[1] == label
+                    and merged_buckets[existing][0] & set(sources)
+                ),
+                None,
             )
+            key: tuple[str, object]
+            if label and (shared is not None or ("label", label) not in merged_buckets):
+                key = ("label", label)
+            else:
+                key = ("sources", sources)
             if key not in merged_buckets:
                 merged_buckets[key] = (set(), [], label)
                 merged_order.append(key)

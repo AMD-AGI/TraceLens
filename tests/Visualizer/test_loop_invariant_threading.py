@@ -312,3 +312,48 @@ def test_deepseek_in_body_arange_docks_the_tensor_its_extent_reads():
     assert aranges, "expected in-body arange nodes"
     rootless = [n["id"] for n in aranges if not _sources(n)]
     assert rootless == [], rootless
+
+
+def test_rope_frame_names_its_query_and_position_inputs_apart():
+    """A frame's two entering tensors get their own boundary tiles, named apart.
+
+    DeepSeek applies rope through a helper taking the query and the position
+    tensor. One of the query's entry steps was still stamped with the position
+    parameter's name, so both buckets reported ``position_embeddings`` and the
+    label-keyed merge collapsed them onto a single tile -- drawing the query
+    under the position tensor's name, with no way to tell which was which.
+
+    Two disjoint producers are two different tensors, so they keep separate
+    tiles, and each is named after the parameter its steps agree on.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, by_id = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
+
+    frames = {
+        node["id"].rsplit("/", 1)[0]
+        for node in graph["nodes"]
+        if "apply_rotary_pos_emb" in node["id"] and "/@input" in node["id"]
+    }
+    assert frames, "expected rope frames with input boundaries"
+
+    for frame in frames:
+        tiles = [
+            node
+            for node in graph["nodes"]
+            if node["id"].startswith(frame + "/@input")
+            and _node_attr(node, "synthetic") == "@input"
+        ]
+        # One tile per entering tensor, and no two share a name.
+        labels = [str(node["label"]) for node in tiles]
+        assert len(labels) == len(set(labels)), (frame, labels)
+        assert len(tiles) >= 2, (frame, labels)
+
+        # The tile fed by the query does not claim the position tensor's name.
+        for tile in tiles:
+            sources = [
+                by_id[e["sourceNodeId"]]
+                for e in tile.get("incomingEdges", []) or []
+                if e["sourceNodeId"] in by_id
+            ]
+            if any(str(s.get("label")) == "q" for s in sources):
+                assert "position" not in str(tile["label"]), tile["id"]
