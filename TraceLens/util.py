@@ -846,8 +846,10 @@ class TraceEventUtils:
             tid = event[TraceEventUtils.TraceKeys.TID]
             # xprof emits thread_sort_index for unnamed host threads and no
             # thread_name. Those events are not GPU streams.
-            thread_name = metadata.get(pid, {}).get(tid, {}).get(
-                TraceEventUtils.MetadataFields.ThreadName
+            thread_name = (
+                metadata.get(pid, {})
+                .get(tid, {})
+                .get(TraceEventUtils.MetadataFields.ThreadName)
             )
             if not thread_name:
                 return "Unknown"
