@@ -1,31 +1,41 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
 import math
-import pandas as pd
 import re
 import string
 from itertools import chain
 
-try:
-    from enum import StrEnum
-except ImportError:
-    try:
-        from backports.strenum import StrEnum
-    # fallback for Python 3.10
-    except ImportError:
-        from strenum import StrEnum
+import pandas as pd
 
-from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from ..PerfModel import perf_model
-from ..PerfModel.utils import add_simulation_time_columns
-from ..util import TraceEventUtils, DataLoader, JaxProfileProcessor
+from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
+from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
+from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 
 
 class JaxAnalyses:
+    GPU_STREAM_PID_MAX = 100
+    GPU_STREAM_TID_MAX = 100
+
+    @staticmethod
+    def is_gpu_stream_pid(event_or_pid) -> bool:
+        if isinstance(event_or_pid, dict):
+            pid = event_or_pid.get("pid")
+        else:
+            pid = event_or_pid
+        return pid is not None and int(pid) <= JaxAnalyses.GPU_STREAM_PID_MAX
+
+    @staticmethod
+    def is_gpu_stream_tid(event_or_tid) -> bool:
+        if isinstance(event_or_tid, dict):
+            tid = event_or_tid.get("tid")
+        else:
+            tid = event_or_tid
+        return tid is not None and int(tid) < JaxAnalyses.GPU_STREAM_TID_MAX
 
     @staticmethod
     def breakdown_compute_events(
@@ -55,15 +65,43 @@ class JaxAnalyses:
                 cur_categorized_list = categorized_events
                 cur_uncategorized_list = uncategorized_events
 
+            # Always seed the Uncategorized bucket so downstream code
+            # (e.g. create_gpu_summary) can index into it unconditionally
+            # even when the fallback below catches every event.
+            cur_categorized_list.setdefault(
+                TraceEventUtils.JaxOpKeys.UncategorizedEventKey, [0, 0]
+            )
+
             name = compute_event[TraceEventUtils.TraceKeys.Name]
             duration = compute_event[TraceEventUtils.TraceKeys.Duration]
-            found = False
-            for category, filters in TraceEventUtils.JaxOpKeys.ClassCategories.items():
-                if any(f in name for f in filters):
-                    add_event(cur_categorized_list, category, duration)
-                    found = True
-                    break
-            if not found:
+
+            def _match_category(candidate):
+                """Return the first JaxOpKeys category whose substring
+                filters match ``candidate``, or ``None``."""
+                if not isinstance(candidate, str) or not candidate:
+                    return None
+                for (
+                    category,
+                    filters,
+                ) in TraceEventUtils.JaxOpKeys.ClassCategories.items():
+                    if any(f in candidate for f in filters):
+                        return category
+                return None
+
+            # 1) Primary: match against the event name.
+            # 2) Fallback (issue #422): an XLA-emitted buffer-init kernel
+            #    such as ``__amd_rocclr_fillBufferAligned.kd`` does not
+            #    match any name keyword, but its ``args["hlo_op"]`` carries
+            #    the surrounding XLA op (e.g.
+            #    ``te_fused_attn_backward_ffi.12``) which does — retry the
+            #    same scan against that field.
+            args_dict = compute_event.get(TraceEventUtils.TraceKeys.Args) or {}
+            hlo_op = args_dict.get(TraceEventUtils.JaxKernelEventArgs.hlo_op)
+            category = _match_category(name) or _match_category(hlo_op)
+
+            if category is not None:
+                add_event(cur_categorized_list, category, duration)
+            else:
                 if group_by_name:
                     name = name.rstrip(string.digits)
                 add_event(
@@ -93,7 +131,7 @@ class JaxAnalyses:
         thread_name = thread_info.get("thread_name", "")
         if not thread_name:
             # Fallback to old logic for backward compatibility
-            return event.get("tid", 200) < 100
+            return JaxAnalyses.is_gpu_stream_tid(event)
         return thread_name.startswith("Stream #")
 
     @staticmethod
@@ -105,6 +143,7 @@ class JaxAnalyses:
             )
         )
 
+    @staticmethod
     def create_gpu_summary(
         analyzer: JaxGPUEventAnalyser,
         group_by_gpu: bool = False,
@@ -118,7 +157,7 @@ class JaxAnalyses:
         average_gpu_metrics = None
         num_gpus = 0
         for pid, cur_events in all_events.items():
-            if pid <= 100:
+            if JaxAnalyses.is_gpu_stream_pid(pid):
                 num_gpus += 1
                 analyzer.verify_dict_gpu_event_lists(cur_events)
                 current_metrics = analyzer.compute_metrics_dict(cur_events)
@@ -465,7 +504,7 @@ class JaxAnalyses:
             """Total FLOPs for the entire batch."""
             return self.param_details["Op B"] * super().flops()
 
-        def bytes(self):
+        def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
             size_map = {
                 "f32": 4,
                 "f16": 2,
@@ -486,7 +525,7 @@ class JaxAnalyses:
         def flops_bwd(self):
             raise NotImplementedError("Backward pass for JaxGemm is not defined.")
 
-        def bytes_bwd(self, _):
+        def bytes_bwd(self, bytes_per_element=None):
             raise NotImplementedError("Backward pass for JaxGemm is not defined.")
 
     @staticmethod
@@ -514,28 +553,10 @@ class JaxAnalyses:
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
         time = event[TraceEventUtils.TraceKeys.Duration]
 
-        tflops_per_s = (gflops / 1e3) / (time / 1e6) if time > 0 else float("nan")
-
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
         # Return metrics
-        dict_metrics = {
-            "GFLOPS": gflops,
-            "Kernel Time (µs)": time,
-            "TFLOPS/s": tflops_per_s,
-        }
-        if bytes_moved is not None:
-            dict_metrics["Data Moved (MB)"] = bytes_moved / (1024 * 1024)
-            dict_metrics["FLOPS/Byte"] = (
-                (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float("nan")
-            )
-            dict_metrics["TB/s"] = (
-                (bytes_moved / 1e12) / (time / 1e6) if time > 0 else float("nan")
-            )
-        else:
-            dict_metrics["Data Moved (MB)"] = float("nan")
-            dict_metrics["FLOPS/Byte"] = float("nan")
-            dict_metrics["TB/s"] = float("nan")
+        dict_metrics = build_perf_metrics_dict(gflops, bytes_moved, time)
 
         if hasattr(perf_model, "get_simulation_time"):
             add_simulation_time_columns(

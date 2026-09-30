@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -8,7 +8,7 @@ import pandas as pd
 import time
 import matplotlib.pyplot as plt
 from io import BytesIO
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
 
 
 def read_xlsx(file_path: str, config: Dict[str, Any]) -> pd.DataFrame:

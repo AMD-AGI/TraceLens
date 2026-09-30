@@ -1,20 +1,82 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
+import argparse
 import ast
+import json
 import logging
+import os
 import re
+import subprocess
+import sys
+from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 import pandas as pd
-from pathlib import Path
-import sys
-import subprocess
+from openpyxl.utils import get_column_letter
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_gpu_arch(
+    *,
+    gpu_arch_json_path: Optional[str] = None,
+    gpu_arch_platform: Optional[str] = None,
+    gpu_arch: Optional[dict] = None,
+) -> Optional[dict]:
+    """Resolve a GPU architecture dict for roofline / Origami.
+
+    Exactly one of ``gpu_arch_json_path``, ``gpu_arch_platform``, or ``gpu_arch``
+    may be set. ``gpu_arch_platform`` is loaded via
+    ``TraceLens.Agent.Analysis.utils.arch_utils.load_arch``.
+    """
+    sources = [
+        gpu_arch_json_path is not None,
+        gpu_arch_platform is not None,
+        gpu_arch is not None,
+    ]
+    if sum(sources) > 1:
+        raise ValueError(
+            "At most one of gpu_arch_json_path, gpu_arch_platform, and gpu_arch "
+            "may be set."
+        )
+    if gpu_arch is not None:
+        return gpu_arch
+    if gpu_arch_json_path is not None:
+        with open(gpu_arch_json_path, "r") as f:
+            return json.load(f)
+    if gpu_arch_platform is not None:
+        from TraceLens.Agent.Analysis.utils.arch_utils import load_arch
+
+        return load_arch(gpu_arch_platform)
+    return None
+
+
+def add_gpu_arch_cli_args(parser: argparse.ArgumentParser) -> None:
+    """Add mutually exclusive GPU arch CLI options to *parser*."""
+    from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
+
+    platforms = ", ".join(list_platforms())
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--gpu_arch_json_path",
+        type=str,
+        default=None,
+        help="Path to the GPU architecture JSON file",
+    )
+    group.add_argument(
+        "--gpu_arch_platform",
+        type=str,
+        default=None,
+        metavar="PLATFORM",
+        help=(
+            "Bundled or TL_EXTENSION platform name loaded via load_arch "
+            f"(available: {platforms})"
+        ),
+    )
 
 
 def export_data_df(
@@ -62,6 +124,75 @@ def export_data_df(
             if verbose:
                 print(f"Exporting summary statistics to {output_path}")
             data_df.to_csv(output_path, index=False)
+
+
+def _safe_sheet_name(name: str, used: set) -> str:
+    """Truncate *name* to Excel's 31-char limit with collision avoidance.
+
+    If the truncated name already appears in *used*, a numeric suffix
+    (``_1``, ``_2``, ...) is appended while staying within the limit.
+    The final name is added to *used* before returning.
+    """
+    base = name[:31]
+    n = 0
+    while base in used:
+        n += 1
+        suffix = f"_{n}"
+        base = name[: 31 - len(suffix)] + suffix
+    used.add(base)
+    return base
+
+
+def write_report_outputs(
+    dfs: Dict[str, pd.DataFrame],
+    *,
+    xlsx_path: Optional[str] = None,
+    csvs_dir: Optional[str] = None,
+    hide_columns: Optional[Dict[str, List[str]]] = None,
+    skip_empty: bool = False,
+) -> None:
+    """Write report DataFrames to CSV files and/or an Excel workbook.
+
+    Sheet names are truncated to 31 characters (Excel limit) with
+    collision-safe suffixes.
+
+    Args:
+        dfs: Mapping of sheet name -> DataFrame.
+        xlsx_path: If set, write an ``.xlsx`` workbook here.
+        csvs_dir: If set, write one CSV per DataFrame into this directory.
+        hide_columns: Optional mapping of sheet name -> column names to
+            hide in the Excel output. Hidden columns stay in the file;
+            names absent from a DataFrame are ignored.
+        skip_empty: If True, ``None`` or empty DataFrames are omitted from
+            all outputs.
+    """
+    if skip_empty:
+        dfs = {name: df for name, df in dfs.items() if df is not None and not df.empty}
+
+    if csvs_dir:
+        os.makedirs(csvs_dir, exist_ok=True)
+        for sheet_name, df in dfs.items():
+            csv_path = os.path.join(csvs_dir, f"{sheet_name}.csv")
+            df.to_csv(csv_path, index=False)
+            logger.info("Wrote %s (%d rows)", csv_path, len(df))
+
+    if xlsx_path:
+        hide_columns = hide_columns or {}
+        used: set = set()
+        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+            for sheet_name, df in dfs.items():
+                safe = _safe_sheet_name(sheet_name, used)
+                df.to_excel(writer, sheet_name=safe, index=False)
+                cols_to_hide = hide_columns.get(sheet_name, [])
+                if not cols_to_hide:
+                    continue
+                worksheet = writer.book.worksheets[-1]
+                for col in cols_to_hide:
+                    if col not in df.columns:
+                        continue
+                    col_letter = get_column_letter(df.columns.get_loc(col) + 1)
+                    worksheet.column_dimensions[col_letter].hidden = True
+        logger.info("Wrote %s", xlsx_path)
 
 
 def request_install(package_name):
@@ -118,9 +249,8 @@ def _parse_pg_ranks(value: Union[str, List[int], tuple]) -> List[int]:
             parsed = ast.literal_eval(value)
             if isinstance(parsed, (list, tuple)):
                 return [int(x) for x in parsed]
-        except Exception:
-            pass
-        return [int(s) for s in re.findall(r"\d+", value)]
+        except (ValueError, SyntaxError):
+            return [int(s) for s in re.findall(r"\d+", value)]
     return []
 
 

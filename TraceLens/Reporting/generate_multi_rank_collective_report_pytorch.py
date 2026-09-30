@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -15,7 +15,7 @@ from TraceLens import NcclAnalyser
 from TraceLens.Reporting.reporting_utils import (
     add_node_span_columns,
     detect_gpus_per_node,
-    request_install,
+    write_report_outputs,
 )
 
 DEFAULT_RANK_REGEX = r"rank[\[\-_/]?(?P<rank>\d+)"
@@ -93,7 +93,7 @@ def generate_collective_report(
     world_size: Optional[int] = None,
     output_xlsx_path: Optional[str] = None,
     output_csvs_dir: Optional[str] = None,
-    detailed_analysis: bool = False,
+    detailed_analysis: bool = True,
     agg_metrics: List[str] = ["mean", "median", "min", "max"],
     strict_world_size_check: bool = True,
     use_multiprocessing: bool = False,
@@ -241,6 +241,12 @@ def generate_collective_report(
         if df_all2allv is not None and not df_all2allv.empty:
             report_dfs["nccl_all2allv"] = df_all2allv
 
+    # Straggler summary — always generated when implicit-sync data exists
+    print("Generating straggler summary...")
+    df_straggler = nccl_analyser.build_df_straggler_summary()
+    if not df_straggler.empty:
+        report_dfs["straggler_summary"] = df_straggler
+
     # Add node_id and node_span columns when gpus_per_node is known
     if gpus_per_node is not None and gpus_per_node > 0:
         print(f"Adding node_span columns (gpus_per_node={gpus_per_node})...")
@@ -250,27 +256,9 @@ def generate_collective_report(
             )
 
     # Export DataFrames
-    if output_csvs_dir:
-        os.makedirs(output_csvs_dir, exist_ok=True)
-        for sheet_name, df in report_dfs.items():
-            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
-            print(f"DataFrame '{sheet_name}' written to {csv_path}")
-
-    if output_xlsx_path:
-        try:
-            import openpyxl
-        except (ImportError, ModuleNotFoundError):
-            print("Error importing openpyxl")
-            request_install("openpyxl")
-
-        print(f"Writing Excel report to {output_xlsx_path}...")
-        with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
-            for sheet_name, df in report_dfs.items():
-                df.to_excel(
-                    writer, sheet_name=sheet_name[:31], index=False
-                )  # Excel limits sheet names to 31 chars
-        print(f"Excel report successfully written to {output_xlsx_path}")
+    write_report_outputs(
+        report_dfs, xlsx_path=output_xlsx_path, csvs_dir=output_csvs_dir
+    )
 
     return report_dfs
 
@@ -323,7 +311,10 @@ def main():
 
     # Analysis options
     parser.add_argument(
-        "--detailed_analysis", action="store_true", help="Include detailed information"
+        "--detailed_analysis",
+        action="store_true",
+        default=True,
+        help="Include detailed information (enabled by default)",
     )
     parser.add_argument(
         "--agg_metrics",

@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -14,7 +14,6 @@ Uses shared pftrace_utils (traceconv) and PftraceParser.
 import os
 import argparse
 import sys
-from pathlib import Path
 from typing import Optional, Dict, List, Any, Tuple
 
 import pandas as pd
@@ -28,7 +27,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from TraceLens.util import PftraceParser
-from TraceLens.Reporting.pftrace_utils import ensure_trace_json
+from TraceLens.Reporting.pftrace_utils import (
+    derive_pftrace_output_path,
+    ensure_trace_json,
+)
+from TraceLens.Reporting.reporting_utils import write_report_outputs
 
 # Event name substrings for direction (ROCm/Perfetto)
 NAME_HOST_TO_DEVICE = "MEMORY_COPY_HOST_TO_DEVICE"
@@ -145,36 +148,15 @@ def generate_perf_report_pftrace_memory_copy(
     count_df = build_memory_copy_count_df(events)
     dfs = {"memory_copy_by_copy_bytes": count_df}
 
-    if output_csvs_dir:
-        logger.info("Writing CSV files to: %s", output_csvs_dir)
-        os.makedirs(output_csvs_dir, exist_ok=True)
-        for sheet_name, df in dfs.items():
-            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
-            logger.info("  - %s.csv (%d rows)", sheet_name, len(df))
-    else:
-        if output_xlsx_path is None:
-            base = Path(trace_path).resolve()
-            if base.suffix.lower() == ".pftrace":
-                base = base.with_suffix("")
-            elif base.suffix.lower() == ".gz" and base.name.endswith(".json.gz"):
-                base = base.parent / base.name.replace(".json.gz", "")
-            else:
-                base = base.with_suffix("")
-            output_xlsx_path = str(base) + "_pftrace_memory_copy_report.xlsx"
-        logger.info("Writing Excel file to: %s", output_xlsx_path)
-        try:
-            import openpyxl  # noqa: F401
-        except (ImportError, ModuleNotFoundError) as e:
-            logger.error(
-                "openpyxl required for Excel output: %s. pip install openpyxl", e
-            )
-            raise
-        with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
-            for sheet_name, df in dfs.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-                logger.info("  - Sheet '%s' (%d rows)", sheet_name, len(df))
-        logger.info("Successfully written to %s", output_xlsx_path)
+    if not output_csvs_dir and output_xlsx_path is None:
+        output_xlsx_path = derive_pftrace_output_path(
+            trace_path, "_pftrace_memory_copy_report.xlsx"
+        )
+    write_report_outputs(
+        dfs,
+        xlsx_path=output_xlsx_path,
+        csvs_dir=output_csvs_dir,
+    )
 
     return dfs
 

@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -8,7 +8,23 @@
 Utils. for perf. model.
 """
 
-import os
+
+def optional_int(value, default=None):
+    """Parse *value* as int, returning *default* when conversion fails."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def optional_float(value, default=0.0):
+    """Parse *value* as float, returning *default* when conversion fails."""
+    if value in ("", "None", None):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def add_simulation_time_columns(
@@ -42,6 +58,43 @@ def add_simulation_time_columns(
     )
 
 
+def build_perf_metrics_dict(gflops, bytes_moved, busy_kernel_time):
+    """
+    Build the standard GFLOPS/TFLOPS/TB-per-s metrics dict shared by the
+    PyTorch and JAX perf-metric code paths.
+    """
+    tflops_per_s = (
+        (gflops / 1e3) / (busy_kernel_time / 1e6)
+        if busy_kernel_time > 0
+        else float("nan")
+    )
+    dict_metrics = {
+        "GFLOPS": gflops,
+        "Kernel Time (µs)": busy_kernel_time,
+        "TFLOPS/s": tflops_per_s,
+    }
+    if bytes_moved is not None:
+        dict_metrics["Data Moved (MB)"] = bytes_moved / (1024 * 1024)
+        dict_metrics["FLOPS/Byte"] = (
+            (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float("nan")
+        )
+        dict_metrics["TB/s"] = (
+            (bytes_moved / 1e12) / (busy_kernel_time / 1e6)
+            if busy_kernel_time > 0
+            else float("nan")
+        )
+    else:
+        dict_metrics["Data Moved (MB)"] = float("nan")
+        dict_metrics["FLOPS/Byte"] = float("nan")
+        dict_metrics["TB/s"] = float("nan")
+    return dict_metrics
+
+
+def gemm_tflops(M, N, K, time_ms):
+    """Achieved TFLOPS for a dense GEMM of shape (M, N, K) given elapsed time in ms."""
+    return (2 * M * N * K) / (time_ms * 1e-3) / 1e12
+
+
 def name2bpe(name):
     """
     This function maps a data type name to the number of bytes per element.
@@ -58,14 +111,23 @@ def name2bpe(name):
             "c10::float8_e4m3fnuz",
             "c10::float8_e4m3fn",
             "c10::float8_e5m2",
+            "c10::float8_e8m0fnu",
             "unsigned char",
             "signed char",
             "fp8",
+            # Float4_e2m1fn_x2 packs two FP4 values into one byte. Trace tensor
+            # shapes already reflect the packed layout (K_packed = K/2), so we
+            # use bpe=1 for the packed-pair element and let callers apply the
+            # ×2 K-unpacking explicitly when modelling FLOPs.
+            "c10::float4_e2m1fn_x2",
+            "fp4",
         ],
     }
     dict_dtype2bpe = {
         dtype: bpe for bpe, dtypes in dict_bpe2dtype.items() for dtype in dtypes
     }
+    if name is None:
+        return None
     return dict_dtype2bpe.get(name.lower(), None)
 
 
@@ -109,3 +171,17 @@ def torch_dtype_map(dtype):
         "c10::float8_e4m3fn": "fp8",
     }
     return dict_dtype2simulation.get(dtype.lower(), None)
+
+
+def parse_bool(input):
+    if isinstance(input, bool):
+        return input
+    if input is None:
+        return False
+    if isinstance(input, str):
+        value = input.strip().lower()
+        if value in {"true", "1"}:
+            return True
+        if value in {"false", "0", ""}:
+            return False
+    return bool(input)

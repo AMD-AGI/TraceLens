@@ -1,11 +1,11 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
-import argparse, os, sys
-import json
+import argparse
+import sys
 from typing import Optional, Dict
 import pandas as pd
 import logging
@@ -17,9 +17,12 @@ logging.basicConfig(
     format="[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s",
 )
 
-from TraceLens.PerfModel import jax_op_mapping
-from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyzer
-from TraceLens.Reporting.reporting_utils import request_install
+from TraceLens.TreePerf import JaxTreePerfAnalyzer
+from TraceLens.Reporting.reporting_utils import (
+    add_gpu_arch_cli_args,
+    resolve_gpu_arch,
+    write_report_outputs,
+)
 from TraceLens.util import TraceEventUtils
 
 
@@ -142,13 +145,15 @@ def generate_perf_report_jax(
     output_csvs_dir: Optional[str] = None,
     kernel_metadata_keyword_filters=None,
     gpu_arch_json_path: Optional[str] = None,
+    gpu_arch_platform: Optional[str] = None,
+    gpu_arch: Optional[dict] = None,
     enable_origami: bool = False,
 ) -> Dict[str, pd.DataFrame]:
-    if gpu_arch_json_path:
-        with open(gpu_arch_json_path, "r") as f:
-            gpu_arch_json = json.load(f)
-    else:
-        gpu_arch_json = None
+    gpu_arch_json = resolve_gpu_arch(
+        gpu_arch_json_path=gpu_arch_json_path,
+        gpu_arch_platform=gpu_arch_platform,
+        gpu_arch=gpu_arch,
+    )
     # Analyze trace profile
     dict_name2df = perf_analysis(
         profile_path,
@@ -158,28 +163,14 @@ def generate_perf_report_jax(
     )
 
     # Write all DataFrames to separate sheets in an Excel workbook
-    if output_csvs_dir:
-        # Ensure the output directory exists
-        os.makedirs(output_csvs_dir, exist_ok=True)
-        for sheet_name, df in dict_name2df.items():
-            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
-            print(f"DataFrame '{sheet_name}' written to {csv_path}")
-    else:
-        if output_xlsx_path is None:
-            # split input path at 'xplane.pb' and take the first part and append '.xlsx'
-            base_path = profile_path.rsplit(".xplane.pb", 1)[0]
-            output_xlsx_path = base_path + "_perf_report.xlsx"
-        try:
-            import openpyxl
-        except (ImportError, ModuleNotFoundError) as e:
-            print(f"Error importing openpyxl: {e}")
-            request_install("openpyxl")
-
-        with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
-            for sheet_name, df in dict_name2df.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-            print(f"DataFrames successfully written to {output_xlsx_path}")
+    if not output_csvs_dir and output_xlsx_path is None:
+        base_path = profile_path.rsplit(".xplane.pb", 1)[0]
+        output_xlsx_path = base_path + "_perf_report.xlsx"
+    write_report_outputs(
+        dict_name2df,
+        xlsx_path=output_xlsx_path,
+        csvs_dir=output_csvs_dir,
+    )
 
     return dict_name2df
 
@@ -221,12 +212,7 @@ def main():
         default=None,
         help="Kernel metadata keyword filters, performance analysis is computed only for the events containing the kerword in the metadata e.g. in framework name scope, e.g. --kernel_metadata_keyword_filters remat checkpoint",
     )
-    parser.add_argument(
-        "--gpu_arch_json_path",
-        type=str,
-        default=None,
-        help="Path to the GPU architecture JSON file",
-    )
+    add_gpu_arch_cli_args(parser)
     parser.add_argument(
         "--enable-origami",
         action="store_true",
@@ -242,6 +228,7 @@ def main():
         output_csvs_dir=args.output_csvs_dir,
         kernel_metadata_keyword_filters=args.kernel_metadata_keyword_filters,
         gpu_arch_json_path=args.gpu_arch_json_path,
+        gpu_arch_platform=args.gpu_arch_platform,
         enable_origami=args.enable_origami,
     )
 

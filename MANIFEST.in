@@ -1,0 +1,5 @@
+recursive-include TraceLens/Agent *.md
+recursive-include TraceLens/Agent/Analysis/skills *
+recursive-include TraceLens/Agent/Profiling/skills *
+recursive-include TraceLens/Agent/Analysis/utils/arch *.json
+prune TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals

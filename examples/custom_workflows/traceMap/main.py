@@ -1,12 +1,11 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
 import argparse
-import pandas as pd
-from bokeh.plotting import figure, save, output_file
+from bokeh.plotting import save, output_file
 from src.chart import GPUTraceDashboard
 import datetime
 

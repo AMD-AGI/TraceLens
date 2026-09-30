@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -7,8 +7,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import Dict, Any, Tuple, List
-from io import BytesIO
+from typing import Dict, Any, Tuple
 
 
 def calculate_ridge_points(config: Dict[str, Any]) -> Tuple[float, float]:

@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -27,7 +27,7 @@ def test_fixed_k_ops_map_to_primus_turbo_grouped_gemm():
     for op in fixed_k_ops:
         assert op_to_perf_model_class_map[op] is primus_turbo_grouped_gemm, op
         row = {"name": op, "kernel_details": []}
-        assert categorize_torch_op(row) == "GEMM", op
+        assert categorize_torch_op(row) == "GroupedGEMM_fwd", op
 
 
 def test_variable_k_ops_map_to_primus_turbo_grouped_gemm_variable_k():
@@ -41,7 +41,7 @@ def test_variable_k_ops_map_to_primus_turbo_grouped_gemm_variable_k():
             op_to_perf_model_class_map[op] is primus_turbo_grouped_gemm_variable_k
         ), op
         row = {"name": op, "kernel_details": []}
-        assert categorize_torch_op(row) == "GEMM", op
+        assert categorize_torch_op(row) == "GroupedGEMM_fwd", op
 
 
 # ---------------------------------------------------------------------------

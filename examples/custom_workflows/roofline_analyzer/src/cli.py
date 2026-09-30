@@ -1,13 +1,12 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
 import typer
 import tomli
-from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from rich.console import Console
 from rich.table import Table
 

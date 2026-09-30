@@ -1,13 +1,11 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
 import argparse
-import pandas as pd
 from TraceLens import TreePerfAnalyzer
-from typing import List, Dict, Any
 
 
 def main():

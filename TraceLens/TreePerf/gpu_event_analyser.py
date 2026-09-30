@@ -1,13 +1,13 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
 import pandas as pd
-import itertools
 import tqdm
-from TraceLens.util import TraceEventUtils
+
+from ..util import TraceEventUtils, merge_intervals
 
 
 class GPUEventAnalyser:
@@ -16,23 +16,6 @@ class GPUEventAnalyser:
         Initialize with a list of event dictionaries.
         """
         self.events = events
-
-    @staticmethod
-    def merge_intervals(intervals):
-        """
-        Merge a list of intervals (each as a (start, end) tuple) into a union of non-overlapping intervals.
-        """
-        if not intervals:
-            return []
-        intervals = sorted(intervals, key=lambda x: x[0])
-        merged = [intervals[0]]
-        for start, end in intervals[1:]:
-            last_start, last_end = merged[-1]
-            if start <= last_end:
-                merged[-1] = (last_start, max(last_end, end))
-            else:
-                merged.append((start, end))
-        return merged
 
     @staticmethod
     def subtract_intervalsA_from_B(intervals_to_subtract, intervals):
@@ -72,14 +55,7 @@ class GPUEventAnalyser:
     gpu_event_keys = [all_gpu_key, computation_key, communication_key, memcpy_key]
     cpu_event_keys = [all_cpu_key]
 
-    @property
-    @staticmethod
-    def all_event_keys():
-        return itertools.chain(
-            GPUEventAnalyser.gpu_event_keys, GPUEventAnalyser.cpu_event_keys
-        )
-
-    def get_gpu_event_lists(self):
+    def get_gpu_event_lists(self, gpu_pid=None, event_filter=None):
         """
         Return a dictionary of lists of events, categorized by event types
         Event types are all gpu events, computation, communication, and memcpy.
@@ -108,18 +84,38 @@ class GPUEventAnalyser:
                 if "t_end" not in event:
                     event["t_end"] = event["ts"] + event["dur"]
                 if "overlapping_uids" not in event:
-                    compute_overlapping_uids = True
-                    points.append(
-                        (event["ts"], 1, event["UID"])
-                    )  # 1 for start, 0 for end (end sorts first so boundary-touching != overlapping)
-                    points.append((event["t_end"], 0, event["UID"]))
                     event["overlapping_uids"] = set()
+                    # Skip zero-duration GPU events from the sweep-line below.
+                    # A zero-measure interval cannot overlap anything, and the
+                    # (ts, point_type) sort ordering puts end (0) before start
+                    # (1) at equal timestamps. For a zero-dur event, ts == t_end,
+                    # so its own end-point would be processed before its
+                    # start-point and raise KeyError on active_uids.remove(uid).
+                    if event["t_end"] > event["ts"]:
+                        compute_overlapping_uids = True
+                        points.append(
+                            (event["ts"], 1, event["UID"])
+                        )  # 1 for start, 0 for end (end sorts first so boundary-touching != overlapping)
+                        points.append((event["t_end"], 0, event["UID"]))
                 gpu_events.append(event)
 
                 if category == "gpu_memcpy":
                     memcpy_events.append(event)
                 elif category in {"kernel", "gpu_memset"}:
-                    if TraceEventUtils.is_communication_string(event.get("name")):
+                    name = event.get("name") or ""
+                    # Reroute ROCm 7.1 legacy rocclr copy kernels to the memcpy
+                    # bucket so cross-version (7.1 vs 7.2) reports compare
+                    # like-for-like; rocclr fill kernels follow gpu_memset's
+                    # existing home (comp_events).
+                    if category == "kernel" and TraceEventUtils.is_rocm_legacy_memcpy(
+                        name
+                    ):
+                        memcpy_events.append(event)
+                    elif category == "kernel" and TraceEventUtils.is_rocm_legacy_memset(
+                        name
+                    ):
+                        comp_events.append(event)
+                    elif TraceEventUtils.is_communication_string(name):
                         comm_events.append(event)
                     else:
                         comp_events.append(event)
@@ -152,7 +148,7 @@ class GPUEventAnalyser:
 
             for _, point_type, uid in points:
                 if point_type == 0:
-                    active_uids.remove(uid)
+                    active_uids.discard(uid)
                 else:
                     event = event_map[uid]
                     my_cpu_op = uid_to_cpu_op[uid]
@@ -218,10 +214,10 @@ class GPUEventAnalyser:
             dict_intervals[key] = [(event["ts"], event["t_end"]) for event in events]
 
         # Merge intervals within each category.
-        comp_union = GPUEventAnalyser.merge_intervals(dict_intervals["computation"])
-        comm_union = GPUEventAnalyser.merge_intervals(dict_intervals["communication"])
-        memcpy_union = GPUEventAnalyser.merge_intervals(dict_intervals["memcpy"])
-        all_intervals = GPUEventAnalyser.merge_intervals(dict_intervals["all_gpu"])
+        comp_union = merge_intervals(dict_intervals["computation"])
+        comm_union = merge_intervals(dict_intervals["communication"])
+        memcpy_union = merge_intervals(dict_intervals["memcpy"])
+        all_intervals = merge_intervals(dict_intervals["all_gpu"])
 
         # end of the last event - start of the first event
         total_time = all_intervals[-1][1] - all_intervals[0][0]
@@ -308,7 +304,9 @@ class GPUEventAnalyser:
                 "total_memcpy_time": total_memcpy_time,
             }
 
-    def compute_metrics(self, micro_idle_thresh_us=None):
+    def compute_metrics(
+        self, micro_idle_thresh_us=None, gpu_pid=None, event_filter=None
+    ):
         """
         Compute various metrics from the GPU event data.
         Computation is defined as the time spent in computation kernels.
@@ -337,8 +335,14 @@ class GPUEventAnalyser:
         df = df.drop(columns=["time"])
         return df
 
-    def get_breakdown_df(self, micro_idle_thresh_us=None):
-        dict_metrics = self.compute_metrics(micro_idle_thresh_us=micro_idle_thresh_us)
+    def get_breakdown_df(
+        self, micro_idle_thresh_us=None, gpu_pid=None, event_filter=None
+    ):
+        dict_metrics = self.compute_metrics(
+            micro_idle_thresh_us=micro_idle_thresh_us,
+            gpu_pid=gpu_pid,
+            event_filter=event_filter,
+        )
         return GPUEventAnalyser.get_breakdown_df_from_dict(dict_metrics)
 
 
@@ -414,7 +418,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
             return return_dict
         return return_dict.get(gpu_pid, {})
 
-    def compute_metrics(self, gpu_pid=1, event_filter=None):
+    def compute_metrics(self, micro_idle_thresh_us=None, gpu_pid=1, event_filter=None):
         # Default: use GPU0 (PID 1) for Jax
         dict_gpu_event_lists = self.get_gpu_event_lists(
             gpu_pid=gpu_pid, event_filter=event_filter
@@ -465,7 +469,9 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
             average_gpu_metrics[k] /= num_gpus
         return average_gpu_metrics
 
-    def get_breakdown_df(self, gpu_pid=None, event_filter=None):
+    def get_breakdown_df(
+        self, micro_idle_thresh_us=None, gpu_pid=None, event_filter=None
+    ):
         """
         Return performance breakdown across GPUs or one gpu, if gpu_pid is provided.
 

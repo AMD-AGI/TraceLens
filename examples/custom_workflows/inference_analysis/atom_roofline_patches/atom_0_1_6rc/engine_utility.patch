@@ -1,0 +1,24 @@
+diff --git a/atom/model_engine/engine_utility.py b/atom/model_engine/engine_utility.py
+index 49fb9219..6a94f433 100644
+--- a/atom/model_engine/engine_utility.py
++++ b/atom/model_engine/engine_utility.py
+@@ -230,6 +230,10 @@ class EngineUtilityHandler:
+     # ------------------------------------------------------------------
+ 
+     def _handle_start_profile(self, args: dict):
++        # Gate the roofline aggregates on an active profiler so unprofiled
++        # steps never pay for them.
++        if self.scheduler is not None:
++            self.scheduler.profile_active = True
+         result = self.runner_mgr.call_func("start_profiler", wait_out=True)
+         logger.info(f"{self.label}: profiler started")
+         self.output_queue.put_nowait(
+@@ -239,6 +243,8 @@ class EngineUtilityHandler:
+     def _handle_stop_profile(self, args: dict):
+         logger.info(f"{self.label}: stopping profiler...")
+         result = self.runner_mgr.call_func("stop_profiler", wait_out=True)
++        if self.scheduler is not None:
++            self.scheduler.profile_active = False
+         logger.info(f"{self.label}: profiler stopped, result={result}")
+         self.output_queue.put_nowait(
+             ("UTILITY_RESPONSE", {"cmd": "stop_profile", "result": result})

@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -15,21 +15,26 @@ Usage:
     pytest tests/test_jax_perf_report.py -v
 """
 
-import glob
-import os
-import shutil
-import tempfile
-
-import pytest
-
+import glob, os, shutil, tempfile, pytest, importlib, sys, pandas as pd, TraceLens.Reporting.generate_perf_report_jax as mod
 from TraceLens.Reporting.generate_perf_report_jax import generate_perf_report_jax
-
 from conftest import (
     compare_cols,
     format_diff_details,
     list_perf_report_csv_sheets,
     read_perf_report_csv,
+    update_reference_csvs,
 )
+from unittest.mock import MagicMock, patch
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer
+from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_df
+from tests.fixtures.traces import JAX_PB
+from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
+from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
+
+# xprof writes SSTABLE cache files next to each .xplane.pb; keep all JAX
+# perf-report tests on one xdist worker so trace loads do not race.
+pytestmark = pytest.mark.xdist_group("jax_traces")
+
 
 # ---------------------------------------------------------------------------
 # Test-trace discovery
@@ -166,16 +171,28 @@ class TestJaxPerfReportE2E:
 @pytest.mark.parametrize(
     "trace_path", JAX_TRACES, ids=[_short_id(t) for t in JAX_TRACES]
 )
-def test_jax_perf_report_csv_regression(trace_path, tmp_path, tol=1e-6):
+def test_jax_perf_report_csv_regression(
+    trace_path, tmp_path, update_references, tol=1e-6
+):
     """
     When a sibling ``<trace_folder>_perf_report_csvs/`` directory exists under
     tests/traces, generated CSVs must match it (regression).
+
+    When ``--update-references`` is passed,
+    the checked-in reference CSVs are overwritten with the freshly generated
+    output and the test is skipped so the suite still returns green.
     """
     ref_dir = jax_ref_perf_report_csv_dir(trace_path)
-    if not os.path.isdir(ref_dir):
-        pytest.skip(f"No CSV reference directory: {ref_dir}")
     out_dir = str(tmp_path / "jax_perf_report_csvs")
     generate_perf_report_jax(profile_path=trace_path, output_csvs_dir=out_dir)
+
+    if update_references:
+        update_reference_csvs(out_dir, ref_dir)
+        pytest.skip(f"Updated reference: {ref_dir}")
+        return
+
+    if not os.path.isdir(ref_dir):
+        pytest.skip(f"No CSV reference directory: {ref_dir}")
 
     sheets = list_perf_report_csv_sheets(ref_dir)
     assert sheets, f"Reference directory has no CSV files: {ref_dir}"
@@ -190,3 +207,110 @@ def test_jax_perf_report_csv_regression(trace_path, tmp_path, tol=1e-6):
         assert (
             not diff_cols
         ), f"Sheet '{sheet}' has differences for {trace_path}:{format_diff_details(diff_cols)}"
+
+
+class TestJaxAnalysisMain:
+    def test_jax_analysis_main(self, tmp_path):
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_jax_analysis"
+        )
+        categorized, xla_events = _mock_side_inputs()
+        gemms = pd.DataFrame({"time ms": [1.0], "percent": [1.0]}, index=["gemm1"])
+        gemms_detailed = pd.DataFrame({"name": ["gemm1"], "tflops": [1.0]})
+        with patch.object(
+            mod.JaxAnalyses,
+            "summarize_gpu_events",
+            return_value=(_sample_averages_df(), categorized, xla_events),
+        ), patch.object(
+            mod.JaxAnalyses,
+            "summarize_gpu_gemm_events_from_pb",
+            return_value=gemms,
+        ), patch.object(
+            mod.JaxAnalyses,
+            "gemm_performance_from_pb",
+            return_value=gemms_detailed,
+        ):
+            old_argv = sys.argv
+            sys.argv = [
+                "generate_perf_report_jax_analysis",
+                "--profile_xplane_pb_path",
+                "/fake/profile.xplane.pb",
+                "--output_path",
+                str(tmp_path),
+                "--output_table_formats",
+                ".csv",
+            ]
+            try:
+                mod.main()
+            finally:
+                sys.argv = old_argv
+        assert (tmp_path / "trace_analysis_results_gpu_events_averages.csv").exists()
+
+    def test_jax_analysis_permission_error(self, tmp_path, monkeypatch):
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_jax_analysis"
+        )
+        bad_path = tmp_path / "nope" / "out"
+        monkeypatch.setattr(
+            mod.Path,
+            "mkdir",
+            MagicMock(side_effect=PermissionError("denied")),
+        )
+        with pytest.raises(SystemExit):
+            mod.generate_perf_report_jax_analysis(
+                "/fake.pb", str(bad_path), "out", [".csv"]
+            )
+
+
+class TestJaxFromFile:
+    def test_jax_analyzer_from_pb(self):
+        analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=JAX_PB)
+        assert analyzer.tree is not None
+        timeline = analyzer.get_df_gpu_timeline()
+        assert isinstance(timeline, pd.DataFrame)
+
+
+class TestJaxComparePhase13:
+    def test_jax_llama_helpers(self, tmp_path):
+        path = _write_gz_trace(tmp_path, _jax_llama_trace_events())
+        trace = jax_cmp.load_trace(path)
+        evs = jax_cmp.extract_gpu_events(trace, gpu_index=0)
+        assert len(evs) > 0
+        d_model, head_dim, gsu = jax_cmp.infer_params(evs)
+        assert d_model == 4096
+
+
+def test_jax_report_default_output_path(tmp_path):
+    """No output_csvs_dir/output_xlsx_path given -> auto-derive next to the
+    input trace, replacing the '.xplane.pb' suffix."""
+    src = os.path.join(
+        os.path.dirname(__file__),
+        "traces/mi300/jax_conv_minimal_legacy/chi-mi300x-013.ord.vultr.cpe.ice.amd.com.xplane.pb",
+    )
+    trace = shutil.copy(src, tmp_path)
+    dict_name2df = generate_perf_report_jax(profile_path=trace)
+    expected_xlsx = trace.rsplit(".xplane.pb", 1)[0] + "_perf_report.xlsx"
+    assert os.path.exists(expected_xlsx)
+    assert isinstance(dict_name2df, dict)
+
+
+def test_jax_report_main(tmp_path):
+    trace = os.path.join(
+        os.path.dirname(__file__),
+        "traces/mi300/jax_conv_minimal_legacy/chi-mi300x-013.ord.vultr.cpe.ice.amd.com.xplane.pb",
+    )
+    out = tmp_path / "jax.xlsx"
+
+    old_argv = sys.argv
+    sys.argv = [
+        "generate_perf_report_jax",
+        "--profile_path",
+        trace,
+        "--output_xlsx_path",
+        str(out),
+    ]
+    try:
+        mod.main()
+    finally:
+        sys.argv = old_argv
+    assert out.exists()

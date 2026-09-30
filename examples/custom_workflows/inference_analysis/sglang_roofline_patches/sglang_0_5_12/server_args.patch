@@ -1,0 +1,24 @@
+diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
+index c5bba8351..e7b8b34f7 100644
+--- a/python/sglang/srt/server_args.py
++++ b/python/sglang/srt/server_args.py
+@@ -638,6 +638,7 @@ class ServerArgs:
+     disable_cuda_graph_padding: bool = False
+     enable_breakable_cuda_graph: bool = False
+     enable_profile_cuda_graph: bool = False
++    enable_shape_discovery_for_cuda_graph_profile: bool = False
+     enable_cudagraph_gc: bool = False
+     debug_cuda_graph: bool = False
+     enable_layerwise_nvtx_marker: bool = False
+@@ -6015,6 +6016,11 @@ class ServerArgs:
+             action="store_true",
+             help="Enable profiling of cuda graph capture.",
+         )
++        parser.add_argument(
++            "--enable-shape-discovery-for-cuda-graph-profile",
++            action="store_true",
++            help="Enable shape discovery for cuda graph profiling.",
++        )
+         parser.add_argument(
+             "--enable-cudagraph-gc",
+             action="store_true",

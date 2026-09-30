@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -16,8 +16,7 @@ Tests cover the following edge cases:
 6. Nested cpu_ops with "execute" pattern
 """
 
-import pytest
-from typing import Dict, List
+from typing import Dict
 from copy import deepcopy
 
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree

@@ -4,14 +4,16 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from .pseudo_ops_registry import apply_pseudo_op_extensions
 from .pseudo_ops_utils import (
-    apply_pseudo_op_extensions,
     inject_pseudo_op,
+    inject_pseudo_op_above_event,
     set_bookkeeping_attr,
 )
 
 __all__ = [
     "apply_pseudo_op_extensions",
     "inject_pseudo_op",
+    "inject_pseudo_op_above_event",
     "set_bookkeeping_attr",
 ]
