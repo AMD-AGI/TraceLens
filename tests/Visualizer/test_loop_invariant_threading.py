@@ -570,3 +570,27 @@ def test_model_scope_mask_frame_names_its_inputs_and_keeps_shapes(model_id):
     assert body, "expected the expanded mask body"
     for node in body:
         assert _shape_of(node), f"{node['id']} left unsized"
+
+
+def test_child_module_method_boundary_names_its_own_parameter():
+    """A method called on a child module names the tensor IT takes.
+
+    ``self.indexer.build_block_mask(block_indices, ...)`` hands over
+    ``block_indices``, while the indexer's own ``forward`` leads with
+    ``hidden_states``. The boundary drawn for the call had no input label of its
+    own and fell back to the generic name, so the tile was labelled with a
+    tensor it does not carry -- and the ops behind it really do read
+    ``block_indices`` (``block_indices < 0``, ``block_indices.masked_fill(...)``),
+    so the label was the part that was wrong.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, _ = _build_nodes("MiniMaxAI/MiniMax-M3")
+    tiles = [
+        node
+        for node in graph["nodes"]
+        if "build_block_mask" in str(node.get("namespace") or "")
+        and str(node["id"]).endswith("/@input")
+    ]
+    assert tiles, "expected the build_block_mask boundary"
+    for tile in tiles:
+        assert str(tile["label"]) == "block_indices", tile["label"]

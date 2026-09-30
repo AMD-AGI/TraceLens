@@ -1859,7 +1859,18 @@ def named_method_operations(
         )
     except Exception:  # noqa: BLE001 - a helper we cannot trace stays a leaf
         return []
-    return list(analysis.operations)
+    # A method called on a CHILD module has its own primary parameter, which is
+    # not the child's ``forward`` input: ``self.indexer.build_block_mask(
+    # block_indices, ...)`` carries ``block_indices`` while the indexer's forward
+    # leads with ``hidden_states``. Stamp it so the boundary drawn for the call
+    # can name the tensor it actually carries.
+    primary = _primary_forward_input_name(func)
+    if not primary:
+        return list(analysis.operations)
+    return [
+        replace(operation, details=(*operation.details, f"method_primary: {primary}"))
+        for operation in analysis.operations
+    ]
 
 
 def _invoked_submodule_attrs(body: list[ast.stmt]) -> frozenset[str]:

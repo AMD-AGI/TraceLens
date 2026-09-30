@@ -1420,6 +1420,15 @@ def _expanded_free_function_node(
     )
 
 
+def _named_method_primary(operations: list[ForwardOperation]) -> str | None:
+    """The primary parameter of a child-module method, from its stamped detail."""
+    for operation in operations:
+        for detail in operation.details or ():
+            if str(detail).startswith("method_primary: "):
+                return str(detail).split(": ", 1)[1].strip() or None
+    return None
+
+
 def _boundary_input_name(
     operation: ForwardOperation,
     cls: ClassStructure,
@@ -2781,6 +2790,14 @@ def build_block_node(
                         forward_order=child_order,
                         details=list(child_details),
                         is_basic=False,
+                        # A method invoked on a CHILD module carries its own
+                        # primary parameter, not the child's forward input:
+                        # ``self.indexer.build_block_mask(block_indices, ...)``
+                        # hands over ``block_indices`` while the indexer's
+                        # forward leads with ``hidden_states``. Without this the
+                        # boundary fell back to the generic name and labelled the
+                        # tile with a tensor it does not carry.
+                        input_label=_named_method_primary(method_ops),
                         children=[
                             _leaf_node(
                                 attr_name=operation.attr_name,
