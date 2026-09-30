@@ -1162,6 +1162,28 @@ FORWARD_OPERATION_PREFIX = "@op_"
 # Stands for the value a helper method receives, so operations reading its parameter
 # resolve to whatever feeds the chain the method is inlined into.
 FORWARD_METHOD_INPUT = "@method_input"
+# A frame's SECONDARY parameter gets its own boundary token
+# (``@method_input:attention_mask``) so several parameters no longer collapse onto
+# the primary's. Every block-level consumer treats it exactly like the shared
+# token -- the chain stays sourced as before -- and only the caller/callee arg
+# mapping tells them apart, which is the one place the distinction is needed.
+FORWARD_METHOD_INPUT_PREFIX = FORWARD_METHOD_INPUT + ":"
+
+
+def is_method_input(name: str) -> bool:
+    """True for the frame boundary token, shared or per-parameter."""
+    return name == FORWARD_METHOD_INPUT or str(name).startswith(
+        FORWARD_METHOD_INPUT_PREFIX
+    )
+
+
+def method_input_param(name: str) -> str | None:
+    """The parameter a per-parameter boundary token names, else ``None``."""
+    if str(name).startswith(FORWARD_METHOD_INPUT_PREFIX):
+        return str(name)[len(FORWARD_METHOD_INPUT_PREFIX) :]
+    return None
+
+
 _SYNTHETIC_ATTENTION_NAMES = {
     "eager_attention_forward",
     "flash_attention_forward",
@@ -2383,6 +2405,14 @@ def _inline_nested_free_functions(
             return call_attr if attr == return_producer else namespace + attr
 
         def remap_pred(pred: str) -> str | None:
+            named = method_input_param(pred)
+            if named is not None:
+                # A SECONDARY parameter is fed by the call's argument for THAT
+                # parameter, not by the first one. Collapsing them made GLM's
+                # mask builder -- which slices ``attention_mask`` -- read the
+                # frame's primary (its ``config``-shaped first argument, the
+                # embedding) and report a [B, S, hidden] "mask".
+                return arg_map.get(named)
             if pred == FORWARD_METHOD_INPUT:
                 # The callee's primary parameter is fed by this call's first arg.
                 return arg_map.get(primary) if primary else None
@@ -7408,7 +7438,12 @@ def _forward_operations_from_forward(
     for name in (
         _traced_free_function_arg_names(func) & _forward_input_names(func)
     ) - reassigned:
-        extractor.var_producer.setdefault(name, FORWARD_METHOD_INPUT)
+        token = (
+            FORWARD_METHOD_INPUT
+            if name == primary
+            else f"{FORWARD_METHOD_INPUT_PREFIX}{name}"
+        )
+        extractor.var_producer.setdefault(name, token)
     extractor.statements(func.body)
     extractor._apply_branch_alternatives()
     extractor._reconstruct_attention_step(func.body)

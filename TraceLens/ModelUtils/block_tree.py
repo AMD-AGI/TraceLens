@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from TraceLens.ModelUtils.ast_analyze import (
     named_method_operations,
-    FORWARD_METHOD_INPUT,
+    is_method_input,
     GATE_ACTIVATION_DETAIL_PREFIX,
     LAYOUT_ONLY_LABELS,
     SYNTHETIC_ATTENTION,
@@ -1336,7 +1336,7 @@ def _expanded_free_function_node(
             if (
                 boundary_name is None
                 and primary_param is not None
-                and FORWARD_METHOD_INPUT in operation.predecessors
+                and any(is_method_input(p) for p in operation.predecessors)
             ):
                 boundary_name = primary_param
             operation_predecessors = list(operation.predecessors)
@@ -1429,7 +1429,7 @@ def _boundary_input_name(
     Only these operations sit on the block's edge, so they are what a boundary input
     has to be named after: everything else reads a tensor produced inside the block.
     """
-    if FORWARD_METHOD_INPUT in operation.predecessors:
+    if any(is_method_input(p) for p in operation.predecessors):
         return cls.forward_input_name
     # `zeros_like` takes its shape from the tensor it is handed, and the analysis
     # records no producer for that read, so the boundary would otherwise fall back
@@ -2858,7 +2858,7 @@ def build_block_node(
                     }
                     for name in referenced:
                         if (
-                            name == FORWARD_METHOD_INPUT
+                            is_method_input(name)
                             or name in method_op_attrs
                             or name in seen_submodule_attrs
                         ):

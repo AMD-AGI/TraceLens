@@ -19,6 +19,7 @@ from TraceLens.ModelUtils.ast_analyze import (
     base_submodule_attr,
     expand_class_forward_dataflow,
     FORWARD_METHOD_INPUT,
+    method_input_param,
     stack_entry_dataflow,
 )
 from TraceLens.ModelUtils.block_tree import (
@@ -4403,6 +4404,11 @@ def _append_source_decoder_layer(
     refs: dict[str, SourceRef] = {}
     if previous_exits:
         refs["@method_input"] = previous_exits[0]
+        # A per-parameter boundary token resolves to the same chain input here:
+        # at decoder scope the distinction between a frame's parameters is not
+        # what this map answers, and leaving them unresolved would drop the edge.
+        for param in getattr(decoder, "forward_param_inputs", None) or ():
+            refs[f"@method_input:{param}"] = previous_exits[0]
 
     for step in decoder.forward_calls:
         operation = decoder.forward_operations.get(step)
@@ -5459,6 +5465,40 @@ def _expand_model_scope_producer_ops(
         edges: list[dict[str, str]] = []
         for pred in operation.predecessors:
             source = own_ids.get(pred)
+            if source is None:
+                # The op names one of the MODEL's own forward parameters
+                # (``@method_input:attention_mask``). It reads THAT tensor, not
+                # whatever the call happened to pass first: GLM's mask builder
+                # slices ``attention_mask`` but, with no port for it, fell back
+                # to the call's first argument -- the embedding -- and reported
+                # a [B, S, hidden] "mask". Dock it on the parameter's own
+                # boundary, which is a real model input, not a fabricated one.
+                named = method_input_param(pred)
+                # Only a param the call reads as a BARE forward parameter has no
+                # argument supplying it. When the call passes the tensor itself,
+                # the op must keep reading that argument -- docking it on a fresh
+                # boundary instead would strand every op downstream.
+                bare = (getattr(cls, "forward_step_boundary_params", None) or {}).get(
+                    producer_attr
+                ) or ()
+                if named and named in bare:
+                    source = _ensure_top_level_input(nodes, node_by_id, named)
+                    # Give the boundary the meta trace's ground truth for that
+                    # parameter (``attention_mask`` is [B, S] bool, not the
+                    # activation shape a name heuristic would guess). The body is
+                    # sized from its operands, so an unsized boundary would leave
+                    # every op below it blank.
+                    boundary_node = node_by_id.get(source)
+                    if boundary_node is not None and not boundary_node.get(
+                        "outputsMetadata"
+                    ):
+                        carried = (
+                            shape_inferencer.boundary_input_spec(named, "")
+                            if shape_inferencer is not None
+                            else None
+                        )
+                        if carried is not None:
+                            apply_shape_attrs(boundary_node, carried)
             if source is not None:
                 edges.append(
                     {
@@ -5553,18 +5593,6 @@ def _apply_expansion_shape(
     except Exception:  # noqa: BLE001 - an op with no rule simply keeps no shape
         return
     if inferred is None:
-        return
-    if (
-        len(input_specs) == 1
-        and tuple(inferred.shape) == tuple(input_specs[0].shape)
-        and any(str(detail).startswith("slice:") for detail in operation.details)
-    ):
-        # The op declares a narrowing and the rule handed back its operand
-        # unchanged, which means the narrowing was not applied -- usually because
-        # the operand is not the tensor the slice was written against. GLM's
-        # recurrent mask builder slices ``(:, -S:)`` but is wired to the
-        # embedding, so accepting this would report a ``[B, S, 4096]`` attention
-        # mask. No shape is honest here; the echoed one is not.
         return
     apply_shape_attrs(node, inferred)
 

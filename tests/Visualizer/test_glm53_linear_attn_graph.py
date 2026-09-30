@@ -1163,7 +1163,9 @@ def test_glm53_ffn_hc_expands_hyperconnection_not_moe():
         assert mirror["incomingEdges"][0]["sourceNodeId"] == output["id"]
     assert {node["label"] for node in outputs} == {"post", "comb", "collapsed"}
     boundary = graph["groupNodeAttributes"][outputs[0]["namespace"]]
-    assert boundary["input_shape"] == "[B, S, 4, 4096] bfloat16"
+    # The hyper stream dominates the boundary; the decoder also receives the
+    # derived [B, S] bool mask, which now carries a resolved shape of its own.
+    assert "[B, S, 4, 4096] bfloat16" in boundary["input_shape"]
     # Sibling order of the @output slots follows the topological node sort
     # (dataflow), not the source return order, which is fine as long as every
     # slot is present with the right shape — the wiring above is what matters.
@@ -1373,7 +1375,9 @@ def test_glm53_decoder_boundary_keeps_hyper_stream_shape():
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     boundary = graph["groupNodeAttributes"]["45x_Glm5NextTextDecoderLayer"]
 
-    assert boundary["input_shape"] == "[B, S, 4, 4096] bfloat16"
+    # The hyper stream dominates the boundary; the decoder also receives the
+    # derived [B, S] bool mask, which now carries a resolved shape of its own.
+    assert "[B, S, 4, 4096] bfloat16" in boundary["input_shape"]
     # The hyper-stream shape dominates; the standard attention variant also
     # sends its collapsed output (B x S x 4096) across the boundary.
     assert "[B, S, 4, 4096] bfloat16" in boundary["output_shape"]
@@ -1547,18 +1551,29 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
 
     # Task A: the decoder ``attention_mask`` is the DERIVED mask-builder output
     # (reassigned before the loop), materialized as a model-scope producer feeding
-    # the decoder boundary -- never a fabricated top-level ``@input:attention_mask``.
+    # the decoder boundary. A top-level ``@input:attention_mask`` is legitimate --
+    # the BUILDER reads the model's own forward parameter -- so what matters is
+    # that nothing but the builder consumes it.
     by_id = {node["id"]: node for node in graph["nodes"]}
-    assert "@input:attention_mask" not in by_id
+    raw_consumers = [
+        node["id"]
+        for node in graph["nodes"]
+        for edge in node.get("incomingEdges", []) or []
+        if edge.get("sourceNodeId") == "@input:attention_mask"
+    ]
+    for consumer in raw_consumers:
+        assert "create_recurrent_attention_mask" in consumer, consumer
     # The builder is expanded into the ops it performs rather than drawn as one
     # tile named after the callee, so look for its op subgraph.
     prefix = "@model_forward/@fn_l1456_create_recurrent_attention_mask"
     builder_ops = [node for node in graph["nodes"] if node["id"].startswith(prefix)]
     assert builder_ops, "mask builder must be rendered"
     assert [node["label"] for node in builder_ops] == ["Slice", "Contiguous"]
-    # Its first op reads what the call site passed in.
+    # Its first op slices ``attention_mask``; ``inputs_embeds`` only supplies the
+    # bound, so it reads the model's own mask parameter -- not the embedding it
+    # fell back to while the frame's parameters shared one boundary.
     assert {e["sourceNodeId"] for e in builder_ops[0]["incomingEdges"]} == {
-        "embed_tokens"
+        "@input:attention_mask"
     }
     # ...and the decoder boundary docks onto the op producing the builder's result.
     # The wrapper groups loop variants and carries no input of its own; the
@@ -3445,7 +3460,10 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     # input the indexer consumes -- and it docks onto the DERIVED mask-builder
     # producer (``create_recurrent_attention_mask``, reassigned before the loop),
     # NOT a fabricated top-level ``@input:attention_mask`` model input.
-    assert "@input:attention_mask" not in by_id
+    # A raw ``attention_mask`` model input is legitimate -- the mask BUILDER reads
+    # the model's own forward parameter. What must never happen is the decoder
+    # reading it: its mask is derived, and the spine boundary below docks the
+    # builder's output.
     spine_invariant_inputs = {
         n["id"]: {e["sourceNodeId"] for e in n.get("incomingEdges", []) or []}
         for n in nodes

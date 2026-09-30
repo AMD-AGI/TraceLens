@@ -37,6 +37,7 @@ from TraceLens.ModelUtils.block_tree import (
 )
 from TraceLens.ModelUtils.ast_analyze import (
     FORWARD_METHOD_INPUT,
+    is_method_input,
     SYNTHETIC_ATTENTION,
     is_forward_operation,
 )
@@ -365,7 +366,7 @@ def _resolve_primary_input(
         }:
             continue
         # This is the primary (non-side) input.
-        if pred == FORWARD_METHOD_INPUT:
+        if is_method_input(pred):
             return input_index
         resolved = attr_last_index.get(pred)
         if resolved is not None:
@@ -394,7 +395,7 @@ def _first_op_entry_params(module: "BlockNode") -> set[str]:
     entry = {
         _normalize_param_name(name)
         for name, src in arg_map.items()
-        if src == FORWARD_METHOD_INPUT
+        if is_method_input(src)
     }
     if not arg_map:
         # The first forward step is an inline op (e.g. ``position_ids[..., None]``)
@@ -1138,7 +1139,7 @@ def _wire_all_predecessor_edges(
             module_preds = [
                 pred
                 for pred in child.operation_predecessors
-                if pred != FORWARD_METHOD_INPUT and not is_forward_operation(pred)
+                if not is_method_input(pred) and not is_forward_operation(pred)
             ]
             multi_input = len(child.operation_predecessors) >= 2
             # A predecessor read at several distinct output ordinals of the same
@@ -1149,7 +1150,7 @@ def _wire_all_predecessor_edges(
             # order, out of ``operation_predecessor_ports``'s per-producer tuple.
             pred_occurrence: dict[str, int] = {}
             for pred in child.operation_predecessors:
-                if pred == FORWARD_METHOD_INPUT:
+                if is_method_input(pred):
                     source_index = input_index
                 else:
                     source_index = attr_last_index.get(pred)
@@ -1358,7 +1359,7 @@ def _wire_all_predecessor_edges(
                 pairs = [(pred, None) for pred in preds]
 
             for pred, arg_name in pairs:
-                if pred == FORWARD_METHOD_INPUT:
+                if is_method_input(pred):
                     # A descendant wiring block (an inline-expanded nested module
                     # such as a vision attention) is visited only to wire its
                     # flattened kernel edges; its steps' ``@method_input`` was
@@ -1894,7 +1895,7 @@ def _operation_source_indices(
     seen_counts: dict[str, int] = {}
     ports = step.operation_predecessor_ports
     for predecessor in step.operation_predecessors:
-        if predecessor == FORWARD_METHOD_INPUT:
+        if is_method_input(predecessor):
             if chain_input_index is not None:
                 sources.append(chain_input_index)
             continue
@@ -2409,7 +2410,7 @@ def _resolve_nested_boundary_param_producer(
         arg_map = parent.forward_step_predecessor_args.get(attr_name) or {}
         if current_param in arg_map:
             source = arg_map[current_param]
-            if source == FORWARD_METHOD_INPUT:
+            if is_method_input(source):
                 current, current_param = parent, _input_label_for(parent)
                 continue
             return source
