@@ -1259,6 +1259,10 @@ def _flydsl_extract_param_details(event):
 
     Expected Input type format:
     [dtype_input, dtype_w1, dtype_w2, ...]
+
+    The donor lists the pre-quant activations, so when the injector recorded the
+    dtypes the stage GEMM actually consumes ("MoE quant input type" /
+    "MoE quant weight type") those take precedence.
     """
     args = event.get("args", {})
 
@@ -1280,8 +1284,8 @@ def _flydsl_extract_param_details(event):
 
     gated = w1_shape[1] == 2 * inter_dim
 
-    input_dtype = args["Input type"][0]
-    weight_dtype = args["Input type"][1]
+    input_dtype = args.get("MoE quant input type") or args["Input type"][0]
+    weight_dtype = args.get("MoE quant weight type") or args["Input type"][1]
 
     return {
         "num_tokens": num_tokens,
@@ -1347,11 +1351,11 @@ class moe_flydsl_stage1(UnfusedMoE_Up):
         raise NotImplementedError("Backward pass for flydsl MoE is not defined.")
 
     def get_compute_precision(self):
-        # flydsl A4W4 MoE GEMMs (moe_gemm1_0/moe_gemm2_0)
-        # consume FP4 activations + FP4 weights via native MXFP4 MFMA scaled
-        # instructions; the BF16 hidden_states are quantized to FP4 before the
-        # matmul. Roof against the FP4 matrix peak.
-        dtype = self.param_details.get("weight_dtype")
+        # The stage GEMM consumes quantized activations (FP4 on A4W4 builds,
+        # FP8 on A8W4) via native scaled MFMA instructions. A mixed operand
+        # pair issues no faster than its wider operand, so roof against the
+        # activation dtype.
+        dtype = self.param_details.get("input_dtype")
         return torch_dtype_map(dtype) if dtype else None
 
     def get_maf_type(self):
@@ -1360,9 +1364,11 @@ class moe_flydsl_stage1(UnfusedMoE_Up):
 
 class moe_flydsl_stage2(UnfusedMoE_Down):
     """
-    Performance model for pseudo_op::moe_flydsl_stage2 (down projection).
+    Performance model for the MoE stage2 pseudo ops (down projection):
+    pseudo_op::moe_flydsl_stage2 and pseudo_op::moe_opus_stage2_a8w4, which
+    differ in kernel implementation but not in the GEMM they perform.
 
-    Injected below the flydsl stage2 wrapper under each aiter::fused_moe_ event
+    Injected below the stage2 wrapper under each aiter::fused_moe_ event
     (see TraceLens/Trace2Tree/extensions/moe_flydsl_pseudo_ops.py). Shapes are
     inherited from the parent aiter::fused_moe_ op.
     """
@@ -1408,8 +1414,9 @@ class moe_flydsl_stage2(UnfusedMoE_Down):
         raise NotImplementedError("Backward pass for flydsl MoE is not defined.")
 
     def get_compute_precision(self):
-        # See moe_flydsl_stage1.get_compute_precision: FP4 MFMA on gfx950.
-        dtype = self.param_details.get("weight_dtype")
+        # See moe_flydsl_stage1.get_compute_precision: scaled MFMA on gfx950,
+        # roofed against the activation dtype.
+        dtype = self.param_details.get("input_dtype")
         return torch_dtype_map(dtype) if dtype else None
 
     def get_maf_type(self):

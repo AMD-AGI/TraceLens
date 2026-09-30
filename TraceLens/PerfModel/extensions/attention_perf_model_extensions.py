@@ -648,6 +648,45 @@ class mla_decode_fwd(InferenceAttention):
     pass
 
 
+class mla_gluon_decode(InferenceAttention):
+    """
+    Performance model for SGLang's packed ``mla_gluon_decode`` wrapper.
+
+    The traced Q and compressed-KV tensors concatenate a 512-element latent
+    vector with 64 RoPE elements. The output contains only the latent vector,
+    and each cached token is one compressed vector rather than separate K and
+    V tensors.
+    """
+
+    ROPE_DIM = 64
+
+    @staticmethod
+    def get_param_details(event):
+        params = InferenceAttention.get_param_details(event)
+        if params.get("_no_perf"):
+            return params
+        params["d_h_v"] = params["d_h_qk"] - mla_gluon_decode.ROPE_DIM
+        if params["d_h_v"] <= 0:
+            return InferenceAttention.no_perf_param_details()
+        return params
+
+    def bytes(self, bytes_per_element=None):
+        if self.param_details.get("_no_perf"):
+            return None
+        q_bpe = bytes_per_element
+        if q_bpe is None:
+            q_bpe = name2bpe(self.param_details.get("dtype_Q"))
+        kv_bpe = name2bpe(self.param_details.get("dtype_KV"))
+        if q_bpe is None or kv_bpe is None:
+            return None
+
+        query_tokens = self.param_details["c_sq"] + self.param_details["g_sq"]
+        kv_tokens = self.param_details["c_sk"] + self.param_details["g_sk"]
+        query_output_elems = query_tokens * self.H_Q * (self.d_h_qk + self.d_h_v)
+        compressed_kv_elems = kv_tokens * self.H_KV * self.d_h_qk
+        return query_output_elems * q_bpe + compressed_kv_elems * kv_bpe
+
+
 class pseudo_mla_prefill_fwd(InferenceAttention):
     @staticmethod
     def get_param_details(event):

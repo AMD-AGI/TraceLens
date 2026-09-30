@@ -31,8 +31,10 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _get_cached_capture_tree,
     align_streams,
     capture_has_kernel_names,
+    find_closest_capture_batch_size,
     find_closest_batch_size,
     find_execution_details,
+    find_execution_role,
     get_subtree_events,
     is_multistream,
     load_capture_folder,
@@ -1219,6 +1221,13 @@ class TestCaptureMergeDeep:
         assert find_closest_batch_size(128, [64, 256, 512]) == 256
         root = {"name": "execute_128_context_3_generation_2"}
         assert find_execution_details(root) == "128"
+        draft = {
+            "name": (
+                "step[DRAFT bs=8 c_sq=56 c_sqsq=392 " "c_sqsk=5370764 c_sk=767252]"
+            )
+        }
+        assert find_execution_details(draft) == "8"
+        assert find_execution_role(draft) == "draft"
 
     @pytest.mark.skipif(
         not os.path.isdir(
@@ -1259,6 +1268,35 @@ class TestCaptureMergePush95:
     def test_find_closest_batch_size(self):
         assert find_closest_batch_size(30, [16, 32, 64]) == 32
         assert find_closest_batch_size(100, [16, 32]) is None
+
+    def test_role_aware_capture_folder_and_closest_size(self, tmp_path):
+        meta = tmp_path / "execution_details.json"
+        entries = [
+            {
+                "file": f"{role}_{batch_size}.json.gz",
+                "batch_size": batch_size,
+                "mode": "FULL",
+                "role": role,
+            }
+            for role in ("draft", "verify")
+            for batch_size in (8, 16)
+        ]
+        meta.write_text(json.dumps(entries))
+        for entry in entries:
+            (tmp_path / entry["file"]).write_bytes(b"capture")
+
+        capture_map, batch_sizes = load_capture_folder(str(tmp_path), str(meta))
+
+        assert set(capture_map) == {
+            "draft_8_FULL",
+            "draft_16_FULL",
+            "verify_8_FULL",
+            "verify_16_FULL",
+        }
+        assert (
+            find_closest_capture_batch_size(9, capture_map, batch_sizes, role="draft")
+            == 16
+        )
 
     def test_verify_subtree_group_alignment(self):
         capture = [
