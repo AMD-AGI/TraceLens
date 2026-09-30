@@ -662,10 +662,11 @@ def test_process_protobuf_file_triggers_tool_names(mock_suppress, mock_glob, tmp
     assert "%x" in hlo_ops
 
 
+@pytest.mark.parametrize("as_bytes", [True, False])
 @patch("TraceLens.util.glob.glob")
 @patch("TraceLens.util.suppress_native_hlo_logs")
-def test_process_protobuf_file_tensorboard_fallback(
-    mock_suppress, mock_glob, tmp_path, monkeypatch
+def test_process_protobuf_file_requests_graph_viewer(
+    mock_suppress, mock_glob, tmp_path, as_bytes
 ):
     pb_path = tmp_path / "plugin.xplane.pb"
     pb_path.write_bytes(b"pb")
@@ -673,38 +674,35 @@ def test_process_protobuf_file_tensorboard_fallback(
     hlo_pb.write_bytes(b"hlo")
 
     mock_suppress.return_value = contextlib.nullcontext()
-    mock_glob.side_effect = [[str(hlo_pb)], [str(hlo_pb)]]
+    mock_glob.return_value = [str(hlo_pb)]
 
     graph_text = "%x = bf16[4,8]{1,0} parameter(0)\n"
-    tb_mod = types.ModuleType("tensorboard_plugin_profile.convert.raw_to_tool_data")
-    tb_mod.xspace_to_tool_names = lambda *args, **kwargs: None
-    tb_mod.xspace_to_tool_data = lambda *args, **kwargs: (
-        graph_text.encode("utf-8"),
-        None,
-    )
-    tb_convert = types.ModuleType("tensorboard_plugin_profile.convert")
-    tb_convert.raw_to_tool_data = tb_mod
-    tb_pkg = types.ModuleType("tensorboard_plugin_profile")
-    tb_pkg.convert = tb_convert
+    calls = []
 
-    real_import = __import__
+    def xspace_to_tool_data(*args, **kwargs):
+        calls.append(args)
+        payload = graph_text.encode("utf-8") if as_bytes else graph_text
+        return (payload, None)
 
-    def fake_import(name, *args, **kwargs):
-        if name == "xprof.convert":
-            raise ImportError("xprof unavailable")
-        return real_import(name, *args, **kwargs)
+    mock_mod = types.ModuleType("xprof.convert.raw_to_tool_data")
+    mock_mod.xspace_to_tool_names = lambda *args, **kwargs: None
+    mock_mod.xspace_to_tool_data = xspace_to_tool_data
+    fake_convert = types.ModuleType("xprof.convert")
+    fake_convert.raw_to_tool_data = mock_mod
+    fake_xprof = types.ModuleType("xprof")
+    fake_xprof.convert = fake_convert
 
-    monkeypatch.setattr("builtins.__import__", fake_import)
     with patch.dict(
         sys.modules,
         {
-            "tensorboard_plugin_profile": tb_pkg,
-            "tensorboard_plugin_profile.convert": tb_convert,
-            "tensorboard_plugin_profile.convert.raw_to_tool_data": tb_mod,
+            "xprof": fake_xprof,
+            "xprof.convert": fake_convert,
+            "xprof.convert.raw_to_tool_data": mock_mod,
         },
     ):
         hlo_ops = JaxProfileProcessor.process_protobuf_file(str(pb_path), "main_jax")
 
+    assert calls[0][1] == "graph_viewer"
     assert "%x" in hlo_ops
 
 
@@ -732,7 +730,7 @@ def test_json_loading_does_not_import_jax_dependencies(
     real_import = __import__
 
     def reject_converter_import(name, *args, **kwargs):
-        if name.split(".", 1)[0] in {"xprof", "tensorboard_plugin_profile"}:
+        if name.split(".", 1)[0] == "xprof":
             raise AssertionError("JSON loading must not import a JAX converter")
         return real_import(name, *args, **kwargs)
 
@@ -753,7 +751,7 @@ def test_protobuf_loading_requires_jax_extra(monkeypatch, hlo_metadata):
     real_import = __import__
 
     def reject_converter_import(name, *args, **kwargs):
-        if name.split(".", 1)[0] in {"xprof", "tensorboard_plugin_profile"}:
+        if name.split(".", 1)[0] == "xprof":
             raise ModuleNotFoundError(name)
         return real_import(name, *args, **kwargs)
 
@@ -780,19 +778,43 @@ def test_dataloader_unknown_file_type():
         DataLoader.load_data("/tmp/not-a-trace.xyz")
 
 
+@pytest.mark.parametrize("as_bytes", [True, False])
 @patch("TraceLens.util.suppress_native_hlo_logs")
-def test_dataloader_load_pb(mock_suppress, tmp_path):
-    payload = {"traceEvents": []}
+def test_dataloader_load_pb(mock_suppress, tmp_path, as_bytes):
+    payload = {
+        "traceEvents": [
+            {},
+            {"name": "mark", "ph": "i", "ts": 1.0},
+            {"name": "kernel", "ph": "X"},
+        ]
+    }
     trace_path = tmp_path / "trace.pb"
     trace_path.write_bytes(b"pb")
 
     mock_suppress.return_value = contextlib.nullcontext()
-    modules = _install_mock_xprof_convert((json.dumps(payload).encode("utf-8"), None))
+    body = json.dumps(payload)
+    encoded = body.encode("utf-8") if as_bytes else body
+    modules = _install_mock_xprof_convert((encoded, None))
+    calls = []
+    converter = modules["xprof.convert.raw_to_tool_data"]
+    original = converter.xspace_to_tool_data
+
+    def xspace_to_tool_data(*args, **kwargs):
+        calls.append(args)
+        return original(*args, **kwargs)
+
+    converter.xspace_to_tool_data = xspace_to_tool_data
 
     with patch.dict(sys.modules, modules):
         result = DataLoader.load_data(str(trace_path))
 
-    assert result == payload
+    assert result == {
+        "traceEvents": [
+            {"name": "mark", "ph": "X", "ts": 1.0, "dur": 1e-6},
+            {"name": "kernel", "ph": "X"},
+        ]
+    }
+    assert calls[0][1] == "trace_viewer"
 
 
 @patch("TraceLens.util.suppress_native_hlo_logs")
@@ -805,43 +827,6 @@ def test_dataloader_load_pb_none_raises(mock_suppress, tmp_path):
     with patch.dict(sys.modules, modules):
         with pytest.raises(RuntimeError, match="returned None"):
             DataLoader.load_data(str(trace_path))
-
-
-@patch("TraceLens.util.suppress_native_hlo_logs")
-def test_dataloader_tensorboard_fallback(mock_suppress, tmp_path, monkeypatch):
-    payload = {"traceEvents": []}
-    trace_path = tmp_path / "trace.pb"
-    trace_path.write_bytes(b"pb")
-    mock_suppress.return_value = contextlib.nullcontext()
-
-    tb_mod = types.ModuleType("tensorboard_plugin_profile.convert.raw_to_tool_data")
-
-    def xspace_to_tool_data(*args, **kwargs):
-        return (json.dumps(payload).encode("utf-8"), None)
-
-    tb_mod.xspace_to_tool_data = xspace_to_tool_data
-    tb_convert = types.ModuleType("tensorboard_plugin_profile.convert")
-    tb_convert.raw_to_tool_data = tb_mod
-    tb_pkg = types.ModuleType("tensorboard_plugin_profile")
-    tb_pkg.convert = tb_convert
-
-    real_import = __import__
-
-    def fake_import(name, *args, **kwargs):
-        if name == "xprof.convert":
-            raise ImportError("xprof unavailable")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr("builtins.__import__", fake_import)
-    with patch.dict(
-        sys.modules,
-        {
-            "tensorboard_plugin_profile": tb_pkg,
-            "tensorboard_plugin_profile.convert": tb_convert,
-            "tensorboard_plugin_profile.convert.raw_to_tool_data": tb_mod,
-        },
-    ):
-        assert DataLoader.load_data(str(trace_path)) == payload
 
 
 def test_dataloader_orjson_fallback(tmp_path, monkeypatch):
@@ -963,6 +948,12 @@ def test_trace_event_utils_get_event_category_metadata_and_unknown():
         TraceEventUtils.get_event_category({}, {TK.Phase: TP.Complete, TK.Name: "x"})
         == "Unknown"
     )
+    unnamed = [
+        _metadata_event(701, 5, MF.ThreadSort, 5),
+        {TK.PID: 701, TK.TID: 5, TK.Phase: TP.Complete, TK.Name: "$queues.py:98 get"},
+    ]
+    metadata = TraceEventUtils.get_metadata(unnamed)
+    assert TraceEventUtils.get_event_category(metadata, unnamed[-1]) == "Unknown"
 
 
 def test_trace_event_utils_split_events_by_pid_tid():

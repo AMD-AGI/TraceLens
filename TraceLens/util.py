@@ -28,8 +28,8 @@ from typing import List, Dict, Callable, Iterable, Tuple, Optional
 logger = logging.getLogger(__name__)
 
 
-# Benign native XLA logs (id > INT_MAX, from packed HLO instruction ids in xprof
-# 2.20.1). Emitted to fd 2 before absl init, so only filterable at the fd level.
+# Benign native XLA logs (id > INT_MAX, from packed HLO instruction ids).
+# Emitted to fd 2 before absl init, so only filterable at the fd level.
 _NATIVE_LOG_NOISE = re.compile(
     r"Instruction with id > INT_MAX"
     r"|not intended behavior and might indicate a bug in the HLO proto serialization"
@@ -129,27 +129,52 @@ def get_filename(filepath: str) -> str:
 
 
 def _load_xplane_converter():
-    """Load the optional JAX converter, preserving the legacy profile backend."""
+    """Load the optional JAX xprof converter."""
     try:
         from xprof.convert import raw_to_tool_data as convert
+    except ImportError as exc:
+        raise ImportError(
+            "JAX XPlane parsing requires the optional JAX dependencies. "
+            "Install TraceLens with the [jax] extra, for example "
+            "`pip install 'TraceLens[jax] @ "
+            "git+https://github.com/AMD-AGI/TraceLens.git'`, "
+            "using a Python version supported by xprof."
+        ) from exc
+    return convert, "xprof"
 
-        return convert, "xprof"
-    except ImportError:
-        try:
-            from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
-        except ImportError as exc:
-            raise ImportError(
-                "JAX XPlane parsing requires the optional JAX dependencies. "
-                "Install TraceLens with the [jax] extra, for example "
-                "`pip install 'TraceLens[jax] @ "
-                "git+https://github.com/AMD-AGI/TraceLens.git'`, "
-                "using a Python version supported by xprof."
-            ) from exc
-        logger.warning(
-            "xprof not available, falling back to tensorboard-plugin-profile "
-            "for trace conversion. Install TraceLens[jax] for JAX 0.8+ support."
-        )
-        return convert, "tensorboard-plugin-profile"
+
+def _converter_text(data):
+    """Return xprof tool output as text.
+
+    The non-streaming trace viewer returns a ``str``. Graph viewer returns
+    ``bytes``.
+    """
+    if isinstance(data, bytes):
+        return data.decode("utf-8")
+    return data
+
+
+def _normalize_xprof_trace(trace: dict) -> dict:
+    """Make non-streaming xprof JSON match the event shape TraceLens expects.
+
+    ``TraceEventsJsonStream`` appends a sentinel ``{}`` so it can always emit
+    a trailing comma. Zero-duration events are written as instant events
+    (``ph`` ``i``) with no ``dur``; the streaming viewer that older xprof
+    builds used emits those as complete events with a 1 ps duration.
+    """
+    events = trace.get("traceEvents")
+    if not isinstance(events, list):
+        return trace
+    normalized = []
+    for event in events:
+        if not event:
+            continue
+        if event.get("ph") == "i":
+            event["ph"] = "X"
+            event.setdefault("dur", 1e-6)
+        normalized.append(event)
+    trace["traceEvents"] = normalized
+    return trace
 
 
 # generic data loader class for json, json.gz, or tensorboard pb files
@@ -161,8 +186,10 @@ class DataLoader:
             convert, converter_lib = _load_xplane_converter()
 
             with suppress_native_hlo_logs():
+                # Streaming trace_viewer@ in xprof >= 2.21 drops hlo_op and
+                # correlation_id. The non-streaming viewer keeps both.
                 data, _ = convert.xspace_to_tool_data(
-                    [filename_path], "trace_viewer@^", {}
+                    [filename_path], "trace_viewer", {}
                 )
             if data is None:
                 raise RuntimeError(
@@ -170,7 +197,7 @@ class DataLoader:
                     f"{filename_path}. Ensure the file exists and the output directory "
                     "is writable (cache files may need to be written)."
                 )
-            data = data.decode("utf-8")  # we get bytes back from the call above
+            data = _converter_text(data)
         elif filename_path.endswith("json.gz"):
             import gzip
 
@@ -191,7 +218,7 @@ class DataLoader:
         try:
             import orjson
 
-            return orjson.loads(data)
+            parsed = orjson.loads(data)
         except ImportError:
             logger.warning(
                 "orjson not available, falling back to standard json. "
@@ -199,7 +226,10 @@ class DataLoader:
             )
             if isinstance(data, bytes):
                 data = data.decode("utf-8")
-            return json.loads(data)
+            parsed = json.loads(data)
+        if filename_path.endswith("pb"):
+            return _normalize_xprof_trace(parsed)
+        return parsed
 
 
 class JaxProfileProcessor:
@@ -281,8 +311,8 @@ class JaxProfileProcessor:
         }
         params = {"graph_viewer_options": graph_viewer_options}
         with suppress_native_hlo_logs():
-            data, _ = convert.xspace_to_tool_data([dir_name], "graph_viewer^", params)
-        data = data.decode("utf-8").split("\n")
+            data, _ = convert.xspace_to_tool_data([dir_name], "graph_viewer", params)
+        data = _converter_text(data).split("\n")
         for line in data:
             JaxProfileProcessor.process_line(hlo_ops, line)
         JaxProfileProcessor._resolve_operand_references(hlo_ops)
@@ -814,14 +844,20 @@ class TraceEventUtils:
         ):
             pid = event[TraceEventUtils.TraceKeys.PID]
             tid = event[TraceEventUtils.TraceKeys.TID]
-            ThreadName = metadata[pid][tid][TraceEventUtils.MetadataFields.ThreadName]
-            if ThreadName == TraceEventUtils.JaxSpecialThreads.FrameworkCallStack:
+            # xprof emits thread_sort_index for unnamed host threads and no
+            # thread_name. Those events are not GPU streams.
+            thread_name = metadata.get(pid, {}).get(tid, {}).get(
+                TraceEventUtils.MetadataFields.ThreadName
+            )
+            if not thread_name:
+                return "Unknown"
+            if thread_name == TraceEventUtils.JaxSpecialThreads.FrameworkCallStack:
                 return "cpu_op"
-            elif TraceEventUtils.JaxSpecialThreads.pyXla in ThreadName:
+            elif TraceEventUtils.JaxSpecialThreads.pyXla in thread_name:
                 return "cpu_op"
-            elif ThreadName == TraceEventUtils.JaxSpecialThreads.XlaOps:
+            elif thread_name == TraceEventUtils.JaxSpecialThreads.XlaOps:
                 return "python function"
-            elif ThreadName.startswith("Stream"):
+            elif thread_name.startswith("Stream"):
                 name = event[TraceEventUtils.TraceKeys.Name]
                 if any(name.lower().startswith(x) for x in ["copy", "memcpy"]):
                     return "memcpy"

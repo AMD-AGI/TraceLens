@@ -432,7 +432,7 @@ class JaxAnalyses:
             xla_module_thread = TraceEventUtils.find_thread_by_item_in_metadata(
                 metadata[1],
                 lambda x: x[0] is not None
-                and x[1][TraceEventUtils.MetadataFields.ThreadName]
+                and x[1].get(TraceEventUtils.MetadataFields.ThreadName)
                 == TraceEventUtils.JaxSpecialThreads.XlaModules,
             )
             module_name = events[1][xla_module_thread][0][
@@ -446,7 +446,7 @@ class JaxAnalyses:
         thread_ids = TraceEventUtils.find_threads_by_item_in_metadata(
             metadata[1],
             lambda x: x[0] is not None
-            and x[1][TraceEventUtils.MetadataFields.ThreadName].startswith(
+            and (x[1].get(TraceEventUtils.MetadataFields.ThreadName) or "").startswith(
                 TraceEventUtils.JaxSpecialThreads.StreamPrefix
             ),
         )

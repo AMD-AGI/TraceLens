@@ -553,7 +553,7 @@ class TreePerfAnalyzer:
                 .get("process_labels", "Unknown"),
                 "thread_name": self.tree.metadata.get(event["pid"], {})
                 .get(event["tid"], {})
-                .get("thread_name", "Unknown"),
+                .get("thread_name", ""),
                 "external_id": event["args"].get("External id"),
                 "overlapping_kernel_names": event.get("overlapping_kernel_names"),
                 "overlapping_kernels_details": event.get("overlapping_kernels_details"),
@@ -1129,7 +1129,7 @@ class TreePerfAnalyzer:
             metrics_event["process_label"] = process_metadata.get(
                 "process_labels", "Unknown"
             )
-            metrics_event["thread_name"] = thread_metadata.get("thread_name", "Unknown")
+            metrics_event["thread_name"] = thread_metadata.get("thread_name", "")
             if self.detect_recompute:
                 metrics_event["is_recompute"] = event.get("is_recompute", False)
             rows.append(metrics_event)
@@ -2032,7 +2032,7 @@ class TreePerfAnalyzer:
                 .get("process_labels", "Unknown"),
                 "thread_name": self.tree.metadata.get(event.get("pid"), {})
                 .get(event.get("tid"), {})
-                .get("thread_name", "Unknown"),
+                .get("thread_name", ""),
                 "External id": args.get("External id"),
                 "duration_us": event.get("dur"),
                 "has_perf_model": has_own_perf_model or is_sole_bwd,
@@ -3685,7 +3685,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                     .get("process_labels", "Unknown"),
                     "thread_name": self.tree.metadata.get(event["pid"], {})
                     .get(event["tid"], {})
-                    .get("thread_name", "Unknown"),
+                    .get("thread_name", ""),
                     "dur": event["dur"],
                     "cat": event["cat"],
                     "op category": event["gpu_kernel_op_cat"],
