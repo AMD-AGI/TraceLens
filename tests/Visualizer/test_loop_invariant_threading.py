@@ -409,3 +409,49 @@ def test_a_declared_narrowing_that_changed_nothing_reports_no_shape():
     assert sliced, "expected the GLM mask builder's slice op"
     for node in sliced:
         assert not _shape_of(node), (node["id"], _shape_of(node))
+
+
+@pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-M3", "zai-org/GLM-5.3-Flash"])
+def test_extent_dims_resolve_to_a_real_length(model_id):
+    """No op reports a dim as the expression that computes it.
+
+    A rule that cannot evaluate a recorded bound hands back the source line --
+    ``torch.arange(key_states.shape[2])`` reporting ``[key_states.shape[2]]`` --
+    and every op downstream inherits it. The operands wired to such an op are
+    marked as carrying its EXTENT, so the axis is read off them.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, _ = _build_nodes(model_id)
+    unresolved = [
+        (node["id"], _shape_of(node))
+        for node in graph["nodes"]
+        if _shape_of(node) and ".shape[" in str(_shape_of(node))
+    ]
+    assert unresolved == [], unresolved
+
+
+def test_a_data_independent_range_is_not_drawn_as_compute():
+    """A constant range is tagged, and filtering it strands nothing.
+
+    ``torch.arange(self.local_blocks)`` is the same tensor on every forward, so
+    it is a constant and constants are never drawn. Its consumers keep their
+    real operands -- an accumulator's zero initializer need not be shown, but
+    the accumulate must still have its activation input.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, _ = _build_nodes("MiniMaxAI/MiniMax-M3")
+    nodes = graph["nodes"]
+    constant_ranges = [
+        node
+        for node in nodes
+        if str(node.get("label", "")).lower() == "arange"
+        and _node_attr(node, "constant") == "true"
+    ]
+    assert constant_ranges, "expected the config-sized range to be tagged constant"
+
+    kept = {node["id"] for node in nodes if _node_attr(node, "constant") != "true"}
+    for node in nodes:
+        if node["id"] not in kept or not node.get("incomingEdges"):
+            continue
+        survivors = [e for e in node["incomingEdges"] if e["sourceNodeId"] in kept]
+        assert survivors, f"{node['id']} lost every input when constants are dropped"

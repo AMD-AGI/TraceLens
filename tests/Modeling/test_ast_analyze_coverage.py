@@ -934,3 +934,54 @@ def test_generator_extent_docks_the_tensor_its_size_reads():
     constant = by_bound["self.local_blocks"]
     assert not constant.predecessors
     assert not any(str(d).startswith("extent_inputs:") for d in constant.details)
+
+
+_CONSTANT_EXTENT_SOURCE = """
+import torch
+class C(torch.nn.Module):
+    def forward(self, x, grid):
+        fixed = torch.arange(self.local_blocks, device=x.device)
+        derived = torch.arange(x.shape[1], device=x.device)
+        for t, h, w in grid.tolist():
+            per_iteration = torch.arange(w, device=x.device)
+        return fixed + derived + per_iteration
+"""
+
+
+def test_only_a_data_independent_extent_is_marked_constant():
+    """A range nothing in the input can change is a constant; the others are not.
+
+    ``torch.arange(self.local_blocks)`` produces the same tensor on every
+    forward, so it is a constant and constants are never drawn as compute. The
+    test is structural -- does this extent read any tensor -- rather than
+    "can we fold the number", because a config attribute the class never
+    resolved is still data-independent. A loop-bound name holds host data read
+    off a real tensor each iteration, so it must NOT be swept up.
+    """
+    analysis = analyze_sources(
+        {Path("modeling_const.py"): _CONSTANT_EXTENT_SOURCE},
+        config={"local_blocks": 8},
+        all_tensor_ops=True,
+    )
+    by_bound = {}
+    for op in analysis.class_registry["C"].forward_operations.values():
+        if op.label.lower() != "arange":
+            continue
+        bound = next(
+            str(d).split(":", 1)[1].strip()
+            for d in op.details
+            if str(d).startswith("arange_stop:")
+        )
+        by_bound[bound] = op
+
+    def marked(bound: str) -> bool:
+        return any(
+            str(d).strip() == "constant_extent: true" for d in by_bound[bound].details
+        )
+
+    assert marked("self.local_blocks")
+    # Sized by a tensor -- a real dependency, wired rather than elided.
+    assert not marked("x.shape[1]")
+    assert any(str(d) == "extent_inputs: 1" for d in by_bound["x.shape[1]"].details)
+    # Host data read off ``grid`` each iteration is not a compile-time constant.
+    assert not marked("w")

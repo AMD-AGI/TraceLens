@@ -4100,6 +4100,12 @@ class _ForwardOperationExtractor:
         # emit fake tensor ops (Add/FloorDivide/Multiply) that dangle when their
         # result feeds a size argument like ``torch.arange(n * k)``.
         self.host_scalar_vars: set[str] = set()
+        # Names bound by a ``for`` target. Such a name holds a different value
+        # each iteration -- often host data read off a tensor
+        # (``for t, h, w in grid_thw.tolist()``) -- so an extent built from one is
+        # never the data-independent constant ``_extent_is_data_independent``
+        # looks for, even when nothing recorded a producer for the iterable.
+        self._loop_bound_names: set[str] = set()
         # Host-scalar locals whose value folds to a concrete int (``output_width =
         # self.index_topk`` → 2048; ``output_width += self.index_kpool - 1``).
         # Lets a slice/pad-to-constant (``topk_indices[..., :output_width]``)
@@ -4614,6 +4620,31 @@ class _ForwardOperationExtractor:
             if bound is not None:
                 walk(bound, 0)
         return producers
+
+    def _extent_is_data_independent(self, bounds: list[ast.AST]) -> bool:
+        """True when nothing in these size arguments can vary with the input.
+
+        Asks the structural question -- does this extent read any tensor? -- not
+        "can we compute the number", because a config attribute the class never
+        resolved is still the same on every forward. False as soon as a bound
+        reads a tensor's shape, a name some op produces, a forward parameter, or
+        a loop-bound name (host data read off a tensor still varies).
+        """
+        for bound in bounds:
+            if self._param_refs(bound):
+                return False
+            for node in ast.walk(bound):
+                if isinstance(node, ast.Attribute) and node.attr == "shape":
+                    return False
+                if isinstance(node, ast.Name):
+                    if (
+                        node.id in self.var_producer
+                        or node.id in self._loop_bound_names
+                    ):
+                        return False
+                    if node.id in self.shape_unpack_tokens:
+                        return False
+        return True
 
     def _is_host_scalar_expr(self, node: ast.AST) -> bool:
         """A pure host-side integer expression (shape math / index bookkeeping).
@@ -5748,6 +5779,18 @@ class _ForwardOperationExtractor:
                 # must discount them rather than read them as mis-wired
                 # arguments. Record how many of the wired edges are extent-only.
                 details.append(f"extent_inputs: {len(extent_producers)}")
+            elif self._extent_is_data_independent(extent_bounds):
+                # No tensor sets this range's extent and every bound is pure host
+                # bookkeeping over config scalars (``torch.arange(self.local_blocks)``,
+                # ``torch.arange(self.index_kpool - 1)``), so the tensor it produces
+                # is the same on every forward. That is a constant, and constants are
+                # never drawn as compute -- mark it so the constant closure covers it
+                # and everything reachable only through it. The test is "no tensor
+                # sets this extent", not "we can compute the number": a config
+                # attribute this class never resolved is still data-independent,
+                # while a host value read off real data (a ``.tolist()`` loop
+                # target) is not host-scalar and is correctly left alone.
+                details.append("constant_extent: true")
         if label == "Concat" and len(emit_predecessors) >= 2:
             # ``cat([freq_hw, freq_hw])`` concatenates one tensor with itself: the
             # deduped edge would collapse to a single-input concat that looks
@@ -6565,6 +6608,9 @@ class _ForwardOperationExtractor:
                         for elt in stmt.target.elts:
                             if isinstance(elt, ast.Name):
                                 self.var_producer[elt.id] = iterable_producer
+                for target in ast.walk(stmt.target):
+                    if isinstance(target, ast.Name):
+                        self._loop_bound_names.add(target.id)
                 before_env = dict(self.var_producer)
                 before = len(self.operations)
                 self.statements(stmt.body, condition=condition)

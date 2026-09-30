@@ -2507,6 +2507,20 @@ def _propagate_constant_closure(graph: ComputationGraph, seed: set[int]) -> None
         graph.nodes[index].constant = True
 
 
+def _has_constant_extent(block: Any) -> bool:
+    """True for a generator whose size comes only from config scalars.
+
+    ``torch.arange(self.local_blocks)`` reads no tensor and its length is the
+    same on every forward, so the tensor it produces is a constant -- and
+    constants are never drawn as compute. The extractor marks these while it
+    still has the config values to fold the bound; here we only read the mark.
+    """
+    return any(
+        str(detail).strip() == "constant_extent: true"
+        for detail in (getattr(block, "details", None) or ())
+    )
+
+
 def _tag_weight_only_ops(graph: ComputationGraph) -> ComputationGraph:
     """Tag ``constant`` the ops whose value derives solely from module parameters/buffers.
 
@@ -2538,7 +2552,7 @@ def _tag_weight_only_ops(graph: ComputationGraph) -> ComputationGraph:
             continue
         if index in incoming:
             continue
-        if _reads_only_a_side_parameter(block):
+        if _reads_only_a_side_parameter(block) or _has_constant_extent(block):
             roots.add(index)
     if not roots:
         return graph

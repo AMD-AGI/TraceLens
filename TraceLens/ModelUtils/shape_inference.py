@@ -2050,6 +2050,7 @@ class ShapeInferencer:
             output = self._infer_node_output(
                 node, input_specs, root=root, input_labels=input_labels
             )
+            output = self._resolve_extent_dims(node, output, input_specs)
             self._tensor_specs[node_id] = output
             if node.metadata.get("synthetic") == "@input":
                 self._forward_input_specs.add(id(output))
@@ -2408,6 +2409,55 @@ class ShapeInferencer:
         if line is None or not (start_line <= line <= end_line):
             return None
         return [spec]
+
+    def _resolve_extent_dims(
+        self,
+        node: ModelGraphNode,
+        output: TensorSpec,
+        input_specs: list[TensorSpec],
+    ) -> TensorSpec:
+        """Replace a ``<tensor>.shape[i]`` dim with the extent it actually names.
+
+        A rule that cannot evaluate a recorded bound reports the expression, so
+        ``torch.arange(key_states.shape[2])`` reports ``[key_states.shape[2]]``
+        -- the source line rather than the length -- and every op downstream
+        inherits it. The extractor marks the operands wired to such an op purely
+        for their EXTENT, and the named tensor is one of them, so read the axis
+        off those operands. Only when they all agree on it: two extent operands
+        disagreeing means the expression could name either, and a guess would be
+        worse than the expression.
+        """
+        dims = [str(dim) for dim in output.shape]
+        if not any(".shape[" in dim for dim in dims):
+            return output
+        details = list(node.metadata.get("details") or ())
+        raw_count = _detail_value(details, "extent_inputs")
+        try:
+            count = int(str(raw_count).strip())
+        except (TypeError, ValueError):
+            return output
+        operands = input_specs[-count:] if count else []
+        if not operands:
+            return output
+        resolved: list[Any] = []
+        changed = False
+        for dim in dims:
+            match = re.fullmatch(r".+\.shape\[(-?\d+)\]", dim)
+            if match is not None:
+                index = int(match.group(1))
+                candidates = {
+                    operand.shape[index]
+                    for operand in operands
+                    if -len(operand.shape) <= index < len(operand.shape)
+                }
+                if len(candidates) == 1:
+                    resolved.append(candidates.pop())
+                    changed = True
+                    continue
+            resolved.append(dim)
+        if not changed:
+            return output
+        return TensorSpec(shape=tuple(resolved), dtype=output.dtype)
 
     def _infer_node_output(
         self,
