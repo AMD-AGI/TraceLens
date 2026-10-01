@@ -6,7 +6,7 @@
 
 """Unit tests for TraceLens.util helpers."""
 
-import contextlib, gzip, json, os, sys, types, pytest, pandas as pd
+import contextlib, gzip, json, os, struct, sys, types, pytest, pandas as pd
 from unittest.mock import patch
 from TraceLens.util import (
     DataLoader,
@@ -14,6 +14,8 @@ from TraceLens.util import (
     PftraceParser,
     RocprofParser,
     TraceEventUtils,
+    _attach_xplane_event_args,
+    _restore_streaming_device_ids,
     merge_intervals,
     suppress_native_hlo_logs,
 )
@@ -848,6 +850,162 @@ def test_dataloader_load_pb(mock_suppress, tmp_path, as_bytes):
     }
     assert calls[0][1] == "trace_viewer@"
     assert calls[0][2] == {"trace_viewer_options": {"resolution": "0"}}
+
+
+def _pb_varint(value):
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def _pb_field(number, wire, payload):
+    return _pb_varint((number << 3) | wire) + payload
+
+
+def _pb_bytes(number, payload):
+    return _pb_field(number, 2, _pb_varint(len(payload)) + payload)
+
+
+def test_restore_streaming_device_ids_undoes_single_host_offset():
+    trace = {"traceEvents": [{"pid": 1001}, {"pid": 1008}, {"pid": 1701}]}
+    _restore_streaming_device_ids(trace)
+    assert [event["pid"] for event in trace["traceEvents"]] == [1, 8, 701]
+
+
+def test_restore_streaming_device_ids_leaves_legacy_pids():
+    trace = {"traceEvents": [{"pid": 1}, {"pid": 8}, {"name": "mark"}]}
+    _restore_streaming_device_ids(trace)
+    assert [event.get("pid") for event in trace["traceEvents"]] == [1, 8, None]
+
+
+def test_attach_xplane_event_args_restores_hlo_op(tmp_path):
+    # Minimal XSpace: one kernel whose hlo_op is a stat-metadata ref.
+    stat_hlo = _pb_bytes(2, b"hlo_op")
+    stat_conv = _pb_bytes(2, b"cudnn-conv.1.0")
+    stat_corr = _pb_bytes(2, b"correlation_id")
+    event_meta = _pb_bytes(2, b"my_kernel")
+    plane = b"".join(
+        [
+            _pb_bytes(2, b"/device:GPU:0"),
+            _pb_bytes(5, _pb_field(1, 0, _pb_varint(1)) + _pb_bytes(2, stat_hlo)),
+            _pb_bytes(5, _pb_field(1, 0, _pb_varint(2)) + _pb_bytes(2, stat_conv)),
+            _pb_bytes(5, _pb_field(1, 0, _pb_varint(3)) + _pb_bytes(2, stat_corr)),
+            _pb_bytes(4, _pb_field(1, 0, _pb_varint(1)) + _pb_bytes(2, event_meta)),
+            _pb_bytes(
+                3,
+                _pb_field(3, 0, _pb_varint(1_000_000))
+                + _pb_bytes(
+                    4,
+                    _pb_field(1, 0, _pb_varint(1))
+                    + _pb_field(3, 0, _pb_varint(1_000_000))
+                    + _pb_bytes(
+                        4,
+                        _pb_field(1, 0, _pb_varint(1)) + _pb_field(7, 0, _pb_varint(2)),
+                    )
+                    + _pb_bytes(
+                        4,
+                        _pb_field(1, 0, _pb_varint(3))
+                        + _pb_field(3, 0, _pb_varint(171)),
+                    ),
+                ),
+            ),
+        ]
+    )
+    xspace = _pb_bytes(1, plane)
+    path = tmp_path / "trace.xplane.pb"
+    path.write_bytes(xspace)
+    trace = {
+        "traceEvents": [
+            {
+                "name": "my_kernel",
+                "ph": "X",
+                "pid": 1001,
+                "ts": 1000.0,
+                "dur": 1.0,
+                "args": {"uid": 7},
+            }
+        ]
+    }
+    _restore_streaming_device_ids(trace)
+    _attach_xplane_event_args(trace, str(path))
+    event = trace["traceEvents"][0]
+    assert event["pid"] == 1
+    assert event["args"]["uid"] == 7
+    assert event["args"]["hlo_op"] == "cudnn-conv.1.0"
+    assert event["args"]["correlation_id"] == "171"
+
+
+def test_attach_xplane_event_args_stat_types_and_bad_input(tmp_path):
+    display = _pb_bytes(4, b"shown_name")
+    hidden = _pb_bytes(2, b"hidden_name")
+    event_meta = display + hidden
+    neg1 = b"\xff" * 9 + b"\x01"
+    double = struct.pack("<d", 1.5)
+    plane = b"".join(
+        [
+            _pb_field(7, 5, b"\x00\x00\x00\x00"),
+            _pb_bytes(
+                5, _pb_field(1, 0, _pb_varint(1)) + _pb_bytes(2, _pb_bytes(2, b"ratio"))
+            ),
+            _pb_bytes(
+                5, _pb_field(1, 0, _pb_varint(2)) + _pb_bytes(2, _pb_bytes(2, b"delta"))
+            ),
+            _pb_bytes(
+                5, _pb_field(1, 0, _pb_varint(3)) + _pb_bytes(2, _pb_bytes(2, b"label"))
+            ),
+            _pb_bytes(
+                5, _pb_field(1, 0, _pb_varint(4)) + _pb_bytes(2, _pb_bytes(2, b"blob"))
+            ),
+            _pb_bytes(4, _pb_field(1, 0, _pb_varint(1)) + _pb_bytes(2, event_meta)),
+            _pb_bytes(
+                3,
+                _pb_bytes(
+                    4,
+                    _pb_field(1, 0, _pb_varint(1))
+                    + _pb_bytes(
+                        4, _pb_field(1, 0, _pb_varint(1)) + _pb_field(2, 1, double)
+                    )
+                    + _pb_bytes(
+                        4, _pb_field(1, 0, _pb_varint(2)) + _pb_field(4, 0, neg1)
+                    )
+                    + _pb_bytes(4, _pb_field(1, 0, _pb_varint(3)) + _pb_bytes(5, b"ok"))
+                    + _pb_bytes(
+                        4, _pb_field(1, 0, _pb_varint(4)) + _pb_bytes(6, b"raw")
+                    )
+                    + _pb_bytes(4, b""),
+                ),
+            ),
+        ]
+    )
+    path = tmp_path / "trace.xplane.pb"
+    path.write_bytes(_pb_bytes(1, plane))
+    trace = {
+        "traceEvents": [
+            {"name": "shown_name", "ph": "X", "ts": 0.0, "args": None},
+            {"ph": "X", "ts": 0.0},
+        ]
+    }
+    _attach_xplane_event_args(trace, str(path))
+    assert trace["traceEvents"][0]["args"] == {
+        "ratio": "1.5",
+        "delta": "-1",
+        "label": "ok",
+        "blob": "raw",
+    }
+
+    bad = tmp_path / "bad.xplane.pb"
+    bad.write_bytes(_pb_field(1, 3, b""))
+    untouched = {"traceEvents": [{"name": "shown_name", "ts": 0.0, "args": {"uid": 1}}]}
+    _attach_xplane_event_args(untouched, str(bad))
+    assert untouched["traceEvents"][0]["args"] == {"uid": 1}
+    _restore_streaming_device_ids({})
+    _restore_streaming_device_ids({"traceEvents": []})
 
 
 @patch("TraceLens.util.suppress_native_hlo_logs")
