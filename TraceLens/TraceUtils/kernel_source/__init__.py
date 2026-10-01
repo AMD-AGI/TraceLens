@@ -83,10 +83,26 @@ def resolve_kernel_source(
         result = resolve_kernel(kernel_name, op_name=op_name, search_paths=search_paths)
         if result.method != "unresolved":
             return result
+        # Native plain miss: a bare device symbol may still be a real
+        # ``@triton.jit`` / ``@gluon.jit`` def the trace never tagged as Triton.
+        # Consult the Triton symbol index by EXACT normalized name only -- a
+        # lookup with a definite answer, not a fuzzy guess -- so a mangled native
+        # symbol can't speculate a wrong ``.py``. Miss -> keep native unresolved.
+        triton_result = resolve_triton_source(
+            "", symbol=kernel_name, search_paths=search_paths, exact=True
+        )
+        if triton_result.method != "unresolved":
+            return triton_result
+        return result
 
     triton_result = resolve_triton_source(
         kernel_file, symbol=kernel_name, search_paths=search_paths
     )
-    if kernel_file or is_triton or triton_result.patchable:
+    # Only ``unresolved`` means the launcher gave no Triton verdict at all -- a
+    # native/precompiled kernel dispatched through a ``triton``-named wrapper with
+    # no ``@triton.jit`` def. A patchable def or a generated-Triton gate is a real
+    # verdict (with its own location/breadcrumb) and is returned as-is.
+    if triton_result.method != "unresolved":
         return triton_result
-    return result
+    native = resolve_kernel(kernel_name, op_name=op_name, search_paths=search_paths)
+    return native if native.method != "unresolved" else triton_result
