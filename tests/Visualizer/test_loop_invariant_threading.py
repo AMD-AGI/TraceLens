@@ -706,3 +706,55 @@ def test_vision_range_docks_the_grid_it_is_sized_from():
     assert ranges, "expected the vision position-id ranges"
     for node in ranges:
         assert node.get("incomingEdges"), f"{node['id']} left rootless"
+
+
+@pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-M3", "zai-org/GLM-5.3-Flash"])
+def test_loop_ports_bracket_the_body_which_names_both_kinds_of_input(model_id):
+    """The loop's ports sit OUTSIDE the body, and the body names what it reads.
+
+    A port drawn inside the body sits among the body's own ops, where its
+    position relative to the iteration is undefined -- no ordering reads
+    correctly for both the seed edge and the back edge. The body nests between
+    them instead.
+
+    The body then carries boundaries of its own for BOTH kinds of dependency:
+    the carried value (fed by ``Loop in``, feeding ``Loop out``) and the
+    loop-invariant tensors each iteration is handed.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, by_id = _build_nodes(model_id)
+    ports = [n for n in graph["nodes"] if _node_attr(n, "synthetic") == "@loop_carried"]
+    assert ports, "expected loop-carried ports"
+
+    for port in ports:
+        outer = str(port.get("namespace") or "")
+        # Whatever the port exchanges the carried value with lives one level in.
+        partners = [
+            by_id[str(e["sourceNodeId"])]
+            for e in port.get("incomingEdges", []) or []
+            if str(e["sourceNodeId"]) in by_id
+        ] + [
+            n
+            for n in graph["nodes"]
+            for e in n.get("incomingEdges", []) or []
+            if str(e.get("sourceNodeId")) == str(port["id"])
+        ]
+        inside = [
+            p for p in partners if str(p.get("namespace") or "").startswith(outer + "/")
+        ]
+        for partner in inside:
+            # The port never reaches into the body: it meets the body's own
+            # boundary, which is what the body's ops read.
+            assert _node_attr(partner, "synthetic") in {"@input", "@output"}, (
+                port["id"],
+                partner["id"],
+            )
+            body_ns = str(partner.get("namespace") or "")
+            siblings = [
+                n
+                for n in graph["nodes"]
+                if str(n.get("namespace") or "") == body_ns
+                and _node_attr(n, "synthetic") == "@input"
+            ]
+            # ...alongside the loop-invariant inputs the body also reads.
+            assert siblings, body_ns

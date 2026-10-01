@@ -5157,11 +5157,18 @@ def _wrap_container_loop_carried(nodes: list[dict[str, Any]], container: str) ->
     out_id = f"{id_prefix}/@loop_carried_out:{id_prefix}:{variable}"
     style = ensure_readable_text(detail_tile_style(None, synthetic="@loop_carried"))
 
+    # The loop's ports belong OUTSIDE the body they bracket. Drawn inside it,
+    # they sit among the body's own ops and their position relative to the
+    # iteration is undefined -- there is no ordering that reads correctly for
+    # both the seed edge and the back edge. One level up, the body nests
+    # between them and the order is unambiguous: in -> body -> out.
+    boundary_namespace = container.rsplit("/", 1)[0] if "/" in container else ""
+
     def _make_tile(tile_id: str, label: str) -> dict[str, Any]:
         return {
             "id": tile_id,
             "label": label,
-            "namespace": container,
+            "namespace": boundary_namespace,
             "attrs": [
                 {"key": "sublabel", "value": f"{variable} · repeated"},
                 {"key": "synthetic", "value": "@loop_carried"},
@@ -5336,6 +5343,180 @@ def _topologically_order_nodes(nodes: list[dict[str, Any]]) -> None:
         placed = set(order)
         order.extend(i for i in range(count) if i not in placed)
     nodes[:] = [nodes[i] for i in order]
+
+
+def _give_loop_body_its_own_boundaries(nodes: list[dict[str, Any]]) -> None:
+    """Put the loop's ports outside the body and give the body its own boundaries.
+
+    A loop port drawn INSIDE the body sits among the body's own ops, where its
+    position relative to the iteration is undefined -- no ordering reads
+    correctly for both the seed edge and the back edge. The body belongs nested
+    between the ports: ``Loop in -> body -> Loop out``.
+
+    The body then needs boundaries of its own for the carried value, the way it
+    already has them for the tensors each iteration is handed, so that what it
+    carries and what it merely reads are both named on the box.
+    """
+    by_id = {str(n["id"]): n for n in nodes}
+    additions: list[dict[str, Any]] = []
+    body_namespaces: set[str] = set()
+
+    ports = [n for n in nodes if _node_attr(n, "synthetic") == "@loop_carried"]
+    for port in ports:
+        match = re.search(r"@loop_carried_(in|out):[^:]+:([^/^]+)$", str(port["id"]))
+        if match is None:
+            continue
+        entering = match.group(1) == "in"
+        variable = match.group(2)
+        body_ns = str(port.get("namespace") or "")
+        if not body_ns:
+            continue
+        outer_ns = body_ns.rsplit("/", 1)[0] if "/" in body_ns else ""
+
+        kind = "@input" if entering else "@output"
+        # Derive the id from the port's WITHOUT keeping the ``@loop_carried``
+        # token: this is the body's own boundary, not a loop port, and leaving
+        # the token in makes it answer to every query that counts loop ports.
+        tile_id = (
+            str(port["id"])
+            .replace("@loop_carried_in:", "@body_in:")
+            .replace("@loop_carried_out:", "@body_out:")
+        )
+        tile = {
+            "id": tile_id,
+            "label": variable,
+            "namespace": body_ns,
+            "attrs": [{"key": "synthetic", "value": kind}],
+            "style": ensure_readable_text(
+                input_port_style() if entering else output_port_style()
+            ),
+            "incomingEdges": [],
+        }
+        carried = node_output_spec(port, "0")
+        if carried is not None:
+            apply_shape_attrs(tile, carried)
+
+        if entering:
+            # Everything the port fed inside the body now reads the body's own
+            # input boundary, which the port feeds.
+            moved = False
+            for node in nodes:
+                if str(node["id"]) == tile_id:
+                    continue
+                for edge in node.get("incomingEdges", []) or []:
+                    if str(edge.get("sourceNodeId")) != str(port["id"]):
+                        continue
+                    if _node_attr(node, "synthetic") == "@loop_carried":
+                        continue  # the back edge stays port-to-port
+                    edge["sourceNodeId"] = tile_id
+                    edge["sourceNodeOutputId"] = "0"
+                    moved = True
+            if moved:
+                tile["incomingEdges"] = [_source_edge(str(port["id"]), "0")]
+                additions.append(tile)
+        else:
+            feeders = [
+                edge
+                for edge in port.get("incomingEdges", []) or []
+                if _node_attr(by_id.get(str(edge.get("sourceNodeId")), {}), "synthetic")
+                != "@loop_carried"
+            ]
+            if feeders:
+                tile["incomingEdges"] = [dict(edge) for edge in feeders]
+                keep = [
+                    edge
+                    for edge in port.get("incomingEdges", []) or []
+                    if edge not in feeders
+                ]
+                port["incomingEdges"] = [*keep, _source_edge(tile_id, "0")]
+                additions.append(tile)
+
+        # ...and the port itself moves out of the body it brackets, together
+        # with the tiles that form the loop's external interface: the seed that
+        # feeds ``Loop in`` and the result ``Loop out`` produces. Those belong
+        # beside the ports, not inside the body -- left behind they point the
+        # wrong way across the boundary (body -> seed -> port, port -> result ->
+        # body), which reads as the box cycling with its own child.
+        port["namespace"] = outer_ns
+        for edge in port.get("incomingEdges", []) or []:
+            seed = by_id.get(str(edge.get("sourceNodeId")))
+            if seed is None or _node_attr(seed, "synthetic") != "@input":
+                continue
+            if str(seed.get("namespace") or "").startswith(body_ns):
+                seed["namespace"] = outer_ns
+        for node in nodes:
+            if _node_attr(node, "synthetic") != "@output":
+                continue
+            if not str(node.get("namespace") or "").startswith(body_ns):
+                continue
+            if any(
+                str(e.get("sourceNodeId")) == str(port["id"])
+                for e in node.get("incomingEdges", []) or []
+            ):
+                node["namespace"] = outer_ns
+        body_namespaces.add(body_ns)
+    nodes.extend(additions)
+    for tile in additions:
+        by_id[str(tile["id"])] = tile
+
+    # Every OTHER tensor the body reads gets a boundary too, so the box names
+    # what it is handed each iteration alongside what it carries. An
+    # accumulator body carries nothing in (its seed is a constant that is not
+    # drawn), and without this it named none of its inputs at all.
+    extra: list[dict[str, Any]] = []
+    for body_ns in sorted(body_namespaces):
+        members = [
+            n
+            for n in nodes
+            if str(n.get("namespace") or "") == body_ns
+            or str(n.get("namespace") or "").startswith(body_ns + "/")
+        ]
+        member_ids = {str(n["id"]) for n in members}
+        used = {
+            str(n.get("label") or "")
+            for n in members
+            if _node_attr(n, "synthetic") in {"@input", "@input_mirror"}
+        }
+        per_source: dict[str, str] = {}
+        for node in members:
+            if _node_attr(node, "synthetic"):
+                continue
+            for edge in node.get("incomingEdges", []) or []:
+                source_id = str(edge.get("sourceNodeId"))
+                if source_id in member_ids:
+                    continue
+                source = by_id.get(source_id)
+                if source is None:
+                    continue
+                tile_id = per_source.get(source_id)
+                if tile_id is None:
+                    base = str(source.get("label") or "input").strip() or "input"
+                    label = base
+                    suffix = 2
+                    while label in used:
+                        label = f"{base}_{suffix}"
+                        suffix += 1
+                    used.add(label)
+                    tile_id = f"{body_ns}/@input:{label}"
+                    tile = {
+                        "id": tile_id,
+                        "label": label,
+                        "namespace": body_ns,
+                        "attrs": [{"key": "synthetic", "value": "@input"}],
+                        "style": ensure_readable_text(input_port_style()),
+                        "incomingEdges": [_source_edge(source_id, "0")],
+                    }
+                    carried = node_output_spec(
+                        source, str(edge.get("sourceNodeOutputId", "0"))
+                    )
+                    if carried is not None:
+                        apply_shape_attrs(tile, carried)
+                    extra.append(tile)
+                    by_id[tile_id] = tile
+                    per_source[source_id] = tile_id
+                edge["sourceNodeId"] = tile_id
+                edge["sourceNodeOutputId"] = "0"
+    nodes.extend(extra)
 
 
 def _hoist_loop_carried_in_ahead_of_body(nodes: list[dict[str, Any]]) -> None:
@@ -6604,6 +6785,7 @@ def build_merged_model_graph(
     # loop body and each ``@loop_carried_out`` after it.
     _order_model_inputs(nodes)
     _topologically_order_nodes(nodes)
+    _give_loop_body_its_own_boundaries(nodes)
     _hoist_loop_carried_in_ahead_of_body(nodes)
 
     # Structural-integrity check on the FINAL built graph (after loop-carried

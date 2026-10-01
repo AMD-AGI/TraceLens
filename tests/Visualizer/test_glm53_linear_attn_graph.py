@@ -1243,13 +1243,14 @@ def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
         )
     ]
     # The loop-carried value ``final`` renders as a carried-dependency boundary
-    # (in/out) nested inside the loop frame, not as a plain ``@input``. Its id
-    # carries the loop id and variable name.
+    # (in/out) BRACKETING the loop frame -- outside the body, which nests
+    # between them -- not as a plain ``@input``. Its id carries the loop id and
+    # variable name.
     carried = [
         node
         for node in graph["nodes"]
         if node["id"].startswith(f"{prefix}/mlp/")
-        and node.get("namespace", "").endswith("/Glm5NextTextMoE/Loop_288_iterations")
+        and node.get("namespace", "").endswith("/Glm5NextTextMoE")
         and any(
             attr.get("key") == "synthetic" and attr.get("value") == "@loop_carried"
             for attr in node.get("attrs", [])
@@ -1363,7 +1364,9 @@ def test_glm53_loop_carried_pairs_are_well_formed():
         (var, slot["in"].get("namespace", "").rsplit("/", 1)[-1])
         for (_prefix, _loop_key, var), slot in pairs.items()
     }
-    assert ("final", "Loop_288_iterations") in carried_vars_by_loop_ns
+    # The ports bracket the body, so their namespace is the module that OWNS
+    # the loop rather than the loop frame itself.
+    assert ("final", "Glm5NextTextMoE") in carried_vars_by_loop_ns
     assert not any(var == "mask" for var, _ns in carried_vars_by_loop_ns)
 
     _assert_export_is_acyclic(nodes)
@@ -1644,9 +1647,24 @@ def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
         if edge["sourceNodeId"] == lc_in["id"]
     ]
     assert consumers, "visual @loop_carried_in has no consumer"
-    assert any(
-        consumer.startswith("visual/seq:3:blocks") for consumer in consumers
-    ), consumers
+    # The port now hands the carried value to the BODY's own input boundary,
+    # which is what the body's ops read -- so the chain is
+    # ``@loop_carried_in -> @body_in -> visual/seq:3:blocks...`` rather than the
+    # port reaching into the body directly.
+    reached = list(consumers)
+    for _ in range(3):
+        if any(c.startswith("visual/seq:3:blocks") for c in reached):
+            break
+        reached = [
+            node["id"]
+            for node in nodes
+            for edge in node.get("incomingEdges", [])
+            if edge["sourceNodeId"] in reached
+        ]
+    assert any(consumer.startswith("visual/seq:3:blocks") for consumer in reached), (
+        consumers,
+        reached[:4],
+    )
 
     # Topological order: the LC-in floats above every loop-body *activation* node
     # even though the body lives in child namespaces (``visual/Block/norm1`` etc.).
