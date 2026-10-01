@@ -4180,6 +4180,10 @@ class _ForwardOperationExtractor:
         # emit fake tensor ops (Add/FloorDivide/Multiply) that dangle when their
         # result feeds a size argument like ``torch.arange(n * k)``.
         self.host_scalar_vars: set[str] = set()
+        # Loop variable -> the iterable it draws from. ``for t, h, w in
+        # grid_thw.tolist()`` makes ``t`` host data read off ``grid_thw``, so a
+        # range sized by ``t`` depends on that tensor.
+        self._loop_target_iters: dict[str, ast.AST] = {}
         # Names bound by a ``for`` target. Such a name holds a different value
         # each iteration -- often host data read off a tensor
         # (``for t, h, w in grid_thw.tolist()``) -- so an extent built from one is
@@ -4297,6 +4301,7 @@ class _ForwardOperationExtractor:
         *,
         details: list[str] | None = None,
         raw_op: str | None = None,
+        extra_param_refs: tuple[str, ...] = (),
     ) -> str:
         attr_name = self._operation_id(node, label)
         if label.lower() in {"matmul", "matmull"}:
@@ -4323,6 +4328,12 @@ class _ForwardOperationExtractor:
         # alias's unpack ordinal alongside it so a per-slot edge can dock onto the
         # right port instead of every alias colliding on the whole tensor.
         raw_param_refs = self._param_refs(node)
+        if extra_param_refs:
+            # A parameter the op depends on without naming it in this expression:
+            # ``torch.arange(t)`` where ``t`` is a loop target over
+            # ``grid_thw.tolist()`` is sized by the GRID, so the op belongs
+            # downstream of it even though it never spells it.
+            raw_param_refs = tuple(dict.fromkeys((*raw_param_refs, *extra_param_refs)))
         param_inputs = self._dedupe(
             self.param_alias_origin.get(name, name) for name in raw_param_refs
         )
@@ -4642,7 +4653,9 @@ class _ForwardOperationExtractor:
             )
         return None
 
-    def _extent_source_producers(self, bounds: list[ast.AST]) -> list[str]:
+    def _extent_source_producers(
+        self, bounds: list[ast.AST]
+    ) -> tuple[list[str], list[str]]:
         """Producers of the tensors whose extent a generator's size arguments read.
 
         ``torch.arange(n_windows)`` reads no tensor *operand*, so it draws as a
@@ -4660,6 +4673,7 @@ class _ForwardOperationExtractor:
         nothing -- that range really is constant.
         """
         producers: list[str] = []
+        params: list[str] = []
         visited: set[str] = set()
 
         def record(base: str) -> None:
@@ -4679,6 +4693,11 @@ class _ForwardOperationExtractor:
                 if isinstance(func, ast.Name) and func.id == "len" and node.args:
                     record(ast.unparse(node.args[0]))
                     return
+                if isinstance(func, ast.Attribute):
+                    # A host materialisation of a tensor (``grid_thw.tolist()``)
+                    # carries that tensor's contents, so whatever is sized from
+                    # it depends on the tensor.
+                    walk(func.value, depth + 1)
                 for argument in node.args:
                     walk(argument, depth + 1)
                 return
@@ -4686,9 +4705,18 @@ class _ForwardOperationExtractor:
                 if node.id in visited:
                     return
                 visited.add(node.id)
+                if node.id in self.param_names:
+                    # The extent reads a forward PARAMETER of this frame, which
+                    # has no internal producer: it docks through the parameter
+                    # channel instead of an edge.
+                    if node.id not in params:
+                        params.append(node.id)
                 token = self.shape_unpack_tokens.get(node.id)
                 if token is not None:
                     record(token.split(".shape", 1)[0])
+                iterable = self._loop_target_iters.get(node.id)
+                if iterable is not None:
+                    walk(iterable, depth + 1)
                 defining = self._name_value_ast.get(node.id)
                 if defining is not None:
                     walk(defining, depth + 1)
@@ -4699,7 +4727,7 @@ class _ForwardOperationExtractor:
         for bound in bounds:
             if bound is not None:
                 walk(bound, 0)
-        return producers
+        return producers, params
 
     def _extent_is_data_independent(self, bounds: list[ast.AST]) -> bool:
         """True when nothing in these size arguments can vary with the input.
@@ -5701,6 +5729,7 @@ class _ForwardOperationExtractor:
             )
 
         details: list[str] = []
+        extra_param_refs: tuple[str, ...] = ()
         # Size arguments of a generator call, kept as AST so the tensors their
         # extent reads can be recovered as real predecessors below.
         extent_bounds: list[ast.AST] = []
@@ -5862,7 +5891,11 @@ class _ForwardOperationExtractor:
             # has no operand to dock onto and would otherwise render rootless --
             # hiding a real dependency and leaving the generated axis
             # unresolvable. Recover the tensors its extent reads.
-            extent_producers = self._extent_source_producers(extent_bounds)
+            extent_producers, extent_params = self._extent_source_producers(
+                extent_bounds
+            )
+            if extent_params:
+                extra_param_refs = tuple(extent_params)
             if extent_producers:
                 emit_predecessors.extend(extent_producers)
                 # These edges carry an EXTENT, not an operand: ``arange``'s
@@ -5912,6 +5945,7 @@ class _ForwardOperationExtractor:
             # not a static op list. The display label discards it; the type-check
             # needs it to resolve the op's real operand arity from its parameters.
             raw_op=functional_name or call_name,
+            extra_param_refs=extra_param_refs,
         )
         return producer, []
 
@@ -6699,6 +6733,9 @@ class _ForwardOperationExtractor:
                         for elt in stmt.target.elts:
                             if isinstance(elt, ast.Name):
                                 self.var_producer[elt.id] = iterable_producer
+                for target in ast.walk(stmt.target):
+                    if isinstance(target, ast.Name):
+                        self._loop_target_iters[target.id] = stmt.iter
                 for target in ast.walk(stmt.target):
                     if isinstance(target, ast.Name):
                         self._loop_bound_names.add(target.id)

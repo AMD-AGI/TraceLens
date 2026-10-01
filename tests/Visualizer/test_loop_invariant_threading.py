@@ -681,3 +681,28 @@ def test_build_block_mask_args_reach_the_ops_that_read_them():
             for node in by_label.get(label, []):
                 assert "position_ids" not in sources(node), (label, sources(node))
                 assert "attention_mask" not in sources(node), (label, sources(node))
+
+
+def test_vision_range_docks_the_grid_it_is_sized_from():
+    """A range sized by host data reaches the tensor that data came from.
+
+    ``for t, h, w in grid_thw.tolist(): torch.arange(t, ...)`` sizes the range
+    from the GRID -- read off the tensor on the host, but the model's data all
+    the same. The loop variable has no producer of its own, so the range drew
+    rootless, asserting it depends on nothing.
+
+    The tensor is a parameter of the frame, so it arrives through the parameter
+    channel, and the boundary it crosses on the way is materialised at every
+    module level rather than letting the edge descend two levels at once.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, _ = _build_nodes("zai-org/GLM-5.3-Flash")
+    ranges = [
+        n
+        for n in graph["nodes"]
+        if "get_vision_position_ids" in n["id"]
+        and str(n.get("label", "")).lower() == "arange"
+    ]
+    assert ranges, "expected the vision position-id ranges"
+    for node in ranges:
+        assert node.get("incomingEdges"), f"{node['id']} left rootless"

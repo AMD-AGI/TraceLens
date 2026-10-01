@@ -2385,6 +2385,58 @@ def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
                     break
     nodes.extend(additions)
 
+    # The same rule for an edge that enters an OP directly rather than a
+    # boundary tile. A parameter the frame reads without naming it in the
+    # expression (``torch.arange(t)`` sized from ``grid_thw``) is wired as a
+    # plain producer edge, so it can descend several module levels at once and
+    # the modules in between never show the tensor they are handed.
+    by_id = {str(n["id"]): n for n in nodes}
+    late: list[dict[str, Any]] = []
+    for node in list(nodes):
+        if _node_attr(node, "synthetic") or boundary_param(node) is not None:
+            continue
+        target_ns = str(node.get("namespace") or "")
+        for edge in list(node.get("incomingEdges", []) or []):
+            source = by_id.get(str(edge.get("sourceNodeId")))
+            if source is None:
+                continue
+            source_ns = str(source.get("namespace") or "")
+            prefix = (source_ns + "/") if source_ns else ""
+            if target_ns == source_ns or not target_ns.startswith(prefix):
+                continue
+            segments = [p for p in target_ns[len(prefix) :].split("/") if p]
+            if len(segments) < 2:
+                continue
+            name = str(source.get("label") or "input").strip() or "input"
+            upstream = str(edge["sourceNodeId"])
+            walk = source_ns
+            for segment in segments[:-1]:
+                walk = f"{walk}/{segment}" if walk else segment
+                if is_loop_wrapper(walk):
+                    continue
+                tile_id = f"{walk}/@input:{name}"
+                existing = by_id.get(tile_id)
+                if existing is None:
+                    tile = {
+                        "id": tile_id,
+                        "label": name,
+                        "namespace": walk,
+                        "attrs": [{"key": "synthetic", "value": "@input"}],
+                        "style": ensure_readable_text(input_port_style()),
+                        "incomingEdges": [_source_edge(upstream, "0")],
+                    }
+                    carried = node_output_spec(
+                        source, str(edge.get("sourceNodeOutputId", "0"))
+                    )
+                    if carried is not None:
+                        apply_shape_attrs(tile, carried)
+                    late.append(tile)
+                    by_id[tile_id] = tile
+                upstream = tile_id
+            edge["sourceNodeId"] = upstream
+            edge["sourceNodeOutputId"] = "0"
+    nodes.extend(late)
+
     # The loop wrapper groups variants; it is not a module and takes no input of
     # its own. Now that each variant carries its own tile, drop the wrapper's and
     # let those read straight from whatever fed it.
