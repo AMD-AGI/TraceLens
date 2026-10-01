@@ -533,6 +533,53 @@ def test_a_tensor_leaves_a_block_through_that_block_output(model_id):
     assert not leaks, leaks[:8]
 
 
+@pytest.mark.parametrize(
+    "model_id",
+    ["MiniMaxAI/MiniMax-M3", "deepseek-ai/DeepSeek-V4-Flash"],
+)
+def test_a_tuple_boundary_names_each_component(model_id):
+    """``position_embeddings`` is one name for two tensors, so it shows two.
+
+    The decoder is handed ``(cos, sin)`` and unpacks them. Both arrived on one
+    tile, on the same input slot, and the tile declared no ports -- so it
+    showed no shape at all (there is no single shape to show) while consumers
+    downstream were already addressing port 1 for ``sin``, a port nothing had
+    defined. A tile that takes one component off the tuple reports THAT
+    component, not the activation default that would otherwise stand in.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, by_id = _build_nodes(model_id)
+
+    tuples = [
+        node
+        for node in graph["nodes"]
+        if str(node.get("label")) == "position_embeddings"
+        and len(node.get("outputsMetadata") or []) > 1
+    ]
+    assert tuples, "expected the position_embeddings boundaries to name cos/sin"
+    for node in tuples:
+        labels = [
+            next(
+                (a["value"] for a in port.get("attrs", []) if a["key"] == "port_label"),
+                "",
+            )
+            for port in node["outputsMetadata"]
+        ]
+        assert labels == ["cos", "sin"], (node["id"], labels)
+        for port in node["outputsMetadata"]:
+            shape = next(
+                (a["value"] for a in port.get("attrs", []) if a["key"] == "shape"), ""
+            )
+            assert shape, (node["id"], port["id"])
+
+    # Each incoming edge lands on its own slot: two tensors are not one input.
+    for node in tuples:
+        slots = [
+            str(e.get("targetNodeInputId")) for e in node.get("incomingEdges") or []
+        ]
+        assert len(set(slots)) == len(slots), (node["id"], slots)
+
+
 def test_a_loop_carries_the_width_its_body_produces():
     """The loop's entry port reports the body's output, not the seed's producer.
 

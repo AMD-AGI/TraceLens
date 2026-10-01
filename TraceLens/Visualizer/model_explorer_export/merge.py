@@ -73,6 +73,8 @@ from TraceLens.Visualizer.model_explorer_export.shapes import (
     infer_block_tree_shapes,
     node_output_spec,
     format_shape_dims,
+    format_shape_tensor,
+    format_shape_with_dtype,
     parse_shape_dims,
     SHAPE_SEPARATOR,
 )
@@ -2391,6 +2393,114 @@ def _route_frame_exits_through_output_tiles(nodes: list[dict[str, Any]]) -> None
             edge["sourceNodeId"] = upstream
             edge["sourceNodeOutputId"] = upstream_port
     nodes.extend(additions)
+
+
+def _declare_tuple_boundary_ports(nodes: list[dict[str, Any]]) -> None:
+    """A boundary handed a TUPLE names each component on its own port.
+
+    ``position_embeddings`` is one name for two tensors: the decoder is handed
+    ``(cos, sin)`` and unpacks them. Both arrived on one tile, on the same
+    input slot, and the tile declared no ports -- so it showed no shape at all
+    (there is no single shape to show) while consumers downstream were already
+    addressing port 1 for ``sin``, a port nothing had defined.
+
+    A tuple is recognised structurally: every producer sits in ONE block and
+    they carry distinct labels. Alternatives look different -- the post-loop
+    head fed by each layer variant's output has one producer per sibling block,
+    all with the same name -- and are left alone.
+
+    A tile that merely passes a tuple along has a single producer, so it
+    inherits that producer's ports rather than inventing any.
+    """
+    by_id = {str(n["id"]): n for n in nodes}
+
+    def live_edges(node: dict[str, Any]) -> list[dict[str, Any]]:
+        out = []
+        for edge in node.get("incomingEdges", []) or []:
+            source = by_id.get(str(edge.get("sourceNodeId")))
+            if source is None:
+                continue
+            if str(_node_attr(source, "constant")) == "true":
+                continue
+            out.append(edge)
+        return out
+
+    def port_entry(ordinal: int, label: str, spec: Any) -> dict[str, Any]:
+        attrs: list[dict[str, Any]] = [{"key": "port_label", "value": label}]
+        if spec is not None:
+            attrs.extend(
+                [
+                    {"key": "shape", "value": format_shape_with_dtype(spec)},
+                    {"key": "tensor_shape", "value": format_shape_tensor(spec)},
+                    {"key": "dtype", "value": spec.dtype},
+                ]
+            )
+        return {"id": str(ordinal), "attrs": attrs}
+
+    # Two sweeps: the first declares the ports where the tuple arrives, the
+    # second hands them to the tiles that pass it further in.
+    for sweep in (0, 1):
+        for node in nodes:
+            if _node_attr(node, "synthetic") not in _INPUT_BOUNDARY_SYNTHETIC:
+                continue
+            if len(node.get("outputsMetadata") or []) > 1:
+                continue  # already names each component
+            edges = live_edges(node)
+            if sweep == 0:
+                if len(edges) < 2:
+                    continue
+                producers = [by_id[str(e["sourceNodeId"])] for e in edges]
+                if len({str(p.get("namespace") or "") for p in producers}) != 1:
+                    continue  # alternatives from sibling blocks, not a tuple
+                labels = [str(p.get("label") or "") for p in producers]
+                if len(set(labels)) != len(labels) or not all(labels):
+                    continue
+                ports = []
+                for ordinal, (edge, producer) in enumerate(zip(edges, producers)):
+                    edge["targetNodeInputId"] = str(ordinal)
+                    ports.append(
+                        port_entry(
+                            ordinal,
+                            labels[ordinal],
+                            node_output_spec(
+                                producer, str(edge.get("sourceNodeOutputId", "0"))
+                            ),
+                        )
+                    )
+                node["outputsMetadata"] = ports
+            else:
+                if len(edges) != 1:
+                    continue
+                source = by_id[str(edges[0]["sourceNodeId"])]
+                inherited = source.get("outputsMetadata") or []
+                if len(inherited) < 2:
+                    continue
+                selected = str(edges[0].get("sourceNodeOutputId", "0")) or "0"
+                if selected not in {"", "0"}:
+                    # This tile takes ONE component off the tuple, so it carries
+                    # that component -- not the whole thing, and not the generic
+                    # activation shape a default would have stamped on it.
+                    component = node_output_spec(source, selected)
+                    if component is not None:
+                        apply_shape_attrs(node, component)
+                        node["outputsMetadata"] = [
+                            port_entry(
+                                0,
+                                str(node.get("label") or "") or selected,
+                                component,
+                            )
+                        ]
+                    continue
+                # Passing the whole tuple along. A single generic port here is
+                # the activation default standing in for something it cannot
+                # describe; the producer's ports say what the components are,
+                # and no one shape describes all of them.
+                node["outputsMetadata"] = [dict(port) for port in inherited]
+                node["attrs"] = [
+                    item
+                    for item in node.get("attrs", []) or []
+                    if item.get("key") not in {"output_shape", "output_dtype"}
+                ]
 
 
 def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
@@ -7033,6 +7143,7 @@ def build_merged_model_graph(
     # The mirror of that pass for the leaving side, run right beside it so both
     # walls of a block are decided by the same state of the graph.
     _route_frame_exits_through_output_tiles(nodes)
+    _declare_tuple_boundary_ports(nodes)
     _name_unnamed_group_inputs(nodes)
 
     # A loop-invariant producer feeding no re-exposed consumer (a decoder variant's
