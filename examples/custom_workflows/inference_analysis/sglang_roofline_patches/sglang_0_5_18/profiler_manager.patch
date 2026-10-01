@@ -1,0 +1,89 @@
+diff --git a/python/sglang/srt/managers/scheduler_components/profiler_manager.py b/python/sglang/srt/managers/scheduler_components/profiler_manager.py
+index 67a74bdbf6..6391df2d16 100644
+--- a/python/sglang/srt/managers/scheduler_components/profiler_manager.py
++++ b/python/sglang/srt/managers/scheduler_components/profiler_manager.py
+@@ -16,6 +16,7 @@ from typing import (
+ 
+ import torch
+ 
++import sglang.srt.utils.kernel_shape_profiler as kernel_shape_profiler
+ from sglang.srt.environ import envs
+ from sglang.srt.managers.io_struct import ProfileReq, ProfileReqOutput, ProfileReqType
+ from sglang.srt.model_executor.forward_batch_info import ForwardMode
+@@ -77,6 +78,7 @@ class SchedulerProfilerManager:
+ 
+         self.profile_by_stage: bool = False
+         self.profile_in_progress: bool = False
++        self.shape_discovery: bool = False
+         self.merge_profiles = False
+ 
+         # For ROCM
+@@ -94,6 +96,7 @@ class SchedulerProfilerManager:
+         profile_id: str,
+         merge_profiles: bool = False,
+         profile_prefix: str = "",
++        shape_discovery: bool = False,
+         profile_stages: Optional[List[str]] = None,
+     ) -> ProfileReqOutput:
+         if envs.SGLANG_PROFILE_V2.get():
+@@ -109,6 +112,7 @@ class SchedulerProfilerManager:
+                 merge_profiles=merge_profiles,
+                 profile_prefix=profile_prefix,
+                 profile_stages=profile_stages,
++                shape_discovery=shape_discovery,
+             )
+ 
+         if self.profile_in_progress:
+@@ -129,6 +133,7 @@ class SchedulerProfilerManager:
+         self.torch_profiler_with_stack = with_stack
+         self.torch_profiler_record_shapes = record_shapes
+         self.profiler_activities = activities
++        self.shape_discovery = shape_discovery
+         self.profile_id = profile_id
+         self.profile_prefix = profile_prefix
+ 
+@@ -244,9 +249,16 @@ class SchedulerProfilerManager:
+                     )
+                 ),
+             )
++            # Activate shape discovery before the profiler starts so the first
++            # recorded launch already carries kernel metadata.
++            if record_shapes and self.shape_discovery:
++                kernel_shape_profiler.enable()
++
+             try:
+                 self.torch_profiler.start()
+             except RuntimeError as e:
++                if record_shapes and self.shape_discovery:
++                    kernel_shape_profiler.disable()
+                 self.torch_profiler = None
+                 return ProfileReqOutput(success=False, message=str(e))
+             self.profile_in_progress = True
+@@ -384,6 +396,9 @@ class SchedulerProfilerManager:
+             self.torch_profiler = None
+             gc.collect()
+ 
++        if self.torch_profiler_record_shapes and self.shape_discovery:
++            kernel_shape_profiler.disable()
++
+         self.profile_in_progress = False
+         self.profiler_start_forward_ct = None
+ 
+@@ -443,7 +458,8 @@ class SchedulerProfilerManager:
+                     recv_req.profile_id,
+                     recv_req.merge_profiles,
+                     recv_req.profile_prefix,
+-                    recv_req.profile_stages,
++                    shape_discovery=recv_req.shape_discovery,
++                    profile_stages=recv_req.profile_stages,
+                 )
+             else:
+                 self._init_profile(
+@@ -457,6 +473,7 @@ class SchedulerProfilerManager:
+                     recv_req.profile_id,
+                     recv_req.merge_profiles,
+                     recv_req.profile_prefix,
++                    shape_discovery=recv_req.shape_discovery,
+                 )
+                 return self._start_profile()
+         else:

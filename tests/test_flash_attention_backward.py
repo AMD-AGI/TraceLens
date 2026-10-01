@@ -57,7 +57,7 @@ def _bwd_event(
     q = q_shape or _Q_SHAPE
     k = k_shape or _K_SHAPE
     v = v_shape or _V_SHAPE
-    dout = list(q)  # dout has the same shape as q
+    dout = _DOUT_SHAPE
     return {
         "name": "flash_attn::_flash_attn_backward",
         "args": {

@@ -9,18 +9,14 @@ Test that the Roofline Bound column appears in the unified_perf_summary
 and per-category sheets when a GPU arch config is provided.
 """
 
-import json
-import os
-import tempfile
-
-import pandas as pd
-import pytest
-
+import importlib.util, json, os, pandas as pd, pytest
 from TraceLens.Reporting.generate_perf_report_pytorch import (
     generate_perf_report_pytorch,
 )
-
 from conftest import list_perf_report_csv_sheets
+
+_ORIGAMI_AVAILABLE = importlib.util.find_spec("origami") is not None
+
 
 MI300X_ARCH = {
     "name": "MI300X",
@@ -91,6 +87,7 @@ def test_roofline_bound_in_unified_perf_summary(perf_report):
     assert bound_vals <= VALID_BOUND_VALUES, f"Unexpected values: {bound_vals}"
 
 
+@pytest.mark.skipif(not _ORIGAMI_AVAILABLE, reason="requires origami (rocm-origami)")
 def test_origami_time_in_unified_perf_summary(perf_report):
     """Origami Time (µs) column must appear in unified_perf_summary."""
     # this test does not test the functionality of the Origami time column,

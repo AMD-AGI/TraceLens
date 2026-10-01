@@ -26,6 +26,9 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
     "aten::_scaled_dot_product_cudnn_attention_backward": "SDPA_bwd",
     "aten::_scaled_dot_product_efficient_attention_backward": "SDPA_bwd",
     "aten::_scaled_dot_product_flash_attention_backward": "SDPA_bwd",
+    # xFormers-style efficient attention (ROCm/older PyTorch backend).
+    "aten::_efficient_attention_forward": "SDPA_fwd",
+    "aten::_efficient_attention_backward": "SDPA_bwd",
     # SSM / Mamba category-only backward ops.
     "MambaSplitConv1dScanCombinedFnBackward": "SSM_bwd",
     "DaoAILab::_causal_conv1d_bwd_cpp": "SSM_bwd",
@@ -42,7 +45,6 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
     "FusedRoPEFuncBackward": "RoPE_bwd",
     "CrossEntropyFunctionBackward": "CrossEntropy_bwd",
     # MoE auxiliary ops.
-    "aiter::moe_sorting_fwd": "MoE_aux",
     "aiter::moe_sorting_opus_fwd": "MoE_aux",
     "aiter::moe_align_block_size": "MoE_aux",
     "_moe_C::moe_align_block_size": "MoE_aux",
@@ -51,7 +53,6 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
     "aiter::topk_softmax": "MoE_aux",
     "aiter::topk_softmax_asm": "MoE_aux",
     "aiter::topk_sigmoid": "MoE_aux",
-    "aiter::biased_grouped_topk_hip": "MoE_aux",
     "aiter::grouped_topk": "MoE_aux",
     "aiter::moe_fused_gate": "MoE_aux",
     # InferenceAttention extras (KV-cache writes).
@@ -63,6 +64,9 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
 OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     (re.compile(r"^triton"), "triton"),
     (re.compile(r"^record_param_comms"), "record_param_comms"),
+    # gsplat 3DGS kernels; ".*" matches the symbol behind a launcher/synthetic prefix (re.match).
+    (re.compile(r".*gsplat::projection_ewa_3dgs_packed_fwd"), "GaussianSplat"),
+    (re.compile(r".*gsplat::intersect_(tile|offset)_kernel"), "GaussianSplat"),
 ]
 
 
@@ -363,6 +367,24 @@ reduce_ops = [
     "aten::amax",
 ]
 
+replication_pad_ops = [
+    "aten::replication_pad1d",
+    "aten::replication_pad2d",
+    "aten::replication_pad3d",
+]
+
+upsample_ops = [
+    "aten::upsample_nearest1d",
+    "aten::upsample_nearest2d",
+    "aten::upsample_nearest3d",
+]
+
+# Bilinear upsampling (F.interpolate mode='bilinear'); same trace layout /
+# bandwidth roofline as nearest, higher per-output arithmetic (4-tap blend).
+bilinear_upsample_ops = [
+    "aten::upsample_bilinear2d",
+]
+
 for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
 for op in binary_elemwise_ops:
@@ -371,6 +393,12 @@ for op_name, op_class in norm_ops.items():
     op_to_perf_model_class_map[op_name] = op_class
 for op in reduce_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_reduce
+for op in replication_pad_ops:
+    op_to_perf_model_class_map[op] = perf_model.aten_replication_pad
+for op in upsample_ops:
+    op_to_perf_model_class_map[op] = perf_model.aten_upsample_nearest
+for op in bilinear_upsample_ops:
+    op_to_perf_model_class_map[op] = perf_model.aten_upsample_bilinear
 
 # ---------------------------------------------------------------------------
 # Pattern-based matchers for perf models with generated kernel names.
@@ -405,6 +433,25 @@ def _match_triton_compiled(name):
 
 
 register_perf_model_matcher(_match_triton_compiled)
+
+
+def _match_gsplat(name):
+    """Resolve gsplat 3DGS kernels by substring, for op names that embed
+    template/kernel signatures (e.g. the projection ``(Synthetic Op)`` child) and
+    can't be keyed exactly. Also covers suffixed variants of the
+    _RasterizeToPixels / _SphericalHarmonics autograd ops."""
+    from TraceLens.PerfModel.extensions import gsplat_perf_model_extensions as _g
+
+    if "gsplat::projection_ewa_3dgs_packed_fwd" in name:
+        return _g.gsplat_projection_ewa_packed
+    if name.startswith("_RasterizeToPixels"):
+        return _g.gsplat_rasterize_to_pixels
+    if name.startswith("_SphericalHarmonics"):
+        return _g.gsplat_spherical_harmonics
+    return None
+
+
+register_perf_model_matcher(_match_gsplat)
 
 OP_CATEGORY_REGISTRY = build_op_category_registry(
     op_to_perf_model_class_map,

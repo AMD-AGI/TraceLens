@@ -5,8 +5,7 @@
 ###############################################################################
 
 import argparse
-import pandas as pd
-from bokeh.plotting import figure, save, output_file
+from bokeh.plotting import save, output_file
 from src.chart import GPUTraceDashboard
 import datetime
 

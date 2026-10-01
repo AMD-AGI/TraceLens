@@ -5,7 +5,7 @@
 ###############################################################################
 
 import argparse
-import json
+import importlib.util
 import pandas as pd
 import numpy as np
 from TraceLens import TreePerfAnalyzer
@@ -226,9 +226,7 @@ def get_dfs_short_kernels(
 def main():
 
     # check openpyxl is installed
-    try:
-        import openpyxl
-    except ImportError:
+    if importlib.util.find_spec("openpyxl") is None:
         raise ImportError(
             "openpyxl is required to write Excel files for perf report gen. Please install it using 'pip install openpyxl'."
         )

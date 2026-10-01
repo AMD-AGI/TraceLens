@@ -40,6 +40,8 @@ Examples:
 
 import argparse
 import json
+import logging
+import re
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -47,7 +49,10 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from triton.testing import do_bench
 
+from ..utils import gemm_tflops
 from .microbench_utils import check_gpu_idle
+
+logger = logging.getLogger(__name__)
 
 try:
     import triton
@@ -87,8 +92,9 @@ except Exception:  # pragma: no cover
 WARMUP = 30
 REP = 200
 
-# Resolved once per process by :func:`_resolve_fp8_dtype`.
-_FP8_DTYPE_CACHE: Optional[torch.dtype] = None
+# Resolved once per process by :func:`_resolve_fp8_dtype` (mutable container avoids
+# module-level global reassignment).
+_FP8_DTYPE_CACHE: list[Optional[torch.dtype]] = [None]
 
 _FP8_DTYPE_CANDIDATES: Tuple[str, ...] = (
     "float8_e4m3fnuz",  # AMD MI300/MI35x MAF dtype when hipBLASLt supports it
@@ -164,6 +170,12 @@ def _bpe(dtype: torch.dtype) -> int:
 
 def _arch_product_name(gpu_name: str, mem_gb: float) -> str:
     """Short name to match arch JSONs like `MI300X.json` (e.g. 'MI300X')."""
+    # Client parts report e.g. "AMD Radeon 8060S Graphics": the model sits
+    # between the brand and the trailing "Graphics", which names no model.
+    match = re.search(r"\bRadeon\s+(.+?)\s+Graphics\b", gpu_name, re.IGNORECASE)
+    if match:
+        return "_".join(["Radeon", *match.group(1).split()])
+
     # ROCm containers often report a generic device string; use memory tier as hint.
     mem = int(round(mem_gb))
     if mem >= 280:
@@ -196,6 +208,7 @@ def _build_measured_arch_json(
         "mem_bw_gbps": int(round(float(read_bw_gbps))),
         "memory_gb": int(round(mem_gb)),
         "max_achievable_tflops": maf,
+        "source": "These are benchmark derived peak flops and bw",
     }
 
 
@@ -213,7 +226,7 @@ def bench_gemm(M: int, N: int, K: int, dtype: torch.dtype, device: int = 0) -> f
     B = torch.randn(K, N, dtype=dtype, device=dev)
 
     ms = do_bench(lambda: torch.matmul(A, B), warmup=WARMUP, rep=REP)
-    tflops = _gemm_flops(M, N, K) / (ms * 1e-3) / 1e12
+    tflops = gemm_tflops(M, N, K, ms)
     return tflops
 
 
@@ -228,9 +241,8 @@ def _fp8_dtypes_to_try() -> List[torch.dtype]:
 
 def _resolve_fp8_dtype(device: int, M: int, N: int, K: int) -> Optional[torch.dtype]:
     """Pick the first FP8 dtype that runs ``torch._scaled_mm`` on this GPU/stack."""
-    global _FP8_DTYPE_CACHE
-    if _FP8_DTYPE_CACHE is not None:
-        return _FP8_DTYPE_CACHE
+    if _FP8_DTYPE_CACHE[0] is not None:
+        return _FP8_DTYPE_CACHE[0]
 
     dev = f"cuda:{device}"
     scale_a = torch.ones(1, dtype=torch.float32, device=dev)
@@ -250,10 +262,11 @@ def _resolve_fp8_dtype(device: int, M: int, N: int, K: int) -> Optional[torch.dt
                 scale_b=scale_b,
                 out_dtype=torch.bfloat16,
             )
-            _FP8_DTYPE_CACHE = fp8_dtype
+            _FP8_DTYPE_CACHE[0] = fp8_dtype
             print(f"    FP8 dtype: {fp8_dtype}")
             return fp8_dtype
         except Exception:
+            logger.debug("FP8 dtype %s probe failed", fp8_dtype, exc_info=True)
             continue
 
     print("    No supported FP8 dtype for torch._scaled_mm on this stack.")
@@ -288,7 +301,7 @@ def bench_gemm_fp8(M: int, N: int, K: int, device: int = 0) -> float:
         print(f"    FP8 scaled_mm failed ({e})")
         return 0.0
 
-    return _gemm_flops(M, N, K) / (ms * 1e-3) / 1e12
+    return gemm_tflops(M, N, K, ms)
 
 
 def bench_gemm_int8(M: int, N: int, K: int, device: int = 0) -> float:
@@ -310,7 +323,7 @@ def bench_gemm_int8(M: int, N: int, K: int, device: int = 0) -> float:
         print(f"    INT8 _int_mm failed: {e}")
         return 0.0
 
-    return _gemm_flops(M, N, K) / (ms * 1e-3) / 1e12
+    return gemm_tflops(M, N, K, ms)
 
 
 def _bench_mx_matrix_peak(
@@ -390,11 +403,13 @@ def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
     results["matrix_fp4_ck"] = ck_mxfp4
     try:
         from .fp4fp6_helpers import (
-            _MXFP6_KIND as _mxfp6_kind,
             _MXFP6_DTYPE as _mxfp6_dt,
+            get_mxfp6_kind,
         )
     except Exception:
         _mxfp6_kind, _mxfp6_dt = "", ""
+    else:
+        _mxfp6_kind = get_mxfp6_kind()
     mxfp6_label = "matrix_fp6"
     if _mxfp6_kind == "f6f4_via_e2m1":
         mxfp6_label = (
@@ -962,8 +977,7 @@ def run_shape_sweep(
     """
     Sweep candidate GEMM shapes and optional HBM sizes; compare to production ``GEMM_SHAPES``.
     """
-    global _FP8_DTYPE_CACHE
-    _FP8_DTYPE_CACHE = None
+    _FP8_DTYPE_CACHE[0] = None
 
     prod_rows: List[Dict[str, object]] = []
     prod_best: Dict[str, Dict[str, object]] = {}

@@ -27,9 +27,12 @@ Cache dirs searched by V1 (first wins):
 
 import getpass
 import glob
+import logging
 import os
 import re
 from math import prod
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # FLOPs per element for ATen ops that commonly appear in fused Triton kernels.
@@ -338,7 +341,7 @@ def _lookup(name: str, inductor_cache_dir: str | None = None) -> dict | None:
                     continue
                 _kernel_meta_cache.update(_parse_wrapper(content))
             except Exception:
-                pass
+                logger.debug("Failed to parse Inductor wrapper %s", path, exc_info=True)
             if name in _kernel_meta_cache:
                 return _kernel_meta_cache[name]
 

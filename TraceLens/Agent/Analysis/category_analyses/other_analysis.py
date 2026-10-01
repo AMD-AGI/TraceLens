@@ -15,8 +15,6 @@ import argparse
 import sys
 import os
 
-import pandas as pd
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from analysis_utils import (
@@ -154,6 +152,7 @@ def main():
         operations,
         category,
         baseline_ms=baseline_ms,
+        comparison_scope=args.comparison_scope,
     )
     category_findings = build_category_findings(
         impact_estimates, comparison_scope=args.comparison_scope

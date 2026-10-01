@@ -5,24 +5,179 @@
 ###############################################################################
 
 import argparse
+import ast
 import importlib.util
-import json
 import os
-import subprocess
-import sys
+import re
 import warnings
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
 
-from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
+from TraceLens import NcclAnalyser, TraceDiff, TreePerfAnalyzer
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
-    request_install,
     resolve_gpu_arch,
+    write_report_outputs,
 )
+
+_WRAPPER_FILE_PATTERNS = frozenset(
+    {
+        "torch/_ops.py",
+        "torch/nn/modules/module.py",
+        "torch/utils/_contextlib.py",
+        "torch/utils/_device.py",
+        "torch/_tensor.py",
+        "torch/functional.py",
+        "torch/overrides.py",
+        "torch/_inductor/",
+        "torch/_functorch/",
+        "torch/distributed/c10d_logger.py",
+        "triton/backends/",
+    }
+)
+
+_WRAPPER_NAME_PREFIXES = frozenset(
+    {
+        "<built-in",
+        "pybind11_builtins",
+        "nn.Module:",
+    }
+)
+
+_WRAPPER_FUNC_NAMES = frozenset(
+    {
+        "__torch_function__",
+        "_call_impl",
+        "_wrapped_call_impl",
+        "decorate_context",
+        "dispatch_wrapper",
+        "handle_torch_function",
+        "wrapper",
+        "custom_wrapper",
+        "wrapper_custom",
+        "outer_wrapper",
+    }
+)
+
+
+def _is_wrapper_frame(frame):
+    """Return True if *frame* is a wrapper/dispatch function that should be
+    skipped when searching outward for the dispatch entry point."""
+    for prefix in _WRAPPER_NAME_PREFIXES:
+        if frame.startswith(prefix):
+            return True
+    for pat in _WRAPPER_FILE_PATTERNS:
+        if pat in frame:
+            return True
+    # Extract function name from "path.py(line): func_name" format
+    if "): " in frame:
+        func_name = frame.split("): ")[-1]
+        if func_name in _WRAPPER_FUNC_NAMES:
+            return True
+    return False
+
+
+def _find_entry_point(call_stack_value, op_name):
+    """Find the dispatch entry point for a CPU op from its call stack.
+
+    Returns a dict with keys:
+    - ``entry_point``: the matched frame string, or ``""``
+    - ``num_wrappers``: number of frames between entry point and the CPU op
+    - ``traversal``: ``"inward"`` or ``"outward"`` (which strategy matched)
+    - ``wrappers``: list of frames between the CPU op and the entry point
+
+    Strategy:
+    1. **Inward matching** – search the call stack for a .py frame whose
+       function name contains the op name (part after '::').
+    2. **Outward matching** (fallback) – if inward matching fails, walk the
+       call stack from innermost frame outward, skip wrapper/dispatch
+       functions, and return the first non-wrapper .py frame.
+    """
+    empty = {
+        "entry_point": "Not found",
+        "num_wrappers": -1,
+        "traversal": "",
+        "wrappers": "",
+    }
+    try:
+        stack = ast.literal_eval(str(call_stack_value))
+        if not isinstance(stack, list):
+            return empty
+    except Exception:
+        return empty
+
+    def flatten(frames):
+        flat = []
+        for frame in frames:
+            if isinstance(frame, list):
+                flat.extend(flatten(frame))
+            else:
+                flat.append(frame)
+        return flat
+
+    flat_stack = flatten(stack)
+
+    # Use the local name part after '::' if present
+    local_name = op_name.split("::")[-1].lower() if "::" in op_name else op_name.lower()
+
+    # Find the CPU op position in the flat stack (search from end for exact match).
+    # If exact match fails, try with trailing numeric suffix stripped — the call
+    # stack builder applies re.sub(r"_\d+", "") to frame names for deduplication,
+    # so e.g. "sglang_profiler::foo_triton_340" is stored as "sglang_profiler::foo_triton".
+    op_idx = -1
+    for i in range(len(flat_stack) - 1, -1, -1):
+        if flat_stack[i] == op_name:
+            op_idx = i
+            break
+    if op_idx == -1:
+        stripped_op_name = re.sub(r"_\d+$", "", op_name)
+        if stripped_op_name != op_name:
+            for i in range(len(flat_stack) - 1, -1, -1):
+                if flat_stack[i] == stripped_op_name:
+                    op_idx = i
+                    break
+    if op_idx == -1:
+        return empty
+
+    # --- Inward matching: from CPU op toward leaf (children), find a .py frame
+    #     whose function name contains the op name ---
+    for i in range(op_idx + 1, len(flat_stack)):
+        frame = flat_stack[i]
+        if ".py" in frame:
+            func_name = (
+                frame.split("): ")[-1].lower() if "): " in frame else frame.lower()
+            )
+            if local_name in func_name:
+                between = flat_stack[op_idx + 1 : i]
+                wrappers_list = [op_name] + between + [frame]
+                return {
+                    "entry_point": frame,
+                    "num_wrappers": len(between),
+                    "traversal": "inward",
+                    "wrappers": str(wrappers_list),
+                }
+
+    # --- Outward matching (fallback): from CPU op toward root (parents),
+    #     skip wrappers, return first non-wrapper .py frame ---
+    for i in range(op_idx - 1, -1, -1):
+        frame = flat_stack[i]
+        if ".py" not in frame:
+            continue
+        if _is_wrapper_frame(frame):
+            continue
+        between = flat_stack[i + 1 : op_idx]
+        wrappers_list = [frame] + between + [op_name]
+        return {
+            "entry_point": frame,
+            "num_wrappers": len(between),
+            "traversal": "outward",
+            "wrappers": str(wrappers_list),
+        }
+
+    return empty
 
 
 def get_dfs_short_kernels(
@@ -85,12 +240,11 @@ def get_dfs_short_kernels(
             sort=False,
         ).agg(agg_dict)
 
-    # Handle empty dataframe case
-    if df_grouped.empty:
-        return df_hist, df_grouped
-
     # Flatten multi-level column names
     df_grouped.columns = ["_".join(col).strip() for col in df_grouped.columns]
+
+    if df_grouped.empty:
+        return df_hist, df_grouped
 
     # Rename columns for clarity
     df_grouped.rename(
@@ -328,6 +482,7 @@ def generate_perf_report_pytorch(
     df_kernel_launchers_summary = pd.DataFrame()
     df_kernel_launchers_summary_by_category = pd.DataFrame()
     df_kernel_launchers_unique_args = pd.DataFrame()
+    df_kernel_launchers_unique_args_overlapping_kernels = pd.DataFrame()
     perf_metrics_dfs = {}
     df_hist = pd.DataFrame()
     df_short_kernels = pd.DataFrame()
@@ -397,6 +552,9 @@ def generate_perf_report_pytorch(
                 for event in perf_analyzer.tree.events
                 if event["name"] in op_names
             ]
+            if not op_events:
+                # No events for this category in the trace
+                continue
 
             if sheet_category in [
                 "GEMM",
@@ -482,19 +640,27 @@ def generate_perf_report_pytorch(
                     for event in op_events
                     if event["name"] != "vllm::unified_attention_with_output"
                 ]
-                df_ops_bwd_raw = perf_analyzer.build_df_perf_metrics(
-                    op_events, bwd=True, include_kernel_details=True, include_args=True
-                )
-                df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_bwd_raw,
-                    agg_metrics,
-                    group_by_num_kernels=group_by_num_kernels,
-                )
-                df_ops_bwd = add_truncated_kernel_details(
-                    df_ops_bwd,
-                    source_col="kernel_details__summarize_kernel_stats",
-                    new_col_name="trunc_kernel_details",
-                )
+                has_bwd_events = any(event.get("bwd_events") for event in op_events)
+                if has_bwd_events:
+                    df_ops_bwd_raw = perf_analyzer.build_df_perf_metrics(
+                        op_events,
+                        bwd=True,
+                        include_kernel_details=True,
+                        include_args=True,
+                    )
+                    df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
+                        df_ops_bwd_raw,
+                        agg_metrics,
+                        group_by_num_kernels=group_by_num_kernels,
+                    )
+                    df_ops_bwd = add_truncated_kernel_details(
+                        df_ops_bwd,
+                        source_col="kernel_details__summarize_kernel_stats",
+                        new_col_name="trunc_kernel_details",
+                    )
+                else:
+                    df_ops_bwd_raw = pd.DataFrame()
+                    df_ops_bwd = pd.DataFrame()
                 if filtered_df_bwd_ops is not None:
                     df_ops_bwd = pd.concat([df_ops_bwd, filtered_df_bwd_ops])
                 # Filter out forward operations that were incorrectly included in backward
@@ -550,24 +716,27 @@ def generate_perf_report_pytorch(
                             ~df_ops_fwd_overlapping_kernels["name"].isin(bwd_op_names)
                         ]
 
-                    df_ops_bwd_overlapping_kernels = (
-                        perf_analyzer.summarize_df_perf_metrics(
-                            df_ops_bwd_raw,
-                            agg_metrics,
-                            group_by_num_kernels=group_by_num_kernels,
-                            include_overlapping_kernels=True,
+                    if has_bwd_events:
+                        df_ops_bwd_overlapping_kernels = (
+                            perf_analyzer.summarize_df_perf_metrics(
+                                df_ops_bwd_raw,
+                                agg_metrics,
+                                group_by_num_kernels=group_by_num_kernels,
+                                include_overlapping_kernels=True,
+                            )
                         )
-                    )
-                    df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
-                        df_ops_bwd_overlapping_kernels,
-                        source_col="kernel_details__summarize_kernel_stats",
-                        new_col_name="trunc_kernel_details",
-                    )
-                    df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
-                        df_ops_bwd_overlapping_kernels,
-                        source_col="overlapping_kernels_details__summarize_kernel_stats",
-                        new_col_name="trunc_overlapping_kernels_details",
-                    )
+                        df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
+                            df_ops_bwd_overlapping_kernels,
+                            source_col="kernel_details__summarize_kernel_stats",
+                            new_col_name="trunc_kernel_details",
+                        )
+                        df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
+                            df_ops_bwd_overlapping_kernels,
+                            source_col="overlapping_kernels_details__summarize_kernel_stats",
+                            new_col_name="trunc_overlapping_kernels_details",
+                        )
+                    else:
+                        df_ops_bwd_overlapping_kernels = pd.DataFrame()
                     if filtered_df_bwd_ops_overlapping_kernels is not None:
                         df_ops_bwd_overlapping_kernels = pd.concat(
                             [
@@ -661,25 +830,35 @@ def generate_perf_report_pytorch(
                     source_col="kernel_details_summary",
                     new_col_name="trunc_kernel_details",
                 )
-                if "call_stack" in df_unified_perf_summary.columns:
-                    df_callstacks = df_unified_perf_summary[
-                        ["name", "op category", "call_stack"]
-                    ].copy()
-                    df_callstacks.insert(0, "row_id", range(len(df_callstacks)))
-                    dict_name2df["unified_perf_callstacks"] = df_callstacks
-
-                    n_frames = 4  # op name + 3 parent frames
-                    cs_col = df_unified_perf_summary.columns.get_loc("call_stack")
+                if "call_stack_full" in df_unified_perf_summary.columns:
+                    cs_col = df_unified_perf_summary.columns.get_loc("call_stack_full")
+                    ep_results = df_unified_perf_summary.apply(
+                        lambda row: _find_entry_point(
+                            row["call_stack_full"], row["name"]
+                        ),
+                        axis=1,
+                    )
                     df_unified_perf_summary.insert(
                         cs_col,
-                        "trunc_call_stack",
-                        df_unified_perf_summary["call_stack"].apply(
-                            lambda s: " => ".join(str(s).split(" => ")[:n_frames])
-                        ),
+                        "entry_point",
+                        ep_results.apply(lambda x: x["entry_point"]),
                     )
-                    df_unified_perf_summary = df_unified_perf_summary.drop(
-                        columns=["call_stack"]
-                    )
+                    if os.environ.get("TRACELENS_DEBUG"):
+                        df_unified_perf_summary.insert(
+                            cs_col + 1,
+                            "num_wrappers",
+                            ep_results.apply(lambda x: x["num_wrappers"]),
+                        )
+                        df_unified_perf_summary.insert(
+                            cs_col + 2,
+                            "traversal",
+                            ep_results.apply(lambda x: x["traversal"]),
+                        )
+                        df_unified_perf_summary.insert(
+                            cs_col + 3,
+                            "wrappers",
+                            ep_results.apply(lambda x: x["wrappers"]),
+                        )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
 
             if _tracediff_diff_stats is not None and not _tracediff_diff_stats.empty:
@@ -731,7 +910,7 @@ def generate_perf_report_pytorch(
     if kernel_summary:
         try:
             df_kernels = perf_analyzer.get_df_kernels(launcher_detail=True)
-        except Exception as e:
+        except Exception:
             df_kernels = pd.DataFrame()
         if not df_kernels.empty and "Kernel duration (µs)" in df_kernels.columns:
             # Fallback: If Parent cpu_op is missing, fill it from Launcher (for display purposes)
@@ -849,27 +1028,12 @@ def generate_perf_report_pytorch(
                 print(f"Added {len(additional_dfs)} additional sheets from extension")
 
     # Write CSVs and/or Excel (independent options)
-    if output_csvs_dir:
-        os.makedirs(output_csvs_dir, exist_ok=True)
-        for sheet_name, df in dict_name2df.items():
-            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
-            print(f"DataFrame '{sheet_name}' written to {csv_path}")
-
-    if output_xlsx_path is not None or output_csvs_dir is None:
-        if output_xlsx_path is None:
-            base_path = profile_json_path.rsplit(".json", 1)[0]
-            output_xlsx_path = base_path + "_perf_report.xlsx"
-        try:
-            import openpyxl
-        except (ImportError, ModuleNotFoundError) as e:
-            print(f"Error importing openpyxl: {e}")
-            request_install("openpyxl")
-
-        with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
-            for sheet_name, df in dict_name2df.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-            print(f"DataFrames successfully written to {output_xlsx_path}")
+    if output_xlsx_path is None and output_csvs_dir is None:
+        base_path = profile_json_path.rsplit(".json", 1)[0]
+        output_xlsx_path = base_path + "_perf_report.xlsx"
+    write_report_outputs(
+        dict_name2df, xlsx_path=output_xlsx_path, csvs_dir=output_csvs_dir
+    )
 
     return dict_name2df
 
@@ -1038,7 +1202,7 @@ def main():
         "--include_call_stack",
         action="store_true",
         default=False,
-        help="Add trunc_call_stack to unified_perf_summary and write unified_perf_callstacks with full call stacks.",
+        help="Add call_stack_trimmed and call_stack_full columns to unified_perf_summary.",
     )
 
     args = parser.parse_args()
@@ -1070,6 +1234,9 @@ def main():
         inductor_cache_dir=args.inductor_cache_dir,
         include_call_stack=args.include_call_stack,
     )
+
+
+__all__ = [name for name in globals() if not name.startswith("_")]
 
 
 if __name__ == "__main__":

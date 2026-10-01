@@ -7,7 +7,7 @@
 
 """
 TraceLens Agent - Orchestrator Preparation Script
-Steps 2-5: GPU Utilization, Top Ops, Tree Data Pre-computation, Category Filtering
+Steps 3-6: GPU Utilization, Top Ops, Tree Data Pre-computation, Category Filtering
 """
 
 import argparse
@@ -18,17 +18,18 @@ import re
 import sys
 import traceback
 from collections import defaultdict
-from typing import Any
+
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from category_analyses.analysis_utils import parse_first_shape, shape_aware_lookup
 from utils.arch_utils import list_platforms, load_arch
-from TraceLens.TreePerf import TreePerfAnalyzer
-from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
+
 from TraceLens.Agent.Analysis.utils.classify_kernels import (
     classify_kernel,
 )
+from TraceLens.TreePerf import TreePerfAnalyzer
+from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
 
 CATEGORY_SKILL_MAP = {
     "cpu_idle": "cpu-idle-analyzer",
@@ -62,7 +63,6 @@ FUSION_ALREADY_FUSED = [
     "flash_attn",
     "flash_fwd",
     "silu_and_mul",
-    "SiluAndMul",
 ]
 _NORM_KERNEL_PATTERNS = [
     "batchnorm",
@@ -511,7 +511,7 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
                         }
                     )
             except (KeyError, IndexError):
-                pass
+                continue
         if len(kernels) < 2:
             continue
 
@@ -563,7 +563,7 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
                 }
             )
         except (KeyError, IndexError):
-            pass
+            continue
 
     sibling_seqs = []
     seen_sibling_bases = {}
@@ -845,7 +845,7 @@ def main():
     print(f"Pseudo Ops: {'Enabled' if enable_pseudo_ops else 'Disabled'}")
     print("=" * 80)
 
-    # Create directory structure (chmod 777 so host user can write when running in container as root)
+    # Create directory structure
     for d in [
         output_dir,
         f"{output_dir}/metadata",
@@ -854,19 +854,20 @@ def main():
         f"{output_dir}/system_findings",
     ]:
         os.makedirs(d, exist_ok=True)
-        os.chmod(d, 0o777)
 
     platform_specs = load_arch(platform)
 
     # ============================================================================
-    # STEP 2: Assess GPU Utilization
+    # STEP 3: Assess GPU Utilization
     # ============================================================================
-    print("\n[STEP 2] Assessing GPU Utilization...")
+    print("\n[STEP 3] Assessing GPU Utilization...")
 
     gpu_timeline = pd.read_csv(os.path.join(trace1_csv_dir, "gpu_timeline.csv"))
     gpu_utilization_metrics = _gpu_utilization_metrics_from_gpu_timeline_df(
         gpu_timeline
     )
+    trace2_gpu_utilization = None
+    trace2_ops_summary_by_category = None
 
     if comparison_scope == "comparative" and trace2_csv_dir is not None:
         trace2_gpu_utilization = _gpu_utilization_metrics_from_gpu_timeline_df(
@@ -898,9 +899,9 @@ def main():
         print(f"  [DIAG:trace_quality:HIGH_IDLE] Compute utilization < 85%")
 
     # ============================================================================
-    # STEP 3: Identify Top Operations
+    # STEP 4: Identify Top Operations
     # ============================================================================
-    print("\n[STEP 3] Identifying Top Operations...")
+    print("\n[STEP 4] Identifying Top Operations...")
 
     ops_summary = pd.read_csv(os.path.join(trace1_csv_dir, "ops_summary.csv"))
 
@@ -931,9 +932,9 @@ def main():
             print(f"  {op_name:50s} | {time_val:10.2f} | {category}")
 
     # ============================================================================
-    # STEP 4: Pre-compute Tree Data (Optimization)
+    # STEP 5: Pre-compute Tree Data (Optimization)
     # ============================================================================
-    print("\n[STEP 4] Pre-computing Tree Data for Bottleneck Operations...")
+    print("\n[STEP 5] Pre-computing Tree Data for Bottleneck Operations...")
 
     try:
         print(f"  Loading trace: {trace_path}")
@@ -997,9 +998,9 @@ def main():
         print(f"  ✓ Identified bottleneck operations")
 
         # ====================================================================
-        # STEP 4.5: Pre-compute Multi-Kernel Issue Data
+        # STEP 5.5: Pre-compute Multi-Kernel Issue Data
         # ====================================================================
-        print("\n[STEP 4.5] Pre-computing Multi-Kernel Issue Data...")
+        print("\n[STEP 5.5] Pre-computing Multi-Kernel Issue Data...")
 
         try:
             gpu_analyser = GPUEventAnalyser(tree.events)
@@ -1163,9 +1164,9 @@ def main():
                 json.dump(multi_kernel_data, f, indent=2)
 
         # ====================================================================
-        # STEP 4b: Extract Kernel Fusion Candidates (Experimental)
+        # STEP 5b: Extract Kernel Fusion Candidates (Experimental)
         # ====================================================================
-        print("\n[STEP 4b] Extracting Kernel Fusion Candidates...")
+        print("\n[STEP 5b] Extracting Kernel Fusion Candidates...")
 
         fusion_candidates_file = f"{output_dir}/category_data/fusion_candidates.json"
 
@@ -1217,45 +1218,21 @@ def main():
         except Exception as ex:
             print(f"  ⚠️  Error during fusion candidate extraction: {ex}")
             traceback.print_exc()
-            fusion_candidates = []
             with open(fusion_candidates_file, "w") as f:
                 json.dump([], f)
 
     except Exception as e:
         print(
-            f"  [DIAG:pipeline:STEP2_5_FAIL] Error during tree data pre-computation: {e}"
+            f"  [DIAG:pipeline:STEP3_6_FAIL] Error during tree data pre-computation: {e}"
         )
         traceback.print_exc()
 
     # ============================================================================
-    # STEP 5: Filter and Export Category Data
+    # STEP 6: Filter and Export Category Data
     # ============================================================================
-    print("\n[STEP 5] Filtering and Exporting Category Data...")
+    print("\n[STEP 6] Filtering and Exporting Category Data...")
 
     unified_df = pd.read_csv(os.path.join(trace1_csv_dir, "unified_perf_summary.csv"))
-
-    # Join full call_stack from perf callstacks CSV (if available) so each
-    # per-category ops CSV carries the complete call stack per row.
-    cs_path = os.path.join(trace1_csv_dir, "unified_perf_callstacks.csv")
-    if os.path.exists(cs_path):
-        cs_df = pd.read_csv(cs_path)
-        cs_df["_trunc_cs"] = cs_df["call_stack"].apply(
-            lambda s: " => ".join(str(s).split(" => ")[:4])
-        )
-        cs_df = cs_df.drop_duplicates(
-            subset=["name", "op category", "_trunc_cs"], keep="first"
-        )
-        pre_merge_len = len(unified_df)
-        unified_df = unified_df.merge(
-            cs_df[["name", "op category", "_trunc_cs", "call_stack"]],
-            left_on=["name", "op category", "trunc_call_stack"],
-            right_on=["name", "op category", "_trunc_cs"],
-            how="left",
-        )
-        unified_df.drop(columns=["_trunc_cs"], inplace=True)
-        assert (
-            len(unified_df) == pre_merge_len
-        ), f"call_stack join changed row count: {pre_merge_len} -> {len(unified_df)}"
 
     # Apply enhanced categorization
     unified_df["enhanced_category"], unified_df["display_name"] = zip(
@@ -1285,7 +1262,7 @@ def main():
             "platform": platform,
             "peak_hbm_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
             "max_achievable_tflops": platform_specs["max_achievable_tflops"],
-            "memory_gb": platform_specs["memory_gb"],
+            "memory_gb": platform_specs.get("memory_gb"),
             "trace_path": trace_path,
             "output_dir": output_dir,
             "category": display_name,
@@ -1321,7 +1298,7 @@ def main():
         "platform": platform,
         "peak_hbm_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
         "max_achievable_tflops": platform_specs["max_achievable_tflops"],
-        "memory_gb": platform_specs["memory_gb"],
+        "memory_gb": platform_specs.get("memory_gb"),
         "trace_path": trace_path,
         "output_dir": output_dir,
         "category": "CPU/Idle Analysis",
@@ -1374,7 +1351,7 @@ def main():
             "platform": platform,
             "peak_hbm_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
             "max_achievable_tflops": platform_specs["max_achievable_tflops"],
-            "memory_gb": platform_specs["memory_gb"],
+            "memory_gb": platform_specs.get("memory_gb"),
             "trace_path": trace_path,
             "output_dir": output_dir,
             "category": "Multi-Kernel Issues",
@@ -1427,9 +1404,9 @@ def main():
             )
 
     # ============================================================================
-    # STEP 5.5: Calculate Time Metric Breakdown per Category
+    # STEP 6.5: Calculate Time Metric Breakdown per Category
     # ============================================================================
-    print("\n[STEP 5.5] Calculating Time Metric Breakdown per Category...")
+    print("\n[STEP 6.5] Calculating Time Metric Breakdown per Category...")
 
     # Calculate GPU kernel time vs CPU duration per category
     # GPU kernel time = actual GPU execution (use for bottleneck prioritization)
@@ -1542,7 +1519,7 @@ def main():
         json.dump(model_info, f, indent=2)
 
     print(f"\n{'='*80}")
-    print(f"✓ Orchestrator Preparation Complete (Steps 2-5)")
+    print(f"✓ Orchestrator Preparation Complete (Steps 3-6)")
     print(f"✓ Exported {len(exported_categories)} categories")
     print(f"✓ Manifest saved: {manifest_file}")
     if comparison_scope == "comparative":
