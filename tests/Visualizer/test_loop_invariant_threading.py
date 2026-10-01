@@ -362,6 +362,16 @@ def test_rope_frame_names_its_query_and_position_inputs_apart():
                 assert "position" not in str(tile["label"]), tile["id"]
 
 
+def _is_constant(node) -> bool:
+    """A constant/learned-weight operand, which is never a merge alternative."""
+    if node is None:
+        return False
+    return any(
+        attr.get("key") == "constant" and str(attr.get("value")) == "true"
+        for attr in node.get("attrs", []) or []
+    )
+
+
 def _shape_of(node) -> str | None:
     for attr in node.get("attrs", []) or []:
         if attr.get("key") == "output_shape":
@@ -380,17 +390,39 @@ def test_model_scope_frame_expansion_ops_are_sized():
     (``inputs_embeds.shape[1]``) are resolved against the named tensor.
     """
     pytest.importorskip("huggingface_hub")
-    graph, _ = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
+    graph, by_id = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
     ops = [
         node
         for node in graph["nodes"]
-        if "create_sliding_window_causal_mask:@op_" in node["id"]
+        if "create_sliding_window_causal_mask" in node["id"] and ":@op_" in node["id"]
     ]
     assert len(ops) >= 5, len(ops)
     for node in ops:
         shape = _shape_of(node)
         assert shape, f"{node['id']} left unsized"
         assert ".shape[" not in shape, f"{node['id']} kept an unresolved dim: {shape}"
+
+    # The builder chooses its mask FUNCTION through four nested ``if``s
+    # (``or_mask_function``, ``and_mask_function``, ``packed_sequence_mask``,
+    # ``block_sequence_ids``). Each once rendered as a branch-merge box carrying
+    # the tensor straight through -- four boxes in a row that compute nothing,
+    # because what the branch picks is a callable, not a tensor. A merge with one
+    # surviving alternative has nothing to choose between, so it is folded onto
+    # its producer; the same holds for a cast whose output dtype and shape equal
+    # its input's.
+    for node in ops:
+        label = str(node.get("label") or "")
+        if label not in {"Merge", "Cast"}:
+            continue
+        incoming = [
+            edge
+            for edge in node.get("incomingEdges", []) or []
+            if not _is_constant(by_id.get(str(edge.get("sourceNodeId"))))
+        ]
+        assert label != "Merge" or len(incoming) > 1, f"{node['id']} merges one input"
+        if label == "Cast" and len(incoming) == 1:
+            producer = by_id[str(incoming[0]["sourceNodeId"])]
+            assert _shape_of(node) != _shape_of(producer), f"{node['id']} casts nothing"
 
 
 def test_glm_mask_builder_claims_no_shape_without_a_mask_to_narrow():

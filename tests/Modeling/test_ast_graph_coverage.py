@@ -176,10 +176,10 @@ def forward(self, x, weight, index, flag):
     assert compact.operations == []
 
 
-def test_both_branch_reassignment_emits_select_join():
+def test_both_branch_reassignment_emits_merge_join():
     # A variable assigned in BOTH arms of an unresolved if/else to *different*
-    # producers is joined by an explicit Select (phi): both branch computations stay
-    # reachable and the downstream consumer reads the single Select, never a union of
+    # producers is joined by an explicit Merge (phi): both branch computations stay
+    # reachable and the downstream consumer reads the single Merge, never a union of
     # two mutually-exclusive tensor operands. (Defect A2.)
     func = _function("""
 def forward(self, x, flag):
@@ -194,21 +194,19 @@ def forward(self, x, flag):
     )
     by_label = lambda label: [op for op in analysis.operations if op.label == label]
 
-    selects = by_label("Select")
-    assert len(selects) == 1, [op.label for op in analysis.operations]
-    select = selects[0]
-    # The Select carries the branch condition and joins the two branch producers.
-    assert any(
-        detail.startswith("select: ") for detail in select.details
-    ), select.details
+    merges = by_label("Merge")
+    assert len(merges) == 1, [op.label for op in analysis.operations]
+    merge = merges[0]
+    # The Merge carries the branch condition and joins the two branch producers.
+    assert any(detail.startswith("merge: ") for detail in merge.details), merge.details
     reshape = by_label("Reshape")[0]
     cast = by_label("Cast")[0]
-    assert set(select.predecessors) == {reshape.attr_name, cast.attr_name}
+    assert set(merge.predecessors) == {reshape.attr_name, cast.attr_name}
 
-    # The downstream consumer reads the Select and NOT either branch producer
+    # The downstream consumer reads the Merge and NOT either branch producer
     # directly -- a single tensor operand, not a two-input union.
     matmul = by_label("MatMul")[0]
-    assert select.attr_name in matmul.predecessors
+    assert merge.attr_name in matmul.predecessors
     assert reshape.attr_name not in matmul.predecessors
     assert cast.attr_name not in matmul.predecessors
 

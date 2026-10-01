@@ -2840,10 +2840,12 @@ class ShapeInferencer:
                 return TensorSpec(shape=tuple(shape), dtype=source.dtype)
             return source
 
-        if operation_label == "select":
+        if operation_label == "merge":
             # An explicit branch-merge (phi): exactly one of its mutually-exclusive
             # inputs flows through per invocation, and both carry the same shape,
             # so the output is just that shape -- a pure passthrough of any operand.
+            # This is NOT ``torch.select``, which indexes one position along a
+            # dimension and so REMOVES that dimension from the output shape.
             return (
                 inputs[0]
                 if inputs

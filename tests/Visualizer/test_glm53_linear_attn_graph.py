@@ -571,7 +571,7 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
     conv_update_key = _graph_key_for_op(graph, ":@op_l662_c24_causal_conv1d_update:")
     conv_key = _graph_key_for_op(graph, ":@op_l677_c24_causal_conv1d:")
     slice_key = _graph_key_for_op(graph, ":@op_l686_c24_slice:")
-    select_key = _graph_key_for_op(graph, ":@op_l661_c8_select:")
+    merge_key = _graph_key_for_op(graph, ":@op_l661_c8_merge:")
     transpose_key = _graph_key_for_op(graph, ":@op_l689_c12_transpose:")
     split_key = _graph_key_for_op(graph, ":@op_l688_c28_split:")
     forget_entry_key = _graph_key(graph, ":forget_gate:f_a_proj:0")
@@ -583,28 +583,28 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
 
     assert key_to_index[concat_key] in sources
     # The decode/update and prefill convolution alternatives both consume mixed_qkv;
-    # they are joined by an explicit Select (the mutually-exclusive branch merge),
+    # they are joined by an explicit Merge (the mutually-exclusive branch join),
     # and the prefill branch's narrowing slice (``mixed_qkv[:, :, -seq_len:]``) is a
-    # visible Slice between the conv and the Select. The Select then feeds
+    # visible Slice between the conv and the Merge. The Merge then feeds
     # transpose -> split into query/key/value -- both convs reach the split only
-    # through the single Select join.
+    # through the single Merge join.
     assert _has_computation_path(
         graph, key_to_index[concat_key], key_to_index[conv_update_key]
     )
     assert _has_computation_path(
         graph, key_to_index[concat_key], key_to_index[conv_key]
     )
-    # Prefill: conv -> Slice -> Select; decode: conv_update -> Select.
+    # Prefill: conv -> Slice -> Merge; decode: conv_update -> Merge.
     assert _has_computation_path(graph, key_to_index[conv_key], key_to_index[slice_key])
     assert _has_computation_path(
-        graph, key_to_index[slice_key], key_to_index[select_key]
+        graph, key_to_index[slice_key], key_to_index[merge_key]
     )
     assert _has_computation_path(
-        graph, key_to_index[conv_update_key], key_to_index[select_key]
+        graph, key_to_index[conv_update_key], key_to_index[merge_key]
     )
-    # Both branches converge on the single Select, which alone reaches the split.
+    # Both branches converge on the single Merge, which alone reaches the split.
     assert _has_computation_path(
-        graph, key_to_index[select_key], key_to_index[transpose_key]
+        graph, key_to_index[merge_key], key_to_index[transpose_key]
     )
     assert _has_computation_path(
         graph, key_to_index[transpose_key], key_to_index[split_key]
@@ -616,15 +616,15 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
     assert key_to_index[branch_add_key] in sources
 
 
-def test_glm53_linear_attention_branch_select_and_slice_in_merged_graph():
-    """In the merged graph the two conv branches join at an explicit Select.
+def test_glm53_linear_attention_branch_merge_and_slice_in_merged_graph():
+    """In the merged graph the two conv branches join at an explicit Merge.
 
     ``Glm5NextTextLinearAttention.forward`` runs exactly one of two mutually
     exclusive conv branches per invocation (``causal_conv1d_update`` on decode,
     ``causal_conv1d_fn`` + ``mixed_qkv[:, :, -seq_len:]`` on prefill), then
     ``query, key, value = split(mixed_qkv.transpose(1, 2), ...)``. Rather than union
     both branch producers onto the transpose (which would give it two tensor
-    operands), the extraction emits an explicit **Select** phi joining the two
+    operands), the extraction emits an explicit **Merge** phi joining the two
     branches; the transpose reads that single node. The dropped prefill narrowing
     ``[:, :, -seq_len:]`` is materialised as a visible **Slice**. The module keeps
     its own ``@input`` boundary (the hierarchy-aware collapse no longer folds it
@@ -653,23 +653,23 @@ def test_glm53_linear_attention_branch_select_and_slice_in_merged_graph():
     assert self_attn_input is not None
     assert self_attn_input.get("label") == "hidden_states"
 
-    # A2: the l689 transpose reads exactly one tensor operand -- the Select phi.
+    # A2: the l689 transpose reads exactly one tensor operand -- the Merge phi.
     transpose = node_by_id[
         f"{prefix}/seq:12:@op_l689_c12_transpose:@op_l689_c12_transpose:0"
     ]
     (t_src,) = _activation_incoming(transpose, node_by_id)
-    select = node_by_id[t_src["sourceNodeId"]]
-    assert select.get("label") == "Select", select["id"]
-    assert select["id"].endswith(":@op_l661_c8_select:0"), select["id"]
+    merge = node_by_id[t_src["sourceNodeId"]]
+    assert merge.get("label") == "Merge", merge["id"]
+    assert merge["id"].endswith(":@op_l661_c8_merge:0"), merge["id"]
     assert len(_activation_incoming(transpose, node_by_id)) == 1
 
-    # Both conv branches are reachable and feed only through the Select.
-    select_sources = {e["sourceNodeId"] for e in select["incomingEdges"]}
+    # Both conv branches are reachable and feed only through the Merge.
+    merge_sources = {e["sourceNodeId"] for e in merge["incomingEdges"]}
     conv_update = f"{prefix}/seq:7:@op_l662_c24_causal_conv1d_update:@op_l662_c24_causal_conv1d_update:0"
     slice_id = f"{prefix}/seq:10:@op_l686_c24_slice:@op_l686_c24_slice:0"
-    assert conv_update in select_sources, select_sources
-    # C: the prefill narrowing slice is a visible Slice feeding the Select.
-    assert slice_id in select_sources, select_sources
+    assert conv_update in merge_sources, merge_sources
+    # C: the prefill narrowing slice is a visible Slice feeding the Merge.
+    assert slice_id in merge_sources, merge_sources
     slice_node = node_by_id[slice_id]
     assert slice_node.get("label") == "Slice"
     (slice_src,) = _activation_incoming(slice_node, node_by_id)

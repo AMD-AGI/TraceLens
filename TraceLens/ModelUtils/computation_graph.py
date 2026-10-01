@@ -1438,7 +1438,7 @@ def _wire_all_predecessor_edges(
                     # ``forward_step_return_producers`` -- the same per-slot
                     # map ``operation_predecessor_ports`` consumers use above
                     # -- instead of every multi-return-slot consumer reading
-                    # the module-call step (the attention kernel, a Select
+                    # the module-call step (the attention kernel, a Merge
                     # phi, ...) collapsing onto one slot.
                     if (
                         source_index == attr_last_index.get(pred)
@@ -3144,7 +3144,7 @@ def _add_linear_pipeline_chain(
         # spine operand: its query/key/value/mask edges are supplied by the
         # attention-provenance and ``forward_step_predecessor`` passes, keyed by
         # its declared input ports. Spine-chaining it from the preceding step
-        # (a compressed-KV attention's last ``Select``) would fabricate a first
+        # (a compressed-KV attention's last ``Merge``) would fabricate a first
         # unlabeled edge that then claims the first declared port name in
         # ``_add_kernel_port_nodes`` — rotating every kernel input off its true
         # source. The atomic-leaf path skips this same edge via its

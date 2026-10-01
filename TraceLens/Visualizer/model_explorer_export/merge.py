@@ -3023,6 +3023,72 @@ def _drop_unconsumed_input_boundaries(nodes: list[dict[str, Any]]) -> None:
                 node["incomingEdges"] = kept
 
 
+def _elide_noop_merges_and_casts(nodes: list[dict[str, Any]]) -> None:
+    """Fold away a merge with nothing to choose and a cast that casts nothing.
+
+    A ``Merge`` joins the mutually-exclusive arms of a branch. Reduced to one
+    incoming edge -- the other arm's producer pruned downstream -- it selects
+    between a single alternative, which is to say it passes its input through.
+
+    A ``Cast`` whose operand already has the output dtype is the same story:
+    ``.to(dtype)`` where the dtype matches, or ``.to(device)``, which moves a
+    tensor between devices and changes nothing a shape graph can show. Both
+    render as a box that computes nothing.
+    """
+    node_by_id = {str(node.get("id")): node for node in nodes}
+    redirect: dict[str, tuple[str, str]] = {}
+    for node in nodes:
+        label = str(node.get("label") or "")
+        if label not in {"Merge", "Cast"}:
+            continue
+        if _node_attr(node, "synthetic"):
+            # A boundary tile takes its name from the tensor it carries, so one
+            # carrying a merge's output is itself called ``Merge``. It is a
+            # boundary, not the op, and removing it would delete the module's
+            # declaration of what it reads.
+            continue
+        incoming = node.get("incomingEdges", []) or []
+        if len(incoming) != 1:
+            continue
+        edge = incoming[0]
+        source_id = str(edge.get("sourceNodeId") or "")
+        source_port = str(edge.get("sourceNodeOutputId", "0"))
+        producer = node_by_id.get(source_id)
+        if producer is None:
+            continue
+        if label == "Cast":
+            out_spec = node_output_spec(node, "0")
+            in_spec = node_output_spec(producer, source_port)
+            if out_spec is None or in_spec is None:
+                continue
+            if (out_spec.dtype, tuple(out_spec.shape)) != (
+                in_spec.dtype,
+                tuple(in_spec.shape),
+            ):
+                continue  # a real cast: it changes the dtype it declares
+        redirect[str(node.get("id"))] = (source_id, source_port)
+    if not redirect:
+        return
+    for node in nodes:
+        if str(node.get("id")) in redirect:
+            continue
+        rebuilt = []
+        for edge in node.get("incomingEdges", []) or []:
+            source_id = str(edge.get("sourceNodeId") or "")
+            hop = redirect.get(source_id)
+            seen = set()
+            while hop is not None and source_id not in seen:
+                seen.add(source_id)
+                edge = dict(edge)
+                edge["sourceNodeId"], edge["sourceNodeOutputId"] = hop
+                source_id = hop[0]
+                hop = redirect.get(source_id)
+            rebuilt.append(edge)
+        if rebuilt:
+            node["incomingEdges"] = rebuilt
+    nodes[:] = [n for n in nodes if str(n.get("id")) not in redirect]
+
+
 def _elide_noop_single_input_concat(nodes: list[dict[str, Any]]) -> None:
     """Fold a single-input ``Concat`` whose output shape equals its input shape
     onto its producer.
@@ -6856,6 +6922,11 @@ def build_merged_model_graph(
     # synthesized so the extra sourced boundaries do not perturb its single-entry
     # detection, and before integrity checks so the reconnected tiles read as sourced.
     _thread_loop_invariant_inputs(nodes, spec=spec, shape_inferencer=shape_inferencer)
+
+    # Runs AFTER the loop-invariant pass: that is what materialises the
+    # model-scope frames, so a no-op inside one does not exist yet when the
+    # earlier elisions run.
+    _elide_noop_merges_and_casts(nodes)
 
     # Runs after threading, which is what connects an outer boundary to its deep
     # consumer: only then is the skipped path visible to walk.

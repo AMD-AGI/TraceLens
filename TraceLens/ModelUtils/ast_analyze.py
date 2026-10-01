@@ -4395,26 +4395,43 @@ class _ForwardOperationExtractor:
         other_producer: str,
         test: str,
     ) -> str:
-        """Emit an explicit Select (phi) node joining two mutually-exclusive branch
+        """Emit an explicit Merge (phi) node joining two mutually-exclusive branch
         producers of one reassigned variable, and return its id.
 
         The two producers come from the taken/not-taken arms of an ``if`` whose
         predicate could not be statically resolved, so exactly one runs per
         invocation. Rendering an explicit merge keeps both branch computations
         reachable while giving downstream consumers a single tensor to read. The
-        node is built directly (not via ``_emit``) so its label stays ``Select``
-        -- it must not be display-mapped onto ``Slice`` nor resolve to
-        ``aten::select`` -- and it carries no ``raw_op``, so the arity type-check
-        skips it (a phi legitimately takes N tensor operands).
+        node is built directly (not via ``_emit``) and carries no ``raw_op``,
+        so the arity type-check skips it (a phi legitimately takes N tensor
+        operands). It is labelled ``Merge``, NOT ``Select``: ``torch.select`` is
+        equivalent to slicing and removes a dimension, so borrowing that name for
+        a node whose output has the same shape as each arm reads as an op that
+        failed to do what it says. ``Merge`` is what a dataflow graph calls this
+        (TensorFlow's control flow uses the same name for the same thing --
+        forward whichever input is the live one), and it says which way the
+        edges run: the arms CONVERGE here. ``Branch`` would suggest the opposite,
+        and ``Phi`` is exact but only to readers who know SSA.
         """
-        attr_name = self._operation_id(node, "Select")
+        producers = self._dedupe([survivor_producer, other_producer])
+        if len(producers) < 2:
+            # Both arms resolve to the SAME producer, so there is nothing to
+            # choose between: a merge with one alternative computes nothing and
+            # renders as a box that passes its input straight through.
+            return producers[0] if producers else survivor_producer
+        attr_name = self._operation_id(node, "Merge")
         self.operations.append(
             ForwardOperation(
                 attr_name=attr_name,
-                label="Select",
-                class_name="Select",
-                predecessors=self._dedupe([survivor_producer, other_producer]),
-                details=(f"select: {test}",),
+                label="Merge",
+                class_name="Merge",
+                predecessors=producers,
+                # NOT a ``condition:`` detail: that key is how
+                # ``block_tree._dead_forward_steps`` finds ops a variant's absent
+                # submodule makes unreachable, and a merge over a pruned arm is
+                # exactly the node that must SURVIVE such a variant -- it still
+                # has a live arm to forward, and pruning it orphans that arm.
+                details=(f"merge: {test}",),
             )
         )
         return attr_name
@@ -6676,10 +6693,10 @@ class _ForwardOperationExtractor:
                     other_env = body_env if stmt.orelse else else_env
                     # A variable assigned in both mutually-exclusive branches to
                     # different producers is the output of exactly one branch per
-                    # invocation. Join them with an explicit Select (phi) node so
+                    # invocation. Join them with an explicit Merge (phi) node so
                     # the merged variable's consumers read a single tensor while
                     # both branch computations stay reachable (they feed the
-                    # Select). When the survivor branch merely passes a boundary
+                    # Merge). When the survivor branch merely passes a boundary
                     # parameter through (no op producer) but the other branch
                     # computes a real op (``topk_indices = self.indexer(...)`` vs
                     # ``= prev_topk_indices``), adopt the real producer so the
@@ -10488,7 +10505,7 @@ def _walk_forward_stmt(
         # which one actually executes. When there IS a second arm (``orelse``),
         # an unrecognised free-function (``@fn_``) call from either arm could
         # collide with the other arm's -- unlike a ``self.<attr>`` submodule
-        # producer (joined by an explicit ``Select`` phi, see
+        # producer (joined by an explicit ``Merge`` phi, see
         # ``_emit_branch_select``), a free-function node has no branch-select
         # mechanism, so both would otherwise leak into the sequence as if
         # unconditional. Suppressing them there is safe: `skip_free_fn` only
@@ -10506,7 +10523,7 @@ def _walk_forward_stmt(
         # (mirrors the forward-operations pruning in ``statements``). When the
         # predicate is not statically resolvable, both arms are flattened as
         # before -- a ``self.<attr>`` producer assigned in both is still joined by
-        # a ``Select`` phi downstream, and free-function collisions are suppressed.
+        # a ``Merge`` phi downstream, and free-function collisions are suppressed.
         outcome = _config_value(node.test, config or {}, self_values or {})
         if outcome is True:
             branch = list(node.body)

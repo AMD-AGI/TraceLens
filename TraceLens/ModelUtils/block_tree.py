@@ -1593,7 +1593,7 @@ def _attention_wrapper_block_nodes(
     # ports and routes *every* input through provenance chains -- which, for a
     # compressed-KV kernel (DeepSeek MLA) whose ``kv`` and ``attention_mask`` trace
     # to the same producer, merges them into one ``kv/attention_mask`` port and
-    # fabricates ``Select`` ports from the split's output ordinals. Declaring the
+    # fabricates ``Merge`` ports from the split's output ordinals. Declaring the
     # ports makes that pass skip them so they dock by normal predecessor tracking,
     # yielding the same clean ``q``/``kv``/``attention_mask`` ports as the leaf.
     core_details = attention_kernel_details(details, inputs)
