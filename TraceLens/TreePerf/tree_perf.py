@@ -36,6 +36,7 @@ from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils, merge_intervals
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
+from ..PerfModel.time_models import builtin_origami_model, predict_time
 from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
 
 
@@ -277,6 +278,10 @@ class TreePerfAnalyzer:
         self.arch = arch
         self.python_path = python_path
         self.enable_origami = enable_origami
+        self.time_models = {}
+        origami = builtin_origami_model(enable_origami, python_path)
+        if origami is not None:
+            self.time_models["Origami"] = origami
         self.inductor_cache_dir = inductor_cache_dir
         self.event_to_category = event_to_category
         self.include_unlinked_kernels = include_unlinked_kernels
@@ -302,6 +307,18 @@ class TreePerfAnalyzer:
 
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
+
+    def set_specialized_perf_model(self, model):
+        """Report ``model(category, params, arch)`` as ``Specialized Time (µs)``.
+
+        See :mod:`TraceLens.PerfModel.time_models`. ``None`` removes it.
+        """
+        if model is None:
+            self.time_models.pop("Specialized", None)
+        elif not callable(model):
+            raise TypeError("specialized perf model must be callable or None")
+        else:
+            self.time_models["Specialized"] = model
 
     def check_gpu_only(self):
         for event in self.tree.events:
@@ -501,6 +518,17 @@ class TreePerfAnalyzer:
                 busy_kernel_time,
             )
 
+        if not bwd:
+            for label, model in self.time_models.items():
+                add_simulation_time_columns(
+                    dict_metrics,
+                    predict_time(model, perf_model, self.arch),
+                    gflops,
+                    bytes_moved,
+                    busy_kernel_time,
+                    label=label,
+                )
+
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
 
@@ -680,11 +708,12 @@ class TreePerfAnalyzer:
             dict_agg["Roofline Bound"] = "first"
         if "Pct Roofline" in df_perf_metrics.columns:
             dict_agg["Pct Roofline"] = agg_metrics
-        if "Origami Time (µs)" in df_perf_metrics.columns:
-            dict_agg["Origami Time (µs)"] = "first"
-            dict_agg["Origami TFLOPS/s"] = "first"
-            dict_agg["Origami TB/s"] = agg_metrics
-            dict_agg["Pct Origami"] = agg_metrics
+        for label in ("Origami", "Specialized"):
+            if f"{label} Time (µs)" in df_perf_metrics.columns:
+                dict_agg[f"{label} Time (µs)"] = "first"
+                dict_agg[f"{label} TFLOPS/s"] = "first"
+                dict_agg[f"{label} TB/s"] = agg_metrics
+                dict_agg[f"Pct {label}"] = agg_metrics
         if "Non-Data-Mov TFLOPS/s" in df_perf_metrics.columns:
             dict_agg["Non-Data-Mov TFLOPS/s"] = agg_metrics
         if "Non-Data-Mov Kernel Time (µs)" in df_perf_metrics.columns:
@@ -2101,6 +2130,10 @@ class TreePerfAnalyzer:
                 "Origami TFLOPS/s",
                 "Origami TB/s",
                 "Pct Origami",
+                "Specialized Time (µs)",
+                "Specialized TFLOPS/s",
+                "Specialized TB/s",
+                "Pct Specialized",
             ]
 
             if include_perf_metrics and has_own_perf_model:
@@ -2320,7 +2353,12 @@ class TreePerfAnalyzer:
 
         # Optional simulated metrics from perf model.
         # Keep the flattened "_first" names in unified_perf_summary for visibility.
-        origami_static_cols = ["Origami Time (µs)", "Origami TFLOPS/s"]
+        origami_static_cols = [
+            "Origami Time (µs)",
+            "Origami TFLOPS/s",
+            "Specialized Time (µs)",
+            "Specialized TFLOPS/s",
+        ]
         for col in origami_static_cols:
             if col in df_temp.columns:
                 agg_dict[col] = "first"
@@ -2330,7 +2368,12 @@ class TreePerfAnalyzer:
         for col in time_varying_cols:
             if col in df_temp.columns:
                 agg_dict[col] = agg_metrics
-        for col in ("Origami TB/s", "Pct Origami"):
+        for col in (
+            "Origami TB/s",
+            "Pct Origami",
+            "Specialized TB/s",
+            "Pct Specialized",
+        ):
             if col in df_temp.columns:
                 agg_dict[col] = agg_metrics
 
@@ -3587,16 +3630,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
 
         dict_metrics = build_perf_metrics_dict(gflops, bytes_moved, busy_kernel_time)
 
-        # JaxGemm (constructor may set simulation_time from Origami)
-        if hasattr(perf_model, "simulation_time"):
-            add_simulation_time_columns(
-                dict_metrics,
-                perf_model.simulation_time,
-                gflops,
-                bytes_moved,
-                busy_kernel_time,
-            )
-
         if hasattr(perf_model, "get_simulation_time") and not bwd:
             add_simulation_time_columns(
                 dict_metrics,
@@ -3614,6 +3647,17 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 bytes_moved,
                 busy_kernel_time,
             )
+
+        if not bwd:
+            for label, model in self.time_models.items():
+                add_simulation_time_columns(
+                    dict_metrics,
+                    predict_time(model, perf_model, self.arch),
+                    gflops,
+                    bytes_moved,
+                    busy_kernel_time,
+                    label=label,
+                )
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value

@@ -288,6 +288,10 @@ def apply_extension(perf_analyzer, extension_path):
     extension = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(extension)
 
+    if hasattr(extension, "specialized_perf_model"):
+        print(f"Applying specialized perf model from {extension_path}")
+        perf_analyzer.set_specialized_perf_model(extension.specialized_perf_model)
+
     if hasattr(extension, "tree_postprocess_extension"):
         print(f"Applying tree postprocess extension from {extension_path}")
         tree_postprocess_extension = getattr(extension, "tree_postprocess_extension")

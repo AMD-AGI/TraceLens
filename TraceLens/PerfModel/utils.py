@@ -33,25 +33,26 @@ def add_simulation_time_columns(
     gflops,
     bytes_moved,
     busy_kernel_time,
+    label="Origami",
 ):
     """
-    Add simulated time columns when using Origami
+    Add simulated time columns (Origami, or ``label`` for other simulators)
     """
     if not simulated_time:
         return
-    dict_metrics["Origami Time (µs)"] = simulated_time
-    dict_metrics["Origami TFLOPS/s"] = (
+    dict_metrics[f"{label} Time (µs)"] = simulated_time
+    dict_metrics[f"{label} TFLOPS/s"] = (
         (gflops / 1e3) / (simulated_time / 1e6) if simulated_time > 0 else float("nan")
     )
     if bytes_moved is not None:
-        dict_metrics["Origami TB/s"] = (
+        dict_metrics[f"{label} TB/s"] = (
             (bytes_moved / 1e12) / (simulated_time / 1e6)
             if simulated_time > 0
             else float("nan")
         )
     else:
-        dict_metrics["Origami TB/s"] = float("nan")
-    dict_metrics["Pct Origami"] = (
+        dict_metrics[f"{label} TB/s"] = float("nan")
+    dict_metrics[f"Pct {label}"] = (
         (simulated_time / busy_kernel_time) * 100
         if busy_kernel_time > 0
         else float("nan")

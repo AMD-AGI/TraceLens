@@ -12,6 +12,7 @@ from itertools import chain
 import pandas as pd
 
 from ..PerfModel import perf_model
+from ..PerfModel.time_models import builtin_origami_model, predict_time
 from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
@@ -561,10 +562,11 @@ class JaxAnalyses:
         # Return metrics
         dict_metrics = build_perf_metrics_dict(gflops, bytes_moved, time)
 
-        if hasattr(perf_model, "get_simulation_time"):
+        origami = builtin_origami_model(enable_origami)
+        if origami is not None:
             add_simulation_time_columns(
                 dict_metrics,
-                perf_model.get_simulation_time(),
+                predict_time(origami, perf_model, arch),
                 gflops,
                 bytes_moved,
                 time,
