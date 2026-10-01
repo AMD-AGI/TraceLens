@@ -14,6 +14,8 @@ from TraceLens.util import (
     PftraceParser,
     RocprofParser,
     TraceEventUtils,
+    _TRACE_VIEWER_EVENT_CAP,
+    _TRACE_VIEWER_MAX_EVENTS_ENV,
     merge_intervals,
     suppress_native_hlo_logs,
 )
@@ -773,6 +775,104 @@ def test_dataloader_save_preprocessed_json(tmp_path):
     assert json.loads(trace_path.read_text()) == payload
 
 
+@patch("TraceLens.util.suppress_native_hlo_logs")
+def test_dataloader_save_preprocessed_pb_writes_normalized(mock_suppress, tmp_path):
+    payload = {
+        "traceEvents": [
+            {},
+            {"name": "mark", "ph": "i", "ts": 1.0},
+        ]
+    }
+    trace_path = tmp_path / "trace.pb"
+    trace_path.write_bytes(b"pb")
+    mock_suppress.return_value = contextlib.nullcontext()
+    modules = _install_mock_xprof_convert((json.dumps(payload), None))
+
+    with patch.dict(sys.modules, modules):
+        result = DataLoader.load_data(str(trace_path), save_preprocessed=True)
+
+    saved = json.loads((tmp_path / "trace.processed.json").read_text())
+    assert saved == result
+    assert saved["traceEvents"] == [{"name": "mark", "ph": "X", "ts": 1.0, "dur": 1e-6}]
+
+
+@patch("TraceLens.util.suppress_native_hlo_logs")
+def test_dataloader_load_pb_without_event_list(mock_suppress, tmp_path):
+    trace_path = tmp_path / "trace.pb"
+    trace_path.write_bytes(b"pb")
+    mock_suppress.return_value = contextlib.nullcontext()
+    modules = _install_mock_xprof_convert((json.dumps({"other": 1}), None))
+
+    with patch.dict(sys.modules, modules):
+        assert DataLoader.load_data(str(trace_path)) == {"other": 1}
+
+
+@patch("TraceLens.util.suppress_native_hlo_logs")
+def test_dataloader_load_pb_rejects_truncated_trace(
+    mock_suppress, tmp_path, monkeypatch
+):
+    payload = {
+        "traceEvents": [
+            {"ph": "M", "name": "thread_name"},
+            {"name": "kernel", "ph": "X"},
+        ]
+    }
+    trace_path = tmp_path / "trace.pb"
+    trace_path.write_bytes(b"pb")
+    mock_suppress.return_value = contextlib.nullcontext()
+    monkeypatch.setenv(_TRACE_VIEWER_MAX_EVENTS_ENV, "1")
+    modules = _install_mock_xprof_convert((json.dumps(payload), None))
+
+    with patch.dict(sys.modules, modules):
+        with pytest.raises(RuntimeError, match="cap of 1"):
+            DataLoader.load_data(str(trace_path), save_preprocessed=True)
+
+    assert not (tmp_path / "trace.processed.json").exists()
+    assert os.environ[_TRACE_VIEWER_MAX_EVENTS_ENV] == "1"
+
+
+@patch("TraceLens.util.suppress_native_hlo_logs")
+def test_dataloader_load_pb_raises_default_event_cap(
+    mock_suppress, tmp_path, monkeypatch
+):
+    seen = {}
+    trace_path = tmp_path / "trace.pb"
+    trace_path.write_bytes(b"pb")
+    mock_suppress.return_value = contextlib.nullcontext()
+    monkeypatch.delenv(_TRACE_VIEWER_MAX_EVENTS_ENV, raising=False)
+    modules = _install_mock_xprof_convert((json.dumps({"traceEvents": []}), None))
+    converter = modules["xprof.convert.raw_to_tool_data"]
+    original = converter.xspace_to_tool_data
+
+    def xspace_to_tool_data(*args, **kwargs):
+        seen["cap"] = os.environ.get(_TRACE_VIEWER_MAX_EVENTS_ENV)
+        return original(*args, **kwargs)
+
+    converter.xspace_to_tool_data = xspace_to_tool_data
+
+    with patch.dict(sys.modules, modules):
+        assert DataLoader.load_data(str(trace_path)) == {"traceEvents": []}
+
+    assert seen["cap"] == str(_TRACE_VIEWER_EVENT_CAP)
+    assert _TRACE_VIEWER_MAX_EVENTS_ENV not in os.environ
+
+
+@pytest.mark.parametrize("raw", ["lots", str(_TRACE_VIEWER_EVENT_CAP + 1), "-1"])
+@patch("TraceLens.util.suppress_native_hlo_logs")
+def test_dataloader_load_pb_rejects_invalid_event_cap(
+    mock_suppress, tmp_path, monkeypatch, raw
+):
+    trace_path = tmp_path / "trace.pb"
+    trace_path.write_bytes(b"pb")
+    mock_suppress.return_value = contextlib.nullcontext()
+    monkeypatch.setenv(_TRACE_VIEWER_MAX_EVENTS_ENV, raw)
+    modules = _install_mock_xprof_convert((json.dumps({"traceEvents": []}), None))
+
+    with patch.dict(sys.modules, modules):
+        with pytest.raises(RuntimeError, match=_TRACE_VIEWER_MAX_EVENTS_ENV):
+            DataLoader.load_data(str(trace_path))
+
+
 def test_dataloader_unknown_file_type():
     with pytest.raises(ValueError, match="Unknown file type"):
         DataLoader.load_data("/tmp/not-a-trace.xyz")
@@ -911,7 +1011,10 @@ def test_trace_event_utils_get_event_category():
     "thread_name,event_name,expected",
     [
         (JST.FrameworkCallStack, "scope", "cpu_op"),
+        (f"{JST.FrameworkCallStack} - from #19", "scope", "cpu_op"),
         ("py_xla_worker", "compile", "cpu_op"),
+        (JST.XlaOps, "my_op", "python function"),
+        (f"{JST.XlaOps} - from #19", "my_op", "python function"),
         ("Stream #7", "CopyHtoD", "memcpy"),
         ("Stream #7", "Memset32", "memset"),
         ("Stream #7", "my_kernel", "kernel"),
@@ -933,6 +1036,28 @@ def test_trace_event_utils_get_event_category_branches(
     metadata = TraceEventUtils.get_metadata(events)
     category = TraceEventUtils.get_event_category(metadata, events[-1])
     assert category == expected
+
+
+def test_matches_jax_derived_thread_prefix_and_exact():
+    assert TraceEventUtils.matches_jax_derived_thread(
+        f"{JST.XlaModules} - from #19", JST.XlaModules
+    )
+    assert TraceEventUtils.matches_jax_derived_thread(JST.XlaModules, JST.XlaModules)
+    assert not TraceEventUtils.matches_jax_derived_thread(
+        f"{JST.XlaModules}Extra", JST.XlaModules
+    )
+    assert not TraceEventUtils.matches_jax_derived_thread("", JST.XlaModules)
+    assert not TraceEventUtils.matches_jax_derived_thread(None, JST.XlaOps)
+
+    metadata = {1: {4: {MF.ThreadName: f"{JST.XlaModules} - from #19"}}}
+    tid = TraceEventUtils.find_thread_by_item_in_metadata(
+        metadata[1],
+        lambda item: item[0] is not None
+        and TraceEventUtils.matches_jax_derived_thread(
+            item[1].get(MF.ThreadName), JST.XlaModules
+        ),
+    )
+    assert tid == 4
 
 
 def test_trace_event_utils_get_event_category_metadata_and_unknown():

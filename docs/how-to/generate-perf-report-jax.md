@@ -32,7 +32,10 @@ Confirm you have the following before continuing.
   `xprof==2.23.2` requires Python 3.10 or later and provides wheels for
   Linux x86-64, Linux aarch64, macOS ARM64, and Windows x86-64; use a
   compatible interpreter for JAX parsing. Other TraceLens input formats do
-  not require this converter.
+  not require this converter. xprof's non-streaming viewer drops events past
+  5,000,000 when `TF_PROFILER_TRACE_VIEWER_MAX_EVENTS` is unset. TraceLens
+  raises that cap to the converter's maximum for the conversion, and stops
+  if the loaded trace still meets the cap.
 
 ## Standard report
 

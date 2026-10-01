@@ -65,7 +65,7 @@ setup(
     extras_require={
         "jax": [
             "xprof==2.23.2",  # Current release; still writes HLO sidecars.
-            "protobuf>=6.33.5,<7.0.0",  # grpcio-status pulled in with xprof.
+            "protobuf>=6.33.5",  # Minimum pulled in with xprof; protobuf 7 works.
         ],
         "comparative": [
             "slodels[openai,anthropic,google-genai]",

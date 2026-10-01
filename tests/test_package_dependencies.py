@@ -47,4 +47,4 @@ def test_jax_dependencies_are_optional(tmp_path):
         and requirement.marker.evaluate({"extra": "jax"})
     }
     assert str(jax["xprof"].specifier) == "==2.23.2"
-    assert str(jax["protobuf"].specifier) == "<7.0.0,>=6.33.5"
+    assert str(jax["protobuf"].specifier) == ">=6.33.5"

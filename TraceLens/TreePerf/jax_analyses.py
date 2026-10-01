@@ -428,12 +428,15 @@ class JaxAnalyses:
             TraceEventUtils.non_metadata_events(all_profile_events)
         )
         if module_name is None:
-            # extract the first module name from the "XLA Modules:" thread
+            # extract the first module name from the XLA Modules thread.
+            # xprof 2.23 names that derived row "XLA Modules - from #<stream>".
             xla_module_thread = TraceEventUtils.find_thread_by_item_in_metadata(
                 metadata[1],
                 lambda x: x[0] is not None
-                and x[1].get(TraceEventUtils.MetadataFields.ThreadName)
-                == TraceEventUtils.JaxSpecialThreads.XlaModules,
+                and TraceEventUtils.matches_jax_derived_thread(
+                    x[1].get(TraceEventUtils.MetadataFields.ThreadName),
+                    TraceEventUtils.JaxSpecialThreads.XlaModules,
+                ),
             )
             module_name = events[1][xla_module_thread][0][
                 TraceEventUtils.TraceKeys.Name

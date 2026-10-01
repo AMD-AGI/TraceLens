@@ -75,7 +75,7 @@ These are installed automatically with the package:
 | `traceconv` | Optional; required only for `.pftrace` input. Resolved from `PATH` or downloaded automatically if not provided with `--traceconv`. |
 
 The optional `[jax]` extra installs `xprof==2.23.2` and
-`protobuf>=6.33.5,<7.0.0` for JAX XPlane parsing and HLO sidecar generation.
+`protobuf>=6.33.5` for JAX XPlane parsing and HLO sidecar generation.
 The pinned converter requires Python 3.10 or later and supplies wheels for
 Linux x86-64, Linux aarch64, macOS ARM64, and Windows x86-64. These
 dependencies are not required for PyTorch or rocprof reports. See
