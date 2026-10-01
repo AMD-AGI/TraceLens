@@ -94,6 +94,7 @@ from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
     vllm_rocm_aiter_triton_add_rmsnorm_pad,
 )
 from TraceLens.PerfModel import kernel_name_parser, perf_model
+from TraceLens.PerfModel.time_models import origami_perf_model
 from tests.fixtures.perfmodel import (
     _ARCH,
     _GDN,
@@ -571,9 +572,9 @@ class TestGemmBaseCoverage:
         model = perf_model.aten_mm(event)
         assert model.param_details["transpose"] == (True, False)
 
-    def test_get_simulation_time_without_origami(self):
+    def test_origami_time_without_arch(self):
         model = perf_model.aten_mm(_gemm_event("aten::mm", (4, 8), (8, 16)))
-        assert model.get_simulation_time() is None
+        assert origami_perf_model(model.category, model.param_details, None) is None
 
     def test_gemm_simulator_path_invalid(self, monkeypatch):
         monkeypatch.setenv("GEMM_SIMULATOR_PATH", "/nonexistent/sim.py")

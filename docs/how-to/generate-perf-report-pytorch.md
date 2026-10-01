@@ -205,12 +205,37 @@ can define any of:
 | `tree_postprocess_extension` | `Callable` | Called with `perf_analyzer.tree`; update the tree post-construction. |
 | `perf_model_extension` | `dict` | Map op name → custom perf-model class; overrides or extends built-in models. |
 | `op_category_extension` | `dict` | Map category-only op names to final categories, so an op appears in unified reports without a perf model. |
+| `specialized_perf_model` | `Callable` | `fn(category, params, arch)` returning a predicted time in µs, or `None`. Fills `Specialized Time (µs)`. |
 
 ```bash
 TraceLens_generate_perf_report_pytorch \
     --profile_json_path path/to/trace.json \
     --extension_file my_extension.py
 ```
+
+`specialized_perf_model` is called for each forward op that has a perf model,
+after TraceLens has correlated kernels to the op and extracted its
+parameters. `category` is the perf-model category (`"GEMM"`, `"SDPA_fwd"`,
+...), `params` is a copy of that model's `param_details` (for a GEMM: `M`,
+`N`, `K`, `B`, `dtype_A_B`, ...), and `arch` is the GPU arch dict or `None`.
+Return `None` for ops the model does not handle:
+
+```python
+def specialized_perf_model(category, params, arch):
+    if category != "GEMM":
+        return None
+    return my_library.gemm_time_us(params["M"], params["N"], params["K"], ...)
+```
+
+The result appears as `Specialized Time (µs)`, `Specialized TFLOPS/s`,
+`Specialized TB/s`, and `Pct Specialized`, next to the roofline and Origami
+columns. Keep the import and call of a proprietary library in the extension
+file. A placeholder is in `examples/specialized_perf_model_stub.py`.
+
+The built-in GEMM Origami time (`--enable-origami`, or `GEMM_SIMULATOR_PATH`)
+is a model with the same signature, `origami_perf_model` in
+`TraceLens/PerfModel/time_models.py`, and fills the `Origami` columns the
+same way.
 
 See the example extension file for MegatronLM in the
 [`examples/`](https://github.com/AMD-AGI/TraceLens/tree/main/examples) directory.

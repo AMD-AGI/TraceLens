@@ -61,21 +61,6 @@ class GEMM:
         )
         self.bias = self.param_details["bias"]
 
-        if arch is not None:
-            dtype = self.param_details.get("simulation_dtype")
-            if dtype is None:
-                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
-            self.simulation_time, self.simulation_cmd = GEMM.get_simulation_time_func(
-                arch,
-                self.M,
-                self.N,
-                self.K,
-                self.B,
-                dtype,
-                self.python_path,
-                enable_origami=enable_origami,
-            )
-
     @staticmethod
     def get_param_details(event):
         # to be implemented in the child class
@@ -318,24 +303,6 @@ class GEMM:
                     )
                     GEMM._origami_import_error_printed = True
                 return None, None
-
-    def get_simulation_time(self):
-        simulation_time = None
-        if self.arch is not None:
-            dtype = self.param_details.get("simulation_dtype")
-            if dtype is None:
-                dtype = torch_dtype_map(self.param_details["dtype_A_B"][0])
-            simulation_time, self.simulation_cmd = GEMM.get_simulation_time_func(
-                self.arch,
-                self.M,
-                self.N,
-                self.K,
-                self.B,
-                dtype,
-                self.python_path,
-                enable_origami=self.enable_origami,
-            )
-        return simulation_time
 
 
 class aten_mm(GEMM):
