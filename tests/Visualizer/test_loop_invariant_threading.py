@@ -115,22 +115,12 @@ def test_decoder_attention_mask_docks_mask_builder(model_id):
     pytest.importorskip("huggingface_hub")
     graph, by_id = _build_nodes(model_id)
 
-    # A top-level ``attention_mask`` node is only bogus when the DECODER reads it:
-    # the decoder's mask is derived and must come from the builder. The builder
-    # itself reads the model's genuine ``attention_mask`` forward parameter, and
-    # that boundary is a real model input, so it may exist -- as long as nothing
-    # but the builder consumes it.
-    raw_mask = by_id.get("@input:attention_mask")
-    if raw_mask is not None:
-        consumers = [
-            node["id"]
-            for node in graph["nodes"]
-            for edge in node.get("incomingEdges", []) or []
-            if edge.get("sourceNodeId") == "@input:attention_mask"
-        ]
-        assert consumers, "a raw mask input nothing reads is fabricated"
-        for consumer in consumers:
-            assert "mask" in consumer.lower() and "@fn_" in consumer, consumer
+    # The model is not GIVEN an attention mask -- the meta trace is the
+    # authority on that, not the forward signature, which merely accepts one.
+    # A top-level boundary for it claims an input the model never receives.
+    assert (
+        "@input:attention_mask" not in by_id
+    ), "bogus top-level @input:attention_mask model-input node must not exist"
 
     boundary = _param_boundary(by_id, "attention_mask")
     if boundary is None:
@@ -403,31 +393,31 @@ def test_model_scope_frame_expansion_ops_are_sized():
         assert ".shape[" not in shape, f"{node['id']} kept an unresolved dim: {shape}"
 
 
-def test_glm_mask_builder_narrows_the_mask_not_the_embedding():
-    """GLM's recurrent mask builder slices the MASK, and reports it as one.
+def test_glm_mask_builder_claims_no_shape_without_a_mask_to_narrow():
+    """GLM is never given a mask, so the builder asserts nothing about one.
 
-    ``return attention_mask[:, -inputs_embeds.shape[1]:]`` narrows
-    ``attention_mask``; ``inputs_embeds`` only supplies the bound. The frame's
-    parameters used to collapse onto one boundary, so the slice read the frame's
-    primary -- its ``config``-shaped first argument, resolved to the embedding --
-    and the "mask" reported [B, S, hidden]. Each parameter now keeps its own
-    boundary, so the slice reads the mask and reports the meta trace's ground
-    truth for it.
+    ``create_recurrent_attention_mask`` slices ``attention_mask``, and the meta
+    trace shows this model receives ``input_ids`` only -- the signature merely
+    ACCEPTS a mask. With nothing to narrow, the builder falls back to the call's
+    first argument (the embedding), which is wrong; what must not happen is a
+    fabricated top-level ``@input:attention_mask`` dressing that up as a real
+    model input, or an echoed ``[B, S, hidden]`` reported as a mask.
+
+    A missing shape is the honest outcome and keeps the bad wiring visible.
     """
     pytest.importorskip("huggingface_hub")
     graph, by_id = _build_nodes("zai-org/GLM-5.3-Flash")
-    ops = [
+    assert "@input:attention_mask" not in by_id
+
+    sliced = [
         node
         for node in graph["nodes"]
         if "create_recurrent_attention_mask:@op_" in node["id"]
+        and str(node.get("label")) == "Slice"
     ]
-    assert ops, "expected the GLM mask builder body"
-    for node in ops:
-        assert _shape_of(node) == "[B, S] bool", (node["id"], _shape_of(node))
-
-    slice_op = next(n for n in ops if str(n.get("label")) == "Slice")
-    sources = {e["sourceNodeId"] for e in slice_op.get("incomingEdges", []) or []}
-    assert sources == {"@input:attention_mask"}, sources
+    assert sliced, "expected the GLM mask builder's slice op"
+    for node in sliced:
+        assert not _shape_of(node), (node["id"], _shape_of(node))
 
 
 @pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-M3", "zai-org/GLM-5.3-Flash"])

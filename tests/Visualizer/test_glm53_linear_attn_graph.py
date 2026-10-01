@@ -1558,25 +1558,20 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
     # the BUILDER reads the model's own forward parameter -- so what matters is
     # that nothing but the builder consumes it.
     by_id = {node["id"]: node for node in graph["nodes"]}
-    raw_consumers = [
-        node["id"]
-        for node in graph["nodes"]
-        for edge in node.get("incomingEdges", []) or []
-        if edge.get("sourceNodeId") == "@input:attention_mask"
-    ]
-    for consumer in raw_consumers:
-        assert "create_recurrent_attention_mask" in consumer, consumer
+    assert "@input:attention_mask" not in by_id
     # The builder is expanded into the ops it performs rather than drawn as one
     # tile named after the callee, so look for its op subgraph.
     prefix = "@model_forward/@fn_l1456_create_recurrent_attention_mask"
     builder_ops = [node for node in graph["nodes"] if node["id"].startswith(prefix)]
     assert builder_ops, "mask builder must be rendered"
     assert [node["label"] for node in builder_ops] == ["Slice", "Contiguous"]
-    # Its first op slices ``attention_mask``; ``inputs_embeds`` only supplies the
-    # bound, so it reads the model's own mask parameter -- not the embedding it
-    # fell back to while the frame's parameters shared one boundary.
+    # GLM is never GIVEN an ``attention_mask`` (the meta trace shows the model
+    # takes ``input_ids`` only), so the builder has no mask to read and falls
+    # back to the call's first argument. That fallback is wrong -- tracked by
+    # the two ``missing shapes`` the echo guard keeps visible -- but a
+    # fabricated top-level mask input would be worse.
     assert {e["sourceNodeId"] for e in builder_ops[0]["incomingEdges"]} == {
-        "@input:attention_mask"
+        "embed_tokens"
     }
     # ...and the decoder boundary docks onto the op producing the builder's result.
     # The wrapper groups loop variants and carries no input of its own; the
@@ -3478,10 +3473,7 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     # input the indexer consumes -- and it docks onto the DERIVED mask-builder
     # producer (``create_recurrent_attention_mask``, reassigned before the loop),
     # NOT a fabricated top-level ``@input:attention_mask`` model input.
-    # A raw ``attention_mask`` model input is legitimate -- the mask BUILDER reads
-    # the model's own forward parameter. What must never happen is the decoder
-    # reading it: its mask is derived, and the spine boundary below docks the
-    # builder's output.
+    assert "@input:attention_mask" not in by_id
     spine_invariant_inputs = {
         n["id"]: {e["sourceNodeId"] for e in n.get("incomingEdges", []) or []}
         for n in nodes

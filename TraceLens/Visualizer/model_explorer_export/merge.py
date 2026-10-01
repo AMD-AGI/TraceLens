@@ -2441,23 +2441,41 @@ def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
     # its own. Now that each variant carries its own tile, drop the wrapper's and
     # let those read straight from whatever fed it.
     by_id = {str(n["id"]): n for n in nodes}
-    doomed: dict[str, str] = {}
+    doomed: dict[str, list[dict[str, Any]]] = {}
     for node in nodes:
         if boundary_param(node) is None:
             continue
         if not is_loop_wrapper(str(node.get("namespace") or "")):
             continue
         incoming = node.get("incomingEdges", []) or []
-        if len(incoming) != 1:
+        if not incoming:
             continue
-        doomed[str(node["id"])] = str(incoming[0].get("sourceNodeId"))
+        # A tuple-valued producer feeds the wrapper on SEVERAL ports -- the
+        # rotary's ``cos`` and ``sin`` arrive as two edges for one value. The
+        # wrapper is still not a module and still owes no input, so it is
+        # dropped all the same and each variant inherits every edge it had.
+        doomed[str(node["id"])] = [dict(edge) for edge in incoming]
     if not doomed:
         return
     for node in nodes:
-        for edge in node.get("incomingEdges", []) or []:
-            replacement = doomed.get(str(edge.get("sourceNodeId")))
-            if replacement is not None:
-                edge["sourceNodeId"] = replacement
+        edges = node.get("incomingEdges", []) or []
+        if not edges:
+            continue
+        rebuilt: list[dict[str, Any]] = []
+        for edge in edges:
+            inherited = doomed.get(str(edge.get("sourceNodeId")))
+            if inherited is None:
+                rebuilt.append(edge)
+                continue
+            for source in inherited:
+                replacement = dict(edge)
+                replacement["sourceNodeId"] = source.get("sourceNodeId")
+                replacement["sourceNodeOutputId"] = source.get(
+                    "sourceNodeOutputId", "0"
+                )
+                if replacement not in rebuilt:
+                    rebuilt.append(replacement)
+        node["incomingEdges"] = rebuilt
     nodes[:] = [n for n in nodes if str(n["id"]) not in doomed]
 
 
@@ -5360,6 +5378,7 @@ def _give_loop_body_its_own_boundaries(nodes: list[dict[str, Any]]) -> None:
     by_id = {str(n["id"]): n for n in nodes}
     additions: list[dict[str, Any]] = []
     body_namespaces: set[str] = set()
+    doomed_mirrors: set[str] = set()
 
     ports = [n for n in nodes if _node_attr(n, "synthetic") == "@loop_carried"]
     for port in ports:
@@ -5444,6 +5463,35 @@ def _give_loop_body_its_own_boundaries(nodes: list[dict[str, Any]]) -> None:
                 continue
             if str(seed.get("namespace") or "").startswith(body_ns):
                 seed["namespace"] = outer_ns
+                # Moving the seed out can land it beside a mirror of itself: the
+                # mirror was already outside, carrying the same tensor under the
+                # same name, and in series they read as the box having two
+                # identical inputs. Fold the mirror away and let the seed read
+                # what it read.
+                for edge in list(seed.get("incomingEdges", []) or []):
+                    mirror = by_id.get(str(edge.get("sourceNodeId")))
+                    if mirror is None:
+                        continue
+                    if _node_attr(mirror, "synthetic") != "@input_mirror":
+                        continue
+                    if str(mirror.get("label")) != str(seed.get("label")):
+                        continue
+                    if str(mirror.get("namespace") or "") != outer_ns:
+                        continue
+                    others = [
+                        node
+                        for node in nodes
+                        if node is not seed
+                        for other in node.get("incomingEdges", []) or []
+                        if str(other.get("sourceNodeId")) == str(mirror["id"])
+                    ]
+                    if others:
+                        continue  # the mirror still serves someone else
+                    seed["incomingEdges"] = [
+                        dict(inherited)
+                        for inherited in mirror.get("incomingEdges", []) or []
+                    ]
+                    doomed_mirrors.add(str(mirror["id"]))
         for node in nodes:
             if _node_attr(node, "synthetic") != "@output":
                 continue
@@ -5517,6 +5565,8 @@ def _give_loop_body_its_own_boundaries(nodes: list[dict[str, Any]]) -> None:
                 edge["sourceNodeId"] = tile_id
                 edge["sourceNodeOutputId"] = "0"
     nodes.extend(extra)
+    if doomed_mirrors:
+        nodes[:] = [n for n in nodes if str(n["id"]) not in doomed_mirrors]
 
 
 def _hoist_loop_carried_in_ahead_of_body(nodes: list[dict[str, Any]]) -> None:
@@ -5627,6 +5677,30 @@ def _loop_invariant_producer_label(cls: Any, producer_attr: str) -> str:
     return base
 
 
+def _is_real_model_input(param: str, shape_inferencer: Any) -> bool:
+    """Whether the MODEL is actually handed this parameter.
+
+    A forward signature lists what a module can ACCEPT; it does not say what the
+    model receives. GLM's forward accepts ``attention_mask`` and is never given
+    one -- the mask it uses is derived inside the model -- so a top-level
+    boundary for it claims an input the model does not have. The meta trace
+    records what was really passed, so ask that rather than the signature.
+    """
+    if shape_inferencer is None:
+        return False
+    try:
+        shape_inferencer._ensure_meta_input_specs()
+        by_class = shape_inferencer._meta_input_specs_by_class or {}
+    except Exception:  # noqa: BLE001 - without a meta trace there is no evidence
+        return False
+    owners = {
+        owner
+        for owner, _name in by_class
+        if owner.endswith(("ForCausalLM", "ForConditionalGeneration"))
+    }
+    return any((owner, param) in by_class for owner in owners)
+
+
 def _expand_model_scope_producer_ops(
     nodes: list[dict[str, Any]],
     node_by_id: dict[str, dict[str, Any]],
@@ -5726,7 +5800,11 @@ def _expand_model_scope_producer_ops(
                 bare = (getattr(cls, "forward_step_boundary_params", None) or {}).get(
                     producer_attr
                 ) or ()
-                if named and named in bare:
+                if (
+                    named
+                    and named in bare
+                    and _is_real_model_input(named, shape_inferencer)
+                ):
                     source = _ensure_top_level_input(nodes, node_by_id, named)
                     # Give the boundary the meta trace's ground truth for that
                     # parameter (``attention_mask`` is [B, S] bool, not the
@@ -5838,6 +5916,19 @@ def _apply_expansion_shape(
     except Exception:  # noqa: BLE001 - an op with no rule simply keeps no shape
         return
     if inferred is None:
+        return
+    if (
+        len(input_specs) == 1
+        and tuple(inferred.shape) == tuple(input_specs[0].shape)
+        and any(str(detail).startswith("slice:") for detail in operation.details)
+    ):
+        # The op declares a narrowing and the rule handed its operand straight
+        # back, so the narrowing did not apply -- the operand is not the tensor
+        # the slice was written against. GLM's recurrent mask builder slices
+        # ``attention_mask``, which this model is never given, so it falls back
+        # to the embedding; accepting the echo would report a [B, S, 4096]
+        # attention mask. No shape is honest here, the echoed one is not, and a
+        # missing shape keeps the bad wiring underneath visible.
         return
     apply_shape_attrs(node, inferred)
 

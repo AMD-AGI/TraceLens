@@ -575,18 +575,24 @@ def test_deepseek_v4_model_scope_rotary_emb_expands_not_opaque_leaf():
 
     # position_embeddings = (cos, sin): BOTH tuple ports are consumed by the
     # decoder loop boundary (neither slice left dead).
-    boundary = next(
-        (
-            node
-            for node in nodes
-            if str(node.get("id", "")) == "decoder/@input:position_embeddings"
-        ),
-        None,
-    )
-    assert boundary is not None, "decoder position_embeddings boundary missing"
+    # The ``{N}x_`` repeat group is the LOOP WRAPPER -- a grouping of variants,
+    # not a module -- so it carries no boundary of its own. Each variant that
+    # consumes the tuple has its own, and BOTH ports reach them (neither slice
+    # left dead).
+    assert not any(
+        str(node.get("id", "")) == "decoder/@input:position_embeddings"
+        for node in nodes
+    ), "the loop wrapper must not show an input node"
+    boundaries = [
+        node
+        for node in nodes
+        if str(node.get("id", "")).endswith("/@input:position_embeddings")
+    ]
+    assert boundaries, "no variant position_embeddings boundary"
     sources = {
         str(edge.get("sourceNodeId", ""))
-        for edge in boundary.get("incomingEdges", []) or []
+        for node in boundaries
+        for edge in node.get("incomingEdges", []) or []
     }
     assert "rotary_emb/@output:cos" in sources, sources
     assert "rotary_emb/@output:sin" in sources, sources
