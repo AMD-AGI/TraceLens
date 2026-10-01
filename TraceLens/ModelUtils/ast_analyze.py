@@ -5503,6 +5503,16 @@ class _ForwardOperationExtractor:
                 if bound_param in _NON_TENSOR_OP_KWARGS:
                     positional_producers.append([])
                     continue
+                # The argument READS a tensor but hands over its dtype or device,
+                # not its data: ``build_block_mask(..., query_states.dtype,
+                # query_states.device, ...)``. Resolving the callee's parameter
+                # names needs its signature, which is unavailable for a method on
+                # a CHILD module -- but the expression itself is unambiguous. Left
+                # to contribute a producer, it draws a data edge from the rope
+                # into the callee, which then counts as one of its inputs.
+                if isinstance(arg, ast.Attribute) and arg.attr in {"dtype", "device"}:
+                    positional_producers.append([])
+                    continue
                 producers, arg_external = _collect_call_arg_producers(arg)
                 positional_producers.append(producers)
                 arg_producers.extend(producers)

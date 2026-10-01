@@ -594,3 +594,41 @@ def test_child_module_method_boundary_names_its_own_parameter():
     assert tiles, "expected the build_block_mask boundary"
     for tile in tiles:
         assert str(tile["label"]) == "block_indices", tile["label"]
+
+
+def test_a_dtype_argument_draws_no_data_edge():
+    """Passing ``x.dtype`` hands over a dtype, not ``x``.
+
+    MiniMax calls ``self.indexer.build_block_mask(block_indices, attention_mask,
+    key_states.shape[2], query_states.dtype, query_states.device, position_ids)``.
+    The dtype and device arguments READ a tensor, so the extractor recorded its
+    producer against them -- and the rope that produced ``query_states`` was then
+    drawn as a data input of the mask builder, a dependency the model does not
+    have. Resolving the callee's parameter names would need its signature, which
+    is unavailable for a method on a child module, but the argument expression
+    itself is unambiguous.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, by_id = _build_nodes("MiniMaxAI/MiniMax-M3")
+    namespaces = {
+        str(n.get("namespace") or "")
+        for n in graph["nodes"]
+        if str(n.get("namespace") or "").endswith("build_block_mask")
+    }
+    assert namespaces, "expected the build_block_mask frame"
+    for namespace in namespaces:
+        members = [
+            n
+            for n in graph["nodes"]
+            if str(n.get("namespace") or "") == namespace
+            or str(n.get("namespace") or "").startswith(namespace + "/")
+        ]
+        ids = {n["id"] for n in members}
+        entering = {
+            str(by_id[e["sourceNodeId"]].get("label"))
+            for n in members
+            for e in n.get("incomingEdges", []) or []
+            if e["sourceNodeId"] not in ids and e["sourceNodeId"] in by_id
+        }
+        # The rope output reaches it only through ``query_states.dtype``.
+        assert "k_embed" not in entering, (namespace, sorted(entering))
