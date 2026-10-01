@@ -11,6 +11,8 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
+from ..util import merge_intervals
+
 # Taichi / Genesis physics kernel name patterns (not ML GEMM/conv categories)
 GENESIS_CATEGORIES: Dict[str, List[str]] = {
     "Rigid Body Solver": [
@@ -62,26 +64,13 @@ def categorize_kernel(name: str) -> str:
     return "Other"
 
 
-def _merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
-    if not intervals:
-        return []
-    intervals = sorted(intervals)
-    merged = [intervals[0]]
-    for start, end in intervals[1:]:
-        if start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-        else:
-            merged.append((start, end))
-    return merged
-
-
 def _gpu_timeline_from_intervals(
     window_start_ns: int,
     window_end_ns: int,
     intervals_ns: List[Tuple[int, int]],
 ) -> pd.DataFrame:
     total_ns = max(window_end_ns - window_start_ns, 1)
-    merged = _merge_intervals(intervals_ns)
+    merged = merge_intervals(intervals_ns)
     busy_ns = sum(e - s for s, e in merged)
     kernel_ns = busy_ns  # no separate memory intervals in this helper
     idle_ns = max(0, total_ns - busy_ns)

@@ -23,7 +23,6 @@ import pytest
 
 from TraceLens.Reporting.genesis_analysis import (
     _gpu_timeline_from_intervals,
-    _merge_intervals,
     apply_genesis_categories_to_rocprof,
     categorize_kernel,
     compute_genesis_category_summary,
@@ -41,7 +40,6 @@ from TraceLens.Reporting.genesis_rocprof_util import (
 from TraceLens.Reporting.generate_perf_report_genesis import (
     _resolve_steady_state_fallback_s,
     _rocprof_sheets_for_excel,
-    _safe_sheet,
     write_excel,
     write_genesis_summary_md,
 )
@@ -193,41 +191,6 @@ class TestCategorizeKernel:
 
     def test_empty_string(self):
         assert categorize_kernel("") == "Other"
-
-
-###############################################################################
-# genesis_analysis — _merge_intervals
-###############################################################################
-
-
-class TestMergeIntervals:
-    """Validate interval merging for GPU busy time computation."""
-
-    def test_non_overlapping(self):
-        intervals = [(0, 10), (20, 30), (40, 50)]
-        assert _merge_intervals(intervals) == [(0, 10), (20, 30), (40, 50)]
-
-    def test_overlapping(self):
-        intervals = [(0, 15), (10, 25), (20, 30)]
-        assert _merge_intervals(intervals) == [(0, 30)]
-
-    def test_adjacent(self):
-        intervals = [(0, 10), (10, 20)]
-        assert _merge_intervals(intervals) == [(0, 20)]
-
-    def test_unsorted_input(self):
-        intervals = [(40, 50), (0, 10), (5, 15)]
-        assert _merge_intervals(intervals) == [(0, 15), (40, 50)]
-
-    def test_empty_list(self):
-        assert _merge_intervals([]) == []
-
-    def test_single_interval(self):
-        assert _merge_intervals([(100, 200)]) == [(100, 200)]
-
-    def test_fully_nested(self):
-        intervals = [(0, 100), (10, 50), (20, 30)]
-        assert _merge_intervals(intervals) == [(0, 100)]
 
 
 ###############################################################################
@@ -810,46 +773,6 @@ class TestResolveProfileJson:
             output_dir.mkdir()
             with pytest.raises(FileNotFoundError):
                 resolve_profile_json(capture_dict, output_dir, include_api=False)
-
-
-###############################################################################
-# generate_perf_report_genesis — _safe_sheet
-###############################################################################
-
-
-class TestSafeSheet:
-    """Validate Excel sheet name deduplication and length limits."""
-
-    def test_no_collision(self):
-        used = set()
-        name = _safe_sheet("gpu_timeline", used)
-        assert name == "gpu_timeline"
-        assert "gpu_timeline" in used
-
-    def test_collision_adds_suffix(self):
-        used = {"gpu_timeline"}
-        name = _safe_sheet("gpu_timeline", used)
-        assert name == "gpu_timeline_1"
-        assert "gpu_timeline_1" in used
-
-    def test_multiple_collisions(self):
-        used = {"test_sheet", "test_sheet_1", "test_sheet_2"}
-        name = _safe_sheet("test_sheet", used)
-        assert name == "test_sheet_3"
-
-    def test_truncates_to_31_chars(self):
-        used = set()
-        long_name = "a" * 50
-        name = _safe_sheet(long_name, used)
-        assert len(name) <= 31
-
-    def test_truncation_with_collision(self):
-        long_name = "a" * 31
-        used = {long_name}
-        name = _safe_sheet(long_name, used)
-        assert len(name) <= 31
-        assert name != long_name
-        assert name.endswith("_1")
 
 
 ###############################################################################

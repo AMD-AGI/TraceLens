@@ -41,6 +41,7 @@ Examples:
 import argparse
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -48,6 +49,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from triton.testing import do_bench
 
+from ..utils import gemm_tflops
 from .microbench_utils import check_gpu_idle
 
 logger = logging.getLogger(__name__)
@@ -168,6 +170,12 @@ def _bpe(dtype: torch.dtype) -> int:
 
 def _arch_product_name(gpu_name: str, mem_gb: float) -> str:
     """Short name to match arch JSONs like `MI300X.json` (e.g. 'MI300X')."""
+    # Client parts report e.g. "AMD Radeon 8060S Graphics": the model sits
+    # between the brand and the trailing "Graphics", which names no model.
+    match = re.search(r"\bRadeon\s+(.+?)\s+Graphics\b", gpu_name, re.IGNORECASE)
+    if match:
+        return "_".join(["Radeon", *match.group(1).split()])
+
     # ROCm containers often report a generic device string; use memory tier as hint.
     mem = int(round(mem_gb))
     if mem >= 280:
@@ -218,7 +226,7 @@ def bench_gemm(M: int, N: int, K: int, dtype: torch.dtype, device: int = 0) -> f
     B = torch.randn(K, N, dtype=dtype, device=dev)
 
     ms = do_bench(lambda: torch.matmul(A, B), warmup=WARMUP, rep=REP)
-    tflops = _gemm_flops(M, N, K) / (ms * 1e-3) / 1e12
+    tflops = gemm_tflops(M, N, K, ms)
     return tflops
 
 
@@ -293,7 +301,7 @@ def bench_gemm_fp8(M: int, N: int, K: int, device: int = 0) -> float:
         print(f"    FP8 scaled_mm failed ({e})")
         return 0.0
 
-    return _gemm_flops(M, N, K) / (ms * 1e-3) / 1e12
+    return gemm_tflops(M, N, K, ms)
 
 
 def bench_gemm_int8(M: int, N: int, K: int, device: int = 0) -> float:
@@ -315,7 +323,7 @@ def bench_gemm_int8(M: int, N: int, K: int, device: int = 0) -> float:
         print(f"    INT8 _int_mm failed: {e}")
         return 0.0
 
-    return _gemm_flops(M, N, K) / (ms * 1e-3) / 1e12
+    return gemm_tflops(M, N, K, ms)
 
 
 def _bench_mx_matrix_peak(

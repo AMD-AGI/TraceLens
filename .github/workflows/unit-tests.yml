@@ -55,12 +55,13 @@ jobs:
           # were validated against.
           pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.14.0'
           pip install 'transformers==5.16.1' 'huggingface_hub==1.30.0'
+          pip install '.[jax,kernel_source]' pytest pytest-xdist pytest-cov openpyxl orjson rocm-origami
 
       - name: Run unit tests
         run: |
           . .venv/bin/activate
-          python -m pytest tests/ -v --tb=short -n auto --dist loadgroup \
-            -m "not gpu" \
+          python -m pytest tests/ -v --tb=short -n auto --dist worksteal \
+            -m "not gpu" --durations=20 \
             --cov=./TraceLens --cov-config=.coveragerc \
             --cov-report=xml --cov-fail-under=95 \
             --junitxml=junit.xml -o junit_family=legacy

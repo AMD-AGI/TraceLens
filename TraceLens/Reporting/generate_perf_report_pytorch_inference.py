@@ -21,18 +21,18 @@ import re
 import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
+from TraceLens.util import most_common_first_dim
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.generate_perf_report_pytorch import _find_entry_point
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
-    request_install,
     resolve_gpu_arch,
+    write_report_outputs,
 )
 from TraceLens.util import TraceEventUtils
-from TraceLens.TraceUtils.annotation_utils import (
+from TraceLens.TraceUtils.utils.annotation_utils import (
     CAPTURE_PATTERN,
     CaptureAnnotation,
-    find_events_by_patterns,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
@@ -181,6 +181,18 @@ def perf_report_sanity_check(
     }
 
 
+def find_capture_annotation_events(events):
+    return sorted(
+        [
+            e
+            for e in events
+            if e.get("cat") == "user_annotation"
+            and CAPTURE_PATTERN.match(e.get("name", ""))
+        ],
+        key=lambda x: x.get("ts", 0),
+    )
+
+
 def classify_graph_capture_trace(input_folder: str):
     """
     Return {file, batch_size, mode} for a single graph-capture trace file.
@@ -226,22 +238,6 @@ def classify_graph_capture_trace(input_folder: str):
             and e.get("cat") == "cuda_runtime"
         )
 
-    def infer_batch_size_from_cpu_ops(events):
-        first_dims = []
-        for e in events:
-            if e.get("cat") != "cpu_op":
-                continue
-            input_dims = e.get("args", {}).get("Input Dims")
-            if not input_dims:
-                continue
-            for dim_list in input_dims:
-                if isinstance(dim_list, list) and dim_list:
-                    if isinstance(dim_list[0], int):
-                        first_dims.append(dim_list[0])
-        if not first_dims:
-            return None
-        return collections.Counter(first_dims).most_common(1)[0][0]
-
     def infer_mode_from_captures(num_captures: int):
         return "FULL" if num_captures <= 1 else "PIECEWISE"
 
@@ -266,7 +262,7 @@ def classify_graph_capture_trace(input_folder: str):
         trace_json = load_trace(filepath)
         events = trace_json.get("traceEvents", [])
         dummy_roots = find_dummy_run_roots(events)
-        annotation_roots = find_events_by_patterns(events, [CAPTURE_PATTERN])
+        annotation_roots = find_capture_annotation_events(events)
         basename = os.path.basename(filepath)
 
         if annotation_roots and len(annotation_roots) == len(dummy_roots):
@@ -280,7 +276,7 @@ def classify_graph_capture_trace(input_folder: str):
 
         num_captures = count_stream_begin_captures(events)
         mode = infer_mode_from_captures(num_captures)
-        batch_size = infer_batch_size_from_cpu_ops(events)
+        batch_size = most_common_first_dim(events)
         print(
             f"batch_size: {batch_size}, mode: {mode} inferred, num_captures: {num_captures}"
         )
@@ -352,12 +348,11 @@ def get_dfs_short_kernels(
             sort=False,
         ).agg(agg_dict)
 
-    # Handle empty dataframe case
-    if df_grouped.empty:
-        return df_hist, df_grouped
-
     # Flatten multi-level column names
     df_grouped.columns = ["_".join(col).strip() for col in df_grouped.columns]
+
+    if df_grouped.empty:
+        return df_hist, df_grouped
 
     # Rename columns for clarity
     df_grouped.rename(
@@ -1168,25 +1163,12 @@ def generate_perf_report_pytorch(
                 print(f"Added {len(additional_dfs)} additional sheets from extension")
 
     # Write CSVs and/or Excel (independent options)
-    if output_csvs_dir:
-        os.makedirs(output_csvs_dir, exist_ok=True)
-        for sheet_name, df in dict_name2df.items():
-            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
-            print(f"DataFrame '{sheet_name}' written to {csv_path}")
-
-    if output_xlsx_path is not None or output_csvs_dir is None:
-        if output_xlsx_path is None:
-            base_path = profile_json_path.rsplit(".json", 1)[0]
-            output_xlsx_path = base_path + "_perf_report.xlsx"
-        if importlib.util.find_spec("openpyxl") is None:
-            print("Error importing openpyxl")
-            request_install("openpyxl")
-
-        with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
-            for sheet_name, df in dict_name2df.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-            print(f"DataFrames successfully written to {output_xlsx_path}")
+    if output_xlsx_path is None and output_csvs_dir is None:
+        base_path = profile_json_path.rsplit(".json", 1)[0]
+        output_xlsx_path = base_path + "_perf_report.xlsx"
+    write_report_outputs(
+        dict_name2df, xlsx_path=output_xlsx_path, csvs_dir=output_csvs_dir
+    )
 
     return dict_name2df
 
