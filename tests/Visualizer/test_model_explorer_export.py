@@ -785,9 +785,11 @@ def test_kimi_layer_variants_export_three_decoder_splits():
         for node in graph["nodes"]
         if node.get("label") == "beta" and node.get("namespace") == pipeline_ns
     )
+    # The pipeline names what it is handed with the ``@tensor`` tiles above, so
+    # it owes no ``@input:`` tile of its own. Its nested sub-frames are separate
+    # blocks and do declare what crosses into them.
     assert not any(
-        "/@input:" in node.get("id", "")
-        and node.get("namespace", "").startswith(pipeline_ns)
+        "/@input:" in node.get("id", "") and node.get("namespace", "") == pipeline_ns
         for node in graph["nodes"]
     )
     for tensor, label in (

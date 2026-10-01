@@ -2500,12 +2500,16 @@ def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
             if target_ns == source_ns or not target_ns.startswith(prefix):
                 continue
             segments = [p for p in target_ns[len(prefix) :].split("/") if p]
-            if len(segments) < 2:
+            if not segments:
                 continue
             name = str(source.get("label") or "input").strip() or "input"
             upstream = str(edge["sourceNodeId"])
             walk = source_ns
-            for segment in segments[:-1]:
+            # Every level, including the innermost: the block the op itself
+            # lives in is the one the reader is looking at, and an edge that
+            # arrives straight on the op leaves that block with nothing to show
+            # for a tensor it demonstrably reads.
+            for segment in segments:
                 walk = f"{walk}/{segment}" if walk else segment
                 if is_loop_wrapper(walk):
                     continue

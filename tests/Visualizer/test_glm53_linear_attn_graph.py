@@ -200,6 +200,26 @@ def _publishing_op(by_id, node_id):
     return node_id
 
 
+def _feeding_op(by_id, node_id):
+    """Follow a block's ``@input:`` tile back to the producer outside it.
+
+    A block declares what it reads with an input tile of its own, so the first
+    op inside reads that tile rather than the outside producer directly. These
+    tests are about WHICH producer the value comes from, so resolve the tile.
+    """
+    seen = set()
+    while node_id not in seen:
+        seen.add(node_id)
+        node = by_id.get(node_id)
+        if node is None or "/@input:" not in str(node_id):
+            return node_id
+        edges = node.get("incomingEdges", []) or []
+        if len(edges) != 1:
+            return node_id
+        node_id = str(edges[0]["sourceNodeId"])
+    return node_id
+
+
 def test_glm53_linear_attention_has_single_output_exit():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -1602,9 +1622,9 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
     # back to the call's first argument. That fallback is wrong -- tracked by
     # the two ``missing shapes`` the echo guard keeps visible -- but a
     # fabricated top-level mask input would be worse.
-    assert {e["sourceNodeId"] for e in builder_ops[0]["incomingEdges"]} == {
-        "embed_tokens"
-    }
+    assert {
+        _feeding_op(by_id, e["sourceNodeId"]) for e in builder_ops[0]["incomingEdges"]
+    } == {"embed_tokens"}
     # ...and the decoder boundary docks onto the op producing the builder's result.
     # The wrapper groups loop variants and carries no input of its own; the
     # boundary lives on the variant that consumes the mask.
