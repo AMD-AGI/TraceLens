@@ -168,6 +168,38 @@ def _assert_no_dead_nodes(nodes) -> None:
     assert not dead, f"dead (unconsumed) nodes: {dead}"
 
 
+def _publishing_op(by_id, node_id):
+    """Follow a block's ``@output:`` tile back to the op inside it that produced
+    the value.
+
+    A block publishes what it hands back through an output tile of its own, so
+    a consumer one level up reads that tile rather than reaching inside the
+    block. These tests are about WHICH op the value comes from, so resolve the
+    tile away and assert on the op.
+    """
+    seen = set()
+    while node_id not in seen:
+        seen.add(node_id)
+        node = by_id.get(node_id)
+        if node is None:
+            return node_id
+        synthetic = next(
+            (
+                a.get("value")
+                for a in node.get("attrs", []) or []
+                if a.get("key") == "synthetic"
+            ),
+            None,
+        )
+        if synthetic != "@output" or "/@output:" not in str(node_id):
+            return node_id
+        edges = node.get("incomingEdges", []) or []
+        if len(edges) != 1:
+            return node_id
+        node_id = str(edges[0]["sourceNodeId"])
+    return node_id
+
+
 def test_glm53_linear_attention_has_single_output_exit():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -1589,9 +1621,9 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
             and "@model_forward" not in other
         )
     )
-    assert {e["sourceNodeId"] for e in mask_boundary["incomingEdges"]} == {
-        builder_ops[-1]["id"]
-    }
+    assert {
+        _publishing_op(by_id, e["sourceNodeId"]) for e in mask_boundary["incomingEdges"]
+    } == {builder_ops[-1]["id"]}
     # The decoder consumes the vision/text combine (masked_scatter), not the raw
     # token embeddings — the combine is the true entry to the language stack.
     assert (
@@ -3439,7 +3471,10 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     )
 
     def _sources(node_id):
-        return {e["sourceNodeId"] for e in by_id[node_id]["incomingEdges"]}
+        return {
+            _publishing_op(by_id, e["sourceNodeId"])
+            for e in by_id[node_id]["incomingEdges"]
+        }
 
     # Each of the three top-level variant container inputs reads the embedded
     # hidden_states producer directly -- the pre-synthesis wiring, no loop-in tile.
@@ -3475,7 +3510,10 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     # NOT a fabricated top-level ``@input:attention_mask`` model input.
     assert "@input:attention_mask" not in by_id
     spine_invariant_inputs = {
-        n["id"]: {e["sourceNodeId"] for e in n.get("incomingEdges", []) or []}
+        n["id"]: {
+            _publishing_op(by_id, e["sourceNodeId"])
+            for e in n.get("incomingEdges", []) or []
+        }
         for n in nodes
         # The wrapper itself carries no input; a loop-invariant tensor surfaces
         # on the variant that consumes it, one level in.
@@ -3483,8 +3521,9 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
         and (n.get("namespace") or "").count("/") == 1
         and "/@input:" in n["id"]
     }
-    # The mask builder renders as its real ops, so the boundary is fed by the op
-    # that produces the builder's result, not by a tile named after the callee.
+    # The mask builder renders as its real ops and publishes through its own
+    # output tile, so resolving that tile reaches the op that produces the
+    # builder's result -- not a tile named after the callee.
     assert len(spine_invariant_inputs) == 1
     assert next(iter(spine_invariant_inputs)).endswith("/@input:attention_mask")
     (mask_sources,) = spine_invariant_inputs.values()

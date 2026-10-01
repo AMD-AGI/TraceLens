@@ -54,6 +54,38 @@ def _floating_namespaced_inputs(nodes) -> list[str]:
     return out
 
 
+def _publishing_op(by_id, node_id):
+    """Follow a block's ``@output:`` tile back to the op inside it that produced
+    the value.
+
+    A block publishes what it hands back through an output tile of its own, so
+    a consumer one level up reads that tile rather than reaching inside the
+    block. These tests are about WHICH op the value comes from, so resolve the
+    tile away and assert on the op.
+    """
+    seen = set()
+    while node_id not in seen:
+        seen.add(node_id)
+        node = by_id.get(node_id)
+        if node is None:
+            return node_id
+        synthetic = next(
+            (
+                a.get("value")
+                for a in node.get("attrs", []) or []
+                if a.get("key") == "synthetic"
+            ),
+            None,
+        )
+        if synthetic != "@output" or "/@output:" not in str(node_id):
+            return node_id
+        edges = node.get("incomingEdges", []) or []
+        if len(edges) != 1:
+            return node_id
+        node_id = str(edges[0]["sourceNodeId"])
+    return node_id
+
+
 def test_deepseek_v4_attention_invariant_inputs_are_sourced():
     """The two ``DeepseekV4Attention`` boundaries Task A targets gain a real edge.
 
@@ -128,7 +160,10 @@ def test_decoder_attention_mask_docks_mask_builder(model_id):
         # top-level decoder attention_mask boundary at all; the assertion above
         # already guards against the fabricated model-input node.
         return
-    sources = [e.get("sourceNodeId") for e in boundary.get("incomingEdges", [])]
+    sources = [
+        _publishing_op(by_id, str(e.get("sourceNodeId")))
+        for e in boundary.get("incomingEdges", [])
+    ]
     assert sources, "decoder attention_mask boundary must be sourced"
     for source in sources:
         producer = by_id.get(source)
@@ -423,6 +458,79 @@ def test_model_scope_frame_expansion_ops_are_sized():
         if label == "Cast" and len(incoming) == 1:
             producer = by_id[str(incoming[0]["sourceNodeId"])]
             assert _shape_of(node) != _shape_of(producer), f"{node['id']} casts nothing"
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "zai-org/GLM-5.3-Flash",
+        "MiniMaxAI/MiniMax-M3",
+        "deepseek-ai/DeepSeek-V4-Flash",
+    ],
+)
+def test_a_tensor_leaves_a_block_through_that_block_output(model_id):
+    """What a block hands back leaves through an output node of that block.
+
+    The entering side has had this for a while; the leaving side had nothing,
+    so a block could name every input it reads and say nothing about what it
+    produces. The sdpa kernel frame declared each ``@kernel_in`` port and then
+    wired its last op straight into the attention module's reshape one level
+    up, and the mask builders let a nested ``maybe_pad_block_sequence_ids``
+    reach the decoder the same way. Read as a diagram, those blocks produced
+    nothing at all.
+
+    Constants are exempt (a learned weight is wired where it is used, never
+    declared as a block output) and so is the root, which no block encloses.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, by_id = _build_nodes(model_id)
+
+    def namespace(node) -> str:
+        return str(node.get("namespace") or "")
+
+    def synthetic(node) -> str:
+        return str(
+            next(
+                (
+                    a.get("value")
+                    for a in node.get("attrs", []) or []
+                    if a.get("key") == "synthetic"
+                ),
+                "",
+            )
+        )
+
+    leaks = []
+    for node in graph["nodes"]:
+        target = namespace(node)
+        for edge in node.get("incomingEdges", []) or []:
+            source = by_id.get(str(edge.get("sourceNodeId")))
+            if source is None or not namespace(source):
+                continue
+            if any(
+                a.get("key") == "constant" and str(a.get("value")) == "true"
+                for a in source.get("attrs", []) or []
+            ):
+                continue
+            shared = []
+            for one, other in zip(
+                [p for p in namespace(source).split("/") if p],
+                [p for p in target.split("/") if p],
+            ):
+                if one != other:
+                    break
+                shared.append(one)
+            if "/".join(shared) == namespace(source):
+                continue  # entering the producer's own block, not leaving it
+            if synthetic(source) in {
+                "@output",
+                "@output_mirror",
+                "@kernel_port_out",
+                "@loop_carried",
+            }:
+                continue
+            leaks.append(f"{source['id']} -> {node['id']}")
+    assert not leaks, leaks[:8]
 
 
 def test_a_loop_carries_the_width_its_body_produces():

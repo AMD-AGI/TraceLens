@@ -2298,6 +2298,101 @@ def _name_unnamed_group_inputs(nodes: list[dict[str, Any]]) -> None:
     nodes.extend(additions)
 
 
+def _common_namespace(left: str, right: str) -> str:
+    """The deepest namespace both arguments sit inside (possibly the root)."""
+    shared: list[str] = []
+    for one, other in zip(
+        [p for p in left.split("/") if p], [p for p in right.split("/") if p]
+    ):
+        if one != other:
+            break
+        shared.append(one)
+    return "/".join(shared)
+
+
+def _route_frame_exits_through_output_tiles(nodes: list[dict[str, Any]]) -> None:
+    """Give every block a tensor LEAVES its own output tile.
+
+    The entering side already has this (``_insert_missing_boundary_levels``);
+    the leaving side had nothing, so a block could declare what it reads and
+    say nothing about what it hands back. The sdpa kernel frame names each of
+    its inputs with a ``@kernel_in`` port and then let its last op wire
+    straight to the attention module's reshape one level up; the mask builders
+    let a nested ``maybe_pad_block_sequence_ids`` reach the decoder two levels
+    up the same way. Read as a diagram, those blocks produce nothing.
+
+    Walk each leaving edge and materialise an ``@output:<name>`` tile at every
+    level being left, chaining them innermost-first, then re-point the edge at
+    the outermost one.
+
+    A source that is already a boundary of its own block is left alone -- it is
+    the tile this pass would otherwise add. ``{N}x_`` loop wrappers group
+    variants rather than being blocks, and a loop's ports deliberately sit
+    outside the body they bracket, so neither takes a tile.
+    """
+    by_id = {str(n["id"]): n for n in nodes}
+    additions: list[dict[str, Any]] = []
+
+    def is_loop_wrapper(namespace: str) -> bool:
+        parts = [p for p in namespace.split("/") if p]
+        return bool(parts) and bool(_REPEAT_SEGMENT_RE.match(parts[-1]))
+
+    for node in list(nodes):
+        target_ns = str(node.get("namespace") or "")
+        for edge in node.get("incomingEdges", []) or []:
+            source = by_id.get(str(edge.get("sourceNodeId")))
+            if source is None:
+                continue
+            source_ns = str(source.get("namespace") or "")
+            if not source_ns or source_ns == target_ns:
+                continue
+            # Levels the tensor leaves are the ones below what the two blocks
+            # share: the consumer nested inside the producer shares all of the
+            # consumer's path, and a sibling shares only their common ancestor.
+            shared = _common_namespace(source_ns, target_ns)
+            if shared == source_ns:
+                continue  # entering the source's own block, not leaving it
+            if _is_synthetic_output(source) or _node_attr(source, "synthetic") in {
+                "@output_mirror",
+                "@kernel_port_out",
+                "@loop_carried",
+            }:
+                continue
+            if str(_node_attr(source, "constant")) == "true":
+                continue
+            tail = source_ns[len(shared) :] if shared else source_ns
+            segments = [p for p in tail.split("/") if p]
+            if not segments:
+                continue
+            name = str(source.get("label") or "output").strip() or "output"
+            carried = node_output_spec(source, str(edge.get("sourceNodeOutputId", "0")))
+            upstream = str(edge["sourceNodeId"])
+            upstream_port = str(edge.get("sourceNodeOutputId", "0"))
+            walk = source_ns
+            for _ in segments:
+                if not is_loop_wrapper(walk):
+                    tile_id = f"{walk}/@output:{name}"
+                    tile = by_id.get(tile_id)
+                    if tile is None:
+                        tile = {
+                            "id": tile_id,
+                            "label": name,
+                            "namespace": walk,
+                            "attrs": [{"key": "synthetic", "value": "@output"}],
+                            "style": ensure_readable_text(output_port_style()),
+                            "incomingEdges": [_source_edge(upstream, upstream_port)],
+                        }
+                        if carried is not None:
+                            apply_shape_attrs(tile, carried)
+                        additions.append(tile)
+                        by_id[tile_id] = tile
+                    upstream, upstream_port = tile_id, "0"
+                walk = walk.rsplit("/", 1)[0] if "/" in walk else ""
+            edge["sourceNodeId"] = upstream
+            edge["sourceNodeOutputId"] = upstream_port
+    nodes.extend(additions)
+
+
 def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
     """Give every module an entering tensor crosses its own boundary tile.
 
@@ -6931,6 +7026,9 @@ def build_merged_model_graph(
     # Runs after threading, which is what connects an outer boundary to its deep
     # consumer: only then is the skipped path visible to walk.
     _insert_missing_boundary_levels(nodes)
+    # The mirror of that pass for the leaving side, run right beside it so both
+    # walls of a block are decided by the same state of the graph.
+    _route_frame_exits_through_output_tiles(nodes)
     _name_unnamed_group_inputs(nodes)
 
     # A loop-invariant producer feeding no re-exposed consumer (a decoder variant's
