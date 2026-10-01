@@ -51,22 +51,26 @@ it is safe to leave the directory on `PYTHONPATH` permanently.
 
 ## What lands in the trace
 
-For a launch of `add_kernel(x, y, out)` with 4096-element fp16 tensors:
+For `add_launcher(x, y)`, which allocates `out` and launches
+`add_kernel(x, y, out)` with 4096-element fp16 tensors:
 
 ```
-jit::add_kernel                        <- record_function span; the GPU kernel is
-  launcher_shapes::add_launcher           launched inside it, so it nests here
-      Input Dims:    [[4096], [4096], [4096]]
-      Input Strides: [[1], [1], [1]]
-      Input type:    ['c10::Half', 'c10::Half', 'c10::Half']
-  kernel_shapes::add_kernel            <- same operands, named after the kernel
-      Input Dims:    [[4096], [4096], [4096]]
-      ...
-  add_kernel                           <- the real GPU kernel
+launcher_shapes::add_launcher          <- cpu_op enclosing the whole launcher call
+    Input Dims:    [[4096], [4096]]       (the launcher's own tensor arguments)
+    Input type:    ['c10::Half', 'c10::Half']
+  add_launcher                         <- the launcher body runs inside the op
+    aten::empty_like                   <- everything it does nests here ...
+    jit::add_kernel                    <- record_function span around the launch
+      kernel_shapes::add_kernel        <- leaf op: the kernel's own operands
+          Input Dims:    [[4096], [4096], [4096]]
+          Input Strides: [[1], [1], [1]]
+      add_kernel                       <- ... including the real GPU kernel
 ```
 
-The span gives an exact association between annotation and kernel (temporal
-nesting), and the op name matches the kernel name for name-based lookup.
+The launcher op sits where a hand-registered wrapper op would: it is an
+ancestor of every GPU kernel the launcher issues, so a trace tree attributes
+those kernels to it. The `jit::` span gives the exact kernel-level association,
+and the kernel op name matches the kernel name for name-based lookup.
 
 ### Two granularities
 
@@ -88,9 +92,19 @@ reaches `.run()` through its own `KernelInterface.__getitem__` lambda, so the
 first frame outside `triton` / `flydsl` and outside this module is the launcher.
 No registry, no source scanning, and no matching on function names.
 
-> Both namespaces carry the **same operands**, so pick one granularity when
-> summing FLOPs or bytes — don't add them. Set
-> `TRACELENS_SHAPE_LAUNCHER_OPS=0` to emit kernel-level annotations only.
+That first launch is also how the launcher is *promoted*: its frame yields the
+function object, whose code object is swapped for a trampoline. Every later
+call goes through `launcher_shapes::<launcher>(<launcher's tensor args>)`,
+whose implementation runs the original function, so the op encloses the
+launcher's whole body. Swapping `__code__` changes the one function object in
+place, so all references to it are covered without patching modules. The call
+that discovers a launcher carries only the kernel-level op. Closures,
+generators and `torch` internals are never swapped and keep a leaf
+`launcher_shapes` op next to the launch, carrying the kernel's operands.
+
+> The two levels describe the same work, so pick one granularity when summing
+> FLOPs or bytes — don't add them. Set `TRACELENS_SHAPE_LAUNCHER_OPS=0` to emit
+> kernel-level annotations only.
 
 ### Optional knobs
 
@@ -100,6 +114,7 @@ No registry, no source scanning, and no matching on function names.
 | `TRACELENS_SHAPE_FORCE_RECORD_SHAPES` | `1` | Force `record_shapes=True` on the profiler (`Input Dims` only surface when shapes are recorded). Set `0` to respect the server's own setting. |
 | `TRACELENS_SHAPE_SPANS` | `1` | Emit the enclosing `jit::<kernel>` span. Set `0` for shape ops only (marginally lower overhead, association by name only). |
 | `TRACELENS_SHAPE_LAUNCHER_OPS` | `1` | Also annotate the calling Python launcher as `launcher_shapes::<caller>`. Set `0` for kernel-level annotations only. |
+| `TRACELENS_SHAPE_LAUNCHER_PROMOTE` | `1` | Run discovered launchers inside their `launcher_shapes` op, so it encloses the whole launcher. Set `0` to keep the launcher op as a leaf next to the launch. |
 
 ## Design
 
@@ -111,8 +126,8 @@ No registry, no source scanning, and no matching on function names.
   support for a new server is a no-op; supporting a new JIT is one function.
 - **Install once, gate with a flag.** Hooks are installed permanently the first
   time the JIT modules appear and short-circuit on a boolean. `enable()` /
-  `disable()` only flip that boolean, so there is no patch/restore churn on the
-  hot path and no way to leave stale wrappers behind.
+  `disable()` flip that boolean and swap promoted launchers' code in and out,
+  so outside a profiler window every launcher runs its original code.
 - **Outermost launch only.** `Autotuner.run` calls `JITFunction.run`
   internally; a thread-local depth counter records each launch once, at the
   outermost hook where the caller's real arguments are still visible.
