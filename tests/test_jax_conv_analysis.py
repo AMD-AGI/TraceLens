@@ -105,9 +105,13 @@ def test_num_tree_events(perf_analyzer):
 
 def test_tree_event_cats(perf_analyzer):
     result = Counter([event["cat"] for event in perf_analyzer.tree.events])
+    # xprof 2.23 names derived rows "XLA Ops - from #<stream>" and
+    # "Framework Name Scope - from #<stream>". Those match by prefix, so they
+    # are python function / cpu_op instead of Unknown.
     assert result == {
-        "Unknown": 4680,
-        "cpu_op": 1145,
+        "Unknown": 4658,
+        "cpu_op": 1147,
+        "python function": 20,
         "memcpy": 53,
         "kernel": 25,
     }
