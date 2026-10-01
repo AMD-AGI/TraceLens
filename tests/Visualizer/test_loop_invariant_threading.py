@@ -632,3 +632,52 @@ def test_a_dtype_argument_draws_no_data_edge():
         }
         # The rope output reaches it only through ``query_states.dtype``.
         assert "k_embed" not in entering, (namespace, sorted(entering))
+
+
+def test_build_block_mask_args_reach_the_ops_that_read_them():
+    """Each argument of a child-module method reaches the op that reads it.
+
+    ``self.indexer.build_block_mask(block_indices, attention_mask, ...,
+    position_ids)`` used to put every argument on ONE boundary tile. That tile
+    fed four ops which read only ``block_indices``, so the graph asserted they
+    read ``position_ids`` and ``attention_mask`` too -- false edges -- while
+    ``arange(key_length) > position_ids`` was left without its second operand
+    altogether.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, by_id = _build_nodes("MiniMaxAI/MiniMax-M3")
+    namespaces = {
+        str(n.get("namespace") or "")
+        for n in graph["nodes"]
+        if str(n.get("namespace") or "").endswith("build_block_mask")
+    }
+    assert namespaces, "expected the build_block_mask frame"
+
+    def sources(node):
+        return [
+            str(by_id[e["sourceNodeId"]].get("label"))
+            for e in node.get("incomingEdges", []) or []
+            if e["sourceNodeId"] in by_id
+        ]
+
+    for namespace in namespaces:
+        members = [
+            n
+            for n in graph["nodes"]
+            if str(n.get("namespace") or "") == namespace
+            or str(n.get("namespace") or "").startswith(namespace + "/")
+        ]
+        by_label = {}
+        for node in members:
+            by_label.setdefault(str(node.get("label")), []).append(node)
+
+        # The comparison reads the position tensor, not just its range.
+        greater = by_label.get("Greater")
+        assert greater, namespace
+        assert "position_ids" in sources(greater[0]), sources(greater[0])
+
+        # ...and the ops that read the block indices read ONLY those.
+        for label in ("Less", "Scatter"):
+            for node in by_label.get(label, []):
+                assert "position_ids" not in sources(node), (label, sources(node))
+                assert "attention_mask" not in sources(node), (label, sources(node))

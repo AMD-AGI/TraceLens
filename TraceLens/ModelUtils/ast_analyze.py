@@ -1867,6 +1867,32 @@ def named_method_operations(
     primary = _primary_forward_input_name(func)
     if not primary:
         return list(analysis.operations)
+    # Only a parameter some op NAMES can be given a boundary inside the
+    # expansion; one no op reads has nothing to dock onto.
+    read = {n for op in analysis.operations for n in op.param_inputs}
+    secondary = [
+        arg.arg
+        for arg in func.args.posonlyargs + func.args.args
+        if arg.arg not in {"self", primary}
+        and arg.arg in read
+        and arg.annotation is not None
+        and any(
+            isinstance(x, ast.Attribute) and x.attr == "Tensor"
+            for x in ast.walk(arg.annotation)
+        )
+    ]
+    if secondary:
+        return [
+            replace(
+                operation,
+                details=(
+                    *operation.details,
+                    f"method_primary: {primary}",
+                    f"method_params: {', '.join(secondary)}",
+                ),
+            )
+            for operation in analysis.operations
+        ]
     return [
         replace(operation, details=(*operation.details, f"method_primary: {primary}"))
         for operation in analysis.operations
@@ -3584,6 +3610,19 @@ _BINOP_LABELS = {
 # here it collapses to a pass-through that silently drops the mask it produces and
 # the whole integer/index producer subgraph feeding it (the ``future_mask`` fed to
 # ``masked_fill``). Mirrors the method-form labels above.
+# The torch function each comparison OPERATOR performs. The operator form carries
+# no callable name of its own, so an op built from ``a > b`` had no ``raw_op`` and
+# its operand arity could not be resolved -- which is how a parameter read as a
+# comparison's second operand was dropped. Python-to-torch operator
+# correspondence for arity resolution, not a model op registry.
+_COMPARE_OP_RAW = {
+    ast.Gt: "gt",
+    ast.GtE: "ge",
+    ast.Lt: "lt",
+    ast.LtE: "le",
+    ast.Eq: "eq",
+    ast.NotEq: "ne",
+}
 _COMPARE_OP_LABELS = {
     ast.Gt: "Greater",
     ast.GtE: "Greater equal",
@@ -5318,6 +5357,7 @@ class _ForwardOperationExtractor:
                 label,
                 [value for value in (left, right) if value],
                 [*left_external, *right_external],
+                raw_op=_COMPARE_OP_RAW.get(type(node.ops[0])),
             )
             return producer, []
         if isinstance(node, ast.BinOp):

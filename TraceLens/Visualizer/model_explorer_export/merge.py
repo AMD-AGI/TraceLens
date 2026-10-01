@@ -978,8 +978,20 @@ def _replace_tile_with_group(
         for entry, edge in zip(unresolved, unclaimed):
             entry["incomingEdges"] = [dict(edge)]
         unclaimed = []
-    elif len(unresolved) == 1 and unclaimed:
-        unresolved[0]["incomingEdges"] = [dict(edge) for edge in unclaimed]
+    elif unclaimed:
+        # Neither a 1:1 match nor a single entry. A NAMED entry
+        # (``@input:<param>``) reaches its own producer through the parameter
+        # boundary built for it, so it needs nothing here; the unnamed primary
+        # is the one left without a source. Assigning nothing when the counts
+        # disagree left that primary empty, which orphaned the caller's other
+        # arguments and, with them, the producer chain feeding one of them.
+        plain = [
+            entry
+            for entry in unresolved
+            if not re.search(r"/@input:[^/^]+$", str(entry.get("id", "")))
+        ]
+        if len(plain) == 1:
+            plain[0]["incomingEdges"] = [dict(edge) for edge in unclaimed]
 
     section_nodes.remove(tile)
     if exit_ref is None:

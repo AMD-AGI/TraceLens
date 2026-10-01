@@ -1420,6 +1420,16 @@ def _expanded_free_function_node(
     )
 
 
+def _named_method_params(operations: list[ForwardOperation]) -> list[str]:
+    """A child-module method's other tensor parameters, from its stamped detail."""
+    for operation in operations:
+        for detail in operation.details or ():
+            if str(detail).startswith("method_params: "):
+                body = str(detail).split(": ", 1)[1]
+                return [part.strip() for part in body.split(",") if part.strip()]
+    return []
+
+
 def _named_method_primary(operations: list[ForwardOperation]) -> str | None:
     """The primary parameter of a child-module method, from its stamped detail."""
     for operation in operations:
@@ -2798,6 +2808,12 @@ def build_block_node(
                         # boundary fell back to the generic name and labelled the
                         # tile with a tensor it does not carry.
                         input_label=_named_method_primary(method_ops),
+                        # Its other tensor parameters get boundaries of their own
+                        # from ``_add_forward_param_inputs``; without this every
+                        # argument the call passes collapses onto the primary's
+                        # single boundary, and the ops that read them receive the
+                        # wrong tensor.
+                        forward_param_inputs=_named_method_params(method_ops),
                         children=[
                             _leaf_node(
                                 attr_name=operation.attr_name,
@@ -2811,6 +2827,13 @@ def build_block_node(
                                 operation_predecessors=list(operation.predecessors),
                                 param_inputs=list(operation.param_inputs),
                                 external_inputs=list(operation.external_inputs),
+                                # Name the parameter each op reads straight from
+                                # the boundary, as every other expansion does.
+                                boundary_input_name=(
+                                    _boundary_input_name(operation, method_child)
+                                    if operation.param_inputs
+                                    else None
+                                ),
                             )
                             for position, operation in enumerate(method_ops)
                         ],

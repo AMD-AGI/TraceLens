@@ -2168,6 +2168,21 @@ def _add_forward_input(graph: ComputationGraph, root: BlockNode) -> int:
     )
 
 
+def _needs_another_tensor_operand(block: BlockNode) -> bool:
+    """True when an op still has an operand slot its edges have not filled.
+
+    An op that already reads an activation usually owns its input that way, and a
+    parameter repeated by a nested expression must not dock a second edge. A
+    genuinely binary op is different: ``torch.arange(key_length) > position_ids``
+    takes two operands and has one producer, so skipping it dropped the parameter
+    read and the op silently computed against the wrong tensor.
+    """
+    ceiling, variadic = _operand_ceiling(_raw_op_from_details(block.details))
+    if variadic or ceiling is None:
+        return False
+    return len(block.operation_predecessors) < ceiling
+
+
 def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
     """Give each extra forward parameter its own boundary input.
 
@@ -2233,7 +2248,9 @@ def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
             # true entry point) and must get its own edge from the shared
             # boundary tile, however many other ops already read the same
             # param elsewhere.
-            if block.operation_predecessors:
+            if block.operation_predecessors and not _needs_another_tensor_operand(
+                block
+            ):
                 continue
             if ordinal is not None:
                 scope = frame_of_index.get(index, "")
