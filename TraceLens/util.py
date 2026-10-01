@@ -154,75 +154,6 @@ def _converter_text(data):
     return data
 
 
-# xprof's non-streaming converter (ConvertXSpaceToTraceEventsString) keeps the
-# earliest events and drops the rest once this cap is hit. The streaming viewer
-# used by older TraceLens builds does not. CapEvents takes a uint32.
-_TRACE_VIEWER_MAX_EVENTS_ENV = "TF_PROFILER_TRACE_VIEWER_MAX_EVENTS"
-_TRACE_VIEWER_EVENT_CAP = 2**32 - 1
-
-
-def _effective_trace_viewer_cap(raw: Optional[str]) -> int:
-    """Return the event cap xprof will apply for this conversion."""
-    if raw is None:
-        return _TRACE_VIEWER_EVENT_CAP
-    try:
-        cap = int(raw)
-    except ValueError as exc:
-        raise RuntimeError(
-            f"{_TRACE_VIEWER_MAX_EVENTS_ENV}={raw!r} is not an integer"
-        ) from exc
-    if cap < 0 or cap > _TRACE_VIEWER_EVENT_CAP:
-        raise RuntimeError(
-            f"{_TRACE_VIEWER_MAX_EVENTS_ENV}={cap} is outside "
-            f"0..{_TRACE_VIEWER_EVENT_CAP}, the range xprof applies"
-        )
-    return cap
-
-
-@contextlib.contextmanager
-def _trace_viewer_event_cap():
-    """Yield the trace-viewer event cap, raising xprof's silent default.
-
-    An unset ``TF_PROFILER_TRACE_VIEWER_MAX_EVENTS`` otherwise stops at
-    5,000,000 events with no marker in the JSON. TraceLens needs the whole
-    profile, so that default is raised to the uint32 maximum for this
-    conversion only. A value the caller already set is left unchanged.
-    """
-    previous = os.environ.get(_TRACE_VIEWER_MAX_EVENTS_ENV)
-    cap = _effective_trace_viewer_cap(previous)
-    if previous is None:
-        os.environ[_TRACE_VIEWER_MAX_EVENTS_ENV] = str(cap)
-    try:
-        yield cap
-    finally:
-        if previous is None:
-            os.environ.pop(_TRACE_VIEWER_MAX_EVENTS_ENV, None)
-        else:
-            os.environ[_TRACE_VIEWER_MAX_EVENTS_ENV] = previous
-
-
-def _reject_truncated_xprof_trace(trace: dict, cap: int) -> None:
-    """Fail when the converted trace is large enough that xprof dropped events.
-
-    Device and thread metadata (``ph`` ``M``) is not part of the capped event
-    list. A count that meets the cap is indistinguishable from a profile that
-    was cut off at the cap.
-    """
-    events = trace.get("traceEvents")
-    if not isinstance(events, list):
-        return
-    kept = sum(1 for event in events if event.get("ph") != "M")
-    if kept >= cap:
-        raise RuntimeError(
-            "xprof's non-streaming trace viewer kept "
-            f"{kept} events, which meets the "
-            f"{_TRACE_VIEWER_MAX_EVENTS_ENV} cap of {cap}. "
-            "Events past that cap are dropped. Raise "
-            f"{_TRACE_VIEWER_MAX_EVENTS_ENV} (maximum {_TRACE_VIEWER_EVENT_CAP}) "
-            "or split the profile."
-        )
-
-
 def _normalize_xprof_trace(trace: dict) -> dict:
     """Make non-streaming xprof JSON match the event shape TraceLens expects.
 
@@ -251,18 +182,18 @@ def _normalize_xprof_trace(trace: dict) -> dict:
 class DataLoader:
     @staticmethod
     def load_data(filename_path: str, save_preprocessed: bool = False) -> dict:
-        event_cap = None
         if filename_path.endswith("pb"):
             convert, converter_lib = _load_xplane_converter()
 
-            with _trace_viewer_event_cap() as event_cap:
-                with suppress_native_hlo_logs():
-                    # Streaming trace_viewer@ in xprof >= 2.21 drops hlo_op and
-                    # correlation_id. The non-streaming viewer keeps both, but
-                    # it also caps the event count (see _trace_viewer_event_cap).
-                    data, _ = convert.xspace_to_tool_data(
-                        [filename_path], "trace_viewer", {}
-                    )
+            with suppress_native_hlo_logs():
+                # Non-streaming trace_viewer stops at 5,000,000 events.
+                # Streaming trace_viewer@ does not, which is how main loads
+                # a full profile. Resolution 0 asks for every event.
+                data, _ = convert.xspace_to_tool_data(
+                    [filename_path],
+                    "trace_viewer@",
+                    {"trace_viewer_options": {"resolution": "0"}},
+                )
             if data is None:
                 raise RuntimeError(
                     f"Trace conversion using '{converter_lib}' returned None for "
@@ -297,7 +228,6 @@ class DataLoader:
             parsed = json.loads(data)
         if filename_path.endswith("pb"):
             parsed = _normalize_xprof_trace(parsed)
-            _reject_truncated_xprof_trace(parsed, event_cap)
         if save_preprocessed:
             out_path = filename_path.replace("pb", "processed.json")
             with open(out_path, "w") as writefile:
