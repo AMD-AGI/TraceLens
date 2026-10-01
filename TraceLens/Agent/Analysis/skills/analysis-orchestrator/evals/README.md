@@ -15,7 +15,7 @@ The framework uses a hybrid approach:
 
 All eval results use a 7-column CSV schema: `index, category, issue_summary, result, details, root_cause, recommended_fix`. See [EVAL_RUBRICS.md](EVAL_RUBRICS.md) for the full rubric reference.
 
-LLM and post-processing **agent skills** ship under `agent_evals/Analysis/skills/<skill-name>/` (`SKILL.md` + `reference.md`). Cursor’s default skill discovery uses `.cursor/skills/` at the workspace root — symlink or copy those folders if you need automatic attachment.
+LLM and post-processing **agent skills** ship under `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/skills/<skill-name>/` (`SKILL.md` + `reference.md`). Cursor’s default skill discovery uses `.cursor/skills/` at the workspace root — symlink or copy those folders if you need automatic attachment.
 
 ## Prerequisites / Setup
 
@@ -66,7 +66,7 @@ All scripts run **on the node** from the repo root. They use `docker exec` to ru
 Dispatches all `(test_case, repeat)` jobs concurrently with a configurable concurrency limit. After all jobs finish, the harness automatically invokes a Cursor agent to aggregate results and generate reports (see [Post-Processing Skill](#post-processing-skill)). `NUM_REPEATS=3` is the recommended setting (good stability signal at lower cost than the default 5); for a single-pass eval, set `NUM_REPEATS=1`.
 
 ```bash
-CONTAINER=my_container bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh
+CONTAINER=my_container bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/run_repeatability_parallel.sh
 ```
 
 Environment variables:
@@ -77,8 +77,8 @@ Environment variables:
 | `MAX_PARALLEL` | 5 | Max concurrent jobs |
 | `NUM_REPEATS` | 5 | Repeats per test case |
 | `SLEEP_BETWEEN` | 30 | Seconds between Phase 1 and Phase 2 |
-| `TEST_TRACES_CSV` | `agent_evals/Analysis/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv` | Path to the trace CSV to use |
-| `RESULTS_ROOT` | `agent_evals/Analysis/repeatability_results` | Where per-run results are written |
+| `TEST_TRACES_CSV` | `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv` | Path to the trace CSV to use |
+| `RESULTS_ROOT` | `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/repeatability_results` | Where per-run results are written |
 | `REPORT_DIR` | `<RESULTS_ROOT>/../reports` | Where reports and reproducers are written |
 | `SUITE_NAME` | `eval` | Suite label used in reports (e.g. `unit`, `e2e`) |
 | `TEST_IDS` | (empty = all) | Space-separated trace IDs to run (filter) |
@@ -91,7 +91,7 @@ Example (subset of traces, 3 repeats, 5 parallel):
 CONTAINER=my_container \
 TEST_IDS="qwen1.5_mi300 06_llama3_2_mi300" \
 NUM_REPEATS=3 MAX_PARALLEL=5 \
-    bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh
+    bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/run_repeatability_parallel.sh
 ```
 
 Use a `screen` session to prevent disconnects during long runs. Each job cleans its output directory before starting to prevent stale results.
@@ -100,7 +100,7 @@ To run evals without generating reports (e.g. to re-process later):
 
 ```bash
 SKIP_POST_PROCESSING=1 CONTAINER=my_container \
-    bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh
+    bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/run_repeatability_parallel.sh
 ```
 
 ### Generate Golden References
@@ -108,13 +108,13 @@ SKIP_POST_PROCESSING=1 CONTAINER=my_container \
 Generates `analysis_output_ref/` for test cases listed in `analysis_tests/combined_traces_standalone.csv` / `combined_traces_comparative.csv`. Runs analysis, copies the output as the reference, and strips intermediate files (keeps only `analysis.md` and `perf_report_csvs/`). Runs in parallel with `MAX_PARALLEL`. Skips test cases with missing trace files.
 
 ```bash
-CONTAINER=my_container bash agent_evals/Analysis/eval_scripts/generate_ref.sh
+CONTAINER=my_container bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/generate_ref.sh
 ```
 
 Or with more parallelism:
 
 ```bash
-MAX_PARALLEL=5 CONTAINER=my_container bash agent_evals/Analysis/eval_scripts/generate_ref.sh
+MAX_PARALLEL=5 CONTAINER=my_container bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/generate_ref.sh
 ```
 
 ### Stopping Eval Jobs
@@ -122,7 +122,7 @@ MAX_PARALLEL=5 CONTAINER=my_container bash agent_evals/Analysis/eval_scripts/gen
 Kills every process `generate_ref.sh` or `run_repeatability_parallel.sh` may have spawned. Processes are identified by the `TRACELENS_EVAL_JOB=1` environment variable marker.
 
 ```bash
-bash agent_evals/Analysis/eval_scripts/kill_eval_jobs.sh
+bash TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_scripts/kill_eval_jobs.sh
 ```
 
 | Invocation | Behavior |
@@ -149,7 +149,7 @@ agent --model claude-opus-4-8-thinking-medium --print --force --trust \
 **Workflow Eval:**
 
 ```bash
-cd agent_evals/Analysis
+cd TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals
 agent --model claude-opus-4-8-thinking-medium --print --force --trust \
     "Run the workflow eval skill on <output_dir> for test case <id>. Write results to <results_path>"
 ```
@@ -157,14 +157,14 @@ agent --model claude-opus-4-8-thinking-medium --print --force --trust \
 **Quality Eval:**
 
 ```bash
-cd agent_evals/Analysis
+cd TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals
 agent --model claude-opus-4-8-thinking-medium --print --force --trust \
     "Run the quality eval skill on <output_dir> with reference <reference_dir> for test case <id>. Write results to <results_path>"
 ```
 
 ## Post-Processing Skill
 
-After the repeatability harness finishes, a Cursor agent is automatically invoked to aggregate results and generate reports. The skill lives under `agent_evals/Analysis/skills/eval-post-processing/` (`SKILL.md` + `reference.md`).
+After the repeatability harness finishes, a Cursor agent is automatically invoked to aggregate results and generate reports. The skill lives under `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/skills/eval-post-processing/` (`SKILL.md` + `reference.md`).
 
 The skill performs four steps:
 
@@ -178,7 +178,7 @@ The skill performs four steps:
 You can re-run the post-processing skill on any previous results without re-running the eval loop:
 
 ```bash
-cd agent_evals/Analysis
+cd TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals
 agent --model claude-opus-4-8-thinking-medium --print --force --trust \
     "Run eval post processing on results_root=<results_root> suite=<suite> test_traces_csv=<csv_path> report_dir=<report_dir> container=<container>"
 ```
@@ -186,9 +186,9 @@ agent --model claude-opus-4-8-thinking-medium --print --force --trust \
 Example:
 
 ```bash
-cd agent_evals/Analysis
+cd TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals
 agent --model claude-opus-4-8-thinking-medium --print --force --trust \
-    "Run eval post processing on results_root=agent_evals/Analysis/eval_reports/my_run/results/repeatability_results suite=eval test_traces_csv=agent_evals/Analysis/analysis_tests/combined_traces_standalone.csv report_dir=agent_evals/Analysis/eval_reports/my_run/reports container=modular_evals"
+    "Run eval post processing on results_root=TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_reports/my_run/results/repeatability_results suite=eval test_traces_csv=TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/combined_traces_standalone.csv report_dir=TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_reports/my_run/reports container=modular_evals"
 ```
 
 ### Error handling
@@ -201,7 +201,7 @@ agent --model claude-opus-4-8-thinking-medium --print --force --trust \
 
 ### 1. Create the test case directory
 
-Each test case lives under `agent_evals/Analysis/analysis_tests/<unit_tests_standalone|unit_tests_comparative|e2e_tests_standalone|e2e_tests_comparative>/<test_id>/` and must contain:
+Each test case lives under `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/<unit_tests_standalone|unit_tests_comparative|e2e_tests_standalone|e2e_tests_comparative>/<test_id>/` and must contain:
 
 - The profiling trace JSON file.
 - `analysis_output_ref/` -- a reference analysis output to compare against (used by quality evals). Should include `analysis.md` and `perf_report_csvs/`. Generate this with `generate_ref.sh`.
@@ -221,7 +221,7 @@ The CSV has the following columns:
 Example row:
 
 ```
-gemm_01_compute_few_tiles,gemm,agent_evals/Analysis/analysis_tests/unit_tests_standalone/gemm_01_compute_few_tiles/gemm_01_compute_few_tiles.json,agent_evals/Analysis/analysis_tests/unit_tests_standalone/gemm_01_compute_few_tiles/analysis_output_ref,MI300X
+gemm_01_compute_few_tiles,gemm,TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/unit_tests_standalone/gemm_01_compute_few_tiles/gemm_01_compute_few_tiles.json,TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/unit_tests_standalone/gemm_01_compute_few_tiles/analysis_output_ref,MI300X
 ```
 
 ## Eval Pipeline Summary
@@ -240,7 +240,7 @@ For each test case in the traces CSV, the scripts run two phases:
 
 ### Eval Skills
 
-Three Cursor agent skills under `agent_evals/Analysis/skills/` define the eval and pipeline logic:
+Three Cursor agent skills under `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/skills/` define the eval and pipeline logic:
 
 **eval-post-processing** -- Aggregates repeatability results, classifies failures using `report_section_rules.yaml`, and generates PR + fix-ticket reports with reproducer packages. Invoked automatically by `run_repeatability_parallel.sh` or manually on existing results.
 
@@ -273,7 +273,7 @@ LLM evals (2–3) run via `skills/quality-llm-eval/` (`SKILL.md` + `reference.md
 
 ## Results
 
-Results are written to `agent_evals/Analysis/repeatability_results/<id>/run_<n>/` and include:
+Results are written to `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/repeatability_results/<id>/run_<n>/` and include:
 
 - `analysis_stream.ndjson` -- stream JSON output from the analysis agent.
 - `workflow_scripted_eval.log` / `workflow_scripted_results.csv` -- scripted workflow eval output.

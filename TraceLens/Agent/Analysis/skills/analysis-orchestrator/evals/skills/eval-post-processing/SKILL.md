@@ -16,7 +16,7 @@ description: >-
 
 # Eval post processing
 
-Run **after** `run_repeatability_parallel.sh` (or manually on an existing results tree): aggregate per-run eval data, split **unit** vs **e2e** metrics, classify failures, emit `pr_report.md` and `fix_ticket_report.md`, package reproducers, then copy the report tree to `agent_evals/Analysis/eval_reports/latest/`.
+Run **after** `run_repeatability_parallel.sh` (or manually on an existing results tree): aggregate per-run eval data, split **unit** vs **e2e** metrics, classify failures, emit `pr_report.md` and `fix_ticket_report.md`, package reproducers, then copy the report tree to `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_reports/latest/`.
 
 ## Full procedure
 
@@ -34,4 +34,4 @@ Follow **[reference.md](reference.md)** for key=value inputs, exact report templ
 
 ## Skill location
 
-Bundled at `agent_evals/Analysis/skills/eval-post-processing/` (`SKILL.md`, `reference.md`). For Cursor auto-discovery, symlink or copy this folder under `.cursor/skills/` in a workspace that includes this repo.
+Bundled at `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/skills/eval-post-processing/` (`SKILL.md`, `reference.md`). For Cursor auto-discovery, symlink or copy this folder under `.cursor/skills/` in a workspace that includes this repo.
