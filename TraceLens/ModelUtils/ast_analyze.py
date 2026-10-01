@@ -3331,15 +3331,17 @@ def stack_entry_dataflow(cls: ClassStructure) -> StackEntryDataflow | None:
     # value names a forward operation), never keyed on a specific parameter name.
     loop_invariant_inputs: dict[str, str] = {}
     for keyword in loop_call.keywords:
-        if keyword.arg is None or not isinstance(keyword.value, ast.Name):
+        if keyword.arg is None:
             continue
-        producer = extractor.var_producer.get(keyword.value.id)
-        if (
-            producer is not None
+        producers = {
+            producer
+            for name in _keyword_source_names(keyword.value, forward.body[:loop_index])
+            if (producer := extractor.var_producer.get(name)) is not None
             and is_forward_operation(producer)
             and producer in by_name
-        ):
-            loop_invariant_inputs[keyword.arg] = producer
+        }
+        if len(producers) == 1:
+            loop_invariant_inputs[keyword.arg] = producers.pop()
 
     live = {output_producer, *loop_invariant_inputs.values()}
     pending = [output_producer, *loop_invariant_inputs.values()]
@@ -10112,6 +10114,37 @@ def _forward_input_names(func: ast.FunctionDef) -> set[str]:
     for arg in args.posonlyargs + args.args:
         if arg.arg != "self":
             names.add(arg.arg)
+    return names
+
+
+def _keyword_source_names(value: ast.expr, pre_loop: list[ast.stmt]) -> list[str]:
+    """Forward locals a loop keyword argument's value could come from.
+
+    Usually the value just names one (``attention_mask=causal_mask``). A model
+    with several layer types picks per layer from a dict built before the loop
+    (``attention_mask=causal_mask_mapping[layer.block_type]``); every entry of
+    that dict is a candidate, and when they all turn out to be the same tensor
+    the loop is handed one thing by a longer route. Reading only the subscript
+    would make the producer invisible, and with it everything that built it.
+    """
+    if isinstance(value, ast.Name):
+        return [value.id]
+    if not (isinstance(value, ast.Subscript) and isinstance(value.value, ast.Name)):
+        return []
+    names: list[str] = []
+    # The dict is often built inside a guard (``if not isinstance(...): mapping =
+    # {...}``), so walk nested statements rather than only the top level.
+    for statement in ast.walk(ast.Module(body=list(pre_loop), type_ignores=[])):
+        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+            continue
+        target = statement.targets[0]
+        if not (isinstance(target, ast.Name) and target.id == value.value.id):
+            continue
+        if not isinstance(statement.value, ast.Dict):
+            continue
+        names = [
+            item.id for item in statement.value.values if isinstance(item, ast.Name)
+        ]
     return names
 
 

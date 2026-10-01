@@ -6494,6 +6494,7 @@ def _resolve_loop_invariant_source(
     pred_args: dict[str, str],
     producer_map: dict[str, str],
     loop_param_producers: dict[str, str],
+    dataflow_producers: dict[str, str],
     shape_inferencer: Any = None,
 ) -> str | None:
     """Legitimate model-level source id for a loop-invariant decoder input.
@@ -6534,6 +6535,19 @@ def _resolve_loop_invariant_source(
         # came from somewhere real, so fall back to the structural capture before
         # giving up; jumping straight to a model-input boundary here fabricated a
         # top-level ``@input:attention_mask`` for a tensor the model derives.
+        # What the extractor recorded the loop as being HANDED for this
+        # parameter: the variable's producer AT the loop, rather than the first
+        # call that assigned it. GLM reassigns its mask after the builder runs
+        # (``if attention_mask is None: ... = torch.ones(...)``, then a merge of
+        # the two), and docking on the builder left everything after it with no
+        # consumer -- so the branch that actually runs when the model is given
+        # no mask was pruned as dead, and the decoder read a mask built from a
+        # tensor that was never supplied.
+        handed = dataflow_producers.get(param)
+        if handed is not None and handed != producer_attr:
+            source = _resolve_existing_producer_node(node_by_id, handed)
+            if source is not None:
+                return source
         captured = loop_param_producers.get(param)
         if captured is not None and captured != producer_attr:
             source = _materialize_model_scope_producer(
@@ -6554,6 +6568,18 @@ def _resolve_loop_invariant_source(
         return None
     if param == primary_param:
         return "@input"
+    # What the extractor recorded the loop as being HANDED for this parameter,
+    # which is the variable's producer at the loop rather than the first call
+    # that happened to assign it. GLM reassigns its mask twice after the builder
+    # runs (``if attention_mask is None: ... = torch.ones(...)`` then a merge of
+    # the two), and docking on the builder left everything after it with no
+    # consumer -- so the branch that actually runs when the model is given no
+    # mask was pruned, and the decoder read a mask built from nothing.
+    handed = dataflow_producers.get(param)
+    if handed is not None:
+        source = _resolve_existing_producer_node(node_by_id, handed)
+        if source is not None:
+            return source
     captured = loop_param_producers.get(param)
     if captured is not None:
         source = _materialize_model_scope_producer(
@@ -6703,6 +6729,10 @@ def _thread_loop_invariant_inputs(
     primary_param = _stack_primary_input_name(cls)
     producer_map = _forward_param_producer_map(cls)
     loop_param_producers = _loop_param_producer_map(cls)
+    entry_dataflow = stack_entry_dataflow(cls) if cls is not None else None
+    dataflow_producers = (
+        dict(entry_dataflow.loop_invariant_inputs) if entry_dataflow else {}
+    )
     node_by_id = {node["id"]: node for node in nodes}
 
     # (1) Floating (unsourced) namespaced ``@input:<param>`` tiles, grouped by
@@ -6728,6 +6758,7 @@ def _thread_loop_invariant_inputs(
             pred_args=pred_args,
             producer_map=producer_map,
             loop_param_producers=loop_param_producers,
+            dataflow_producers=dataflow_producers,
             shape_inferencer=shape_inferencer,
         )
         if source is None:

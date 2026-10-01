@@ -220,6 +220,14 @@ def _feeding_op(by_id, node_id):
     return node_id
 
 
+def _shape_attr(node) -> str | None:
+    """The node's rendered ``output_shape``, if it reports one."""
+    for attr in node.get("attrs", []) or []:
+        if attr.get("key") == "output_shape":
+            return str(attr.get("value"))
+    return None
+
+
 def test_glm53_linear_attention_has_single_output_exit():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -1599,32 +1607,30 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
     ]
 
     assert [node["label"] for node in model_ops] == [
+        "Ones",
         "Unsqueeze",
         "Expand",
         "Contiguous",
     ]
+    movement_ops = model_ops[1:]
 
-    # Task A: the decoder ``attention_mask`` is the DERIVED mask-builder output
-    # (reassigned before the loop), materialized as a model-scope producer feeding
-    # the decoder boundary. A top-level ``@input:attention_mask`` is legitimate --
-    # the BUILDER reads the model's own forward parameter -- so what matters is
-    # that nothing but the builder consumes it.
+    # The decoder ``attention_mask`` is DERIVED, never a fabricated top-level
+    # model input. GLM is never GIVEN a mask -- the meta trace shows the model
+    # takes ``input_ids`` only -- so ``create_recurrent_attention_mask`` returns
+    # None and the model guarantees one itself:
+    #     if attention_mask is None:
+    #         attention_mask = torch.ones(B, S, dtype=torch.bool)
+    # That is the branch the diagram must show. The builder's own body does not
+    # run, so none of its ops are drawn.
     by_id = {node["id"]: node for node in graph["nodes"]}
     assert "@input:attention_mask" not in by_id
-    # The builder is expanded into the ops it performs rather than drawn as one
-    # tile named after the callee, so look for its op subgraph.
-    prefix = "@model_forward/@fn_l1456_create_recurrent_attention_mask"
-    builder_ops = [node for node in graph["nodes"] if node["id"].startswith(prefix)]
-    assert builder_ops, "mask builder must be rendered"
-    assert [node["label"] for node in builder_ops] == ["Slice", "Contiguous"]
-    # GLM is never GIVEN an ``attention_mask`` (the meta trace shows the model
-    # takes ``input_ids`` only), so the builder has no mask to read and falls
-    # back to the call's first argument. That fallback is wrong -- tracked by
-    # the two ``missing shapes`` the echo guard keeps visible -- but a
-    # fabricated top-level mask input would be worse.
-    assert {
-        _feeding_op(by_id, e["sourceNodeId"]) for e in builder_ops[0]["incomingEdges"]
-    } == {"embed_tokens"}
+    assert not [
+        node
+        for node in graph["nodes"]
+        if "create_recurrent_attention_mask" in node["id"]
+    ]
+    built_mask = next(node for node in model_ops if str(node.get("label")) == "Ones")
+    assert _shape_attr(built_mask) == "[B, S] bool", built_mask
     # ...and the decoder boundary docks onto the op producing the builder's result.
     # The wrapper groups loop variants and carries no input of its own; the
     # boundary lives on the variant that consumes the mask.
@@ -1643,23 +1649,24 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
     )
     assert {
         _publishing_op(by_id, e["sourceNodeId"]) for e in mask_boundary["incomingEdges"]
-    } == {builder_ops[-1]["id"]}
+    } == {built_mask["id"]}
     # The decoder consumes the vision/text combine (masked_scatter), not the raw
     # token embeddings — the combine is the true entry to the language stack.
     assert (
-        model_ops[0]["incomingEdges"][0]["sourceNodeId"] == "@vision_language_combine"
+        movement_ops[0]["incomingEdges"][0]["sourceNodeId"]
+        == "@vision_language_combine"
     )
     combine = next(
         node for node in graph["nodes"] if node["id"] == "@vision_language_combine"
     )
     combine_sources = {edge["sourceNodeId"] for edge in combine["incomingEdges"]}
     assert combine_sources == {"embed_tokens", "@image_mask", "visual/@output"}
-    assert model_ops[1]["incomingEdges"][0]["sourceNodeId"] == model_ops[0]["id"]
-    assert model_ops[2]["incomingEdges"][0]["sourceNodeId"] == model_ops[1]["id"]
+    assert movement_ops[1]["incomingEdges"][0]["sourceNodeId"] == movement_ops[0]["id"]
+    assert movement_ops[2]["incomingEdges"][0]["sourceNodeId"] == movement_ops[1]["id"]
     assert not any(node["id"] == "rotary_pos_emb" for node in graph["nodes"])
     assert [
         next(attr["value"] for attr in node["attrs"] if attr["key"] == "output_shape")
-        for node in model_ops
+        for node in movement_ops
     ] == [
         "[B, S, 1, 4096] bfloat16",
         "[B, S, 4, 4096] bfloat16",
@@ -3525,9 +3532,9 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     # The hidden_states spine keeps its direct wiring: it is never surfaced as an
     # invented ``/@input:hidden_states`` group tile. The only loop-invariant input
     # threaded across the spine boundary is ``attention_mask`` -- a genuine side
-    # input the indexer consumes -- and it docks onto the DERIVED mask-builder
-    # producer (``create_recurrent_attention_mask``, reassigned before the loop),
-    # NOT a fabricated top-level ``@input:attention_mask`` model input.
+    # input the indexer consumes -- and it docks onto the DERIVED producer the
+    # model actually runs (``torch.ones``, the mask it guarantees itself when the
+    # builder returns None), NOT a fabricated top-level ``@input:attention_mask``.
     assert "@input:attention_mask" not in by_id
     spine_invariant_inputs = {
         n["id"]: {
@@ -3548,9 +3555,9 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     assert next(iter(spine_invariant_inputs)).endswith("/@input:attention_mask")
     (mask_sources,) = spine_invariant_inputs.values()
     assert len(mask_sources) == 1
-    assert next(iter(mask_sources)).startswith(
-        "@model_forward/@fn_l1456_create_recurrent_attention_mask:"
-    ), spine_invariant_inputs
+    mask_source = by_id[next(iter(mask_sources))]
+    assert str(mask_source.get("label")) == "Ones", spine_invariant_inputs
+    assert _shape_attr(mask_source) == "[B, S] bool", mask_source
     assert not any("hidden_states" in nid for nid in spine_invariant_inputs)
 
     # The vision tower's CG-built boundary (a *uniform* loop) is untouched -- the

@@ -168,6 +168,12 @@ def test_decoder_attention_mask_docks_mask_builder(model_id):
     for source in sources:
         producer = by_id.get(source)
         assert producer is not None
+        if str(producer.get("label")) in {"Ones", "Zeros", "Full"}:
+            # The builder returned None for this model (it is never given a
+            # mask), so what the decoder is handed is the one the model
+            # guarantees itself. Still derived, still not a model input.
+            assert source.startswith("@model_forward/@op_"), source
+            continue
         assert source.startswith(
             "@model_forward/@fn_l"
         ), f"attention_mask boundary sourced by {source!r}, not a mask-builder node"
@@ -615,7 +621,7 @@ def test_a_constructed_tensor_is_a_visible_op_with_its_own_shape(model_id):
         details = " ".join(
             str(a.get("value"))
             for a in node.get("attrs", []) or []
-            if a.get("key") == "details"
+            if a.get("key") in {"detail", "details"}
         )
         if node.get("incomingEdges"):
             assert "extent_inputs:" in details, (node["id"], details)
@@ -659,31 +665,47 @@ def test_a_loop_carries_the_width_its_body_produces():
             assert _shape_of(body_in) == _shape_of(node), (body_in["id"], node_id)
 
 
-def test_glm_mask_builder_claims_no_shape_without_a_mask_to_narrow():
-    """GLM is never given a mask, so the builder asserts nothing about one.
+def test_glm_builds_the_mask_it_is_never_given():
+    """GLM is never handed a mask, so the diagram shows the one it builds.
 
-    ``create_recurrent_attention_mask`` slices ``attention_mask``, and the meta
-    trace shows this model receives ``input_ids`` only -- the signature merely
-    ACCEPTS a mask. With nothing to narrow, the builder falls back to the call's
-    first argument (the embedding), which is wrong; what must not happen is a
-    fabricated top-level ``@input:attention_mask`` dressing that up as a real
-    model input, or an echoed ``[B, S, hidden]`` reported as a mask.
+    The meta trace says the model receives ``input_ids`` only -- the signature
+    merely ACCEPTS a mask -- so ``create_recurrent_attention_mask`` returns None
+    and the model guarantees one itself:
 
-    A missing shape is the honest outcome and keeps the bad wiring visible.
+        if attention_mask is None:
+            attention_mask = torch.ones(B, S, dtype=torch.bool)
+
+    That branch is what runs, and it is what the decoder is handed. Before, the
+    builder's body was drawn instead: its slice had no mask to narrow, so it
+    took the call's first argument -- the embedding -- and could not be sized,
+    which is how two ops came to read a tensor they have nothing to do with.
+    What must never appear either way is a top-level ``@input:attention_mask``
+    dressing a derived tensor up as a model input.
     """
     pytest.importorskip("huggingface_hub")
     graph, by_id = _build_nodes("zai-org/GLM-5.3-Flash")
     assert "@input:attention_mask" not in by_id
 
-    sliced = [
+    # The builder returns None for this model, so none of its body is drawn.
+    assert not [
         node
         for node in graph["nodes"]
-        if "create_recurrent_attention_mask:@op_" in node["id"]
-        and str(node.get("label")) == "Slice"
+        if "create_recurrent_attention_mask" in node["id"]
     ]
-    assert sliced, "expected the GLM mask builder's slice op"
-    for node in sliced:
-        assert not _shape_of(node), (node["id"], _shape_of(node))
+
+    built = [
+        node
+        for node in graph["nodes"]
+        if str(node.get("label")) == "Ones" and node["id"].startswith("@model_forward")
+    ]
+    assert len(built) == 1, [n["id"] for n in built]
+    assert _shape_of(built[0]) == "[B, S] bool", _shape_of(built[0])
+
+    boundary = _param_boundary(by_id, "attention_mask")
+    assert boundary is not None, "the decoder must show the mask it is handed"
+    assert {str(e.get("sourceNodeId")) for e in boundary.get("incomingEdges", [])} == {
+        built[0]["id"]
+    }
 
 
 @pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-M3", "zai-org/GLM-5.3-Flash"])
