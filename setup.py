@@ -64,8 +64,8 @@ setup(
     ],
     extras_require={
         "jax": [
-            "xprof==2.20.1",  # Last version with HLO sidecar generation; supports JAX 0.8+.
-            "protobuf>=6.31.1,<7.0.0",
+            "xprof==2.23.2",  # Current release; still writes HLO sidecars.
+            "protobuf>=6.33.5",  # Minimum pulled in with xprof; protobuf 7 works.
         ],
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
