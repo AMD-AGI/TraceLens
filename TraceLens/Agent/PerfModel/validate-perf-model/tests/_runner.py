@@ -61,6 +61,7 @@ def _build_op_table():
     other = _try_import("other")
     rope = _try_import("rope")
     atom_flydsl = _try_import("atom_flydsl")
+    kimi = _try_import("kimi")
 
     table = {}
     _add(table, gemm, {
@@ -131,6 +132,14 @@ def _build_op_table():
         "atom_flydsl_preshuffle_gemm_a8": "test_atom_flydsl_preshuffle_gemm_a8",
         "atom_flydsl_gdr_decode": "test_atom_flydsl_gdr_decode",
     })
+    _add(table, kimi, {
+        "kimi_situ_and_mul": "test_kimi_situ_and_mul",
+        "kimi_static_per_tensor_quant": "test_kimi_static_per_tensor_quant",
+        "kimi_aten_addmm_": "test_kimi_aten_addmm_",
+        "kimi_moe_sorting_opus_fwd": "test_kimi_moe_sorting_opus_fwd",
+        "kimi_fused_kda_decode": "test_kimi_fused_kda_decode",
+        "kimi_gather_and_maybe_dequant_cache": "test_kimi_gather_and_maybe_dequant_cache",
+    })
 
     generic = _try_import("_generic")
     if generic is not None and getattr(generic, "test_generic_simple_op", None):
@@ -146,7 +155,7 @@ def main():
     for k in (
         "M", "N", "K", "E", "topk", "group_size", "seq_len", "num_heads_q",
         "num_heads_kv", "head_dim", "block_n", "block_k", "block_m", "split_k",
-        "num_decode_seqs", "ctx_len", "prefill_seq_len",
+        "num_decode_seqs", "ctx_len", "prefill_seq_len", "n_ctx", "ctx_qlen",
     ):
         p.add_argument(f"--{k}", type=int, default=None)
     for k in (
@@ -175,6 +184,8 @@ def main():
     )
     p.add_argument("--input-dims-json", default=None, dest="input_dims_json")
     p.add_argument("--input-types-json", default=None, dest="input_types_json")
+    p.add_argument("--concrete-inputs-json", default=None, dest="concrete_inputs_json",
+                   help="Traced non-tensor arguments (generic-CSV mode only).")
     p.add_argument("--op-namespace", default=None, dest="op_namespace")
     p.add_argument("--op-fn-name", default=None, dest="op_fn_name")
     p.add_argument(

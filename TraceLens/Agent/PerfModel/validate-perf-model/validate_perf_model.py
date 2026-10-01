@@ -98,6 +98,12 @@ from perf_model_harnesses import (
     run_perf_model_dsv4_dynamic_per_group_scaled_quant,
     run_perf_model_dsv4_topk_softplus,
     run_perf_model_dsv4_fused_dynamic_mx_quant_moe_sort,
+    run_perf_model_kimi_fused_kda_decode,
+    run_perf_model_kimi_situ_and_mul,
+    run_perf_model_kimi_static_per_tensor_quant,
+    run_perf_model_kimi_moe_sorting_opus_fwd,
+    run_perf_model_kimi_aten_addmm_,
+    run_perf_model_kimi_gather_and_maybe_dequant_cache,
 )
 
 # *** CORRECTED memory-read counters: the raw TCC RDREQ set is collected instead
@@ -221,7 +227,7 @@ TESTS_RUNNER = Path(__file__).resolve().parent / 'tests' / '_runner.py'
 
 _RUNNER_INT_FLAGS = ('M', 'N', 'K', 'E', 'topk', 'group_size', 'seq_len',
                      'num_heads_q', 'num_heads_kv', 'head_dim', 'block_n',
-                     'block_k', 'block_m', 'split_k')
+                     'block_k', 'block_m', 'split_k', 'n_ctx', 'ctx_qlen')
 
 _RUNNER_STR_FLAGS = ('in_dtype', 'w_dtype', 'out_dtype', 'scale_dtype',
                      'quant_dtype', 'quant_type', 'activation', 'kv_dtype',
@@ -259,12 +265,15 @@ def _build_runner_argv(op_name, effective_args, num_warmup=3):
     return (cmd, num_warmup)
 
 
-def _build_csv_runner_argv(registry_key, effective_args, num_warmup=3, input_dims=None, input_types=None):
+def _build_csv_runner_argv(registry_key, effective_args, num_warmup=3, input_dims=None,
+                           input_types=None, concrete_inputs=None):
     """Build a runner argv for the generic CSV path.
 
     ``registry_key`` is the OP_REGISTRY key (also used by
     ``test_generic_simple_op`` to look up the call dispatch); ``input_dims``
     and ``input_types`` are the raw lists from ``unified_perf_summary.csv``.
+    ``concrete_inputs`` carries the traced non-tensor arguments (expert counts,
+    block sizes, flags) so dispatchers can reproduce the original call.
     """
     cmd = [sys.executable, str(TESTS_RUNNER), '--op', '__generic__',
            '--registry-key', registry_key, '--num-warmup', str(num_warmup)]
@@ -272,6 +281,8 @@ def _build_csv_runner_argv(registry_key, effective_args, num_warmup=3, input_dim
         cmd += ['--input-dims-json', json.dumps(_tuple_to_list(input_dims))]
     if input_types is not None:
         cmd += ['--input-types-json', json.dumps(list(input_types) if input_types else [])]
+    if concrete_inputs is not None:
+        cmd += ['--concrete-inputs-json', json.dumps([str(c) for c in concrete_inputs])]
     return (cmd, num_warmup)
 
 
@@ -307,6 +318,19 @@ def _populate_varlen_attention_args(op_name, effective_args):
     effective_args._varlen_total_q = cu_q[-1]
     effective_args._varlen_total_kv = cu_k[-1]
     return None
+
+
+def _csv_only_perf_model(_effective_args):
+    """Placeholder model_fn for ops validated only through ``--from-report-dir``.
+
+    These ops have no standalone dimension-driven perf model in
+    ``perf_model_harnesses``; in CSV mode the prediction comes from
+    :func:`run_perf_model_from_event` using the traced operands, so this is
+    never called unless someone selects the op via ``--op``.
+    """
+    raise NotImplementedError(
+        'This op is only validated via --from-report-dir, which derives the '
+        'prediction from the traced event rather than from CLI dimensions.')
 
 
 OP_REGISTRY = {
@@ -471,7 +495,6 @@ OP_REGISTRY = {
         'defaults': {'M': 2048, 'N': 4096, 'K': 8192},
         'required_args': ['M', 'N', 'K'],
         'description': 'vLLM FP4 GEMM with dynamic quantization (Quark OCP MX)',
-        'perf_model_only': True,
     },
     'vllm_triton_group_quant_fp8': {
         'category': 'vllm_quant',
@@ -594,9 +617,10 @@ OP_REGISTRY = {
     'dsv3_mla_decode_fwd': {
         'category': 'dsv3_mla_decode',
         'model_fn': run_perf_model_dsv3_mla_decode_fwd,
-        'defaults': {'seq_len': 8677, 'E': 64, 'num_heads_q': 16, 'head_dim': 576},
+        'defaults': {'seq_len': 8677, 'E': 64, 'num_heads_q': 16, 'head_dim': 576,
+                     'kv_dtype': 'fp8', 'n_ctx': 0, 'ctx_qlen': 0},
         'required_args': ['seq_len', 'E', 'num_heads_q', 'head_dim'],
-        'description': 'AITER FP8 paged MLA decode (pseudo_mla_decode_fwd: core ASM + reduce)',
+        'description': 'AITER paged MLA attention (pseudo_mla_decode_fwd: core ASM + reduce)',
     },
     'dsv3_moe_flydsl_stage1': {
         'category': 'dsv3_moe_flydsl',
@@ -717,6 +741,121 @@ OP_REGISTRY = {
         'required_args': ['M', 'N', 'E', 'topk'],
         'description': 'DSV4 fused MX-FP8 quant + MoE sort (aiter)',
     },
+    # ---------------------------------------------------------------------
+    # CSV-only ops: dispatched from traced operands via tests/_generic.py.
+    # ---------------------------------------------------------------------
+    'batched_gemm_a16wfp4_': {
+        'category': 'gemm',
+        'model_fn': _csv_only_perf_model,
+        'defaults': {},
+        'required_args': [],
+        'description': 'AITER batched BF16 x MXFP4 GEMM (triton)',
+    },
+    'fused_qk_rmsnorm': {
+        'category': 'norm',
+        'model_fn': _csv_only_perf_model,
+        'defaults': {},
+        'required_args': [],
+        'description': 'AITER fused Q/K RMSNorm',
+    },
+    'biased_grouped_topk_hip': {
+        'category': 'moe',
+        'model_fn': _csv_only_perf_model,
+        'defaults': {},
+        'required_args': [],
+        'description': 'AITER biased grouped top-k MoE routing (HIP)',
+    },
+    'moe_sorting_fwd': {
+        'category': 'moe',
+        'model_fn': _csv_only_perf_model,
+        'defaults': {},
+        'required_args': [],
+        'description': 'AITER MoE token sorting / expert bucketing',
+    },
+    'mxfp4_moe_sort_hip': {
+        'category': 'moe',
+        'model_fn': _csv_only_perf_model,
+        'defaults': {},
+        'required_args': [],
+        'description': 'AITER MXFP4 MoE scale sorting (HIP)',
+    },
+    'sgl_kernel_silu_and_mul': {
+        'category': 'activation',
+        'model_fn': _csv_only_perf_model,
+        'defaults': {},
+        'required_args': [],
+        'description': 'SGLang sgl_kernel SiLU-and-mul (needs an SGLang runtime)',
+    },
+    'vllm_concat_and_cache_mla': {
+        'category': 'vllm_attention',
+        'model_fn': _csv_only_perf_model,
+        'defaults': {},
+        'required_args': [],
+        'description': 'vLLM MLA KV-cache concat + write',
+    },
+    'vllm_concat_mla_q': {
+        'category': 'vllm_attention',
+        'model_fn': _csv_only_perf_model,
+        'defaults': {},
+        'required_args': [],
+        'description': 'vLLM MLA query concat (nope + pe)',
+    },
+    'vllm_per_token_group_fp8_quant': {
+        'category': 'vllm_quant',
+        'model_fn': _csv_only_perf_model,
+        'defaults': {},
+        'required_args': [],
+        'description': 'vLLM per-token-group FP8 quantization',
+    },
+    'flash_attn_varlen_forward': {
+        'category': 'attention',
+        'model_fn': _csv_only_perf_model,
+        'defaults': {},
+        'required_args': [],
+        'description': 'flash-attn varlen forward (packed prefill)',
+    },
+    'kimi_fused_kda_decode': {
+        'category': 'kimi_k3',
+        'model_fn': run_perf_model_kimi_fused_kda_decode,
+        'defaults': {'seq_len': 7, 'num_heads_q': 12, 'head_dim': 128, 'E': 2732},
+        'required_args': ['seq_len'],
+        'description': 'Kimi-K3 fused KDA decode (conv + recurrence + gated RMSNorm)',
+    },
+    'kimi_situ_and_mul': {
+        'category': 'kimi_k3',
+        'model_fn': run_perf_model_kimi_situ_and_mul,
+        'defaults': {'M': 7, 'N': 768},
+        'required_args': ['M', 'N'],
+        'description': 'Kimi SituGLU (_C::situ_and_mul)',
+    },
+    'kimi_static_per_tensor_quant': {
+        'category': 'kimi_k3',
+        'model_fn': run_perf_model_kimi_static_per_tensor_quant,
+        'defaults': {'M': 7, 'N': 6912},
+        'required_args': ['M', 'N'],
+        'description': 'AITER static per-tensor quant (Kimi MLA path)',
+    },
+    'kimi_moe_sorting_opus_fwd': {
+        'category': 'kimi_k3',
+        'model_fn': run_perf_model_kimi_moe_sorting_opus_fwd,
+        'defaults': {'M': 7, 'topk': 16, 'E': 896, 'block_m': 32},
+        'required_args': ['M'],
+        'description': 'AITER opus MoE sorting (Kimi-K3)',
+    },
+    'kimi_aten_addmm_': {
+        'category': 'kimi_k3',
+        'model_fn': run_perf_model_kimi_aten_addmm_,
+        'defaults': {'M': 7, 'N': 896, 'K': 3584},
+        'required_args': ['M', 'N', 'K'],
+        'description': 'In-place aten::addmm_ (Kimi-K3 decode GEMM)',
+    },
+    'kimi_gather_and_maybe_dequant_cache': {
+        'category': 'kimi_k3',
+        'model_fn': run_perf_model_kimi_gather_and_maybe_dequant_cache,
+        'defaults': {'seq_len': 1024, 'head_dim': 576},
+        'required_args': ['seq_len'],
+        'description': 'vLLM FP8 MLA KV gather + dequant',
+    },
 }
 
 CATEGORIES = sorted(set(v['category'] for v in OP_REGISTRY.values()))
@@ -746,6 +885,20 @@ CSV_NAME_TO_REGISTRY = {
     'aiter::gelu_and_mul': 'gelu_and_mul',
     'aiter::gelu_tanh_and_mul': 'gelu_tanh_and_mul',
     'aiter::rms_norm': 'rms_norm',
+    'aiter::rmsnorm': 'rmsnorm',
+    'aiter::add_rmsnorm': 'add_rmsnorm',
+    'aiter::gemm_a16w16': 'gemm_a16w16_atomic_',
+    'vllm::gemm_with_dynamic_quant': 'vllm_gemm_with_dynamic_quant',
+    'aiter::batched_gemm_a16wfp4_': 'batched_gemm_a16wfp4_',
+    'aiter::_fused_qk_rmsnorm_kernel': 'fused_qk_rmsnorm',
+    'aiter::biased_grouped_topk_hip': 'biased_grouped_topk_hip',
+    'aiter::moe_sorting_fwd': 'moe_sorting_fwd',
+    'sgl_kernel::silu_and_mul': 'sgl_kernel_silu_and_mul',
+    'aiter::mxfp4_moe_sort_hip': 'mxfp4_moe_sort_hip',
+    '_C_cache_ops::concat_and_cache_mla': 'vllm_concat_and_cache_mla',
+    '_C_cache_ops::concat_mla_q': 'vllm_concat_mla_q',
+    '_C::per_token_group_fp8_quant': 'vllm_per_token_group_fp8_quant',
+    'flash_attn::_flash_attn_varlen_forward': 'flash_attn_varlen_forward',
     'aiter::rmsnorm2d_fwd_ck': 'rms_norm',
     'aiter::rmsnorm2d_fwd_with_add_ck': 'add_rmsnorm',
     'aiter::rmsnorm2d_fwd_with_dynamicquant_ck': 'rmsnorm_dynamicquant',
@@ -777,6 +930,12 @@ CSV_NAME_TO_REGISTRY = {
     'pseudo_mla_decode_fwd': 'dsv3_mla_decode_fwd',
     'pseudo_op::moe_flydsl_stage1': 'dsv3_moe_flydsl_stage1',
     'pseudo_op::moe_flydsl_stage2': 'dsv3_moe_flydsl_stage2',
+    '_C::fused_kda_decode': 'kimi_fused_kda_decode',
+    '_C::situ_and_mul': 'kimi_situ_and_mul',
+    'aiter::static_per_tensor_quant': 'kimi_static_per_tensor_quant',
+    'aiter::moe_sorting_opus_fwd': 'kimi_moe_sorting_opus_fwd',
+    'aten::addmm_': 'kimi_aten_addmm_',
+    '_C_cache_ops::gather_and_maybe_dequant_cache': 'kimi_gather_and_maybe_dequant_cache',
 }
 
 USE_EXISTING_HARNESS_FOR_CSV = frozenset({
@@ -784,7 +943,7 @@ USE_EXISTING_HARNESS_FOR_CSV = frozenset({
     'fmha_v3_varlen_fwd', 'wrapper_fmha_v3_fwd', 'atom_flydsl_gdr_decode',
     'vllm_unified_attention', 'vllm_gdn_attention_core', 'fmoe_fp8_blockscale_g1u1',
     'moe_cktile2stages_gemm1_ck', 'moe_cktile2stages_gemm2_ck',
-    'atom_flydsl_preshuffle_gemm_a8',
+    'atom_flydsl_preshuffle_gemm_a8', 'vllm_gemm_with_dynamic_quant',
     'dsv3_mla_decode_fwd', 'dsv3_moe_flydsl_stage1', 'dsv3_moe_flydsl_stage2',
 })
 
@@ -927,7 +1086,14 @@ def run_rocprofv3(rocprofv3_path, counters, runner_argv, out_name, out_dir, time
     return csv_path
 
 
-_INFRA_KERNEL_PATTERNS = ['at::native::', 'at::cuda::', 'void hip', 'Cijk_', 'void at::native']
+_INFRA_KERNEL_PATTERNS = [
+    'at::native::', 'at::cuda::', 'void hip', 'Cijk_', 'void at::native',
+    # Runtime allocator/transfer kernels. Ops that allocate or zero their own
+    # buffers (e.g. the vLLM GEMM wrappers) emit many of these, and they can
+    # otherwise outweigh the kernel under test during auto-discovery.
+    '__amd_rocclr_fillBuffer', '__amd_rocclr_copyBuffer',
+    '__amd_rocclr_memset', 'hipMemset',
+]
 
 
 def discover_kernel_name(rocprofv3_path, runner_argv, num_warmup_iters, out_dir, timeout=120):
@@ -1680,17 +1846,34 @@ def _extract_dims_for_existing_harness(registry_key, input_dims, input_types, co
     cat = reg['category']
     pp = perf_params or {}
     if cat == 'dsv3_mla_decode':
-        # pseudo_mla_decode_fwd: batch of decode steps (q_len==1) over FP8 paged KV.
-        # B is the trace batch; N_Q is total decode q tokens (== batch since q_len==1).
-        batch = int(pp.get('N_Q') or 64)
+        # pseudo_mla_decode_fwd carries a whole scheduler batch: c_* describe the
+        # context (prefill) requests and g_* the generation requests. Both halves
+        # run in one kernel launch, so the harness has to rebuild both.
         nhead = int(pp.get('H_Q') or 16)
         qk = int(pp.get('d_h_qk') or 576)
-        g_sk = int(pp.get('g_sk') or (batch * 8677))
-        ctx = max(1, round(g_sk / batch)) if batch else 8677
-        ns.seq_len = ctx
-        ns.E = batch
+        n_gen = int(pp.get('g_sq') or pp.get('N_Q') or 64)
+        g_sk = int(pp.get('g_sk') or (n_gen * 8677))
+        # c_sqsq / c_sq is the (uniform) query length of a context request. The
+        # c_* terms describe the scheduler batch, which is not always the same
+        # thing as this call: some backends route context attention to a
+        # separate flash-attention op and only send generation tokens here. The
+        # query tensor settles it -- replay the context half only when N_Q
+        # actually accounts for those tokens.
+        c_sq = int(pp.get('c_sq') or 0)
+        c_sqsq = int(pp.get('c_sqsq') or 0)
+        n_q = int(pp.get('N_Q') or n_gen)
+        ctx_qlen = round(c_sqsq / c_sq) if c_sq else 0
+        ctx_in_this_call = c_sq and abs(n_q - (c_sq + n_gen)) <= 1
+        ns.n_ctx = round(c_sq / ctx_qlen) if (ctx_qlen and ctx_in_this_call) else 0
+        ns.ctx_qlen = ctx_qlen if ctx_in_this_call else 0
+        ns.E = n_gen
+        ns.seq_len = max(1, round(g_sk / n_gen)) if n_gen else 8677
         ns.num_heads_q = nhead
         ns.head_dim = qk
+        # The KV cache tensor dtype picks the a8w8 or a16w16 kernel; the logical
+        # dtype in perf_params says bf16 even where the cache is quantised.
+        kv_type = str(input_types[1]) if input_types and len(input_types) > 1 else ''
+        ns.kv_dtype = 'fp8' if 'Float8' in kv_type else 'bf16'
         return ns
     if cat == 'dsv3_moe_flydsl':
         ns.M = int(pp.get('num_tokens') or 64)
@@ -1709,6 +1892,16 @@ def _extract_dims_for_existing_harness(registry_key, input_dims, input_types, co
             ns.N = 4096
         return ns
     if cat == 'moe':
+        # perf_params carries the logical MoE dims directly. The raw operand
+        # shapes are ambiguous (operand 0 may be the routing table rather than
+        # the activation, which yields K=topk), so prefer perf_params.
+        if pp.get('num_tokens') and pp.get('hidden_dim'):
+            ns.M = int(pp['num_tokens'])
+            ns.K = int(pp['hidden_dim'])
+            ns.N = int(pp.get('inter_dim') or 256)
+            ns.E = int(pp.get('num_experts') or 8)
+            ns.topk = int(pp.get('topk') or 2)
+            return ns
         ns.M = input_dims[0][0] if len(input_dims) > 0 and input_dims[0] else 512
         ns.K = input_dims[0][1] if len(input_dims) > 0 and len(input_dims[0]) > 1 else 7168
         if len(input_dims) > 1 and input_dims[1] and len(input_dims[1]) >= 3:
@@ -1806,7 +1999,8 @@ def _build_runner_argv_from_csv_entry(registry_key, input_dims, input_types, con
         ns = _extract_dims_for_existing_harness(registry_key, input_dims, input_types, concrete_inputs, attn_params, perf_params)
         return _build_runner_argv(registry_key, ns, num_warmup=num_warmup)
     return _build_csv_runner_argv(registry_key, argparse.Namespace(), num_warmup=num_warmup,
-                                  input_dims=input_dims, input_types=input_types)
+                                  input_dims=input_dims, input_types=input_types,
+                                  concrete_inputs=concrete_inputs)
 
 
 def load_report_dir(report_dir):
@@ -2170,6 +2364,9 @@ def main():
                         help='Skip derived counters (TOTAL_16_OPS, TOTAL_32_OPS).')
     parser.add_argument('--timeout', type=int, default=300, help='Timeout in seconds for each rocprofv3 run.')
     parser.add_argument('--kernel-filter', default=None, help='Manual kernel name filter (overrides auto-discovery).')
+    parser.add_argument('--only-ops', default=None,
+                        help='Comma-separated registry keys or trace names; with --from-report-dir, '
+                             'restrict the run to those ops (useful for targeted re-runs).')
     args = parser.parse_args()
 
     if args.discover:
@@ -2183,6 +2380,11 @@ def main():
         base_output_dir = os.path.abspath(args.output_dir)
         os.makedirs(base_output_dir, exist_ok=True)
         entries = load_report_dir(from_report_dir)
+        if args.only_ops:
+            wanted = {o.strip() for o in args.only_ops.split(',') if o.strip()}
+            entries = [e for e in entries
+                       if e['registry_key'] in wanted or e['trace_name'] in wanted]
+            print(f'--only-ops filter kept {len(entries)} entries: {sorted(wanted)}')
         if not entries:
             print('No ops to validate from report dir.')
             return None

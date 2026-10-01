@@ -265,11 +265,12 @@ def test_vllm_gemm_with_dynamic_quant(
 
     Note
     ----
-    Marked ``perf_model_only`` in the validation registry; the test runs only
-    if vllm with the gemm_with_dynamic_quant op is installed.
+    The op is registered lazily by the Quark OCP-MX scheme module rather than
+    by ``import vllm``, so that submodule has to be imported explicitly.
     """
     import torch
     import vllm  # noqa: F401  (registers torch.ops.vllm.*)
+    import vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx  # noqa: F401
 
     in_t = _resolve_dtype(in_dtype)
     out_t = _resolve_dtype(out_dtype)

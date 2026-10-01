@@ -691,51 +691,86 @@ def test_dsv3_mla_reduce_v1(seq_len, E=16, num_heads_q=16, head_dim=192,
 
 
 def test_dsv3_mla_decode_fwd(seq_len, E=64, num_heads_q=16, head_dim=576,
-                             page_size=1, num_warmup=3, **_):
-    """``aiter.mla.mla_decode_fwd`` (FP8 paged MLA decode, q_len==1).
+                             page_size=1, kv_dtype='fp8', n_ctx=0, ctx_qlen=0,
+                             num_warmup=3, **_):
+    """``aiter.mla.mla_decode_fwd`` (paged MLA attention through the MQA path).
 
-    Reproduces ``pseudo_mla_decode_fwd`` from the DSV3 decode trace: a batch of
-    decode steps (one query token each) attending over an FP8 paged KV cache.
-    The pseudo op aggregates the ASM core kernel
-    (``mla_a8w8_qh16_qseqlen1_gqaratio16_ps``) plus the cross-split reduce; the
-    auto-discovered kernel filter measures the dominant (core) kernel.
+    Reproduces ``pseudo_mla_decode_fwd``. The traces drive this entry point in
+    two precisions and two batch shapes:
+
+      * DSV3 decode          fp8 KV      ``mla_a8w8_qh16_qseqlen1_gqaratio16_ps``
+      * GLM/Kimi decode      bf16 KV     ``mla_a16w16_qh16_m16x4_n16x1_coex0_mask1_ps``
+      * GLM chunked prefill  bf16 KV     same kernel, context + generation batch
+
+    The scheduler expands a chunked prefill into one entry per query token, so a
+    context request of ``ctx_qlen`` tokens contributes ``ctx_qlen`` entries whose
+    kv lengths walk the causal ramp 1..ctx_qlen. That keeps ``max_seqlen_qo`` at
+    1 for every batch shape, which is what the persistent-scheduler metadata
+    (the ``_ps`` in the kernel name) is sized for.
 
     Parameters mapped from the trace:
-      * ``--seq_len``     : per-sequence KV context length (g_sk / batch).
-      * ``--E``           : batch size (number of decode sequences). Default 64.
+      * ``--seq_len``     : per-sequence KV context length of a generation
+                            request (g_sk / g_sq).
+      * ``--E``           : number of generation requests (g_sq).
+      * ``--n_ctx``       : number of context (prefill) requests, c_sq / ctx_qlen.
+      * ``--ctx_qlen``    : query tokens per context request, c_sqsq / c_sq.
+      * ``--kv_dtype``    : ``fp8`` or ``bf16``, taken from the traced KV cache
+                            tensor dtype; it selects the a8w8 or a16w16 kernel.
       * ``--num_heads_q`` : number of Q heads (nhead_kv == 1 for MLA). Default 16.
       * ``--head_dim``    : qk_head_dim = kv_lora_rank + qk_rope_head_dim. Default 576.
     """
     import torch
     import aiter
     from aiter import dtypes
+    from aiter.ops.attention import get_mla_metadata_info_v1, get_mla_metadata_v1
 
-    batch_size = E
     nhead = num_heads_q
     nhead_kv = 1
     qk_head_dim = head_dim               # 576 = 512 (kv_lora) + 64 (qk_rope)
     qk_rope_head_dim = 64
     kv_lora_rank = qk_head_dim - qk_rope_head_dim   # 512
     v_head_dim = kv_lora_rank            # absorbed decode: v_head_dim == kv_lora_rank
-    ctx_lens = seq_len
     device = "cuda"
+    use_fp8 = str(kv_dtype).lower() in ('fp8', 'fp8_e4m3', 'float8_e4m3fn')
+    causal = n_ctx > 0
+
+    # One entry per query token: a causal ramp for each context request, then
+    # the generation requests at their cached history length. Entries belonging
+    # to the same request share one KV region, so the ramp re-reads the same
+    # pages rather than touching fresh memory -- getting that wrong inflates the
+    # measured byte count by the length of the ramp.
+    kv_lens, kv_starts, region_base = [], [], 0
+    for _ in range(int(n_ctx)):
+        for length in range(1, int(ctx_qlen) + 1):
+            kv_lens.append(length)
+            kv_starts.append(region_base)
+        region_base += int(ctx_qlen)
+    for _ in range(int(E)):
+        kv_lens.append(seq_len)
+        kv_starts.append(region_base)
+        region_base += seq_len
+    batch_size = len(kv_lens)
+    if batch_size == 0:
+        raise ValueError('mla_decode_fwd harness needs at least one request')
 
     print(
-        f"test: dsv3_mla_decode_fwd ctx={ctx_lens} batch={batch_size} "
-        f"heads={nhead} qk_d={qk_head_dim} v_d={v_head_dim} page={page_size}",
+        f"test: dsv3_mla_decode_fwd gen={E}x{seq_len} ctx={n_ctx}x{ctx_qlen} "
+        f"entries={batch_size} heads={nhead} qk_d={qk_head_dim} v_d={v_head_dim} "
+        f"kv_dtype={'fp8' if use_fp8 else 'bf16'} causal={causal} page={page_size}",
         flush=True,
     )
 
-    seq_lens_kv = torch.full((batch_size,), ctx_lens, dtype=torch.int, device=device)
     kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int, device=device)
-    kv_indptr[1:] = torch.cumsum(seq_lens_kv, dim=0)
+    kv_indptr[1:] = torch.cumsum(torch.tensor(kv_lens, dtype=torch.int, device=device), 0)
     total_kv = int(kv_indptr[-1].item())
 
-    num_page = total_kv + 128            # page_size == 1
-    kv_indices = torch.arange(total_kv, dtype=torch.int, device=device)
+    num_page = region_base + 128         # page_size == 1
+    kv_indices = torch.cat([
+        torch.arange(start, start + length, dtype=torch.int, device=device)
+        for start, length in zip(kv_starts, kv_lens)])
     kv_last_page_lens = torch.ones(batch_size, dtype=torch.int, device=device)
 
-    # Decode: exactly one query token per sequence.
+    # Every entry carries exactly one query token.
     qo_indptr = torch.arange(batch_size + 1, dtype=torch.int, device=device)
     total_q = batch_size
     max_seqlen_qo = 1
@@ -745,19 +780,35 @@ def test_dsv3_mla_decode_fwd(seq_len, E=64, num_heads_q=16, head_dim=576,
         (num_page * page_size, nhead_kv, kv_lora_rank + qk_rope_head_dim),
         dtype=torch.bfloat16, device=device,
     )
-
-    q_fp8 = q.to(dtypes.fp8)
-    kv_fp8 = kv_buffer.to(dtypes.fp8)
-    q_scale = torch.ones([1], dtype=torch.float, device=device)
-    kv_scale = torch.ones([1], dtype=torch.float, device=device)
+    if use_fp8:
+        q, kv_buffer = q.to(dtypes.fp8), kv_buffer.to(dtypes.fp8)
+        q_scale = torch.ones([1], dtype=torch.float, device=device)
+        kv_scale = torch.ones([1], dtype=torch.float, device=device)
+    else:
+        q_scale = kv_scale = None
     sm_scale = 1.0 / (qk_head_dim ** 0.5)
 
     out = torch.empty((total_q, nhead, v_head_dim), dtype=torch.bfloat16, device=device).fill_(-1)
 
+    # Persistent-scheduler work plan. get_mla_metadata_info_v1 returns the buffer
+    # sizes as (ptrs, work_indptr, work_info_set, ...) while get_mla_metadata_v1
+    # takes them as (ptrs, work_info_set, work_indptr, ...), so the two middle
+    # buffers swap between allocation and the call, as vLLM does.
+    specs = get_mla_metadata_info_v1(
+        batch_size=batch_size, max_seqlen_qo=max_seqlen_qo, num_head_qo=nhead,
+        q_dtype=q.dtype, kv_dtype=kv_buffer.dtype, is_sparse=False, fast_mode=True)
+    ptrs, work_indptr, work_info_set, red_indptr, red_final, red_partial = [
+        torch.zeros(shape, dtype=dt, device=device) for shape, dt in specs]
+    get_mla_metadata_v1(
+        qo_indptr, kv_indptr, kv_last_page_lens, nhead // nhead_kv, nhead_kv, causal,
+        ptrs, work_info_set, work_indptr, red_indptr, red_final, red_partial,
+        page_size=page_size, kv_granularity=16, max_seqlen_qo=max_seqlen_qo,
+        uni_seqlen_qo=max_seqlen_qo, fast_mode=True)
+
     def _call():
         aiter.mla.mla_decode_fwd(
-            q_fp8,
-            kv_fp8.view(num_page, page_size, nhead_kv, qk_head_dim),
+            q,
+            kv_buffer.view(num_page, page_size, nhead_kv, qk_head_dim),
             out,
             qo_indptr,
             kv_indptr,
@@ -769,6 +820,12 @@ def test_dsv3_mla_decode_fwd(seq_len, E=64, num_heads_q=16, head_dim=576,
             sm_scale,
             q_scale=q_scale,
             kv_scale=kv_scale,
+            work_meta_data=ptrs,
+            work_indptr=work_indptr,
+            work_info_set=work_info_set,
+            reduce_indptr=red_indptr,
+            reduce_final_map=red_final,
+            reduce_partial_map=red_partial,
         )
 
     for _ in range(num_warmup):
@@ -777,7 +834,8 @@ def test_dsv3_mla_decode_fwd(seq_len, E=64, num_heads_q=16, head_dim=576,
     print("test: measured iteration...", flush=True)
     _call()
     torch.cuda.synchronize()
-    print(f"test: done, output={out.shape}", flush=True)
+    print(f"test: done, output={out.shape} qk_pairs={total_kv} kv_pages={region_base}",
+          flush=True)
 
 
 def test_dsv4_pa_sparse_prefill_opus(

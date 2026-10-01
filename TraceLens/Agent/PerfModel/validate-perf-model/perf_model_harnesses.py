@@ -2642,3 +2642,163 @@ def run_perf_model_dsv4_fused_dynamic_mx_quant_moe_sort(args):
     }
     return _dsv4_eval('aiter::fused_dynamic_mx_quant_moe_sort_hip', event)
 
+
+_KIMI_EXT_DEFAULT = (
+    '/home/devashah/TraceLens/Magpie/results/agentx_k3tp8_v29patch_qi0_256it/'
+    'benchmark_vllm_20260914_152749/kimi_k3_perf_model_extension.py'
+)
+_KIMI_EXT_CACHE = {}
+
+
+def _load_kimi_extension():
+    path = _os.environ.get('KIMI_K3_TRIAGE_EXTENSION', _KIMI_EXT_DEFAULT)
+    cached = _KIMI_EXT_CACHE.get(path)
+    if cached is not None:
+        return cached
+    _ensure_tracelens_importable()
+    spec = _ilu.spec_from_file_location('kimi_k3_perf_model_extension', path)
+    if spec is None or spec.loader is None:
+        raise ImportError(
+            f"Could not load Kimi-K3 extension from '{path}'. "
+            "Set KIMI_K3_TRIAGE_EXTENSION."
+        )
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _KIMI_EXT_CACHE[path] = mod
+    return mod
+
+
+def run_perf_model_kimi_fused_kda_decode(args):
+    """Perf model for ``_C::fused_kda_decode`` (Kimi-K3 fused KDA decode)."""
+    mod = _load_kimi_extension()
+    T = getattr(args, 'seq_len', None) or getattr(args, 'M', None) or 7
+    H = getattr(args, 'num_heads_q', None) or getattr(args, 'num_heads', None) or 12
+    d = getattr(args, 'head_dim', None) or 128
+    W_c = getattr(args, 'conv_width', None) or 4
+    d_x = 3 * H * d
+    event = {
+        'name': '_C::fused_kda_decode',
+        'args': {
+            'Input Dims': [
+                [T, d_x],
+                [3, W_c, H * d],
+                [],
+                [64, d_x, W_c - 1],
+                [1, T, H, d],
+                [1, T, H],
+                [H],
+                [H * d],
+                [T],
+                [64, H, d, d],
+                [1, T, H, d],
+                [],
+                [T, H, d],
+                [d],
+                [],
+            ],
+            'Input type': [
+                'c10::BFloat16', 'float', '', 'c10::BFloat16',
+                'c10::BFloat16', 'c10::BFloat16', 'float', 'float', 'int',
+                'float', 'c10::BFloat16', 'Scalar', 'c10::BFloat16', 'float',
+                'Scalar',
+            ],
+        },
+    }
+    model = mod.kimi_fused_kda_decode(event)
+    return (model.flops(), model.bytes(), model.get_compute_precision())
+
+
+def run_perf_model_kimi_situ_and_mul(args):
+    """Perf model for ``_C::situ_and_mul``."""
+    mod = _load_kimi_extension()
+    T = getattr(args, 'M', None) or 7
+    D = getattr(args, 'N', None) or 768
+    event = {
+        'name': '_C::situ_and_mul',
+        'args': {
+            'Input Dims': [[T, D], [T, 2 * D], [], [], []],
+            'Input type': ['c10::BFloat16', 'c10::BFloat16', 'Scalar', 'Scalar', ''],
+            'Input Strides': [[D, 1], [2 * D, 1], [], [], []],
+            'Concrete Inputs': ['', '', '4.', '25.', ''],
+        },
+    }
+    model = mod.kimi_situ_and_mul(event)
+    return (model.flops(), model.bytes(), model.get_compute_precision())
+
+
+def run_perf_model_kimi_static_per_tensor_quant(args):
+    """Perf model for ``aiter::static_per_tensor_quant``."""
+    mod = _load_kimi_extension()
+    T = getattr(args, 'M', None) or 7
+    N = getattr(args, 'N', None) or 6912
+    event = {
+        'name': 'aiter::static_per_tensor_quant',
+        'args': {
+            'Input Dims': [[T, N], [T, N], []],
+            'Input type': ['c10::Float8_e4m3fn', 'c10::BFloat16', 'float'],
+        },
+    }
+    model = mod.kimi_static_per_tensor_quant(event)
+    return (model.flops(), model.bytes(), model.get_compute_precision())
+
+
+def run_perf_model_kimi_moe_sorting_opus_fwd(args):
+    """Perf model for ``aiter::moe_sorting_opus_fwd``."""
+    mod = _load_kimi_extension()
+    T = getattr(args, 'M', None) or 7
+    topk = getattr(args, 'topk', None) or 16
+    event = {
+        'name': 'aiter::moe_sorting_opus_fwd',
+        'args': {
+            'Input Dims': [
+                [T, topk], [T, topk], [28768], [28768], [899], [2],
+                [0, 0], [], [], [], [], [118528], [], [], [], [],
+            ],
+            'Input type': [
+                'int', 'float', 'int', 'float', 'int', 'int',
+                'c10::BFloat16', 'Scalar', 'Scalar', '', '',
+                'unsigned char', 'Scalar', '', '', '',
+            ],
+        },
+    }
+    model = mod.kimi_moe_sorting_opus_fwd(event)
+    return (model.flops(), model.bytes(), model.get_compute_precision())
+
+
+def run_perf_model_kimi_aten_addmm_(args):
+    """Perf model for ``aten::addmm_``."""
+    mod = _load_kimi_extension()
+    M = getattr(args, 'M', None) or 7
+    N = getattr(args, 'N', None) or 896
+    K = getattr(args, 'K', None) or 3584
+    event = {
+        'name': 'aten::addmm_',
+        'args': {
+            'Input Dims': [[M, N], [M, K], [K, N], [], []],
+            'Input type': ['c10::BFloat16', 'c10::BFloat16', 'c10::BFloat16', 'Scalar', 'Scalar'],
+            'Input Strides': [[N, 1], [K, 1], [1, N], [], []],
+        },
+    }
+    model = mod.kimi_aten_addmm_inplace(event)
+    return (model.flops(), model.bytes(), model.get_compute_precision())
+
+
+def run_perf_model_kimi_gather_and_maybe_dequant_cache(args):
+    """Perf model for ``_C_cache_ops::gather_and_maybe_dequant_cache``."""
+    mod = _load_kimi_extension()
+    n_kv = getattr(args, 'seq_len', None) or getattr(args, 'M', None) or 1024
+    d_kv = getattr(args, 'head_dim', None) or 576
+    event = {
+        'name': '_C_cache_ops::gather_and_maybe_dequant_cache',
+        'args': {
+            'Input Dims': [[n_kv, d_kv], [n_kv, d_kv]],
+            'Input type': ['c10::Float8_e4m3fn', 'c10::BFloat16'],
+        },
+        'annotation': (
+            f'execute_{n_kv}_context_1(sq{n_kv}sk{n_kv}sqsq0sqsk{n_kv})'
+            f'_generation_0(sq0sk0sqsq0sqsk0)'
+        ),
+    }
+    model = mod.kimi_gather_and_maybe_dequant_cache(event)
+    return (model.flops(), model.bytes(), model.get_compute_precision())
+
