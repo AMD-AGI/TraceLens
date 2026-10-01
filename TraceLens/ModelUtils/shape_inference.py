@@ -2115,6 +2115,27 @@ class ShapeInferencer:
                             continue
                         merged[spec_id] = spec
 
+        # A loop's entry port reports what the body hands back, not what seeded
+        # it. They are the same variable: from the second iteration on, the body
+        # consumes its own output, so the body's shape is the one the loop
+        # actually runs on. The seed is sized from its producer, and a producer
+        # whose only rule is to echo its input -- a module with no shape rule of
+        # its own -- would otherwise make the whole loop report the width from
+        # BEFORE that module ran (GLM's vision loop carried the raw patch width
+        # [Pv, C*T*P*P] instead of the embedded [Pv, hidden]).
+        for node in graph.nodes:
+            if node.metadata.get("synthetic") != "@loop_carried":
+                continue
+            carried_back = [
+                edge.source
+                for edge in graph.edges
+                if edge.target == node.id
+                and (source := node_by_id.get(edge.source)) is not None
+                and source.metadata.get("synthetic") == "@loop_carried"
+            ]
+            if len(carried_back) == 1 and merged.get(carried_back[0]) is not None:
+                merged[node.id] = merged[carried_back[0]]
+
         # Per-output-port slices for tuple-unpacked split/chunk/unbind. The node's
         # own spec is the whole (pre-split) tensor; each consumer edge selects an
         # ordinal. Publish one spec per ordinal under a reserved key so the

@@ -425,6 +425,44 @@ def test_model_scope_frame_expansion_ops_are_sized():
             assert _shape_of(node) != _shape_of(producer), f"{node['id']} casts nothing"
 
 
+def test_a_loop_carries_the_width_its_body_produces():
+    """The loop's entry port reports the body's output, not the seed's producer.
+
+    GLM's vision tower runs ``for blk in self.blocks: hidden_states = blk(...)``
+    seeded from the patch embed. The patch embed has no shape rule of its own,
+    so its node echoes its input -- the raw patch width ``[Pv, C*T*P*P]`` -- even
+    though its expansion ends on a Conv3d that produces ``[Pv, hidden]``. Seeding
+    the port from that echo made the whole loop report a width that exists only
+    BEFORE the first module runs. Entry port, body input and exit port all carry
+    one variable, so they must all report one shape.
+    """
+    pytest.importorskip("huggingface_hub")
+    _, by_id = _build_nodes("zai-org/GLM-5.3-Flash")
+
+    ports = {
+        node_id: node
+        for node_id, node in by_id.items()
+        if "@loop_carried_in:" in node_id or "@loop_carried_out:" in node_id
+    }
+    assert ports, "expected the vision block loop to declare its ports"
+    for node_id, node in ports.items():
+        if "@loop_carried_in:" not in node_id:
+            continue
+        exit_port = by_id.get(
+            node_id.replace("@loop_carried_in:", "@loop_carried_out:")
+        )
+        if exit_port is None:
+            continue
+        assert _shape_of(node) == _shape_of(exit_port), (
+            node_id,
+            _shape_of(node),
+            _shape_of(exit_port),
+        )
+        body_in = by_id.get(node_id.replace("@loop_carried_in:", "@body_in:"))
+        if body_in is not None:
+            assert _shape_of(body_in) == _shape_of(node), (body_in["id"], node_id)
+
+
 def test_glm_mask_builder_claims_no_shape_without_a_mask_to_narrow():
     """GLM is never given a mask, so the builder asserts nothing about one.
 
