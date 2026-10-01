@@ -580,6 +580,47 @@ def test_a_tuple_boundary_names_each_component(model_id):
         assert len(set(slots)) == len(slots), (node["id"], slots)
 
 
+@pytest.mark.parametrize(
+    "model_id",
+    ["zai-org/GLM-5.3-Flash", "MiniMaxAI/MiniMax-M3"],
+)
+def test_a_constructed_tensor_is_a_visible_op_with_its_own_shape(model_id):
+    """``torch.zeros``/``ones``/``full`` build a tensor, so they draw as ops.
+
+    They were unlabelled, so a real tensor appeared from nowhere: GLM's indexer
+    builds its ``selected_counts`` with ``torch.zeros(B, S, kv_length)`` and its
+    visible-tail bookkeeping with ``torch.full((batch_size,), kv_length)``, and
+    none of it was in the diagram. Being built from host scalars, such an op
+    sizes its own axes rather than inheriting a neighbour's, and the tensors its
+    SIZES read are extents, not operands -- ``torch.zeros(keep.shape)`` depends
+    on ``keep`` without taking its data.
+    """
+    pytest.importorskip("huggingface_hub")
+    graph, by_id = _build_nodes(model_id)
+
+    built = [
+        node
+        for node in graph["nodes"]
+        if str(node.get("label")) in {"Ones", "Zeros", "Full", "Empty"}
+    ]
+    assert built, "expected the tensor constructors to render as ops"
+    for node in built:
+        shape = _shape_of(node)
+        assert shape, f"{node['id']} built a tensor of no stated shape"
+        # The sizes are host scalars, so nothing here may claim to read a
+        # tensor's DATA: every wired edge carries an extent.
+        for edge in node.get("incomingEdges", []) or []:
+            producer = by_id.get(str(edge.get("sourceNodeId")))
+            assert producer is not None, edge
+        details = " ".join(
+            str(a.get("value"))
+            for a in node.get("attrs", []) or []
+            if a.get("key") == "details"
+        )
+        if node.get("incomingEdges"):
+            assert "extent_inputs:" in details, (node["id"], details)
+
+
 def test_a_loop_carries_the_width_its_body_produces():
     """The loop's entry port reports the body's output, not the seed's producer.
 

@@ -2606,15 +2606,20 @@ def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
             if source is None:
                 continue
             source_ns = str(source.get("namespace") or "")
-            prefix = (source_ns + "/") if source_ns else ""
-            if target_ns == source_ns or not target_ns.startswith(prefix):
+            if target_ns == source_ns:
                 continue
-            segments = [p for p in target_ns[len(prefix) :].split("/") if p]
+            # Levels the tensor enters are the ones below what the two blocks
+            # share -- the same rule the leaving side uses, so an edge between
+            # two siblings is handled as well as one that descends.
+            shared = _common_namespace(source_ns, target_ns)
+            if shared == target_ns:
+                continue  # leaving the target's block, not entering it
+            segments = [p for p in target_ns[len(shared) :].split("/") if p]
             if not segments:
                 continue
             name = str(source.get("label") or "input").strip() or "input"
             upstream = str(edge["sourceNodeId"])
-            walk = source_ns
+            walk = shared
             # Every level, including the innermost: the block the op itself
             # lives in is the one the reader is looking at, and an edge that
             # arrives straight on the op leaves that block with nothing to show

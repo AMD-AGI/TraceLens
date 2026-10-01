@@ -2655,6 +2655,43 @@ class ShapeInferencer:
             length = _arange_axis(details, arange_dims)
             return TensorSpec(shape=(length,), dtype="int64")
 
+        if operation_label in {"ones", "zeros", "empty", "full"}:
+            # Built from host scalars, so it must size its own axes rather than
+            # inherit a neighbour's: ``torch.ones(B, S, dtype=torch.bool)``
+            # reads no tensor operand at all. Each size resolves the way an
+            # ``arange`` bound does -- an int literal, a known dim, or the bare
+            # identifier kept as a symbolic extent.
+            owner = self._owner_class_name(node, root=root) or (
+                root.class_name if root is not None else None
+            )
+            owner_scalars = (
+                self.module_dims.scalar_by_class.get(owner) if owner else None
+            )
+            size_dims = self.context.dims
+            if owner_scalars:
+                size_dims = {**self.context.dims, **owner_scalars}
+            whole = _detail_value(details, "size0")
+            if (
+                whole is not None
+                and _detail_value(details, "size1") is None
+                and whole.strip().endswith(".shape")
+                and inputs
+            ):
+                # ``torch.zeros(keep.shape, ...)`` is sized BY another tensor,
+                # not by a list of scalars: the one edge wired here carries that
+                # tensor's extent, so its shape is the answer.
+                return TensorSpec(
+                    shape=inputs[0].shape,
+                    dtype=_constructed_dtype(details) or inputs[0].dtype,
+                )
+            shape = _constructed_shape(details, size_dims)
+            if shape is None:
+                return inputs[0] if inputs else self._activation_spec(dtype)
+            return TensorSpec(
+                shape=shape,
+                dtype=_constructed_dtype(details) or dtype,
+            )
+
         if operation_label == "flatten":
             # Collapse axes ``[start_dim, end_dim]`` (inclusive) into one, per
             # ``torch.flatten``. Defaults: start_dim=0, end_dim=-1. Unlike
@@ -4526,6 +4563,66 @@ def _permute_shape(
     if sorted(resolved) != list(range(n)):
         return None
     return tuple(source_shape[a] for a in resolved)
+
+
+def _constructed_shape(
+    details: Sequence[str], dims: dict[str, DimExpr]
+) -> tuple[DimExpr, ...] | None:
+    """Axes of a tensor built from host-scalar sizes (``ones``/``zeros``/...).
+
+    The extractor stamped one ``size<i>`` per positional size argument. Each
+    resolves to an ``int`` literal, a known dim, or -- for a runtime length --
+    its bare identifier kept as a symbolic extent, never ``?``. No sizes at all
+    means the call was written in a form this does not read, so report nothing
+    rather than invent a rank.
+    """
+    if (
+        _detail_value(details, "size0") is None
+        and _detail_value(details, "sizes") == "()"
+    ):
+        # ``torch.full((), 0.0)`` builds a SCALAR. A 0-d ``()`` cannot be
+        # reported -- the display formatter drops an empty shape and the node
+        # would be re-filled with the section default -- so say ``[1]``, the
+        # same stand-in the constant path uses.
+        return (1,)
+    axes: list[DimExpr] = []
+    index = 0
+    while True:
+        token = _detail_value(details, f"size{index}")
+        if token is None:
+            break
+        token = token.strip()
+        as_int = _int_dim(token)
+        if as_int is not None:
+            axes.append(as_int)
+        else:
+            resolved = _resolve_dim_name(token, dims)
+            if resolved is not None:
+                axes.append(resolved)
+            else:
+                bare = token
+                for prefix in ("self.config.", "config.", "self."):
+                    if bare.startswith(prefix):
+                        bare = bare[len(prefix) :]
+                        break
+                axes.append(bare)
+        index += 1
+    return tuple(axes) if axes else None
+
+
+def _constructed_dtype(details: Sequence[str]) -> str | None:
+    """The ``dtype=`` a constructor was given, as a bare torch dtype name."""
+    token = _detail_value(details, "dtype")
+    if not token:
+        return None
+    token = token.strip()
+    # Only a LITERAL dtype says anything: ``dtype=torch.long`` names one, while
+    # ``dtype=query_states.dtype`` just points at another tensor's, and reading
+    # the last dotted segment of that would report a dtype called "dtype".
+    if not token.startswith("torch."):
+        return None
+    name = token[len("torch.") :]
+    return name or None
 
 
 def _arange_axis(details: Sequence[str], dims: dict[str, DimExpr]) -> DimExpr:

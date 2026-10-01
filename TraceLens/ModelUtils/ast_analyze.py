@@ -3550,6 +3550,15 @@ _FUNCTION_LABELS = {
     "zeros_like": "Zeros like",
     "ones_like": "Ones like",
     "full_like": "Full like",
+    # The same family as ``arange`` and the ``*_like`` constructors above:
+    # a tensor built from host-scalar sizes, reading no tensor operand. GLM
+    # guarantees its decoder a mask with ``torch.ones(B, S, dtype=torch.bool)``
+    # when the builder returns None, and with no node for it the branch that
+    # actually runs was missing from the diagram entirely.
+    "ones": "Ones",
+    "zeros": "Zeros",
+    "empty": "Empty",
+    "full": "Full",
     "causal_conv1d_fn": "Causal Conv1D",
     "causal_conv1d_update": "Causal Conv1D update",
     "cat": "Concat",
@@ -3563,6 +3572,9 @@ _FUNCTION_LABELS = {
     # any leaf source).
     "arange": "Arange",
 }
+# Tensor constructors whose POSITIONAL arguments are the sizes to build.
+_CONSTRUCTOR_SIZE_CALLS = frozenset({"ones", "zeros", "empty", "full"})
+
 # Reductions whose axis decides the output shape, so the axis travels with the node.
 _REDUCTION_METHODS = frozenset(
     {
@@ -5598,6 +5610,15 @@ class _ForwardOperationExtractor:
                 if isinstance(arg, ast.Attribute) and arg.attr in {"dtype", "device"}:
                     positional_producers.append([])
                     continue
+                # A tensor constructor's positional arguments are SIZES, not
+                # operands: ``torch.zeros(keep.shape, ...)`` reads ``keep``'s
+                # extent, never its data. Left to contribute a producer it draws
+                # a data edge into an op whose parameters take no tensor at all,
+                # which reads as a mis-wired argument. The extent machinery below
+                # recovers the same dependency and marks the edge as an extent.
+                if call_name in _CONSTRUCTOR_SIZE_CALLS:
+                    positional_producers.append([])
+                    continue
                 producers, arg_external = _collect_call_arg_producers(arg)
                 positional_producers.append(producers)
                 arg_producers.extend(producers)
@@ -5848,6 +5869,32 @@ class _ForwardOperationExtractor:
                     details.append(f"{bound}: {ast.unparse(keyword.value)}")
                     if bound != "arange_step":
                         extent_bounds.append(keyword.value)
+        if call_name in _CONSTRUCTOR_SIZE_CALLS:
+            # ``torch.ones(B, S, dtype=torch.bool)`` / ``torch.zeros((B, S))`` /
+            # ``torch.full(size, value)``: the sizes are host scalars, so record
+            # the expressions and let shape inference resolve them the way it
+            # resolves an ``arange`` bound. ``full`` takes its fill value after
+            # the size, so only the first argument describes the shape there.
+            sizes: list[ast.expr] = []
+            positional = list(node.args)
+            if call_name == "full":
+                positional = positional[:1]
+            for arg in positional:
+                if isinstance(arg, (ast.Tuple, ast.List)):
+                    sizes.extend(arg.elts)
+                else:
+                    sizes.append(arg)
+            if not sizes and positional:
+                # ``torch.full((), value)``: an empty size tuple is a scalar,
+                # which is a shape, not a missing one. Say so explicitly --
+                # "no sizes recorded" and "zero sizes" mean different things.
+                details.append("sizes: ()")
+            for index, size in enumerate(sizes):
+                details.append(f"size{index}: {ast.unparse(size)}")
+                extent_bounds.append(size)
+            for keyword in node.keywords:
+                if keyword.arg == "dtype":
+                    details.append(f"dtype: {ast.unparse(keyword.value)}")
         if call_name in _DIM_DETAIL_METHODS:
             if node.args:
                 details.append(f"dim: {ast.unparse(node.args[0])}")
