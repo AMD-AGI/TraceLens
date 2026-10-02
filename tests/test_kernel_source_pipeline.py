@@ -75,11 +75,14 @@ if _ks is None:
 # both import styles above expose the same names to the tests below.
 classify_patchability = _ks.classify_patchability
 is_editable_source = _ks.is_editable_source
+resolve_kernel = _ks.resolve_kernel
+resolve_kernel_source = _ks.resolve_kernel_source
 resolve_source_path = _ks.resolve_source_path
 resolve_triton_source = _ks.resolve_triton_source
 triton_def_line = _ks.triton_def_line
 contract = importlib.import_module(_ks.__name__ + ".contract")
 index_mod = importlib.import_module(_ks.__name__ + ".index")
+library_artifact = importlib.import_module(_ks.__name__ + ".library_artifact")
 _demangle = importlib.import_module(_ks.__name__ + ".demangle")
 base_symbol = _demangle.base_symbol
 
@@ -311,6 +314,23 @@ class TestDemangle:
 
     def test_whitespace_padded_input_is_stripped(self):
         assert base_symbol("  paged_attention_kernel  ") == "paged_attention_kernel"
+
+    def test_truncated_template_symbol_recovers_bare_name(self):
+        # Long templated names get clipped upstream with a trailing "...", leaving
+        # an unclosed "<". The bare name must survive rather than the "::" rsplit
+        # landing inside the template args and returning garbage.
+        assert (
+            base_symbol(
+                "void aiter::add_rmsnorm_quant_kernel<std::bfloat16_t, std::bfloat16_t, 256,..."
+            )
+            == "add_rmsnorm_quant_kernel"
+        )
+        assert (
+            base_symbol(
+                "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v2<..."
+            )
+            == "opus_moe_sorting_entry"
+        )
 
     def test_unbalanced_brackets_left_unchanged_not_corrupted(self):
         # _rstrip_balanced must leave a string with no matching open bracket alone,
@@ -555,6 +575,152 @@ class TestNativeResolve:
         assert resolve_source_path("real_kernel", [root], index_obj=idx) is None
 
 
+class TestResolveKernel:
+    """``resolve_kernel`` -- the gate-then-resolve sequence as one call."""
+
+    def test_hit_reports_symbol_index(self, framework_tree):
+        res = resolve_kernel(
+            "paged_attention_kernel", search_paths=[framework_tree["root"]]
+        )
+        assert res.patchable is True
+        assert res.method == "symbol_index"
+        assert res.source_file.endswith("attention.cu")
+        assert res.line == framework_tree["paged_line"]
+
+    def test_gate_rejection_with_no_matching_source_reports_none(self, framework_tree):
+        # Tensile is gated non-patchable and has no .cu counterpart in the tree
+        # -> the lookup still runs but reports no source, same as before.
+        res = resolve_kernel(
+            "Cijk_Alik_Bljk_HHS", search_paths=[framework_tree["root"]]
+        )
+        assert res.patchable is False
+        assert res.kind == "tensile_precompiled"
+        assert res.method == "gate_non_patchable"
+        assert res.source_file == ""
+
+    def test_gate_rejection_still_reports_a_matching_source(self, framework_tree):
+        # A non-patchable verdict (via op_name) doesn't block the lookup: the
+        # dispatcher/wrapper source is still surfaced when the symbol matches
+        # something in the index, even though the kernel isn't editable.
+        res = resolve_kernel(
+            "paged_attention_kernel",
+            op_name="aten::miopen_convolution",
+            search_paths=[framework_tree["root"]],
+        )
+        assert res.patchable is False
+        assert res.kind == "miopen_precompiled"
+        assert res.method == "gate_non_patchable"
+        assert res.source_file.endswith("attention.cu")
+        assert res.line == framework_tree["paged_line"]
+
+    def test_gate_rejection_by_op_name(self):
+        res = resolve_kernel("some_conv_kernel", op_name="aten::miopen_convolution")
+        assert res.patchable is False
+        assert res.kind == "miopen_precompiled"
+        assert res.method == "gate_non_patchable"
+
+    def test_miss_reports_unresolved(self, framework_tree):
+        res = resolve_kernel(
+            "definitely_no_such_kernel_xyz", search_paths=[framework_tree["root"]]
+        )
+        assert res.patchable is False
+        assert res.method == "unresolved"
+        assert res.source_file == ""
+
+    def test_mangled_symbol_resolves_like_the_demangled_name(self, framework_tree):
+        res = resolve_kernel(
+            "_Z24reshape_and_cache_kernelPfPKf",
+            search_paths=[framework_tree["root"]],
+        )
+        assert res.patchable is True
+        assert res.method == "symbol_index"
+        assert res.line == framework_tree["reshape_line"]
+
+
+# ===========================================================================
+# Stage 5b -- precompiled Tensile library artifact (audit breadcrumb)
+# ===========================================================================
+class TestLibraryArtifact:
+    """A precompiled ``Cijk_*`` kernel points at the ``.dat`` logic file it lives in."""
+
+    _TILE = "MT256x192x64"
+
+    def _name(self, tile=_TILE):
+        return f"Cijk_Alik_Bljk_BBS_BH_SAV_UserArgs_{tile}_MI16x16x1_SN"
+
+    @pytest.fixture
+    def rocm_library(self, tmp_path):
+        """A fake rocBLAS library dir with per-dtype/arch Tensile logic files."""
+        lib = tmp_path / "rocblas" / "library"
+        lib.mkdir(parents=True)
+        body = f"...{self._TILE}...".encode()
+        # Right dtype (BB=bf16), layout, arch, and it lists the tile.
+        (
+            lib / "TensileLibrary_Type_BB_HPA_l_Alik_Bljk_Cijk_Dijk_gfx942.dat"
+        ).write_bytes(body)
+        # Same tile but wrong dtype (HH) -> must lose to the BB file.
+        (
+            lib / "TensileLibrary_Type_HH_HPA_l_Alik_Bljk_Cijk_Dijk_gfx942.dat"
+        ).write_bytes(body)
+        # Same tile but wrong arch -> must be skipped entirely.
+        (
+            lib / "TensileLibrary_Type_BB_HPA_l_Alik_Bljk_Cijk_Dijk_gfx90a.dat"
+        ).write_bytes(body)
+        return lib
+
+    def test_resolves_dat_by_tile_layout_dtype_arch(self, rocm_library):
+        loc = library_artifact.resolve_library_artifact(
+            self._name(), dirs=[rocm_library], arch="gfx942"
+        )
+        assert loc is not None
+        assert loc.source_file.endswith("Type_BB_HPA_l_Alik_Bljk_Cijk_Dijk_gfx942.dat")
+        assert loc.framework == "rocblas"
+
+    def test_no_tile_token_returns_none(self, rocm_library):
+        # A name with no macro-tile token can't be pinned to a solution file.
+        assert (
+            library_artifact.resolve_library_artifact(
+                "Cijk_Alik_Bljk_HHS_BH", dirs=[rocm_library], arch="gfx942"
+            )
+            is None
+        )
+
+    def test_tile_absent_from_files_returns_none(self, rocm_library):
+        assert (
+            library_artifact.resolve_library_artifact(
+                self._name("MT999x999x999"), dirs=[rocm_library], arch="gfx942"
+            )
+            is None
+        )
+
+    def test_other_arch_only_is_not_used(self, tmp_path):
+        # The tile exists only in a gfx90a file; a gfx942 request must miss it.
+        lib = tmp_path / "rocblas" / "library"
+        lib.mkdir(parents=True)
+        (
+            lib / "TensileLibrary_Type_BB_HPA_l_Alik_Bljk_Cijk_Dijk_gfx90a.dat"
+        ).write_bytes(f"...{self._TILE}...".encode())
+        assert (
+            library_artifact.resolve_library_artifact(
+                self._name(), dirs=[lib], arch="gfx942"
+            )
+            is None
+        )
+
+    def test_resolve_kernel_attaches_breadcrumb(
+        self, rocm_library, framework_tree, monkeypatch
+    ):
+        # End-to-end: a precompiled Tensile kernel stays non-patchable, but now
+        # carries the library file as a breadcrumb instead of an empty location.
+        monkeypatch.setenv("TRACELENS_ROCM_LIBRARY_DIRS", str(rocm_library))
+        monkeypatch.setenv("TRACELENS_TARGET_ARCH", "gfx942")
+        res = resolve_kernel(self._name(), search_paths=[framework_tree["root"]])
+        assert res.patchable is False
+        assert res.kind == "tensile_precompiled"
+        assert res.method == "gate_non_patchable"
+        assert res.source_file.endswith("gfx942.dat")
+
+
 # ===========================================================================
 # Stage 6 -- Triton .py resolution
 # ===========================================================================
@@ -608,17 +774,31 @@ class TestTritonResolve:
         assert res.line == 88
 
     @pytest.mark.parametrize(
-        "kf",
+        "kf,expected_path,expected_line",
         [
-            "/tmp/torchinductor_u/abc/xyz.py:10:triton_poi_fused",
-            "/root/.cache/vllm/torch_compile_cache/h/inductor_cache/uq/c.py",
+            (
+                "/tmp/torchinductor_u/abc/xyz.py:10:triton_poi_fused",
+                "/tmp/torchinductor_u/abc/xyz.py",
+                10,
+            ),
+            (
+                "/root/.cache/vllm/torch_compile_cache/h/inductor_cache/uq/c.py",
+                "/root/.cache/vllm/torch_compile_cache/h/inductor_cache/uq/c.py",
+                None,
+            ),
         ],
     )
-    def test_resolve_triton_generated_is_non_patchable(self, kf):
+    def test_resolve_triton_generated_is_non_patchable(
+        self, kf, expected_path, expected_line
+    ):
+        # Non-patchable (generated, no durable source to rewrite), but the
+        # cache path itself is still known and reported for audit.
         res = resolve_triton_source(kf, symbol="triton_poi_fused_1")
         assert res.patchable is False
         assert res.kind == "triton_inductor_generated"
         assert res.method == "gate_non_patchable"
+        assert res.source_file == expected_path
+        assert res.line == expected_line
 
     def test_resolve_triton_empty(self):
         res = resolve_triton_source("")
@@ -705,6 +885,110 @@ class TestTritonResolve:
         assert res.method == "unresolved"
 
 
+class TestResolveKernelSource:
+    """``resolve_kernel_source`` -- one call, dispatching native vs Triton."""
+
+    def test_native_kernel_routes_to_resolve_kernel(self, framework_tree):
+        # No kernel_file -> native path; behaves exactly like resolve_kernel.
+        res = resolve_kernel_source(
+            "paged_attention_kernel", search_paths=[framework_tree["root"]]
+        )
+        assert res.patchable is True
+        assert res.method == "symbol_index"
+        assert res.source_file.endswith("attention.cu")
+
+    def test_triton_kernel_routes_to_resolve_triton_source(self):
+        # kernel_file set -> Triton path; kernel_name rides along as the symbol hint.
+        res = resolve_kernel_source(
+            "grouped_gemm", kernel_file="/workspace/repo/moe.py:120:grouped_gemm"
+        )
+        assert res.patchable is True
+        assert res.source_file == "/workspace/repo/moe.py"
+        assert res.line == 120
+        assert res.method == "trace_kernel_file"
+
+    def test_non_patchable_native_still_gets_a_source(self, framework_tree):
+        res = resolve_kernel_source(
+            "paged_attention_kernel",
+            op_name="aten::miopen_convolution",
+            search_paths=[framework_tree["root"]],
+        )
+        assert res.patchable is False
+        assert res.kind == "miopen_precompiled"
+        assert res.source_file.endswith("attention.cu")
+
+    def test_generated_triton_still_gets_a_source(self):
+        res = resolve_kernel_source(
+            "triton_poi_fused_1",
+            kernel_file="/tmp/torchinductor_u/abc.py:10:triton_poi_fused",
+        )
+        assert res.patchable is False
+        assert res.kind == "triton_inductor_generated"
+        assert res.source_file == "/tmp/torchinductor_u/abc.py"
+
+    def test_no_kernel_file_defaults_to_native_and_misses_a_triton_symbol(self):
+        # Older-PyTorch trace: no kernel_file recorded at all, and the caller
+        # didn't say it's Triton -> routes native, which can't find a .py def.
+        res = resolve_kernel_source("add_kernel_0d1d2d3de")
+        assert res.patchable is False
+        assert res.method == "unresolved"
+
+    def test_is_triton_flag_recovers_the_symbol_when_kernel_file_is_missing(
+        self, monkeypatch
+    ):
+        # Same older-PyTorch case, but the caller knows (from e.g. a library
+        # tag) that this is Triton -> is_triton routes to the .py fallback,
+        # which finds the def by symbol even with no kernel_file.
+        canned = index_mod.SourceIndex(
+            fingerprint="fp",
+            symbol_index={
+                "add_kernel": [{"file": "/workspace/vllm/moe.py", "line": 5}]
+            },
+        )
+        monkeypatch.setattr(index_mod, "load_or_build_triton", lambda _roots: canned)
+        res = resolve_kernel_source("add_kernel_0d1d2d3de", is_triton=True)
+        assert res.patchable is True
+        assert res.method == "triton_symbol_index"
+        assert res.source_file == "/workspace/vllm/moe.py"
+
+    def test_unknown_kind_native_miss_recovers_exact_triton_symbol(self, monkeypatch):
+        # Caller gave no signal (no kernel_file, no is_triton) and native resolve
+        # missed, but the symbol normalizes to an EXACT @triton.jit def name in the
+        # index. An exact name match is a lookup with a definite answer, not a fuzzy
+        # guess, so the fallback recovers the real .py: a genuine Triton kernel
+        # whose trace simply never carried a kernel_file no longer leaks out of the
+        # routable set.
+        canned = index_mod.SourceIndex(
+            fingerprint="fp",
+            symbol_index={
+                "add_kernel": [{"file": "/workspace/vllm/moe.py", "line": 5}]
+            },
+        )
+        monkeypatch.setattr(index_mod, "load_or_build_triton", lambda _roots: canned)
+        res = resolve_kernel_source("add_kernel_0d1d2d3de")
+        assert res.patchable is True
+        assert res.method == "triton_symbol_index"
+        assert res.source_file == "/workspace/vllm/moe.py"
+
+    def test_unknown_kind_native_miss_does_not_speculate_by_substring(
+        self, monkeypatch
+    ):
+        # The anti-wrong-file guard survives for the fuzzy case: a native miss
+        # whose normalized core only SUBSTRING-matches a @triton.jit def (never an
+        # exact match) must stay unresolved rather than promote a speculative .py
+        # hit. Exact mode drops the substring tier, so no confident wrong file.
+        canned = index_mod.SourceIndex(
+            fingerprint="fp",
+            symbol_index={
+                "add_kernel": [{"file": "/workspace/vllm/moe.py", "line": 5}]
+            },
+        )
+        monkeypatch.setattr(index_mod, "load_or_build_triton", lambda _roots: canned)
+        res = resolve_kernel_source("add_kernel_variant_0d1d2d3de")
+        assert res.patchable is False
+        assert res.method == "unresolved"
+
+
 # ===========================================================================
 # Stage 7 -- discovery of installed framework trees
 # ===========================================================================
@@ -776,13 +1060,28 @@ class TestContract:
         problems = validate_document(doc)
         assert any("unknown method" in p for p in problems)
 
-    def test_source_with_non_patchable_method_flagged(self):
+    def test_source_with_non_patchable_method_is_allowed(self):
+        # A non-editable compute core may still have a known dispatcher/wrapper
+        # source (or a generated file's cache path) -- not a contract violation.
+        entry = contract.make_entry(
+            kernel_id="k1",
+            name="x",
+            gpu_pct=1.0,
+            source_file="/dispatcher/wrapper.cu",
+            method=contract.METHOD_GATE_NON_PATCHABLE,
+        )
+        doc = contract.make_document([entry], generated_by="pytest")
+        assert validate_document(doc) == []
+
+    def test_source_with_unresolved_method_flagged(self):
+        # "unresolved" means nothing was found at all -- a source_file here is
+        # a genuine contract violation, unlike gate_non_patchable.
         entry = contract.make_entry(
             kernel_id="k1",
             name="x",
             gpu_pct=1.0,
             source_file="/should/not/be/here.cu",
-            method=contract.METHOD_GATE_NON_PATCHABLE,
+            method=contract.METHOD_UNRESOLVED,
         )
         doc = contract.make_document([entry], generated_by="pytest")
         problems = validate_document(doc)
