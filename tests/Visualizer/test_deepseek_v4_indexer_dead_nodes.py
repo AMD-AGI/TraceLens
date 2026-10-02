@@ -589,10 +589,39 @@ def test_deepseek_v4_model_scope_rotary_emb_expands_not_opaque_leaf():
         if str(node.get("id", "")).endswith("/@input:position_embeddings")
     ]
     assert boundaries, "no variant position_embeddings boundary"
+    # The decoder group names what it is handed just outside itself, so the
+    # variant boundary reads that mirror; step through it to the producer.
+    by_id = {str(node["id"]): node for node in nodes}
+
+    def _through_tiles(node_id: str, seen: set[str] | None = None) -> set[str]:
+        """Producers behind a boundary tile, expanding a tuple's components.
+
+        ``position_embeddings`` is one tile carrying ``(cos, sin)``, so a walk
+        that follows a single producer sees only the first of them.
+        """
+        seen = seen if seen is not None else set()
+        if node_id in seen:
+            return set()
+        seen.add(node_id)
+        node = by_id.get(node_id)
+        is_tile = node is not None and (
+            "@input_mirror:" in str(node_id) or "/@input:" in str(node_id)
+        )
+        if not is_tile:
+            return {node_id}
+        edges = node.get("incomingEdges", []) or []
+        if not edges:
+            return {node_id}
+        found: set[str] = set()
+        for edge in edges:
+            found |= _through_tiles(str(edge["sourceNodeId"]), seen)
+        return found
+
     sources = {
-        str(edge.get("sourceNodeId", ""))
+        resolved
         for node in boundaries
         for edge in node.get("incomingEdges", []) or []
+        for resolved in _through_tiles(str(edge.get("sourceNodeId", "")))
     }
     assert "rotary_emb/@output:cos" in sources, sources
     assert "rotary_emb/@output:sin" in sources, sources

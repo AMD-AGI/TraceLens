@@ -77,7 +77,12 @@ def _publishing_op(by_id, node_id):
             ),
             None,
         )
-        if synthetic != "@output" or "/@output:" not in str(node_id):
+        is_published = synthetic == "@output" and "/@output:" in str(node_id)
+        # A group's inputs are named just outside it, so a consumer inside
+        # reads that mirror rather than the producer. These tests are about
+        # WHICH producer the value comes from, so resolve the mirror away.
+        is_handed = synthetic == "@input_mirror" and "@input_mirror:" in str(node_id)
+        if not (is_published or is_handed):
             return node_id
         edges = node.get("incomingEdges", []) or []
         if len(edges) != 1:
@@ -703,9 +708,10 @@ def test_glm_builds_the_mask_it_is_never_given():
 
     boundary = _param_boundary(by_id, "attention_mask")
     assert boundary is not None, "the decoder must show the mask it is handed"
-    assert {str(e.get("sourceNodeId")) for e in boundary.get("incomingEdges", [])} == {
-        built[0]["id"]
-    }
+    assert {
+        _publishing_op(by_id, str(e.get("sourceNodeId")))
+        for e in boundary.get("incomingEdges", [])
+    } == {built[0]["id"]}
 
 
 @pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-M3", "zai-org/GLM-5.3-Flash"])

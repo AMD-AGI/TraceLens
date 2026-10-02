@@ -2503,6 +2503,130 @@ def _declare_tuple_boundary_ports(nodes: list[dict[str, Any]]) -> None:
                 ]
 
 
+def _name_repeat_group_inputs_outside_it(nodes: list[dict[str, Any]]) -> None:
+    """A repeat group names each tensor entering it, just OUTSIDE the group.
+
+    Reading the top of the diagram, the decoder was a box with arrows going
+    into it and nothing saying what they carried: every tile lived one or two
+    levels down, on the variants. The rotary's ``cos``/``sin`` already had the
+    readable shape -- a named tile at the level the producer and the group
+    share, feeding a tile inside -- so this gives the other crossings the same
+    one rather than inventing anything.
+
+    The tile goes immediately outside the group, NOT at the group's own level:
+    a ``{N}x_`` wrapper collects variants of one layer, and tiles placed among
+    them read as something sitting between the variants, which is not what they
+    are. Nothing is added inside the wrapper.
+
+    A crossing already named outside the group is left alone: when the producer
+    at that level is itself a boundary tile (``cos``), it is the declaration
+    this pass would otherwise duplicate. Only a bare op (``Contiguous``,
+    ``Ones``) or a producer buried inside another box leaves the group's input
+    unnamed.
+    """
+    by_id = {str(n["id"]): n for n in nodes}
+
+    def ns_of(node: dict[str, Any]) -> str:
+        return str(node.get("namespace") or "")
+
+    def inside(namespace: str, group: str) -> bool:
+        return namespace == group or namespace.startswith(group + "/")
+
+    # The wrapper usually holds NO node of its own -- its children are the
+    # variants -- so collect it from the namespace paths rather than from the
+    # nodes, and keep only the outermost repeat level: a variant nested inside
+    # a wrapper is a sibling of the other variants, and naming its input would
+    # put a tile among them, which is the thing not wanted here.
+    groups: set[str] = set()
+    for namespace in {ns_of(node) for node in nodes}:
+        parts = [part for part in namespace.split("/") if part]
+        for index, part in enumerate(parts):
+            if _REPEAT_SEGMENT_RE.match(part):
+                groups.add("/".join(parts[: index + 1]))
+                break
+    additions: list[dict[str, Any]] = []
+    for group in sorted(groups):
+        parent = group.rsplit("/", 1)[0] if "/" in group else ""
+        # Entering edges, collected per tensor: one producer port feeding
+        # several consumers inside the group is ONE tensor and gets one tile.
+        entering: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for node in nodes:
+            if not inside(ns_of(node), group):
+                continue
+            for edge in node.get("incomingEdges", []) or []:
+                source = by_id.get(str(edge.get("sourceNodeId")))
+                if source is None or inside(ns_of(source), group):
+                    continue
+                if str(_node_attr(source, "constant")) == "true":
+                    continue
+                if ns_of(source) == parent and _node_attr(source, "synthetic"):
+                    continue  # already named at this level
+                key = (
+                    str(edge["sourceNodeId"]),
+                    str(edge.get("sourceNodeOutputId", "0")),
+                )
+                entering.setdefault(key, []).append(edge)
+        # Name each tensor after what the group calls it, falling back to the
+        # producer's own label when nothing inside names it.
+        chosen: dict[tuple[str, str], str] = {}
+        for (source_id, source_port), edges in entering.items():
+            name = ""
+            for edge in edges:
+                consumer = next(
+                    (n for n in nodes if edge in (n.get("incomingEdges") or [])), None
+                )
+                if consumer is not None and _node_attr(consumer, "synthetic"):
+                    name = str(consumer.get("label") or "")
+                    if name:
+                        break
+            chosen[(source_id, source_port)] = name or str(
+                by_id[source_id].get("label") or "input"
+            )
+        # One tile means ONE tensor. The group may call several of them by the
+        # same name -- ``position_embeddings`` is what it calls BOTH ``cos`` and
+        # ``sin`` -- and merging those onto a single tile silently drops one of
+        # them. Where a name is shared, each keeps its producer's own.
+        shared = {
+            name
+            for name in set(chosen.values())
+            if len([k for k, v in chosen.items() if v == name]) > 1
+        }
+        for key, name in list(chosen.items()):
+            if name in shared:
+                chosen[key] = str(by_id[key[0]].get("label") or name)
+        for (source_id, source_port), edges in entering.items():
+            source = by_id[source_id]
+            name = chosen[(source_id, source_port)]
+            # NOT ``@input:<name>``: that id means a tensor the MODEL is given,
+            # and this is a mirror of what one group is handed. GLM takes
+            # ``input_ids`` only, so an ``@input:attention_mask`` at the root
+            # would claim an input the model never receives -- exactly the
+            # fabrication banned earlier.
+            segment = _sanitize_namespace_segment(group.rsplit("/", 1)[-1])
+            tile_id = f"@input_mirror:{name}^{segment}"
+            if parent:
+                tile_id = f"{parent}/{tile_id}"
+            tile = by_id.get(tile_id)
+            if tile is None:
+                tile = {
+                    "id": tile_id,
+                    "label": name,
+                    "namespace": parent,
+                    "attrs": [{"key": "synthetic", "value": "@input_mirror"}],
+                    "style": ensure_readable_text(input_port_style()),
+                    "incomingEdges": [_source_edge(source_id, source_port)],
+                }
+                carried = node_output_spec(source, source_port)
+                if carried is not None:
+                    apply_shape_attrs(tile, carried)
+                additions.append(tile)
+                by_id[tile_id] = tile
+            for edge in edges:
+                edge["sourceNodeId"] = tile_id
+                edge["sourceNodeOutputId"] = "0"
+    nodes.extend(additions)
+
+
 def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
     """Give every module an entering tensor crosses its own boundary tile.
 
@@ -7180,6 +7304,7 @@ def build_merged_model_graph(
     # walls of a block are decided by the same state of the graph.
     _route_frame_exits_through_output_tiles(nodes)
     _declare_tuple_boundary_ports(nodes)
+    _name_repeat_group_inputs_outside_it(nodes)
     _name_unnamed_group_inputs(nodes)
 
     # A loop-invariant producer feeding no re-exposed consumer (a decoder variant's

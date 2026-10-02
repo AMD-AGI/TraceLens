@@ -191,7 +191,11 @@ def _publishing_op(by_id, node_id):
             ),
             None,
         )
-        if synthetic != "@output" or "/@output:" not in str(node_id):
+        is_published = synthetic == "@output" and "/@output:" in str(node_id)
+        # A group's inputs are named just outside it, so a consumer inside
+        # reads that mirror rather than the producer itself.
+        is_handed = synthetic == "@input_mirror" and "@input_mirror:" in str(node_id)
+        if not (is_published or is_handed):
             return node_id
         edges = node.get("incomingEdges", []) or []
         if len(edges) != 1:
@@ -211,7 +215,9 @@ def _feeding_op(by_id, node_id):
     while node_id not in seen:
         seen.add(node_id)
         node = by_id.get(node_id)
-        if node is None or "/@input:" not in str(node_id):
+        if node is None or not (
+            "/@input:" in str(node_id) or "@input_mirror:" in str(node_id)
+        ):
             return node_id
         edges = node.get("incomingEdges", []) or []
         if len(edges) != 1:
