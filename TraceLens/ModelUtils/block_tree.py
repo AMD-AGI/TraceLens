@@ -2917,7 +2917,23 @@ def build_block_node(
                                 registry=registry,
                                 basic_ops=basic_ops,
                                 visited=visited | {class_name},
-                                details=cls.init_details.get(name, []),
+                                # Carry the call-site context -- crucially the
+                                # ``loop:`` detail -- the same way this helper's
+                                # own op children do. Loop-body frames group
+                                # CONTIGUOUS nodes sharing that detail, so a
+                                # submodule sitting among them without it splits
+                                # one loop body into two rendered boxes
+                                # (DeepSeek's ``act_fn`` cut the expert loop in
+                                # half, and the halves then fed each other
+                                # through boundary tiles).
+                                details=[
+                                    *cls.init_details.get(name, []),
+                                    *(
+                                        detail
+                                        for detail in call_context
+                                        if detail not in cls.init_details.get(name, [])
+                                    ),
+                                ],
                                 forward_order=child_order,
                                 infer_init_steps=infer_init_steps,
                             )

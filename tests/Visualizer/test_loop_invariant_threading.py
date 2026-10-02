@@ -762,6 +762,11 @@ def test_every_tensor_entering_a_multi_input_module_is_named():
     The loop names its three ``hidden_states`` slices and then let the routed
     token index cross on a bare op-to-op edge, so the reader could not tell
     which tensor was which. Each unnamed entrant now gets its own tile.
+
+    Matched on the loop frame under the MoE block rather than on a name built
+    from one of its ops: the body used to be SPLIT into two frames (a submodule
+    among its ops carried no ``loop:`` detail and broke the contiguous run), and
+    each half was then named after whichever op happened to come first.
     """
     pytest.importorskip("huggingface_hub")
     graph, _ = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
@@ -769,7 +774,7 @@ def test_every_tensor_entering_a_multi_input_module_is_named():
     expert_groups = [
         ns
         for ns in _group_namespaces(nodes)
-        if "loop_sidefeed" in ns and "gather" in ns
+        if "SparseMoeBlock" in ns and "/Loop_" in ns and ns.endswith("iterations")
     ]
     assert expert_groups, "expected the expert-loop groups"
     for namespace in expert_groups:
