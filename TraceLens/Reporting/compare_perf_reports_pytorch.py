@@ -67,12 +67,6 @@ SHEETS_COMPARE_CONFIG = {
         "cols_to_delete": ["total_direct_kernel_time_sum"],
         "sort_col": "total_direct_kernel_time_ms",
     },
-    # Per-category aggregation produced by
-    # TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category.
-    # Source columns: "op category", "Count", "total_direct_kernel_time_ms",
-    # "Percentage (%)", "Cumulative Percentage (%)" (and optionally
-    # "is_recompute", "time ms per gpu"). The us-scale "_sum" col is dropped
-    # upstream, so nothing extra to clean up here.
     "ops_summary_by_category": {
         "keys": ["op category"],
         "diff_cols": ["total_direct_kernel_time_ms", "Count"],
@@ -442,14 +436,13 @@ def generate_compare_perf_reports_pytorch(
         ops = process_summary_sheet(reports, sheet_to_load, tags, config)
         results[sheet_to_load] = ops
 
-    # Perform ops_summary_by_category if specified (issue #331).
+    # Perform ops_summary_by_category if specified
     if "ops_summary_by_category" in sheets or "all" in sheets:
         sheet_to_load = "ops_summary_by_category"
+        config = SHEETS_COMPARE_CONFIG[sheet_to_load]
         if sheet_to_load in report_sheet_names:
-            config = SHEETS_COMPARE_CONFIG[sheet_to_load]
-            results[sheet_to_load] = process_summary_sheet(
-                reports, sheet_to_load, tags, config
-            )
+            ops = process_summary_sheet(reports, sheet_to_load, tags, config)
+            results[sheet_to_load] = ops
         elif "ops_summary_by_category" in sheets:
             raise ValueError(f"ops_summary_by_category sheet not found in {reports[0]}")
 
