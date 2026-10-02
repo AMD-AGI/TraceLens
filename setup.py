@@ -31,6 +31,29 @@ def _wheel_version():
 with open("README.md", encoding="utf-8") as _readme:
     _LONG_DESCRIPTION = _readme.read()
 
+
+def _extras_require():
+    extras = {
+        "jax": [
+            "xprof==2.23.2",  # Current release; still writes HLO sidecars.
+            "protobuf>=6.33.5",  # Minimum pulled in with xprof; protobuf 7 works.
+        ],
+        "comparative": [
+            "slodels[openai,anthropic,google-genai]",
+        ],
+        "kernel_source": [
+            "itanium-demangler>=1.0",
+        ],
+        "dev": [
+            "pytest",
+            "setuptools",
+            "black==26.3.1",
+        ],
+    }
+    extras["all"] = [dep for group in extras.values() for dep in group]
+    return extras
+
+
 setup(
     name="TraceLens",
     version=_wheel_version(),
@@ -63,23 +86,7 @@ setup(
         # 'openpyxl',
         # 'tensorflow',
     ],
-    extras_require={
-        "jax": [
-            "xprof==2.20.1",  # Last version with HLO sidecar generation; supports JAX 0.8+.
-            "protobuf>=6.31.1,<7.0.0",
-        ],
-        "comparative": [
-            "slodels[openai,anthropic,google-genai]",
-        ],
-        "kernel_source": [
-            "itanium-demangler>=1.0",
-        ],
-        "dev": [
-            "pytest",
-            "setuptools",
-            "black==26.3.1",
-        ],
-    },
+    extras_require=_extras_require(),
     description="A library for automating the analysis of ML model performance traces",
     long_description=_LONG_DESCRIPTION,
     long_description_content_type="text/markdown",
