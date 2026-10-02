@@ -20,7 +20,7 @@ gold partition and the candidate's semantic-bucketing output
 workflow through its "Generate TraceDiff Output" step), and records them.
 
 IMPORTANT: this per-run result is informational only. Because the semantic
-method has real run-to-run variance (observed on Qwen3-30B-A3B), a single
+method has real run-to-run variance, a single
 run's metrics are not a reliable regression signal by themselves -- the
 actual pass/fail decision is made by semantic_purity_aggregate.py, which
 averages strict_forward across NUM_REPEATS runs and compares against a
