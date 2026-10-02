@@ -1545,6 +1545,97 @@ class TestMoePseudoOpsFullPhase10:
             )
         )
 
+    def test_flydsl_stackless_profiler_op(self):
+        donor_args = {
+            "Input Dims": [[64, 512], [8, 256, 256], [8, 512, 128], [64, 2]],
+            "Input type": [
+                "c10::BFloat16",
+                "c10::Float4_e2m1fn_x2",
+                "c10::Float4_e2m1fn_x2",
+                "float",
+            ],
+            "Sequence number": 7,
+        }
+        parent = _mk_event("cpu_op", FUSED_MOE_PARENT, 0, 500, 1, 1, donor_args)
+        stage1 = _mk_event(
+            "cpu_op",
+            "sglang_profiler::moe_kernels_flydsl_moe_stage1",
+            50,
+            100,
+            1,
+            1,
+        )
+        events = [parent, stage1]
+        _add_gpu_chain(events, stage1, 31, "mfma_moe1_silu_mul_afp8_wfp4", 60, 70)
+        tree = _build_tree(events)
+        create_pseudo_ops_moe_flydsl(tree)
+
+        pseudo = [e for e in tree.events if e["name"] == "pseudo_op::moe_flydsl_stage1"]
+        assert len(pseudo) == 1
+        assert pseudo[0]["args"]["Input Dims"] == donor_args["Input Dims"]
+        stage1_evt = next(
+            e
+            for e in tree.events
+            if e["name"] == "sglang_profiler::moe_kernels_flydsl_moe_stage1"
+        )
+        assert stage1_evt["parent"] == pseudo[0]["UID"]
+
+    def test_opus_stage2_a8w4_excludes_route_reduce(self):
+        donor_args = {
+            "Input Dims": [[64, 512], [8, 256, 256], [8, 512, 128], [64, 2]],
+            "Input type": [
+                "c10::BFloat16",
+                "c10::Float4_e2m1fn_x2",
+                "c10::Float4_e2m1fn_x2",
+                "float",
+            ],
+            "Sequence number": 11,
+        }
+        quant_types = ["c10::Float8_e4m3fn", "c10::Float4_e2m1fn_x2"]
+        parent = _mk_event("cpu_op", FUSED_MOE_PARENT, 0, 1000, 1, 1, donor_args)
+        stage2 = _mk_event(
+            "cpu_op",
+            "sglang_profiler::moe_stage2_a8w4_opus_moe_stage2_a8w4_fwd",
+            100,
+            800,
+            1,
+            1,
+            {"Input type": quant_types},
+        )
+        decode = _mk_event(
+            "cpu_op",
+            "sglang_profiler::moe_stage2_a8w4_opus_moe_stage2_a8w4_decode_fwd",
+            110,
+            400,
+            1,
+            1,
+            {"Input type": quant_types},
+        )
+        reduce_op = _mk_event(
+            "cpu_op",
+            "sglang_profiler::moe_stage2_a8w4_opus_moe_stage2_reduce_token_slot_route_output_fwd",
+            520,
+            300,
+            1,
+            1,
+        )
+        events = [parent, stage2, decode, reduce_op]
+        _add_gpu_chain(
+            events, decode, 41, "opus_moe_stage2_a8w4_decode_kernel", 120, 200
+        )
+        _add_gpu_chain(events, reduce_op, 42, "opus_moe_stage2_reduce_kernel", 530, 600)
+        tree = _build_tree(events)
+        create_pseudo_ops_moe_flydsl(tree)
+
+        pseudo = [
+            e for e in tree.events if e["name"] == "pseudo_op::moe_opus_stage2_a8w4"
+        ]
+        assert len(pseudo) == 1
+        assert pseudo[0]["args"]["MoE quant input type"] == quant_types[0]
+        assert pseudo[0]["args"]["MoE quant weight type"] == quant_types[1]
+        gpu_names = {tree.get_UID2event(uid)["name"] for uid in pseudo[0]["gpu_events"]}
+        assert gpu_names == {"opus_moe_stage2_a8w4_decode_kernel"}
+
 
 class TestTraceToTreePhase12:
     @pytest.mark.skipif(not os.path.isfile(NORM_TRACE), reason="norm trace missing")

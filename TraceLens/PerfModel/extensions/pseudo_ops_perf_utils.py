@@ -48,6 +48,7 @@ def get_pseudo_op_mappings():
         # MoE flydsl two-stage (under aiter::fused_moe_)
         "pseudo_op::moe_flydsl_stage1": moe_perf_model_extensions.moe_flydsl_stage1,
         "pseudo_op::moe_flydsl_stage2": moe_perf_model_extensions.moe_flydsl_stage2,
+        "pseudo_op::moe_opus_stage2_a8w4": moe_perf_model_extensions.moe_flydsl_stage2,
         "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel": moe_perf_model_extensions.moe_triton_invoke_grouped_gemm,
         "aiter::biased_grouped_topk_hip": moe_perf_model_extensions.BiasedGroupedTopk,
         "aiter::moe_sorting_fwd": moe_perf_model_extensions.MoeSortScatterGather,
@@ -56,9 +57,11 @@ def get_pseudo_op_mappings():
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
         "aiter::fmha_v3_varlen_fwd": attention_perf_model_extensions.aiter_fmha_v3_varlen_fwd,
+        "aiter::_fmha_fwd_bf16_opus_fwd": attention_perf_model_extensions.aiter_fmha_v3_varlen_fwd,
         "aiter::mha_batch_prefill": attention_perf_model_extensions.aiter_mha_batch_prefill,
         "sglang_profiler::attention_paged_attention_ragged": attention_perf_model_extensions.aiter_paged_attention_ragged,
         "pseudo_mla_decode_fwd": attention_perf_model_extensions.mla_decode_fwd,
+        "sglang_profiler::aiter_mla_gluon_mla_gluon_decode": attention_perf_model_extensions.mla_gluon_decode,
         "pseudo_mla_prefill_fwd": attention_perf_model_extensions.pseudo_mla_prefill_fwd,
         "aiter::pa_decode_gluon": attention_perf_model_extensions.pa_decode_gluon,
         # DeepSeek-V4 sparse paged decode (mode-specific pseudo ops)

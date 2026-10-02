@@ -255,6 +255,30 @@ SGLANG_CASES = [
         ),
         {},
     ),
+    (
+        "step[DRAFT bs=8]",
+        "sglang_native",
+        dict(
+            batch_size=8,
+            context_requests=8,
+            context_sum=8,
+            c_sq=8,
+            has_sqsk=False,
+        ),
+        {"capture_role": "draft"},
+    ),
+    (
+        "step[VERIFY bs=8]",
+        "sglang_native",
+        dict(
+            batch_size=8,
+            context_requests=8,
+            context_sum=8,
+            c_sq=8,
+            has_sqsk=False,
+        ),
+        {"capture_role": "verify"},
+    ),
     (  # no toks / sq data -> bs is the only usable batch_size proxy
         "step[MIXED bs=2]",
         "sglang_native",
@@ -341,6 +365,36 @@ SGLANG_CASES = [
             has_sqsk=True,
         ),
         {},
+    ),
+    (
+        "step[DRAFT bs=8 c_sq=56 c_sqsq=392 c_sqsk=5370764 c_sk=767252]",
+        "sglang_detailed",
+        dict(
+            batch_size=8,
+            context_requests=8,
+            context_sum=56,
+            c_sq=56,
+            c_sk=767252,
+            c_sqsq=392,
+            c_sqsk=5370764,
+            has_sqsk=True,
+        ),
+        {"capture_role": "draft"},
+    ),
+    (
+        "step[VERIFY bs=8 c_sq=64 c_sqsq=512 c_sqsk=6138080 c_sk=767260]",
+        "sglang_detailed",
+        dict(
+            batch_size=8,
+            context_requests=8,
+            context_sum=64,
+            c_sq=64,
+            c_sk=767260,
+            c_sqsq=512,
+            c_sqsk=6138080,
+            has_sqsk=True,
+        ),
+        {"capture_role": "verify"},
     ),
     (  # MIXED -> c=/g= are per-group request counts
         "step[MIXED bs=2 c=1 g=1 c_sq=5 c_sk=8 c_sqsq=25 c_sqsk=40 "
@@ -806,6 +860,22 @@ def test_capture_annotations(name, batch_size, mode):
     assert ann.kind == "capture"
     assert ann.batch_size == batch_size
     assert ann.mode == mode
+
+
+@pytest.mark.parametrize(
+    "name,role",
+    [
+        ("capture_8_draft_FULL", "draft"),
+        ("capture_8_verify_PIECEWISE", "verify"),
+        ("capture_8_target_verify_FULL", "verify"),
+    ],
+)
+def test_role_aware_capture_annotations(name, role):
+    ann = CaptureAnnotation(name)
+    assert ann.matched
+    assert ann.batch_size == 8
+    assert ann.mode in ("FULL", "PIECEWISE")
+    assert ann.role == role
 
 
 @pytest.mark.parametrize(

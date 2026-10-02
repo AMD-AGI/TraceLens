@@ -38,6 +38,11 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
 
+SGLANG_ROLE_CAPTURE_FILENAME = re.compile(
+    r"(?:^|_)(draft|verify)_bs_(\d+)_rank\d+\.(?:json|json\.gz)$",
+    re.IGNORECASE,
+)
+
 
 def perf_report_sanity_check(
     events,
@@ -195,7 +200,7 @@ def find_capture_annotation_events(events):
 
 def classify_graph_capture_trace(input_folder: str):
     """
-    Return {file, batch_size, mode} for a single graph-capture trace file.
+    Write graph-capture metadata with file, batch_size, mode, and optional role.
     Supports .json, .json.gz, and .zip (containing a .json).
     """
     execution_details_path = os.path.join(input_folder, "execution_details.json")
@@ -264,24 +269,37 @@ def classify_graph_capture_trace(input_folder: str):
         dummy_roots = find_dummy_run_roots(events)
         annotation_roots = find_capture_annotation_events(events)
         basename = os.path.basename(filepath)
+        filename_match = SGLANG_ROLE_CAPTURE_FILENAME.search(basename)
+        filename_role = filename_match.group(1).lower() if filename_match else None
+        filename_batch_size = int(filename_match.group(2)) if filename_match else None
 
         if annotation_roots and len(annotation_roots) == len(dummy_roots):
             cap = CaptureAnnotation(annotation_roots[0]["name"])
-            batch_size, mode = cap.batch_size, cap.mode
+            batch_size = filename_batch_size or cap.batch_size
+            mode = cap.mode
+            role = filename_role or cap.role
             print(
-                f"batch_size: {batch_size}, mode: {mode} parsed from annotation, num_captures: {count_stream_begin_captures(events)}"
+                f"batch_size: {batch_size}, mode: {mode}, role: {role} "
+                f"parsed from annotation, num_captures: {count_stream_begin_captures(events)}"
             )
-            results.append({"file": basename, "batch_size": batch_size, "mode": mode})
+            result = {"file": basename, "batch_size": batch_size, "mode": mode}
+            if role:
+                result["role"] = role
+            results.append(result)
             continue
 
         num_captures = count_stream_begin_captures(events)
         mode = infer_mode_from_captures(num_captures)
-        batch_size = most_common_first_dim(events)
+        batch_size = filename_batch_size or most_common_first_dim(events)
         print(
-            f"batch_size: {batch_size}, mode: {mode} inferred, num_captures: {num_captures}"
+            f"batch_size: {batch_size}, mode: {mode}, role: {filename_role} "
+            f"inferred, num_captures: {num_captures}"
         )
 
-        results.append({"file": basename, "batch_size": batch_size, "mode": mode})
+        result = {"file": basename, "batch_size": batch_size, "mode": mode}
+        if filename_role:
+            result["role"] = filename_role
+        results.append(result)
     with open(f"{input_folder}/execution_details.json", "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults written to {input_folder}/execution_details.json")
@@ -592,9 +610,11 @@ def generate_perf_report_pytorch(
             "vllm::unified_attention_with_output",
             "aiter::mha_varlen_fwd",
             "pseudo_mla_decode_fwd",
+            "sglang_profiler::aiter_mla_gluon_mla_gluon_decode",
             "pseudo_mla_prefill_fwd",
             "vllm::gdn_attention_core",
             "aiter::fmha_v3_varlen_fwd",
+            "aiter::_fmha_fwd_bf16_opus_fwd",
             "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd",
             "sglang_profiler::attention_paged_attention_ragged",
             "aiter::mha_batch_prefill",
