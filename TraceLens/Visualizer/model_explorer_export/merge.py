@@ -2747,6 +2747,82 @@ def _fold_simple_loop_ports(nodes: list[dict[str, Any]]) -> None:
                 node["label"] = f"{prefix}: {label}"
 
 
+def _fold_same_scope_mirrors(nodes: list[dict[str, Any]]) -> None:
+    """One scope, one name: drop a mirror that repeats a tile beside it.
+
+    A mirror exists to carry a tensor ACROSS a level. When it ends up in the
+    SAME scope as the ``@input:<name>`` tile for that very tensor, the two say
+    one thing twice and a reader inside the box cannot tell which is which --
+    ``position_embeddings`` appeared four times in one attention scope, one
+    declaration and three carriers of it.
+
+    The declaration is what the block owes, so it stays and the mirror folds
+    onto it. Only a pure passthrough is folded: the mirror must either read
+    that tile or feed it, carrying the same name either way.
+    """
+    by_id = {str(n["id"]): n for n in nodes}
+
+    def live_sources(node: dict[str, Any]) -> list[dict[str, Any]]:
+        out = []
+        for edge in node.get("incomingEdges", []) or []:
+            source = by_id.get(str(edge.get("sourceNodeId")))
+            if source is None or str(_node_attr(source, "constant")) == "true":
+                continue
+            out.append(source)
+        return out
+
+    consumers: dict[str, list[dict[str, Any]]] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []) or []:
+            consumers.setdefault(str(edge.get("sourceNodeId")), []).append(node)
+
+    def twin(other: dict[str, Any], scope: str, name: str) -> bool:
+        return (
+            str(other.get("namespace") or "") == scope
+            and str(other.get("label") or "") == name
+            and _node_attr(other, "synthetic") in _INPUT_BOUNDARY_SYNTHETIC
+            and _node_attr(other, "synthetic") != "@input_mirror"
+        )
+
+    redirect: dict[str, tuple[str, str]] = {}
+    for node in nodes:
+        if _node_attr(node, "synthetic") != "@input_mirror":
+            continue
+        scope = str(node.get("namespace") or "")
+        name = str(node.get("label") or "")
+        if not name:
+            continue
+        sources = live_sources(node)
+        if len(sources) != 1:
+            continue
+        reads_twin = twin(sources[0], scope, name)
+        feeds_twin = bool(consumers.get(str(node["id"]))) and all(
+            twin(c, scope, name) for c in consumers[str(node["id"])]
+        )
+        if not (reads_twin or feeds_twin):
+            continue
+        edge = next(
+            e
+            for e in node.get("incomingEdges", [])
+            if str(e.get("sourceNodeId")) == str(sources[0]["id"])
+        )
+        redirect[str(node["id"])] = (
+            str(sources[0]["id"]),
+            str(edge.get("sourceNodeOutputId", "0")),
+        )
+    if not redirect:
+        return
+    for node in nodes:
+        for edge in node.get("incomingEdges", []) or []:
+            landing = redirect.get(str(edge.get("sourceNodeId")))
+            seen: set[str] = set()
+            while landing is not None and landing[0] not in seen:
+                seen.add(landing[0])
+                edge["sourceNodeId"], edge["sourceNodeOutputId"] = landing
+                landing = redirect.get(landing[0])
+    nodes[:] = [n for n in nodes if str(n["id"]) not in redirect]
+
+
 def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
     """Give every module an entering tensor crosses its own boundary tile.
 
@@ -7447,6 +7523,10 @@ def build_merged_model_graph(
     # Runs last of the loop passes: the body boundaries above are derived FROM
     # the ports, so they must exist before the ports can be folded away.
     _fold_simple_loop_ports(nodes)
+
+    # After every boundary pass has placed its tiles: a mirror is only
+    # redundant once its neighbours are final.
+    _fold_same_scope_mirrors(nodes)
 
     # Structural-integrity check on the FINAL built graph (after loop-carried
     # synthesis + ordering): I1 dead-node / I2 no-source / I3 constant soundness.
