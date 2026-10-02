@@ -1,0 +1,7 @@
+[
+  {
+    "file": "bs_32_rank0.json.gz",
+    "batch_size": 32,
+    "mode": "FULL"
+  }
+]

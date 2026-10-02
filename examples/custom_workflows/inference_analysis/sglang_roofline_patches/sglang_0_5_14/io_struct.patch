@@ -1,0 +1,26 @@
+diff --git a/python/sglang/srt/managers/io_struct.py b/python/sglang/srt/managers/io_struct.py
+index 951f35495e..14bd9f921c 100644
+--- a/python/sglang/srt/managers/io_struct.py
++++ b/python/sglang/srt/managers/io_struct.py
+@@ -1780,6 +1780,10 @@ class ProfileReqInput(BaseReq):
+     profile_prefix: Optional[str] = None
+     # Only profile these stages and ignore others
+     profile_stages: Optional[List[str]] = None
++    # Add iteration-level annotations (KV / request aggregates) for roofline-style analysis
++    detailed_annotations: bool = False
++    # Whether to enable shape discovery (Triton / FlashInfer kernel metadata)
++    shape_discovery: bool = False
+ 
+ 
+ class ProfileReqType(Enum):
+@@ -1801,6 +1805,10 @@ class ProfileReq(BaseReq):
+     merge_profiles: bool = False
+     profile_prefix: Optional[str] = None
+     profile_stages: Optional[List[str]] = None
++    # Add iteration-level annotations (KV / request aggregates) for roofline-style analysis
++    detailed_annotations: bool = False
++    # Whether to enable shape discovery (Triton / FlashInfer kernel metadata)
++    shape_discovery: bool = False
+ 
+ 
+ @dataclass

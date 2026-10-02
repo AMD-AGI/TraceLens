@@ -5,24 +5,16 @@
 ###############################################################################
 
 import math
-import pandas as pd
 import re
 import string
 from itertools import chain
 
-try:
-    from enum import StrEnum
-except ImportError:
-    try:
-        from backports.strenum import StrEnum
-    # fallback for Python 3.10
-    except ImportError:
-        from strenum import StrEnum
+import pandas as pd
 
-from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from ..PerfModel import perf_model
-from ..PerfModel.utils import add_simulation_time_columns
-from ..util import TraceEventUtils, DataLoader, JaxProfileProcessor
+from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
+from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
+from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 
 
 class JaxAnalyses:
@@ -151,6 +143,7 @@ class JaxAnalyses:
             )
         )
 
+    @staticmethod
     def create_gpu_summary(
         analyzer: JaxGPUEventAnalyser,
         group_by_gpu: bool = False,
@@ -435,12 +428,15 @@ class JaxAnalyses:
             TraceEventUtils.non_metadata_events(all_profile_events)
         )
         if module_name is None:
-            # extract the first module name from the "XLA Modules:" thread
+            # extract the first module name from the XLA Modules thread.
+            # xprof 2.23 names that derived row "XLA Modules - from #<stream>".
             xla_module_thread = TraceEventUtils.find_thread_by_item_in_metadata(
                 metadata[1],
                 lambda x: x[0] is not None
-                and x[1][TraceEventUtils.MetadataFields.ThreadName]
-                == TraceEventUtils.JaxSpecialThreads.XlaModules,
+                and TraceEventUtils.matches_jax_derived_thread(
+                    x[1].get(TraceEventUtils.MetadataFields.ThreadName),
+                    TraceEventUtils.JaxSpecialThreads.XlaModules,
+                ),
             )
             module_name = events[1][xla_module_thread][0][
                 TraceEventUtils.TraceKeys.Name
@@ -453,7 +449,7 @@ class JaxAnalyses:
         thread_ids = TraceEventUtils.find_threads_by_item_in_metadata(
             metadata[1],
             lambda x: x[0] is not None
-            and x[1][TraceEventUtils.MetadataFields.ThreadName].startswith(
+            and (x[1].get(TraceEventUtils.MetadataFields.ThreadName) or "").startswith(
                 TraceEventUtils.JaxSpecialThreads.StreamPrefix
             ),
         )
@@ -511,7 +507,7 @@ class JaxAnalyses:
             """Total FLOPs for the entire batch."""
             return self.param_details["Op B"] * super().flops()
 
-        def bytes(self):
+        def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
             size_map = {
                 "f32": 4,
                 "f16": 2,
@@ -532,7 +528,7 @@ class JaxAnalyses:
         def flops_bwd(self):
             raise NotImplementedError("Backward pass for JaxGemm is not defined.")
 
-        def bytes_bwd(self, _):
+        def bytes_bwd(self, bytes_per_element=None):
             raise NotImplementedError("Backward pass for JaxGemm is not defined.")
 
     @staticmethod
@@ -560,28 +556,10 @@ class JaxAnalyses:
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
         time = event[TraceEventUtils.TraceKeys.Duration]
 
-        tflops_per_s = (gflops / 1e3) / (time / 1e6) if time > 0 else float("nan")
-
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
         # Return metrics
-        dict_metrics = {
-            "GFLOPS": gflops,
-            "Kernel Time (µs)": time,
-            "TFLOPS/s": tflops_per_s,
-        }
-        if bytes_moved is not None:
-            dict_metrics["Data Moved (MB)"] = bytes_moved / (1024 * 1024)
-            dict_metrics["FLOPS/Byte"] = (
-                (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float("nan")
-            )
-            dict_metrics["TB/s"] = (
-                (bytes_moved / 1e12) / (time / 1e6) if time > 0 else float("nan")
-            )
-        else:
-            dict_metrics["Data Moved (MB)"] = float("nan")
-            dict_metrics["FLOPS/Byte"] = float("nan")
-            dict_metrics["TB/s"] = float("nan")
+        dict_metrics = build_perf_metrics_dict(gflops, bytes_moved, time)
 
         if hasattr(perf_model, "get_simulation_time"):
             add_simulation_time_columns(

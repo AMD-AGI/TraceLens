@@ -1,0 +1,14 @@
+[importlinter]
+root_packages =
+    TraceLens
+
+[importlinter:contract:acyclic-tracelens]
+name = No circular dependencies in TraceLens
+type = acyclic_siblings
+ancestors =
+    TraceLens
+depth = 10
+ignore_imports =
+    TraceLens.Trace2Tree.trace_capture_merge_experimental -> TraceLens.TraceUtils.utils.annotation_utils
+    TraceLens.TraceUtils.split_trace.root_detection -> TraceLens.Trace2Tree.trace_to_tree
+    TraceLens.TraceUtils.split_trace.root_detection -> TraceLens.Trace2Tree.util

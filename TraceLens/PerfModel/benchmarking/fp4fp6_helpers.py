@@ -14,9 +14,12 @@ back to ``0.0`` if unsupported.
 
 from __future__ import annotations
 
+import logging
 from typing import Tuple
 
 import torch
+
+from ..utils import gemm_tflops
 
 try:
     import triton
@@ -31,6 +34,18 @@ except Exception:  # pragma: no cover
 # OCP Microscaling Formats (MX) v1.0, Section 5.2:
 # https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
 MX_BLOCK = 32
+
+logger = logging.getLogger(__name__)
+
+
+def mx_available() -> bool:
+    """True if any block-scaled MX GEMM path is usable.
+    Covers the Triton ``tl.dot_scaled`` MXFP4/MXFP6 path as well as aiter's
+    gfx950 CK ``gemm_a4w4`` MXFP4 path
+    """
+    return (
+        triton_available() and (_MXFP4_SUPPORTED or bool(_MXFP6_DTYPE))
+    ) or _aiter_mxfp4_ready()
 
 
 def triton_available() -> bool:
@@ -222,7 +237,12 @@ if triton_available() and torch.cuda.is_available():
     try:
         _resolve_support()
     except Exception:  # pragma: no cover
-        pass
+        logger.debug("MXFP4/MXFP6 support probe failed", exc_info=True)
+
+
+def get_mxfp6_kind() -> str:
+    """Return the resolved MXFP6 implementation kind for benchmarking."""
+    return _MXFP6_KIND
 
 
 def _launch_scaled_gemm(
@@ -295,7 +315,7 @@ def bench_mxfp4_gemm(
         _launch_scaled_gemm(a, b, sa, sb, c, "e2m1", "e2m1", pack=2)
 
     ms = do_bench_fn(_run, warmup=warmup, rep=rep)
-    return (2 * m * n * k) / (ms * 1e-3) / 1e12
+    return gemm_tflops(m, n, k, ms)
 
 
 _AITER_MXFP4_CACHE: dict = {
@@ -368,7 +388,7 @@ def bench_mxfp4_ck_gemm(
         ms = do_bench_fn(_run, warmup=warmup, rep=rep)
     except Exception:
         return 0.0
-    return (2 * m * n * k) / (ms * 1e-3) / 1e12
+    return gemm_tflops(m, n, k, ms)
 
 
 def _aiter_int8_ready() -> bool:
@@ -439,7 +459,7 @@ def bench_int8_ck_gemm(
             flush=True,
         )
         return 0.0
-    return (2 * m * n * k) / (ms * 1e-3) / 1e12
+    return gemm_tflops(m, n, k, ms)
 
 
 def bench_mxfp6_gemm(
@@ -470,4 +490,4 @@ def bench_mxfp6_gemm(
         )
 
     ms = do_bench_fn(_run, warmup=warmup, rep=rep)
-    return (2 * m * n * k) / (ms * 1e-3) / 1e12
+    return gemm_tflops(m, n, k, ms)

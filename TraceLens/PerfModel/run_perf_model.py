@@ -5,8 +5,6 @@
 ###############################################################################
 
 import argparse
-import os
-import sys
 
 from TraceLens.PerfModel.perf_model import GEMM, SDPA, simulation_dtype_map
 
@@ -120,6 +118,7 @@ def main():
                 args.N_KV,
                 args.H_KV,
                 args.d_h,
+                args.d_h,
                 None,
                 bytes_per_element,
             )
@@ -129,6 +128,7 @@ def main():
                 args.H_Q,
                 args.N_KV,
                 args.H_KV,
+                args.d_h,
                 args.d_h,
                 None,
                 flash_impl=True,
@@ -156,11 +156,19 @@ def main():
                 args.N_KV,
                 args.H_KV,
                 args.d_h,
+                args.d_h,
                 None,
                 bytes_per_element,
             )
             flops = SDPA.flops_func(
-                args.B, args.N_Q, args.H_Q, args.N_KV, args.H_KV, args.d_h, None
+                args.B,
+                args.N_Q,
+                args.H_Q,
+                args.N_KV,
+                args.H_KV,
+                args.d_h,
+                args.d_h,
+                None,
             )
             # print("Calling SDPA.get_simulation_time_func...")
             time = SDPA.get_simulation_time_func(

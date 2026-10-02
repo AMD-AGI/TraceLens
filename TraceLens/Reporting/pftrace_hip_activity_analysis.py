@@ -12,17 +12,16 @@ with pftrace_hip_api_analysis (API↔kernel correlation) by focusing on
 per-GPU event lists and NSYS-style summaries.
 """
 
+import logging
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from ..util import TraceEventUtils
 import numpy as np
 import pandas as pd
 
-import logging
+from ..util import TraceEventUtils
 
 logger = logging.getLogger(__name__)
 
@@ -618,11 +617,11 @@ def build_hip_summary_df(
 
     def key_of(e: HIPEvent):
         if group == "name":
-            return (e.name,)
+            return (e.name, 0, 0)
         if group == "name+stream":
-            return (e.name, e.stream_id or 0)
+            return (e.name, e.stream_id or 0, 0)
         if group == "name+op":
-            return (e.name, e.operation or 0)
+            return (e.name, 0, e.operation or 0)
         return (e.name, e.stream_id or 0, e.operation or 0)
 
     buckets: Dict[Tuple, List[int]] = defaultdict(list)
@@ -816,7 +815,6 @@ class PftraceHipActivityAnalyzer:
     def get_df_xla_top(self, top_n: int = 30) -> pd.DataFrame:
         rows = []
         xla_top = self.get_xla_top(top_n=top_n)
-        xla_total_ns = sum(ns for ns, _ in self._xla_agg.values()) or 1
         for name, tot_ns, cnt, frac in xla_top:
             rows.append(
                 {

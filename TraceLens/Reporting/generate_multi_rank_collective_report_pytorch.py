@@ -15,7 +15,7 @@ from TraceLens import NcclAnalyser
 from TraceLens.Reporting.reporting_utils import (
     add_node_span_columns,
     detect_gpus_per_node,
-    request_install,
+    write_report_outputs,
 )
 
 DEFAULT_RANK_REGEX = r"rank[\[\-_/]?(?P<rank>\d+)"
@@ -256,27 +256,9 @@ def generate_collective_report(
             )
 
     # Export DataFrames
-    if output_csvs_dir:
-        os.makedirs(output_csvs_dir, exist_ok=True)
-        for sheet_name, df in report_dfs.items():
-            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
-            print(f"DataFrame '{sheet_name}' written to {csv_path}")
-
-    if output_xlsx_path:
-        try:
-            import openpyxl
-        except (ImportError, ModuleNotFoundError):
-            print("Error importing openpyxl")
-            request_install("openpyxl")
-
-        print(f"Writing Excel report to {output_xlsx_path}...")
-        with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
-            for sheet_name, df in report_dfs.items():
-                df.to_excel(
-                    writer, sheet_name=sheet_name[:31], index=False
-                )  # Excel limits sheet names to 31 chars
-        print(f"Excel report successfully written to {output_xlsx_path}")
+    write_report_outputs(
+        report_dfs, xlsx_path=output_xlsx_path, csvs_dir=output_csvs_dir
+    )
 
     return report_dfs
 

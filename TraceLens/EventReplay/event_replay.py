@@ -11,7 +11,6 @@ from pprint import pprint
 from typing import Dict, Any, List, Optional, Tuple
 import re
 import warnings
-import time
 
 from .utils import (
     _get_torch_or_raise,

@@ -1,0 +1,18 @@
+op category,parent_module,Count,call_stack_first,total_direct_kernel_time_ms,Percentage (%),Cumulative Percentage (%)
+GEMM,nn.Module: MergedColumnParallelLinear,36,"['aten::mm', 'nn.Module: MergedColumnParallelLinear_0', 'nn.Module: Qwen2MLP_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",243.643025390625,49.43939026737225,49.43939026737225
+GEMM,nn.Module: RowParallelLinear,72,"['aten::mm', 'nn.Module: RowParallelLinear_0', 'nn.Module: Qwen3Attention_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",124.9309140625,25.350646532536214,74.79003679990846
+GEMM,nn.Module: QKVParallelLinear,36,"['aten::mm', 'nn.Module: QKVParallelLinear_0', 'nn.Module: Qwen3Attention_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",51.2954833984375,10.408742128460071,85.19877892836854
+RMSNorm,nn.Module: RMSNorm,145,"['aiter::rmsnorm', 'nn.Module: RMSNorm_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",26.258552734375,5.32831520381003,90.52709413217858
+InferenceAttention,nn.Module: RadixAttention,72,"['sglang::store_cache', 'nn.Module: RadixAttention_0', 'nn.Module: Qwen3Attention_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",21.3463740234375,4.331549053973585,94.85864318615216
+elementwise,nn.Module: SiluAndMul,36,"['sgl_kernel::silu_and_mul', 'nn.Module: SiluAndMul_0', 'nn.Module: Qwen2MLP_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",16.50814453125,3.349788481579329,98.20843166773149
+RoPE_fwd,nn.Module: RotaryEmbedding,36,"['sgl_kernel::rotary_embedding', 'nn.Module: RotaryEmbedding_0', 'nn.Module: Qwen3Attention_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",4.7251044921875,0.9588055503285519,99.16723721806004
+elementwise,nn.Module: Qwen3Attention,72,"['aten::copy_', 'nn.Module: Qwen3Attention_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",3.3899130859375,0.6878720856442996,99.85510930370434
+GEMM,nn.Module: LogitsProcessor,1,"['aten::mm', 'nn.Module: LogitsProcessor_0']",0.4363310546875,0.0885391291783701,99.94364843288271
+reduce,nn.Module: Sampler,1,"['aten::argmax', 'nn.Module: Sampler_0']",0.074349609375,0.01508682363562024,99.95873525651832
+other,nn.Module: VocabParallelEmbedding,1,"['aten::gather', 'nn.Module: VocabParallelEmbedding_0', 'nn.Module: Qwen3Model_0']",0.0662578125,0.013444857882543437,99.97218011440087
+elementwise,NA,10,['aten::copy_'],0.0489033203125,0.009923330800968749,99.98210344520184
+other,NA,7,['aten::arange'],0.0360478515625,0.007314733507521605,99.98941817870937
+elementwise,nn.Module: LogitsProcessor,3,"['aten::copy_', 'nn.Module: LogitsProcessor_0']",0.0211494140625,0.004291582466133758,99.99370976117551
+reduce,NA,4,['aten::max'],0.019423828125,0.003941431188594933,99.9976511923641
+other,nn.Module: LogitsProcessor,1,"['aten::index', 'nn.Module: LogitsProcessor_0']",0.006087890625,0.0012353384630317149,99.99888653082714
+reduce,nn.Module: LogitsProcessor,1,"['aten::cumsum', 'nn.Module: LogitsProcessor_0']",0.0054873046875,0.0011134691728866225,100.00000000000003

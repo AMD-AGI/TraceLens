@@ -27,14 +27,24 @@ _PYTHON_YAML_HEADER_RE = re.compile(
     re.MULTILINE,
 )
 
-_MARKDOWN_HEADER_RE = re.compile(
-    r"^<!--\n"
+_MARKDOWN_COPYRIGHT_BLOCK = (
+    r"<!--\n"
     rf"Copyright \(c\) {_COPYRIGHT_YEAR_RE} Advanced Micro Devices, Inc\. "
     r"All rights reserved\.\n"
     r"\n"
     r"See LICENSE for license information\.\n"
-    r"-->\n",
+    r"-->\n"
+)
+
+_MARKDOWN_HEADER_RE = re.compile(
+    r"^" + _MARKDOWN_COPYRIGHT_BLOCK,
     re.MULTILINE,
+)
+
+# Agent Skills SKILL.md files start with YAML frontmatter; copyright follows `---`.
+_MARKDOWN_HEADER_AFTER_FRONTMATTER_RE = re.compile(
+    r"^---\r?\n.*?\r?\n---(?:\r?\n)+" + _MARKDOWN_COPYRIGHT_BLOCK,
+    re.DOTALL,
 )
 
 _NOTEBOOK_COPYRIGHT_CELL_RE = re.compile(
@@ -60,7 +70,10 @@ def _matches_python_copyright_header(content: str) -> bool:
 
 
 def _matches_markdown_copyright_header(content: str) -> bool:
-    return bool(_MARKDOWN_HEADER_RE.match(content))
+    return bool(
+        _MARKDOWN_HEADER_RE.match(content)
+        or _MARKDOWN_HEADER_AFTER_FRONTMATTER_RE.match(content)
+    )
 
 
 def _matches_yaml_copyright_header(content: str) -> bool:

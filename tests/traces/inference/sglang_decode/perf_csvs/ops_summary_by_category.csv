@@ -1,0 +1,17 @@
+op category,parent_module,Count,call_stack_first,total_direct_kernel_time_ms,Percentage (%),Cumulative Percentage (%)
+GEMM,nn.Module: MergedColumnParallelLinear,36,"['aten::mm', 'nn.Module: MergedColumnParallelLinear_0', 'nn.Module: Qwen2MLP_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",2.4176591796875,24.72393727385087,24.72393727385087
+InferenceAttention,nn.Module: RadixAttention,72,"['sglang::store_cache', 'nn.Module: RadixAttention_0', 'nn.Module: Qwen3Attention_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",2.30140625,23.535088917703888,48.25902619155475
+GEMM,nn.Module: RowParallelLinear,72,"['aten::mm', 'nn.Module: RowParallelLinear_0', 'nn.Module: Qwen3Attention_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",2.064244140625,21.10977555460216,69.36880174615692
+GEMM,nn.Module: QKVParallelLinear,36,"['aten::mm', 'nn.Module: QKVParallelLinear_0', 'nn.Module: Qwen3Attention_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",0.9035185546875,9.23973745329214,78.60853919944905
+RMSNorm,nn.Module: RMSNorm,145,"['aiter::rmsnorm', 'nn.Module: RMSNorm_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",0.6839638671875,6.9944845377709495,85.60302373722
+GEMM,nn.Module: LogitsProcessor,1,"['aten::mm', 'nn.Module: LogitsProcessor_0']",0.39683203125,4.0581610225755655,89.66118475979556
+elementwise,nn.Module: Qwen3Attention,72,"['aten::copy_', 'nn.Module: Qwen3Attention_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",0.3466484375,3.5449637801868397,93.2061485399824
+elementwise,nn.Module: SiluAndMul,36,"['sgl_kernel::silu_and_mul', 'nn.Module: SiluAndMul_0', 'nn.Module: Qwen2MLP_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",0.3243671875,3.3171069209523645,96.52325546093476
+RoPE_fwd,nn.Module: RotaryEmbedding,36,"['sgl_kernel::rotary_embedding', 'nn.Module: RotaryEmbedding_0', 'nn.Module: Qwen3Attention_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",0.1958154296875,2.002485892768261,98.52574135370303
+reduce,nn.Module: Sampler,1,"['aten::argmax', 'nn.Module: Sampler_0']",0.05383984375,0.550587498392139,99.07632885209516
+elementwise,NA,6,['aten::copy_'],0.0291982421875,0.29859275220246984,99.37492160429763
+other,NA,4,['aten::arange'],0.021830078125,0.22324299751610457,99.59816460181374
+other,nn.Module: VocabParallelEmbedding,1,"['aten::gather', 'nn.Module: VocabParallelEmbedding_0', 'nn.Module: Qwen3Model_0']",0.0134990234375,0.13804634314507977,99.73621094495881
+multi_tensor_apply,NA,2,['aten::_foreach_copy_'],0.0120966796875,0.12370542230616388,99.85991636726497
+elementwise,nn.Module: LogitsProcessor,1,"['aten::copy_', 'nn.Module: LogitsProcessor_0']",0.008451171875,0.0864250201531882,99.94634138741816
+reduce,NA,1,['aten::cumsum'],0.0052470703125,0.05365861258182115,99.99999999999999

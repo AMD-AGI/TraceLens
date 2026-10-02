@@ -14,7 +14,6 @@ from typing import Optional
 import pandas as pd
 import streamlit as st
 import torch
-
 from TraceLens.UI.utils.hipblaslt import HipBLASLtColumns, perform_offline_tuning
 from TraceLens.UI.utils.reporting import (
     FAReportColumns,
@@ -58,9 +57,11 @@ def download_file_button(label: str, path: str) -> None:
     if not os.path.exists(path):
         return
 
+    with open(path, "rb") as download_file:
+        file_data = download_file.read()
     st.download_button(
         label=label,
-        data=open(path, "rb"),
+        data=file_data,
         file_name=Path(path).name,
         icon=":material/download:",
         use_container_width=True,
@@ -110,7 +111,7 @@ def main() -> None:
             value=False,
             disabled=not prepare_for_tuning_chk,
         )
-        iterations = st.selectbox(
+        st.selectbox(
             "Number of iterations",
             options=[100, 200, "All using '--algo_method index'"],
             index=1,

@@ -14,7 +14,6 @@ pytestmark = pytest.mark.filterwarnings(
     "ignore:Source column 'kernel_details__summarize_kernel_stats' not found.*:UserWarning",
 )
 import json
-import os
 from typing import List, Dict
 
 import pandas as pd

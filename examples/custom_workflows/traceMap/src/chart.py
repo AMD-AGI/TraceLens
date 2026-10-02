@@ -4,7 +4,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import pandas as pd
 from bokeh.plotting import figure
 from bokeh.models import (
     DataTable,

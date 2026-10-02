@@ -16,8 +16,7 @@ Tests cover the following edge cases:
 6. Nested cpu_ops with "execute" pattern
 """
 
-import pytest
-from typing import Dict, List
+from typing import Dict
 from copy import deepcopy
 
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
