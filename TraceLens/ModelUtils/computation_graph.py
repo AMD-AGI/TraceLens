@@ -123,6 +123,13 @@ class ComputationGraph:
     output_ports: dict[str, int] = field(default_factory=dict)
     primary_output_port: str | None = None
     loop_carried_nodes: dict[str, int] = field(default_factory=dict)
+    # A frame's ``@method_input`` edge that could not be resolved when the frame
+    # was chained, because the argument feeding it had not been emitted yet.
+    # ``(consumer index, producer attr, wrong source)``; resolved by
+    # ``_resolve_deferred_method_inputs`` once every node exists.
+    deferred_method_inputs: list[tuple[int, str, int | None]] = field(
+        default_factory=list
+    )
     attr_output_indices: dict[str, int] = field(default_factory=dict)
     dead_node_indices: set[int] = field(default_factory=set)
 
@@ -1717,6 +1724,9 @@ def _wire_all_predecessor_edges(
     if not skip_forward_links:
         _wire_inline_frame_dangling_outputs(graph)
 
+    # --- 7. Frame entries whose argument was emitted after the frame ---
+    _resolve_deferred_method_inputs(graph)
+
 
 def _wire_multi_input_op_forward_links(
     graph: ComputationGraph,
@@ -1833,6 +1843,38 @@ def _merge_link_output_port(
     if existing == port:
         return existing
     return [existing, port]
+
+
+def _resolve_deferred_method_inputs(graph: ComputationGraph) -> None:
+    """Point each frame's ``@method_input`` at the argument it was actually passed.
+
+    That entry is otherwise resolved by CHAIN POSITION -- the last node emitted
+    before the call -- which coincides with the real argument only while nothing
+    is added to the caller ahead of it. A frame can even be chained BEFORE its
+    argument exists, and the fallback then points it at an unrelated tensor and
+    leaves the real one with no consumer.
+
+    The caller's argument is recorded, so those cases are set aside during
+    construction and re-pointed here, with the attr map complete.
+    """
+    if not graph.deferred_method_inputs:
+        return
+    attr_last_index = _rebuild_attr_last_index(graph)
+    for consumer_index, producer_attr, wrong_index in graph.deferred_method_inputs:
+        source_index = attr_last_index.get(producer_attr)
+        if source_index is None or source_index == wrong_index:
+            continue
+        if not (0 <= consumer_index < len(graph.nodes)):
+            continue
+        rebuilt = [
+            (src, dst)
+            for src, dst in graph.links
+            if not (dst == consumer_index and src == wrong_index)
+        ]
+        if (source_index, consumer_index) not in rebuilt:
+            rebuilt.append((source_index, consumer_index))
+        graph.links = rebuilt
+    graph.deferred_method_inputs = []
 
 
 def _wire_inline_frame_dangling_outputs(graph: ComputationGraph) -> None:
@@ -3111,6 +3153,33 @@ def _add_linear_pipeline_chain(
             attr_last_index,
             chain_input_index=chain_input_index,
         )
+        # This frame's entry was resolved by chain position. Where the caller
+        # recorded which producer it passes, prefer that -- resolving it now if
+        # it exists, and otherwise setting it aside, since a frame can be
+        # chained before the argument feeding it has been emitted.
+        if (
+            wrapper is not None
+            and attr_last_index is not None
+            and chain_input_index is not None
+            and chain_input_index in explicit_sources
+            and any(is_method_input(p) for p in (sub_step.operation_predecessors or ()))
+        ):
+            for detail in wrapper.details or ():
+                token = str(detail)
+                if not token.startswith("method_input_producer:"):
+                    continue
+                producer_attr = token.split(":", 1)[1].strip()
+                recorded_index = attr_last_index.get(producer_attr)
+                if recorded_index is None:
+                    graph.deferred_method_inputs.append(
+                        (step_index, producer_attr, chain_input_index)
+                    )
+                elif recorded_index != chain_input_index:
+                    explicit_sources = [
+                        recorded_index if src == chain_input_index else src
+                        for src in explicit_sources
+                    ]
+                break
         # A consumer reading a specific slice of a multi-output producer
         # (``up`` is ordinal 1 of a ``gate_up.chunk(2)``) must tag its edge with
         # that ordinal so the split fans out into per-slice tiles and the right

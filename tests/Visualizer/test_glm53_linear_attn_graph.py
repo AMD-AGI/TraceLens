@@ -3041,10 +3041,15 @@ def test_glm53_router_outputs_no_redundant_mirror_passthrough():
         router_mirror
     }
 
-    gather = node_by_id[
+    # Matched on the op, not on its position in the step list: the trailing
+    # index shifts whenever the loop body gains or loses a step.
+    gather_prefix = (
         "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/"
-        "sidefeed:1:experts:@op_l134_c70_gather:12"
-    ]
+        "sidefeed:1:experts:@op_l134_c70_gather:"
+    )
+    gather_ids = [nid for nid in node_by_id if nid.startswith(gather_prefix)]
+    assert len(gather_ids) == 1, gather_ids
+    gather = node_by_id[gather_ids[0]]
     assert group_input in {e["sourceNodeId"] for e in gather["incomingEdges"]}
     # topk_indices wiring into the experts one-hot is untouched.
     one_hot = node_by_id[

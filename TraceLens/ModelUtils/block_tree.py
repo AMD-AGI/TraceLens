@@ -1376,13 +1376,23 @@ def _expanded_free_function_node(
                     runs_on_host=_operation_runs_on_host(operation),
                 )
             )
+        # Which producer the CALLER passes as this frame's primary argument.
+        # The frame's ``@method_input`` is otherwise resolved by chain position,
+        # which stops matching as soon as anything is added to the caller ahead
+        # of the call.
+        fn_entry = (cls.forward_step_predecessors.get(call_attr) or (None,))[0]
+        fn_entry_detail = (
+            [f"method_input_producer: {fn_entry}"]
+            if fn_entry and is_forward_operation(fn_entry)
+            else []
+        )
         return BlockNode(
             attr_name=call_attr,
             class_name=call_attr,
             role="other",
             label=label,
             forward_order=child_order,
-            details=[f"function `{name}()`", *call_context],
+            details=[f"function `{name}()`", *call_context, *fn_entry_detail],
             output_names=list(output_names or []),
             # The callee's own primary (first) parameter name (``q`` for
             # ``apply_rotary_pos_emb_vision``), the same way a ``self.<method>()``
@@ -3042,6 +3052,14 @@ def build_block_node(
                             for operation_index, operation in enumerate(method_ops)
                         ),
                     ]
+                # Same as the free-function frame: name the producer the
+                # caller passes, so the entry does not depend on chain order.
+                m_entry = (cls.forward_step_predecessors.get(call_attr) or (None,))[0]
+                m_entry_detail = (
+                    [f"method_input_producer: {m_entry}"]
+                    if m_entry and is_forward_operation(m_entry)
+                    else []
+                )
                 child_nodes.append(
                     BlockNode(
                         attr_name=call_attr,
@@ -3049,7 +3067,11 @@ def build_block_node(
                         role=_classify_role(base_attr, base_attr),
                         label=base_attr.strip("_").replace("_", " "),
                         forward_order=child_order,
-                        details=[f"method `{base_attr}()`", *call_context],
+                        details=[
+                            f"method `{base_attr}()`",
+                            *call_context,
+                            *m_entry_detail,
+                        ],
                         input_label=cls.multi_op_method_inputs.get(base_attr),
                         forward_return_slots=dict(m_return_slots),
                         forward_return_order=list(m_return_order),

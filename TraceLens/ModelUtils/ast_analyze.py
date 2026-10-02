@@ -6782,6 +6782,7 @@ class _ForwardOperationExtractor:
             if isinstance(stmt, ast.For):
                 iteration_count = self._loop_iteration_count(stmt)
                 iterable_producer, _iterable_external = self.expression(stmt.iter)
+                row_producer = iterable_producer
                 if iterable_producer is not None:
                     # Record WHAT each iteration binds, not just that the value
                     # is iterated. The render names a boundary after whatever
@@ -6808,12 +6809,53 @@ class _ForwardOperationExtractor:
                             }
                         )
                         break
+                    # Each iteration takes ONE ROW of the iterable, and that
+                    # row select is a real op. Binding the target straight to
+                    # the iterable makes the loop variable BE the whole tensor:
+                    # every op indexed by it reports the iterable's shape, and
+                    # nothing in the body tells one iteration from the next.
+                    # ``.tolist()`` moves the value to host, so a loop over it
+                    # walks Python numbers, not rows of a tensor: there is no
+                    # row to select (GLM's vision position-ids helper iterates
+                    # ``zip(grid_thw.tolist(), ...)`` purely for its sizes).
+                    iterates_host_values = any(
+                        isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr == "tolist"
+                        for inner in ast.walk(stmt.iter)
+                    )
+                    if (
+                        is_forward_operation(iterable_producer)
+                        and not iterates_host_values
+                    ):
+                        # The row select happens ONCE PER ITERATION, so it
+                        # belongs to the loop body: loop frames group contiguous
+                        # nodes sharing this detail, and without it this op
+                        # would sit among the body's and split the frame in two.
+                        loop_detail = (
+                            f"loop: {iteration_count} iterations"
+                            if iteration_count is not None
+                            else "loop: repeated"
+                        )
+                        row_producer = self._emit(
+                            # The ITERABLE expression, not the whole ``for``:
+                            # an op takes its parameter references from the node
+                            # it is given, and the statement covers the entire
+                            # body -- so this select absorbed every param the
+                            # body reads and, being the first consumer, claimed
+                            # their boundary slots from the ops that use them.
+                            stmt.iter,
+                            "Slice",
+                            [iterable_producer],
+                            [],
+                            details=["select_dim: 0", marker, loop_detail],
+                        )
                     if isinstance(stmt.target, ast.Name):
-                        self.var_producer[stmt.target.id] = iterable_producer
+                        self.var_producer[stmt.target.id] = row_producer
                     elif isinstance(stmt.target, (ast.Tuple, ast.List)):
                         for elt in stmt.target.elts:
                             if isinstance(elt, ast.Name):
-                                self.var_producer[elt.id] = iterable_producer
+                                self.var_producer[elt.id] = row_producer
                 for target in ast.walk(stmt.target):
                     if isinstance(target, ast.Name):
                         self._loop_target_iters[target.id] = stmt.iter
@@ -6829,7 +6871,32 @@ class _ForwardOperationExtractor:
                     else "loop: repeated"
                 )
                 self._annotate_operations_since(before, detail)
+                # Decide BEFORE injecting: the injection below adds the row as
+                # a predecessor of the body's ops, so asking afterwards whether
+                # anything reads it always says yes.
+                if row_producer != iterable_producer and not any(
+                    row_producer in operation.predecessors
+                    for operation in self.operations[before:]
+                ):
+                    # A loop whose body never reads the value it iterates (GLM's
+                    # vision position-ids helper walks a grid only to count) has
+                    # nothing to select a row FOR, so drawing the select would
+                    # add a node nothing consumes.
+                    self.operations = [
+                        operation
+                        for operation in self.operations
+                        if operation.attr_name != row_producer
+                    ]
+                    for name, producer in list(self.var_producer.items()):
+                        if producer == row_producer:
+                            self.var_producer[name] = iterable_producer
+                    row_producer = iterable_producer
                 if iterable_producer is not None:
+                    # Ops that do not NAME the loop variable still depend on the
+                    # iterable, exactly as before: the row select changes what
+                    # the loop TARGET resolves to, not this blanket dependency.
+                    # Injecting the row here instead cost the GLM expert gather
+                    # its weights-table operand.
                     self._inject_iterator_predecessor(before, iterable_producer)
                 operation_ids = tuple(
                     operation.attr_name for operation in self.operations[before:]
