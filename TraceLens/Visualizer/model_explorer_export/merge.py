@@ -2212,6 +2212,28 @@ _INPUT_BOUNDARY_SYNTHETIC = frozenset({"@input", "@input_mirror", "@kernel_port_
 _NAMED_INPUT_SYNTHETIC = frozenset({"@input", "@input_mirror", "@kernel_port_in"})
 
 
+def _producer_tile_name(producer: dict[str, Any]) -> str:
+    """What to call a boundary named after *producer*.
+
+    Normally the producer's own label. A loop ITERATOR is the exception: the
+    value entering the body is one row of it per iteration, so naming the tile
+    after the op that built the whole thing (``Nonzero``) puts a box inside the
+    body labelled for an op that lives outside it, and says nothing about the
+    indexing that makes the iterations differ. Use the name each iteration
+    binds instead -- the extractor records it beside the iterator marker.
+    """
+    for attr in producer.get("attrs", []) or []:
+        if attr.get("key") not in {"detail", "details"}:
+            continue
+        for token in str(attr.get("value") or "").split(";"):
+            token = token.strip()
+            if token.startswith("loop iterator:"):
+                bound = token.split(":", 1)[1].strip()
+                if bound:
+                    return bound
+    return str(producer.get("label") or "input").strip() or "input"
+
+
 def _name_unnamed_group_inputs(nodes: list[dict[str, Any]]) -> None:
     """Give every tensor entering a multi-input module a boundary that names it.
 
@@ -2274,7 +2296,7 @@ def _name_unnamed_group_inputs(nodes: list[dict[str, Any]]) -> None:
             producer = by_id.get(source)
             if producer is None:
                 continue
-            base = str(producer.get("label") or "input").strip() or "input"
+            base = _producer_tile_name(producer)
             label = base
             suffix = 2
             while label in used or f"{namespace}/@input:{label}" in by_id:
@@ -2937,7 +2959,7 @@ def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
             segments = [p for p in target_ns[len(shared) :].split("/") if p]
             if not segments:
                 continue
-            name = str(source.get("label") or "input").strip() or "input"
+            name = _producer_tile_name(source)
             upstream = str(edge["sourceNodeId"])
             walk = shared
             # Every level, including the innermost: the block the op itself
@@ -6138,7 +6160,7 @@ def _give_loop_body_its_own_boundaries(nodes: list[dict[str, Any]]) -> None:
                     continue
                 tile_id = per_source.get(source_id)
                 if tile_id is None:
-                    base = str(source.get("label") or "input").strip() or "input"
+                    base = _producer_tile_name(source)
                     label = base
                     suffix = 2
                     while label in used:

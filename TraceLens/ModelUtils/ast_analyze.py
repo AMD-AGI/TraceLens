@@ -6783,13 +6783,28 @@ class _ForwardOperationExtractor:
                 iteration_count = self._loop_iteration_count(stmt)
                 iterable_producer, _iterable_external = self.expression(stmt.iter)
                 if iterable_producer is not None:
+                    # Record WHAT each iteration binds, not just that the value
+                    # is iterated. The render names a boundary after whatever
+                    # produced it, so without this the tile carrying ``hit``
+                    # into an expert loop reads ``Nonzero`` -- the op outside
+                    # the body -- and nothing says it is indexed per iteration.
+                    bound = ""
+                    if isinstance(stmt.target, ast.Name):
+                        bound = stmt.target.id
+                    elif isinstance(stmt.target, (ast.Tuple, ast.List)):
+                        bound = ", ".join(
+                            elt.id
+                            for elt in stmt.target.elts
+                            if isinstance(elt, ast.Name)
+                        )
+                    marker = f"loop iterator: {bound}" if bound else "loop iterator"
                     for index, operation in enumerate(self.operations):
                         if operation.attr_name != iterable_producer:
                             continue
                         self.operations[index] = ForwardOperation(
                             **{
                                 **operation.__dict__,
-                                "details": (*operation.details, "loop iterator"),
+                                "details": (*operation.details, marker),
                             }
                         )
                         break
