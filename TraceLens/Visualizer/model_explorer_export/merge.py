@@ -2832,6 +2832,13 @@ def _fold_same_scope_mirrors(nodes: list[dict[str, Any]]) -> None:
             str(sources[0]["id"]),
             str(edge.get("sourceNodeOutputId", "0")),
         )
+    _apply_tile_redirects(nodes, redirect)
+
+
+def _apply_tile_redirects(
+    nodes: list[dict[str, Any]], redirect: dict[str, tuple[str, str]]
+) -> None:
+    """Point every edge at a folded tile's landing, then drop the folded tiles."""
     if not redirect:
         return
     for node in nodes:
@@ -2843,6 +2850,83 @@ def _fold_same_scope_mirrors(nodes: list[dict[str, Any]]) -> None:
                 edge["sourceNodeId"], edge["sourceNodeOutputId"] = landing
                 landing = redirect.get(landing[0])
     nodes[:] = [n for n in nodes if str(n["id"]) not in redirect]
+
+
+def _fold_same_source_twins(nodes: list[dict[str, Any]]) -> None:
+    """One scope, one name, one producer: a tensor declared twice.
+
+    A boundary tile carries a tensor NAME, which is how a reader inside the box
+    tells one from another. Two tiles under one name in one scope are only
+    ambiguous if they are two tensors -- and when both read the very same
+    producer at the same port they are not. They are one value said twice: the
+    compressor declaring ``hidden_states`` while a mirror carries that same
+    ``hidden_states`` on to its indexer. The first declaration stays and the
+    rest hand their consumers to it, which keeps every consumer at the level it
+    was already reading from.
+
+    A fused kernel's operand ports are left alone. Ports 15, 16 and 17 of one
+    kernel are three distinct slots even when a single ``cu_seqlens`` feeds all
+    three, and folding them would misreport how many operands the kernel takes.
+    """
+    kernel_ports = {"@kernel_port_in", "@kernel_port_out"}
+    boundary = (_INPUT_BOUNDARY_SYNTHETIC | _OUTPUT_BOUNDARY_SYNTHETIC) - kernel_ports
+
+    consumer_count: dict[str, int] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []) or []:
+            key = str(edge.get("sourceNodeId"))
+            consumer_count[key] = consumer_count.get(key, 0) + 1
+
+    # A producer that declares exactly one output has one tensor to give,
+    # however an edge spells the port: the frame tile below reads
+    # ``topk_indices`` by name while the block's own tile reads port ``0``, and
+    # both land on that single value. A producer declaring NO ports is not the
+    # same claim -- it can still publish several ordinals -- so its edges keep
+    # the port they name, or two distinct slots would fold into one.
+    single_output = {
+        str(n["id"]) for n in nodes if len(n.get("outputsMetadata", []) or []) == 1
+    }
+
+    def feed(node: dict[str, Any]) -> frozenset[tuple[str, str]]:
+        ports = set()
+        for edge in node.get("incomingEdges", []) or []:
+            source = str(edge.get("sourceNodeId"))
+            port = str(edge.get("sourceNodeOutputId", "0"))
+            ports.add((source, "*" if source in single_output else port))
+        return frozenset(ports)
+
+    groups: dict[tuple[str, str, frozenset[tuple[str, str]]], list[dict[str, Any]]] = {}
+    for node in nodes:
+        name = str(node.get("label") or "").strip()
+        if not name or _node_attr(node, "synthetic") not in boundary:
+            continue
+        sources = feed(node)
+        if not sources:
+            continue
+        groups.setdefault((str(node.get("namespace") or ""), name, sources), []).append(
+            node
+        )
+
+    redirect: dict[str, tuple[str, str]] = {}
+    for same in groups.values():
+        if len(same) < 2:
+            continue
+        # Keep the plainest, most load-bearing declaration: a tile the block
+        # itself declares outranks a mirror of it, and the one more consumers
+        # already read outranks one almost nothing does.
+        same.sort(
+            key=lambda n: (
+                str(_node_attr(n, "synthetic")).endswith("_mirror"),
+                -consumer_count.get(str(n["id"]), 0),
+                str(n["id"]),
+            )
+        )
+        published = same[0].get("outputsMetadata", []) or []
+        port = str(published[0].get("id", "0")) if len(published) == 1 else "0"
+        landing = (str(same[0]["id"]), port)
+        for extra in same[1:]:
+            redirect[str(extra["id"])] = landing
+    _apply_tile_redirects(nodes, redirect)
 
 
 def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
@@ -7549,6 +7633,7 @@ def build_merged_model_graph(
     # After every boundary pass has placed its tiles: a mirror is only
     # redundant once its neighbours are final.
     _fold_same_scope_mirrors(nodes)
+    _fold_same_source_twins(nodes)
 
     # Structural-integrity check on the FINAL built graph (after loop-carried
     # synthesis + ordering): I1 dead-node / I2 no-source / I3 constant soundness.

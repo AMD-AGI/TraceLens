@@ -7638,6 +7638,41 @@ def finalize_class_registry(registry: dict[str, ClassStructure]) -> None:
             cls.forward_operations,
             module_unpacks=module_unpacks,
         )
+        _publish_submodule_return_producers(cls, registry)
+
+
+def _publish_submodule_return_producers(
+    cls: ClassStructure, registry: dict[str, ClassStructure]
+) -> None:
+    """Say which op inside a submodule produces each slot of its return tuple.
+
+    ``_, routing_weights, selected_experts = self.gate(hidden_states)`` reads two
+    slots of one call. The caller records the ordinals it read, but the edge can
+    only start from an op, and every slot resolved to the gate's LAST op -- so
+    the experts' ``one_hot`` was handed the routing WEIGHTS where the model
+    passes it the expert INDICES, and the router published one tensor twice
+    under one name instead of its two distinct returns.
+
+    The callee already knows the answer: its ``forward_return_order`` names the
+    slots and ``forward_return_slots`` names the op behind each. Publishing them
+    in call order lets a consumer reading ordinal 2 dock onto that slot's own
+    producer (the ``topk``), the same way an inline-expanded method or free
+    function already does. A submodule the export keeps opaque has no internal
+    op to dock onto, so the lookup finds nothing and the wiring is unchanged.
+    """
+    for module_attr, callee_name in cls.init_assignments.items():
+        callee = registry.get(callee_name)
+        if callee is None or len(callee.forward_return_order) < 2:
+            continue
+        producers = [
+            callee.forward_return_slots.get(slot)
+            for slot in callee.forward_return_order
+        ]
+        if any(producer is None for producer in producers):
+            continue
+        cls.forward_step_return_producers.setdefault(
+            module_attr, [producer for producer in producers if producer is not None]
+        )
 
 
 def _forward_operations_from_forward(

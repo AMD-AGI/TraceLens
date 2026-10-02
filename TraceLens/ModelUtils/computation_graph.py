@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,6 +39,7 @@ from TraceLens.ModelUtils.block_tree import (
 from TraceLens.ModelUtils.ast_analyze import (
     FORWARD_METHOD_INPUT,
     is_method_input,
+    SideInputSpec,
     SYNTHETIC_ATTENTION,
     is_forward_operation,
 )
@@ -4425,6 +4427,43 @@ def _add_tensor_ports_segment(
     return step_indices.get(segment.steps[-1].attr_name)
 
 
+def _side_slot_sources(
+    root: BlockNode,
+    sides: Sequence[SideInputSpec],
+    attr_last_index: dict[str, int],
+) -> dict[int, int]:
+    """Give each side feed its own slot of the module they all read.
+
+    ``topk_idx, topk_weight = self.gate(...)`` then
+    ``self.moe_infer(x, topk_idx, topk_weight)``: both side feeds trace back to
+    ``gate``, and resolving each to that module's LAST op handed the
+    aggregation the routing WEIGHTS twice while the expert INDICES never
+    arrived. The module publishes one producer per return slot, so an unpack
+    that consumes ALL of them maps side by side onto them in order -- the only
+    order a tuple can be unpacked in.
+
+    Requiring the counts to match keeps this to a full unpack. A call that
+    takes just one slot of a multi-slot return says nothing about WHICH, so it
+    keeps the module's own tail and the wiring is unchanged.
+    """
+    positions_by_attr: dict[str, list[int]] = {}
+    for position, side in enumerate(sides):
+        attr = side.source_chain[-1] if side.source_chain else None
+        if attr and side.source_kind != "forward_input":
+            positions_by_attr.setdefault(attr, []).append(position)
+
+    slot_sources: dict[int, int] = {}
+    for attr, positions in positions_by_attr.items():
+        producers = root.forward_step_return_producers.get(attr) or []
+        if len(positions) < 2 or len(positions) != len(producers):
+            continue
+        for ordinal, position in enumerate(positions):
+            resolved = attr_last_index.get(producers[ordinal])
+            if resolved is not None:
+                slot_sources[position] = resolved
+    return slot_sources
+
+
 def _fanout_merge_key_prefix(merge: BlockNode, segment_index: int) -> str:
     """Stable node-id prefix for fan-out merge steps."""
     if merge.class_name == "KernelPipeline" and merge.attr_name:
@@ -4628,7 +4667,8 @@ def build_computation_graph(
                     graph.links.append((last_index, agg_index))
                 elif input_index is not None:
                     graph.links.append((input_index, agg_index))
-                for side in segment.sides:
+                slot_sources = _side_slot_sources(root, segment.sides, attr_last_index)
+                for position, side in enumerate(segment.sides):
                     if side.source_kind == "forward_input":
                         if input_index is not None:
                             _link_forward_input(graph, input_index, agg_index)
@@ -4636,11 +4676,14 @@ def build_computation_graph(
                     source_attr = side.source_chain[-1] if side.source_chain else None
                     if source_attr is None:
                         continue
-                    source_index = attr_last_index.get(source_attr)
+                    source_index = slot_sources.get(
+                        position, attr_last_index.get(source_attr)
+                    )
                     if source_index is None:
                         continue
                     link_key = (source_index, agg_index)
-                    graph.links.append(link_key)
+                    if link_key not in graph.links:
+                        graph.links.append(link_key)
                     if side.port_label and side.port_label != "router":
                         graph.link_port_labels[link_key] = side.port_label
                 last_index = agg_index
