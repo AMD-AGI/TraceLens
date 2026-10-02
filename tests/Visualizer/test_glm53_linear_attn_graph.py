@@ -1315,14 +1315,20 @@ def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
     carried = [
         node
         for node in graph["nodes"]
-        if node["id"].startswith(f"{prefix}/mlp/")
-        and node.get("namespace", "").endswith("/Glm5NextTextMoE")
-        and any(
-            attr.get("key") == "synthetic" and attr.get("value") == "@loop_carried"
-            for attr in node.get("attrs", [])
-        )
+        if "/mlp/" in node["id"]
+        and "/Glm5NextTextMoE" in node.get("namespace", "")
+        and ("@body_in:" in node["id"] or "@body_out:" in node["id"])
+        and node["id"].endswith(":final")
     ]
-    assert any(node["id"].endswith(":final") for node in carried)
+    # The expert loop carries ``final``. With its ports folded away the body's
+    # own boundaries are what name it, as ``loop in: final`` / ``loop out:
+    # final``. Matched on the carried variable rather than on one variant, so
+    # this does not depend on which MoE variant comes first.
+    assert carried, "the expert loop must name the value it carries"
+    assert {str(n.get("label")) for n in carried} == {
+        "loop in: final",
+        "loop out: final",
+    }, [n.get("label") for n in carried]
     assert all(len(node.get("incomingEdges", [])) <= 1 for node in loop_inputs)
     assert not any(
         "nonzero" in edge["sourceNodeId"]
@@ -1366,76 +1372,56 @@ def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
 
 
 def test_glm53_loop_carried_pairs_are_well_formed():
-    """Every loop-carried variable is one nested in/out pair with a single back edge.
+    """A loop carrying ONE value shows its body, not a cycle around it.
 
-    General loop-rendering invariant (not GLM-specific): for each ``@loop_carried``
-    variable the export must emit exactly one ``@loop_carried_in`` and one
-    ``@loop_carried_out`` node, both nested in the *same* loop namespace (not
-    siblings of the loop), joined by exactly one back edge (out → in). No orphan
-    ``out`` without its ``in``. The whole export stays acyclic once those single
-    back edges are removed. The expert loop specifically carries ``final`` (not the
-    ``mask`` intermediate) under a counted ``Loop_288_iterations`` frame.
+    General loop-rendering invariant (not GLM-specific). ``Loop in``/``Loop
+    out`` existed to make the back edge legible, and the back edge was the only
+    cycle the graph allowed. For a loop carrying a single value those two boxes
+    plus the edge closing them say less than the ``{N}x_`` group name already
+    does, so they are folded away: the seed feeds the body directly and the
+    body feeds its consumer directly, exactly as the heterogeneous decoder has
+    always rendered.
+
+    What remains is the body's own boundary pair, named for the value it
+    carries, and no ``@loop_carried`` tile anywhere.
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
-    def is_carried(node) -> bool:
-        return any(
-            attr.get("key") == "synthetic" and attr.get("value") == "@loop_carried"
-            for attr in node.get("attrs", [])
-        )
-
-    # key = (prefix, loop_key, var) -> {"in": node, "out": node}
-    pairs: dict[tuple[str, str, str], dict[str, dict]] = {}
-    for node in nodes:
-        node_id = node["id"]
-        for marker, direction in (
-            ("@loop_carried_in:", "in"),
-            ("@loop_carried_out:", "out"),
-        ):
-            if marker in node_id:
-                assert is_carried(node), node_id
-                prefix, rest = node_id.split(marker, 1)
-                loop_key, var = rest.split(":", 1)
-                slot = pairs.setdefault((prefix, loop_key, var), {})
-                assert direction not in slot, f"duplicate {direction} for {node_id}"
-                slot[direction] = node
-                break
-
-    assert pairs, "expected loop-carried boundaries in the export"
-
-    for (prefix, loop_key, var), slot in pairs.items():
-        # Exactly one in and one out — no orphan boundary.
-        assert set(slot) == {"in", "out"}, (loop_key, var, sorted(slot))
-        in_node, out_node = slot["in"], slot["out"]
-        # Both boundaries live in the *same* namespace — nested together inside
-        # the loop body, never split so that one is a sibling of the other. (A
-        # compactly-rendered loop puts them under a ``Loop_N_iterations`` frame;
-        # an inline-expanded loop such as the vision block shares the block's own
-        # namespace. Either way, in and out agree.)
-        assert in_node.get("namespace") == out_node.get("namespace")
-        # Exactly one back edge: the in node is fed by its matching out node.
-        back_edges = [
-            edge
-            for edge in in_node.get("incomingEdges", [])
-            if edge["sourceNodeId"] == out_node["id"]
-        ]
-        assert len(back_edges) == 1, (loop_key, var, back_edges)
-
-    # The expert loop carries ``final`` under a counted 288-iteration frame, and
-    # never the ``mask`` intermediate that a scope collision used to mis-resolve.
-    carried_vars_by_loop_ns = {
-        (var, slot["in"].get("namespace", "").rsplit("/", 1)[-1])
-        for (_prefix, _loop_key, var), slot in pairs.items()
-    }
-    # The ports bracket the body, so their namespace is the module that OWNS
-    # the loop rather than the loop frame itself.
-    assert ("final", "Glm5NextTextMoE") in carried_vars_by_loop_ns
-    assert not any(var == "mask" for var, _ns in carried_vars_by_loop_ns)
-
     _assert_export_is_acyclic(nodes)
+
+    carried: dict[tuple[str, str], dict[str, str]] = {}
+    for node in nodes:
+        for token, side in (("@body_in:", "in"), ("@body_out:", "out")):
+            if token not in node["id"]:
+                continue
+            prefix, rest = node["id"].split(token, 1)
+            loop_id, _, variable = rest.partition(":")
+            carried.setdefault((prefix, loop_id, variable), {})[side] = node["id"]
+    assert carried, "expected the loops to name what they carry"
+    by_id = {n["id"]: n for n in nodes}
+    # A loop is folded only when its body names the value BOTH ways; one that
+    # names it only on the way out keeps its ports, because dropping them would
+    # leave what it carries in with nothing naming it at all.
+    folded = {
+        key
+        for key, sides in carried.items()
+        if str(by_id[next(iter(sides.values()))].get("label", "")).startswith("loop ")
+    }
+    assert folded, "expected at least one folded loop"
+    for key in folded:
+        variable, sides = key[2], carried[key]
+        assert set(sides) == {"in", "out"}, (variable, sides)
+        assert str(by_id[sides["in"]].get("label")) == f"loop in: {variable}"
+        assert str(by_id[sides["out"]].get("label")) == f"loop out: {variable}"
+        # Both ends sit inside the body they bracket, and each is wired.
+        assert by_id[sides["in"]].get("incomingEdges"), sides["in"]
+        assert by_id[sides["out"]].get("incomingEdges"), sides["out"]
+        assert not any(
+            n["id"].endswith(f"@loop_carried_in:{key[1]}:{variable}") for n in nodes
+        ), "a folded loop keeps no ports"
 
 
 def test_glm53_decoder_boundary_keeps_hyper_stream_shape():
@@ -1681,67 +1667,43 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
 
 
 def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
+    """The vision block is seeded straight from the patch embed.
+
+    With the ports folded away there is nothing between the two: the embed's
+    result enters the block's own ``loop in:`` boundary, which the body's ops
+    read. The graph is plainly acyclic now -- not acyclic apart from one
+    sanctioned back edge.
+    """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
-
-    # The graph must never ship a cycle even with the vision loop inlined.
+    by_id = {n["id"]: n for n in nodes}
     _assert_export_is_acyclic(nodes)
 
-    # The vision tower has more than one loop now (a helper that accumulates a
-    # list across iterations carries a value too), so name the block loop rather
-    # than taking whichever tile happens to come first.
-    lc_in = next(
-        node
-        for node in nodes
-        if "visual/@loop_carried_in:" in node["id"]
-        and node["id"].endswith(":hidden_states")
-    )
-    # Wiring: the loop-carried-in must actually feed the loop body (mirroring the
-    # decoder LC nodes), not sit dead like ``patch_embed/@output``-only.
-    consumers = [
-        node["id"]
-        for node in nodes
-        for edge in node.get("incomingEdges", [])
-        if edge["sourceNodeId"] == lc_in["id"]
+    entry = [
+        n
+        for n in nodes
+        if "visual/@body_in:" in n["id"] and n["id"].endswith(":hidden_states")
     ]
-    assert consumers, "visual @loop_carried_in has no consumer"
-    # The port now hands the carried value to the BODY's own input boundary,
-    # which is what the body's ops read -- so the chain is
-    # ``@loop_carried_in -> @body_in -> visual/seq:3:blocks...`` rather than the
-    # port reaching into the body directly.
-    reached = list(consumers)
-    for _ in range(3):
-        if any(c.startswith("visual/seq:3:blocks") for c in reached):
-            break
-        reached = [
-            node["id"]
-            for node in nodes
-            for edge in node.get("incomingEdges", [])
-            if edge["sourceNodeId"] in reached
-        ]
-    assert any(consumer.startswith("visual/seq:3:blocks") for consumer in reached), (
-        consumers,
-        reached[:4],
-    )
+    assert len(entry) == 1, [n["id"] for n in entry]
+    entry_node = entry[0]
+    assert str(entry_node.get("label")) == "loop in: hidden_states"
 
-    # Topological order: the LC-in floats above every loop-body *activation* node
-    # even though the body lives in child namespaces (``visual/Block/norm1`` etc.).
-    # Materialized ``constant`` leaves (buffer/param reads such as ``self.inv_freq``)
-    # are pure sources with no incoming edge, so they legitimately sort ahead of the
-    # LC-in; they are filtered out of the rendered graph, so exclude them here.
-    positions = {node["id"]: index for index, node in enumerate(nodes)}
-    body_positions = [
-        index
-        for node in nodes
-        if node["id"].startswith("visual/seq:3:blocks")
-        and "@loop_carried" not in node["id"]
-        and _attr_value(node, "constant") != "true"
-        for index in (positions[node["id"]],)
+    sources = {e["sourceNodeId"] for e in entry_node.get("incomingEdges", []) or []}
+    assert sources == {"visual/@input:initial"}, sources
+    seed = by_id["visual/@input:initial"]
+    assert {e["sourceNodeId"] for e in seed.get("incomingEdges", []) or []} == {
+        "visual/seq:1:patch_embed:patch_embed:0/@output"
+    }
+
+    consumers = [
+        n["id"]
+        for n in nodes
+        for e in n.get("incomingEdges", []) or []
+        if e["sourceNodeId"] == entry_node["id"]
     ]
-    assert body_positions
-    assert positions[lc_in["id"]] < min(body_positions)
+    assert consumers, "the body must read what the loop carries in"
 
 
 def _output_shape(node) -> str | None:
@@ -3566,19 +3528,21 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     assert _shape_attr(mask_source) == "[B, S] bool", mask_source
     assert not any("hidden_states" in nid for nid in spine_invariant_inputs)
 
-    # The vision tower's CG-built boundary (a *uniform* loop) is untouched -- the
-    # suppression is targeted at heterogeneous groups only, so a single instance of
-    # the vision loop-carried boundary and its loop-invariant cos/sin inputs remain.
-    # The block loop keeps exactly one boundary. (A position-ids helper in the
-    # same tower accumulates a list across its own loop and therefore carries a
-    # value too, so match the block loop by its carried variable rather than
-    # assuming the tower has only one loop.)
+    # The vision block carries ONE value, so it renders like this decoder does:
+    # its body, with no ports and no back edge. The carried value is named on
+    # the body's own entry boundary. (A position-ids helper in the same tower
+    # carries a value across its own loop too, so match the block loop by its
+    # carried variable rather than assuming the tower has only one loop.)
     vision_in = [
         n["id"]
         for n in nodes
-        if "visual/@loop_carried_in:" in n["id"] and n["id"].endswith(":hidden_states")
+        if "visual/@body_in:" in n["id"] and n["id"].endswith(":hidden_states")
     ]
     assert len(vision_in) == 1, vision_in
+    assert str(by_id[vision_in[0]].get("label")) == "loop in: hidden_states"
+    assert not any(
+        "@loop_carried" in n["id"] and n["id"].endswith(":hidden_states") for n in nodes
+    )
     # The loop-invariant cos/sin inputs are still wired into the loop body. Each
     # crossing enters a module (the rotary producer -> the visual block section),
     # so the hierarchy-aware same-name collapse KEEPS the visual/@input:cos/sin
@@ -3999,11 +3963,26 @@ def test_glm53_heterogeneous_decoder_group_has_no_loop_carried_tiles():
     ]
     assert decoder_level_loop_tiles == [], decoder_level_loop_tiles
 
-    # The uniform loops still carry theirs (vision block + CG-built per-op loops),
-    # so suppression is targeted, not a blanket removal.
-    surviving_loop_tiles = [
-        n for n in nodes if _attr_value(n, "synthetic") == "@loop_carried"
+    # A loop carrying ONE value now renders the same way this heterogeneous one
+    # always has: its body, seeded from its producer and feeding its consumer,
+    # with no ports and no back edge. A loop whose body names the carried value
+    # only on the way OUT keeps its ports -- folding them would leave what it
+    # carries in with nothing naming it -- so ports may remain, but never for a
+    # loop whose body names the value both ways.
+    folded_vars = {
+        n["id"].split("@body_in:", 1)[1]
+        for n in nodes
+        if "@body_in:" in n["id"] and str(n.get("label", "")).startswith("loop in:")
+    }
+    stale = [
+        n["id"]
+        for n in nodes
+        if _attr_value(n, "synthetic") == "@loop_carried"
+        and n["id"]
+        .rsplit("@loop_carried_in:", 1)[-1]
+        .rsplit("@loop_carried_out:", 1)[-1]
+        in folded_vars
     ]
-    assert surviving_loop_tiles, "uniform loops must keep their loop-carried tiles"
+    assert stale == [], stale
 
     _assert_export_is_acyclic(nodes)

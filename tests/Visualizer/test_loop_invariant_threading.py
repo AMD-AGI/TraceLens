@@ -633,41 +633,33 @@ def test_a_constructed_tensor_is_a_visible_op_with_its_own_shape(model_id):
 
 
 def test_a_loop_carries_the_width_its_body_produces():
-    """The loop's entry port reports the body's output, not the seed's producer.
+    """The loop's entry boundary reports the body's output, not the seed's producer.
 
     GLM's vision tower runs ``for blk in self.blocks: hidden_states = blk(...)``
     seeded from the patch embed. The patch embed has no shape rule of its own,
     so its node echoes its input -- the raw patch width ``[Pv, C*T*P*P]`` -- even
-    though its expansion ends on a Conv3d that produces ``[Pv, hidden]``. Seeding
-    the port from that echo made the whole loop report a width that exists only
-    BEFORE the first module runs. Entry port, body input and exit port all carry
-    one variable, so they must all report one shape.
+    though its expansion ends on a Conv3d that produces ``[Pv, hidden]``. Sizing
+    the entry from that echo made the whole loop report a width that exists only
+    BEFORE the first module in it runs. Entry and exit carry one variable, so
+    they must report one shape.
     """
     pytest.importorskip("huggingface_hub")
     _, by_id = _build_nodes("zai-org/GLM-5.3-Flash")
 
-    ports = {
+    entries = {
         node_id: node
         for node_id, node in by_id.items()
-        if "@loop_carried_in:" in node_id or "@loop_carried_out:" in node_id
+        if "@body_in:" in node_id and str(node.get("label", "")).startswith("loop in:")
     }
-    assert ports, "expected the vision block loop to declare its ports"
-    for node_id, node in ports.items():
-        if "@loop_carried_in:" not in node_id:
-            continue
-        exit_port = by_id.get(
-            node_id.replace("@loop_carried_in:", "@loop_carried_out:")
-        )
-        if exit_port is None:
-            continue
-        assert _shape_of(node) == _shape_of(exit_port), (
+    assert entries, "expected a folded loop to name what it carries"
+    for node_id, node in entries.items():
+        exit_node = by_id.get(node_id.replace("@body_in:", "@body_out:"))
+        assert exit_node is not None, node_id
+        assert _shape_of(node) == _shape_of(exit_node), (
             node_id,
             _shape_of(node),
-            _shape_of(exit_port),
+            _shape_of(exit_node),
         )
-        body_in = by_id.get(node_id.replace("@loop_carried_in:", "@body_in:"))
-        if body_in is not None:
-            assert _shape_of(body_in) == _shape_of(node), (body_in["id"], node_id)
 
 
 def test_glm_builds_the_mask_it_is_never_given():
@@ -994,51 +986,44 @@ def test_vision_range_docks_the_grid_it_is_sized_from():
 
 @pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-M3", "zai-org/GLM-5.3-Flash"])
 def test_loop_ports_bracket_the_body_which_names_both_kinds_of_input(model_id):
-    """The loop's ports sit OUTSIDE the body, and the body names what it reads.
+    """A loop carrying ONE value shows its body, with no ports and no back edge.
 
-    A port drawn inside the body sits among the body's own ops, where its
-    position relative to the iteration is undefined -- no ordering reads
-    correctly for both the seed edge and the back edge. The body nests between
-    them instead.
+    ``Loop in``/``Loop out`` existed to make the back edge legible, and that
+    edge was the only cycle the graph allowed. For a single carried value the
+    two boxes plus the edge closing them say less than the ``{N}x_`` group name
+    already does, so they fold away -- the seed feeds the body directly and the
+    body feeds its consumer directly, which is how the heterogeneous decoder
+    has always rendered.
 
-    The body then carries boundaries of its own for BOTH kinds of dependency:
-    the carried value (fed by ``Loop in``, feeding ``Loop out``) and the
-    loop-invariant tensors each iteration is handed.
+    The body keeps its own boundaries and they name the value, so the loop
+    still says what it carries; it just no longer draws a circle to say it.
     """
     pytest.importorskip("huggingface_hub")
     graph, by_id = _build_nodes(model_id)
-    ports = [n for n in graph["nodes"] if _node_attr(n, "synthetic") == "@loop_carried"]
-    assert ports, "expected loop-carried ports"
 
-    for port in ports:
-        outer = str(port.get("namespace") or "")
-        # Whatever the port exchanges the carried value with lives one level in.
-        partners = [
-            by_id[str(e["sourceNodeId"])]
-            for e in port.get("incomingEdges", []) or []
-            if str(e["sourceNodeId"]) in by_id
-        ] + [
-            n
-            for n in graph["nodes"]
-            for e in n.get("incomingEdges", []) or []
-            if str(e.get("sourceNodeId")) == str(port["id"])
-        ]
-        inside = [
-            p for p in partners if str(p.get("namespace") or "").startswith(outer + "/")
-        ]
-        for partner in inside:
-            # The port never reaches into the body: it meets the body's own
-            # boundary, which is what the body's ops read.
-            assert _node_attr(partner, "synthetic") in {"@input", "@output"}, (
-                port["id"],
-                partner["id"],
-            )
-            body_ns = str(partner.get("namespace") or "")
-            siblings = [
-                n
-                for n in graph["nodes"]
-                if str(n.get("namespace") or "") == body_ns
-                and _node_attr(n, "synthetic") == "@input"
-            ]
-            # ...alongside the loop-invariant inputs the body also reads.
-            assert siblings, body_ns
+    carried: dict[str, dict[str, dict]] = {}
+    for node in graph["nodes"]:
+        for token, side in (("@body_in:", "in"), ("@body_out:", "out")):
+            if token not in node["id"]:
+                continue
+            prefix, rest = node["id"].split(token, 1)
+            carried.setdefault(f"{prefix}{rest}", {})[side] = node
+    folded = {
+        key: sides
+        for key, sides in carried.items()
+        if any(str(n.get("label", "")).startswith("loop ") for n in sides.values())
+    }
+    assert folded, "expected at least one folded loop"
+    for key, sides in folded.items():
+        assert set(sides) == {"in", "out"}, (key, sorted(sides))
+        variable = key.rsplit(":", 1)[-1]
+        assert str(sides["in"].get("label")) == f"loop in: {variable}"
+        assert str(sides["out"].get("label")) == f"loop out: {variable}"
+        # Both ends are wired: the body reads what comes in and produces what
+        # goes out, with nothing circling back between them.
+        for side, node in sides.items():
+            assert node.get("incomingEdges"), (side, node["id"])
+            for edge in node["incomingEdges"]:
+                source = by_id.get(str(edge["sourceNodeId"]))
+                assert source is not None
+                assert _node_attr(source, "synthetic") != "@loop_carried"

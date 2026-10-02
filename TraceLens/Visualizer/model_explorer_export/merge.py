@@ -2627,6 +2627,126 @@ def _name_repeat_group_inputs_outside_it(nodes: list[dict[str, Any]]) -> None:
     nodes.extend(additions)
 
 
+def _fold_simple_loop_ports(nodes: list[dict[str, Any]]) -> None:
+    """A loop carrying ONE value shows its body, not a cycle around it.
+
+    ``Loop in`` and ``Loop out`` exist to make the back edge legible, and the
+    back edge is the only cycle the graph is allowed. For a loop that carries a
+    single value with a clear way in and out, those two boxes plus the edge
+    that closes them say less than the ``{N}x_`` group name already does -- the
+    heterogeneous decoder has rendered this way all along, seeded straight from
+    its producer and feeding straight into its consumer, with no back edge.
+
+    So fold the ports away and wire the seed to whatever the entry port fed and
+    whatever fed the exit port to its consumers. The body's own boundaries stay
+    and say which value is carried, now named ``loop in: <var>`` and
+    ``loop out: <var>``. Nothing here creates an edge, so the graph strictly
+    loses its one cycle rather than gaining anything.
+
+    Loops carrying several values keep their ports: with more than one value in
+    flight, which output returns to which input is exactly what the reader
+    cannot infer, and that is what the back edges are for.
+    """
+    by_id = {str(n["id"]): n for n in nodes}
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    carried_per_loop: dict[tuple[str, str], set[str]] = {}
+    for node in nodes:
+        node_id = str(node["id"])
+        if "@loop_carried_in:" not in node_id:
+            continue
+        prefix, rest = node_id.split("@loop_carried_in:", 1)
+        loop_id, _, variable = rest.partition(":")
+        carried_per_loop.setdefault((prefix, loop_id), set()).add(variable)
+    for node in nodes:
+        node_id = str(node["id"])
+        if "@loop_carried_in:" not in node_id:
+            continue
+        prefix, rest = node_id.split("@loop_carried_in:", 1)
+        loop_id, _, variable = rest.partition(":")
+        if len(carried_per_loop.get((prefix, loop_id), ())) != 1:
+            continue  # several values in flight: keep the ports
+        exit_port = by_id.get(
+            node_id.replace("@loop_carried_in:", "@loop_carried_out:")
+        )
+        if exit_port is None:
+            continue
+        # Fold only when the BODY already names the value BOTH ways. GLM's
+        # position-ids helper has an exit boundary and no entry one, so folding
+        # its ports would leave what it carries IN with nothing naming it at
+        # all -- worse than the two boxes this removes.
+        wanted = f"{loop_id}:{variable}"
+        named_sides = {
+            token
+            for other in nodes
+            for token in ("@body_in:", "@body_out:")
+            if token in str(other["id"])
+            and str(other["id"]).split(token, 1)[1] == wanted
+        }
+        if len(named_sides) < 2:
+            continue
+        pairs.append((node, exit_port))
+    if not pairs:
+        return
+
+    doomed = {str(entry["id"]) for entry, _ in pairs} | {
+        str(exit_port["id"]) for _, exit_port in pairs
+    }
+    # What each port passes on: the entry port's seed (its back edge comes from
+    # the exit port, which is going away), and the exit port's own producers.
+    replacement: dict[str, list[dict[str, Any]]] = {}
+    for port in (p for pair in pairs for p in pair):
+        replacement[str(port["id"])] = [
+            dict(edge)
+            for edge in port.get("incomingEdges", []) or []
+            if str(edge.get("sourceNodeId")) not in doomed
+        ]
+    for node in nodes:
+        edges = node.get("incomingEdges", []) or []
+        if not edges:
+            continue
+        rebuilt: list[dict[str, Any]] = []
+        for edge in edges:
+            inherited = replacement.get(str(edge.get("sourceNodeId")))
+            if inherited is None:
+                rebuilt.append(edge)
+                continue
+            for source in inherited:
+                carried = dict(edge)
+                carried["sourceNodeId"] = source["sourceNodeId"]
+                carried["sourceNodeOutputId"] = source.get("sourceNodeOutputId", "0")
+                rebuilt.append(carried)
+        # Several consumers of one folded port can end up reading the same
+        # source twice; one tensor arriving on one slot is one edge.
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for edge in rebuilt:
+            key = (
+                str(edge.get("sourceNodeId")),
+                str(edge.get("sourceNodeOutputId", "0")),
+                str(edge.get("targetNodeInputId", "")),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(edge)
+        node["incomingEdges"] = deduped
+    nodes[:] = [n for n in nodes if str(n["id"]) not in doomed]
+
+    # The body's boundaries now carry the whole story, so say which value the
+    # loop carries rather than repeating the tensor's bare name. Only for the
+    # loops actually folded: one that kept its ports still says it there, and
+    # saying it twice would be worse than either.
+    folded = {str(entry["id"]).split("@loop_carried_in:", 1)[1] for entry, _ in pairs}
+    for node in nodes:
+        node_id = str(node["id"])
+        for token, prefix in (("@body_in:", "loop in"), ("@body_out:", "loop out")):
+            if token not in node_id or node_id.split(token, 1)[1] not in folded:
+                continue
+            label = str(node.get("label") or "")
+            if label and not label.startswith(("loop in:", "loop out:")):
+                node["label"] = f"{prefix}: {label}"
+
+
 def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
     """Give every module an entering tensor crosses its own boundary tile.
 
@@ -7323,6 +7443,10 @@ def build_merged_model_graph(
     _topologically_order_nodes(nodes)
     _give_loop_body_its_own_boundaries(nodes)
     _hoist_loop_carried_in_ahead_of_body(nodes)
+
+    # Runs last of the loop passes: the body boundaries above are derived FROM
+    # the ports, so they must exist before the ports can be folded away.
+    _fold_simple_loop_ports(nodes)
 
     # Structural-integrity check on the FINAL built graph (after loop-carried
     # synthesis + ordering): I1 dead-node / I2 no-source / I3 constant soundness.
