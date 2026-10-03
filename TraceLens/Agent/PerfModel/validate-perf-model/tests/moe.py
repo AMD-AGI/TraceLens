@@ -48,10 +48,10 @@ from ._dtypes import (
     resolve_quant_type as _resolve_quant_type,
 )
 
-
 # ---------------------------------------------------------------------------
 # Shared MoE input builders
 # ---------------------------------------------------------------------------
+
 
 def _init_moe_routing(M, K, E, topk, dtype, device="cuda"):
     """Build a random MoE routing buffer set.
@@ -67,9 +67,14 @@ def _init_moe_routing(M, K, E, topk, dtype, device="cuda"):
     hidden = torch.randn(M, K, dtype=dtype, device=device)
     w_score = torch.randn(M, E, dtype=dtype, device=device)
     topk_weights, topk_ids = fused_topk(hidden, w_score, topk, True)
-    (sorted_token_ids, sorted_weights, sorted_expert_ids,
-     num_valid_ids, out) = moe_sorting(
-        topk_ids, topk_weights, E, K, dtype,
+    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, out = (
+        moe_sorting(
+            topk_ids,
+            topk_weights,
+            E,
+            K,
+            dtype,
+        )
     )
     return {
         "hidden": hidden,
@@ -133,8 +138,13 @@ def _shuffle_moe_weights(*weights, tile=(16, 16)):
 # 1. fmoe_fp8_blockscale_g1u1
 # ---------------------------------------------------------------------------
 
+
 def test_fmoe_fp8_blockscale_g1u1(
-    M, N, K, E, topk,
+    M,
+    N,
+    K,
+    E,
+    topk,
     in_dtype="bf16",
     w_dtype="fp8",
     out_dtype="bf16",
@@ -165,13 +175,17 @@ def test_fmoe_fp8_blockscale_g1u1(
     from aiter import dtypes
 
     torch.set_default_device("cuda")
-    in_t  = _resolve_dtype(in_dtype)
-    w_t   = _resolve_dtype(w_dtype)
+    in_t = _resolve_dtype(in_dtype)
+    w_t = _resolve_dtype(w_dtype)
     out_t = _resolve_dtype(out_dtype)
     if w_t != dtypes.fp8:
-        raise ValueError(f"fmoe_fp8_blockscale_g1u1 requires fp8 weights, got {w_dtype}")
+        raise ValueError(
+            f"fmoe_fp8_blockscale_g1u1 requires fp8 weights, got {w_dtype}"
+        )
     if out_t != dtypes.bf16:
-        raise ValueError(f"fmoe_fp8_blockscale_g1u1 requires bf16 output, got {out_dtype}")
+        raise ValueError(
+            f"fmoe_fp8_blockscale_g1u1 requires bf16 output, got {out_dtype}"
+        )
     if in_t not in (dtypes.bf16, dtypes.fp8):
         raise ValueError(f"fmoe_fp8_blockscale_g1u1: unsupported in_dtype {in_dtype}")
 
@@ -209,11 +223,22 @@ def test_fmoe_fp8_blockscale_g1u1(
 
     def _run():
         aiter.fmoe_fp8_blockscale_g1u1(
-            out, a_in, w1_shuf, w2_shuf,
-            routing["sorted_token_ids"], routing["sorted_weights"],
-            routing["sorted_expert_ids"], routing["num_valid_ids"], topk,
-            a_scale_in, w1_scale, w2_scale,
-            "", block_n, block_k, None,
+            out,
+            a_in,
+            w1_shuf,
+            w2_shuf,
+            routing["sorted_token_ids"],
+            routing["sorted_weights"],
+            routing["sorted_expert_ids"],
+            routing["num_valid_ids"],
+            topk,
+            a_scale_in,
+            w1_scale,
+            w2_scale,
+            "",
+            block_n,
+            block_k,
+            None,
             activation=act.value,
         )
 
@@ -229,6 +254,7 @@ def test_fmoe_fp8_blockscale_g1u1(
 # ---------------------------------------------------------------------------
 # 2. moe_cktile2stages_gemm1_ck
 # ---------------------------------------------------------------------------
+
 
 def _build_cktile_fp4_weights(E, dim_n, dim_k, dtype_in, scale_dtype, device="cuda"):
     """Build ``(w_packed_fp4, w_scale)`` for the CK-Tile MoE kernels.
@@ -256,10 +282,13 @@ def _build_cktile_fp4_weights(E, dim_n, dim_k, dtype_in, scale_dtype, device="cu
     # decode to valid FP4 values but the corresponding scales must obey
     # the kernel's expected MX layout; using the upstream quantizer keeps
     # the layout in sync with whatever ``moe_cktile2stages_gemm{1,2}_ck``
-    # currently expects (gfx950 GPU MAFs otherwise).
+    # currently expects.
     from aiter import fp4_utils
+
     dynamic_mxfp4_quant = fp4_utils.dynamic_mxfp4_quant
-    w_bf16 = (torch.randn((E, dim_n, dim_k), dtype=torch.bfloat16, device=device) / 10).contiguous()
+    w_bf16 = (
+        torch.randn((E, dim_n, dim_k), dtype=torch.bfloat16, device=device) / 10
+    ).contiguous()
     # ``dynamic_mxfp4_quant`` operates per-row on the trailing dim; we
     # quantize each (dim_n, dim_k) expert slab independently and stack.
     packed_slabs = []
@@ -275,7 +304,11 @@ def _build_cktile_fp4_weights(E, dim_n, dim_k, dtype_in, scale_dtype, device="cu
     # the quantizer (matches MX block tiling) and cast only when the
     # caller asked for a non-e8m0 dtype.
     target_scl = _resolve_dtype(scale_dtype)
-    if target_scl == torch.float32 or target_scl == torch.float16 or target_scl == torch.bfloat16:
+    if (
+        target_scl == torch.float32
+        or target_scl == torch.float16
+        or target_scl == torch.bfloat16
+    ):
         # Decode e8m0 -> fp32 then cast.
         w_scale = fp4_utils.e8m0_to_f32(w_scale_e8m0).to(target_scl)
     else:
@@ -284,7 +317,11 @@ def _build_cktile_fp4_weights(E, dim_n, dim_k, dtype_in, scale_dtype, device="cu
 
 
 def test_moe_cktile2stages_gemm1_ck(
-    M, N, K, E, topk,
+    M,
+    N,
+    K,
+    E,
+    topk,
     in_dtype="bf16",
     w_dtype="fp4x2",
     out_dtype="bf16",
@@ -304,9 +341,9 @@ def test_moe_cktile2stages_gemm1_ck(
     import aiter
 
     torch.set_default_device("cuda")
-    in_t   = _resolve_dtype(in_dtype)
-    w_t    = _resolve_dtype(w_dtype)
-    out_t  = _resolve_dtype(out_dtype)
+    in_t = _resolve_dtype(in_dtype)
+    w_t = _resolve_dtype(w_dtype)
+    out_t = _resolve_dtype(out_dtype)
     if w_dtype != "fp4x2":
         raise ValueError(
             f"moe_cktile2stages_gemm1_ck only supports fp4x2 weights, got {w_dtype}"
@@ -328,8 +365,10 @@ def test_moe_cktile2stages_gemm1_ck(
         # Caller-side activation cast (a8w4 path uses FP8 hidden).
         from aiter import pertoken_quant
         from aiter import dtypes
+
         hidden_q, x_scale = pertoken_quant(
-            hidden.view(-1, K // 128, 128), quant_dtype=dtypes.fp8,
+            hidden.view(-1, K // 128, 128),
+            quant_dtype=dtypes.fp8,
         )
         hidden = hidden_q.view(-1, K)
         x_scale = x_scale.squeeze(-1).to(_resolve_dtype(scale_dtype))
@@ -337,21 +376,32 @@ def test_moe_cktile2stages_gemm1_ck(
         x_scale = None
 
     w1_packed, w1_scale = _build_cktile_fp4_weights(
-        E, N * 2, K, in_t, scale_dtype,
+        E,
+        N * 2,
+        K,
+        in_t,
+        scale_dtype,
     )
     Y = torch.empty(M, topk, N, dtype=out_t, device="cuda")
 
     def _run():
         aiter.moe_cktile2stages_gemm1_ck(
-            hidden, w1_packed, Y,
-            routing["sorted_token_ids"], routing["sorted_expert_ids"],
-            routing["num_valid_ids"], topk,
-            0, 0,
+            hidden,
+            w1_packed,
+            Y,
+            routing["sorted_token_ids"],
+            routing["sorted_expert_ids"],
+            routing["num_valid_ids"],
+            topk,
+            0,
+            0,
             routing["sorted_weights"],
-            x_scale, w1_scale,
-            None,           # exp_bias
+            x_scale,
+            w1_scale,
+            None,  # exp_bias
             act.value,
-            block_m, split_k,
+            block_m,
+            split_k,
             "",
         )
 
@@ -365,7 +415,11 @@ def test_moe_cktile2stages_gemm1_ck(
 
 
 def test_moe_cktile2stages_gemm2_ck(
-    M, N, K, E, topk,
+    M,
+    N,
+    K,
+    E,
+    topk,
     in_dtype="bf16",
     w_dtype="fp4x2",
     out_dtype="bf16",
@@ -381,8 +435,8 @@ def test_moe_cktile2stages_gemm2_ck(
     import aiter
 
     torch.set_default_device("cuda")
-    in_t  = _resolve_dtype(in_dtype)
-    w_t   = _resolve_dtype(w_dtype)
+    in_t = _resolve_dtype(in_dtype)
+    w_t = _resolve_dtype(w_dtype)
     out_t = _resolve_dtype(out_dtype)
     if w_dtype != "fp4x2":
         raise ValueError(
@@ -403,15 +457,16 @@ def test_moe_cktile2stages_gemm2_ck(
     # ``torch.randn`` does not implement ``normal_kernel_cuda`` for FP8;
     # always allocate the BF16 source and quantize down for FP8 input.
     # The cktile gemm2 kernel takes the 3D ``(token, topk, N)`` activation
-    # tensor directly (it unrolls topk internally); flattening to 2D drops
-    # the ``topk`` axis and the kernel falls back to reading off-by-one,
-    # producing GPU memory access faults.
+    # tensor directly (it unrolls topk internally), so keep the ``topk``
+    # axis rather than flattening to 2D.
     inter_states = torch.randn(M, topk, N, dtype=torch.bfloat16)
     if in_t != torch.bfloat16:
         from aiter import pertoken_quant
         from aiter import dtypes
+
         inter_q, x_scale = pertoken_quant(
-            inter_states.view(-1, N // 128, 128), quant_dtype=dtypes.fp8,
+            inter_states.view(-1, N // 128, 128),
+            quant_dtype=dtypes.fp8,
         )
         inter_states_in = inter_q.view(M, topk, N)
         x_scale = x_scale.squeeze(-1).to(_resolve_dtype(scale_dtype))
@@ -420,21 +475,32 @@ def test_moe_cktile2stages_gemm2_ck(
         x_scale = None
 
     w2_packed, w2_scale = _build_cktile_fp4_weights(
-        E, K, N, in_t, scale_dtype,
+        E,
+        K,
+        N,
+        in_t,
+        scale_dtype,
     )
     Y = torch.empty(M, topk, K, dtype=out_t, device="cuda")
 
     def _run():
         aiter.moe_cktile2stages_gemm2_ck(
-            inter_states_in, w2_packed, Y,
-            routing["sorted_token_ids"], routing["sorted_expert_ids"],
-            routing["num_valid_ids"], topk,
-            0, 0,
+            inter_states_in,
+            w2_packed,
+            Y,
+            routing["sorted_token_ids"],
+            routing["sorted_expert_ids"],
+            routing["num_valid_ids"],
+            topk,
+            0,
+            0,
             routing["sorted_weights"],
-            x_scale, w2_scale,
-            None,           # exp_bias
+            x_scale,
+            w2_scale,
+            None,  # exp_bias
             act.value,
-            block_m, split_k,
+            block_m,
+            split_k,
             "",
         )
 
@@ -451,6 +517,7 @@ def test_moe_cktile2stages_gemm2_ck(
 # 4. ck_moe_stage1
 # ---------------------------------------------------------------------------
 
+
 def _build_ck_moe_inputs(M, N, K, E, topk, in_dtype, w_dtype, quant_type, block_k=128):
     """Build hidden + W1 + W2 + (optional) scales for the CK two-stage MoE.
 
@@ -461,20 +528,22 @@ def _build_ck_moe_inputs(M, N, K, E, topk, in_dtype, w_dtype, quant_type, block_
     from aiter import QuantType
 
     in_t = _resolve_dtype(in_dtype)
-    w_t  = _resolve_dtype(w_dtype)
-    qt   = _resolve_quant_type(quant_type)
+    w_t = _resolve_dtype(w_dtype)
+    qt = _resolve_quant_type(quant_type)
 
     # Build BF16 reference tensors then cast / quantize.
     hidden_bf16 = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
-    w1_bf16     = torch.randn(E, N * 2, K, dtype=torch.bfloat16, device="cuda") / 10
-    w2_bf16     = torch.randn(E, K, N, dtype=torch.bfloat16, device="cuda") / 10
+    w1_bf16 = torch.randn(E, N * 2, K, dtype=torch.bfloat16, device="cuda") / 10
+    w2_bf16 = torch.randn(E, K, N, dtype=torch.bfloat16, device="cuda") / 10
 
     if qt == QuantType.No:
         return (
             hidden_bf16.to(in_t),
             w1_bf16.to(w_t),
             w2_bf16.to(w_t),
-            None, None, None,
+            None,
+            None,
+            None,
         )
 
     if qt == QuantType.per_1x128:
@@ -482,7 +551,7 @@ def _build_ck_moe_inputs(M, N, K, E, topk, in_dtype, w_dtype, quant_type, block_
         BLOCK_N, BLOCK_K = 128, 128
         w1_q, w1_scale = _quantize_weight_blockscale(w1_bf16, BLOCK_N, BLOCK_K, w_t)
         w2_q, w2_scale = _quantize_weight_blockscale(w2_bf16, BLOCK_N, BLOCK_K, w_t)
-        a_q,  a_scale  = _quantize_act_blockscale(hidden_bf16, K, BLOCK_K, w_t)
+        a_q, a_scale = _quantize_act_blockscale(hidden_bf16, K, BLOCK_K, w_t)
         return a_q, w1_q, w2_q, a_scale, w1_scale, w2_scale
 
     raise NotImplementedError(
@@ -491,7 +560,11 @@ def _build_ck_moe_inputs(M, N, K, E, topk, in_dtype, w_dtype, quant_type, block_
 
 
 def test_ck_moe_stage1(
-    M, N, K, E, topk,
+    M,
+    N,
+    K,
+    E,
+    topk,
     in_dtype="bf16",
     w_dtype="bf16",
     out_dtype="bf16",
@@ -508,8 +581,8 @@ def test_ck_moe_stage1(
 
     torch.set_default_device("cuda")
     out_t = _resolve_dtype(out_dtype)
-    qt    = _resolve_quant_type(quant_type)
-    act   = _resolve_activation(activation)
+    qt = _resolve_quant_type(quant_type)
+    act = _resolve_activation(activation)
     print(
         f"test: ck_moe_stage1 M={M} K={K} N={N} E={E} topk={topk} "
         f"in={in_dtype} w={w_dtype} out={out_dtype} quant={quant_type} "
@@ -519,17 +592,30 @@ def test_ck_moe_stage1(
 
     routing = _init_moe_routing(M, K, E, topk, dtype=out_t)
     hidden, w1, w2, a_scale, w1_scale, w2_scale = _build_ck_moe_inputs(
-        M, N, K, E, topk, in_dtype, w_dtype, quant_type,
+        M,
+        N,
+        K,
+        E,
+        topk,
+        in_dtype,
+        w_dtype,
+        quant_type,
     )
     out = torch.empty(M, topk, N, dtype=out_t, device="cuda")
 
     def _run():
         ck_moe_stage1_fwd(
-            hidden, w1, w2,
-            routing["sorted_token_ids"], routing["sorted_expert_ids"],
-            routing["num_valid_ids"], out, topk,
+            hidden,
+            w1,
+            w2,
+            routing["sorted_token_ids"],
+            routing["sorted_expert_ids"],
+            routing["num_valid_ids"],
+            out,
+            topk,
             "",
-            w1_scale, a_scale,
+            w1_scale,
+            a_scale,
             block_m,
             None,
             qt,
@@ -549,7 +635,11 @@ def test_ck_moe_stage1(
 
 
 def test_ck_moe_stage2(
-    M, N, K, E, topk,
+    M,
+    N,
+    K,
+    E,
+    topk,
     in_dtype="bf16",
     w_dtype="bf16",
     out_dtype="bf16",
@@ -564,10 +654,10 @@ def test_ck_moe_stage2(
     from aiter.ops.moe_op import ck_moe_stage2_fwd
 
     torch.set_default_device("cuda")
-    in_t  = _resolve_dtype(in_dtype)
+    in_t = _resolve_dtype(in_dtype)
     out_t = _resolve_dtype(out_dtype)
-    qt    = _resolve_quant_type(quant_type)
-    act   = _resolve_activation(activation)
+    qt = _resolve_quant_type(quant_type)
+    act = _resolve_activation(activation)
     print(
         f"test: ck_moe_stage2 M={M} K={K} N={N} E={E} topk={topk} "
         f"in={in_dtype} w={w_dtype} out={out_dtype} quant={quant_type} "
@@ -583,17 +673,30 @@ def test_ck_moe_stage2(
     else:
         inter_states = torch.randn(M, topk, N, dtype=torch.bfloat16).to(in_t)
     _, w1, w2, a2_scale, _w1_scale, w2_scale = _build_ck_moe_inputs(
-        M, N, K, E, topk, in_dtype, w_dtype, quant_type,
+        M,
+        N,
+        K,
+        E,
+        topk,
+        in_dtype,
+        w_dtype,
+        quant_type,
     )
     out = torch.empty(M, K, dtype=out_t, device="cuda")
 
     def _run():
         ck_moe_stage2_fwd(
-            inter_states, w1, w2,
-            routing["sorted_token_ids"], routing["sorted_expert_ids"],
-            routing["num_valid_ids"], out, topk,
+            inter_states,
+            w1,
+            w2,
+            routing["sorted_token_ids"],
+            routing["sorted_expert_ids"],
+            routing["num_valid_ids"],
+            out,
+            topk,
             "",
-            w2_scale, a2_scale,
+            w2_scale,
+            a2_scale,
             block_m,
             None,
             qt,
@@ -614,8 +717,13 @@ def test_ck_moe_stage2(
 # 6. SGLang Triton fused-MoE grouped GEMM (single invoke_fused_moe_kernel)
 # ---------------------------------------------------------------------------
 
+
 def test_sglang_fused_moe_triton_invoke(
-    M, N, K, E, topk,
+    M,
+    N,
+    K,
+    E,
+    topk,
     in_dtype="bf16",
     w_dtype="fp8",
     out_dtype="bf16",
@@ -658,7 +766,9 @@ def test_sglang_fused_moe_triton_invoke(
     out_t = _resolve_dtype(out_dtype)
     fp8_t = _resolve_dtype("fp8")
     if w_dtype != "fp8":
-        raise ValueError(f"sglang fused_moe invoke harness requires fp8 weights, got {w_dtype}")
+        raise ValueError(
+            f"sglang fused_moe invoke harness requires fp8 weights, got {w_dtype}"
+        )
 
     # The fp8_w8a8 path (block_shape=None) quantizes the BF16 activations to fp8
     # *inside* invoke_fused_moe_kernel via scaled_fp8_quant; A must therefore be
@@ -694,7 +804,11 @@ def test_sglang_fused_moe_triton_invoke(
     }
     try:
         get_config = try_get_optimal_moe_config(
-            (E, N, K), (E, K, N), topk, "fp8_w8a8", M,
+            (E, N, K),
+            (E, K, N),
+            topk,
+            "fp8_w8a8",
+            M,
         )
         if isinstance(get_config, dict) and get_config:
             config = get_config
@@ -702,16 +816,27 @@ def test_sglang_fused_moe_triton_invoke(
         print(f"test: using fallback config ({exc})", flush=True)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-        topk_ids, config["BLOCK_SIZE_M"], E,
+        topk_ids,
+        config["BLOCK_SIZE_M"],
+        E,
     )
 
     def _run():
         invoke_fused_moe_kernel(
-            hidden, w1, None, out,
-            None, w1_scale, None,
-            topk_weights, topk_ids,
-            sorted_token_ids, expert_ids, num_tokens_post_padded,
-            False, topk,
+            hidden,
+            w1,
+            None,
+            out,
+            None,
+            w1_scale,
+            None,
+            topk_weights,
+            topk_ids,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            False,
+            topk,
             config,
             tl_dtype_for(out_t),
             use_fp8_w8a8=True,
@@ -747,6 +872,7 @@ def tl_dtype_for(torch_dtype):
 # DSV3 / DSV4 MoE router + sort harnesses
 # ---------------------------------------------------------------------------
 
+
 def test_dsv3_fused_append_shared_experts(M, K=8, E=256, num_warmup=3, **_):
     """``sglang ... fused_moe_triton_kernels.fused_append_shared_experts``.
 
@@ -772,12 +898,20 @@ def test_dsv3_fused_append_shared_experts(M, K=8, E=256, num_warmup=3, **_):
 
     for _ in range(num_warmup):
         out_ids, out_weights = fused_append_shared_experts(
-            topk_ids, topk_weights, num_fused_shared_experts=1, scale_factor=1, N=E,
+            topk_ids,
+            topk_weights,
+            num_fused_shared_experts=1,
+            scale_factor=1,
+            N=E,
         )
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
     out_ids, out_weights = fused_append_shared_experts(
-        topk_ids, topk_weights, num_fused_shared_experts=1, scale_factor=1, N=E,
+        topk_ids,
+        topk_weights,
+        num_fused_shared_experts=1,
+        scale_factor=1,
+        N=E,
     )
     torch.cuda.synchronize()
     print(f"test: done, out_ids={out_ids.shape}", flush=True)
@@ -789,9 +923,15 @@ def test_dsv4_topk_softplus(M=1819, N=384, topk=6, num_warmup=3, **_):
     import aiter
 
     num_tokens, num_experts = M, N
-    print(f"test: dsv4_topk_softplus tokens={num_tokens} experts={num_experts} topk={topk}", flush=True)
-    gating = (torch.arange(-1, 1, 2.0 / num_experts, device="cuda")[:num_experts]
-              .repeat(num_tokens, 1).to(torch.bfloat16))
+    print(
+        f"test: dsv4_topk_softplus tokens={num_tokens} experts={num_experts} topk={topk}",
+        flush=True,
+    )
+    gating = (
+        torch.arange(-1, 1, 2.0 / num_experts, device="cuda")[:num_experts]
+        .repeat(num_tokens, 1)
+        .to(torch.bfloat16)
+    )
     perm = torch.argsort(torch.rand_like(gating.float()), dim=-1)
     gating = torch.gather(gating, dim=-1, index=perm).contiguous()
     bias = torch.randn(num_experts, device="cuda", dtype=torch.bfloat16) * 0.1
@@ -807,8 +947,9 @@ def test_dsv4_topk_softplus(M=1819, N=384, topk=6, num_warmup=3, **_):
     print(f"test: done weights={tuple(topk_weights.shape)}", flush=True)
 
 
-def test_dsv4_fused_dynamic_mx_quant_moe_sort(M=32, N=7168, E=384, topk=6,
-                                              group_size=32, block_m=32, num_warmup=3, **_):
+def test_dsv4_fused_dynamic_mx_quant_moe_sort(
+    M=32, N=7168, E=384, topk=6, group_size=32, block_m=32, num_warmup=3, **_
+):
     """``aiter.fused_dynamic_mx_quant_moe_sort`` — fused MX-FP8 quant + MoE sort."""
     import torch
     import aiter
@@ -816,18 +957,29 @@ def test_dsv4_fused_dynamic_mx_quant_moe_sort(M=32, N=7168, E=384, topk=6,
 
     token_num, model_dim = M, N
     block_size = block_m
-    print(f"test: dsv4_fused_dynamic_mx_quant_moe_sort tokens={token_num} dim={model_dim} "
-          f"E={E} topk={topk} block={block_size} group={group_size}", flush=True)
+    print(
+        f"test: dsv4_fused_dynamic_mx_quant_moe_sort tokens={token_num} dim={model_dim} "
+        f"E={E} topk={topk} block={block_size} group={group_size}",
+        flush=True,
+    )
     input_t = torch.randn(token_num, model_dim, device="cuda", dtype=torch.bfloat16)
     score = torch.randn(token_num, E, device="cuda", dtype=torch.bfloat16)
     topk_weights, topk_ids = fused_topk(input_t, score, topk, True)
-    sort_ret = moe_sorting(topk_ids, topk_weights, E, model_dim, torch.bfloat16, block_size=block_size)
+    sort_ret = moe_sorting(
+        topk_ids, topk_weights, E, model_dim, torch.bfloat16, block_size=block_size
+    )
     sorted_ids, num_valid_ids = sort_ret[0], sort_ret[3]
 
     def _call():
         aiter.fused_dynamic_mx_quant_moe_sort(
-            input_t, sorted_ids, num_valid_ids, token_num, 1, block_size,
-            quant_dtype=aiter.dtypes.fp8, group_size=group_size,
+            input_t,
+            sorted_ids,
+            num_valid_ids,
+            token_num,
+            1,
+            block_size,
+            quant_dtype=aiter.dtypes.fp8,
+            group_size=group_size,
         )
 
     for _ in range(num_warmup):
@@ -853,7 +1005,11 @@ def _gen_flydsl_a4w4_data(token, model_dim, inter_dim, E, topk, block_m, dtype=N
     import aiter
     from aiter import QuantType
     from aiter.fused_moe import fused_topk, moe_sorting
-    from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight, shuffle_weight_a16w4
+    from aiter.ops.shuffle import (
+        shuffle_scale_a16w4,
+        shuffle_weight,
+        shuffle_weight_a16w4,
+    )
     from aiter.utility.fp4_utils import e8m0_shuffle, moe_mxfp4_sort
 
     if dtype is None:
@@ -896,29 +1052,40 @@ def _gen_flydsl_a4w4_data(token, model_dim, inter_dim, E, topk, block_m, dtype=N
 
     a1_scale_sort = moe_mxfp4_sort(
         a1_scale[:token, :].view(token, 1, -1),
-        sorted_ids=sorted_ids, num_valid_ids=num_valid_ids,
-        token_num=token, block_size=block_m,
+        sorted_ids=sorted_ids,
+        num_valid_ids=num_valid_ids,
+        token_num=token,
+        block_size=block_m,
     )
     a2_scale_sort = moe_mxfp4_sort(
         a2_scale[: token * topk, :].view(token, topk, -1),
-        sorted_ids=sorted_ids, num_valid_ids=num_valid_ids,
-        token_num=token, block_size=block_m,
+        sorted_ids=sorted_ids,
+        num_valid_ids=num_valid_ids,
+        token_num=token,
+        block_size=block_m,
     )
 
     return dict(
         dtype=dtype,
-        a1_qt=a1_qt, a1_scale_sort=a1_scale_sort,
-        a2_qt=a2_qt, a2_scale_sort=a2_scale_sort,
-        w1_qt_shuf=w1_qt_shuf, w1_scale_shuf=w1_scale_shuf,
-        w2_qt_shuf=w2_qt_shuf, w2_scale_shuf=w2_scale_shuf,
-        sorted_ids=sorted_ids, sorted_expert_ids=sorted_expert_ids,
+        a1_qt=a1_qt,
+        a1_scale_sort=a1_scale_sort,
+        a2_qt=a2_qt,
+        a2_scale_sort=a2_scale_sort,
+        w1_qt_shuf=w1_qt_shuf,
+        w1_scale_shuf=w1_scale_shuf,
+        w2_qt_shuf=w2_qt_shuf,
+        w2_scale_shuf=w2_scale_shuf,
+        sorted_ids=sorted_ids,
+        sorted_expert_ids=sorted_expert_ids,
         num_valid_ids=num_valid_ids,
-        sorted_weights_s1=None, sorted_weights_s2=sorted_weights,
+        sorted_weights_s1=None,
+        sorted_weights_s2=sorted_weights,
     )
 
 
-def test_dsv3_moe_flydsl_stage1(M=64, K=7168, N=256, E=257, topk=9,
-                                block_m=32, num_warmup=3, **_):
+def test_dsv3_moe_flydsl_stage1(
+    M=64, K=7168, N=256, E=257, topk=9, block_m=32, num_warmup=3, **_
+):
     """FlyDSL MoE stage-1 GEMM (a4w4 gate+up) -- ``pseudo_op::moe_flydsl_stage1``.
 
     Launches the ``moe_gemm1_0`` FlyDSL kernel via ``flydsl_moe_stage1`` with
@@ -936,6 +1103,7 @@ def test_dsv3_moe_flydsl_stage1(M=64, K=7168, N=256, E=257, topk=9,
     """
     import torch
     from aiter.ops.flydsl.utils import is_flydsl_available
+
     if not is_flydsl_available():
         print("test: FlyDSL not available; skipping dsv3_moe_flydsl_stage1", flush=True)
         return
@@ -949,20 +1117,31 @@ def test_dsv3_moe_flydsl_stage1(M=64, K=7168, N=256, E=257, topk=9,
         flush=True,
     )
     data = _gen_flydsl_a4w4_data(
-        token=token, model_dim=model_dim, inter_dim=inter_dim,
-        E=E, topk=topk, block_m=block_m,
+        token=token,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        E=E,
+        topk=topk,
+        block_m=block_m,
     )
     out_dtype_str = "bf16" if data["dtype"] == torch.bfloat16 else "f16"
 
     def _call():
         return flydsl_moe_stage1(
-            a=data["a1_qt"], w1=data["w1_qt_shuf"],
+            a=data["a1_qt"],
+            w1=data["w1_qt_shuf"],
             sorted_token_ids=data["sorted_ids"],
             sorted_expert_ids=data["sorted_expert_ids"],
-            num_valid_ids=data["num_valid_ids"], topk=topk,
-            tile_m=block_m, tile_n=256, tile_k=256,
-            a_dtype="fp4", b_dtype="fp4", out_dtype=out_dtype_str,
-            w1_scale=data["w1_scale_shuf"], a1_scale=data["a1_scale_sort"],
+            num_valid_ids=data["num_valid_ids"],
+            topk=topk,
+            tile_m=block_m,
+            tile_n=256,
+            tile_k=256,
+            a_dtype="fp4",
+            b_dtype="fp4",
+            out_dtype=out_dtype_str,
+            w1_scale=data["w1_scale_shuf"],
+            a1_scale=data["a1_scale_sort"],
             sorted_weights=data["sorted_weights_s1"],
         )
 
@@ -975,8 +1154,9 @@ def test_dsv3_moe_flydsl_stage1(M=64, K=7168, N=256, E=257, topk=9,
     print("test: done dsv3_moe_flydsl_stage1", flush=True)
 
 
-def test_dsv3_moe_flydsl_stage2(M=64, K=7168, N=256, E=257, topk=9,
-                                block_m=32, mode="atomic", num_warmup=3, **_):
+def test_dsv3_moe_flydsl_stage2(
+    M=64, K=7168, N=256, E=257, topk=9, block_m=32, mode="atomic", num_warmup=3, **_
+):
     """FlyDSL MoE stage-2 GEMM (a4w4 down-proj) -- ``pseudo_op::moe_flydsl_stage2``.
 
     Launches the ``moe_gemm2`` FlyDSL kernel via ``flydsl_moe_stage2``. Shares
@@ -986,6 +1166,7 @@ def test_dsv3_moe_flydsl_stage2(M=64, K=7168, N=256, E=257, topk=9,
     """
     import torch
     from aiter.ops.flydsl.utils import is_flydsl_available
+
     if not is_flydsl_available():
         print("test: FlyDSL not available; skipping dsv3_moe_flydsl_stage2", flush=True)
         return
@@ -999,21 +1180,32 @@ def test_dsv3_moe_flydsl_stage2(M=64, K=7168, N=256, E=257, topk=9,
         flush=True,
     )
     data = _gen_flydsl_a4w4_data(
-        token=token, model_dim=model_dim, inter_dim=inter_dim,
-        E=E, topk=topk, block_m=block_m,
+        token=token,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        E=E,
+        topk=topk,
+        block_m=block_m,
     )
     out_dtype_str = "bf16" if data["dtype"] == torch.bfloat16 else "f16"
 
     def _call():
         return flydsl_moe_stage2(
-            inter_states=data["a2_qt"], w2=data["w2_qt_shuf"],
+            inter_states=data["a2_qt"],
+            w2=data["w2_qt_shuf"],
             sorted_token_ids=data["sorted_ids"],
             sorted_expert_ids=data["sorted_expert_ids"],
-            num_valid_ids=data["num_valid_ids"], topk=topk,
-            tile_m=block_m, tile_n=256, tile_k=256,
-            a_dtype="fp4", b_dtype="fp4", out_dtype=out_dtype_str,
+            num_valid_ids=data["num_valid_ids"],
+            topk=topk,
+            tile_m=block_m,
+            tile_n=256,
+            tile_k=256,
+            a_dtype="fp4",
+            b_dtype="fp4",
+            out_dtype=out_dtype_str,
             mode=mode,
-            w2_scale=data["w2_scale_shuf"], a2_scale=data["a2_scale_sort"],
+            w2_scale=data["w2_scale_shuf"],
+            a2_scale=data["a2_scale_sort"],
             sorted_weights=data["sorted_weights_s2"],
         )
 
@@ -1024,101 +1216,3 @@ def test_dsv3_moe_flydsl_stage2(M=64, K=7168, N=256, E=257, topk=9,
     _call()
     torch.cuda.synchronize()
     print("test: done dsv3_moe_flydsl_stage2", flush=True)
-
-
-# ---------------------------------------------------------------------------
-# OP_METADATA
-# ---------------------------------------------------------------------------
-
-OP_METADATA: dict = {
-    "fmoe_fp8_blockscale_g1u1": {
-        "fn":           test_fmoe_fp8_blockscale_g1u1,
-        "category":     "MoE",
-        "description":  "AITER FP8 fused MoE (ASM G1U1 kernel, FMoE)",
-        "dtypes":       ["fp8"],
-        "defaults":     {
-            "M": 256, "N": 4096, "K": 7168, "E": 256, "topk": 8,
-            "in_dtype": "fp8", "w_dtype": "fp8",
-        },
-        "required_args": ["M", "N", "K"],
-    },
-    "moe_cktile2stages_gemm1_ck": {
-        "fn":           test_moe_cktile2stages_gemm1_ck,
-        "category":     "MoE",
-        "description":  "AITER CKTile 2-stage MoE GEMM-1 (up/gate projection)",
-        "dtypes":       ["fp8", "i8"],
-        "defaults":     {
-            "M": 256, "N": 4096, "K": 7168, "E": 256, "topk": 8,
-            "in_dtype": "fp8", "w_dtype": "fp8",
-        },
-        "required_args": ["M", "N", "K"],
-    },
-    "moe_cktile2stages_gemm2_ck": {
-        "fn":           test_moe_cktile2stages_gemm2_ck,
-        "category":     "MoE",
-        "description":  "AITER CKTile 2-stage MoE GEMM-2 (down projection)",
-        "dtypes":       ["fp8", "i8"],
-        "defaults":     {
-            "M": 256, "N": 7168, "K": 4096, "E": 256, "topk": 8,
-            "in_dtype": "fp8", "w_dtype": "fp8",
-        },
-        "required_args": ["M", "N", "K"],
-    },
-    "ck_moe_stage1": {
-        "fn":           test_ck_moe_stage1,
-        "category":     "MoE",
-        "description":  "AITER CK unfused MoE stage-1 (up+gate projection)",
-        "dtypes":       ["fp8", "bf16"],
-        "defaults":     {
-            "M": 256, "N": 4096, "K": 7168, "E": 256, "topk": 8,
-            "in_dtype": "fp8",
-        },
-        "required_args": ["M", "N", "K"],
-    },
-    "ck_moe_stage2": {
-        "fn":           test_ck_moe_stage2,
-        "category":     "MoE",
-        "description":  "AITER CK unfused MoE stage-2 (down projection)",
-        "dtypes":       ["fp8", "bf16"],
-        "defaults":     {
-            "M": 256, "N": 7168, "K": 4096, "E": 256, "topk": 8,
-            "in_dtype": "fp8",
-        },
-        "required_args": ["M", "N", "K"],
-    },
-    "sglang_fused_moe_triton_invoke": {
-        "fn":           test_sglang_fused_moe_triton_invoke,
-        "category":     "MoE",
-        "description":  "SGLang Triton fused-MoE grouped GEMM (invoke_fused_moe_kernel)",
-        "dtypes":       ["fp8"],
-        "defaults":     {
-            "M": 15360, "N": 1536, "K": 2048, "E": 128, "topk": 8,
-            "in_dtype": "bf16", "w_dtype": "fp8", "out_dtype": "bf16",
-        },
-        "required_args": ["M", "N", "K", "E", "topk"],
-    },
-    "dsv3_fused_append_shared_experts": {
-        "fn":           test_dsv3_fused_append_shared_experts,
-        "category":     "MoE",
-        "description":  "DSV3 sglang triton MoE shared-expert append",
-        "dtypes":       ["fp32"],
-        "defaults":     {"M": 32, "K": 8, "E": 256},
-        "required_args": ["M"],
-    },
-    "dsv4_topk_softplus": {
-        "fn":           test_dsv4_topk_softplus,
-        "category":     "Reduce",
-        "description":  "DSV4 MoE router topk + sqrt(softplus) (aiter)",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 1819, "N": 384, "topk": 6},
-        "required_args": ["M", "N", "topk"],
-    },
-    "dsv4_fused_dynamic_mx_quant_moe_sort": {
-        "fn":           test_dsv4_fused_dynamic_mx_quant_moe_sort,
-        "category":     "GroupQuant",
-        "description":  "DSV4 fused MX-FP8 quant + MoE sort (aiter)",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 32, "N": 7168, "E": 384, "topk": 6, "group_size": 32},
-        "required_args": ["M", "N", "E", "topk"],
-    },
-}

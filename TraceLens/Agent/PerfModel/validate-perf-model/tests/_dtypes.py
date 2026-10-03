@@ -24,11 +24,11 @@ _DTYPE_ALIASES = {
     "bf16": "bfloat16",
     "fp16": "float16",
     "fp32": "float32",
-    "f32":  "float32",
-    "i8":   "int8",
-    "i32":  "int32",
-    "u8":   "uint8",
-    "u32":  "uint32",
+    "f32": "float32",
+    "i8": "int8",
+    "i32": "int32",
+    "u8": "uint8",
+    "u32": "uint32",
 }
 
 
@@ -42,6 +42,7 @@ def resolve_dtype(name):
     "default" sentinel.
     """
     import torch
+
     try:
         from aiter import dtypes as _aiter_dtypes
     except Exception:
@@ -76,11 +77,11 @@ def resolve_activation(name):
         return name
     key = str(name).strip().lower()
     table = {
-        "silu":   ActivationType.Silu,
-        "gelu":   ActivationType.Gelu,
+        "silu": ActivationType.Silu,
+        "gelu": ActivationType.Gelu,
         "swiglu": ActivationType.Swiglu,
-        "no":     ActivationType.No,
-        "none":   ActivationType.No,
+        "no": ActivationType.No,
+        "none": ActivationType.No,
     }
     if key not in table:
         raise ValueError(f"Unknown activation: {name!r}")
@@ -97,13 +98,13 @@ def resolve_quant_type(name):
         return name
     key = str(name).strip().lower()
     table = {
-        "no":           QuantType.No,
-        "per_tensor":   QuantType.per_Tensor,
-        "per_token":    QuantType.per_Token,
-        "per_1x32":     QuantType.per_1x32,
-        "per_1x128":    QuantType.per_1x128,
-        "per_128x128":  QuantType.per_128x128,
-        "per_256x128":  QuantType.per_256x128,
+        "no": QuantType.No,
+        "per_tensor": QuantType.per_Tensor,
+        "per_token": QuantType.per_Token,
+        "per_1x32": QuantType.per_1x32,
+        "per_1x128": QuantType.per_1x128,
+        "per_128x128": QuantType.per_128x128,
+        "per_256x128": QuantType.per_256x128,
         "per_1024x128": QuantType.per_1024x128,
     }
     if key not in table:

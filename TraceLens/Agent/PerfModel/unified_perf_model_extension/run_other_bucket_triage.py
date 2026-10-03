@@ -1,39 +1,36 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 """
-Step 1 triage for unified-perf-report-postprocess: load unified_perf_summary.csv,
-summarize "other" bucket runtime, cumulative 95% (within-other and optional global),
-and emit per-row fields for downstream triage.
-
-No TraceLens import required. Optional --check-mapping uses the repo checkout.
+Triage for unified-perf-report-postprocess: rank ops in a
+unified_perf_summary.csv that are worth a perf model.
 
 Modes
 -----
 other-bucket (default):
-  Filters rows where op category == "other", ranks by runtime, and shows the
-  cumulative-95% set (Definition A within-other, optional Definition B global).
+  Rows whose op category is "other", ranked by runtime, up to the cumulative
+  --fraction of "other" time (Definition A). --also-global-pareto also prints
+  the rows needed to reach --fraction of the global total (Definition B).
 
 top-ops:
   Groups ALL rows by `name`, sums runtime across shapes, and lists every op
-  whose summed runtime exceeds --threshold (default 4%) of the global total
-  AND has has_perf_model == False.  Use this to find high-impact ops missing
-  perf models regardless of their category.
+  whose summed runtime is at least --threshold (default 4%) of the global
+  total and has has_perf_model == False on some row.
 
 Usage (from repo root):
-  python3 <skill-dir>/run_other_bucket_triage.py \\
-    perf_skill_debug/unified_perf_summary.csv
-
-  # top-ops mode (EP1 entry point):
-  python3 <skill-dir>/run_other_bucket_triage.py \\
-    perf_skill_debug/unified_perf_summary.csv --mode top-ops --threshold 0.04
+  python3 <skill-dir>/run_other_bucket_triage.py unified_perf_summary.csv
+  python3 <skill-dir>/run_other_bucket_triage.py unified_perf_summary.csv \\
+    --mode top-ops --threshold 0.04
 
   # Write a starter extension next to the CSV (<stem>_triage_extension.py):
-  python3 <skill-dir>/run_other_bucket_triage.py \\
-    perf_skill_debug/unified_perf_summary.csv --emit-extension
+  python3 <skill-dir>/run_other_bucket_triage.py unified_perf_summary.csv \\
+    --emit-extension [--extension-out PATH]
 
-  # Explicit output path:
-  python3 <skill-dir>/run_other_bucket_triage.py \\
-    perf_skill_debug/unified_perf_summary.csv \\
-    --emit-extension --extension-out /path/to/my_triage_extension.py
+No TraceLens import is needed, except for --check-mapping, which needs
+TraceLens importable (`pip install -e .`).
 """
 
 from __future__ import annotations
@@ -42,521 +39,354 @@ import argparse
 import csv
 import re
 import sys
-from collections import defaultdict
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-# Column names as emitted by generate_perf_report_pytorch_inference-style pipelines
-RUNTIME_COLUMNS_PREFERENCE: Sequence[str] = (
-    "Kernel Time (µs)_sum",
-    "total_duration_us",
+RUNTIME_COLUMNS = ("Kernel Time (µs)_sum", "total_duration_us")
+# Newer TraceLens embeds the call stack in the summary CSV; prefer the full one.
+CALL_STACK_COLUMNS = ("call_stack_full", "call_stack", "trunc_call_stack")
+REPO_HINTS = (
+    (r"aiter/", "AITER (aiter/…)"),
+    (r"vllm/", "vLLM (vllm/…)"),
+    (r"sglang/", "SGLang (sglang/…)"),
+    (r"sgl_kernel/", "SGLang / sgl_kernel"),
+    (r"\batom/", "ATOM (atom/…)"),
+    (r"torch/_ops\.py|aten::", "PyTorch (torch/aten)"),
+    (r"flash_attn", "FlashAttention"),
+    (r"triton", "Triton"),
+    (r"/tmp/torchinductor", "Inductor cache (/tmp/torchinductor_…)"),
 )
-CATEGORY_COLUMN_DEFAULT = "op category"
-OTHER_VALUE_DEFAULT = "other"
+
+Row = Dict[str, str]
 
 
-def _parse_float(s: str) -> float:
-    s = (s or "").strip()
-    if not s:
-        return 0.0
+def _float(s: Optional[str]) -> float:
     try:
-        return float(s)
+        return float((s or "").strip() or 0.0)
     except ValueError:
         return 0.0
 
 
-def pick_runtime_column(fieldnames: Sequence[str]) -> str:
-    for c in RUNTIME_COLUMNS_PREFERENCE:
-        if c in fieldnames:
-            return c
-    raise SystemExit(
-        "No known runtime column found. Expected one of: "
-        + ", ".join(RUNTIME_COLUMNS_PREFERENCE)
-        + f". Got: {list(fieldnames)}"
-    )
+def _trunc(s: str, n: int) -> str:
+    return s if len(s) <= n else s[: n - 3] + "..."
 
 
-def normalize_call_stack(row: Dict[str, str]) -> str:
-    """Return the row's call stack, preferring the embedded summary columns.
-
-    Newer TraceLens emits the full call stack inline in unified_perf_summary.csv
-    as a Python-list-style string under `call_stack_full` (with `call_stack` /
-    `trunc_call_stack` as possible truncated variants).  Older pipelines stored
-    it in a companion unified_perf_callstacks.csv.  Prefer the inline value.
-    """
-    for col in ("call_stack_full", "call_stack", "trunc_call_stack"):
-        val = (row.get(col) or "").strip()
-        if val:
-            return val
-    return ""
+def _pct(x: float, total: float) -> float:
+    return 100.0 * x / total if total > 0 else 0.0
 
 
-def load_rows(path: Path) -> Tuple[List[Dict[str, str]], str]:
+def load_rows(path: Path) -> Tuple[List[Row], str]:
+    """Load the summary CSV. Each row gets `call_stack` and its runtime as `_us`."""
     with path.open(newline="", encoding="utf-8", errors="replace") as f:
         reader = csv.DictReader(f)
-        if not reader.fieldnames:
-            raise SystemExit(f"Empty or headerless CSV: {path}")
-        runtime_col = pick_runtime_column(reader.fieldnames)
-        fieldnames = reader.fieldnames
+        fields = reader.fieldnames or []
         rows = list(reader)
+    runtime_col = next((c for c in RUNTIME_COLUMNS if c in fields), None)
+    if runtime_col is None:
+        raise SystemExit(
+            f"{path}: no runtime column; expected one of {RUNTIME_COLUMNS}, got {fields}"
+        )
 
-    has_inline_callstack = "call_stack_full" in fieldnames or "call_stack" in fieldnames
-
-    # Legacy fallback: merge full call_stack from companion file only when the
-    # summary CSV does not already carry it inline.
-    callstacks_path = path.parent / "unified_perf_callstacks.csv"
-    if not has_inline_callstack and callstacks_path.is_file():
-        with callstacks_path.open(newline="", encoding="utf-8", errors="replace") as f:
-            cs_reader = csv.DictReader(f)
-            cs_rows = list(cs_reader)
-        cs_by_id = {r.get("row_id", ""): r.get("call_stack", "") for r in cs_rows}
+    # Older pipelines kept the call stack in a companion file keyed by row index.
+    legacy = path.parent / "unified_perf_callstacks.csv"
+    if not {"call_stack_full", "call_stack"} & set(fields) and legacy.is_file():
+        with legacy.open(newline="", encoding="utf-8", errors="replace") as f:
+            by_id = {
+                r.get("row_id", ""): r.get("call_stack", "") for r in csv.DictReader(f)
+            }
         for i, r in enumerate(rows):
-            r["call_stack"] = cs_by_id.get(str(i), "")
+            r["call_stack"] = by_id.get(str(i), "")
 
-    # Normalize so downstream code can rely on a single `call_stack` key.
     for r in rows:
-        r["call_stack"] = normalize_call_stack(r)
-
+        stacks = ((r.get(c) or "").strip() for c in CALL_STACK_COLUMNS)
+        r["call_stack"] = next((s for s in stacks if s), "")
+        r["_us"] = _float(r.get(runtime_col))
     return rows, runtime_col
 
 
-def filter_other(
-    rows: List[Dict[str, str]],
-    category_col: str,
-    other_value: str,
-) -> List[Dict[str, str]]:
-    out = []
-    for r in rows:
-        if (r.get(category_col) or "").strip() == other_value:
-            out.append(r)
-    return out
+def infer_repo_hints(call_stack: str) -> List[str]:
+    return [label for pat, label in REPO_HINTS if re.search(pat, call_stack, re.I)]
 
 
-def row_runtime(r: Dict[str, str], runtime_col: str) -> float:
-    return _parse_float(r.get(runtime_col, ""))
-
-
-def cumulative_until_fraction(
-    sorted_rows: List[Dict[str, str]],
-    runtime_col: str,
-    total: float,
-    fraction: float,
-) -> Tuple[List[Dict[str, str]], float]:
-    """Greedy prefix of sorted_rows until cumulative runtime >= fraction * total."""
-    if total <= 0:
-        return [], 0.0
-    target = fraction * total
+def greedy_prefix(sorted_rows: Sequence[Row], target: float) -> Tuple[List[Row], float]:
+    """Shortest prefix of sorted_rows whose runtime reaches target."""
+    picked: List[Row] = []
     acc = 0.0
-    picked: List[Dict[str, str]] = []
+    if target <= 0:
+        return picked, acc
     for r in sorted_rows:
-        t = row_runtime(r, runtime_col)
         picked.append(r)
-        acc += t
+        acc += r["_us"]
         if acc >= target:
             break
     return picked, acc
 
 
-def first_kernel_hint(row: Dict[str, str]) -> str:
-    raw = row.get("kernel_details_summary") or row.get("trunc_kernel_details") or ""
-    raw = raw.strip()
-    if len(raw) > 120:
-        return raw[:117] + "..."
-    return raw
+def unique_names(rows: Sequence[Row]) -> List[str]:
+    return list(
+        dict.fromkeys(n for n in ((r.get("name") or "").strip() for r in rows) if n)
+    )
 
 
-def infer_repo_hints(call_stack: str) -> List[str]:
-    """Lightweight path/prefix hints for Step 1b (deduplicated order)."""
-    if not call_stack:
-        return []
-    hints: List[str] = []
-    patterns = [
-        (r"aiter/", "AITER (aiter/…)"),
-        (r"vllm/", "vLLM (vllm/…)"),
-        (r"sglang/", "SGLang (sglang/…)"),
-        (r"sgl_kernel/", "SGLang / sgl_kernel"),
-        (r"torch/_ops\.py|aten::", "PyTorch (torch/aten)"),
-        (r"flash_attn|FlashAttn", "FlashAttention"),
-        (r"triton", "Triton"),
-        (r"/tmp/torchinductor", "Inductor cache (/tmp/torchinductor_…)"),
+def report_other_bucket(
+    path: Path, rows: List[Row], runtime_col: str, args
+) -> List[str]:
+    """Print the other-bucket triage; return the Definition A op names."""
+    other = [
+        r for r in rows if (r.get(args.category_col) or "").strip() == args.other_value
     ]
-    seen = set()
-    for pat, label in patterns:
-        if re.search(pat, call_stack, re.I) and label not in seen:
-            seen.add(label)
-            hints.append(label)
-    return hints
-
-
-def compute_definition_a(
-    other_rows: List[Dict[str, str]],
-    runtime_col: str,
-    fraction: float,
-) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], float, float]:
-    """Sort `other` rows by runtime, return (sorted_other, picked_a, acc_a, total_other)."""
-    total_other = sum(row_runtime(r, runtime_col) for r in other_rows)
-    sorted_other = sorted(other_rows, key=lambda r: row_runtime(r, runtime_col), reverse=True)
-    picked_a, acc_a = cumulative_until_fraction(sorted_other, runtime_col, total_other, fraction)
-    return sorted_other, picked_a, acc_a, total_other
-
-
-def unique_op_names_in_order(picked_rows: Sequence[Dict[str, str]]) -> List[str]:
-    out: List[str] = []
-    seen = set()
-    for r in picked_rows:
-        n = (r.get("name") or "").strip()
-        if n and n not in seen:
-            seen.add(n)
-            out.append(n)
-    return out
-
-
-def write_generated_extension(
-    out_path: Path,
-    csv_path: Path,
-    op_names: Sequence[str],
-    fraction: float,
-) -> None:
-    """Emit a loadable TraceLens --extension_file module (stdlib + triage metadata only)."""
-    lines_body = ["    " + repr(n) + "," for n in op_names]
-    names_block = "\n".join(lines_body) if lines_body else "    # (no op names in Definition A set)"
-
-    content = f'''###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-
-"""
-Auto-generated by run_other_bucket_triage.py (--emit-extension).
-
-Source CSV: {csv_path}
-Definition A (within-other cumulative fraction): {fraction:g}
-
-Next steps:
-  - Add subclasses to perf_model_extension for stable, non-synthetic op names.
-  - Extend dict_cat2names_extension so each mapped name appears under a categorize_torch_op label.
-  - Keep categorize_extension for (Synthetic Op) and category-only rows (no perf model).
-
-Regenerate after the CSV changes:
-  python3 .../run_other_bucket_triage.py <csv> --emit-extension [--extension-out PATH]
-
-Pass to the report generator:
-  --extension_file {out_path}
-"""
-
-from __future__ import annotations
-
-# Full profiler `name` strings from the triage Definition A set (deduplicated, stable order).
-_DEFINITION_A_OP_NAMES = (
-{names_block}
-)
-
-
-def categorize_extension(row, plugin):
-    """Category-only path for synthetic / uncertain ops; return None to use default categorizer."""
-    name = row.get("name")
-    if not name:
-        return None
-    if "(Synthetic Op)" in name:
-        if "batched_gemm_a8w8" in name:
-            return "GEMM"
-        if "unified_mla_attention_with_output" in name:
-            return "InferenceAttention"
-        if "fused_moe_" in name or name.startswith("aiter::fused_moe_"):
-            return "MoE_aux"
-        return None
-    return None
-
-
-# TODO: name -> perf model class (do not register synthetic / (Synthetic Op) names).
-perf_model_extension = {{
-}}
-
-# TODO: category string -> list of profiler names (must match categorize_torch_op vocabulary).
-dict_cat2names_extension = {{
-}}
-'''
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(content, encoding="utf-8")
-
-
-def print_report(
-    path: Path,
-    rows: List[Dict[str, str]],
-    other_rows: List[Dict[str, str]],
-    runtime_col: str,
-    category_col: str,
-    other_value: str,
-    fraction: float,
-    name_max: int,
-    print_global_pareto: bool,
-    sorted_other: List[Dict[str, str]],
-    picked_a: List[Dict[str, str]],
-    acc_a: float,
-    total_other: float,
-) -> None:
-    total_all = sum(row_runtime(r, runtime_col) for r in rows)
-    share_other_pct = (100.0 * total_other / total_all) if total_all > 0 else 0.0
+    other.sort(key=lambda r: r["_us"], reverse=True)
+    total_all = sum(r["_us"] for r in rows)
+    total_other = sum(r["_us"] for r in other)
+    picked, acc = greedy_prefix(other, args.fraction * total_other)
 
     print("=" * 72)
-    print("unified-perf-report-postprocess — Step 1 (other bucket triage)")
+    print("unified-perf-report-postprocess — other bucket triage")
     print("=" * 72)
     print(f"CSV: {path}")
     print(f"Runtime column: {runtime_col}")
-    print(f"Category column: {category_col!r} == {other_value!r}")
-    print()
+    print(f"Category column: {args.category_col!r} == {args.other_value!r}\n")
     print(f"Rows (all): {len(rows)}")
-    print(f"Rows (other): {len(other_rows)}")
+    print(f"Rows (other): {len(other)}")
     print(f"Total runtime (all rows): {total_all:,.3f} µs")
-    print(f"Total runtime (other only): {total_other:,.3f} µs  ({share_other_pct:.2f}% of all)")
-    print()
     print(
-        f"Definition A — cumulative {fraction:.0%} of time **within other only**: "
-        f"{len(picked_a)} row(s), covering {acc_a:,.3f} µs "
-        f"({100.0 * acc_a / total_other:.2f}% of other)" if total_other > 0 else "Definition A: N/A (no other time)"
+        f"Total runtime (other only): {total_other:,.3f} µs  "
+        f"({_pct(total_other, total_all):.2f}% of all)\n"
     )
-
-    if print_global_pareto and total_all > 0:
-        target_g = fraction * total_all
-        acc_g = 0.0
-        picked_g: List[Dict[str, str]] = []
-        for r in sorted_other:
-            acc_g += row_runtime(r, runtime_col)
-            picked_g.append(r)
-            if acc_g >= target_g:
-                break
+    if total_other > 0:
         print(
-            f"Definition B — greedy other rows until sum reaches {fraction:.0%} of **global** total: "
+            f"Definition A — cumulative {args.fraction:.0%} of time within other only: "
+            f"{len(picked)} row(s), covering {acc:,.3f} µs ({_pct(acc, total_other):.2f}% of other)"
+        )
+    else:
+        print("Definition A: N/A (no other time)")
+    if args.also_global_pareto:
+        picked_g, acc_g = greedy_prefix(other, args.fraction * total_all)
+        print(
+            f"Definition B — other rows until sum reaches {args.fraction:.0%} of global total: "
             f"{len(picked_g)} row(s), sum {acc_g:,.3f} µs"
         )
 
-    print()
-    print(f"Top contributors toward Definition A (name truncated to {name_max} chars):")
+    print(
+        f"\nTop contributors toward Definition A (name truncated to {args.name_max} chars):"
+    )
     print("-" * 72)
     cum = 0.0
-    for r in picked_a:
-        t = row_runtime(r, runtime_col)
-        cum += t
-        name = (r.get("name") or "").strip()
-        disp = name if len(name) <= name_max else name[: name_max - 3] + "..."
-        pct_o = (100.0 * t / total_other) if total_other > 0 else 0.0
-        cum_pct_o = (100.0 * cum / total_other) if total_other > 0 else 0.0
-        print(f"  {t:>14,.3f} µs  {pct_o:5.2f}% of other  cum {cum_pct_o:5.2f}% of other")
-        print(f"    name: {disp}")
-        kh = first_kernel_hint(r)
-        if kh:
-            print(f"    kernel hint: {kh[:200]}{'...' if len(kh) > 200 else ''}")
+    for r in picked:
+        cum += r["_us"]
+        print(
+            f"  {r['_us']:>14,.3f} µs  {_pct(r['_us'], total_other):5.2f}% of other  "
+            f"cum {_pct(cum, total_other):5.2f}% of other"
+        )
+        print(f"    name: {_trunc((r.get('name') or '').strip(), args.name_max)}")
+        kernel = (
+            r.get("kernel_details_summary") or r.get("trunc_kernel_details") or ""
+        ).strip()
+        if kernel:
+            print(f"    kernel hint: {_trunc(kernel, 120)}")
         print()
 
-    uniq = unique_op_names_in_order(picked_a)
-    print(f"Unique `name` values in Definition A set: {len(uniq)}")
-    for n in uniq:
-        print(f"  - {n if len(n) <= 120 else n[:117] + '...'}")
+    names = unique_names(picked)
+    print(f"Unique `name` values in Definition A set: {len(names)}")
+    for n in names:
+        print(f"  - {_trunc(n, 120)}")
 
-    # Step 1b: aggregate repo hints from call stacks of picked rows
-    hint_counts: Dict[str, int] = defaultdict(int)
-    for r in picked_a:
-        cs = r.get("call_stack") or r.get("trunc_call_stack") or ""
-        for h in infer_repo_hints(cs):
-            hint_counts[h] += 1
-    if hint_counts:
-        print()
-        print("Step 1b — inferred source hints (from call_stack on Definition A rows):")
-        for h, c in sorted(hint_counts.items(), key=lambda x: (-x[1], x[0])):
+    hints = Counter(h for r in picked for h in infer_repo_hints(r["call_stack"]))
+    if hints:
+        print("\nInferred source hints (from call_stack on Definition A rows):")
+        for h, c in sorted(hints.items(), key=lambda x: (-x[1], x[0])):
             print(f"  [{c} rows] {h}")
-
-
-def try_mapping_check(names: Sequence[str], repo_root: Path) -> None:
-    """Optional: verify op names against torch_op_mapping (needs importable TraceLens)."""
-    root = repo_root.resolve()
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    try:
-        from TraceLens.PerfModel import torch_op_mapping as tom  # type: ignore
-    except Exception as e:
-        print()
-        print(f"Optional mapping check skipped (import failed): {e}")
-        return
-
-    print()
-    print("Optional — torch_op_mapping membership (exact `name` key):")
-    for name in names:
-        in_map = name in tom.op_to_perf_model_class_map
-        print(f"  in op_to_perf_model_class_map: {in_map}  {name[:100]}{'...' if len(name) > 100 else ''}")
-
-
-def _parse_bool(s: str) -> bool:
-    return (s or "").strip().lower() in ("true", "1", "yes")
+    return names
 
 
 def compute_top_ops(
-    rows: List[Dict[str, str]],
-    runtime_col: str,
-    threshold: float,
-    require_missing_perf_model: bool = True,
-) -> List[Dict[str, object]]:
-    """Group rows by `name`, sum runtime, return ops above threshold.
-
-    Returns list of dicts with keys:
-      name, total_us, pct_global, has_perf_model, op_category,
-      rep_input_dims, rep_input_type, rep_perf_params, repo_hints, call_stack
-    sorted descending by total_us.
-    """
-    total_all = sum(row_runtime(r, runtime_col) for r in rows)
-    if total_all <= 0:
-        return []
-
+    rows: List[Row], threshold: float, include_covered: bool = False
+) -> List[Dict]:
+    """Group rows by `name`; return ops with >= threshold of total runtime, largest first."""
+    total = sum(r["_us"] for r in rows)
     by_name: Dict[str, Dict] = {}
     for r in rows:
         name = (r.get("name") or "").strip()
         if not name:
             continue
-        if name not in by_name:
-            by_name[name] = {
+        e = by_name.setdefault(
+            name,
+            {
                 "name": name,
                 "total_us": 0.0,
-                "has_perf_model_any": False,
-                "has_perf_model_all": True,
-                "op_category": (r.get("op category") or r.get("op_category") or "").strip(),
-                "rep_input_dims": r.get("Input Dims", ""),
-                "rep_input_type": r.get("Input type", ""),
-                "rep_perf_params": r.get("perf_params", ""),
-                "call_stack": r.get("call_stack") or r.get("trunc_call_stack") or "",
-                "row_count": 0,
-            }
-        entry = by_name[name]
-        entry["total_us"] += row_runtime(r, runtime_col)
-        entry["row_count"] += 1
-        hpm = _parse_bool(r.get("has_perf_model", "False"))
-        if hpm:
-            entry["has_perf_model_any"] = True
-        else:
-            entry["has_perf_model_all"] = False
-        # prefer longer call stack for display
-        cs = r.get("call_stack") or r.get("trunc_call_stack") or ""
-        if len(cs) > len(entry["call_stack"]):
-            entry["call_stack"] = cs
+                "covered": True,
+                "op_category": (
+                    r.get("op category") or r.get("op_category") or ""
+                ).strip(),
+                "call_stack": "",
+            },
+        )
+        e["total_us"] += r["_us"]
+        e["covered"] &= (r.get("has_perf_model") or "").strip().lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        if len(r["call_stack"]) > len(e["call_stack"]):
+            e["call_stack"] = r["call_stack"]
 
     results = []
-    for entry in by_name.values():
-        pct = 100.0 * entry["total_us"] / total_all
-        if pct < threshold * 100.0:
-            continue
-        # Filter: keep only ops missing a perf model (default) or all ops
-        if require_missing_perf_model and entry["has_perf_model_all"]:
-            continue
-        entry["pct_global"] = pct
-        entry["repo_hints"] = infer_repo_hints(entry["call_stack"])
-        results.append(entry)
-
-    results.sort(key=lambda e: e["total_us"], reverse=True)
-    return results
+    for e in by_name.values():
+        e["pct_global"] = _pct(e["total_us"], total)
+        if (
+            total > 0
+            and e["pct_global"] >= threshold * 100.0
+            and (include_covered or not e["covered"])
+        ):
+            e["repo_hints"] = infer_repo_hints(e["call_stack"])
+            results.append(e)
+    return sorted(results, key=lambda e: e["total_us"], reverse=True)
 
 
-def print_top_ops_report(
-    path: Path,
-    results: List[Dict[str, object]],
-    total_all_us: float,
-    threshold: float,
-    name_max: int,
-) -> List[str]:
-    """Print the top-ops candidate table; return list of op names."""
+def report_top_ops(path: Path, rows: List[Row], args) -> List[str]:
+    """Print the top-ops candidate table; return the op names."""
+    results = compute_top_ops(rows, args.threshold, args.include_covered)
     print("=" * 72)
     print("unified-perf-report-postprocess — top-ops mode (EP1)")
     print("=" * 72)
     print(f"CSV: {path}")
-    print(f"Threshold: >{threshold * 100:.1f}% of global total  |  has_perf_model == False")
-    print(f"Global total runtime: {total_all_us:,.0f} µs")
-    print()
-
+    print(
+        f"Threshold: >={args.threshold * 100:.1f}% of global total  |  has_perf_model == False"
+    )
+    print(f"Global total runtime: {sum(r['_us'] for r in rows):,.0f} µs\n")
     if not results:
         print("No ops found above threshold with missing perf model.")
         return []
 
-    print(f"{'Op name':<50}  {'Sum µs':>12}  {'% global':>8}  {'Category':<20}  {'Repo hints'}")
+    print(
+        f"{'Op name':<50}  {'Sum µs':>12}  {'% global':>8}  {'Category':<20}  Repo hints"
+    )
     print("-" * 110)
-    op_names = []
     for e in results:
-        name = e["name"]
-        disp = name if len(name) <= name_max else name[: name_max - 3] + "..."
-        cat = (e["op_category"] or "")[:18]
-        hints = ", ".join(e["repo_hints"][:2]) if e["repo_hints"] else ""
-        print(f"  {disp:<48}  {e['total_us']:>12,.0f}  {e['pct_global']:>7.2f}%  {cat:<20}  {hints}")
+        print(
+            f"  {_trunc(e['name'], args.name_max):<48}  {e['total_us']:>12,.0f}  "
+            f"{e['pct_global']:>7.2f}%  {e['op_category'][:18]:<20}  {', '.join(e['repo_hints'][:2])}"
+        )
         if e["call_stack"]:
-            cs_short = e["call_stack"][:120]
-            print(f"    stack: {cs_short}{'...' if len(e['call_stack']) > 120 else ''}")
+            print(f"    stack: {_trunc(e['call_stack'], 123)}")
         print()
-        op_names.append(name)
-
     print(f"Total candidate ops: {len(results)}")
-    return op_names
+    return [e["name"] for e in results]
+
+
+EXTENSION_TEMPLATE = '''\
+"""
+Auto-generated by run_other_bucket_triage.py --emit-extension.
+
+Source CSV: {csv_path}
+Selection: {selection}
+
+Next steps:
+  - Map stable op names to perf model classes in perf_model_extension.
+  - Map category-only op names (no perf model) in op_category_extension.
+  - Do not give (Synthetic Op) names a perf model; their names are unstable.
+
+Pass to the report generator:
+  --extension_file {out_path}
+"""
+
+# Candidate profiler `name` strings from triage, in ranked order.
+TRIAGE_OP_NAMES = (
+{names}
+)
+
+# name -> perf model class
+perf_model_extension = {{}}
+
+# name -> category, for ops without a perf model
+op_category_extension = {{}}
+'''
+
+
+def write_extension(
+    out_path: Path, csv_path: Path, op_names: Sequence[str], selection: str
+) -> None:
+    """Write a starter --extension_file module for the triaged op names."""
+    names = (
+        "\n".join(f"    {n!r}," for n in op_names) or "    # (no candidate op names)"
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        EXTENSION_TEMPLATE.format(
+            csv_path=csv_path, selection=selection, out_path=out_path, names=names
+        ),
+        encoding="utf-8",
+    )
+
+
+def builtin_perf_model_map() -> Optional[Dict[str, type]]:
+    """TraceLens' built-in name -> perf model map (incl. pseudo ops), or None."""
+    try:
+        from TraceLens.PerfModel.torch_op_mapping import op_to_perf_model_class_map
+    except ImportError as e:
+        print(
+            f"\nMapping check skipped, TraceLens is not importable ({e}). "
+            "Run `pip install -e .` in the TraceLens repo.",
+            file=sys.stderr,
+        )
+        return None
+    return op_to_perf_model_class_map
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument(
-        "csv_path",
-        type=Path,
-        help="Path to unified_perf_summary.csv (or unified_perf_report.csv)",
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    p.add_argument("csv_path", type=Path, help="Path to unified_perf_summary.csv")
     p.add_argument(
-        "--mode",
-        choices=["other-bucket", "top-ops"],
-        default="other-bucket",
-        help=(
-            "other-bucket (default): triage rows in the 'other' category. "
-            "top-ops: group ALL rows by name, list ops >--threshold of global total with missing perf model."
-        ),
+        "--mode", choices=["other-bucket", "top-ops"], default="other-bucket"
     )
     p.add_argument(
         "--threshold",
         type=float,
         default=0.04,
         metavar="FRAC",
-        help="Fraction of global total runtime (top-ops mode only). Default 0.04 = 4%%.",
+        help="top-ops: fraction of global runtime (default 0.04 = 4%%).",
     )
     p.add_argument(
         "--include-covered",
         action="store_true",
-        help="top-ops mode: also show ops that already have has_perf_model == True.",
+        help="top-ops: also show ops that already have a perf model.",
     )
-    p.add_argument("--category-col", default=CATEGORY_COLUMN_DEFAULT, help="Category column header")
-    p.add_argument("--other-value", default=OTHER_VALUE_DEFAULT, help='Value meaning "other"')
+    p.add_argument(
+        "--category-col", default="op category", help="Category column header"
+    )
+    p.add_argument("--other-value", default="other", help='Value meaning "other"')
     p.add_argument(
         "--fraction",
         type=float,
         default=0.95,
-        help="Cumulative fraction for Definition A (within-other) and B (if enabled)",
+        help="other-bucket: cumulative fraction for Definitions A and B",
     )
-    p.add_argument("--name-max", type=int, default=100, help="Truncate printed op names")
+    p.add_argument(
+        "--name-max", type=int, default=100, help="Truncate printed op names"
+    )
     p.add_argument(
         "--also-global-pareto",
         action="store_true",
-        help="Also print Definition B (greedy other rows until fraction of global total)",
+        help="other-bucket: also print Definition B (fraction of global total)",
     )
     p.add_argument(
         "--check-mapping",
         action="store_true",
-        help="After triage, try importing TraceLens and print op_to_perf_model_class_map hits for A-set names",
-    )
-    p.add_argument(
-        "--repo-root",
-        type=Path,
-        default=None,
-        help="Repository root on sys.path for --check-mapping (default: parent of .cursor/skills/...)",
+        help="Print whether each candidate is in TraceLens' built-in perf model map",
     )
     p.add_argument(
         "--emit-extension",
         action="store_true",
-        help="Write generated --extension_file module (see --extension-out for path).",
+        help="Write a starter --extension_file module",
     )
     p.add_argument(
         "--extension-out",
         type=Path,
-        default=None,
         metavar="PATH",
-        help="Output .py for --emit-extension (default: <csv_stem>_triage_extension.py next to the CSV).",
+        help="Output for --emit-extension (default: <csv_stem>_triage_extension.py next to the CSV)",
     )
     args = p.parse_args(argv)
 
@@ -564,55 +394,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not path.is_file():
         print(f"Not a file: {path}", file=sys.stderr)
         return 1
-
     rows, runtime_col = load_rows(path)
 
     if args.mode == "top-ops":
-        total_all = sum(row_runtime(r, runtime_col) for r in rows)
-        results = compute_top_ops(
-            rows,
-            runtime_col,
-            args.threshold,
-            require_missing_perf_model=not args.include_covered,
-        )
-        a_names = print_top_ops_report(path, results, total_all, args.threshold, args.name_max)
+        names = report_top_ops(path, rows, args)
+        selection = f"top-ops, >= {args.threshold:g} of global runtime"
     else:
-        other_rows = filter_other(rows, args.category_col, args.other_value)
-        sorted_other, picked_a, acc_a, total_other = compute_definition_a(
-            other_rows, runtime_col, args.fraction
-        )
-        print_report(
-            path,
-            rows,
-            other_rows,
-            runtime_col,
-            args.category_col,
-            args.other_value,
-            args.fraction,
-            args.name_max,
-            args.also_global_pareto,
-            sorted_other,
-            picked_a,
-            acc_a,
-            total_other,
-        )
-        a_names = unique_op_names_in_order(picked_a)
+        names = report_other_bucket(path, rows, runtime_col, args)
+        selection = f"other-bucket, cumulative {args.fraction:g} of other runtime"
 
     if args.emit_extension:
-        ext_path = args.extension_out
-        if ext_path is None:
-            ext_path = path.with_name(path.stem + "_triage_extension.py")
-        write_generated_extension(ext_path, path, a_names, getattr(args, "fraction", 0.95))
-        print()
-        print(f"Wrote generated extension module: {ext_path.resolve()}")
+        out = args.extension_out or path.with_name(path.stem + "_triage_extension.py")
+        write_extension(out, path, names, selection)
+        print(f"\nWrote generated extension module: {out.resolve()}")
 
     if args.check_mapping:
-        repo_root = args.repo_root
-        if repo_root is None:
-            here = Path(__file__).resolve()
-            repo_root = here.parents[3] if len(here.parents) >= 4 else Path.cwd()
-        try_mapping_check(a_names, repo_root)
-
+        mapping = builtin_perf_model_map()
+        if mapping is not None:
+            print("\nBuilt-in perf model map membership (exact `name` key):")
+            for n in names:
+                print(f"  {n in mapping!s:<5}  {_trunc(n, 100)}")
     return 0
 
 

@@ -37,6 +37,9 @@ For single-GPU roofline validation, the harnesses below initialize the
 smallest possible context (1 rank = rank 0 only) to exercise the local HBM
 path measured by rocprofv3.  The inter-GPU communication bytes are *not*
 captured by hardware counters and are excluded from the perf model's roofline.
+
+This module is not in ``_runner.MODULES`` and its ops are not registered in
+``perf_model_harnesses.py``; wire both up before validating collectives.
 """
 
 # NOTE: torch is imported lazily inside each function so that this module can
@@ -45,10 +48,10 @@ captured by hardware counters and are excluded from the perf model's roofline.
 
 from ._dtypes import resolve_dtype as _resolve_dtype
 
-
 # ---------------------------------------------------------------------------
 # Shared helper — best-effort single-rank dist init
 # ---------------------------------------------------------------------------
+
 
 def _init_single_rank_dist():
     """Initialize a single-rank distributed process group if not already done.
@@ -65,6 +68,7 @@ def _init_single_rank_dist():
         return False
     try:
         import os
+
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
         os.environ.setdefault("MASTER_PORT", "29500")
         dist.init_process_group(
@@ -82,8 +86,10 @@ def _init_single_rank_dist():
 # 1. aiter fused_allreduce_rmsnorm  (aiter pattern)
 # ---------------------------------------------------------------------------
 
+
 def test_aiter_fused_allreduce_rmsnorm(
-    M, N,
+    M,
+    N,
     in_dtype="bf16",
     num_warmup=3,
     **_,
@@ -105,11 +111,13 @@ def test_aiter_fused_allreduce_rmsnorm(
         Activation dtype. The kernel currently requires BF16 throughout.
     """
     import torch
+
     try:
         from aiter.ops.fused_allreduce_rmsnorm import fused_allreduce_rmsnorm as _fn
     except ImportError:
         try:
             import aiter
+
             _fn = aiter.fused_allreduce_rmsnorm
         except (ImportError, AttributeError) as exc:
             raise ImportError(
@@ -148,8 +156,10 @@ def test_aiter_fused_allreduce_rmsnorm(
 # 2. vLLM _C_custom_ar all_reduce  (vLLM torch.ops pattern)
 # ---------------------------------------------------------------------------
 
+
 def test_custom_ar_all_reduce(
-    M, N,
+    M,
+    N,
     in_dtype="bf16",
     num_warmup=3,
     **_,
@@ -170,6 +180,7 @@ def test_custom_ar_all_reduce(
         Activation dtype.
     """
     import torch
+
     try:
         import vllm._C_custom_ar as _car  # registers torch.ops._C_custom_ar
     except ImportError as exc:
@@ -213,8 +224,10 @@ def test_custom_ar_all_reduce(
 # 3. SGLang sgl_kernel all_reduce_reg  (SGLang pattern)
 # ---------------------------------------------------------------------------
 
+
 def test_sgl_kernel_all_reduce_reg(
-    M, N,
+    M,
+    N,
     in_dtype="bf16",
     num_warmup=3,
     **_,
@@ -231,8 +244,10 @@ def test_sgl_kernel_all_reduce_reg(
         Activation dtype.
     """
     import torch
+
     try:
         import sgl_kernel
+
         _fn = sgl_kernel.all_reduce_reg
     except (ImportError, AttributeError) as exc:
         raise ImportError(
@@ -269,8 +284,10 @@ def test_sgl_kernel_all_reduce_reg(
 # 4. SGLang sgl_kernel qr_all_reduce  (SGLang QuickReduce pattern)
 # ---------------------------------------------------------------------------
 
+
 def test_sgl_kernel_qr_all_reduce(
-    M, N,
+    M,
+    N,
     in_dtype="bf16",
     quant_level=0,
     num_warmup=3,
@@ -287,8 +304,10 @@ def test_sgl_kernel_qr_all_reduce(
         0 = BF16 (no compression), 3 = INT4 inter-GPU codec (default 0).
     """
     import torch
+
     try:
         import sgl_kernel
+
         _fn = sgl_kernel.qr_all_reduce
     except (ImportError, AttributeError) as exc:
         raise ImportError(
@@ -327,8 +346,10 @@ def test_sgl_kernel_qr_all_reduce(
 # 5. vLLM _C_custom_ar qr_all_reduce  (vLLM QuickReduce pattern)
 # ---------------------------------------------------------------------------
 
+
 def test_custom_ar_qr_all_reduce(
-    M, N,
+    M,
+    N,
     in_dtype="bf16",
     quant_level=0,
     num_warmup=3,
@@ -345,6 +366,7 @@ def test_custom_ar_qr_all_reduce(
         0 = BF16 transport, 3 = INT4 inter-GPU codec.
     """
     import torch
+
     try:
         import vllm._C_custom_ar  # noqa: F401
     except ImportError as exc:
@@ -385,8 +407,10 @@ def test_custom_ar_qr_all_reduce(
 # 6. aiter reduce_scatter  (aiter pattern)
 # ---------------------------------------------------------------------------
 
+
 def test_aiter_reduce_scatter(
-    M, N,
+    M,
+    N,
     n_gpus=8,
     in_dtype="bf16",
     num_warmup=3,
@@ -409,13 +433,13 @@ def test_aiter_reduce_scatter(
     in_dtype : {"bf16"}
     """
     import torch
+
     try:
         import aiter
+
         _fn = aiter.reduce_scatter
     except (ImportError, AttributeError) as exc:
-        raise ImportError(
-            "aiter.reduce_scatter is not available."
-        ) from exc
+        raise ImportError("aiter.reduce_scatter is not available.") from exc
 
     in_t = _resolve_dtype(in_dtype)
     device = "cuda"
@@ -448,8 +472,10 @@ def test_aiter_reduce_scatter(
 # 7. aiter all_gather_reg  (aiter pattern)
 # ---------------------------------------------------------------------------
 
+
 def test_aiter_all_gather_reg(
-    M, N,
+    M,
+    N,
     n_gpus=8,
     in_dtype="bf16",
     num_warmup=3,
@@ -471,13 +497,13 @@ def test_aiter_all_gather_reg(
     in_dtype : {"bf16"}
     """
     import torch
+
     try:
         import aiter
+
         _fn = aiter.all_gather_reg
     except (ImportError, AttributeError) as exc:
-        raise ImportError(
-            "aiter.all_gather_reg is not available."
-        ) from exc
+        raise ImportError("aiter.all_gather_reg is not available.") from exc
 
     in_t = _resolve_dtype(in_dtype)
     device = "cuda"
@@ -510,8 +536,10 @@ def test_aiter_all_gather_reg(
 # 8. SGLang sgl_kernel reg_all_gather_into_tensor  (SGLang pattern)
 # ---------------------------------------------------------------------------
 
+
 def test_sgl_kernel_reg_all_gather_into_tensor(
-    M, N,
+    M,
+    N,
     n_gpus=8,
     in_dtype="bf16",
     num_warmup=3,
@@ -533,8 +561,10 @@ def test_sgl_kernel_reg_all_gather_into_tensor(
     in_dtype : {"bf16"}
     """
     import torch
+
     try:
         import sgl_kernel
+
         _fn = sgl_kernel.reg_all_gather_into_tensor
     except (ImportError, AttributeError) as exc:
         raise ImportError(
@@ -567,76 +597,3 @@ def test_sgl_kernel_reg_all_gather_into_tensor(
         pass
     torch.cuda.synchronize()
     print(f"test: done, out={out.shape}", flush=True)
-
-
-# ---------------------------------------------------------------------------
-# OP_METADATA
-# ---------------------------------------------------------------------------
-
-#: Metadata for all CustomCollective harnesses in this module.
-OP_METADATA: dict = {
-    "aiter_fused_allreduce_rmsnorm": {
-        "fn":           test_aiter_fused_allreduce_rmsnorm,
-        "category":     "CustomCollective",
-        "description":  "AITER fused AllReduce + residual-add + RMSNorm",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 32, "N": 7168, "in_dtype": "bf16"},
-        "required_args": ["M", "N"],
-    },
-    "custom_ar_all_reduce": {
-        "fn":           test_custom_ar_all_reduce,
-        "category":     "CustomCollective",
-        "description":  "vLLM _C_custom_ar::all_reduce (pure all-reduce)",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 32, "N": 7168, "in_dtype": "bf16"},
-        "required_args": ["M", "N"],
-    },
-    "sgl_kernel_all_reduce_reg": {
-        "fn":           test_sgl_kernel_all_reduce_reg,
-        "category":     "CustomCollective",
-        "description":  "SGLang sgl_kernel::all_reduce_reg (registered buffer)",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 32, "N": 7168, "in_dtype": "bf16"},
-        "required_args": ["M", "N"],
-    },
-    "sgl_kernel_qr_all_reduce": {
-        "fn":           test_sgl_kernel_qr_all_reduce,
-        "category":     "CustomCollective",
-        "description":  "SGLang sgl_kernel::qr_all_reduce (QuickReduce)",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 1866, "N": 7168, "in_dtype": "bf16", "quant_level": 0},
-        "required_args": ["M", "N"],
-    },
-    "custom_ar_qr_all_reduce": {
-        "fn":           test_custom_ar_qr_all_reduce,
-        "category":     "CustomCollective",
-        "description":  "vLLM _C_custom_ar::qr_all_reduce (QuickReduce)",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 1689, "N": 7168, "in_dtype": "bf16", "quant_level": 0},
-        "required_args": ["M", "N"],
-    },
-    "aiter_reduce_scatter": {
-        "fn":           test_aiter_reduce_scatter,
-        "category":     "CustomCollective",
-        "description":  "AITER aiter::reduce_scatter",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 32, "N": 7168, "n_gpus": 8, "in_dtype": "bf16"},
-        "required_args": ["M", "N"],
-    },
-    "aiter_all_gather_reg": {
-        "fn":           test_aiter_all_gather_reg,
-        "category":     "CustomCollective",
-        "description":  "AITER aiter::all_gather_reg (registered buffer)",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 32, "N": 7168, "n_gpus": 8, "in_dtype": "bf16"},
-        "required_args": ["M", "N"],
-    },
-    "sgl_kernel_reg_all_gather_into_tensor": {
-        "fn":           test_sgl_kernel_reg_all_gather_into_tensor,
-        "category":     "CustomCollective",
-        "description":  "SGLang sgl_kernel::reg_all_gather_into_tensor",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 256, "N": 16160, "n_gpus": 8, "in_dtype": "bf16"},
-        "required_args": ["M", "N"],
-    },
-}

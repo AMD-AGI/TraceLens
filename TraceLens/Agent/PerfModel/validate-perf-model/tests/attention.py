@@ -55,9 +55,13 @@ def make_varlen_seqlens(total_tokens, num_seqs=4, seed=42, scenario="random"):
 
     if scenario == "random":
         rng = random.Random(seed)
-        cuts = sorted(rng.sample(range(1, total_tokens), min(num_seqs - 1, total_tokens - 1)))
+        cuts = sorted(
+            rng.sample(range(1, total_tokens), min(num_seqs - 1, total_tokens - 1))
+        )
         boundaries = [0] + cuts + [total_tokens]
-        seq_lengths = [boundaries[i + 1] - boundaries[i] for i in range(len(boundaries) - 1)]
+        seq_lengths = [
+            boundaries[i + 1] - boundaries[i] for i in range(len(boundaries) - 1)
+        ]
         cu_seqlens = [0]
         for sl in seq_lengths:
             cu_seqlens.append(cu_seqlens[-1] + sl)
@@ -96,30 +100,15 @@ def compute_varlen_annotation_stats(seq_lengths_q, seq_lengths_k=None):
     return (c_sq, c_sqsk)
 
 
-def _parse_unified_attention_annotation(annotation):
-    """Parse an ``execute_..._context_..._generation_(...)`` iter marker.
-
-    Returns a dict with ctx_/gen_ ``req``, ``sq``, ``sk``, ``sqsq``, ``sqsk``
-    fields, or ``None`` if the annotation does not match the vLLM convention.
-    """
-    if not annotation:
-        return None
-    import re
-
-    pat = re.compile(
-        r"execute_(?P<iter>\d+)_context_(?P<ctx_req>\d+)\(sq(?P<ctx_sq>\d+)sk(?P<ctx_sk>\d+)"
-        r"sqsq(?P<ctx_sqsq>\d+)sqsk(?P<ctx_sqsk>\d+)\)_generation_(?P<gen_req>\d+)\("
-        r"sq(?P<gen_sq>\d+)sk(?P<gen_sk>\d+)sqsq(?P<gen_sqsq>\d+)sqsk(?P<gen_sqsk>\d+)\)"
-    )
-    m = pat.search(str(annotation))
-    if not m:
-        return None
-    return {k: int(v) for k, v in m.groupdict().items()}
-
-
 def test__flash_attn_forward(
-    seq_len, num_heads_q=32, num_heads_kv=8, head_dim=128,
-    in_dtype="bf16", out_dtype="bf16", num_warmup=3, **_,
+    seq_len,
+    num_heads_q=32,
+    num_heads_kv=8,
+    head_dim=128,
+    in_dtype="bf16",
+    out_dtype="bf16",
+    num_warmup=3,
+    **_,
 ):
     """``aiter._flash_attn_forward`` via ``aiter.flash_attn_func`` (CK).
 
@@ -145,7 +134,10 @@ def test__flash_attn_forward(
     B = 1
     S, H_Q, H_KV, d = seq_len, num_heads_q, num_heads_kv, head_dim
     device = "cuda"
-    print(f"test: flash_attn B={B} S={S} H_Q={H_Q} H_KV={H_KV} d={d} dtype={in_dtype}", flush=True)
+    print(
+        f"test: flash_attn B={B} S={S} H_Q={H_Q} H_KV={H_KV} d={d} dtype={in_dtype}",
+        flush=True,
+    )
     q = torch.randn(B, S, H_Q, d, dtype=in_t, device=device)
     k = torch.randn(B, S, H_KV, d, dtype=in_t, device=device)
     v = torch.randn(B, S, H_KV, d, dtype=in_t, device=device)
@@ -159,8 +151,14 @@ def test__flash_attn_forward(
 
 
 def test_wrapper_fmha_v3_fwd(
-    seq_len, num_heads_q=32, num_heads_kv=8, head_dim=128,
-    in_dtype="bf16", out_dtype="bf16", num_warmup=3, **_,
+    seq_len,
+    num_heads_q=32,
+    num_heads_kv=8,
+    head_dim=128,
+    in_dtype="bf16",
+    out_dtype="bf16",
+    num_warmup=3,
+    **_,
 ):
     """``aiter::wrapper_fmha_v3_fwd`` via ``aiter.ops.mha.fmha_v3_fwd``.
 
@@ -173,25 +171,40 @@ def test_wrapper_fmha_v3_fwd(
     _resolve_dtype(out_dtype)
     B = 1
     S, H_Q, H_KV, d = seq_len, num_heads_q, num_heads_kv, head_dim
-    softmax_scale = 1 / d ** 0.5
+    softmax_scale = 1 / d**0.5
     device = "cuda"
-    print(f"test: fmha_v3 B={B} S={S} H_Q={H_Q} H_KV={H_KV} d={d} dtype={in_dtype}", flush=True)
+    print(
+        f"test: fmha_v3 B={B} S={S} H_Q={H_Q} H_KV={H_KV} d={d} dtype={in_dtype}",
+        flush=True,
+    )
     q = torch.randn(B, S, H_Q, d, device=device).to(in_t)
     k = torch.randn(B, S, H_KV, d, device=device).to(in_t)
     v = torch.randn(B, S, H_KV, d, device=device).to(in_t)
     for _ in range(num_warmup):
-        out, lse, S_dmask, _ = fmha_v3_fwd(q, k, v, 0, softmax_scale, True, -1, -1, True, False, 1)
+        out, lse, S_dmask, _ = fmha_v3_fwd(
+            q, k, v, 0, softmax_scale, True, -1, -1, True, False, 1
+        )
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
-    out, lse, S_dmask, _ = fmha_v3_fwd(q, k, v, 0, softmax_scale, True, -1, -1, True, False, 1)
+    out, lse, S_dmask, _ = fmha_v3_fwd(
+        q, k, v, 0, softmax_scale, True, -1, -1, True, False, 1
+    )
     torch.cuda.synchronize()
     print(f"test: done, shape={out.shape}", flush=True)
 
 
 def test_mha_varlen_fwd(
-    seq_len, num_heads_q=32, num_heads_kv=8, head_dim=128,
-    in_dtype="bf16", out_dtype="bf16", num_warmup=3,
-    varlen_seed=42, varlen_num_seqs=4, varlen_scenario="random", **_,
+    seq_len,
+    num_heads_q=32,
+    num_heads_kv=8,
+    head_dim=128,
+    in_dtype="bf16",
+    out_dtype="bf16",
+    num_warmup=3,
+    varlen_seed=42,
+    varlen_num_seqs=4,
+    varlen_scenario="random",
+    **_,
 ):
     """``aiter::mha_varlen_fwd`` (variable-length flash attention forward, CK).
 
@@ -224,7 +237,7 @@ def test_mha_varlen_fwd(
     max_seqlen_q = max(sq)
     max_seqlen_k = max(sk)
     min_seqlen_q = min(sq)
-    softmax_scale = 1 / d ** 0.5
+    softmax_scale = 1 / d**0.5
     device = "cuda"
     print(
         f"test: mha_varlen scenario={varlen_scenario} num_seqs={len(sq)} "
@@ -239,23 +252,63 @@ def test_mha_varlen_fwd(
     cu_k = torch.tensor(cu_k_list, dtype=torch.int32, device=device)
     for _ in range(num_warmup):
         out, lse, S_dmask, _ = mha_varlen_fwd(
-            q, k, v, cu_q, cu_k, max_seqlen_q, max_seqlen_k, min_seqlen_q,
-            0, softmax_scale, 0, False, True, -1, -1, 0, True, False,
+            q,
+            k,
+            v,
+            cu_q,
+            cu_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            min_seqlen_q,
+            0,
+            softmax_scale,
+            0,
+            False,
+            True,
+            -1,
+            -1,
+            0,
+            True,
+            False,
         )
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
     out, lse, S_dmask, _ = mha_varlen_fwd(
-        q, k, v, cu_q, cu_k, max_seqlen_q, max_seqlen_k, min_seqlen_q,
-        0, softmax_scale, 0, False, True, -1, -1, 0, True, False,
+        q,
+        k,
+        v,
+        cu_q,
+        cu_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        min_seqlen_q,
+        0,
+        softmax_scale,
+        0,
+        False,
+        True,
+        -1,
+        -1,
+        0,
+        True,
+        False,
     )
     torch.cuda.synchronize()
     print(f"test: done, shape={out.shape}", flush=True)
 
 
 def test_fmha_v3_varlen_fwd(
-    seq_len, num_heads_q=32, num_heads_kv=8, head_dim=128,
-    in_dtype="bf16", out_dtype="bf16", num_warmup=3,
-    varlen_seed=42, varlen_num_seqs=4, varlen_scenario="random", **_,
+    seq_len,
+    num_heads_q=32,
+    num_heads_kv=8,
+    head_dim=128,
+    in_dtype="bf16",
+    out_dtype="bf16",
+    num_warmup=3,
+    varlen_seed=42,
+    varlen_num_seqs=4,
+    varlen_scenario="random",
+    **_,
 ):
     """``aiter::fmha_v3_varlen_fwd`` (variable-length FMHA v3 forward).
 
@@ -276,7 +329,7 @@ def test_fmha_v3_varlen_fwd(
     max_seqlen_q = max(sq)
     max_seqlen_k = max(sk)
     min_seqlen_q = min(sq)
-    softmax_scale = 1 / d ** 0.5
+    softmax_scale = 1 / d**0.5
     device = "cuda"
     print(
         f"test: fmha_v3_varlen scenario={varlen_scenario} num_seqs={len(sq)} "
@@ -291,23 +344,65 @@ def test_fmha_v3_varlen_fwd(
     cu_k = torch.tensor(cu_k_list, dtype=torch.int32, device=device)
     for _ in range(num_warmup):
         out, lse, S_dmask, _ = fmha_v3_varlen_fwd(
-            q, k, v, cu_q, cu_k, max_seqlen_q, max_seqlen_k, min_seqlen_q,
-            0, softmax_scale, 0, False, True, -1, -1, True, False, 1,
+            q,
+            k,
+            v,
+            cu_q,
+            cu_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            min_seqlen_q,
+            0,
+            softmax_scale,
+            0,
+            False,
+            True,
+            -1,
+            -1,
+            True,
+            False,
+            1,
         )
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
     out, lse, S_dmask, _ = fmha_v3_varlen_fwd(
-        q, k, v, cu_q, cu_k, max_seqlen_q, max_seqlen_k, min_seqlen_q,
-        0, softmax_scale, 0, False, True, -1, -1, True, False, 1,
+        q,
+        k,
+        v,
+        cu_q,
+        cu_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        min_seqlen_q,
+        0,
+        softmax_scale,
+        0,
+        False,
+        True,
+        -1,
+        -1,
+        True,
+        False,
+        1,
     )
     torch.cuda.synchronize()
     print(f"test: done, shape={out.shape}", flush=True)
 
 
 def test_vllm_unified_attention(
-    seq_len=None, num_heads_q=32, num_heads_kv=8, head_dim=128,
-    in_dtype="bf16", kv_dtype="fp8", out_dtype="bf16", num_warmup=3,
-    annotation=None, num_decode_seqs=None, ctx_len=None, prefill_seq_len=0, **_,
+    seq_len=None,
+    num_heads_q=32,
+    num_heads_kv=8,
+    head_dim=128,
+    in_dtype="bf16",
+    kv_dtype="fp8",
+    out_dtype="bf16",
+    num_warmup=3,
+    annotation=None,
+    num_decode_seqs=None,
+    ctx_len=None,
+    prefill_seq_len=0,
+    **_,
 ):
     """``vllm::unified_attention_with_output`` via the aiter Triton unified_attention kernel.
 
@@ -379,7 +474,7 @@ def test_vllm_unified_attention(
     for s in seq_lens_q:
         cu_q_list.append(cu_q_list[-1] + s)
 
-    softmax_scale = 1 / d ** 0.5
+    softmax_scale = 1 / d**0.5
     print(
         f"test: vllm_unified_attention num_seqs={num_seqs} total_q={total_q} "
         f"prefill={prefill_seq_len} decodes={num_decode_seqs} ctx_len={ctx_len} "
@@ -397,7 +492,9 @@ def test_vllm_unified_attention(
     key_cache = torch.randn(total_blocks, block_size, H_KV, d, device=device).to(kv_t)
     value_cache = torch.randn(total_blocks, block_size, H_KV, d, device=device).to(kv_t)
 
-    block_table = torch.zeros(num_seqs, max_blocks_per_seq, dtype=torch.int32, device=device)
+    block_table = torch.zeros(
+        num_seqs, max_blocks_per_seq, dtype=torch.int32, device=device
+    )
     blk = 0
     for i in range(num_seqs):
         nblk = (seq_lens_k[i] + block_size - 1) // block_size
@@ -415,12 +512,22 @@ def test_vllm_unified_attention(
 
     def _call():
         unified_attention(
-            q=q, k=key_cache, v=value_cache, out=out,
-            cu_seqlens_q=cu_seqlens_q, max_seqlen_q=max_seqlen_q,
-            seqused_k=seqused_k, max_seqlen_k=max_seqlen_k,
-            softmax_scale=softmax_scale, causal=True,
-            window_size=(-1, -1), block_table=block_table,
-            softcap=0.0, q_descale=None, k_descale=k_descale, v_descale=v_descale,
+            q=q,
+            k=key_cache,
+            v=value_cache,
+            out=out,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=seqused_k,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=softmax_scale,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=block_table,
+            softcap=0.0,
+            q_descale=None,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
 
     for _ in range(num_warmup):
@@ -433,9 +540,16 @@ def test_vllm_unified_attention(
 
 
 def test_unified_attention(
-    seq_len, num_heads_q=32, num_heads_kv=8, head_dim=128,
-    in_dtype="bf16", kv_dtype="fp8", out_dtype="bf16", num_warmup=3,
-    annotation=None, **kwargs,
+    seq_len,
+    num_heads_q=32,
+    num_heads_kv=8,
+    head_dim=128,
+    in_dtype="bf16",
+    kv_dtype="fp8",
+    out_dtype="bf16",
+    num_warmup=3,
+    annotation=None,
+    **kwargs,
 ):
     """``aiter`` triton ``unified_attention`` forward (paged KV / varlen).
 
@@ -456,10 +570,18 @@ def test_unified_attention(
     if ctx_len is None:
         ctx_len = seq_len
     return test_vllm_unified_attention(
-        seq_len=seq_len, num_heads_q=num_heads_q, num_heads_kv=num_heads_kv,
-        head_dim=head_dim, in_dtype=in_dtype, kv_dtype=kv_dtype, out_dtype=out_dtype,
-        num_warmup=num_warmup, annotation=annotation,
-        num_decode_seqs=num_decode_seqs, ctx_len=ctx_len, prefill_seq_len=prefill_seq_len,
+        seq_len=seq_len,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
+        head_dim=head_dim,
+        in_dtype=in_dtype,
+        kv_dtype=kv_dtype,
+        out_dtype=out_dtype,
+        num_warmup=num_warmup,
+        annotation=annotation,
+        num_decode_seqs=num_decode_seqs,
+        ctx_len=ctx_len,
+        prefill_seq_len=prefill_seq_len,
         **kwargs,
     )
 
@@ -468,9 +590,20 @@ def test_unified_attention(
 # DSV3 / DSV4 MLA attention harnesses
 # ---------------------------------------------------------------------------
 
-def _build_mla_ps_metadata(*, seq_len, batch_size, num_heads, qk_head_dim,
-                           v_head_dim, block_size, is_causal, dtype_q, dtype_kv,
-                           device):
+
+def _build_mla_ps_metadata(
+    *,
+    seq_len,
+    batch_size,
+    num_heads,
+    qk_head_dim,
+    v_head_dim,
+    block_size,
+    is_causal,
+    dtype_q,
+    dtype_kv,
+    device,
+):
     """Build the planner outputs + Q/K/V tensors needed by mla_prefill_ps_asm_fwd / mla_reduce_v1.
 
     Mirrors the canonical setup in ``../aiter/op_tests/test_mla_prefill_ps.py``.
@@ -483,7 +616,7 @@ def _build_mla_ps_metadata(*, seq_len, batch_size, num_heads, qk_head_dim,
 
     assert num_heads >= 1
     gqa_ratio = num_heads // num_heads
-    softmax_scale = 1 / (qk_head_dim ** 0.5)
+    softmax_scale = 1 / (qk_head_dim**0.5)
     tile_q = 256
     tile_kv = 128
     qhead_granularity = gqa_ratio
@@ -499,11 +632,17 @@ def _build_mla_ps_metadata(*, seq_len, batch_size, num_heads, qk_head_dim,
     actual_blocks = (seq_lens_kv + block_size - 1) // block_size
     kv_indptr[1:] = torch.cumsum(actual_blocks, dim=0)
     num_blocks = int(kv_indptr[-1].item())
-    kv_indices = torch.randint(0, num_blocks, (num_blocks,), dtype=torch.int, device=device)
+    kv_indices = torch.randint(
+        0, num_blocks, (num_blocks,), dtype=torch.int, device=device
+    )
     num_tokens = int(qo_indptr[-1].item())
 
-    Q_bf16 = torch.randn(num_tokens, num_heads, qk_head_dim, dtype=torch.bfloat16, device=device)
-    K_bf16 = torch.randn(num_blocks, num_heads, qk_head_dim, dtype=torch.bfloat16, device=device)
+    Q_bf16 = torch.randn(
+        num_tokens, num_heads, qk_head_dim, dtype=torch.bfloat16, device=device
+    )
+    K_bf16 = torch.randn(
+        num_blocks, num_heads, qk_head_dim, dtype=torch.bfloat16, device=device
+    )
     V_bf16 = K_bf16[:, :, :v_head_dim].contiguous()
 
     q_quant, q_scale = per_tensor_quant(Q_bf16, quant_dtype=dtype_q)
@@ -524,18 +663,33 @@ def _build_mla_ps_metadata(*, seq_len, batch_size, num_heads, qk_head_dim,
         qlen_granularity=qlen_granularity,
     )
 
-    work_metadata_ptrs = torch.empty(work_meta_data_size, dtype=work_meta_data_type, device=device)
+    work_metadata_ptrs = torch.empty(
+        work_meta_data_size, dtype=work_meta_data_type, device=device
+    )
     work_indptr = torch.empty(work_indptr_size, dtype=work_indptr_type, device=device)
     work_info = torch.empty(work_info_size, dtype=work_info_type, device=device)
-    reduce_indptr = torch.empty(reduce_indptr_size, dtype=reduce_indptr_type, device=device)
-    reduce_final_map = torch.empty(reduce_final_map_size, dtype=reduce_final_map_type, device=device)
-    reduce_partial_map = torch.empty(reduce_partial_map_size, dtype=reduce_partial_map_type, device=device)
+    reduce_indptr = torch.empty(
+        reduce_indptr_size, dtype=reduce_indptr_type, device=device
+    )
+    reduce_final_map = torch.empty(
+        reduce_final_map_size, dtype=reduce_final_map_type, device=device
+    )
+    reduce_partial_map = torch.empty(
+        reduce_partial_map_size, dtype=reduce_partial_map_type, device=device
+    )
 
     aiter.get_ps_metadata_v1(
-        qo_indptr.cpu(), kv_indptr.cpu(), seq_lens_kv.cpu(),
-        gqa_ratio, num_heads,
-        work_metadata_ptrs, work_indptr, work_info,
-        reduce_indptr, reduce_final_map, reduce_partial_map,
+        qo_indptr.cpu(),
+        kv_indptr.cpu(),
+        seq_lens_kv.cpu(),
+        gqa_ratio,
+        num_heads,
+        work_metadata_ptrs,
+        work_indptr,
+        work_info,
+        reduce_indptr,
+        reduce_final_map,
+        reduce_partial_map,
         qhead_granularity=qhead_granularity,
         qlen_granularity=qlen_granularity,
         kvlen_granularity=kvlen_granularity,
@@ -544,14 +698,21 @@ def _build_mla_ps_metadata(*, seq_len, batch_size, num_heads, qk_head_dim,
     )
     torch.cuda.synchronize()
 
-    output = torch.empty(num_tokens, num_heads, v_head_dim, dtype=torch.bfloat16, device=device)
+    output = torch.empty(
+        num_tokens, num_heads, v_head_dim, dtype=torch.bfloat16, device=device
+    )
     logits = torch.empty(
-        reduce_partial_map.size(0) * tile_q, num_heads, v_head_dim,
-        dtype=dtypes.fp32, device=device,
+        reduce_partial_map.size(0) * tile_q,
+        num_heads,
+        v_head_dim,
+        dtype=dtypes.fp32,
+        device=device,
     )
     attn_lse = torch.empty(
-        reduce_partial_map.size(0) * tile_q, num_heads,
-        dtype=dtypes.fp32, device=device,
+        reduce_partial_map.size(0) * tile_q,
+        num_heads,
+        dtype=dtypes.fp32,
+        device=device,
     )
     final_lse = torch.empty(num_tokens, num_heads, dtype=dtypes.fp32, device=device)
 
@@ -580,8 +741,9 @@ def _build_mla_ps_metadata(*, seq_len, batch_size, num_heads, qk_head_dim,
     )
 
 
-def test_dsv3_mla_prefill_ps_asm_fwd(seq_len, E=16, num_heads_q=16, head_dim=192,
-                                     block_size=1, num_warmup=3, **_):
+def test_dsv3_mla_prefill_ps_asm_fwd(
+    seq_len, E=16, num_heads_q=16, head_dim=192, block_size=1, num_warmup=3, **_
+):
     """``aiter.mla_prefill_ps_asm_fwd`` (FP8 MLA prefill, persistent scheduler ASM).
 
     Parameters mapped from the DSV3 trace:
@@ -617,12 +779,23 @@ def test_dsv3_mla_prefill_ps_asm_fwd(seq_len, E=16, num_heads_q=16, head_dim=192
 
     def _call():
         aiter.mla_prefill_ps_asm_fwd(
-            meta["q_quant"], meta["k_quant"], meta["v_quant"],
-            meta["qo_indptr"], meta["kv_indptr"], meta["kv_indices"],
-            meta["work_indptr"], meta["work_info"],
-            meta["max_qlen"], meta["softmax_scale"], True,
-            meta["logits"], meta["attn_lse"], meta["output"],
-            meta["q_scale"], meta["k_scale"], meta["v_scale"],
+            meta["q_quant"],
+            meta["k_quant"],
+            meta["v_quant"],
+            meta["qo_indptr"],
+            meta["kv_indptr"],
+            meta["kv_indices"],
+            meta["work_indptr"],
+            meta["work_info"],
+            meta["max_qlen"],
+            meta["softmax_scale"],
+            True,
+            meta["logits"],
+            meta["attn_lse"],
+            meta["output"],
+            meta["q_scale"],
+            meta["k_scale"],
+            meta["v_scale"],
         )
 
     for _ in range(num_warmup):
@@ -634,8 +807,9 @@ def test_dsv3_mla_prefill_ps_asm_fwd(seq_len, E=16, num_heads_q=16, head_dim=192
     print(f"test: done, output={meta['output'].shape}", flush=True)
 
 
-def test_dsv3_mla_reduce_v1(seq_len, E=16, num_heads_q=16, head_dim=192,
-                            block_size=1, num_warmup=3, **_):
+def test_dsv3_mla_reduce_v1(
+    seq_len, E=16, num_heads_q=16, head_dim=192, block_size=1, num_warmup=3, **_
+):
     """``aiter.mla_reduce_v1`` (cross-split MLA reduce).
 
     Shares the persistent-scheduler planner with mla_prefill_ps_asm_fwd. We
@@ -665,20 +839,36 @@ def test_dsv3_mla_reduce_v1(seq_len, E=16, num_heads_q=16, head_dim=192,
         device="cuda",
     )
     aiter.mla_prefill_ps_asm_fwd(
-        meta["q_quant"], meta["k_quant"], meta["v_quant"],
-        meta["qo_indptr"], meta["kv_indptr"], meta["kv_indices"],
-        meta["work_indptr"], meta["work_info"],
-        meta["max_qlen"], meta["softmax_scale"], True,
-        meta["logits"], meta["attn_lse"], meta["output"],
-        meta["q_scale"], meta["k_scale"], meta["v_scale"],
+        meta["q_quant"],
+        meta["k_quant"],
+        meta["v_quant"],
+        meta["qo_indptr"],
+        meta["kv_indptr"],
+        meta["kv_indices"],
+        meta["work_indptr"],
+        meta["work_info"],
+        meta["max_qlen"],
+        meta["softmax_scale"],
+        True,
+        meta["logits"],
+        meta["attn_lse"],
+        meta["output"],
+        meta["q_scale"],
+        meta["k_scale"],
+        meta["v_scale"],
     )
     torch.cuda.synchronize()
 
     def _call():
         aiter.mla_reduce_v1(
-            meta["logits"], meta["attn_lse"], meta["reduce_indptr"],
-            meta["reduce_final_map"], meta["reduce_partial_map"],
-            meta["tile_q"], meta["output"], meta["final_lse"],
+            meta["logits"],
+            meta["attn_lse"],
+            meta["reduce_indptr"],
+            meta["reduce_final_map"],
+            meta["reduce_partial_map"],
+            meta["tile_q"],
+            meta["output"],
+            meta["final_lse"],
         )
 
     for _ in range(num_warmup):
@@ -690,9 +880,18 @@ def test_dsv3_mla_reduce_v1(seq_len, E=16, num_heads_q=16, head_dim=192,
     print(f"test: done, output={meta['output'].shape}", flush=True)
 
 
-def test_dsv3_mla_decode_fwd(seq_len, E=64, num_heads_q=16, head_dim=576,
-                             page_size=1, kv_dtype='fp8', n_ctx=0, ctx_qlen=0,
-                             num_warmup=3, **_):
+def test_dsv3_mla_decode_fwd(
+    seq_len,
+    E=64,
+    num_heads_q=16,
+    head_dim=576,
+    page_size=1,
+    kv_dtype="fp8",
+    n_ctx=0,
+    ctx_qlen=0,
+    num_warmup=3,
+    **_,
+):
     """``aiter.mla.mla_decode_fwd`` (paged MLA attention through the MQA path).
 
     Reproduces ``pseudo_mla_decode_fwd``. The traces drive this entry point in
@@ -726,12 +925,12 @@ def test_dsv3_mla_decode_fwd(seq_len, E=64, num_heads_q=16, head_dim=576,
 
     nhead = num_heads_q
     nhead_kv = 1
-    qk_head_dim = head_dim               # 576 = 512 (kv_lora) + 64 (qk_rope)
+    qk_head_dim = head_dim  # 576 = 512 (kv_lora) + 64 (qk_rope)
     qk_rope_head_dim = 64
-    kv_lora_rank = qk_head_dim - qk_rope_head_dim   # 512
-    v_head_dim = kv_lora_rank            # absorbed decode: v_head_dim == kv_lora_rank
+    kv_lora_rank = qk_head_dim - qk_rope_head_dim  # 512
+    v_head_dim = kv_lora_rank  # absorbed decode: v_head_dim == kv_lora_rank
     device = "cuda"
-    use_fp8 = str(kv_dtype).lower() in ('fp8', 'fp8_e4m3', 'float8_e4m3fn')
+    use_fp8 = str(kv_dtype).lower() in ("fp8", "fp8_e4m3", "float8_e4m3fn")
     causal = n_ctx > 0
 
     # One entry per query token: a causal ramp for each context request, then
@@ -751,7 +950,7 @@ def test_dsv3_mla_decode_fwd(seq_len, E=64, num_heads_q=16, head_dim=576,
         region_base += seq_len
     batch_size = len(kv_lens)
     if batch_size == 0:
-        raise ValueError('mla_decode_fwd harness needs at least one request')
+        raise ValueError("mla_decode_fwd harness needs at least one request")
 
     print(
         f"test: dsv3_mla_decode_fwd gen={E}x{seq_len} ctx={n_ctx}x{ctx_qlen} "
@@ -761,13 +960,18 @@ def test_dsv3_mla_decode_fwd(seq_len, E=64, num_heads_q=16, head_dim=576,
     )
 
     kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int, device=device)
-    kv_indptr[1:] = torch.cumsum(torch.tensor(kv_lens, dtype=torch.int, device=device), 0)
+    kv_indptr[1:] = torch.cumsum(
+        torch.tensor(kv_lens, dtype=torch.int, device=device), 0
+    )
     total_kv = int(kv_indptr[-1].item())
 
-    num_page = region_base + 128         # page_size == 1
-    kv_indices = torch.cat([
-        torch.arange(start, start + length, dtype=torch.int, device=device)
-        for start, length in zip(kv_starts, kv_lens)])
+    num_page = region_base + 128  # page_size == 1
+    kv_indices = torch.cat(
+        [
+            torch.arange(start, start + length, dtype=torch.int, device=device)
+            for start, length in zip(kv_starts, kv_lens)
+        ]
+    )
     kv_last_page_lens = torch.ones(batch_size, dtype=torch.int, device=device)
 
     # Every entry carries exactly one query token.
@@ -778,7 +982,8 @@ def test_dsv3_mla_decode_fwd(seq_len, E=64, num_heads_q=16, head_dim=576,
     q = torch.randn((total_q, nhead, qk_head_dim), dtype=torch.bfloat16, device=device)
     kv_buffer = torch.randn(
         (num_page * page_size, nhead_kv, kv_lora_rank + qk_rope_head_dim),
-        dtype=torch.bfloat16, device=device,
+        dtype=torch.bfloat16,
+        device=device,
     )
     if use_fp8:
         q, kv_buffer = q.to(dtypes.fp8), kv_buffer.to(dtypes.fp8)
@@ -786,24 +991,47 @@ def test_dsv3_mla_decode_fwd(seq_len, E=64, num_heads_q=16, head_dim=576,
         kv_scale = torch.ones([1], dtype=torch.float, device=device)
     else:
         q_scale = kv_scale = None
-    sm_scale = 1.0 / (qk_head_dim ** 0.5)
+    sm_scale = 1.0 / (qk_head_dim**0.5)
 
-    out = torch.empty((total_q, nhead, v_head_dim), dtype=torch.bfloat16, device=device).fill_(-1)
+    out = torch.empty(
+        (total_q, nhead, v_head_dim), dtype=torch.bfloat16, device=device
+    ).fill_(-1)
 
     # Persistent-scheduler work plan. get_mla_metadata_info_v1 returns the buffer
     # sizes as (ptrs, work_indptr, work_info_set, ...) while get_mla_metadata_v1
     # takes them as (ptrs, work_info_set, work_indptr, ...), so the two middle
     # buffers swap between allocation and the call, as vLLM does.
     specs = get_mla_metadata_info_v1(
-        batch_size=batch_size, max_seqlen_qo=max_seqlen_qo, num_head_qo=nhead,
-        q_dtype=q.dtype, kv_dtype=kv_buffer.dtype, is_sparse=False, fast_mode=True)
+        batch_size=batch_size,
+        max_seqlen_qo=max_seqlen_qo,
+        num_head_qo=nhead,
+        q_dtype=q.dtype,
+        kv_dtype=kv_buffer.dtype,
+        is_sparse=False,
+        fast_mode=True,
+    )
     ptrs, work_indptr, work_info_set, red_indptr, red_final, red_partial = [
-        torch.zeros(shape, dtype=dt, device=device) for shape, dt in specs]
+        torch.zeros(shape, dtype=dt, device=device) for shape, dt in specs
+    ]
     get_mla_metadata_v1(
-        qo_indptr, kv_indptr, kv_last_page_lens, nhead // nhead_kv, nhead_kv, causal,
-        ptrs, work_info_set, work_indptr, red_indptr, red_final, red_partial,
-        page_size=page_size, kv_granularity=16, max_seqlen_qo=max_seqlen_qo,
-        uni_seqlen_qo=max_seqlen_qo, fast_mode=True)
+        qo_indptr,
+        kv_indptr,
+        kv_last_page_lens,
+        nhead // nhead_kv,
+        nhead_kv,
+        causal,
+        ptrs,
+        work_info_set,
+        work_indptr,
+        red_indptr,
+        red_final,
+        red_partial,
+        page_size=page_size,
+        kv_granularity=16,
+        max_seqlen_qo=max_seqlen_qo,
+        uni_seqlen_qo=max_seqlen_qo,
+        fast_mode=True,
+    )
 
     def _call():
         aiter.mla.mla_decode_fwd(
@@ -834,15 +1062,22 @@ def test_dsv3_mla_decode_fwd(seq_len, E=64, num_heads_q=16, head_dim=576,
     print("test: measured iteration...", flush=True)
     _call()
     torch.cuda.synchronize()
-    print(f"test: done, output={out.shape} qk_pairs={total_kv} kv_pages={region_base}",
-          flush=True)
+    print(
+        f"test: done, output={out.shape} qk_pairs={total_kv} kv_pages={region_base}",
+        flush=True,
+    )
 
 
 def test_dsv4_pa_sparse_prefill_opus(
-    M=1819, num_heads_q=32, head_dim=512,
-    total_pages=329728, total_tokens=1819,
-    nnz_prefix=2095488, nnz_extend=232832,
-    num_warmup=3, **_,
+    M=1819,
+    num_heads_q=32,
+    head_dim=512,
+    total_pages=329728,
+    total_tokens=1819,
+    nnz_prefix=2095488,
+    nnz_extend=232832,
+    num_warmup=3,
+    **_,
 ):
     """``aiter.pa_sparse_prefill_opus`` — two-region sparse paged prefill MLA."""
     import math
@@ -850,8 +1085,11 @@ def test_dsv4_pa_sparse_prefill_opus(
     from aiter.ops.pa_sparse_prefill_opus import pa_sparse_prefill_opus
 
     N, H, D = M, num_heads_q, head_dim
-    print(f"test: dsv4_pa_sparse_prefill_opus N={N} H={H} D={D} "
-          f"nnz_prefix={nnz_prefix} nnz_extend={nnz_extend}", flush=True)
+    print(
+        f"test: dsv4_pa_sparse_prefill_opus N={N} H={H} D={D} "
+        f"nnz_prefix={nnz_prefix} nnz_extend={nnz_extend}",
+        flush=True,
+    )
 
     def _csr(num_rows, pool_rows, target_nnz, seed):
         # Even split per query row; sample indices with replacement on GPU
@@ -864,14 +1102,22 @@ def test_dsv4_pa_sparse_prefill_opus(
         indptr = torch.zeros(num_rows + 1, dtype=torch.int32, device="cuda")
         indptr[1:] = torch.cumsum(lens, dim=0)
         nnz = int(indptr[-1].item())
-        g = torch.Generator(device="cuda"); g.manual_seed(seed)
-        indices = torch.randint(0, pool_rows, (nnz,), dtype=torch.int32,
-                                device="cuda", generator=g)
+        g = torch.Generator(device="cuda")
+        g.manual_seed(seed)
+        indices = torch.randint(
+            0, pool_rows, (nnz,), dtype=torch.int32, device="cuda", generator=g
+        )
         return indptr, indices
 
-    q = (torch.randn(N, H, D, device="cuda", dtype=torch.float32) * 0.5).to(torch.bfloat16)
-    unified_kv = (torch.randn(total_pages, D, device="cuda", dtype=torch.float32) * 0.5).to(torch.bfloat16)
-    kv = (torch.randn(total_tokens, D, device="cuda", dtype=torch.float32) * 0.5).to(torch.bfloat16)
+    q = (torch.randn(N, H, D, device="cuda", dtype=torch.float32) * 0.5).to(
+        torch.bfloat16
+    )
+    unified_kv = (
+        torch.randn(total_pages, D, device="cuda", dtype=torch.float32) * 0.5
+    ).to(torch.bfloat16)
+    kv = (torch.randn(total_tokens, D, device="cuda", dtype=torch.float32) * 0.5).to(
+        torch.bfloat16
+    )
     attn_sink = torch.randn(H, device="cuda", dtype=torch.float32) * 0.25
 
     kv_indptr_prefix, kv_indices_prefix = _csr(N, total_pages, nnz_prefix, 1)
@@ -881,10 +1127,16 @@ def test_dsv4_pa_sparse_prefill_opus(
 
     def _call():
         pa_sparse_prefill_opus(
-            q, unified_kv,
-            kv_indices_prefix, kv_indptr_prefix,
-            kv, kv_indices_extend, kv_indptr_extend,
-            attn_sink, softmax_scale, out,
+            q,
+            unified_kv,
+            kv_indices_prefix,
+            kv_indptr_prefix,
+            kv,
+            kv_indices_extend,
+            kv_indptr_extend,
+            attn_sink,
+            softmax_scale,
+            out,
         )
 
     for _ in range(num_warmup):
@@ -894,104 +1146,3 @@ def test_dsv4_pa_sparse_prefill_opus(
     _call()
     torch.cuda.synchronize()
     print(f"test: done out={tuple(out.shape)}", flush=True)
-
-
-OP_METADATA: dict = {
-    "_flash_attn_forward": {
-        "fn": test__flash_attn_forward,
-        "category": "InferenceAttention",
-        "description": "AITER FlashAttention-2 forward (aiter.flash_attn_func)",
-        "dtypes": ["bf16", "fp16"],
-        "defaults": {"seq_len": 1024, "num_heads_q": 32, "num_heads_kv": 8, "head_dim": 128, "in_dtype": "bf16"},
-        "required_args": ["seq_len"],
-    },
-    "wrapper_fmha_v3_fwd": {
-        "fn": test_wrapper_fmha_v3_fwd,
-        "category": "InferenceAttention",
-        "description": "AITER FMHA v3 fixed-length forward (causal decode)",
-        "dtypes": ["bf16", "fp8"],
-        "defaults": {"seq_len": 1024, "num_heads_q": 32, "num_heads_kv": 8, "head_dim": 128, "in_dtype": "bf16"},
-        "required_args": ["seq_len"],
-    },
-    "mha_varlen_fwd": {
-        "fn": test_mha_varlen_fwd,
-        "category": "InferenceAttention",
-        "description": "AITER variable-length MHA forward (packed Q/K/V)",
-        "dtypes": ["bf16", "fp16"],
-        "defaults": {"seq_len": 1024, "num_heads_q": 32, "num_heads_kv": 8, "head_dim": 128, "in_dtype": "bf16"},
-        "required_args": ["seq_len"],
-    },
-    "fmha_v3_varlen_fwd": {
-        "fn": test_fmha_v3_varlen_fwd,
-        "category": "InferenceAttention",
-        "description": "AITER FMHA v3 variable-length forward",
-        "dtypes": ["bf16", "fp8"],
-        "defaults": {"seq_len": 1024, "num_heads_q": 32, "num_heads_kv": 8, "head_dim": 128, "in_dtype": "bf16"},
-        "required_args": ["seq_len"],
-    },
-    "unified_attention": {
-        "fn": test_unified_attention,
-        "category": "InferenceAttention",
-        "description": "AITER unified paged-decode attention (aiter.unified_attention)",
-        "dtypes": ["bf16", "fp8"],
-        "defaults": {"seq_len": 256, "num_heads_q": 32, "num_heads_kv": 8, "head_dim": 128, "in_dtype": "bf16"},
-        "required_args": ["seq_len"],
-    },
-    "vllm_unified_attention": {
-        "fn": test_vllm_unified_attention,
-        "category": "InferenceAttention",
-        "description": "vLLM unified paged-decode attention (torch.ops.vllm.unified_attention)",
-        "defaults": {"num_heads_q": 32, "num_heads_kv": 8, "head_dim": 128, "in_dtype": "bf16"},
-        "required_args": [],
-        "test_cases": [
-            {"num_decode_seqs": 1, "ctx_len": 256, "prefill_seq_len": 0, "kv_dtype": "fp8"},
-            {"num_decode_seqs": 1, "ctx_len": 256, "prefill_seq_len": 0, "kv_dtype": "bf16"},
-            {"num_decode_seqs": 1, "ctx_len": 512, "prefill_seq_len": 0, "kv_dtype": "fp8"},
-            {"num_decode_seqs": 1, "ctx_len": 512, "prefill_seq_len": 0, "kv_dtype": "bf16"},
-            {"num_decode_seqs": 1, "ctx_len": 1024, "prefill_seq_len": 0, "kv_dtype": "fp8"},
-            {"num_decode_seqs": 1, "ctx_len": 1024, "prefill_seq_len": 0, "kv_dtype": "bf16"},
-            {"num_decode_seqs": 128, "ctx_len": 256, "prefill_seq_len": 0, "kv_dtype": "fp8"},
-            {"num_decode_seqs": 128, "ctx_len": 256, "prefill_seq_len": 0, "kv_dtype": "bf16"},
-            {"num_decode_seqs": 128, "ctx_len": 1024, "prefill_seq_len": 0, "kv_dtype": "fp8"},
-            {"num_decode_seqs": 128, "ctx_len": 1024, "prefill_seq_len": 0, "kv_dtype": "bf16"},
-            {"num_decode_seqs": 512, "ctx_len": 256, "prefill_seq_len": 0, "kv_dtype": "fp8"},
-            {"num_decode_seqs": 512, "ctx_len": 256, "prefill_seq_len": 0, "kv_dtype": "bf16"},
-            {"num_decode_seqs": 512, "ctx_len": 1024, "prefill_seq_len": 0, "kv_dtype": "fp8"},
-            {"num_decode_seqs": 512, "ctx_len": 1024, "prefill_seq_len": 0, "kv_dtype": "bf16"},
-            {"num_decode_seqs": 1024, "ctx_len": 256, "prefill_seq_len": 0, "kv_dtype": "fp8"},
-            {"num_decode_seqs": 1024, "ctx_len": 256, "prefill_seq_len": 0, "kv_dtype": "bf16"},
-            {"num_decode_seqs": 1024, "ctx_len": 1024, "prefill_seq_len": 0, "kv_dtype": "fp8"},
-            {"num_decode_seqs": 1024, "ctx_len": 1024, "prefill_seq_len": 0, "kv_dtype": "bf16"},
-            {"num_decode_seqs": 128, "ctx_len": 512, "prefill_seq_len": 1024, "kv_dtype": "fp8"},
-            {"num_decode_seqs": 128, "ctx_len": 512, "prefill_seq_len": 1024, "kv_dtype": "bf16"},
-            {"num_decode_seqs": 512, "ctx_len": 512, "prefill_seq_len": 1024, "kv_dtype": "fp8"},
-            {"num_decode_seqs": 512, "ctx_len": 512, "prefill_seq_len": 1024, "kv_dtype": "bf16"},
-            {"num_decode_seqs": 1024, "ctx_len": 512, "prefill_seq_len": 1024, "kv_dtype": "fp8"},
-            {"num_decode_seqs": 1024, "ctx_len": 512, "prefill_seq_len": 1024, "kv_dtype": "bf16"},
-        ],
-    },
-    "dsv3_mla_prefill_ps_asm_fwd": {
-        "fn": test_dsv3_mla_prefill_ps_asm_fwd,
-        "category": "InferenceAttention",
-        "description": "DSV3 AITER ASM MLA prefill (persistent scheduler, FP8)",
-        "dtypes": ["fp8"],
-        "defaults": {"seq_len": 2048, "E": 16, "num_heads_q": 16, "head_dim": 192, "block_size": 1},
-        "required_args": ["seq_len"],
-    },
-    "dsv3_mla_reduce_v1": {
-        "fn": test_dsv3_mla_reduce_v1,
-        "category": "InferenceAttention",
-        "description": "DSV3 AITER MLA cross-split reduce (paired with prefill)",
-        "dtypes": ["fp8"],
-        "defaults": {"seq_len": 2048, "E": 16, "num_heads_q": 16, "head_dim": 192, "block_size": 1},
-        "required_args": ["seq_len"],
-    },
-    "dsv4_pa_sparse_prefill_opus": {
-        "fn": test_dsv4_pa_sparse_prefill_opus,
-        "category": "InferenceAttention",
-        "description": "DSV4 sparse paged prefill MLA attention (aiter)",
-        "dtypes": ["bf16"],
-        "defaults": {"M": 1819, "num_heads_q": 32, "head_dim": 512},
-        "required_args": ["M", "num_heads_q", "head_dim"],
-    },
-}

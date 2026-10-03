@@ -28,10 +28,10 @@ See ``tests/rope.md`` (to be generated) for the per-op dtype/shape matrix and
 
 from ._dtypes import resolve_dtype as _resolve_dtype
 
-
 # ---------------------------------------------------------------------------
 # 1. aiter rope_cached_positions_2c_fwd_impl  (aiter pattern)
 # ---------------------------------------------------------------------------
+
 
 def test_rope_cached_positions_2c_fwd_impl(
     M,
@@ -64,6 +64,7 @@ def test_rope_cached_positions_2c_fwd_impl(
         Rotation style: 0 = NEOX, 1 = GPT-J (default 0).
     """
     import torch
+
     try:
         from aiter.ops.rope import rope_cached_positions_2c_fwd_impl as _fn
     except ImportError:
@@ -100,20 +101,30 @@ def test_rope_cached_positions_2c_fwd_impl(
 
     for _ in range(num_warmup):
         _fn(
-            output_x, output_y,
-            input_x, input_y,
-            cos_cache, sin_cache,
+            output_x,
+            output_y,
+            input_x,
+            input_y,
+            cos_cache,
+            sin_cache,
             positions,
-            rotate_style, reuse_freqs_front_part, nope_first,
+            rotate_style,
+            reuse_freqs_front_part,
+            nope_first,
         )
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
     _fn(
-        output_x, output_y,
-        input_x, input_y,
-        cos_cache, sin_cache,
+        output_x,
+        output_y,
+        input_x,
+        input_y,
+        cos_cache,
+        sin_cache,
         positions,
-        rotate_style, reuse_freqs_front_part, nope_first,
+        rotate_style,
+        reuse_freqs_front_part,
+        nope_first,
     )
     torch.cuda.synchronize()
     print(
@@ -125,6 +136,7 @@ def test_rope_cached_positions_2c_fwd_impl(
 # ---------------------------------------------------------------------------
 # 2. sgl_kernel rotary_embedding  (SGLang pattern)
 # ---------------------------------------------------------------------------
+
 
 def test_sgl_kernel_rotary_embedding(
     M,
@@ -158,8 +170,10 @@ def test_sgl_kernel_rotary_embedding(
         NEOX-style rotation if True (default), GPT-J style if False.
     """
     import torch
+
     try:
         import sgl_kernel
+
         _fn = sgl_kernel.rotary_embedding
     except ImportError as exc:
         raise ImportError(
@@ -197,8 +211,10 @@ def test_sgl_kernel_rotary_embedding(
 # 3. dsv3_fused_qk_rope_cat_and_cache_mla  (aiter triton MLA RoPE + KV cache)
 # ---------------------------------------------------------------------------
 
-def test_dsv3_fused_qk_rope_cat_and_cache_mla(M, num_heads_q=16, head_dim=576,
-                                              group_size=64, num_warmup=3, **_):
+
+def test_dsv3_fused_qk_rope_cat_and_cache_mla(
+    M, num_heads_q=16, head_dim=576, group_size=64, num_warmup=3, **_
+):
     """``aiter.ops.triton.fusions.fused_kv_cache.fused_qk_rope_cat_and_cache_mla``.
 
     Constructs the smallest realistic MLA prefill/decode call:
@@ -234,17 +250,32 @@ def test_dsv3_fused_qk_rope_cat_and_cache_mla(M, num_heads_q=16, head_dim=576,
     q_pe = torch.randn(T, H_q, D_pe, dtype=dtype, device=device)
     k_nope = torch.randn(T, KH, D_lora, dtype=dtype, device=device)
     k_pe = torch.randn(T, KH, D_pe, dtype=dtype, device=device)
-    kv_cache = torch.zeros(num_kv_cache_tokens, KH, D_lora + D_pe, dtype=dtype, device=device)
+    kv_cache = torch.zeros(
+        num_kv_cache_tokens, KH, D_lora + D_pe, dtype=dtype, device=device
+    )
     pos = torch.randint(0, max_pos, (T,), dtype=torch.int64, device=device)
-    slot_mapping = torch.randperm(num_kv_cache_tokens, device=device, dtype=torch.int64)[:T]
+    slot_mapping = torch.randperm(
+        num_kv_cache_tokens, device=device, dtype=torch.int64
+    )[:T]
     cos = torch.randn(max_pos, 1, 1, D_pe // 2, dtype=dtype, device=device)
     sin = torch.randn(max_pos, 1, 1, D_pe // 2, dtype=dtype, device=device)
     k_scale = torch.ones((1,), dtype=torch.float32, device=device)[0]
 
     def _call():
         return fused_qk_rope_cat_and_cache_mla(
-            q_nope, q_pe, k_nope, k_pe, kv_cache, slot_mapping, pos, cos, sin, k_scale,
-            is_neox=True, num_decode_toks_for_zeros=0, apply_scale=False,
+            q_nope,
+            q_pe,
+            k_nope,
+            k_pe,
+            kv_cache,
+            slot_mapping,
+            pos,
+            cos,
+            sin,
+            k_scale,
+            is_neox=True,
+            num_decode_toks_for_zeros=0,
+            apply_scale=False,
         )
 
     for _ in range(num_warmup):
@@ -254,53 +285,3 @@ def test_dsv3_fused_qk_rope_cat_and_cache_mla(M, num_heads_q=16, head_dim=576,
     _call()
     torch.cuda.synchronize()
     print("test: done", flush=True)
-
-
-# ---------------------------------------------------------------------------
-# OP_METADATA
-# ---------------------------------------------------------------------------
-
-#: Metadata for all FusedRoPE harnesses in this module.
-OP_METADATA: dict = {
-    "rope_cached_positions_2c_fwd_impl": {
-        "fn":           test_rope_cached_positions_2c_fwd_impl,
-        "category":     "FusedRoPE",
-        "description":  "AITER 2-channel cached-positions forward RoPE",
-        "dtypes":       ["bf16", "fp16"],
-        "defaults":     {
-            "M": 822,
-            "num_heads_q": 16,
-            "num_heads_kv": 1,
-            "head_dim": 64,
-            "in_dtype": "bf16",
-        },
-        "required_args": ["M"],
-    },
-    "sgl_kernel_rotary_embedding": {
-        "fn":           test_sgl_kernel_rotary_embedding,
-        "category":     "FusedRoPE",
-        "description":  "SGLang in-place rotate-half RoPE (Q and K)",
-        "dtypes":       ["bf16", "fp16"],
-        "defaults":     {
-            "M": 1024,
-            "num_heads_q": 32,
-            "num_heads_kv": 8,
-            "head_dim": 128,
-            "in_dtype": "bf16",
-        },
-        "required_args": ["M"],
-    },
-    "dsv3_fused_qk_rope_cat_and_cache_mla": {
-        "fn":           test_dsv3_fused_qk_rope_cat_and_cache_mla,
-        "category":     "FusedRoPE",
-        "description":  "DSV3 AITER triton MLA RoPE + KV-cache fusion",
-        "dtypes":       ["bf16"],
-        "defaults":     {
-            "M": 32,
-            "num_heads_q": 16,
-            "head_dim": 576,
-            "group_size": 64,
-        },
-        "required_args": ["M"],
-    },
-}

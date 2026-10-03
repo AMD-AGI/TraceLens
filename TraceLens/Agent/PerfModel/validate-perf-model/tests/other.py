@@ -21,13 +21,15 @@ canonical parameter combinations.
 
 from ._dtypes import resolve_dtype as _resolve_dtype
 
-
 # ---------------------------------------------------------------------------
 # Activation _and_mul kernels (SwiGLU-style: input [M, 2N] -> out [M, N])
 # ---------------------------------------------------------------------------
 
+
 def _activation_and_mul(
-    fn_name, M, N,
+    fn_name,
+    M,
+    N,
     in_dtype="bf16",
     out_dtype="bf16",
     num_warmup=3,
@@ -63,34 +65,43 @@ def _activation_and_mul(
     print(f"test: done, shape={out.shape}", flush=True)
 
 
-def test_silu_and_mul(M, N, in_dtype="bf16", out_dtype="bf16",
-                      num_warmup=3, **_):
+def test_silu_and_mul(M, N, in_dtype="bf16", out_dtype="bf16", num_warmup=3, **_):
     """``aiter.silu_and_mul`` (SwiGLU gate*up).
 
     Kernel supports BF16 / FP16 input and BF16 / FP16 / FP32 output (with
     upcast accumulation). Production deployments use BF16 in / BF16 out.
     """
     _activation_and_mul(
-        "silu_and_mul", M, N,
-        in_dtype=in_dtype, out_dtype=out_dtype, num_warmup=num_warmup,
+        "silu_and_mul",
+        M,
+        N,
+        in_dtype=in_dtype,
+        out_dtype=out_dtype,
+        num_warmup=num_warmup,
     )
 
 
-def test_gelu_and_mul(M, N, in_dtype="bf16", out_dtype="bf16",
-                      num_warmup=3, **_):
+def test_gelu_and_mul(M, N, in_dtype="bf16", out_dtype="bf16", num_warmup=3, **_):
     """``aiter.gelu_and_mul`` (GeGLU)."""
     _activation_and_mul(
-        "gelu_and_mul", M, N,
-        in_dtype=in_dtype, out_dtype=out_dtype, num_warmup=num_warmup,
+        "gelu_and_mul",
+        M,
+        N,
+        in_dtype=in_dtype,
+        out_dtype=out_dtype,
+        num_warmup=num_warmup,
     )
 
 
-def test_gelu_tanh_and_mul(M, N, in_dtype="bf16", out_dtype="bf16",
-                           num_warmup=3, **_):
+def test_gelu_tanh_and_mul(M, N, in_dtype="bf16", out_dtype="bf16", num_warmup=3, **_):
     """``aiter.gelu_tanh_and_mul`` (tanh-approximated GeGLU)."""
     _activation_and_mul(
-        "gelu_tanh_and_mul", M, N,
-        in_dtype=in_dtype, out_dtype=out_dtype, num_warmup=num_warmup,
+        "gelu_tanh_and_mul",
+        M,
+        N,
+        in_dtype=in_dtype,
+        out_dtype=out_dtype,
+        num_warmup=num_warmup,
     )
 
 
@@ -98,8 +109,10 @@ def test_gelu_tanh_and_mul(M, N, in_dtype="bf16", out_dtype="bf16",
 # Quantization kernels
 # ---------------------------------------------------------------------------
 
+
 def test_dynamic_per_token_scaled_quant(
-    M, N,
+    M,
+    N,
     in_dtype="bf16",
     out_dtype="fp8",
     scale_dtype="fp32",
@@ -145,7 +158,8 @@ def test_dynamic_per_token_scaled_quant(
 
 
 def test_vllm_triton_group_quant_fp8(
-    M, N,
+    M,
+    N,
     in_dtype="bf16",
     out_dtype="fp8",
     scale_dtype="fp32",
@@ -193,8 +207,10 @@ def test_vllm_triton_group_quant_fp8(
 # fused_flatten_mxfp4_quant  — SGLang triton fused flatten + MXFP4 quant
 # ---------------------------------------------------------------------------
 
+
 def test_fused_flatten_mxfp4_quant(
-    M, N,
+    M,
+    N,
     in_dtype="bf16",
     group_size=128,
     num_warmup=3,
@@ -216,6 +232,7 @@ def test_fused_flatten_mxfp4_quant(
     group_size : int (default 128)
     """
     import torch
+
     in_t = _resolve_dtype(in_dtype)
     device = "cuda"
 
@@ -235,12 +252,19 @@ def test_fused_flatten_mxfp4_quant(
 
     try:
         import sgl_kernel
+
         _fn = sgl_kernel.fused_mxfp4_quant
-        def _call(): return _fn(x)  # noqa: E731
+
+        def _call():
+            return _fn(x)  # noqa: E731
+
     except (ImportError, AttributeError):
         try:
             from aiter.triton import fused_flatten_mxfp4_quant as _triton_fn
-            def _call(): return _triton_fn(x)  # noqa: E731
+
+            def _call():
+                return _triton_fn(x)  # noqa: E731
+
         except (ImportError, AttributeError) as exc:
             raise ImportError(
                 "Neither sgl_kernel.fused_mxfp4_quant nor "
@@ -259,6 +283,7 @@ def test_fused_flatten_mxfp4_quant(
 # ---------------------------------------------------------------------------
 # DSV3 / DSV4 group-quant harnesses
 # ---------------------------------------------------------------------------
+
 
 def test_dsv3_fused_flatten_fp8_group_quant(M, N, group_size=128, num_warmup=3, **_):
     """``aiter.ops.triton.quant.fused_fp8_quant.fused_flatten_fp8_group_quant``.
@@ -294,24 +319,31 @@ def test_dsv3_fused_flatten_fp8_group_quant(M, N, group_size=128, num_warmup=3, 
     print(f"test: done, out={out.shape} scale={scale.shape}", flush=True)
 
 
-def test_dsv4_dynamic_per_group_scaled_quant(M=1819, N=7168, group_size=32, num_warmup=3, **_):
+def test_dsv4_dynamic_per_group_scaled_quant(
+    M=1819, N=7168, group_size=32, num_warmup=3, **_
+):
     """``aiter.dynamic_per_group_scaled_quant`` — per-group dynamic MX-FP8 quant."""
     import torch
     import aiter
 
     K = N
-    print(f"test: dsv4_dynamic_per_group_scaled_quant M={M} K={K} group_size={group_size}", flush=True)
+    print(
+        f"test: dsv4_dynamic_per_group_scaled_quant M={M} K={K} group_size={group_size}",
+        flush=True,
+    )
     input_t = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
     out = torch.empty(M, K, device="cuda", dtype=aiter.dtypes.fp8)
     scales = torch.empty(M, K // group_size, device="cuda", dtype=aiter.dtypes.fp8_e8m0)
 
     for _ in range(num_warmup):
-        aiter.dynamic_per_group_scaled_quant(out, input_t, scales,
-                                             group_size=group_size, shuffle_scale=False)
+        aiter.dynamic_per_group_scaled_quant(
+            out, input_t, scales, group_size=group_size, shuffle_scale=False
+        )
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
-    aiter.dynamic_per_group_scaled_quant(out, input_t, scales,
-                                         group_size=group_size, shuffle_scale=False)
+    aiter.dynamic_per_group_scaled_quant(
+        out, input_t, scales, group_size=group_size, shuffle_scale=False
+    )
     torch.cuda.synchronize()
     print(f"test: done out={tuple(out.shape)} scales={tuple(scales.shape)}", flush=True)
 
@@ -319,6 +351,7 @@ def test_dsv4_dynamic_per_group_scaled_quant(M=1819, N=7168, group_size=32, num_
 # ---------------------------------------------------------------------------
 # DSV4 mHC (multi-residual hyper-connection) family
 # ---------------------------------------------------------------------------
+
 
 def test_dsv4_mhc_pre_gemm_sqrsum(M=1819, N=7168, hc_mult=4, num_warmup=3, **_):
     """``aiter.mhc_pre_gemm_sqrsum`` — flattened-residual GEMM + sum-of-squares."""
@@ -328,15 +361,16 @@ def test_dsv4_mhc_pre_gemm_sqrsum(M=1819, N=7168, hc_mult=4, num_warmup=3, **_):
 
     C = N
     hc_mult3 = hc_mult * 2 + hc_mult * hc_mult  # 24
-    hc_hidden = hc_mult * C                       # 28672
+    hc_hidden = hc_mult * C  # 28672
     print(f"test: dsv4_mhc_pre_gemm_sqrsum M={M} hc_mult={hc_mult} C={C}", flush=True)
 
     residual = torch.randn(M, hc_mult, C, dtype=torch.bfloat16, device="cuda")
     fn = torch.randn(hc_mult3, hc_hidden, dtype=torch.float32, device="cuda")
     split_k, tile_k = get_mhc_pre_splitk(M, hc_hidden)
 
-    out_pad = torch.empty(split_k, M, (hc_mult3 + 31) // 32 * 32,
-                          dtype=torch.float32, device="cuda")
+    out_pad = torch.empty(
+        split_k, M, (hc_mult3 + 31) // 32 * 32, dtype=torch.float32, device="cuda"
+    )
     out = out_pad[:, :, :hc_mult3]
     sqrsum = torch.empty(split_k, M, dtype=torch.float32, device="cuda")
 
@@ -349,7 +383,9 @@ def test_dsv4_mhc_pre_gemm_sqrsum(M=1819, N=7168, hc_mult=4, num_warmup=3, **_):
     print(f"test: done split_k={split_k} tile_k={tile_k}", flush=True)
 
 
-def test_dsv4_mhc_pre_big_fuse(M=1819, N=7168, hc_mult=4, split_k=16, num_warmup=3, **_):
+def test_dsv4_mhc_pre_big_fuse(
+    M=1819, N=7168, hc_mult=4, split_k=16, num_warmup=3, **_
+):
     """``aiter.mhc_pre_big_fuse`` — RMS-norm + Sinkhorn + fused residual mix."""
     import torch
     from aiter.ops.mhc import mhc_pre_big_fuse, get_mhc_pre_splitk
@@ -360,7 +396,10 @@ def test_dsv4_mhc_pre_big_fuse(M=1819, N=7168, hc_mult=4, split_k=16, num_warmup
         split_k, _ = get_mhc_pre_splitk(M, hc_mult * C)
     except Exception:
         pass
-    print(f"test: dsv4_mhc_pre_big_fuse M={M} hc_mult={hc_mult} C={C} split_k={split_k}", flush=True)
+    print(
+        f"test: dsv4_mhc_pre_big_fuse M={M} hc_mult={hc_mult} C={C} split_k={split_k}",
+        flush=True,
+    )
 
     residual = torch.randn(M, hc_mult, C, dtype=torch.bfloat16, device="cuda")
     gemm_out_mul = torch.randn(split_k, M, hc_mult3, dtype=torch.float32, device="cuda")
@@ -374,11 +413,19 @@ def test_dsv4_mhc_pre_big_fuse(M=1819, N=7168, hc_mult=4, split_k=16, num_warmup
 
     def _call():
         mhc_pre_big_fuse(
-            post_mix, comb_mix, layer_input,
-            gemm_out_mul, gemm_out_sqrsum,
-            hc_scale, hc_base, residual,
-            rms_eps=1e-6, hc_pre_eps=1e-6, hc_sinkhorn_eps=1e-6,
-            hc_post_mult_value=2.0, sinkhorn_repeat=20,
+            post_mix,
+            comb_mix,
+            layer_input,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            hc_scale,
+            hc_base,
+            residual,
+            rms_eps=1e-6,
+            hc_pre_eps=1e-6,
+            hc_sinkhorn_eps=1e-6,
+            hc_post_mult_value=2.0,
+            sinkhorn_repeat=20,
         )
 
     for _ in range(num_warmup):
@@ -411,99 +458,3 @@ def test_dsv4_mhc_post(M=1819, N=7168, hc_mult=4, num_warmup=3, **_):
     mhc_post(out, x, residual, post_layer_mix, comb_res_mix)
     torch.cuda.synchronize()
     print(f"test: done out={tuple(out.shape)}", flush=True)
-
-
-# ---------------------------------------------------------------------------
-# OP_METADATA
-# ---------------------------------------------------------------------------
-
-OP_METADATA: dict = {
-    "silu_and_mul": {
-        "fn":           test_silu_and_mul,
-        "category":     "UnaryElementwise",
-        "description":  "AITER silu_and_mul (SwiGLU gate*up, BF16)",
-        "dtypes":       ["bf16", "fp16"],
-        "defaults":     {"M": 2048, "N": 4096, "in_dtype": "bf16"},
-        "required_args": ["M", "N"],
-    },
-    "gelu_and_mul": {
-        "fn":           test_gelu_and_mul,
-        "category":     "UnaryElementwise",
-        "description":  "AITER gelu_and_mul (GeGLU)",
-        "dtypes":       ["bf16", "fp16"],
-        "defaults":     {"M": 2048, "N": 4096, "in_dtype": "bf16"},
-        "required_args": ["M", "N"],
-    },
-    "gelu_tanh_and_mul": {
-        "fn":           test_gelu_tanh_and_mul,
-        "category":     "UnaryElementwise",
-        "description":  "AITER gelu_tanh_and_mul (tanh-approximated GeGLU)",
-        "dtypes":       ["bf16", "fp16"],
-        "defaults":     {"M": 2048, "N": 4096, "in_dtype": "bf16"},
-        "required_args": ["M", "N"],
-    },
-    "dynamic_per_token_scaled_quant": {
-        "fn":           test_dynamic_per_token_scaled_quant,
-        "category":     "GroupQuant",
-        "description":  "AITER dynamic per-token FP8 quantization",
-        "dtypes":       ["bf16", "fp16"],
-        "defaults":     {"M": 2048, "N": 4096, "in_dtype": "bf16", "out_dtype": "fp8"},
-        "required_args": ["M", "N"],
-    },
-    "vllm_triton_group_quant_fp8": {
-        "fn":           test_vllm_triton_group_quant_fp8,
-        "category":     "GroupQuant",
-        "description":  "vLLM Triton per-token group FP8 quantization",
-        "dtypes":       ["bf16", "fp16"],
-        "defaults":     {"M": 2048, "N": 4096, "in_dtype": "bf16", "out_dtype": "fp8"},
-        "required_args": ["M", "N"],
-    },
-    "fused_flatten_mxfp4_quant": {
-        "fn":           test_fused_flatten_mxfp4_quant,
-        "category":     "GroupQuant",
-        "description":  "SGLang triton fused flatten + MXFP4 quant",
-        "dtypes":       ["bf16", "fp16"],
-        "defaults":     {"M": 822, "N": 7168, "group_size": 128, "in_dtype": "bf16"},
-        "required_args": ["M", "N"],
-    },
-    "dsv3_fused_flatten_fp8_group_quant": {
-        "fn":           test_dsv3_fused_flatten_fp8_group_quant,
-        "category":     "GroupQuant",
-        "description":  "DSV3 AITER triton fused flatten + FP8 group quant",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 32, "N": 2048, "group_size": 128},
-        "required_args": ["M", "N"],
-    },
-    "dsv4_dynamic_per_group_scaled_quant": {
-        "fn":           test_dsv4_dynamic_per_group_scaled_quant,
-        "category":     "GroupQuant",
-        "description":  "DSV4 per-group dynamic MX-FP8 quant (aiter)",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 1819, "N": 7168, "group_size": 32},
-        "required_args": ["M", "N"],
-    },
-    "dsv4_mhc_pre_gemm_sqrsum": {
-        "fn":           test_dsv4_mhc_pre_gemm_sqrsum,
-        "category":     "mHC_pre",
-        "description":  "DSV4 mHC pre GEMM + sum-of-squares (aiter)",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 1819, "N": 7168},
-        "required_args": ["M", "N"],
-    },
-    "dsv4_mhc_pre_big_fuse": {
-        "fn":           test_dsv4_mhc_pre_big_fuse,
-        "category":     "mHC_pre",
-        "description":  "DSV4 mHC pre RMS+Sinkhorn+mix fuse (aiter)",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 1819, "N": 7168},
-        "required_args": ["M", "N"],
-    },
-    "dsv4_mhc_post": {
-        "fn":           test_dsv4_mhc_post,
-        "category":     "mHC_post",
-        "description":  "DSV4 mHC post stream-merge (aiter)",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 1819, "N": 7168},
-        "required_args": ["M", "N"],
-    },
-}

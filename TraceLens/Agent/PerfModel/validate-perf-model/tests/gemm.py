@@ -23,10 +23,10 @@ by the validation harness.
 
 from ._dtypes import resolve_dtype as _resolve_dtype
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
 
 def _quantize_a8w8_blockscale(x_f, w_f, block_k, fp8=False):
     """Per-block quantize ``(x_f, w_f)`` into i8/fp8 + FP32 block scales.
@@ -50,6 +50,7 @@ def _quantize_a8w8_blockscale(x_f, w_f, block_k, fp8=False):
 
     if fp8:
         from aiter import dtypes as _aiter_dtypes
+
         fp8_dtype = _aiter_dtypes.fp8
         x_q = x_q.view(torch.uint8).view(fp8_dtype)
         w_q = w_q.view(torch.uint8).view(fp8_dtype)
@@ -61,8 +62,11 @@ def _quantize_a8w8_blockscale(x_f, w_f, block_k, fp8=False):
 # 1. gemm_a8w8_blockscale (aiter CK FP8 / INT8 block-scaled GEMM)
 # ---------------------------------------------------------------------------
 
+
 def test_gemm_a8w8_blockscale(
-    M, N, K,
+    M,
+    N,
+    K,
     in_dtype="i8",
     w_dtype="i8",
     out_dtype="bf16",
@@ -97,7 +101,7 @@ def test_gemm_a8w8_blockscale(
         flush=True,
     )
 
-    fp8_storage = (str(in_dtype).lower() == "fp8" or str(w_dtype).lower() == "fp8")
+    fp8_storage = str(in_dtype).lower() == "fp8" or str(w_dtype).lower() == "fp8"
     x_q, w_q, x_scale, w_scale = _quantize_a8w8_blockscale(
         torch.empty(M, K, device=device),
         torch.empty(N, K, device=device),
@@ -120,12 +124,20 @@ def test_gemm_a8w8_blockscale(
     print(f"test: done, shape={out.shape}", flush=True)
 
 
+# vllm_triton_gemm_a8w8_blockscale has no dedicated test; it reuses the aiter
+# a8w8 blockscale GEMM test.
+test_vllm_triton_gemm_a8w8_blockscale = test_gemm_a8w8_blockscale
+
+
 # ---------------------------------------------------------------------------
 # 2. gemm_a16w16_atomic_ (aiter ASM BF16 / FP16 GEMM with atomic accumulation)
 # ---------------------------------------------------------------------------
 
+
 def test_gemm_a16w16_atomic_(
-    M, N, K,
+    M,
+    N,
+    K,
     in_dtype="bf16",
     w_dtype="bf16",
     out_dtype="bf16",
@@ -186,8 +198,11 @@ def test_gemm_a16w16_atomic_(
 # 3. vllm::rocm_unquantized_gemm
 # ---------------------------------------------------------------------------
 
+
 def test_vllm_unquantized_gemm(
-    M, N, K,
+    M,
+    N,
+    K,
     in_dtype="bf16",
     w_dtype="bf16",
     out_dtype="bf16",
@@ -239,8 +254,11 @@ def test_vllm_unquantized_gemm(
 # 4. vllm::gemm_with_dynamic_quant (FP4 GEMM, Quark OCP MX scales)
 # ---------------------------------------------------------------------------
 
+
 def test_vllm_gemm_with_dynamic_quant(
-    M, N, K,
+    M,
+    N,
+    K,
     in_dtype="bf16",
     w_dtype="fp4x2",
     out_dtype="bf16",
@@ -305,8 +323,11 @@ def test_vllm_gemm_with_dynamic_quant(
 # 5. gemm_afp4wfp4  — AITER MXFP4 GEMM
 # ---------------------------------------------------------------------------
 
+
 def test_gemm_afp4wfp4(
-    M, N, K,
+    M,
+    N,
+    K,
     group_size=128,
     out_dtype="bf16",
     num_warmup=3,
@@ -328,8 +349,10 @@ def test_gemm_afp4wfp4(
         Output accumulation dtype.
     """
     import torch
+
     try:
         import aiter
+
         _fn = aiter.gemm_afp4wfp4_
     except (ImportError, AttributeError) as exc:
         raise ImportError(
@@ -375,6 +398,7 @@ def test_gemm_afp4wfp4(
 # 6. dsv3_flydsl_hgemm (aiter FlyDSL BF16 NT GEMM)
 # ---------------------------------------------------------------------------
 
+
 def test_dsv3_flydsl_hgemm(M, N, K, num_warmup=3, **_):
     """``aiter.ops.flydsl.gemm_kernels.flydsl_hgemm`` (BF16 NT GEMM).
 
@@ -415,6 +439,7 @@ def test_dsv3_flydsl_hgemm(M, N, K, num_warmup=3, **_):
 # 7. dsv3_batched_gemm_a8w8 (aiter triton batched A8W8 GEMM)
 # ---------------------------------------------------------------------------
 
+
 def test_dsv3_batched_gemm_a8w8(M, N, K, E, group_size=128, num_warmup=3, **_):
     """``aiter.ops.triton.gemm.batched.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant``.
 
@@ -454,6 +479,7 @@ def test_dsv3_batched_gemm_a8w8(M, N, K, E, group_size=128, num_warmup=3, **_):
 # 8. dsv4_opus_gemm_a16w16 (aiter opus batched BF16 GEMM, split-K)
 # ---------------------------------------------------------------------------
 
+
 def test_dsv4_opus_gemm_a16w16(M=1819, N=384, K=7168, num_warmup=3, **_):
     """``aiter.ops.opus.gemm_a16w16_opus`` — batched BF16 GEMM (split-K).
 
@@ -480,7 +506,10 @@ def test_dsv4_opus_gemm_a16w16(M=1819, N=384, K=7168, num_warmup=3, **_):
 # 9. dsv4_gemm_a8w8_blockscale_bpreshuffle_asm (FP8 block-scaled GEMM, ASM)
 # ---------------------------------------------------------------------------
 
-def test_dsv4_gemm_a8w8_blockscale_bpreshuffle_asm(M=1819, N=2048, K=7168, num_warmup=3, **_):
+
+def test_dsv4_gemm_a8w8_blockscale_bpreshuffle_asm(
+    M=1819, N=2048, K=7168, num_warmup=3, **_
+):
     """``aiter.gemm_a8w8_blockscale_bpreshuffle_asm`` — FP8 block-scaled GEMM (ASM)."""
     import torch
     import aiter
@@ -489,10 +518,14 @@ def test_dsv4_gemm_a8w8_blockscale_bpreshuffle_asm(M=1819, N=2048, K=7168, num_w
     block = 128
     scale_k = (K + block - 1) // block
     scale_n = (N + block - 1) // block
-    print(f"test: dsv4_gemm_a8w8_blockscale_bpreshuffle_asm M={M} N={N} K={K}", flush=True)
+    print(
+        f"test: dsv4_gemm_a8w8_blockscale_bpreshuffle_asm M={M} N={N} K={K}", flush=True
+    )
 
     A = (torch.rand(M, K, device="cuda", dtype=torch.float32) / 10).to(aiter.dtypes.fp8)
-    B_raw = (torch.rand(N, K, device="cuda", dtype=torch.float32) / 10).to(aiter.dtypes.fp8)
+    B_raw = (torch.rand(N, K, device="cuda", dtype=torch.float32) / 10).to(
+        aiter.dtypes.fp8
+    )
     B = shuffle_weight(B_raw, layout=(16, 16))
     A_scale = torch.rand(M, scale_k, device="cuda", dtype=torch.float32)
     A_scale = A_scale.transpose(0, 1).contiguous().view(M, scale_k)
@@ -506,91 +539,3 @@ def test_dsv4_gemm_a8w8_blockscale_bpreshuffle_asm(M=1819, N=2048, K=7168, num_w
     aiter.gemm_a8w8_blockscale_bpreshuffle_asm(A, B, out, A_scale, B_scale)
     torch.cuda.synchronize()
     print(f"test: done out={tuple(out.shape)}", flush=True)
-
-
-# ---------------------------------------------------------------------------
-# OP_METADATA
-# ---------------------------------------------------------------------------
-
-OP_METADATA: dict = {
-    "gemm_a8w8_blockscale": {
-        "fn":           test_gemm_a8w8_blockscale,
-        "category":     "GEMM",
-        "description":  "AITER FP8/INT8 block-scaled GEMM (CK / CKTile / ASM)",
-        "dtypes":       ["i8", "fp8"],
-        "defaults":     {"M": 2048, "N": 4096, "K": 7168, "in_dtype": "i8"},
-        "required_args": ["M", "N", "K"],
-    },
-    "gemm_a16w16_atomic_": {
-        "fn":           test_gemm_a16w16_atomic_,
-        "category":     "GEMM",
-        "description":  "AITER BF16/FP16 GEMM (atomic-add ASM, gemm_a16w16_asm)",
-        "dtypes":       ["bf16", "fp16"],
-        "defaults":     {"M": 2048, "N": 4096, "K": 7168, "in_dtype": "bf16"},
-        "required_args": ["M", "N", "K"],
-    },
-    "vllm_unquantized_gemm": {
-        "fn":           test_vllm_unquantized_gemm,
-        "category":     "GEMM",
-        "description":  "vLLM unquantized BF16 GEMM (gemm_a16w16_asm dispatch)",
-        "dtypes":       ["bf16", "fp16"],
-        "defaults":     {"M": 2048, "N": 4096, "K": 7168, "in_dtype": "bf16"},
-        "required_args": ["M", "N", "K"],
-    },
-    "vllm_triton_gemm_a8w8_blockscale": {
-        "fn":           test_gemm_a8w8_blockscale,
-        "category":     "GEMM",
-        "description":  "vLLM Triton FP8/INT8 block-scaled GEMM (maps to gemm_a8w8_blockscale)",
-        "dtypes":       ["i8", "fp8"],
-        "defaults":     {"M": 2048, "N": 4096, "K": 7168, "in_dtype": "i8"},
-        "required_args": ["M", "N", "K"],
-    },
-    "vllm_gemm_with_dynamic_quant": {
-        "fn":           test_vllm_gemm_with_dynamic_quant,
-        "category":     "GEMM",
-        "description":  "vLLM Quark OCP MX FP4 GEMM (gemm_with_dynamic_quant)",
-        "dtypes":       ["fp4x2"],
-        "defaults":     {"M": 2048, "N": 4096, "K": 7168, "w_dtype": "fp4x2"},
-        "required_args": ["M", "N", "K"],
-    },
-    "gemm_afp4wfp4": {
-        "fn":           test_gemm_afp4wfp4,
-        "category":     "GEMM",
-        "description":  "AITER MXFP4 GEMM (gemm_afp4wfp4_)",
-        "dtypes":       ["fp4x2"],
-        "defaults":     {"M": 822, "N": 2112, "K": 3584, "group_size": 128},
-        "required_args": ["M", "N", "K"],
-    },
-    "dsv3_flydsl_hgemm": {
-        "fn":           test_dsv3_flydsl_hgemm,
-        "category":     "GEMM",
-        "description":  "DSV3 AITER FlyDSL BF16 NT GEMM (flydsl_hgemm)",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 2048, "N": 4096, "K": 7168},
-        "required_args": ["M", "N", "K"],
-    },
-    "dsv3_batched_gemm_a8w8": {
-        "fn":           test_dsv3_batched_gemm_a8w8,
-        "category":     "GEMM",
-        "description":  "DSV3 AITER triton batched A8W8 GEMM (per-token-group / per-batch FP8)",
-        "dtypes":       ["fp8"],
-        "defaults":     {"M": 32, "N": 4096, "K": 7168, "E": 16, "group_size": 128},
-        "required_args": ["M", "N", "K", "E"],
-    },
-    "dsv4_opus_gemm_a16w16": {
-        "fn":           test_dsv4_opus_gemm_a16w16,
-        "category":     "GEMM",
-        "description":  "DSV4 batched BF16 GEMM (aiter opus split-K)",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 1819, "N": 384, "K": 7168},
-        "required_args": ["M", "N", "K"],
-    },
-    "dsv4_gemm_a8w8_blockscale_bpreshuffle_asm": {
-        "fn":           test_dsv4_gemm_a8w8_blockscale_bpreshuffle_asm,
-        "category":     "GEMM",
-        "description":  "DSV4 FP8 block-scaled GEMM, B preshuffle (aiter ASM)",
-        "dtypes":       ["fp8"],
-        "defaults":     {"M": 1819, "N": 2048, "K": 7168},
-        "required_args": ["M", "N", "K"],
-    },
-}

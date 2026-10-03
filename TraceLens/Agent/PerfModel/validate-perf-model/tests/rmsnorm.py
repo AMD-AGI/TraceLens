@@ -24,8 +24,9 @@ for the canonical parameter combinations.
 from ._dtypes import resolve_dtype as _resolve_dtype
 
 
-def test_rms_norm(M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16",
-                  num_warmup=3, **_):
+def test_rms_norm(
+    M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16", num_warmup=3, **_
+):
     """``aiter.rms_norm`` (CK).
 
     Parameters
@@ -61,8 +62,9 @@ def test_rms_norm(M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16",
     print(f"test: done, shape={out.shape}", flush=True)
 
 
-def test_rmsnorm(M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16",
-                 num_warmup=3, **_):
+def test_rmsnorm(
+    M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16", num_warmup=3, **_
+):
     """``aiter.ops.rmsnorm.rmsnorm`` (compiled CK op, out-first API).
 
     Same dtype constraints as :func:`test_rms_norm` -- input/weight/output
@@ -96,8 +98,9 @@ def test_rmsnorm(M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16",
     print(f"test: done, shape={out.shape}", flush=True)
 
 
-def test_add_rmsnorm(M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16",
-                     num_warmup=3, **_):
+def test_add_rmsnorm(
+    M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16", num_warmup=3, **_
+):
     """``aiter.fused_add_rms_norm_cu`` (residual-add + RMSNorm).
 
     Parameters mirror :func:`test_rms_norm`. The kernel updates ``inp`` and
@@ -131,9 +134,16 @@ def test_add_rmsnorm(M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16",
     print("test: done", flush=True)
 
 
-def test_rmsnorm_dynamicquant(M, N, in_dtype="bf16", w_dtype="bf16",
-                              out_dtype="fp8", scale_dtype="fp32",
-                              num_warmup=3, **_):
+def test_rmsnorm_dynamicquant(
+    M,
+    N,
+    in_dtype="bf16",
+    w_dtype="bf16",
+    out_dtype="fp8",
+    scale_dtype="fp32",
+    num_warmup=3,
+    **_,
+):
     """``aiter.ops.rmsnorm.rmsnorm2d_fwd_with_dynamicquant`` (fused RMSNorm + dynamic FP8 quant).
 
     Parameters
@@ -174,9 +184,17 @@ def test_rmsnorm_dynamicquant(M, N, in_dtype="bf16", w_dtype="bf16",
     print(f"test: done, shape={out.shape}", flush=True)
 
 
-def test_vllm_rmsnorm_fp8_group_quant(M, N, in_dtype="bf16", w_dtype="bf16",
-                                      out_dtype="fp8", scale_dtype="fp32",
-                                      group_size=128, num_warmup=3, **_):
+def test_vllm_rmsnorm_fp8_group_quant(
+    M,
+    N,
+    in_dtype="bf16",
+    w_dtype="bf16",
+    out_dtype="fp8",
+    scale_dtype="fp32",
+    group_size=128,
+    num_warmup=3,
+    **_,
+):
     """``vllm::rocm_aiter_rmsnorm_fp8_group_quant`` (fused RMSNorm + FP8 group quant).
 
     Parameters
@@ -217,9 +235,17 @@ def test_vllm_rmsnorm_fp8_group_quant(M, N, in_dtype="bf16", w_dtype="bf16",
     print(f"test: done, x_q={x_q.shape} x_scales={x_scales.shape}", flush=True)
 
 
-def test_vllm_rmsnorm_add_fp8_group_quant(M, N, in_dtype="bf16", w_dtype="bf16",
-                                          out_dtype="fp8", scale_dtype="fp32",
-                                          group_size=128, num_warmup=3, **_):
+def test_vllm_rmsnorm_add_fp8_group_quant(
+    M,
+    N,
+    in_dtype="bf16",
+    w_dtype="bf16",
+    out_dtype="fp8",
+    scale_dtype="fp32",
+    group_size=128,
+    num_warmup=3,
+    **_,
+):
     """``vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant``."""
     import torch
     import vllm._aiter_ops as vllm
@@ -242,7 +268,9 @@ def test_vllm_rmsnorm_add_fp8_group_quant(M, N, in_dtype="bf16", w_dtype="bf16",
     fn = torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant
 
     for _ in range(num_warmup):
-        x_q, res_out, x_scales = fn(x.clone(), residual.clone(), weight, eps, group_size)
+        x_q, res_out, x_scales = fn(
+            x.clone(), residual.clone(), weight, eps, group_size
+        )
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
     x_q, res_out, x_scales = fn(x.clone(), residual.clone(), weight, eps, group_size)
@@ -250,8 +278,9 @@ def test_vllm_rmsnorm_add_fp8_group_quant(M, N, in_dtype="bf16", w_dtype="bf16",
     print(f"test: done, x_q={x_q.shape} res={res_out.shape}", flush=True)
 
 
-def test_fused_rms_mxfp4_quant(M, N, in_dtype="bf16", w_dtype="bf16",
-                               num_warmup=3, **_):
+def test_fused_rms_mxfp4_quant(
+    M, N, in_dtype="bf16", w_dtype="bf16", num_warmup=3, **_
+):
     """SGLang triton fused RMSNorm + MXFP4 quantization kernel.
 
     Single-path variant: normalizes ``x1 [M, N]`` with weight ``w [N]`` and
@@ -266,6 +295,7 @@ def test_fused_rms_mxfp4_quant(M, N, in_dtype="bf16", w_dtype="bf16",
     in_dtype, w_dtype : {"bf16", "fp16"}
     """
     import torch
+
     in_t = _resolve_dtype(in_dtype)
     w_t = _resolve_dtype(w_dtype)
     device = "cuda"
@@ -280,12 +310,19 @@ def test_fused_rms_mxfp4_quant(M, N, in_dtype="bf16", w_dtype="bf16",
 
     try:
         import sgl_kernel
+
         _fn = sgl_kernel.fused_rms_mxfp4_quant
-        def _call(): return _fn(x, weight)  # noqa: E731
+
+        def _call():
+            return _fn(x, weight)  # noqa: E731
+
     except (ImportError, AttributeError):
         try:
             from aiter.triton import fused_rms_mxfp4_quant as _triton_fn
-            def _call(): return _triton_fn(x, weight)  # noqa: E731
+
+            def _call():
+                return _triton_fn(x, weight)  # noqa: E731
+
         except (ImportError, AttributeError) as exc:
             raise ImportError(
                 "Neither sgl_kernel.fused_rms_mxfp4_quant nor "
@@ -299,67 +336,3 @@ def test_fused_rms_mxfp4_quant(M, N, in_dtype="bf16", w_dtype="bf16",
     _call()
     torch.cuda.synchronize()
     print("test: done", flush=True)
-
-
-# ---------------------------------------------------------------------------
-# OP_METADATA
-# ---------------------------------------------------------------------------
-
-OP_METADATA: dict = {
-    "rms_norm": {
-        "fn":           test_rms_norm,
-        "category":     "RMSNorm",
-        "description":  "AITER CK RMSNorm (aiter.rms_norm)",
-        "dtypes":       ["bf16", "fp16"],
-        "defaults":     {"M": 2048, "N": 7168, "in_dtype": "bf16"},
-        "required_args": ["M", "N"],
-    },
-    "rmsnorm": {
-        "fn":           test_rmsnorm,
-        "category":     "RMSNorm",
-        "description":  "AITER compiled CK RMSNorm (out-first API)",
-        "dtypes":       ["bf16", "fp16"],
-        "defaults":     {"M": 2048, "N": 7168, "in_dtype": "bf16"},
-        "required_args": ["M", "N"],
-    },
-    "add_rmsnorm": {
-        "fn":           test_add_rmsnorm,
-        "category":     "RMSNorm",
-        "description":  "AITER fused residual-add + RMSNorm (fused_add_rms_norm_cu)",
-        "dtypes":       ["bf16", "fp16"],
-        "defaults":     {"M": 2048, "N": 7168, "in_dtype": "bf16"},
-        "required_args": ["M", "N"],
-    },
-    "rmsnorm_dynamicquant": {
-        "fn":           test_rmsnorm_dynamicquant,
-        "category":     "RMSNorm",
-        "description":  "AITER RMSNorm + dynamic per-token FP8 quant",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 2048, "N": 7168, "in_dtype": "bf16", "out_dtype": "fp8"},
-        "required_args": ["M", "N"],
-    },
-    "vllm_rmsnorm_fp8_group_quant": {
-        "fn":           test_vllm_rmsnorm_fp8_group_quant,
-        "category":     "RMSNorm",
-        "description":  "vLLM AITER fused RMSNorm + FP8 group quant",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 2048, "N": 7168, "in_dtype": "bf16", "out_dtype": "fp8"},
-        "required_args": ["M", "N"],
-    },
-    "vllm_rmsnorm_add_fp8_group_quant": {
-        "fn":           test_vllm_rmsnorm_add_fp8_group_quant,
-        "category":     "RMSNorm",
-        "description":  "vLLM AITER fused residual-add + RMSNorm + FP8 group quant",
-        "dtypes":       ["bf16"],
-        "defaults":     {"M": 2048, "N": 7168, "in_dtype": "bf16", "out_dtype": "fp8"},
-        "required_args": ["M", "N"],
-    },
-    "fused_rms_mxfp4_quant": {
-        "fn":           test_fused_rms_mxfp4_quant,
-        "category":     "RMSNorm",
-        "description":  "SGLang triton fused RMSNorm + MXFP4 quant",
-        "dtypes":       ["bf16", "fp16"],
-        "defaults":     {"M": 822, "N": 7168, "in_dtype": "bf16"},
-        "required_args": ["M", "N"],
-    },
-}

@@ -6,16 +6,12 @@
 
 """Generic CSV-driven harness for ``--from-report-dir`` mode.
 
-For ops whose entry in ``OP_CALL_SPEC`` does *not* set
-``use_existing_harness=True``, the parent ``validate_perf_model.py`` doesn't
-know specific dimensional defaults; instead it forwards the raw ``Input
-Dims`` and ``Input type`` columns from the trace's
-``unified_perf_summary.csv`` and lets ``test_generic_simple_op`` build random
-tensors of the right shapes and dtypes, then dispatch to the registered
-callable here.
-
-This replaces the runtime string template that
-``generate_harness_from_csv`` previously emitted.
+For report rows whose op was not registered with ``csv_harness=True`` in
+``perf_model_harnesses.py``, ``validate_perf_model.py`` forwards the raw
+``Input Dims`` and ``Input type`` columns from the trace's
+``unified_perf_summary.csv``. ``test_generic_simple_op`` builds random
+tensors of those shapes and dtypes and dispatches to the op's
+``OP_CALL_SPEC`` entry here.
 """
 
 import inspect
@@ -60,22 +56,27 @@ _FP8_DTYPES = {
 
 def _call_gemm_a8w8_blockscale(t):
     import aiter
+
     return aiter.gemm_a8w8_blockscale(t[0], t[1], t[2], t[3])
 
 
 def _call_gemm_a16w16_asm(t):
     from aiter.ops.gemm_op_a16w16 import gemm_a16w16_asm
+
     # Some traces record the output operand as an empty shape (it is allocated
     # inside the op), so materialise it from the A/B shapes when it is absent.
     out = t.get(2)
     if out is None:
-        out = torch.empty((t[0].shape[0], t[1].shape[0]), dtype=t[0].dtype, device="cuda")
+        out = torch.empty(
+            (t[0].shape[0], t[1].shape[0]), dtype=t[0].dtype, device="cuda"
+        )
     return gemm_a16w16_asm(t[0], t[1], out)
 
 
 def _call_vllm_rocm_unquantized_gemm(t):
     import vllm  # noqa: F401
     import vllm.model_executor.layers.utils  # noqa: F401  (registers the op)
+
     # Dispatch through the real vLLM op so the skinny-GEMM / torch.mm decision
     # matches the trace; the aiter ASM kernel alone rejects some N values.
     return torch.ops.vllm.rocm_unquantized_gemm(t[0], t[1], t.get(2))
@@ -83,11 +84,13 @@ def _call_vllm_rocm_unquantized_gemm(t):
 
 def _call_aiter_silu_and_mul(t):
     import aiter
+
     return aiter.silu_and_mul(t[0], t[1])
 
 
 def _call_sgl_kernel_silu_and_mul(t):
     import sgl_kernel
+
     # The trace records (out, input) while the Python wrapper takes
     # (input, out); the input is twice as wide, so pick by shape.
     a, b = t[0], t[1]
@@ -97,51 +100,63 @@ def _call_sgl_kernel_silu_and_mul(t):
 
 def _call_aiter_gelu_and_mul(t):
     import aiter
+
     return aiter.gelu_and_mul(t[0], t[1])
 
 
 def _call_aiter_gelu_tanh_and_mul(t):
     import aiter
+
     return aiter.gelu_tanh_and_mul(t[0], t[1])
 
 
 def _call_aiter_rms_norm(t):
     import aiter
+
     return aiter.rms_norm(t[0], t[1], 1e-06)
 
 
 def _call_aiter_fused_add_rms_norm(t):
     import aiter
+
     return aiter.fused_add_rms_norm_cu(t[0].clone(), t[1].clone(), t[4], 1e-06)
 
 
 def _call_rmsnorm_dynamicquant(t):
     from aiter.ops.rmsnorm import rmsnorm2d_fwd_with_dynamicquant
+
     return rmsnorm2d_fwd_with_dynamicquant(t[0], t[1], 1e-06)
 
 
 def _call_dynamic_per_token_scaled_quant(t):
     import aiter
+
     return aiter.dynamic_per_token_scaled_quant(t[0], t[1], t[2])
 
 
 def _call_flash_attn_func(t):
     import aiter
+
     return aiter.flash_attn_func(t[0], t[1], t[2], causal=True)
 
 
 def _call_vllm_triton_group_quant_fp8(t):
     from vllm.model_executor.layers.quantization.utils import fp8_utils  # noqa: F401
+
     return torch.ops.vllm.rocm_aiter_triton_per_token_group_quant_fp8(t[0], t[1], t[2])
 
 
 def _call_vllm_rmsnorm_fp8_group_quant(t):
     import vllm._aiter_ops  # noqa: F401
-    return torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant(t[0], t[1], t[2], t[3], 1e-06, 128)
+
+    return torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant(
+        t[0], t[1], t[2], t[3], 1e-06, 128
+    )
 
 
 def _call_vllm_rmsnorm_add_fp8_group_quant(t):
     import vllm._aiter_ops  # noqa: F401
+
     return torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant(
         t[0], t[1], t[2], t[3], t[4], 1e-06, 128
     )
@@ -151,6 +166,7 @@ def _call_dsv3_fused_qk_rope_cat_and_cache_mla(t):
     from aiter.ops.triton.fusions.fused_kv_cache import (
         fused_qk_rope_cat_and_cache_mla,
     )
+
     q_nope = t[0]
     q_pe = t[1]
     k_nope = t[2]
@@ -164,13 +180,25 @@ def _call_dsv3_fused_qk_rope_cat_and_cache_mla(t):
     pos = torch.randint(0, cos.shape[0], (T,), device="cuda", dtype=torch.int64)
     k_scale = torch.ones((1,), dtype=torch.float32, device="cuda")[0]
     return fused_qk_rope_cat_and_cache_mla(
-        q_nope, q_pe, k_nope, k_pe, kv_cache, slot, pos, cos, sin, k_scale,
-        is_neox=True, num_decode_toks_for_zeros=0, apply_scale=False,
+        q_nope,
+        q_pe,
+        k_nope,
+        k_pe,
+        kv_cache,
+        slot,
+        pos,
+        cos,
+        sin,
+        k_scale,
+        is_neox=True,
+        num_decode_toks_for_zeros=0,
+        apply_scale=False,
     )
 
 
 def _call_dsv3_dynamic_per_group_scaled_quant_fp4(t):
     import aiter
+
     x = t[1]
     M, N = x.shape
     out = torch.empty((M, N // 2), dtype=torch.uint8, device="cuda")
@@ -180,16 +208,19 @@ def _call_dsv3_dynamic_per_group_scaled_quant_fp4(t):
 
 def _call_dsv3_quant_dynamic_mxfp4_quant(t):
     from aiter.utility.fp4_utils import dynamic_mxfp4_quant
+
     return dynamic_mxfp4_quant(t[0])
 
 
 def _call_aiter_rmsnorm(t):
     from aiter.ops.rmsnorm import rmsnorm
+
     return rmsnorm(t[0], t[1], t[2], 1e-06)
 
 
 def _call_gemm_afp4wfp4(t):
     from aiter.ops.triton.gemm.basic.gemm_afp4wfp4 import gemm_afp4wfp4_
+
     # Signature is (x, w, x_scales, w_scales, dtype, y): operand 4 in the trace
     # is the output ScalarType, not a tensor, and operand 5 is the output.
     out = t[5]
@@ -198,15 +229,26 @@ def _call_gemm_afp4wfp4(t):
 
 def _call_rope_cached_positions_2c_fwd_impl(t):
     from aiter.ops.rope import rope_cached_positions_2c_fwd_impl
+
     # Positions index the cos/sin caches, so they must stay in range; the
     # generic allocator zero-fills integer tensors, which is already valid.
     return rope_cached_positions_2c_fwd_impl(
-        t[0], t[1], t[2], t[3], t[4], t[5], t[6], 0, True, False,
+        t[0],
+        t[1],
+        t[2],
+        t[3],
+        t[4],
+        t[5],
+        t[6],
+        0,
+        True,
+        False,
     )
 
 
 def _call_fused_rms_mxfp4_quant(t):
     from aiter.ops.triton.quant import fused_rms_mxfp4_quant
+
     # Two shapes occur: a QK-pair variant (x1, w1, x2, w2) and a single-input
     # variant that may carry a residual tensor in the last operand slot.
     x2 = t.get(2)
@@ -219,36 +261,48 @@ def _call_fused_rms_mxfp4_quant(t):
 
 def _call_fused_flatten_mxfp4_quant(t):
     from aiter.ops.triton.quant import fused_flatten_mxfp4_quant
+
     return fused_flatten_mxfp4_quant(t[0])
 
 
 def _call_batched_gemm_a16wfp4(t, c):
     from aiter.ops.triton.gemm.batched.batched_gemm_a16wfp4 import batched_gemm_a16wfp4_
+
     # (x, w, w_scales, dtype, y, config, transpose_bm, prequant). transpose_bm
     # decides whether y is (M, B, N) or (B, M, N), and it varies per call site.
     out = t[4]
     transpose_bm = c.get(6)
     if transpose_bm is None:
         transpose_bm = out.shape[0] != t[0].shape[0]
-    return batched_gemm_a16wfp4_(t[0], t[1], t[2], out.dtype, out, None,
-                                 bool(transpose_bm), bool(c.get(7, True)))
+    return batched_gemm_a16wfp4_(
+        t[0], t[1], t[2], out.dtype, out, None, bool(transpose_bm), bool(c.get(7, True))
+    )
 
 
 def _call_fused_qk_rmsnorm(t):
     from aiter.ops.fused_qk_norm_rope_cache_quant import fused_qk_rmsnorm
+
     return fused_qk_rmsnorm(t[0], t[1], 1e-06, t[3], t[4], 1e-06)
 
 
 def _call_biased_grouped_topk(t, c):
     from aiter.ops.topk import biased_grouped_topk
+
     return biased_grouped_topk(
-        t[0], t[1], t[2], t[3],
-        c.get(4, 1), c.get(5, 1), c.get(6, True), c.get(7, 1.0),
+        t[0],
+        t[1],
+        t[2],
+        t[3],
+        c.get(4, 1),
+        c.get(5, 1),
+        c.get(6, True),
+        c.get(7, 1.0),
     )
 
 
 def _call_moe_sorting_fwd(t, c):
     from aiter.ops.moe_sorting import moe_sorting_fwd
+
     # (topk_ids, topk_weights, sorted_token_ids, sorted_weights,
     #  sorted_expert_ids, num_valid_ids, moe_buf, num_experts, unit_size, ...)
     num_experts = c.get(7, 256)
@@ -256,23 +310,41 @@ def _call_moe_sorting_fwd(t, c):
     # topk_ids must address a real expert; the generic allocator zero-fills
     # integer tensors, which routes every token to expert 0 and skews the sort,
     # so spread them across the expert range instead.
-    topk_ids = torch.randint(0, num_experts, t[0].shape, dtype=t[0].dtype, device="cuda")
-    return moe_sorting_fwd(topk_ids, t[1], t[2], t[3], t[4], t[5], t[6],
-                           num_experts, unit_size, None, None, c.get(11, 0))
+    topk_ids = torch.randint(
+        0, num_experts, t[0].shape, dtype=t[0].dtype, device="cuda"
+    )
+    return moe_sorting_fwd(
+        topk_ids,
+        t[1],
+        t[2],
+        t[3],
+        t[4],
+        t[5],
+        t[6],
+        num_experts,
+        unit_size,
+        None,
+        None,
+        c.get(11, 0),
+    )
 
 
 def _call_mxfp4_moe_sort_hip(t, c):
     from aiter.ops.quant import mxfp4_moe_sort_hip
+
     # (out_scale, scale, sorted_ids, num_valid_ids, token_num, cols)
     token_num = c.get(4, t[1].shape[0])
     cols = c.get(5, t[1].shape[1] * 32)
-    sorted_ids = torch.randint(0, t[1].shape[0], t[2].shape, dtype=t[2].dtype, device="cuda")
+    sorted_ids = torch.randint(
+        0, t[1].shape[0], t[2].shape, dtype=t[2].dtype, device="cuda"
+    )
     num_valid = torch.full(t[3].shape, t[2].shape[0], dtype=t[3].dtype, device="cuda")
     return mxfp4_moe_sort_hip(t[0], t[1], sorted_ids, num_valid, token_num, cols)
 
 
 def _call_vllm_concat_and_cache_mla(t):
     import vllm._C  # noqa: F401  (registers torch.ops._C_cache_ops.*)
+
     kv_c, k_pe, kv_cache = t[0], t[1], t[2]
     # Distinct slots keep the write pattern representative; the traced
     # slot_mapping is a permutation over cache blocks.
@@ -281,24 +353,29 @@ def _call_vllm_concat_and_cache_mla(t):
     slot_mapping = torch.randperm(n_slots, device="cuda", dtype=torch.int64)[:n_tokens]
     scale = torch.ones((1,), dtype=torch.float32, device="cuda")
     return torch.ops._C_cache_ops.concat_and_cache_mla(
-        kv_c, k_pe, kv_cache, slot_mapping.contiguous(), "auto", scale)
+        kv_c, k_pe, kv_cache, slot_mapping.contiguous(), "auto", scale
+    )
 
 
 def _call_vllm_concat_mla_q(t):
     import vllm._C  # noqa: F401
+
     return torch.ops._C_cache_ops.concat_mla_q(t[0], t[1], t[2])
 
 
 def _call_vllm_per_token_group_fp8_quant(t):
     import vllm._C  # noqa: F401
+
     # Traced scalars: group_size=128, eps=1e-10, fp8 range +/-448, ue8m0 scales.
     group_size = t[0].shape[-1]
     return torch.ops._C.per_token_group_fp8_quant(
-        t[0], t[1], t[2], group_size, 1e-10, -448.0, 448.0, True, False, False)
+        t[0], t[1], t[2], group_size, 1e-10, -448.0, 448.0, True, False, False
+    )
 
 
 def _call_flash_attn_varlen_forward(t):
     import flash_attn  # noqa: F401  (registers torch.ops.flash_attn.*)
+
     q, k, v = t[0], t[1], t[2]
     # cu_seqlens has n_seqs+1 entries; the trace records only its length, so
     # split the packed tokens evenly across that many sequences.
@@ -307,8 +384,21 @@ def _call_flash_attn_varlen_forward(t):
     cu = cu.round().to(torch.int32).contiguous()
     max_seqlen = int((cu[1:] - cu[:-1]).max().item())
     return torch.ops.flash_attn._flash_attn_varlen_forward(
-        q, k, v, cu, cu, max_seqlen, max_seqlen,
-        0.0, q.shape[-1] ** -0.5, True, -1, -1, 0.0, None, False,
+        q,
+        k,
+        v,
+        cu,
+        cu,
+        max_seqlen,
+        max_seqlen,
+        0.0,
+        q.shape[-1] ** -0.5,
+        True,
+        -1,
+        -1,
+        0.0,
+        None,
+        False,
     )
 
 
@@ -328,9 +418,21 @@ OP_CALL_SPEC = {
         "output_indices": [],
         "skip_indices": [],
     },
-    "gemm_a8w8_blockscale": {"call": _call_gemm_a8w8_blockscale, "output_indices": [4], "skip_indices": []},
-    "gemm_a16w16_atomic_": {"call": _call_gemm_a16w16_asm, "output_indices": [2], "skip_indices": []},
-    "gemm_afp4wfp4": {"call": _call_gemm_afp4wfp4, "output_indices": [5], "skip_indices": []},
+    "gemm_a8w8_blockscale": {
+        "call": _call_gemm_a8w8_blockscale,
+        "output_indices": [4],
+        "skip_indices": [],
+    },
+    "gemm_a16w16_atomic_": {
+        "call": _call_gemm_a16w16_asm,
+        "output_indices": [2],
+        "skip_indices": [],
+    },
+    "gemm_afp4wfp4": {
+        "call": _call_gemm_afp4wfp4,
+        "output_indices": [5],
+        "skip_indices": [],
+    },
     "rmsnorm": {"call": _call_aiter_rmsnorm, "output_indices": [0], "skip_indices": []},
     "rope_cached_positions_2c_fwd_impl": {
         "call": _call_rope_cached_positions_2c_fwd_impl,
@@ -352,7 +454,11 @@ OP_CALL_SPEC = {
         "output_indices": [4],
         "skip_indices": [],
     },
-    "fused_qk_rmsnorm": {"call": _call_fused_qk_rmsnorm, "output_indices": [], "skip_indices": []},
+    "fused_qk_rmsnorm": {
+        "call": _call_fused_qk_rmsnorm,
+        "output_indices": [],
+        "skip_indices": [],
+    },
     "biased_grouped_topk_hip": {
         "call": _call_biased_grouped_topk,
         "output_indices": [2, 3],
@@ -373,7 +479,11 @@ OP_CALL_SPEC = {
         "output_indices": [2],
         "skip_indices": [3],
     },
-    "vllm_concat_mla_q": {"call": _call_vllm_concat_mla_q, "output_indices": [2], "skip_indices": []},
+    "vllm_concat_mla_q": {
+        "call": _call_vllm_concat_mla_q,
+        "output_indices": [2],
+        "skip_indices": [],
+    },
     "vllm_per_token_group_fp8_quant": {
         "call": _call_vllm_per_token_group_fp8_quant,
         "output_indices": [1, 2],
@@ -384,29 +494,61 @@ OP_CALL_SPEC = {
         "output_indices": [],
         "skip_indices": [],
     },
-    "silu_and_mul": {"call": _call_aiter_silu_and_mul, "output_indices": [0], "skip_indices": []},
+    "silu_and_mul": {
+        "call": _call_aiter_silu_and_mul,
+        "output_indices": [0],
+        "skip_indices": [],
+    },
     "sgl_kernel_silu_and_mul": {
         "call": _call_sgl_kernel_silu_and_mul,
         "output_indices": [0],
         "skip_indices": [],
     },
-    "gelu_and_mul": {"call": _call_aiter_gelu_and_mul, "output_indices": [0], "skip_indices": []},
-    "gelu_tanh_and_mul": {"call": _call_aiter_gelu_tanh_and_mul, "output_indices": [0], "skip_indices": []},
-    "rms_norm": {"call": _call_aiter_rms_norm, "output_indices": [], "skip_indices": [2, 3]},
-    "add_rmsnorm": {"call": _call_aiter_fused_add_rms_norm, "output_indices": [2, 3], "skip_indices": [5, 6]},
-    "rmsnorm_dynamicquant": {"call": _call_rmsnorm_dynamicquant, "output_indices": [], "skip_indices": [2, 3, 4]},
+    "gelu_and_mul": {
+        "call": _call_aiter_gelu_and_mul,
+        "output_indices": [0],
+        "skip_indices": [],
+    },
+    "gelu_tanh_and_mul": {
+        "call": _call_aiter_gelu_tanh_and_mul,
+        "output_indices": [0],
+        "skip_indices": [],
+    },
+    "rms_norm": {
+        "call": _call_aiter_rms_norm,
+        "output_indices": [],
+        "skip_indices": [2, 3],
+    },
+    "add_rmsnorm": {
+        "call": _call_aiter_fused_add_rms_norm,
+        "output_indices": [2, 3],
+        "skip_indices": [5, 6],
+    },
+    "rmsnorm_dynamicquant": {
+        "call": _call_rmsnorm_dynamicquant,
+        "output_indices": [],
+        "skip_indices": [2, 3, 4],
+    },
     "dynamic_per_token_scaled_quant": {
         "call": _call_dynamic_per_token_scaled_quant,
         "output_indices": [0, 2],
         "skip_indices": [3, 4, 5, 6],
     },
-    "_flash_attn_forward": {"call": _call_flash_attn_func, "output_indices": [], "skip_indices": []},
+    "_flash_attn_forward": {
+        "call": _call_flash_attn_func,
+        "output_indices": [],
+        "skip_indices": [],
+    },
     "vllm_unquantized_gemm": {
         "call": _call_vllm_rocm_unquantized_gemm,
         "output_indices": [],
         "skip_indices": [],
     },
-    "vllm_triton_gemm_a8w8_blockscale": {"call": _call_gemm_a8w8_blockscale, "output_indices": [4], "skip_indices": []},
+    "vllm_triton_gemm_a8w8_blockscale": {
+        "call": _call_gemm_a8w8_blockscale,
+        "output_indices": [4],
+        "skip_indices": [],
+    },
     "vllm_triton_group_quant_fp8": {
         "call": _call_vllm_triton_group_quant_fp8,
         "output_indices": [0, 2],
@@ -422,20 +564,6 @@ OP_CALL_SPEC = {
         "output_indices": [0, 2],
         "skip_indices": [5, 6],
     },
-}
-USE_EXISTING_HARNESS = {
-    "ck_moe_stage1",
-    "ck_moe_stage2",
-    "mha_varlen_fwd",
-    "unified_attention",
-    "fmha_v3_varlen_fwd",
-    "wrapper_fmha_v3_fwd",
-    "vllm_unified_attention",
-    "vllm_gdn_attention_core",
-    "fmoe_fp8_blockscale_g1u1",
-    "moe_cktile2stages_gemm1_ck",
-    "moe_cktile2stages_gemm2_ck",
-    "vllm_gemm_with_dynamic_quant",
 }
 
 
@@ -486,8 +614,14 @@ def _parse_concrete(raw_json):
     return out
 
 
-def test_generic_simple_op(input_dims_json, input_types_json, registry_key=None, num_warmup=3,
-                           concrete_inputs_json=None, **_):
+def test_generic_simple_op(
+    input_dims_json,
+    input_types_json,
+    registry_key=None,
+    num_warmup=3,
+    concrete_inputs_json=None,
+    **_,
+):
     """Generic harness driven by CSV ``Input Dims`` / ``Input type`` columns.
 
     Looks up ``registry_key`` in :data:`OP_CALL_SPEC` to find the call dispatch
@@ -509,7 +643,10 @@ def test_generic_simple_op(input_dims_json, input_types_json, registry_key=None,
     input_types = json.loads(input_types_json)
     output_indices = set(spec.get("output_indices", []))
     skip_indices = set(spec.get("skip_indices", []))
-    print(f"test: __generic__ registry_key={registry_key} n_inputs={len(input_dims)}", flush=True)
+    print(
+        f"test: __generic__ registry_key={registry_key} n_inputs={len(input_dims)}",
+        flush=True,
+    )
     t = {}
     for i, (dims, dtype_str) in enumerate(zip(input_dims, input_types)):
         if i in skip_indices:

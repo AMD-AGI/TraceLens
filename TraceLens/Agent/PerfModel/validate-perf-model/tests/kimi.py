@@ -73,12 +73,16 @@ def test_kimi_moe_sorting_opus_fwd(M=7, topk=16, E=896, block_m=32, num_warmup=3
     device = "cuda"
     num_experts = int(E)
     unit_size = int(block_m)
-    topk_ids = torch.randint(0, num_experts, (M, topk), dtype=torch.int32, device=device)
+    topk_ids = torch.randint(
+        0, num_experts, (M, topk), dtype=torch.int32, device=device
+    )
     topk_weights = torch.rand(M, topk, dtype=torch.float32, device=device)
     max_num_tokens_padded = int(topk_ids.numel() + num_experts * unit_size - topk)
     max_num_m_blocks = int((max_num_tokens_padded + unit_size - 1) // unit_size)
     sorted_ids = torch.empty(max_num_tokens_padded, dtype=torch.int32, device=device)
-    sorted_weights = torch.empty(max_num_tokens_padded, dtype=torch.float32, device=device)
+    sorted_weights = torch.empty(
+        max_num_tokens_padded, dtype=torch.float32, device=device
+    )
     sorted_expert_ids = torch.empty(max_num_m_blocks, dtype=torch.int32, device=device)
     num_valid_ids = torch.empty(2, dtype=torch.int32, device=device)
     moe_buf = torch.empty((0, 0), dtype=torch.bfloat16, device=device)
@@ -141,11 +145,9 @@ def test_kimi_fused_kda_decode(
     packed_x = torch.randn(T, 3 * dim, dtype=torch.bfloat16, device=device)
     weight = 0.1 * torch.randn(3, W, dim, dtype=torch.float32, device=device)
     # SD cache layout: [slots, W-1, 3*dim] then transpose to [slots, 3*dim, W-1]
-    conv_state = (
-        0.1
-        * torch.randn(slots, W - 1, 3 * dim, dtype=torch.bfloat16, device=device)
-        .transpose(1, 2)
-    )
+    conv_state = 0.1 * torch.randn(
+        slots, W - 1, 3 * dim, dtype=torch.bfloat16, device=device
+    ).transpose(1, 2)
     raw_g = torch.randn(1, T, H, D, dtype=torch.bfloat16, device=device)
     raw_beta = torch.randn(1, T, H, dtype=torch.bfloat16, device=device)
     output_gate = torch.randn(T, H, D, dtype=torch.bfloat16, device=device)
@@ -220,7 +222,9 @@ def test_kimi_gather_and_maybe_dequant_cache(
     token_to_seq = torch.repeat_interleave(
         torch.arange(batch_size, dtype=torch.int32, device=device), seq_len_tensor
     )
-    block_table = torch.empty((batch_size, num_blocks), dtype=torch.int32, device=device)
+    block_table = torch.empty(
+        (batch_size, num_blocks), dtype=torch.int32, device=device
+    )
     block_table[0] = torch.arange(num_blocks, dtype=torch.int32, device=device)
     dst = torch.zeros((total_tokens, entry_size), dtype=torch.bfloat16, device=device)
     print(
@@ -248,55 +252,3 @@ def test_kimi_gather_and_maybe_dequant_cache(
     _call()
     torch.cuda.synchronize()
     print(f"test: done, dst={tuple(dst.shape)}", flush=True)
-
-
-OP_METADATA: dict = {
-    "kimi_situ_and_mul": {
-        "fn": test_kimi_situ_and_mul,
-        "category": "elementwise",
-        "description": "Kimi SituGLU (_C::situ_and_mul)",
-        "dtypes": ["bf16"],
-        "defaults": {"M": 7, "N": 768},
-        "required_args": ["M", "N"],
-    },
-    "kimi_static_per_tensor_quant": {
-        "fn": test_kimi_static_per_tensor_quant,
-        "category": "GroupQuant",
-        "description": "AITER static per-tensor FP8 quant",
-        "dtypes": ["bf16"],
-        "defaults": {"M": 7, "N": 6912},
-        "required_args": ["M", "N"],
-    },
-    "kimi_aten_addmm_": {
-        "fn": test_kimi_aten_addmm_,
-        "category": "GEMM",
-        "description": "In-place aten::addmm_",
-        "dtypes": ["bf16"],
-        "defaults": {"M": 7, "N": 896, "K": 3584},
-        "required_args": ["M", "N", "K"],
-    },
-    "kimi_moe_sorting_opus_fwd": {
-        "fn": test_kimi_moe_sorting_opus_fwd,
-        "category": "MoE_aux",
-        "description": "AITER opus MoE sorting",
-        "dtypes": ["fp32"],
-        "defaults": {"M": 7, "topk": 16, "E": 896, "block_m": 32},
-        "required_args": ["M"],
-    },
-    "kimi_fused_kda_decode": {
-        "fn": test_kimi_fused_kda_decode,
-        "category": "InferenceAttention",
-        "description": "Kimi-K3 fused KDA decode",
-        "dtypes": ["bf16"],
-        "defaults": {"seq_len": 7, "num_heads_q": 12, "head_dim": 128, "E": 2732},
-        "required_args": ["seq_len"],
-    },
-    "kimi_gather_and_maybe_dequant_cache": {
-        "fn": test_kimi_gather_and_maybe_dequant_cache,
-        "category": "InferenceAttention",
-        "description": "vLLM FP8 MLA KV gather + dequant",
-        "dtypes": ["fp8"],
-        "defaults": {"seq_len": 1024, "head_dim": 576},
-        "required_args": ["seq_len"],
-    },
-}
