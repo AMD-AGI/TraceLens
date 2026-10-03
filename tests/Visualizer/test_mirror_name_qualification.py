@@ -167,3 +167,54 @@ def test_the_port_label_follows_the_node_label() -> None:
     # The label a reader sees is qualified; the port ID an edge cites is not.
     assert mirror["outputsMetadata"][0]["attrs"][0]["value"] == "attn_hc.collapsed"
     assert mirror["outputsMetadata"][0]["id"] == "collapsed"
+
+
+def _op(node_id, attr_name, namespace):
+    return {
+        "id": node_id,
+        "label": "Linear",
+        "namespace": namespace,
+        "attrs": [{"key": "attr_name", "value": attr_name}],
+        "incomingEdges": [],
+    }
+
+
+def test_kernel_operand_ports_name_the_step_that_fed_them() -> None:
+    """Three calls to one helper bind ``x`` three times, on q, k and v."""
+    nodes = [
+        _op("attn/q_proj", "q_proj", "attn"),
+        _op("attn/k_proj", "k_proj", "attn"),
+        _op("attn/v_proj", "v_proj", "attn"),
+        _node("attn/@kernel_in:15:x", "x", "attn", "@kernel_port_in", ["attn/q_proj"]),
+        _node("attn/@kernel_in:16:x", "x", "attn", "@kernel_port_in", ["attn/k_proj"]),
+        _node("attn/@kernel_in:17:x", "x", "attn", "@kernel_port_in", ["attn/v_proj"]),
+    ]
+
+    _qualify_colliding_mirrors(nodes)
+
+    assert [n["label"] for n in nodes[3:]] == ["q_proj.x", "k_proj.x", "v_proj.x"]
+
+
+def test_one_tensor_at_several_operand_slots_keeps_its_name() -> None:
+    """Ports 15/16/17 all hold the SAME cu_seqlens -- nothing to tell apart."""
+    nodes = [
+        _op("attn/unpad", "unpad", "attn"),
+        _node(
+            "attn/@kernel_in:15:cu_seqlens",
+            "cu_seqlens",
+            "attn",
+            "@kernel_port_in",
+            ["attn/unpad"],
+        ),
+        _node(
+            "attn/@kernel_in:16:cu_seqlens",
+            "cu_seqlens",
+            "attn",
+            "@kernel_port_in",
+            ["attn/unpad"],
+        ),
+    ]
+
+    _qualify_colliding_mirrors(nodes)
+
+    assert [n["label"] for n in nodes[1:]] == ["cu_seqlens", "cu_seqlens"]

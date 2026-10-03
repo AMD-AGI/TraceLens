@@ -2897,6 +2897,37 @@ def _qualify_colliding_mirrors(nodes: list[dict[str, Any]]) -> None:
             return None
         return space[len(prefix) :].split("/")[0] or None
 
+    def feeding_step(node: dict[str, Any]) -> str | None:
+        """The step whose value this operand port was handed.
+
+        A fused kernel names an operand port after the PARAMETER it binds, and
+        a helper called three times binds the same parameter each time: ports
+        15, 16 and 17 all read ``x`` while being handed the query, key and
+        value projections. The step that produced each one is what tells them
+        apart, and it is the name the model itself uses.
+        """
+        if _node_attr(node, "synthetic") not in {
+            "@kernel_port_in",
+            "@kernel_port_out",
+            "@tensor",
+        }:
+            return None
+        producers = [
+            by_id.get(str(e.get("sourceNodeId")))
+            for e in node.get("incomingEdges", []) or []
+        ]
+        # Only a name the MODEL gives a submodule will do. A synthesized step
+        # carries a generated attr (``@op_l1618_c23_unsqueeze``) that no reader
+        # should ever be shown, so those leave the port's name as it was.
+        named = {
+            str(_node_attr(p, "attr_name"))
+            for p in producers
+            if p is not None
+            and _node_attr(p, "attr_name")
+            and not str(_node_attr(p, "attr_name")).startswith("@")
+        }
+        return named.pop() if len(named) == 1 else None
+
     by_scope_name: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for node in nodes:
         name = str(node.get("label") or "").strip()
@@ -2910,9 +2941,9 @@ def _qualify_colliding_mirrors(nodes: list[dict[str, Any]]) -> None:
             continue
         renames: dict[str, str] = {}
         for node in same:
-            box = inner_box(node)
-            if box is not None:
-                renames[str(node["id"])] = f"{box}.{name}"
+            source = inner_box(node) or feeding_step(node)
+            if source is not None:
+                renames[str(node["id"])] = f"{source}.{name}"
         # Renaming must actually settle the ambiguity: every qualified name has
         # to be new to the scope and distinct from the others, or the reader is
         # no better off than before.
