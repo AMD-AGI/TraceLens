@@ -2852,6 +2852,91 @@ def _apply_tile_redirects(
     nodes[:] = [n for n in nodes if str(n["id"]) not in redirect]
 
 
+def _qualify_colliding_mirrors(nodes: list[dict[str, Any]]) -> None:
+    """Name a mirror for the box it crosses when its name is taken.
+
+    A mirror carries a tensor ACROSS a level, and it is named for what the box
+    on the FAR side calls it -- so a scope holding two of them holds one name
+    standing for two tensors. The layer shows ``collapsed`` twice, once leaving
+    ``attn_hc`` and once leaving ``ffn_hc``; the attention shows ``x`` three
+    times, once entering each rope frame. The tensors are genuinely different,
+    so folding them would be a lie; what the reader is missing is which box
+    each belongs to.
+
+    That box is already on screen, so its name is the honest qualifier:
+    ``attn_hc.collapsed`` and ``ffn_hc.collapsed``. Only mirrors are renamed --
+    the block's own ``@input``/``@output`` declaration keeps the plain name,
+    which is what it is owed. Port IDS are left alone: an edge cites them, and
+    only the label is read by a person.
+    """
+    consumers: dict[str, list[dict[str, Any]]] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []) or []:
+            consumers.setdefault(str(edge.get("sourceNodeId")), []).append(node)
+    by_id = {str(n["id"]): n for n in nodes}
+
+    def inner_box(node: dict[str, Any]) -> str | None:
+        """Last segment of the nested box this mirror reaches across."""
+        scope = str(node.get("namespace") or "")
+        kind = _node_attr(node, "synthetic")
+        if kind == "@output_mirror":
+            far = [
+                by_id.get(str(e.get("sourceNodeId")))
+                for e in node.get("incomingEdges", []) or []
+            ]
+        elif kind == "@input_mirror":
+            far = list(consumers.get(str(node["id"]), []))
+        else:
+            return None
+        spaces = {str(n.get("namespace") or "") for n in far if n is not None}
+        if len(spaces) != 1:
+            return None
+        space = spaces.pop()
+        prefix = f"{scope}/" if scope else ""
+        if not space.startswith(prefix) or space == scope:
+            return None
+        return space[len(prefix) :].split("/")[0] or None
+
+    by_scope_name: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for node in nodes:
+        name = str(node.get("label") or "").strip()
+        if name:
+            by_scope_name.setdefault(
+                (str(node.get("namespace") or ""), name), []
+            ).append(node)
+
+    for (scope, name), same in by_scope_name.items():
+        if len(same) < 2:
+            continue
+        renames: dict[str, str] = {}
+        for node in same:
+            box = inner_box(node)
+            if box is not None:
+                renames[str(node["id"])] = f"{box}.{name}"
+        # Renaming must actually settle the ambiguity: every qualified name has
+        # to be new to the scope and distinct from the others, or the reader is
+        # no better off than before.
+        taken = {
+            str(n.get("label") or "")
+            for n in nodes
+            if str(n.get("namespace") or "") == scope and str(n["id"]) not in renames
+        }
+        qualified = list(renames.values())
+        if not renames or len(set(qualified)) != len(qualified):
+            continue
+        if any(label in taken for label in qualified):
+            continue
+        for node in same:
+            label = renames.get(str(node["id"]))
+            if label is None:
+                continue
+            node["label"] = label
+            for port in node.get("outputsMetadata", []) or []:
+                for attr in port.get("attrs", []) or []:
+                    if attr.get("key") == "port_label" and attr.get("value") == name:
+                        attr["value"] = label
+
+
 def _fold_same_source_twins(nodes: list[dict[str, Any]]) -> None:
     """One scope, one name, one producer: a tensor declared twice.
 
@@ -7634,6 +7719,7 @@ def build_merged_model_graph(
     # redundant once its neighbours are final.
     _fold_same_scope_mirrors(nodes)
     _fold_same_source_twins(nodes)
+    _qualify_colliding_mirrors(nodes)
 
     # Structural-integrity check on the FINAL built graph (after loop-carried
     # synthesis + ordering): I1 dead-node / I2 no-source / I3 constant soundness.

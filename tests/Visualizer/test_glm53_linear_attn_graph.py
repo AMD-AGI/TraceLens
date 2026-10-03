@@ -357,7 +357,11 @@ def test_glm53_spine_hyperconnection_stays_on_variant_namespace():
         assert all(
             f"/{component}" in node.get("namespace", "") for node in internal_nodes
         )
-        assert {node["label"] for node in mirrors} == {"post", "comb", "collapsed"}
+        # Both hyperconnections return the same three slot names, so each
+        # mirror says which block it came out of.
+        assert {node["label"] for node in mirrors} == {
+            f"{component}.{slot}" for slot in ("post", "comb", "collapsed")
+        }
         assert all(node.get("namespace") == variant_namespace for node in mirrors)
 
 
@@ -1032,7 +1036,9 @@ def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
         norm_input_id = f"{prefix}/{target}/@input"
         norm_output_id = f"{prefix}/{target}/@output"
         mirror = node_by_id[mirror_id]
-        assert mirror.get("label") == "collapsed"
+        # Outside the block, two hyperconnections both publish
+        # ``collapsed``; the mirror names the one it belongs to.
+        assert mirror.get("label") == f"{source_component[target]}.collapsed"
         assert any(
             attr.get("key") == "synthetic" and attr.get("value") == "@output_mirror"
             for attr in mirror.get("attrs", [])
@@ -1075,7 +1081,7 @@ def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
         for output in output_nodes:
             port = output["outputsMetadata"][0]["id"]
             output_mirror = node_by_id[f"{output['id']}^{port}"]
-            assert output_mirror["label"] == port
+            assert output_mirror["label"] == f"{source_component[target]}.{port}"
             assert output_mirror["incomingEdges"][0]["sourceNodeId"] == output["id"]
             assert output_mirror["incomingEdges"][0]["sourceNodeOutputId"] == port
 
@@ -1223,7 +1229,7 @@ def test_glm53_ffn_hc_expands_hyperconnection_not_moe():
     for output in outputs:
         port = output["outputsMetadata"][0]["id"]
         mirror = node_by_id[f"{output['id']}^{port}"]
-        assert mirror["label"] == port
+        assert mirror["label"] == f"ffn_hc.{port}"
         # Boundary and mirror name the same tensor on both sides of the block.
         assert output["label"] == port
         assert mirror["incomingEdges"][0]["sourceNodeId"] == output["id"]
@@ -1355,7 +1361,12 @@ def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
         and node.get("namespace", "").endswith("/Glm5NextTextMoE")
     ]
     mirror_labels = {node["label"] for node in expert_input_mirrors}
-    assert "hidden_states" in mirror_labels
+    # The MoE scope already declares a ``hidden_states``, so the mirror
+    # carrying one INTO the expert loop names that loop.
+    assert any(
+        label.endswith(".hidden_states") or label == "hidden_states"
+        for label in mirror_labels
+    )
     assert "topk_weights" not in mirror_labels
 
     experts = build_block_node(
