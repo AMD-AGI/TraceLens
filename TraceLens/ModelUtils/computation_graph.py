@@ -2377,10 +2377,24 @@ def _add_submodule_boundary_param_inputs(
         ):
             continue
         param = secondary[0]
+        # A call expanded INLINE leaves no node carrying its own attr -- its ops
+        # are the nodes, under their own attrs -- so matching the attr alone
+        # found nothing and the boundary was never built. Kimi's
+        # ``get_unpad_data(attention_mask[:, -q_len:])`` is such a frame: its
+        # first op kept reading the module's ``hidden_states``, which then set
+        # the shape of everything the unpad path derives.
+        call_block = next(
+            (block for block in _iter_all_blocks(root) if block.attr_name == call_attr),
+            None,
+        )
         member_indices = {
             index
             for index, spec in enumerate(graph.nodes)
-            if spec.block is not None and spec.block.attr_name == call_attr
+            if spec.block is not None
+            and (
+                spec.block.attr_name == call_attr
+                or (call_block is not None and _is_in_subtree(spec.block, call_block))
+            )
         }
         if not member_indices:
             continue

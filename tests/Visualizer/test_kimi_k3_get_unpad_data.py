@@ -50,11 +50,17 @@ def test_kimi_get_unpad_data_ops_are_device_not_cpu():
     labels = {n.get("label") for n in unpad}
     # The device work is visible...
     assert "Nonzero" in labels
-    assert "Max" in labels
     # ...and none of the expanded ops is tagged device: cpu (the only host crossing
     # is the untraced ``.item()`` scalar read).
     cpu_ops = [n.get("label") for n in unpad if _is_cpu(n)]
     assert cpu_ops == [], cpu_ops
+    # ``Max`` is deliberately NOT required. ``max_seqlen = lens.max().item()`` is
+    # read by the caller as a Python scalar, so it feeds no tensor and is pruned
+    # like any other unconsumed op -- which is what the model's own dataflow
+    # says. It used to appear here only because every return slot of this helper
+    # collapsed onto its last op, keeping ``Max`` alive as a stand-in for
+    # ``indices``; with the slots resolved per return, that no longer happens.
+    # Kimi's own provisioned environment never showed it at all.
 
 
 def test_kimi_index_select_shape_leads_with_nnz():

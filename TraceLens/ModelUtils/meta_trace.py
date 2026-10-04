@@ -756,6 +756,11 @@ def trace_meta_input_specs(
     # (class_name, param_name) -> set of (shape, dtype) seen within that class.
     observed_by_class: dict[tuple[str, str], set[tuple[tuple[Any, ...], str]]] = {}
 
+    # Which pair of dicts ``_record`` writes into. Swapped for the second,
+    # mask-carrying pass below so its observations stay separate and cannot
+    # make a parameter the first pass resolved look ambiguous.
+    target: dict[str, Any] = {"global": observed, "by_class": observed_by_class}
+
     def _record(class_name: str, param: str, tensor: Any) -> None:
         shape = symbolise_meta_shape(
             tuple(int(d) for d in tensor.shape),
@@ -763,8 +768,8 @@ def trace_meta_input_specs(
             seq_len=seq_len,
         )
         dtype = str(tensor.dtype).replace("torch.", "")
-        observed.setdefault(param, set()).add((shape, dtype))
-        observed_by_class.setdefault((class_name, param), set()).add((shape, dtype))
+        target["global"].setdefault(param, set()).add((shape, dtype))
+        target["by_class"].setdefault((class_name, param), set()).add((shape, dtype))
 
     def _make_hook(module: Any):
         class_name = type(module).__name__
@@ -796,9 +801,31 @@ def trace_meta_input_specs(
         # Meta tensors fail on data-dependent ops; pre-hooks already fired for
         # every module reached before the failure (incl. the sparse indexer).
         pass
+
+    # A forward parameter the model was never GIVEN is never observed, so a
+    # boundary for it falls back to the generic ``(B, S, hidden)`` default --
+    # which is how Kimi's padding mask came to claim the hidden width, and with
+    # it every shape the unpad path derives from the mask. Real callers pass a
+    # mask and these forwards declare one, so ask again supplying it. The first
+    # pass WINS throughout: this run only fills names it never saw, so no seed
+    # already established can change.
+    masked: dict[str, set[tuple[tuple[Any, ...], str]]] = {}
+    masked_by_class: dict[tuple[str, str], set[tuple[tuple[Any, ...], str]]] = {}
+    target["global"], target["by_class"] = masked, masked_by_class
+    try:
+        dummy = torch.zeros(batch_size, seq_len, dtype=torch.long, device="meta")
+        mask = torch.ones(batch_size, seq_len, dtype=torch.long, device="meta")
+        with torch.no_grad():
+            model(dummy, attention_mask=mask)
+    except Exception:
+        pass
     finally:
         for handle in handles:
             handle.remove()
+    for param, values in masked.items():
+        observed.setdefault(param, values)
+    for class_key, values in masked_by_class.items():
+        observed_by_class.setdefault(class_key, values)
 
     # Keep only globally-unambiguous parameters (exactly one observed value).
     resolved = {

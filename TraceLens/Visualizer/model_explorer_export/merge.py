@@ -1238,8 +1238,16 @@ def _group_entry_buckets(
             for edge in node.get("incomingEdges", [])
             if edge["sourceNodeId"] not in internal_ids
         ]
-        keys = {source_id for source_id, _ in sources} or {""}
-        for key in keys:
+        # Keep the order this node's own edges arrive in. A SET here let string
+        # hash randomisation decide which of two producers opened its bucket
+        # first, and that order is what names the tiles -- so the same code
+        # produced ``hidden_states``/``hidden_states_2`` the other way round
+        # from one run to the next, and the shapes travelled with the names.
+        keys: list[str] = []
+        for source_id, _port in sources:
+            if source_id not in keys:
+                keys.append(source_id)
+        for key in keys or [""]:
             if key not in buckets:
                 buckets[key] = (set(), [])
                 order.append(key)

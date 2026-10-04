@@ -28,6 +28,7 @@ from TraceLens.ModelUtils.ast_analyze import (
     attention_kernel_details,
     attention_kernel_label,
     base_submodule_attr,
+    map_clone_base_attr,
     displays_as_linear,
     effective_forward_calls,
     expand_conditional_block_components,
@@ -804,7 +805,9 @@ class BlockNode:
     # internal producer attrs (ordinal -> producer), so a consumer reading a
     # specific return slot docks onto the matching internal op, not the frame's
     # last op. Empty for single-return helpers.
-    forward_step_return_producers: dict[str, list[str]] = field(default_factory=dict)
+    forward_step_return_producers: dict[str, list[str | None]] = field(
+        default_factory=dict
+    )
     # Submodule call attr -> secondary forward params it reads directly as bare
     # boundary args (``q = self.wq_b(q_resid)`` -> ``{'wq_b': ('q_resid',)}``).
     # A secondary param handed straight to a plain submodule has no internal
@@ -1764,6 +1767,19 @@ def _kernel_pipeline_block_nodes(
     ordered_labels = tensor_input_label_order(details, inputs)
     step_targets = compute_tensor_step_targets(details, pipeline_steps)
 
+    # A step's predecessors are a frozenset, so listing them straight let string
+    # hash randomisation decide the order its edges were wired -- and that order
+    # is what names a kernel's operand ports, so one run called a port ``x`` and
+    # the next called the very same tensor ``x_2``. Order them the way the
+    # pipeline runs: earlier stages first, with anything unplaced after them.
+    step_position = {step.attr_name: index for index, step in enumerate(pipeline_steps)}
+
+    def _ordered_predecessors(step: KernelPipelineStep) -> list[str]:
+        return sorted(
+            step.predecessors,
+            key=lambda attr: (step_position.get(attr, len(step_position)), attr),
+        )
+
     pipeline_children: list[BlockNode] = []
     for index, step in enumerate(pipeline_steps):
         if len(step.children) >= 2:
@@ -1789,7 +1805,7 @@ def _kernel_pipeline_block_nodes(
                     details=list(step.details or []),
                     is_basic=False,
                     children=sub_children,
-                    kernel_predecessors=list(step.predecessors),
+                    kernel_predecessors=_ordered_predecessors(step),
                 )
             )
         else:
@@ -1801,7 +1817,7 @@ def _kernel_pipeline_block_nodes(
                     label=step.call_name,
                     details=list(step.details or []),
                     basic=False,
-                    kernel_predecessors=list(step.predecessors),
+                    kernel_predecessors=_ordered_predecessors(step),
                 )
             )
 
@@ -2605,6 +2621,9 @@ def build_block_node(
         base_attr = base_submodule_attr(call_attr)
         child_details = (
             cls.forward_step_details.get(call_attr)
+            # Clones of one ``map(lambda ...)`` call share the call site, so they
+            # share what was recorded about it.
+            or cls.forward_step_details.get(map_clone_base_attr(call_attr))
             or cls.forward_step_details.get(base_attr)
             or cls.init_details.get(base_attr, [])
         )

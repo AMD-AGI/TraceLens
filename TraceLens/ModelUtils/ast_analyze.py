@@ -215,6 +215,17 @@ def function_synthetic_attr(
     return base if discriminator is None else f"{base}@m{discriminator}"
 
 
+def map_clone_base_attr(attr_name: str) -> str:
+    """Strip the ``@m{n}`` that tells apart clones of one ``map(lambda ...)`` call.
+
+    ``q, k = map(lambda x: rearrange(x, ...), (q, k))`` applies ONE call site to
+    each element, so the clones share everything the source says about them --
+    including the einops pattern. Lookups keyed by the call site need this to
+    reach that shared record.
+    """
+    return _MAP_DISCRIMINATOR_RE.sub("", attr_name)
+
+
 def is_function_synthetic(attr_name: str) -> bool:
     return attr_name.startswith(FUNCTION_SYNTHETIC_PREFIX)
 
@@ -1440,6 +1451,35 @@ def _module_forward_functions(
     return functions
 
 
+_EINOPS_CALLS = frozenset({"rearrange", "repeat"})
+
+
+def _einops_step_details(func: ast.FunctionDef) -> dict[str, list[str]]:
+    """Detail lines for einops calls, whose pattern IS their shape rule.
+
+    ``rearrange(hidden_states, "b s ... -> (b s) ...")`` says exactly what
+    happens to every axis. einops itself is a third-party generic, so there is
+    no body worth reading -- but the pattern at the call site is a complete
+    specification, and without it the tensor passed through at a rank the call
+    just changed.
+    """
+    details: dict[str, list[str]] = {}
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id not in _EINOPS_CALLS or len(node.args) < 2:
+            continue
+        pattern = node.args[1]
+        if not isinstance(pattern, ast.Constant) or not isinstance(pattern.value, str):
+            continue
+        lines = [f"pattern: {pattern.value}"]
+        for keyword in node.keywords:
+            if keyword.arg:
+                lines.append(f"axis {keyword.arg}: {ast.unparse(keyword.value)}")
+        details[function_synthetic_attr(node.func.id, node.lineno)] = lines
+    return details
+
+
 def _positional_step_details(func: ast.FunctionDef) -> dict[str, list[str]]:
     """Detail lines for traced rope calls, so an inverse rotation reads differently."""
     details: dict[str, list[str]] = {}
@@ -1751,7 +1791,10 @@ def _merge_branch_sites(
 ) -> dict[str, set[int]]:
     """Pick the busier branch per attr; mutually-exclusive arms don't both count."""
     out: dict[str, set[int]] = {}
-    for attr in set(body) | set(orelse):
+    # Source order, not set order: the result is a dict whose own iteration
+    # order is read downstream, and a set's would vary with the hash seed.
+    merged_attrs = list(body) + [attr for attr in orelse if attr not in body]
+    for attr in merged_attrs:
         body_sites = body.get(attr, set())
         else_sites = orelse.get(attr, set())
         out[attr] = body_sites if len(body_sites) >= len(else_sites) else else_sites
@@ -2564,7 +2607,7 @@ def _multi_op_free_functions(
     ``@input`` resolution defaults to when nothing more specific is known.
     """
     expanded: dict[str, list[ForwardOperation]] = {}
-    return_producers: dict[str, list[str]] = {}
+    return_producers: dict[str, list[str | None]] = {}
     method_returns: dict[str, tuple[dict[str, str], list[str], str | None]] = {}
     primary_params: dict[str, str] = {}
     loop_carried: dict[str, list[LoopCarriedSpec]] = {}
@@ -2615,10 +2658,20 @@ def _multi_op_free_functions(
                 producers = [
                     analysis.return_slots.get(slot) for slot in analysis.return_order
                 ]
-                # Only publish the map when every slot resolves to an op that
-                # survived inlining (else fall back to the default last-op wiring).
-                if all(p is not None and p in op_attrs for p in producers):
-                    return_producers[call_attr] = [p for p in producers if p]
+                # Publish per slot what IS known, each in its own position.
+                # Demanding that EVERY slot resolve threw away the ones that
+                # did: ``get_unpad_data`` returns (indices, cu_seqlens,
+                # max_seqlen), and where the cu_seqlens arm was not captured,
+                # ``indices`` lost its producer too -- so every consumer fell
+                # onto the helper's last op, the scalar ``.max()``, and a gather
+                # was shown reading a scalar. A slot left ``None`` simply keeps
+                # the old default for that slot alone.
+                placed: list[str | None] = [
+                    producer if (producer and producer in op_attrs) else None
+                    for producer in producers
+                ]
+                if any(placed):
+                    return_producers[call_attr] = placed
                     method_returns[call_attr] = (
                         dict(analysis.return_slots),
                         list(analysis.return_order),
@@ -3215,7 +3268,9 @@ class ClassStructure:
     # (``q_embed, k_embed = apply_rotary_pos_emb_vision(...)``): call attr ->
     # ordered internal producer attrs, so a consumer reading a specific return
     # ordinal docks onto the matching internal op, not the frame's last op.
-    forward_step_return_producers: dict[str, list[str]] = field(default_factory=dict)
+    forward_step_return_producers: dict[str, list[str | None]] = field(
+        default_factory=dict
+    )
     forward_return_slots: dict[str, str] = field(default_factory=dict)
     forward_return_order: list[str] = field(default_factory=list)
     primary_return_slot: str | None = None
@@ -5841,9 +5896,33 @@ class _ForwardOperationExtractor:
                 details.append(f"start_dim: {ast.unparse(flatten_args[0])}")
             if len(flatten_args) >= 2:
                 details.append(f"end_dim: {ast.unparse(flatten_args[1])}")
-            for keyword in node.keywords:
-                if keyword.arg in {"start_dim", "end_dim"}:
-                    details.append(f"{keyword.arg}: {ast.unparse(keyword.value)}")
+            span_keywords = [
+                keyword
+                for keyword in node.keywords
+                if keyword.arg in {"start_dim", "end_dim"}
+            ]
+            for keyword in span_keywords:
+                details.append(f"{keyword.arg}: {ast.unparse(keyword.value)}")
+            if not flatten_args and not span_keywords:
+                # ``x.flatten()`` with no span at all collapses EVERY axis into
+                # one. Say so here, where the call site is in hand: further
+                # down, a missing ``start_dim`` is indistinguishable from an
+                # argument we failed to capture, and shape inference rightly
+                # refuses to guess -- which left ``attention_mask.flatten()``
+                # at rank 3 and everything derived from it wrong.
+                details.append("flatten_all: true")
+        if call_name == "pad":
+            # ``F.pad(x, (1, 0))`` widens the LAST axis by left+right (and the
+            # next axis up for each further pair). Record the amounts so shape
+            # inference reports the padded extent; ``cu_seqlens`` is a ``[B+1]``
+            # tensor precisely because of this call, and passing the tensor
+            # through reported it one short.
+            pad_arg = node.args[1] if len(node.args) > 1 else None
+            if isinstance(pad_arg, (ast.Tuple, ast.List)):
+                details.append(
+                    "pad: " + ", ".join(ast.unparse(item) for item in pad_arg.elts)
+                )
+
         if call_name == "arange":
             # ``torch.arange(end)`` / ``(start, end)`` / ``(start, end, step)``
             # fabricates a 1-D range tensor whose length is
@@ -6750,7 +6829,15 @@ class _ForwardOperationExtractor:
                     # computes a real op (``topk_indices = self.indexer(...)`` vs
                     # ``= prev_topk_indices``), adopt the real producer so the
                     # merged variable wires to the visible computation.
-                    for variable in set(survivor_env) | set(other_env):
+                    # Source order, not set order: this loop EMITS Merge nodes,
+                    # so a set would let the hash seed decide what each one is
+                    # called and in which order they appear.
+                    merged_variables = list(survivor_env) + [
+                        variable
+                        for variable in other_env
+                        if variable not in survivor_env
+                    ]
+                    for variable in merged_variables:
                         survivor_producer = survivor_env.get(variable)
                         other_producer = other_env.get(variable)
                         if (
@@ -7994,7 +8081,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         multi_op_method_step_predecessors: dict[str, dict[str, tuple[str, ...]]] = {}
         multi_op_method_order: dict[str, list[str]] = {}
         multi_op_method_step_predecessor_args: dict[str, dict[str, dict[str, str]]] = {}
-        forward_step_return_producers: dict[str, list[str]] = {}
+        forward_step_return_producers: dict[str, list[str | None]] = {}
         init_func = next(
             (
                 item
@@ -10545,6 +10632,7 @@ def _parse_forward(
             config=config,
         )
     forward_step_details.update(_positional_step_details(func))
+    forward_step_details.update(_einops_step_details(func))
     for _key, _detail in _submodule_method_step_details(
         func.body, module_attrs
     ).items():

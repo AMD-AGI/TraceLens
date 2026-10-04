@@ -1528,6 +1528,14 @@ class ShapeInferencer:
         self._tensor_names: dict[str, str] = {}
         self._tensor_specs: dict[str, TensorSpec] = {}
         self._owner_classes: dict[int, dict[str, str]] = {}
+        # CPython reuses an object's address once it is freed, so a cache keyed
+        # by ``id()`` can serve one object's entry to an unrelated later one --
+        # the owner-class map of a discarded block answering for whatever block
+        # next lands at that address, which silently resolves a parameter
+        # against the wrong class. Holding a reference keeps each address
+        # unique for as long as its key is in use.
+        self._owner_class_refs: list[Any] = []
+        self._forward_input_spec_refs: list[Any] = []
         # Specs carrying the activation a block's forward receives.
         self._forward_input_specs: set[int] = set()
         # Guard against infinite recursion during forward introspection.
@@ -2020,6 +2028,9 @@ class ShapeInferencer:
                 self._tensor_names[node.id] = _output_tensor_name(node)
         self._tensor_specs = {}
         self._forward_input_specs = set()
+        # Reset with the id set it guards; the owner-class refs outlive this,
+        # since that cache does.
+        self._forward_input_spec_refs = []
         self._entry_seeded_ids = set()
         self._module_resolved_ids: set[str] = set()
         order = _topological_order(graph)
@@ -2054,6 +2065,7 @@ class ShapeInferencer:
             self._tensor_specs[node_id] = output
             if node.metadata.get("synthetic") == "@input":
                 self._forward_input_specs.add(id(output))
+                self._forward_input_spec_refs.append(output)
                 if self._entry_spec_for(node, root) is not None:
                     self._entry_seeded_ids.add(node_id)
 
@@ -2709,10 +2721,17 @@ class ShapeInferencer:
             start_detail = _detail_value(details, "start_dim")
             end_detail = _detail_value(details, "end_dim")
             if start_detail is None and end_detail is None:
-                # No captured span. A bare ``flatten()`` collapses everything, but
-                # a missing detail is indistinguishable from "args not captured",
-                # so pass through rather than guess a full collapse.
-                return source
+                # No captured span. A bare ``flatten()`` collapses everything,
+                # but a missing detail would otherwise be indistinguishable
+                # from "args not captured", so only the call site saying it
+                # took NO span lets us collapse; anything else passes through
+                # rather than guess.
+                if _detail_value(details, "flatten_all") is None:
+                    return source
+                collapsed = _merge_axes(shape)
+                if collapsed is None:
+                    return source
+                return TensorSpec(shape=(collapsed,), dtype=source.dtype)
             rank = len(shape)
             start = _int_dim(start_detail)
             end = _int_dim(end_detail)
@@ -2728,6 +2747,71 @@ class ShapeInferencer:
                 shape=shape[:start] + (merged,) + shape[end + 1 :],
                 dtype=source.dtype,
             )
+
+        if operation_label == "pad":
+            source = (
+                inputs[0]
+                if inputs
+                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
+            )
+            raw = _detail_value(details, "pad")
+            if not raw or not source.shape:
+                return source
+            amounts: list[int] = []
+            for token in raw.split(","):
+                token = token.strip()
+                if not token.lstrip("-").isdigit():
+                    return source
+                amounts.append(int(token))
+            pairs = len(amounts) // 2
+            if len(amounts) % 2 or pairs > len(source.shape):
+                return source
+            padded = list(source.shape)
+            for index in range(pairs):
+                added = amounts[2 * index] + amounts[2 * index + 1]
+                if not added:
+                    continue
+                axis = len(padded) - 1 - index
+                padded[axis] = _sum_dim_sizes([padded[axis], added])
+            return TensorSpec(shape=tuple(padded), dtype=source.dtype)
+
+        if operation_label in {"rearrange", "repeat"}:
+            # einops already states the answer; apply it rather than passing
+            # the tensor through at a rank the pattern just changed.
+            source = (
+                inputs[0]
+                if inputs
+                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
+            )
+            pattern = _detail_value(details, "pattern")
+            if not pattern or not source.shape:
+                return source
+            owner = self._owner_class_name(node, root=root) or (
+                root.class_name if root is not None else None
+            )
+            axis_dims = dict(self.context.dims)
+            owner_scalars = (
+                self.module_dims.scalar_by_class.get(owner) if owner else None
+            )
+            if owner_scalars:
+                axis_dims.update(owner_scalars)
+            sizes: dict[str, DimExpr] = {}
+            for item in details:
+                if not item.startswith("axis "):
+                    continue
+                name, _, raw = item[len("axis ") :].partition(":")
+                token = raw.strip()
+                resolved: DimExpr | None = (
+                    int(token)
+                    if token.lstrip("-").isdigit()
+                    else _resolve_dim_name(token, axis_dims)
+                )
+                if resolved is not None:
+                    sizes[name.strip()] = resolved
+            rearranged = _einops_shape(pattern, source.shape, sizes)
+            if rearranged is None:
+                return source
+            return TensorSpec(shape=rearranged, dtype=source.dtype)
 
         if operation_label in {"view", "reshape"}:
             source = (
@@ -4221,6 +4305,7 @@ class ShapeInferencer:
             if classes is None:
                 classes = _descendant_classes(root)
                 self._owner_classes[id(root)] = classes
+                self._owner_class_refs.append(root)
             for segment in reversed(re.split(r"[:/]", node.id)):
                 if segment.startswith("@"):
                     continue
@@ -4335,6 +4420,7 @@ class ShapeInferencer:
         if classes is None:
             classes = _descendant_classes(root)
             self._owner_classes[id(root)] = classes
+            self._owner_class_refs.append(root)
         for segment in reversed(re.split(r"[:/]", node.id)):
             if segment.startswith("@"):
                 # Operation segments name the op itself, not the module that owns it.
@@ -4513,6 +4599,170 @@ def _merge_flatten_dim(
         base = "*".join(remaining)
         return f"{base}/{divisor}" if divisor != 1 else base
     return None
+
+
+def _parse_einops_side(side: str) -> list[Any] | None:
+    """Axis terms of one side of an einops pattern, or None if unsupported.
+
+    A term is an axis name, ``"..."`` for the ellipsis, or a tuple of names for
+    a parenthesised group. ``1`` is accepted as a literal singleton axis.
+    """
+    terms: list[Any] = []
+    index = 0
+    while index < len(side):
+        char = side[index]
+        if char.isspace():
+            index += 1
+            continue
+        if char == "(":
+            close = side.find(")", index)
+            if close == -1:
+                return None
+            inner = side[index + 1 : close].split()
+            if any(not _is_einops_name(name) for name in inner):
+                return None
+            terms.append(tuple(inner))
+            index = close + 1
+            continue
+        if char == ")":
+            return None
+        end = index
+        while end < len(side) and not side[end].isspace() and side[end] not in "()":
+            end += 1
+        token = side[index:end]
+        if token == "...":
+            terms.append("...")
+        elif _is_einops_name(token):
+            terms.append(token)
+        else:
+            return None
+        index = end
+    return terms
+
+
+def _is_einops_name(token: str) -> bool:
+    return token == "1" or (token.isidentifier() and token != "_")
+
+
+def _einops_shape(
+    pattern: str,
+    source: tuple[DimExpr, ...],
+    sizes: dict[str, DimExpr],
+) -> tuple[DimExpr, ...] | None:
+    """Apply an einops ``rearrange`` pattern to a shape.
+
+    The pattern says exactly what happens to each axis, so this needs no
+    guessing: bind the left side's names to the source dims, then read the
+    right side off those bindings. A group ``(a b)`` multiplies its axes
+    together, and the ellipsis carries whatever axes the named ones did not
+    claim. Returns *None* for anything it cannot account for exactly -- an
+    unresolvable split, a name the right side introduces from nowhere -- so an
+    unsupported pattern passes the tensor through rather than inventing a rank.
+    """
+    if "->" not in pattern:
+        return None
+    left_side, right_side = pattern.split("->", 1)
+    left = _parse_einops_side(left_side)
+    right = _parse_einops_side(right_side)
+    if left is None or right is None:
+        return None
+    if left.count("...") > 1 or right.count("...") > 1:
+        return None
+
+    # The ellipsis absorbs every axis the named terms do not take.
+    named = sum(1 for term in left if term != "...")
+    if "..." in left:
+        if len(source) < named:
+            return None
+        ellipsis_at = left.index("...")
+        before = ellipsis_at
+        after = named - before
+        ellipsis_dims = source[before : len(source) - after]
+    else:
+        if len(source) != named:
+            return None
+        ellipsis_dims = ()
+
+    bound: dict[str, DimExpr] = {}
+    cursor = 0
+    for term in left:
+        if term == "...":
+            cursor += len(ellipsis_dims)
+            continue
+        if cursor >= len(source):
+            return None
+        dim = source[cursor]
+        cursor += 1
+        if isinstance(term, tuple):
+            # A grouped INPUT axis splits one dim into several. Every factor but
+            # one must be given (``d=self.head_dim``); the remaining one is what
+            # is left over.
+            known = [name for name in term if name in sizes or name == "1"]
+            unknown = [name for name in term if name not in known]
+            if len(unknown) > 1:
+                return None
+            for name in known:
+                bound[name] = 1 if name == "1" else sizes[name]
+            if unknown:
+                divisor = _merge_axes(tuple(bound[name] for name in known) or (1,))
+                remainder = _divide_dim(dim, divisor)
+                if remainder is None:
+                    return None
+                bound[unknown[0]] = remainder
+        else:
+            if term == "1":
+                continue
+            bound[term] = sizes.get(term, dim)
+
+    out: list[DimExpr] = []
+    for term in right:
+        if term == "...":
+            out.extend(ellipsis_dims)
+        elif isinstance(term, tuple):
+            factors = []
+            for name in term:
+                if name == "1":
+                    factors.append(1)
+                elif name in bound:
+                    factors.append(bound[name])
+                else:
+                    return None
+            merged = _merge_axes(tuple(factors))
+            if merged is None:
+                return None
+            out.append(merged)
+        elif term == "1":
+            out.append(1)
+        elif term in bound:
+            out.append(bound[term])
+        else:
+            return None
+    return tuple(out)
+
+
+def _divide_dim(dim: DimExpr, divisor: DimExpr) -> DimExpr | None:
+    """``dim / divisor`` as a shape dim, or None when it does not divide."""
+    factors = list(_dim_factors(dim))
+    for token in _dim_factors(divisor):
+        if token in factors:
+            factors.remove(token)
+            continue
+        numeric = [item for item in factors if item.lstrip("-").isdigit()]
+        if not token.lstrip("-").isdigit() or not numeric:
+            return None
+        product = 1
+        for item in numeric:
+            product *= int(item)
+        if product % int(token):
+            return None
+        product //= int(token)
+        for item in numeric:
+            factors.remove(item)
+        if product != 1:
+            factors.append(str(product))
+    if not factors:
+        return 1
+    return _merge_axes(tuple(factors))
 
 
 def _merge_axes(axes: tuple[DimExpr, ...]) -> DimExpr | None:

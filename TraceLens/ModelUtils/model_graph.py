@@ -336,11 +336,23 @@ def _minimal_metadata(spec: GraphNodeSpec) -> dict[str, Any]:
     is_kernel_stage_op = block is not None and any(
         str(detail).startswith("triton_op:") for detail in block.details
     )
+    # A traced free-function leaf that records a DECLARATIVE pattern is the same
+    # case once more. einops' ``rearrange(x, "b s ... -> (b s) ...")`` has no
+    # body worth reading -- it is a third-party generic -- but the pattern at
+    # the call site states the entire layout change. Without it the node passed
+    # its input through at a rank the call had just changed, and every shape
+    # downstream inherited the stale one.
+    is_declarative_layout_leaf = (
+        block is not None
+        and not block.children
+        and any(str(detail).startswith("pattern:") for detail in block.details)
+    )
     if block is not None and (
         is_forward_operation(block.attr_name)
         or is_folded_frame_terminal_op
         or is_basic_op_leaf
         or is_kernel_stage_op
+        or is_declarative_layout_leaf
     ):
         metadata["attr_name"] = block.attr_name
         if block.details:
