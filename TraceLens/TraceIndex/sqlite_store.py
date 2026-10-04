@@ -27,6 +27,42 @@ from TraceLens.TraceIndex.utils import (
     utc_now,
 )
 
+# Promoted from unified_perf_summary.csv into typed columns so catalogs can
+# filter without json_extract on raw_row_json.
+UNIFIED_ROOFLINE_COLUMNS = (
+    ("gpu_kernel_pct", "REAL"),
+    ("pct_roofline_max", "REAL"),
+    ("pct_roofline_mean", "REAL"),
+    ("pct_roofline_median", "REAL"),
+    ("pct_roofline_min", "REAL"),
+    ("pct_roofline_std", "REAL"),
+    ("roofline_bound", "TEXT"),
+    ("roofline_time_us", "REAL"),
+)
+
+_ROOFLINE_TIME_KEYS = (
+    "Roofline Time (\u00b5s)_first",
+    "Roofline Time (us)_first",
+    "Roofline Time (\u00b5s)",
+    "Roofline Time (us)",
+)
+
+
+def extract_unified_roofline(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Pull roofline / GPU-share fields from a CSV row or parsed raw_row_json."""
+    return {
+        "gpu_kernel_pct": as_float(
+            first_value(row, ["Percentage (%)", "gpu_kernel_pct", "percent"])
+        ),
+        "pct_roofline_max": as_float(first_value(row, ["Pct Roofline_max"])),
+        "pct_roofline_mean": as_float(first_value(row, ["Pct Roofline_mean"])),
+        "pct_roofline_median": as_float(first_value(row, ["Pct Roofline_median"])),
+        "pct_roofline_min": as_float(first_value(row, ["Pct Roofline_min"])),
+        "pct_roofline_std": as_float(first_value(row, ["Pct Roofline_std"])),
+        "roofline_bound": as_text(first_value(row, ["Roofline Bound"])),
+        "roofline_time_us": as_float(first_value(row, _ROOFLINE_TIME_KEYS)),
+    }
+
 
 def is_read_only_sql(sql: str) -> bool:
     stripped = sql.strip().lower()
@@ -124,6 +160,13 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 has_perf_model INTEGER,
                 overlap_pct REAL,
                 gpu_kernel_pct REAL,
+                pct_roofline_max REAL,
+                pct_roofline_mean REAL,
+                pct_roofline_median REAL,
+                pct_roofline_min REAL,
+                pct_roofline_std REAL,
+                roofline_bound TEXT,
+                roofline_time_us REAL,
                 perf_params_json TEXT,
                 kernel_details_json TEXT,
                 raw_row_json TEXT
@@ -216,7 +259,101 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 tokenize='unicode61'
             );
             """)
+        added = self._ensure_unified_roofline_columns()
+        if added:
+            self._backfill_roofline_from_raw()
         self.conn.commit()
+
+    def _ensure_unified_roofline_columns(self) -> List[str]:
+        existing = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(unified_perf_rows)")
+        }
+        added: List[str] = []
+        alter_sql = {
+            "gpu_kernel_pct": (
+                "ALTER TABLE unified_perf_rows ADD COLUMN gpu_kernel_pct REAL"
+            ),
+            "pct_roofline_max": (
+                "ALTER TABLE unified_perf_rows ADD COLUMN pct_roofline_max REAL"
+            ),
+            "pct_roofline_mean": (
+                "ALTER TABLE unified_perf_rows ADD COLUMN pct_roofline_mean REAL"
+            ),
+            "pct_roofline_median": (
+                "ALTER TABLE unified_perf_rows ADD COLUMN pct_roofline_median REAL"
+            ),
+            "pct_roofline_min": (
+                "ALTER TABLE unified_perf_rows ADD COLUMN pct_roofline_min REAL"
+            ),
+            "pct_roofline_std": (
+                "ALTER TABLE unified_perf_rows ADD COLUMN pct_roofline_std REAL"
+            ),
+            "roofline_bound": (
+                "ALTER TABLE unified_perf_rows ADD COLUMN roofline_bound TEXT"
+            ),
+            "roofline_time_us": (
+                "ALTER TABLE unified_perf_rows ADD COLUMN roofline_time_us REAL"
+            ),
+        }
+        for name, _decl in UNIFIED_ROOFLINE_COLUMNS:
+            if name in existing:
+                continue
+            self.conn.execute(alter_sql[name])
+            added.append(name)
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trace_index_unified_roofline_bound "
+            "ON unified_perf_rows(roofline_bound)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trace_index_unified_pct_roofline_mean "
+            "ON unified_perf_rows(pct_roofline_mean)"
+        )
+        return added
+
+    def _backfill_roofline_from_raw(self) -> None:
+        rows = self.conn.execute(
+            "SELECT id, raw_row_json FROM unified_perf_rows WHERE raw_row_json IS NOT NULL"
+        ).fetchall()
+        updates = []
+        for row in rows:
+            try:
+                payload = json.loads(row["raw_row_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            fields = extract_unified_roofline(payload)
+            updates.append(
+                (
+                    fields["gpu_kernel_pct"],
+                    fields["pct_roofline_max"],
+                    fields["pct_roofline_mean"],
+                    fields["pct_roofline_median"],
+                    fields["pct_roofline_min"],
+                    fields["pct_roofline_std"],
+                    fields["roofline_bound"],
+                    fields["roofline_time_us"],
+                    row["id"],
+                )
+            )
+        if not updates:
+            return
+        self.conn.executemany(
+            """
+            UPDATE unified_perf_rows SET
+                gpu_kernel_pct = COALESCE(gpu_kernel_pct, ?),
+                pct_roofline_max = COALESCE(pct_roofline_max, ?),
+                pct_roofline_mean = COALESCE(pct_roofline_mean, ?),
+                pct_roofline_median = COALESCE(pct_roofline_median, ?),
+                pct_roofline_min = COALESCE(pct_roofline_min, ?),
+                pct_roofline_std = COALESCE(pct_roofline_std, ?),
+                roofline_bound = COALESCE(roofline_bound, ?),
+                roofline_time_us = COALESCE(roofline_time_us, ?)
+            WHERE id = ?
+            """,
+            updates,
+        )
 
     def upsert_trace(self, trace: TraceRecord) -> int:
         now = utc_now()
@@ -427,6 +564,7 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             kernel_details = parse_repr(
                 first_value(row, ["kernel_details_summary", "trunc_kernel_details"])
             )
+            roofline = extract_unified_roofline(row)
             cursor = self.conn.execute(
                 """
                 INSERT INTO unified_perf_rows(
@@ -435,10 +573,13 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                     kernel_time_std_us, kernel_time_min_us, kernel_time_max_us,
                     op_duration_us, tflops_mean, tflops_median, tbs_mean, tbs_median,
                     gflops, data_moved_mb, flops_per_byte, compute_spec,
-                    has_perf_model, overlap_pct, gpu_kernel_pct, perf_params_json,
-                    kernel_details_json, raw_row_json
+                    has_perf_model, overlap_pct, gpu_kernel_pct,
+                    pct_roofline_max, pct_roofline_mean, pct_roofline_median,
+                    pct_roofline_min, pct_roofline_std, roofline_bound,
+                    roofline_time_us, perf_params_json, kernel_details_json,
+                    raw_row_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trace_id,
@@ -516,12 +657,14 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                     as_text(first_value(row, ["Compute Spec", "compute_spec"])),
                     as_bool_int(first_value(row, ["has_perf_model", "Has Perf Model"])),
                     as_float(first_value(row, ["overlap_pct", "Overlap (%)"])),
-                    as_float(
-                        first_value(
-                            row,
-                            ["Percentage (%)", "gpu_kernel_pct", "percent"],
-                        )
-                    ),
+                    roofline["gpu_kernel_pct"],
+                    roofline["pct_roofline_max"],
+                    roofline["pct_roofline_mean"],
+                    roofline["pct_roofline_median"],
+                    roofline["pct_roofline_min"],
+                    roofline["pct_roofline_std"],
+                    roofline["roofline_bound"],
+                    roofline["roofline_time_us"],
                     to_json(params),
                     to_json(kernel_details),
                     to_json(dict(row)),
