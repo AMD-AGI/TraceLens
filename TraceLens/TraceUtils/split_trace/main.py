@@ -349,16 +349,14 @@ def _extract_iterations(detection, ctx, args, start, end):
             end,
         )
         return details, details
-    if args.iterations != "all":
-        details = extract_and_save_single_trace(
-            iteration_roots[start:end],
-            ctx,
-            start,
-            end,
-            uid_map=detection.diagnostics.get("_events_by_uid", {}),
-        )
-        return details, None
-    return [], None
+    details = extract_and_save_single_trace(
+        iteration_roots[start:end],
+        ctx,
+        start,
+        end,
+        uid_map=detection.diagnostics.get("_events_by_uid", {}),
+    )
+    return details, None
 
 
 def _working_roots(iteration_roots, args, start, end):

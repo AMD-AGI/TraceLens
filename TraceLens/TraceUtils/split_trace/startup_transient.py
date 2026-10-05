@@ -31,6 +31,7 @@ from typing import Dict, List, Optional, Tuple
 
 from ..utils.detect_utils import (
     BOOKEND_NAMES,
+    CoverageReport,
     DetectStatus,
     EventIndex,
     GpuAttribution,
@@ -132,6 +133,16 @@ def trim_startup_transient(
         )
         new_roots = roots[1:]
         coverage = GpuAttribution(trace_index).audit(new_roots)
+        transient_dur = first_totals.get(collective_name, 0.0)
+        adjusted_gpu_busy = coverage.gpu_busy - transient_dur
+        if adjusted_gpu_busy > 0:
+            scale = coverage.gpu_busy / adjusted_gpu_busy
+            coverage = CoverageReport(
+                strategy=coverage.strategy,
+                covered_selected=min(1.0, coverage.covered_selected * scale),
+                covered_spans=min(1.0, coverage.covered_spans * scale),
+                gpu_busy=adjusted_gpu_busy,
+            )
         return RootSet(
             roots=new_roots,
             method=root_set.method,
