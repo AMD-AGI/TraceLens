@@ -165,6 +165,17 @@ class TestTrimStartupTransient:
         result = trim_startup_transient(root_set, EventIndex(kernels))
         assert result is root_set
 
+    def test_kernel_only_in_iter0_is_skipped(self):
+        """A collective kernel only in iteration 0 has no later samples — skipped, not crashed."""
+        roots = [_root(i) for i in range(5)]
+        kernels = []
+        for i in range(5):
+            base = i * ITER_PERIOD
+            kernels.append(_kernel(base + 10, 40, "gemm"))
+        kernels.append(_kernel(roots[0]["ts"] + 20, 9000, "ncclOnlyInIter0"))
+        result = trim_startup_transient(_root_set(roots), EventIndex(kernels))
+        assert result.diagnostics["startup_transient_trimmed"] is False
+
     def test_coverage_excludes_transient_kernel_duration(self):
         """After trimming, the transient kernel's duration is removed from gpu_busy."""
         roots, kernels = _build(
