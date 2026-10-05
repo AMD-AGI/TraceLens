@@ -57,9 +57,9 @@ Splitting proceeds in four stages:
 ```text
 trace.json.gz
    └─ Detect iteration roots   detects the iteration markers i.e. where to split
-      └─ Find steady state  finds the window of splits that are steady state (peak concurrency/stable runtime)
+      └─ Find steady state   finds the window of splits that are steady state (peak concurrency/stable runtime)
       └─ Divide phases   divides splits into prefill/decode/prefilldecode (only for LLM inference)
-   └─ Extract extract the splits. creates traces from splits
+   └─ Extract extract   the splits. creates traces from splits
 ```
 
 Detection and extraction always run. Finding the steady-state region and dividing
@@ -68,11 +68,18 @@ operate on the iterations found in the first stage.
 
 ## Split a trace
 
-Invoke the splitter as a module (it is also installed as the
-`TraceLens_split_inference_trace` console script):
+Invoke the splitter as a module, as the installed `TraceLens_split_trace`
+console script, or as a direct script invocation:
 
 ```bash
-python -m TraceLens.TraceUtils.trace_split.main trace.json.gz -o ./output [OPTIONS]
+# As a module
+python -m TraceLens.TraceUtils.split_trace.main trace.json.gz -o ./output [OPTIONS]
+
+# As the installed console script
+TraceLens_split_trace trace.json.gz -o ./output [OPTIONS]
+
+# As a direct script invocation
+python TraceLens/TraceUtils/split_trace/main.py trace.json.gz -o ./output [OPTIONS]
 ```
 
 `--store-single-iteration`, `--find-steady-state`, and `--divide-phases` can all

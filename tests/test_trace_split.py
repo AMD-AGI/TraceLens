@@ -18,7 +18,7 @@ Run with --update-references to generate or refresh reference directories.
 
 import gzip, json, os, re, shutil, sys, pytest
 
-from TraceLens.TraceUtils.trace_split import main as split
+from TraceLens.TraceUtils.split_trace import main as split
 from TraceLens.util import DataLoader
 
 MULTI_ITER_TRACES_ROOT = "tests/traces/trace_splitter_traces"
