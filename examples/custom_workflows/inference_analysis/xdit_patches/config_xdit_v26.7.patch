@@ -9,21 +9,7 @@
      profile_wait: int = 2
      profile_warmup: int = 2
      profile_active: int = 1
-@@ -179,6 +181,13 @@
-     distilled_transformer_path: Optional[str] = None
-     distilled_transformer_2_path: Optional[str] = None
- 
-+    def __post_init__(self):
-+        if self.profile_with_stack and not self.profile:
-+            logger.warning(
-+                "--profile_with_stack has no effect without --profile; "
-+                "no profiles will be outputted."
-+            )
-+
-     @staticmethod
-     def add_cli_args(parser: FlexibleArgumentParser):
-         """Shared CLI arguments for xFuser engine."""
-@@ -661,6 +670,16 @@
+@@ -661,6 +663,16 @@
              help="active argument for torch.profiler.schedule. Only used with --profile.",
          )
          parser.add_argument(
@@ -40,6 +26,18 @@
              "--warmup_calls",
              help="The number of full pipe calls to warmup the model.",
              default=0,
+@@ -820,6 +832,11 @@
+     def from_runner_args(cls, args: dict):
+         attrs = [attr.name for attr in dataclasses.fields(cls)]
+         engine_args = cls(**{arg_name: arg_value for arg_name, arg_value in args.items() if arg_name in attrs})
++        if engine_args.profile_with_stack and not engine_args.profile:
++            logger.warning(
++                "--profile_with_stack has no effect without --profile; "
++                "no profiles will be outputted."
++            )
+         return engine_args
+ 
+ 
 --- a/xfuser/model_executor/models/runner_models/base_model.py
 +++ b/xfuser/model_executor/models/runner_models/base_model.py
 @@ -3,6 +3,7 @@
