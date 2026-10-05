@@ -646,12 +646,13 @@ def test_a_loop_carries_the_width_its_body_produces():
     pytest.importorskip("huggingface_hub")
     _, by_id = _build_nodes("zai-org/GLM-5.3-Flash")
 
+    # Every loop body entry, found by its id rather than its label: the two
+    # ends are named for the tensor itself now, and which is which is given by
+    # the direction.
     entries = {
-        node_id: node
-        for node_id, node in by_id.items()
-        if "@body_in:" in node_id and str(node.get("label", "")).startswith("loop in:")
+        node_id: node for node_id, node in by_id.items() if "@body_in:" in node_id
     }
-    assert entries, "expected a folded loop to name what it carries"
+    assert entries, "expected a loop body to declare what it carries"
     for node_id, node in entries.items():
         exit_node = by_id.get(node_id.replace("@body_in:", "@body_out:"))
         assert exit_node is not None, node_id
@@ -1013,17 +1014,21 @@ def test_loop_ports_bracket_the_body_which_names_both_kinds_of_input(model_id):
                 continue
             prefix, rest = node["id"].split(token, 1)
             carried.setdefault(f"{prefix}{rest}", {})[side] = node
-    folded = {
-        key: sides
-        for key, sides in carried.items()
-        if any(str(n.get("label", "")).startswith("loop ") for n in sides.values())
+    # Folded means its ports are GONE, which is a structural fact rather than
+    # a naming one: both ends of a folded body are simply named for the tensor.
+    ported = {
+        "".join(node["id"].split("@loop_carried_in:", 1))
+        for node in graph["nodes"]
+        if "@loop_carried_in:" in node["id"]
     }
+    folded = {key: sides for key, sides in carried.items() if key not in ported}
     assert folded, "expected at least one folded loop"
     for key, sides in folded.items():
         assert set(sides) == {"in", "out"}, (key, sorted(sides))
         variable = key.rsplit(":", 1)[-1]
-        assert str(sides["in"].get("label")) == f"loop in: {variable}"
-        assert str(sides["out"].get("label")) == f"loop out: {variable}"
+        # Both ends carry the tensor's own name; the direction says which end.
+        assert str(sides["in"].get("label")) == variable
+        assert str(sides["out"].get("label")) == variable
         # Both ends are wired: the body reads what comes in and produces what
         # goes out, with nothing circling back between them.
         for side, node in sides.items():

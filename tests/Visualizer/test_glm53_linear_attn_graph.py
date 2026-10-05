@@ -1327,14 +1327,16 @@ def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
         and node["id"].endswith(":final")
     ]
     # The expert loop carries ``final``. With its ports folded away the body's
-    # own boundaries are what name it, as ``loop in: final`` / ``loop out:
-    # final``. Matched on the carried variable rather than on one variant, so
-    # this does not depend on which MoE variant comes first.
+    # own boundaries are what name it -- both simply ``final``, told apart by
+    # which end of the body they sit at. Matched on the carried variable rather
+    # than on one variant, so this does not depend on which MoE variant comes
+    # first.
     assert carried, "the expert loop must name the value it carries"
-    assert {str(n.get("label")) for n in carried} == {
-        "loop in: final",
-        "loop out: final",
-    }, [n.get("label") for n in carried]
+    assert {str(n.get("label")) for n in carried} == {"final"}, [
+        n.get("label") for n in carried
+    ]
+    assert any("@body_in:" in n["id"] for n in carried), "no entry end"
+    assert any("@body_out:" in n["id"] for n in carried), "no exit end"
     assert all(len(node.get("incomingEdges", [])) <= 1 for node in loop_inputs)
     assert not any(
         "nonzero" in edge["sourceNodeId"]
@@ -1418,15 +1420,16 @@ def test_glm53_loop_carried_pairs_are_well_formed():
     # leave what it carries in with nothing naming it at all.
     folded = {
         key
-        for key, sides in carried.items()
-        if str(by_id[next(iter(sides.values()))].get("label", "")).startswith("loop ")
+        for key in carried
+        if f"{key[0]}@loop_carried_in:{key[1]}:{key[2]}" not in by_id
     }
     assert folded, "expected at least one folded loop"
     for key in folded:
         variable, sides = key[2], carried[key]
         assert set(sides) == {"in", "out"}, (variable, sides)
-        assert str(by_id[sides["in"]].get("label")) == f"loop in: {variable}"
-        assert str(by_id[sides["out"]].get("label")) == f"loop out: {variable}"
+        # Both ends carry the tensor's own name; the direction says which end.
+        assert str(by_id[sides["in"]].get("label")) == variable
+        assert str(by_id[sides["out"]].get("label")) == variable
         # Both ends sit inside the body they bracket, and each is wired.
         assert by_id[sides["in"]].get("incomingEdges"), sides["in"]
         assert by_id[sides["out"]].get("incomingEdges"), sides["out"]
@@ -1681,8 +1684,7 @@ def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
     """The vision block is seeded straight from the patch embed.
 
     With the ports folded away there is nothing between the two: the embed's
-    result enters the block's own ``loop in:`` boundary, which the body's ops
-    read. The graph is plainly acyclic now -- not acyclic apart from one
+    result enters the block's own body boundary, which the body's ops read. The graph is plainly acyclic now -- not acyclic apart from one
     sanctioned back edge.
     """
     pytest.importorskip("huggingface_hub")
@@ -1699,7 +1701,7 @@ def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
     ]
     assert len(entry) == 1, [n["id"] for n in entry]
     entry_node = entry[0]
-    assert str(entry_node.get("label")) == "loop in: hidden_states"
+    assert str(entry_node.get("label")) == "hidden_states"
 
     sources = {e["sourceNodeId"] for e in entry_node.get("incomingEdges", []) or []}
     assert sources == {"visual/@input:initial"}, sources
@@ -3555,7 +3557,7 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
         if "visual/@body_in:" in n["id"] and n["id"].endswith(":hidden_states")
     ]
     assert len(vision_in) == 1, vision_in
-    assert str(by_id[vision_in[0]].get("label")) == "loop in: hidden_states"
+    assert str(by_id[vision_in[0]].get("label")) == "hidden_states"
     assert not any(
         "@loop_carried" in n["id"] and n["id"].endswith(":hidden_states") for n in nodes
     )
@@ -3985,11 +3987,22 @@ def test_glm53_heterogeneous_decoder_group_has_no_loop_carried_tiles():
     # only on the way OUT keeps its ports -- folding them would leave what it
     # carries in with nothing naming it -- so ports may remain, but never for a
     # loop whose body names the value both ways.
+    # Which loops SHOULD have folded is a structural question, not a naming
+    # one: a loop body carrying exactly ONE variable is the case this fold is
+    # for. Deriving it from the ids keeps the check honest now that both ends
+    # of a folded body are simply named for the tensor they carry.
+    carried_by_loop: dict[str, set[str]] = {}
+    for n in nodes:
+        if "@body_in:" not in n["id"]:
+            continue
+        loop_id, _, variable = n["id"].split("@body_in:", 1)[1].partition(":")
+        carried_by_loop.setdefault(loop_id, set()).add(variable)
     folded_vars = {
-        n["id"].split("@body_in:", 1)[1]
-        for n in nodes
-        if "@body_in:" in n["id"] and str(n.get("label", "")).startswith("loop in:")
+        f"{loop_id}:{next(iter(variables))}"
+        for loop_id, variables in carried_by_loop.items()
+        if len(variables) == 1
     }
+    assert folded_vars, "expected at least one single-value loop"
     stale = [
         n["id"]
         for n in nodes

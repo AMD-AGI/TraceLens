@@ -2669,9 +2669,10 @@ def _fold_simple_loop_ports(nodes: list[dict[str, Any]]) -> None:
 
     So fold the ports away and wire the seed to whatever the entry port fed and
     whatever fed the exit port to its consumers. The body's own boundaries stay
-    and say which value is carried, now named ``loop in: <var>`` and
-    ``loop out: <var>``. Nothing here creates an edge, so the graph strictly
-    loses its one cycle rather than gaining anything.
+    and keep the tensor's own name on both sides -- which end is which is given
+    by the direction, the way every other block says it. Nothing here creates an
+    edge, so the graph strictly loses its one cycle rather than gaining
+    anything.
 
     Loops carrying several values keep their ports: with more than one value in
     flight, which output returns to which input is exactly what the reader
@@ -2761,20 +2762,6 @@ def _fold_simple_loop_ports(nodes: list[dict[str, Any]]) -> None:
             deduped.append(edge)
         node["incomingEdges"] = deduped
     nodes[:] = [n for n in nodes if str(n["id"]) not in doomed]
-
-    # The body's boundaries now carry the whole story, so say which value the
-    # loop carries rather than repeating the tensor's bare name. Only for the
-    # loops actually folded: one that kept its ports still says it there, and
-    # saying it twice would be worse than either.
-    folded = {str(entry["id"]).split("@loop_carried_in:", 1)[1] for entry, _ in pairs}
-    for node in nodes:
-        node_id = str(node["id"])
-        for token, prefix in (("@body_in:", "loop in"), ("@body_out:", "loop out")):
-            if token not in node_id or node_id.split(token, 1)[1] not in folded:
-                continue
-            label = str(node.get("label") or "")
-            if label and not label.startswith(("loop in:", "loop out:")):
-                node["label"] = f"{prefix}: {label}"
 
 
 def _fold_same_scope_mirrors(nodes: list[dict[str, Any]]) -> None:
