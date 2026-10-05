@@ -1365,6 +1365,41 @@ class TestTreePerfCollectPhase12:
         collected = analyzer.collect_unified_perf_events()
         assert isinstance(collected, list)
 
+    def test_synthetic_op_registered_in_events_by_uid(self):
+        """Synthetic ops fabricated by collect_unified_perf_events must be
+        registered in tree.events_by_uid, or get_UID2event(synthetic_uid)
+        raises KeyError downstream (e.g. in compute_perf_metrics)."""
+        corr = 900
+        events = [
+            _make_gpu_event(
+                "rt",
+                1000,
+                5,
+                "cuda_runtime",
+                "hipModuleLaunchKernel",
+                args={"correlation": corr},
+            ),
+            _make_gpu_event(
+                "k",
+                1005,
+                10,
+                "kernel",
+                "triton_kernel_0",
+                pid=0,
+                tid=7,
+                args={"correlation": corr, "stream": 7},
+            ),
+            _mk_ac2g(corr, 0, 7, 1005, "s"),
+            _mk_ac2g(corr, 0, 7, 1015, "f"),
+        ]
+        analyzer = _build_analyzer(events)
+        collected = analyzer.collect_unified_perf_events()
+        synthetic_ops = [e for e in collected if "Synthetic Op" in e["name"]]
+        assert synthetic_ops, "expected an orphan-launcher synthetic op to be created"
+        for synthetic_op in synthetic_ops:
+            assert synthetic_op["UID"] in analyzer.tree.events_by_uid
+            assert analyzer.tree.get_UID2event(synthetic_op["UID"]) is synthetic_op
+
 
 @pytest.mark.skipif(not os.path.isfile(RESNET_TRACE), reason="resnet trace missing")
 class TestResnetTrace:
@@ -1848,6 +1883,35 @@ def test_merged_graph_treeperf_extended():
 def test_jax_gemm_performance_from_pb():
     df = JaxAnalyses.gemm_performance_from_pb(JAX_PB, module_name="jit_forward_3d_conv")
     assert isinstance(df, pd.DataFrame)
+
+
+def test_gemm_performance_from_pb_accepts_derived_xla_module_row():
+    events = [
+        {
+            "ph": "M",
+            "pid": 1,
+            "name": "process_name",
+            "args": {"name": "gpu"},
+        },
+        {
+            "ph": "M",
+            "pid": 1,
+            "tid": 4,
+            "name": "thread_name",
+            "args": {"name": "XLA Modules - from #19"},
+        },
+        {"ph": "X", "pid": 1, "tid": 4, "name": "jit_train_step(args)"},
+    ]
+    with patch(
+        "TraceLens.TreePerf.jax_analyses.DataLoader.load_data",
+        return_value={"traceEvents": events},
+    ), patch(
+        "TraceLens.TreePerf.jax_analyses.JaxProfileProcessor.process_protobuf_file",
+        return_value={},
+    ) as process_pb:
+        df = JaxAnalyses.gemm_performance_from_pb("trace.xplane.pb", module_name=None)
+    process_pb.assert_called_once_with("trace.xplane.pb", "jit_train_step")
+    assert df.empty
 
 
 class TestTreePerfFromFileCapture:

@@ -21,9 +21,9 @@ from .util import (
     _get_node_arg,
     _is_gpu_path,
     _is_kernel,
-    _normalize_name_for_comparison,
     _sort_by_ts,
 )
+from ..util import normalize_name_for_comparison
 
 _TRACELENS_DEBUG = os.environ.get("TRACELENS_DEBUG", "0") == "1"
 _GRAPH_LAUNCH_NAMES = ["hipGraphLaunch", "cudaGraphLaunch"]
@@ -387,11 +387,11 @@ class TraceDiff:
         """
         # Pre-compute names for cache key
         names1 = [
-            _normalize_name_for_comparison(self._get_op_name(item, 1), strip_details)
+            normalize_name_for_comparison(self._get_op_name(item, 1), strip_details)
             for item in items1
         ]
         names2 = [
-            _normalize_name_for_comparison(self._get_op_name(item, 2), strip_details)
+            normalize_name_for_comparison(self._get_op_name(item, 2), strip_details)
             for item in items2
         ]
 

@@ -74,11 +74,12 @@ These are installed automatically with the package:
 | `office365-rest-python-client`, `msal` | Optional SharePoint/365 integrations. |
 | `traceconv` | Optional; required only for `.pftrace` input. Resolved from `PATH` or downloaded automatically if not provided with `--traceconv`. |
 
-The optional `[jax]` extra installs `xprof==2.20.1` and
-`protobuf>=6.31.1,<7.0.0` for JAX XPlane parsing and HLO sidecar generation.
-The pinned converter supplies CPython 3.9–3.12 wheels for Linux x86-64 and
-macOS ARM64. These dependencies are not required for PyTorch or rocprof
-reports. See [JAX setup](../how-to/generate-perf-report-jax.md#before-you-begin).
+The optional `[jax]` extra installs `xprof==2.23.2` and
+`protobuf>=6.33.5` for JAX XPlane parsing and HLO sidecar generation.
+The pinned converter requires Python 3.10 or later and supplies wheels for
+Linux x86-64, Linux aarch64, macOS ARM64, and Windows x86-64. These
+dependencies are not required for PyTorch or rocprof reports. See
+[JAX setup](../how-to/generate-perf-report-jax.md#before-you-begin).
 
 ## Supported trace formats
 
