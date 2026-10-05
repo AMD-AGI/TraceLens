@@ -29,34 +29,13 @@ from bisect import bisect_left
 from statistics import median
 from typing import Dict, List, Optional, Tuple
 
-from ...util import TraceEventUtils
 from ..utils.detect_utils import (
     BOOKEND_NAMES,
     DetectStatus,
     EventIndex,
     GpuAttribution,
     RootSet,
-    build_root_tiles,
     grade_coverage,
-)
-
-# Need enough later iterations that a median of their durations is meaningful,
-# not just one or two samples that could themselves be noisy.
-MIN_OTHER_ITERATIONS = 3
-
-# Collective-op names, scoped to this feature via get_communication_regexes'
-# custom-pattern override so the broader NCCL/RCCL defaults used elsewhere
-# (roofline, GEMM categorization) are unaffected.
-_COLLECTIVE_PATTERNS: List[Tuple[str, str]] = [
-    (r"cross_device_reduce", "allreduce"),
-    (r"all_?reduce", "allreduce"),
-    (r"all_?gather", "allgather"),
-    (r"reduce_?scatter", "reducescatter"),
-    (r"all_?to_?all", "alltoall"),
-    (r"broadcast", "broadcast"),
-]
-_COLLECTIVE_REGEXES = TraceEventUtils.get_communication_regexes(
-    custom_collective_patterns=_COLLECTIVE_PATTERNS
 )
 
 # Iteration 0's collective kernel must run at least this many times its later-
@@ -66,18 +45,6 @@ _COLLECTIVE_RATIO_FLOOR = 5.0
 # inflation by this factor, so ordinary noise that touches every op alike never
 # qualifies.
 _NOISE_RATIO_MARGIN = 5.0
-
-
-def _is_collective(name: str) -> bool:
-    return bool(name) and any(p.search(name) for p in _COLLECTIVE_REGEXES)
-
-
-def _window_for(root: dict, tiles: dict) -> Tuple[float, float]:
-    key = (root.get("pid"), root.get("tid"), root.get("ts", 0))
-    if key in tiles:
-        return tiles[key]
-    start = root.get("ts", 0)
-    return start, start + root.get("dur", 0)
 
 
 def _kernel_durations_by_name(
@@ -111,21 +78,25 @@ def trim_startup_transient(
     roots = root_set.roots
     if (
         trace_index is None
-        or len(roots) < 1 + MIN_OTHER_ITERATIONS
+        or len(roots) < 2
         or root_set.status is DetectStatus.NOT_SPLITTABLE
         or roots[0].get("name") in BOOKEND_NAMES
+        or not trace_index.collective_kernels
     ):
         return root_set
 
-    tiles, _ = build_root_tiles(roots)
     kernels = trace_index.kernels
     starts = [k["ts"] for k in kernels]
 
     first_totals = _kernel_durations_by_name(
-        kernels, starts, _window_for(roots[0], tiles)
+        kernels,
+        starts,
+        (roots[0].get("ts", 0), roots[0].get("ts", 0) + roots[0].get("dur", 0)),
     )
     later_totals = [
-        _kernel_durations_by_name(kernels, starts, _window_for(r, tiles))
+        _kernel_durations_by_name(
+            kernels, starts, (r.get("ts", 0), r.get("ts", 0) + r.get("dur", 0))
+        )
         for r in roots[1:]
     ]
 
@@ -135,13 +106,11 @@ def trim_startup_transient(
     for name, first_dur in first_totals.items():
         later_values = [t.get(name, 0.0) for t in later_totals]
         nonzero = [v for v in later_values if v > 0]
-        if len(nonzero) < MIN_OTHER_ITERATIONS:
+        if not nonzero:
             continue
         med = median(nonzero)
-        if med <= 0:
-            continue
         ratio = first_dur / med
-        if _is_collective(name):
+        if name in trace_index.collective_kernels:
             if collective_ratio is None or ratio > collective_ratio:
                 collective_ratio, collective_name = ratio, name
         else:

@@ -22,7 +22,7 @@ from enum import Enum, IntEnum
 from statistics import median
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from ...util import GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION
+from ...util import GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION, TraceEventUtils
 
 # Coverage to accept roots outright, and the floor below which a trace is
 # unsplittable rather than degraded.
@@ -346,6 +346,11 @@ class EventIndex:
 
         self.kernels.sort(key=lambda x: x["ts"])
         self.annotations.sort(key=lambda e: e["ts"])
+        self.collective_kernels: set = {
+            k.get("name", "")
+            for k in self.kernels
+            if TraceEventUtils.is_communication_string(k.get("name", ""))
+        }
 
 
 # --- GPU attribution and coverage -------------------------------------------
