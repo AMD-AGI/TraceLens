@@ -6,7 +6,7 @@
 
 """Unit tests for TraceLens.util helpers."""
 
-import contextlib, gzip, json, os, sys, types, pytest, pandas as pd
+import contextlib, gzip, json, os, struct, sys, types, pytest, pandas as pd
 from unittest.mock import patch
 from TraceLens.util import (
     DataLoader,
@@ -14,6 +14,8 @@ from TraceLens.util import (
     PftraceParser,
     RocprofParser,
     TraceEventUtils,
+    _attach_xplane_event_args,
+    _restore_streaming_device_ids,
     merge_intervals,
     suppress_native_hlo_logs,
 )
@@ -662,10 +664,11 @@ def test_process_protobuf_file_triggers_tool_names(mock_suppress, mock_glob, tmp
     assert "%x" in hlo_ops
 
 
+@pytest.mark.parametrize("as_bytes", [True, False])
 @patch("TraceLens.util.glob.glob")
 @patch("TraceLens.util.suppress_native_hlo_logs")
-def test_process_protobuf_file_tensorboard_fallback(
-    mock_suppress, mock_glob, tmp_path, monkeypatch
+def test_process_protobuf_file_requests_graph_viewer(
+    mock_suppress, mock_glob, tmp_path, as_bytes
 ):
     pb_path = tmp_path / "plugin.xplane.pb"
     pb_path.write_bytes(b"pb")
@@ -673,38 +676,35 @@ def test_process_protobuf_file_tensorboard_fallback(
     hlo_pb.write_bytes(b"hlo")
 
     mock_suppress.return_value = contextlib.nullcontext()
-    mock_glob.side_effect = [[str(hlo_pb)], [str(hlo_pb)]]
+    mock_glob.return_value = [str(hlo_pb)]
 
     graph_text = "%x = bf16[4,8]{1,0} parameter(0)\n"
-    tb_mod = types.ModuleType("tensorboard_plugin_profile.convert.raw_to_tool_data")
-    tb_mod.xspace_to_tool_names = lambda *args, **kwargs: None
-    tb_mod.xspace_to_tool_data = lambda *args, **kwargs: (
-        graph_text.encode("utf-8"),
-        None,
-    )
-    tb_convert = types.ModuleType("tensorboard_plugin_profile.convert")
-    tb_convert.raw_to_tool_data = tb_mod
-    tb_pkg = types.ModuleType("tensorboard_plugin_profile")
-    tb_pkg.convert = tb_convert
+    calls = []
 
-    real_import = __import__
+    def xspace_to_tool_data(*args, **kwargs):
+        calls.append(args)
+        payload = graph_text.encode("utf-8") if as_bytes else graph_text
+        return (payload, None)
 
-    def fake_import(name, *args, **kwargs):
-        if name == "xprof.convert":
-            raise ImportError("xprof unavailable")
-        return real_import(name, *args, **kwargs)
+    mock_mod = types.ModuleType("xprof.convert.raw_to_tool_data")
+    mock_mod.xspace_to_tool_names = lambda *args, **kwargs: None
+    mock_mod.xspace_to_tool_data = xspace_to_tool_data
+    fake_convert = types.ModuleType("xprof.convert")
+    fake_convert.raw_to_tool_data = mock_mod
+    fake_xprof = types.ModuleType("xprof")
+    fake_xprof.convert = fake_convert
 
-    monkeypatch.setattr("builtins.__import__", fake_import)
     with patch.dict(
         sys.modules,
         {
-            "tensorboard_plugin_profile": tb_pkg,
-            "tensorboard_plugin_profile.convert": tb_convert,
-            "tensorboard_plugin_profile.convert.raw_to_tool_data": tb_mod,
+            "xprof": fake_xprof,
+            "xprof.convert": fake_convert,
+            "xprof.convert.raw_to_tool_data": mock_mod,
         },
     ):
         hlo_ops = JaxProfileProcessor.process_protobuf_file(str(pb_path), "main_jax")
 
+    assert calls[0][1] == "graph_viewer"
     assert "%x" in hlo_ops
 
 
@@ -732,7 +732,7 @@ def test_json_loading_does_not_import_jax_dependencies(
     real_import = __import__
 
     def reject_converter_import(name, *args, **kwargs):
-        if name.split(".", 1)[0] in {"xprof", "tensorboard_plugin_profile"}:
+        if name.split(".", 1)[0] == "xprof":
             raise AssertionError("JSON loading must not import a JAX converter")
         return real_import(name, *args, **kwargs)
 
@@ -753,7 +753,7 @@ def test_protobuf_loading_requires_jax_extra(monkeypatch, hlo_metadata):
     real_import = __import__
 
     def reject_converter_import(name, *args, **kwargs):
-        if name.split(".", 1)[0] in {"xprof", "tensorboard_plugin_profile"}:
+        if name.split(".", 1)[0] == "xprof":
             raise ModuleNotFoundError(name)
         return real_import(name, *args, **kwargs)
 
@@ -775,24 +775,237 @@ def test_dataloader_save_preprocessed_json(tmp_path):
     assert json.loads(trace_path.read_text()) == payload
 
 
+@patch("TraceLens.util.suppress_native_hlo_logs")
+def test_dataloader_save_preprocessed_pb_writes_normalized(mock_suppress, tmp_path):
+    payload = {
+        "traceEvents": [
+            {},
+            {"name": "mark", "ph": "i", "ts": 1.0},
+        ]
+    }
+    trace_path = tmp_path / "trace.pb"
+    trace_path.write_bytes(b"pb")
+    mock_suppress.return_value = contextlib.nullcontext()
+    modules = _install_mock_xprof_convert((json.dumps(payload), None))
+
+    with patch.dict(sys.modules, modules):
+        result = DataLoader.load_data(str(trace_path), save_preprocessed=True)
+
+    saved = json.loads((tmp_path / "trace.processed.json").read_text())
+    assert saved == result
+    assert saved["traceEvents"] == [{"name": "mark", "ph": "X", "ts": 1.0, "dur": 1e-6}]
+
+
+@patch("TraceLens.util.suppress_native_hlo_logs")
+def test_dataloader_load_pb_without_event_list(mock_suppress, tmp_path):
+    trace_path = tmp_path / "trace.pb"
+    trace_path.write_bytes(b"pb")
+    mock_suppress.return_value = contextlib.nullcontext()
+    modules = _install_mock_xprof_convert((json.dumps({"other": 1}), None))
+
+    with patch.dict(sys.modules, modules):
+        assert DataLoader.load_data(str(trace_path)) == {"other": 1}
+
+
 def test_dataloader_unknown_file_type():
     with pytest.raises(ValueError, match="Unknown file type"):
         DataLoader.load_data("/tmp/not-a-trace.xyz")
 
 
+@pytest.mark.parametrize("as_bytes", [True, False])
 @patch("TraceLens.util.suppress_native_hlo_logs")
-def test_dataloader_load_pb(mock_suppress, tmp_path):
-    payload = {"traceEvents": []}
+def test_dataloader_load_pb(mock_suppress, tmp_path, as_bytes):
+    payload = {
+        "traceEvents": [
+            {},
+            {"name": "mark", "ph": "i", "ts": 1.0},
+            {"name": "kernel", "ph": "X"},
+        ]
+    }
     trace_path = tmp_path / "trace.pb"
     trace_path.write_bytes(b"pb")
 
     mock_suppress.return_value = contextlib.nullcontext()
-    modules = _install_mock_xprof_convert((json.dumps(payload).encode("utf-8"), None))
+    body = json.dumps(payload)
+    encoded = body.encode("utf-8") if as_bytes else body
+    modules = _install_mock_xprof_convert((encoded, None))
+    calls = []
+    converter = modules["xprof.convert.raw_to_tool_data"]
+    original = converter.xspace_to_tool_data
+
+    def xspace_to_tool_data(*args, **kwargs):
+        calls.append(args)
+        return original(*args, **kwargs)
+
+    converter.xspace_to_tool_data = xspace_to_tool_data
 
     with patch.dict(sys.modules, modules):
         result = DataLoader.load_data(str(trace_path))
 
-    assert result == payload
+    assert result == {
+        "traceEvents": [
+            {"name": "mark", "ph": "X", "ts": 1.0, "dur": 1e-6},
+            {"name": "kernel", "ph": "X"},
+        ]
+    }
+    assert calls[0][1] == "trace_viewer@"
+    assert calls[0][2] == {"trace_viewer_options": {"resolution": "0"}}
+
+
+def _pb_varint(value):
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def _pb_field(number, wire, payload):
+    return _pb_varint((number << 3) | wire) + payload
+
+
+def _pb_bytes(number, payload):
+    return _pb_field(number, 2, _pb_varint(len(payload)) + payload)
+
+
+def test_restore_streaming_device_ids_undoes_single_host_offset():
+    trace = {"traceEvents": [{"pid": 1001}, {"pid": 1008}, {"pid": 1701}]}
+    _restore_streaming_device_ids(trace)
+    assert [event["pid"] for event in trace["traceEvents"]] == [1, 8, 701]
+
+
+def test_restore_streaming_device_ids_leaves_legacy_pids():
+    trace = {"traceEvents": [{"pid": 1}, {"pid": 8}, {"name": "mark"}]}
+    _restore_streaming_device_ids(trace)
+    assert [event.get("pid") for event in trace["traceEvents"]] == [1, 8, None]
+
+
+def test_attach_xplane_event_args_restores_hlo_op(tmp_path):
+    # Minimal XSpace: one kernel whose hlo_op is a stat-metadata ref.
+    stat_hlo = _pb_bytes(2, b"hlo_op")
+    stat_conv = _pb_bytes(2, b"cudnn-conv.1.0")
+    stat_corr = _pb_bytes(2, b"correlation_id")
+    event_meta = _pb_bytes(2, b"my_kernel")
+    plane = b"".join(
+        [
+            _pb_bytes(2, b"/device:GPU:0"),
+            _pb_bytes(5, _pb_field(1, 0, _pb_varint(1)) + _pb_bytes(2, stat_hlo)),
+            _pb_bytes(5, _pb_field(1, 0, _pb_varint(2)) + _pb_bytes(2, stat_conv)),
+            _pb_bytes(5, _pb_field(1, 0, _pb_varint(3)) + _pb_bytes(2, stat_corr)),
+            _pb_bytes(4, _pb_field(1, 0, _pb_varint(1)) + _pb_bytes(2, event_meta)),
+            _pb_bytes(
+                3,
+                _pb_field(3, 0, _pb_varint(1_000_000))
+                + _pb_bytes(
+                    4,
+                    _pb_field(1, 0, _pb_varint(1))
+                    + _pb_field(3, 0, _pb_varint(1_000_000))
+                    + _pb_bytes(
+                        4,
+                        _pb_field(1, 0, _pb_varint(1)) + _pb_field(7, 0, _pb_varint(2)),
+                    )
+                    + _pb_bytes(
+                        4,
+                        _pb_field(1, 0, _pb_varint(3))
+                        + _pb_field(3, 0, _pb_varint(171)),
+                    ),
+                ),
+            ),
+        ]
+    )
+    xspace = _pb_bytes(1, plane)
+    path = tmp_path / "trace.xplane.pb"
+    path.write_bytes(xspace)
+    trace = {
+        "traceEvents": [
+            {
+                "name": "my_kernel",
+                "ph": "X",
+                "pid": 1001,
+                "ts": 1000.0,
+                "dur": 1.0,
+                "args": {"uid": 7},
+            }
+        ]
+    }
+    _restore_streaming_device_ids(trace)
+    _attach_xplane_event_args(trace, str(path))
+    event = trace["traceEvents"][0]
+    assert event["pid"] == 1
+    assert event["args"]["uid"] == 7
+    assert event["args"]["hlo_op"] == "cudnn-conv.1.0"
+    assert event["args"]["correlation_id"] == "171"
+
+
+def test_attach_xplane_event_args_stat_types_and_bad_input(tmp_path):
+    display = _pb_bytes(4, b"shown_name")
+    hidden = _pb_bytes(2, b"hidden_name")
+    event_meta = display + hidden
+    neg1 = b"\xff" * 9 + b"\x01"
+    double = struct.pack("<d", 1.5)
+    plane = b"".join(
+        [
+            _pb_field(7, 5, b"\x00\x00\x00\x00"),
+            _pb_bytes(
+                5, _pb_field(1, 0, _pb_varint(1)) + _pb_bytes(2, _pb_bytes(2, b"ratio"))
+            ),
+            _pb_bytes(
+                5, _pb_field(1, 0, _pb_varint(2)) + _pb_bytes(2, _pb_bytes(2, b"delta"))
+            ),
+            _pb_bytes(
+                5, _pb_field(1, 0, _pb_varint(3)) + _pb_bytes(2, _pb_bytes(2, b"label"))
+            ),
+            _pb_bytes(
+                5, _pb_field(1, 0, _pb_varint(4)) + _pb_bytes(2, _pb_bytes(2, b"blob"))
+            ),
+            _pb_bytes(4, _pb_field(1, 0, _pb_varint(1)) + _pb_bytes(2, event_meta)),
+            _pb_bytes(
+                3,
+                _pb_bytes(
+                    4,
+                    _pb_field(1, 0, _pb_varint(1))
+                    + _pb_bytes(
+                        4, _pb_field(1, 0, _pb_varint(1)) + _pb_field(2, 1, double)
+                    )
+                    + _pb_bytes(
+                        4, _pb_field(1, 0, _pb_varint(2)) + _pb_field(4, 0, neg1)
+                    )
+                    + _pb_bytes(4, _pb_field(1, 0, _pb_varint(3)) + _pb_bytes(5, b"ok"))
+                    + _pb_bytes(
+                        4, _pb_field(1, 0, _pb_varint(4)) + _pb_bytes(6, b"raw")
+                    )
+                    + _pb_bytes(4, b""),
+                ),
+            ),
+        ]
+    )
+    path = tmp_path / "trace.xplane.pb"
+    path.write_bytes(_pb_bytes(1, plane))
+    trace = {
+        "traceEvents": [
+            {"name": "shown_name", "ph": "X", "ts": 0.0, "args": None},
+            {"ph": "X", "ts": 0.0},
+        ]
+    }
+    _attach_xplane_event_args(trace, str(path))
+    assert trace["traceEvents"][0]["args"] == {
+        "ratio": "1.5",
+        "delta": "-1",
+        "label": "ok",
+        "blob": "raw",
+    }
+
+    bad = tmp_path / "bad.xplane.pb"
+    bad.write_bytes(_pb_field(1, 3, b""))
+    untouched = {"traceEvents": [{"name": "shown_name", "ts": 0.0, "args": {"uid": 1}}]}
+    _attach_xplane_event_args(untouched, str(bad))
+    assert untouched["traceEvents"][0]["args"] == {"uid": 1}
+    _restore_streaming_device_ids({})
+    _restore_streaming_device_ids({"traceEvents": []})
 
 
 @patch("TraceLens.util.suppress_native_hlo_logs")
@@ -805,43 +1018,6 @@ def test_dataloader_load_pb_none_raises(mock_suppress, tmp_path):
     with patch.dict(sys.modules, modules):
         with pytest.raises(RuntimeError, match="returned None"):
             DataLoader.load_data(str(trace_path))
-
-
-@patch("TraceLens.util.suppress_native_hlo_logs")
-def test_dataloader_tensorboard_fallback(mock_suppress, tmp_path, monkeypatch):
-    payload = {"traceEvents": []}
-    trace_path = tmp_path / "trace.pb"
-    trace_path.write_bytes(b"pb")
-    mock_suppress.return_value = contextlib.nullcontext()
-
-    tb_mod = types.ModuleType("tensorboard_plugin_profile.convert.raw_to_tool_data")
-
-    def xspace_to_tool_data(*args, **kwargs):
-        return (json.dumps(payload).encode("utf-8"), None)
-
-    tb_mod.xspace_to_tool_data = xspace_to_tool_data
-    tb_convert = types.ModuleType("tensorboard_plugin_profile.convert")
-    tb_convert.raw_to_tool_data = tb_mod
-    tb_pkg = types.ModuleType("tensorboard_plugin_profile")
-    tb_pkg.convert = tb_convert
-
-    real_import = __import__
-
-    def fake_import(name, *args, **kwargs):
-        if name == "xprof.convert":
-            raise ImportError("xprof unavailable")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr("builtins.__import__", fake_import)
-    with patch.dict(
-        sys.modules,
-        {
-            "tensorboard_plugin_profile": tb_pkg,
-            "tensorboard_plugin_profile.convert": tb_convert,
-            "tensorboard_plugin_profile.convert.raw_to_tool_data": tb_mod,
-        },
-    ):
-        assert DataLoader.load_data(str(trace_path)) == payload
 
 
 def test_dataloader_orjson_fallback(tmp_path, monkeypatch):
@@ -926,7 +1102,10 @@ def test_trace_event_utils_get_event_category():
     "thread_name,event_name,expected",
     [
         (JST.FrameworkCallStack, "scope", "cpu_op"),
+        (f"{JST.FrameworkCallStack} - from #19", "scope", "cpu_op"),
         ("py_xla_worker", "compile", "cpu_op"),
+        (JST.XlaOps, "my_op", "python function"),
+        (f"{JST.XlaOps} - from #19", "my_op", "python function"),
         ("Stream #7", "CopyHtoD", "memcpy"),
         ("Stream #7", "Memset32", "memset"),
         ("Stream #7", "my_kernel", "kernel"),
@@ -950,6 +1129,28 @@ def test_trace_event_utils_get_event_category_branches(
     assert category == expected
 
 
+def test_matches_jax_derived_thread_prefix_and_exact():
+    assert TraceEventUtils.matches_jax_derived_thread(
+        f"{JST.XlaModules} - from #19", JST.XlaModules
+    )
+    assert TraceEventUtils.matches_jax_derived_thread(JST.XlaModules, JST.XlaModules)
+    assert not TraceEventUtils.matches_jax_derived_thread(
+        f"{JST.XlaModules}Extra", JST.XlaModules
+    )
+    assert not TraceEventUtils.matches_jax_derived_thread("", JST.XlaModules)
+    assert not TraceEventUtils.matches_jax_derived_thread(None, JST.XlaOps)
+
+    metadata = {1: {4: {MF.ThreadName: f"{JST.XlaModules} - from #19"}}}
+    tid = TraceEventUtils.find_thread_by_item_in_metadata(
+        metadata[1],
+        lambda item: item[0] is not None
+        and TraceEventUtils.matches_jax_derived_thread(
+            item[1].get(MF.ThreadName), JST.XlaModules
+        ),
+    )
+    assert tid == 4
+
+
 def test_trace_event_utils_get_event_category_metadata_and_unknown():
     metadata_event = {
         TK.Phase: TP.Metadata,
@@ -963,6 +1164,12 @@ def test_trace_event_utils_get_event_category_metadata_and_unknown():
         TraceEventUtils.get_event_category({}, {TK.Phase: TP.Complete, TK.Name: "x"})
         == "Unknown"
     )
+    unnamed = [
+        _metadata_event(701, 5, MF.ThreadSort, 5),
+        {TK.PID: 701, TK.TID: 5, TK.Phase: TP.Complete, TK.Name: "$queues.py:98 get"},
+    ]
+    metadata = TraceEventUtils.get_metadata(unnamed)
+    assert TraceEventUtils.get_event_category(metadata, unnamed[-1]) == "Unknown"
 
 
 def test_trace_event_utils_split_events_by_pid_tid():
