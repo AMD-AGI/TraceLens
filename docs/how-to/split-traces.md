@@ -183,21 +183,8 @@ The detector that fires depends on what the trace contains:
 
 ### Profiler-start transient trim
 
-In tensor-parallel serving, every rank starts its profiler independently, so the
-rank(s) that reach the first collective op earliest wait for the slowest rank —
-and that wait is booked against the collective kernel's duration, inflating
-iteration 0's collective-op time. After the cascade above picks a candidate,
-the splitter compares iteration 0's per-kernel-name GPU duration against the
-median of the same kernel in later iterations, separately for collective ops
-(all-reduce, all-gather, reduce-scatter, all-to-all, broadcast, NCCL/RCCL) and
-everything else. Iteration 0 is dropped only when a collective op's inflation
-both clears an absolute floor and dwarfs the worst inflation seen among
-non-collective ops in the same trace — the run's own noise ceiling. This keeps
-ordinary variance, which touches all op types alike, from ever qualifying, and
-needs no arbitrary sample-count or outlier-count safeguards: the collective vs.
-non-collective comparison is itself the confidence check. Coverage is
-re-audited after the drop, so the manifest's `status` reflects the trimmed
-root set.
+In TP, each rank starts it's profiler independently. Ranks whose profiler starts earlier or get through the start-up steps faster, reach the first collective and are forced to wait for the other ranks to complete. Since this collective is a GPU kernel, it inflates the GPU time of the trace, meaning the total GPU runtime % of other kernels is deflated, reducing impact ratings in TraceLens analysis. Because this behavior skews analysis and is not representative of the workload, we want to drop these events from analysis. The simplest approach is to drop this first iteration entirely. 
+The trace splitter removes this initial iteration if it is dominated by stalling from these profiling delays. After the splits are made, the first iteration's per-kernel-name GPU duration is compared against the median of the same kernel in later iterations, separately for collective ops and everything else. The first iteration is dropped when the difference between a collective op's first iteration time and the collective op's median time for the rest of the iterations is far greater than that of other non-collective operations. 
 
 ## Extraction and the split manifest
 
