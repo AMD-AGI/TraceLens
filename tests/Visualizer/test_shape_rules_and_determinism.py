@@ -89,3 +89,31 @@ class TestGroupEntryBucketOrder:
         node = self._entry("op", ["outside_a", "outside_a"])
         buckets = _group_entry_buckets([node], internal_ids=set())
         assert len(buckets) == 1
+
+
+class TestSliceBoundedByALocalName:
+    """Partial RoPE splits on a local, then concatenates the halves back."""
+
+    @staticmethod
+    def _bound(raw):
+        from TraceLens.ModelUtils.shape_inference import _slice_bound_name
+
+        return _slice_bound_name(raw)
+
+    def test_head_slice_takes_the_named_width(self) -> None:
+        assert self._bound("(..., :rotary_dim)") == ("rotary_dim", True)
+
+    def test_tail_slice_takes_the_remainder(self) -> None:
+        assert self._bound("(..., rotary_dim:)") == ("rotary_dim", False)
+
+    def test_a_numeric_bound_is_left_to_the_folding_branches(self) -> None:
+        assert self._bound("(..., :2051)") is None
+
+    def test_a_full_slice_narrows_nothing(self) -> None:
+        assert self._bound("(..., :)") is None
+
+    def test_the_two_halves_sum_back_to_the_whole(self) -> None:
+        """``r`` and ``128-(r)`` must cancel, or the concat reports double."""
+        from TraceLens.ModelUtils.shape_inference import _sum_dim_sizes
+
+        assert _sum_dim_sizes(["rotary_dim", "128-(rotary_dim)"]) == 128

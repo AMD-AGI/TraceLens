@@ -2980,6 +2980,22 @@ class ShapeInferencer:
                     # else: neither bound resolved (e.g. a no-op full slice) --
                     # leave this axis unchanged.
                 return TensorSpec(shape=tuple(shape), dtype=source.dtype)
+            # A range slice bounded by a LOCAL name -- partial RoPE's
+            # ``rotary_dim = cos.shape[-1]`` then ``q[..., :rotary_dim]`` and
+            # ``q[..., rotary_dim:]`` -- resolves to no integer, so both halves
+            # used to report the FULL width. The concat that rejoins them then
+            # reported double: MiniMax's query reached ``sdpa`` 256 wide against
+            # a 128-wide key, a product that cannot be formed. The two are
+            # complementary by construction, so narrow them symbolically and let
+            # summing them cancel back to the source width.
+            bound = _slice_bound_name(_detail_value(details, "slice"))
+            if bound is not None and source.shape:
+                name, takes_head = bound
+                width = source.shape[-1]
+                narrowed = name if takes_head else f"{width}-({name})"
+                return TensorSpec(
+                    shape=source.shape[:-1] + (narrowed,), dtype=source.dtype
+                )
             return source
 
         if operation_label == "merge":
@@ -6143,6 +6159,27 @@ def _broadcast_rank(spec: TensorSpec) -> tuple[int, float]:
     last = spec.shape[-1] if spec.shape else 1
     width = float(last) if isinstance(last, int) else float("inf")
     return len(spec.shape), width
+
+
+def _slice_bound_name(raw: str | None) -> tuple[str, bool] | None:
+    """``(name, takes_head)`` for a trailing-axis slice bounded by a bare name.
+
+    ``(..., :rotary_dim)`` takes the head of the axis and ``(..., rotary_dim:)``
+    the tail. Returns *None* for anything else -- a numeric bound is folded by
+    the branches above, and a bound we cannot even name is not narrowed at all.
+    """
+    if not raw:
+        return None
+    element = raw.strip().removeprefix("(").removesuffix(")").split(",")[-1].strip()
+    if element.count(":") != 1:
+        return None
+    head, _, tail = element.partition(":")
+    head, tail = head.strip(), tail.strip()
+    if head and not tail and head.isidentifier():
+        return head, False
+    if tail and not head and tail.isidentifier():
+        return tail, True
+    return None
 
 
 def _detail_value(details: Sequence[str], key: str) -> str | None:
