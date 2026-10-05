@@ -602,10 +602,21 @@ def _kernel_port_roles(spec: NodeSpec) -> dict[str, str]:
         if not detail.startswith("operand_role:"):
             continue
         roles: dict[str, str] = {}
+        parameters: list[str] = []
         for item in detail.split(":", 1)[1].split(","):
             caller, _, param = item.strip().partition("=")
-            if caller and param:
-                roles[caller] = param
+            if not caller or not param:
+                continue
+            parameters.append(param)
+            # One caller tensor can supply SEVERAL parameters -- DeepSeek hands
+            # a single ``kv`` to both ``key`` and ``value``, which ``port_split``
+            # then draws as two ports named for those roles. Keep the first
+            # binding; the split ports are resolved by their own name below.
+            roles.setdefault(caller, param)
+        # A port produced by the split is named for the role it carries, so it
+        # answers for itself.
+        for param in parameters:
+            roles.setdefault(param, param)
         return roles
     return {}
 

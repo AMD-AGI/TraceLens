@@ -2402,6 +2402,7 @@ class ShapeInferencer:
         """
         specs: list[TensorSpec] = []
         labels: list[str] = []
+        node_by_id = {item.id: item for item in graph.nodes}
         for edge in graph.edges:
             if edge.target != node_id:
                 continue
@@ -2409,7 +2410,18 @@ class ShapeInferencer:
             if source_spec is None:
                 continue
             specs.append(source_spec)
-            if "@kernel_in:" in edge.source:
+            # Ask the PORT which operand it supplies. It was stamped when the
+            # port was bound, so a port renamed for the reader still answers.
+            # Only a port that never declared one falls back to its id.
+            source_node = node_by_id.get(edge.source)
+            role = (
+                str((source_node.metadata or {}).get("operand_role") or "")
+                if source_node is not None
+                else ""
+            )
+            if role:
+                labels.append(role)
+            elif "@kernel_in:" in edge.source:
                 labels.append(edge.source.rsplit(":", 1)[-1])
             else:
                 labels.append(edge.label or "")
@@ -3187,26 +3199,21 @@ class ShapeInferencer:
         # shape-correct for grouped-query attention (repeat_kv expands the query
         # head *count*, not value's head dim) and for latent attention where
         # ``v_head_dim != qk_head_dim`` (value's own last dim carries it). Query and
-        # value are told apart by their kernel-input port role (``query``/``value``
-        # -> leading ``q``/``v``), not by operand order, so a swapped edge order
-        # never mis-picks. Scoped to a wrapper-expanded core (``@attn_pipeline``) so
-        # a non-expanded atomic attention leaf keeps its prior section-shape output.
-        if ("@attn_pipeline" in str(node.id)) and (
-            "sdpa" in operation_label or "scaled_dot_product" in operation_label
-        ):
-            labels = input_labels or []
+        # value are told apart by the ROLE each kernel port declared when it was
+        # bound, not by operand order or by the op's name, so a swapped edge
+        # order never mis-picks and renaming a port for the reader cannot break
+        # it. The rule fires for any op handed a ``query`` and a ``value`` --
+        # which is what makes something attention-shaped -- rather than for ops
+        # we recognise by name.
+        roles = [str(label).lower() for label in (input_labels or [])]
+        if "query" in roles and "value" in roles:
             query_spec: TensorSpec | None = None
             value_spec: TensorSpec | None = None
-            for spec, label in zip(inputs, labels):
-                roles = str(label).lower().split("/")
-                if query_spec is None and any(r.startswith("q") for r in roles):
+            for spec, role in zip(inputs, roles):
+                if role == "query" and query_spec is None:
                     query_spec = spec
-                if value_spec is None and any(r.startswith("v") for r in roles):
+                if role == "value" and value_spec is None:
                     value_spec = spec
-            if query_spec is None and inputs:
-                query_spec = inputs[0]
-            if value_spec is None:
-                value_spec = query_spec
             if (
                 query_spec is not None
                 and value_spec is not None

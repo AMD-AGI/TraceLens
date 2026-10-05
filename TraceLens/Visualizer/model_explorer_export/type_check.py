@@ -463,22 +463,6 @@ def _unresolved_shape_warnings(nodes: list[dict[str, Any]]) -> list[str]:
     return warnings
 
 
-def _role_covers(param: str, label: str) -> bool:
-    """Whether a kernel input port ``label`` supplies the required operand ``param``.
-
-    Both are normalized to alphanumerics (``attention_mask`` -> ``attentionmask``)
-    and matched by equality or shared prefix in either direction, so a role label
-    covers its param under the naming the wrapper actually uses (``query`` <- ``q``,
-    ``key`` <- ``key``, ``value`` <- ``value``, ``query`` <- ``query_states``)
-    while a merged ``kv`` port covers neither ``key`` nor ``value`` (no shared
-    prefix) -- exactly the combined-input defect the check must catch."""
-    p = re.sub(r"[^a-z0-9]", "", str(param).lower())
-    lbl = re.sub(r"[^a-z0-9]", "", str(label).lower())
-    if not p or not lbl:
-        return False
-    return p == lbl or p.startswith(lbl) or lbl.startswith(p)
-
-
 def _kernel_operand_arity_warnings(nodes: list[dict[str, Any]]) -> list[str]:
     """Flag a kernel that carries fewer distinct tensor input ports than its
     resolved function requires as distinct tensor operands.
@@ -527,16 +511,12 @@ def _kernel_operand_arity_warnings(nodes: list[dict[str, Any]]) -> list[str]:
                 port_roles.append(str(role))
         if not port_labels:
             continue
-        covered = sum(
-            1
-            for param in required
-            # The role a port declared settles it. Falling back to the label
-            # PER OPERAND rather than only when no port declared one at all:
-            # the binding does not reach every kernel path yet, and an operand
-            # covered by an unstamped port is still covered.
-            if param in port_roles
-            or any(_role_covers(param, lbl) for lbl in port_labels)
-        )
+        if not port_roles:
+            # No port declared which operand it supplies, so there is nothing to
+            # judge structurally. Say nothing rather than guess from names: a
+            # display label is not evidence about wiring.
+            continue
+        covered = sum(1 for param in required if param in port_roles)
         if covered < len(required):
             node_id = node.get("id")
             warnings.append(

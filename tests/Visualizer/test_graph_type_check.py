@@ -735,23 +735,36 @@ def test_h_group_cycle_ignores_legitimate_parent_child_tile_crossings():
 # --------------------------------------------------------------------------- #
 
 
-def _kernel_port(port_id, label):
-    return {
-        "id": port_id,
-        "label": label,
-        "attrs": [
-            {"key": "synthetic", "value": "@kernel_port_in"},
-            {"key": "port_label", "value": label},
-        ],
-    }
+def _kernel_port(port_id, label, role=None):
+    """A kernel operand port. ``role`` is the operand it was bound to supply.
+
+    The role is an identity stamped when the port is bound, which is what the
+    coverage check reads -- the label is a display name and may be qualified.
+    """
+    attrs = [
+        {"key": "synthetic", "value": "@kernel_port_in"},
+        {"key": "port_label", "value": label},
+    ]
+    if role:
+        attrs.append({"key": "operand_role", "value": role})
+    return {"id": port_id, "label": label, "attrs": attrs}
 
 
 def _sdpa_core_with_ports(
-    core_id, port_labels, primitive="scaled_dot_product_attention"
+    core_id, port_labels, primitive="scaled_dot_product_attention", roles=None
 ):
-    """An sdpa core node fed by one ``@kernel_port_in`` per label, plus those ports."""
+    """An sdpa core node fed by one ``@kernel_port_in`` per label, plus those ports.
+
+    ``roles`` gives each port the operand it supplies, as the wrapper's binding
+    would. Omitted, every port declares the operand its label names -- the
+    common case where caller var and parameter coincide.
+    """
+    declared = list(roles) if roles is not None else list(port_labels)
     ports = [
-        _kernel_port(f"{core_id}/port:{i}", lbl) for i, lbl in enumerate(port_labels)
+        _kernel_port(
+            f"{core_id}/port:{i}", lbl, declared[i] if i < len(declared) else None
+        )
+        for i, lbl in enumerate(port_labels)
     ]
     core = {
         "id": core_id,
@@ -769,7 +782,13 @@ def test_sdpa_combined_kv_port_flags_missing_operand_coverage():
     # The DeepSeek pre-fix defect: key and value both read one combined ``kv`` port.
     # sdpa requires three distinct tensor operands (query/key/value); ``kv`` covers
     # neither key nor value, so only the query operand is covered -> a warning.
-    nodes = _sdpa_core_with_ports("k:sdpa", ["q", "kv", "attention_mask"])
+    # The binding gives the combined port ONE role -- a caller var cannot supply
+    # two parameters through a single edge -- so ``value`` goes uncovered.
+    nodes = _sdpa_core_with_ports(
+        "k:sdpa",
+        ["q", "kv", "attention_mask"],
+        roles=["query", "key", "attention_mask"],
+    )
     warnings = type_check_graph_nodes(nodes)
     assert len(warnings) == 1
     assert "k:sdpa" in warnings[0]
@@ -779,17 +798,26 @@ def test_sdpa_combined_kv_port_flags_missing_operand_coverage():
 
 def test_sdpa_distinct_key_value_ports_is_clean():
     # The post-fix graph: the combined ``kv`` producer fanned into distinct ``key``
-    # and ``value`` role ports. All three required operands are now covered.
-    nodes = _sdpa_core_with_ports("k:sdpa", ["q", "key", "value", "attention_mask"])
+    # and ``value`` role ports. All three required operands are now covered --
+    # the caller still calls its query ``q``, and the binding says which
+    # parameter that is.
+    nodes = _sdpa_core_with_ports(
+        "k:sdpa",
+        ["q", "key", "value", "attention_mask"],
+        roles=["query", "key", "value", "attention_mask"],
+    )
     assert type_check_graph_nodes(nodes) == []
 
 
 def test_sdpa_distinct_caller_var_ports_is_clean():
     # Models whose interface already passes distinct key/value caller vars
-    # (``query_states``/``key_states``/``value_states``) cover every required
-    # operand by prefix match and never needed the split.
+    # (``query_states``/``key_states``/``value_states``) bind one parameter each
+    # and never needed the split. The caller's name differs from the
+    # parameter's, which is exactly why the role is carried rather than guessed.
     nodes = _sdpa_core_with_ports(
-        "k:sdpa", ["query_states", "key_states", "value_states", "attention_mask"]
+        "k:sdpa",
+        ["query_states", "key_states", "value_states", "attention_mask"],
+        roles=["query", "key", "value", "attention_mask"],
     )
     assert type_check_graph_nodes(nodes) == []
 
@@ -809,6 +837,7 @@ def test_sdpa_forwarded_extra_kwarg_port_does_not_break_coverage():
             "attention_mask",
             "block_indices",
         ],
+        roles=["query", "key", "value", "attention_mask", None],
     )
     assert type_check_graph_nodes(nodes) == []
 
@@ -894,3 +923,27 @@ def test_output_dtype_reads_the_suffix_and_tolerates_junk():
     assert _tc._output_dtype(_attr_node(output_shape="no bracket")) is None
     assert _tc._output_dtype({"attrs": [{"key": "output_shape", "value": 1}]}) is None
     assert _tc._output_dtype({"attrs": []}) is None
+
+
+def test_a_renamed_port_still_declares_its_operand():
+    """A port qualified for the reader keeps the operand identity it was bound to.
+
+    Matching on the display label is what made this impossible: ``key`` against
+    ``Reshape.key_states`` shares no prefix either way, so qualifying a port to
+    disambiguate it silently uncovered a required operand and the check fired
+    on a correct graph.
+    """
+    nodes = _sdpa_core_with_ports(
+        "k:sdpa",
+        ["query_states", "Reshape.key_states", "Reshape.value_states", "mask"],
+        roles=["query", "key", "value", "attention_mask"],
+    )
+    assert type_check_graph_nodes(nodes) == []
+
+
+def test_ports_that_declare_no_operand_are_not_guessed_at():
+    """No role, no claim -- a display label is not evidence about wiring."""
+    nodes = _sdpa_core_with_ports(
+        "k:sdpa", ["q", "kv", "attention_mask"], roles=[None, None, None]
+    )
+    assert type_check_graph_nodes(nodes) == []
