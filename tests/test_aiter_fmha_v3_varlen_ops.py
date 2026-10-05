@@ -86,7 +86,7 @@ def test_extension_mapping_falls_back_to_core_for_unannotated_varlen_fwd():
 def test_extension_mapping_uses_annotation_when_available():
     event = {
         **_WAN22_VARLEN_FWD,
-        "annotation": "attn_req_ctx_10_100_tail_a_b_c",
+        "annotation": "execute_10_context_1(sq10sk10sqsq100sqsk100)_generation_0(sq0sk0sqsq0sqsk0)",
     }
     mapped = op_to_perf_model_class_map["aiter::fmha_v3_varlen_fwd"](event)
     assert "_fallback_core" not in mapped.param_details
