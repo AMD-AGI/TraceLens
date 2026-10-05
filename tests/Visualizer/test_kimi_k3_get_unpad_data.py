@@ -13,22 +13,14 @@ property: the helper expands into its real ops and none is tagged ``device: cpu`
 because the only host crossing (``.item()``) collapses to a Python scalar that is
 never traced as a visible op. The device gather/nonzero work is shown as the
 device ops it is.
+
+Kimi's graph comes from the ``kimi_nodes`` fixture, which builds it under the
+``transformers`` Kimi's own code needs. Built in this interpreter instead, a
+DIFFERENT ``get_unpad_data`` is parsed and the model cannot reach the meta
+device -- so these assertions would describe a file the model never runs.
 """
 
 from __future__ import annotations
-
-import pytest
-
-from TraceLens.ModelUtils.loader import load_model_spec
-from TraceLens.ModelUtils.shape_inference import ShapeInferencer
-from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
-
-
-def _nodes(model_id: str):
-    pytest.importorskip("huggingface_hub")
-    spec = load_model_spec(model_id, detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
-    return graph["nodes"]
 
 
 def _is_cpu(node) -> bool:
@@ -38,15 +30,13 @@ def _is_cpu(node) -> bool:
     )
 
 
-def test_kimi_get_unpad_data_is_no_longer_an_opaque_leaf():
-    nodes = _nodes("moonshotai/Kimi-K3")
-    opaque = [n for n in nodes if n.get("label") == "Get unpad data"]
+def test_kimi_get_unpad_data_is_no_longer_an_opaque_leaf(kimi_nodes):
+    opaque = [n for n in kimi_nodes if n.get("label") == "Get unpad data"]
     assert not opaque, [n["id"] for n in opaque]
 
 
-def test_kimi_get_unpad_data_ops_are_device_not_cpu():
-    nodes = _nodes("moonshotai/Kimi-K3")
-    unpad = [n for n in nodes if "get_unpad_data" in n.get("id", "")]
+def test_kimi_get_unpad_data_ops_are_device_not_cpu(kimi_nodes):
+    unpad = [n for n in kimi_nodes if "get_unpad_data" in n.get("id", "")]
     labels = {n.get("label") for n in unpad}
     # The device work is visible...
     assert "Nonzero" in labels
@@ -60,15 +50,41 @@ def test_kimi_get_unpad_data_ops_are_device_not_cpu():
     # says. It used to appear here only because every return slot of this helper
     # collapsed onto its last op, keeping ``Max`` alive as a stand-in for
     # ``indices``; with the slots resolved per return, that no longer happens.
-    # Kimi's own provisioned environment never showed it at all.
 
 
-def test_kimi_index_select_shape_leads_with_nnz():
+def test_kimi_unpad_publishes_its_real_return_names(kimi_nodes):
+    """The helper returns ``indices`` and ``cu_seqlens``, and says so.
+
+    Only reachable in Kimi's own environment: the helper this interpreter would
+    otherwise parse has no ``_prepare_cu_seqlens_from_mask`` arm at all.
+    """
+    unpad = [n for n in kimi_nodes if "get_unpad_data" in n.get("id", "")]
+    labels = {n.get("label") for n in unpad}
+    assert {"indices", "cu_seqlens"} <= labels, sorted(labels)
+
+
+def test_kimi_cu_seqlens_is_one_longer_than_the_batch(kimi_nodes):
+    """``F.pad(cumsum(lens), (1, 0))`` prepends a zero, so the extent is B + 1."""
+    tiles = [
+        n
+        for n in kimi_nodes
+        if n.get("label") == "cu_seqlens" and "get_unpad_data" in n.get("id", "")
+    ]
+    assert tiles
+    shapes = {
+        a.get("value")
+        for n in tiles
+        for a in n.get("attrs", [])
+        if a.get("key") == "output_shape"
+    }
+    assert shapes == {"[B + 1] int64"}, shapes
+
+
+def test_kimi_index_select_shape_leads_with_nnz(kimi_nodes):
     """With ``get_unpad_data`` expanded, ``indices`` carries an int64 ``[nnz]``
     shape, so the ``Index select`` output leads with the symbolic ``nnz`` gathered
     row count instead of the base-passthrough batch dim."""
-    nodes = _nodes("moonshotai/Kimi-K3")
-    selects = [n for n in nodes if n.get("label") == "Index select"]
+    selects = [n for n in kimi_nodes if n.get("label") == "Index select"]
     assert selects
     node = selects[0]
     meta = node.get("outputsMetadata") or []
@@ -79,7 +95,7 @@ def test_kimi_index_select_shape_leads_with_nnz():
     assert shape.startswith("[nnz"), shape
 
 
-def test_no_device_cpu_nodes_remain_after_per_op_hostness():
+def test_no_device_cpu_nodes_remain_after_per_op_hostness(model_graph_nodes):
     """No previously-collapsed host helper leaves a ``device: cpu`` tile behind:
     per-op host-ness expands them all into their device ops (no traced
     materialisation op exists in any of the four models to carry a cpu tag)."""
@@ -88,6 +104,6 @@ def test_no_device_cpu_nodes_remain_after_per_op_hostness():
         "zai-org/GLM-5.3-Flash",
         "MiniMaxAI/MiniMax-M3",
     ):
-        nodes = _nodes(model_id)
+        nodes = model_graph_nodes(model_id)
         cpu = [n.get("label") for n in nodes if _is_cpu(n)]
         assert cpu == [], (model_id, cpu)

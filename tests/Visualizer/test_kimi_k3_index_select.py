@@ -11,32 +11,23 @@
 whose index operand is the free function's own tensor *parameter* -- captured as
 zero ops. It is now captured as a dedicated ``Index select`` op and inlined at the
 call site, keeping the exact base/index wiring the opaque leaf already had.
+
+Kimi's graph comes from the ``kimi_nodes`` fixture, which builds it under the
+``transformers`` Kimi's own code needs; this interpreter would parse a different
+``index_first_axis`` and reach no meta shapes.
 """
 
 from __future__ import annotations
 
-import pytest
 
-from TraceLens.ModelUtils.loader import load_model_spec
-from TraceLens.ModelUtils.shape_inference import ShapeInferencer
-from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
-
-
-def _kimi_nodes():
-    pytest.importorskip("huggingface_hub")
-    spec = load_model_spec("moonshotai/Kimi-K3", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
-    return graph["nodes"]
-
-
-def test_kimi_index_first_axis_is_no_longer_an_opaque_leaf():
-    nodes = _kimi_nodes()
+def test_kimi_index_first_axis_is_no_longer_an_opaque_leaf(kimi_nodes):
+    nodes = kimi_nodes
     opaque = [n for n in nodes if n.get("label") == "Index first axis"]
     assert not opaque, [n["id"] for n in opaque]
 
 
-def test_kimi_index_select_reads_base_and_indices_and_feeds_unsqueeze():
-    nodes = _kimi_nodes()
+def test_kimi_index_select_reads_base_and_indices_and_feeds_unsqueeze(kimi_nodes):
+    nodes = kimi_nodes
     by_id = {n["id"]: n for n in nodes}
     selects = [n for n in nodes if n.get("label") == "Index select"]
     assert selects, "expected at least one Index select node"
