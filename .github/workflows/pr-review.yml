@@ -1,0 +1,180 @@
+# Agent-driven PR self-review. Manual, comment-triggered, privilege-separated.
+# See issue #1076 for the design: gate (write) -> review (read-only, holds the
+# key) -> publish (write, posts a verdict only). The review job never has a
+# GitHub write path; only publish does, and it never approves or merges.
+name: PR review
+
+on:
+  issue_comment:
+    types: [created]
+
+# Default-deny at the top level; each job grants exactly what it needs.
+permissions: {}
+
+# One review at a time per PR; never cancel an in-flight review on a new comment.
+concurrency:
+  group: pr-review-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    # PR comments only, and only the "/review" command.
+    if: >-
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/review')
+    runs-on: ${{ vars.PR_REVIEW_RUNNER_LABEL || 'ubuntu-latest' }}
+    permissions:
+      pull-requests: write
+    outputs:
+      head_sha: ${{ steps.check.outputs.head_sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.issue.number }}
+      # Hidden marker on every verdict comment, so the 2-review cap can count them.
+      MARKER: "<!-- tracelens-pr-review -->"
+      ASSOC: ${{ github.event.comment.author_association }}
+    steps:
+      - name: Gate the request
+        id: check
+        run: |
+          set -euo pipefail
+          # Write access: OWNER/MEMBER/COLLABORATOR is the comment's author_association.
+          case "$ASSOC" in
+            OWNER | MEMBER | COLLABORATOR) ;;
+            *) gh pr comment "$PR" --repo "$REPO" --body \
+                 "$MARKER"$'\nPR review refused: /review is limited to users with write access.'
+               exit 1 ;;
+          esac
+
+          pr=$(gh api "repos/$REPO/pulls/$PR")
+          state=$(jq -r '.state' <<<"$pr")
+          is_fork=$(jq -r '.head.repo.fork' <<<"$pr")
+          head_sha=$(jq -r '.head.sha' <<<"$pr")
+
+          if [ "$state" != "open" ]; then
+            gh pr comment "$PR" --repo "$REPO" --body "$MARKER"$'\nPR review refused: the PR is not open.'
+            exit 1
+          fi
+          if [ "$is_fork" = "true" ]; then
+            gh pr comment "$PR" --repo "$REPO" --body \
+              "$MARKER"$'\nPR review refused: fork PRs are out of scope (the review job has no secret access on forks).'
+            exit 1
+          fi
+
+          # Hard 2-review cap: count prior verdict comments carrying the marker.
+          prior=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq '[.[] | select(.body | contains("<!-- tracelens-pr-review -->"))] | length')
+          if [ "$prior" -ge 2 ]; then
+            gh pr comment "$PR" --repo "$REPO" --body \
+              "$MARKER"$'\nPR review refused: this PR already has 2 automated reviews (the cap). Push changes and ask a human reviewer.'
+            exit 1
+          fi
+
+          gh pr comment "$PR" --repo "$REPO" --body \
+            "$MARKER"$'\nPR review started at '"$head_sha"$'. This posts request-changes or an LGTM comment; it never approves or merges.'
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+  review:
+    needs: gate
+    runs-on: ${{ vars.PR_REVIEW_RUNNER_LABEL || 'ubuntu-latest' }}
+    # Read-only: the LLM holds no write path to GitHub.
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: ${{ fromJSON(vars.PR_REVIEW_TIMEOUT_MIN || '30') }}
+    env:
+      # The key lives only in this job's env -- never in gate or publish.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.issue.number }}
+      HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
+      WORK: ${{ runner.temp }}/tl-review-${{ github.event.issue.number }}
+      PR_REVIEW_MODEL: ${{ vars.PR_REVIEW_MODEL }}
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install the review CLI (pinned)
+        run: npm i -g "@anthropic-ai/claude-code@${{ vars.PR_REVIEW_CLAUDE_CLI_VERSION }}"
+
+      - name: Collect evidence
+        run: bash .claude/skills/review-pr/fetch.sh "$PR" "$WORK"
+
+      - name: Run the review
+        run: |
+          set -euo pipefail
+          # The CI contract overrides SKILL.md's Publishing step: no write path.
+          read -r -d '' CI_CONTRACT <<'EOF' || true
+          You are running in CI with NO GitHub write access. Do NOT run `gh pr review`,
+          `gh pr comment`, `gh pr merge`, `gh api -X`, or any mutation; a separate job
+          publishes the verdict. Follow SKILL.md Steps 0-8 using the evidence already in
+          $WORK, then write ONLY the two-part card to $WORK/card.md, verbatim in the
+          Step 8 card format:
+            - first line: `## PR #<n> -- <title>`
+            - a line `Blocking issues: <N|none>`
+            - numbered findings when N>0, each with path:line, Impact, Action
+            - the final `Checked: ... | Ran: ... | Base: ... | Head: ...` line
+          Write nothing else to that file and take no other action.
+          EOF
+          model_flag=""
+          if [ -n "${PR_REVIEW_MODEL:-}" ]; then model_flag="--model $PR_REVIEW_MODEL"; fi
+          claude -p "Read .claude/skills/review-pr/SKILL.md and follow it for PR #$PR in $REPO. Evidence is already collected in $WORK; do not re-run fetch.sh." \
+            --append-system-prompt "$CI_CONTRACT" \
+            --output-format stream-json --verbose \
+            $model_flag
+          test -s "$WORK/card.md" || { echo "review produced no card.md"; exit 1; }
+          cp "$WORK/card.md" card.md
+
+      - name: Upload the card (card.md only -- not the work folder)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-review-card
+          path: card.md
+          if-no-files-found: error
+
+  publish:
+    needs: [gate, review]
+    if: ${{ needs.review.result == 'success' }}
+    runs-on: ${{ vars.PR_REVIEW_RUNNER_LABEL || 'ubuntu-latest' }}
+    permissions:
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.issue.number }}
+      EXPECTED_HEAD: ${{ needs.gate.outputs.head_sha }}
+      MARKER: "<!-- tracelens-pr-review -->"
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Download the card
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-review-card
+
+      - name: Abort if the head moved
+        run: |
+          set -euo pipefail
+          now=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha')
+          if [ "$now" != "$EXPECTED_HEAD" ]; then
+            echo "head moved $EXPECTED_HEAD -> $now since the review ran; not publishing a stale verdict."
+            exit 1
+          fi
+
+      - name: Publish the verdict
+        run: bash .github/scripts/pr-review-publish.sh "$PR" card.md "$MARKER"
