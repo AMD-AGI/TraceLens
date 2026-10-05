@@ -10091,20 +10091,27 @@ def _capture_attention_inputs(
             and call.args[0].id == "self"
             else 0
         )
+        # A tensor that arrives as a forward parameter of the attention module
+        # (``attention_mask``) has no provenance chain -- no prior op in THIS
+        # forward produced it -- but it is every bit as real an operand as one
+        # that does. The empty chain is the marker the cross-module predecessor
+        # pass reads to thread such a boundary input back to its producer. Whether
+        # the call writes it positionally or by keyword is a calling convention,
+        # not a fact about the tensor, so both scans record it the same way;
+        # recognising it only in the keyword scan left a positional
+        # ``attention_interface(self, q, k, v, attention_mask, ...)`` declaring an
+        # operand port that no edge ever reached.
         for index, arg in enumerate(call.args[start:], start=start):
             if not isinstance(arg, ast.Name):
                 continue
             chain = var_chains.get(arg.id, [])
             if chain:
                 attention_inputs[arg.id] = _extended(arg.id, list(chain))
+            elif arg.id in forward_input_names:
+                attention_inputs.setdefault(arg.id, [])
         # Packed-attention metadata (``cu_seq_lens_q=cu_seqlens``,
         # ``max_length_q=max_seqlen``) reaches the kernel by keyword and is a real
-        # kernel input, but it arrives as a forward parameter of the attention
-        # module (empty provenance chain) rather than a prior op — the positional
-        # scan above misses both facts. Record such keyword tensor arguments so the
-        # kernel declares them as input ports; the empty chain marks a boundary
-        # forward input that the cross-module predecessor pass threads back to its
-        # producer. General: any attention-interface keyword whose value is a
+        # kernel input. General: any attention-interface keyword whose value is a
         # module forward input or a prior-step tensor.
         for keyword in call.keywords:
             value = keyword.value

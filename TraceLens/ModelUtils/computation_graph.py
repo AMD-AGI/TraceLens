@@ -39,6 +39,7 @@ from TraceLens.ModelUtils.block_tree import (
 from TraceLens.ModelUtils.ast_analyze import (
     FORWARD_METHOD_INPUT,
     is_method_input,
+    method_input_param,
     SideInputSpec,
     SYNTHETIC_ATTENTION,
     is_forward_operation,
@@ -564,15 +565,52 @@ SYNTHETIC_KERNEL_PORT_IN = "@kernel_port_in"
 SYNTHETIC_KERNEL_PORT_OUT = "@kernel_port_out"
 
 
-def _kernel_input_names(spec: NodeSpec) -> list[str]:
-    """Extract declared input names from a kernel block's ``inputs:`` detail."""
-    if spec.block is None:
+def _secondary_input_index(graph: ComputationGraph, param: str) -> int:
+    """The boundary tile for a non-primary forward parameter, created on demand.
+
+    Keyed exactly as :func:`_add_forward_param_inputs` keys it, so a parameter read
+    both by a plain op and by a kernel docks on ONE shared tile rather than two.
+    """
+    key = f"{SYNTHETIC_INPUT}:{param}"
+    for index, spec in enumerate(graph.nodes):
+        if spec.key == key:
+            return index
+    return _add_node(graph, key=key, label=param, synthetic=SYNTHETIC_INPUT)
+
+
+def _declared_input_names(block: "BlockNode | None") -> list[str]:
+    """Input names a kernel block declares in its ``inputs:`` detail."""
+    if block is None:
         return []
-    for detail in spec.block.details:
+    for detail in block.details:
         if detail.startswith("inputs:"):
             raw = detail.split(":", 1)[1].strip()
             return [name.strip() for name in raw.split(",") if name.strip()]
     return []
+
+
+def _kernel_input_names(spec: NodeSpec) -> list[str]:
+    """Extract declared input names from a kernel block's ``inputs:`` detail."""
+    return _declared_input_names(spec.block)
+
+
+def _declared_operand_names(block: "BlockNode | None") -> set[str]:
+    """Operand names declared by a step OR by whatever it expands into.
+
+    A wrapper-expanded attention step is a small pipeline: the ``inputs:`` list
+    lives on the atomic core leaf inside it, not on the step node the call site
+    names. Asking only the step node would answer "declares nothing" for exactly
+    the kernels that declare the most.
+    """
+    names: set[str] = set()
+    stack = [block]
+    while stack:
+        node = stack.pop()
+        if node is None:
+            continue
+        names.update(name.strip().lower() for name in _declared_input_names(node))
+        stack.extend(node.children or ())
+    return names
 
 
 def _kernel_stage_attr(attr: str) -> str:
@@ -1471,7 +1509,30 @@ def _wire_all_predecessor_edges(
                     # both ``norm1`` (its true arg) and the raw block input.
                     if block is not root:
                         continue
-                    source_index = input_index
+                    # The boundary token can name WHICH parameter it carries
+                    # (``@method_input:attention_mask``). Collapsing every one of
+                    # them onto the module's single primary ``@input`` makes a
+                    # step handed a secondary forward parameter report the primary
+                    # tensor as that operand's producer -- an attention mask port
+                    # showing ``hidden_states``, at the primary's shape.
+                    #
+                    # Only a step that DECLARES the parameter among its own
+                    # operands gets its own boundary tile. That declaration is what
+                    # makes the primary-input answer provably wrong, and it is also
+                    # what makes the tile sourceable: a parameter the step merely
+                    # closes over may have no producer anywhere in this graph (a
+                    # vision tower's ``grid_thw``), and minting a boundary for it
+                    # would orphan the tile instead of wiring anything.
+                    param = method_input_param(pred)
+                    declared = _declared_operand_names(step_node)
+                    if (
+                        param
+                        and param.lower() in declared
+                        and param != _input_label_for(root)
+                    ):
+                        source_index = _secondary_input_index(graph, param)
+                    else:
+                        source_index = input_index
                 else:
                     source_index = attr_last_index.get(pred)
                     # Scope-aware correction. ``attr_last_index`` is flat and

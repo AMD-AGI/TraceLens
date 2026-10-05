@@ -1586,6 +1586,19 @@ def _attention_wrapper_block_nodes(
         return None
     inputs = dict(attention_inputs or {})
 
+    # A BOUNDARY input -- a kernel tensor with an empty provenance chain, fed
+    # straight from an enclosing scope -- is only representable here if the
+    # wrapper's own signature BINDS it: the expansion renders the wrapper's
+    # parameters, so a tensor the wrapper never names has no port to arrive on and
+    # its producing chain would be pruned as unreachable (GLM's vision
+    # ``cu_seqlens``, whose varlen metadata the sdpa wrapper does not take, taking
+    # the whole seqlens frame with it). Those keep the atomic-leaf path, which
+    # declares such inputs as ``param_inputs`` instead. A boundary input the
+    # wrapper DOES bind (``attention_mask``) is an ordinary operand and expands.
+    bound_callers = {caller for _param, caller in plan.port_map}
+    if any(not chain and port not in bound_callers for port, chain in inputs.items()):
+        return None
+
     # The atomic compiled primitive is the pipeline entry: it keeps the
     # ``SYNTHETIC_ATTENTION`` attr so the caller's provenance edges (query / key /
     # value / mask) dock onto it through the existing attention-provenance pass and
@@ -2670,27 +2683,14 @@ def build_block_node(
                 and not cls.attention_inputs
             ):
                 continue
-            has_boundary_input = any(
-                not chain for chain in cls.attention_inputs.values()
-            )
-            if (
-                is_attention_wrapper_expandable(child_details)
-                and cls.attention_inputs
-                and not has_boundary_input
-            ):
+            if is_attention_wrapper_expandable(child_details) and cls.attention_inputs:
                 # A dispatched attention interface (``sdpa_attention_forward``) is a
                 # Python wrapper, not a kernel: expand it into its visible ops
                 # (``sdpa -> transpose -> contiguous``) with the compiled primitive
                 # as the only atomic leaf. Falls through to the atomic-leaf path
-                # when the wrapper source cannot be resolved.
-                #
-                # A *boundary* attention input -- a kernel tensor with an empty
-                # provenance chain, fed straight from an enclosing scope (varlen
-                # attention's ``cu_seqlens``) -- needs the dedicated ``param_inputs``
-                # kernel entry the atomic-leaf else-branch below declares; this
-                # single-entry pipeline can't reproduce that per-input docking and
-                # would leave the boundary producer (and the rotary / unbind ops the
-                # kernel consumes) dangling. Defer those to the proven leaf path.
+                # when the wrapper source cannot be resolved. A boundary attention
+                # input docks on the core leaf's own ``param_inputs``, declared in
+                # that builder exactly as the atomic-leaf path declares them.
                 wrapper_node = _attention_wrapper_block_nodes(
                     forward_order=child_order,
                     details=child_details,
