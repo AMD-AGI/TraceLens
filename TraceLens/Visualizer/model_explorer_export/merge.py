@@ -2847,6 +2847,36 @@ def _apply_tile_redirects(
     nodes[:] = [n for n in nodes if str(n["id"]) not in redirect]
 
 
+def _name_kernel_leaves_for_their_kernel(nodes: list[dict[str, Any]]) -> None:
+    """A fused kernel leaf is labelled with the kernel it actually runs.
+
+    Kimi's output norm is ``FusedRMSNormGated`` -- it takes the attention result
+    AND the gate, and runs as one GPU kernel -- but it was labelled with the
+    model's generic norm type, ``RMSNorm``. A reader then sees a plain norm
+    apparently taking two inputs and filled like a kernel, with nothing on
+    screen explaining either. The node already records which kernel it is; show
+    that.
+
+    Only a leaf whose recorded kernel DIFFERS from its label is touched, so a
+    kernel already named for itself (``sdpa``, ``ShortConvolution``) is left
+    exactly as it is.
+    """
+    for node in nodes:
+        if _node_attr(node, "operation") != "gpu_kernel":
+            continue
+        details = str(_node_attr(node, "details") or "")
+        kernel = next(
+            (
+                part.split(":", 1)[1].strip()
+                for part in details.split(";")
+                if part.strip().startswith("kernel:")
+            ),
+            "",
+        )
+        if kernel and kernel != str(node.get("label") or ""):
+            node["label"] = kernel
+
+
 def _share_one_tile_per_kernel_operand(nodes: list[dict[str, Any]]) -> None:
     """One tensor entering a pipeline is one node, however many kernels read it.
 
@@ -7958,6 +7988,7 @@ def build_merged_model_graph(
     # redundant once its neighbours are final.
     _fold_same_scope_mirrors(nodes)
     _fold_same_source_twins(nodes)
+    _name_kernel_leaves_for_their_kernel(nodes)
     _share_one_tile_per_kernel_operand(nodes)
     _name_kernel_ports_after_their_source(nodes)
     _qualify_colliding_mirrors(nodes)
