@@ -11,9 +11,13 @@ detection cascade, so each case isolates one property of the collective-vs-
 noise comparison in :func:`trim_startup_transient`.
 """
 
-from TraceLens.TraceUtils.trace_split import DetectStatus, PhaseConfidence, RootSet
-from TraceLens.TraceUtils.trace_split.startup_transient import trim_startup_transient
-from TraceLens.TraceUtils.utils.detect_utils import EventIndex
+from TraceLens.TraceUtils.utils.detect_utils import (
+    DetectStatus,
+    EventIndex,
+    PhaseConfidence,
+    RootSet,
+)
+from TraceLens.TraceUtils.split_trace.startup_transient import trim_startup_transient
 
 ITER_PERIOD = 1000
 ITER_DUR = 500
@@ -101,12 +105,22 @@ class TestTrimStartupTransient:
         assert result.diagnostics["startup_transient_trimmed"] is False
         assert len(result.roots) == 5
 
-    def test_too_few_iterations_is_not_trimmed(self):
-        """Below MIN_OTHER_ITERATIONS later iterations, the median isn't trustworthy."""
+    def test_two_iterations_can_still_trim(self):
+        """Even with just one later iteration, the comparison works."""
         roots, kernels = _build(
-            n_iterations=3,
-            collective_durs=[900, 40, 40],
-            compute_durs=[40, 40, 40],
+            n_iterations=2,
+            collective_durs=[900, 40],
+            compute_durs=[40, 40],
+        )
+        result = trim_startup_transient(_root_set(roots), EventIndex(kernels))
+        assert result.diagnostics["startup_transient_trimmed"] is True
+        assert len(result.roots) == 1
+
+    def test_single_iteration_is_left_alone(self):
+        roots, kernels = _build(
+            n_iterations=1,
+            collective_durs=[900],
+            compute_durs=[40],
         )
         root_set = _root_set(roots)
         result = trim_startup_transient(root_set, EventIndex(kernels))
@@ -142,3 +156,23 @@ class TestTrimStartupTransient:
         root_set = _root_set(roots)
         result = trim_startup_transient(root_set, None)
         assert result is root_set
+
+    def test_no_collective_kernels_is_left_alone(self):
+        """When no kernels match collective patterns, skip entirely."""
+        roots = [_root(i) for i in range(5)]
+        kernels = [_kernel(i * ITER_PERIOD + 10, 40, "gemm") for i in range(5)]
+        root_set = _root_set(roots)
+        result = trim_startup_transient(root_set, EventIndex(kernels))
+        assert result is root_set
+
+    def test_coverage_excludes_transient_kernel_duration(self):
+        """After trimming, the transient kernel's duration is removed from gpu_busy."""
+        roots, kernels = _build(
+            n_iterations=5,
+            collective_durs=[900, 40, 40, 40, 40],
+            compute_durs=[40, 40, 40, 40, 40],
+        )
+        result = trim_startup_transient(_root_set(roots), EventIndex(kernels))
+        assert result.diagnostics["startup_transient_trimmed"] is True
+        total_all = sum(k["dur"] for k in kernels)
+        assert result.coverage.gpu_busy < total_all
