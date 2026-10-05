@@ -205,10 +205,10 @@ result. Its key fields are:
 | `gpu_event_retention` | The fraction of GPU kernels that survived extraction. This should be `1.0`, meaning every kernel is accounted for across the slices. |
 | `gpu_events_duplicated` | Whether any kernel was claimed by more than one slice, which indicates a tiling error. |
 | `gap_fill` | Whether tiling was used. |
-| `startup_transient_trimmed` | Whether iteration 0 was dropped as a profiler-start transient. |
+| `startup_transient_trimmed` | Whether iteration 0 was dropped. |
 | `startup_transient_kernel` | The collective kernel name whose inflation triggered the trim, when trimmed. |
 | `startup_transient_collective_ratio` | Iteration 0's duration for that kernel, divided by its median over later iterations. |
-| `startup_transient_noise_ratio` | The worst same-ratio seen among non-collective kernels, i.e. the noise ceiling the collective ratio had to clear. |
+| `startup_transient_noise_ratio` | The worst same-ratio seen among non-collective kernels, i.e. the ratio ceiling the collective ratio had to clear. |
 
 A per-iteration `execution_details` file records the same accounting for each
 slice.
