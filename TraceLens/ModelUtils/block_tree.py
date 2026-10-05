@@ -1774,6 +1774,24 @@ def _kernel_pipeline_block_nodes(
     # pipeline runs: earlier stages first, with anything unplaced after them.
     step_position = {step.attr_name: index for index, step in enumerate(pipeline_steps)}
 
+    def _stage_details(step: KernelPipelineStep) -> list[str]:
+        """The stage's own details plus what the call named each operand.
+
+        ``operand: <producing step>=<parameter>`` keeps the call-site binding
+        reachable from the rendered tree, so a port can be named for what the
+        KERNEL calls that operand instead of for whatever produced it.
+        """
+        details = list(step.details or [])
+        if step.operand_parameters:
+            details.append(
+                "operand: "
+                + ", ".join(
+                    f"{producer}={parameter}"
+                    for producer, parameter in step.operand_parameters
+                )
+            )
+        return details
+
     def _ordered_predecessors(step: KernelPipelineStep) -> list[str]:
         return sorted(
             step.predecessors,
@@ -1802,7 +1820,7 @@ def _kernel_pipeline_block_nodes(
                     role="other",
                     label=step.call_name,
                     forward_order=index,
-                    details=list(step.details or []),
+                    details=_stage_details(step),
                     is_basic=False,
                     children=sub_children,
                     kernel_predecessors=_ordered_predecessors(step),
@@ -1815,7 +1833,7 @@ def _kernel_pipeline_block_nodes(
                     class_name=step.class_name,
                     forward_order=index,
                     label=step.call_name,
-                    details=list(step.details or []),
+                    details=_stage_details(step),
                     basic=False,
                     kernel_predecessors=_ordered_predecessors(step),
                 )

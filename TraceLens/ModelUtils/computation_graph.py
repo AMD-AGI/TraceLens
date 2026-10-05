@@ -575,6 +575,38 @@ def _kernel_input_names(spec: NodeSpec) -> list[str]:
     return []
 
 
+def _kernel_stage_attr(attr: str) -> str:
+    """The stage a decomposed sub-step belongs to.
+
+    ``introspect_kernel_op_substeps`` names a stage's parts
+    ``<stage>_sub_<n>``, and the value a stage produces comes out of its last
+    part -- but the call site named the STAGE, so a lookup by producer has to
+    climb back to it.
+    """
+    head, separator, tail = attr.rpartition("_sub_")
+    return head if separator and tail.isdigit() else attr
+
+
+def _kernel_operand_parameters(spec: NodeSpec) -> dict[str, str]:
+    """``producing step -> the parameter this kernel binds it to``.
+
+    Recorded from the call site (``chunk_kda_fwd_intra(q=q, gk=g, ...)``), which
+    is the only place the kernel's own name for an operand appears.
+    """
+    if spec.block is None:
+        return {}
+    for detail in spec.block.details:
+        if not detail.startswith("operand:"):
+            continue
+        bindings: dict[str, str] = {}
+        for item in detail.split(":", 1)[1].split(","):
+            producer, _, parameter = item.strip().partition("=")
+            if producer and parameter:
+                bindings[producer] = parameter
+        return bindings
+    return {}
+
+
 def _prefer_activation_followup(
     attr_last_index: dict[str, int], attr: str, index: int
 ) -> int:
@@ -701,11 +733,30 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
                 label = f"{label}_{count + 1}"
             all_inputs.append((source, label))
 
+        # What the KERNEL calls each operand beats what produced it: a Triton
+        # stage's label is a glyph for the arithmetic it does, which names
+        # nothing a reader can use and may not even be printable. The bare
+        # parameter name is what the kernel itself says; if that name turns out
+        # to be taken in this scope, the render qualifies it by the box the
+        # value came out of -- qualifying every port up front would shout the
+        # kernel's name at a reader who can already see it.
+        operand_parameters = _kernel_operand_parameters(kernel_spec)
         for idx, source in enumerate(unlabeled_sources):
-            if idx < len(remaining):
+            src_spec = graph.nodes[source]
+            source_attr = (
+                str(src_spec.block.attr_name) if src_spec.block is not None else ""
+            )
+            # A decomposed kernel stage produces its value from its LAST
+            # sub-step (``forward_l2norm_fwd_q_sub_3``), and the call site
+            # named the stage, not the sub-step -- so ask the stage too.
+            parameter = operand_parameters.get(source_attr) or operand_parameters.get(
+                _kernel_stage_attr(source_attr)
+            )
+            if parameter:
+                label = parameter
+            elif idx < len(remaining):
                 label = remaining[idx]
             else:
-                src_spec = graph.nodes[source]
                 label = src_spec.label or f"input_{len(all_inputs)}"
             count = seen_labels.get(label, 0)
             seen_labels[label] = count + 1
@@ -4330,13 +4381,31 @@ def _label_multi_input_kernel_edges(
     for target, edges in inputs_per_target.items():
         if len(edges) < 2:
             continue
+        # What the KERNEL calls this operand, taken from its own call site,
+        # beats the label of whatever produced it -- a decomposed Triton stage
+        # is labelled with a glyph for the arithmetic it does, which names
+        # nothing and may not even be printable.
+        target_spec = graph.nodes[target] if target < len(graph.nodes) else None
+        operand_parameters = (
+            _kernel_operand_parameters(target_spec) if target_spec is not None else {}
+        )
         for source, tgt in edges:
             if (source, tgt) in graph.link_port_labels:
                 continue
             source_spec = graph.nodes[source] if source < len(graph.nodes) else None
             if source_spec is None:
                 continue
-            if (source, tgt) in tensor_link_set:
+            source_attr = (
+                str(source_spec.block.attr_name)
+                if source_spec.block is not None
+                else ""
+            )
+            parameter = operand_parameters.get(source_attr) or operand_parameters.get(
+                _kernel_stage_attr(source_attr)
+            )
+            if parameter:
+                label = parameter
+            elif (source, tgt) in tensor_link_set:
                 label = source_spec.label or ""
             else:
                 label = source_spec.label or source_spec.key or ""

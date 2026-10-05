@@ -152,6 +152,14 @@ class KernelPipelineStep:
     predecessors: frozenset[str] = frozenset()
     children: tuple[KernelPipelineStep, ...] = ()
     second_operand: str | None = None
+    # Which PARAMETER of this kernel each operand was bound to at the call site:
+    # ``chunk_kda_fwd_intra(q=q, k=k, v=v, gk=g, beta=beta)`` names every one of
+    # them. Keeping only the set of operand names threw that away, leaving a
+    # port to be named after whatever op produced its value -- which for a
+    # Triton stage is a GLYPH, so three of this kernel's five operands rendered
+    # as an unprintable symbol. Pairs rather than a dict so the step stays
+    # hashable and the order the call made is preserved.
+    operand_parameters: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -789,6 +797,44 @@ def _predecessor_attr_names(
     return frozenset(predecessors)
 
 
+def _operand_parameter_bindings(
+    call: ast.Call,
+    var_producer: dict[str, str],
+    port_producer: dict[str, str],
+    tensor_ports: set[str],
+) -> tuple[tuple[str, str], ...]:
+    """``(producing step or port, parameter name)`` for each operand of *call*.
+
+    A kernel call states what it calls each operand -- ``gk=g`` says the gate
+    arrives at the parameter ``gk`` -- and that is the only name for the value
+    the kernel itself uses. Keywords are read directly; a positional argument
+    is left out rather than guessed at, since the callee's signature is not
+    necessarily in hand here and a wrong binding is worse than none.
+    """
+    aliases: dict[str, str] = {}
+    for port in tensor_ports:
+        aliases[port] = port
+        for suffix in ("_raw", "_org", "_input"):
+            aliases[f"{port}{suffix}"] = port
+    if "g" in tensor_ports:
+        aliases["g_input"] = "g"
+
+    bindings: dict[str, str] = {}
+    for keyword in call.keywords:
+        if not keyword.arg:
+            continue
+        for node in ast.walk(keyword.value):
+            if not isinstance(node, ast.Name):
+                continue
+            producer = var_producer.get(node.id)
+            if producer is None:
+                port = aliases.get(node.id)
+                producer = port_producer.get(port) if port else None
+            if producer is not None:
+                bindings.setdefault(producer, keyword.arg)
+    return tuple(bindings.items())
+
+
 def _should_bind_step(condition: str | None, flags: dict[str, str | bool]) -> bool:
     """True when an AST branch matches modeling kwargs and may update variable producers."""
     if not flags:
@@ -825,6 +871,7 @@ def _filter_step_predecessors(
                 pred for pred in step.predecessors if pred in active_attrs
             ),
             children=step.children,
+            operand_parameters=step.operand_parameters,
         )
         for step in steps
     ]
@@ -1049,6 +1096,9 @@ def _extract_pipeline_from_function(
             pred_attrs = _predecessor_attr_names(
                 call, var_producer
             ) | _port_predecessor_attr_names(call, shared_port_producer, active_ports)
+            operand_parameters = _operand_parameter_bindings(
+                call, var_producer, shared_port_producer, active_ports
+            )
             if dedupe_key in seen:
                 for index, existing in enumerate(steps):
                     if (
@@ -1071,6 +1121,12 @@ def _extract_pipeline_from_function(
                                 existing.computation, computation
                             ),
                             predecessors=existing.predecessors | pred_attrs,
+                            operand_parameters=existing.operand_parameters
+                            + tuple(
+                                pair
+                                for pair in operand_parameters
+                                if pair not in existing.operand_parameters
+                            ),
                         )
                         steps[index] = updated
                         if _should_bind_step(condition, active_flags):
@@ -1095,6 +1151,7 @@ def _extract_pipeline_from_function(
                 tensor_inputs=effective_ports,
                 computation=computation or call_name,
                 predecessors=pred_attrs,
+                operand_parameters=operand_parameters,
             )
             steps.append(created)
             _bind_assignment(stmt, attr_name, var_producer)
@@ -1467,6 +1524,7 @@ def _attach_kernel_op_expansions(
                     computation=step.computation,
                     predecessors=step.predecessors,
                     children=children,
+                    operand_parameters=step.operand_parameters,
                 )
             )
         else:

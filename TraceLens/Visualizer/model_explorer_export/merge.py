@@ -2847,6 +2847,167 @@ def _apply_tile_redirects(
     nodes[:] = [n for n in nodes if str(n["id"]) not in redirect]
 
 
+def _share_one_tile_per_kernel_operand(nodes: list[dict[str, Any]]) -> None:
+    """One tensor entering a pipeline is one node, however many kernels read it.
+
+    The gate's cumulative sum feeds ``chunk_kda_fwd_intra`` AND
+    ``chunk_gated_delta_rule_fwd_h``, and each got its own operand tile -- two
+    identical boxes, same name, same shape, same producer, drawn side by side.
+    They are one value, so they are one node with two edges out of it.
+
+    Ports feeding the SAME kernel are left alone: a kernel that binds one
+    tensor to two of its parameters really does take two operands, and merging
+    those would misreport how many it has.
+
+    A port that merely repeats the operand tile feeding it goes too: the
+    pipeline's ``v`` tile already names the tensor, so docking it into a second
+    ``v`` immediately below says nothing the first did not.
+    """
+    kernel_ports = {"@kernel_port_in", "@kernel_port_out"}
+    by_id = {str(n["id"]): n for n in nodes}
+    consumers: dict[str, list[str]] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []) or []:
+            consumers.setdefault(str(edge.get("sourceNodeId")), []).append(
+                str(node["id"])
+            )
+
+    def feed(node: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            sorted(
+                (str(e.get("sourceNodeId")), str(e.get("sourceNodeOutputId", "0")))
+                for e in node.get("incomingEdges", []) or []
+            )
+        )
+
+    redirect: dict[str, tuple[str, str]] = {}
+
+    # (a) A port that only repeats the tile feeding it.
+    for node in nodes:
+        if _node_attr(node, "synthetic") not in kernel_ports:
+            continue
+        sources = feed(node)
+        if len(sources) != 1:
+            continue
+        producer = by_id.get(sources[0][0])
+        if producer is None or _node_attr(producer, "synthetic") is None:
+            continue
+        if str(producer.get("namespace") or "") != str(node.get("namespace") or ""):
+            continue
+        if str(producer.get("label") or "") != str(node.get("label") or ""):
+            continue
+        redirect[str(node["id"])] = sources[0]
+
+    # (b) Ports carrying one tensor into DIFFERENT kernels.
+    groups: dict[tuple[str, tuple[tuple[str, str], ...]], list[dict[str, Any]]] = {}
+    for node in nodes:
+        if _node_attr(node, "synthetic") not in kernel_ports:
+            continue
+        if str(node["id"]) in redirect:
+            continue
+        sources = feed(node)
+        if sources:
+            groups.setdefault((str(node.get("namespace") or ""), sources), []).append(
+                node
+            )
+    for same in groups.values():
+        if len(same) < 2:
+            continue
+        reads = [tuple(sorted(consumers.get(str(n["id"]), ()))) for n in same]
+        if any(len(set(pair)) == 1 for pair in zip(reads, reads[1:])):
+            continue  # two slots of ONE kernel: a real pair of operands
+        same.sort(key=lambda n: str(n["id"]))
+        keeper = str(same[0]["id"])
+        for extra in same[1:]:
+            redirect[str(extra["id"])] = (keeper, "0")
+
+    _apply_tile_redirects(nodes, redirect)
+
+
+def _name_kernel_ports_after_their_source(nodes: list[dict[str, Any]]) -> None:
+    """An operand port named for a GLYPH is named for nothing a reader can use.
+
+    A fused kernel's operand port takes its name from the stage that produced
+    the value, and a stage's display label is sometimes the symbol for what it
+    does -- so ``chunk_kda_fwd_intra`` showed operands called ``x``, ``x_2`` and
+    ``x scale`` (a multiplication sign, which the viewer cannot even draw and
+    renders as ``?``). Three of its five operands were therefore unnamed in
+    practice.
+
+    The kernel's own declared ``tensor_inputs`` cannot settle it: that is a SET,
+    so choosing which name belongs to which port would be the same unordered
+    guess that used to make the export differ between runs. The producing BOX,
+    though, is already on screen and already named for the work it does -- so
+    take its name: ``l2norm_fwd_q``, ``l2norm_fwd_k``, and for a port that also
+    says which of the box's outputs it carries, ``fused_beta_sigmoid_scale``.
+
+    Only a glyph name is replaced. A port already carrying a real name (``v``,
+    ``cu_seqlens``, ``CumSum``) keeps it, and a rename is applied only when it
+    leaves the scope's names unique -- never trading one ambiguity for another.
+    """
+    by_id = {str(n["id"]): n for n in nodes}
+
+    def source_box(node: dict[str, Any]) -> str | None:
+        """Last path segment of the box the port's value comes out of."""
+        producers = [
+            by_id.get(str(e.get("sourceNodeId")))
+            for e in node.get("incomingEdges", []) or []
+        ]
+        spaces = {str(p.get("namespace") or "") for p in producers if p is not None}
+        if len(spaces) != 1:
+            return None
+        space = spaces.pop()
+        scope = str(node.get("namespace") or "")
+        prefix = f"{scope}/" if scope else ""
+        if not space.startswith(prefix) or space == scope:
+            return None
+        return space[len(prefix) :].split("/")[0] or None
+
+    proposed: dict[str, tuple[str, str]] = {}
+    for node in nodes:
+        if _node_attr(node, "synthetic") not in {"@kernel_port_in", "@kernel_port_out"}:
+            continue
+        label = str(node.get("label") or "").strip()
+        if not label:
+            continue
+        # Drop the ``_2`` a duplicate port picked up, so the name underneath is
+        # what gets judged.
+        base = re.sub(r"_\d+$", "", label)
+        head, _, tail = base.partition(" ")
+        if any(character.isalnum() for character in head):
+            continue  # a real name, not a symbol for an operation
+        box = source_box(node)
+        if box is None:
+            continue
+        proposed[str(node["id"])] = (
+            f"{box}_{tail.strip().replace(' ', '_')}" if tail.strip() else box,
+            str(node.get("namespace") or ""),
+        )
+
+    if not proposed:
+        return
+    # A rename must leave every name in its scope distinct, or it has traded one
+    # ambiguity for another.
+    taken: dict[str, set[str]] = {}
+    for node in nodes:
+        if str(node["id"]) in proposed:
+            continue
+        taken.setdefault(str(node.get("namespace") or ""), set()).add(
+            str(node.get("label") or "")
+        )
+    wanted: dict[str, list[str]] = {}
+    for name, scope in proposed.values():
+        wanted.setdefault(scope, []).append(name)
+    for node in nodes:
+        entry = proposed.get(str(node["id"]))
+        if entry is None:
+            continue
+        name, scope = entry
+        if wanted[scope].count(name) > 1 or name in taken.get(scope, set()):
+            continue
+        node["label"] = name
+
+
 def _qualify_colliding_mirrors(nodes: list[dict[str, Any]]) -> None:
     """Name a mirror for the box it crosses when its name is taken.
 
@@ -2892,26 +3053,57 @@ def _qualify_colliding_mirrors(nodes: list[dict[str, Any]]) -> None:
             return None
         return space[len(prefix) :].split("/")[0] or None
 
-    def feeding_step(node: dict[str, Any]) -> str | None:
-        """The step whose value this operand port was handed.
+    def feeding_step(node: dict[str, Any]) -> list[str]:
+        """The box, or failing that the step, whose value this port was handed.
 
         A fused kernel names an operand port after the PARAMETER it binds, and
-        a helper called three times binds the same parameter each time: ports
-        15, 16 and 17 all read ``x`` while being handed the query, key and
-        value projections. The step that produced each one is what tells them
-        apart, and it is the name the model itself uses.
+        two kernels in one pipeline bind the same parameter name -- or a helper
+        called three times binds it each time: ports 15, 16 and 17 all read
+        ``x`` while being handed the query, key and value projections. Where
+        the value CAME FROM is what tells them apart, and it is already on
+        screen beside them.
         """
+        # Operand TILES are the pipeline's own declaration of what it takes --
+        # the counterpart of an ``@input`` -- so they keep their plain name and
+        # the port docking into them is the one that gets qualified. Renaming
+        # both would say twice what one of them saying it settles.
         if _node_attr(node, "synthetic") not in {
             "@kernel_port_in",
             "@kernel_port_out",
-            "@tensor",
         }:
-            return None
+            return []
         producers = [
             by_id.get(str(e.get("sourceNodeId")))
             for e in node.get("incomingEdges", []) or []
         ]
-        # Only a name the MODEL gives a submodule will do. A synthesized step
+        # The BOX the value came out of reads best: ``l2norm_fwd_q.q`` says
+        # which ``q`` this is far better than the step attr behind it would.
+        scope = str(node.get("namespace") or "")
+        prefix = f"{scope}/" if scope else ""
+        boxes = {
+            str(p.get("namespace") or "")[len(prefix) :].split("/")[0]
+            for p in producers
+            if p is not None
+            and str(p.get("namespace") or "").startswith(prefix)
+            and str(p.get("namespace") or "") != scope
+        }
+        boxes.discard("")
+        candidates: list[str] = []
+        if len(boxes) == 1:
+            candidates.append(boxes.pop())
+        # A sibling stage in this same scope is named by its label: its attr
+        # repeats the pipeline prefix (``chunk_kda_fwd_chunk_kda_fwd_intra``),
+        # which is noise beside a port already drawn inside that pipeline.
+        labels = {
+            str(p.get("label") or "")
+            for p in producers
+            if p is not None
+            and str(p.get("namespace") or "") == scope
+            and any(character.isalnum() for character in str(p.get("label") or ""))
+        }
+        if len(labels) == 1:
+            candidates.append(labels.pop())
+        # Failing that, a name the MODEL gives a submodule. A synthesized step
         # carries a generated attr (``@op_l1618_c23_unsqueeze``) that no reader
         # should ever be shown, so those leave the port's name as it was.
         named = {
@@ -2921,7 +3113,9 @@ def _qualify_colliding_mirrors(nodes: list[dict[str, Any]]) -> None:
             and _node_attr(p, "attr_name")
             and not str(_node_attr(p, "attr_name")).startswith("@")
         }
-        return named.pop() if len(named) == 1 else None
+        if len(named) == 1:
+            candidates.append(named.pop())
+        return candidates
 
     by_scope_name: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for node in nodes:
@@ -2934,23 +3128,40 @@ def _qualify_colliding_mirrors(nodes: list[dict[str, Any]]) -> None:
     for (scope, name), same in by_scope_name.items():
         if len(same) < 2:
             continue
-        renames: dict[str, str] = {}
+        # Each node offers its qualifiers best-first: the box it crosses, the
+        # sibling stage that made the value, then the model's own attr for that
+        # step. Take the best RANK that actually settles the scope -- three
+        # ports fed by three ``Linear`` steps are not told apart by "Linear",
+        # but they are by ``q_proj``/``k_proj``/``v_proj`` one rank down.
+        options: dict[str, list[str]] = {}
         for node in same:
-            source = inner_box(node) or feeding_step(node)
-            if source is not None:
-                renames[str(node["id"])] = f"{source}.{name}"
-        # Renaming must actually settle the ambiguity: every qualified name has
-        # to be new to the scope and distinct from the others, or the reader is
-        # no better off than before.
-        taken = {
-            str(n.get("label") or "")
-            for n in nodes
-            if str(n.get("namespace") or "") == scope and str(n["id"]) not in renames
-        }
-        qualified = list(renames.values())
-        if not renames or len(set(qualified)) != len(qualified):
-            continue
-        if any(label in taken for label in qualified):
+            box = inner_box(node)
+            options[str(node["id"])] = ([box] if box else []) + feeding_step(node)
+        renames: dict[str, str] = {}
+        for rank in range(
+            max((len(choices) for choices in options.values()), default=0)
+        ):
+            attempt = {
+                node_id: f"{choices[rank]}.{name}"
+                for node_id, choices in options.items()
+                if rank < len(choices)
+            }
+            qualified = list(attempt.values())
+            if not attempt or len(set(qualified)) != len(qualified):
+                continue
+            # Renaming must settle the ambiguity: every qualified name has to be
+            # new to the scope, or the reader is no better off than before.
+            taken = {
+                str(n.get("label") or "")
+                for n in nodes
+                if str(n.get("namespace") or "") == scope
+                and str(n["id"]) not in attempt
+            }
+            if any(label in taken for label in qualified):
+                continue
+            renames = attempt
+            break
+        if not renames:
             continue
         for node in same:
             label = renames.get(str(node["id"]))
@@ -2975,9 +3186,11 @@ def _fold_same_source_twins(nodes: list[dict[str, Any]]) -> None:
     rest hand their consumers to it, which keeps every consumer at the level it
     was already reading from.
 
-    A fused kernel's operand ports are left alone. Ports 15, 16 and 17 of one
-    kernel are three distinct slots even when a single ``cu_seqlens`` feeds all
-    three, and folding them would misreport how many operands the kernel takes.
+    A fused kernel's operand ports are left to
+    ``_share_one_tile_per_kernel_operand``, which can tell apart the two cases
+    this one cannot: ports 15, 16 and 17 of ONE kernel are three distinct slots
+    even when a single tensor feeds all three, whereas the same three feeding
+    three DIFFERENT kernels are one value drawn three times.
     """
     kernel_ports = {"@kernel_port_in", "@kernel_port_out"}
     boundary = (_INPUT_BOUNDARY_SYNTHETIC | _OUTPUT_BOUNDARY_SYNTHETIC) - kernel_ports
@@ -7745,6 +7958,8 @@ def build_merged_model_graph(
     # redundant once its neighbours are final.
     _fold_same_scope_mirrors(nodes)
     _fold_same_source_twins(nodes)
+    _share_one_tile_per_kernel_operand(nodes)
+    _name_kernel_ports_after_their_source(nodes)
     _qualify_colliding_mirrors(nodes)
 
     # Structural-integrity check on the FINAL built graph (after loop-carried

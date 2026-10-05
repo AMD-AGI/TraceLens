@@ -379,6 +379,10 @@ def test_kernel_pipeline_block_nodes_multi_input_step(monkeypatch):
             "details": ["kernel: stage_fwd"],
             "children": [sub, sub],
             "predecessors": [],
+            # Mirrors the real ``KernelPipelineStep``: a stage records what the
+            # call named each operand, which is how a port gets the kernel's
+            # own name for it rather than the producing step's glyph.
+            "operand_parameters": (),
         },
     )()
     monkeypatch.setattr(kp, "introspect_kernel_pipeline", lambda d: ([step], []))
@@ -1803,6 +1807,7 @@ def test_kernel_pipeline_block_nodes_single_child_step(monkeypatch):
         details=["kernel: stage_fwd"],
         children=[],
         predecessors=[],
+        operand_parameters=(),
     )
     monkeypatch.setattr(kp, "introspect_kernel_pipeline", lambda d: ([step], []))
     pipeline, output = bt._kernel_pipeline_block_nodes(
@@ -1823,6 +1828,7 @@ def test_kernel_pipeline_block_nodes_with_output_step(monkeypatch):
         details=["kernel: stage_fwd"],
         children=[],
         predecessors=[],
+        operand_parameters=(),
     )
     out_step = SimpleNamespace(
         attr_name="out",
@@ -1831,6 +1837,7 @@ def test_kernel_pipeline_block_nodes_with_output_step(monkeypatch):
         call_name="combine",
         children=[],
         predecessors=["stage"],
+        operand_parameters=(),
     )
     monkeypatch.setattr(
         kp, "introspect_kernel_pipeline", lambda d: ([step], [out_step])
