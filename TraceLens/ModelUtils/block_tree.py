@@ -1642,6 +1642,17 @@ def _attention_wrapper_block_nodes(
     # check keys on this dedicated attr instead.
     if plan.kernel_primitive:
         core_details.append(f"kernel_primitive: {plan.kernel_primitive}")
+    # Which PARAMETER of the wrapper each caller-side port supplies, from the
+    # binding ``port_map`` already resolved (``q`` -> ``query``). Stamped so the
+    # role travels with the port as an identity: recovering it downstream by
+    # string-matching the port's DISPLAY label breaks the moment that label is
+    # qualified for a reader, which is exactly how renaming a port once made
+    # ``sdpa`` appear to read one tensor where it reads three.
+    if plan.port_map:
+        core_details.append(
+            "operand_role: "
+            + ", ".join(f"{caller}={param}" for param, caller in plan.port_map)
+        )
     core_leaf = _leaf_node(
         attr_name=core_attr,
         class_name="AttentionOp",

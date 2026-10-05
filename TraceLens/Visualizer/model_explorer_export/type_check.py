@@ -508,7 +508,13 @@ def _kernel_operand_arity_warnings(nodes: list[dict[str, Any]]) -> list[str]:
         required = _required_tensor_operand_names(primitive)
         if len(required) < 2:
             continue
+        # Follow the EDGE to each port and ask that port which operand it
+        # supplies. The role was fixed when the port was bound, so a port
+        # renamed for the reader still answers correctly; matching on the
+        # display label instead meant qualifying a port silently uncovered a
+        # required operand and this check fired on a correct graph.
         port_labels: list[str] = []
+        port_roles: list[str] = []
         for edge in node.get("incomingEdges", []) or []:
             source = by_id.get(str(edge.get("sourceNodeId")))
             if source is None:
@@ -516,12 +522,20 @@ def _kernel_operand_arity_warnings(nodes: list[dict[str, Any]]) -> list[str]:
             if _node_attr_value(source, "synthetic") != "@kernel_port_in":
                 continue
             port_labels.append(_port_label(source))
+            role = _node_attr_value(source, "operand_role")
+            if role:
+                port_roles.append(str(role))
         if not port_labels:
             continue
         covered = sum(
             1
             for param in required
-            if any(_role_covers(param, lbl) for lbl in port_labels)
+            # The role a port declared settles it. Falling back to the label
+            # PER OPERAND rather than only when no port declared one at all:
+            # the binding does not reach every kernel path yet, and an operand
+            # covered by an unstamped port is still covered.
+            if param in port_roles
+            or any(_role_covers(param, lbl) for lbl in port_labels)
         )
         if covered < len(required):
             node_id = node.get("id")

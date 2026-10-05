@@ -587,6 +587,29 @@ def _kernel_stage_attr(attr: str) -> str:
     return head if separator and tail.isdigit() else attr
 
 
+def _kernel_port_roles(spec: NodeSpec) -> dict[str, str]:
+    """``caller-side port name -> the wrapper parameter it supplies``.
+
+    Read from the ``operand_role`` detail the block tree stamped out of the
+    wrapper's resolved ``port_map``. The role is an IDENTITY fixed when the
+    port was bound; a consumer that needs to know which operand a port carries
+    asks for this rather than reading the port's display label, which exists to
+    be renamed.
+    """
+    if spec.block is None:
+        return {}
+    for detail in spec.block.details:
+        if not detail.startswith("operand_role:"):
+            continue
+        roles: dict[str, str] = {}
+        for item in detail.split(":", 1)[1].split(","):
+            caller, _, param = item.strip().partition("=")
+            if caller and param:
+                roles[caller] = param
+        return roles
+    return {}
+
+
 def _kernel_operand_parameters(spec: NodeSpec) -> dict[str, str]:
     """``producing step -> the parameter this kernel binds it to``.
 
@@ -741,6 +764,7 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
         # value came out of -- qualifying every port up front would shout the
         # kernel's name at a reader who can already see it.
         operand_parameters = _kernel_operand_parameters(kernel_spec)
+        port_roles = _kernel_port_roles(kernel_spec)
         for idx, source in enumerate(unlabeled_sources):
             src_spec = graph.nodes[source]
             source_attr = (
@@ -833,11 +857,17 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
                     # the producer-ordinal only applied to the original edge.
                     feed_port = None
 
+                # The role is the operand's identity; the label is what a
+                # reader sees. Keeping them apart lets the label be qualified
+                # later without a downstream check losing track of which
+                # operand this port supplies.
+                role = port_roles.get(label) or port_roles.get(label.rsplit("_", 1)[0])
                 port_index = _add_node(
                     graph,
                     key=f"@kernel_in:{kernel_index}:{safe_label}",
                     label=label,
                     synthetic=SYNTHETIC_KERNEL_PORT_IN,
+                    extra_metadata={"operand_role": role} if role else None,
                 )
                 _inherit_kernel_frames(graph, kernel_index, port_index)
                 graph.links.append((feed_source, port_index))

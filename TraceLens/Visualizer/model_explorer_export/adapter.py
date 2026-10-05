@@ -91,6 +91,12 @@ def _node_attrs(spec) -> list[dict[str, str]]:
         attrs.append(_kv("port_label", spec.port_label))
     if spec.port_style:
         attrs.append(_kv("port_style", spec.port_style))
+    # Which operand of its kernel this port supplies, fixed when the port was
+    # bound. A consumer asks for this instead of reading the port's display
+    # label, so the label stays free to be qualified for a reader.
+    operand_role = (getattr(spec, "extra_metadata", None) or {}).get("operand_role")
+    if operand_role:
+        attrs.append(_kv("operand_role", str(operand_role)))
     if spec.synthetic:
         attrs.append(_kv("synthetic", spec.synthetic))
     if getattr(spec, "constant", False):
