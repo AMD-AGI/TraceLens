@@ -23,4 +23,4 @@ See **[reference.md](reference.md)** for inputs, files to read, scoring table, p
 
 ## Skill location
 
-`agent_evals/Analysis/skills/workflow-llm-eval/`
+`TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/skills/workflow-llm-eval/`

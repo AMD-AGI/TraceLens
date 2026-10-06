@@ -9,7 +9,7 @@ See LICENSE for license information.
 Single-source reference for every eval check, its pass/fail criteria, tolerances,
 root-cause categories, and where the implementation lives.
 
-> **Canonical location:** `agent_evals/Analysis/EVAL_RUBRICS.md`
+> **Canonical location:** `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/EVAL_RUBRICS.md`
 > Update this file whenever an eval is added, removed, or its criteria change.
 
 ---
@@ -137,7 +137,7 @@ Finds every priority item (`### ...P{N}:` headers) and checks for required bold 
 
 **Type:** LLM, multi-dimensional weighted scoring. **Root cause on fail:** `template`.
 
-**Implementation:** `agent_evals/Analysis/skills/workflow-llm-eval/SKILL.md` (see `reference.md` for rubric detail)
+**Implementation:** `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/skills/workflow-llm-eval/SKILL.md` (see `reference.md` for rubric detail)
 
 Checks the `## Appendix` section for hardware reference values (only for trace1 if in comparative mode):
 - Platform name (e.g., MI300X)
@@ -209,7 +209,7 @@ Compares CSVs against the reference directory.
 
 **Type:** LLM, multi-dimensional weighted scoring. **Root cause on fail:** `data`.
 
-**Implementation:** `agent_evals/Analysis/skills/quality-llm-eval/SKILL.md` (see `reference.md` for rubric detail)
+**Implementation:** `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/skills/quality-llm-eval/SKILL.md` (see `reference.md` for rubric detail)
 
 Compares P-item titles in the generated report against the reference report.
 This is a **semantic** comparison — not a string match.
@@ -240,7 +240,7 @@ overall_score = correctness × 0.40 + completeness × 0.30 + precision × 0.30
 
 **Type:** LLM, multi-dimensional weighted scoring. **Root cause on fail:** `data`.
 
-**Implementation:** `agent_evals/Analysis/skills/quality-llm-eval/SKILL.md` (see `reference.md` for rubric detail)
+**Implementation:** `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/skills/quality-llm-eval/SKILL.md` (see `reference.md` for rubric detail)
 
 For each matched compute P-item pair (from eval 2), compares content values.
 **Only compares Compute Kernel P-items** — System-Level P-items are skipped entirely.
@@ -291,7 +291,7 @@ overall_score = correctness × 0.40 + completeness × 0.30 + precision × 0.30
 
 **Type:** Scripted (structural / deterministic). **Root cause on fail:** `template`.
 
-**Implementation:** `agent_evals/Analysis/eval_utils/workflow_scripted_evals.py`
+**Implementation:** `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/eval_utils/workflow_scripted_evals.py`
 
 Validates the structural correctness of impact markers (`<!-- impact-begin ... -->` /
 `<!-- impact-end -->`) in generated `analysis.md` files. These checks are purely

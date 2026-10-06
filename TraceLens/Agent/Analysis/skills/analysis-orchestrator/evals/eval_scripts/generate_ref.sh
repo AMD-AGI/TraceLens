@@ -41,7 +41,7 @@ PI_VENV_PREFIX="use venv_tracelens for all commands and tool calls. "
 
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="$REPO_ROOT/TraceLens/Agent/Analysis"
-EVALS_DIR="$REPO_ROOT/agent_evals/Analysis"
+EVALS_DIR="$REPO_ROOT/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals"
 TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv}"
 STATUS_FILE="$(mktemp)"
 
@@ -71,7 +71,8 @@ for archive in "$EVALS_DIR"/analysis_tests/e2e_tests_${COMPARISON_SCOPE}.tar.gz 
     target_dir="${archive%.tar.gz}"
     if [ ! -d "$target_dir" ]; then
         echo "Extracting $(basename "$archive")..."
-        tar -xzf "$archive" -C "$REPO_ROOT"
+        # Archives store paths as agent_evals/Analysis/analysis_tests/...
+        tar -xzf "$archive" -C "$EVALS_DIR" --strip-components=2
     fi
 done
 

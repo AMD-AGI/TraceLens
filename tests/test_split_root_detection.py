@@ -15,7 +15,7 @@ from TraceLens.TraceUtils.utils.annotation_utils import (
     name_skeleton,
     parse_annotation,
 )
-from TraceLens.TraceUtils.trace_split import (
+from TraceLens.TraceUtils.split_trace import (
     DetectStatus,
     PhaseConfidence,
     RootSet,
@@ -25,7 +25,7 @@ from TraceLens.TraceUtils.trace_split import (
     extract_iteration,
     find_iteration_roots,
 )
-from TraceLens.TraceUtils.trace_split import root_detection as rd
+from TraceLens.TraceUtils.split_trace import root_detection as rd
 from TraceLens.TraceUtils.utils.detect_utils import (
     COVERAGE_FLOOR,
     COVERAGE_GATE,
@@ -33,7 +33,7 @@ from TraceLens.TraceUtils.utils.detect_utils import (
     IntervalIndex,
     group_by_thread,
 )
-from TraceLens.TraceUtils.trace_split.period_detection import (
+from TraceLens.TraceUtils.split_trace.period_detection import (
     _find_repeating_period,
 )
 
