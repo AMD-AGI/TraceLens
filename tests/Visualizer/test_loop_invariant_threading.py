@@ -193,6 +193,39 @@ def test_decoder_attention_mask_docks_mask_builder(model_id):
         )
 
 
+def _derivation_sources(by_id, node):
+    """Walk back through boundary tiles to the ops that actually build the value.
+
+    One tensor entering several boxes is drawn once: the producer feeds a single
+    named tile and every box reads that. So a boundary's immediate source is now
+    that shared tile rather than the derivation itself, and what these tests care
+    about -- that the value comes from the real op chain and not a fabricated
+    input -- is one hop further back.
+    """
+    seen: set[str] = set()
+    found: list[str] = []
+    pending = [
+        str(edge.get("sourceNodeId")) for edge in node.get("incomingEdges", []) or []
+    ]
+    while pending:
+        source_id = pending.pop()
+        if source_id in seen:
+            continue
+        seen.add(source_id)
+        producer = by_id.get(source_id)
+        if producer is None:
+            continue
+        synthetic = _node_attr(producer, "synthetic") or ""
+        if synthetic in {"@input", "@input_mirror"}:
+            pending.extend(
+                str(edge.get("sourceNodeId"))
+                for edge in producer.get("incomingEdges", []) or []
+            )
+            continue
+        found.append(source_id)
+    return found
+
+
 def _param_boundary(by_id, param):
     """The boundary tile for *param*, wherever the hierarchy puts it.
 
@@ -262,7 +295,7 @@ def test_deepseek_decoder_position_ids_docks_derived_producer():
 
     boundary = _param_boundary(by_id, "position_ids")
     assert boundary is not None, "expected a decoder position_ids boundary"
-    sources = [e.get("sourceNodeId") for e in boundary.get("incomingEdges", [])]
+    sources = _derivation_sources(by_id, boundary)
     assert sources, "decoder position_ids boundary must be sourced"
     for source in sources:
         producer = by_id.get(source)
@@ -300,7 +333,7 @@ def test_minimax_m3_position_ids_docks_its_real_derivation():
     ), "position_ids is derived, not a raw model input"
     boundary = _param_boundary(by_id, "position_ids")
     assert boundary is not None
-    sources = [e.get("sourceNodeId") for e in boundary.get("incomingEdges", [])]
+    sources = _derivation_sources(by_id, boundary)
     assert len(sources) == 1, sources
     assert sources[0].startswith("@model_forward/"), sources
     # ...and that producer is the tail of the real derivation, not a bare tile.

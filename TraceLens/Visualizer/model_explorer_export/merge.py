@@ -4584,6 +4584,84 @@ def _producer_output_spec(
     return known.get(str(predecessors[0]))
 
 
+def _share_one_tile_per_entering_tensor(nodes: list[dict[str, Any]]) -> None:
+    """One tensor entering several boxes is drawn once, not once per box.
+
+    ``position_ids`` is computed by a single ``unsqueeze`` at model scope and read
+    by the decoder stack, the rotary embedding and the mask builder. Each of those
+    minted its own boundary straight off the producer, so the diagram showed the
+    unsqueeze fanning out to three unrelated-looking ports -- one of them labelled
+    after the producing op rather than the tensor -- while a correctly named
+    ``position_ids`` tile sat beside them carrying only the decoder's edge.
+
+    Fold them: the producer feeds ONE tile and every box reads that. The tile is
+    chosen from the boundaries already present, preferring one that sits at the
+    producer's own level, so every remaining edge still runs downward and no cycle
+    can be introduced. Boundaries nested inside another consumer are left alone --
+    those are the inner half of a crossing this pass has no business rerouting.
+    """
+    by_id = {str(node.get("id")): node for node in nodes}
+    # Keyed by the producer PORT, not by the tile's label: one of these tiles is
+    # typically named after the producing op rather than the tensor, which is the
+    # same defect seen from the other side.
+    consumers_of: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []) or []:
+            source = str(edge.get("sourceNodeId"))
+            if source in by_id:
+                port = str(edge.get("sourceNodeOutputId") or "0")
+                consumers_of.setdefault((source, port), []).append(node)
+
+    def _encloses(outer: str, inner: str) -> bool:
+        return not outer or inner == outer or inner.startswith(outer + "/")
+
+    for (producer_id, port), consumers in consumers_of.items():
+        producer_namespace = str(by_id[producer_id].get("namespace") or "")
+        tiles = [
+            node
+            for node in consumers
+            if _is_synthetic_input(node)
+            or _node_attr(node, "synthetic") == "@input_mirror"
+        ]
+        if len(tiles) < 2:
+            continue
+        # The tile every other one will read must sit at or above the producer,
+        # so every remaining edge still runs downward and no cycle is introduced.
+        shared = next(
+            (
+                tile
+                for tile in tiles
+                if _encloses(str(tile.get("namespace") or ""), producer_namespace)
+            ),
+            None,
+        )
+        if shared is None:
+            continue
+        shared_id = str(shared["id"])
+        label = str(shared.get("label") or "")
+        for tile in tiles:
+            if tile is shared:
+                continue
+            # A boundary standing for this tensor carries this tensor's name. One
+            # minted straight off the producer is named after the producing op
+            # instead (``Unsqueeze`` for what is plainly ``position_ids``), which
+            # is the same defect seen from the other side.
+            if label and _node_attr(tile, "synthetic") == "@input":
+                tile["label"] = label
+                for attr in tile.get("attrs") or []:
+                    if attr.get("key") == "port_label":
+                        attr["value"] = label
+            tile["incomingEdges"] = [
+                (
+                    _source_edge((shared_id, "0"), label)
+                    if str(edge.get("sourceNodeId")) == producer_id
+                    and str(edge.get("sourceNodeOutputId") or "0") == port
+                    else edge
+                )
+                for edge in tile.get("incomingEdges", []) or []
+            ]
+
+
 def _reconcile_edge_endpoint_shapes(nodes: list[dict[str, Any]]) -> None:
     """Make both ends of every edge agree on shape where one end is under-specified.
 
@@ -8315,6 +8393,9 @@ def build_merged_model_graph(
     # (keeping the two image-side inputs adjacent), then emit nodes
     # producer-before-consumer so each ``@loop_carried_in`` renders ahead of its
     # loop body and each ``@loop_carried_out`` after it.
+    # After the loop-invariant threading, which is what wires several of
+    # these boundaries in the first place.
+    _share_one_tile_per_entering_tensor(nodes)
     _order_model_inputs(nodes)
     _topologically_order_nodes(nodes)
     _give_loop_body_its_own_boundaries(nodes)
