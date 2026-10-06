@@ -829,7 +829,7 @@ class gdn_attention_core(InferenceAttention):
 
     @staticmethod
     def _gdn_bytes_func(H_V, d_k, d_v, total_tokens, bytes_per_element):
-        """GDN HBM traffic.  State S stays in registers during recurrence.
+        """GDN DRAM traffic.  State S stays in registers during recurrence.
 
         Per token read:  q(d_k) + k(d_k) shared across 2 v-heads → H_V*d_k
                          v(d_v) per v-head → H_V*d_v

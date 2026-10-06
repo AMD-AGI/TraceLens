@@ -38,6 +38,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     comparative_efficiency,
     compute_impact_estimates,
     format_args,
+    get_peak_mem_bw_tbs,
     get_peak_specs,
     load_category_data,
     parse_first_shape,
@@ -141,7 +142,7 @@ def output_dir_with_category_data(tmp_path):
     # gemm_metadata.json
     meta = {
         "platform": "MI300X",
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708, "matrix_fp16": 654},
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
@@ -260,7 +261,7 @@ def output_dir_other_and_customcollective_nccl(tmp_path):
 
     meta = {
         "platform": "MI300X",
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708},
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
@@ -399,7 +400,7 @@ def test_comparative_impact_from_operations_trace2_faster():
             "delta_us (trace2 - trace1)": [-5_000.0, 1_000.0, -200.0],
         }
     )
-    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    metadata = {"peak_mem_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
     config: dict = {}
     operations = build_operation_metrics(
         df, metadata, config, comparison_scope="comparative"
@@ -439,7 +440,7 @@ def test_comparative_roofline_cap_clamps_savings():
             "Pct Roofline_mean": [60.0],  # roofline floor
         }
     )
-    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    metadata = {"peak_mem_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
     operations = build_operation_metrics(
         df, metadata, {}, comparison_scope="comparative"
     )
@@ -471,7 +472,7 @@ def test_comparative_roofline_cap_no_clamp_when_trace2_above_roofline():
             "Pct Roofline_mean": [60.0],
         }
     )
-    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    metadata = {"peak_mem_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
     operations = build_operation_metrics(
         df, metadata, {}, comparison_scope="comparative"
     )
@@ -495,7 +496,7 @@ def test_comparative_roofline_cap_no_roofline_column():
             # no Pct Roofline_mean column
         }
     )
-    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    metadata = {"peak_mem_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
     operations = build_operation_metrics(
         df, metadata, {}, comparison_scope="comparative"
     )
@@ -574,7 +575,7 @@ def test_load_category_data(output_dir_with_category_data):
     assert "name" in df.columns
     assert "Kernel Time (µs)_sum" in df.columns
     assert meta["platform"] == "MI300X"
-    assert meta["peak_hbm_bw_tbs"] == 5.3
+    assert meta["peak_mem_bw_tbs"] == 5.3
 
 
 def test_load_category_data_missing_csv_raises(tmp_path):
@@ -633,7 +634,7 @@ def test_build_operation_metrics_stamps_none_for_zero_time():
         }
     )
     meta = {
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708},
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
@@ -657,7 +658,7 @@ def test_build_operation_metrics_per_row_impact_sums_to_card():
         }
     )
     meta = {
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708},
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
@@ -686,7 +687,7 @@ def test_build_operation_metrics_comparative_uses_delta():
         }
     )
     meta = {
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708},
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
@@ -708,7 +709,7 @@ def test_build_operation_metrics_comparative_no_comparative_cols_yields_none():
         }
     )
     meta = {
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708},
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
@@ -2486,14 +2487,66 @@ def test_resolve_peak_maf_unknown_spec_falls_back():
 
 def test_get_peak_specs_dict_form():
     specs = get_peak_specs(
-        {"max_achievable_tflops": {"matrix_bf16": 708}, "peak_hbm_bw_tbs": 5.3}
+        {"max_achievable_tflops": {"matrix_bf16": 708}, "peak_mem_bw_tbs": 5.3}
     )
-    assert specs == {"peak_maf_tflops": 708, "peak_hbm_bw_tbs": 5.3}
+    assert specs == {"peak_maf_tflops": 708, "peak_mem_bw_tbs": 5.3}
 
 
 def test_get_peak_specs_scalar_form():
+    specs = get_peak_specs({"peak_bf16_maf_tflops": 700.0, "peak_mem_bw_tbs": 5.3})
+    assert specs == {"peak_maf_tflops": 700.0, "peak_mem_bw_tbs": 5.3}
+
+
+def test_get_peak_specs_legacy_hbm_key():
     specs = get_peak_specs({"peak_bf16_maf_tflops": 700.0, "peak_hbm_bw_tbs": 5.3})
-    assert specs == {"peak_maf_tflops": 700.0, "peak_hbm_bw_tbs": 5.3}
+    assert specs == {"peak_maf_tflops": 700.0, "peak_mem_bw_tbs": 5.3}
+
+
+# ----- analysis_utils: get_peak_mem_bw_tbs -----
+
+
+def test_get_peak_mem_bw_tbs_prefers_canonical_key():
+    assert (
+        get_peak_mem_bw_tbs({"peak_mem_bw_tbs": 0.256, "peak_hbm_bw_tbs": 5.3}) == 0.256
+    )
+
+
+def test_get_peak_mem_bw_tbs_accepts_legacy_key():
+    assert get_peak_mem_bw_tbs({"peak_hbm_bw_tbs": 5.3}) == 5.3
+
+
+def test_get_peak_mem_bw_tbs_default_when_missing():
+    assert get_peak_mem_bw_tbs({}) is None
+    assert get_peak_mem_bw_tbs({}, default=1) == 1
+
+
+def test_build_operation_metrics_legacy_metadata_uses_platform_peak():
+    df = pd.DataFrame(
+        {
+            "name": ["aten::add"],
+            "count": [1],
+            "Kernel Time (µs)_sum": [1_000.0],
+            "TB/s_mean": [0.2],
+        }
+    )
+    metadata = {"peak_hbm_bw_tbs": 0.64, "peak_bf16_maf_tflops": 100.0}
+    (op,) = build_operation_metrics(df, metadata, {})
+    assert op["efficiency"]["resolved_peak_mem_bw"] == 0.64
+
+
+def test_kernel_fusion_load_arch_config_reads_legacy_metadata(tmp_path):
+    meta_dir = tmp_path / "metadata"
+    meta_dir.mkdir()
+    (meta_dir / "gemm_metadata.json").write_text(
+        json.dumps(
+            {"peak_hbm_bw_tbs": 0.64, "max_achievable_tflops": {"matrix_bf16": 100.0}}
+        )
+    )
+    arch = kfa.load_arch_config(str(tmp_path), "no_such_platform")
+    assert arch == {
+        "peak_mem_bw_tbs": 0.64,
+        "max_achievable_tflops": {"matrix_bf16": 100.0},
+    }
 
 
 # ----- analysis_utils: _eff_bucket -----
@@ -2660,7 +2713,7 @@ def _many_ops_df(n):
 
 def test_build_operation_metrics_call_chain_present_under_cap():
     meta = {
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708},
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
@@ -2672,7 +2725,7 @@ def test_build_operation_metrics_call_chain_present_under_cap():
 
 def test_build_operation_metrics_call_chain_dropped_over_cap():
     meta = {
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708},
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
@@ -4315,7 +4368,7 @@ class TestKernelFusionMain:
         meta_dir = os.path.join(out, "metadata")
         os.makedirs(meta_dir)
         json.dump(
-            {"peak_hbm_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_fp32": 100}},
+            {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_fp32": 100}},
             open(os.path.join(meta_dir, "gemm_metadata.json"), "w"),
         )
 
@@ -4706,7 +4759,7 @@ def test_analysis_utils_efficiency_and_fusion(tmp_path):
         }
     )
     result = au.calculate_efficiency(
-        row, peak_maf_or_maf_dict={"matrix_bf16": 1000}, peak_hbm_bw=5300
+        row, peak_maf_or_maf_dict={"matrix_bf16": 1000}, peak_mem_bw=5300
     )
     assert result["bound_type"] == "compute"
 

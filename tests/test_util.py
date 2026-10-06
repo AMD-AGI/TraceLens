@@ -1450,7 +1450,7 @@ class TestAnalysisUtilsPhase13:
             }
         )
         eff = au.calculate_efficiency(
-            row, peak_maf_or_maf_dict={"matrix_fp16": 100.0}, peak_hbm_bw=5300
+            row, peak_maf_or_maf_dict={"matrix_fp16": 100.0}, peak_mem_bw=5300
         )
         assert eff["bound_type"] == "memory"
         assert au._load_fusion_map(str(tmp_path)) == {}
@@ -1468,7 +1468,7 @@ class TestAnalysisUtilsPhase7:
             }
         )
         eff = au.calculate_efficiency(
-            row, peak_maf_or_maf_dict={"matrix_fp16": 100.0}, peak_hbm_bw=5300
+            row, peak_maf_or_maf_dict={"matrix_fp16": 100.0}, peak_mem_bw=5300
         )
         assert eff["bound_type"] == "compute"
 
@@ -1543,7 +1543,7 @@ class TestAnalysisUtilsPhase8:
             ops,
             {
                 "gpu_utilization": {"total_time_ms": 100.0},
-                "peak_hbm_bw_tbs": 5.3,
+                "peak_mem_bw_tbs": 5.3,
                 "max_achievable_tflops": {"matrix_fp16": 100.0},
             },
             {},
