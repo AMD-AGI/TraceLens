@@ -4522,6 +4522,68 @@ def _stamp_boundary_input_shapes(
         apply_shape_attrs(node, spec)
 
 
+def _spec_from_shape_attr(text: str | None) -> TensorSpec | None:
+    """Rebuild a ``TensorSpec`` from a rendered ``[B, S, 4096] float16`` value."""
+    if not text:
+        return None
+    dims, dtype = _split_shape_dtype(str(text))
+    if not dims:
+        return None
+    shape = tuple(int(dim) if dim.lstrip("-").isdigit() else dim for dim in dims)
+    return TensorSpec(shape=shape, dtype=dtype or None)
+
+
+def _section_output_spec(nodes: list[dict[str, Any]], prefix: str) -> TensorSpec | None:
+    """The spec a just-annotated nested section hands back.
+
+    Its ``@output`` boundary if it has one; otherwise the last annotated node
+    under the section, which is what a section with no explicit boundary returns.
+    """
+    members = [node for node in nodes if str(node.get("id", "")).startswith(prefix)]
+    if not members:
+        return None
+    outputs = [node for node in members if _node_attr(node, "synthetic") in {"@output"}]
+    for node in reversed(outputs or members):
+        spec = _spec_from_shape_attr(_node_attr(node, "output_shape"))
+        if spec is not None:
+            return spec
+    return None
+
+
+def _producer_output_spec(
+    spec: ArchitectureSpec,
+    class_name: str | None,
+    nested_block: Any,
+    known: dict[str, TensorSpec],
+) -> TensorSpec | None:
+    """Spec of the tensor a nested method expansion is handed.
+
+    ``self.indexer.build_block_mask(block_indices, ...)`` is inferred as its own
+    section, so nothing tells its ``@input`` what ``block_indices`` is and the
+    body computes the decoder's geometry instead. The step's FIRST recorded
+    predecessor is what produced that tensor (``indexer@l466``, the indexer's own
+    forward), and sibling sections are annotated in order, so its output is
+    already known.
+
+    Scoped to a method expansion -- a block whose ``input_label`` names something
+    other than the activation it would otherwise inherit. A plain submodule
+    section is fed by the spine and must keep inheriting it.
+    """
+    if not getattr(nested_block, "input_label", None) or not class_name:
+        return None
+    if not any(
+        str(detail).startswith("method:") for detail in nested_block.details or ()
+    ):
+        return None
+    structure = spec.class_registry.get(class_name)
+    predecessors = (getattr(structure, "forward_step_predecessors", None) or {}).get(
+        str(nested_block.attr_name)
+    )
+    if not predecessors:
+        return None
+    return known.get(str(predecessors[0]))
+
+
 def _reconcile_edge_endpoint_shapes(nodes: list[dict[str, Any]]) -> None:
     """Make both ends of every edge agree on shape where one end is under-specified.
 
@@ -5223,6 +5285,13 @@ def _append_section(
     duplicate_nested_labels = {
         label for label, count in nested_label_counts.items() if count > 1
     }
+    # Output spec of each nested section, as it is annotated. A method expansion
+    # is inferred as its own section with no caller context, so its ``@input``
+    # falls back to the activation default -- MiniMax's ``build_block_mask`` reads
+    # ``block_indices`` as the decoder activation. The tensor it is handed is the
+    # output of the sibling step that produced it, and that sibling is annotated
+    # first.
+    nested_output_specs: dict[str, TensorSpec] = {}
     for nested_label, nested_block in nested_diagrams:
         tile_id = tile_ids.get(id(nested_block))
         nested_prefix = tile_id or _merge_node_id(id_prefix, nested_block.attr_name)
@@ -5305,10 +5374,21 @@ def _append_section(
             annotate_nodes_with_shapes(
                 section_nodes,
                 infer_block_tree_shapes(
-                    shape_inferencer, nested_block, title=nested_label
+                    shape_inferencer,
+                    nested_block,
+                    title=nested_label,
+                    entry_spec=_producer_output_spec(
+                        spec,
+                        block_tree.class_name,
+                        nested_block,
+                        nested_output_specs,
+                    ),
                 ),
                 id_prefix=nested_prefix,
             )
+            produced = _section_output_spec(section_nodes, nested_prefix)
+            if produced is not None:
+                nested_output_specs[str(nested_block.attr_name)] = produced
         if nested_block.class_name == "KernelPipeline":
             _integrate_kernel_pipeline_merge(
                 section_nodes,

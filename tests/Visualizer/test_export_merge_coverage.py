@@ -2426,7 +2426,7 @@ def test_merge_append_section_expands_nested_diagram_and_shapes(
     monkeypatch.setattr(
         merge,
         "infer_block_tree_shapes",
-        lambda inferencer, tree, title: {
+        lambda inferencer, tree, title, entry_spec=None: {
             "@input": TensorSpec(("B", "S", 16)),
             "result" if tree is nested else "after": TensorSpec(("B", "S", 16)),
         },

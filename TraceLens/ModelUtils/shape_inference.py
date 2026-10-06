@@ -1475,6 +1475,10 @@ class ShapeInferencer:
         # segment boundary per patch. Keyed by the frame's attr name, which every
         # op id underneath carries. See ``_descriptor_frame_specs``.
         self._descriptor_frames: dict[str, TensorSpec] = _descriptor_frame_specs(spec)
+        # What the caller hands the section currently being inferred, when the
+        # section is a method expansion with no caller context of its own. Last
+        # resort for its ``@input``, below every authoritative seed.
+        self._caller_entry_spec: TensorSpec | None = None
         self.module_dims = module_dims or ModuleDimRegistry.from_registry(
             spec.class_registry,
             config=spec.raw_config or {},
@@ -1872,7 +1876,9 @@ class ShapeInferencer:
         meta_input = self._meta_input_specs_for(node.label, root)
         if meta_input is not None:
             return meta_input
-        return None
+        # Nothing authoritative named this boundary; fall back to what the caller
+        # hands this section, when that is known.
+        return self._caller_entry_spec
 
     def _meta_input_specs_for(
         self, label: str | None, root: BlockNode | None
@@ -2241,14 +2247,29 @@ class ShapeInferencer:
         return dict(merged)
 
     def infer_block_tree(
-        self, root: BlockNode, *, title: str = ""
+        self,
+        root: BlockNode,
+        *,
+        title: str = "",
+        entry_spec: TensorSpec | None = None,
     ) -> dict[str, TensorSpec]:
-        """Build a model graph from a block tree and infer all node shapes."""
+        """Build a model graph from a block tree and infer all node shapes.
+
+        ``entry_spec`` is what the CALLER hands this tree. A method expansion is
+        inferred as its own section with no caller context, so without it the
+        ``@input`` falls back to the activation default and the whole body
+        computes the enclosing module's geometry.
+        """
         from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 
         basic_ops = self.spec.basic_ops or BasicOpFilter.for_detailed()
         graph = build_model_graph(root, title=title or root.label, basic_ops=basic_ops)
-        return self.infer_model_graph(graph, root=root)
+        previous = self._caller_entry_spec
+        self._caller_entry_spec = entry_spec
+        try:
+            return self.infer_model_graph(graph, root=root)
+        finally:
+            self._caller_entry_spec = previous
 
     def export_operators(
         self,

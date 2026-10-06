@@ -792,5 +792,6 @@ def infer_block_tree_shapes(
     block_tree: BlockNode,
     *,
     title: str,
+    entry_spec: TensorSpec | None = None,
 ) -> dict[str, TensorSpec]:
-    return inferencer.infer_block_tree(block_tree, title=title)
+    return inferencer.infer_block_tree(block_tree, title=title, entry_spec=entry_spec)
