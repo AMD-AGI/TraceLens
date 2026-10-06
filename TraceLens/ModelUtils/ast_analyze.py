@@ -4457,6 +4457,36 @@ class _ForwardOperationExtractor:
                 seen_count[value] = count + 1
         return tuple(kept)
 
+    def _reassigns_its_own_arguments(self, stmt, value, operations_before, producer):
+        if len(self.operations) != operations_before:
+            return False
+        if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+            return False
+        target = stmt.targets[0]
+        if not isinstance(target, (ast.Tuple, ast.List)) or not isinstance(
+            value, ast.Call
+        ):
+            return False
+        receiver = value.func
+        if not (
+            isinstance(receiver, ast.Attribute)
+            and isinstance(receiver.value, ast.Name)
+            and receiver.value.id != "self"
+            and receiver.value.id in self.param_names
+        ):
+            return False
+        names = [elt.id for elt in target.elts if isinstance(elt, ast.Name)]
+        if len(names) != len(target.elts) or not names:
+            return False
+        leading = value.args[: len(names)]
+        if len(leading) != len(names):
+            return False
+        if [a.id if isinstance(a, ast.Name) else None for a in leading] != names:
+            return False
+        if not all(self.var_producer.get(n) for n in names):
+            return False
+        return producer is None or producer in {self.var_producer.get(n) for n in names}
+
     def _emit_branch_select(
         self,
         node: ast.AST,
@@ -6654,7 +6684,12 @@ class _ForwardOperationExtractor:
                             # Parallel reassignment also drops any stale ordinal.
                             self.var_output_ordinal.pop(element_target.id, None)
                     continue
+                operations_before = len(self.operations)
                 producer, _ = self.expression(value)
+                if self._reassigns_its_own_arguments(
+                    stmt, value, operations_before, producer
+                ):
+                    continue
                 if producer is None and self._is_host_scalar_expr(value):
                     for target in targets:
                         if isinstance(target, ast.Name):

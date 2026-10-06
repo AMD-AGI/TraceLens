@@ -1725,9 +1725,21 @@ def _inject_group_outputs(
             # Multiple outputs → one Output node per source,
             # matching _wrap_actual_group_boundary for consistency.
             source_to_port_id: dict[tuple[str, str], str] = {}
+            emitted: set[str] = set()
             for port, source, source_port in ports:
                 per_port_id = _port_output_id(output_id, port, len(ports))
                 source_to_port_id[(source, source_port)] = per_port_id
+                if per_port_id in emitted:
+                    # Two edges landed on the SAME return slot. The id encodes
+                    # that slot, so emitting again would put two nodes under one
+                    # id -- and a later fold, finding a group that holds that id
+                    # twice, deletes both and orphans the producer. It happens
+                    # when a consumer addresses the slot by the CALLEE's ordinal
+                    # (``key_states`` is return 1 of ``apply_rotary_pos_emb``)
+                    # while the producing op inside the frame has only output 0:
+                    # the two edges carry one tensor, so they are one boundary.
+                    continue
+                emitted.add(per_port_id)
                 section_nodes.append(
                     _make_group_output_node(
                         output_id=per_port_id,
