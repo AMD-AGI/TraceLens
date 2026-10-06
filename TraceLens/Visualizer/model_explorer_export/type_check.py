@@ -618,6 +618,10 @@ def _noop_cast_warnings(nodes: list[dict[str, Any]]) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# A repeat group (``45x_Glm5NextTextDecoderLayer``) renders N identical layers;
+# it is not a scope a tensor enters, so it is not a box wall for I5.
+_REPEAT_SEGMENT = re.compile(r"^\d+x_")
+
 # Graph-integrity checks (I1 dead-node, I2 no-source/orphan, I3 constant sound).
 #
 # These are structural invariants over the whole node list, orthogonal to the
@@ -756,6 +760,17 @@ def integrity_check_graph_nodes(
       survivor means that pass failed to fire. A same-name crossing between
       *different* owners (a real module entry/exit) is expected and never flagged,
       as are renamed crossings (different port labels).
+    - **I5 boundary skip** -- no edge crosses more than one box wall in a single
+      hop. A tensor entering a box should land on that box's own boundary tile;
+      an edge that jumps straight into a box nested inside it leaves the outer
+      box showing no such input at all, even though the tensor plainly enters it.
+      GLM's ``grid_thw`` did exactly that -- a model input wired directly to a
+      tile two levels down, so the ``visual`` tower drew no ``grid_thw`` input.
+      The same applies leaving a box, where the tile is an ``@output``.
+
+      Repeat groups (``45x_Glm5NextTextDecoderLayer``) are NOT walls: the group
+      is a rendering of N identical layers rather than a scope the tensor enters,
+      and its carried values are drawn by the loop boundary machinery instead.
     """
     consumed = {
         str(e.get("sourceNodeId"))
@@ -842,9 +857,61 @@ def integrity_check_graph_nodes(
                             f"redundant tile in _collapse_same_name_boundary_passthroughs."
                         )
 
+        # I5 boundary skip: an edge may cross at most one box wall per hop.
+        for source_id in _incoming_source_ids(node):
+            producer = by_id.get(source_id)
+            if producer is None:
+                continue
+            left, entered = _walls_crossed(producer, node)
+            if len(left) > 1 or len(entered) > 1:
+                warnings.append(
+                    f"I5 boundary-skip{tag}: {source_id} -> {node_id} crosses "
+                    f"{len(left)} box(es) out and {len(entered)} in "
+                    f"(out={left}, in={entered}); a tensor entering a box must "
+                    f"land on that box's own boundary tile, or the box renders "
+                    f"with an input it never declares."
+                )
+
     for line in warnings:
         _log.warning("graph integrity: %s", line)
+
     return warnings
+
+
+def _incoming_source_ids(node: dict[str, Any]) -> list[str]:
+    """Producer ids on a node's incoming edges."""
+    return [
+        str(edge.get("sourceNodeId"))
+        for edge in node.get("incomingEdges", []) or []
+        if edge.get("sourceNodeId") is not None
+    ]
+
+
+def _boundary_segments(node: dict[str, Any]) -> list[str]:
+    """Namespace segments that are real boxes.
+
+    A repeat group is a rendering of N identical layers, not a scope a tensor
+    enters, so it is not a wall (see I5).
+    """
+    return [
+        part
+        for part in str(node.get("namespace") or "").split("/")
+        if part and not _REPEAT_SEGMENT.match(part)
+    ]
+
+
+def _walls_crossed(
+    producer: dict[str, Any], consumer: dict[str, Any]
+) -> tuple[list[str], list[str]]:
+    """Boxes an edge leaves and boxes it enters, below their common ancestry."""
+    source = _boundary_segments(producer)
+    target = _boundary_segments(consumer)
+    shared = 0
+    while shared < len(source) and shared < len(target):
+        if source[shared] != target[shared]:
+            break
+        shared += 1
+    return source[shared:], target[shared:]
 
 
 def _immediate_child_unit(node_id: str, ns: str, box: str) -> str:

@@ -6129,7 +6129,78 @@ def _wire_vision_passthrough_inputs(
         )
         nodes.append(boundary)
         for node in docked:
-            node["incomingEdges"] = [_source_edge((input_id, "0"), param)]
+            source_id = _bridge_boundaries(
+                nodes,
+                source_id=input_id,
+                target=node,
+                param=param,
+                template=boundary,
+            )
+            node["incomingEdges"] = [_source_edge((source_id, "0"), param)]
+
+
+def _bridge_boundaries(
+    nodes: list[dict[str, Any]],
+    *,
+    source_id: str,
+    target: dict[str, Any],
+    param: str,
+    template: dict[str, Any],
+) -> str:
+    """Give every box the edge enters a boundary of its own; return the last one.
+
+    A model input consumed deep inside the tower would otherwise reach it in one
+    hop: ``@vision_input:grid_thw`` landed straight on a tile inside
+    ``visual/get_vision_attention_seqlens``, so the ``visual`` box showed no
+    ``grid_thw`` input at all even though the tensor plainly enters it. A reader
+    opening the tower sees its inputs; one that crosses the wall invisibly is not
+    among them.
+
+    One tile per namespace between the source's box and the target's, each
+    reading the one above it. The target is the boundary at its own level, so it
+    is not duplicated.
+    """
+    target_namespace = str(target.get("namespace") or "")
+    if not target_namespace:
+        return source_id
+    source_namespace = str(
+        next(
+            (
+                node.get("namespace") or ""
+                for node in nodes
+                if str(node.get("id")) == source_id
+            ),
+            "",
+        )
+    )
+    segments = target_namespace.split("/")
+    by_id = {str(node.get("id")): node for node in nodes}
+    current = source_id
+    for depth in range(1, len(segments)):
+        namespace = "/".join(segments[:depth])
+        if source_namespace and not namespace.startswith(source_namespace):
+            continue
+        if namespace == source_namespace:
+            continue
+        boundary_id = f"{namespace}/@input:{param}"
+        boundary = by_id.get(boundary_id)
+        if boundary is None:
+            boundary = _make_group_input_node(
+                input_id=boundary_id,
+                label=param,
+                namespace=namespace,
+                port_label=param,
+            )
+            shape = _node_attr(template, "output_shape")
+            if shape:
+                boundary.setdefault("attrs", []).append(
+                    {"key": "output_shape", "value": shape}
+                )
+            nodes.append(boundary)
+            by_id[boundary_id] = boundary
+        boundary["incomingEdges"] = [_source_edge((current, "0"), param)]
+        current = boundary_id
+    return current
 
 
 def _attach_vision_language_combine(

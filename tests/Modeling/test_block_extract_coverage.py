@@ -364,7 +364,7 @@ def test_remote_config_discovery_ranks_downloaded_candidates(monkeypatch, tmp_pa
         },
     }
 
-    def fake_download(_model_id, path):
+    def fake_download(_model_id, path, revision=None):
         if path not in payloads:
             raise OSError(path)
         target = tmp_path / path.replace("/", "_")
@@ -376,7 +376,10 @@ def test_remote_config_discovery_ranks_downloaded_candidates(monkeypatch, tmp_pa
     )
     monkeypatch.setattr(
         "TraceLens.ModelUtils.config_resolve._list_repo_config_paths",
-        lambda _model_id: ["config.json", "text_encoder/config.json"],
+        lambda _model_id, revision=None: [
+            "config.json",
+            "text_encoder/config.json",
+        ],
     )
 
     config, label = discover_remote_config("org/model")
@@ -391,14 +394,14 @@ def test_remote_config_discovery_errors(monkeypatch):
     )
     monkeypatch.setattr(
         "TraceLens.ModelUtils.config_resolve._list_repo_config_paths",
-        lambda _model_id: [],
+        lambda _model_id, revision=None: [],
     )
     with pytest.raises(FileNotFoundError, match="Could not load any config.json"):
         discover_remote_config("org/empty")
 
     monkeypatch.setattr(
         "TraceLens.ModelUtils.config_resolve._list_repo_config_paths",
-        lambda _model_id: (_ for _ in ()).throw(OSError("denied")),
+        lambda _model_id, revision=None: (_ for _ in ()).throw(OSError("denied")),
     )
     with pytest.raises(FileNotFoundError, match="Could not list files"):
         discover_remote_config("org/error")
