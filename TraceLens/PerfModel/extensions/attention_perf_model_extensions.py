@@ -8,6 +8,7 @@
 Performance models for pseudo-op extensions.
 """
 
+from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
 from TraceLens.TraceUtils.utils.annotation_utils import IterationAnnotation
 import math
@@ -555,15 +556,11 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
 
     @staticmethod
     def _core_param_details(event):
-        from TraceLens.PerfModel import perf_model
-
         params = perf_model.aiter__fmha_v3_varlen_fwd.get_param_details(event).copy()
         params["_fallback_core"] = True
         return params
 
     def _core_model(self):
-        from TraceLens.PerfModel import perf_model
-
         return perf_model.aiter__fmha_v3_varlen_fwd(
             self.event,
             self.arch,
