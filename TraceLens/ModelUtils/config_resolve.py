@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from TraceLens.ModelUtils.model_pins import pinned_revision
+
 SKIP_CONFIG_PARTS = {
     "tokenizer",
     "processor",
@@ -174,13 +176,21 @@ def _paths_from_model_index(config: dict[str, Any]) -> list[str]:
 def _list_repo_config_paths(model_id: str) -> list[str]:
     from huggingface_hub import list_repo_files
 
-    return [path for path in list_repo_files(model_id) if path.endswith("config.json")]
+    return [
+        path
+        for path in list_repo_files(model_id, revision=pinned_revision(model_id))
+        if path.endswith("config.json")
+    ]
 
 
 def _download_config(model_id: str, config_path: str) -> Path:
     from huggingface_hub import hf_hub_download
 
-    return Path(hf_hub_download(model_id, config_path))
+    # The config has to come from the same revision as the source: a config read
+    # at ``main`` can name dimensions the pinned modeling code does not have.
+    return Path(
+        hf_hub_download(model_id, config_path, revision=pinned_revision(model_id))
+    )
 
 
 def _load_json(path: Path) -> dict[str, Any]:

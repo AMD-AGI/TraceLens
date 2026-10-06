@@ -21,6 +21,7 @@ from TraceLens.ModelUtils.github import (
     parse_github_url,
     python_source_priority,
 )
+from TraceLens.ModelUtils.model_pins import pinned_revision
 from TraceLens.ModelUtils.source_policy import SourcePolicy, get_source_policy
 
 MODELING_CANDIDATES = (
@@ -75,12 +76,23 @@ def _hub_cache_root() -> Path:
 
 
 def _hub_snapshot_root(model_id: str) -> Path | None:
-    """Local Hugging Face snapshot directory for a model id, if one is cached."""
+    """Local Hugging Face snapshot directory for a model id, if one is cached.
+
+    A pinned model resolves to its pinned revision alone. Falling back to
+    whatever ``refs/main`` currently names would quietly undo the pin -- and
+    reading a different revision than the one the tests are written against is
+    the failure the pin exists to prevent. Returning ``None`` for an uncached pin
+    lets the download path fetch that exact revision.
+    """
     slug = "models--" + model_id.replace("/", "--")
     base = _hub_cache_root() / slug
     snapshots = base / "snapshots"
     if not snapshots.is_dir():
         return None
+    pinned = pinned_revision(model_id)
+    if pinned is not None:
+        candidate = snapshots / pinned
+        return candidate if candidate.is_dir() else None
     for ref_name in ("main", "master"):
         ref_file = base / "refs" / ref_name
         if not ref_file.is_file():
@@ -106,7 +118,7 @@ def _list_repo_python_files(model_id: str) -> list[str]:
     try:
         return [
             name
-            for name in list_repo_files(model_id)
+            for name in list_repo_files(model_id, revision=pinned_revision(model_id))
             if name.endswith(".py") and "__pycache__" not in name.split("/")
         ]
     except Exception:
@@ -122,10 +134,11 @@ def _download_repo_files(model_id: str, filenames: list[str]) -> list[Path]:
     except ImportError:
         return []
 
+    revision = pinned_revision(model_id)
     paths: list[Path] = []
     for name in filenames:
         try:
-            downloaded = hf_hub_download(model_id, name)
+            downloaded = hf_hub_download(model_id, name, revision=revision)
             paths.append(Path(downloaded))
         except Exception:
             continue

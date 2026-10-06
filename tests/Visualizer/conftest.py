@@ -86,10 +86,23 @@ def model_graph_nodes():
     """``nodes(model_id)`` -> merged-graph nodes, built where the model belongs."""
     pytest.importorskip("huggingface_hub")
     from TraceLens.ModelUtils import model_env
+    from TraceLens.ModelUtils.model_pins import is_pinned
 
     cache: dict[str, list[dict]] = {}
 
     def nodes(model_id: str) -> list[dict]:
+        # Every graph test funnels through here, so this is where an unpinned
+        # model is caught. Asserting on a floating checkpoint means asserting on
+        # whatever its repo holds today: when DeepSeek-V4-Flash published two
+        # extra directories, 20 tests went red for a reason that was nothing to
+        # do with this repo and took a while to tell apart from a real
+        # regression.
+        assert is_pinned(model_id), (
+            f"{model_id} is not pinned. Graph assertions describe one revision "
+            "of a model's source; add its commit SHA to "
+            "TraceLens/ModelUtils/model_pins.py so this suite reads the same "
+            "code every run."
+        )
         if model_id not in cache:
             # Already inside a provisioned environment (the exporter's own
             # re-exec flag): this interpreter IS the right one.

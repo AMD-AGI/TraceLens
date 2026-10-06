@@ -347,13 +347,19 @@ def test_hub_snapshot_selection(tmp_path: Path, monkeypatch):
 
 def test_hub_list_and_download_are_failure_tolerant(tmp_path: Path, monkeypatch):
     module = types.ModuleType("huggingface_hub")
-    module.list_repo_files = lambda model_id: [
-        "model.py",
-        "__pycache__/bad.py",
-        "README.md",
-    ]
+    # Both hub calls carry the revision the model is pinned to. ``org/model`` is
+    # not pinned, so that is ``None`` -- an unpinned checkpoint still resolves to
+    # whatever the hub currently serves.
+    seen_revisions: list[str | None] = []
 
-    def download(model_id: str, name: str):
+    def list_repo_files(model_id: str, revision: str | None = None):
+        seen_revisions.append(revision)
+        return ["model.py", "__pycache__/bad.py", "README.md"]
+
+    module.list_repo_files = list_repo_files
+
+    def download(model_id: str, name: str, revision: str | None = None):
+        seen_revisions.append(revision)
         if name == "bad.py":
             raise RuntimeError("missing")
         return str(tmp_path / name)
@@ -365,7 +371,10 @@ def test_hub_list_and_download_are_failure_tolerant(tmp_path: Path, monkeypatch)
     assert source._download_repo_files("org/model", ["good.py", "bad.py"]) == [
         tmp_path / "good.py"
     ]
-    module.list_repo_files = lambda model_id: (_ for _ in ()).throw(RuntimeError())
+    assert seen_revisions and set(seen_revisions) == {None}, seen_revisions
+    module.list_repo_files = lambda model_id, revision=None: (_ for _ in ()).throw(
+        RuntimeError()
+    )
     assert source._list_repo_python_files("org/model") == []
 
 
