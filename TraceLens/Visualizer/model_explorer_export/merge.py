@@ -3302,6 +3302,12 @@ def _fold_same_source_twins(nodes: list[dict[str, Any]]) -> None:
         port = str(published[0].get("id", "0")) if len(published) == 1 else "0"
         landing = (str(same[0]["id"]), port)
         for extra in same[1:]:
+            if str(extra["id"]) == landing[0]:
+                # The same tile listed twice, not two tiles saying one thing.
+                # Redirecting it to itself puts its id in the removal set, so the
+                # "kept" copy goes too -- and its producer, which had exactly one
+                # consumer, is left dead.
+                continue
             redirect[str(extra["id"])] = landing
     _apply_tile_redirects(nodes, redirect)
 
