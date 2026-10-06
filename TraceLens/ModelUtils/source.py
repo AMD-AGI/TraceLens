@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import ast
 import functools
 import importlib.util
 from pathlib import Path
@@ -256,6 +257,60 @@ def _has_modeling_implementation(files: list[Path]) -> bool:
     return False
 
 
+def _declared_architectures(config: dict[str, Any]) -> set[str]:
+    """Class names the config says this checkpoint runs, including nested towers."""
+    names: set[str] = set()
+    pending = [config]
+    while pending:
+        current = pending.pop()
+        if not isinstance(current, dict):
+            continue
+        declared = current.get("architectures")
+        if isinstance(declared, list):
+            names.update(str(name) for name in declared if name)
+        for key in NESTED_CONFIG_KEYS + ("vision_config",):
+            nested = current.get(key)
+            if isinstance(nested, dict):
+                pending.append(nested)
+    return names
+
+
+def _defines_any_class(path: Path, names: set[str]) -> bool:
+    """True when a Python file defines one of ``names`` at any nesting level."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return False
+    return any(
+        isinstance(node, ast.ClassDef) and node.name in names for node in ast.walk(tree)
+    )
+
+
+def _checkpoint_modeling_files(files: list[Path], config: dict[str, Any]) -> list[Path]:
+    """Keep a checkpoint's Python files only when they implement the architecture.
+
+    A repo ships more than its modeling code. DeepSeek-V4-Flash carries a
+    standalone reference implementation under ``inference/model.py`` and a
+    chat-template encoder under ``encoding/`` -- neither defines the
+    ``DeepseekV4ForCausalLM`` the config names, because the real implementation
+    lives in installed transformers. Taking them anyway both skips the
+    transformers lookup (``files`` is no longer empty) and passes
+    ``_has_modeling_implementation`` on the strength of the filename alone, so
+    the export silently analyses a tool-call encoder as if it were the model.
+
+    ``auto_map`` is the checkpoint stating which files implement it, so a repo
+    that declares one is trusted as-is.
+    """
+    if not files or config.get("auto_map"):
+        return files
+    names = _declared_architectures(config)
+    if not names:
+        return files
+    if any(_defines_any_class(path, names) for path in files):
+        return files
+    return []
+
+
 def _dedupe_paths(files: list[Path]) -> list[Path]:
     seen: set[Path] = set()
     unique: list[Path] = []
@@ -336,7 +391,9 @@ def resolve_source_files(
     if model_id and not files:
         snapshot = _hub_snapshot_root(model_id)
         if snapshot is not None:
-            snapshot_files = _local_modeling_files(snapshot)
+            snapshot_files = _checkpoint_modeling_files(
+                _local_modeling_files(snapshot), config
+            )
             files.extend(snapshot_files)
             if snapshot_files:
                 labels.append(f"hf://{model_id}")

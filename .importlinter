@@ -13,6 +13,7 @@ ignore_imports =
     TraceLens.ModelUtils.blocks -> TraceLens.ModelUtils.ast_analyze
     TraceLens.ModelUtils.block_tree -> TraceLens.ModelUtils.computation_graph
     TraceLens.ModelUtils.ast_analyze -> TraceLens.ModelUtils.kernel_pipeline
+    TraceLens.ModelUtils.ast_analyze -> TraceLens.ModelUtils.attention_wrapper
     TraceLens.ModelUtils.model_graph -> TraceLens.ModelUtils.computation_graph
     TraceLens.ModelUtils.torch_introspect -> TraceLens.Visualizer.model_explorer_export.adapter
     TraceLens.ModelUtils.torch_introspect -> TraceLens.Visualizer.model_explorer_export.shapes
