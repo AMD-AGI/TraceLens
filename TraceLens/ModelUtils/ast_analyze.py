@@ -4137,6 +4137,138 @@ class _MapLambdaParamSubstituter(ast.NodeTransformer):
         return node
 
 
+def _comprehension_over_literal(
+    value: ast.expr,
+) -> tuple[ast.expr, str, ast.Tuple | ast.List] | None:
+    """``[BODY(t) for t in (a, b, ...)]`` as ``(body, loop var, literal)``.
+
+    Only the shape that is a FAN-OUT rather than a loop: one generator, a plain
+    name as its target, a literal tuple/list to walk, no filter. Anything else is
+    a real loop whose trip count this rewrite cannot speak for, and is left alone.
+    """
+    if not isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+        return None
+    if len(value.generators) != 1:
+        return None
+    generator = value.generators[0]
+    if generator.ifs or getattr(generator, "is_async", 0):
+        return None
+    if not isinstance(generator.target, ast.Name):
+        return None
+    if not isinstance(generator.iter, (ast.Tuple, ast.List)):
+        return None
+    return value.elt, generator.target.id, generator.iter
+
+
+def _clone_per_element(
+    body: ast.expr, param_name: str, iterable: ast.Tuple | ast.List
+) -> ast.Tuple:
+    """One clone of *body* per element, with *param_name* bound to that element."""
+    elements: list[ast.expr] = []
+    for index, item in enumerate(iterable.elts):
+        substituted = _MapLambdaParamSubstituter(param_name, item).visit(
+            copy.deepcopy(body)
+        )
+        ast.fix_missing_locations(substituted)
+        # Every clone shares the body's own source position (one textual call
+        # site applied N times), so the free-function/positional synthetic naming
+        # that keys on ``lineno`` alone would still collide. Stamp a
+        # discriminator any downstream call-producer lookup can key on.
+        substituted._tracelens_map_discriminator = index  # type: ignore[attr-defined]
+        elements.append(substituted)
+    return ast.Tuple(elts=elements, ctx=ast.Load())
+
+
+def _rebind_fanout_comprehension(
+    stmt: ast.stmt, bindings: dict[str, ast.expr]
+) -> ast.stmt:
+    """``xs = [BODY(t) for t in (a, b, c)]`` rebinds a, b and c to their own body.
+
+    GLM's vision attention splits its three tensors in one comprehension and then
+    reads the result back through ``zip(*splits)``. Expanding the fan-out alone
+    emits the three splits but binds them to ONE name, so the later comprehension
+    reaches only one and the other two are dead. Each element's natural name is
+    the one it was built from -- after this line ``q`` IS the split of ``q`` -- so
+    bind them that way, and record in *bindings* what the collecting name stands
+    for, which is what lets ``zip(*splits)`` resolve.
+    """
+    if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+        return stmt
+    collector = stmt.targets[0]
+    if not isinstance(collector, ast.Name):
+        return stmt
+    parsed = _comprehension_over_literal(stmt.value)
+    if parsed is None:
+        return stmt
+    body, param_name, iterable = parsed
+    if not all(isinstance(elt, ast.Name) for elt in iterable.elts):
+        return stmt
+    expanded = _clone_per_element(body, param_name, iterable)
+    names = ast.Tuple(
+        elts=[ast.Name(id=elt.id, ctx=ast.Load()) for elt in iterable.elts],
+        ctx=ast.Load(),
+    )
+    ast.fix_missing_locations(names)
+    bindings[collector.id] = names
+    rebound = ast.Assign(
+        targets=[
+            ast.Tuple(
+                elts=[ast.Name(id=elt.id, ctx=ast.Store()) for elt in iterable.elts],
+                ctx=ast.Store(),
+            )
+        ],
+        value=expanded,
+    )
+    return ast.copy_location(ast.fix_missing_locations(rebound), stmt)
+
+
+def _expand_zipped_literal_comprehension(
+    value: ast.expr, bindings: dict[str, ast.expr]
+) -> ast.expr | None:
+    """``[BODY(a, b, c) for a, b, c in zip(*names)]`` as ONE clone of BODY.
+
+    GLM's vision attention runs its kernel once per variable-length image. The
+    trip count is the image count, which is data-dependent -- so this is a real
+    loop and the body is emitted ONCE, reading each split. The clone count says
+    nothing about the iterable's length; it says the kernel consumes those three
+    tensors, which is what the diagram is for. Without it the kernel read only
+    one split and the other two were dead.
+    """
+    if not isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+        return None
+    if len(value.generators) != 1:
+        return None
+    generator = value.generators[0]
+    if generator.ifs or getattr(generator, "is_async", 0):
+        return None
+    target = generator.target
+    if not isinstance(target, (ast.Tuple, ast.List)):
+        return None
+    names = [elt.id for elt in target.elts if isinstance(elt, ast.Name)]
+    if len(names) != len(target.elts) or not names:
+        return None
+    call = generator.iter
+    if not (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "zip"
+        and len(call.args) == 1
+        and isinstance(call.args[0], ast.Starred)
+        and isinstance(call.args[0].value, ast.Name)
+    ):
+        return None
+    bound = bindings.get(call.args[0].value.id)
+    if not isinstance(bound, (ast.Tuple, ast.List)):
+        return None
+    if len(bound.elts) != len(names):
+        return None
+    body = copy.deepcopy(value.elt)
+    for name, element in zip(names, bound.elts):
+        body = _MapLambdaParamSubstituter(name, element).visit(body)
+    ast.fix_missing_locations(body)
+    return body
+
+
 def _expand_map_lambda_tuple(value: ast.expr) -> ast.expr:
     """Rewrite ``map(lambda x: BODY(x), (a, b, ...))`` into ``BODY(a), BODY(b), ...``.
 
@@ -4158,6 +4290,10 @@ def _expand_map_lambda_tuple(value: ast.expr) -> ast.expr:
     Returns *value* unchanged when it is not this exact shape (a single-param
     lambda mapped over a literal tuple/list).
     """
+    comprehension = _comprehension_over_literal(value)
+    if comprehension is not None:
+        body, param_name, iterable = comprehension
+        return _clone_per_element(body, param_name, iterable)
     if not (
         isinstance(value, ast.Call)
         and isinstance(value.func, ast.Name)
@@ -4178,19 +4314,7 @@ def _expand_map_lambda_tuple(value: ast.expr) -> ast.expr:
     if not isinstance(iterable, (ast.Tuple, ast.List)):
         return value
 
-    elements: list[ast.expr] = []
-    for index, item in enumerate(iterable.elts):
-        substituted = _MapLambdaParamSubstituter(param_name, item).visit(
-            copy.deepcopy(lam.body)
-        )
-        ast.fix_missing_locations(substituted)
-        # Both clones share the lambda body's own source position (one textual
-        # call site applied twice), so the free-function/positional synthetic
-        # naming that keys on ``lineno`` alone would still collide. Stamp a
-        # discriminator any downstream call-producer lookup can key on.
-        substituted._tracelens_map_discriminator = index  # type: ignore[attr-defined]
-        elements.append(substituted)
-    return ast.Tuple(elts=elements, ctx=ast.Load())
+    return _clone_per_element(lam.body, param_name, iterable)
 
 
 class _ForwardOperationExtractor:
@@ -4359,6 +4483,7 @@ class _ForwardOperationExtractor:
         # The op owns the boundary param it read, so an enclosing expression must
         # not re-attribute that param to itself (it reads the new op instead).
         self._materialized_subscripts: set[int] = set()
+        self._pending_shape_snapshots: list[str] = []
 
     @staticmethod
     def _dedupe(values: list[str]) -> tuple[str, ...]:
@@ -4376,6 +4501,35 @@ class _ForwardOperationExtractor:
             counter += 1
         self._used_ids.add(candidate)
         return candidate
+
+    def _host_only_param_refs(
+        self, node: ast.AST, raw_param_refs: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Of *raw_param_refs*, those this expression reads only on the host.
+
+        ``lengths.tolist()`` crosses to Python: what reaches the op is a list of
+        ints, not a tensor. A parameter whose every read here sits inside such a
+        materialisation is a size input. One read outside makes it a real
+        operand, so it is not listed.
+        """
+        if not raw_param_refs:
+            return ()
+        host_names = {
+            name.id
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and _call_forces_host(call)
+            for name in ast.walk(call)
+            if isinstance(name, ast.Name)
+        }
+        inside: set[str] = set()
+        outside: set[str] = set()
+        for name_node in ast.walk(node):
+            if not isinstance(name_node, ast.Name):
+                continue
+            if name_node.id not in raw_param_refs:
+                continue
+            (inside if name_node.id in host_names else outside).add(name_node.id)
+        return tuple(n for n in raw_param_refs if n in inside - outside)
 
     def _emit(
         self,
@@ -4422,6 +4576,23 @@ class _ForwardOperationExtractor:
         param_inputs = self._dedupe(
             self.param_alias_origin.get(name, name) for name in raw_param_refs
         )
+        # A parameter this op reads ONLY through a host materialisation
+        # (``torch.split(t, lengths.tolist(), dim=2)`` -- ``lengths`` stands for
+        # ``cu_seqlens``) is a SIZE dependency, not a tensor operand. The edge
+        # belongs in the graph, or the tensor's producer has no consumer and is
+        # pruned; but counting it as an operand makes a one-operand op look like
+        # it takes two. Record them so the exporter can type them as it types a
+        # constant.
+        host_params = self._host_only_param_refs(node, raw_param_refs)
+        if host_params:
+            emitted_details.append(
+                "host_params: "
+                + ", ".join(
+                    self._dedupe(
+                        self.param_alias_origin.get(name, name) for name in host_params
+                    )
+                )
+            )
         param_input_ordinals = tuple(
             (self.param_alias_origin.get(name, name), self.param_alias_ordinal[name])
             for name in raw_param_refs
@@ -5884,6 +6055,10 @@ class _ForwardOperationExtractor:
             details.append("dtype: torch.float32")
         if call_name in {"view", "reshape", "expand"}:
             details.append("shape: " + self._format_shape_args(node.args))
+            if getattr(self, "_pending_shape_snapshots", None):
+                details.append(
+                    "shape_snapshots: " + ", ".join(self._pending_shape_snapshots)
+                )
         if call_name in {"split", "chunk"}:
             # For torch.split(tensor, split_size, dim) the tensor is arg0;
             # for tensor.split(split_size, dim) there is no tensor arg.
@@ -6254,6 +6429,34 @@ class _ForwardOperationExtractor:
             for ordinal, name in enumerate(names):
                 self.var_output_ordinal[name] = ordinal
 
+    def _sole_param_behind(self, value: ast.AST) -> str | None:
+        """The one tracked parameter a local is computed from, if there is just one.
+
+        ``lengths = cu_seqlens[1:] - cu_seqlens[:-1]`` is still ``cu_seqlens``:
+        those range slices over a bare forward parameter are deliberately kept
+        pass-through as index bookkeeping, so they leave no op behind and the
+        local would otherwise stand for nothing -- and whatever reads it (GLM's
+        per-image ``torch.split``, sized by exactly this) records no dependency,
+        leaving ``cu_seqlens``'s producer with no consumer and its frames pruned.
+
+        Every name in the expression must be the SAME parameter: a value built
+        from two tensors aliases neither, and one mixing in a local with its own
+        producer has a real op behind it instead.
+        """
+        if not self.param_names or not isinstance(value, (ast.BinOp, ast.UnaryOp)):
+            return None
+        names = {
+            n.id
+            for n in ast.walk(value)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        }
+        if len(names) != 1:
+            return None
+        only = next(iter(names))
+        if only not in self.param_names or self.var_producer.get(only) is not None:
+            return None
+        return self.param_alias_origin.get(only, only)
+
     def _propagate_param_alias(self, targets: list[ast.expr], value: ast.AST) -> None:
         """Carry a secondary forward-input's param status onto unpacked locals.
 
@@ -6285,6 +6488,8 @@ class _ForwardOperationExtractor:
             and value.value.id in self.param_names
         ):
             origin_name = value.value.id
+        else:
+            origin_name = self._sole_param_behind(value)
         if origin_name is None:
             return
         # The RHS may itself be an alias (``pe = position_embeddings; cos, sin = pe``);
@@ -6344,6 +6549,7 @@ class _ForwardOperationExtractor:
 
     def _format_shape_args(self, args: list[ast.expr]) -> str:
         """Render ``view``/``reshape``/``expand`` args, expanding shape locals."""
+        self._pending_shape_snapshots = []
         parts: list[str] = []
         for arg in args:
             parts.extend(self._expand_shape_arg(arg))
@@ -6383,7 +6589,17 @@ class _ForwardOperationExtractor:
         is left as source text for the shape inferencer to interpret.
         """
         if isinstance(elt, ast.Name) and elt.id in self.shape_unpack_tokens:
-            return self.shape_unpack_tokens[elt.id]
+            # An unpacked shape local (``seq_length = hidden_states.shape[0]``)
+            # is a SNAPSHOT: it records what that tensor measured where the local
+            # was bound, which may be a different tensor from whatever is being
+            # reshaped here. An inline ``x.shape[i]`` written in the reshape
+            # itself is not -- it reads x as it is now. Note which is which so
+            # the resolver knows when it may look the name up elsewhere.
+            token = self.shape_unpack_tokens[elt.id]
+            snapshots = getattr(self, "_pending_shape_snapshots", None)
+            if snapshots is not None and token not in snapshots:
+                snapshots.append(token)
+            return token
         resolved = _config_value(elt, {}, self.self_values)
         if isinstance(resolved, int) and not isinstance(resolved, bool):
             return str(resolved)
@@ -6621,7 +6837,10 @@ class _ForwardOperationExtractor:
     ) -> None:
         for stmt in statements:
             if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
-                value = _expand_map_lambda_tuple(stmt.value)
+                stmt = _rebind_fanout_comprehension(stmt, self._name_value_ast)
+                value = _expand_zipped_literal_comprehension(
+                    stmt.value, self._name_value_ast
+                ) or _expand_map_lambda_tuple(stmt.value)
                 targets = (
                     stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
                 )
@@ -7150,11 +7369,23 @@ def _functional_synthetic_source_positions(
     return positions
 
 
-def _kernel_merge_source_position(func: ast.FunctionDef) -> tuple[int, int] | None:
-    """First source position of a kernel represented by the synthetic merge node."""
+def _kernel_merge_source_position(
+    func: ast.FunctionDef, config: dict[str, Any] | None = None
+) -> tuple[int, int] | None:
+    """Source position of the kernel the synthetic merge node stands for.
+
+    This ranks the kernel among the forward's other ops, so it must be the call
+    that RUNS: taking the first in the whole body puts the node before operands
+    it consumes. GLM's vision attention spells the kernel out once per arm of
+    ``if is_flash_attention_requested(...)``, flash arm first -- ranked there the
+    kernel sorted ahead of the per-image ``torch.split`` calls feeding it, its
+    inputs read as a backward edge, and the kernel and its ``cat`` were dropped.
+    """
+    live, _dropped = _split_resolved_dropped_stmts(list(func.body), config)
     positions = [
         (node.lineno, node.col_offset)
-        for node in ast.walk(func)
+        for stmt in live
+        for node in ast.walk(stmt)
         if isinstance(node, ast.Call) and _is_kernel_merge_call(node.func)
     ]
     return min(positions) if positions else None
@@ -7217,6 +7448,7 @@ def _forward_calls_in_source_order(
     func: ast.FunctionDef,
     module_calls: list[str],
     operations: list[ForwardOperation],
+    config: dict[str, Any] | None = None,
 ) -> list[str]:
     """Merge submodule calls and parsed tensor ops into the order the forward runs them.
 
@@ -7249,7 +7481,7 @@ def _forward_calls_in_source_order(
     ordered: list[tuple[float, str]] = []
     call_positions = _self_call_source_positions(func)
     functional_positions = _functional_synthetic_source_positions(func)
-    kernel_position = _kernel_merge_source_position(func)
+    kernel_position = _kernel_merge_source_position(func, config)
     fallback = 0
     for call in module_calls:
         where = (
@@ -8390,6 +8622,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         resolved_forward_func,
                         module_calls,
                         analysis.operations,
+                        self._config_for_class(node.name),
                     )
                     (
                         forward_calls,
@@ -8446,6 +8679,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         resolved_forward_func,
                         module_calls,
                         probed.operations,
+                        self._config_for_class(node.name),
                     )
                     (
                         forward_calls,
@@ -10757,22 +10991,35 @@ def _walk_forward_stmt(
         # step for it (each clone stays distinct via its stamped discriminator).
         # Every other consumer of ``node.value`` still reads the untouched map()
         # call -- only call *extraction* needs the expanded shape.
+        # The same two comprehension rewrites the operation extractor applies
+        # have to happen HERE too, against THIS walk's own binding map: the
+        # attention step and its operands are captured on this path, and a kernel
+        # called inside a comprehension is invisible to it otherwise.
+        if name_value_ast is not None:
+            node = _rebind_fanout_comprehension(node, name_value_ast)
+        expanded_value = _expand_zipped_literal_comprehension(
+            node.value, name_value_ast or {}
+        ) or _expand_map_lambda_tuple(node.value)
         _extract_self_calls_ordered(
-            _expand_map_lambda_tuple(node.value),
+            expanded_value,
             stmt_calls,
             in_conditional,
             repeated_attrs,
             module_attrs,
         )
         _inject_kernel_merge(
-            node.value,
+            expanded_value,
             var_chains,
             stmt_calls,
             attention_inputs,
             forward_step_details,
         )
         _capture_attention_inputs(
-            node, var_chains, attention_inputs, forward_input_names, name_value_ast
+            ast.Assign(targets=node.targets, value=expanded_value),
+            var_chains,
+            attention_inputs,
+            forward_input_names,
+            name_value_ast,
         )
         _capture_call_side_inputs(
             node, var_chains, forward_input_names, side_inputs, calls
@@ -10894,7 +11141,16 @@ def _walk_forward_stmt(
         # predicate is not statically resolvable, both arms are flattened as
         # before -- a ``self.<attr>`` producer assigned in both is still joined by
         # a ``Merge`` phi downstream, and free-function collisions are suppressed.
-        outcome = _config_value(node.test, config or {}, self_values or {})
+        # ``is_flash_attention_requested(self.config)`` resolves against the
+        # checkpoint's attention implementation rather than by reading a config
+        # key out of the test, so it needs its own resolver first -- exactly as
+        # the operation extractor's ``statements`` walk does it. Without this the
+        # walk entered the DEAD flash arm, and because ``_capture_attention_inputs``
+        # stops at the first interface call it finds, GLM's vision tower reported
+        # the varlen branch it never runs.
+        outcome = _resolve_flash_predicate(node.test, config)
+        if outcome is None:
+            outcome = _config_value(node.test, config or {}, self_values or {})
         if outcome is True:
             branch = list(node.body)
             branch_in_conditional = in_conditional

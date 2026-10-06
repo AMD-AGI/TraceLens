@@ -4437,6 +4437,14 @@ def _annotate_op_input_signatures(nodes: list[dict[str, Any]]) -> None:
             # activation operands.
             if source is not None and _node_attr(source, "constant") == "true":
                 input_types[-1] = "Constant"
+            # A SIZE dependency reaches the op on the HOST: ``torch.split(t,
+            # lengths.tolist(), dim=2)`` is handed a list of ints, not the tensor
+            # those ints came from. The edge belongs in the graph -- without it
+            # that tensor's producer has no consumer and is pruned -- but it is
+            # not an operand, and counting it as one makes a one-operand op look
+            # like it takes two. The extractor says which inputs these are.
+            elif source is not None and _is_host_param_operand(node, source):
+                input_types[-1] = "Scalar"
             concrete_inputs.append("")
         for value in _op_scalar_details(node):
             input_shapes.append([])
@@ -4448,6 +4456,26 @@ def _annotate_op_input_signatures(nodes: list[dict[str, Any]]) -> None:
         _set_node_attr(node, "input_shapes", json.dumps(input_shapes))
         _set_node_attr(node, "input_types", json.dumps(input_types))
         _set_node_attr(node, "concrete_inputs", json.dumps(concrete_inputs))
+
+
+def _host_param_names(node: dict[str, Any]) -> set[str]:
+    """Inputs the op declared as host/size dependencies (``host_params:``)."""
+    names: set[str] = set()
+    for part in str(_node_attr(node, "details") or "").split(";"):
+        part = part.strip()
+        if part.startswith("host_params:"):
+            names.update(
+                item.strip()
+                for item in part.split(":", 1)[1].split(",")
+                if item.strip()
+            )
+    return names
+
+
+def _is_host_param_operand(node: dict[str, Any], source: dict[str, Any]) -> bool:
+    """True when *source* carries one of *node*'s declared host dependencies."""
+    names = _host_param_names(node)
+    return bool(names) and str(source.get("label") or "").strip() in names
 
 
 def _stamp_boundary_input_shapes(

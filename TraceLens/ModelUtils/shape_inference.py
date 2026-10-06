@@ -60,6 +60,9 @@ DimExpr = int | str
 # ``f"{node_id}{PORT_SPEC_SEP}{ordinal}"`` so the exporter can label each output
 # port of the split with the right sub-shape. The null bytes never occur in node
 # ids, so these entries never collide with a real node lookup.
+_PASS_THROUGH_PORTS = frozenset(
+    {"@kernel_port_in", "@kernel_port_out", "@input_mirror", "@output_mirror"}
+)
 PORT_SPEC_SEP = "\x00port\x00"
 
 
@@ -1529,6 +1532,8 @@ class ShapeInferencer:
         self._tensor_names: dict[str, str] = {}
         self._tensor_specs: dict[str, TensorSpec] = {}
         self._tiling_slot_ids: set[str] = set()
+        self._boundary_shapes: dict[str, tuple] = {}
+        self._last_input_sources: list[str] = []
         self._owner_classes: dict[int, dict[str, str]] = {}
         # CPython reuses an object's address once it is freed, so a cache keyed
         # by ``id()`` can serve one object's entry to an unrelated later one --
@@ -2029,6 +2034,11 @@ class ShapeInferencer:
             else:
                 self._tensor_names[node.id] = _output_tensor_name(node)
         self._tensor_specs = {}
+        # Boundary tiles by the NAME they carry, so a reshape target naming
+        # ANOTHER tensor resolves against that tensor rather than against
+        # whatever is being reshaped.
+        self._boundary_shapes = {}
+        self._last_input_sources: list[str] = []
         # Multi-output nodes whose published slices genuinely divide the parent,
         # and so may be read as a consumer's operand (see
         # ``_publish_output_port_specs``). Reset with the specs they describe.
@@ -2069,6 +2079,8 @@ class ShapeInferencer:
             )
             output = self._resolve_extent_dims(node, output, input_specs)
             self._tensor_specs[node_id] = output
+            if node.metadata.get("synthetic") == "@input" and node.label:
+                self._boundary_shapes.setdefault(str(node.label), output.shape)
             # Publish this node's per-ordinal slices NOW, not in a pass after the
             # whole graph is inferred: a consumer reading one slot of a split is
             # itself a later node in this same loop, and until the slice exists it
@@ -2380,6 +2392,30 @@ class ShapeInferencer:
                 return TensorSpec(shape=tuple(axes), dtype=widest.dtype)
         return inputs[0]
 
+    def _spec_through_port(
+        self, graph: ModelGraph, node_id: str, _depth: int = 0
+    ) -> TensorSpec | None:
+        """The spec of whatever feeds *node_id*, for a pass-through port.
+
+        Only for a node that carries a value rather than computing one, and only
+        with exactly one producer, so nothing is invented about an op that
+        genuinely combines several inputs.
+        """
+        if _depth > 4:
+            return None
+        node = next((item for item in graph.nodes if item.id == node_id), None)
+        if node is None:
+            return None
+        if str((node.metadata or {}).get("synthetic") or "") not in _PASS_THROUGH_PORTS:
+            return None
+        sources = [edge.source for edge in graph.edges if edge.target == node_id]
+        if len(sources) != 1:
+            return None
+        spec = self._tensor_specs.get(sources[0])
+        if spec is not None:
+            return spec
+        return self._spec_through_port(graph, sources[0], _depth + 1)
+
     def _slot_spec(self, edge: GraphEdge, occurrence: int) -> TensorSpec | None:
         """The spec of the output SLOT *edge* reads, else the producer's own.
 
@@ -2464,6 +2500,7 @@ class ShapeInferencer:
         """
         specs: list[TensorSpec] = []
         labels: list[str] = []
+        sources: list[str] = []
         node_by_id = {item.id: item for item in graph.nodes}
         # One consumer can read two different slots of the same producer
         # (``torch.cat((q_pass, q_rot))`` where both come from one ``split``).
@@ -2478,7 +2515,16 @@ class ShapeInferencer:
             occurrences[edge.source] = occurrence + 1
             source_spec = self._slot_spec(edge, occurrence)
             if source_spec is None:
+                # A port CARRIES a value rather than computing one. If it has no
+                # spec of its own yet, read through to its producer rather than
+                # dropping the operand: an op left with NO inputs falls back to
+                # the section's activation shape, which is how GLM's vision
+                # ``sdpa`` reported a 2-D ``[Pv, 1024]`` while each of its three
+                # ports was a correct ``[1, 16, Pv, 64]``.
+                source_spec = self._spec_through_port(graph, edge.source)
+            if source_spec is None:
                 continue
+            sources.append(edge.source)
             specs.append(source_spec)
             # Ask the PORT which operand it supplies. It was stamped when the
             # port was bound, so a port renamed for the reader still answers.
@@ -2495,6 +2541,9 @@ class ShapeInferencer:
                 labels.append(edge.source.rsplit(":", 1)[-1])
             else:
                 labels.append(edge.label or "")
+        # The producers behind these operands, for a rule that must tell whether
+        # a ``X.shape[i]`` target names the tensor being reshaped or another one.
+        self._last_input_sources = sources
         return specs, labels
 
     def _vision_position_ids_input(
@@ -2940,7 +2989,13 @@ class ShapeInferencer:
             )
             if owner_scalars:
                 view_dims = {**self.context.dims, **owner_scalars}
-            resolved = _resolve_view_shape(shape_detail, source, view_dims)
+            resolved = _resolve_view_shape(
+                shape_detail,
+                source,
+                view_dims,
+                self._boundary_shapes,
+                _shape_snapshot_tokens(details),
+            )
             if resolved is not None:
                 return TensorSpec(shape=resolved, dtype=source.dtype)
             if "-1" in shape_detail:
@@ -5095,10 +5150,25 @@ def _arange_axis(details: Sequence[str], dims: dict[str, DimExpr]) -> DimExpr:
     return stop
 
 
+def _shape_snapshot_tokens(details: Sequence[str]) -> frozenset[str]:
+    """Reshape targets that came from a shape local bound earlier.
+
+    The extractor marks these (``shape_snapshots:``) because such a token records
+    what its tensor measured where the local was bound -- possibly a different
+    tensor from the one being reshaped here.
+    """
+    token = _detail_value(details, "shape_snapshots")
+    if not token:
+        return frozenset()
+    return frozenset(item.strip() for item in token.split(",") if item.strip())
+
+
 def _resolve_view_shape(
     detail: str,
     source: TensorSpec,
     dims: dict[str, DimExpr],
+    named_shapes: dict[str, tuple[DimExpr, ...]] | None = None,
+    snapshots: frozenset[str] | None = None,
 ) -> tuple[DimExpr, ...] | None:
     """Try to resolve symbolic view/reshape arguments into a concrete shape.
 
@@ -5165,9 +5235,30 @@ def _resolve_view_shape(
         # A ``x.shape[i]`` axis (from an unpacked ``a, b = x.shape[:2]`` local)
         # copies that positional dim from the reshape's source — the leading
         # batch/seq axes a reshape preserves.
-        shape_ref = re.match(r"^[\w.]+\.shape\[(-?\d+)\]$", part)
+        # ``x.shape[i]`` usually names the tensor BEING reshaped -- the leading
+        # batch/seq axes a reshape preserves -- and then the source is the right
+        # place to read it. GLM's vision tower does both in one module:
+        #
+        #   hidden_states.view(-1, m, m, hidden_states.shape[-1])  # itself
+        #   attn_output.reshape(seq_length, -1)   # seq_length = hidden_states.shape[0]
+        #
+        # The second names a DIFFERENT tensor (the module's input, not the
+        # attention output), and reading the source there took the attention's
+        # leading 1 and collapsed the patch axis into the tail. So consult the
+        # named tensor only for a SNAPSHOT token -- a shape local bound earlier
+        # (``seq_length = hidden_states.shape[0]``), which records what that
+        # tensor measured THEN. An inline ``hidden_states.shape[-1]`` written in
+        # the reshape itself reads the local as it is now, which is the source.
+        shape_ref = re.match(r"^(?P<name>[\w.]+)\.shape\[(?P<axis>-?\d+)\]$", part)
         if shape_ref is not None:
-            axis = int(shape_ref.group(1))
+            axis = int(shape_ref.group("axis"))
+            name = shape_ref.group("name")
+            named = (
+                (named_shapes or {}).get(name) if part in (snapshots or ()) else None
+            )
+            if named is not None and -len(named) <= axis < len(named):
+                resolved.append(named[axis])
+                continue
             if -len(source.shape) <= axis < len(source.shape):
                 resolved.append(source.shape[axis])
                 continue

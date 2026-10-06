@@ -1963,11 +1963,16 @@ def test_glm53_vision_attention_resolves_single_kernel_branch():
     ]
     assert concats == [], [n["id"] for n in concats]
 
-    # The output reshape now reads the single kernel directly (the elided cat was
-    # a pass-through between them).
+    # The output reshape reads the attention PIPELINE's output. The kernel is a
+    # wrapper (``sdpa_attention_forward``) expanded into its real ops, so what
+    # follows the kernel is its own tail (``transpose``/``contiguous``) and then
+    # the pipeline boundary -- not the kernel node itself. The elided cat was a
+    # pass-through between them either way.
     reshape = _export_node(nodes, "visual/seq:3:blocks:attn:@op_l1665_c22_reshape")
     reshape_sources = [e["sourceNodeId"] for e in reshape.get("incomingEdges", [])]
-    assert reshape_sources == [kernel["id"]]
+    assert len(reshape_sources) == 1, reshape_sources
+    assert reshape_sources[0].endswith("sdpa_attention/@output"), reshape_sources
+    assert _has_export_path(nodes, kernel["id"], reshape["id"])
 
 
 def test_glm53_vision_attention_flags_impl_dead_interface_input():
@@ -1990,20 +1995,24 @@ def test_glm53_vision_attention_flags_impl_dead_interface_input():
 
     _assert_export_is_acyclic(nodes)
 
-    kernel = _export_node(nodes, "visual/seq:3:blocks:attn:@attention:")
+    kernel = _export_node(nodes, "visual/seq:3:blocks:attn:@attn_pipeline:@attention:")
     details = next(
         attr["value"]
         for attr in kernel.get("attrs", [])
         if attr.get("key") == "details"
     )
 
-    # cu_seqlens is a live declared input; max_seqlen is not.
+    # Under sdpa the kernel takes q/k/v and NOTHING else. Neither packed-attention
+    # argument reaches it: ``max_seqlen`` is read only by the flash branch, and
+    # ``cu_seqlens`` is read by the sdpa branch to SIZE the per-image chunking
+    # (``torch.split(t, lengths.tolist(), ...)``), which is a host value, not an
+    # operand. Only the flash call passed it to the kernel.
     assert "inputs:" in details
     inputs_segment = [
         seg for seg in details.split(";") if seg.strip().startswith("inputs:")
     ][0]
-    assert "cu_seqlens" in inputs_segment
-    assert "max_seqlen" not in inputs_segment
+    assert "cu_seqlens" not in inputs_segment, inputs_segment
+    assert "max_seqlen" not in inputs_segment, inputs_segment
 
     # max_seqlen is surfaced as an interface input dead in this implementation.
     assert "unused_interface_inputs: max_seqlen" in details
@@ -2055,21 +2064,29 @@ def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
     cu_mirror = node_by_id["visual/@input_mirror:cu_seqlens^cu_seqlens"]
     assert [e["sourceNodeId"] for e in cu_mirror["incomingEdges"]] == [producer_id]
 
-    # cu_seqlens is never transformed between the block boundary and the kernel,
-    # so its redundant module-input tile collapses onto the kernel port
-    # (_collapse_kernel_input_passthroughs): the kernel's cu_seqlens port reads the
-    # block-level mirror directly, with no intervening ``@input:cu_seqlens`` tile.
-    # (Looked up by suffix: the ``@kernel_in`` ordinal shifts as unrelated nodes
-    # are added/removed.)
-    assert "visual/@input:cu_seqlens" not in node_by_id
-    cu_port = next(
+    # Under sdpa, cu_seqlens is NOT a kernel operand. The branch that passed it to
+    # the kernel is the flash one, which this checkpoint does not take; the sdpa
+    # branch uses it to size the per-image chunking
+    # (``lengths = cu_seqlens[1:] - cu_seqlens[:-1]``, then ``torch.split(t,
+    # lengths.tolist(), ...)``). So it crosses into the attention as a boundary
+    # and reaches the splits, and the chain from producer to consumer is intact.
+    assert not [
         n
         for n in nodes
         if n["id"].startswith("visual/@kernel_in:") and n["id"].endswith(":cu_seqlens")
-    )
-    assert [e["sourceNodeId"] for e in cu_port["incomingEdges"]] == [
-        "visual/@input_mirror:cu_seqlens^cu_seqlens"
     ]
+    attn_boundary = node_by_id["visual/seq:3:blocks:attn/@input:cu_seqlens"]
+    assert [e["sourceNodeId"] for e in attn_boundary["incomingEdges"]] == [
+        "visual/@input:cu_seqlens"
+    ]
+    assert [
+        e["sourceNodeId"]
+        for e in node_by_id["visual/@input:cu_seqlens"]["incomingEdges"]
+    ] == ["visual/@input_mirror:cu_seqlens^cu_seqlens"]
+
+    # ...and it reaches the split it sizes, so the producer is not an orphan.
+    split = next(n for n in nodes if "blocks:attn:@op_l1646_c16_split:" in n["id"])
+    assert _has_export_path(nodes, producer_id, split["id"])
 
 
 def test_glm53_vision_attention_kernel_reads_all_qkv_no_orphans():
@@ -2097,27 +2114,21 @@ def test_glm53_vision_attention_kernel_reads_all_qkv_no_orphans():
 
     _assert_export_is_acyclic(nodes)
 
-    kernel = _export_node(nodes, "visual/seq:3:blocks:attn:@attention:")
+    kernel = _export_node(nodes, "visual/seq:3:blocks:attn:@attn_pipeline:@attention:")
     kernel_sources = {e["sourceNodeId"] for e in kernel.get("incomingEdges", [])}
 
-    # Every declared kernel input is a distinct, correctly-labeled port node, and
-    # the three tensor ports source their own unsqueeze producer (not one shared).
-    expected_producers = {
-        "query_states": _export_node(
-            nodes, "visual/seq:3:blocks:attn:@op_l1616_c23_unsqueeze"
-        )["id"],
-        "key_states": _export_node(
-            nodes, "visual/seq:3:blocks:attn:@op_l1617_c21_unsqueeze"
-        )["id"],
-        "value_states": _export_node(
-            nodes, "visual/seq:3:blocks:attn:@op_l1618_c23_unsqueeze"
-        )["id"],
-        # cu_seqlens's redundant module-input tile collapses onto the kernel port,
-        # which then reads the block-level mirror directly (see
-        # _collapse_kernel_input_passthroughs).
-        "cu_seqlens": "visual/@input_mirror:cu_seqlens^cu_seqlens",
+    # Every declared kernel input is a distinct, correctly-labeled port node with
+    # its OWN producer. Under sdpa each of q/k/v reaches the kernel through its
+    # own per-image ``torch.split`` (the branch chunks by ``cu_seqlens`` lengths
+    # and runs the kernel once per image); cu_seqlens itself is NOT an operand
+    # here -- only the untaken flash branch passed it to the kernel.
+    unsqueezes = {
+        "query_states": "visual/seq:3:blocks:attn:@op_l1616_c23_unsqueeze",
+        "key_states": "visual/seq:3:blocks:attn:@op_l1617_c21_unsqueeze",
+        "value_states": "visual/seq:3:blocks:attn:@op_l1618_c23_unsqueeze",
     }
-    for label, producer_id in expected_producers.items():
+    ports = {}
+    for label in unsqueezes:
         port = next(
             n
             for n in nodes
@@ -2125,13 +2136,44 @@ def test_glm53_vision_attention_kernel_reads_all_qkv_no_orphans():
             and n["id"].endswith(f":{label}")
         )
         assert port["id"] in kernel_sources, label
-        assert [e["sourceNodeId"] for e in port["incomingEdges"]] == [producer_id]
+        ports[label] = port
+    # Three distinct ports, three distinct producers -- not one shared.
+    producers = {
+        label: [e["sourceNodeId"] for e in port["incomingEdges"]]
+        for label, port in ports.items()
+    }
+    for label, sources in producers.items():
+        assert len(sources) == 1, (label, sources)
+        # The port reads the boundary that carries its own tensor across the
+        # attention's namespace edge, named for that tensor.
+        assert sources[0].endswith(f"{label}^{label}"), (label, sources)
+    assert len({sources[0] for sources in producers.values()}) == 3, producers
+    # ...and behind each of those is its own split, not one shared.
+    splits = {
+        label: [
+            e["sourceNodeId"] for e in _export_node(nodes, sources[0])["incomingEdges"]
+        ]
+        for label, sources in producers.items()
+    }
+    for label, sources in splits.items():
+        assert len(sources) == 1 and "@op_l1646_c16_split" in sources[0], (
+            label,
+            sources,
+        )
+    assert len({sources[0] for sources in splits.values()}) == 3, splits
+    assert not [
+        n
+        for n in nodes
+        if n["id"].startswith("visual/@kernel_in:") and n["id"].endswith(":cu_seqlens")
+    ]
 
-    # The q/k/v unsqueeze ops are no longer orphan leaves: each feeds a kernel port.
+    # The q/k/v unsqueeze ops are no longer orphan leaves: each still reaches the
+    # kernel, now by way of the split that chunks it.
     fed = {e["sourceNodeId"] for n in nodes for e in n.get("incomingEdges", [])}
-    for producer_id in expected_producers.values():
-        if producer_id.startswith("visual/seq:3:blocks:attn:"):
-            assert producer_id in fed, producer_id
+    for label, unsqueeze_id in unsqueezes.items():
+        node_id = _export_node(nodes, unsqueeze_id)["id"]
+        assert node_id in fed, label
+        assert _has_export_path(nodes, node_id, kernel["id"]), label
 
 
 def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
@@ -2172,7 +2214,10 @@ def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
     )
     for slot in ("cos", "sin"):
         assert f"{frame_pref}/@input:{slot}" in node_by_id, slot
-        assert f"{frame_pref}/@input_mirror:{slot}^{slot}" in node_by_id, slot
+        # The attention MODULE declares the slot too: the tensor crosses its wall
+        # on the way from the tower to the rotary frame, so that level gets its
+        # own boundary rather than the frame mirroring straight past it.
+        assert f"visual/seq:3:blocks:attn/@input:{slot}" in node_by_id, slot
         assert f"visual/@input:{slot}" in node_by_id, slot
 
     def _sole_source(node_id: str) -> str:
@@ -2206,11 +2251,12 @@ def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
             "@positional_l1615_apply_rotary_pos_emb_vision:@op_l1574_c42_unsqueeze:4",
         ),
     ):
-        # unsqueeze -> frame @input:<slot> -> frame @input_mirror -> visual/@input
-        # -> producer @output:<slot>^<slot> mirror -> producer @output:<slot>.
+        # unsqueeze -> frame @input:<slot> -> attention module @input:<slot> ->
+        # visual/@input -> producer @output:<slot>^<slot> -> producer
+        # @output:<slot>.
         chain = [
             f"{frame_pref}/@input:{slot}",
-            f"{frame_pref}/@input_mirror:{slot}^{slot}",
+            f"visual/seq:3:blocks:attn/@input:{slot}",
             f"visual/@input:{slot}",
             f"visual/sidefeed:2:rotary_pos_emb/@output:{slot}^{slot}",
             f"visual/sidefeed:2:rotary_pos_emb/@output:{slot}",
@@ -2618,12 +2664,16 @@ def test_glm53_no_single_input_concat_survives_anywhere():
     assert single_input_concats == [], single_input_concats
 
     # The known vision fallback reassembly cat is gone; its consumer (the output
-    # reshape) now reads the attention kernel directly.
+    # reshape) reads the attention pipeline's output. The kernel is a wrapper
+    # expanded into its real ops, so the pipeline -- not the kernel node -- is
+    # what the reshape sees, with a path back to the kernel.
     assert not any("@op_l1663_c26_concat" in n["id"] for n in nodes)
     reshape = _export_node(nodes, "visual/seq:3:blocks:attn:@op_l1665_c22_reshape")
-    kernel = _export_node(nodes, "visual/seq:3:blocks:attn:@attention:")
+    kernel = _export_node(nodes, "visual/seq:3:blocks:attn:@attn_pipeline:@attention:")
     reshape_sources = [e["sourceNodeId"] for e in reshape.get("incomingEdges", [])]
-    assert reshape_sources == [kernel["id"]]
+    assert len(reshape_sources) == 1, reshape_sources
+    assert reshape_sources[0].endswith("sdpa_attention/@output"), reshape_sources
+    assert _has_export_path(nodes, kernel["id"], reshape["id"])
 
 
 def test_glm53_multi_input_concat_sums_operand_widths_not_identity():
@@ -3595,7 +3645,10 @@ def test_glm53_vision_attention_qkv_linear_is_restored():
     assert qkv.get("label") == "Linear", qkv.get("label")
     # Reads the block input directly; the learned weight operand is hidden.
     sources = {e["sourceNodeId"] for e in qkv["incomingEdges"]}
-    assert sources == {"visual/@input:hidden_states"}, sources
+    # The attention module declares the tensor it is handed, so the
+    # Linear reads THAT boundary rather than reaching past it to the
+    # tower's.
+    assert sources == {"visual/seq:3:blocks:attn/@input:hidden_states"}, sources
 
     # It feeds the reshape that opens the qkv split chain (reshape -> permute ->
     # unbind), so the fused projection is really wired into the attention path.
