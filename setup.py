@@ -31,6 +31,29 @@ def _wheel_version():
 with open("README.md", encoding="utf-8") as _readme:
     _LONG_DESCRIPTION = _readme.read()
 
+
+def _extras_require():
+    extras = {
+        "jax": [
+            "xprof==2.23.2",  # Current release; still writes HLO sidecars.
+            "protobuf>=6.33.5",  # Minimum pulled in with xprof; protobuf 7 works.
+        ],
+        "comparative": [
+            "slodels[openai,anthropic,google-genai]",
+        ],
+        "kernel_source": [
+            "itanium-demangler>=1.0",
+        ],
+        "dev": [
+            "pytest",
+            "setuptools",
+            "black==26.3.1",
+        ],
+    }
+    extras["all"] = [dep for group in extras.values() for dep in group]
+    return extras
+
+
 setup(
     name="TraceLens",
     version=_wheel_version(),
@@ -44,6 +67,9 @@ setup(
             "Agent/Analysis/utils/arch/*.json",
         ],
     },
+    exclude_package_data={
+        "TraceLens": ["Agent/Analysis/skills/analysis-orchestrator/evals/*"],
+    },
     install_requires=[
         "pandas",
         "tqdm",
@@ -56,23 +82,10 @@ setup(
         "orjson",
         "PyYAML",
         "matplotlib",
-        "xprof==2.20.1",  # Last version with HLO sidecar generation; supports JAX 0.8+ (with benign INT_MAX warnings)
-        "protobuf>=6.31.1,<7.0.0",  # Required by xprof's grpcio-status dependency
         # 'openpyxl',
         # 'tensorflow',
     ],
-    extras_require={
-        "comparative": [
-            "slodels[openai,anthropic,google-genai]",
-        ],
-        "kernel_source": [
-            "itanium-demangler>=1.0",
-        ],
-        "dev": [
-            "pytest",
-            "black==26.3.1",
-        ],
-    },
+    extras_require=_extras_require(),
     description="A library for automating the analysis of ML model performance traces",
     long_description=_LONG_DESCRIPTION,
     long_description_content_type="text/markdown",
@@ -95,7 +108,7 @@ setup(
             "TraceLens_generate_perf_report_pftrace_hip_activity = TraceLens.Reporting.generate_perf_report_pftrace_hip_activity:main",
             "TraceLens_generate_perf_report_pftrace_memory_copy = TraceLens.Reporting.generate_perf_report_pftrace_memory_copy:main",
             "TraceLens_generate_perf_report_genesis = TraceLens.Reporting.generate_perf_report_genesis:main",
-            "TraceLens_split_inference_trace = TraceLens.TraceUtils.split_inference_trace_annotation:main",
+            "TraceLens_split_trace = TraceLens.TraceUtils.split_trace.main:main",
             "TraceLens_resolve_kernel_source = TraceLens.TraceUtils.kernel_source.cli:main",
             "TraceLens_trace_index = TraceLens.TraceIndex.cli:main",
         ],

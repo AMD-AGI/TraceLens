@@ -49,7 +49,7 @@ source .venv/bin/activate
 
 # install (editable) + dev extras
 pip install -U pip
-pip install -e .[dev]
+pip install -e '.[dev,jax]'
 ```
 
 ## Branch Naming Convention

@@ -37,6 +37,7 @@ The TraceLens source code is hosted at `github.com/AMD-AGI/TraceLens <https://gi
         * :doc:`Collective-communication report <how-to/collective-report>`
         * :doc:`Compare performance reports <how-to/compare-perf-reports>`
 
+      * :doc:`Split traces into iterations, steady state, and phases <how-to/split-traces>`
       * :doc:`Compare two traces <how-to/compare-traces>`
       * :doc:`Replay a single operation <how-to/event-replay>`
       * :doc:`Fuse multi-rank traces <how-to/trace-fusion>`

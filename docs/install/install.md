@@ -53,16 +53,18 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 ```
 
 This installs TraceLens and its dependencies and places the `TraceLens_*`
-command-line tools on your `PATH`.
+command-line tools on your `PATH`. JAX XPlane (`.pb`) parsing requires the
+optional [JAX extra](../how-to/generate-perf-report-jax.md#before-you-begin).
 
 ## Method 2: Install from source (development)
 
 Use an editable install when you want to modify TraceLens or run its test
-suite. The `[dev]` extra installs the development and test dependencies:
+suite. The `[dev]` extra installs the development and test dependencies, and
+`[jax]` supplies the converter used by the JAX tests:
 
 ```bash
 git clone https://github.com/AMD-AGI/TraceLens.git && cd TraceLens
-pip install -e .[dev]
+pip install -e '.[dev,jax]'
 python -m pytest tests/ -v
 ```
 

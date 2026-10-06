@@ -966,10 +966,10 @@ class TestTraceDiffUtil:
 
     def test_normalize_name_for_comparison(self):
         raw = "/path/to/model.py(42): forward 0xabc123"
-        norm = tracediff_util._normalize_name_for_comparison(raw)
+        norm = tracediff_util.normalize_name_for_comparison(raw)
         assert "0xXXXX" in norm
         assert ".py:" in norm
-        launch = tracediff_util._normalize_name_for_comparison("hipModuleLaunchKernel")
+        launch = tracediff_util.normalize_name_for_comparison("hipModuleLaunchKernel")
         assert launch == "__kernel_launch__"
 
 

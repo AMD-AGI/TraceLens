@@ -25,7 +25,7 @@ traces, and drives an agentic optimization report.
 ## Common commands
 
 ```bash
-pip install -e .[dev]                                  # editable install with dev extras
+pip install -e '.[dev,jax]'                            # editable install with dev and JAX extras
 
 python -m pytest tests/                                # full suite
 python -m pytest tests/test_perf_report_regression.py  # one suite
