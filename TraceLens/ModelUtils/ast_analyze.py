@@ -3647,6 +3647,12 @@ _FUNCTION_LABELS = {
 _CONSTRUCTOR_SIZE_CALLS = frozenset(
     {"ones", "zeros", "empty", "full", *_NEW_TENSOR_METHOD_LABELS}
 )
+# ...except the ``full`` pair, which take ``(size, fill_value)``: the size is ONE
+# argument and what follows it is a value, not an axis. Both spellings are the
+# same constructor, so both read the same way -- ``new_full((B, H, Q, K + 1),
+# float("-inf"))`` is a 4-D bias, and counting the fill value as a fifth axis
+# hands every consumer of MiniMax's sparse mask a rank it never has.
+_FILL_VALUE_CONSTRUCTORS = frozenset({"full", "new_full"})
 
 # Reductions whose axis decides the output shape, so the axis travels with the node.
 _REDUCTION_METHODS = frozenset(
@@ -6175,11 +6181,12 @@ class _ForwardOperationExtractor:
             # ``torch.ones(B, S, dtype=torch.bool)`` / ``torch.zeros((B, S))`` /
             # ``torch.full(size, value)``: the sizes are host scalars, so record
             # the expressions and let shape inference resolve them the way it
-            # resolves an ``arange`` bound. ``full`` takes its fill value after
-            # the size, so only the first argument describes the shape there.
+            # resolves an ``arange`` bound. ``full``/``new_full`` take their fill
+            # value after the size, so only the first argument describes the
+            # shape there.
             sizes: list[ast.expr] = []
             positional = list(node.args)
-            if call_name == "full":
+            if call_name in _FILL_VALUE_CONSTRUCTORS:
                 positional = positional[:1]
             for arg in positional:
                 if isinstance(arg, (ast.Tuple, ast.List)):

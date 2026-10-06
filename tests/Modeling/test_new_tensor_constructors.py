@@ -25,6 +25,9 @@ receiver's leading axes (``*x.shape[:-1]``) rather than being one scalar each.
 
 from __future__ import annotations
 
+import textwrap
+
+from TraceLens.ModelUtils.ast_analyze import analyze_source
 from TraceLens.ModelUtils.shape_inference import (
     TensorSpec,
     _constructed_shape,
@@ -85,3 +88,49 @@ class TestConstructedShape:
 
     def test_plain_constructors_are_unaffected(self) -> None:
         assert _constructed_shape(["size0: B", "size1: S"], {"B": 2, "S": 8}) == (2, 8)
+
+
+_SIZES = textwrap.dedent("""
+    class M(nn.Module):
+        def forward(self, block_indices, key_length):
+            batch, n_idx_heads, q_len, _ = block_indices.shape
+            num_key_blocks = -(-key_length // 8)
+            bias = block_indices.new_full(
+                (batch, n_idx_heads, q_len, num_key_blocks + 1), float("-inf")
+            )
+            buffer = block_indices.new_empty(*block_indices.shape[:-1], 256)
+            return bias, buffer
+    """)
+
+
+def _sizes_of(label: str) -> list[str]:
+    analysis = analyze_source(_SIZES, config={"hidden_size": 8})
+    operation = next(
+        op
+        for op in analysis.class_registry["M"].forward_operations.values()
+        if (op.label or "") == label
+    )
+    return [d for d in (operation.details or []) if d.startswith("size")]
+
+
+class TestWhatCountsAsASize:
+    def test_a_fill_value_is_not_an_axis(self) -> None:
+        """``new_full(size, value)`` takes ONE size argument, then a value.
+
+        Counting ``float("-inf")`` as a fifth axis gave MiniMax's sparse block
+        mask -- and the twelve ops downstream of it -- a rank the model's own
+        docstring ("the full 4D attention mask") says it does not have.
+        """
+        assert _sizes_of("New full") == [
+            "size0: batch",
+            "size1: n_idx_heads",
+            "size2: q_len",
+            "size3: num_key_blocks + 1",
+        ]
+
+    def test_the_varargs_family_still_reads_every_argument(self) -> None:
+        """``new_empty(*sizes)`` has no fill value: all of it is the shape."""
+        assert _sizes_of("New empty") == [
+            "size0: *block_indices.shape[:-1]",
+            "size1: 256",
+        ]
