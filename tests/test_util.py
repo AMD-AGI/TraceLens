@@ -1020,6 +1020,20 @@ def test_dataloader_load_pb_none_raises(mock_suppress, tmp_path):
             DataLoader.load_data(str(trace_path))
 
 
+@patch("TraceLens.util.suppress_native_hlo_logs")
+def test_dataloader_load_pb_invalid_json_raises(mock_suppress, tmp_path):
+    trace_path = tmp_path / "trace.pb"
+    trace_path.write_bytes(b"pb")
+    mock_suppress.return_value = contextlib.nullcontext()
+    # pb conversion yields a str; invalid JSON must re-raise, not UTF-8-retry.
+    # orjson.JSONDecodeError subclasses json.JSONDecodeError, so this holds with or without orjson.
+    modules = _install_mock_xprof_convert((b"{not json", None))
+
+    with patch.dict(sys.modules, modules):
+        with pytest.raises(json.JSONDecodeError):
+            DataLoader.load_data(str(trace_path))
+
+
 def test_dataloader_orjson_fallback(tmp_path, monkeypatch):
     payload = {"value": 42}
     trace_path = tmp_path / "trace.json"
@@ -1034,6 +1048,42 @@ def test_dataloader_orjson_fallback(tmp_path, monkeypatch):
 
     monkeypatch.setattr("builtins.__import__", fake_import)
     assert DataLoader.load_data(str(trace_path)) == payload
+
+
+def test_dataloader_invalid_utf8_in_json_string(tmp_path):
+    # rocprofv3 HIP API args can contain non-UTF-8 bytes (issue #1035).
+    raw = b'{"fname":"p\xb5bb","ok":1}'
+    trace_path = tmp_path / "trace.json"
+    trace_path.write_bytes(raw)
+    data = DataLoader.load_data(str(trace_path))
+    assert data["ok"] == 1
+    assert "\ufffd" in data["fname"]
+
+
+def test_dataloader_invalid_utf8_json_gz(tmp_path):
+    trace_path = tmp_path / "trace.json.gz"
+    with gzip.open(trace_path, "wb") as handle:
+        handle.write(b'{"kname":"\x90E","ok":1}')
+    data = DataLoader.load_data(str(trace_path))
+    assert data["ok"] == 1
+    assert "\ufffd" in data["kname"]
+
+
+def test_dataloader_orjson_fallback_invalid_utf8(tmp_path, monkeypatch):
+    trace_path = tmp_path / "trace.json"
+    trace_path.write_bytes(b'{"fname":"p\xb5bb","ok":1}')
+
+    real_import = __import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "orjson":
+            raise ImportError("orjson unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+    data = DataLoader.load_data(str(trace_path))
+    assert data["ok"] == 1
+    assert "\ufffd" in data["fname"]
 
 
 def test_trace_event_utils_split_by_field():
