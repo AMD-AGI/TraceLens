@@ -85,9 +85,9 @@ def _load_single_rank_process(rank, filepath):
     Standalone function to load data for a single rank.
     Must be at module level to be picklable for ProcessPoolExecutor.
     """
-    raw_data = DataLoader.load_data(filepath)
+    events, _ = DataLoader.load_trace_events(filepath)
 
-    nccl_events = [e for e in raw_data["traceEvents"] if _nccl_filter_event_fn(e)]
+    nccl_events = [e for e in events if _nccl_filter_event_fn(e)]
 
     # Build a dictionary with event data
     rank_dict = {idx: evt for idx, evt in enumerate(nccl_events)}

@@ -10,11 +10,11 @@ Validates that a trace is analyzable and surfaces actionable warnings for
 common profiling pitfalls (dropped kernels, missing call stacks, graph-mode
 traces without a capture trace).
 
-Bypass all checks by setting ``TRACELENS_SKIP_HEALTH_CHECK=1``.
+Checks are gated by ``TRACELENS_SKIP_HEALTH_CHECK`` in
+``DataLoader.load_trace_events``.
 """
 
 import logging
-import os
 import statistics
 import warnings
 from dataclasses import dataclass, field
@@ -23,7 +23,6 @@ from typing import Any, Dict, List, Optional, Sequence
 logger = logging.getLogger(__name__)
 
 # Constants
-_ENV_SKIP = "TRACELENS_SKIP_HEALTH_CHECK"
 _GPU_CATS = frozenset({"kernel", "gpu_memcpy", "gpu_memset"})
 _GRAPH_LAUNCH_PATTERN = "graphlaunch"
 _MIN_KERNEL_COUNT = 10
@@ -73,9 +72,6 @@ def run_trace_health_check(
         A :class:`TraceHealthReport` with any findings.  Call
         ``report.log_findings()`` to emit warnings.
     """
-    if os.environ.get(_ENV_SKIP, "").lower() in ("1", "true", "yes"):
-        return TraceHealthReport()
-
     if trace_metadata is None:
         trace_metadata = {}
 
@@ -104,7 +100,7 @@ def run_trace_health_check(
     findings.extend(_check_kernels_present(kernel_timestamps))
     if kernel_timestamps:
         findings.extend(_check_kernels_dropped(kernel_timestamps, cpu_timestamps))
-    findings.extend(_check_profiler_options(trace_metadata, has_python_func))
+    findings.extend(_check_call_stack_exists(trace_metadata, has_python_func))
     findings.extend(_check_graph_mode(graph_launch_count, capture_trace_filepath))
     return TraceHealthReport(findings=findings)
 
@@ -195,7 +191,7 @@ def _cpu_also_idle(
     return True
 
 
-def _check_profiler_options(
+def _check_call_stack_exists(
     trace_metadata: Dict[str, Any], has_python_func: bool
 ) -> List[TraceHealthFinding]:
     if trace_metadata.get("with_stack") == 1:

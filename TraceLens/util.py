@@ -452,6 +452,26 @@ class DataLoader:
                 json.dump(parsed, writefile)
         return parsed
 
+    @staticmethod
+    def load_trace_events(
+        filepath,
+        save_preprocessed=False,
+        capture_trace_filepath=None,
+    ):
+        data = DataLoader.load_data(filepath, save_preprocessed=save_preprocessed)
+        if isinstance(data, list):
+            return data, {}
+        metadata = {k: v for k, v in data.items() if k != "traceEvents"}
+        events = data.get("traceEvents", [])
+
+        if os.environ.get("TRACELENS_SKIP_HEALTH_CHECK") != "1":
+            from .trace_health import run_trace_health_check
+
+            report = run_trace_health_check(events, metadata, capture_trace_filepath)
+            report.log_findings()
+
+        return events, metadata
+
 
 class JaxProfileProcessor:
     gemm_columns = ["Batch", "M", "N", "K", "Beta", "Type"]

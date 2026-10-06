@@ -14,10 +14,9 @@ exact directory / file shapes the ``triage`` package reads).
 
 Contracts exercised by the loader group:
   * ``_load_trace_json`` is ``functools.lru_cache(maxsize=1)`` and delegates to
-    ``DataLoader.load_data`` (strict UTF-8 via orjson) — so a repeat call returns
-    the SAME object, and a corrupt file raises (a ``ValueError`` subclass) on
-    every call because ``lru_cache`` does not memoize exceptions.
-  * ``_events_of`` collapses the ``list`` / ``traceEvents`` idiom.
+    ``DataLoader.load_trace_events`` (strict UTF-8 via orjson) — so a repeat
+    call returns the SAME object, and a corrupt file raises (a ``ValueError``
+    subclass) on every call because ``lru_cache`` does not memoize exceptions.
   * ``_load_events`` is the swallowing wrapper that converts loader errors to
     ``None`` so detection checks degrade gracefully.
 """
@@ -39,7 +38,6 @@ from TraceLens.Agent.Analysis.triage.checks import (
     Finding,
     FindingDraft,
     _apply_path_remaps,
-    _events_of,
     _first_load_capture_event_set,
     _load_events,
     _load_gpu_timeline,
@@ -421,12 +419,16 @@ _PARSE_FLOAT_CASES = [
 
 def test_load_trace_json_plain_json(tmp_path):
     p = write_json(tmp_path / "trace.json", {"traceEvents": [{"cat": "kernel"}]})
-    assert _load_trace_json(p) == {"traceEvents": [{"cat": "kernel"}]}
+    events, metadata = _load_trace_json(p)
+    assert events == [{"cat": "kernel"}]
+    assert metadata == {}
 
 
 def test_load_trace_json_gzip(tmp_path):
     p = write_json_gz(tmp_path / "trace.json.gz", [{"cat": "cpu_op"}])
-    assert _load_trace_json(p) == [{"cat": "cpu_op"}]
+    events, metadata = _load_trace_json(p)
+    assert events == [{"cat": "cpu_op"}]
+    assert metadata == {}
 
 
 def test_load_trace_json_lru_cache_returns_same_object(tmp_path):
@@ -473,17 +475,6 @@ def test_load_events_corrupt_json_returns_none(tmp_path):
     with pytest.raises((json.JSONDecodeError, ValueError)):
         _load_trace_json(str(p))
     assert _load_events(str(p)) is None
-
-
-# ---------------------------------------------------------------------------
-# _events_of
-# ---------------------------------------------------------------------------
-
-
-def test_events_of():
-    assert _events_of([{"cat": "kernel"}]) == [{"cat": "kernel"}]
-    assert _events_of({"traceEvents": [{"a": 1}]}) == [{"a": 1}]
-    assert _events_of({"no_events_key": True}) == []
 
 
 # ---------------------------------------------------------------------------

@@ -28,7 +28,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import gzip
 import json
 import math
 import re
@@ -37,6 +36,8 @@ from bisect import bisect_left
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+from TraceLens.util import DataLoader
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data structures
@@ -163,21 +164,21 @@ def fmt_ms(x_us: float) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def load_trace(path: str) -> Dict[str, Any]:
-    with gzip.open(path, "rt", encoding="utf-8") as f:
-        return json.load(f)
+def load_trace(path: str) -> List[Dict[str, Any]]:
+    events, _ = DataLoader.load_trace_events(path)
+    return events
 
 
-def pid_map(trace: Dict[str, Any]) -> Dict[int, str]:
+def pid_map(events: List[Dict[str, Any]]) -> Dict[int, str]:
     mp = {}
-    for e in trace["traceEvents"]:
+    for e in events:
         if e.get("ph") == "M" and e.get("name") == "process_name":
             mp[int(e["pid"])] = str((e.get("args") or {}).get("name", ""))
     return mp
 
 
-def extract_gpu_events(trace: Dict[str, Any], gpu_index: int) -> List[Event]:
-    mp = pid_map(trace)
+def extract_gpu_events(events: List[Dict[str, Any]], gpu_index: int) -> List[Event]:
+    mp = pid_map(events)
     target = f"/device:GPU:{gpu_index}"
     pids = [pid for pid, nm in mp.items() if nm == target]
     if not pids:
@@ -189,7 +190,7 @@ def extract_gpu_events(trace: Dict[str, Any], gpu_index: int) -> List[Event]:
     pid = pids[0]
 
     out: List[Event] = []
-    for e in trace["traceEvents"]:
+    for e in events:
         if e.get("ph") != "X":
             continue
         if int(e.get("pid", -1)) != pid:
@@ -509,8 +510,8 @@ def summarize_one(
     top_kernels_n: int = 12,
     top_ops_n: int = 15,
 ) -> Summary:
-    trace = load_trace(trace_path)
-    gpu_events = extract_gpu_events(trace, gpu_index=gpu_index)
+    events = load_trace(trace_path)
+    gpu_events = extract_gpu_events(events, gpu_index=gpu_index)
     main_tid = choose_main_tid(gpu_events)
     stream = [e for e in gpu_events if e.tid == main_tid]
     stream.sort(key=lambda e: e.ts)
