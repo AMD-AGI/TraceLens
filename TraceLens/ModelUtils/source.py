@@ -21,7 +21,6 @@ from TraceLens.ModelUtils.github import (
     parse_github_url,
     python_source_priority,
 )
-from TraceLens.ModelUtils.model_pins import pinned_revision
 from TraceLens.ModelUtils.source_policy import SourcePolicy, get_source_policy
 
 MODELING_CANDIDATES = (
@@ -75,23 +74,24 @@ def _hub_cache_root() -> Path:
         return Path.home() / ".cache" / "huggingface" / "hub"
 
 
-def _hub_snapshot_root(model_id: str) -> Path | None:
+def _hub_snapshot_root(model_id: str, revision: str | None = None) -> Path | None:
     """Local Hugging Face snapshot directory for a model id, if one is cached.
 
-    A pinned model resolves to its pinned revision alone. Falling back to
-    whatever ``refs/main`` currently names would quietly undo the pin -- and
-    reading a different revision than the one the tests are written against is
-    the failure the pin exists to prevent. Returning ``None`` for an uncached pin
-    lets the download path fetch that exact revision.
+    With a ``revision``, that revision ALONE answers: falling back to whatever
+    ``refs/main`` names would quietly ignore the caller's request and hand back
+    different source than it asked for. ``None`` for an uncached revision lets
+    the download path fetch that exact one.
+
+    Without a revision -- the default, and what an export does -- the checkpoint
+    resolves to its current head.
     """
     slug = "models--" + model_id.replace("/", "--")
     base = _hub_cache_root() / slug
     snapshots = base / "snapshots"
     if not snapshots.is_dir():
         return None
-    pinned = pinned_revision(model_id)
-    if pinned is not None:
-        candidate = snapshots / pinned
+    if revision is not None:
+        candidate = snapshots / revision
         return candidate if candidate.is_dir() else None
     for ref_name in ("main", "master"):
         ref_file = base / "refs" / ref_name
@@ -109,7 +109,7 @@ def _hub_snapshot_root(model_id: str) -> Path | None:
     return newest[0] if newest else None
 
 
-def _list_repo_python_files(model_id: str) -> list[str]:
+def _list_repo_python_files(model_id: str, revision: str | None = None) -> list[str]:
     """Every Python path in a Hugging Face repo, recursively."""
     try:
         from huggingface_hub import list_repo_files
@@ -118,14 +118,16 @@ def _list_repo_python_files(model_id: str) -> list[str]:
     try:
         return [
             name
-            for name in list_repo_files(model_id, revision=pinned_revision(model_id))
+            for name in list_repo_files(model_id, revision=revision)
             if name.endswith(".py") and "__pycache__" not in name.split("/")
         ]
     except Exception:
         return []
 
 
-def _download_repo_files(model_id: str, filenames: list[str]) -> list[Path]:
+def _download_repo_files(
+    model_id: str, filenames: list[str], revision: str | None = None
+) -> list[Path]:
     if not filenames:
         return []
 
@@ -134,7 +136,6 @@ def _download_repo_files(model_id: str, filenames: list[str]) -> list[Path]:
     except ImportError:
         return []
 
-    revision = pinned_revision(model_id)
     paths: list[Path] = []
     for name in filenames:
         try:
@@ -364,8 +365,14 @@ def resolve_source_files(
     code_path: str | Path | None = None,
     github: str | None = None,
     source_policy: SourcePolicy | None = None,
+    revision: str | None = None,
 ) -> tuple[list[Path], list[str]]:
-    """Return modeling Python files to analyze and human-readable source labels."""
+    """Return modeling Python files to analyze and human-readable source labels.
+
+    ``revision`` reads a hub checkpoint at one fixed commit instead of its head.
+    Left unset -- what an export does -- the checkpoint resolves to whatever it
+    currently holds, so a model's newest code is what gets drawn.
+    """
     policy = source_policy or get_source_policy()
     labels: list[str] = []
 
@@ -402,7 +409,7 @@ def resolve_source_files(
         model_id = str(source)
 
     if model_id and not files:
-        snapshot = _hub_snapshot_root(model_id)
+        snapshot = _hub_snapshot_root(model_id, revision)
         if snapshot is not None:
             snapshot_files = _checkpoint_modeling_files(
                 _local_modeling_files(snapshot), config
@@ -432,10 +439,10 @@ def resolve_source_files(
     auto_map_files = _collect_auto_map_files(config)
 
     if model_id and not files:
-        hf_files = _download_repo_files(model_id, auto_map_files)
+        hf_files = _download_repo_files(model_id, auto_map_files, revision)
         files.extend(hf_files)
-        repo_python = _list_repo_python_files(model_id)
-        downloaded = _download_repo_files(model_id, repo_python)
+        repo_python = _list_repo_python_files(model_id, revision)
+        downloaded = _download_repo_files(model_id, repo_python, revision)
         files.extend(downloaded)
         if files and f"hf://{model_id}" not in labels:
             labels.append(f"hf://{model_id}")
@@ -443,6 +450,7 @@ def resolve_source_files(
             fallback = _download_repo_files(
                 model_id,
                 [name.format(model_type=model_type) for name in MODELING_CANDIDATES],
+                revision,
             )
             files.extend(fallback)
             if fallback and f"hf://{model_id}" not in labels:

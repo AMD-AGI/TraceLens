@@ -12,8 +12,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from TraceLens.ModelUtils.model_pins import pinned_revision
-
 SKIP_CONFIG_PARTS = {
     "tokenizer",
     "processor",
@@ -173,24 +171,25 @@ def _paths_from_model_index(config: dict[str, Any]) -> list[str]:
     return paths
 
 
-def _list_repo_config_paths(model_id: str) -> list[str]:
+def _list_repo_config_paths(model_id: str, revision: str | None = None) -> list[str]:
     from huggingface_hub import list_repo_files
 
     return [
         path
-        for path in list_repo_files(model_id, revision=pinned_revision(model_id))
+        for path in list_repo_files(model_id, revision=revision)
         if path.endswith("config.json")
     ]
 
 
-def _download_config(model_id: str, config_path: str) -> Path:
+def _download_config(
+    model_id: str, config_path: str, revision: str | None = None
+) -> Path:
     from huggingface_hub import hf_hub_download
 
-    # The config has to come from the same revision as the source: a config read
-    # at ``main`` can name dimensions the pinned modeling code does not have.
-    return Path(
-        hf_hub_download(model_id, config_path, revision=pinned_revision(model_id))
-    )
+    # When a revision is given the config must come from it, not from the head:
+    # a config read at ``main`` can name dimensions that revision's modeling
+    # code does not have.
+    return Path(hf_hub_download(model_id, config_path, revision=revision))
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -202,20 +201,22 @@ def _local_config_candidates(root: Path) -> list[Path]:
     return sorted(root.glob("**/config.json"))
 
 
-def discover_remote_config(model_id: str) -> tuple[dict[str, Any], str]:
+def discover_remote_config(
+    model_id: str, revision: str | None = None
+) -> tuple[dict[str, Any], str]:
     """Find and load the best config.json for a remote HF checkpoint."""
     candidates: list[str] = []
 
     try:
         candidates.append("config.json")
-        root_index = _download_config(model_id, "model_index.json")
+        root_index = _download_config(model_id, "model_index.json", revision)
         index_config = _load_json(root_index)
         candidates.extend(_paths_from_model_index(index_config))
     except Exception:
         pass
 
     try:
-        repo_configs = _list_repo_config_paths(model_id)
+        repo_configs = _list_repo_config_paths(model_id, revision)
     except Exception as exc:
         raise FileNotFoundError(
             f"Could not list files for Hugging Face checkpoint `{model_id}`: {exc}"
@@ -233,7 +234,7 @@ def discover_remote_config(model_id: str) -> tuple[dict[str, Any], str]:
 
     for path in candidates:
         try:
-            local_path = _download_config(model_id, path)
+            local_path = _download_config(model_id, path, revision)
             config = _load_json(local_path)
             score = _score_config_content(config, path)
             ranked.append((score, path, config))
@@ -286,8 +287,13 @@ def load_checkpoint_config(
     checkpoint: str | Path,
     *,
     config_path: str | None = None,
+    revision: str | None = None,
 ) -> tuple[dict[str, Any], str]:
-    """Load config for a HF checkpoint id, optional subpath, or local directory."""
+    """Load config for a HF checkpoint id, optional subpath, or local directory.
+
+    ``revision`` reads a hub checkpoint at one fixed commit; unset, it reads the
+    head, which is what an export wants.
+    """
     if config_path:
         path = Path(config_path)
         checkpoint_path = Path(checkpoint)
@@ -301,7 +307,7 @@ def load_checkpoint_config(
         if checkpoint_path.is_dir():
             resolved = checkpoint_path / config_path
         else:
-            resolved = _download_config(str(checkpoint), config_path)
+            resolved = _download_config(str(checkpoint), config_path, revision)
 
         if not resolved.is_file():
             raise FileNotFoundError(f"Config path not found: {config_path}")
@@ -321,9 +327,9 @@ def load_checkpoint_config(
         return discover_local_config(path)
 
     try:
-        downloaded = _download_config(str(checkpoint), "config.json")
+        downloaded = _download_config(str(checkpoint), "config.json", revision)
         config = _load_json(downloaded)
         label = f"hf://{checkpoint}/config.json"
         return normalize_config(config, source_label=label), label
     except Exception:
-        return discover_remote_config(str(checkpoint))
+        return discover_remote_config(str(checkpoint), revision)

@@ -227,12 +227,31 @@ def _probe_command(checkpoint: str | Path) -> list[str]:
     ]
 
 
+def _is_installed(target: Path, requirement: str) -> bool:
+    """Whether ``name==version`` is already present in *target*.
+
+    Read off the installed ``.dist-info`` directory rather than by importing:
+    the point is to avoid reinstalling what is already there, and some of these
+    libraries cannot be imported in this interpreter at all.
+    """
+    name, _, version = requirement.partition("==")
+    if not version:
+        return False
+    normalized = re.sub(r"[-_.]+", "_", name.strip()).lower()
+    for entry in target.glob("*.dist-info"):
+        dist, _, dist_version = entry.name[: -len(".dist-info")].rpartition("-")
+        if re.sub(r"[-_.]+", "_", dist).lower() == normalized:
+            return dist_version == version.strip()
+    return False
+
+
 def ensure_model_dependencies(
     checkpoint: str | Path,
     version: str,
     *,
     root: Path | None = None,
     probe: bool = True,
+    extra_packages: list[str] | None = None,
 ) -> Path | None:
     """Directory holding the code ``checkpoint`` needs, for ``PYTHONPATH``.
 
@@ -265,6 +284,21 @@ def ensure_model_dependencies(
             )
             return None
         stamp.write_text(version, encoding="utf-8")
+
+    # Pinned libraries go in BEFORE the probe, so the probe has nothing left to
+    # discover and cannot fetch an unpinned latest in their place. Only the ones
+    # not already present at the requested version are installed, so an env that
+    # already satisfies the pins needs no network at all. An export names none of
+    # these and lets the probe choose -- that is how it picks up a model's
+    # current requirements.
+    for package in extra_packages or ():
+        if _is_installed(target, package):
+            continue
+        _log.info("Installing pinned %s into %s", package, target)
+        ok, output = _pip_install(target, [package], deps=True)
+        if not ok:
+            _log.warning("Installing %s failed: %s", package, output[-800:])
+            return None
 
     if not probe:
         return target

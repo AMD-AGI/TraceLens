@@ -151,7 +151,7 @@ def test_resolve_source_files_uses_cached_hub_snapshot(tmp_path: Path, monkeypat
     )
     monkeypatch.setattr(
         "TraceLens.ModelUtils.source._hub_snapshot_root",
-        lambda model_id: snapshot,
+        lambda model_id, revision=None: snapshot,
     )
 
     files, labels = resolve_source_files(
@@ -179,14 +179,16 @@ def _stub_upstream_transformers(
 
     monkeypatch.setattr("TraceLens.ModelUtils.source.fetch_github_source", fake_fetch)
     monkeypatch.setattr(
-        "TraceLens.ModelUtils.source._hub_snapshot_root", lambda model_id: None
+        "TraceLens.ModelUtils.source._hub_snapshot_root",
+        lambda model_id, revision=None: None,
     )
     monkeypatch.setattr(
-        "TraceLens.ModelUtils.source._list_repo_python_files", lambda model_id: []
+        "TraceLens.ModelUtils.source._list_repo_python_files",
+        lambda model_id, revision=None: [],
     )
     monkeypatch.setattr(
         "TraceLens.ModelUtils.source._download_repo_files",
-        lambda model_id, filenames: [],
+        lambda model_id, filenames, revision=None: [],
     )
     # Decouple from whichever transformers version happens to be installed: these
     # tests exercise the "not shipped locally, fall back to GitHub" path regardless
@@ -247,7 +249,8 @@ def test_resolve_source_files_keeps_checkpoint_modeling_code(tmp_path, monkeypat
     )
     requested = _stub_upstream_transformers(monkeypatch, tmp_path, {"custom"})
     monkeypatch.setattr(
-        "TraceLens.ModelUtils.source._hub_snapshot_root", lambda model_id: snapshot
+        "TraceLens.ModelUtils.source._hub_snapshot_root",
+        lambda model_id, revision=None: snapshot,
     )
 
     files, _labels = resolve_source_files("acme/custom", {"model_type": "custom"})
@@ -270,7 +273,8 @@ def test_resolve_source_files_orders_modeling_before_config_helpers(
     )
     _stub_upstream_transformers(monkeypatch, tmp_path, {"minimax_m3_vl"})
     monkeypatch.setattr(
-        "TraceLens.ModelUtils.source._hub_snapshot_root", lambda model_id: snapshot
+        "TraceLens.ModelUtils.source._hub_snapshot_root",
+        lambda model_id, revision=None: snapshot,
     )
 
     files, _labels = resolve_source_files(

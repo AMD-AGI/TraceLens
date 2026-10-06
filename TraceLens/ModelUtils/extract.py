@@ -173,9 +173,12 @@ def load_config_dict(
     checkpoint: str | Path,
     *,
     config_path: str | None = None,
+    revision: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Load config.json from a HF checkpoint, subpath, or local directory."""
-    return load_checkpoint_config(checkpoint, config_path=config_path)
+    return load_checkpoint_config(
+        checkpoint, config_path=config_path, revision=revision
+    )
 
 
 def _resolve_checkpoint(
@@ -183,9 +186,10 @@ def _resolve_checkpoint(
     checkpoint: str | Path | None,
     github: str | None,
     config_path: str | None = None,
+    revision: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     if checkpoint is not None:
-        return load_config_dict(checkpoint, config_path=config_path)
+        return load_config_dict(checkpoint, config_path=config_path, revision=revision)
 
     if github:
         ref = parse_github_url(github)
@@ -1939,8 +1943,14 @@ def load_architecture(
     basic_ops: BasicOpFilter | None = None,
     all_tensor_ops: bool = False,
     allow_github_repos: list[str] | None = None,
+    revision: str | None = None,
 ) -> ArchitectureSpec:
-    """Load architecture metadata from an HF checkpoint and/or GitHub modeling code."""
+    """Load architecture metadata from an HF checkpoint and/or GitHub modeling code.
+
+    ``revision`` reads a hub checkpoint at one fixed commit. Unset -- what an
+    export does -- the checkpoint resolves to its head, so the model's newest
+    code is what gets drawn.
+    """
     from TraceLens.ModelUtils.source_policy import SourcePolicy, set_source_policy
 
     set_source_policy(SourcePolicy.from_env_and_cli(allow_github_repos))
@@ -1949,6 +1959,7 @@ def load_architecture(
         checkpoint=resolved_checkpoint,
         github=github,
         config_path=config_path,
+        revision=revision,
     )
     code_analysis: CodeAnalysis | None = None
     code_labels: list[str] = []
@@ -1959,6 +1970,7 @@ def load_architecture(
             config,
             code_path=code_path,
             github=github,
+            revision=revision,
         )
         if source_files:
             from TraceLens.ModelUtils.kernel_pipeline import register_kernel_search_root

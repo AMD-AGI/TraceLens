@@ -37,28 +37,29 @@ import pytest
 _BUILDER = Path(__file__).with_name("build_graph_in_env.py")
 
 
-def _build_here(model_id: str) -> list[dict]:
+def _build_here(model_id: str, revision: str | None = None) -> list[dict]:
     from TraceLens.ModelUtils.loader import load_model_spec
     from TraceLens.ModelUtils.shape_inference import ShapeInferencer
     from TraceLens.Visualizer.model_explorer_export.merge import (
         build_merged_model_graph,
     )
 
-    spec = load_model_spec(model_id, detailed=True)
+    spec = load_model_spec(model_id, detailed=True, revision=revision)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     return graph["nodes"]
 
 
-def _build_in_env(model_id: str, reason: str) -> list[dict]:
+def _build_in_env(model_id: str, reason: str, pin) -> list[dict]:
     from TraceLens.ModelUtils import model_env
 
-    version = model_env.required_transformers_version(model_id)
-    if version is None:
-        pytest.skip(
-            f"{model_id} needs different model code ({reason}) but its config "
-            "names no transformers version to pin"
-        )
-    target = model_env.ensure_model_dependencies(model_id, version)
+    # The pin names the versions these assertions were written against, rather
+    # than whatever the checkpoint's config happens to say or the probe happens
+    # to find. An export does the opposite and takes the model's current
+    # requirements -- that is the point of the split.
+    version = pin.transformers
+    target = model_env.ensure_model_dependencies(
+        model_id, version, extra_packages=list(pin.packages)
+    )
     if target is None:
         pytest.skip(
             f"could not provision transformers=={version} for {model_id}; "
@@ -68,7 +69,7 @@ def _build_in_env(model_id: str, reason: str) -> list[dict]:
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "nodes.json"
         result = subprocess.run(
-            [sys.executable, str(_BUILDER), model_id, str(out)],
+            [sys.executable, str(_BUILDER), model_id, str(out), pin.revision],
             env=model_env._child_env(target),
             capture_output=True,
             text=True,
@@ -81,12 +82,31 @@ def _build_in_env(model_id: str, reason: str) -> list[dict]:
         return json.loads(out.read_text())
 
 
+def _require_pinned_transformers(model_id: str, pin) -> None:
+    """Skip rather than assert on a graph read from a different transformers.
+
+    A natively-supported model is read from the INSTALLED package, so its graph
+    moves with that package just as surely as with the checkpoint. A test cannot
+    re-exec itself into another release, so the honest thing is to say plainly
+    that it would be describing different source.
+    """
+    import transformers
+
+    installed = getattr(transformers, "__version__", "")
+    if installed != pin.transformers:
+        pytest.skip(
+            f"{model_id} is pinned to transformers=={pin.transformers} but "
+            f"{installed} is installed; this graph would be read from different "
+            "source than these assertions describe"
+        )
+
+
 @pytest.fixture(scope="session")
 def model_graph_nodes():
     """``nodes(model_id)`` -> merged-graph nodes, built where the model belongs."""
     pytest.importorskip("huggingface_hub")
     from TraceLens.ModelUtils import model_env
-    from TraceLens.ModelUtils.model_pins import is_pinned
+    from model_pins import pin_for
 
     cache: dict[str, list[dict]] = {}
 
@@ -94,14 +114,14 @@ def model_graph_nodes():
         # Every graph test funnels through here, so this is where an unpinned
         # model is caught. Asserting on a floating checkpoint means asserting on
         # whatever its repo holds today: when DeepSeek-V4-Flash published two
-        # extra directories, 20 tests went red for a reason that was nothing to
-        # do with this repo and took a while to tell apart from a real
+        # extra directories, 20 tests went red for a reason that had nothing to
+        # do with this repo, and that took a while to tell apart from a real
         # regression.
-        assert is_pinned(model_id), (
-            f"{model_id} is not pinned. Graph assertions describe one revision "
-            "of a model's source; add its commit SHA to "
-            "TraceLens/ModelUtils/model_pins.py so this suite reads the same "
-            "code every run."
+        pin = pin_for(model_id)
+        assert pin is not None, (
+            f"{model_id} is not pinned. A graph assertion describes one revision "
+            "of one model's source; add its commit SHA and library versions to "
+            "tests/model_pins.py so this suite reads the same code every run."
         )
         if model_id not in cache:
             # Already inside a provisioned environment (the exporter's own
@@ -109,14 +129,15 @@ def model_graph_nodes():
             import os
 
             if os.environ.get(model_env.REEXEC_ENV_FLAG):
-                cache[model_id] = _build_here(model_id)
-            else:
+                cache[model_id] = _build_here(model_id, pin.revision)
+            elif pin.own_environment:
                 reason = model_env.detect_env_mismatch(model_id)
-                cache[model_id] = (
-                    _build_here(model_id)
-                    if reason is None
-                    else _build_in_env(model_id, reason)
+                cache[model_id] = _build_in_env(
+                    model_id, reason or "pinned to its own environment", pin
                 )
+            else:
+                _require_pinned_transformers(model_id, pin)
+                cache[model_id] = _build_here(model_id, pin.revision)
         return cache[model_id]
 
     return nodes

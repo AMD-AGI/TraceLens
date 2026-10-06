@@ -457,15 +457,21 @@ def test_resolve_hf_download_and_candidate_fallback(tmp_path: Path, monkeypatch)
     fallback = tmp_path / "modeling_demo.py"
     downloaded.write_text("", encoding="utf-8")
     fallback.write_text("", encoding="utf-8")
-    monkeypatch.setattr(source, "_hub_snapshot_root", lambda model_id: None)
+    monkeypatch.setattr(
+        source, "_hub_snapshot_root", lambda model_id, revision=None: None
+    )
     monkeypatch.setattr(source, "_transformers_modeling_path", lambda model_type: None)
-    monkeypatch.setattr(source, "_list_repo_python_files", lambda model_id: [])
+    monkeypatch.setattr(
+        source, "_list_repo_python_files", lambda model_id, revision=None: []
+    )
     monkeypatch.setattr(
         source, "_transformers_github_modeling_file", lambda *args, **kwargs: None
     )
     calls: list[list[str]] = []
 
-    def download(model_id: str, names: list[str]) -> list[Path]:
+    def download(
+        model_id: str, names: list[str], revision: str | None = None
+    ) -> list[Path]:
         calls.append(names)
         if names == ["modeling_demo.py", "modeling.py"]:
             return [fallback]
@@ -1402,16 +1408,22 @@ def test_source_import_fallbacks_and_resolve_gaps(tmp_path: Path, monkeypatch):
 
     auto = tmp_path / "modeling_auto.py"
     auto.write_text("", encoding="utf-8")
-    monkeypatch.setattr(source, "_hub_snapshot_root", lambda model_id: None)
+    monkeypatch.setattr(
+        source, "_hub_snapshot_root", lambda model_id, revision=None: None
+    )
     monkeypatch.setattr(source, "_transformers_modeling_path", lambda model_type: None)
-    monkeypatch.setattr(source, "_list_repo_python_files", lambda model_id: [])
+    monkeypatch.setattr(
+        source, "_list_repo_python_files", lambda model_id, revision=None: []
+    )
     monkeypatch.setattr(
         source, "_transformers_github_modeling_file", lambda *args, **kwargs: None
     )
     monkeypatch.setattr(
         source,
         "_download_repo_files",
-        lambda model_id, names: [auto] if names == ["modeling_auto.py"] else [],
+        lambda model_id, names, revision=None: (
+            [auto] if names == ["modeling_auto.py"] else []
+        ),
     )
     files, labels = source.resolve_source_files(
         "org/auto",

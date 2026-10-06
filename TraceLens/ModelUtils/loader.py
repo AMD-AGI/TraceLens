@@ -48,6 +48,7 @@ def load_model_spec(
     basic_ops: BasicOpFilter | None = None,
     require_code: bool = False,
     allow_github_repos: list[str] | None = None,
+    revision: str | None = None,
 ) -> ArchitectureSpec:
     """Load architecture metadata for Model Explorer export.
 
@@ -77,6 +78,7 @@ def load_model_spec(
         # `gate.to(float32)` leaves the sigmoid that reads it with no producer.
         all_tensor_ops=detailed,
         allow_github_repos=allow_github_repos,
+        revision=revision,
     )
 
     if require_code and analyze_code and not spec.class_registry:

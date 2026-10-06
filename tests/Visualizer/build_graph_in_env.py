@@ -10,7 +10,7 @@ Run as a script, so a test can build a model inside the environment that model's
 own code needs rather than in whatever interpreter pytest happens to be. See
 ``tests/Visualizer/conftest.py``.
 
-    python tests/Visualizer/build_graph_in_env.py <model-id> <out.json>
+    python tests/Visualizer/build_graph_in_env.py <model-id> <out.json> [revision]
 """
 
 from __future__ import annotations
@@ -21,6 +21,9 @@ import sys
 
 def main(argv: list[str]) -> int:
     model_id, out_path = argv[1], argv[2]
+    # The caller passes the revision these assertions were written against; a
+    # bare invocation reads the checkpoint's head, like an export does.
+    revision = argv[3] if len(argv) > 3 else None
 
     from TraceLens.ModelUtils.loader import load_model_spec
     from TraceLens.ModelUtils.shape_inference import ShapeInferencer
@@ -28,7 +31,7 @@ def main(argv: list[str]) -> int:
         build_merged_model_graph,
     )
 
-    spec = load_model_spec(model_id, detailed=True)
+    spec = load_model_spec(model_id, detailed=True, revision=revision)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     with open(out_path, "w") as handle:
         json.dump(graph["nodes"], handle, default=str)
