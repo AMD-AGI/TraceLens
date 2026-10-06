@@ -16,6 +16,7 @@ import re
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any, Literal
 
 _log = logging.getLogger(__name__)
@@ -2393,6 +2394,9 @@ def _inline_nested_free_functions(
     *,
     self_values: dict[str, Any],
     all_tensor_ops: bool,
+    class_nodes: Iterable[ast.AST] = (),
+    caller: ast.FunctionDef | None = None,
+    param_values: dict[str, Any] | None = None,
     _seen: frozenset[str] = frozenset(),
     _depth: int = 0,
 ) -> list[ForwardOperation]:
@@ -2444,18 +2448,33 @@ def _inline_nested_free_functions(
     for call_attr in nested_calls:
         name = _synthetic_call_function_name(call_attr)
         nested_func = module_functions[name]
+        bound = _nested_call_param_values(
+            nested_func, call_attr, caller, param_values or {}
+        )
+        nested_values = (
+            {
+                **_settled_param_defaults(nested_func, module_functions, class_nodes),
+                **bound,
+            }
+            if bound is not None
+            else {}
+        )
         nested = _forward_operations_from_forward(
             nested_func,
             self_values=self_values,
             all_tensor_ops=all_tensor_ops,
             module_functions=module_functions,
             is_free_function_body=True,
+            param_values=nested_values,
         )
         nested_ops = _inline_nested_free_functions(
             nested,
             module_functions,
             self_values=self_values,
             all_tensor_ops=all_tensor_ops,
+            class_nodes=class_nodes,
+            caller=nested_func,
+            param_values=nested_values,
             _seen=_seen | {name},
             _depth=_depth + 1,
         )
@@ -2568,6 +2587,7 @@ def _multi_op_free_functions(
     *,
     self_values: dict[str, Any],
     all_tensor_ops: bool,
+    class_nodes: Iterable[ast.AST] = (),
 ) -> tuple[
     dict[str, list[ForwardOperation]],
     dict[str, list[str]],
@@ -2618,18 +2638,25 @@ def _multi_op_free_functions(
         func = module_functions.get(name)
         if func is None:
             continue
+        # Filtered, never raw: a default is in force only if no visible caller
+        # overrides it and the function is not entered from unparsed code.
+        settled = _settled_param_defaults(func, module_functions, class_nodes)
         analysis = _forward_operations_from_forward(
             func,
             self_values=self_values,
             all_tensor_ops=all_tensor_ops,
             module_functions=module_functions,
             is_free_function_body=True,
+            param_values=settled,
         )
         operations = _inline_nested_free_functions(
             analysis,
             module_functions,
             self_values=self_values,
             all_tensor_ops=all_tensor_ops,
+            class_nodes=class_nodes,
+            caller=func,
+            param_values=settled,
             _seen=frozenset({name}),
         )
         # A free function whose body reduces to a *single* traced op (``index_first_axis``:
@@ -3829,8 +3856,155 @@ def _literal_dtype_token(node: ast.AST) -> str | None:
     return None
 
 
+def _literal_param_defaults(func: ast.FunctionDef) -> dict[str, Any]:
+    """Parameters whose default is a plain literal, to that literal.
+
+    Only literals: anything computed is a value this analysis cannot stand behind.
+    """
+    defaults: dict[str, Any] = {}
+    positional = func.args.posonlyargs + func.args.args
+    paired = positional[len(positional) - len(func.args.defaults) :]
+    for arg, default in zip(paired, func.args.defaults):
+        if isinstance(default, ast.Constant):
+            defaults[arg.arg] = default.value
+    for arg, default in zip(func.args.kwonlyargs, func.args.kw_defaults):
+        if isinstance(default, ast.Constant):
+            defaults[arg.arg] = default.value
+    return defaults
+
+
+def _call_target_name(call: ast.Call) -> str | None:
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _settled_param_defaults(
+    func: ast.FunctionDef,
+    module_functions: dict[str, ast.FunctionDef] | None,
+    class_nodes: Iterable[ast.AST] = (),
+) -> dict[str, Any]:
+    """Defaults that are actually in force, because nothing overrides them.
+
+    A default is only the value in force if no caller supplies one. The one call
+    site being inlined cannot establish that, so every visible caller is asked --
+    module-level functions AND class methods, since a free function is most often
+    called from a ``forward``.
+
+    Two refusals, both learned the hard way:
+
+    * a ``f(**kwargs)`` call can supply any parameter without naming it, so a
+      function reached that way settles NOTHING. ``create_causal_mask`` is called
+      exactly once, as ``create_causal_mask(**mask_kwargs)``;
+    * a function with no visible caller at all is entered from code this analysis
+      never parsed, so its defaults say nothing about what it is really given.
+
+    Trusting ``create_causal_mask``'s ``position_ids=None`` resolved
+    ``if position_ids is not None`` to False and deleted
+    ``find_packed_sequence_indices`` from the graph -- live computation removed
+    because a default looked settled. Drawing a dead arm is the lesser error.
+    """
+    defaults = _literal_param_defaults(func)
+    if not defaults:
+        return {}
+    sources: list[ast.AST] = list((module_functions or {}).values())
+    sources.extend(class_nodes)
+    names = [arg.arg for arg in func.args.posonlyargs + func.args.args]
+    passed: set[str] = set()
+    callers = 0
+    for source in sources:
+        for node in ast.walk(source):
+            if not isinstance(node, ast.Call) or _call_target_name(node) != func.name:
+                continue
+            callers += 1
+            if any(keyword.arg is None for keyword in node.keywords):
+                return {}
+            passed.update(names[: len(node.args)])
+            passed.update(
+                keyword.arg for keyword in node.keywords if keyword.arg is not None
+            )
+    if not callers:
+        return {}
+    return {name: value for name, value in defaults.items() if name not in passed}
+
+
+def _bound_call_param_values(
+    func: ast.FunctionDef, call: ast.Call, caller_values: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Callee parameter values settled by THIS call site, or ``None`` if none can be.
+
+    An argument that is a literal, or a name the caller already settled, carries
+    its value across: ``get_vision_attention_seqlens`` defaults ``merge_temporal``
+    to False and forwards it by keyword, which is how the branch inside
+    ``get_vision_cu_seqlens`` becomes decidable two frames from the default.
+    """
+    if any(keyword.arg is None for keyword in call.keywords):
+        return None
+    names = [arg.arg for arg in func.args.posonlyargs + func.args.args]
+    bound: dict[str, Any] = {}
+
+    def resolve(value: ast.expr) -> Any:
+        if isinstance(value, ast.Constant):
+            return value.value
+        if isinstance(value, ast.Name) and value.id in caller_values:
+            return caller_values[value.id]
+        return _UNKNOWN
+
+    for index, arg in enumerate(call.args):
+        if index >= len(names):
+            break
+        settled = resolve(arg)
+        if settled is not _UNKNOWN:
+            bound[names[index]] = settled
+    for keyword in call.keywords:
+        if keyword.arg is None:
+            continue
+        settled = resolve(keyword.value)
+        if settled is not _UNKNOWN:
+            bound[keyword.arg] = settled
+    return bound
+
+
+def _synthetic_call_line(call_attr: str) -> int | None:
+    """Source line a traced free-function synthetic attr was called from."""
+    match = re.search(r"_l(\d+)_", call_attr)
+    return int(match.group(1)) if match else None
+
+
+def _nested_call_param_values(
+    callee: ast.FunctionDef,
+    call_attr: str,
+    caller: ast.FunctionDef | None,
+    caller_values: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Callee parameter values this particular call site settles.
+
+    The synthetic attr carries the call's line, so the right call is found by
+    position rather than by taking the first call to that name.
+    """
+    if caller is None:
+        return None
+    line = _synthetic_call_line(call_attr)
+    name = _synthetic_call_function_name(call_attr)
+    for node in ast.walk(caller):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != name:
+            continue
+        if line is not None and node.lineno != line:
+            continue
+        return _bound_call_param_values(callee, node, caller_values)
+    return None
+
+
 def _config_value(
-    node: ast.AST, config: dict[str, Any], self_values: dict[str, Any]
+    node: ast.AST,
+    config: dict[str, Any],
+    self_values: dict[str, Any],
+    param_values: dict[str, Any] | None = None,
 ) -> Any:
     """Evaluate the small literal/config expression subset used by model constructors."""
     if isinstance(node, ast.Constant):
@@ -3838,6 +4012,8 @@ def _config_value(
     if isinstance(node, ast.Name):
         if node.id == "config":
             return config
+        if param_values is not None and node.id in param_values:
+            return param_values[node.id]
         return _UNKNOWN
     if isinstance(node, ast.Attribute):
         if isinstance(node.value, ast.Name) and node.value.id == "config":
@@ -3874,17 +4050,17 @@ def _config_value(
             # arithmetic/comparison folding; surface it as unknown here so the rest
             # of ``_config_value`` never operates on the sentinel object.
             return _UNKNOWN if resolved is _SCALAR_SETTING else resolved
-        base = _config_value(node.value, config, self_values)
+        base = _config_value(node.value, config, self_values, param_values)
         if isinstance(base, dict):
             return base.get(node.attr, _UNKNOWN)
         return _UNKNOWN
     if isinstance(node, ast.Call):
         name = _expr_name(node.func)
         if name == "getattr" and len(node.args) >= 2:
-            base = _config_value(node.args[0], config, self_values)
-            key = _config_value(node.args[1], config, self_values)
+            base = _config_value(node.args[0], config, self_values, param_values)
+            key = _config_value(node.args[1], config, self_values, param_values)
             default = (
-                _config_value(node.args[2], config, self_values)
+                _config_value(node.args[2], config, self_values, param_values)
                 if len(node.args) >= 3
                 else _UNKNOWN
             )
@@ -3892,8 +4068,8 @@ def _config_value(
                 return base.get(key, default)
         return _UNKNOWN
     if isinstance(node, ast.BinOp):
-        left = _config_value(node.left, config, self_values)
-        right = _config_value(node.right, config, self_values)
+        left = _config_value(node.left, config, self_values, param_values)
+        right = _config_value(node.right, config, self_values, param_values)
         if left is _UNKNOWN or right is _UNKNOWN:
             return _UNKNOWN
         try:
@@ -3911,10 +4087,13 @@ def _config_value(
             return _UNKNOWN
         return _UNKNOWN
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        value = _config_value(node.operand, config, self_values)
+        value = _config_value(node.operand, config, self_values, param_values)
         return not value if value is not _UNKNOWN else _UNKNOWN
     if isinstance(node, ast.BoolOp):
-        values = [_config_value(value, config, self_values) for value in node.values]
+        values = [
+            _config_value(value, config, self_values, param_values)
+            for value in node.values
+        ]
         if isinstance(node.op, ast.And):
             if any(value is False for value in values):
                 return False
@@ -3932,9 +4111,10 @@ def _config_value(
                 else _UNKNOWN
             )
     if isinstance(node, ast.Compare):
-        left = _config_value(node.left, config, self_values)
+        left = _config_value(node.left, config, self_values, param_values)
         comparators = [
-            _config_value(item, config, self_values) for item in node.comparators
+            _config_value(item, config, self_values, param_values)
+            for item in node.comparators
         ]
         if left is _UNKNOWN or any(item is _UNKNOWN for item in comparators):
             return _UNKNOWN
@@ -4393,6 +4573,7 @@ class _ForwardOperationExtractor:
         submodule_attrs: frozenset[str] | None = None,
         class_methods: dict[str, ast.FunctionDef] | None = None,
         is_free_function_body: bool = False,
+        param_values: dict[str, Any] | None = None,
     ) -> None:
         self.self_values = self_values
         self.all_tensor_ops = all_tensor_ops
@@ -4466,6 +4647,10 @@ class _ForwardOperationExtractor:
         # resize an axis to the folded width instead of aliasing through, and is
         # kept a superset of the names in ``host_scalar_vars`` that resolve.
         self.host_scalar_values: dict[str, int] = {}
+        # Parameters whose value is settled before this body runs -- a default
+        # nothing overrides, or a literal the call site passed. A branch on one
+        # has a known outcome, so only the live arm is emitted.
+        self.param_values: dict[str, Any] = dict(param_values or {})
         # Locals bound to a literal ``torch.<dtype>``. A call given ``dtype=dtype``
         # names a local, and the local is where the answer is.
         self.local_dtypes: dict[str, str] = {}
@@ -7189,7 +7374,9 @@ class _ForwardOperationExtractor:
                     # arm; the dead arm's ops never enter the sequence. Threading
                     # ``self.config`` (not ``{}``) lets ``self.config.<key>`` resolve
                     # even when ``__init__`` did not bind ``self.config`` locally.
-                    outcome = _config_value(stmt.test, self.config, self.self_values)
+                    outcome = _config_value(
+                        stmt.test, self.config, self.self_values, self.param_values
+                    )
                 if outcome is True:
                     self.statements(stmt.body, condition=condition)
                     if self._statements_terminate(stmt.body):
@@ -8195,6 +8382,7 @@ def _forward_operations_from_forward(
     module_functions: dict[str, ast.FunctionDef] | None = None,
     class_methods: dict[str, ast.FunctionDef] | None = None,
     is_free_function_body: bool = False,
+    param_values: dict[str, Any] | None = None,
 ) -> ForwardAnalysis:
     # The primary parameter is the main path, so only the extra ones can identify
     # which step consumes a side feed.
@@ -8209,6 +8397,7 @@ def _forward_operations_from_forward(
         submodule_attrs=_invoked_submodule_attrs(func.body),
         class_methods=class_methods,
         is_free_function_body=is_free_function_body,
+        param_values=param_values,
     )
     # An operation reading the primary parameter partway through the forward reads the
     # value arriving at the chain, not the previous step. Naming it lets those reads
@@ -8435,6 +8624,13 @@ class _ModelAstVisitor(ast.NodeVisitor):
             else {}
         )
         self.module_functions = dict(module_functions or {})
+        # Class bodies seen so far, so a free function's call sites can be found:
+        # it is most often called from a ``forward``, and a default is only in
+        # force if no caller supplies one.
+        self._seen_class_nodes: list[ast.AST] = []
+
+    def _class_nodes_for_call_sites(self) -> list[ast.AST]:
+        return list(self._seen_class_nodes)
 
     def _config_for_class(self, class_name: str) -> dict[str, Any]:
         """Config a class resolves ``self.<attr> = config.<attr>`` against.
@@ -8469,6 +8665,8 @@ class _ModelAstVisitor(ast.NodeVisitor):
         return self.config
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        if node not in self._seen_class_nodes:
+            self._seen_class_nodes.append(node)
         init_assignments: dict[str, str] = {}
         init_details: dict[str, list[str]] = {}
         init_assignment_options: dict[str, list[str]] = {}
@@ -8667,6 +8865,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     init_func, self._config_for_class(node.name)
                 ),
                 all_tensor_ops=self.all_tensor_ops,
+                # A free function is most often called from a ``forward``, so the
+                # class bodies are where its real call sites are.
+                class_nodes=self._class_nodes_for_call_sites(),
             )
             multi_op_methods.update(free_fn_methods)
             forward_step_return_producers.update(free_fn_return_producers)
