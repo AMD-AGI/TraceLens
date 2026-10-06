@@ -2749,7 +2749,18 @@ class ShapeInferencer:
             length = _arange_axis(details, arange_dims)
             return TensorSpec(shape=(length,), dtype="int64")
 
-        if operation_label in {"ones", "zeros", "empty", "full"}:
+        if operation_label in {
+            "ones",
+            "zeros",
+            "empty",
+            "full",
+            # ``x.new_empty(*sizes)`` and kin: the same thing spelled as a
+            # method, with the receiver supplying only dtype and device.
+            "new empty",
+            "new zeros",
+            "new ones",
+            "new full",
+        }:
             # Built from host scalars, so it must size its own axes rather than
             # inherit a neighbour's: ``torch.ones(B, S, dtype=torch.bool)``
             # reads no tensor operand at all. Each size resolves the way an
@@ -2778,12 +2789,17 @@ class ShapeInferencer:
                     shape=inputs[0].shape,
                     dtype=_constructed_dtype(details) or inputs[0].dtype,
                 )
-            shape = _constructed_shape(details, size_dims)
+            # A ``new_*`` constructor's receiver is its TEMPLATE: it supplies
+            # dtype and device, and the sizes may name its leading axes
+            # (``kv_nope.new_empty(*kv_nope.shape[:-1], head_dim)``).
+            template = inputs[0] if inputs else None
+            shape = _constructed_shape(details, size_dims, template)
             if shape is None:
                 return inputs[0] if inputs else self._activation_spec(dtype)
             return TensorSpec(
                 shape=shape,
-                dtype=_constructed_dtype(details) or dtype,
+                dtype=_constructed_dtype(details)
+                or (template.dtype if template is not None else dtype),
             )
 
         if operation_label == "flatten":
@@ -4908,8 +4924,56 @@ def _permute_shape(
     return tuple(source_shape[a] for a in resolved)
 
 
+_STARRED_SHAPE_SLICE_RE = re.compile(
+    r"^\*\s*[A-Za-z_][\w.]*\.shape\[(?P<slice>[^\]]*)\]$"
+)
+
+
+def _starred_shape_axes(
+    token: str, template: TensorSpec | None
+) -> list[DimExpr] | None:
+    """Axes a ``*<tensor>.shape[...]`` size argument stands for.
+
+    ``kv_nope.new_empty(*kv_nope.shape[:-1], head_dim)`` says "the same leading
+    axes as this tensor, then a new last one". The starred term is not one size
+    but however many the slice selects, so it has to be read off the template
+    tensor rather than folded to a scalar. ``None`` when the token is not that
+    form or no template is available.
+    """
+    match = _STARRED_SHAPE_SLICE_RE.match(token)
+    if match is None or template is None or not template.shape:
+        return None
+    text = match.group("slice").strip()
+    parts = text.split(":")
+    if len(parts) == 1:
+        index = _int_dim(parts[0])
+        if index is None:
+            return None
+        try:
+            return [template.shape[index]]
+        except IndexError:
+            return None
+    if len(parts) > 3:
+        return None
+    bounds: list[int | None] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            bounds.append(None)
+            continue
+        value = _int_dim(part)
+        if value is None:
+            return None
+        bounds.append(value)
+    while len(bounds) < 3:
+        bounds.append(None)
+    return list(template.shape[bounds[0] : bounds[1] : bounds[2]])
+
+
 def _constructed_shape(
-    details: Sequence[str], dims: dict[str, DimExpr]
+    details: Sequence[str],
+    dims: dict[str, DimExpr],
+    template: TensorSpec | None = None,
 ) -> tuple[DimExpr, ...] | None:
     """Axes of a tensor built from host-scalar sizes (``ones``/``zeros``/...).
 
@@ -4918,6 +4982,9 @@ def _constructed_shape(
     its bare identifier kept as a symbolic extent, never ``?``. No sizes at all
     means the call was written in a form this does not read, so report nothing
     rather than invent a rank.
+
+    *template* is the receiver of a ``new_*`` constructor, which such a call can
+    name its leading axes from (``*x.shape[:-1]``).
     """
     if (
         _detail_value(details, "size0") is None
@@ -4935,11 +5002,25 @@ def _constructed_shape(
         if token is None:
             break
         token = token.strip()
+        starred = _starred_shape_axes(token, template)
+        if starred is not None:
+            axes.extend(starred)
+            index += 1
+            continue
         as_int = _int_dim(token)
         if as_int is not None:
             axes.append(as_int)
         else:
             resolved = _resolve_dim_name(token, dims)
+            if resolved is None:
+                # A size can be arithmetic over config scalars rather than one
+                # name: GLM allocates its key buffer
+                # ``self.qk_nope_head_dim + self.qk_rope_head_dim`` wide. Keeping
+                # that as a symbolic string reports a head dim nothing can
+                # compare, which is how a key of 256 read as 512.
+                folded = _eval_dim_expr(token, dims)
+                if folded is not None:
+                    resolved = folded
             if resolved is not None:
                 axes.append(resolved)
             else:

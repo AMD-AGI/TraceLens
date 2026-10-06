@@ -3517,7 +3517,21 @@ LAYOUT_ONLY_LABELS = frozenset(_LAYOUT_ONLY_METHOD_LABELS.values()) | {
 }
 
 # Keyed on the trailing call name, so `x.mean(...)` and `torch.mean(x)` both resolve.
+# ``x.new_empty(*sizes)`` and kin build a NEW tensor of the given sizes, taking
+# only dtype/device from the receiver. GLM's ``expand_kv`` allocates its key
+# buffer that way (``kv_nope.new_empty(*kv_nope.shape[:-1], qk_nope + qk_rope)``)
+# and then fills it with two ``copy_`` calls. With no node for the allocation the
+# buffer had no producer at all, so the first ``copy_`` spine-fell onto the
+# preceding op -- the undivided ``kv_nope`` -- and the key reached sdpa at the
+# latent width (512) instead of the head width (256).
+_NEW_TENSOR_METHOD_LABELS = {
+    "new_empty": "New empty",
+    "new_zeros": "New zeros",
+    "new_ones": "New ones",
+    "new_full": "New full",
+}
 _TENSOR_METHOD_LABELS = {
+    **_NEW_TENSOR_METHOD_LABELS,
     # Reductions
     "amax": "Block max",
     "amin": "Block min",
@@ -3630,7 +3644,9 @@ _FUNCTION_LABELS = {
     "arange": "Arange",
 }
 # Tensor constructors whose POSITIONAL arguments are the sizes to build.
-_CONSTRUCTOR_SIZE_CALLS = frozenset({"ones", "zeros", "empty", "full"})
+_CONSTRUCTOR_SIZE_CALLS = frozenset(
+    {"ones", "zeros", "empty", "full", *_NEW_TENSOR_METHOD_LABELS}
+)
 
 # Reductions whose axis decides the output shape, so the axis travels with the node.
 _REDUCTION_METHODS = frozenset(

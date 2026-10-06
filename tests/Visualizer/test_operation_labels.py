@@ -232,17 +232,24 @@ def test_glm_attention_expand_kv_assembles_key_states_from_split_and_expand():
     op_nodes = [node for node in nodes if synthetic(node) is None]
 
     # ``expand_kv`` projects ``kv_nope`` through ``kv_b_proj``, splits it and
-    # expands ``k_rot``, then assembles ``key_states`` with two in-place
-    # ``copy_`` writes into slices. Those copies are the real consumers of the
-    # Split and Expand — without them modelled, both dangle with no consumer.
-    # This makes the block a genuine (branchy) assembly. ``kv_b_proj`` itself
-    # is a real, materialised submodule call (not a dangling reference), so it
-    # is the block's genuine first step.
+    # expands ``k_rot``, ALLOCATES the key buffer, then assembles it with two
+    # in-place ``copy_`` writes into slices. Those copies are the real consumers
+    # of the Split and Expand — without them modelled, both dangle with no
+    # consumer. This makes the block a genuine (branchy) assembly. ``kv_b_proj``
+    # itself is a real, materialised submodule call (not a dangling reference),
+    # so it is the block's genuine first step.
+    #
+    # The allocation (``kv_nope.new_empty(*kv_nope.shape[:-1], qk_nope +
+    # qk_rope)``) is an op like any other constructor. Leaving it out did not
+    # merely omit a box: ``key_states`` then had no producer, so the first
+    # ``copy_`` spine-fell onto the preceding op and the key reached sdpa at the
+    # latent width instead of the head width.
     assert [node["label"] for node in op_nodes] == [
         "Linear",
         "View",
         "Transpose",
         "Split",
+        "New empty",
         "Expand",
         "Copy",
         "Copy",
