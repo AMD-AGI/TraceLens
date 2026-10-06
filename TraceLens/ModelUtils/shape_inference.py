@@ -2132,6 +2132,7 @@ class ShapeInferencer:
                 node, input_specs, root=root, input_labels=input_labels
             )
             output = self._resolve_extent_dims(node, output, input_specs)
+            output = _with_explicit_dtype(node, output)
             self._tensor_specs[node_id] = output
             if node.metadata.get("synthetic") == "@input" and node.label:
                 self._boundary_shapes.setdefault(str(node.label), output.shape)
@@ -5141,6 +5142,22 @@ def _constructed_shape(
                 axes.append(bare)
         index += 1
     return tuple(axes) if axes else None
+
+
+def _with_explicit_dtype(node: ModelGraphNode, spec: TensorSpec) -> TensorSpec:
+    """Honour a ``dtype=`` the op was explicitly given.
+
+    An op handed a dtype produces it, whatever flowed in: GLM's
+    ``seqlens.cumsum(dim=0, dtype=torch.int32)`` is what keeps ``cu_seqlens`` an
+    int32 offset tensor. The rules that compute the shape reason about extents
+    and pass the input's dtype through, so the declared one is applied here, in
+    one place, rather than taught to each of them. Constructors already resolve
+    their own (:func:`_constructed_dtype`) and agree with this.
+    """
+    declared = _constructed_dtype(node.metadata.get("details") or ())
+    if declared is None or declared == spec.dtype:
+        return spec
+    return TensorSpec(shape=spec.shape, dtype=declared)
 
 
 def _constructed_dtype(details: Sequence[str]) -> str | None:

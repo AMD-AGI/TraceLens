@@ -71,10 +71,30 @@ class TestTheGridIsItsOwnInput:
 
 class TestCuSeqlens:
     def test_it_is_one_offset_per_segment_boundary(self, glm_nodes) -> None:
+        """``(num_segments + 1,) int32``, per the helper's own docstring.
+
+        The dtype is the ``cumsum(dim=0, dtype=dtype)`` the source asks for,
+        where ``dtype`` resolves through ``torch.jit.is_tracing()`` -- False in
+        the forward this export documents.
+        """
         tiles = _labelled(glm_nodes, "cu_seqlens")
         assert tiles, "no cu_seqlens tile in the graph"
         for node in tiles:
-            assert _shape(node) == "[Img + 1] int64", (node["id"], _shape(node))
+            assert _shape(node) == "[Img + 1] int32", (node["id"], _shape(node))
+
+    def test_no_cast_reports_a_device_as_its_dtype(self, glm_nodes) -> None:
+        """``x.to(inputs_embeds.device)`` moves a tensor; it casts nothing.
+
+        Recorded as a target dtype it made a pure device move look like a dtype
+        change, which then survived cast elision as a Cast that changes nothing.
+        """
+        offenders = [
+            (str(node["id"]), _attr(node, "details"))
+            for node in glm_nodes
+            if "dtype: " in _attr(node, "details")
+            and ".device" in _attr(node, "details").split("dtype: ", 1)[1]
+        ]
+        assert not offenders, offenders
 
     def test_no_node_in_the_chain_counts_patches(self, glm_nodes) -> None:
         """Pv is the patch axis; the grid chain must never report it."""

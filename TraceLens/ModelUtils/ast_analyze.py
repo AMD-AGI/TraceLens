@@ -3774,6 +3774,61 @@ _CONFIG_NESTED_ALIASES: dict[str, tuple[str, str]] = {
 }
 
 
+# Predicates that are definitionally False in the forward this analysis reads.
+# We document the EAGER forward, where the tracing/scripting/compiling guards all
+# take their else-arm. That is a fact about what is being modelled, not a guess
+# about what some caller might pass -- the distinction that makes resolving these
+# sound where inferring a parameter's value from its default was not.
+_EAGER_FALSE_PREDICATES = frozenset(
+    {"is_tracing", "is_scripting", "is_compiling", "is_exporting"}
+)
+
+
+def _is_eager_false_predicate(node: ast.AST) -> bool:
+    """True for ``torch.jit.is_tracing()`` and its siblings, called with no args."""
+    if not isinstance(node, ast.Call) or node.args or node.keywords:
+        return False
+    func = node.func
+    return isinstance(func, ast.Attribute) and func.attr in _EAGER_FALSE_PREDICATES
+
+
+def _names_a_device(node: ast.AST) -> bool:
+    """True when an expression names a DEVICE rather than a dtype.
+
+    ``x.to(inputs_embeds.device)``, ``x.to(torch.device("cuda"))`` and
+    ``x.to("cuda")`` all move a tensor without touching its dtype.
+    """
+    if isinstance(node, ast.Attribute) and node.attr == "device":
+        return True
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "device":
+            return True
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def _literal_dtype_token(node: ast.AST) -> str | None:
+    """The ``torch.<dtype>`` an expression names, or ``None``.
+
+    Resolves the one conditional this idiom actually uses:
+    ``grid_thw.dtype if torch.jit.is_tracing() else torch.int32`` is ``int32`` in
+    the forward we document. ``x.dtype`` names no dtype of its own and answers
+    ``None`` rather than reporting a dtype called "dtype".
+    """
+    if isinstance(node, ast.IfExp):
+        if _is_eager_false_predicate(node.test):
+            return _literal_dtype_token(node.orelse)
+        return None
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "torch"
+        and node.attr
+    ):
+        return f"torch.{node.attr}"
+    return None
+
+
 def _config_value(
     node: ast.AST, config: dict[str, Any], self_values: dict[str, Any]
 ) -> Any:
@@ -4411,6 +4466,9 @@ class _ForwardOperationExtractor:
         # resize an axis to the folded width instead of aliasing through, and is
         # kept a superset of the names in ``host_scalar_vars`` that resolve.
         self.host_scalar_values: dict[str, int] = {}
+        # Locals bound to a literal ``torch.<dtype>``. A call given ``dtype=dtype``
+        # names a local, and the local is where the answer is.
+        self.local_dtypes: dict[str, str] = {}
         # Set while resolving the *base* of an in-place slice mutation
         # (``key_states[..., :n].copy_(src)``): that subscript is an lvalue, so the
         # range-slice must NOT materialise a resize ``Slice`` op — the base tensor
@@ -5166,6 +5224,25 @@ class _ForwardOperationExtractor:
         else:
             # A reassignment to a now-unresolvable value must not keep the stale int.
             self.host_scalar_values.pop(target.id, None)
+        resolved = _literal_dtype_token(value)
+        if resolved is not None:
+            self.local_dtypes[target.id] = resolved
+        else:
+            self.local_dtypes.pop(target.id, None)
+
+    def _dtype_token(self, value: ast.AST) -> str | None:
+        """The ``torch.<dtype>`` a ``dtype=`` argument names, following locals.
+
+        ``seqlens.cumsum(dim=0, dtype=dtype)`` spells a local, and the local is
+        where the answer is. Returns ``None`` -- say nothing -- for
+        ``dtype=x.dtype``, which merely points at another tensor's.
+        """
+        direct = _literal_dtype_token(value)
+        if direct is not None:
+            return direct
+        if isinstance(value, ast.Name):
+            return self.local_dtypes.get(value.id)
+        return None
 
     def _subscript_resize_dims(self, index: ast.AST) -> list[tuple[int, int]]:
         """Axes a bounded range-slice (``x[..., :output_width]``) resizes to a constant.
@@ -6187,6 +6264,19 @@ class _ForwardOperationExtractor:
                     details.append(f"{bound}: {ast.unparse(keyword.value)}")
                     if bound != "arange_step":
                         extent_bounds.append(keyword.value)
+        if call_name not in _CONSTRUCTOR_SIZE_CALLS:
+            # Any call given an explicit dtype produces that dtype, not its
+            # input's. ``seqlens.cumsum(dim=0, dtype=torch.int32)`` is how a
+            # cumulative sum of segment lengths stays an int32 offset tensor;
+            # without this the whole chain reports whatever flowed in. The
+            # constructor branch below records its own ``dtype:`` already.
+            for keyword in node.keywords:
+                if keyword.arg != "dtype":
+                    continue
+                resolved = self._dtype_token(keyword.value)
+                if resolved is not None:
+                    details.append(f"dtype: {resolved}")
+                break
         if call_name in _CONSTRUCTOR_SIZE_CALLS:
             # ``torch.ones(B, S, dtype=torch.bool)`` / ``torch.zeros((B, S))`` /
             # ``torch.full(size, value)``: the sizes are host scalars, so record
@@ -6246,12 +6336,26 @@ class _ForwardOperationExtractor:
             # cast back" idiom (`return output.type_as(x)`) restores. Without
             # this the downcast carries no dtype and float32 leaks downstream,
             # which in turn makes a genuine later upcast look like a no-op.
-            dtype = (
-                ast.unparse(node.args[0])
-                if node.args
-                else ("float32" if call_name == "float" else "")
+            # ``.to()`` moves a tensor between devices as readily as between
+            # dtypes, and ``x.to(inputs_embeds.device)`` names a DEVICE. Recording
+            # that as the target dtype makes a pure device move report whatever
+            # the device expression unparses to, and the cast-elision pass then
+            # keeps it as a dtype change it is not. An explicit ``dtype=`` wins;
+            # a positional naming a device means this call changes no dtype.
+            keyword_dtype = next(
+                (kw.value for kw in node.keywords if kw.arg == "dtype"), None
             )
-            details.append(f"dtype: {dtype}" if dtype else "dtype cast")
+            positional = node.args[0] if node.args else None
+            if keyword_dtype is not None:
+                details.append(f"dtype: {ast.unparse(keyword_dtype)}")
+            elif positional is not None and _names_a_device(positional):
+                pass
+            elif positional is not None:
+                details.append(f"dtype: {ast.unparse(positional)}")
+            elif call_name == "float":
+                details.append("dtype: float32")
+            else:
+                details.append("dtype cast")
         if (
             call_name.endswith("_")
             and isinstance(node.func, ast.Attribute)

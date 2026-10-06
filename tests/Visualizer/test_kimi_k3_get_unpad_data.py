@@ -64,7 +64,13 @@ def test_kimi_unpad_publishes_its_real_return_names(kimi_nodes):
 
 
 def test_kimi_cu_seqlens_is_one_longer_than_the_batch(kimi_nodes):
-    """``F.pad(cumsum(lens), (1, 0))`` prepends a zero, so the extent is B + 1."""
+    """``F.pad(cumsum(lens), (1, 0))`` prepends a zero, so the extent is B + 1.
+
+    int32, not int64: ``_get_unpad_data`` writes
+    ``torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32)`` and the flash
+    kernels it feeds require int32 offsets. This asserted int64 while the export
+    ignored a ``dtype=`` outside a tensor constructor.
+    """
     tiles = [
         n
         for n in kimi_nodes
@@ -77,7 +83,7 @@ def test_kimi_cu_seqlens_is_one_longer_than_the_batch(kimi_nodes):
         for a in n.get("attrs", [])
         if a.get("key") == "output_shape"
     }
-    assert shapes == {"[B + 1] int64"}, shapes
+    assert shapes == {"[B + 1] int32"}, shapes
 
 
 def test_kimi_index_select_shape_leads_with_nnz(kimi_nodes):
