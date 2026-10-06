@@ -149,6 +149,77 @@ def test_compare_perf_reports(
             shutil.rmtree(fn_root)
 
 
+# ─── Unit tests for --sheets all with missing kernel_summary ─────────────────
+
+
+def _make_minimal_report_dir(path, include_kernel_summary=False):
+    """Create a minimal CSV report directory for testing."""
+    os.makedirs(path, exist_ok=True)
+
+    import pandas as pd
+
+    pd.DataFrame({"type": ["compute", "idle"], "time ms": [100.0, 50.0]}).to_csv(
+        os.path.join(path, "gpu_timeline.csv"), index=False
+    )
+    pd.DataFrame(
+        {
+            "name": ["aten::mm", "aten::add"],
+            "total_direct_kernel_time_ms": [80.0, 20.0],
+            "total_direct_kernel_time_sum": [80000.0, 20000.0],
+            "Count": [10, 5],
+        }
+    ).to_csv(os.path.join(path, "ops_summary.csv"), index=False)
+
+    if include_kernel_summary:
+        pd.DataFrame(
+            {
+                "Kernel name": ["gemm_kernel", "add_kernel"],
+                "Kernel duration (µs)_sum": [80000.0, 20000.0],
+                "Kernel duration (µs)_mean": [8000.0, 4000.0],
+                "Kernel duration (µs)_count": [10, 5],
+                "Kernel duration (µs)_min": [7000.0, 3000.0],
+                "Kernel duration (µs)_max": [9000.0, 5000.0],
+                "Parent op category": ["GEMM", "BinaryElementwise"],
+            }
+        ).to_csv(os.path.join(path, "kernel_summary.csv"), index=False)
+
+
+def test_sheets_all_skips_missing_kernel_summary(tmp_path):
+    """--sheets all should skip kernel_summary when absent, not raise."""
+    r1 = str(tmp_path / "report1")
+    r2 = str(tmp_path / "report2")
+    _make_minimal_report_dir(r1)
+    _make_minimal_report_dir(r2)
+
+    results = generate_compare_perf_reports_pytorch(
+        reports=[r1, r2],
+        output=None,
+        output_csvs_dir=str(tmp_path / "compare_out"),
+        names=["base", "variant"],
+        sheets=["all"],
+    )
+    assert "gpu_timeline" in results
+    assert "ops_summary" in results
+    assert "kernel_summary" not in results
+
+
+def test_sheets_kernel_summary_explicit_raises_when_absent(tmp_path):
+    """--sheets kernel_summary should raise with helpful message when absent."""
+    r1 = str(tmp_path / "report1")
+    r2 = str(tmp_path / "report2")
+    _make_minimal_report_dir(r1)
+    _make_minimal_report_dir(r2)
+
+    with pytest.raises(ValueError, match="--enable_kernel_summary"):
+        generate_compare_perf_reports_pytorch(
+            reports=[r1, r2],
+            output=None,
+            output_csvs_dir=str(tmp_path / "compare_out"),
+            names=["base", "variant"],
+            sheets=["kernel_summary"],
+        )
+
+
 # ─── E2E compare report tests (generate reports from traces, then compare) ────
 
 E2E_TRACE_NAME = "Qwen_Qwen1.5-0.5B-Chat__1016005"
