@@ -39,6 +39,7 @@ from TraceLens.ModelUtils.extract import (
     architecture_section_trees,
     image_placeholder_token_id,
     vision_tower_component,
+    vision_tower_passthrough_inputs,
 )
 from TraceLens.ModelUtils.shape_inference import (
     _merge_flatten_dim,
@@ -5974,7 +5975,81 @@ def _append_vision_section(
         parent_class=None,
         inline_expansion=inline_expansion,
     )
+    _wire_vision_passthrough_inputs(nodes, spec=spec)
     return exits[0] if exits else None
+
+
+def _grid_descriptor_columns(nodes: list[dict[str, Any]], boundary_id: str) -> int:
+    """Columns a descriptor tensor has, read off the columns its readers take.
+
+    ``grid_thw[:, 0]``/``[:, 1]``/``[:, 2]`` is the only statement anywhere that
+    the grid is three wide, so the readers are the measurement: one more than the
+    largest column selected. Defaults to 1 -- a descriptor nothing fans out of is
+    a single column, never the activation's width.
+    """
+    widest = 0
+    for node in nodes:
+        if not any(
+            str(edge.get("sourceNodeId")) == boundary_id
+            for edge in node.get("incomingEdges", []) or []
+        ):
+            continue
+        raw = _node_attr(node, "details") or ""
+        for part in str(raw).split(";"):
+            part = part.strip()
+            if not part.startswith("select_index:"):
+                continue
+            for token in part.split(":", 1)[1].split(","):
+                try:
+                    index = int(token.strip())
+                except ValueError:
+                    continue
+                if index >= 0:
+                    widest = max(widest, index + 1)
+    return widest or 1
+
+
+def _wire_vision_passthrough_inputs(
+    nodes: list[dict[str, Any]], *, spec: ArchitectureSpec
+) -> None:
+    """Give a tower parameter the model passes straight in its own boundary.
+
+    A vision-tower forward parameter that the caller hands over untouched from
+    its OWN signature entered the model there; nothing computed it. With no
+    boundary of its own it docks on the tower's activation ``@input``, so GLM's
+    ``grid_thw`` reads the image patches -- and since the shape is then correctly
+    inherited from the wrong tensor, every node downstream agrees: the whole
+    ``cu_seqlens`` chain runs on the patch axis and reports one segment boundary
+    per patch (``[Pv + 1]``) in the activation's dtype.
+    """
+    passthrough = vision_tower_passthrough_inputs(spec)
+    if not passthrough:
+        return
+    for param, dtype in sorted(passthrough.items()):
+        docked = [
+            node
+            for node in nodes
+            if (node.get("label") or "") == param and _is_synthetic_input(node)
+        ]
+        if not docked:
+            continue
+        input_id = f"@vision_input:{param}"
+        boundary = _make_group_input_node(
+            input_id=input_id, label=param, namespace="", port_label=param
+        )
+        apply_shape_attrs(
+            boundary,
+            TensorSpec(
+                (
+                    Symbol.VISION_GRID.value,
+                    _grid_descriptor_columns(nodes, str(docked[0]["id"])),
+                ),
+                dtype or "int64",
+            ),
+        )
+        nodes.append(boundary)
+        for node in docked:
+            node["incomingEdges"] = [_source_edge((input_id, "0"), param)]
 
 
 def _attach_vision_language_combine(

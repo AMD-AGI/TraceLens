@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 from dataclasses import dataclass, field
@@ -1701,6 +1702,113 @@ def vision_tower_component(spec: ArchitectureSpec) -> BlockComponent | None:
         role="vision",
         label="Vision Tower",
         forward_order=0,
+    )
+
+
+_ANNOTATION_DTYPES = {"Long": "int64", "Int": "int32", "Bool": "bool"}
+
+
+def _annotation_dtype(annotation: ast.AST | None) -> str | None:
+    """Dtype named by a ``torch.LongTensor``-style annotation, else ``None``.
+
+    ``torch.Tensor`` says nothing about dtype and answers ``None``; the typed
+    aliases say it exactly. Optional annotations (``X | None``) unwrap first.
+    """
+    while isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        left, right = annotation.left, annotation.right
+        is_none = lambda node: isinstance(node, ast.Constant) and node.value is None
+        annotation = right if is_none(left) else left
+    name = None
+    if isinstance(annotation, ast.Attribute):
+        name = annotation.attr
+    elif isinstance(annotation, ast.Name):
+        name = annotation.id
+    if not name or not name.endswith("Tensor"):
+        return None
+    return _ANNOTATION_DTYPES.get(name[: -len("Tensor")])
+
+
+def vision_tower_passthrough_inputs(spec: ArchitectureSpec) -> dict[str, str | None]:
+    """Vision-tower forward parameters that are MODEL inputs, to their dtype.
+
+    The tower's first forward parameter is the activation -- the patch tensor the
+    patch-embed consumes. A further tensor parameter is handed in from outside the
+    tower, and when the caller passes it STRAIGHT from its own forward signature
+    (``self.visual(pixel_values, grid_thw=image_grid_thw)``) it entered the model
+    there and nothing computed it. Without a boundary of its own such a parameter
+    docks onto the activation, so GLM's ``grid_thw`` reads the image patches and
+    the whole ``cu_seqlens`` chain inherits the patch geometry.
+
+    A caller that DERIVES the argument first (the video path builds
+    ``flattened_video_grid_thw`` with a ``repeat_interleave``/``cat``) is not a
+    pass-through and is skipped -- that tensor has a real producer to draw.
+
+    Maps parameter name -> dtype named by the model-level annotation, or ``None``
+    when the annotation is the untyped ``torch.Tensor``.
+    """
+    component = vision_tower_component(spec)
+    if component is None:
+        return {}
+    tower = spec.class_registry.get(component.class_name)
+    forward = _forward_def(getattr(tower, "node", None))
+    if forward is None:
+        return {}
+    params = [arg.arg for arg in forward.args.args if arg.arg != "self"]
+    # The activation is the first parameter; only the rest can be passed in.
+    candidates = set(params[1:])
+    if not candidates:
+        return {}
+    resolved: dict[str, str | None] = {}
+    for structure in spec.class_registry.values():
+        node = getattr(structure, "node", None)
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for method in node.body:
+            if not isinstance(method, ast.FunctionDef):
+                continue
+            signature = {arg.arg: arg for arg in method.args.args}
+            for call in ast.walk(method):
+                if not isinstance(call, ast.Call):
+                    continue
+                func = call.func
+                if not (
+                    isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "self"
+                    and func.attr == component.attr_name
+                ):
+                    continue
+                bound: list[tuple[str, ast.expr]] = [
+                    (keyword.arg, keyword.value)
+                    for keyword in call.keywords
+                    if keyword.arg in candidates
+                ]
+                bound += [
+                    (params[index], arg)
+                    for index, arg in enumerate(call.args)
+                    if index < len(params) and params[index] in candidates
+                ]
+                for param, value in bound:
+                    # Straight from the caller's signature, or computed on the way?
+                    if not isinstance(value, ast.Name) or value.id not in signature:
+                        continue
+                    resolved.setdefault(
+                        param, _annotation_dtype(signature[value.id].annotation)
+                    )
+    return resolved
+
+
+def _forward_def(node: ast.AST | None) -> ast.FunctionDef | None:
+    """The ``forward`` method of a parsed class, if it has one."""
+    if not isinstance(node, ast.ClassDef):
+        return None
+    return next(
+        (
+            item
+            for item in node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
     )
 
 

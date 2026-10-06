@@ -5483,14 +5483,24 @@ class _ForwardOperationExtractor:
                 select_dims = _subscript_select_dims(node.slice)
                 if select_dims:
                     self._materialized_subscripts.add(id(node))
+                    select_details = [
+                        "select_dim: " + ", ".join(str(dim) for dim in select_dims)
+                    ]
+                    # Which column, not just which axis: the only record of how
+                    # wide a descriptor tensor is can be the set of columns its
+                    # readers take (see ``_subscript_select_indices``).
+                    select_indices = _subscript_select_indices(node.slice)
+                    if select_indices:
+                        select_details.append(
+                            "select_index: "
+                            + ", ".join(str(value) for value in select_indices)
+                        )
                     producer = self._emit(
                         node,
                         "Slice",
                         base_predecessors,
                         base_external,
-                        details=[
-                            "select_dim: " + ", ".join(str(dim) for dim in select_dims)
-                        ],
+                        details=select_details,
                     )
                     return producer, []
                 # A bounded range-slice to a config-derived constant width
@@ -8978,6 +8988,30 @@ def _subscript_select_dims(index: ast.AST) -> list[int]:
     return [
         -(len(tail) - offset) for offset, elt in enumerate(tail) if _is_int_index(elt)
     ]
+
+
+def _subscript_select_indices(index: ast.AST) -> list[int]:
+    """The POSITIONS an integer select takes, parallel to ``_subscript_select_dims``.
+
+    ``grid[:, 2]`` drops axis 1 (what ``_subscript_select_dims`` reports) and reads
+    column 2 (what this reports). The column matters when the selects are what tell
+    us how wide the tensor is: a grid descriptor read as ``grid[:, 0]``, ``[:, 1]``,
+    ``[:, 2]`` has three columns, and nothing else in the graph says so.
+    """
+    elts = index.elts if isinstance(index, ast.Tuple) else [index]
+    if len(elts) < 2:
+        return []
+    values: list[int] = []
+    for elt in elts:
+        if not _is_int_index(elt):
+            continue
+        node = elt
+        sign = 1
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            node, sign = node.operand, -1
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            values.append(sign * node.value)
+    return values
 
 
 def _subscript_inserts_axis(index: ast.AST) -> bool:

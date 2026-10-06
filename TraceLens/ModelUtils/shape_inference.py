@@ -27,6 +27,7 @@ from TraceLens.ModelUtils.extract import (
     find_vision_tower,
     vision_scoped_classes,
     vision_scoped_config,
+    vision_tower_passthrough_inputs,
 )
 from TraceLens.ModelUtils.ast_analyze import (
     analyze_source,
@@ -83,6 +84,11 @@ class Symbol(str, Enum):
     # image tokens (and the spatial-merge ``Pv/4`` reduction) are not conflated with
     # the language sequence they are scattered into at ``masked_scatter``.
     VISION_PATCH = "Pv"
+    # Images (or videos) in the batch -- the rows of a vision grid descriptor
+    # ``[Img, 3]``. Distinct from ``Pv``: one image contributes many patches, so
+    # counting the grid's rows in patches is what made GLM's ``cu_seqlens`` claim
+    # one segment boundary per patch.
+    VISION_GRID = "Img"
 
 
 # Config attribute names modeling code reads for each symbolic dimension. Registered as
@@ -1462,6 +1468,13 @@ class ShapeInferencer:
         self._vision_patch_flat: int | None = _vision_patch_flat_dim(
             self._vision_config
         )
+        # Frames whose input is a grid DESCRIPTOR the model was handed, not the
+        # activation flowing down the tower. Their ops have no predecessor inside
+        # the graph, so without this they fall back to the section activation and
+        # compute the patch geometry: GLM's ``cu_seqlens`` then reports one
+        # segment boundary per patch. Keyed by the frame's attr name, which every
+        # op id underneath carries. See ``_descriptor_frame_specs``.
+        self._descriptor_frames: dict[str, TensorSpec] = _descriptor_frame_specs(spec)
         self.module_dims = module_dims or ModuleDimRegistry.from_registry(
             spec.class_registry,
             config=spec.raw_config or {},
@@ -1779,6 +1792,43 @@ class ShapeInferencer:
                 best = (len(indices), forward.lineno, end_line)
         return best
 
+    def _descriptor_frame_input(
+        self, node: ModelGraphNode, sources: list[str]
+    ) -> list[TensorSpec] | None:
+        """Input specs for an op reading a grid descriptor, or ``None``.
+
+        An op inside a descriptor frame whose operand comes from OUTSIDE that
+        frame is reading the frame's parameter -- the grid the model was handed.
+        It has no producer in the graph, so the edge carries whatever the section
+        was flowing (the flat image patches), and the whole chain then computes
+        patch geometry. Provenance decides this, not shape: the patches and the
+        tower's hidden activation are different shapes and either may be what the
+        stale edge supplies.
+        """
+        if not self._descriptor_frames:
+            return None
+        frame = self._descriptor_frame_name(str(node.id))
+        if frame is None:
+            return None
+        spec = self._descriptor_frames[frame]
+        if not sources:
+            return [spec]
+        outside = [frame not in str(source) for source in sources]
+        if not any(outside):
+            return None
+        return [
+            spec if is_outside else self._tensor_specs.get(source, spec)
+            for source, is_outside in zip(sources, outside)
+        ]
+
+    def _descriptor_frame_name(self, node_id: str) -> str | None:
+        """The descriptor frame a node sits inside, longest match first."""
+        best: str | None = None
+        for attr_name in self._descriptor_frames:
+            if attr_name in node_id and (best is None or len(attr_name) > len(best)):
+                best = attr_name
+        return best
+
     def _entry_spec_for(
         self, node: ModelGraphNode, root: BlockNode | None
     ) -> TensorSpec | None:
@@ -2059,6 +2109,10 @@ class ShapeInferencer:
         for node_id in order:
             node = node_by_id[node_id]
             input_specs, input_labels = self._gather_input_specs(graph, node_id)
+            descriptor = self._descriptor_frame_input(node, self._last_input_sources)
+            if descriptor is not None:
+                input_specs = descriptor
+                input_labels = [""] * len(descriptor)
             seeded = self._vision_position_ids_input(node)
             if seeded is not None:
                 input_specs = seeded
@@ -6560,6 +6614,63 @@ def _eval_shape_expr(expr: str, shape: Sequence[Any]) -> int | str | None:
     except SyntaxError:
         return None
     return _eval(tree)
+
+
+def _descriptor_frame_specs(spec: "ArchitectureSpec") -> dict[str, TensorSpec]:
+    """Frames that read a vision grid descriptor, to the spec of that descriptor.
+
+    A vision-tower forward parameter the caller hands straight from its own
+    signature (``self.visual(pixel_values, grid_thw=image_grid_thw)``) is a model
+    input; see :func:`vision_tower_passthrough_inputs`. The frames it is passed to
+    carry it as ``input_label``, and their ops read it with no predecessor in the
+    graph -- so the fallback hands them the tower activation and the whole chain
+    computes patch geometry instead of grid geometry.
+
+    The descriptor's width is measured from the columns its readers take
+    (``grid[:, 0]``, ``[:, 1]``, ``[:, 2]`` is three wide); nothing else in the
+    model states it. Rows are :attr:`Symbol.VISION_GRID`, one per image.
+    """
+    passthrough = vision_tower_passthrough_inputs(spec)
+    if not passthrough:
+        return {}
+    # Frame attr name -> the parameter it was handed, and per PARAMETER the widest
+    # column anyone selects. The width belongs to the tensor, not to the frame:
+    # one helper may read only ``grid[:, 0]`` while its sibling reads all three,
+    # and the grid is three wide in both.
+    owner: dict[str, str] = {}
+    widest: dict[str, int] = {}
+    for _attr, tree in spec.export_block_trees:
+        pending = [tree]
+        while pending:
+            node = pending.pop()
+            children = list(getattr(node, "children", None) or [])
+            pending.extend(children)
+            label = getattr(node, "input_label", None)
+            attr_name = str(getattr(node, "attr_name", "") or "")
+            if label not in passthrough or not attr_name:
+                continue
+            owner[attr_name] = label
+            nested = list(children)
+            while nested:
+                inner = nested.pop()
+                nested.extend(list(getattr(inner, "children", None) or []))
+                for detail in getattr(inner, "details", None) or []:
+                    if not str(detail).startswith("select_index:"):
+                        continue
+                    for token in str(detail).split(":", 1)[1].split(","):
+                        try:
+                            index = int(token.strip())
+                        except ValueError:
+                            continue
+                        if index >= 0:
+                            widest[label] = max(widest.get(label, 0), index + 1)
+    return {
+        attr_name: TensorSpec(
+            shape=(Symbol.VISION_GRID.value, widest.get(label, 1)),
+            dtype=passthrough[label] or "int64",
+        )
+        for attr_name, label in owner.items()
+    }
 
 
 def _vision_patch_flat_dim(vision_config: dict[str, Any]) -> int | None:
