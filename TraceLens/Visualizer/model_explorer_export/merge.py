@@ -2354,6 +2354,48 @@ def _common_namespace(left: str, right: str) -> str:
     return "/".join(shared)
 
 
+def _draw_entering_tensor_tiles_as_inputs(nodes: list[dict[str, Any]]) -> None:
+    """A named tensor a box is HANDED is drawn as that box's input.
+
+    A kernel pipeline declares its operands as ``@tensor`` tiles -- ``chunk_kda_
+    pipeline`` names ``q``, ``k``, ``v``, ``g`` and ``beta`` that way -- and those
+    tiles already are the box's interface: the ``block boundaries`` check counts
+    them as input boundaries, and every edge entering the box lands on one. They
+    just did not LOOK like it. Drawn in the ordinary op gray, a reader opening
+    ``KimiDeltaAttention`` saw the pipeline's operands as if they were computed
+    inside it, with nothing marking where the box's inputs are.
+
+    The test is the tile's own dataflow, not its name: every producer lies
+    outside the namespace the tile sits in, which is what "entered here" means. A
+    ``@tensor`` tile fed from within its own box is an intermediate value and
+    keeps the op styling. A constant is never a box input (a learned weight is
+    wired where it is used), and neither is the scalar/config operand docked
+    beside a single op (``:external:``).
+    """
+    by_id = {str(n["id"]): n for n in nodes}
+    for node in nodes:
+        if _node_attr(node, "synthetic") != "@tensor":
+            continue
+        if str(_node_attr(node, "constant")) == "true":
+            continue
+        if ":external:" in str(node.get("id")):
+            continue
+        namespace = str(node.get("namespace") or "")
+        if not namespace:
+            continue
+        edges = node.get("incomingEdges", []) or []
+        if not edges:
+            continue
+        producers = [by_id.get(str(edge.get("sourceNodeId"))) for edge in edges]
+        if any(source is None for source in producers):
+            continue
+        if all(
+            not str(source.get("namespace") or "").startswith(namespace)
+            for source in producers
+        ):
+            node["style"] = ensure_readable_text(input_port_style())
+
+
 def _route_frame_exits_through_output_tiles(nodes: list[dict[str, Any]]) -> None:
     """Give every block a tensor LEAVES its own output tile.
 
@@ -8000,6 +8042,9 @@ def build_merged_model_graph(
     # The mirror of that pass for the leaving side, run right beside it so both
     # walls of a block are decided by the same state of the graph.
     _route_frame_exits_through_output_tiles(nodes)
+    # Runs after both boundary passes, so a tile they add or re-point is
+    # judged on its final dataflow.
+    _draw_entering_tensor_tiles_as_inputs(nodes)
     _declare_tuple_boundary_ports(nodes)
     _name_repeat_group_inputs_outside_it(nodes)
     _name_unnamed_group_inputs(nodes)
