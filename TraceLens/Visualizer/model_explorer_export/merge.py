@@ -3241,10 +3241,33 @@ def _fold_same_source_twins(nodes: list[dict[str, Any]]) -> None:
         str(n["id"]) for n in nodes if len(n.get("outputsMetadata", []) or []) == 1
     }
 
+    # A MIRROR is not a different producer: it is the same tensor carried across
+    # a namespace edge, which is the whole reason it exists. Two tiles that both
+    # name one tensor -- one reading the mirror, one reading what the mirror
+    # mirrors -- are still one value said twice, and a reader inside the box sees
+    # two identical tiles. Resolve each source past any mirrors in front of it so
+    # they compare equal. Only a mirror with exactly one producer can stand for
+    # it; anything else is not a plain carry.
+    by_id = {str(n["id"]): n for n in nodes}
+    mirrors = {"@input_mirror", "@output_mirror"}
+
+    def through_mirrors(source: str) -> str:
+        seen: set[str] = set()
+        while source not in seen:
+            seen.add(source)
+            node = by_id.get(source)
+            if node is None or _node_attr(node, "synthetic") not in mirrors:
+                return source
+            edges = node.get("incomingEdges", []) or []
+            if len(edges) != 1:
+                return source
+            source = str(edges[0].get("sourceNodeId"))
+        return source
+
     def feed(node: dict[str, Any]) -> frozenset[tuple[str, str]]:
         ports = set()
         for edge in node.get("incomingEdges", []) or []:
-            source = str(edge.get("sourceNodeId"))
+            source = through_mirrors(str(edge.get("sourceNodeId")))
             port = str(edge.get("sourceNodeOutputId", "0"))
             ports.add((source, "*" if source in single_output else port))
         return frozenset(ports)

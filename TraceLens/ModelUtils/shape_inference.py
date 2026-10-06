@@ -38,6 +38,7 @@ from TraceLens.ModelUtils.kernel_pipeline import (
     _find_symbol_definition,
 )
 from TraceLens.ModelUtils.model_graph import (
+    GraphEdge,
     ModelGraph,
     ModelGraphNode,
     NodeKind,
@@ -1527,6 +1528,7 @@ class ShapeInferencer:
         self._module_resolved_ids: set[str] = set()
         self._tensor_names: dict[str, str] = {}
         self._tensor_specs: dict[str, TensorSpec] = {}
+        self._tiling_slot_ids: set[str] = set()
         self._owner_classes: dict[int, dict[str, str]] = {}
         # CPython reuses an object's address once it is freed, so a cache keyed
         # by ``id()`` can serve one object's entry to an unrelated later one --
@@ -2027,6 +2029,10 @@ class ShapeInferencer:
             else:
                 self._tensor_names[node.id] = _output_tensor_name(node)
         self._tensor_specs = {}
+        # Multi-output nodes whose published slices genuinely divide the parent,
+        # and so may be read as a consumer's operand (see
+        # ``_publish_output_port_specs``). Reset with the specs they describe.
+        self._tiling_slot_ids: set[str] = set()
         self._forward_input_specs = set()
         # Reset with the id set it guards; the owner-class refs outlive this,
         # since that cache does.
@@ -2063,6 +2069,13 @@ class ShapeInferencer:
             )
             output = self._resolve_extent_dims(node, output, input_specs)
             self._tensor_specs[node_id] = output
+            # Publish this node's per-ordinal slices NOW, not in a pass after the
+            # whole graph is inferred: a consumer reading one slot of a split is
+            # itself a later node in this same loop, and until the slice exists it
+            # can only fall back to the undivided tensor. That is how a
+            # ``cat((q_pass, q_rot))`` of a [..., 128] and a [..., 64] slice came
+            # out [..., 384] -- it was handed the [..., 192] parent twice.
+            self._publish_output_port_specs(node, self._tensor_specs)
             if node.metadata.get("synthetic") == "@input":
                 self._forward_input_specs.add(id(output))
                 self._forward_input_spec_refs.append(output)
@@ -2154,28 +2167,7 @@ class ShapeInferencer:
         # exporter can label each output port with its slice shape ([B, S, 16] for
         # ``comb_w``) instead of the undivided tensor.
         for node in graph.nodes:
-            output_names = node.metadata.get("output_names")
-            if not output_names or len(output_names) < 2:
-                continue
-            class_name = (node.metadata.get("class_name") or node.label or "").strip()
-            op_label = (node.label or class_name).strip().lower()
-            if op_label not in {"split", "chunk", "unbind"}:
-                continue
-            whole = merged.get(node.id)
-            if whole is None:
-                continue
-            details = [str(item) for item in node.metadata.get("details", [])]
-            for ordinal in range(len(output_names)):
-                sliced = _multi_output_slice_shape(
-                    whole,
-                    details,
-                    op_label,
-                    ordinal,
-                    self.context.dims,
-                    output_count=len(output_names),
-                )
-                if sliced is not None:
-                    merged[f"{node.id}{PORT_SPEC_SEP}{ordinal}"] = sliced
+            self._publish_output_port_specs(node, merged)
 
         self._tensor_specs = merged
         self._active_seq_axes, self._active_hidden = prev_axes, prev_hidden
@@ -2388,6 +2380,76 @@ class ShapeInferencer:
                 return TensorSpec(shape=tuple(axes), dtype=widest.dtype)
         return inputs[0]
 
+    def _slot_spec(self, edge: GraphEdge, occurrence: int) -> TensorSpec | None:
+        """The spec of the output SLOT *edge* reads, else the producer's own.
+
+        An edge out of a multi-output op names the ordinal it takes
+        (``source_port``), either as a single value or -- when one consumer reads
+        several slots of the same producer -- as a list consumed in edge order.
+        Reading the producer's undivided spec instead silently hands a consumer
+        the parent tensor: a ``cat`` of two slices then sums the parent's width
+        once per slice.
+        """
+        port = edge.source_port
+        ordinal: str | None = None
+        if isinstance(port, (list, tuple)):
+            if occurrence < len(port):
+                ordinal = str(port[occurrence])
+        elif port is not None:
+            ordinal = str(port)
+        if ordinal is not None and edge.source in self._tiling_slot_ids:
+            sliced = self._tensor_specs.get(f"{edge.source}{PORT_SPEC_SEP}{ordinal}")
+            if sliced is not None:
+                return sliced
+        return self._tensor_specs.get(edge.source)
+
+    def _publish_output_port_specs(
+        self, node: ModelGraphNode, specs: dict[str, TensorSpec]
+    ) -> None:
+        """Record one spec per ordinal for a tuple-unpacked split/chunk/unbind.
+
+        The node's own spec is the whole (pre-split) tensor; each consumer edge
+        selects an ordinal. Publishing each slice under a reserved key lets both
+        the exporter label the output port with its slice shape and a consumer
+        read the slot it actually takes.
+        """
+        output_names = node.metadata.get("output_names")
+        if not output_names or len(output_names) < 2:
+            return
+        class_name = (node.metadata.get("class_name") or node.label or "").strip()
+        op_label = (node.label or class_name).strip().lower()
+        if op_label not in {"split", "chunk", "unbind"}:
+            return
+        whole = specs.get(node.id)
+        if whole is None:
+            return
+        details = [str(item) for item in node.metadata.get("details", [])]
+        slices: list[TensorSpec | None] = []
+        for ordinal in range(len(output_names)):
+            sliced = _multi_output_slice_shape(
+                whole,
+                details,
+                op_label,
+                ordinal,
+                self.context.dims,
+                output_count=len(output_names),
+            )
+            slices.append(sliced)
+            if sliced is not None:
+                specs[f"{node.id}{PORT_SPEC_SEP}{ordinal}"] = sliced
+        # A slice is good enough to LABEL an output port -- it is the best thing
+        # we can say about that port -- without being good enough to compute
+        # with. Only a set of slices that genuinely divides the parent may feed a
+        # consumer's shape rule: GLM's indexer has a 3-way split of a [B, S, 257]
+        # whose recorded sizes read 1/0/0, and handing a consumer a zero-width
+        # operand silently drops an axis for the rest of the chain. Where the
+        # division does not add up, consumers stay on the undivided tensor.
+        resolved = [item for item in slices if item is not None]
+        if len(resolved) == len(slices) and _slices_tile(
+            whole, resolved, removes_axis=op_label == "unbind"
+        ):
+            self._tiling_slot_ids.add(node.id)
+
     def _gather_input_specs(
         self, graph: ModelGraph, node_id: str
     ) -> tuple[list[TensorSpec], list[str]]:
@@ -2403,10 +2465,18 @@ class ShapeInferencer:
         specs: list[TensorSpec] = []
         labels: list[str] = []
         node_by_id = {item.id: item for item in graph.nodes}
+        # One consumer can read two different slots of the same producer
+        # (``torch.cat((q_pass, q_rot))`` where both come from one ``split``).
+        # That is carried as two parallel edges sharing one ordinal LIST, taken in
+        # order -- so count the occurrences of each source to know which slot this
+        # edge is.
+        occurrences: dict[str, int] = {}
         for edge in graph.edges:
             if edge.target != node_id:
                 continue
-            source_spec = self._tensor_specs.get(edge.source)
+            occurrence = occurrences.get(edge.source, 0)
+            occurrences[edge.source] = occurrence + 1
+            source_spec = self._slot_spec(edge, occurrence)
             if source_spec is None:
                 continue
             specs.append(source_spec)
@@ -6749,3 +6819,47 @@ __all__ = [
     "save_operator_export",
     "serialize_dim",
 ]
+
+
+def _slices_tile(
+    whole: TensorSpec, slices: list[TensorSpec], *, removes_axis: bool
+) -> bool:
+    """True when *slices* genuinely divide *whole* along exactly one axis.
+
+    A split's recorded sizes are only trustworthy if they account for the parent:
+    the slices must agree with it on every axis but one, and their extents along
+    that axis must add back up to it. When a size could not be resolved to a
+    concrete integer the sum cannot be checked, so the shape is accepted only if
+    it is otherwise consistent -- a symbolic width is normal, a width that
+    contradicts the parent is not.
+
+    ``unbind`` removes its axis instead of dividing it, so each slice has one
+    fewer axis and the count of slices is what must match the parent's extent.
+    """
+    if not slices or not whole.shape:
+        return False
+    if removes_axis:
+        return all(len(item.shape) == len(whole.shape) - 1 for item in slices)
+    if any(len(item.shape) != len(whole.shape) for item in slices):
+        return False
+    differing = [
+        axis
+        for axis in range(len(whole.shape))
+        if any(item.shape[axis] != whole.shape[axis] for item in slices)
+    ]
+    if len(differing) > 1:
+        return False
+    if not differing:
+        # Every slice equals the parent: nothing was actually divided, so the
+        # slices carry no information the parent does not already have.
+        return False
+    axis = differing[0]
+    extents = [item.shape[axis] for item in slices]
+    if any(isinstance(size, int) and size <= 0 for size in extents):
+        return False
+    if not all(isinstance(size, int) for size in extents):
+        return True
+    parent = whole.shape[axis]
+    if not isinstance(parent, int):
+        return True
+    return sum(extents) == parent

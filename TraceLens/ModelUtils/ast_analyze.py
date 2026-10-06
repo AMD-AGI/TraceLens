@@ -9444,11 +9444,7 @@ def _resolve_flash_predicate(
         return None
     if _expr_name(node.func) not in _FLASH_REQUEST_PREDICATES:
         return None
-    impl = (config or {}).get("_attn_implementation")
-    resolved = (
-        impl.strip().lower() if isinstance(impl, str) and impl.strip() else "sdpa"
-    )
-    is_flash = resolved in _FLASH_IMPL_NAMES
+    is_flash = resolved_attn_implementation(config) in _FLASH_IMPL_NAMES
     return (not is_flash) if negate else is_flash
 
 
@@ -9781,11 +9777,7 @@ def _resolve_dispatched_attention_kernel(
     second slot the wrapper fills with ``None`` does not fan out a phantom second
     output. General: arity comes from the resolved wrapper's own source.
     """
-    implementation = (config or {}).get("_attn_implementation")
-    if isinstance(implementation, str) and implementation.strip():
-        resolved = implementation.strip()
-    else:
-        resolved = "sdpa"
+    resolved = resolved_attn_implementation(config)
     resolver = _HostSourceResolver()
     wrapper = _resolve_attention_wrapper_source(resolved, config, resolver)
     arity = _max_real_return_arity(wrapper[2]) if wrapper is not None else None
@@ -11706,6 +11698,40 @@ def merge_class_registries(
     return merged
 
 
+def resolved_attn_implementation(config: dict[str, Any] | None) -> str:
+    """Which attention implementation the checkpoint runs.
+
+    A checkpoint that configures nothing runs ``"sdpa"`` -- the transformers
+    default. Several passes need this answer (which kernel the dispatch variable
+    resolves to, whether a flash-request predicate is true, whether a branch
+    guarded on the implementation is live), and they must all give the SAME one.
+    """
+    implementation = (config or {}).get("_attn_implementation")
+    if isinstance(implementation, str) and implementation.strip():
+        return implementation.strip().lower()
+    return "sdpa"
+
+
+def _with_resolved_attn_implementation(
+    config: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """*config* with its attention implementation spelled out.
+
+    Leaving the key absent made the SAME fact readable two ways: the kernel
+    resolver and the flash predicate both defaulted it to ``"sdpa"``, while a
+    forward branching on ``self.config._attn_implementation == "flash_attention_2"``
+    saw an unresolvable test and kept BOTH arms. Kimi then rendered the padding
+    and slicing that only the flash path performs. Writing the default in once
+    means nobody has to remember to apply it.
+    """
+    if config is None:
+        return None
+    existing = config.get("_attn_implementation")
+    if isinstance(existing, str) and existing.strip():
+        return config
+    return {**config, "_attn_implementation": resolved_attn_implementation(config)}
+
+
 def analyze_source(
     source: str,
     *,
@@ -11714,6 +11740,7 @@ def analyze_source(
     all_tensor_ops: bool = False,
 ) -> CodeAnalysis:
     """Analyze one modeling file and return extracted block structure."""
+    config = _with_resolved_attn_implementation(config)
     tree = parse_python_ast(source, filename=filename)
     external_imports = _collect_external_imports(tree)
     activation_param_bindings = _collect_activation_param_bindings(tree, config)

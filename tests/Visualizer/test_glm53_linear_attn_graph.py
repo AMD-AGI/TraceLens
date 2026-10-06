@@ -3720,8 +3720,10 @@ def test_glm53_build_attention_mask_frame_is_not_opaque():
     """``build_attention_mask_from_topk`` must render every inner op, not an empty box.
 
     The sparse-attention decoder block builds its mask by
-    ``ge``/``lt`` -> ``&`` -> ``clamp`` -> ``scatter_add_`` -> ``ne`` -> ``unsqueeze``
-    -> ``where``. Two independent bugs used to collapse the whole frame:
+    ``ge``/``lt`` -> ``&`` -> ``clamp`` -> ``scatter_add_`` -> ``ne`` -> ``unsqueeze``,
+    and then RETURNS -- the trailing ``where`` belongs to the eager path, which
+    this checkpoint does not take (see the implementation assertion below). Two
+    independent bugs used to collapse the whole frame:
 
     * the attention kernel's ``query_states`` and ``attention_mask`` ports were
       never wired -- an ``arg_map`` that named only the tuple-slot operands
@@ -3757,18 +3759,24 @@ def test_glm53_build_attention_mask_frame_is_not_opaque():
         "Scatter add",
         "Not equal",
         "Unsqueeze",
-        "Where",
     ):
         assert expected in frame_labels, (expected, sorted(frame_labels))
 
+    # ...and nothing from the arm this checkpoint does not run. The body is
+    # ``if self.config._attn_implementation == "sdpa": return mask`` followed by
+    # the eager ``torch.where(mask, torch.full(...), min_dtype)``. GLM configures
+    # no implementation, which means sdpa -- so the early return fires and the
+    # eager tail is dead code. Drawing it would show the reader arithmetic the
+    # model never performs.
+    assert "Where" not in frame_labels, sorted(frame_labels)
+    assert "Full" not in frame_labels, sorted(frame_labels)
+
     # The internal chain must be correctly ordered, not short-circuited: the
-    # final Where reads the Unsqueeze, which reads the Not equal, which reads the
-    # Scatter add (not the Cast directly, as the incomplete extraction did).
-    where = _export_node(nodes, f"{frame}:@op_l1258_c15_where")
+    # final Unsqueeze reads the Not equal, which reads the Scatter add (not the
+    # Cast directly, as the incomplete extraction did).
     unsqueeze = _export_node(nodes, f"{frame}:@op_l1249_c15_unsqueeze")
     not_equal = _export_node(nodes, f"{frame}:@op_l1249_c15_not_equal")
     scatter_add = _export_node(nodes, f"{frame}:@op_l1246_c8_scatter_add")
-    assert unsqueeze["id"] in {e["sourceNodeId"] for e in where["incomingEdges"]}
     assert not_equal["id"] in {e["sourceNodeId"] for e in unsqueeze["incomingEdges"]}
     assert scatter_add["id"] in {e["sourceNodeId"] for e in not_equal["incomingEdges"]}
 
@@ -3794,7 +3802,7 @@ def test_glm53_build_attention_mask_frame_is_not_opaque():
 
     # The mask the frame produces must actually reach the kernel's mask port
     # (proving the chain is consumed, hence not pruned).
-    assert _has_export_path(nodes, where["id"], kernel["id"])
+    assert _has_export_path(nodes, unsqueeze["id"], kernel["id"])
 
 
 def test_glm53_graph_integrity_checks_emit_no_warnings():
