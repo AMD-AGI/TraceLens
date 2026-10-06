@@ -16,12 +16,12 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 import collections
-import gzip
+
 import re
 import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
-from TraceLens.util import most_common_first_dim
+from TraceLens.util import DataLoader, most_common_first_dim
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.generate_perf_report_pytorch import _find_entry_point
 from TraceLens.Reporting.reporting_utils import (
@@ -219,11 +219,10 @@ def classify_graph_capture_trace(input_folder: str):
                     raise ValueError(f"No .json file found inside {path}")
                 with zf.open(json_files[0]) as f:
                     return json.load(f)
-        if path.endswith(".json.gz"):
-            with gzip.open(path, "rt") as f:
-                return json.load(f)
-        with open(path, "r") as f:
-            return json.load(f)
+        events, metadata = DataLoader.load_trace_events(path)
+        result = dict(metadata)
+        result["traceEvents"] = events
+        return result
 
     def find_dummy_run_roots(events):
         roots = [e for e in events if dummy_run_pattern.match(e.get("name", ""))]

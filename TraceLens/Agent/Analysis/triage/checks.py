@@ -285,25 +285,16 @@ def _load_manifest(run_dir):
 @functools.lru_cache(maxsize=1)
 def _load_trace_json(trace_path):
     """Parse a trace file (plain or gzipped) via the library loader. Returns
-    parsed data or raises.
+    ``(events, metadata)`` or raises.
 
-    Delegates to ``DataLoader.load_data`` (orjson, strict UTF-8) and caches the
-    single most-recent parse so checks resolving the same rank-0 file don't
-    re-parse a multi-GB trace. ``orjson.JSONDecodeError`` subclasses
+    Delegates to ``DataLoader.load_trace_events`` (orjson, strict UTF-8) and
+    caches the single most-recent parse so checks resolving the same rank-0
+    file don't re-parse a multi-GB trace. ``orjson.JSONDecodeError`` subclasses
     ``json.JSONDecodeError``, so callers guarding ``(OSError, json.JSONDecodeError)``
     still catch parse failures; ``lru_cache`` does not memoize exceptions, so a
     corrupt file re-raises on every call.
     """
-    return DataLoader.load_data(trace_path)
-
-
-def _events_of(data):
-    """Extract the trace-event list from parsed trace data.
-
-    Traces are either a bare event list or a dict with a ``traceEvents`` key; a
-    dict without that key yields ``[]`` (empty, not an error).
-    """
-    return data if isinstance(data, list) else data.get("traceEvents", [])
+    return DataLoader.load_trace_events(trace_path)
 
 
 def _load_events(trace_path):
@@ -318,7 +309,8 @@ def _load_events(trace_path):
     if os.path.getsize(trace_path) > _MAX_TRACE_BYTES:
         return None
     try:
-        return _events_of(_load_trace_json(trace_path))
+        events, _ = _load_trace_json(trace_path)
+        return events
     except (OSError, ValueError):
         return None
 
@@ -414,10 +406,10 @@ def _first_load_capture_event_set(capture_folder):
     )
     for fname in candidates:
         try:
-            data = _load_trace_json(os.path.join(capture_folder, fname))
+            events, _ = _load_trace_json(os.path.join(capture_folder, fname))
         except (OSError, json.JSONDecodeError):
             continue
-        return _events_of(data)
+        return events
     return None
 
 
@@ -685,7 +677,7 @@ def check_inference_annotation_missing(run_dir, _stream_file):
     if os.path.getsize(main_path) > _MAX_TRACE_BYTES:
         return None
     try:
-        data = _load_trace_json(main_path)
+        events, _ = _load_trace_json(main_path)
     except (OSError, json.JSONDecodeError):
         # Narrow on purpose: main_path is glob-restricted to a .json* file, so the
         # bare ValueError("Unknown file type") that check_corrupt_json guards against
@@ -695,7 +687,6 @@ def check_inference_annotation_missing(run_dir, _stream_file):
             f"JSONDecodeError reading trace at path: {main_path}",
             "Verify the correct trace was selected and that the inference mode was enabled",
         )
-    events = _events_of(data)
     execs = sum(
         1
         for e in events

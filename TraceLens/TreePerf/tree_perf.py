@@ -33,7 +33,6 @@ from ..PerfModel.torch_op_mapping import (
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
-from ..trace_health import run_trace_health_check
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils, merge_intervals
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
@@ -170,55 +169,10 @@ class TreePerfAnalyzer:
     ) -> "TreePerfAnalyzer":
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
-        data = DataLoader.load_data(profile_filepath)
-        # PyTorch Chrome traces carry run metadata as top-level JSON fields.
-        # Field presence varies by profiler version, profiler options, and backend, e.g.
-        # {
-        #   "schemaVersion": 1,          # usually present
-        #   "deviceProperties": [{       # usually present for GPU traces
-        #     "id": 0,
-        #     "name": "AMD Instinct MI210",
-        #     "totalGlobalMem": 68702699520,
-        #     "computeMajor": 9,
-        #     "computeMinor": 0,
-        #     "maxThreadsPerBlock": 1024,
-        #     "maxThreadsPerMultiprocessor": 2048,
-        #     "regsPerBlock": 131072,
-        #     "warpSize": 64,
-        #     "sharedMemPerBlock": 65536,
-        #     "maxSharedMemoryPerMultiProcessor": 65536,
-        #     "numSms": 104
-        #   }],
-        #   "distributedInfo": {         # optional; distributed profiler traces
-        #     "backend": "nccl",
-        #     "rank": 0,
-        #     "world_size": 1,
-        #     "pg_count": 7,
-        #     "pg_config": [{
-        #       "pg_name": "0",
-        #       "pg_desc": "default_pg",
-        #       "backend_config": "cuda:nccl",
-        #       "pg_size": 1,
-        #       "ranks": [0]
-        #     }]
-        #   },
-        #   "record_shapes": 1,              # optional; profiler option/version dependent
-        #   "with_stack": 1,                 # optional; profiler option/version dependent
-        #   "roctracer_version": 4.1,        # optional; ROCm traces only
-        #   "hip_runtime_version": 70253211, # optional; ROCm traces only
-        #   "hip_driver_version": 70253211,  # optional; ROCm traces only
-        #   "traceEvents": [...]             # required event payload
-        # }
-        # Keep these trace-level fields separate from Chrome "M" metadata events.
-        trace_metadata = {
-            key: value for key, value in data.items() if key != "traceEvents"
-        }
-        data = data["traceEvents"]
-
-        health_report = run_trace_health_check(
-            data, trace_metadata, capture_trace_filepath
+        data, trace_metadata = DataLoader.load_trace_events(
+            profile_filepath,
+            capture_trace_filepath=capture_trace_filepath,
         )
-        health_report.log_findings()
 
         categorizer = (
             TraceToTree.default_categorizer
@@ -3004,11 +2958,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         *args,
         **kwargs,
     ) -> "JaxTreePerfAnalyzer":
-        data = DataLoader.load_data(profile_filepath)
-        data_pb = data["traceEvents"]
-
-        health_report = run_trace_health_check(data_pb)
-        health_report.log_findings()
+        data_pb, _ = DataLoader.load_trace_events(profile_filepath)
 
         categorizer = TraceEventUtils.prepare_event_categorizer(data_pb)
         metadata_events, events = TraceEventUtils.split_event_list(data_pb)
