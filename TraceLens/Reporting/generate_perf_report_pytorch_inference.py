@@ -34,6 +34,7 @@ from TraceLens.TraceUtils.utils.annotation_utils import (
     CAPTURE_PATTERN,
     CaptureAnnotation,
 )
+from TraceLens.TraceUtils.vllm_async_llm import maybe_add_vllm_async_llm_sheets
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
@@ -539,6 +540,8 @@ def generate_perf_report_pytorch(
     group_by_parent_module: bool = False,
     group_by_num_kernels: bool = False,
     include_call_stack: bool = False,
+    engine: Optional[str] = None,
+    async_llm_trace: Optional[str] = None,
 ) -> Dict[str, pd.DataFrame]:
     gpu_arch_json = resolve_gpu_arch(
         gpu_arch_json_path=gpu_arch_json_path,
@@ -1162,6 +1165,13 @@ def generate_perf_report_pytorch(
                 dict_name2df.update(additional_dfs)
                 print(f"Added {len(additional_dfs)} additional sheets from extension")
 
+    maybe_add_vllm_async_llm_sheets(
+        dict_name2df,
+        async_llm_trace=async_llm_trace,
+        engine=engine,
+        worker_events=perf_analyzer.tree.events,
+    )
+
     # Write CSVs and/or Excel (independent options)
     if output_xlsx_path is None and output_csvs_dir is None:
         base_path = profile_json_path.rsplit(".json", 1)[0]
@@ -1338,6 +1348,25 @@ def main():
         "Adds ops_unique_args_kl_overlap, unified_perf_summary_kl_overlap, and "
         "per-category *_kl_overlap / *_fwd_kl_overlap / *_bwd_kl_overlap sheets when data exists.",
     )
+    parser.add_argument(
+        "--engine",
+        type=str,
+        choices=["vllm", "sglang", "atom", "xdit"],
+        default=None,
+        help="Serving engine that produced the worker trace. "
+        "--async_llm_trace is applied only when this is vllm (or omitted).",
+    )
+    parser.add_argument(
+        "--async_llm_trace",
+        type=str,
+        default=None,
+        help=(
+            "Optional vLLM AsyncLLM / frontend torch.profiler trace "
+            "(.json or .json.gz). Adds vllm_async_ingress, "
+            "vllm_async_output_groups, and vllm_async_engine_steps sheets. "
+            "Not auto-discovered; pass the explicit path."
+        ),
+    )
 
     args = parser.parse_args()
     if args.comparison_capture_folder and not args.comparison_json_path:
@@ -1390,6 +1419,8 @@ def main():
         group_by_parent_module=args.group_by_parent_module,
         group_by_num_kernels=args.group_by_num_kernels,
         include_call_stack=args.include_call_stack,
+        engine=args.engine,
+        async_llm_trace=args.async_llm_trace,
     )
 
 
