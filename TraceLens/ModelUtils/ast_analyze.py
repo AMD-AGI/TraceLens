@@ -6171,6 +6171,26 @@ class _ForwardOperationExtractor:
                 continue
             if operation.label not in self._MULTI_OUTPUT_LABELS:
                 return
+            # An inline op's outputs are named by the unpack of ITS OWN call. A
+            # later statement that merely RESOLVES to it as producer is a
+            # different call, and naming its results here renames the op's real
+            # slots: Kimi's ``key_states, value_states = past_key_values.update(
+            # key_states, value_states, ...)`` -- a method on a forward parameter,
+            # which produces no op of its own -- traced back through its arguments
+            # to the earlier ``k_pass, value_states = torch.split(...)`` and
+            # relabelled that split's first slice ``key_states``. The split then
+            # looked like a producer of ``key_states``, so the branch phi joined
+            # it and the attention read a key one concat too early. The op's attr
+            # carries the line it was extracted from; require it to fall inside
+            # the unpacking statement. A SPAN, not one line: GLM's vision
+            # ``query_states, key_states, value_states = (self.qkv(x).reshape(...)
+            # .permute(...).unbind(0))`` puts its unbind three lines below the
+            # assignment, and that unpack does name those slices.
+            where = _OPERATION_SOURCE_POS_RE.match(str(operation.attr_name))
+            if where is not None and not (
+                stmt.lineno <= int(where.group(1)) <= (stmt.end_lineno or stmt.lineno)
+            ):
+                return
             self.operations[index] = replace(operation, output_names=tuple(names))
             for ordinal, name in enumerate(names):
                 self.var_output_ordinal[name] = ordinal
