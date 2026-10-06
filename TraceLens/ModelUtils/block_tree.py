@@ -1301,10 +1301,23 @@ def _expanded_free_function_node(
                         # boundary crossing to fall back to the frame's generic
                         # default label instead of the callee's own parameter name.
                         slot = (producer_attr, ordinal)
-                        if slot in claimed_producer_slots:
+                        first_consumer = slot not in claimed_producer_slots
+                        if not first_consumer and operation.predecessors:
                             # A rebound re-read of this slot; the value already
                             # flows in through this op's internal predecessor.
                             continue
+                        # An op with NO internal predecessor has
+                        # nothing carrying the value to it: it reads the
+                        # parameter raw, exactly as the first consumer does.
+                        # ``k_rot, k_pass = k[..., :rotary_dim],
+                        # k[..., rotary_dim:]`` is two such reads of one
+                        # never-reassigned parameter. Dropping the second left it
+                        # with no operand at all, so the linear-pipeline fallback
+                        # chained it onto the PREVIOUS op -- the first slice --
+                        # and ``k_pass`` came out ``rotary_dim - rotary_dim``
+                        # wide, i.e. empty. The identical ``q`` line escaped only
+                        # because ``q`` is the callee's primary parameter and
+                        # resolves through ``FORWARD_METHOD_INPUT`` instead.
                         claimed_producer_slots.add(slot)
                         if ordinal is not None:
                             extra_predecessor_ports.append((producer_attr, ordinal))
@@ -1318,7 +1331,7 @@ def _expanded_free_function_node(
                         # first consumer so a rebound re-read is not re-exposed.
                         if param not in translated:
                             translated.append(param)
-                        if boundary_name is None:
+                        if boundary_name is None and first_consumer:
                             boundary_name = param
                             boundary_ordinal = ordinal
                         if producer_attr not in extra_predecessors:
