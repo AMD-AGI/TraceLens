@@ -195,45 +195,222 @@ def _wrapper_returned_name(func: ast.FunctionDef) -> str | None:
     return None
 
 
-def _wrapper_kernel_primitive(func: ast.FunctionDef) -> str | None:
-    """The atomic torch primitive the wrapper calls to produce its result.
+def _wrapper_primitive_call(func: ast.FunctionDef) -> ast.Call | None:
+    """The call whose result the wrapper returns, past its tail re-materialisation.
 
     The returned var (``attn_output``) is assigned twice: once from the primitive
     call (``attn_output = F.scaled_dot_product_attention(...)``) and once from the
     tail method chain rooted on itself (``attn_output = attn_output.transpose(...)``
-    -- handled by :func:`_wrapper_tail_ops`). This returns the callee name of the
-    FIRST assignment whose value is a call NOT rooted on the returned name -- the
-    primitive that feeds the tail. Structural: the tail chain (whose call base
-    resolves back to the returned name) is skipped, so a layout re-materialisation
-    is never mistaken for the primitive. ``None`` when no such call is found.
+    -- handled by :func:`_wrapper_tail_ops`). Returns the FIRST assignment whose
+    value is a call NOT rooted on the returned name. Structural: the tail chain
+    (whose call base resolves back to the returned name) is skipped, so a layout
+    re-materialisation is never mistaken for the primitive.
     """
     returned = _wrapper_returned_name(func)
     if returned is None:
+        # A wrapper that hands the call straight back (``return
+        # flex_attention_compiled(q, k, v, **kwargs)``) names no variable at all.
+        for stmt in ast.walk(func):
+            if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Call):
+                return stmt.value
         return None
+    return _producing_call(func, returned, set())
+
+
+def _binds(target: ast.expr, name: str) -> bool:
+    """True when an assignment target binds *name*, including a tuple unpack."""
+    if isinstance(target, ast.Name):
+        return target.id == name
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return any(_binds(element, name) for element in target.elts)
+    return False
+
+
+def _producing_call(
+    func: ast.FunctionDef, name: str, seen: set[str]
+) -> ast.Call | None:
+    """The call that produces local *name*, following aliases and tuple unpacks.
+
+    A wrapper need not assign its result from the kernel call directly:
+    ``flex_attention_output = compile_friendly_flex_attention(...)`` then
+    ``attention_output, aux = flex_attention_output``. Asking only for a call
+    assigned straight to the returned name finds nothing there, so follow the
+    alias one name at a time (cycle-guarded) until a real call turns up.
+    """
+    if name in seen:
+        return None
+    seen.add(name)
+    aliases: list[str] = []
     for stmt in ast.walk(func):
-        if (
-            not isinstance(stmt, ast.Assign)
-            or len(stmt.targets) != 1
-            or not isinstance(stmt.targets[0], ast.Name)
-            or stmt.targets[0].id != returned
-            or not isinstance(stmt.value, ast.Call)
-        ):
+        if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
             continue
-        call = stmt.value
-        base = call.func
-        while isinstance(base, ast.Attribute):
-            base = base.value
-        if isinstance(base, ast.Name) and base.id == returned:
+        if not _binds(stmt.targets[0], name):
+            continue
+        value = stmt.value
+        if isinstance(value, ast.Name):
+            aliases.append(value.id)
+            continue
+        if not isinstance(value, ast.Call):
+            continue
+        base: ast.expr = value.func
+        # Unwrap BOTH attributes and the intermediate calls between them:
+        # ``attention_output.transpose(1, 2).contiguous()`` reaches its root name
+        # only through a Call node, so stopping at the first Call left the tail
+        # unrecognised. That matters whenever the real producer is not the first
+        # assignment ``ast.walk`` happens to yield -- i.e. whenever the primitive
+        # sits inside a branch and the tail does not.
+        while isinstance(base, (ast.Attribute, ast.Call)):
+            base = base.value if isinstance(base, ast.Attribute) else base.func
+        if isinstance(base, ast.Name) and base.id == name:
             # The tail re-materialisation (``attn_output.transpose(...)...``); the
-            # primitive is a different assignment to the same name.
+            # producer is a different assignment to the same name.
             continue
-        func_node = call.func
-        if isinstance(func_node, ast.Attribute):
-            return func_node.attr
-        if isinstance(func_node, ast.Name):
-            return func_node.id
-        return None
+        return value
+    for alias in aliases:
+        found = _producing_call(func, alias, seen)
+        if found is not None:
+            return found
     return None
+
+
+def _wrapper_kernel_primitive(func: ast.FunctionDef) -> str | None:
+    """The atomic torch primitive the wrapper calls to produce its result.
+
+    ``None`` when no such call is found.
+    """
+    call = _wrapper_primitive_call(func)
+    if call is None:
+        return None
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    return None
+
+
+def _local_binding_names(func: ast.FunctionDef, name: str) -> list[str]:
+    """Names a local variable in *func* is bound to, following conditional arms.
+
+    ``flex_attention_compiled = WrappedFlexAttention(t)() if not compiling()
+    else flex_attention`` binds one local to two different callables. Reading the
+    call site alone yields only the local's own name, which resolves to nothing;
+    the arms are what actually get called.
+    """
+    found: list[str] = []
+    for stmt in ast.walk(func):
+        if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+            continue
+        target = stmt.targets[0]
+        if not isinstance(target, ast.Name) or target.id != name:
+            continue
+        for value in (
+            [stmt.value.body, stmt.value.orelse]
+            if isinstance(stmt.value, ast.IfExp)
+            else [stmt.value]
+        ):
+            node = value
+            # ``WrappedFlexAttention(training)()`` -- unwrap the calls to whatever
+            # callable sits at the bottom.
+            while isinstance(node, ast.Call):
+                node = node.func
+            if isinstance(node, ast.Name):
+                found.append(node.id)
+            elif isinstance(node, ast.Attribute):
+                root = node
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if isinstance(root, ast.Name):
+                    found.append(root.id)
+    return found
+
+
+def _providing_module(module: str, func: ast.FunctionDef, depth: int = 0) -> str | None:
+    """The dotted module that PROVIDES the callable *func* bottoms out at.
+
+    This is what distinguishes attention torch itself implements from attention an
+    outside library implements -- a question about where the code lives, which the
+    import graph answers, rather than about what the kernel is called.
+
+    ``sdpa_attention_forward`` calls ``torch.nn.functional.scaled_dot_product_
+    attention`` -> ``torch``. ``flash_attention_forward`` calls
+    ``_flash_attention_forward``, imported from ``transformers`` -> recurse ->
+    ``flash_attn``. ``flex_attention_forward`` calls a transformers wrapper whose
+    own body resolves, through a conditionally-imported binding, to
+    ``torch.nn.attention.flex_attention``.
+
+    Recursion is bounded and stops as soon as a torch-provided symbol is reached,
+    so a thin non-torch shim around a torch op is not mistaken for a library
+    kernel. ``None`` when the chain cannot be followed -- the caller then treats
+    the kernel as not-torch, which is the safe reading: an attention step nobody
+    could resolve is far more often an outside fused kernel than a torch call.
+    """
+    if depth >= 4:
+        return None
+    call = _wrapper_primitive_call(func)
+    if call is None:
+        return None
+    resolver = _HostSourceResolver()
+    loaded = resolver._load(module)
+    imports = loaded[1] if loaded else {}
+
+    callee = call.func
+    if isinstance(callee, ast.Attribute):
+        # ``torch.nn.functional.scaled_dot_product_attention`` -- the root name is
+        # what the import table knows; the attributes between it and the callee
+        # spell out the rest of the module path.
+        path: list[str] = []
+        node: ast.expr = callee
+        while isinstance(node, ast.Attribute):
+            path.append(node.attr)
+            node = node.value
+        if not isinstance(node, ast.Name):
+            return None
+        binding = imports.get(node.id)
+        base = binding.partition("#")[0] if binding else node.id
+        # Drop the final attribute: that is the function, not its module.
+        return ".".join([base, *reversed(path[1:])]) if len(path) > 1 else base
+
+    if not isinstance(callee, ast.Name):
+        return None
+
+    candidates = [callee.id]
+    if callee.id not in imports:
+        candidates = _local_binding_names(func, callee.id) or candidates
+
+    fallback: str | None = None
+    for name in candidates:
+        binding = imports.get(name)
+        if binding:
+            dest, _, symbol = binding.partition("#")
+        else:
+            # Not imported: a shim defined in this very module
+            # (``compile_friendly_flex_attention``). Recursing into it is the
+            # whole point -- a thin local wrapper tells us nothing about who
+            # provides the kernel, only its body does.
+            dest, symbol = module, name
+        if not dest:
+            continue
+        if dest.split(".")[0] == "torch":
+            return dest
+        nested = _resolve_wrapper_def(dest, symbol)
+        if nested is not None and nested is not func:
+            deeper = _providing_module(dest, nested, depth + 1)
+            if deeper and deeper.split(".")[0] == "torch":
+                return deeper
+            fallback = fallback or deeper
+        fallback = fallback or dest
+    return fallback
+
+
+def attention_kernel_provider(module: str, symbol: str) -> str | None:
+    """The module providing the attention implementation *module*``#``*symbol* runs.
+
+    Reads source only -- never imports or executes the wrapper.
+    """
+    func = _resolve_wrapper_def(module, symbol)
+    if func is None:
+        return None
+    return _providing_module(module, func)
 
 
 def _wrapper_tail_ops(func: ast.FunctionDef) -> tuple[tuple[str, tuple[int, ...]], ...]:

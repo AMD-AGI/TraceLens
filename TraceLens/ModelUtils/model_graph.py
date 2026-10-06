@@ -28,8 +28,7 @@ from TraceLens.ModelUtils.ast_analyze import (
     is_forward_operation,
     is_function_synthetic,
     is_functional_synthetic,
-    is_torch_native_attention_kernel,
-    kernel_name_from_step_details,
+    is_torch_provided_attention,
 )
 from TraceLens.ModelUtils.extract import architecture_section_trees
 
@@ -277,7 +276,7 @@ def _is_torch_library_operation(block: BlockNode, details: list[str]) -> bool:
     if is_torch_primitive_label(block.label or ""):
         return True
     if block.class_name == "AttentionOp":
-        return is_torch_native_attention_kernel(kernel_name_from_step_details(details))
+        return is_torch_provided_attention(details)
     return False
 
 

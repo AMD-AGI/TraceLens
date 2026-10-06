@@ -87,13 +87,24 @@ def test_public_name_role_and_kernel_helpers_cover_fallbacks():
     assert aa.displays_as_pointwise_leaf("act", "GELU")
     assert not aa.displays_as_pointwise_leaf("block", None)
 
-    # Coloring classifier (the only surviving marker use): torch-shipped attention
-    # is native; an outside fused library kernel is not.
-    assert aa.is_torch_native_attention_kernel("torch.nn.attention.flex_attention")
-    assert aa.is_torch_native_attention_kernel("sdpa_attention_forward")
-    assert not aa.is_torch_native_attention_kernel("xformers_attention")
-    assert not aa.is_torch_native_attention_kernel("flash_attn_func")
-    assert not aa.is_torch_native_attention_kernel(None)
+    # Coloring classifier: torch-shipped attention is native, an outside fused
+    # library kernel is not -- decided by WHERE the implementation lives, read off
+    # the resolved provider module, never by the kernel's name.
+    assert aa.is_torch_provided_attention(["kernel_provider: torch.nn.functional"])
+    assert aa.is_torch_provided_attention(
+        ["kernel_provider: torch.nn.attention.flex_attention"]
+    )
+    assert not aa.is_torch_provided_attention(["kernel_provider: flash_attn"])
+    assert not aa.is_torch_provided_attention(["import: xformers.ops#memory_eff"])
+    # A name that merely MENTIONS torch does not make it torch's.
+    assert not aa.is_torch_provided_attention(["kernel: torch_style_sdpa_kernel"])
+    # Unresolvable reads as not-torch: an attention nobody could resolve is far
+    # more often an outside fused kernel.
+    assert not aa.is_torch_provided_attention([])
+    # A directly-imported kernel names its provider through its import.
+    assert aa.attention_kernel_provider_module(["import: fla.ops.kda#chunk_kda"]) == (
+        "fla.ops.kda"
+    )
     assert aa.attention_kernel_label(["kernel: custom_delta"]) == "custom_delta"
     assert aa.attention_kernel_label([]) == "Attention"
     # A concrete resolved kernel shows its real name (not the generic "Attention").

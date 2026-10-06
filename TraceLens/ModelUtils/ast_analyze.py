@@ -9796,6 +9796,17 @@ def _resolve_dispatched_attention_kernel(
     # location comes from the same registry/config resolution as the arity — never a
     # per-kernel table — and is inert for a kernel with no expandable wrapper source.
     wrapper_expand = f"{wrapper[0]}#{wrapper[1]}" if wrapper is not None else None
+    # Which MODULE provides the implementation this kernel actually runs, read by
+    # following the wrapper's own body through the import graph (sdpa ->
+    # ``torch.nn.functional``; flash -> ``transformers`` -> ``flash_attn``; flex ->
+    # a local shim -> ``torch.nn.attention.flex_attention``). That is the
+    # structural form of "is this torch's own attention or an outside library's",
+    # a question about where the code lives rather than what it is called.
+    provider: str | None = None
+    if wrapper is not None:
+        from TraceLens.ModelUtils.attention_wrapper import _providing_module
+
+        provider = _providing_module(wrapper[0], wrapper[2])
     for cls in classes.values():
         details = cls.forward_step_details.get(SYNTHETIC_ATTENTION)
         if not details:
@@ -9806,12 +9817,14 @@ def _resolve_dispatched_attention_kernel(
         rewritten = [
             f"kernel: {resolved}" if line.startswith("kernel:") else line
             for line in details
-            if not line.startswith(("outputs:", "wrapper_expand:"))
+            if not line.startswith(("outputs:", "wrapper_expand:", "kernel_provider:"))
         ]
         if arity is not None:
             rewritten.append(f"outputs: {arity}")
         if wrapper_expand is not None:
             rewritten.append(f"wrapper_expand: {wrapper_expand}")
+        if provider:
+            rewritten.append(f"kernel_provider: {provider}")
         cls.forward_step_details[SYNTHETIC_ATTENTION] = rewritten
         if arity is not None:
             names = cls.forward_step_output_names.get(SYNTHETIC_ATTENTION)
@@ -9886,67 +9899,40 @@ def kernel_name_from_step_details(details: list[str]) -> str | None:
     return None
 
 
-# Attention coloring markers (the ONLY surviving marker use).
+# Keep-atomic, return-arity, the display label and now node COLORING are all
+# derived structurally: the keep-atomic gate resolves the kernel through
+# ``ALL_ATTENTION_FUNCTIONS`` and introspects the wrapper AST
+# (``_resolve_dispatched_attention_kernel``), arity comes from the wrapper's own
+# return statement (``_max_real_return_arity``), the label is the resolved callee
+# qualname (``attention_kernel_label``), and the color follows the provider module
+# resolved below. No attention marker list survives.
 #
-# Keep-atomic, return-arity, and the display label are all derived structurally
-# now: the keep-atomic gate resolves the kernel through ``ALL_ATTENTION_FUNCTIONS``
-# and introspects the wrapper AST (``_resolve_dispatched_attention_kernel``),
-# arity comes from the wrapper's own return statement (``_max_real_return_arity``),
-# and the label is the resolved callee qualname (``attention_kernel_label``). None
-# of those read a marker list any more.
-#
-# The one thing left keyed on a list is cosmetic node COLORING in
-# ``classify_operation`` (model_graph.py): whether an AttentionOp is painted as a
-# plain torch functional op or as an outside fused GPU kernel. A robustly-general
-# structural test can classify the kernels every model actually uses (sdpa is a
-# direct ``torch.nn.functional`` call → native; flash/recurrent bottom out at an
-# external compiled kernel → not native), but ``flex_attention`` only reaches its
-# torch op through a ``torch.compile`` singleton selected by a conditional import,
-# which no AST walk can follow without fragile guesswork. Rather than ship that
-# fragility (or silently flip an unused kernel's color), the coloring stays on
-# these two small, stable name lists.
-#
-# Attention that torch itself provides: SDPA, torch.nn.attention, and the plain
-# matmul/softmax eager path.
-_TORCH_NATIVE_ATTENTION_MARKERS = (
-    "sdpa",
-    "scaled_dot_product",
-    "eager",
-    "flex_attention",
-    "dot_product_attention",
-    "multi_head_attention",
-    "torch.nn.attention",
-    "nn.attention",
-)
-# Attention from an outside library, which runs its own fused GPU kernel.
-_LIBRARY_ATTENTION_MARKERS = (
-    "flash_attn",
-    "flash_attention",
-    "transformer_engine",
-    "transformerengine",
-    "fused_attention",
-    "fused_attn",
-    "memory_efficient_attention",
-    "paged_attention",
-    "xformers",
-)
+# Coloring was the last holdout, on the grounds that ``flex_attention`` reaches
+# its torch op through a ``torch.compile`` singleton behind a conditional import.
+# It does -- but that import is an ordinary binding the import table already
+# records (``_absolute_import_bindings`` deliberately reads imports nested in
+# ``if``/``try``), and the singleton is selected by a plain ternary whose other
+# arm is the torch symbol itself. Following a local binding's arms resolves it
+# with no guesswork, and the result is checked against the real installed
+# transformers source rather than assumed.
+def is_torch_provided_attention(details: list[str]) -> bool:
+    """True when the attention implementation this step runs lives inside torch.
 
+    "torch's own attention" vs "an outside library's fused kernel" is a question
+    about where the implementation is DEFINED, and the import graph answers it --
+    so this reads the resolved provider module
+    (:func:`attention_kernel_provider_module`) and asks whether its root package is
+    ``torch``. No marker list: ``sdpa`` resolves through its wrapper to
+    ``torch.nn.functional``, ``flex_attention`` through a local shim and a
+    conditionally-imported binding to ``torch.nn.attention.flex_attention``, while
+    flash-attn, xformers and Transformer Engine resolve outside torch.
 
-def is_torch_native_attention_kernel(kernel: str | None) -> bool:
-    """True only for attention torch ships itself, as opposed to a library kernel.
-
-    Flash-attn, xformers and Transformer Engine are recognizable attention, but they
-    are still outside fused kernels rather than torch operations. This drives node
-    coloring only; see the marker-list comment above.
+    An unresolvable step reads as NOT torch, which is the safe way round: an
+    attention nobody could resolve is far more often an outside fused kernel than
+    a torch call, and that is also how it is drawn.
     """
-    if not kernel:
-        return False
-    lowered = kernel.lower()
-    if any(marker in lowered for marker in _LIBRARY_ATTENTION_MARKERS):
-        return False
-    if lowered in {"eager_attention_forward", "sdpa_attention_forward"}:
-        return True
-    return any(marker in lowered for marker in _TORCH_NATIVE_ATTENTION_MARKERS)
+    provider = attention_kernel_provider_module(details)
+    return bool(provider) and provider.split(".")[0] == "torch"
 
 
 def is_kernel_pipeline_step(
@@ -10028,6 +10014,32 @@ def attention_kernel_label(details: list[str]) -> str:
     return kernel
 
 
+def attention_kernel_provider_module(details: list[str]) -> str | None:
+    """The module providing the attention implementation this step runs.
+
+    Either resolved from the dispatched wrapper's body
+    (``kernel_provider:``, stamped by :func:`_resolve_dispatched_attention_kernel`)
+    or, for a kernel the modeling file imports and calls directly, the module it
+    was imported from (``import: fla.ops.kda#...``). ``None`` when neither is
+    known, which the consumer must read as "not resolvable" rather than as any
+    particular provider.
+    """
+    for line in details:
+        if line.startswith("kernel_provider:"):
+            value = line.split(":", 1)[1].strip()
+            if value:
+                return value
+    for line in details:
+        if line.startswith("import:"):
+            payload = line.split(":", 1)[1].strip()
+            if "#" in payload:
+                return payload.partition("#")[0].strip() or None
+            if "." in payload:
+                return payload.rsplit(".", 1)[0].strip() or None
+            return payload or None
+    return None
+
+
 def attention_kernel_details(
     details: list[str],
     attention_inputs: dict[str, list[str]] | None = None,
@@ -10050,6 +10062,9 @@ def attention_kernel_details(
         for line in details:
             if line.startswith(("unused_interface_inputs:", "outputs:")):
                 lines.append(line)
+        provider = attention_kernel_provider_module(details)
+        if provider:
+            lines.append(f"kernel_provider: {provider}")
         return lines
 
     # The kernel could not be named, but this step IS an attention kernel -- that

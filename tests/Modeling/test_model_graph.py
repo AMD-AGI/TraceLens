@@ -149,7 +149,7 @@ def test_classify_operation_kinds():
         class_name="AttentionOp",
         role="attention",
         label="Attention",
-        details=["kernel: sdpa_attention_forward"],
+        details=["kernel: sdpa", "kernel_provider: torch.nn.functional"],
     )
     assert classify_operation(nn_attention) == OperationKind.TORCH_FUNCTIONAL
 
@@ -167,34 +167,47 @@ def test_classify_operation_kinds():
 
 
 def test_library_attention_is_a_kernel_but_torch_attention_is_not():
-    """Flash-attn and friends are fused library kernels; SDPA and eager are torch."""
+    """Flash-attn and friends are fused library kernels; SDPA and flex are torch.
 
-    def attention(kernel: str) -> BlockNode:
+    Which one a step is follows from WHERE its implementation is defined -- the
+    provider module resolved from the wrapper's own body -- not from its name, so
+    each case here supplies the provider a real step carries.
+    """
+
+    def attention(kernel: str, provider: str | None) -> BlockNode:
+        details = [f"kernel: {kernel}"]
+        if provider:
+            details.append(f"kernel_provider: {provider}")
         return BlockNode(
             attr_name="@attention",
             class_name="AttentionOp",
             role="attention",
             label="Attention",
-            details=[f"kernel: {kernel}"],
+            details=details,
         )
 
-    for kernel in (
-        "sdpa",
-        "eager",
-        "sdpa_attention_forward",
-        "torch.nn.attention.flex_attention",
+    for kernel, provider in (
+        ("sdpa", "torch.nn.functional"),
+        ("eager", "torch.nn.functional"),
+        ("flex_attention", "torch.nn.attention.flex_attention"),
     ):
         assert (
-            classify_operation(attention(kernel)) == OperationKind.TORCH_FUNCTIONAL
+            classify_operation(attention(kernel, provider))
+            == OperationKind.TORCH_FUNCTIONAL
         ), kernel
 
-    for kernel in (
-        "flash_attention_2",
-        "flash_attn_varlen_func",
-        "xformers",
-        "transformer_engine",
+    for kernel, provider in (
+        ("flash_attention_2", "flash_attn"),
+        ("flash_attn_varlen_func", "flash_attn.flash_attn_interface"),
+        ("xformers", "xformers.ops"),
+        ("transformer_engine", "transformer_engine.pytorch"),
+        # A kernel named after a torch op but provided by a library is a library
+        # kernel; the old marker list read this one exactly backwards.
+        ("scaled_dot_product_attention", "xformers.ops"),
     ):
-        assert classify_operation(attention(kernel)) == OperationKind.GPU_KERNEL, kernel
+        assert (
+            classify_operation(attention(kernel, provider)) == OperationKind.GPU_KERNEL
+        ), kernel
 
     # Built the way the extractor builds it, so this checks the real contract:
     # an attention step whose kernel could not be named still RECORDS that it is
