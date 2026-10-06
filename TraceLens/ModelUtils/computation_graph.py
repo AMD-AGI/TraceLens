@@ -267,6 +267,47 @@ def _build_module_param_entries(
     return result
 
 
+def _host_size_param_readers(
+    graph: ComputationGraph,
+) -> dict[str, dict[str, list[int]]]:
+    """Per frame, EVERY op that reads a parameter only to size itself.
+
+    :func:`_build_module_param_entries` keeps one entry point per parameter,
+    because a rebound activation reaches its later readers through the op that
+    rebound it. A size dependency is not rebound and not carried along the tensor
+    edge: GLM splits q, k and v by the same ``lengths.tolist()``, so all three
+    read ``cu_seqlens`` directly and only the first was drawn, leaving the other
+    two apparently split by nothing.
+    """
+    result: dict[str, dict[str, list[int]]] = {}
+    for frame in graph.inline_frames:
+        readers: dict[str, list[int]] = {}
+        for index in frame.node_indices:
+            block = graph.nodes[index].block
+            if block is None:
+                continue
+            for param in _block_host_params(block):
+                if param in block.param_inputs:
+                    readers.setdefault(param, []).append(index)
+        if readers:
+            result[frame.frame_id] = readers
+    return result
+
+
+def _block_host_params(block: "BlockNode") -> set[str]:
+    """Parameters an op declared as size-only reads (its ``host_params:`` detail)."""
+    names: set[str] = set()
+    for detail in block.details or ():
+        text = str(detail).strip()
+        if text.startswith("host_params:"):
+            names.update(
+                item.strip()
+                for item in text.split(":", 1)[1].split(",")
+                if item.strip()
+            )
+    return names
+
+
 def _build_module_param_ordinal_entries(
     graph: ComputationGraph,
 ) -> dict[str, dict[str, list[tuple[int, int]]]]:
@@ -1239,6 +1280,7 @@ def _wire_all_predecessor_edges(
     # side-fed arguments land on the correct expanded pipeline node.  Graph-wide
     # and independent of which block we are wiring, so build it once.
     module_param_entries = _build_module_param_entries(graph)
+    host_size_readers = _host_size_param_readers(graph)
     module_param_ordinal_entries = _build_module_param_ordinal_entries(graph)
 
     # --- 1. Inline-op predecessor edges ---
@@ -1774,6 +1816,16 @@ def _wire_all_predecessor_edges(
                 link = (source_index, target_index)
                 if link not in graph.links:
                     graph.links.append(link)
+                # Every op that reads this parameter only as a SIZE reads it
+                # directly; the entry point above is just the first of them.
+                for extra in host_size_readers.get(step_attr, {}).get(
+                    arg_name or "", ()
+                ):
+                    if extra == target_index:
+                        continue
+                    extra_link = (source_index, extra)
+                    if extra_link not in graph.links:
+                        graph.links.append(extra_link)
                 # A module call reading a specific slot of a multi-output
                 # producer (``k_norm(key_states)`` where ``key_states`` is
                 # ordinal 1 of an ``unbind``) tags its edge with that ordinal so
