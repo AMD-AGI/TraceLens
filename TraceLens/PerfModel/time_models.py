@@ -37,8 +37,8 @@ def time_model_columns(label):
     depend on the measured kernel time.
     """
     return (
-        [f"{label} Time (µs)", f"{label} TFLOPS/s"],
-        [f"{label} TB/s", f"Pct {label}"],
+        [f"{label} Time (µs)", f"{label} TFLOPS/s", f"{label} TB/s"],
+        [f"Pct {label}"],
     )
 
 

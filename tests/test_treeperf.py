@@ -2213,6 +2213,9 @@ class TestTreePerfFinalCoverage:
             df_raw, agg_metrics=["mean", "std"]
         )
         assert isinstance(summary, pd.DataFrame)
+        for col in ("Origami Time (µs)", "Origami TFLOPS/s", "Origami TB/s"):
+            assert f"{col}_first" in summary.columns
+        assert "Pct Origami_mean" in summary.columns
 
     def test_collect_unified_perf_events_with_python_stack(self):
         analyzer = _build_analyzer(self._nn_module_trace(), add_python_func=True)
