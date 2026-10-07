@@ -887,6 +887,16 @@ def _marker_attrs_from_inner(inner):
     return dict(_MV_ATTR_RE.findall(inner))
 
 
+def _count_table_data_rows(text):
+    """Count markdown table data rows in text"""
+    n_rows = sum(
+        1
+        for ln in text.splitlines()
+        if ln.lstrip().startswith("|") and not re.match(r"^\s*\|[\s\-:|]+\|\s*$", ln)
+    )
+    return max(0, n_rows - 1)
+
+
 def _make_marker_row(index, summary, result, details, root_cause="", fix=""):
     return _make_row(
         index,
@@ -939,10 +949,13 @@ def _check_marker_top_ops(output_dir, comparison_scope=None):
         else:
             block = content[top_ops_begin.end() : end_after.start()]
             row_markers = list(_TOP_OPS_ROW_RE.finditer(block))
+            n_data_rows = _count_table_data_rows(block)
             if not row_markers:
-                errors.append(
-                    "No <!-- top-ops-row ... --> markers found inside top_ops block"
-                )
+                if n_data_rows > 0:
+                    errors.append(
+                        "No <!-- top-ops-row ... --> markers found inside "
+                        "top_ops block"
+                    )
             else:
                 for i, rm in enumerate(row_markers, start=1):
                     inner = rm.group(1)
@@ -993,14 +1006,21 @@ def _check_marker_p_items(output_dir, comparison_scope=None):
 
     p_items = _extract_p_items(compute_section)
     if not p_items:
+        intentionally_empty = (
+            "No compute kernel optimization opportunities identified" in compute_section
+        )
         return [
             _make_marker_row(
                 "marker_eval_2",
                 "P-item markers (kind=p_item)",
-                "FAIL",
-                "No P-items found in Compute Kernel Optimizations",
-                "template",
-                "Ensure report contains P-items",
+                "PASS" if intentionally_empty else "FAIL",
+                (
+                    ""
+                    if intentionally_empty
+                    else "No P-items found in Compute Kernel Optimizations"
+                ),
+                "" if intentionally_empty else "template",
+                "" if intentionally_empty else "Ensure report contains P-items",
             )
         ]
 
@@ -1095,14 +1115,26 @@ def _check_marker_detail_estimates(output_dir, comparison_scope=None):
         blocks += _p_blocks("fusion", fusion_subsection, fusion_matches)
 
     if not blocks:
+        intentionally_empty = (
+            "No compute kernel optimization opportunities identified"
+            in compute_subsection
+        )
         return [
             _make_marker_row(
                 "marker_eval_3",
                 "Detail estimate markers (kind=detail_estimate)",
-                "FAIL",
-                "No P-item headers found in Detailed Analysis",
-                "template",
-                "Ensure Detailed Analysis contains P-item sections",
+                "PASS" if intentionally_empty else "FAIL",
+                (
+                    ""
+                    if intentionally_empty
+                    else "No P-item headers found in Detailed Analysis"
+                ),
+                "" if intentionally_empty else "template",
+                (
+                    ""
+                    if intentionally_empty
+                    else "Ensure Detailed Analysis contains P-item sections"
+                ),
             )
         ]
 
