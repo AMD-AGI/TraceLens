@@ -489,7 +489,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### Hardware Reference
 - **Platform**: <platform>
-- **Peak HBM BW**: X TB/s
+- **Peak Memory BW**: X TB/s
 - **Peak MAF (BF16)**: Y TFLOPS
 - **Peak MAF (FP8)**: Z TFLOPS (if supported)
 - **Peak MAF (FP4)**: W TFLOPS (if supported)
