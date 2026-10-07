@@ -12,6 +12,7 @@ and test_detect_recompute.
 """
 
 import ast
+import hashlib
 import os
 import re
 import shutil
@@ -20,6 +21,8 @@ import numpy as np
 import pandas as pd
 import pytest
 from pandas.api.types import is_float_dtype
+
+_TRACE_SUFFIXES = (".json.gz", ".json", ".pb")
 
 
 def pytest_configure(config):
@@ -33,11 +36,80 @@ def pytest_configure(config):
     )
 
 
+def _is_trace_file(path: str) -> bool:
+    return path.endswith(_TRACE_SUFFIXES)
+
+
+def trace_path_from_params(params) -> str | None:
+    """Trace file referenced by a test's call spec, if it has one."""
+    if not isinstance(params, dict):
+        return None
+    trace_path = params.get("trace_path")
+    if isinstance(trace_path, os.PathLike):
+        trace_path = os.fspath(trace_path)
+    if isinstance(trace_path, str) and _is_trace_file(trace_path):
+        return trace_path
+    dirpath = params.get("dirpath")
+    if isinstance(dirpath, os.PathLike):
+        dirpath = os.fspath(dirpath)
+    if isinstance(dirpath, str):
+        for key in ("gz", "trace_gz"):
+            name = params.get(key)
+            if isinstance(name, str) and name.endswith(".json.gz"):
+                return os.path.join(dirpath, name)
+    return None
+
+
+def trace_group_id(path: str) -> str:
+    """Stable xdist group id for one trace file. Hex only, so nodeids stay valid."""
+    real = os.path.realpath(path)
+    return hashlib.sha256(real.encode()).hexdigest()[:16]
+
+
+def assign_trace_groups(items) -> None:
+    """Pin tests of the same trace file to one xdist worker.
+
+    Items that already carry ``xdist_group`` (for example ``jax_traces``) are
+    left unchanged. ``--dist loadgroup`` is what keeps the group on one worker.
+    """
+    for item in items:
+        if item.get_closest_marker("xdist_group") is not None:
+            continue
+        callspec = getattr(item, "callspec", None)
+        params = getattr(callspec, "params", None)
+        path = trace_path_from_params(params)
+        if path is None:
+            continue
+        item.add_marker(pytest.mark.xdist_group(trace_group_id(path)))
+
+
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items):
-    """GPU tests must not affect Codecov unit coverage (see codecov.yml gpu flag)."""
+    """GPU tests must not affect Codecov unit coverage (see codecov.yml gpu flag).
+
+    ``tryfirst`` so trace groups exist before pytest-xdist appends ``@group``
+    to the nodeid.
+    """
     for item in items:
         if item.get_closest_marker("gpu"):
             item.add_marker(pytest.mark.no_cover)
+    assign_trace_groups(items)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _enable_parsed_trace_cache():
+    """Share immutable parsed traces across tests in this worker."""
+    from TraceLens.parsed_trace_cache import (
+        clear_parse_cache,
+        enable_parse_cache,
+        reset_parse_cache,
+    )
+
+    clear_parse_cache()
+    token = enable_parse_cache()
+    yield
+    reset_parse_cache(token)
+    clear_parse_cache()
 
 
 @pytest.fixture(autouse=True)

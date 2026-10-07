@@ -390,6 +390,33 @@ def _normalize_xprof_trace(trace: dict) -> dict:
 class DataLoader:
     @staticmethod
     def load_data(filename_path: str, save_preprocessed: bool = False) -> dict:
+        # Imported lazily so library use does not depend on the test cache module
+        # at import time, and so the cache stays off unless pytest enables it.
+        from TraceLens.parsed_trace_cache import cache_enabled, load_cached
+
+        if not cache_enabled():
+            return DataLoader._load_data_uncached(filename_path, save_preprocessed)
+
+        parsed = load_cached(
+            filename_path,
+            lambda: DataLoader._load_data_uncached(
+                filename_path, save_preprocessed=False
+            ),
+        )
+        if save_preprocessed:
+            DataLoader._write_preprocessed(filename_path, parsed)
+        return parsed
+
+    @staticmethod
+    def _write_preprocessed(filename_path: str, parsed: dict) -> None:
+        out_path = filename_path.replace("pb", "processed.json")
+        with open(out_path, "w") as writefile:
+            json.dump(parsed, writefile)
+
+    @staticmethod
+    def _load_data_uncached(
+        filename_path: str, save_preprocessed: bool = False
+    ) -> dict:
         if filename_path.endswith("pb"):
             convert, converter_lib = _load_xplane_converter()
 
@@ -447,9 +474,7 @@ class DataLoader:
             _restore_streaming_device_ids(parsed)
             _attach_xplane_event_args(parsed, filename_path)
         if save_preprocessed:
-            out_path = filename_path.replace("pb", "processed.json")
-            with open(out_path, "w") as writefile:
-                json.dump(parsed, writefile)
+            DataLoader._write_preprocessed(filename_path, parsed)
         return parsed
 
 

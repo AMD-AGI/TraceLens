@@ -65,7 +65,7 @@ suite. The `[dev]` extra installs the development and test dependencies, and
 ```bash
 git clone https://github.com/AMD-AGI/TraceLens.git && cd TraceLens
 pip install -e '.[dev,jax]'
-python -m pytest tests/ -v
+python -m pytest tests/ -v -n auto
 ```
 
 ## Optional: `traceconv` for `.pftrace` input

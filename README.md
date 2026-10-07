@@ -68,7 +68,7 @@ pip install 'TraceLens[all] @ git+https://github.com/AMD-AGI/TraceLens.git'
 | `jax` | [JAX XPlane (`.pb`) traces](docs/how-to/generate-perf-report-jax.md#before-you-begin) (`xprof`, `protobuf`) |
 | `kernel_source` | [Kernel source mapping](docs/how-to/map-kernel-source.md) (`itanium-demangler`) |
 | `comparative` | LLM clients for comparative analysis (`slodels` with OpenAI, Anthropic, and Google) |
-| `dev` | Test and format tools (`pytest`, `setuptools`, `black`) |
+| `dev` | Test and format tools (`pytest`, `pytest-xdist`, `setuptools`, `black`) |
 | `all` | Every extra in this table |
 
 ### 2. Collect Traces

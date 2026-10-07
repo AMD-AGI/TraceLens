@@ -55,7 +55,7 @@ jobs:
       - name: Run unit tests
         run: |
           . .venv/bin/activate
-          python -m pytest tests/ -v --tb=short -n auto --dist worksteal \
+          python -m pytest tests/ -v --tb=short -n auto --dist loadgroup \
             -m "not gpu" --durations=20 \
             --cov=./TraceLens --cov-config=.coveragerc \
             --cov-report=xml --cov-fail-under=95 \

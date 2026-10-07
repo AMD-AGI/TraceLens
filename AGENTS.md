@@ -27,7 +27,7 @@ traces, and drives an agentic optimization report.
 ```bash
 pip install -e '.[dev,jax]'                            # editable install with dev and JAX extras
 
-python -m pytest tests/                                # full suite
+python -m pytest tests/ -n auto                      # full suite, one worker per CPU
 python -m pytest tests/test_perf_report_regression.py  # one suite
 
 black .                                                # required before every PR; CI pins black==26.3.1

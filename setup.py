@@ -46,6 +46,7 @@ def _extras_require():
         ],
         "dev": [
             "pytest",
+            "pytest-xdist",
             "setuptools",
             "black==26.3.1",
         ],

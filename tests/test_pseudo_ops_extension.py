@@ -36,7 +36,7 @@ from TraceLens.Trace2Tree.extensions.moe_aiter_pseudo_ops import (
     _has_cpu_op_descendant,
     create_pseudo_ops_moe_fused_aiter,
 )
-from tests.fixtures.traces import NORM_TRACE, TRACES_ROOT
+from tests.fixtures.traces import NORM_TRACE, _discover_inference_cases
 from tests.fixtures.treeperf import _make_gpu_event, _mk_ac2g
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     generate_perf_report_pytorch as generate_inference_report,
@@ -1566,26 +1566,28 @@ class TestTraceToTreePhase4:
         tree.build_tree()
         assert len(tree.events) >= 1
 
-    def test_inference_report_all_inference_dirs(self, tmp_path):
-        inf_root = os.path.join(TRACES_ROOT, "inference")
-        if not os.path.isdir(inf_root):
-            pytest.skip("no inference fixtures")
-        for case in os.listdir(inf_root):
-            case_dir = os.path.join(inf_root, case)
-            if not os.path.isdir(case_dir):
-                continue
-            gz = [f for f in os.listdir(case_dir) if f.endswith(".json.gz")]
-            if not gz:
-                continue
-            trace = os.path.join(case_dir, gz[0])
-            out = tmp_path / case
-            out.mkdir(exist_ok=True)
-            generate_inference_report(
-                profile_json_path=trace,
-                output_csvs_dir=str(out),
-                output_xlsx_path=str(out / "r.xlsx"),
-                collective_analysis=False,
-                kernel_summary=True,
-                short_kernel_study=True,
+    @pytest.mark.parametrize(
+        "dirpath,trace_gz",
+        _discover_inference_cases()
+        or [
+            pytest.param(
+                "",
+                "",
+                marks=pytest.mark.skip(reason="no inference fixtures"),
             )
-            assert (out / "gpu_timeline.csv").exists()
+        ],
+    )
+    def test_inference_report_all_inference_dirs(self, dirpath, trace_gz, tmp_path):
+        trace = os.path.join(dirpath, trace_gz)
+        case = os.path.basename(dirpath.rstrip(os.sep))
+        out = tmp_path / case
+        out.mkdir(exist_ok=True)
+        generate_inference_report(
+            profile_json_path=trace,
+            output_csvs_dir=str(out),
+            output_xlsx_path=str(out / "r.xlsx"),
+            collective_analysis=False,
+            kernel_summary=True,
+            short_kernel_study=True,
+        )
+        assert (out / "gpu_timeline.csv").exists()
