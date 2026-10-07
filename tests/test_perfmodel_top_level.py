@@ -39,12 +39,14 @@ from TraceLens.PerfModel.triton_compiled_perf_model import (
     _parse_wrapper,
 )
 from TraceLens.PerfModel.utils import (
+    add_duration_rate_columns,
     add_simulation_time_columns,
     gemm_tflops,
     name2bpe,
     optional_float,
     optional_int,
     parse_bool,
+    rates_for_duration,
     simulation_dtype_map,
     torch_dtype_map,
 )
@@ -107,7 +109,28 @@ class TestPerfModelUtils:
         )
         assert metrics["Origami Time (µs)"] == 100.0
         assert metrics["Origami TFLOPS/s"] == pytest.approx(2000.0)
+        assert metrics["Origami TB/s"] == pytest.approx(10000.0)
         assert metrics["Pct Origami"] == 50.0
+
+    def test_rates_for_duration(self):
+        tflops, tb_s = rates_for_duration(200.0, 1e12, 100.0)
+        assert tflops == pytest.approx(2000.0)
+        assert tb_s == pytest.approx(10000.0)
+
+        tflops, tb_s = rates_for_duration(200.0, None, 100.0)
+        assert tflops == pytest.approx(2000.0)
+        assert tb_s != tb_s
+
+        tflops, tb_s = rates_for_duration(200.0, 1e12, 0)
+        assert tflops != tflops
+        assert tb_s != tb_s
+
+    def test_add_duration_rate_columns_prefix(self):
+        metrics = {}
+        add_duration_rate_columns(metrics, 200.0, 1e12, 100.0, prefix="Roofline")
+        assert metrics["Roofline TFLOPS/s"] == pytest.approx(2000.0)
+        assert metrics["Roofline TB/s"] == pytest.approx(10000.0)
+        assert "TFLOPS/s" not in metrics
 
     def test_gemm_tflops(self):
         assert gemm_tflops(4096, 4096, 4096, 1.0) == pytest.approx(

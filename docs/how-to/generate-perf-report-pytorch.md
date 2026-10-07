@@ -130,6 +130,8 @@ This adds:
   `vector_fp32`).
 - `Roofline Time (µs):` theoretical minimum time from the GPU's peak
   capabilities.
+- `Roofline TFLOPS/s:` throughput from dividing modeled FLOPs by that time.
+- `Roofline TB/s:` bandwidth from dividing modeled bytes by that time.
 - `Roofline Bound:` `COMPUTE_BOUND` or `MEMORY_BOUND`.
 - `Pct Roofline:` how close the measured kernel time runs to the roofline.
 
