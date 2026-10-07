@@ -1570,6 +1570,11 @@ class ShapeInferencer:
         # ``_entry_spec_for`` seed/override. A root-less subgraph recursion must
         # not clobber these with its default activation spec (see infer_model_graph).
         self._entry_seeded_ids: set[str] = set()
+        # ``@output`` boundaries this graph resolved WITH its class context. The
+        # root-less subgraph recursion below re-reads the same ids with no class
+        # to resolve against, and must not clobber them -- the same protection
+        # ``_entry_seeded_ids`` gives the entry side.
+        self._rooted_output_ids: set[str] = set()
         self._module_resolved_ids: set[str] = set()
         self._tensor_names: dict[str, str] = {}
         self._tensor_specs: dict[str, TensorSpec] = {}
@@ -2132,6 +2137,7 @@ class ShapeInferencer:
         # since that cache does.
         self._forward_input_spec_refs = []
         self._entry_seeded_ids = set()
+        self._rooted_output_ids = set()
         self._module_resolved_ids: set[str] = set()
         order = _topological_order(graph)
         node_by_id = {node.id: node for node in graph.nodes}
@@ -2167,6 +2173,8 @@ class ShapeInferencer:
             )
             output = self._resolve_extent_dims(node, output, input_specs)
             output = _with_explicit_dtype(node, output)
+            if root is not None and node.metadata.get("synthetic") == "@output":
+                self._rooted_output_ids.add(node_id)
             self._tensor_specs[node_id] = output
             if node.metadata.get("synthetic") == "@input" and node.label:
                 self._boundary_shapes.setdefault(str(node.label), output.shape)
@@ -2230,7 +2238,17 @@ class ShapeInferencer:
         # dimensions: that lookup needs the class context ``root`` supplies,
         # and the recursion below deliberately runs without one, so its
         # class-less result for the same id is strictly less informed.
-        seeded = set(self._entry_seeded_ids) | set(self._module_resolved_ids)
+        # An ``@output`` resolved in class context is the module's real return.
+        # Without the class the recursion resolves the same id against whatever
+        # the body's last op happened to be: DeepSeek's indexer returns its int64
+        # ``[B, S, 6]`` top-k picks, and the root-less pass reported the scorer's
+        # float32 ``[B, S, 64, 32]`` scores in their place -- which every consumer
+        # of the indexer then inherited.
+        seeded = (
+            set(self._entry_seeded_ids)
+            | set(self._module_resolved_ids)
+            | set(self._rooted_output_ids)
+        )
         for node in graph.nodes:
             if node.kind == NodeKind.SUBGRAPH:
                 subgraph_key = node.metadata.get("subgraph_key")
