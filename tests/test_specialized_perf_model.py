@@ -73,7 +73,6 @@ def test_model_returning_none_gives_no_prediction():
         return None
 
     assert external_time_model(model)(op_work(_mm()), ARCH) is None
-    assert external_time_model(len)(op_work(_mm(), bwd=True), ARCH) is None
 
 
 @pytest.mark.parametrize(

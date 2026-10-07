@@ -7,6 +7,7 @@
 """Time estimators: OpWork, the built-in estimators, registration, columns."""
 
 import math
+import warnings
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -212,6 +213,36 @@ class TestGemmSimulatorEstimator:
             perf_model.SDPA.get_simulation_time_func(*args, backend="simulator")
             perf_model.SDPA.get_simulation_time_bwd_func(*args, backend="simulator")
         assert backends == ["simulator"] * 4
+
+
+class _Attention(perf_model.SDPA):
+    @staticmethod
+    def get_param_details(event):
+        dims = dict(B=1, N_Q=128, H_Q=8, N_KV=128, H_KV=8, d_h_qk=64, d_h_v=64)
+        return {**dims, "causal": False, "dtype_A_B": ("c10::BFloat16",)}
+
+
+class TestSimulationWarning:
+    @pytest.fixture(autouse=True)
+    def _fresh(self, monkeypatch):
+        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
+        monkeypatch.setattr(perf_model.SDPA, "_simulation_warnings", set())
+
+    def test_warns_once_when_a_requested_simulation_fails(self):
+        model = _Attention({}, arch={"name": "mi300x"}, enable_origami=True)
+        with pytest.warns(RuntimeWarning, match="_Attention: no simulated time"):
+            assert model.get_simulation_time(backend="origami") is None
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert model.get_simulation_time(backend="origami") is None
+        with pytest.warns(RuntimeWarning, match="no simulated backward time"):
+            assert model.get_simulation_time_bwd(backend="origami") is None
+
+    def test_silent_when_no_simulation_was_asked_for(self):
+        model = _Attention({}, arch={"name": "mi300x"})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert model.get_simulation_time(backend="origami") is None
 
 
 class TestColumns:

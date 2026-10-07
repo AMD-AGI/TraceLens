@@ -2011,10 +2011,30 @@ class SDPA:
                     enable_origami=self.enable_origami,
                     backend=backend,
                 )
-            except Exception:
+            except Exception as error:
                 # Origami/GEMM may not support all dtypes on a given arch JSON; omit simulated time.
+                self._warn_simulation_skipped(error, backend, bwd=False)
                 simulated_time = None
         return simulated_time
+
+    _simulation_warnings = set()
+
+    def _warn_simulation_skipped(self, error, backend, bwd):
+        """Warn once per op type and error type, if a simulation was asked for."""
+        requested = (
+            getattr(self, "enable_origami", False)
+            or backend == "simulator"
+            or (backend is None and "GEMM_SIMULATOR_PATH" in os.environ)
+        )
+        key = (type(self).__name__, bwd, type(error).__name__)
+        if not requested or key in SDPA._simulation_warnings:
+            return
+        SDPA._simulation_warnings.add(key)
+        warnings.warn(
+            f"{type(self).__name__}: no simulated {'backward ' if bwd else ''}time "
+            f"({type(error).__name__}: {error}). Shown once per op and error type.",
+            RuntimeWarning,
+        )
 
     @staticmethod
     def get_simulation_time_bwd_func(
@@ -2197,7 +2217,8 @@ class SDPA:
                     enable_origami=self.enable_origami,
                     backend=backend,
                 )
-            except Exception:
+            except Exception as error:
+                self._warn_simulation_skipped(error, backend, bwd=True)
                 simulated_time = None
         return simulated_time
 
