@@ -799,6 +799,10 @@ class OperatorRecord:
 # Display labels (lowercased) whose op collapses one axis of its input.
 _REDUCTION_LABELS = frozenset(
     {
+        # Boolean reductions: they reduce an axis like any other reduction, and
+        # the answer is bool whatever went in.
+        "any",
+        "all",
         "sum",
         "mean",
         "product",
@@ -3422,9 +3426,18 @@ class ShapeInferencer:
             # out to "keep the widest operand's shape" (which silently swallows
             # every other operand's width, including concrete ones).
             dim_str = _detail_value(details, "dim")
-            dim = _int_dim(dim_str) if dim_str is not None else -1
-            if dim is None:
-                dim = -1
+            if dim_str is None:
+                # ``torch.cat([a, b])`` joins along axis 0, the same default
+                # ``stack`` takes just above -- assuming the TRAILING axis is the
+                # one case where leaving the argument out changed the answer.
+                dim = 0
+            else:
+                # A ``dim`` that is named but not a literal (``cat(parts, dim=d)``)
+                # leaves the axis unknown; the trailing axis remains the better
+                # guess there than axis 0.
+                dim = _int_dim(dim_str)
+                if dim is None:
+                    dim = -1
             base = max(inputs, key=_broadcast_rank)
             base_dim = dim % len(base.shape) if base.shape else 0
             concat_sizes = []
@@ -3627,6 +3640,18 @@ class ShapeInferencer:
                 text = str(k_detail).strip()
                 if text.isdigit() and int(text) > 0:
                     top_k = int(text)
+            # ``k`` narrows the axis ``dim`` names. That axis is the trailing one
+            # by default, but a gate scoring expert GROUPS takes its top few along
+            # another (``scores.topk(2, dim=1)``), and narrowing the last axis
+            # instead reports a width that tensor never had.
+            axes = _reduction_axes(_detail_value(details, "dim"))
+            rank = len(source.shape)
+            if axes and rank:
+                axis = axes[0]
+                if -rank <= axis < rank:
+                    dims = list(source.shape)
+                    dims[axis] = top_k
+                    return TensorSpec(shape=tuple(dims), dtype="int64")
             return TensorSpec(
                 shape=_replace_last_dim(source.shape, top_k), dtype="int64"
             )
@@ -3728,36 +3753,50 @@ class ShapeInferencer:
                 inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
             )
             index_reduction = operation_label in {"argmax", "argmin"}
-            reduced_dim = _detail_value(details, "dim")
-            if reduced_dim is not None and reduced_dim != "-1":
-                # A concrete axis this tensor actually has is reduced the way any
-                # other axis is: ``(scores * weights).sum(dim=2)`` on
-                # ``[B, S, H, T]`` is ``[B, S, T]``, and returning the source
-                # unchanged publishes the tensor from before the reduction -- the
-                # scorer's own boundary reported ``[B, S, H, T]`` where its
-                # docstring says ``[B, S, T]``.
-                axis = _as_int(reduced_dim)
+            boolean_reduction = operation_label in {"any", "all"}
+            out_dtype = _reduction_dtype(
+                source.dtype, index_reduction, boolean_reduction
+            )
+            # torch reductions default to ``keepdim=False`` -- a reduced axis is
+            # dropped, not collapsed to size 1. Only an explicit ``keepdim=True``
+            # keeps it. Collapsing unconditionally (an earlier behaviour)
+            # fabricates a phantom axis a downstream ``cat``/``stack`` then
+            # disagrees with its sibling operand's real rank on.
+            keepdim = _detail_value(details, "keepdim") == "True"
+            axes = _reduction_axes(_detail_value(details, "dim"))
+            if axes is not None:
+                # Every axis the call names is reduced, whether it names one
+                # (``sum(dim=2)``) or several (``expert_mask.sum(dim=(-1, -2))``,
+                # which every MoE router runs). Reducing only the first, or none,
+                # publishes the tensor from BEFORE the reduction -- the scorer's
+                # boundary reported ``[B, S, H, T]`` where its docstring says
+                # ``[B, S, T]``, and the router's ``greater``/``nonzero`` read two
+                # axes that were already summed away.
                 rank = len(source.shape)
-                if axis is not None and -rank <= axis < rank:
+                present = sorted(
+                    {axis + rank if axis < 0 else axis for axis in axes}
+                    & set(range(rank))
+                )
+                if present:
                     dims = list(source.shape)
-                    out_dtype = "int64" if index_reduction else source.dtype
-                    if _detail_value(details, "keepdim") == "True":
-                        dims[axis] = 1
+                    if keepdim:
+                        for axis in present:
+                            dims[axis] = 1
                     else:
-                        del dims[axis]
+                        for axis in reversed(present):
+                            del dims[axis]
                     return TensorSpec(shape=tuple(dims), dtype=out_dtype)
                 # An axis the symbolic (B, S, H) view omits -- a stream or head
                 # axis this shape does not carry -- cannot be dropped from it.
+                if boolean_reduction:
+                    return TensorSpec(shape=source.shape, dtype="bool")
                 if not index_reduction:
                     return source
                 return TensorSpec(shape=source.shape, dtype="int64")
-            out_dtype = "int64" if index_reduction else source.dtype
-            # torch reductions default to ``keepdim=False`` -- the reduced axis is
-            # dropped, not collapsed to size 1. Only an explicit ``keepdim=True``
-            # keeps it. Collapsing unconditionally (the previous behaviour)
-            # fabricates a phantom trailing axis a downstream ``cat``/``stack``
-            # then disagrees with its sibling operand's real rank on.
-            if _detail_value(details, "keepdim") == "True":
+            # No axis named at all (``dim`` absent, or spelled ``None``): read it
+            # as the trailing axis, which is what every such call in the four
+            # models means.
+            if keepdim:
                 return TensorSpec(
                     shape=_replace_last_dim(source.shape, 1), dtype=out_dtype
                 )
@@ -5313,6 +5352,46 @@ def _with_explicit_dtype(node: ModelGraphNode, spec: TensorSpec) -> TensorSpec:
     if declared is None or declared == spec.dtype:
         return spec
     return TensorSpec(shape=spec.shape, dtype=declared)
+
+
+def _reduction_dtype(
+    source_dtype: str, index_reduction: bool, boolean_reduction: bool
+) -> str:
+    """Dtype a reduction answers: an index is int64, a predicate is bool."""
+    if index_reduction:
+        return "int64"
+    if boolean_reduction:
+        return "bool"
+    return source_dtype
+
+
+def _reduction_axes(value: Any) -> tuple[int, ...] | None:
+    """The axes a reduction's ``dim`` names, or ``None`` when it names none.
+
+    A reduction may name one axis (``sum(dim=2)``) or several
+    (``sum(dim=(-1, -2))``); ``dim=None`` names none and reduces everything.
+    Returning only the first axis of a tuple leaves the others in the published
+    shape.
+    """
+    if value is None:
+        return None
+    token = str(value).strip()
+    if not token or token == "None":
+        return None
+    try:
+        parsed = ast.literal_eval(token)
+    except (ValueError, SyntaxError):
+        return None
+    if isinstance(parsed, int) and not isinstance(parsed, bool):
+        return (parsed,)
+    if isinstance(parsed, (tuple, list)) and parsed:
+        axes = tuple(
+            item
+            for item in parsed
+            if isinstance(item, int) and not isinstance(item, bool)
+        )
+        return axes if len(axes) == len(parsed) else None
+    return None
 
 
 def _as_int(value: Any) -> int | None:

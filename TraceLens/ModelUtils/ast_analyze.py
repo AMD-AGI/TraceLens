@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import functools
 import importlib.util
 import logging
 import re
@@ -3560,6 +3561,11 @@ _NEW_TENSOR_METHOD_LABELS = {
 _TENSOR_METHOD_LABELS = {
     **_NEW_TENSOR_METHOD_LABELS,
     # Reductions
+    # ``x.any(dim)`` / ``x.all(dim)`` are TENSOR reductions, not the Python
+    # builtins of the same name: they reduce that axis and answer bool. Unknown
+    # as methods, ``valid_keys.any(-1)`` was elided entirely, so the ``where``
+    # reading it took the un-reduced tensor as its condition and everything
+    # built from it inherited that shape.
     "amax": "Block max",
     "amin": "Block min",
     "sum": "Sum",
@@ -3684,6 +3690,8 @@ _FILL_VALUE_CONSTRUCTORS = frozenset({"full", "new_full"})
 # Reductions whose axis decides the output shape, so the axis travels with the node.
 _REDUCTION_METHODS = frozenset(
     {
+        "any",
+        "all",
         "sum",
         "mean",
         "prod",
@@ -3700,6 +3708,79 @@ _REDUCTION_METHODS = frozenset(
         "std",
     }
 )
+# The namespaces a tensor op is reached through when it is called as a free
+# function (``torch.cat(x, 1)``, ``F.pad(x, (1, 0))``) rather than as a method on
+# the tensor itself. Through one of these the tensor is the FIRST POSITIONAL
+# argument, so every later argument sits one place further along than the same
+# call spelled as a method.
+_TORCH_NAMESPACES = frozenset({"torch", "F", "torch.nn.functional", "nn.functional"})
+
+
+@functools.lru_cache(maxsize=None)
+def _schema_positional_names(op: str) -> tuple[str, ...]:
+    """Positional parameter names of an op's aten schema, ``self`` included.
+
+    ``sum`` answers ``(self, dim, keepdim)`` while ``norm`` answers
+    ``(self, p, dim, keepdim)``, ``var`` answers
+    ``(self, dim, unbiased, keepdim)`` and ``cat`` answers ``(tensors, dim)``.
+    The overload with the most positional parameters is the one that spells
+    every argument out; an op with no schema answers empty, and callers keep
+    whatever reading they had before.
+    """
+    try:
+        import torch
+
+        schemas = torch._C._jit_get_schemas_for_operator(f"aten::{op}")
+    except Exception:  # noqa: BLE001 - torch absent or no such operator
+        return ()
+    best: tuple[str, ...] = ()
+    for schema in schemas or ():
+        names = tuple(
+            str(arg.name)
+            for arg in getattr(schema, "arguments", [])
+            if not getattr(arg, "kwarg_only", False)
+        )
+        if len(names) > len(best):
+            best = names
+    return best
+
+
+def _positional_parameter_names(method: str) -> tuple[str, ...]:
+    """Positional parameter names of a tensor method, after ``self``."""
+    names = _schema_positional_names(method)
+    return names[1:] if names and names[0] == "self" else names
+
+
+def _calls_through_namespace(func: ast.AST) -> bool:
+    """True when an op is called as ``torch.op(tensor, ...)``, not ``tensor.op()``."""
+    if not isinstance(func, ast.Attribute):
+        return True
+    return _expr_name(func.value) in _TORCH_NAMESPACES
+
+
+def _schema_arguments(op: str, node: ast.Call) -> dict[str, ast.expr]:
+    """This call's arguments, keyed by the name the op's own schema gives them.
+
+    One table answers every spelling: positional (``x.sum(1, True)``), keyword
+    (``x.sum(dim=1, keepdim=True)``), mixed (``x.sum(1, keepdim=True)``) and
+    free-function (``torch.sum(x, 1, True)``). Counting positions by hand
+    instead mis-read every op whose arguments are not in the assumed order --
+    ``norm``'s first argument is the ORDER, ``var``'s second is ``unbiased``,
+    and ``F.pad`` was taken for a method because its namespace is not ``torch``.
+    """
+    names = _schema_positional_names(op)
+    if names and names[0] == "self" and not _calls_through_namespace(node.func):
+        names = names[1:]  # the receiver supplies ``self``
+    bound: dict[str, ast.expr] = {}
+    for index, argument in enumerate(node.args):
+        if index < len(names):
+            bound.setdefault(names[index], argument)
+    for keyword in node.keywords:
+        if keyword.arg:
+            bound.setdefault(keyword.arg, keyword.value)
+    return bound
+
+
 _DIM_DETAIL_METHODS = _REDUCTION_METHODS | {"unsqueeze", "squeeze", "gather"}
 
 # How far ``_extent_source_producers`` chases a generator bound through
@@ -6061,12 +6142,7 @@ class _ForwardOperationExtractor:
         if isinstance(node.func, ast.Attribute):
             method_name = node.func.attr
             owner_name = _expr_name(node.func.value)
-            is_namespace_call = owner_name in {
-                "torch",
-                "F",
-                "torch.nn.functional",
-                "nn.functional",
-            }
+            is_namespace_call = owner_name in _TORCH_NAMESPACES
             if not is_namespace_call:
                 base_producer, base_external = self.expression(node.func.value)
                 external.extend(base_external)
@@ -6364,36 +6440,45 @@ class _ForwardOperationExtractor:
                     "shape_snapshots: " + ", ".join(self._pending_shape_snapshots)
                 )
         if call_name in {"split", "chunk"}:
-            # For torch.split(tensor, split_size, dim) the tensor is arg0;
-            # for tensor.split(split_size, dim) there is no tensor arg.
-            is_method = isinstance(node.func, ast.Attribute) and not (
-                isinstance(node.func.value, ast.Name) and node.func.value.id == "torch"
+            bound = _schema_arguments(call_name, node)
+            # The same quantity is spelled ``split_size`` by ``split``, ``chunks``
+            # by ``chunk`` and ``split_size_or_sections`` by the Python wrapper.
+            size = next(
+                (
+                    bound[name]
+                    for name in (
+                        "split_size",
+                        "split_sizes",
+                        "chunks",
+                        "split_size_or_sections",
+                    )
+                    if name in bound
+                ),
+                None,
             )
-            size_idx = 0 if is_method else 1
-            dim_idx = size_idx + 1
-            if len(node.args) > size_idx:
-                details.append(f"split_size: {ast.unparse(node.args[size_idx])}")
-            if len(node.args) > dim_idx:
-                details.append(f"dim: {ast.unparse(node.args[dim_idx])}")
-            for keyword in node.keywords:
-                if keyword.arg == "dim":
-                    details.append(f"dim: {ast.unparse(keyword.value)}")
-                elif keyword.arg in {"split_size_or_sections", "chunks"}:
-                    details.append(f"split_size: {ast.unparse(keyword.value)}")
+            if size is not None:
+                details.append(f"split_size: {ast.unparse(size)}")
+            if "dim" in bound:
+                details.append(f"dim: {ast.unparse(bound['dim'])}")
         if call_name == "transpose":
-            is_method = isinstance(node.func, ast.Attribute) and not (
-                isinstance(node.func.value, ast.Name) and node.func.value.id == "torch"
-            )
-            arg_start = 0 if is_method else 1
-            if len(node.args) > arg_start + 1:
-                details.append(f"dim0: {ast.unparse(node.args[arg_start])}")
-                details.append(f"dim1: {ast.unparse(node.args[arg_start + 1])}")
+            # Both axes, however they are spelled -- ``x.transpose(1, 2)``,
+            # ``x.transpose(dim0=1, dim1=2)`` and ``torch.transpose(x, 1, 2)``
+            # name the same swap. Requiring two POSITIONAL arguments recorded
+            # neither axis for the keyword spelling, leaving the swap invisible.
+            bound = _schema_arguments(call_name, node)
+            if "dim0" in bound and "dim1" in bound:
+                details.append(f"dim0: {ast.unparse(bound['dim0'])}")
+                details.append(f"dim1: {ast.unparse(bound['dim1'])}")
         if call_name == "permute":
-            is_method = isinstance(node.func, ast.Attribute) and not (
-                isinstance(node.func.value, ast.Name) and node.func.value.id == "torch"
-            )
-            arg_start = 0 if is_method else 1
+            arg_start = 1 if _calls_through_namespace(node.func) else 0
             dims_args = node.args[arg_start:]
+            if not dims_args:
+                # ``x.permute(dims=(0, 2, 1))`` names the order by keyword.
+                keyword_dims = next(
+                    (kw.value for kw in node.keywords if kw.arg == "dims"), None
+                )
+                if keyword_dims is not None:
+                    dims_args = [keyword_dims]
             # ``permute`` accepts either varargs (``x.permute(0, 2, 1, 3)``) or a
             # single tuple/list (``x.permute((0, 2, 1, 3))``); flatten both to a
             # comma-joined dims spec so shape inference can reorder the axes.
@@ -6412,23 +6497,11 @@ class _ForwardOperationExtractor:
             # ``[start_dim, end_dim]`` into one. Record both so shape inference
             # can compute the merged extent instead of passing the tensor
             # through unchanged (which left phantom rank, e.g. topk_indices).
-            is_method = isinstance(node.func, ast.Attribute) and not (
-                isinstance(node.func.value, ast.Name) and node.func.value.id == "torch"
-            )
-            arg_start = 0 if is_method else 1
-            flatten_args = node.args[arg_start:]
-            if len(flatten_args) >= 1:
-                details.append(f"start_dim: {ast.unparse(flatten_args[0])}")
-            if len(flatten_args) >= 2:
-                details.append(f"end_dim: {ast.unparse(flatten_args[1])}")
-            span_keywords = [
-                keyword
-                for keyword in node.keywords
-                if keyword.arg in {"start_dim", "end_dim"}
-            ]
-            for keyword in span_keywords:
-                details.append(f"{keyword.arg}: {ast.unparse(keyword.value)}")
-            if not flatten_args and not span_keywords:
+            bound = _schema_arguments(call_name, node)
+            span = [name for name in ("start_dim", "end_dim") if name in bound]
+            for name in span:
+                details.append(f"{name}: {ast.unparse(bound[name])}")
+            if not span:
                 # ``x.flatten()`` with no span at all collapses EVERY axis into
                 # one. Say so here, where the call site is in hand: further
                 # down, a missing ``start_dim`` is indistinguishable from an
@@ -6442,7 +6515,7 @@ class _ForwardOperationExtractor:
             # inference reports the padded extent; ``cu_seqlens`` is a ``[B+1]``
             # tensor precisely because of this call, and passing the tensor
             # through reported it one short.
-            pad_arg = node.args[1] if len(node.args) > 1 else None
+            pad_arg = _schema_arguments(call_name, node).get("pad")
             if isinstance(pad_arg, (ast.Tuple, ast.List)):
                 details.append(
                     "pad: " + ", ".join(ast.unparse(item) for item in pad_arg.elts)
@@ -6516,29 +6589,40 @@ class _ForwardOperationExtractor:
                 if keyword.arg == "dtype":
                     details.append(f"dtype: {ast.unparse(keyword.value)}")
         if call_name in _DIM_DETAIL_METHODS:
-            if node.args:
-                details.append(f"dim: {ast.unparse(node.args[0])}")
-            for keyword in node.keywords:
-                if keyword.arg in {"dim", "keepdim"}:
-                    details.append(f"{keyword.arg}: {ast.unparse(keyword.value)}")
+            # Which positional argument is ``dim`` and which is ``keepdim`` comes
+            # from the op's own schema, never from assuming argument 0 is the
+            # axis: ``x.norm(2, dim=-1)`` passes the ORDER first, and
+            # ``x.var(-1, False)`` passes ``unbiased`` where ``sum`` takes
+            # ``keepdim``. Reading position 0 as the axis mislabelled the first
+            # and reading position 1 as ``keepdim`` would mislabel the second.
+            if _schema_positional_names(call_name):
+                bound = _schema_arguments(call_name, node)
+                for name in ("dim", "keepdim"):
+                    if name in bound:
+                        details.append(f"{name}: {ast.unparse(bound[name])}")
+            else:
+                # No schema to consult: keep the long-standing reading.
+                if node.args:
+                    details.append(f"dim: {ast.unparse(node.args[0])}")
+                for keyword in node.keywords:
+                    if keyword.arg in {"dim", "keepdim"}:
+                        details.append(f"{keyword.arg}: {ast.unparse(keyword.value)}")
         if call_name == "topk":
             # ``x.topk(k, dim=...)`` / ``torch.topk(x, k, dim=...)``: this call's own
             # k sets the output width. A MoE gate picks experts-per-token with one
             # topk and, on the way there, takes a different k over the expert groups
             # (``.view(-1, n_group, per_group).topk(2, dim=-1)``), so the model-wide
             # experts-per-token is the right default but the wrong answer here.
-            is_method = isinstance(node.func, ast.Attribute) and not (
-                isinstance(node.func.value, ast.Name) and node.func.value.id == "torch"
-            )
-            k_value = next(
-                (keyword.value for keyword in node.keywords if keyword.arg == "k"), None
-            )
-            if k_value is None:
-                k_index = 0 if is_method else 1
-                if len(node.args) > k_index:
-                    k_value = node.args[k_index]
+            bound = _schema_arguments(call_name, node)
+            k_value = bound.get("k")
             if k_value is not None:
                 details.append(f"k: {ast.unparse(k_value)}")
+            # ``k`` narrows the axis ``dim`` names, which is the LAST axis only
+            # by default. A gate that takes its top groups with
+            # ``scores.topk(2, dim=1)`` narrows axis 1, and applying ``k`` to the
+            # trailing axis instead reports a width the tensor never had.
+            if "dim" in bound:
+                details.append(f"dim: {ast.unparse(bound['dim'])}")
         if call_name in {"type", "float", "to", "type_as"}:
             # ``x.type_as(y)`` names its target dtype indirectly, via the tensor
             # ``y`` it copies the dtype from. Recording that reference expression
@@ -6576,11 +6660,18 @@ class _ForwardOperationExtractor:
         if label in {"Concat", "Stack"}:
             # The assembly axis drives the output width; record it so shape
             # inference sums (concat) or tiles along the right dim.
-            dim_arg = next((kw.value for kw in node.keywords if kw.arg == "dim"), None)
-            if dim_arg is None and len(node.args) > 1:
-                dim_arg = node.args[1]
+            dim_arg = _schema_arguments(
+                "cat" if label == "Concat" else "stack", node
+            ).get("dim")
             if dim_arg is not None:
                 details.append(f"dim: {ast.unparse(dim_arg)}")
+            else:
+                # ``torch.cat([a, b])`` and ``torch.stack([a, b])`` assemble along
+                # axis 0, not the trailing one. Saying nothing let the shape rule
+                # fall back to its own default, which for concat was the LAST
+                # axis -- the one case where leaving the argument out changes the
+                # answer.
+                details.append("dim: 0")
         emit_predecessors = [
             value for value in (base_producer, *arg_producers) if value
         ]

@@ -81,3 +81,81 @@ class TestReductionAxis:
             root=None,
         )
         assert out.shape == ("B", "S", 8), out.shape
+
+    def test_every_axis_a_tuple_names_is_reduced(self) -> None:
+        """``expert_mask.sum(dim=(-1, -2))`` -- which every MoE router runs.
+
+        Reducing only the first axis of the tuple, or none of them, published the
+        tensor from before the reduction, and the ``greater``/``nonzero`` reading
+        it counted two axes that were already summed away.
+        """
+        out = _inferencer()._infer_node_output(
+            _node("sum", ["dim: (-1, -2)"]),
+            [TensorSpec(("B", "S", 8, 4), "float32")],
+            root=None,
+        )
+        assert out.shape == ("B", "S"), out.shape
+
+    def test_a_tuple_of_axes_honours_keepdim(self) -> None:
+        out = _inferencer()._infer_node_output(
+            _node("sum", ["dim: (1, 2)", "keepdim: True"]),
+            [TensorSpec(("B", "S", 8), "float32")],
+            root=None,
+        )
+        assert out.shape == ("B", 1, 1), out.shape
+
+    def test_a_list_spells_the_same_thing(self) -> None:
+        out = _inferencer()._infer_node_output(
+            _node("sum", ["dim: [1, 2]"]),
+            [TensorSpec(("B", "S", 8), "float32")],
+            root=None,
+        )
+        assert out.shape == ("B",), out.shape
+
+    def test_an_axis_the_view_omits_is_skipped_among_others(self) -> None:
+        out = _inferencer()._infer_node_output(
+            _node("sum", ["dim: (1, 9)"]),
+            [TensorSpec(("B", "S", 8), "float32")],
+            root=None,
+        )
+        assert out.shape == ("B", 8), out.shape
+
+
+class TestPredicateReduction:
+    """``any``/``all`` reduce an axis and answer bool, like any other reduction."""
+
+    def test_any_drops_its_axis_and_answers_bool(self) -> None:
+        out = _inferencer()._infer_node_output(
+            _node("any", ["dim: -1"]),
+            [TensorSpec(("B", "S", 257), "float32")],
+            root=None,
+        )
+        assert out.shape == ("B", "S"), out.shape
+        assert out.dtype == "bool", out.dtype
+
+    def test_any_keeps_the_axis_when_asked(self) -> None:
+        out = _inferencer()._infer_node_output(
+            _node("any", ["dim: -1", "keepdim: True"]),
+            [TensorSpec(("B", "S", 257), "float32")],
+            root=None,
+        )
+        assert out.shape == ("B", "S", 1), out.shape
+        assert out.dtype == "bool", out.dtype
+
+    def test_all_reduces_a_named_inner_axis(self) -> None:
+        out = _inferencer()._infer_node_output(
+            _node("all", ["dim: 1", "keepdim: True"]),
+            [TensorSpec(("B", "S", 257), "float32")],
+            root=None,
+        )
+        assert out.shape == ("B", 1, 257), out.shape
+        assert out.dtype == "bool", out.dtype
+
+    def test_an_index_reduction_still_answers_int64(self) -> None:
+        out = _inferencer()._infer_node_output(
+            _node("argmax", ["dim: -1", "keepdim: True"]),
+            [TensorSpec(("B", "S", 257), "float32")],
+            root=None,
+        )
+        assert out.shape == ("B", "S", 1), out.shape
+        assert out.dtype == "int64", out.dtype
