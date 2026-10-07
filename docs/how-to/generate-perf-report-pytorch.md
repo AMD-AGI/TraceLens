@@ -149,8 +149,10 @@ This adds:
   Equivalently, operations whose arithmetic intensity (FLOPs/byte) sits below the
   roofline knee point (peak FLOPS / peak bandwidth) are memory-bound; those above
   it are compute-bound.
-- Add `--enable-origami` to use Origami-simulated GEMM/SDPA times when a GPU arch
+- Add `--enable-origami` to use Origami-simulated GEMM times when a GPU arch
   spec is provided.
+- Add `--sdpa-tile-model origami` (or `simulator`) for attention times from
+  TraceLens's SDPA tile model (see below).
 
 The arch JSON specifies Max Achievable FLOPS (MAF) per compute type and
 precision; see the
@@ -245,15 +247,22 @@ and call of a proprietary library in the extension file. A placeholder is in
 Roofline and Origami are estimators behind the same interface, in
 `TraceLens/PerfModel/time_models.py`: each takes the op's work (category,
 params, GFLOPs, bytes moved, compute spec) and the arch dict, and returns a
-time. Origami covers GEMMs (with `--enable-origami`) and attention through the
-attention perf model's own simulation.
+time. Origami covers GEMMs, with `--enable-origami`.
 
 To compare with an external GEMM simulator, set `GEMM_SIMULATOR_PATH` to its
 script. TraceLens runs it as
 `python <script> -b B -m M -n N -k K --dtype <dtype> -d 1 -a <arch name>`
 (plus `--freq_mhz`, `--cus`, and `--hbm_bw` from the arch) and reads
-`Time=<µs>` from its output. Its times fill a separate `GEMM Simulator` column
-group, for GEMMs and for the attention tile GEMMs, next to Origami's.
+`Time=<µs>` from its output. Its GEMM times fill a separate `GEMM Simulator`
+column group next to Origami's.
+
+Origami and the GEMM simulator model GEMMs only. For attention,
+`--sdpa-tile-model origami|simulator` adds TraceLens's SDPA tile model: it
+times one Q·Kᵀ tile and one P·V tile on one CU with the chosen GEMM backend,
+scales them by the number of waves, and adds softmax and memory terms. Its
+columns are labeled `SDPA Tile (Origami)` or `SDPA Tile (GEMM Simulator)`. It
+needs `num_cus`, `gemm_units_per_cu`, and `mem_bw_gbps` in the arch, and
+`l1_bw_gbps` for backward.
 
 A kernel filter reports the op's throughput over a subset of its kernels, for
 example without copy and transpose kernels:
@@ -279,7 +288,8 @@ The following table describes all optional arguments.
 | `--output_csvs_dir DIR` | `None` | Write each sheet as a CSV in this directory. |
 | `--gpu_arch_platform NAME` | `None` | Bundled GPU arch for roofline classification (`MI300X`, `MI325X`). |
 | `--gpu_arch_json_path PATH` | `None` | Custom GPU arch JSON (mutually exclusive with `--gpu_arch_platform`). |
-| `--enable-origami` | `False` | Use Origami-simulated GEMM/SDPA times when an arch is provided. |
+| `--enable-origami` | `False` | Use Origami-simulated GEMM times when an arch is provided. |
+| `--sdpa-tile-model {origami,simulator}` | `None` | Add `SDPA Tile (<backend>)` attention times from TraceLens's tile model; `simulator` needs `GEMM_SIMULATOR_PATH`. |
 | `--detect_recompute` | `False` | Add an `is_recompute` column for activation checkpointing (see above). |
 | `--extension_file PATH` | `None` | Custom tree / perf-model / op-category hooks (see above). |
 | `--enable_kernel_summary` | `False` | Add the `kernel_summary` sheet. |

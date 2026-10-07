@@ -15,8 +15,8 @@ estimator is a function::
 
 Each estimator writes one column group, ``<label> Time (µs)``,
 ``<label> TFLOPS/s``, ``<label> TB/s``, any extra columns (named
-``<label> ...``), and ``Pct <label>``. Roofline, Origami, and (when
-``GEMM_SIMULATOR_PATH`` is set) GEMM Simulator are built in.
+``<label> ...``), and ``Pct <label>``. Roofline, Origami, GEMM Simulator
+(when ``GEMM_SIMULATOR_PATH`` is set), and the SDPA tile model are built in.
 
 External time models use a simpler signature and are adapted with
 :func:`external_time_model`::
@@ -44,7 +44,14 @@ from .utils import add_duration_rate_columns
 
 # Built-in labels come first in summaries, in this order; others follow in
 # column order.
-BUILTIN_LABEL_ORDER = ("Roofline", "Origami", "GEMM Simulator", "External")
+BUILTIN_LABEL_ORDER = (
+    "Roofline",
+    "Origami",
+    "GEMM Simulator",
+    "SDPA Tile (Origami)",
+    "SDPA Tile (GEMM Simulator)",
+    "External",
+)
 
 
 @dataclass(frozen=True)
@@ -256,10 +263,27 @@ def _accepts_backend(fn):
     )
 
 
+def origami_estimator(python_path=None):
+    """Origami time for forward GEMMs."""
+    return external_time_model(partial(origami_perf_model, python_path=python_path))
+
+
+def gemm_simulator_estimator(python_path=None):
+    """GEMM simulator time for forward GEMMs."""
+    return external_time_model(partial(gemm_simulator_model, python_path=python_path))
+
+
+SDPA_TILE_BACKENDS = {"origami": "Origami", "simulator": "GEMM Simulator"}
+
+
+def sdpa_tile_label(backend):
+    """Report label of the SDPA tile model on ``backend``."""
+    return f"SDPA Tile ({SDPA_TILE_BACKENDS[backend]})"
+
+
 def class_simulation_time(perf_model, bwd, backend):
-    """Time from the perf-model class's own simulation (attention's tile
-    model) on ``backend``. A class whose simulation takes no ``backend`` counts
-    as Origami."""
+    """Time from the perf-model class's own simulation on ``backend``. A class
+    whose simulation takes no ``backend`` counts as Origami."""
     simulate = getattr(
         perf_model, "get_simulation_time_bwd" if bwd else "get_simulation_time", None
     )
@@ -270,44 +294,39 @@ def class_simulation_time(perf_model, bwd, backend):
     return simulate() if backend == "origami" else None
 
 
-def simulation_estimator(backend, gemm_model):
-    """Estimator for a GEMM backend: the class's own simulation, overridden
-    for a forward op by ``gemm_model(category, params, arch)`` when it
-    returns a time. ``gemm_model`` may be None."""
+def sdpa_tile_estimator(backend):
+    """TraceLens's attention tile model: one Q·Kᵀ and one P·V tile GEMM timed
+    on one CU with ``backend``, scaled by the number of waves, plus softmax and
+    memory terms. Origami and the GEMM simulator only model GEMMs; the tiling
+    is TraceLens's own."""
+    if backend not in SDPA_TILE_BACKENDS:
+        raise ValueError(
+            f"Unknown SDPA tile model backend {backend!r}; "
+            f"expected one of {sorted(SDPA_TILE_BACKENDS)}"
+        )
 
     def estimate(work, arch):
-        time_us = class_simulation_time(work.perf_model, work.bwd, backend)
-        if gemm_model is not None and not work.bwd and work.params is not None:
-            gemm_time_us = gemm_model(work.category, work.params, arch)
-            if gemm_time_us:
-                time_us = float(gemm_time_us)
-        return time_us
+        return class_simulation_time(work.perf_model, work.bwd, backend)
 
     return estimate
 
 
-def origami_estimator(enable_origami=False, python_path=None):
-    """Origami time: attention's tile model always, GEMMs when enabled."""
-    gemm_model = (
-        partial(origami_perf_model, python_path=python_path) if enable_origami else None
-    )
-    return simulation_estimator("origami", gemm_model)
-
-
-def gemm_simulator_estimator(python_path=None):
-    """Simulator time for GEMMs and attention's tile GEMMs."""
-    return simulation_estimator(
-        "simulator", partial(gemm_simulator_model, python_path=python_path)
-    )
-
-
-def default_time_estimators(enable_origami=False, python_path=None):
-    """Built-in estimators, in report order. The GEMM simulator is added when
-    ``GEMM_SIMULATOR_PATH`` is set."""
-    estimators = {
-        "Roofline": roofline_estimator,
-        "Origami": origami_estimator(enable_origami, python_path),
-    }
+def default_time_estimators(
+    enable_origami=False, python_path=None, sdpa_tile_model=None
+):
+    """Built-in estimators, in report order: Roofline; Origami with
+    ``enable_origami``; the GEMM simulator when ``GEMM_SIMULATOR_PATH`` is set;
+    the SDPA tile model on ``sdpa_tile_model`` (``"origami"`` or
+    ``"simulator"``) when given."""
+    estimators = {"Roofline": roofline_estimator}
+    if enable_origami:
+        estimators["Origami"] = origami_estimator(python_path)
     if "GEMM_SIMULATOR_PATH" in os.environ:
         estimators["GEMM Simulator"] = gemm_simulator_estimator(python_path)
+    if sdpa_tile_model is not None:
+        if sdpa_tile_model == "simulator" and "GEMM_SIMULATOR_PATH" not in os.environ:
+            raise ValueError("sdpa_tile_model='simulator' needs GEMM_SIMULATOR_PATH")
+        estimators[sdpa_tile_label(sdpa_tile_model)] = sdpa_tile_estimator(
+            sdpa_tile_model
+        )
     return estimators

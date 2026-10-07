@@ -19,8 +19,8 @@ doesn't install Origami.
 
 Origami integrates into TraceLens in the following ways.
 
-- GEMM and SDPA perf models call Origami's Python bindings to predict a duration in microseconds for forward (and SDPA backward where applicable).
-- Results show up in perf reports under columns such as `Origami Time (µs)`, `Origami TFLOPS/s`, `Origami TB/s`, and `Pct Origami` (relative to measured kernel busy time), when simulation uses Origami.
+- With `--enable-origami`, GEMMs call Origami's Python bindings to predict a duration in microseconds. Results show up under columns such as `Origami Time (µs)`, `Origami TFLOPS/s`, `Origami TB/s`, and `Pct Origami` (relative to measured kernel busy time).
+- Origami models GEMMs only. With `--sdpa-tile-model origami`, TraceLens's SDPA tile model times its per-tile GEMMs with Origami and reports forward and backward attention under `SDPA Tile (Origami)` columns.
 - Roofline metrics from `--gpu_arch_json_path` are separate; they don't require Origami. Origami adds *simulated* timing on top when enabled.
 
 ## Installation

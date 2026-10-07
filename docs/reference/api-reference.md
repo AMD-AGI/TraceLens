@@ -41,7 +41,8 @@ Generate a multi-sheet Excel report from a PyTorch (`torch.profiler`) trace.
 | `--include_unlinked_kernels` | off | Include kernels with no linked CPU op in the GPU-timeline analysis. |
 | `--micro_idle_thresh_us` | None | Threshold (µs) to classify an idle interval as micro-idle. |
 | `--comparison_json_path` | None | Second trace to compare against; runs TraceDiff and adds speedup/delta/LCA columns plus a `diff_stats` sheet. |
-| `--enable-origami` | off | Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided. |
+| `--enable-origami` | off | Use Origami for simulated GEMM times when a GPU arch JSON is provided. |
+| `--sdpa-tile-model` | None | `origami` or `simulator`: add `SDPA Tile (<backend>)` attention times from TraceLens's tile model. |
 | `--detect_recompute` | off | Detect activation recomputation and add an `is_recompute` column. |
 | `--include_overlap_info` | off | Add kernel-overlap sheets. |
 | `--topk_ops`, `--topk_roofline_ops` | None | Limit rows in the unique-args and roofline tables. |
@@ -76,7 +77,7 @@ trace).
 | `--output_xlsx_path` | auto | Output Excel file. |
 | `--output_csvs_dir` | None | Directory for CSV output. |
 | `--kernel_metadata_keyword_filters` | None | Only analyze events whose metadata contains the given keyword(s), for example `remat checkpoint`. |
-| `--enable-origami` | off | Use Origami simulated GEMM/SDPA times when a GPU arch JSON is provided. |
+| `--enable-origami` | off | Use Origami simulated GEMM times when a GPU arch JSON is provided. |
 
 ### TraceLens_generate_perf_report_rocprof
 

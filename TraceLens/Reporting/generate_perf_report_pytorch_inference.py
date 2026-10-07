@@ -557,6 +557,8 @@ def generate_perf_report_pytorch(
     gpu_arch_platform: Optional[str] = None,
     gpu_arch: Optional[dict] = None,
     enable_origami: bool = False,
+    # GEMM backend for the SDPA tile model: "origami", "simulator", or None (off)
+    sdpa_tile_model: Optional[str] = None,
     group_by_parent_module: bool = False,
     group_by_num_kernels: bool = False,
     include_call_stack: bool = False,
@@ -585,6 +587,8 @@ def generate_perf_report_pytorch(
             add_python_func=add_python_func,
             enable_pseudo_ops=enable_pseudo_ops,
             rebuild_tree=False,
+            enable_origami=enable_origami,
+            sdpa_tile_model=sdpa_tile_model,
         )
     else:
         perf_analyzer = TreePerfAnalyzer.from_file(
@@ -594,6 +598,8 @@ def generate_perf_report_pytorch(
             include_unlinked_kernels=include_unlinked_kernels,
             add_python_func=add_python_func,
             enable_pseudo_ops=enable_pseudo_ops,
+            enable_origami=enable_origami,
+            sdpa_tile_model=sdpa_tile_model,
         )
 
         graph_launch_events = [
@@ -1342,7 +1348,14 @@ def main():
         "--enable-origami",
         action="store_true",
         default=False,
-        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+        help="Use Origami for simulated GEMM times when a GPU arch JSON is provided",
+    )
+    parser.add_argument(
+        "--sdpa-tile-model",
+        choices=["origami", "simulator"],
+        default=None,
+        help="Add SDPA Tile (<backend>) columns from TraceLens's attention tile model, "
+        "timing each tile GEMM with Origami or the GEMM simulator (GEMM_SIMULATOR_PATH).",
     )
 
     parser.add_argument(
@@ -1435,6 +1448,7 @@ def main():
         gpu_arch_json_path=args.gpu_arch_json_path,
         gpu_arch_platform=args.gpu_arch_platform,
         enable_origami=args.enable_origami,
+        sdpa_tile_model=args.sdpa_tile_model,
         group_by_parent_module=args.group_by_parent_module,
         group_by_num_kernels=args.group_by_num_kernels,
         include_call_stack=args.include_call_stack,

@@ -2008,7 +2008,7 @@ class SDPA:
                     self.N_KV,
                     self.d_h,
                     fa,
-                    enable_origami=self.enable_origami,
+                    enable_origami=self.enable_origami or backend == "origami",
                     backend=backend,
                 )
             except Exception as error:
@@ -2023,7 +2023,7 @@ class SDPA:
         """Warn once per op type and error type, if a simulation was asked for."""
         requested = (
             getattr(self, "enable_origami", False)
-            or backend == "simulator"
+            or backend in ("origami", "simulator")
             or (backend is None and "GEMM_SIMULATOR_PATH" in os.environ)
         )
         key = (type(self).__name__, bwd, type(error).__name__)
@@ -2214,7 +2214,7 @@ class SDPA:
                     self.N_KV,
                     self.d_h,
                     fa,
-                    enable_origami=self.enable_origami,
+                    enable_origami=self.enable_origami or backend == "origami",
                     backend=backend,
                 )
             except Exception as error:

@@ -58,7 +58,7 @@ Options:
 - `--kernel_metadata_keyword_filters <kw> ...` restricts the analysis to events
   whose metadata contains the given keywords (for example, `remat checkpoint` to
   focus on rematerialization or checkpointing scopes).
-- `--enable-origami` uses Origami-simulated GEMM/SDPA times when a GPU arch JSON
+- `--enable-origami` uses Origami-simulated GEMM times when a GPU arch JSON
   is available.
 - `--output_xlsx_path` and `--output_csvs_dir` control output paths. (JAX
   currently supports only these output options.)

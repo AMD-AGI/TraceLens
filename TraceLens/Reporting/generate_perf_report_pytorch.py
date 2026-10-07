@@ -451,6 +451,8 @@ def generate_perf_report_pytorch(
     inductor_cache_dir: Optional[str] = None,
     group_by_num_kernels: bool = False,
     enable_origami: bool = False,
+    # GEMM backend for the SDPA tile model: "origami", "simulator", or None (off)
+    sdpa_tile_model: Optional[str] = None,
     # activation recompute detection
     detect_recompute: bool = False,
     include_call_stack: bool = False,
@@ -471,6 +473,7 @@ def generate_perf_report_pytorch(
         detect_recompute=detect_recompute,
         enable_origami=enable_origami,
         inductor_cache_dir=inductor_cache_dir,
+        sdpa_tile_model=sdpa_tile_model,
     )
 
     ## Apply annotation for vLLM eager and replay phase
@@ -1205,7 +1208,14 @@ def main():
         "--enable-origami",
         action="store_true",
         default=False,
-        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+        help="Use Origami for simulated GEMM times when a GPU arch JSON is provided",
+    )
+    parser.add_argument(
+        "--sdpa-tile-model",
+        choices=["origami", "simulator"],
+        default=None,
+        help="Add SDPA Tile (<backend>) columns from TraceLens's attention tile model, "
+        "timing each tile GEMM with Origami or the GEMM simulator (GEMM_SIMULATOR_PATH).",
     )
     parser.add_argument(
         "--inductor_cache_dir",
@@ -1275,6 +1285,7 @@ def main():
         gpu_arch_platform=args.gpu_arch_platform,
         group_by_num_kernels=args.group_by_num_kernels,
         enable_origami=args.enable_origami,
+        sdpa_tile_model=args.sdpa_tile_model,
         detect_recompute=args.detect_recompute,
         inductor_cache_dir=args.inductor_cache_dir,
         include_call_stack=args.include_call_stack,

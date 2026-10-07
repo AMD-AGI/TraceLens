@@ -262,6 +262,7 @@ class TreePerfAnalyzer:
         pb_file_name=None,
         metadata_events=None,
         kernel_metadata_keyword_filters=None,
+        sdpa_tile_model=None,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
@@ -274,7 +275,9 @@ class TreePerfAnalyzer:
         self.arch = arch
         self.python_path = python_path
         self.enable_origami = enable_origami
-        self.time_estimators = default_time_estimators(enable_origami, python_path)
+        self.time_estimators = default_time_estimators(
+            enable_origami, python_path, sdpa_tile_model
+        )
         self.kernel_filters = {}
         self.inductor_cache_dir = inductor_cache_dir
         self.event_to_category = event_to_category
@@ -3020,6 +3023,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         pb_file_name=None,
         metadata_events=None,
         kernel_metadata_keyword_filters: list[str] = None,
+        sdpa_tile_model=None,
     ):
         super().__init__(
             tree=tree,
@@ -3035,6 +3039,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             detect_recompute=detect_recompute,
             enable_origami=enable_origami,
             inductor_cache_dir=inductor_cache_dir,
+            sdpa_tile_model=sdpa_tile_model,
         )
         self.pb_file_name = pb_file_name
         self.tree.build_tree(
