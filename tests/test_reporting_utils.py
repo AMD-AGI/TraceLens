@@ -2528,6 +2528,7 @@ class TestPush95Phase3:
         csv_dir.mkdir()
         pd.DataFrame(
             {
+                "name": ["aten::mm", "aten::add"],
                 "kernel_details_summary": [
                     "[{'name': 'Cijk_a'}]",
                     "[{'name': 'ew_add'}]",
@@ -2586,10 +2587,10 @@ class TestPush95Phase3:
         )
 
         candidates, manifest, csv_path = kfa.load_fusion_data(str(tmp_path))
-        lookup = kfa.build_kernel_perf_lookup(csv_path)
+        perf_rows = kfa.load_perf_rows(csv_path)
         estimates = kfa.compute_fusion_impact_estimates(
             candidates,
-            lookup,
+            perf_rows,
             peak_bw_tbs=5.3,
             peak_maf_tflops={"matrix_bf16": 1000.0, "vector_fp32": 100.0},
             baseline_ms=1000.0,

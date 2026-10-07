@@ -40,8 +40,6 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     format_args,
     get_peak_specs,
     load_category_data,
-    parse_first_shape,
-    shape_aware_lookup,
     standalone_efficiency,
     validate_efficiency,
     write_metrics_json,
@@ -61,10 +59,12 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
     _check_priority_consistency,
     _check_time_sanity,
     _extract_detailed_analysis_subsection,
+    _iter_candidate_blocks,
     _load_valid_args,
     _metrics_json_for_findings,
     _scan_args_cells,
     _validate_compute_data_tables,
+    _validate_fusion_data_tables,
     _validate_report_args_column,
     _validate_report_comparison_scope_diffs,
     _validate_report_priority_consistency,
@@ -76,7 +76,6 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
 from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
     _apply_comparative_gates,
     _build_diff_stats_lookups,
-    _build_kernel_perf_lookup,
     _build_parent_chain,
     _build_trace2_ops_summary_by_enhanced_category,
     _compute_data_in_out,
@@ -91,7 +90,6 @@ from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
     _is_gemm_norm_only,
     _make_comparative_candidate,
     _normalize_category,
-    _prefix_lookup,
     _strip_module_index,
 )
 from tests.fixtures.traces import NORM_TRACE, RESNET_TRACE
@@ -1036,7 +1034,7 @@ def test_marker_scan_missing_required_attr():
 
 
 def test_marker_scan_detail_estimate_required_attrs():
-    # detail_estimate requires low + high (not mid).
+    # detail_estimate requires low, mid and high.
     text = "<!-- impact-begin kind=detail_estimate low=1 -->\n<!-- impact-end -->\n"
     errors, _ = MarkerValidator.scan(text, "f.md")
     assert any("kind=detail_estimate missing required attr high" in e for e in errors)
@@ -1129,7 +1127,7 @@ def _valid_category_findings(rank=1):
         f"### P{rank}: Do the thing\n"
         "<!-- impact-begin kind=p_item low=1.0 mid=2.0 high=3.0 -->\n"
         "<!-- impact-end -->\n"
-        "<!-- impact-begin kind=detail_estimate low=1.0 high=3.0 -->\n"
+        "<!-- impact-begin kind=detail_estimate low=1.0 mid=2.0 high=3.0 -->\n"
         "<!-- impact-end -->\n"
     )
 
@@ -1145,7 +1143,7 @@ def test_check_findings_file_missing_p_item(tmp_path):
     # A reasoning-candidate with only a detail_estimate marker (no p_item).
     text = (
         "<!-- reasoning-candidate tier=compute rank=1 -->\n"
-        "<!-- impact-begin kind=detail_estimate low=1.0 high=3.0 -->\n"
+        "<!-- impact-begin kind=detail_estimate low=1.0 mid=2.0 high=3.0 -->\n"
         "<!-- impact-end -->\n"
     )
     p = tmp_path / "gemm_findings.md"
@@ -1728,6 +1726,80 @@ def test_compute_data_tables_missing_data_table(tmp_path):
     assert any("no **Data:** table found" in e for e in errors)
 
 
+# ----- _validate_fusion_data_tables -----
+
+_FUSION_HEADER = (
+    "| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | "
+    "FLOPS/Byte | Efficiency | Bound | Type |"
+)
+_FUSION_SEP = "|---|---|---|---|---|---|---|---|---|---|---|"
+
+
+def _fusion_block(header=_FUSION_HEADER, tier="fusion"):
+    return (
+        f"<!-- reasoning-candidate tier={tier} rank=1 -->\n"
+        "**Data:**\n\n"
+        f"{header}\n"
+        f"{_FUSION_SEP}\n"
+        "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
+        "50.00% of 5.3 TB/s | memory-bound | GEMM |\n"
+    )
+
+
+def test_fusion_data_tables_valid_header():
+    assert _validate_fusion_data_tables(_fusion_block()) == []
+
+
+def test_fusion_data_tables_rejects_header_without_type():
+    errors = _validate_fusion_data_tables(
+        _fusion_block(_FUSION_HEADER.replace(" | Type |", " |"))
+    )
+    assert any("fusion Data table" in e and "canonical columns" in e for e in errors)
+
+
+def test_fusion_data_tables_rejects_old_perf_model_header():
+    old = "| Kernel | Type | Duration (us) | Perf model |"
+    errors = _validate_fusion_data_tables(_fusion_block(old))
+    assert any("canonical columns" in e for e in errors)
+
+
+def test_fusion_data_tables_missing_data_table():
+    content = "<!-- reasoning-candidate tier=fusion rank=1 -->\nno table here\n"
+    errors = _validate_fusion_data_tables(content)
+    assert any("no **Data:** table found" in e for e in errors)
+
+
+def test_fusion_data_tables_ignores_compute_blocks():
+    assert _validate_fusion_data_tables(_fusion_block("| bogus |", "compute")) == []
+
+
+def test_fusion_data_tables_comparative_trace1_table_is_validated():
+    # Comparative layout: one **Data:** line, then Trace 1 / Trace 2 tables.
+    # The first table after **Data:** (Trace 1) is the one validated.
+    block = (
+        "<!-- reasoning-candidate tier=fusion rank=1 -->\n"
+        "**Data:**\n\n"
+        "**Trace 1**\n\n"
+        f"{_FUSION_HEADER}\n{_FUSION_SEP}\n"
+        "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
+        "50.00% of 5.3 TB/s | memory-bound | GEMM |\n\n"
+        "**Trace 2**\n\n"
+        f"{_FUSION_HEADER}\n{_FUSION_SEP}\n"
+        "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
+        "50.00% of 5.3 TB/s | memory-bound | GEMM |\n"
+    )
+    assert _validate_fusion_data_tables(block) == []
+    bad = block.replace(_FUSION_HEADER, "| bogus |", 1)
+    assert any("canonical columns" in e for e in _validate_fusion_data_tables(bad))
+
+
+def test_iter_candidate_blocks_filters_by_tier():
+    content = _fusion_block() + _fusion_block(tier="compute")
+    assert len(list(_iter_candidate_blocks(content, "fusion"))) == 1
+    assert len(list(_iter_candidate_blocks(content, "compute"))) == 1
+    assert list(_iter_candidate_blocks(content, "system")) == []
+
+
 # ----- _compute_data_in_out -----
 
 
@@ -1956,62 +2028,90 @@ def test_dedup_by_kernel_set_kernel_name_variant():
     assert out[0]["score"] == 7
 
 
-# ----- _prefix_lookup -----
-
-
-def test_prefix_lookup_exact_match():
-    lookup = {"my_kernel": {"data": 1}}
-    assert _prefix_lookup(lookup, "my_kernel") == {"data": 1}
-
-
-def test_prefix_lookup_query_startswith_csv_name():
-    # kname longer than the (truncated) csv key.
-    lookup = {"my_kernel": {"data": 1}}
-    assert _prefix_lookup(lookup, "my_kernel_specialization") == {"data": 1}
-
-
-def test_prefix_lookup_csv_name_startswith_query():
-    lookup = {"my_kernel_full_name": {"data": 1}}
-    assert _prefix_lookup(lookup, "my_kernel") == {"data": 1}
-
-
-def test_prefix_lookup_no_match_returns_none():
-    lookup = {"my_kernel": {"data": 1}}
-    assert _prefix_lookup(lookup, "unrelated") is None
-
-
 # ----- _extract_attention_core -----
+
+
+def _attn_kernel(name, perf_key=None):
+    return {"name": name, "perf_key": perf_key}
+
+
+_ATTN_PERF_ROWS = {
+    ("aten::bmm", "qk"): {"op category": "GEMM"},
+    ("aten::bmm", "pv"): {"op category": "GEMM"},
+}
 
 
 def test_extract_attention_core_narrows_to_qk_softmax_pv():
     kernels = [
-        {"name": "pre_kernel"},
-        {"name": "qk_gemm"},
-        {"name": "softmax_kernel"},
-        {"name": "pv_gemm"},
-        {"name": "post_kernel"},
+        _attn_kernel("pre_kernel"),
+        _attn_kernel("qk_gemm", ["aten::bmm", "qk"]),
+        _attn_kernel("softmax_kernel"),
+        _attn_kernel("pv_gemm", ["aten::bmm", "pv"]),
+        _attn_kernel("post_kernel"),
     ]
-    perf_lookup = {
-        "qk_gemm": {"s": {"op_category": "GEMM"}},
-        "pv_gemm": {"s": {"op_category": "GEMM"}},
-    }
-    core = _extract_attention_core(kernels, perf_lookup)
+    core = _extract_attention_core(kernels, _ATTN_PERF_ROWS)
     assert [k["name"] for k in core] == ["qk_gemm", "softmax_kernel", "pv_gemm"]
 
 
 def test_extract_attention_core_no_softmax_returns_none():
-    kernels = [{"name": "qk_gemm"}, {"name": "pv_gemm"}]
-    perf_lookup = {
-        "qk_gemm": {"s": {"op_category": "GEMM"}},
-        "pv_gemm": {"s": {"op_category": "GEMM"}},
-    }
-    assert _extract_attention_core(kernels, perf_lookup) is None
+    kernels = [
+        _attn_kernel("qk_gemm", ["aten::bmm", "qk"]),
+        _attn_kernel("pv_gemm", ["aten::bmm", "pv"]),
+    ]
+    assert _extract_attention_core(kernels, _ATTN_PERF_ROWS) is None
 
 
 def test_extract_attention_core_softmax_without_flanking_gemms_returns_none():
-    kernels = [{"name": "softmax_kernel"}, {"name": "elementwise_add"}]
-    perf_lookup = {}
-    assert _extract_attention_core(kernels, perf_lookup) is None
+    kernels = [_attn_kernel("softmax_kernel"), _attn_kernel("elementwise_add")]
+    assert _extract_attention_core(kernels, {}) is None
+
+
+# ----- _group_ops -----
+
+
+def _g_kernel(name, op_uid, perf_key, dur_us):
+    return {
+        "name": name,
+        "type": "GEMM",
+        "dur_us": dur_us,
+        "op_uid": op_uid,
+        "perf_key": perf_key,
+    }
+
+
+def test_group_ops_sums_every_instance_and_counts_distinct_ops():
+    # Two instances with different shapes: one op per signature, summed time.
+    vision = ["aten::bmm", "(16,5185,64)"]
+    text = ["aten::bmm", "(12,5,64)"]
+    instances = [
+        [_g_kernel("kv", 1, vision, 100.0), _g_kernel("kv", 1, vision, 50.0)],
+        [_g_kernel("kv", 2, vision, 100.0)],
+        [_g_kernel("kt", 3, text, 1.0)],
+    ]
+    groups = {tuple(g["perf_key"]): g for g in op._group_ops(instances)}
+    assert set(groups) == {tuple(vision), tuple(text)}
+    assert groups[tuple(vision)]["time_us"] == 250.0
+    assert groups[tuple(vision)]["count"] == 2
+    assert groups[tuple(vision)]["kernel_names"] == ["kv"]
+    assert groups[tuple(text)]["time_us"] == 1.0
+    assert groups[tuple(text)]["count"] == 1
+
+
+def test_group_ops_stacks_kernels_of_one_op_and_keeps_unmatched_apart():
+    key = ["aten::addmm", "x"]
+    instances = [
+        [
+            _g_kernel("k1", 1, key, 1.0),
+            _g_kernel("k2", 1, key, 2.0),
+            _g_kernel("u", 9, None, 4.0),
+        ]
+    ]
+    groups = op._group_ops(instances)
+    matched = next(g for g in groups if g["perf_key"] == key)
+    unmatched = next(g for g in groups if g["perf_key"] is None)
+    assert matched["kernel_names"] == ["k1", "k2"]
+    assert matched["time_us"] == 3.0 and matched["count"] == 1
+    assert unmatched["time_us"] == 4.0
 
 
 # ----- orchestrator_prepare: _build_diff_stats_lookups -----
@@ -2257,45 +2357,119 @@ def test_build_parent_chain_multi_level_cleans_names():
     assert _build_parent_chain(ev, tree) == ["mm", "Foo_2", "root"]
 
 
-# ----- orchestrator_prepare: _build_kernel_perf_lookup -----
+# ----- orchestrator_prepare: perf row match (_row_data_in_out, OpResolver) -----
 
 
-def test_build_kernel_perf_lookup(tmp_path):
-    csv = tmp_path / "unified_perf_summary.csv"
-    pd.DataFrame(
+def test_row_data_in_out_gemm_row():
+    row = pd.Series(
         {
-            "kernel_details_summary": ["[{'name': 'kA'}]", "[{'name': 'kB'}]"],
-            "op category": ["GEMM", "reduce"],
-            "Data Moved (MB)": [26.0, 8.0],
-            "perf_params": ["{'M':2,'N':4,'K':3}", "{}"],
-            "Input Dims": ["[[2,3]]", "[[4]]"],
-        }
-    ).to_csv(csv, index=False)
-    lookup = _build_kernel_perf_lookup(str(csv))
-    assert set(lookup) == {"kA", "kB"}
-    a_entry = lookup["kA"][(2, 3)]
-    assert a_entry["op_category"] == "GEMM"
-    assert a_entry["data_in_mb"] == pytest.approx(18.0)
-    assert a_entry["data_out_mb"] == pytest.approx(8.0)
-    b_entry = lookup["kB"][(4,)]
-    assert b_entry["data_in_mb"] == pytest.approx(8.0)
-    assert b_entry["data_out_mb"] == 0.0
-
-
-def test_build_kernel_perf_lookup_skips_nan_kernel_details(tmp_path):
-    csv = tmp_path / "unified_perf_summary.csv"
-    df = pd.DataFrame(
-        {
-            "kernel_details_summary": ["[{'name': 'kA'}]", None],
-            "op category": ["GEMM", "reduce"],
-            "Data Moved (MB)": [26.0, None],
-            "perf_params": ["{'M':2,'N':4,'K':3}", None],
-            "Input Dims": ["[[2,3]]", None],
+            "op category": "GEMM",
+            "Data Moved (MB)": 26.0,
+            "perf_params": "{'M':2,'N':4,'K':3}",
         }
     )
-    df.to_csv(csv, index=False)
-    lookup = _build_kernel_perf_lookup(str(csv))
-    assert set(lookup) == {"kA"}
+    din, dout = op._row_data_in_out(row)
+    assert din == pytest.approx(18.0)
+    assert dout == pytest.approx(8.0)
+
+
+def test_row_data_in_out_missing_cells():
+    row = pd.Series(
+        {"op category": "reduce", "Data Moved (MB)": None, "perf_params": None}
+    )
+    assert op._row_data_in_out(row) == (None, None)
+
+
+class _MetaTree:
+    metadata = {
+        7: {
+            0: {"process_name": "python", "process_labels": "GPU 0"},
+            9: {"thread_name": "main"},
+        }
+    }
+
+
+def test_event_perf_key_matches_csv_row_key():
+    ev = {
+        "name": "aten::bmm",
+        "pid": 7,
+        "tid": 9,
+        "args": {
+            "Input Dims": [[16, 64], [64, 8]],
+            "Input type": ["c10::BFloat16", "c10::BFloat16"],
+            "Input Strides": [[64, 1], [8, 1]],
+            "Concrete Inputs": ["", ""],
+        },
+    }
+    csv_row = pd.Series(
+        {
+            "name": "aten::bmm",
+            "Input Dims": str(((16, 64), (64, 8))),
+            "Input type": str(("c10::BFloat16", "c10::BFloat16")),
+            "Input Strides": str(((64, 1), (8, 1))),
+            "Concrete Inputs": str(("", "")),
+            "process_name": "python",
+            "process_label": "GPU 0",
+            "thread_name": "main",
+        }
+    )
+    key = tuple(op.OpResolver(_MetaTree, []).perf_key(ev))
+    assert key == au.perf_row_key(
+        csv_row["name"], *(csv_row[c] for c in au.PERF_ARG_COLS + au.PERF_THREAD_COLS)
+    )
+
+
+def test_op_resolver_fields():
+    launcher = {
+        "UID": 50,
+        "name": "aten::mm",
+        "args": {"Input Dims": [[2, 3], [3, 4]]},
+        "gpu_events": [11, 12],
+    }
+    resolver = op.OpResolver(_MetaTree, [launcher])
+    for uid in (11, 12):
+        fields = resolver.fields(uid)
+        assert fields["op_uid"] == 50
+        assert fields["perf_key"] == resolver.perf_key(launcher)
+    # A kernel with no launching perf op keeps its own uid and has no perf key.
+    assert resolver.fields(99) == {"op_uid": 99, "perf_key": None}
+
+
+def test_perf_float():
+    row = pd.Series({"a": 1.5, "b": "2", "c": float("nan")})
+    assert au.perf_float(row, "a") == 1.5
+    assert au.perf_float(row, "b") == 2.0
+    assert au.perf_float(row, "c") is None
+    assert au.perf_float(row, "missing") is None
+    assert au.perf_float(None, "a") is None
+
+
+def test_perf_row_key_separates_rows_differing_only_by_thread(tmp_path):
+    # Same op + args on two threads are distinct unified-perf rows; the
+    # thread-aware key keeps them apart, with_thread=False (diff_stats side)
+    # collapses them to the first row.
+    base = {
+        "name": "aten::mm",
+        "Input Dims": "((2, 3),)",
+        "Input type": "('c10::BFloat16',)",
+        "Input Strides": "((3, 1),)",
+        "Concrete Inputs": "('',)",
+        "process_name": "python",
+        "process_label": "GPU 0",
+    }
+    csv = tmp_path / "unified_perf_summary.csv"
+    pd.DataFrame(
+        [
+            {**base, "thread_name": "fwd", "GFLOPS": 1.0},
+            {**base, "thread_name": "bwd", "GFLOPS": 2.0},
+        ]
+    ).to_csv(csv, index=False)
+    rows = au.load_perf_rows(str(csv))
+    assert len(rows) == 2
+    assert sorted(r["GFLOPS"] for r in rows.values()) == [1.0, 2.0]
+    collapsed = au.load_perf_rows(str(csv), with_thread=False)
+    assert len(collapsed) == 1
+    assert next(iter(collapsed.values()))["GFLOPS"] == 1.0
 
 
 # ----- orchestrator_prepare: _build_trace2_ops_summary_by_enhanced_category -----
@@ -2581,28 +2755,6 @@ def test_classify_kernel_library(op_name, kernel_details, expected):
     assert classify_kernel_library(op_name, kernel_details) == expected
 
 
-# ----- analysis_utils: shape_aware_lookup / parse_first_shape -----
-
-
-def test_shape_aware_lookup_exact_and_prefix_and_fallback():
-    table = {"my_kernel": {(2, 3): {"a": 1}, (9, 9): {"b": 2}}}
-    assert shape_aware_lookup(table, "my_kernel", "[[2,3]]") == {"a": 1}
-    # No shape hint -> first value.
-    assert shape_aware_lookup(table, "my_kernel", None) == {"a": 1}
-    # Prefix fallback: query longer than stored (truncated) csv name.
-    assert shape_aware_lookup(table, "my_kernel_full", "[[2,3]]") == {"a": 1}
-    # Unknown kernel -> empty dict.
-    assert shape_aware_lookup(table, "unrelated") == {}
-
-
-def test_parse_first_shape_variants():
-    assert parse_first_shape("[[2,3],[3,4]]") == (2, 3)
-    assert parse_first_shape("[5]") is None
-    assert parse_first_shape("[]") is None
-    assert parse_first_shape(None) is None
-    assert parse_first_shape("bad{{") is None
-
-
 # ----- analysis_utils: _parse_call_stack / _extract_module_chain / _extract_call_chain -----
 
 
@@ -2819,7 +2971,7 @@ def _valid_compute_findings(rank=1, row=None):
         f"<!-- reasoning-candidate tier=compute rank={rank} -->\n"
         "**Data:**\n\n"
         f"{header}\n{sep}\n{row}\n"
-        "<!-- impact-begin kind=detail_estimate low=1.0 high=3.0 -->\n"
+        "<!-- impact-begin kind=detail_estimate low=1.0 mid=2.0 high=3.0 -->\n"
         "<!-- impact-end -->\n"
     )
 
@@ -2834,7 +2986,7 @@ def _valid_system_findings():
         "## Detailed Analysis\n\n"
         "<!-- reasoning-candidate tier=system rank=1 -->\n"
         "System detail block.\n"
-        "<!-- impact-begin kind=detail_estimate low=1.0 high=3.0 -->\n"
+        "<!-- impact-begin kind=detail_estimate low=1.0 mid=2.0 high=3.0 -->\n"
         "<!-- impact-end -->\n"
     )
 
@@ -3001,6 +3153,34 @@ def test_scan_args_cells_and_load_valid_args(tmp_path):
     assert valid == {"M=2,N=3"}
 
 
+def test_report_args_column_accepts_fusion_rows_args(tmp_path):
+    cat = tmp_path / "category_data"
+    cat.mkdir()
+    (cat / "gemm_metrics.json").write_text(
+        json.dumps({"operations": [{"args": "M=2,N=3"}]})
+    )
+    (cat / "kernel_fusion_metrics.json").write_text(
+        json.dumps(
+            {
+                "impact_estimates": [
+                    {
+                        "rows_trace1": [{"args": "(4,8) bf16"}],
+                        "rows_trace2": [{"args": "(4,16) bf16"}, {"args": "—"}],
+                    }
+                ]
+            }
+        )
+    )
+    content = (
+        "| Operation | Args | Time |\n|---|---|---|\n"
+        "| aten::mm | M=2,N=3 | 1 |\n"
+        "| aten::add | (4,8) bf16 | 1 |\n"
+        "| aten::add | (4,16) bf16 | 1 |\n"
+        "| aten::mul | — | 1 |\n"
+    )
+    assert _validate_report_args_column(content, str(tmp_path)) == []
+
+
 def test_validate_findings_file_missing_recommendations_section(tmp_path):
     fp = tmp_path / "gemm_findings.md"
     _write(str(fp), "## Detailed Analysis\n\nbody\n")
@@ -3029,7 +3209,7 @@ def test_validate_findings_file_comparative_data_table(tmp_path):
         "<!-- reasoning-candidate tier=compute rank=1 -->\n"
         "**Data:**\n\n"
         f"{header}\n{sep}\n{row}\n"
-        "<!-- impact-begin kind=detail_estimate low=1.0 high=3.0 -->\n"
+        "<!-- impact-begin kind=detail_estimate low=1.0 mid=2.0 high=3.0 -->\n"
         "<!-- impact-end -->\n"
     )
     findings_dir = tmp_path / "category_findings"
@@ -3661,12 +3841,16 @@ class _StubTree:
         self.events = events
         self._uid_map = uid_map
         self._parent_map = parent_map or {}
+        self.metadata = {}
 
     def get_UID2event(self, uid):
         return self._uid_map[uid]
 
     def get_parent_event(self, ev):
         return self._parent_map.get(id(ev))
+
+
+_UNKNOWN_THREAD = {c: "Unknown" for c in au.PERF_THREAD_COLS}
 
 
 class _StubAnalyzer:
@@ -3702,6 +3886,7 @@ def test_extract_standalone_fusion_candidates(tmp_path):
     csv_dir.mkdir()
     pd.DataFrame(
         {
+            "name": "aten::mm",
             "kernel_details_summary": [
                 "[{'name': 'Cijk_gemm_a'}]",
                 "[{'name': 'vectorized_elementwise_kernel add'}]",
@@ -3718,6 +3903,170 @@ def test_extract_standalone_fusion_candidates(tmp_path):
     assert any(c.get("base_name") == "MLP" for c in cands)
 
 
+def _op_event(uid, name, gpu_events, dims, dtype="c10::BFloat16"):
+    return {
+        "UID": uid,
+        "name": name,
+        "gpu_events": gpu_events,
+        "args": {
+            "Input Dims": dims,
+            "Input type": [dtype] * len(dims),
+            "Input Strides": [[1]] * len(dims),
+            "Concrete Inputs": [""] * len(dims),
+        },
+    }
+
+
+def test_extract_standalone_sums_time_over_instances_of_differing_shape(tmp_path):
+    # Three instances of one module pattern; the middle one runs a different
+    # shape. Time sums every instance, ops group per perf row, and the data
+    # moved comes from the matched row (no instance_count extrapolation).
+    ea, eb = "Cijk_gemm", "vectorized_elementwise_kernel add"
+    uid_map, events, ops = {}, [], []
+    shapes = [[[16, 64]], [[2, 8]], [[16, 64]]]
+    for i, dims in enumerate(shapes):
+        ka, kb = 10 + 10 * i, 11 + 10 * i
+        uid_map[ka] = _kernel_event(ka, ea, dur=100)
+        uid_map[kb] = _kernel_event(kb, eb, dur=10)
+        events.append(
+            {
+                "name": f"nn.Module: MLP_{i}",
+                "_category": "aten",
+                "gpu_events": [ka, kb],
+            }
+        )
+        ops.append(_op_event(1000 + ka, "aten::mm", [ka], dims))
+        ops.append(_op_event(1000 + kb, "aten::add", [kb], dims))
+    tree = _StubTree(events, uid_map)
+    analyzer = _StubAnalyzer(tree, unified_events=ops)
+
+    csv_dir = tmp_path / "csv"
+    csv_dir.mkdir()
+    rows = []
+    for dims in ([[16, 64]], [[2, 8]]):
+        for name in ("aten::mm", "aten::add"):
+            rows.append(
+                {
+                    "name": name,
+                    "Input Dims": str(au.list_to_tuple(dims)),
+                    "Input type": str(("c10::BFloat16",)),
+                    "Input Strides": str(((1,),)),
+                    "Concrete Inputs": str(("",)),
+                    **_UNKNOWN_THREAD,
+                    "op category": "GEMM" if name == "aten::mm" else "elementwise",
+                    "Data Moved (MB)": 26.0 if dims == [[16, 64]] else 1.0,
+                    "perf_params": (
+                        "{'M':2,'N':4,'K':3}" if name == "aten::mm" else "{}"
+                    ),
+                }
+            )
+    pd.DataFrame(rows).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
+
+    (cand,) = _extract_standalone_fusion_candidates(analyzer, tree, str(csv_dir))
+    assert cand["total_kernel_time_us"] == 330
+    assert "_instances" not in cand
+    by_dims = {tuple(o["perf_key"]): o for o in cand["ops"] if o["perf_key"]}
+    gemm_big = by_dims[
+        ("aten::mm",)
+        + tuple(
+            str(au.list_to_tuple(v))
+            for v in ([[16, 64]], ["c10::BFloat16"], [[1]], [""])
+        )
+        + ("Unknown",) * 3
+    ]
+    assert gemm_big["time_us"] == 200 and gemm_big["count"] == 2
+    assert sorted(o["time_us"] for o in cand["ops"]) == [10, 20, 100, 200]
+    assert cand["kernels"][0]["data_in_mb"] == pytest.approx(18.0)
+    assert cand["kernels"][0]["data_out_mb"] == pytest.approx(8.0)
+
+
+def _perf_csv_row(name, dims, category, dm=1.0):
+    return {
+        "name": name,
+        "Input Dims": str(au.list_to_tuple(dims)),
+        "Input type": str(("c10::BFloat16",) * len(dims)),
+        "Input Strides": str(((1,),) * len(dims)),
+        "Concrete Inputs": str(("",) * len(dims)),
+        **_UNKNOWN_THREAD,
+        "op category": category,
+        "Data Moved (MB)": dm,
+        "perf_params": "{'M':2,'N':4,'K':3}" if category == "GEMM" else "{}",
+    }
+
+
+def test_extract_standalone_attention_narrowing_recounts_instances(tmp_path):
+    # Instances 0 and 1 run unfused attention (qk gemm, softmax, pv gemm) plus a
+    # trailing add; instance 2 has no softmax. Narrowing keeps the core of the
+    # two attention instances only, so instance_count, time and op counts all
+    # drop the third instance and the trailing add.
+    qk, pv = [[4, 8]], [[4, 4]]
+    uid_map, events, ops = {}, [], []
+    for i in range(3):
+        base = 100 * (i + 1)
+        specs = [("Cijk_qk", 100), ("softmax_kernel", 20), ("Cijk_pv", 100)]
+        if i == 2:
+            specs = [("Cijk_gemm", 100)]
+        specs.append(("vectorized_elementwise_kernel add", 5))
+        uids = []
+        for j, (kname, dur) in enumerate(specs):
+            uid = base + j
+            uid_map[uid] = _kernel_event(uid, kname, dur=dur)
+            uids.append(uid)
+            if kname == "Cijk_qk":
+                ops.append(_op_event(1000 + uid, "aten::bmm", [uid], qk))
+            elif kname in ("Cijk_pv", "Cijk_gemm"):
+                ops.append(_op_event(1000 + uid, "aten::bmm", [uid], pv))
+            elif kname == "softmax_kernel":
+                ops.append(_op_event(1000 + uid, "aten::_softmax", [uid], pv))
+            else:
+                ops.append(_op_event(1000 + uid, "aten::add", [uid], pv))
+        events.append(
+            {"name": f"nn.Module: Attn_{i}", "_category": "aten", "gpu_events": uids}
+        )
+    tree = _StubTree(events, uid_map)
+    analyzer = _StubAnalyzer(tree, unified_events=ops)
+    csv_dir = tmp_path / "csv"
+    csv_dir.mkdir()
+    pd.DataFrame(
+        [
+            _perf_csv_row("aten::bmm", qk, "GEMM"),
+            _perf_csv_row("aten::bmm", pv, "GEMM"),
+            _perf_csv_row("aten::_softmax", pv, "elementwise"),
+            _perf_csv_row("aten::add", pv, "elementwise"),
+        ]
+    ).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
+
+    (cand,) = _extract_standalone_fusion_candidates(analyzer, tree, str(csv_dir))
+    assert [k["name"] for k in cand["kernels"]] == [
+        "Cijk_qk",
+        "softmax_kernel",
+        "Cijk_pv",
+    ]
+    assert cand["instance_count"] == 2
+    assert cand["total_kernel_time_us"] == 2 * (100 + 20 + 100)
+    assert sorted((o["time_us"], o["count"]) for o in cand["ops"]) == [
+        (40, 2),
+        (200, 2),
+        (200, 2),
+    ]
+
+
+def test_group_ops_unmatched_kernels_get_separate_rows():
+    def k(name, key, uid):
+        return {"name": name, "perf_key": key, "dur_us": 10, "op_uid": uid}
+
+    instances = [
+        [k("ka", None, 1), k("kb", None, 2), k("kc", ["aten::mm", "a"], 3)],
+        [k("ka", None, 4), k("kc", ["aten::mm", "a"], 5)],
+    ]
+    rows = op._group_ops(instances)
+    unmatched = {tuple(r["kernel_names"]): r for r in rows if r["perf_key"] is None}
+    assert set(unmatched) == {("ka",), ("kb",)}
+    assert unmatched[("ka",)]["time_us"] == 20 and unmatched[("ka",)]["count"] == 2
+    (matched,) = [r for r in rows if r["perf_key"] is not None]
+    assert matched["count"] == 2 and matched["time_us"] == 20
+
+
 def test_extract_standalone_skips_fused_and_gemm_norm(tmp_path):
     k1 = _kernel_event(10, "Cijk_gemm")
     k2 = _kernel_event(11, "rmsnorm_kernel")
@@ -3732,6 +4081,7 @@ def test_extract_standalone_skips_fused_and_gemm_norm(tmp_path):
     csv_dir.mkdir()
     pd.DataFrame(
         {
+            "name": "aten::mm",
             "kernel_details_summary": ["[{'name': 'Cijk_gemm'}]"],
             "op category": ["GEMM"],
             "Data Moved (MB)": [1.0],
@@ -4023,6 +4373,7 @@ class TestOrchestratorPhase11:
         csv_dir.mkdir()
         pd.DataFrame(
             {
+                "name": "aten::mm",
                 "kernel_details_summary": [
                     "[{'name': 'Cijk_gemm_a'}]",
                     "[{'name': 'Cijk_gemm_b'}]",
@@ -4553,6 +4904,7 @@ class TestOrchestratorPhase6:
         csv_dir.mkdir()
         pd.DataFrame(
             {
+                "name": "aten::mm",
                 "kernel_details_summary": [
                     "[{'name': 'Cijk_gemm_a'}]",
                     "[{'name': 'vectorized_elementwise_kernel add'}]",
@@ -4642,6 +4994,7 @@ class TestOrchestratorPush95:
         csv_dir.mkdir()
         pd.DataFrame(
             {
+                "name": "aten::mm",
                 "kernel_details_summary": [
                     "[{'name': 'Cijk_gemm_a'}]",
                     "[{'name': 'rmsnorm2d'}]",
@@ -4692,6 +5045,130 @@ def test_comparative_fusion_full_path(tmp_path):
     analyzer = _StubAnalyzer(tree)
     cands = _extract_comparative_fusion_candidates(str(csv_dir), analyzer, tree)
     assert len(cands) >= 1
+
+
+def _comparative_fusion_metrics(out, platform2):
+    """Run extraction (trace 1 tree + diff_stats) then kfa.main; return the metrics."""
+    t1_dir = os.path.join(out, "perf_report_trace1_csvs")
+    t2_dir = os.path.join(out, "perf_report_trace2_csvs")
+    os.makedirs(t1_dir)
+    os.makedirs(t2_dir)
+    os.makedirs(os.path.join(out, "metadata"))
+    cat_dir = os.path.join(out, "category_data")
+    os.makedirs(cat_dir)
+    dims = [[2, 3]]
+    key_cols = {
+        "Input Dims": str(au.list_to_tuple(dims)),
+        "Input type": str(("c10::BFloat16",)),
+        "Input Strides": str(((1,),)),
+        "Concrete Inputs": str(("",)),
+    }
+    pd.DataFrame(
+        {
+            "name": ["Cijk_A", "ew_B", "fused_k"],
+            "source": ["trace1", "trace1", "trace2"],
+            "lowest_common_ancestor_id": [100, 100, 100],
+            "kernel_time": [50000.0, 30000.0, 20000.0],
+            "gpu_op_uid": [10, 11, 600],
+            "cpu_op_uid": [None, None, 500],
+            "cpu_op_name": [None, None, "aten::mm"],
+            **{c: [None, None, v] for c, v in key_cols.items()},
+        }
+    ).to_csv(os.path.join(t1_dir, "diff_stats.csv"), index=False)
+    uid_map = {
+        10: _kernel_event(10, "Cijk_A", dur=50000),
+        11: _kernel_event(11, "ew_B", dur=30000),
+    }
+    module = {
+        "name": "nn.Module: Blk_0",
+        "_category": "aten",
+        "gpu_events": [10, 11],
+        "args": {},
+    }
+    tree = _StubTree([module], uid_map)
+    analyzer = _StubAnalyzer(
+        tree,
+        unified_events=[
+            _op_event(1010, "aten::mm", [10], dims),
+            _op_event(1011, "aten::add", [11], dims),
+        ],
+    )
+    cands = _extract_comparative_fusion_candidates(t1_dir, analyzer, tree)
+    with open(os.path.join(cat_dir, "fusion_candidates.json"), "w") as f:
+        json.dump(cands, f, default=str)
+
+    perf_cols = {
+        "op category": "GEMM",
+        "FLOPS/Byte": 2.0,
+        "Pct Roofline_mean": 50.0,
+        "Roofline Bound": "MEMORY_BOUND",
+    }
+    pd.DataFrame(
+        [
+            {"name": "aten::mm", **key_cols, **_UNKNOWN_THREAD, **perf_cols},
+            {"name": "aten::add", **key_cols, **_UNKNOWN_THREAD, **perf_cols},
+        ]
+    ).to_csv(os.path.join(t1_dir, "unified_perf_summary.csv"), index=False)
+    pd.DataFrame([{"name": "aten::mm", **key_cols, **perf_cols}]).to_csv(
+        os.path.join(t2_dir, "unified_perf_summary.csv"), index=False
+    )
+    with open(os.path.join(out, "metadata", "x_metadata.json"), "w") as f:
+        json.dump(
+            {"peak_hbm_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_bf16": 1000}},
+            f,
+        )
+    with open(os.path.join(cat_dir, "category_manifest.json"), "w") as f:
+        json.dump(
+            {
+                "comparison_scope": "comparative",
+                "platform": "MI300X",
+                "platform2": platform2,
+                "gpu_utilization": {"total_time_ms": 1000.0},
+                "trace2_gpu_utilization": {"total_time_ms": 900.0},
+            },
+            f,
+        )
+    old_argv = sys.argv
+    sys.argv = [
+        "kernel_fusion_analysis",
+        "--output-dir",
+        out,
+        "--comparison-scope",
+        "comparative",
+    ]
+    try:
+        kfa.main()
+    finally:
+        sys.argv = old_argv
+    with open(os.path.join(cat_dir, "kernel_fusion_metrics.json")) as f:
+        return cands, json.load(f)
+
+
+def test_comparative_fusion_producer_to_rows(tmp_path):
+    cands, metrics = _comparative_fusion_metrics(str(tmp_path / "same"), "MI300X")
+    (cand,) = cands
+    # Trace 1 keys carry the event's thread, trace 2 keys (diff_stats) do not.
+    (t1_mm,) = [o for o in cand["ops_trace1"] if o["perf_key"][0] == "aten::mm"]
+    assert len(t1_mm["perf_key"]) == 1 + len(au.PERF_ARG_COLS) + len(
+        au.PERF_THREAD_COLS
+    )
+    (t2,) = cand["ops_trace2"]
+    assert t2["perf_key"][0] == "aten::mm"
+    assert len(t2["perf_key"]) == 1 + len(au.PERF_ARG_COLS)
+    assert all(
+        "op_uid" not in k for k in cand["kernels_trace1"] + cand["kernels_trace2"]
+    )
+
+    (est,) = metrics["impact_estimates"]
+    assert [r["operation"] for r in est["rows_trace1"]] == ["aten::mm", "aten::add"]
+    (row2,) = est["rows_trace2"]
+    assert row2["operation"] == "aten::mm" and row2["time_ms"] == "20.000"
+    # Same platform: trace 2 Efficiency and Bound are filled.
+    assert row2["efficiency"] != "\u2014" and row2["bound"] != "\u2014"
+
+    _, other = _comparative_fusion_metrics(str(tmp_path / "other"), "MI355X")
+    (row2_other,) = other["impact_estimates"][0]["rows_trace2"]
+    assert row2_other["efficiency"] == "\u2014" and row2_other["bound"] == "\u2014"
 
 
 def test_analysis_utils_efficiency_and_fusion(tmp_path):
@@ -4819,28 +5296,34 @@ class TestOrchestratorHelpersSweep:
 class TestOrchestratorPush95Coverage:
     def test_attention_core_narrowing(self):
         perf_lookup = {
-            "Cijk_QK": {
-                None: {"op_category": "GEMM", "data_in_mb": 1.0, "data_out_mb": 1.0},
-            },
-            "Cijk_PV": {
-                None: {"op_category": "GEMM", "data_in_mb": 2.0, "data_out_mb": 2.0},
-            },
-            "softmax_kernel": {
-                None: {
-                    "op_category": "SDPA_fwd",
-                    "data_in_mb": 0.5,
-                    "data_out_mb": 0.5,
-                },
-            },
+            ("aten::bmm", "qk"): {"op category": "GEMM"},
+            ("aten::bmm", "pv"): {"op category": "GEMM"},
+            ("aten::_softmax", "sm"): {"op category": "SDPA_fwd"},
         }
         kernels = [
-            {"name": "Cijk_QK", "type": "GEMM", "dur_us": 100},
-            {"name": "softmax_kernel", "type": "SDPA", "dur_us": 50},
-            {"name": "Cijk_PV", "type": "GEMM", "dur_us": 120},
+            {
+                "name": "Cijk_QK",
+                "type": "GEMM",
+                "dur_us": 100,
+                "perf_key": ["aten::bmm", "qk"],
+            },
+            {
+                "name": "softmax_kernel",
+                "type": "SDPA",
+                "dur_us": 50,
+                "perf_key": ["aten::_softmax", "sm"],
+            },
+            {
+                "name": "Cijk_PV",
+                "type": "GEMM",
+                "dur_us": 120,
+                "perf_key": ["aten::bmm", "pv"],
+            },
             {
                 "name": "vectorized_elementwise_kernel",
                 "type": "Elementwise",
                 "dur_us": 10,
+                "perf_key": None,
             },
         ]
         core = _extract_attention_core(kernels, perf_lookup)
@@ -4879,6 +5362,7 @@ class TestOrchestratorPush95Coverage:
         csv_dir.mkdir()
         pd.DataFrame(
             {
+                "name": "aten::mm",
                 "kernel_details_summary": [
                     "[{'name': 'Cijk_QK_gemm'}]",
                     "[{'name': 'softmax_warp_forward'}]",
@@ -4906,6 +5390,7 @@ class TestOrchestratorPush95Coverage:
         csv_dir.mkdir()
         pd.DataFrame(
             {
+                "name": "aten::mm",
                 "kernel_details_summary": ["[{'name': 'Cijk_a'}]"],
                 "op category": ["GEMM"],
                 "Data Moved (MB)": [1.0],
@@ -5070,6 +5555,7 @@ class TestOrchestratorPrepareFinal:
         csv_dir.mkdir()
         pd.DataFrame(
             {
+                "name": "aten::mm",
                 "kernel_details_summary": [
                     "[{'name': 'Cijk_gemm_a'}]",
                     "[{'name': 'vectorized_elementwise_kernel add'}]",

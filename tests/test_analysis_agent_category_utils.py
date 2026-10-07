@@ -46,6 +46,7 @@ from TraceLens.Agent.Analysis.category_analyses.kernel_fusion_analysis import (
     _roofline_savings_us,
     _split_into_subgroups,
     _standalone_estimate,
+    build_rows,
     compute_fusion_impact_estimates,
 )
 from TraceLens.Agent.Analysis.category_analyses.multi_kernel_analysis import (
@@ -395,23 +396,33 @@ def test_roofline_savings_overlap_blend():
 # ----- _standalone_estimate -----
 
 
-def _lookup(**entries):
-    """Build a kernel_lookup keyed by name with a single shape=None entry each."""
-    table = {}
-    for name, (dm, gf, spec) in entries.items():
-        table[name] = {
-            None: {"Data Moved (MB)": dm, "GFLOPS": gf, "Compute Spec": spec}
+def _name_key(name):
+    """A perf row key that is just the kernel name (empty args)."""
+    return [name, "", "", "", ""]
+
+
+def _perf_rows(**entries):
+    """perf_rows keyed by ``_name_key``; ``_standalone`` points each kernel at its own."""
+    return {
+        tuple(_name_key(name)): {
+            "Data Moved (MB)": dm,
+            "GFLOPS": gf,
+            "Compute Spec": spec,
         }
-    return table
+        for name, (dm, gf, spec) in entries.items()
+    }
 
 
 STD_ARGS = dict(peak_bw_bytes_s=1e12, vector_maf=1.0, matrix_maf=700.0)
 
 
-def _standalone(candidate, lookup, min_savings_ms=0.01, baseline_ms=1.0):
+def _standalone(candidate, perf_rows, min_savings_ms=0.01, baseline_ms=1.0):
+    # Each kernel's perf row is the one keyed by its own name.
+    for k in candidate["kernels"]:
+        k["perf_key"] = _name_key(k["name"])
     return _standalone_estimate(
         candidate,
-        lookup,
+        perf_rows,
         STD_ARGS["peak_bw_bytes_s"],
         STD_ARGS["vector_maf"],
         STD_ARGS["matrix_maf"],
@@ -450,8 +461,8 @@ def test_standalone_skip_all_matrix():
             {"name": "g2", "type": "GEMM", "dur_us": 10},
         ],
     }
-    lookup = _lookup(g1=(1.0, None, "matrix_bf16"), g2=(1.0, None, "matrix_bf16"))
-    assert _standalone(candidate, lookup) is None
+    perf_rows = _perf_rows(g1=(1.0, None, "matrix_bf16"), g2=(1.0, None, "matrix_bf16"))
+    assert _standalone(candidate, perf_rows) is None
 
 
 def test_standalone_skip_triton():
@@ -462,8 +473,8 @@ def test_standalone_skip_triton():
             {"name": "ew", "type": "Elementwise", "dur_us": 10},
         ],
     }
-    lookup = _lookup(triton_poi_fused_add=(1.0, None, None), ew=(1.0, None, None))
-    assert _standalone(candidate, lookup) is None
+    perf_rows = _perf_rows(triton_poi_fused_add=(1.0, None, None), ew=(1.0, None, None))
+    assert _standalone(candidate, perf_rows) is None
 
 
 def test_standalone_skip_norm_only_epilogue():
@@ -475,10 +486,10 @@ def test_standalone_skip_norm_only_epilogue():
             {"name": "rmsnorm_kernel", "type": "Elementwise", "dur_us": 100},
         ],
     }
-    lookup = _lookup(
+    perf_rows = _perf_rows(
         Cijk_gemm=(1.0, None, "matrix_bf16"), rmsnorm_kernel=(1.0, None, None)
     )
-    assert _standalone(candidate, lookup) is None
+    assert _standalone(candidate, perf_rows) is None
 
 
 def test_standalone_skip_below_modeled_frac():
@@ -491,28 +502,49 @@ def test_standalone_skip_below_modeled_frac():
             {"name": "unmodeled_b", "type": "Elementwise", "dur_us": 10},
         ],
     }
-    lookup = _lookup(ew_modeled=(1.0, None, None))
-    assert _standalone(candidate, lookup) is None
+    perf_rows = _perf_rows(ew_modeled=(1.0, None, None))
+    assert _standalone(candidate, perf_rows) is None
 
 
 def _golden_candidate():
     return {
         "base_name": "mlp_block",
         "instance_count": 1,
+        "total_kernel_time_us": 200,
         "kernels": [
-            {"name": "Cijk_gemm", "type": "GEMM", "dur_us": 100},
-            {"name": "ew_add", "type": "Elementwise", "dur_us": 100},
+            {
+                "name": "Cijk_gemm",
+                "type": "GEMM",
+                "dur_us": 100,
+                "perf_key": _name_key("Cijk_gemm"),
+            },
+            {
+                "name": "ew_add",
+                "type": "Elementwise",
+                "dur_us": 100,
+                "perf_key": _name_key("ew_add"),
+            },
+        ],
+        "ops": [
+            {
+                "perf_key": _name_key(n),
+                "kernel_names": [n],
+                "kernel_types": [t],
+                "time_us": 100.0,
+                "count": 1,
+            }
+            for n, t in (("Cijk_gemm", "GEMM"), ("ew_add", "Elementwise"))
         ],
     }
 
 
-def _golden_lookup():
-    return _lookup(Cijk_gemm=(1.0, None, "matrix_bf16"), ew_add=(1.0, None, None))
+def _golden_perf_rows():
+    return _perf_rows(Cijk_gemm=(1.0, None, "matrix_bf16"), ew_add=(1.0, None, None))
 
 
 def test_standalone_gemm_epilogue_full_estimate():
     """GEMM+elementwise: savings = elementwise dur; impact bands via TARGET_*."""
-    est = _standalone(_golden_candidate(), _golden_lookup(), baseline_ms=1.0)
+    est = _standalone(_golden_candidate(), _golden_perf_rows(), baseline_ms=1.0)
     assert est is not None
     # gap_high = 100/200 = 0.5; time_ms = 0.2; impact_high = 0.5*0.2/1*100 = 10.0
     assert est["impact_score_high"] == 10.0
@@ -528,14 +560,16 @@ def test_standalone_gemm_epilogue_full_estimate():
 def test_standalone_skip_below_min_impact_score():
     """Same shape but a large baseline pushes impact_score_high below MIN_IMPACT_SCORE."""
     assert (
-        _standalone(_golden_candidate(), _golden_lookup(), baseline_ms=1000.0) is None
+        _standalone(_golden_candidate(), _golden_perf_rows(), baseline_ms=1000.0)
+        is None
     )
 
 
 def test_standalone_skip_below_min_savings_ms():
     """min_savings_ms above the 0.1 ms projected savings drops the candidate."""
     assert (
-        _standalone(_golden_candidate(), _golden_lookup(), min_savings_ms=1.0) is None
+        _standalone(_golden_candidate(), _golden_perf_rows(), min_savings_ms=1.0)
+        is None
     )
 
 
@@ -591,7 +625,7 @@ def test_compute_fusion_invalid_baseline_returns_empty(capsys):
 def test_compute_fusion_standalone_dispatch():
     out = compute_fusion_impact_estimates(
         [_golden_candidate()],
-        _golden_lookup(),
+        _golden_perf_rows(),
         5.3,
         {"matrix_bf16": 700},
         baseline_ms=1.0,
@@ -607,12 +641,16 @@ def test_compute_fusion_comparative_dispatch_and_sort():
         "kernels_trace1": [{"name": "k", "type": "Elementwise"}],
         "total_kernel_time_us_trace1": 6_000,
         "total_kernel_time_us_trace2": 3_000,
+        "ops_trace1": [],
+        "ops_trace2": [],
     }
     large = {
         "base_name": "large",
         "kernels_trace1": [{"name": "k", "type": "GEMM"}],
         "total_kernel_time_us_trace1": 20_000,
         "total_kernel_time_us_trace2": 5_000,
+        "ops_trace1": [],
+        "ops_trace2": [],
     }
     out = compute_fusion_impact_estimates(
         [small, large],
@@ -1587,16 +1625,182 @@ def _write_fusion_inputs(base, candidates):
         )
     pd.DataFrame(
         {
-            "kernel_details_summary": [
-                "[{'name': 'Cijk_gemm', 'mean_duration_us': 100.0}]"
-            ],
-            "Input Dims": ["[[1, 2]]"],
-            "Data Moved (MB)": [1.0],
-            "GFLOPS": [None],
-            "FLOPS/Byte": [None],
-            "Compute Spec": ["matrix_bf16"],
+            "name": ["aten::mm", "aten::add"],
+            "Input Dims": ["x", "x"],
+            "Input type": ["y", "y"],
+            "Input Strides": ["z", "z"],
+            "Data Moved (MB)": [1.0, 1.0],
+            "GFLOPS": [None, None],
+            "FLOPS/Byte": [None, None],
+            "Compute Spec": ["matrix_bf16", None],
         }
     ).to_csv(os.path.join(csv_dir, "unified_perf_summary.csv"), index=False)
+
+
+def _op_group(perf_key, kernel_names, kernel_types, time_us, count):
+    return {
+        "perf_key": perf_key,
+        "kernel_names": kernel_names,
+        "kernel_types": kernel_types,
+        "time_us": time_us,
+        "count": count,
+    }
+
+
+_PEAKS = (5.3, {"matrix_bf16": 1300.0})
+_KEY = [
+    "aten::mm",
+    "((16, 64), (64, 8))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "x",
+    "",
+]
+
+
+def _perf_row(**extra):
+    return pd.Series({"entry_point": "torch.mm", "FLOPS/Byte": 12.345, **extra})
+
+
+def test_build_rows_uses_summed_time_count_and_row_values():
+    ops = [_op_group(_KEY, ["k1", "k2"], ["GEMM", "Elementwise"], 2500.0, 3)]
+    (row,) = build_rows(ops, {tuple(_KEY): _perf_row()}, 100.0, *_PEAKS)
+    assert row["operation"] == "aten::mm"
+    assert row["time_ms"] == "2.500"
+    assert row["pct_e2e"] == "2.50"
+    assert row["count"] == 3
+    assert row["flops_per_byte"] == "12.35"
+    assert row["kernel_path"] == "torch.mm"
+    assert row["type"] == "GEMM<br>Elementwise"
+    assert row["efficiency"] == "—" and row["bound"] == "—"
+
+
+def test_build_rows_unmatched_op_gets_placeholders():
+    ops = [_op_group(None, ["k"], ["Elementwise"], 10.0, 1)]
+    (row,) = build_rows(ops, {}, 0, *_PEAKS)
+    assert row["operation"] == row["args"] == row["flops_per_byte"] == "—"
+    assert row["pct_e2e"] == "—"
+    assert row["kernel_path"] == "Not found"
+
+
+def test_build_rows_trace2_efficiency_gated_by_platform():
+    perf = _perf_row(**{"Pct Roofline_mean": 50.0, "Roofline Bound": "COMPUTE_BOUND"})
+    ops = [_op_group(_KEY, ["k"], ["GEMM"], 100.0, 1)]
+    same = build_rows(ops, {tuple(_KEY): perf}, 10.0, *_PEAKS, fill_efficiency=True)
+    other = build_rows(ops, {tuple(_KEY): perf}, 10.0, *_PEAKS, fill_efficiency=False)
+    assert same[0]["bound"] == "compute-bound"
+    assert same[0]["efficiency"].endswith("of 1300 TFLOPS")
+    assert other[0]["efficiency"] == other[0]["bound"] == "—"
+    assert other[0]["flops_per_byte"] == "12.35"
+
+
+def _owl_key(op, dims):
+    bf16 = ("c10::BFloat16",) * len(dims)
+    return [op, str(dims), str(bf16), str(((1,),) * len(dims)), str(("",) * len(dims))]
+
+
+def test_build_rows_owl_groups_reproduce_sample_cells_and_totals():
+    """Owl standalone sample: two fusion groups through build_rows, 3 ops each.
+
+    The first two rows of each group are the sample's rows; the third completes
+    the group to the heading total (250.25 ms / 36.61 ms).
+    """
+    bmm_qk = _owl_key("aten::bmm", ((16, 5185, 64), (16, 64, 5185)))
+    softmax = _owl_key("aten::_softmax", ((16, 5185, 5185),))
+    bmm_pv = _owl_key("aten::bmm", ((16, 5185, 5185), (16, 5185, 64)))
+    addmm = _owl_key("aten::addmm", ((4096,), (5185, 1024), (1024, 4096)))
+    sigmoid = _owl_key("aten::sigmoid", ((1, 5185, 4096),))
+    mul = _owl_key("aten::mul", ((1, 5185, 4096), (1, 5185, 4096)))
+    perf_rows = {
+        tuple(bmm_qk): _perf_row(
+            **{
+                "entry_point": "transformers/models/owlv2/modeling_owlv2.py(410): forward",
+                "FLOPS/Byte": 62.46,
+                "Pct Roofline_mean": 49.39,
+                "Roofline Bound": "MEMORY_BOUND",
+            }
+        ),
+        tuple(softmax): _perf_row(
+            **{
+                "entry_point": "torch/nn/functional.py(2103): softmax",
+                "FLOPS/Byte": None,
+            }
+        ),
+        tuple(addmm): _perf_row(
+            **{
+                "entry_point": "torch/nn/modules/linear.py(124): forward",
+                "FLOPS/Byte": 707.68,
+                "Pct Roofline_mean": 63.68,
+                "Roofline Bound": "COMPUTE_BOUND",
+                "Compute Spec": "matrix_bf16",
+            }
+        ),
+        tuple(sigmoid): _perf_row(
+            **{
+                "entry_point": "transformers/activations.py(95): forward",
+                "FLOPS/Byte": 0.25,
+                "Pct Roofline_mean": 54.59,
+                "Roofline Bound": "MEMORY_BOUND",
+            }
+        ),
+    }
+    p1 = [
+        _op_group(bmm_qk, ["Cijk_qk"], ["GEMM"], 40_460.0, 120),
+        _op_group(softmax, ["cunn_SoftMaxForwardReg"], ["Unknown"], 153_698.0, 120),
+        _op_group(bmm_pv, ["Cijk_pv"], ["GEMM"], 56_092.0, 120),
+    ]
+    p2 = [
+        _op_group(addmm, ["Cijk_addmm"], ["GEMM"], 11_587.0, 120),
+        _op_group(sigmoid, ["vectorized_sigmoid"], ["Elementwise"], 3_529.0, 120),
+        _op_group(mul, ["vectorized_mul"], ["Elementwise"], 21_494.0, 120),
+    ]
+    peaks = (5.3, {"matrix_bf16": 708.0})
+    rows1 = build_rows(p1, perf_rows, 908.4, *peaks)
+    rows2 = build_rows(p2, perf_rows, 908.4, *peaks)
+
+    assert sum(float(r["time_ms"]) for r in rows1) == pytest.approx(250.25)
+    assert sum(float(r["time_ms"]) for r in rows2) == pytest.approx(36.61)
+    qk, sm, pv = rows1
+    assert (qk["time_ms"], qk["pct_e2e"], qk["count"]) == ("40.460", "4.45", 120)
+    assert qk["args"] == "(16,5185,64) bf16<br>(16,64,5185) bf16"
+    assert qk["kernel_path"].endswith("modeling_owlv2.py(410): forward")
+    assert (qk["flops_per_byte"], qk["efficiency"], qk["bound"]) == (
+        "62.46",
+        "49.39% of 5.3 TB/s",
+        "memory-bound",
+    )
+    # No perf model for the softmax: path from its row, metric cells empty.
+    assert (sm["time_ms"], sm["pct_e2e"]) == ("153.698", "16.92")
+    assert sm["kernel_path"] == "torch/nn/functional.py(2103): softmax"
+    assert sm["flops_per_byte"] == sm["efficiency"] == sm["bound"] == "\u2014"
+    # No perf row at all: placeholders.
+    assert pv["operation"] == "aten::bmm" and pv["kernel_path"] == "Not found"
+    addmm_row, sig_row, _ = rows2
+    assert addmm_row["efficiency"] == "63.68% of 708 TFLOPS"
+    assert addmm_row["bound"] == "compute-bound"
+    assert (sig_row["time_ms"], sig_row["pct_e2e"]) == ("3.529", "0.39")
+
+
+def test_compute_fusion_comparative_rows_trace2_uses_trace2_baseline():
+    cand = {
+        "base_name": "c",
+        "kernels_trace1": [{"name": "k", "type": "GEMM"}],
+        "total_kernel_time_us_trace1": 20_000,
+        "total_kernel_time_us_trace2": 5_000,
+        "ops_trace1": [_op_group(_KEY, ["k"], ["GEMM"], 20_000.0, 2)],
+        "ops_trace2": [_op_group(_KEY, ["k2"], ["GEMM"], 5_000.0, 2)],
+    }
+    (est,) = compute_fusion_impact_estimates(
+        [cand],
+        {tuple(_KEY): _perf_row()},
+        *_PEAKS,
+        baseline_ms=100.0,
+        is_comparative=True,
+        perf_rows2={tuple(_KEY): _perf_row()},
+        baseline2_ms=50.0,
+    )
+    assert est["rows_trace1"][0]["pct_e2e"] == "20.00"
+    assert est["rows_trace2"][0]["pct_e2e"] == "10.00"
+    assert "rows" not in est
 
 
 def test_driver_fusion_main_missing_files_errors(tmp_path, monkeypatch):
@@ -1621,15 +1825,33 @@ def test_driver_fusion_main_no_candidates(tmp_path, monkeypatch):
 
 def test_driver_fusion_main_ok_with_estimate(tmp_path, monkeypatch):
     base = str(tmp_path)
+    # name, the four arg columns, then the three thread columns (absent -> "").
+    mm_key = ["aten::mm", "x", "y", "z", "", "", "", ""]
+    add_key = ["aten::add", "x", "y", "z", "", "", "", ""]
     candidate = {
         "module_name": "mlp_block",
         "base_name": "mlp_block",
         "instance_count": 1,
         "kernel_count": 2,
-        "total_kernel_time_us": 3000.0,
+        "total_kernel_time_us": 30000.0,
         "kernels": [
-            {"name": "Cijk_gemm", "type": "GEMM", "dur_us": 1500},
-            {"name": "ew_add", "type": "Elementwise", "dur_us": 1500},
+            {"name": "Cijk_gemm", "type": "GEMM", "dur_us": 1500, "perf_key": mm_key},
+            {
+                "name": "ew_add",
+                "type": "Elementwise",
+                "dur_us": 1500,
+                "perf_key": add_key,
+            },
+        ],
+        "ops": [
+            _op_group(mm_key, ["Cijk_gemm"], ["GEMM"], 15000.0, 1),
+            _op_group(
+                add_key,
+                ["ew_add"],
+                ["Elementwise"],
+                15000.0,
+                1,
+            ),
         ],
     }
     _write_fusion_inputs(base, [candidate])
@@ -1640,6 +1862,10 @@ def test_driver_fusion_main_ok_with_estimate(tmp_path, monkeypatch):
     assert metrics["candidate_count"] == 1
     assert metrics["platform"] == "MI300X"
     assert "high_confidence_kernel_map" in metrics
+    rows = metrics["impact_estimates"][0]["rows"]
+    assert [r["operation"] for r in rows] == ["aten::mm", "aten::add"]
+    assert [r["time_ms"] for r in rows] == ["15.000", "15.000"]
+    assert [r["pct_e2e"] for r in rows] == ["15.00", "15.00"]
 
 
 # ----- multi_kernel_analysis.main() end-to-end -----

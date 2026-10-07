@@ -1047,6 +1047,13 @@ def _check_marker_p_items(output_dir, comparison_scope=None):
     return rows
 
 
+def _p_blocks(tier, subsection, matches):
+    """(tier, P number, block text) for each P-item header in a Detailed Analysis subsection."""
+    for i, match in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(subsection)
+        yield tier, int(match.group(1)), subsection[match.start() : end]
+
+
 def _check_marker_detail_estimates(output_dir, comparison_scope=None):
     """Marker eval 3: kind=detail_estimate markers in Detailed Analysis."""
     content = _read_report(output_dir)
@@ -1069,7 +1076,7 @@ def _check_marker_detail_estimates(output_dir, comparison_scope=None):
         ]
 
     m = re.search(
-        r"^### Compute Kernel Insights[^\n]*\n(.*?)(?=^### (?!.*P\d)|^## |\Z)",
+        r"^### Compute Kernel Insights[^\n]*\n(.*?)(?=^### (?![^\n]*P\d)|^## |\Z)",
         detailed_section,
         re.MULTILINE | re.DOTALL,
     )
@@ -1079,7 +1086,15 @@ def _check_marker_detail_estimates(output_dir, comparison_scope=None):
     if not matches:
         matches = list(_DETAIL_P_HEADER_FALLBACK_RE.finditer(compute_subsection))
 
-    if not matches:
+    blocks = list(_p_blocks("compute", compute_subsection, matches))
+    fusion_subsection = _extract_detailed_analysis_subsection(
+        content, "### Kernel Fusion Insights"
+    )
+    if fusion_subsection:
+        fusion_matches = list(_DETAIL_P_HEADER_RE.finditer(fusion_subsection))
+        blocks += _p_blocks("fusion", fusion_subsection, fusion_matches)
+
+    if not blocks:
         return [
             _make_marker_row(
                 "marker_eval_3",
@@ -1092,13 +1107,8 @@ def _check_marker_detail_estimates(output_dir, comparison_scope=None):
         ]
 
     rows = []
-    for i, match in enumerate(matches):
-        pnum = int(match.group(1))
-        start = match.start()
-        end = (
-            matches[i + 1].start() if i + 1 < len(matches) else len(compute_subsection)
-        )
-        block = compute_subsection[start:end]
+    for tier, pnum, block in blocks:
+        pname = f"P{pnum}" if tier == "compute" else f"{tier} P{pnum}"
 
         errors = []
         detail_markers = []
@@ -1118,8 +1128,7 @@ def _check_marker_detail_estimates(output_dir, comparison_scope=None):
         elif detail_markers:
             for inner in detail_markers:
                 attrs = _marker_attrs_from_inner(inner)
-                required = ("low", "high")
-                missing = [a for a in required if a not in attrs]
+                missing = [a for a in ("low", "mid", "high") if a not in attrs]
                 if missing:
                     errors.append(
                         f"kind=detail_estimate marker missing attributes: "
@@ -1135,13 +1144,13 @@ def _check_marker_detail_estimates(output_dir, comparison_scope=None):
         details = "; ".join(errors) if errors else ""
         rows.append(
             _make_marker_row(
-                f"marker_eval_3_P{pnum}",
-                f"Detailed Analysis P{pnum} estimate marker (kind=detail_estimate)",
+                f"marker_eval_3_{pname.replace(' ', '_')}",
+                f"Detailed Analysis {pname} estimate marker (kind=detail_estimate)",
                 result,
                 details,
                 "template" if result == "FAIL" else "",
                 (
-                    f"Fix kind=detail_estimate marker for P{pnum} in Detailed Analysis"
+                    f"Fix kind=detail_estimate marker for {pname} in Detailed Analysis"
                     if result == "FAIL"
                     else ""
                 ),
