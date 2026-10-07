@@ -4612,6 +4612,43 @@ def _producer_output_spec(
     return known.get(str(predecessors[0]))
 
 
+def _name_a_boundary_for_its_mirror(nodes: list[dict[str, Any]]) -> None:
+    """A boundary fed by a tensor's own mirror carries that tensor's name.
+
+    A boundary minted for a tensor that enters unnamed is named after whatever
+    produced it, which is an OPERATION (``@input:Slice``). When that producer is
+    later redirected to the tensor's mirror, the tile keeps the op's name -- the
+    existing fold only renames a tile when two of them share a producer, and a
+    lone tile never qualified. The reader is then shown a port called ``Slice``
+    for what is plainly ``valid_keys``.
+
+    A mirror carries the SAME tensor across a wall, so its name is the tensor's
+    name and adopting it is safe. A boundary fed by an ``@output`` is a different
+    thing -- that IS a rename across a wall (``@input:hidden_states`` from
+    ``@output:collapsed``) -- and is left alone.
+    """
+    by_id = {str(node.get("id")): node for node in nodes}
+    for node in nodes:
+        if _node_attr(node, "synthetic") != "@input":
+            continue
+        match = re.search(r"/@input:([^/^]+)$", str(node.get("id", "")))
+        if match is None:
+            continue
+        edges = node.get("incomingEdges", []) or []
+        if len(edges) != 1:
+            continue
+        producer = by_id.get(str(edges[0].get("sourceNodeId")))
+        if producer is None or _node_attr(producer, "synthetic") != "@input_mirror":
+            continue
+        name = str(producer.get("label") or "").strip()
+        if not name or name == match.group(1):
+            continue
+        node["label"] = name
+        for attr in node.get("attrs") or []:
+            if attr.get("key") == "port_label":
+                attr["value"] = name
+
+
 def _share_one_tile_per_entering_tensor(nodes: list[dict[str, Any]]) -> None:
     """One tensor entering several boxes is drawn once, not once per box.
 
@@ -8429,6 +8466,7 @@ def build_merged_model_graph(
     # After the loop-invariant threading, which is what wires several of
     # these boundaries in the first place.
     _share_one_tile_per_entering_tensor(nodes)
+    _name_a_boundary_for_its_mirror(nodes)
     _order_model_inputs(nodes)
     _topologically_order_nodes(nodes)
     _give_loop_body_its_own_boundaries(nodes)
