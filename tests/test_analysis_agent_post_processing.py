@@ -15,7 +15,7 @@ network.
 
 The constants exercise: the agentic envelope + operation grouping
 (``_AGENTIC_MD``), the deterministic-fallback path (``_FALLBACK_MD``), the
-zero-score fallback + fan-out row when a table has no op_row marker
+pct_e2e back-fill + fan-out row when a table has no op_row marker
 (``_NO_OP_ROW_MD``), and the em-dash null Operation cell on an agentic report
 (``_AGENTIC_NULL_OP_MD``). The remaining ``_render_text`` cases build minimal md
 inline for prose caps, missing columns, em-dash cells, and empty findings.
@@ -28,6 +28,9 @@ import sys
 
 import pytest
 
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    HEURISTIC_FRACTION_MID,
+)
 from TraceLens.Agent.Analysis.post_processing import (
     AnalysisReport,
     ComputeMember,
@@ -238,8 +241,8 @@ _FALLBACK_MD = """# Deterministic Fallback Analysis
 """
 
 # Agentic report whose compute table carries NO op_row marker: impact_score
-# scores 0.0 (no pct_e2e back-fill). The first row is a fan-out (Kernel 1 / Kernel 2), which
-# must collapse into one member holding a 2-element kernel_name list.
+# back-fills pct_e2e * HEURISTIC_FRACTION_MID. The first row is a fan-out
+# (Kernel 1 / Kernel 2), which must collapse into one member holding a 2-element kernel_name list.
 _NO_OP_ROW_MD = """# ExampleDecoder - MI300X Standalone Analysis
 
 <!-- report-begin kind=report_mode mode=agentic -->
@@ -766,19 +769,24 @@ def test_fanout_row_stays_one_member(tmp_path):
         )
 
 
-def test_no_pct_e2e_backfill_when_no_op_row(tmp_path):
-    # _NO_OP_ROW_MD has NO op_row markers -> rows score 0.0, never pct_e2e * 0.30.
+def test_pct_e2e_backfill_when_no_op_row(tmp_path):
+    # _NO_OP_ROW_MD has NO op_row marker -> each row scores pct_e2e * 0.30, so the
+    # task mid is the non-zero member sum (not 0, which would sort by name).
     report, _ = _render_text(_NO_OP_ROW_MD, tmp_path)
-    members = [m for t in report["compute_optimizations"] for m in t["members"]]
+    tasks = report["compute_optimizations"]
+    members = [m for t in tasks for m in t["members"]]
     assert members and all(m["pct_e2e"] for m in members)
-    assert all(m["impact_score"] == 0.0 for m in members)
+    for m in members:
+        assert m["impact_score"] == pytest.approx(m["pct_e2e"] * HEURISTIC_FRACTION_MID)
+    assert tasks[0]["impact"]["mid"] == pytest.approx((6.59 + 3.00) * 0.30)
 
 
 def test_null_csv_entry_scores_zero(tmp_path):
     # op_row CSV = "3.5,—": row 0 takes the marker, row 1's — scores 0.0 (no
-    # back-fill). A raw float("—") here would crash the render; the null must
-    # map cleanly.
+    # back-fill while the marker is present). A raw float("—") here would crash
+    # the render; the null must map cleanly.
     report, _ = _render_text(_NULL_CSV_ENTRY_MD, tmp_path)
+    assert report["compute_optimizations"][0]["impact"]["mid"] == pytest.approx(3.5)
     members = report["compute_optimizations"][0]["members"]
     by_kernel = {m["kernel_name"][0]: m for m in members}
     assert by_kernel["k_a"]["impact_score"] == pytest.approx(3.5)
@@ -956,10 +964,12 @@ def test_matrix_grouping_faithfulness(name, md, mode, has_op_row, n_warn, tmp_pa
 def test_matrix_impact_path(name, md, mode, has_op_row, n_warn, tmp_path):
     report, _ = _render_text(md, tmp_path)
     if not has_op_row:
-        # No op_row marker: rows score 0.0 (no pct_e2e back-fill).
+        # No op_row marker: rows back-fill pct_e2e * HEURISTIC_FRACTION_MID.
         for task in report["compute_optimizations"]:
             for m in task["members"]:
-                assert m["impact_score"] == 0.0
+                assert m["impact_score"] == pytest.approx(
+                    (m["pct_e2e"] or 0.0) * HEURISTIC_FRACTION_MID
+                )
 
 
 @pytest.mark.parametrize("name,md,mode,has_op_row,n_warn", _MATRIX)

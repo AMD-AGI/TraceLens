@@ -19,6 +19,9 @@ import logging
 import re
 from pathlib import Path
 
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    HEURISTIC_FRACTION_MID,
+)
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     MarkerValidator,
     _find_data_table,
@@ -350,7 +353,8 @@ class AnalysisMdParser:
         """Return the ``kind=op_row`` ``impacts=`` CSV, one entry per row.
 
         A ``—`` cell (spec-legal null, e.g. a fusion-flagged row) maps to
-        ``None``, which scores 0.0; the whole marker is None when absent.
+        ``None``, which scores 0.0. The whole marker is None when absent, and
+        every row then back-fills ``pct_e2e * HEURISTIC_FRACTION_MID``.
         """
         for m in MarkerValidator.BEGIN_RE.finditer(block):
             inner = m.group(1)
@@ -560,17 +564,21 @@ class TaskGrouper:
             members = finding["members"]
             impacts = finding["impacts"]
             for ri, member in enumerate(members):
+                # Marker absent for the block: back-fill pct_e2e * HEURISTIC_FRACTION_MID.
+                # Marker present: the cell value, with a ``—`` cell scoring 0.0.
+                if impacts is None:
+                    row_impact = (member["pct_e2e"] or 0.0) * HEURISTIC_FRACTION_MID
+                else:
+                    row_impact = impacts[ri] or 0.0
+
                 if self.tier == "fusion":
                     key, operation = fi, finding["title"]
-                    row_impact = None
                 elif self.is_fallback:
                     key = member["kernel_name"][0] if member["kernel_name"] else ""
                     operation = None
-                    row_impact = impacts[ri] if impacts is not None else None
                 else:
                     operation = AnalysisMdParser._cell_or_null(member["operation_cell"])
                     key = operation or ""
-                    row_impact = impacts[ri] if impacts is not None else None
 
                 bucket = buckets.setdefault(
                     key, {"operation": operation, "members": [], "findings": {}}
@@ -580,7 +588,7 @@ class TaskGrouper:
 
         return buckets
 
-    def _emit_member(self, member: dict, row_impact: "float | None") -> dict:
+    def _emit_member(self, member: dict, row_impact: float) -> dict:
         """The per-row member fields; compute rows lead with their ``impact_score``."""
         fields = {
             "kernel_launcher_path": member["kernel_launcher_path"],
@@ -601,7 +609,7 @@ class TaskGrouper:
         }
         if self.tier == "fusion":
             return fields
-        return {"impact_score": 0.0 if row_impact is None else row_impact, **fields}
+        return {"impact_score": row_impact, **fields}
 
     def _build_task(self, bucket: dict) -> dict:
         entries = bucket["members"]

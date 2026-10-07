@@ -405,7 +405,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 > **Note:** Kernel fusion analysis is experimental.
 
 <!-- Paste reasoning blocks from kernel_fusion_findings.md, ordered by impact_score, highest first (matching card order). -->
-<!-- Comparative: replace the single Data table with a **Trace 1** (E2E <ms> ms) table and a **Trace 2** (E2E <ms> ms) table. No Reasoning for Slowdown. -->
+<!-- Comparative: replace the single Data table with a **Trace 1** (E2E <ms> ms) table and a **Trace 2** (E2E <ms> ms) table. -->
 <!-- If kernel_fusion category is not in the manifest or findings are empty, show "No fusion impact estimates available." -->
 
 <a id="detailed-analysis-fusion-P1"></a>
