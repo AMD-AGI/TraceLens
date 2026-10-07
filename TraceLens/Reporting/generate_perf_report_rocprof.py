@@ -21,7 +21,11 @@ logger = logging.getLogger(__name__)
 
 from TraceLens.util import RocprofParser
 from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
-from TraceLens.Reporting.reporting_utils import write_report_outputs
+from TraceLens.Reporting.reporting_utils import (
+    add_parse_cache_cli_arg,
+    enable_parse_cache_if_requested,
+    write_report_outputs,
+)
 
 
 def generate_perf_report_rocprof(
@@ -230,8 +234,10 @@ Examples:
         default=None,
         help="Limit kernel details to top K kernels by time (default: all)",
     )
+    add_parse_cache_cli_arg(parser)
 
     args = parser.parse_args()
+    enable_parse_cache_if_requested(args.enable_parse_cache)
 
     # Validate input file exists
     if not os.path.exists(args.profile_json_path):

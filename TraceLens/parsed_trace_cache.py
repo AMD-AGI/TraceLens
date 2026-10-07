@@ -6,9 +6,8 @@
 
 """Process-local cache of immutable parsed traces.
 
-Enabled only under pytest. A hit returns the frozen parse itself. Callers that
-need to add tree fields shallow-copy the event; callers that write into
-``args`` copy that dict first.
+A hit returns the frozen parse itself. Callers that need to add tree fields
+shallow-copy the event; callers that write into ``args`` copy that dict first.
 """
 
 from __future__ import annotations

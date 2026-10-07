@@ -36,7 +36,11 @@ from TraceLens.Reporting.genesis_rocprof_util import (
     pftrace_to_json,
     resolve_profile_json,
 )
-from TraceLens.Reporting.reporting_utils import write_report_outputs
+from TraceLens.Reporting.reporting_utils import (
+    add_parse_cache_cli_arg,
+    enable_parse_cache_if_requested,
+    write_report_outputs,
+)
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -317,7 +321,9 @@ Examples:
         action="store_true",
         help="Keep .work/ intermediates (kernel_results.json, pftrace_events.json) for debugging",
     )
+    add_parse_cache_cli_arg(parser)
     args = parser.parse_args()
+    enable_parse_cache_if_requested(args.enable_parse_cache)
 
     generate_perf_report_genesis(
         capture_dir=args.capture_dir,

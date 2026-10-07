@@ -32,7 +32,11 @@ from TraceLens.Reporting.pftrace_utils import (
     derive_pftrace_output_path,
     ensure_trace_json,
 )
-from TraceLens.Reporting.reporting_utils import write_report_outputs
+from TraceLens.Reporting.reporting_utils import (
+    add_parse_cache_cli_arg,
+    enable_parse_cache_if_requested,
+    write_report_outputs,
+)
 from TraceLens.Reporting.pftrace_hip_activity_analysis import (
     PftraceHipActivityAnalyzer,
     ns_to_ms,
@@ -247,8 +251,10 @@ Examples:
         action="store_true",
         help="Write Markdown report (default path: <trace_stem>_report.md)",
     )
+    add_parse_cache_cli_arg(parser)
 
     args = parser.parse_args()
+    enable_parse_cache_if_requested(args.enable_parse_cache)
     if not os.path.exists(args.trace_path):
         logger.error("Input file not found: %s", args.trace_path)
         sys.exit(1)

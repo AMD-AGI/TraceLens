@@ -26,7 +26,11 @@ from TraceLens.Reporting.pftrace_utils import (
     derive_pftrace_output_path,
     ensure_trace_json,
 )
-from TraceLens.Reporting.reporting_utils import write_report_outputs
+from TraceLens.Reporting.reporting_utils import (
+    add_parse_cache_cli_arg,
+    enable_parse_cache_if_requested,
+    write_report_outputs,
+)
 from TraceLens.Reporting.pftrace_hip_api_analysis import PftraceHipApiAnalyzer
 
 
@@ -179,8 +183,10 @@ Examples:
         dest="traceconv_path",
         help="Path to Perfetto traceconv (optional; for .pftrace, auto-resolved from PATH or downloaded)",
     )
+    add_parse_cache_cli_arg(parser)
 
     args = parser.parse_args()
+    enable_parse_cache_if_requested(args.enable_parse_cache)
 
     if not os.path.exists(args.trace_path):
         logger.error(f"Input file not found: {args.trace_path}")

@@ -426,8 +426,8 @@ def detach_event_args(event: dict) -> dict:
 class DataLoader:
     @staticmethod
     def load_data(filename_path: str, save_preprocessed: bool = False) -> dict:
-        # Imported lazily so library use does not depend on the test cache module
-        # at import time, and so the cache stays off unless pytest enables it.
+        # Imported lazily so library use does not depend on the cache module
+        # at import time.
         from TraceLens.parsed_trace_cache import cache_enabled, load_cached
 
         if not cache_enabled():

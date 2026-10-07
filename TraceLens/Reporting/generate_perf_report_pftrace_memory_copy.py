@@ -31,7 +31,11 @@ from TraceLens.Reporting.pftrace_utils import (
     derive_pftrace_output_path,
     ensure_trace_json,
 )
-from TraceLens.Reporting.reporting_utils import write_report_outputs
+from TraceLens.Reporting.reporting_utils import (
+    add_parse_cache_cli_arg,
+    enable_parse_cache_if_requested,
+    write_report_outputs,
+)
 
 # Event name substrings for direction (ROCm/Perfetto)
 NAME_HOST_TO_DEVICE = "MEMORY_COPY_HOST_TO_DEVICE"
@@ -190,7 +194,9 @@ def main() -> None:
         dest="traceconv_path",
         help="Path to traceconv (optional; for .pftrace, auto-resolved from PATH or downloaded)",
     )
+    add_parse_cache_cli_arg(parser)
     args = parser.parse_args()
+    enable_parse_cache_if_requested(args.enable_parse_cache)
 
     if not os.path.exists(args.trace_path):
         logger.error("Input file not found: %s", args.trace_path)

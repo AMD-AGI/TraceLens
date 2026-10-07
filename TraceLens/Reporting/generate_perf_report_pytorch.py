@@ -19,6 +19,8 @@ from TraceLens import NcclAnalyser, TraceDiff, TreePerfAnalyzer
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
+    add_parse_cache_cli_arg,
+    enable_parse_cache_if_requested,
     resolve_gpu_arch,
     write_report_outputs,
 )
@@ -1226,8 +1228,10 @@ def main():
         default=False,
         help="Add call_stack_trimmed and call_stack_full columns to unified_perf_summary.",
     )
+    add_parse_cache_cli_arg(parser)
 
     args = parser.parse_args()
+    enable_parse_cache_if_requested(args.enable_parse_cache)
     if args.comparison_json_path and args.precomputed_diff_stats:
         parser.error(
             "--comparison_json_path and --precomputed_diff_stats cannot be "

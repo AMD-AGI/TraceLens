@@ -20,6 +20,8 @@ logging.basicConfig(
 from TraceLens.TreePerf import JaxTreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
+    add_parse_cache_cli_arg,
+    enable_parse_cache_if_requested,
     resolve_gpu_arch,
     write_report_outputs,
 )
@@ -219,8 +221,10 @@ def main():
         default=False,
         help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
     )
+    add_parse_cache_cli_arg(parser)
 
     args = parser.parse_args()
+    enable_parse_cache_if_requested(args.enable_parse_cache)
 
     generate_perf_report_jax(
         profile_path=args.profile_path,

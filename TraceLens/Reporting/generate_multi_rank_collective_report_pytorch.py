@@ -14,7 +14,9 @@ import warnings
 from TraceLens import NcclAnalyser
 from TraceLens.Reporting.reporting_utils import (
     add_node_span_columns,
+    add_parse_cache_cli_arg,
     detect_gpus_per_node,
+    enable_parse_cache_if_requested,
     write_report_outputs,
 )
 
@@ -350,8 +352,10 @@ def main():
         action="store_true",
         help="Add an nccl_all2allv_heatmap sheet with per rank-pair send volumes.",
     )
+    add_parse_cache_cli_arg(parser)
 
     args = parser.parse_args()
+    enable_parse_cache_if_requested(args.enable_parse_cache)
 
     # If no output specified, create default Excel output
     if args.output_xlsx_path is None and args.output_csvs_dir is None:

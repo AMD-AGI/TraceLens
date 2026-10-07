@@ -11,7 +11,11 @@ from pathlib import Path
 
 from TraceLens.TreePerf import JaxAnalyses
 
-from TraceLens.Reporting.reporting_utils import export_data_df
+from TraceLens.Reporting.reporting_utils import (
+    add_parse_cache_cli_arg,
+    enable_parse_cache_if_requested,
+    export_data_df,
+)
 
 
 def calculate_gpu_event_statistics(profile_xplane_pb_path: str) -> tuple:
@@ -207,8 +211,10 @@ def main():
         default="trace_analysis_results",
         help="Base name for output files",
     )
+    add_parse_cache_cli_arg(parser)
 
     args = parser.parse_args()
+    enable_parse_cache_if_requested(args.enable_parse_cache)
 
     generate_perf_report_jax_analysis(
         args.profile_xplane_pb_path,

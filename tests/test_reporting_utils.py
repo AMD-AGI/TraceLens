@@ -13,6 +13,8 @@ from TraceLens.Reporting.reporting_utils import (
     _parse_pg_ranks,
     _safe_sheet_name,
     add_gpu_arch_cli_args,
+    add_parse_cache_cli_arg,
+    enable_parse_cache_if_requested,
     add_node_span_columns,
     detect_gpus_per_node,
     export_data_df,
@@ -302,6 +304,26 @@ def test_detect_gpus_per_node_from_trace():
 
 def test_detect_gpus_per_node_invalid_file():
     assert detect_gpus_per_node("/nonexistent/trace.json") is None
+
+
+def test_parse_cache_cli_is_off_unless_requested():
+    import argparse
+
+    from TraceLens.parsed_trace_cache import _enabled, cache_enabled
+
+    parser = argparse.ArgumentParser()
+    add_parse_cache_cli_arg(parser)
+    assert parser.parse_args([]).enable_parse_cache is False
+    assert parser.parse_args(["--enable_parse_cache"]).enable_parse_cache is True
+
+    token = _enabled.set(False)
+    try:
+        enable_parse_cache_if_requested(False)
+        assert not cache_enabled()
+        enable_parse_cache_if_requested(True)
+        assert cache_enabled()
+    finally:
+        _enabled.reset(token)
 
 
 def test_add_gpu_arch_cli_args_adds_mutually_exclusive_group():

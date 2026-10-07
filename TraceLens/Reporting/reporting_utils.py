@@ -55,6 +55,28 @@ def resolve_gpu_arch(
     return None
 
 
+def add_parse_cache_cli_arg(parser: argparse.ArgumentParser) -> None:
+    """Add ``--enable_parse_cache``, off unless the flag is passed."""
+    parser.add_argument(
+        "--enable_parse_cache",
+        action="store_true",
+        default=False,
+        help=(
+            "Reuse a parsed trace when the same file is loaded again in this "
+            "process. Off by default."
+        ),
+    )
+
+
+def enable_parse_cache_if_requested(enabled: bool) -> None:
+    """Turn on the process-local parsed-trace cache when *enabled* is true."""
+    if not enabled:
+        return
+    from TraceLens.parsed_trace_cache import enable_parse_cache
+
+    enable_parse_cache()
+
+
 def add_gpu_arch_cli_args(parser: argparse.ArgumentParser) -> None:
     """Add mutually exclusive GPU arch CLI options to *parser*."""
     from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
