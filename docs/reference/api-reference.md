@@ -65,6 +65,50 @@ Shares most options with `TraceLens_generate_perf_report_pytorch` (output
 paths, short-kernel study, roofline/Origami, comparison, call stack). Run with
 `--help` for the full list.
 
+### TraceLens_generate_perf_report_from_config
+
+Generate one report per job from a YAML file. The same entry point is
+`python -m TraceLens.Reporting.generate_perf_report_from_config`.
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--config` | required | Path to the run YAML. |
+
+The file is checked in full before any trace is opened.
+
+| Key | Required | Meaning |
+|-----|----------|---------|
+| `analysis_mode` | yes | `default`, `inference_graph_capture`, `spec_dec`, or `pd_disaggregation`. |
+| `output_dir` | yes | Directory for the workbook and CSV files. |
+| `jobs[].trace_path` | yes | Trace passed as `profile_json_path`. |
+| `jobs[].platform` | yes | Bundled or `TL_EXTENSION` arch name, resolved with `load_arch`. |
+| `jobs[].capture_folder` | no | Graph-capture folder. Inference modes only. |
+| `jobs[].role`, `jobs[].rank` | PD only | Workbook is named `perf_report_<role>_rank<r>`. |
+| `spec_decode` | `spec_dec` only | `method` (`eagle`, `eagle3`, or `mtp`) and `num_spec_tokens`. |
+| any report parameter | no | Top-level key with the same name as the selected function's parameter. Applies to every job. |
+
+`default` calls the training report. The other three modes call the inference
+report. `spec_dec` and `pd_disaggregation` don't have their own report
+functions yet: `spec_decode` is validated and isn't forwarded, and PD only
+changes the output name.
+
+Unless the YAML turns them off, these flags default on when the selected
+function accepts them: `enable_pseudo_ops`, `group_by_num_kernels`,
+`include_call_stack`, and `group_by_parent_module`.
+
+Compare two traces by running this wrapper once per trace, then the compare
+step. `comparison_json_path` isn't accepted here.
+
+```yaml
+analysis_mode: default
+output_dir: /data/llama_train/analysis_output
+include_call_stack: false
+kernel_summary: true
+jobs:
+  - trace_path: /data/llama_train/trace.json.gz
+    platform: MI300X
+```
+
 ### TraceLens_generate_perf_report_jax
 
 Generate a report from a JAX XPlane protobuf trace (also accepts a PyTorch
