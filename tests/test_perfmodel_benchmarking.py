@@ -37,18 +37,21 @@ def _require_cuda_gpu():
 
 def _import_microbench():
     _require_torch()
+    from TraceLens.PerfModel.benchmarking import microbench as mb
 
     return mb
 
 
 def _import_microbench_rocprof():
     _require_torch()
+    from TraceLens.PerfModel.benchmarking import microbench_rocprof as rp
 
     return rp
 
 
 def _import_fp4fp6_helpers():
     _require_torch()
+    from TraceLens.PerfModel.benchmarking import fp4fp6_helpers as fp
 
     return fp
 
@@ -247,6 +250,47 @@ class TestFp4Fp6Helpers:
             fp.bench_mxfp4_gemm(64, 64, 33, 0, warmup=1, rep=1, do_bench_fn=fake_bench)
             == 0.0
         )
+
+    def test_mx_tile_sweep_keeps_original_tile_first(self):
+        fp = _import_fp4fp6_helpers()
+        assert fp.MX_TILE_CONFIGS[0] == (128, 128, 256, 8, None)
+
+    def test_best_tile_keeps_fastest_and_skips_non_dividing(self):
+        fp = _import_fp4fp6_helpers()
+        ms_by_tile = {
+            (128, 128, 256, 8, None): 8.0,
+            (128, 128, 128, 8, None): 2.0,
+            (128, 128, 64, 8, None): 3.0,
+            (64, 128, 64, 4, None): 4.0,
+            (128, 128, 64, 4, 1): 1.0,
+        }
+        tried = []
+
+        def run(*tile):
+            tried.append(tile)
+
+        def fake_bench(fn, *, warmup, rep):
+            fn()
+            return ms_by_tile[tried[-1]]
+
+        m, n, k = 256, 256, 1152  # 1152 is not a multiple of BLOCK_K=256
+        best = fp._bench_best_tile(
+            m, n, k, run, warmup=1, rep=1, do_bench_fn=fake_bench
+        )
+        assert (128, 128, 256, 8, None) not in tried
+        assert (128, 128, 64, 4, 1) in tried
+        assert best == pytest.approx(fp.gemm_tflops(m, n, k, 1.0))
+
+    def test_best_tile_raises_when_every_tile_fails(self):
+        fp = _import_fp4fp6_helpers()
+
+        def fake_bench(_fn, *, warmup, rep):
+            raise RuntimeError("out of resources")
+
+        with pytest.raises(RuntimeError, match="out of resources"):
+            fp._bench_best_tile(
+                256, 256, 256, lambda *t: None, warmup=1, rep=1, do_bench_fn=fake_bench
+            )
 
 
 @pytest.mark.gpu

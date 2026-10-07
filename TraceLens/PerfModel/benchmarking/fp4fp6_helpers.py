@@ -15,7 +15,7 @@ back to ``0.0`` if unsupported.
 from __future__ import annotations
 
 import logging
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -258,6 +258,8 @@ def _launch_scaled_gemm(
     block_m: int = 128,
     block_n: int = 128,
     block_k: int = 256,
+    num_warps: int = 8,
+    num_stages: Optional[int] = None,
 ) -> None:
     m, packed_k = a.shape
     k = packed_k * pack
@@ -265,6 +267,7 @@ def _launch_scaled_gemm(
     w = b_nk.T  # kernel expects (K // PACK, N)
 
     grid = (triton.cdiv(m, block_m), triton.cdiv(n, block_n))
+    launch_opts = {} if num_stages is None else {"num_stages": num_stages}
     _mx_dot_scaled_kernel[grid](
         a,
         w,
@@ -290,8 +293,54 @@ def _launch_scaled_gemm(
         LHS_DTYPE=lhs_dtype,
         RHS_DTYPE=rhs_dtype,
         PACK=pack,
-        num_warps=8,
+        num_warps=num_warps,
+        **launch_opts,
     )
+
+
+# (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) tried for every shape; the
+# fastest is kept. num_stages=None leaves Triton's backend default. The first
+# entry is the original fixed tile, which suits gfx950; on RDNA4 the smaller
+# BLOCK_K tiles are much faster, and single-stage (no software pipelining)
+# helps further.
+MX_TILE_CONFIGS: Tuple[Tuple[int, int, int, int, Optional[int]], ...] = (
+    (128, 128, 256, 8, None),
+    (128, 128, 128, 8, None),
+    (128, 128, 64, 8, None),
+    (64, 128, 64, 4, None),
+    (128, 128, 64, 4, 1),
+)
+
+
+def _bench_best_tile(m: int, n: int, k: int, run, *, warmup, rep, do_bench_fn):
+    """
+    Best TFLOPS of ``run(block_m, block_n, block_k, num_warps, num_stages)`` over the
+    ``MX_TILE_CONFIGS`` that evenly divide the shape (the kernel has no
+    bounds masks). Tiles that fail to compile or launch are skipped; if every
+    applicable tile fails, the last error is raised.
+    """
+    best, error = 0.0, None
+    for block_m, block_n, block_k, num_warps, num_stages in MX_TILE_CONFIGS:
+        if m % block_m or n % block_n or k % block_k:
+            continue
+        try:
+            ms = do_bench_fn(
+                lambda: run(block_m, block_n, block_k, num_warps, num_stages),
+                warmup=warmup,
+                rep=rep,
+            )
+        except Exception as e:
+            logger.debug(
+                "MX tile %s failed",
+                (block_m, block_n, block_k, num_warps, num_stages),
+                exc_info=True,
+            )
+            error = e
+            continue
+        best = max(best, gemm_tflops(m, n, k, ms))
+    if best == 0.0 and error is not None:
+        raise error
+    return best
 
 
 def bench_mxfp4_gemm(
@@ -311,11 +360,32 @@ def bench_mxfp4_gemm(
     dev = torch.device(f"cuda:{device}")
     a, b, sa, sb, c = prepare_mxfp4_gemm(m, n, k, dev)
 
-    def _run() -> None:
-        _launch_scaled_gemm(a, b, sa, sb, c, "e2m1", "e2m1", pack=2)
+    def _run(
+        block_m: int,
+        block_n: int,
+        block_k: int,
+        num_warps: int,
+        num_stages: Optional[int],
+    ) -> None:
+        _launch_scaled_gemm(
+            a,
+            b,
+            sa,
+            sb,
+            c,
+            "e2m1",
+            "e2m1",
+            pack=2,
+            block_m=block_m,
+            block_n=block_n,
+            block_k=block_k,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
 
-    ms = do_bench_fn(_run, warmup=warmup, rep=rep)
-    return gemm_tflops(m, n, k, ms)
+    return _bench_best_tile(
+        m, n, k, _run, warmup=warmup, rep=rep, do_bench_fn=do_bench_fn
+    )
 
 
 _AITER_MXFP4_CACHE: dict = {
@@ -484,10 +554,29 @@ def bench_mxfp6_gemm(
     else:
         a, b, sa, sb, c = prepare_mxfp6_gemm(m, n, k, dev)
 
-    def _run() -> None:
+    def _run(
+        block_m: int,
+        block_n: int,
+        block_k: int,
+        num_warps: int,
+        num_stages: Optional[int],
+    ) -> None:
         _launch_scaled_gemm(
-            a, b, sa, sb, c, _MXFP6_DTYPE, _MXFP6_DTYPE, pack=_MXFP6_PACK
+            a,
+            b,
+            sa,
+            sb,
+            c,
+            _MXFP6_DTYPE,
+            _MXFP6_DTYPE,
+            pack=_MXFP6_PACK,
+            block_m=block_m,
+            block_n=block_n,
+            block_k=block_k,
+            num_warps=num_warps,
+            num_stages=num_stages,
         )
 
-    ms = do_bench_fn(_run, warmup=warmup, rep=rep)
-    return gemm_tflops(m, n, k, ms)
+    return _bench_best_tile(
+        m, n, k, _run, warmup=warmup, rep=rep, do_bench_fn=do_bench_fn
+    )
