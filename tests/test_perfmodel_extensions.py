@@ -1444,6 +1444,11 @@ class TestMoeExtensionsCoverage:
         event["args"]["Input type"][0] = input_type
         assert cls(event).get_compute_precision() == expected
 
+    @pytest.mark.parametrize("cls", [moe_triton_unfused_up, moe_triton_unfused_down])
+    def test_moe_triton_unfused_no_precision_without_weight_dtype(self, cls):
+        event = _moe_unfused_event(kernel_name="moe_gemm_kernel")
+        assert cls(event).get_compute_precision() is None
+
     def test_moe_aiter_unfused(self):
         up_event = {
             "args": {
