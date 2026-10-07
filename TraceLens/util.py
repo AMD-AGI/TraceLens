@@ -385,6 +385,19 @@ def _normalize_xprof_trace(trace: dict) -> dict:
     return trace
 
 
+def detach_event_args(event: dict) -> dict:
+    """Give *event* its own mutable ``args`` dict and return it.
+
+    ``TraceToTree`` shallow-copies each event, so nested ``args`` can still be
+    the frozen parse cached by :func:`DataLoader.load_data`. Copy before
+    assigning into ``args``.
+    """
+    args = event.get("args")
+    copied = dict(args) if isinstance(args, dict) else {}
+    event["args"] = copied
+    return copied
+
+
 # generic data loader class for json, json.gz, or tensorboard pb files
 # tensorboard pb files are useful for Jax in particular because the json.gz traces produced by jax can have incorrect timestamps and missing information
 class DataLoader:

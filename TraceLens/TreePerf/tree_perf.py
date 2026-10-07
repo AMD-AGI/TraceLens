@@ -33,7 +33,13 @@ from ..PerfModel.torch_op_mapping import (
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
-from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils, merge_intervals
+from ..util import (
+    DataLoader,
+    JaxProfileProcessor,
+    TraceEventUtils,
+    detach_event_args,
+    merge_intervals,
+)
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
 from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
@@ -3402,8 +3408,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 event
             )
             dict_jax_metadata = JaxTreePerfAnalyzer.get_event_metadata(event)
-            if not isinstance(event.get("args"), dict):
-                event["args"] = {}
+            detach_event_args(event)
             for _key, _val in dict_jax_metadata.items():
                 event["args"][_key] = _val
             kernel_launchers.append(event)
@@ -3645,8 +3650,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             ]
             perf_model_name = JaxTreePerfAnalyzer.get_event_perf_model_name(event)
             dict_jax_metadata = JaxTreePerfAnalyzer.get_event_metadata(event)
-            if not isinstance(event.get("args"), dict):
-                event["args"] = {}
+            detach_event_args(event)
             for _key, _val in dict_jax_metadata.items():
                 event["args"][_key] = _val
             dict_perf_metrics = None

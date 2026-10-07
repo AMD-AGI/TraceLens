@@ -82,34 +82,38 @@ def test_frozen_parse_rejects_inplace_writes():
         frozen.clear()
 
 
-def test_loads_are_isolated_and_do_not_reread(tmp_path):
+def test_loads_return_the_frozen_parse_and_do_not_reread(tmp_path):
     payload = {"traceEvents": [{"name": "kernel", "args": {"x": 1}}]}
     path = tmp_path / "model.json.gz"
     _write_gz(path, payload)
     path_str = str(path)
 
-    def load_twice():
-        first = DataLoader.load_data(path_str)
-        second = DataLoader.load_data(path_str)
-        return first, second
+    loaded = {}
 
-    reads = _count_gzip_open(lambda: load_twice())
-    # The counter wraps both loads; repeat them so the assertions see the objects.
-    first, second = load_twice()
+    def load_twice():
+        loaded["first"] = DataLoader.load_data(path_str)
+        loaded["second"] = DataLoader.load_data(path_str)
+
+    reads = _count_gzip_open(load_twice)
+    first = loaded["first"]
+    second = loaded["second"]
     assert reads == 1
     assert first == payload
-    assert second == payload
-    assert first is not second
-    assert first["traceEvents"] is not second["traceEvents"]
+    assert first is second
+    assert first is get_frozen(path_str)
 
-    first["traceEvents"][0]["name"] = "mutated"
-    first["traceEvents"].append({"name": "extra"})
-    third = DataLoader.load_data(path_str)
-    assert third == payload
-    frozen = get_frozen(path_str)
-    assert frozen["traceEvents"][0]["name"] == "kernel"
     with pytest.raises(TypeError, match="immutable"):
-        frozen["traceEvents"][0]["args"]["x"] = 2
+        first["traceEvents"][0]["name"] = "mutated"
+    with pytest.raises(TypeError, match="immutable"):
+        first["traceEvents"][0]["args"]["x"] = 2
+
+    # Tree construction shallow-copies the event. args writes copy that dict.
+    event = dict(first["traceEvents"][0])
+    event["children"] = []
+    event["args"] = dict(event["args"])
+    event["args"]["rank"] = 3
+    assert "children" not in first["traceEvents"][0]
+    assert "rank" not in first["traceEvents"][0]["args"]
 
 
 def test_rewritten_file_is_a_cache_miss(tmp_path):

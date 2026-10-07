@@ -11,7 +11,7 @@ from collections import defaultdict
 import math
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from ..util import DataLoader
+from ..util import DataLoader, detach_event_args
 
 
 def _default_filter_fn(event, include_pyfunc=False):
@@ -45,8 +45,9 @@ def _process_single_rank(
         else:
             if not filter_fn(event):
                 continue
-        if "args" not in event:
-            event["args"] = {}
+        # The loaded event may be a frozen cached parse. Copy before writing.
+        event = dict(event)
+        detach_event_args(event)
         event["args"]["rank"] = rank
 
         # Adjust fields with offsets

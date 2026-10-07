@@ -365,6 +365,8 @@ def make_connections(graph_tree, graph_filtered_events, capture_filtered_events)
 
         graph_tree.events[c_event[UID]]["children"] = [g_uid]
         graph_tree.events[g_uid]["parent"] = c_event[UID]
+        # args may still be the frozen cached parse; copy before assigning.
+        TraceLens.util.detach_event_args(graph_tree.events[g_uid])
         graph_tree.events[g_uid]["args"]["correlation"] = c_event["args"].get(
             "correlation", None
         )

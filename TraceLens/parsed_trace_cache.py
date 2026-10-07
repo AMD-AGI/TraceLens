@@ -6,8 +6,9 @@
 
 """Process-local cache of immutable parsed traces.
 
-Enabled only under pytest. Each checkout returns a plain mutable copy so
-callers can build and annotate a tree without changing the cached parse.
+Enabled only under pytest. A hit returns the frozen parse itself. Callers that
+need to add tree fields shallow-copy the event; callers that write into
+``args`` copy that dict first.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from __future__ import annotations
 import contextvars
 import os
 from collections import OrderedDict
-from copy import deepcopy
 from typing import Any, Callable
 
 PARSE_CACHE_MAX_SIZE = 8
@@ -57,13 +57,6 @@ class FrozenDict(_Immutable, dict):
     setdefault = _Immutable._reject
     update = _Immutable._reject
 
-    def __deepcopy__(self, memo):
-        copied = {}
-        memo[id(self)] = copied
-        for key, value in self.items():
-            copied[deepcopy(key, memo)] = deepcopy(value, memo)
-        return copied
-
 
 class FrozenList(_Immutable, list):
     __setitem__ = _Immutable._reject
@@ -77,12 +70,6 @@ class FrozenList(_Immutable, list):
     reverse = _Immutable._reject
     sort = _Immutable._reject
 
-    def __deepcopy__(self, memo):
-        copied = []
-        memo[id(self)] = copied
-        copied.extend(deepcopy(value, memo) for value in self)
-        return copied
-
 
 def freeze(obj: Any) -> Any:
     """Recursively wrap dicts and lists so in-place writes raise."""
@@ -93,11 +80,6 @@ def freeze(obj: Any) -> Any:
     if isinstance(obj, tuple):
         return tuple(freeze(value) for value in obj)
     return obj
-
-
-def thaw(obj: Any) -> Any:
-    """Return a plain mutable structure. The frozen cache object stays put."""
-    return deepcopy(obj)
 
 
 def cache_key(filename_path: str) -> tuple:
@@ -111,10 +93,10 @@ def get_frozen(filename_path: str) -> Any:
 
 
 def load_cached(filename_path: str, parse: Callable[[], Any]) -> Any:
-    """Return a thawed parse, reading the file only on a cache miss.
+    """Return the frozen parse, reading the file only on a cache miss.
 
     When the cache is disabled, or the path is not a file, ``parse`` runs
-    every time and nothing is stored.
+    every time and nothing is stored. A hit returns the cached object itself.
     """
     if not cache_enabled() or not os.path.isfile(filename_path):
         return parse()
@@ -127,4 +109,4 @@ def load_cached(filename_path: str, parse: Callable[[], Any]) -> Any:
         while len(_cache) > PARSE_CACHE_MAX_SIZE:
             _cache.popitem(last=False)
     _cache.move_to_end(key)
-    return thaw(frozen)
+    return frozen
