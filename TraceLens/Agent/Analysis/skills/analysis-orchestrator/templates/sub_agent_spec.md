@@ -120,7 +120,7 @@ of speculating.
 | Kernel names | `trunc_kernel_details` column |
 | Kernel durations | Trace events |
 | Achieved TFLOPS/s or TB/s | Calculated from duration + FLOPs/bytes |
-| Efficiency % vs roofline | Achieved / resolved peak (MAF or HBM BW) |
+| Efficiency % vs roofline | Achieved / resolved peak (MAF or memory BW) |
 | Invocation counts | Number of trace events per signature |
 | Library / backend | `library` column / kernel-name heuristics |
 | Bound type | `efficiency.bound_type` (compute / memory) |
@@ -181,7 +181,7 @@ inside `## Detailed Analysis` blocks.
 - **FLOPS/Byte**: `operations[i].efficiency.flops_per_byte` — note the nested path under `efficiency`, NOT a top-level field. `—` when null.
 - **Efficiency**: `operations[i].efficiency.efficiency_percent`, formatted by `bound_type`:
   - `compute-bound`: `X.XX% of Y TFLOPS` (Y = `resolved_peak_maf`)
-  - `memory-bound`: `X.XX% of Y TB/s` (Y = `resolved_peak_hbm_bw`)
+  - `memory-bound`: `X.XX% of Y TB/s` (Y = `resolved_peak_mem_bw`)
 - **Bound**: `operations[i].efficiency.bound_type` + `-bound` suffix (e.g., `memory-bound`). Must reflect compute/memory bound type — never use `classification.gemm_type` or similar.
 
 ### Comparative (`comparison_scope` = `comparative`)
@@ -229,7 +229,7 @@ When citing peak performance for a bottleneck, select the correct peak based on
 `operations[i].efficiency.bound_type`:
 - **compute-bound**: Use `operations[i].efficiency.resolved_peak_maf` (TFLOPS).
   Report achieved TFLOPS/s vs peak TFLOPS.
-- **memory-bound**: Use `operations[i].efficiency.resolved_peak_hbm_bw` (TB/s).
+- **memory-bound**: Use `operations[i].efficiency.resolved_peak_mem_bw` (TB/s).
   Report achieved TB/s vs peak TB/s.
 
 Do not look up peaks independently from the metadata dict.
