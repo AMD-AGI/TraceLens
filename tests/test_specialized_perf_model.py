@@ -7,6 +7,7 @@
 """Time models: built-in Origami and an extension-registered specialized model."""
 
 import importlib
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -112,11 +113,15 @@ def test_origami_is_registered_only_when_enabled(monkeypatch):
 
 
 def test_set_specialized_perf_model():
-    analyzer = SimpleNamespace(time_models={})
+    analyzer = SimpleNamespace(time_estimators={})
+    analyzer.register_time_model = partial(
+        TreePerfAnalyzer.register_time_model, analyzer
+    )
     TreePerfAnalyzer.set_specialized_perf_model(analyzer, len)
-    assert analyzer.time_models == {"Specialized": len}
+    assert list(analyzer.time_estimators) == ["Specialized"]
+    assert analyzer.time_estimators["Specialized"].time_model is len
     TreePerfAnalyzer.set_specialized_perf_model(analyzer, None)
-    assert analyzer.time_models == {}
+    assert analyzer.time_estimators == {}
     with pytest.raises(TypeError):
         TreePerfAnalyzer.set_specialized_perf_model(analyzer, "not a function")
 

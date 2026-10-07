@@ -400,6 +400,15 @@ def apply_extension(perf_analyzer, extension_path):
         print(f"Applying specialized perf model from {extension_path}")
         perf_analyzer.set_specialized_perf_model(extension.specialized_perf_model)
 
+    if hasattr(extension, "time_models"):
+        print(f"Applying time models from {extension_path}")
+        if not isinstance(extension.time_models, dict):
+            raise TypeError(
+                f"Expected time_models to be a dict, got {type(extension.time_models)}"
+            )
+        for label, model in extension.time_models.items():
+            perf_analyzer.register_time_model(label, model)
+
     if hasattr(extension, "tree_postprocess_extension"):
         print(f"Applying tree postprocess extension from {extension_path}")
         tree_postprocess_extension = getattr(extension, "tree_postprocess_extension")

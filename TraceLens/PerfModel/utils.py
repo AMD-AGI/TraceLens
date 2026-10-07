@@ -66,16 +66,10 @@ def add_simulation_time_columns(
     """
     Add simulated time columns (Origami, or ``label`` for other simulators)
     """
-    if not simulated_time:
-        return
-    dict_metrics[f"{label} Time (µs)"] = simulated_time
-    add_duration_rate_columns(
-        dict_metrics, gflops, bytes_moved, simulated_time, prefix=label
-    )
-    dict_metrics[f"Pct {label}"] = (
-        (simulated_time / busy_kernel_time) * 100
-        if busy_kernel_time > 0
-        else float("nan")
+    from .time_models import add_time_estimate_columns
+
+    add_time_estimate_columns(
+        dict_metrics, label, simulated_time, gflops, bytes_moved, busy_kernel_time
     )
 
 

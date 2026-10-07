@@ -37,14 +37,15 @@ from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils, merge_inter
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
 from ..PerfModel.time_models import (
-    TIME_MODEL_LABELS,
-    builtin_origami_model,
-    predict_time,
+    OpWork,
+    add_time_estimate_columns,
+    default_time_estimators,
+    external_time_model,
+    time_estimate_group_columns,
+    time_estimate_labels,
     time_model_columns,
 )
 from ..PerfModel.utils import (
-    add_duration_rate_columns,
-    add_simulation_time_columns,
     build_perf_metrics_dict,
     rates_for_duration,
 )
@@ -289,10 +290,7 @@ class TreePerfAnalyzer:
         self.arch = arch
         self.python_path = python_path
         self.enable_origami = enable_origami
-        self.time_models = {}
-        origami = builtin_origami_model(enable_origami, python_path)
-        if origami is not None:
-            self.time_models["Origami"] = origami
+        self.time_estimators = default_time_estimators(enable_origami, python_path)
         self.inductor_cache_dir = inductor_cache_dir
         self.event_to_category = event_to_category
         self.include_unlinked_kernels = include_unlinked_kernels
@@ -319,17 +317,22 @@ class TreePerfAnalyzer:
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
 
-    def set_specialized_perf_model(self, model):
-        """Report ``model(category, params, arch)`` as ``Specialized Time (µs)``.
+    def register_time_model(self, label, model):
+        """Report ``model(category, params, arch)`` as ``<label> Time (µs)``.
 
-        See :mod:`TraceLens.PerfModel.time_models`. ``None`` removes it.
+        See :mod:`TraceLens.PerfModel.time_models`. ``None`` removes the label.
+        Registering an existing label replaces its model.
         """
         if model is None:
-            self.time_models.pop("Specialized", None)
+            self.time_estimators.pop(label, None)
         elif not callable(model):
-            raise TypeError("specialized perf model must be callable or None")
+            raise TypeError(f"time model {label!r} must be callable or None")
         else:
-            self.time_models["Specialized"] = model
+            self.time_estimators[label] = external_time_model(model)
+
+    def set_specialized_perf_model(self, model):
+        """Report ``model(category, params, arch)`` as ``Specialized Time (µs)``."""
+        self.register_time_model("Specialized", model)
 
     def check_gpu_only(self):
         for event in self.tree.events:
@@ -415,32 +418,40 @@ class TreePerfAnalyzer:
     def compute_perf_metrics(
         self, event, bwd=False, non_data_mov=False, perf_model_class=None
     ):
+        """Perf metrics for one op: measure it, model its work, then add one
+        column group per registered time estimator."""
+        busy_kernel_time, busy_non_data_mov_time = self._measure_op_time(
+            event, bwd, non_data_mov
+        )
+        perf_model = self._build_perf_model(event, perf_model_class)
+        work = self._op_work(perf_model, bwd)
 
-        # Handle kernel aggregation
+        dict_metrics = build_perf_metrics_dict(
+            work.gflops, work.bytes_moved, busy_kernel_time
+        )
+        if non_data_mov:
+            dict_metrics["Non-Data-Mov Kernel Time (µs)"] = busy_non_data_mov_time
+            dict_metrics["Non-Data-Mov TFLOPS/s"], _ = rates_for_duration(
+                work.gflops, None, busy_non_data_mov_time
+            )
+        dict_metrics["Compute Spec"] = work.compute_spec or ""
+        self._add_time_estimates(dict_metrics, work, busy_kernel_time)
+
+        for key, value in perf_model.param_details.items():
+            dict_metrics[f"param: {key}"] = value
+
+        return dict_metrics
+
+    def _measure_op_time(self, event, bwd=False, non_data_mov=False):
+        """GPU busy time of the op's kernels (and of its non-data-movement
+        kernels when ``non_data_mov``). Records ``event["kernel_details"]``."""
         if bwd:
             # Always use subtree aggregation for backward metrics
             cpu_op_uids = self.tree.get_subtree_bwd_events(event["UID"])
         else:
             cpu_op_uids = [event["UID"]]
         cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
-        _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
-        list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
-        busy_kernel_time = 0
-        if len(list_kernels) > 0:
-            busy_kernel_time = self.GPUEventAnalyser(list_kernels).compute_metrics()[
-                "busy_time"
-            ]
-        _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(
-            cpu_op_list, filter_func=self.non_data_mov_filter
-        )
-        list_non_data_mov_kernels = [
-            self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs
-        ]
-        busy_non_data_mov_time = 0
-        if len(list_non_data_mov_kernels) > 0:
-            busy_non_data_mov_time = self.GPUEventAnalyser(
-                list_non_data_mov_kernels
-            ).compute_metrics()["busy_time"]
+        list_kernels = self._kernels_under(cpu_op_list)
         event["kernel_details"] = [
             {
                 "name": kernel["name"],
@@ -450,11 +461,26 @@ class TreePerfAnalyzer:
             }
             for kernel in sorted(list_kernels, key=lambda k: k.get("ts", 0))
         ]
+        busy_non_data_mov_time = None
+        if non_data_mov:
+            busy_non_data_mov_time = self._busy_time(
+                self._kernels_under(cpu_op_list, self.non_data_mov_filter)
+            )
+        return self._busy_time(list_kernels), busy_non_data_mov_time
 
-        # Select the appropriate dictionary for FLOPS and memory functions
+    def _kernels_under(self, cpu_op_list, filter_func=None):
+        _, kernel_uids = self.loop_and_aggregate_kernels(cpu_op_list, filter_func)
+        return [self.tree.events_by_uid[uid] for uid in kernel_uids]
+
+    def _busy_time(self, kernels):
+        if not kernels:
+            return 0
+        return self.GPUEventAnalyser(kernels).compute_metrics()["busy_time"]
+
+    def _build_perf_model(self, event, perf_model_class=None):
         if perf_model_class is None:
             perf_model_class = resolve_perf_model_class(event["name"])
-        perf_model = perf_model_class(
+        return perf_model_class(
             **_perf_model_init_kwargs(
                 perf_model_class,
                 event,
@@ -465,90 +491,32 @@ class TreePerfAnalyzer:
             )
         )
 
+    @staticmethod
+    def _op_work(perf_model, bwd=False):
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
-
-        non_data_mov_tflops_per_s, _ = rates_for_duration(
-            gflops, None, busy_non_data_mov_time
-        )
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
+        return OpWork(
+            category=getattr(perf_model, "bwd_category" if bwd else "category", None),
+            params=getattr(perf_model, "param_details", None),
+            gflops=gflops,
+            bytes_moved=bytes_moved,
+            compute_spec=get_compute_spec(perf_model),
+            bwd=bwd,
+            perf_model=perf_model,
+        )
 
-        dict_metrics = build_perf_metrics_dict(gflops, bytes_moved, busy_kernel_time)
-        if non_data_mov:
-            dict_metrics["Non-Data-Mov Kernel Time (µs)"] = busy_non_data_mov_time
-            dict_metrics["Non-Data-Mov TFLOPS/s"] = non_data_mov_tflops_per_s
-
-        # Add compute spec column (e.g., "matrix_fp16", "vector_bf16")
-        compute_spec = get_compute_spec(perf_model)
-        dict_metrics["Compute Spec"] = compute_spec if compute_spec else ""
-
-        # Compute roofline time and pct_roofline (only if arch is provided)
-        if self.arch is not None:
-            peak_tflops = get_max_achievable_tflops(perf_model, self.arch)
-            mem_bw_gbps = self.arch.get("mem_bw_gbps")
-
-            if (
-                peak_tflops is not None
-                and mem_bw_gbps is not None
-                and bytes_moved is not None
-                and gflops > 0
-            ):
-                # Compute time: flops / (peak_tflops * 1e12) gives seconds, convert to µs
-                compute_time_us = (gflops * 1e9 / (peak_tflops * 1e12)) * 1e6
-                # Memory time: bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
-                memory_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
-                roofline_time_us = max(compute_time_us, memory_time_us)
-                if compute_time_us >= memory_time_us:
-                    roofline_bound = "COMPUTE_BOUND"
-                else:
-                    roofline_bound = "MEMORY_BOUND"
-                dict_metrics["Roofline Time (µs)"] = roofline_time_us
-                add_duration_rate_columns(
-                    dict_metrics,
-                    gflops,
-                    bytes_moved,
-                    roofline_time_us,
-                    prefix="Roofline",
-                )
-                dict_metrics["Roofline Bound"] = roofline_bound
-                dict_metrics["Pct Roofline"] = (
-                    (roofline_time_us / busy_kernel_time) * 100
-                    if busy_kernel_time > 0
-                    else float("nan")
-                )
-
-        if hasattr(perf_model, "get_simulation_time") and not bwd:
-            add_simulation_time_columns(
+    def _add_time_estimates(self, dict_metrics, work, busy_kernel_time, skip=()):
+        for label, estimator in self.time_estimators.items():
+            if label in skip:
+                continue
+            add_time_estimate_columns(
                 dict_metrics,
-                perf_model.get_simulation_time(),
-                gflops,
-                bytes_moved,
+                label,
+                estimator(work, self.arch),
+                work.gflops,
+                work.bytes_moved,
                 busy_kernel_time,
             )
-
-        if hasattr(perf_model, "get_simulation_time_bwd") and bwd:
-            add_simulation_time_columns(
-                dict_metrics,
-                perf_model.get_simulation_time_bwd(),
-                gflops,
-                bytes_moved,
-                busy_kernel_time,
-            )
-
-        if not bwd:
-            for label, model in self.time_models.items():
-                add_simulation_time_columns(
-                    dict_metrics,
-                    predict_time(model, perf_model, self.arch),
-                    gflops,
-                    bytes_moved,
-                    busy_kernel_time,
-                    label=label,
-                )
-
-        for key, value in perf_model.param_details.items():
-            dict_metrics[f"param: {key}"] = value
-
-        return dict_metrics
 
     def compute_fwd_perf_metrics(self, event, non_data_mov=False):
         return self.compute_perf_metrics(event, bwd=False, non_data_mov=non_data_mov)
@@ -717,19 +685,14 @@ class TreePerfAnalyzer:
         # Compute Spec - static for same args
         if "Compute Spec" in df_perf_metrics.columns:
             dict_agg["Compute Spec"] = "first"
-        # Roofline metrics - first since they should be same for the group
-        for col in ("Roofline Time (µs)", "Roofline TFLOPS/s", "Roofline TB/s"):
-            if col in df_perf_metrics.columns:
-                dict_agg[col] = "first"
-        if "Roofline Bound" in df_perf_metrics.columns:
-            dict_agg["Roofline Bound"] = "first"
-        if "Pct Roofline" in df_perf_metrics.columns:
-            dict_agg["Pct Roofline"] = agg_metrics
-        for label in TIME_MODEL_LABELS:
-            per_shape, per_instance = time_model_columns(label)
-            if per_shape[0] in df_perf_metrics.columns:
-                dict_agg.update(dict.fromkeys(per_shape, "first"))
-                dict_agg.update(dict.fromkeys(per_instance, agg_metrics))
+        # Time estimates depend only on the op's params, so take the first;
+        # Pct <label> depends on the measured time, so aggregate it.
+        labels = time_estimate_labels(df_perf_metrics.columns)
+        for label in labels:
+            for col in time_estimate_group_columns(
+                df_perf_metrics.columns, label, labels
+            ):
+                dict_agg[col] = agg_metrics if col == f"Pct {label}" else "first"
         if "Non-Data-Mov TFLOPS/s" in df_perf_metrics.columns:
             dict_agg["Non-Data-Mov TFLOPS/s"] = agg_metrics
         if "Non-Data-Mov Kernel Time (µs)" in df_perf_metrics.columns:
@@ -2145,7 +2108,9 @@ class TreePerfAnalyzer:
                 "Roofline Bound",
                 "Pct Roofline",
             ]
-            for label in TIME_MODEL_LABELS:
+            for label in self.time_estimators:
+                if label == "Roofline":
+                    continue
                 for cols in time_model_columns(label):
                     perf_cols.extend(cols)
 
@@ -2364,16 +2329,14 @@ class TreePerfAnalyzer:
             if col in df_temp.columns:
                 agg_dict[col] = "first"
 
-        # Optional time-model metrics.
+        # Time estimates other than roofline (placed below).
         # Keep the flattened "_first" names in unified_perf_summary for visibility.
-        for label in TIME_MODEL_LABELS:
-            per_shape, per_instance = time_model_columns(label)
-            for col in per_shape:
-                if col in df_temp.columns:
-                    agg_dict[col] = "first"
-            for col in per_instance:
-                if col in df_temp.columns:
-                    agg_dict[col] = agg_metrics
+        labels = time_estimate_labels(df_temp.columns)
+        for label in labels:
+            if label == "Roofline":
+                continue
+            for col in time_estimate_group_columns(df_temp.columns, label, labels):
+                agg_dict[col] = agg_metrics if col == f"Pct {label}" else "first"
 
         # Time-varying metrics - mean/std (varies per instance)
         time_varying_cols = ["TB/s", "TFLOPS/s"]
@@ -3628,41 +3591,15 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             )
         )
 
-        gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
+        work = self._op_work(perf_model, bwd)
         busy_kernel_time = event[TraceEventUtils.TraceKeys.Duration]
 
-        bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
-
-        dict_metrics = build_perf_metrics_dict(gflops, bytes_moved, busy_kernel_time)
-
-        if hasattr(perf_model, "get_simulation_time") and not bwd:
-            add_simulation_time_columns(
-                dict_metrics,
-                perf_model.get_simulation_time(),
-                gflops,
-                bytes_moved,
-                busy_kernel_time,
-            )
-
-        if hasattr(perf_model, "get_simulation_time_bwd") and bwd:
-            add_simulation_time_columns(
-                dict_metrics,
-                perf_model.get_simulation_time_bwd(),
-                gflops,
-                bytes_moved,
-                busy_kernel_time,
-            )
-
-        if not bwd:
-            for label, model in self.time_models.items():
-                add_simulation_time_columns(
-                    dict_metrics,
-                    predict_time(model, perf_model, self.arch),
-                    gflops,
-                    bytes_moved,
-                    busy_kernel_time,
-                    label=label,
-                )
+        dict_metrics = build_perf_metrics_dict(
+            work.gflops, work.bytes_moved, busy_kernel_time
+        )
+        self._add_time_estimates(
+            dict_metrics, work, busy_kernel_time, skip=("Roofline",)
+        )
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
