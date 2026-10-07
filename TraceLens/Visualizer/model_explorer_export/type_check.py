@@ -275,6 +275,26 @@ def _check_node(node: dict[str, Any]) -> list[str]:
                 f"kept off the edges."
             )
 
+    # An op that takes an INDEX takes an integer one. ``torch`` cannot index with
+    # a float tensor at all, so a gather/scatter/embedding whose wired operands
+    # are all floating-point is reporting an index it could not have run: the
+    # dtype was lost upstream, and with it the shape rule's only way to tell the
+    # index from the table it reads. Resolved from the op's real signature --
+    # never a list of op names.
+    index_parameters = [
+        name
+        for name in _required_tensor_operand_names(_raw_op(node))
+        if name in {"index", "indices"}
+    ]
+    if index_parameters and tensor_count >= 2:
+        if not any(_is_integer_dtype(item) for item in input_types):
+            warnings.append(
+                f"{node_id} [{op}]: takes an {index_parameters[0]!r} operand, but "
+                f"none of its operands is an integer type "
+                f"(input_types={input_types}). An index is never floating-point; "
+                f"the dtype was dropped upstream."
+            )
+
     # Shape-change no-op checks. Both compare the op's resolved OUTPUT shape to its
     # single tensor INPUT shape; a match means the declared reshaping did not take
     # effect. Compute the shared operands once.
