@@ -20,6 +20,7 @@ from typing import Tuple
 import torch
 
 from ..utils import gemm_tflops
+from .microbench_utils import NATIVE_MX_GFX_ARCHS
 
 try:
     import triton
@@ -341,7 +342,7 @@ def _aiter_mxfp4_ready() -> bool:
         except ImportError:
             from aiter.jit.utils.chip_info import get_gfx
 
-        if get_gfx() not in ("gfx950",):
+        if get_gfx() not in NATIVE_MX_GFX_ARCHS:
             return False
         quant = aiter.get_triton_quant(aiter.QuantType.per_1x32)
         _AITER_MXFP4_CACHE["quant"] = quant

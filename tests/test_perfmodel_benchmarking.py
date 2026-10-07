@@ -18,6 +18,8 @@ from unittest.mock import patch
 from TraceLens.PerfModel.benchmarking.microbench_utils import (
     _int_metric,
     check_gpu_idle,
+    gfx_target,
+    mx_peak_without_native_support,
     resolve_physical_device,
 )
 
@@ -121,6 +123,30 @@ class TestMicrobenchUtils:
             idle, msg = check_gpu_idle(0)
         assert idle is True
         assert "idle" in msg.lower()
+
+
+class TestMxPeakWithoutNativeSupport:
+    MATRIX = {"matrix_fp16": 100.0, "matrix_bf16": 120.0, "matrix_fp4": 10.0}
+
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            ("gfx942:sramecc+:xnack-", "gfx942"),
+            ("gfx1201", "gfx1201"),
+            ("", ""),
+            (None, ""),
+        ],
+    )
+    def test_gfx_target(self, name, expected):
+        assert gfx_target(name) == expected
+
+    @pytest.mark.parametrize("gfx", ["gfx1201", "gfx1151", "gfx942"])
+    def test_non_native_targets_use_16bit_peak(self, gfx):
+        assert mx_peak_without_native_support(gfx, self.MATRIX) == 120.0
+
+    @pytest.mark.parametrize("gfx", ["gfx950", ""])
+    def test_native_or_non_amd_targets_keep_measurement(self, gfx):
+        assert mx_peak_without_native_support(gfx, self.MATRIX) is None
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
