@@ -8,6 +8,8 @@
 
 - resolve_physical_device: logical torch index -> physical id used by smi tools.
 - check_gpu_idle: pre-flight idle check via amdsmi or nvidia-smi.
+- mx_peak_without_native_support: MXFP4/MXFP6 ceiling on AMD targets that
+  lack native MX matrix instructions.
 """
 
 from __future__ import annotations
@@ -15,7 +17,33 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from typing import Any, Tuple
+from typing import Any, Mapping, Optional, Tuple
+
+# AMD gfx targets whose matrix cores execute MXFP4/MXFP6 natively. On other
+# targets these formats are converted and multiplied on the 16-bit matrix cores.
+NATIVE_MX_GFX_ARCHS = frozenset({"gfx950"})
+
+
+def gfx_target(gcn_arch_name: Optional[str]) -> str:
+    """Base gfx target of a ``gcnArchName`` such as ``gfx942:sramecc+:xnack-``."""
+    return (gcn_arch_name or "").split(":")[0]
+
+
+def mx_peak_without_native_support(
+    gfx: str, matrix_results: Mapping[str, float]
+) -> Optional[float]:
+    """
+    The 16-bit matrix peak to publish as ``matrix_fp4`` / ``matrix_fp6`` on an
+    AMD target without native MX matrix instructions, since that is the rate
+    those formats actually run at there. ``None`` keeps the measured value:
+    the target has native support, or is not an AMD target.
+    """
+    if not gfx or gfx in NATIVE_MX_GFX_ARCHS:
+        return None
+    return max(
+        float(matrix_results.get("matrix_fp16", 0.0)),
+        float(matrix_results.get("matrix_bf16", 0.0)),
+    )
 
 
 def resolve_physical_device(logical: int) -> Tuple[int, str]:

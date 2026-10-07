@@ -26,7 +26,7 @@ Run it once per platform to produce a `<platform>.json` arch file. Roofline-base
 - Timing via Triton's `do_bench` with L2 cache clearing, `warmup=30`, `rep=200`, median milliseconds.
 - Normal-distributed inputs; **best** shape reported per dtype (peak across the GEMM shape list).
 - A **pre-flight idle check** aborts if the target GPU is busy (other processes, high utilization, or resident memory), so the baseline reflects an uncontended device. Override with `--allow-busy`.
-- Matrix TFLOPS and INT8 use `2·M·N·K` FLOPs per GEMM. FP8 runs through `torch._scaled_mm` (dtype auto-selected per stack); INT8 through `torch._int_mm` and, when available, aiter CK `gemm_a8w8` (max is kept). MXFP4/MXFP6 use Triton `tl.dot_scaled` and, on gfx950, aiter CK `gemm_a4w4`.
+- Matrix TFLOPS and INT8 use `2·M·N·K` FLOPs per GEMM. FP8 runs through `torch._scaled_mm` (dtype auto-selected per stack); INT8 through `torch._int_mm` and, when available, aiter CK `gemm_a8w8` (max is kept). MXFP4/MXFP6 use Triton `tl.dot_scaled` and, on gfx950, aiter CK `gemm_a4w4`. On AMD targets without native MX matrix instructions (any target not in `NATIVE_MX_GFX_ARCHS` in `microbench_utils.py`), these formats are converted and multiplied on the 16-bit matrix cores, so `matrix_fp4` and `matrix_fp6` report the 16-bit matrix peak instead of the converted kernel's measurement.
 - Vector TFLOPS use a compute-bound Triton FMA dependency chain (not PyTorch elementwise) to saturate the SIMD units.
 - HBM bandwidth is measured via device-to-device copy (read = `2·bytes`) and fill (write).
 
