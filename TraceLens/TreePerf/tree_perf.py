@@ -36,7 +36,12 @@ from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils, merge_intervals
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
-from ..PerfModel.time_models import builtin_origami_model, predict_time
+from ..PerfModel.time_models import (
+    TIME_MODEL_LABELS,
+    builtin_origami_model,
+    predict_time,
+    time_model_columns,
+)
 from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
 
 
@@ -708,12 +713,11 @@ class TreePerfAnalyzer:
             dict_agg["Roofline Bound"] = "first"
         if "Pct Roofline" in df_perf_metrics.columns:
             dict_agg["Pct Roofline"] = agg_metrics
-        for label in ("Origami", "Specialized"):
-            if f"{label} Time (µs)" in df_perf_metrics.columns:
-                dict_agg[f"{label} Time (µs)"] = "first"
-                dict_agg[f"{label} TFLOPS/s"] = "first"
-                dict_agg[f"{label} TB/s"] = agg_metrics
-                dict_agg[f"Pct {label}"] = agg_metrics
+        for label in TIME_MODEL_LABELS:
+            per_shape, per_instance = time_model_columns(label)
+            if per_shape[0] in df_perf_metrics.columns:
+                dict_agg.update(dict.fromkeys(per_shape, "first"))
+                dict_agg.update(dict.fromkeys(per_instance, agg_metrics))
         if "Non-Data-Mov TFLOPS/s" in df_perf_metrics.columns:
             dict_agg["Non-Data-Mov TFLOPS/s"] = agg_metrics
         if "Non-Data-Mov Kernel Time (µs)" in df_perf_metrics.columns:
@@ -2126,15 +2130,10 @@ class TreePerfAnalyzer:
                 "Roofline Time (µs)",
                 "Roofline Bound",
                 "Pct Roofline",
-                "Origami Time (µs)",
-                "Origami TFLOPS/s",
-                "Origami TB/s",
-                "Pct Origami",
-                "Specialized Time (µs)",
-                "Specialized TFLOPS/s",
-                "Specialized TB/s",
-                "Pct Specialized",
             ]
+            for label in TIME_MODEL_LABELS:
+                for cols in time_model_columns(label):
+                    perf_cols.extend(cols)
 
             if include_perf_metrics and has_own_perf_model:
                 # Has own perf model - compute forward metrics
@@ -2351,29 +2350,20 @@ class TreePerfAnalyzer:
             if col in df_temp.columns:
                 agg_dict[col] = "first"
 
-        # Optional simulated metrics from perf model.
+        # Optional time-model metrics.
         # Keep the flattened "_first" names in unified_perf_summary for visibility.
-        origami_static_cols = [
-            "Origami Time (µs)",
-            "Origami TFLOPS/s",
-            "Specialized Time (µs)",
-            "Specialized TFLOPS/s",
-        ]
-        for col in origami_static_cols:
-            if col in df_temp.columns:
-                agg_dict[col] = "first"
+        for label in TIME_MODEL_LABELS:
+            per_shape, per_instance = time_model_columns(label)
+            for col in per_shape:
+                if col in df_temp.columns:
+                    agg_dict[col] = "first"
+            for col in per_instance:
+                if col in df_temp.columns:
+                    agg_dict[col] = agg_metrics
 
         # Time-varying metrics - mean/std (varies per instance)
         time_varying_cols = ["TB/s", "TFLOPS/s"]
         for col in time_varying_cols:
-            if col in df_temp.columns:
-                agg_dict[col] = agg_metrics
-        for col in (
-            "Origami TB/s",
-            "Pct Origami",
-            "Specialized TB/s",
-            "Pct Specialized",
-        ):
             if col in df_temp.columns:
                 agg_dict[col] = agg_metrics
 

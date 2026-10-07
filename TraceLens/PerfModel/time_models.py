@@ -27,6 +27,20 @@ library call belongs in that file, not in this repository.
 import os
 from functools import partial
 
+TIME_MODEL_LABELS = ("Origami", "Specialized")
+
+
+def time_model_columns(label):
+    """``(per-shape, per-instance)`` column names for a time-model label.
+
+    Per-shape columns depend only on the op's params; per-instance columns
+    depend on the measured kernel time.
+    """
+    return (
+        [f"{label} Time (µs)", f"{label} TFLOPS/s"],
+        [f"{label} TB/s", f"Pct {label}"],
+    )
+
 
 def predict_time(model, perf_model, arch):
     """Call ``model`` for a constructed perf model. Returns µs or None."""

@@ -6,6 +6,7 @@
 
 """Time models: built-in Origami and an extension-registered specialized model."""
 
+import importlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -63,6 +64,32 @@ def test_model_gets_category_a_copy_of_params_and_arch():
     assert (seen["params"]["N"], seen["params"]["K"]) == (32, 64)
     assert seen["arch"] is ARCH
     assert gemm.param_details["M"] == 128
+
+
+def test_predict_time_returns_none_without_a_prediction():
+    def model(category, params, arch):
+        return None
+
+    assert predict_time(model, _mm(), ARCH) is None
+    assert predict_time(len, SimpleNamespace(category="GEMM"), ARCH) is None
+    assert predict_time(len, SimpleNamespace(param_details={}), ARCH) is None
+
+
+@pytest.mark.parametrize(
+    "report_module",
+    [
+        "TraceLens.Reporting.generate_perf_report_pytorch",
+        "TraceLens.Reporting.generate_perf_report_pytorch_inference",
+    ],
+)
+def test_extension_file_registers_specialized_model(report_module):
+    registered = []
+    analyzer = SimpleNamespace(set_specialized_perf_model=registered.append)
+    importlib.import_module(report_module).apply_extension(analyzer, str(STUB))
+    assert len(registered) == 1
+    assert registered[0](
+        "GEMM", {"M": 1, "N": 1, "K": 1, "B": 1}, None
+    ) == pytest.approx(2e-8)
 
 
 def test_origami_model_passes_gemm_shape_to_the_simulator():
