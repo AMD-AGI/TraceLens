@@ -152,6 +152,12 @@ class ModuleParameterSpec:
     """Shape of an ``nn.Parameter`` / raw tensor buffer declared in ``__init__``."""
 
     shape: tuple[DimExpr, ...]
+    dtype: str | None = None
+    """Set only when ``__init__`` states it (``torch.zeros(..., dtype=torch.long)``).
+
+    A routing table is int64 and reads as one; left unset, a buffer takes the
+    module's working precision like any activation.
+    """
 
 
 @dataclass
@@ -576,6 +582,25 @@ class ModuleDimRegistry:
                 spec = ModuleParameterSpec(shape=(length,))
                 self.parameter[(class_name, attr)] = spec
                 self.parameter_by_attr.setdefault(attr, spec)
+                continue
+            # Not a 1-D ``arange``. A buffer built by a plain constructor states
+            # its own shape and dtype -- ``nn.Buffer(torch.zeros(vocab_size,
+            # top_k, dtype=torch.long))`` is the token -> expert routing table,
+            # and without this it renders as a scalar in the module's working
+            # precision, so the lookup that reads it loses both its rank and its
+            # integer-ness and every consumer downstream inherits that.
+            built = _constructor_buffer_spec(
+                source,
+                config=config,
+                context=context,
+                dim_locals=dim_locals,
+                self_dims=_resolved_self_dims(
+                    init_func, config=config, context=context, dim_locals=dim_locals
+                ),
+            )
+            if built is not None:
+                self.parameter[(class_name, attr)] = built
+                self.parameter_by_attr.setdefault(attr, built)
 
     def _walk_init_body(
         self,
@@ -1685,7 +1710,10 @@ class ShapeInferencer:
         parameter = self._lookup_parameter_spec(node, root=root, names=names)
         if parameter is not None:
             has_weight = any("weight" in str(n).lower() for n in names)
-            param_dtype = (
+            # A buffer whose ``__init__`` states its dtype keeps it: a routing
+            # table is int64, and reading it as an activation loses the
+            # integer-ness every index consumer depends on.
+            param_dtype = parameter.dtype or (
                 self.context.weight_dtype(str(node.id))
                 if has_weight
                 else self.context.dtype
@@ -2752,7 +2780,10 @@ class ShapeInferencer:
             hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
             parameter = self._lookup_parameter_spec(node, root=root, names=[label])
             if parameter is not None:
-                param_dtype = (
+                # A buffer whose ``__init__`` states its dtype keeps it: a routing
+                # table is int64, and reading it as an activation loses the
+                # integer-ness every index consumer depends on.
+                param_dtype = parameter.dtype or (
                     self.context.weight_dtype(str(node.id))
                     if "weight" in label
                     else dtype
@@ -3588,10 +3619,30 @@ class ShapeInferencer:
 
         if operation_label == "gather":
             has_dim = _detail_value(details, "dim") is not None
-            int_indices = [item for item in inputs if item.dtype == "int64"]
+            # A buffer this op reads is the TABLE being indexed, whatever its
+            # dtype. Separating base from index by "the non-integer one" works
+            # only while the table is floating-point: a token -> expert routing
+            # table is int64 exactly like the ids that index it, and then that
+            # rule finds no base at all and the lookup collapses to the index's
+            # own shape. The op names its buffer, so ask it.
+            table_shapes: set[tuple[DimExpr, ...]] = set()
+            for name in node.metadata.get("external_inputs", []) or ():
+                buffer_spec = self._lookup_parameter_spec(
+                    node, root=root, names=[str(name)]
+                )
+                if buffer_spec is not None and buffer_spec.shape:
+                    table_shapes.add(tuple(buffer_spec.shape))
             base = next(
-                (item for item in inputs if item.dtype not in {"int64", "bool"}), None
+                (item for item in inputs if tuple(item.shape) in table_shapes), None
             )
+            if base is None:
+                base = next(
+                    (item for item in inputs if item.dtype not in {"int64", "bool"}),
+                    None,
+                )
+            int_indices = [
+                item for item in inputs if item is not base and item.dtype == "int64"
+            ]
             # Integer advanced indexing ``base[i, j, ...]`` is a ``Subscript`` /
             # ``__getitem__`` and -- unlike ``torch.gather`` -- carries no ``dim``
             # detail. With two or more integer index operands it indexes the
@@ -3599,7 +3650,22 @@ class ShapeInferencer:
             # axes and the trailing base axes are kept. ``torch.gather`` (always a
             # single index operand with a ``dim``) and boolean-mask indexing are
             # left on the path below, so every real ``torch.gather`` is unchanged.
-            if not has_dim and base is not None and len(int_indices) >= 2:
+            # Indexing the LEADING axes: the broadcast of the index operands
+            # replaces them and the trailing base axes are kept. Two cases reach
+            # it -- several index operands, or a single one reading a BUFFER,
+            # which is a lookup table by construction. The ``gather`` label is
+            # overloaded (single-index/no-``dim`` covers many non-row-gather
+            # shapes across these models), so a lone index into an ordinary
+            # activation deliberately keeps the legacy ``index.shape`` answer
+            # rather than being reinterpreted on a guess.
+            if (
+                not has_dim
+                and base is not None
+                and (
+                    len(int_indices) >= 2
+                    or (int_indices and tuple(base.shape) in table_shapes)
+                )
+            ):
                 idx_shape = _broadcast_shapes([item.shape for item in int_indices])
                 tail = tuple(base.shape[len(int_indices) :])
                 return TensorSpec(shape=tuple(idx_shape) + tail, dtype=base.dtype)
@@ -3668,6 +3734,19 @@ class ShapeInferencer:
                     # letting a wider bool mask win the ``_broadcast_rank`` vote.
                     return TensorSpec(shape=inputs[0].shape, dtype=inputs[0].dtype)
                 source = max(inputs, key=_broadcast_rank)
+                if operation_label == "where":
+                    # ``torch.where(condition, x, y)`` takes its VALUES from x and
+                    # y; the condition only selects between them. Letting the
+                    # condition win the dtype vote turns a selected index into a
+                    # mask -- DeepSeek's ``torch.where(valid, top_k_indices, ...)``
+                    # reported bool, so the scatter reading it had no integer
+                    # operand at all. The shape still broadcasts across all three.
+                    values = [item for item in inputs if item.dtype != "bool"]
+                    if values:
+                        return TensorSpec(
+                            shape=source.shape,
+                            dtype=max(values, key=_broadcast_rank).dtype,
+                        )
                 return TensorSpec(shape=source.shape, dtype=source.dtype)
             return TensorSpec(shape=self._active_hidden_shape(), dtype=dtype)
 
@@ -6164,6 +6243,105 @@ def _arange_length(
     if step <= 0:
         return None
     return max(0, (stop - start + step - 1) // step)
+
+
+def _resolved_self_dims(
+    func: ast.FunctionDef,
+    *,
+    config: dict[str, Any],
+    context: ShapeContext,
+    dim_locals: dict[str, DimExpr],
+) -> dict[str, DimExpr]:
+    """``self.<attr> = <dim expr>`` in ``__init__``, resolved to concrete dims.
+
+    A buffer is routinely sized by the attributes the constructor just set
+    (``torch.zeros(config.vocab_size, self.top_k)``), which are not locals and so
+    are invisible to the ordinary local resolver.
+    """
+    resolved: dict[str, DimExpr] = {}
+    for stmt in func.body:
+        if not isinstance(stmt, ast.Assign):
+            continue
+        for target in stmt.targets:
+            if not (isinstance(target, ast.Attribute) and _is_self_attr(target)):
+                continue
+            dim = _resolve_dim_expr(
+                stmt.value, config=config, local_vars=dim_locals, context=context
+            )
+            if dim is not None:
+                resolved[target.attr] = dim
+    return resolved
+
+
+def _constructor_buffer_spec(
+    node: ast.AST,
+    *,
+    config: dict[str, Any],
+    context: ShapeContext,
+    dim_locals: dict[str, DimExpr],
+    self_dims: dict[str, DimExpr] | None = None,
+) -> ModuleParameterSpec | None:
+    """Shape and dtype of a buffer built by ``torch.zeros``/``ones``/``empty``/``full``.
+
+    Sizes resolve the way every other extent does -- an int literal, a config
+    value, or a local already resolved in ``__init__``. Returns ``None`` unless
+    EVERY size resolves, so a buffer this cannot size is left alone rather than
+    given a guess.
+    """
+    if not isinstance(node, ast.Call):
+        return None
+    name = _call_class_name(node)
+    if name not in {"zeros", "ones", "empty", "full"}:
+        return None
+    positional = list(node.args)
+    if name == "full":
+        positional = positional[:1]
+    sizes: list[ast.expr] = []
+    for arg in positional:
+        if isinstance(arg, (ast.Tuple, ast.List)):
+            sizes.extend(arg.elts)
+        else:
+            sizes.append(arg)
+    if not sizes:
+        return None
+    shape: list[DimExpr] = []
+    for size in sizes:
+        resolved: DimExpr | None = None
+        if (
+            self_dims
+            and isinstance(size, ast.Attribute)
+            and _is_self_attr(size)
+            and size.attr in self_dims
+        ):
+            resolved = self_dims[size.attr]
+        if resolved is None:
+            resolved = _resolve_dim_expr(
+                size, config=config, local_vars=dim_locals, context=context
+            )
+        if resolved is None:
+            return None
+        shape.append(resolved)
+    dtype: str | None = None
+    for keyword in node.keywords:
+        if keyword.arg == "dtype":
+            token = _literal_torch_dtype(keyword.value)
+            if token is not None:
+                dtype = token
+    return ModuleParameterSpec(shape=tuple(shape), dtype=dtype)
+
+
+def _literal_torch_dtype(node: ast.AST) -> str | None:
+    """``torch.long`` -> ``int64``; anything else unnamed answers ``None``."""
+    if not (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "torch"
+    ):
+        return None
+    return {"long": "int64", "int": "int32", "bool": "bool"}.get(
+        node.attr,
+        node.attr if node.attr.startswith(("int", "float", "bfloat")) else None,
+    )
 
 
 def _resolve_buffer_length(

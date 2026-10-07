@@ -712,6 +712,14 @@ def _is_top_level_model_input(node: dict[str, Any]) -> bool:
     return "/" not in str(node.get("id", ""))
 
 
+def _is_integer_dtype(type_str: Any) -> bool:
+    """True for an integer tensor dtype (never ``Scalar``/``Constant`` markers)."""
+    if not isinstance(type_str, str):
+        return False
+    lowered = type_str.strip().lower()
+    return lowered.startswith(("int", "uint", "long", "short", "byte"))
+
+
 def _is_float_dtype(type_str: Any) -> bool:
     """True for a floating-point tensor dtype (real activation), not an index/mask.
 
