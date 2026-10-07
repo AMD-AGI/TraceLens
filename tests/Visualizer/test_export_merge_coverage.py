@@ -1982,7 +1982,9 @@ def test_shape_module_registry_lookup_and_ambiguity():
             ("B", "S", 1),
             "float16",
         ),
-        ("sum", [TensorSpec(("B", "S", 8))], ["dim: 2"], ("B", "S", 8), "float16"),
+        # ``dim: 2`` names the same axis as ``dim: -1`` on a rank-3 tensor, so it
+        # reduces the same way. Only an axis this shape does not carry is left.
+        ("sum", [TensorSpec(("B", "S", 8))], ["dim: 2"], ("B", "S"), "float16"),
         (
             "multiply",
             [TensorSpec((8,)), TensorSpec(("B", "S", 16))],

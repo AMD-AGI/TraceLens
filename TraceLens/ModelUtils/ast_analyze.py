@@ -5207,6 +5207,15 @@ class _ForwardOperationExtractor:
                 and receiver.id not in self.param_names
             ):
                 return node.func.attr or None
+            # Seeing through the call is right only when the call is
+            # HOUSEKEEPING -- a cast, a device move, a layout fix -- which hands
+            # back the same tensor. A call that TRANSFORMS it does not:
+            # ``(scores * weights).sum(dim=2)`` returns ``[B, S, T]`` while
+            # ``scores`` is ``[B, S, H, T]``, so naming that slot ``scores``
+            # collides with the local of the same name and publishes the tensor
+            # from BEFORE the reduction.
+            if node.func.attr not in _VALUE_PRESERVING_METHODS:
+                return node.func.attr or None
             return self._return_element_label(receiver)
         if isinstance(node, ast.BinOp):
             # A returned element can be a scaled/combined tensor
@@ -9310,6 +9319,30 @@ def _subscript_select_dims(index: ast.AST) -> list[int]:
     return [
         -(len(tail) - offset) for offset, elt in enumerate(tail) if _is_int_index(elt)
     ]
+
+
+# Methods that hand back the same tensor: a cast, a device move, a layout fix.
+# Anything else transforms the value, so the result is not the receiver and must
+# not be named for it (see ``_return_element_label``).
+_VALUE_PRESERVING_METHODS = frozenset(
+    {
+        "to",
+        "type",
+        "type_as",
+        "float",
+        "double",
+        "half",
+        "bfloat16",
+        "long",
+        "int",
+        "bool",
+        "contiguous",
+        "detach",
+        "clone",
+        "cpu",
+        "cuda",
+    }
+)
 
 
 def _subscript_select_indices(index: ast.AST) -> list[int]:

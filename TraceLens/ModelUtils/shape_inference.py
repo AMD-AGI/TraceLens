@@ -1575,6 +1575,12 @@ class ShapeInferencer:
         # to resolve against, and must not clobber them -- the same protection
         # ``_entry_seeded_ids`` gives the entry side.
         self._rooted_output_ids: set[str] = set()
+        # What each module class RETURNS, learned when that class is inferred in
+        # its own context. A module drawn as a subgraph in a parent graph is
+        # sized before its own body is walked, so without this it falls back to
+        # passing its input through. Kept per class and used only when every
+        # instance agrees, so a class built at two widths reports neither.
+        self._module_output_specs: dict[str, set[tuple[Any, str | None]]] = {}
         self._module_resolved_ids: set[str] = set()
         self._tensor_names: dict[str, str] = {}
         self._tensor_specs: dict[str, TensorSpec] = {}
@@ -2175,6 +2181,10 @@ class ShapeInferencer:
             output = _with_explicit_dtype(node, output)
             if root is not None and node.metadata.get("synthetic") == "@output":
                 self._rooted_output_ids.add(node_id)
+                if node_id == "@output" and getattr(root, "class_name", None):
+                    self._module_output_specs.setdefault(
+                        str(root.class_name), set()
+                    ).add((tuple(output.shape), output.dtype))
             self._tensor_specs[node_id] = output
             if node.metadata.get("synthetic") == "@input" and node.label:
                 self._boundary_shapes.setdefault(str(node.label), output.shape)
@@ -2757,6 +2767,16 @@ class ShapeInferencer:
         synthetic = node.metadata.get("synthetic")
         class_name = (node.metadata.get("class_name") or node.label or "").strip()
         block_class = class_name or node.label
+
+        # A module drawn as a subgraph reports what its own graph returns. It is
+        # sized here before that graph is walked, so the fallback passes its input
+        # through -- which is how the indexer, handed hidden states and returning
+        # int64 picks, reported hidden states to everything reading it.
+        if node.kind == NodeKind.SUBGRAPH and class_name:
+            returned = self._module_output_specs.get(class_name)
+            if returned and len(returned) == 1:
+                shape, returned_dtype = next(iter(returned))
+                return TensorSpec(shape=shape, dtype=returned_dtype or dtype)
 
         if synthetic == "@input":
             if (node.label or "").lower() in {"input_ids", "input"}:
@@ -3710,7 +3730,24 @@ class ShapeInferencer:
             index_reduction = operation_label in {"argmax", "argmin"}
             reduced_dim = _detail_value(details, "dim")
             if reduced_dim is not None and reduced_dim != "-1":
-                # Reductions over stream or head axes the symbolic (B, S, H) view omits.
+                # A concrete axis this tensor actually has is reduced the way any
+                # other axis is: ``(scores * weights).sum(dim=2)`` on
+                # ``[B, S, H, T]`` is ``[B, S, T]``, and returning the source
+                # unchanged publishes the tensor from before the reduction -- the
+                # scorer's own boundary reported ``[B, S, H, T]`` where its
+                # docstring says ``[B, S, T]``.
+                axis = _as_int(reduced_dim)
+                rank = len(source.shape)
+                if axis is not None and -rank <= axis < rank:
+                    dims = list(source.shape)
+                    out_dtype = "int64" if index_reduction else source.dtype
+                    if _detail_value(details, "keepdim") == "True":
+                        dims[axis] = 1
+                    else:
+                        del dims[axis]
+                    return TensorSpec(shape=tuple(dims), dtype=out_dtype)
+                # An axis the symbolic (B, S, H) view omits -- a stream or head
+                # axis this shape does not carry -- cannot be dropped from it.
                 if not index_reduction:
                     return source
                 return TensorSpec(shape=source.shape, dtype="int64")
@@ -5276,6 +5313,14 @@ def _with_explicit_dtype(node: ModelGraphNode, spec: TensorSpec) -> TensorSpec:
     if declared is None or declared == spec.dtype:
         return spec
     return TensorSpec(shape=spec.shape, dtype=declared)
+
+
+def _as_int(value: Any) -> int | None:
+    """``value`` as an int when it plainly is one, else ``None``."""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
 
 
 def _constructed_dtype(details: Sequence[str]) -> str | None:

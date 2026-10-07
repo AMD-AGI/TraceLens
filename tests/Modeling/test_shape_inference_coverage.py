@@ -520,13 +520,28 @@ def test_gather_no_inputs_uses_default():
     assert out.shape == ("B", "S", 4)
 
 
-def test_reduction_argmax_with_dim_keeps_shape_int64():
+def test_reduction_argmax_drops_the_axis_it_reduces_and_is_int64():
+    """``argmax(dim=1)`` on ``[B, S, 8]`` is ``[B, 8]``: the axis is gone.
+
+    This used to assert the shape was kept, which treated a positive ``dim`` as
+    an axis the symbolic view omits -- and then disagreed with ``dim: -1`` about
+    the very same axis. A reduction over an axis the tensor HAS reduces it.
+    """
     inf = _make_inferencer()
     inp = TensorSpec(("B", "S", 8), "float16")
     node = _node("argmax", details=["dim: 1"])
     out = inf._infer_node_output(node, [inp], root=None)
-    assert out.shape == ("B", "S", 8)
+    assert out.shape == ("B", 8)
     assert out.dtype == "int64"
+
+
+def test_reduction_over_an_axis_the_shape_does_not_carry_is_left_alone():
+    """A head/stream axis the symbolic ``(B, S, H)`` view omits cannot be dropped."""
+    inf = _make_inferencer()
+    inp = TensorSpec(("B", "S", 8), "float16")
+    node = _node("sum", details=["dim: 7"])
+    out = inf._infer_node_output(node, [inp], root=None)
+    assert out.shape == ("B", "S", 8)
 
 
 def test_pointwise_no_inputs():

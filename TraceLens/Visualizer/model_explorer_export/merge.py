@@ -5360,6 +5360,11 @@ def _append_section(
         skip_synthetic_input=skip_variant_root_input,
     )
     if shape_inferencer is not None:
+        # Resolve the nested modules FIRST, so this section knows what each of
+        # them returns before it sizes the node that stands for one. They are
+        # annotated properly further down; this pass only warms that knowledge.
+        for _label, nested in collect_nested_diagrams(block_tree, basic_ops=basic_ops):
+            infer_block_tree_shapes(shape_inferencer, nested, title=_label)
         annotate_nodes_with_shapes(
             section_nodes,
             infer_block_tree_shapes(shape_inferencer, block_tree, title=_title),
