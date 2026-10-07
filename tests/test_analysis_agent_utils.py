@@ -1730,9 +1730,9 @@ def test_compute_data_tables_missing_data_table(tmp_path):
 
 _FUSION_HEADER = (
     "| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | "
-    "FLOPS/Byte | Efficiency | Bound | Type |"
+    "FLOPS/Byte | Efficiency | Bound |"
 )
-_FUSION_SEP = "|---|---|---|---|---|---|---|---|---|---|---|"
+_FUSION_SEP = "|---|---|---|---|---|---|---|---|---|---|"
 
 
 def _fusion_block(header=_FUSION_HEADER, tier="fusion"):
@@ -1742,19 +1742,12 @@ def _fusion_block(header=_FUSION_HEADER, tier="fusion"):
         f"{header}\n"
         f"{_FUSION_SEP}\n"
         "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
-        "50.00% of 5.3 TB/s | memory-bound | GEMM |\n"
+        "50.00% of 5.3 TB/s | memory-bound |\n"
     )
 
 
 def test_fusion_data_tables_valid_header():
     assert _validate_fusion_data_tables(_fusion_block()) == []
-
-
-def test_fusion_data_tables_rejects_header_without_type():
-    errors = _validate_fusion_data_tables(
-        _fusion_block(_FUSION_HEADER.replace(" | Type |", " |"))
-    )
-    assert any("fusion Data table" in e and "canonical columns" in e for e in errors)
 
 
 def test_fusion_data_tables_rejects_old_perf_model_header():
@@ -1782,11 +1775,11 @@ def test_fusion_data_tables_comparative_trace1_table_is_validated():
         "**Trace 1**\n\n"
         f"{_FUSION_HEADER}\n{_FUSION_SEP}\n"
         "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
-        "50.00% of 5.3 TB/s | memory-bound | GEMM |\n\n"
+        "50.00% of 5.3 TB/s | memory-bound |\n\n"
         "**Trace 2**\n\n"
         f"{_FUSION_HEADER}\n{_FUSION_SEP}\n"
         "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
-        "50.00% of 5.3 TB/s | memory-bound | GEMM |\n"
+        "50.00% of 5.3 TB/s | memory-bound |\n"
     )
     assert _validate_fusion_data_tables(block) == []
     bad = block.replace(_FUSION_HEADER, "| bogus |", 1)

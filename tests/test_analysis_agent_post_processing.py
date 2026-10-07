@@ -1078,16 +1078,16 @@ _FUSION_MD = """# Owl - MI300X Standalone Analysis
 
 <a id="detailed-analysis-fusion-P1"></a>
 <!-- reasoning-candidate tier=fusion rank=1 -->
-#### 🔴 P1: Unfused Attention (250.25 ms, 180 instances)
+#### 🔴 P1: Unfused Attention
 
 **Identification:** Attention runs as separate bmm, softmax and bmm kernels.
 
 **Data:**
 
-| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound | Type |
-|---|---|---|---|---|---|---|---|---|---|---|
-| aten::bmm | (16,5185,64) bf16<br>(16,64,5185) bf16 | transformers/models/owlv2/modeling_owlv2.py(410): forward | Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x32_MI16x16x1_SN_LDS... | 40.460 | 4.45 | 120 | 62.46 | 49.39% of 5.3 TB/s | memory-bound | GEMM |
-| aten::_softmax | (16,5185,5185) bf16 | torch/nn/functional.py(2103): softmax | void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat1... | 153.698 | 16.92 | 120 | — | — | — | Unknown |
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
+| aten::bmm | (16,5185,64) bf16<br>(16,64,5185) bf16 | transformers/models/owlv2/modeling_owlv2.py(410): forward | Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x32_MI16x16x1_SN_LDS... | 40.460 | 4.45 | 120 | 62.46 | 49.39% of 5.3 TB/s | memory-bound |
+| aten::_softmax | (16,5185,5185) bf16 | torch/nn/functional.py(2103): softmax | void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat1... | 153.698 | 16.92 | 120 | — | — | — |
 
 **Resolution:** Call a vendor library's fused attention if one exists; otherwise write a fused kernel.
 
@@ -1099,16 +1099,16 @@ _FUSION_MD = """# Owl - MI300X Standalone Analysis
 
 <a id="detailed-analysis-fusion-P2"></a>
 <!-- reasoning-candidate tier=fusion rank=2 -->
-#### 🟡 P2: Unfused MLP Activation (36.61 ms, 180 instances)
+#### 🟡 P2: Unfused MLP Activation
 
 **Identification:** The QuickGELU runs as three elementwise kernels between two GEMMs.
 
 **Data:**
 
-| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound | Type |
-|---|---|---|---|---|---|---|---|---|---|---|
-| aten::addmm | (4096,) bf16<br>(5185,1024) bf16<br>(1024,4096) bf16 | torch/nn/modules/linear.py(124): forward | Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT128x288x64_MI16x16x1_SN_LDS... | 11.587 | 1.28 | 120 | 707.68 | 63.68% of 708 TFLOPS | compute-bound | GEMM |
-| aten::sigmoid | (1,5185,4096) bf16 | transformers/activations.py(95): forward | void at::native::vectorized_elementwise_kernel<8, at::native::sigmoid_kerne... | 3.529 | 0.39 | 120 | 0.25 | 54.59% of 5.3 TB/s | memory-bound | Elementwise |
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
+| aten::addmm | (4096,) bf16<br>(5185,1024) bf16<br>(1024,4096) bf16 | torch/nn/modules/linear.py(124): forward | Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT128x288x64_MI16x16x1_SN_LDS... | 11.587 | 1.28 | 120 | 707.68 | 63.68% of 708 TFLOPS | compute-bound |
+| aten::sigmoid | (1,5185,4096) bf16 | transformers/activations.py(95): forward | void at::native::vectorized_elementwise_kernel<8, at::native::sigmoid_kerne... | 3.529 | 0.39 | 120 | 0.25 | 54.59% of 5.3 TB/s | memory-bound |
 
 **Resolution:** Fold the activation into the fc1 GEMM epilogue.
 
@@ -1120,7 +1120,7 @@ _FUSION_MD = """# Owl - MI300X Standalone Analysis
 """
 
 _FUSION_P2_GOLDEN = {
-    "operation": "🟡 P2: Unfused MLP Activation (36.61 ms, 180 instances)",
+    "operation": "🟡 P2: Unfused MLP Activation",
     "members": [
         {
             "kernel_launcher_path": "torch/nn/modules/linear.py(124): forward",
@@ -1177,7 +1177,7 @@ def test_fusion_tier_golden(tmp_path):
     p1, p2 = report["fusion_optimizations"]
     assert p2 == _FUSION_P2_GOLDEN
     assert p1["priority"] == 1
-    assert p1["operation"] == "🔴 P1: Unfused Attention (250.25 ms, 180 instances)"
+    assert p1["operation"] == "🔴 P1: Unfused Attention"
     assert p1["reasoning"] is None
     assert p1["impact"] == {"mid": 13.5, "low": 11.5, "high": 15.5}
     assert p1["resolution"].startswith("Call a vendor library's fused attention")

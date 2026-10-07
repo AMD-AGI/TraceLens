@@ -270,7 +270,7 @@ def build_rows(
 ) -> List[dict]:
     """Detail-table rows, one per launching op + args, as finished cells.
 
-    Time, %E2E, Count, Kernel Name and Type come from the candidate's own ops
+    Time, %E2E, Count and Kernel Name come from the candidate's own ops
     (summed over its instances). Args, Kernel Path, FLOPS/Byte, Efficiency and
     Bound describe the op signature and come from its ``perf_rows`` entry.
     ``fill_efficiency=False`` leaves Efficiency and Bound empty (trace 2 on a
@@ -312,7 +312,6 @@ def build_rows(
                 ),
                 "efficiency": efficiency,
                 "bound": bound,
-                "type": "<br>".join(g["kernel_types"]),
             }
         )
     return rows

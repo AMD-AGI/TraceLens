@@ -74,7 +74,6 @@ _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE = (
     "Bound (T1)",
 )
 
-_FUSION_DATA_REQUIRED_COLS = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE + ("Type",)
 _TIME_DISCREPANCY_THRESHOLD = 10  # percent
 _ROLLUP_IMPACT_TOL = 0.02  # ms; matches 2-decimal rounding in generate_priority_data
 _MARKER_NUMERIC_TOL = 0.005  # ms; half a ULP at 2-decimal marker rendering
@@ -466,12 +465,12 @@ def _validate_fusion_data_tables(content):
             )
             continue
         header_line, header_cols, _ = table
-        n_cols = len(_FUSION_DATA_REQUIRED_COLS)
-        if tuple(header_cols[:n_cols]) != _FUSION_DATA_REQUIRED_COLS:
+        n_cols = len(_COMPUTE_DATA_REQUIRED_COLS_STANDALONE)
+        if tuple(header_cols[:n_cols]) != _COMPUTE_DATA_REQUIRED_COLS_STANDALONE:
             errors.append(
                 f"fusion Data table at line {header_line}: header must start "
                 f"with the {n_cols} canonical columns in order "
-                f"{list(_FUSION_DATA_REQUIRED_COLS)}; got {header_cols}"
+                f"{list(_COMPUTE_DATA_REQUIRED_COLS_STANDALONE)}; got {header_cols}"
             )
     return errors
 

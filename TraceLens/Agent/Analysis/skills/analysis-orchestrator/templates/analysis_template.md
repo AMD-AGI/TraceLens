@@ -410,15 +410,15 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 <a id="detailed-analysis-fusion-P1"></a>
 <!-- reasoning-candidate tier=fusion rank=1 -->
-#### 🔴/🟡/🟢 P1: <Candidate Name> (<time_ms> ms, <instance_count> instances)
+#### 🔴/🟡/🟢 P1: <Candidate Name>
 
 **Identification:**
 
 **Data:**
 
-| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound | Type |
-|---|---|---|---|---|---|---|---|---|---|---|
-| <op> | <args> | <kernel path> | <kernel name (truncated)> | X.XXX | X.XX | N | X.XX | X.XX% of Y TFLOPS/TB/s | compute/memory-bound | <type> |
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
+| <op> | <args> | <kernel path> | <kernel name (truncated)> | X.XXX | X.XX | N | X.XX | X.XX% of Y TFLOPS/TB/s | compute/memory-bound |
 
 **Resolution:**
 

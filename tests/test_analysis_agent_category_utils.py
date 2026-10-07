@@ -529,11 +529,10 @@ def _golden_candidate():
             {
                 "perf_key": _name_key(n),
                 "kernel_names": [n],
-                "kernel_types": [t],
                 "time_us": 100.0,
                 "count": 1,
             }
-            for n, t in (("Cijk_gemm", "GEMM"), ("ew_add", "Elementwise"))
+            for n in ("Cijk_gemm", "ew_add")
         ],
     }
 
@@ -1637,11 +1636,10 @@ def _write_fusion_inputs(base, candidates):
     ).to_csv(os.path.join(csv_dir, "unified_perf_summary.csv"), index=False)
 
 
-def _op_group(perf_key, kernel_names, kernel_types, time_us, count):
+def _op_group(perf_key, kernel_names, time_us, count):
     return {
         "perf_key": perf_key,
         "kernel_names": kernel_names,
-        "kernel_types": kernel_types,
         "time_us": time_us,
         "count": count,
     }
@@ -1662,7 +1660,7 @@ def _perf_row(**extra):
 
 
 def test_build_rows_uses_summed_time_count_and_row_values():
-    ops = [_op_group(_KEY, ["k1", "k2"], ["GEMM", "Elementwise"], 2500.0, 3)]
+    ops = [_op_group(_KEY, ["k1", "k2"], 2500.0, 3)]
     (row,) = build_rows(ops, {tuple(_KEY): _perf_row()}, 100.0, *_PEAKS)
     assert row["operation"] == "aten::mm"
     assert row["time_ms"] == "2.500"
@@ -1670,12 +1668,11 @@ def test_build_rows_uses_summed_time_count_and_row_values():
     assert row["count"] == 3
     assert row["flops_per_byte"] == "12.35"
     assert row["kernel_path"] == "torch.mm"
-    assert row["type"] == "GEMM<br>Elementwise"
     assert row["efficiency"] == "—" and row["bound"] == "—"
 
 
 def test_build_rows_unmatched_op_gets_placeholders():
-    ops = [_op_group(None, ["k"], ["Elementwise"], 10.0, 1)]
+    ops = [_op_group(None, ["k"], 10.0, 1)]
     (row,) = build_rows(ops, {}, 0, *_PEAKS)
     assert row["operation"] == row["args"] == row["flops_per_byte"] == "—"
     assert row["pct_e2e"] == "—"
@@ -1684,7 +1681,7 @@ def test_build_rows_unmatched_op_gets_placeholders():
 
 def test_build_rows_trace2_efficiency_gated_by_platform():
     perf = _perf_row(**{"Pct Roofline_mean": 50.0, "Roofline Bound": "COMPUTE_BOUND"})
-    ops = [_op_group(_KEY, ["k"], ["GEMM"], 100.0, 1)]
+    ops = [_op_group(_KEY, ["k"], 100.0, 1)]
     same = build_rows(ops, {tuple(_KEY): perf}, 10.0, *_PEAKS, fill_efficiency=True)
     other = build_rows(ops, {tuple(_KEY): perf}, 10.0, *_PEAKS, fill_efficiency=False)
     assert same[0]["bound"] == "compute-bound"
@@ -1744,14 +1741,14 @@ def test_build_rows_owl_groups_reproduce_sample_cells_and_totals():
         ),
     }
     p1 = [
-        _op_group(bmm_qk, ["Cijk_qk"], ["GEMM"], 40_460.0, 120),
-        _op_group(softmax, ["cunn_SoftMaxForwardReg"], ["Unknown"], 153_698.0, 120),
-        _op_group(bmm_pv, ["Cijk_pv"], ["GEMM"], 56_092.0, 120),
+        _op_group(bmm_qk, ["Cijk_qk"], 40_460.0, 120),
+        _op_group(softmax, ["cunn_SoftMaxForwardReg"], 153_698.0, 120),
+        _op_group(bmm_pv, ["Cijk_pv"], 56_092.0, 120),
     ]
     p2 = [
-        _op_group(addmm, ["Cijk_addmm"], ["GEMM"], 11_587.0, 120),
-        _op_group(sigmoid, ["vectorized_sigmoid"], ["Elementwise"], 3_529.0, 120),
-        _op_group(mul, ["vectorized_mul"], ["Elementwise"], 21_494.0, 120),
+        _op_group(addmm, ["Cijk_addmm"], 11_587.0, 120),
+        _op_group(sigmoid, ["vectorized_sigmoid"], 3_529.0, 120),
+        _op_group(mul, ["vectorized_mul"], 21_494.0, 120),
     ]
     peaks = (5.3, {"matrix_bf16": 708.0})
     rows1 = build_rows(p1, perf_rows, 908.4, *peaks)
@@ -1786,8 +1783,8 @@ def test_compute_fusion_comparative_rows_trace2_uses_trace2_baseline():
         "kernels_trace1": [{"name": "k", "type": "GEMM"}],
         "total_kernel_time_us_trace1": 20_000,
         "total_kernel_time_us_trace2": 5_000,
-        "ops_trace1": [_op_group(_KEY, ["k"], ["GEMM"], 20_000.0, 2)],
-        "ops_trace2": [_op_group(_KEY, ["k2"], ["GEMM"], 5_000.0, 2)],
+        "ops_trace1": [_op_group(_KEY, ["k"], 20_000.0, 2)],
+        "ops_trace2": [_op_group(_KEY, ["k2"], 5_000.0, 2)],
     }
     (est,) = compute_fusion_impact_estimates(
         [cand],
@@ -1844,14 +1841,8 @@ def test_driver_fusion_main_ok_with_estimate(tmp_path, monkeypatch):
             },
         ],
         "ops": [
-            _op_group(mm_key, ["Cijk_gemm"], ["GEMM"], 15000.0, 1),
-            _op_group(
-                add_key,
-                ["ew_add"],
-                ["Elementwise"],
-                15000.0,
-                1,
-            ),
+            _op_group(mm_key, ["Cijk_gemm"], 15000.0, 1),
+            _op_group(add_key, ["ew_add"], 15000.0, 1),
         ],
     }
     _write_fusion_inputs(base, [candidate])

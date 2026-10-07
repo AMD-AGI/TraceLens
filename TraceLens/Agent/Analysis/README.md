@@ -151,12 +151,12 @@ The snippets below are illustrative excerpts showing the format of the agent's a
 >
 > **Data:**
 >
-> | Operation | Args | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
-> |-----------|------|-----------|------|-------|------------|------------|-------|
-> | aten::mm | (24576,8192) × (8192,28672) bf16 | 7607.463 | 13.42 | 320 | 5059.76 | 68.74% of 708 TFLOPS | compute-bound |
-> | aten::mm | (24576,8192) × (8192,28672) bf16 | 6636.191 | 11.70 | 320 | 5059.76 | 79.04% of 708 TFLOPS | compute-bound |
-> | aten::mm | (28672,24576) × (24576,8192) bf16 | 6313.337 | 11.13 | 320 | 5059.76 | 82.70% of 708 TFLOPS | compute-bound |
-> | aten::mm | (24576,28672) × (28672,8192) bf16 | 6071.557 | 10.71 | 320 | 5059.76 | 85.99% of 708 TFLOPS | compute-bound |
+> | Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+> |-----------|------|-------------|-------------|-----------|------|-------|------------|------------|-------|
+> | aten::mm | (24576,8192) × (8192,28672) bf16 | ... | ... | 7607.463 | 13.42 | 320 | 5059.76 | 68.74% of 708 TFLOPS | compute-bound |
+> | aten::mm | (24576,8192) × (8192,28672) bf16 | ... | ... | 6636.191 | 11.70 | 320 | 5059.76 | 79.04% of 708 TFLOPS | compute-bound |
+> | aten::mm | (28672,24576) × (24576,8192) bf16 | ... | ... | 6313.337 | 11.13 | 320 | 5059.76 | 82.70% of 708 TFLOPS | compute-bound |
+> | aten::mm | (24576,28672) × (28672,8192) bf16 | ... | ... | 6071.557 | 10.71 | 320 | 5059.76 | 85.99% of 708 TFLOPS | compute-bound |
 >
 > **Reasoning for Slowdown:** Every flagged shape has very high arithmetic intensity (FLOPS/Byte 3510–5863), so each GEMM is correctly compute-bound against the BF16 matrix-FP roofline (708 TFLOPS) rather than HBM-bound. The achieved TFLOPS/s sit between 486.7 and 613.5, which is 68.7%–86.7% of peak — the heaviest shape (`(24576,8192) × (8192,28672)`, 7.6 s of kernel time, count = 320) lands at only 68.7%, and a second 6.6 s instance of the same shape only reaches 79.0%, indicating the same logical GEMM is hitting more than one Tensile kernel and at least one is sub-optimal.
 >
@@ -172,16 +172,20 @@ The snippets below are illustrative excerpts showing the format of the agent's a
 
 > <a id="detailed-analysis-fusion-P1"></a>
 > <!-- reasoning-candidate tier=fusion rank=1 -->
-> #### 🔴 P1: Unfused Attention (250.25 ms, 180 instances)
+> #### 🔴 P1: Unfused Attention
 >
 > **Identification:** Attention runs as separate bmm, softmax and bmm kernels, so the 5185x5185 score matrix round-trips through HBM between launches (source: `fusion_candidates.json`).
 >
 > **Data:**
 >
-> | Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound | Type |
-> |---|---|---|---|---|---|---|---|---|---|---|
-> | aten::bmm | (16,5185,64) bf16<br>(16,64,5185) bf16 | transformers/models/owlv2/modeling_owlv2.py(410): forward | Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x32_MI16x16x1_SN_LDS... | 40.460 | 4.45 | 120 | 62.46 | 49.39% of 5.3 TB/s | memory-bound | GEMM |
-> | aten::_softmax | (16,5185,5185) bf16 | torch/nn/functional.py(2103): softmax | void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat1... | 153.698 | 16.92 | 120 | — | — | — | Unknown |
+> | Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+> |---|---|---|---|---|---|---|---|---|---|
+> | aten::bmm | (16,5185,64) bf16<br>(16,64,5185) bf16 | ... | ... | 40.460 | 4.45 | 120 | 62.46 | 49.39% of 5.3 TB/s | memory-bound |
+> | aten::_softmax | (16,5185,5185) bf16 | ... | ... | 153.698 | 16.92 | 120 | — | — | — |
+> | aten::bmm | (16,5185,5185) bf16<br>(16,5185,64) bf16 | ... | ... | 55.056 | 6.06 | 120 | 62.46 | 36.51% of 5.3 TB/s | memory-bound |
+> | aten::bmm | (12,5,64) bf16<br>(12,64,5) bf16 | ... | ... | 0.356 | 0.04 | 60 | 2.41 | 0.05% of 5.3 TB/s | memory-bound |
+> | aten::_softmax | (12,5,5) bf16 | ... | ... | 0.295 | 0.03 | 60 | — | — | — |
+> | aten::bmm | (12,5,5) bf16<br>(12,5,64) bf16 | ... | ... | 0.385 | 0.04 | 60 | 2.41 | 0.05% of 5.3 TB/s | memory-bound |
 >
 > **Resolution:** Call a vendor library's fused attention if one exists; otherwise write a fused kernel.
 >

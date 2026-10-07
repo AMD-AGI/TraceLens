@@ -162,7 +162,7 @@ def _group_ops(instances: list) -> list:
     """Group kernels from every instance by launching op (perf row key).
 
     ``time_us`` sums the kernels' durations over all instances; ``count`` is the
-    number of distinct op invocations. Kernel names/types stack in first-seen order.
+    number of distinct op invocations. Kernel names stack in first-seen order.
     Kernels with no perf row are not merged: each kernel name gets its own group.
     """
     groups: dict = {}
@@ -177,13 +177,11 @@ def _group_ops(instances: list) -> list:
                 {
                     "perf_key": k.get("perf_key"),
                     "kernel_names": [],
-                    "kernel_types": [],
                     "time_us": 0.0,
                 },
             )
             if kname not in g["kernel_names"]:
                 g["kernel_names"].append(kname)
-                g["kernel_types"].append(k.get("type", k.get("kernel_type", "Unknown")))
             g["time_us"] += k["dur_us"]
             op_uids[key].add(k["op_uid"])
     return [{**g, "count": len(op_uids[key])} for key, g in groups.items()]

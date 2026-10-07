@@ -75,7 +75,7 @@ Then read `<output_dir>/category_data/kernel_fusion_metrics.json`. The `impact_e
 - `confidence`: "high" or "medium"
 - `time_ms`: Total candidate time across all instances (summed from the real kernels of every instance)
 - `warning`: Present when some kernels lack perf models
-- `rows` (standalone) or `rows_trace1` / `rows_trace2` (comparative): the finished Data-table rows, one per launching op and args, with the keys `operation`, `args`, `kernel_path`, `kernel_name`, `time_ms`, `pct_e2e`, `count`, `flops_per_byte`, `efficiency`, `bound`, `type`. Copy them verbatim into the Data table; do not recompute or reformat any cell.
+- `rows` (standalone) or `rows_trace1` / `rows_trace2` (comparative): the finished Data-table rows, one per launching op and args, with the keys `operation`, `args`, `kernel_path`, `kernel_name`, `time_ms`, `pct_e2e`, `count`, `flops_per_byte`, `efficiency`, `bound`. Copy them verbatim into the Data table; do not recompute or reformat any cell.
 
 The file also has `baseline_ms` (Trace 1 E2E GPU time in ms) and, in comparative mode, `baseline2_ms` (Trace 2 E2E).
 
@@ -182,7 +182,7 @@ Found N kernel fusion opportunities across M module types.
 
 ## Recommendations
 
-### 🔴 P1: <Pattern Name> (<time_ms> ms, <instance_count> instances)
+### 🔴 P1: <Pattern Name>
 
 **Insight**: <Module name, what it launches, how many instances, why it's fusable>
 <!-- [comparative] Also state: how many kernels in trace1 vs trace2. -->
@@ -204,7 +204,7 @@ Found N kernel fusion opportunities across M module types.
 ## Detailed Analysis
 
 <!-- reasoning-candidate tier=fusion rank=1 -->
-#### <Pattern Name> (<time_ms> ms, <instance_count> instances)
+#### <Pattern Name>
 
 **Identification:** <1-2 sentences: how this fusion candidate was surfaced>
 <!-- [standalone] (source: `fusion_candidates.json` → `module_name`, `has_fused_kernel`, `kernels[]`) -->
@@ -213,21 +213,21 @@ Found N kernel fusion opportunities across M module types.
 **Data:**
 
 <!-- [standalone] Single Data table: -->
-| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound | Type |
-|---|---|---|---|---|---|---|---|---|---|---|
-| <rows[].operation> | <rows[].args> | <rows[].kernel_path> | <rows[].kernel_name> | <rows[].time_ms> | <rows[].pct_e2e> | <rows[].count> | <rows[].flops_per_byte> | <rows[].efficiency> | <rows[].bound> | <rows[].type> |
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
+| <rows[].operation> | <rows[].args> | <rows[].kernel_path> | <rows[].kernel_name> | <rows[].time_ms> | <rows[].pct_e2e> | <rows[].count> | <rows[].flops_per_byte> | <rows[].efficiency> | <rows[].bound> |
 
 <!-- [comparative] Two Data tables with the same columns — you MUST include BOTH, each labelled with that trace's E2E ms. Do NOT add a totals line: -->
 **Trace 1** (E2E <baseline_ms> ms):
 
-| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound | Type |
-|---|---|---|---|---|---|---|---|---|---|---|
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
 | <rows_trace1[] cells, same order> |
 
 **Trace 2** (E2E <baseline2_ms> ms):
 
-| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound | Type |
-|---|---|---|---|---|---|---|---|---|---|---|
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
 | <rows_trace2[] cells, same order> |
 
 **Resolution:** <What to change, in this order: if a vendor library has a fused implementation of this pattern, change the model code to call it; otherwise write a custom fused kernel. Vendor-agnostic wording, no library named.>
