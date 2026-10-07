@@ -152,9 +152,18 @@ class GEMM:
         force_to_l1=False,
         num_cus=None,
         enable_origami=False,
+        backend=None,
     ):
-        if "GEMM_SIMULATOR_PATH" in os.environ:
-            if not os.path.exists(os.environ.get("GEMM_SIMULATOR_PATH")):
+        """GEMM time in µs from ``backend``: ``"simulator"`` runs the script at
+        ``GEMM_SIMULATOR_PATH``, ``"origami"`` runs Origami when
+        ``enable_origami``. ``None`` picks the simulator when that variable is
+        set, else Origami."""
+        if backend is None:
+            backend = "simulator" if "GEMM_SIMULATOR_PATH" in os.environ else "origami"
+        if backend not in ("simulator", "origami"):
+            raise ValueError(f"Unknown GEMM simulation backend: {backend!r}")
+        if backend == "simulator":
+            if not os.path.exists(os.environ.get("GEMM_SIMULATOR_PATH", "")):
                 raise ValueError(
                     f"GEMM_SIMULATOR_PATH does not exist: {os.environ.get('GEMM_SIMULATOR_PATH')}"
                 )
@@ -1906,6 +1915,7 @@ class SDPA:
         d_h,
         fa=True,
         enable_origami=False,
+        backend=None,
     ):
         force_to_l1 = False
         block_N_Q = N_Q
@@ -1934,6 +1944,7 @@ class SDPA:
             force_to_l1=force_to_l1,
             num_cus=1,
             enable_origami=enable_origami,
+            backend=backend,
         )
         if qkt_time is None:
             return None
@@ -1959,6 +1970,7 @@ class SDPA:
             force_to_l1=force_to_l1,
             num_cus=1,
             enable_origami=enable_origami,
+            backend=backend,
         )
         if pv_time is None:
             return None
@@ -1975,7 +1987,7 @@ class SDPA:
         )
         return qkt_time + softmax_time + pv_time + mem_time
 
-    def get_simulation_time(self):
+    def get_simulation_time(self, backend=None):
         simulated_time = None
         if self.arch is not None:
             try:
@@ -1997,6 +2009,7 @@ class SDPA:
                     self.d_h,
                     fa,
                     enable_origami=self.enable_origami,
+                    backend=backend,
                 )
             except Exception:
                 # Origami/GEMM may not support all dtypes on a given arch JSON; omit simulated time.
@@ -2017,6 +2030,7 @@ class SDPA:
         d_h,
         fa=True,
         enable_origami=False,
+        backend=None,
     ):
         force_to_l1 = False
         block_N_Q = N_Q
@@ -2047,6 +2061,7 @@ class SDPA:
             force_to_l1=force_to_l1,
             num_cus=1,
             enable_origami=enable_origami,
+            backend=backend,
         )
         if qkt_fwd_time is None:
             return None
@@ -2065,6 +2080,7 @@ class SDPA:
             force_to_l1=force_to_l1,
             num_cus=1,
             enable_origami=enable_origami,
+            backend=backend,
         )
         if pv_fwd_time is None:
             return None
@@ -2153,7 +2169,7 @@ class SDPA:
         )
         return simulated_time
 
-    def get_simulation_time_bwd(self):
+    def get_simulation_time_bwd(self, backend=None):
         simulated_time = None
         if self.arch is not None:
             try:
@@ -2179,6 +2195,7 @@ class SDPA:
                     self.d_h,
                     fa,
                     enable_origami=self.enable_origami,
+                    backend=backend,
                 )
             except Exception:
                 simulated_time = None

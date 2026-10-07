@@ -7,11 +7,13 @@
 """Time estimators: OpWork, the built-in estimators, registration, columns."""
 
 import math
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pandas as pd
 import pytest
 
 from TraceLens.PerfModel import perf_model
@@ -19,8 +21,10 @@ from TraceLens.PerfModel.time_models import (
     OpWork,
     TimeEstimate,
     add_time_estimate_columns,
+    class_simulation_time,
     default_time_estimators,
     external_time_model,
+    gemm_simulator_estimator,
     origami_estimator,
     roofline_estimator,
     time_estimate_group_columns,
@@ -128,15 +132,80 @@ class TestOrigamiEstimator:
                 "dtype_A_B": ("c10::BFloat16",),
             },
         )
+        work = _work(perf_model=pm, params=pm.param_details)
         with patch.object(
             perf_model.GEMM, "get_simulation_time_func", return_value=(7.0, "cmd")
-        ):
-            assert origami_estimator(False)(_work(perf_model=pm), ARCH) is None
-            assert origami_estimator(True)(_work(perf_model=pm), ARCH) == 7.0
-            assert origami_estimator(True)(_work(perf_model=pm, bwd=True), ARCH) is None
+        ) as sim:
+            assert origami_estimator(False)(work, ARCH) is None
+            assert origami_estimator(True)(work, ARCH) == 7.0
+            assert origami_estimator(True)(replace(work, bwd=True), ARCH) is None
+        assert sim.call_args.kwargs["backend"] == "origami"
 
-    def test_default_estimators_order(self):
+    def test_default_estimators_order(self, monkeypatch):
+        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         assert list(default_time_estimators()) == ["Roofline", "Origami"]
+        monkeypatch.setenv("GEMM_SIMULATOR_PATH", "sim.py")
+        assert list(default_time_estimators()) == [
+            "Roofline",
+            "Origami",
+            "GEMM Simulator",
+        ]
+
+
+class TestGemmSimulatorEstimator:
+    def test_class_simulation_gets_the_backend(self):
+        class WithBackend:
+            def get_simulation_time(self, backend=None):
+                return {"origami": 1.0, "simulator": 2.0}[backend]
+
+        class Legacy:
+            def get_simulation_time(self):
+                return 3.0
+
+        assert class_simulation_time(WithBackend(), False, "simulator") == 2.0
+        assert class_simulation_time(WithBackend(), False, "origami") == 1.0
+        assert class_simulation_time(Legacy(), False, "origami") == 3.0
+        assert class_simulation_time(Legacy(), False, "simulator") is None
+        assert class_simulation_time(object(), False, "origami") is None
+
+    def test_gemm_params_use_the_simulator(self):
+        params = {**_work().params, "dtype_A_B": ("c10::BFloat16",)}
+        pm = SimpleNamespace(category="GEMM", param_details=params)
+        work = _work(perf_model=pm, params=params)
+        with patch.object(
+            perf_model.GEMM, "get_simulation_time_func", return_value=(7.0, "cmd")
+        ) as sim:
+            assert gemm_simulator_estimator()(work, ARCH) == 7.0
+            assert gemm_simulator_estimator()(replace(work, bwd=True), ARCH) is None
+        assert sim.call_args.kwargs["backend"] == "simulator"
+
+    def test_unknown_backend(self):
+        with pytest.raises(ValueError, match="backend"):
+            perf_model.GEMM.get_simulation_time_func(
+                ARCH, 4, 8, 16, 1, "bf16", backend="other"
+            )
+
+    def test_origami_backend_ignores_the_simulator_path(self, monkeypatch):
+        monkeypatch.setenv("GEMM_SIMULATOR_PATH", "/nonexistent/sim.py")
+        assert perf_model.GEMM.get_simulation_time_func(
+            ARCH, 4, 8, 16, 1, "bf16", backend="origami"
+        ) == (None, None)
+
+    def test_sdpa_passes_the_backend_to_its_tile_gemms(self):
+        backends = []
+
+        def fake_gemm(*args, backend=None, **kwargs):
+            backends.append(backend)
+            return 1.0, "cmd"
+
+        arch = {**ARCH, "num_cus": 304}
+        with patch.object(
+            perf_model.GEMM, "get_simulation_time_func", side_effect=fake_gemm
+        ), patch.object(perf_model.Softmax, "get_time", return_value=0.0):
+            args = (arch, "bf16", None, "c10::BFloat16", 1024, 1, 8, 128, 128, 64)
+            perf_model.SDPA.get_simulation_time_func(*args, backend="simulator")
+            perf_model.SDPA.get_simulation_time_bwd_func(*args, backend="simulator")
+        assert backends == ["simulator"] * 4
 
 
 class TestColumns:
@@ -263,6 +332,39 @@ def test_report_shows_every_kernel_filter(tmp_path, monkeypatch):
     assert gemms["All Kernel Time (µs)_sum"].tolist() == pytest.approx(
         gemms["Kernel Time (µs)_sum"].tolist()
     )
+
+
+@pytest.mark.parametrize("enable_origami", [False, True])
+def test_report_has_gemm_simulator_columns_next_to_origami(
+    tmp_path, monkeypatch, enable_origami
+):
+    monkeypatch.setenv("GEMM_SIMULATOR_PATH", "sim.py")
+
+    def fake_gemm(*args, backend=None, **kwargs):
+        return {"simulator": 3.0, "origami": 5.0}[backend], "cmd"
+
+    with patch.object(
+        perf_model.GEMM, "get_simulation_time_func", side_effect=fake_gemm
+    ):
+        dfs = generate_perf_report_pytorch(
+            profile_json_path=str(TRACE),
+            output_csvs_dir=str(tmp_path / "csvs"),
+            gpu_arch=ARCH,
+            enable_origami=enable_origami,
+            collective_analysis=False,
+        )
+    for df in (
+        dfs["GEMM"],
+        dfs["unified_perf_summary"].query("`op category` == 'GEMM'"),
+    ):
+        assert (df["GEMM Simulator Time (µs)_first"] == 3.0).all()
+        assert "Pct GEMM Simulator_mean" in df.columns
+        if enable_origami:
+            assert (df["Origami Time (µs)_first"] == 5.0).all()
+        else:
+            assert (
+                df.get("Origami Time (µs)_first", pd.Series(dtype=float)).isna().all()
+            )
 
 
 def test_report_shows_every_registered_model(tmp_path, monkeypatch):

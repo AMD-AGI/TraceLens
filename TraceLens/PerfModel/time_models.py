@@ -15,7 +15,8 @@ estimator is a function::
 
 Each estimator writes one column group, ``<label> Time (µs)``,
 ``<label> TFLOPS/s``, ``<label> TB/s``, any extra columns (named
-``<label> ...``), and ``Pct <label>``. Roofline and Origami are built in.
+``<label> ...``), and ``Pct <label>``. Roofline, Origami, and (when
+``GEMM_SIMULATOR_PATH`` is set) GEMM Simulator are built in.
 
 External time models use a simpler signature and are adapted with
 :func:`external_time_model`::
@@ -32,6 +33,7 @@ GEMM: M, N, K, B, dtype_A_B, ...), and ``arch`` is the GPU arch dict or
 library call belongs in an ``--extension_file``, not in this repository.
 """
 
+import inspect
 import os
 from dataclasses import dataclass, field
 from functools import partial
@@ -41,7 +43,7 @@ from .utils import add_duration_rate_columns
 
 # Built-in labels come first in summaries, in this order; others follow in
 # column order.
-BUILTIN_LABEL_ORDER = ("Roofline", "Origami", "Specialized")
+BUILTIN_LABEL_ORDER = ("Roofline", "Origami", "GEMM Simulator", "Specialized")
 
 
 @dataclass(frozen=True)
@@ -171,8 +173,8 @@ def external_time_model(model):
     return estimate
 
 
-def origami_perf_model(category, params, arch, python_path=None):
-    """GEMM time from Origami, or from ``GEMM_SIMULATOR_PATH`` when it is set."""
+def gemm_time(category, params, arch, python_path=None, backend=None):
+    """GEMM time from ``backend`` (see ``GEMM.get_simulation_time_func``)."""
     if category != "GEMM" or arch is None:
         return None
     from .perf_model import GEMM
@@ -190,42 +192,92 @@ def origami_perf_model(category, params, arch, python_path=None):
         dtype,
         python_path,
         enable_origami=True,
+        backend=backend,
     )
     return time_us
 
 
+def origami_perf_model(category, params, arch, python_path=None):
+    """GEMM time from Origami."""
+    return gemm_time(category, params, arch, python_path, backend="origami")
+
+
+def gemm_simulator_model(category, params, arch, python_path=None):
+    """GEMM time from the simulator script at ``GEMM_SIMULATOR_PATH``."""
+    return gemm_time(category, params, arch, python_path, backend="simulator")
+
+
 def builtin_origami_model(enable_origami, python_path=None):
-    """Origami model to register, or None when neither Origami nor
-    ``GEMM_SIMULATOR_PATH`` is enabled."""
+    """GEMM model for JAX reports: the simulator when ``GEMM_SIMULATOR_PATH``
+    is set, else Origami when enabled, else None."""
     if not enable_origami and "GEMM_SIMULATOR_PATH" not in os.environ:
         return None
-    return partial(origami_perf_model, python_path=python_path)
+    return partial(gemm_time, python_path=python_path)
 
 
-def origami_estimator(enable_origami=False, python_path=None):
-    """Origami time: the perf-model class's own simulation (attention's tile
-    model), and for GEMMs Origami on the GEMM's params when enabled."""
-    gemm_model = builtin_origami_model(enable_origami, python_path)
+def _accepts_backend(fn):
+    try:
+        parameters = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        p.name == "backend" or p.kind is inspect.Parameter.VAR_KEYWORD
+        for p in parameters
+    )
+
+
+def class_simulation_time(perf_model, bwd, backend):
+    """Time from the perf-model class's own simulation (attention's tile
+    model) on ``backend``. A class whose simulation takes no ``backend`` counts
+    as Origami."""
+    simulate = getattr(
+        perf_model, "get_simulation_time_bwd" if bwd else "get_simulation_time", None
+    )
+    if simulate is None:
+        return None
+    if _accepts_backend(simulate):
+        return simulate(backend=backend)
+    return simulate() if backend == "origami" else None
+
+
+def simulation_estimator(backend, gemm_model):
+    """Estimator for a GEMM backend: the class's own simulation, overridden
+    for a forward op by ``gemm_model(category, params, arch)`` when it
+    returns a time. ``gemm_model`` may be None."""
 
     def estimate(work, arch):
-        simulate = getattr(
-            work.perf_model,
-            "get_simulation_time_bwd" if work.bwd else "get_simulation_time",
-            None,
-        )
-        time_us = simulate() if simulate is not None else None
-        if gemm_model is not None and not work.bwd:
-            gemm_time_us = predict_time(gemm_model, work.perf_model, arch)
+        time_us = class_simulation_time(work.perf_model, work.bwd, backend)
+        if gemm_model is not None and not work.bwd and work.params is not None:
+            gemm_time_us = gemm_model(work.category, work.params, arch)
             if gemm_time_us:
-                time_us = gemm_time_us
+                time_us = float(gemm_time_us)
         return time_us
 
     return estimate
 
 
+def origami_estimator(enable_origami=False, python_path=None):
+    """Origami time: attention's tile model always, GEMMs when enabled."""
+    gemm_model = (
+        partial(origami_perf_model, python_path=python_path) if enable_origami else None
+    )
+    return simulation_estimator("origami", gemm_model)
+
+
+def gemm_simulator_estimator(python_path=None):
+    """Simulator time for GEMMs and attention's tile GEMMs."""
+    return simulation_estimator(
+        "simulator", partial(gemm_simulator_model, python_path=python_path)
+    )
+
+
 def default_time_estimators(enable_origami=False, python_path=None):
-    """Built-in estimators, in report order."""
-    return {
+    """Built-in estimators, in report order. The GEMM simulator is added when
+    ``GEMM_SIMULATOR_PATH`` is set."""
+    estimators = {
         "Roofline": roofline_estimator,
         "Origami": origami_estimator(enable_origami, python_path),
     }
+    if "GEMM_SIMULATOR_PATH" in os.environ:
+        estimators["GEMM Simulator"] = gemm_simulator_estimator(python_path)
+    return estimators

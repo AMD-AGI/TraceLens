@@ -18,6 +18,7 @@ from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.perf_model import aten_mm
 from TraceLens.PerfModel.time_models import (
     builtin_origami_model,
+    gemm_simulator_model,
     origami_perf_model,
     predict_time,
 )
@@ -101,10 +102,14 @@ def test_origami_model_passes_gemm_shape_to_the_simulator():
         assert origami_perf_model("GEMM", gemm.param_details, ARCH) == 7.0
         assert origami_perf_model("SDPA_fwd", gemm.param_details, ARCH) is None
         assert origami_perf_model("GEMM", gemm.param_details, None) is None
-    sim.assert_called_once_with(ARCH, 128, 32, 64, 1, "bf16", None, enable_origami=True)
+        assert gemm_simulator_model("GEMM", gemm.param_details, ARCH) == 7.0
+    assert [c.kwargs["backend"] for c in sim.call_args_list] == ["origami", "simulator"]
+    sim.assert_called_with(
+        ARCH, 128, 32, 64, 1, "bf16", None, enable_origami=True, backend="simulator"
+    )
 
 
-def test_origami_is_registered_only_when_enabled(monkeypatch):
+def test_jax_gemm_model_is_registered_only_when_enabled(monkeypatch):
     monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
     assert builtin_origami_model(False) is None
     assert builtin_origami_model(True) is not None

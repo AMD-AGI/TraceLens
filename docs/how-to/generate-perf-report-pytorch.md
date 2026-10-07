@@ -243,8 +243,15 @@ and call of a proprietary library in the extension file. A placeholder is in
 Roofline and Origami are estimators behind the same interface, in
 `TraceLens/PerfModel/time_models.py`: each takes the op's work (category,
 params, GFLOPs, bytes moved, compute spec) and the arch dict, and returns a
-time. Origami covers GEMMs (with `--enable-origami`, or `GEMM_SIMULATOR_PATH`)
-and attention through the attention perf model's own simulation.
+time. Origami covers GEMMs (with `--enable-origami`) and attention through the
+attention perf model's own simulation.
+
+To compare with an external GEMM simulator, set `GEMM_SIMULATOR_PATH` to its
+script. TraceLens runs it as
+`python <script> -b B -m M -n N -k K --dtype <dtype> -d 1 -a <arch name>`
+(plus `--freq_mhz`, `--cus`, and `--hbm_bw` from the arch) and reads
+`Time=<µs>` from its output. Its times fill a separate `GEMM Simulator` column
+group, for GEMMs and for the attention tile GEMMs, next to Origami's.
 
 A kernel filter reports the op's throughput over a subset of its kernels, for
 example without copy and transpose kernels:
