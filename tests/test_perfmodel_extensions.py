@@ -1423,6 +1423,27 @@ class TestMoeExtensionsCoverage:
         assert model.flops() > 0
         assert model.get_maf_type() == "matrix"
 
+    @pytest.mark.parametrize("cls", [moe_triton_unfused_up, moe_triton_unfused_down])
+    @pytest.mark.parametrize(
+        "input_type,kernel,expected",
+        [
+            ("c10::BFloat16", "_matmul_ogs_NNT_bf16xbf16xmxfp4_128x128x128x1", "bf16"),
+            ("c10::BFloat16", "moe_fp8_gemm_kernel", "bf16"),
+            (
+                "c10::Float8_e4m3fn",
+                "_matmul_ogs_NNT_bf16xfp8xmxfp4_16x128x256x1",
+                "fp8",
+            ),
+            ("Float8_e5m2", "moe_fp8_gemm_kernel", "fp8"),
+        ],
+    )
+    def test_moe_triton_unfused_roofs_at_activation_width(
+        self, cls, input_type, kernel, expected
+    ):
+        event = _moe_unfused_event(kernel_name=kernel)
+        event["args"]["Input type"][0] = input_type
+        assert cls(event).get_compute_precision() == expected
+
     def test_moe_aiter_unfused(self):
         up_event = {
             "args": {
