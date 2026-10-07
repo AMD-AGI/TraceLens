@@ -1025,17 +1025,18 @@ def test_vision_range_docks_the_grid_it_is_sized_from():
 
 @pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-M3", "zai-org/GLM-5.3-Flash"])
 def test_loop_ports_bracket_the_body_which_names_both_kinds_of_input(model_id):
-    """A loop carrying ONE value shows its body, with no ports and no back edge.
+    """Every loop body names what it carries, ported or not.
 
-    ``Loop in``/``Loop out`` existed to make the back edge legible, and that
-    edge was the only cycle the graph allowed. For a single carried value the
-    two boxes plus the edge closing them say less than the ``{N}x_`` group name
-    already does, so they fold away -- the seed feeds the body directly and the
-    body feeds its consumer directly, which is how the heterogeneous decoder
-    has always rendered.
+    ``Loop in``/``Loop out`` make the back edge legible, and that edge is the
+    only cycle the graph allows. A loop that carries one value AND is handed
+    nothing else folds them away -- the two boxes say less than the ``{N}x_``
+    group name already does, so the seed feeds the body directly and the body
+    feeds its consumer directly, which is how the heterogeneous decoder has
+    always rendered. A body handed several tensors keeps its ports, because
+    which of them is the recurrence is exactly what the back edge says.
 
-    The body keeps its own boundaries and they name the value, so the loop
-    still says what it carries; it just no longer draws a circle to say it.
+    Either way the body keeps its own boundaries and they name the value, so the
+    loop always says what it carries.
     """
     pytest.importorskip("huggingface_hub")
     graph, by_id = _build_nodes(model_id)
@@ -1054,8 +1055,29 @@ def test_loop_ports_bracket_the_body_which_names_both_kinds_of_input(model_id):
         for node in graph["nodes"]
         if "@loop_carried_in:" in node["id"]
     }
+    assert carried, "expected at least one loop body"
     folded = {key: sides for key, sides in carried.items() if key not in ported}
-    assert folded, "expected at least one folded loop"
+    # A ported loop brackets its body: both ends still named, and the entry
+    # boundary reads the port rather than the seed directly.
+    for key, sides in carried.items():
+        if key in folded:
+            continue
+        variable = key.rsplit(":", 1)[-1]
+        # A ported body may name only one end -- GLM's position-ids helper has an
+        # exit boundary and no entry one, which is why the fold demands both --
+        # but whichever ends exist carry the tensor's own name.
+        for node in sides.values():
+            assert str(node.get("label")) == variable, (key, node["id"])
+        if "in" in sides:
+            entry_sources = [
+                by_id.get(str(edge["sourceNodeId"]))
+                for edge in sides["in"].get("incomingEdges", []) or []
+            ]
+            assert any(
+                source is not None
+                and _node_attr(source, "synthetic") == "@loop_carried"
+                for source in entry_sources
+            ), key
     for key, sides in folded.items():
         assert set(sides) == {"in", "out"}, (key, sorted(sides))
         variable = key.rsplit(":", 1)[-1]

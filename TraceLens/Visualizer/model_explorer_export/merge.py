@@ -2761,15 +2761,43 @@ def _fold_simple_loop_ports(nodes: list[dict[str, Any]]) -> None:
         # its ports would leave what it carries IN with nothing naming it at
         # all -- worse than the two boxes this removes.
         wanted = f"{loop_id}:{variable}"
-        named_sides = {
-            token
+        body_tiles = [
+            other
             for other in nodes
             for token in ("@body_in:", "@body_out:")
             if token in str(other["id"])
             and str(other["id"]).split(token, 1)[1] == wanted
+        ]
+        named_sides = {
+            token
+            for other in body_tiles
+            for token in ("@body_in:", "@body_out:")
+            if token in str(other["id"])
         }
         if len(named_sides) < 2:
             continue
+        # Carrying one value is not the same as being handed one. A body that
+        # reads several tensors needs its ports: with more than one tensor
+        # entering, which of them is the recurrence is exactly what the reader
+        # cannot infer, and that is what the back edge says. DeepSeek's expert
+        # loop is handed four tensors besides the accumulator it carries.
+        body_namespace = next(
+            (
+                str(tile.get("namespace") or "")
+                for tile in body_tiles
+                if "@body_in:" in str(tile["id"])
+            ),
+            "",
+        )
+        if body_namespace:
+            entering = [
+                other
+                for other in nodes
+                if str(other.get("namespace") or "") == body_namespace
+                and _node_attr(other, "synthetic") == "@input"
+            ]
+            if len(entering) > 1:
+                continue
         pairs.append((node, exit_port))
     if not pairs:
         return

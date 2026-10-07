@@ -1703,8 +1703,19 @@ def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
     entry_node = entry[0]
     assert str(entry_node.get("label")) == "hidden_states"
 
+    # The body reads the loop's entry port; the port takes the seed from the embed
+    # and the back edge from the exit port, which is what the ports are for.
     sources = {e["sourceNodeId"] for e in entry_node.get("incomingEdges", []) or []}
-    assert sources == {"visual/@input:initial"}, sources
+    assert len(sources) == 1, sources
+    (port_id,) = sources
+    assert "@loop_carried_in:" in port_id, port_id
+    port_sources = {
+        e["sourceNodeId"] for e in by_id[port_id].get("incomingEdges", []) or []
+    }
+    assert port_sources == {
+        "visual/@input:initial",
+        port_id.replace("@loop_carried_in:", "@loop_carried_out:"),
+    }, port_sources
     seed = by_id["visual/@input:initial"]
     assert {e["sourceNodeId"] for e in seed.get("incomingEdges", []) or []} == {
         "visual/seq:1:patch_embed:patch_embed:0/@output"
@@ -3596,11 +3607,13 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     assert _shape_attr(mask_source) == "[B, S] bool", mask_source
     assert not any("hidden_states" in nid for nid in spine_invariant_inputs)
 
-    # The vision block carries ONE value, so it renders like this decoder does:
-    # its body, with no ports and no back edge. The carried value is named on
-    # the body's own entry boundary. (A position-ids helper in the same tower
-    # carries a value across its own loop too, so match the block loop by its
-    # carried variable rather than assuming the tower has only one loop.)
+    # The vision block carries one value but is HANDED several -- cos, sin and
+    # cu_seqlens, asserted just below -- so it keeps its ports: with more than one
+    # tensor entering, which of them is the recurrence is what the back edge says.
+    # The carried value is still named on the body's own entry boundary. (A
+    # position-ids helper in the same tower carries a value across its own loop
+    # too, so match the block loop by its carried variable rather than assuming
+    # the tower has only one loop.)
     vision_in = [
         n["id"]
         for n in nodes
@@ -3608,9 +3621,12 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     ]
     assert len(vision_in) == 1, vision_in
     assert str(by_id[vision_in[0]].get("label")) == "hidden_states"
-    assert not any(
-        "@loop_carried" in n["id"] and n["id"].endswith(":hidden_states") for n in nodes
-    )
+    vision_ports = [
+        n["id"]
+        for n in nodes
+        if "@loop_carried" in n["id"] and n["id"].endswith(":hidden_states")
+    ]
+    assert len(vision_ports) == 2, vision_ports
     # The loop-invariant cos/sin inputs are still wired into the loop body. Each
     # crossing enters a module (the rotary producer -> the visual block section),
     # so the hierarchy-aware same-name collapse KEEPS the visual/@input:cos/sin
@@ -4058,10 +4074,28 @@ def test_glm53_heterogeneous_decoder_group_has_no_loop_carried_tiles():
             continue
         loop_id, _, variable = n["id"].split("@body_in:", 1)[1].partition(":")
         carried_by_loop.setdefault(loop_id, set()).add(variable)
+    # ...and is handed nothing else. Carrying one value is not the same as being
+    # handed one: a body reading several tensors keeps its ports, because which
+    # of them is the recurrence is exactly what the back edge says.
+    body_namespace_of = {
+        n["id"].split("@body_in:", 1)[1]: str(n.get("namespace") or "")
+        for n in nodes
+        if "@body_in:" in n["id"]
+    }
+    entering_count: dict[str, int] = {}
+    for n in nodes:
+        if _attr_value(n, "synthetic") != "@input":
+            continue
+        namespace = str(n.get("namespace") or "")
+        entering_count[namespace] = entering_count.get(namespace, 0) + 1
     folded_vars = {
         f"{loop_id}:{next(iter(variables))}"
         for loop_id, variables in carried_by_loop.items()
         if len(variables) == 1
+        and entering_count.get(
+            body_namespace_of.get(f"{loop_id}:{next(iter(variables))}", ""), 0
+        )
+        <= 1
     }
     assert folded_vars, "expected at least one single-value loop"
     stale = [
