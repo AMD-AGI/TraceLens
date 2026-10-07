@@ -47,6 +47,16 @@ jobs:
         with:
           filter: blob:none
 
+      - name: Restore test durations
+        uses: actions/cache/restore@v4
+        with:
+          path: .test_durations
+          # Never hits on this run. The prefix picks up the merged file from the
+          # previous run. A miss leaves the checked-in file in place.
+          key: test-durations-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            test-durations-
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -67,6 +77,7 @@ jobs:
             --splits 4 --group ${{ matrix.shard }} \
             --splitting-algorithm least_duration \
             --durations-path .test_durations \
+            --store-durations \
             -m "not gpu" --durations=20 \
             --cov=./TraceLens --cov-config=.coveragerc \
             --cov-report=xml \
@@ -87,6 +98,14 @@ jobs:
         with:
           name: junit-report-${{ matrix.shard }}
           path: junit.xml
+          if-no-files-found: error
+
+      - name: Upload test durations
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-durations-${{ matrix.shard }}
+          path: .test_durations
+          include-hidden-files: true
           if-no-files-found: error
 
   codecov:
@@ -142,3 +161,35 @@ jobs:
           flags: unit
           fail_ci_if_error: true
           verbose: true
+
+      - name: Download test durations
+        uses: actions/download-artifact@v8
+        with:
+          pattern: test-durations-*
+          merge-multiple: false
+
+      - name: Merge test durations
+        run: |
+          python - << 'PY'
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          paths = sorted(Path(".").glob("test-durations-*/.test_durations"))
+          if len(paths) != 4:
+              raise SystemExit(f"expected 4 duration files, found {[str(p) for p in paths]}")
+          maps = [json.loads(path.read_text()) for path in paths]
+          merged = {}
+          for key in set().union(*(item.keys() for item in maps)):
+              counts = Counter(item[key] for item in maps if key in item)
+              # The shard that ran a test is the only one with a new time.
+              merged[key] = min(counts, key=lambda value: (counts[value], value))
+          Path(".test_durations").write_text(json.dumps(merged, indent=4, sort_keys=True) + "\n")
+          print(f"merged {len(merged)} durations from {len(paths)} shards")
+          PY
+
+      - name: Save test durations
+        uses: actions/cache/save@v4
+        with:
+          path: .test_durations
+          key: test-durations-${{ github.run_id }}-${{ github.run_attempt }}
