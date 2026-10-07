@@ -713,7 +713,7 @@ Each sheet contains:
   - `matrix_*`: operations using matrix compute units (GEMM, CONV, SDPA).
   - `vector_*`: operations using vector compute units (elementwise).
   - Precision: `fp8`, `fp16`, `bf16`, `fp32`, `fp64`.
-- Roofline metrics (when `--gpu_arch_json_path` is provided): Roofline Time (µs), Pct Roofline; compares achieved time to the theoretical roofline bound.
+- Roofline metrics (when `--gpu_arch_json_path` is provided): Roofline Time (µs), Roofline TFLOPS/s, Roofline TB/s, Pct Roofline. Roofline Time is the theoretical minimum. Roofline TFLOPS/s and Roofline TB/s are the throughputs that time implies. Pct Roofline compares measured kernel time to that minimum.
 - Runtime metrics: Kernel Time (µs), TFLOPS/s, TB/s (statistics across all occurrences).
   - `mean`, `median`: central tendency; use median if variance is high.
   - `std_dev`: variability; high `std_dev` (>10% of mean) suggests inconsistent performance.

@@ -36,7 +36,12 @@ from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils, merge_intervals
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
-from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
+from ..PerfModel.utils import (
+    add_duration_rate_columns,
+    add_simulation_time_columns,
+    build_perf_metrics_dict,
+    rates_for_duration,
+)
 
 
 def normalize_dtype_to_precision(dtype_str):
@@ -440,10 +445,8 @@ class TreePerfAnalyzer:
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
 
-        non_data_mov_tflops_per_s = (
-            (gflops / 1e3) / (busy_non_data_mov_time / 1e6)
-            if busy_non_data_mov_time > 0
-            else float("nan")
+        non_data_mov_tflops_per_s, _ = rates_for_duration(
+            gflops, None, busy_non_data_mov_time
         )
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
@@ -477,6 +480,13 @@ class TreePerfAnalyzer:
                 else:
                     roofline_bound = "MEMORY_BOUND"
                 dict_metrics["Roofline Time (µs)"] = roofline_time_us
+                add_duration_rate_columns(
+                    dict_metrics,
+                    gflops,
+                    bytes_moved,
+                    roofline_time_us,
+                    prefix="Roofline",
+                )
                 dict_metrics["Roofline Bound"] = roofline_bound
                 dict_metrics["Pct Roofline"] = (
                     (roofline_time_us / busy_kernel_time) * 100
@@ -675,8 +685,9 @@ class TreePerfAnalyzer:
         if "Compute Spec" in df_perf_metrics.columns:
             dict_agg["Compute Spec"] = "first"
         # Roofline metrics - first since they should be same for the group
-        if "Roofline Time (µs)" in df_perf_metrics.columns:
-            dict_agg["Roofline Time (µs)"] = "first"
+        for col in ("Roofline Time (µs)", "Roofline TFLOPS/s", "Roofline TB/s"):
+            if col in df_perf_metrics.columns:
+                dict_agg[col] = "first"
         if "Roofline Bound" in df_perf_metrics.columns:
             dict_agg["Roofline Bound"] = "first"
         if "Pct Roofline" in df_perf_metrics.columns:
@@ -2096,6 +2107,8 @@ class TreePerfAnalyzer:
                 "TB/s",
                 "Compute Spec",
                 "Roofline Time (µs)",
+                "Roofline TFLOPS/s",
+                "Roofline TB/s",
                 "Roofline Bound",
                 "Pct Roofline",
                 "Origami Time (µs)",
@@ -2335,9 +2348,10 @@ class TreePerfAnalyzer:
             if col in df_temp.columns:
                 agg_dict[col] = agg_metrics
 
-        # Roofline metrics
-        if "Roofline Time (µs)" in df_temp.columns:
-            agg_dict["Roofline Time (µs)"] = "first"  # Static for same args
+        # Roofline time and the rates it implies are static for the same args.
+        for col in ("Roofline Time (µs)", "Roofline TFLOPS/s", "Roofline TB/s"):
+            if col in df_temp.columns:
+                agg_dict[col] = "first"
         if "Pct Roofline" in df_temp.columns:
             agg_dict["Pct Roofline"] = agg_metrics  # Varies per instance
 
