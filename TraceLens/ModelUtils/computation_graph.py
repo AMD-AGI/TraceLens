@@ -2432,6 +2432,66 @@ def _needs_another_tensor_operand(block: BlockNode) -> bool:
     return len(block.operation_predecessors) < ceiling
 
 
+def _share_frame_param_source(graph: ComputationGraph) -> None:
+    """A second INDEPENDENT reader of a frame parameter reads the same source.
+
+    A frame gets ONE entry per parameter, on the reasoning that a rebound
+    activation reaches its later readers through the op that rebound it. That
+    holds while the later reader consumes the earlier one's result, and fails
+    when two ops read the parameter independently: ``key_valid.any(-1)`` and
+    ``key_valid.long()`` are two separate reads of the same tensor, and only the
+    first was given the entry. The second was left with NO operand at all, so it
+    had nothing to take a shape from and fell back to the module's working shape
+    -- which every op built on it then inherited.
+
+    Only a node with no incoming edge AND no activation predecessor is filled:
+    one that already reads something owns its input that way, and one whose
+    parameter reaches it through an earlier op must not dock a second edge.
+    """
+    frame_of_index: dict[int, str] = {}
+    for frame in graph.inline_frames:
+        for index in frame.node_indices:
+            frame_of_index[index] = frame.frame_id
+    incoming: dict[int, list[int]] = {}
+    for source, target in graph.links:
+        incoming.setdefault(target, []).append(source)
+    # Where each (frame, parameter) already enters from.
+    entry_source: dict[tuple[str, str], int] = {}
+    orphans: list[tuple[tuple[str, str], int]] = []
+    for index, spec in enumerate(graph.nodes):
+        block = spec.block
+        if block is None or not block.param_inputs:
+            continue
+        frame_id = frame_of_index.get(index)
+        if frame_id is None:
+            continue
+        for param in block.param_inputs:
+            # Only an op that NAMES this parameter as the one it reads straight
+            # from the boundary is part of this question. An op that merely
+            # mentions the parameter among several reads it through its own
+            # edges, and filling it would fabricate a dependency.
+            if block.boundary_input_name != param:
+                continue
+            key = (frame_id, param)
+            sources = incoming.get(index) or []
+            if sources:
+                entry_source.setdefault(key, sources[0])
+            elif not block.operation_predecessors:
+                # A generator fabricates its tensor from host scalars alone
+                # (``torch.arange(valid_keys.shape[-1])`` reads a parameter only
+                # to SIZE itself). It takes no tensor operand at all, so handing
+                # it one is a mis-wiring, not a repair.
+                if _graph_node_takes_no_tensor_operand(graph, index):
+                    continue
+                orphans.append((key, index))
+    for key, index in orphans:
+        source = entry_source.get(key)
+        if source is None or source == index:
+            continue
+        if (source, index) not in graph.links:
+            graph.links.append((source, index))
+
+
 def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
     """Give each extra forward parameter its own boundary input.
 
@@ -5387,6 +5447,7 @@ def build_computation_graph(
         graph.primary_output_index = last_index
     if resolved_include_input:
         _add_forward_param_inputs(graph, root)
+        _share_frame_param_source(graph)
         _add_submodule_boundary_param_inputs(graph, root, input_index)
         _add_nested_submodule_side_producers(graph, root)
     graph = _apply_dead_code_elimination(

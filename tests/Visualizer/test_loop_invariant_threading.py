@@ -968,12 +968,27 @@ def test_build_block_mask_args_reach_the_ops_that_read_them():
     }
     assert namespaces, "expected the build_block_mask frame"
 
-    def sources(node):
-        return [
-            str(by_id[e["sourceNodeId"]].get("label"))
-            for e in node.get("incomingEdges", []) or []
-            if e["sourceNodeId"] in by_id
-        ]
+    def sources(node, _seen=None):
+        """Labels this node reads, seeing through pure axis inserts.
+
+        ``position_ids[:, None, None]`` inserts TWO axes and so draws two
+        ``Unsqueeze`` nodes between the tensor and its reader. That is the shape
+        the source states; what matters here is still which TENSOR is read, so
+        walk back through those inserts to name it.
+        """
+        seen = set() if _seen is None else _seen
+        labels = []
+        for edge in node.get("incomingEdges", []) or []:
+            source_id = edge["sourceNodeId"]
+            if source_id not in by_id or source_id in seen:
+                continue
+            seen.add(source_id)
+            source = by_id[source_id]
+            if str(source.get("label")) == "Unsqueeze":
+                labels.extend(sources(source, seen))
+            else:
+                labels.append(str(source.get("label")))
+        return labels
 
     for namespace in namespaces:
         members = [

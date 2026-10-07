@@ -3152,6 +3152,38 @@ class ShapeInferencer:
                 return TensorSpec(
                     shape=(flattened, source.shape[-1]), dtype=source.dtype
                 )
+            # A view STATES its own rank, so returning the source contradicts the
+            # call. A dimension this scope cannot resolve to a number is still a
+            # dimension: ``pool_offsets.view(1, number_of_pools, self.index_kpool)``
+            # stayed rank 1, and the advanced index reading it, the ``flatten(-2)``
+            # after that and the concat at the end all inherited the missing axes.
+            # Keep the stated rank, carrying an unresolved name as a symbolic
+            # extent -- a starred prefix (``*x.shape[:-1]``) stands for an unknown
+            # NUMBER of axes, so that one genuinely cannot be counted.
+            tokens = [token.strip() for token in shape_detail.split(",")]
+            if tokens and all(tokens) and not any("*" in token for token in tokens):
+                dims: list[Any] = []
+                for token in tokens:
+                    number = _as_int(token)
+                    if number is not None:
+                        dims.append(number)
+                        continue
+                    # ``self.block_size`` is this module's own scalar.
+                    resolved_dim = view_dims.get(token)
+                    if resolved_dim is None and token.startswith("self."):
+                        resolved_dim = view_dims.get(token.removeprefix("self."))
+                    if resolved_dim is not None:
+                        dims.append(resolved_dim)
+                        continue
+                    # A plain name stands for an extent this scope cannot put a
+                    # number to but can still carry (``number_of_pools``). Anything
+                    # that is still an EXPRESSION (``hidden_states.shape[0]``) is
+                    # not a dimension name, and printing it as one states a shape
+                    # nobody can read -- keep the old reading there.
+                    if not _PLAIN_DIM_NAME.fullmatch(token):
+                        return source
+                    dims.append(token)
+                return TensorSpec(shape=tuple(dims), dtype=source.dtype)
             return source
 
         if operation_label == "unsqueeze":
@@ -6864,6 +6896,7 @@ def _ast_const_int(node: ast.AST) -> int | None:
     return None
 
 
+_PLAIN_DIM_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _OP_LINE_RE = re.compile(r"@op_l(\d+)_c")
 
 

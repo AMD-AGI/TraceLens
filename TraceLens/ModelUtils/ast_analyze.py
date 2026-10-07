@@ -3379,6 +3379,7 @@ def stack_entry_dataflow(cls: ClassStructure) -> StackEntryDataflow | None:
         self_values=_self_config_values(init_func, {}),
         all_tensor_ops=True,
         param_names=_forward_input_names(forward) - {primary} if primary else set(),
+        host_scalar_params=_host_scalar_param_names(forward),
     )
     if primary:
         extractor.var_producer[primary] = FORWARD_METHOD_INPUT
@@ -3486,6 +3487,24 @@ _UNKNOWN = object()
 # attribute (parameter/buffer), never recorded". ``_config_value`` normalizes it
 # back to ``_UNKNOWN`` so arithmetic/comparison folding stays value-based.
 _SCALAR_SETTING = object()
+# The dtype each shorthand cast names: ``x.long()`` is ``x.to(torch.int64)``
+# written shorter. Without these the shorthands were not casts, not layout
+# methods and not housekeeping -- so they neither rendered nor passed their
+# producer through, and the op reading one was left with no operand at all
+# (``key_valid.long().argmax(-1)`` reached nothing and had to guess its shape).
+_CAST_METHOD_DTYPES = {
+    "long": "int64",
+    "int": "int32",
+    "short": "int16",
+    "char": "int8",
+    "byte": "uint8",
+    "bool": "bool",
+    "half": "float16",
+    "bfloat16": "bfloat16",
+    "double": "float64",
+    "float": "float32",
+}
+
 _HOUSEKEEPING_METHODS = frozenset(
     {
         "view",
@@ -3505,10 +3524,22 @@ _HOUSEKEEPING_METHODS = frozenset(
         "clone",
         "view_as_complex",
         "view_as_real",
+        *_CAST_METHOD_DTYPES,
     }
 )
 # Layout-only tensor methods: they rearrange or retype a tensor without computing
 # new values, so the exporter renders them differently from real math.
+# The shorthand casts that have no label of their own. ``float`` and ``to`` are
+# labelled Cast already and keep rendering as one; these do not, so they pass
+# their producer through rather than vanishing with it.
+_SHORTHAND_CAST_METHODS = frozenset(_CAST_METHOD_DTYPES) - {
+    "float",
+    "to",
+    "type",
+    "type_as",
+}
+
+
 _LAYOUT_ONLY_METHOD_LABELS = {
     "view": "View",
     "reshape": "Reshape",
@@ -3532,6 +3563,7 @@ _LAYOUT_ONLY_METHOD_LABELS = {
     "clone": "Clone",
     "view_as_complex": "View as complex",
     "view_as_real": "View as real",
+    **{name: "Cast" for name in _CAST_METHOD_DTYPES},
 }
 
 # Split / Concat / Slice / Tile rearrange or replicate tensors without computing
@@ -3566,6 +3598,18 @@ _TENSOR_METHOD_LABELS = {
     # as methods, ``valid_keys.any(-1)`` was elided entirely, so the ``where``
     # reading it took the un-reduced tensor as its condition and everything
     # built from it inherited that shape.
+    # ``x.any(dim)`` / ``x.all(dim)`` are TENSOR reductions, not the Python
+    # builtins of the same name: they reduce that axis and answer bool. Unknown
+    # as methods, ``valid_keys.any(-1)`` was elided entirely, so the ``where``
+    # reading it took the un-reduced tensor as its condition and everything
+    # built from it inherited that shape.
+    # ``x.any(dim)`` / ``x.all(dim)`` are TENSOR reductions, not the Python
+    # builtins of the same name: they reduce that axis and answer bool. Unknown
+    # as methods, ``key_valid.any(-1)`` was elided entirely, so the ``where``
+    # reading it took the UN-reduced tensor as its condition and everything
+    # built from it inherited that shape.
+    "any": "Any",
+    "all": "All",
     "amax": "Block max",
     "amin": "Block min",
     "sum": "Sum",
@@ -4648,6 +4692,7 @@ class _ForwardOperationExtractor:
         self_values: dict[str, Any],
         all_tensor_ops: bool,
         param_names: set[str] | None = None,
+        host_scalar_params: set[str] | None = None,
         config: dict[str, Any] | None = None,
         module_functions: dict[str, ast.FunctionDef] | None = None,
         repeated_submodule_attrs: frozenset[str] | None = None,
@@ -4671,6 +4716,7 @@ class _ForwardOperationExtractor:
         # so the allowance below is scoped to free-function bodies only.
         self.is_free_function_body = is_free_function_body
         self.param_names = set(param_names or ())
+        self.host_scalar_params = set(host_scalar_params or ())
         # Plain instance methods defined in the SAME class as the forward being
         # traced (``append_visible_tail``, ``get_visible_tokens``, ...), keyed by
         # name. A ``self.<method>(...)`` call site's positional args are the
@@ -5427,7 +5473,9 @@ class _ForwardOperationExtractor:
             return isinstance(node.value, int) and not isinstance(node.value, bool)
         if isinstance(node, ast.Name):
             return (
-                node.id in self.shape_unpack_tokens or node.id in self.host_scalar_vars
+                node.id in self.shape_unpack_tokens
+                or node.id in self.host_scalar_vars
+                or node.id in self.host_scalar_params
             )
         if isinstance(node, ast.Attribute):
             value = _config_value(node, self.config, self.self_values)
@@ -6001,16 +6049,22 @@ class _ForwardOperationExtractor:
                 # unsqueeze, not a pass-through, so downstream broadcasting sees
                 # the new axis.
                 if _subscript_inserts_axis(node.slice):
-                    unsqueeze_dim = _none_insert_dim(node.slice)
-                    if unsqueeze_dim is not None:
+                    unsqueeze_dims = _none_insert_dims(node.slice)
+                    if unsqueeze_dims:
                         self._materialized_subscripts.add(id(node))
-                        producer = self._emit(
-                            node,
-                            "Unsqueeze",
-                            base_predecessors,
-                            base_external,
-                            details=[f"dim: {unsqueeze_dim}"],
-                        )
+                        producer = None
+                        predecessors = base_predecessors
+                        external = base_external
+                        for unsqueeze_dim in unsqueeze_dims:
+                            producer = self._emit(
+                                node,
+                                "Unsqueeze",
+                                predecessors,
+                                external,
+                                details=[f"dim: {unsqueeze_dim}"],
+                            )
+                            predecessors = [producer] if producer else []
+                            external = []
                         return producer, []
             return base, base_external
         if isinstance(node, ast.UnaryOp):
@@ -6414,7 +6468,15 @@ class _ForwardOperationExtractor:
             producers = [value for value in (base_producer, *arg_producers) if value]
             return (producers[-1] if producers else None), external
 
-        if housekeeping and not self.all_tensor_ops:
+        if housekeeping and (
+            not self.all_tensor_ops or call_name in _SHORTHAND_CAST_METHODS
+        ):
+            # A shorthand cast (``x.long()``, ``x.bool()``) carries the same value
+            # in another dtype, and carries NO label -- so in detailed mode it fell
+            # through to the generic call handling and produced nothing at all, not
+            # even its own producer. The op reading it was then left with no
+            # operand and had to guess its shape: ``key_valid.long().argmax(-1)``
+            # reported the module's working shape instead of the tensor's.
             return (
                 base_producer or (arg_producers[0] if arg_producers else None),
                 external,
@@ -6623,6 +6685,9 @@ class _ForwardOperationExtractor:
             # trailing axis instead reports a width the tensor never had.
             if "dim" in bound:
                 details.append(f"dim: {ast.unparse(bound['dim'])}")
+        if call_name in _CAST_METHOD_DTYPES and call_name != "float":
+            # ``x.long()`` takes no argument: the method name IS the dtype.
+            details.append(f"dtype: {_CAST_METHOD_DTYPES[call_name]}")
         if call_name in {"type", "float", "to", "type_as"}:
             # ``x.type_as(y)`` names its target dtype indirectly, via the tensor
             # ``y`` it copies the dtype from. Recording that reference expression
@@ -8508,6 +8573,7 @@ def _forward_operations_from_forward(
         self_values=self_values,
         all_tensor_ops=all_tensor_ops,
         param_names=_forward_input_names(func) - {primary} if primary else set(),
+        host_scalar_params=_host_scalar_param_names(func),
         config=config,
         module_functions=module_functions,
         repeated_submodule_attrs=_repeated_self_call_attrs(func.body),
@@ -9466,28 +9532,28 @@ def _subscript_inserts_axis(index: ast.AST) -> bool:
     return any(isinstance(elt, ast.Constant) and elt.value is None for elt in elts)
 
 
-def _none_insert_dim(index: ast.AST) -> int | None:
-    """Axis at which a single ``None`` inserts a size-1 dim, or None if ambiguous.
+def _none_insert_dims(index: ast.AST) -> tuple[int, ...]:
+    """Each axis at which a ``None`` inserts a size-1 dim, in the order applied.
 
     ``x[..., None]`` appends (dim ``-1``); ``x[None]`` prepends (dim ``0``);
-    ``x[:, None]`` inserts at that position. Only single-``None`` subscripts
-    resolve; anything more elaborate falls back to a pass-through alias.
+    ``x[:, None]`` inserts at that position. A subscript may insert SEVERAL:
+    ``first_key[:, None, None]`` adds two axes, and resolving only the
+    single-``None`` case made that one a pass-through -- the tensor kept its old
+    rank, and the broadcast against it, the advanced index reading the result and
+    the concat at the end of the chain all inherited the missing axes.
+    Applying the axes in order is what torch does.
     """
     elts = index.elts if isinstance(index, ast.Tuple) else [index]
-    none_positions = [
-        pos
-        for pos, elt in enumerate(elts)
-        if isinstance(elt, ast.Constant) and elt.value is None
-    ]
-    if len(none_positions) != 1:
-        return None
-    pos = none_positions[0]
-    has_ellipsis_before = any(
-        isinstance(elt, ast.Constant) and elt.value is Ellipsis for elt in elts[:pos]
-    )
-    if has_ellipsis_before:
-        return -1
-    return pos
+    dims: list[int] = []
+    for pos, elt in enumerate(elts):
+        if not (isinstance(elt, ast.Constant) and elt.value is None):
+            continue
+        has_ellipsis_before = any(
+            isinstance(item, ast.Constant) and item.value is Ellipsis
+            for item in elts[:pos]
+        )
+        dims.append(-1 if has_ellipsis_before else pos)
+    return tuple(dims)
 
 
 def _is_inplace_method(name: str) -> bool:
@@ -11116,6 +11182,40 @@ def _capture_augassign_module_input(
             for item in existing
         ):
             existing.append(spec)
+
+
+# Annotations that say a parameter carries a Python number, not a tensor. The
+# model states this itself (``q_length: int``), and a bare ``int`` / ``float`` /
+# ``bool`` is unambiguous in a way ``torch.BoolTensor`` or an unannotated
+# parameter is not -- so only these count.
+_HOST_SCALAR_ANNOTATIONS = frozenset({"int", "float", "bool"})
+
+
+def _host_scalar_param_names(func: ast.AST) -> set[str]:
+    """Parameters a function annotates as a Python number rather than a tensor.
+
+    ``current_length - q_length`` is host arithmetic over two such parameters, so
+    it takes no tensor operand. Without this the names resolved to no producer
+    and the subtraction fell back onto the chain's tensor input -- giving
+    ``q_positions`` the hidden state's rank, which the ``<=`` against it, the
+    ``&`` after that and everything downstream inherited.
+    """
+    names: set[str] = set()
+    arguments = getattr(func, "args", None)
+    if arguments is None:
+        return names
+    for argument in (
+        *getattr(arguments, "posonlyargs", []),
+        *getattr(arguments, "args", []),
+        *getattr(arguments, "kwonlyargs", []),
+    ):
+        annotation = getattr(argument, "annotation", None)
+        if (
+            isinstance(annotation, ast.Name)
+            and annotation.id in _HOST_SCALAR_ANNOTATIONS
+        ):
+            names.add(argument.arg)
+    return names
 
 
 def _forward_input_names(func: ast.FunctionDef) -> set[str]:
