@@ -27,7 +27,8 @@ External time models use a simpler signature and are adapted with
         return predicted_time_us
 
 ``category`` is the perf-model class's ``category`` (``"GEMM"``,
-``"SDPA_fwd"``, ...), ``params`` is a copy of its ``param_details`` (for a
+``"SDPA_fwd"``, ...), or its ``bwd_category`` (``"SDPA_bwd"``, ...) for a
+backward op, ``params`` is a copy of its ``param_details`` (for a
 GEMM: M, N, K, B, dtype_A_B, ...), and ``arch`` is the GPU arch dict or
 ``None``. Return ``None`` for ops the model does not handle. A proprietary
 library call belongs in an ``--extension_file``, not in this repository.
@@ -161,10 +162,13 @@ def predict_time(model, perf_model, arch):
 
 
 def external_time_model(model):
-    """Adapt ``model(category, params, arch)`` to the estimator interface."""
+    """Adapt ``model(category, params, arch)`` to the estimator interface.
+
+    A backward op is passed its perf model's ``bwd_category`` (``"SDPA_bwd"``,
+    ...) with the forward params; ops without one (GEMM) are skipped."""
 
     def estimate(work, arch):
-        if work.bwd or work.category is None or work.params is None:
+        if work.category is None or work.params is None:
             return None
         time_us = model(work.category, dict(work.params), arch)
         return None if time_us is None else float(time_us)

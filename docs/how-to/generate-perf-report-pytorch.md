@@ -217,9 +217,11 @@ TraceLens_generate_perf_report_pytorch \
     --extension_file my_extension.py
 ```
 
-A time model is called for each forward op that has a perf model, after
-TraceLens has correlated kernels to the op and extracted its parameters.
-`category` is the perf-model category (`"GEMM"`, `"SDPA_fwd"`, ...), `params`
+A time model is called for each op that has a perf model, after TraceLens has
+correlated kernels to the op and extracted its parameters. `category` is the
+perf-model category (`"GEMM"`, `"SDPA_fwd"`, ...); for a backward op it is the
+backward category (`"SDPA_bwd"`, `"CONV_bwd"`, ...) with the forward op's
+params, and ops without one, such as GEMM backward, are skipped. `params`
 is a copy of that model's `param_details` (for a GEMM: `M`, `N`, `K`, `B`,
 `dtype_A_B`, ...), and `arch` is the GPU arch dict or `None`. Return `None`
 for ops the model does not handle:

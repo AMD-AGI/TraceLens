@@ -101,9 +101,13 @@ class TestExternalModel:
         assert seen["params"] is not work.params
         assert work.params["M"] == 4
 
-    def test_skips_backward_and_unknown_category(self):
+    def test_backward_gets_the_backward_category(self):
+        model = external_time_model(lambda category, params, arch: len(category))
+        assert model(_work(category="SDPA_bwd", bwd=True), ARCH) == 8.0
+        assert model(_work(category=None, bwd=True), ARCH) is None
+
+    def test_skips_unknown_category(self):
         model = external_time_model(lambda category, params, arch: 1.0)
-        assert model(_work(bwd=True), ARCH) is None
         assert model(_work(category=None), ARCH) is None
         assert model(_work(params=None), ARCH) is None
 
@@ -288,6 +292,45 @@ def test_extension_time_models_dict(tmp_path):
     ext.write_text("time_models = [1]\n")
     with pytest.raises(TypeError):
         apply_extension(analyzer, str(ext))
+
+
+class _FakeAttention:
+    category = "SDPA_fwd"
+    bwd_category = "SDPA_bwd"
+    param_details = {"N_Q": 128}
+
+    def flops(self):
+        return 2e9
+
+    def bytes(self):
+        return 1e6
+
+    def flops_bwd(self):
+        return 5e9
+
+    def bytes_bwd(self):
+        return 2e6
+
+
+@pytest.mark.parametrize(
+    "bwd, category, gflops", [(False, "SDPA_fwd", 2.0), (True, "SDPA_bwd", 5.0)]
+)
+def test_external_model_sees_the_op_direction(bwd, category, gflops):
+    seen = []
+
+    def model(category, params, arch):
+        seen.append((category, params))
+        return 10.0
+
+    analyzer = SimpleNamespace(arch=ARCH, time_estimators={})
+    TreePerfAnalyzer.register_time_model(analyzer, "Mine", model)
+    metrics = {}
+    work = TreePerfAnalyzer._op_work(_FakeAttention(), bwd=bwd)
+    TreePerfAnalyzer._add_time_estimates(analyzer, metrics, work, 20.0)
+    assert seen == [(category, {"N_Q": 128})]
+    assert metrics["Mine Time (µs)"] == 10.0
+    assert metrics["Mine TFLOPS/s"] == pytest.approx(gflops / 10.0 * 1e3)
+    assert metrics["Pct Mine"] == 50.0
 
 
 def test_register_kernel_filter():
