@@ -4,19 +4,19 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Placeholder specialized perf model.
+"""Placeholder external perf model.
 
-Pass this file with ``--extension_file`` to see ``Specialized Time (µs)``
+Pass this file with ``--extension_file`` to see ``External Time (µs)``
 columns. The time is ``2*M*N*K*B`` at a fixed 100 TFLOP/s, so it is not a
 device model.
 
 A real model belongs in an extension file outside this repository that
-defines ``specialized_perf_model`` the same way and imports its library
+defines ``external_perf_model`` the same way and imports its library
 itself.
 """
 
 
-def specialized_perf_model(category, params, arch):
+def external_perf_model(category, params, arch):
     if category != "GEMM":
         return None
     flops = 2 * params["M"] * params["N"] * params["K"] * (params.get("B") or 1)

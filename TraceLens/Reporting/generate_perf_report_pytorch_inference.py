@@ -396,9 +396,9 @@ def apply_extension(perf_analyzer, extension_path):
     extension = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(extension)
 
-    if hasattr(extension, "specialized_perf_model"):
-        print(f"Applying specialized perf model from {extension_path}")
-        perf_analyzer.set_specialized_perf_model(extension.specialized_perf_model)
+    if hasattr(extension, "external_perf_model"):
+        print(f"Applying external perf model from {extension_path}")
+        perf_analyzer.set_external_perf_model(extension.external_perf_model)
 
     for attr, register in (
         ("time_models", "register_time_model"),

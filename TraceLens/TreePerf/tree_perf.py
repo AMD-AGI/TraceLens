@@ -315,9 +315,9 @@ class TreePerfAnalyzer:
         else:
             self.time_estimators[label] = external_time_model(model)
 
-    def set_specialized_perf_model(self, model):
-        """Report ``model(category, params, arch)`` as ``Specialized Time (µs)``."""
-        self.register_time_model("Specialized", model)
+    def set_external_perf_model(self, model):
+        """Report ``model(category, params, arch)`` as ``External Time (µs)``."""
+        self.register_time_model("External", model)
 
     def register_kernel_filter(self, label, keep_kernel):
         """Report the busy time of the op's kernels for which ``keep_kernel(kernel)``

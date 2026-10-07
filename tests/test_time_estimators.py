@@ -280,13 +280,13 @@ class TestColumns:
 
     def test_labels_put_builtins_first(self):
         columns = []
-        for label in ("Mine", "Specialized", "Origami", "Roofline"):
+        for label in ("Mine", "External", "Origami", "Roofline"):
             columns += [f"{label} Time (µs)", f"Pct {label}"]
         columns += ["Non-Data-Mov Kernel Time (µs)", "Pct Nothing"]
         assert time_estimate_labels(columns) == [
             "Roofline",
             "Origami",
-            "Specialized",
+            "External",
             "Mine",
         ]
 

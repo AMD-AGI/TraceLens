@@ -208,7 +208,7 @@ can define any of:
 | `perf_model_extension` | `dict` | Map op name → custom perf-model class; overrides or extends built-in models. |
 | `op_category_extension` | `dict` | Map category-only op names to final categories, so an op appears in unified reports without a perf model. |
 | `time_models` | `dict` | Map a label → `fn(category, params, arch)` returning a predicted time in µs, or `None`. Each label fills `<label> Time (µs)` and the columns below. |
-| `specialized_perf_model` | `Callable` | Same signature; registered under the label `Specialized`. |
+| `external_perf_model` | `Callable` | Same signature; registered under the label `External`. |
 | `kernel_filters` | `dict` | Map a label → `fn(kernel_event)` returning whether to count the kernel. Each label fills `<label> Kernel Time (µs)` and `<label> TFLOPS/s` with the busy time of the op's kept kernels. |
 
 ```bash
@@ -239,7 +239,7 @@ Each registered label gets its own column group, `<label> Time (µs)`,
 `<label> TFLOPS/s`, `<label> TB/s`, and `Pct <label>`, next to the roofline
 and Origami columns; the summary sheets pick up every label. Keep the import
 and call of a proprietary library in the extension file. A placeholder is in
-`examples/specialized_perf_model_stub.py`. From Python, register a model with
+`examples/external_perf_model_stub.py`. From Python, register a model with
 `TreePerfAnalyzer.register_time_model(label, fn)`.
 
 Roofline and Origami are estimators behind the same interface, in

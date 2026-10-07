@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Time models: built-in Origami and an extension-registered specialized model."""
+"""Time models: built-in Origami and an extension-registered external model."""
 
 import importlib
 from functools import partial
@@ -28,7 +28,7 @@ from TraceLens.Reporting.generate_perf_report_pytorch import (
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 REPO = Path(__file__).resolve().parents[1]
-STUB = REPO / "examples" / "specialized_perf_model_stub.py"
+STUB = REPO / "examples" / "external_perf_model_stub.py"
 TRACE = (
     REPO
     / "tests"
@@ -82,9 +82,9 @@ def test_model_returning_none_gives_no_prediction():
         "TraceLens.Reporting.generate_perf_report_pytorch_inference",
     ],
 )
-def test_extension_file_registers_specialized_model(report_module):
+def test_extension_file_registers_external_model(report_module):
     registered = []
-    analyzer = SimpleNamespace(set_specialized_perf_model=registered.append)
+    analyzer = SimpleNamespace(set_external_perf_model=registered.append)
     importlib.import_module(report_module).apply_extension(analyzer, str(STUB))
     assert len(registered) == 1
     assert registered[0](
@@ -107,21 +107,21 @@ def test_origami_model_passes_gemm_shape_to_the_simulator():
     )
 
 
-def test_set_specialized_perf_model():
+def test_set_external_perf_model():
     analyzer = SimpleNamespace(time_estimators={})
     analyzer.register_time_model = partial(
         TreePerfAnalyzer.register_time_model, analyzer
     )
-    TreePerfAnalyzer.set_specialized_perf_model(analyzer, len)
-    assert list(analyzer.time_estimators) == ["Specialized"]
-    assert analyzer.time_estimators["Specialized"].time_model is len
-    TreePerfAnalyzer.set_specialized_perf_model(analyzer, None)
+    TreePerfAnalyzer.set_external_perf_model(analyzer, len)
+    assert list(analyzer.time_estimators) == ["External"]
+    assert analyzer.time_estimators["External"].time_model is len
+    TreePerfAnalyzer.set_external_perf_model(analyzer, None)
     assert analyzer.time_estimators == {}
     with pytest.raises(TypeError):
-        TreePerfAnalyzer.set_specialized_perf_model(analyzer, "not a function")
+        TreePerfAnalyzer.set_external_perf_model(analyzer, "not a function")
 
 
-def test_report_has_origami_and_specialized_columns_for_gemms(tmp_path, monkeypatch):
+def test_report_has_origami_and_external_columns_for_gemms(tmp_path, monkeypatch):
     monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
     with patch.object(
         perf_model.GEMM, "get_simulation_time_func", return_value=(1.0, "cmd")
@@ -139,12 +139,12 @@ def test_report_has_origami_and_specialized_columns_for_gemms(tmp_path, monkeypa
     assert not gemms.empty
     assert (gemms["Origami Time (µs)_first"] == 1.0).all()
 
-    specialized = summary["Specialized Time (µs)_first"]
-    assert (summary.loc[specialized.notna(), "op category"] == "GEMM").all()
+    external = summary["External Time (µs)_first"]
+    assert (summary.loc[external.notna(), "op category"] == "GEMM").all()
     p = gemms.iloc[0]["perf_params"]
     expected = 2 * p["M"] * p["N"] * p["K"] * p["B"] / 1e8
-    assert gemms.iloc[0]["Specialized Time (µs)_first"] == pytest.approx(expected)
-    assert "Specialized Time (µs)_first" in dfs["GEMM"].columns
+    assert gemms.iloc[0]["External Time (µs)_first"] == pytest.approx(expected)
+    assert "External Time (µs)_first" in dfs["GEMM"].columns
 
 
 def test_report_without_models_has_no_simulated_columns(tmp_path, monkeypatch):
@@ -156,4 +156,4 @@ def test_report_without_models_has_no_simulated_columns(tmp_path, monkeypatch):
         collective_analysis=False,
     )
     columns = dfs["unified_perf_summary"].columns
-    assert not [c for c in columns if "Origami" in c or "Specialized" in c]
+    assert not [c for c in columns if "Origami" in c or "External" in c]

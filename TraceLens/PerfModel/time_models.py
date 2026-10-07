@@ -44,7 +44,7 @@ from .utils import add_duration_rate_columns
 
 # Built-in labels come first in summaries, in this order; others follow in
 # column order.
-BUILTIN_LABEL_ORDER = ("Roofline", "Origami", "GEMM Simulator", "Specialized")
+BUILTIN_LABEL_ORDER = ("Roofline", "Origami", "GEMM Simulator", "External")
 
 
 @dataclass(frozen=True)
