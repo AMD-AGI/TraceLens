@@ -209,6 +209,7 @@ can define any of:
 | `op_category_extension` | `dict` | Map category-only op names to final categories, so an op appears in unified reports without a perf model. |
 | `time_models` | `dict` | Map a label → `fn(category, params, arch)` returning a predicted time in µs, or `None`. Each label fills `<label> Time (µs)` and the columns below. |
 | `specialized_perf_model` | `Callable` | Same signature; registered under the label `Specialized`. |
+| `kernel_filters` | `dict` | Map a label → `fn(kernel_event)` returning whether to count the kernel. Each label fills `<label> Kernel Time (µs)` and `<label> TFLOPS/s` with the busy time of the op's kept kernels. |
 
 ```bash
 TraceLens_generate_perf_report_pytorch \
@@ -244,6 +245,17 @@ Roofline and Origami are estimators behind the same interface, in
 params, GFLOPs, bytes moved, compute spec) and the arch dict, and returns a
 time. Origami covers GEMMs (with `--enable-origami`, or `GEMM_SIMULATOR_PATH`)
 and attention through the attention perf model's own simulation.
+
+A kernel filter reports the op's throughput over a subset of its kernels, for
+example without copy and transpose kernels:
+
+```python
+from TraceLens import TreePerfAnalyzer
+
+kernel_filters = {"Non-Data-Mov": TreePerfAnalyzer.non_data_mov_filter}
+```
+
+From Python, use `TreePerfAnalyzer.register_kernel_filter(label, fn)`.
 
 See the example extension file for MegatronLM in the
 [`examples/`](https://github.com/AMD-AGI/TraceLens/tree/main/examples) directory.

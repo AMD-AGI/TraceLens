@@ -118,6 +118,12 @@ def get_compute_spec(perf_model):
     return f"{maf_type}_{precision}"
 
 
+def kernel_filter_labels(columns):
+    """Labels of kernel-filter columns, ``<label> Kernel Time (µs)``."""
+    suffix = " Kernel Time (µs)"
+    return [col[: -len(suffix)] for col in columns if col.endswith(suffix)]
+
+
 def get_max_achievable_tflops(perf_model, arch):
     """
     Get the max achievable TFLOPS for a perf model based on arch specs.
@@ -291,6 +297,7 @@ class TreePerfAnalyzer:
         self.python_path = python_path
         self.enable_origami = enable_origami
         self.time_estimators = default_time_estimators(enable_origami, python_path)
+        self.kernel_filters = {}
         self.inductor_cache_dir = inductor_cache_dir
         self.event_to_category = event_to_category
         self.include_unlinked_kernels = include_unlinked_kernels
@@ -333,6 +340,21 @@ class TreePerfAnalyzer:
     def set_specialized_perf_model(self, model):
         """Report ``model(category, params, arch)`` as ``Specialized Time (µs)``."""
         self.register_time_model("Specialized", model)
+
+    def register_kernel_filter(self, label, keep_kernel):
+        """Report the busy time of the op's kernels for which ``keep_kernel(kernel)``
+        is true as ``<label> Kernel Time (µs)``, with ``<label> TFLOPS/s``.
+
+        For example, ``register_kernel_filter("Non-Data-Mov",
+        TreePerfAnalyzer.non_data_mov_filter)`` leaves out copy and transpose
+        kernels. ``None`` removes the label.
+        """
+        if keep_kernel is None:
+            self.kernel_filters.pop(label, None)
+        elif not callable(keep_kernel):
+            raise TypeError(f"kernel filter {label!r} must be callable or None")
+        else:
+            self.kernel_filters[label] = keep_kernel
 
     def check_gpu_only(self):
         for event in self.tree.events:
@@ -415,24 +437,20 @@ class TreePerfAnalyzer:
         DATA_MOVEMENT_PATTERNS = ["at::native::direct_copy_kernel_cuda", "transpose_"]
         return not any(pattern in event["name"] for pattern in DATA_MOVEMENT_PATTERNS)
 
-    def compute_perf_metrics(
-        self, event, bwd=False, non_data_mov=False, perf_model_class=None
-    ):
+    def compute_perf_metrics(self, event, bwd=False, perf_model_class=None):
         """Perf metrics for one op: measure it, model its work, then add one
         column group per registered time estimator."""
-        busy_kernel_time, busy_non_data_mov_time = self._measure_op_time(
-            event, bwd, non_data_mov
-        )
+        busy_kernel_time, filtered_busy_times = self._measure_op_time(event, bwd)
         perf_model = self._build_perf_model(event, perf_model_class)
         work = self._op_work(perf_model, bwd)
 
         dict_metrics = build_perf_metrics_dict(
             work.gflops, work.bytes_moved, busy_kernel_time
         )
-        if non_data_mov:
-            dict_metrics["Non-Data-Mov Kernel Time (µs)"] = busy_non_data_mov_time
-            dict_metrics["Non-Data-Mov TFLOPS/s"], _ = rates_for_duration(
-                work.gflops, None, busy_non_data_mov_time
+        for label, busy_time in filtered_busy_times.items():
+            dict_metrics[f"{label} Kernel Time (µs)"] = busy_time
+            dict_metrics[f"{label} TFLOPS/s"], _ = rates_for_duration(
+                work.gflops, None, busy_time
             )
         dict_metrics["Compute Spec"] = work.compute_spec or ""
         self._add_time_estimates(dict_metrics, work, busy_kernel_time)
@@ -442,9 +460,9 @@ class TreePerfAnalyzer:
 
         return dict_metrics
 
-    def _measure_op_time(self, event, bwd=False, non_data_mov=False):
-        """GPU busy time of the op's kernels (and of its non-data-movement
-        kernels when ``non_data_mov``). Records ``event["kernel_details"]``."""
+    def _measure_op_time(self, event, bwd=False):
+        """GPU busy time of the op's kernels, and per registered kernel filter.
+        Records ``event["kernel_details"]``."""
         if bwd:
             # Always use subtree aggregation for backward metrics
             cpu_op_uids = self.tree.get_subtree_bwd_events(event["UID"])
@@ -461,12 +479,11 @@ class TreePerfAnalyzer:
             }
             for kernel in sorted(list_kernels, key=lambda k: k.get("ts", 0))
         ]
-        busy_non_data_mov_time = None
-        if non_data_mov:
-            busy_non_data_mov_time = self._busy_time(
-                self._kernels_under(cpu_op_list, self.non_data_mov_filter)
-            )
-        return self._busy_time(list_kernels), busy_non_data_mov_time
+        filtered_busy_times = {
+            label: self._busy_time(self._kernels_under(cpu_op_list, keep_kernel))
+            for label, keep_kernel in self.kernel_filters.items()
+        }
+        return self._busy_time(list_kernels), filtered_busy_times
 
     def _kernels_under(self, cpu_op_list, filter_func=None):
         _, kernel_uids = self.loop_and_aggregate_kernels(cpu_op_list, filter_func)
@@ -518,17 +535,16 @@ class TreePerfAnalyzer:
                 busy_kernel_time,
             )
 
-    def compute_fwd_perf_metrics(self, event, non_data_mov=False):
-        return self.compute_perf_metrics(event, bwd=False, non_data_mov=non_data_mov)
+    def compute_fwd_perf_metrics(self, event):
+        return self.compute_perf_metrics(event, bwd=False)
 
-    def compute_bwd_perf_metrics(self, event, non_data_mov=False):
-        return self.compute_perf_metrics(event, bwd=True, non_data_mov=non_data_mov)
+    def compute_bwd_perf_metrics(self, event):
+        return self.compute_perf_metrics(event, bwd=True)
 
     def build_df_perf_metrics(
         self,
         events,
         bwd=False,
-        non_data_mov=False,
         include_kernel_details=False,
         include_args=False,
         dict_name_to_perf_model=None,
@@ -581,7 +597,6 @@ class TreePerfAnalyzer:
                 dict_perf_metrics = self.compute_perf_metrics(
                     event,
                     bwd=bwd,
-                    non_data_mov=non_data_mov,
                     perf_model_class=perf_model_class,
                 )
             except NotImplementedError:
@@ -693,10 +708,10 @@ class TreePerfAnalyzer:
                 df_perf_metrics.columns, label, labels
             ):
                 dict_agg[col] = agg_metrics if col == f"Pct {label}" else "first"
-        if "Non-Data-Mov TFLOPS/s" in df_perf_metrics.columns:
-            dict_agg["Non-Data-Mov TFLOPS/s"] = agg_metrics
-        if "Non-Data-Mov Kernel Time (µs)" in df_perf_metrics.columns:
-            dict_agg["Non-Data-Mov Kernel Time (µs)"] = ["sum"]
+        for label in kernel_filter_labels(df_perf_metrics.columns):
+            if f"{label} TFLOPS/s" in df_perf_metrics.columns:
+                dict_agg[f"{label} TFLOPS/s"] = agg_metrics
+            dict_agg[f"{label} Kernel Time (µs)"] = ["sum"]
         # this is a quick fix, we need to veriify it matches in the group
         if "kernel_details" in df_perf_metrics.columns:
             dict_agg["kernel_details"] = partial(
@@ -2113,6 +2128,8 @@ class TreePerfAnalyzer:
                     continue
                 for cols in time_model_columns(label):
                     perf_cols.extend(cols)
+            for label in self.kernel_filters:
+                perf_cols.extend([f"{label} Kernel Time (µs)", f"{label} TFLOPS/s"])
 
             if include_perf_metrics and has_own_perf_model:
                 # Has own perf model - compute forward metrics
@@ -2354,6 +2371,10 @@ class TreePerfAnalyzer:
         # Kernel Time gets mean/std + sum
         if "Kernel Time (µs)" in df_temp.columns:
             agg_dict["Kernel Time (µs)"] = agg_metrics + ["sum"]
+        for label in kernel_filter_labels(df_temp.columns):
+            if f"{label} TFLOPS/s" in df_temp.columns:
+                agg_dict[f"{label} TFLOPS/s"] = agg_metrics
+            agg_dict[f"{label} Kernel Time (µs)"] = ["sum"]
 
         # Kernel details - summarize using _summarize_kernel_stats
         if "kernel_details" in df_temp.columns:
@@ -3567,9 +3588,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
     #############
     ## OP metrics
     #############
-    def compute_perf_metrics(
-        self, event, bwd=False, non_data_mov=False, perf_model_class=None
-    ):
+    def compute_perf_metrics(self, event, bwd=False, perf_model_class=None):
         # Select the appropriate dictionary for FLOPS and memory functions
         perf_model_name = None
         if perf_model_class is None:
@@ -3610,7 +3629,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         self,
         events,
         bwd=False,
-        non_data_mov=False,
         include_kernel_details=False,
         include_args=False,
         dict_name_to_perf_model=None,
@@ -3647,7 +3665,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                     dict_perf_metrics = self.compute_perf_metrics(
                         event,
                         bwd=bwd_flag,
-                        non_data_mov=non_data_mov,
                         perf_model_class=perf_model_class,
                     )
                 except Exception as e:

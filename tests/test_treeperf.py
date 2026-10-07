@@ -504,7 +504,7 @@ class TestTreePerfAnalyzer:
         analyzer = _build_analyzer(_mk_pytorch_trace())
         calls = []
 
-        def fake_compute(event, bwd=False, non_data_mov=False, perf_model_class=None):
+        def fake_compute(event, bwd=False, perf_model_class=None):
             calls.append(bwd)
             return {"bwd": bwd}
 
@@ -2216,6 +2216,8 @@ class TestTreePerfFinalCoverage:
         for col in ("Origami Time (µs)", "Origami TFLOPS/s", "Origami TB/s"):
             assert f"{col}_first" in summary.columns
         assert "Pct Origami_mean" in summary.columns
+        assert "Non-Data-Mov TFLOPS/s_mean" in summary.columns
+        assert "Non-Data-Mov Kernel Time (µs)_sum" in summary.columns
 
     def test_collect_unified_perf_events_with_python_stack(self):
         analyzer = _build_analyzer(self._nn_module_trace(), add_python_func=True)

@@ -7,6 +7,7 @@
 """Time estimators: OpWork, the built-in estimators, registration, columns."""
 
 import math
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -29,6 +30,7 @@ from TraceLens.Reporting.generate_perf_report_pytorch import (
     apply_extension,
     generate_perf_report_pytorch,
 )
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer, kernel_filter_labels
 
 REPO = Path(__file__).resolve().parents[1]
 TRACE = REPO / "tests/traces/mi300/gaunernst_bert-small-uncased__1016001.json.gz"
@@ -217,6 +219,50 @@ def test_extension_time_models_dict(tmp_path):
     ext.write_text("time_models = [1]\n")
     with pytest.raises(TypeError):
         apply_extension(analyzer, str(ext))
+
+
+def test_register_kernel_filter():
+    analyzer = SimpleNamespace(kernel_filters={})
+    register = partial(TreePerfAnalyzer.register_kernel_filter, analyzer)
+    register("NDM", TreePerfAnalyzer.non_data_mov_filter)
+    assert analyzer.kernel_filters == {"NDM": TreePerfAnalyzer.non_data_mov_filter}
+    with pytest.raises(TypeError):
+        register("Bad", 1)
+    register("NDM", None)
+    assert analyzer.kernel_filters == {}
+
+
+def test_kernel_filter_labels():
+    columns = ["Kernel Time (µs)", "A Kernel Time (µs)", "A TFLOPS/s", "B Time (µs)"]
+    assert kernel_filter_labels(columns) == ["A"]
+
+
+def test_report_shows_every_kernel_filter(tmp_path, monkeypatch):
+    monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
+    ext = tmp_path / "ext.py"
+    ext.write_text(
+        "kernel_filters = {'All': lambda k: True, 'Empty': lambda k: False}\n"
+    )
+    dfs = generate_perf_report_pytorch(
+        profile_json_path=str(TRACE),
+        output_csvs_dir=str(tmp_path / "csvs"),
+        extension_file=str(ext),
+        gpu_arch=ARCH,
+        collective_analysis=False,
+    )
+    gemm = dfs["GEMM"]
+    assert gemm["All Kernel Time (µs)_sum"].tolist() == pytest.approx(
+        gemm["Kernel Time (µs)_sum"].tolist()
+    )
+    assert gemm["All TFLOPS/s_mean"].tolist() == pytest.approx(
+        gemm["TFLOPS/s_mean"].tolist()
+    )
+    assert (gemm["Empty Kernel Time (µs)_sum"] == 0).all()
+    summary = dfs["unified_perf_summary"]
+    gemms = summary[summary["op category"] == "GEMM"]
+    assert gemms["All Kernel Time (µs)_sum"].tolist() == pytest.approx(
+        gemms["Kernel Time (µs)_sum"].tolist()
+    )
 
 
 def test_report_shows_every_registered_model(tmp_path, monkeypatch):
