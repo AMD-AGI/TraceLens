@@ -1813,6 +1813,16 @@ def _wire_all_predecessor_edges(
                     # parameter's genuine consumer is wired via the inline
                     # pipeline's own input threading.
                     continue
+                if _graph_node_reads_a_boundary_slot(graph, target_index):
+                    # This op reads ONE SLOT of a tuple boundary parameter and
+                    # nothing else. Inside ``apply_rotary_pos_emb(x, cos, sin)``,
+                    # ``cos.repeat_interleave(...)`` reads ``position_embeddings``
+                    # slot 0; dumping the caller's argument on it handed it the
+                    # wrong tensor, and -- because it then already had an incoming
+                    # edge -- the boundary pass skipped it as already fed. Slot 1
+                    # wired correctly and slot 0 reached no op at all, so ``cos``
+                    # vanished from a graph whose source multiplies by it.
+                    continue
                 link = (source_index, target_index)
                 if link not in graph.links:
                     graph.links.append(link)
@@ -2088,6 +2098,25 @@ def _wire_inline_frame_dangling_outputs(graph: ComputationGraph) -> None:
     """No-op: previously connected dead-end inline-frame nodes to the frame
     exit, but this fabricated edges not present in the model.  Dead-end nodes
     now remain unconnected, reflecting the actual data flow."""
+
+
+def _graph_node_reads_a_boundary_slot(
+    graph: ComputationGraph, index: int | None
+) -> bool:
+    """True when the node reads one SLOT of a tuple boundary parameter, only.
+
+    ``cos``/``sin`` inside ``apply_rotary_pos_emb(x, cos, sin)`` each name one
+    slot of the caller's ``position_embeddings`` and read nothing else, so the
+    boundary supplies their operand and no other edge should.
+    """
+    if index is None or not (0 <= index < len(graph.nodes)):
+        return False
+    block = graph.nodes[index].block
+    return (
+        block is not None
+        and block.boundary_input_ordinal is not None
+        and not block.operation_predecessors
+    )
 
 
 def _graph_node_takes_no_tensor_operand(
