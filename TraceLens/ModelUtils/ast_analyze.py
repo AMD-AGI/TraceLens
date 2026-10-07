@@ -5190,7 +5190,24 @@ class _ForwardOperationExtractor:
         if isinstance(node, ast.Subscript):
             return self._return_element_label(node.value)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            return self._return_element_label(node.func.value)
+            receiver = node.func.value
+            # ``cos.to(...)`` is housekeeping ON a value, so the value names the
+            # slot. ``torch.where(...)`` has the same shape but its receiver is a
+            # MODULE, and naming the slot ``torch`` leaves the boundary standing
+            # for nothing: DeepSeek's indexer returns
+            # ``torch.where(invalid, ..., top_k_indices)`` and published an
+            # ``@output`` labelled ``torch`` that reported the section's
+            # activation geometry instead of the int64 indices wired into it.
+            # A receiver that names no traced value is such a module; the call
+            # itself is then what the slot is named for.
+            if (
+                isinstance(receiver, ast.Name)
+                and receiver.id != "self"
+                and receiver.id not in self.var_producer
+                and receiver.id not in self.param_names
+            ):
+                return node.func.attr or None
+            return self._return_element_label(receiver)
         if isinstance(node, ast.BinOp):
             # A returned element can be a scaled/combined tensor
             # (``weights * self.routed_scaling_factor``): one side is the real
