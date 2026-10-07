@@ -1456,6 +1456,24 @@ def _named_method_params(operations: list[ForwardOperation]) -> list[str]:
     return []
 
 
+def _method_param_inputs(
+    operations: list[ForwardOperation], primary: str | None
+) -> list[str]:
+    """The tensor parameters a helper method's own ops read, besides the primary.
+
+    A method invoked on a CHILD module has its parameters stamped on it
+    (``method_params:``), but one the class calls on itself does not -- so its
+    frame declared none, and the wiring pass skips a parameter the frame does not
+    declare. The ops themselves name what they read, which is the same answer.
+    """
+    names: list[str] = []
+    for operation in operations:
+        for name in operation.param_inputs or ():
+            if name and name != primary and name not in names:
+                names.append(name)
+    return names
+
+
 def _named_method_primary(operations: list[ForwardOperation]) -> str | None:
     """The primary parameter of a child-module method, from its stamped detail."""
     for operation in operations:
@@ -2900,10 +2918,25 @@ def build_block_node(
                                 external_inputs=list(operation.external_inputs),
                                 # Name the parameter each op reads straight from
                                 # the boundary, as every other expansion does.
+                                # An op reading the method's PRIMARY parameter has
+                                # no ``param_inputs`` at all -- that one is carried
+                                # as ``@method_input`` instead -- so requiring them
+                                # left it unnamed, and its tile fell back to the
+                                # op's own label (``@input:Cast``). A tile named
+                                # for an operation rather than the tensor it
+                                # carries never docks, and the op reading it was
+                                # left with no operand to take its shape from.
                                 boundary_input_name=(
                                     _boundary_input_name(operation, method_child)
                                     if operation.param_inputs
-                                    else None
+                                    else (
+                                        _named_method_primary(method_ops)
+                                        if any(
+                                            is_method_input(predecessor)
+                                            for predecessor in operation.predecessors
+                                        )
+                                        else None
+                                    )
                                 ),
                             )
                             for position, operation in enumerate(method_ops)
@@ -3056,6 +3089,29 @@ def build_block_node(
                         ),
                         external_inputs=list(operation.external_inputs),
                         param_inputs=list(operation.param_inputs),
+                        # Name the parameter this op reads straight from the
+                        # boundary. The method's PRIMARY parameter is carried as
+                        # ``@method_input`` rather than in ``param_inputs``, so
+                        # without this only the FIRST op reading it docked the
+                        # frame's primary tile; every later reader entered
+                        # unnamed and the boundary pass minted it a tile named
+                        # after the producing OP (``@input:Cast``). A tile named
+                        # for an operation rather than the tensor it carries
+                        # never docks, leaving the op that reads it with no
+                        # operand at all -- which is how
+                        # ``key_valid.long().argmax(-1)`` came to guess its shape.
+                        boundary_input_name=(
+                            _boundary_input_name(operation, cls)
+                            if operation.param_inputs
+                            else (
+                                cls.multi_op_method_inputs.get(base_attr)
+                                if any(
+                                    is_method_input(predecessor)
+                                    for predecessor in operation.predecessors
+                                )
+                                else None
+                            )
+                        ),
                     )
 
                 # A submodule call embedded mid-expression (``act_fn``) must sit
@@ -3134,6 +3190,20 @@ def build_block_node(
                             *m_entry_detail,
                         ],
                         input_label=cls.multi_op_method_inputs.get(base_attr),
+                        # The method's OTHER tensor parameters get boundaries of
+                        # their own, exactly as a method invoked on a child module
+                        # already does. Declaring none left every argument but the
+                        # primary with nowhere to dock: the first op reading one
+                        # took the frame's single entry and every later reader
+                        # entered unnamed, to be given a tile named after the
+                        # producing op instead of the tensor.
+                        forward_param_inputs=(
+                            _named_method_params(method_ops)
+                            or _method_param_inputs(
+                                method_ops,
+                                cls.multi_op_method_inputs.get(base_attr),
+                            )
+                        ),
                         forward_return_slots=dict(m_return_slots),
                         forward_return_order=list(m_return_order),
                         primary_return_slot=m_primary_return,
