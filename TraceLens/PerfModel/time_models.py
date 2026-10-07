@@ -68,6 +68,37 @@ class TimeEstimate:
     extra_columns: dict = field(default_factory=dict)
 
 
+def get_compute_spec(perf_model):
+    """Compute spec (maf type + precision) of a perf model, such as
+    ``"matrix_fp16"`` or ``"vector_bf16"``, or None if not available."""
+    maf_type = (
+        perf_model.get_maf_type() if hasattr(perf_model, "get_maf_type") else None
+    )
+    precision = (
+        perf_model.get_compute_precision()
+        if hasattr(perf_model, "get_compute_precision")
+        else None
+    )
+    if maf_type is None or precision is None:
+        return None
+    return f"{maf_type}_{precision}"
+
+
+def op_work(perf_model, bwd=False):
+    """The :class:`OpWork` of a constructed perf model, forward or backward."""
+    gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
+    bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
+    return OpWork(
+        category=getattr(perf_model, "bwd_category" if bwd else "category", None),
+        params=getattr(perf_model, "param_details", None),
+        gflops=gflops,
+        bytes_moved=bytes_moved,
+        compute_spec=get_compute_spec(perf_model),
+        bwd=bwd,
+        perf_model=perf_model,
+    )
+
+
 def time_model_columns(label):
     """``(per-shape, per-instance)`` column names for a time-model label.
 
@@ -129,6 +160,19 @@ def add_time_estimate_columns(
     )
 
 
+def add_time_estimates(dict_metrics, estimators, work, arch, busy_kernel_time):
+    """Run each ``{label: estimator}`` on ``work`` and write its column group."""
+    for label, estimator in estimators.items():
+        add_time_estimate_columns(
+            dict_metrics,
+            label,
+            estimator(work, arch),
+            work.gflops,
+            work.bytes_moved,
+            busy_kernel_time,
+        )
+
+
 def roofline_estimator(work, arch):
     """Roofline time: the larger of peak-compute time and peak-bandwidth time."""
     if arch is None or work.compute_spec is None:
@@ -149,16 +193,6 @@ def roofline_estimator(work, arch):
     memory_time_us = (work.bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
     bound = "COMPUTE_BOUND" if compute_time_us >= memory_time_us else "MEMORY_BOUND"
     return TimeEstimate(max(compute_time_us, memory_time_us), {"Roofline Bound": bound})
-
-
-def predict_time(model, perf_model, arch):
-    """Call ``model`` for a constructed perf model. Returns µs or None."""
-    category = getattr(perf_model, "category", None)
-    params = getattr(perf_model, "param_details", None)
-    if category is None or params is None:
-        return None
-    time_us = model(category, dict(params), arch)
-    return None if time_us is None else float(time_us)
 
 
 def external_time_model(model):
@@ -209,14 +243,6 @@ def origami_perf_model(category, params, arch, python_path=None):
 def gemm_simulator_model(category, params, arch, python_path=None):
     """GEMM time from the simulator script at ``GEMM_SIMULATOR_PATH``."""
     return gemm_time(category, params, arch, python_path, backend="simulator")
-
-
-def builtin_origami_model(enable_origami, python_path=None):
-    """GEMM model for JAX reports: the simulator when ``GEMM_SIMULATOR_PATH``
-    is set, else Origami when enabled, else None."""
-    if not enable_origami and "GEMM_SIMULATOR_PATH" not in os.environ:
-        return None
-    return partial(gemm_time, python_path=python_path)
 
 
 def _accepts_backend(fn):

@@ -25,6 +25,7 @@ from TraceLens.Reporting.pftrace_hip_activity_analysis import (
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
+from TraceLens.PerfModel.perf_model import GEMM
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf import (
     GPUEventAnalyser,
@@ -408,6 +409,26 @@ class TestJaxAnalyses:
         metrics = JaxAnalyses.gemm_perf_metrics(gemm_event, op_params)
         assert metrics["GFLOPS"] > 0
         assert metrics["param: M"] == 128
+        assert "Roofline Time (µs)" not in metrics
+
+        arch = {
+            "name": "mi300x",
+            "mem_bw_gbps": 5300,
+            "max_achievable_tflops": {"matrix_bf16": 700},
+        }
+        with patch.object(
+            GEMM, "get_simulation_time_func", return_value=(9.0, "cmd")
+        ) as sim:
+            metrics = JaxAnalyses.gemm_perf_metrics(
+                gemm_event,
+                {**op_params, "Type": "bf16"},
+                arch=arch,
+                enable_origami=True,
+            )
+        assert metrics["Compute Spec"] == "matrix_bf16"
+        assert metrics["Roofline Time (µs)"] > 0
+        assert metrics["Origami Time (µs)"] == 9.0
+        assert sim.call_args.kwargs["backend"] == "origami"
         with pytest.raises(NotImplementedError):
             JaxAnalyses.JaxGemm(
                 {

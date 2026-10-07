@@ -37,10 +37,11 @@ from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils, merge_inter
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
 from ..PerfModel.time_models import (
-    OpWork,
-    add_time_estimate_columns,
+    add_time_estimates,
     default_time_estimators,
     external_time_model,
+    get_compute_spec,
+    op_work,
     time_estimate_group_columns,
     time_estimate_labels,
     time_model_columns,
@@ -93,29 +94,6 @@ def normalize_dtype_to_precision(dtype_str):
     }
 
     return dtype_mapping.get(dtype_lower, None)
-
-
-def get_compute_spec(perf_model):
-    """
-    Get the compute spec (maf_type + precision) for a perf model.
-
-    Args:
-        perf_model: A perf model instance with get_maf_type() and get_compute_precision() methods.
-
-    Returns:
-        str: Compute spec like "matrix_fp16", "vector_bf16", or None if not available.
-    """
-    maf_type = (
-        perf_model.get_maf_type() if hasattr(perf_model, "get_maf_type") else None
-    )
-    precision = (
-        perf_model.get_compute_precision()
-        if hasattr(perf_model, "get_compute_precision")
-        else None
-    )
-    if maf_type is None or precision is None:
-        return None
-    return f"{maf_type}_{precision}"
 
 
 def kernel_filter_labels(columns):
@@ -442,7 +420,7 @@ class TreePerfAnalyzer:
         column group per registered time estimator."""
         busy_kernel_time, filtered_busy_times = self._measure_op_time(event, bwd)
         perf_model = self._build_perf_model(event, perf_model_class)
-        work = self._op_work(perf_model, bwd)
+        work = op_work(perf_model, bwd)
 
         dict_metrics = build_perf_metrics_dict(
             work.gflops, work.bytes_moved, busy_kernel_time
@@ -453,7 +431,9 @@ class TreePerfAnalyzer:
                 work.gflops, None, busy_time
             )
         dict_metrics["Compute Spec"] = work.compute_spec or ""
-        self._add_time_estimates(dict_metrics, work, busy_kernel_time)
+        add_time_estimates(
+            dict_metrics, self.time_estimators, work, self.arch, busy_kernel_time
+        )
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
@@ -507,33 +487,6 @@ class TreePerfAnalyzer:
                 self.inductor_cache_dir,
             )
         )
-
-    @staticmethod
-    def _op_work(perf_model, bwd=False):
-        gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
-        bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
-        return OpWork(
-            category=getattr(perf_model, "bwd_category" if bwd else "category", None),
-            params=getattr(perf_model, "param_details", None),
-            gflops=gflops,
-            bytes_moved=bytes_moved,
-            compute_spec=get_compute_spec(perf_model),
-            bwd=bwd,
-            perf_model=perf_model,
-        )
-
-    def _add_time_estimates(self, dict_metrics, work, busy_kernel_time, skip=()):
-        for label, estimator in self.time_estimators.items():
-            if label in skip:
-                continue
-            add_time_estimate_columns(
-                dict_metrics,
-                label,
-                estimator(work, self.arch),
-                work.gflops,
-                work.bytes_moved,
-                busy_kernel_time,
-            )
 
     def compute_fwd_perf_metrics(self, event):
         return self.compute_perf_metrics(event, bwd=False)
@@ -3610,14 +3563,15 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             )
         )
 
-        work = self._op_work(perf_model, bwd)
+        work = op_work(perf_model, bwd)
         busy_kernel_time = event[TraceEventUtils.TraceKeys.Duration]
 
         dict_metrics = build_perf_metrics_dict(
             work.gflops, work.bytes_moved, busy_kernel_time
         )
-        self._add_time_estimates(
-            dict_metrics, work, busy_kernel_time, skip=("Roofline",)
+        dict_metrics["Compute Spec"] = work.compute_spec or ""
+        add_time_estimates(
+            dict_metrics, self.time_estimators, work, self.arch, busy_kernel_time
         )
 
         for key, value in perf_model.param_details.items():

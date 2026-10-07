@@ -21,10 +21,12 @@ from TraceLens.PerfModel.time_models import (
     OpWork,
     TimeEstimate,
     add_time_estimate_columns,
+    add_time_estimates,
     class_simulation_time,
     default_time_estimators,
     external_time_model,
     gemm_simulator_estimator,
+    op_work,
     origami_estimator,
     roofline_estimator,
     time_estimate_group_columns,
@@ -325,8 +327,8 @@ def test_external_model_sees_the_op_direction(bwd, category, gflops):
     analyzer = SimpleNamespace(arch=ARCH, time_estimators={})
     TreePerfAnalyzer.register_time_model(analyzer, "Mine", model)
     metrics = {}
-    work = TreePerfAnalyzer._op_work(_FakeAttention(), bwd=bwd)
-    TreePerfAnalyzer._add_time_estimates(analyzer, metrics, work, 20.0)
+    work = op_work(_FakeAttention(), bwd=bwd)
+    add_time_estimates(metrics, analyzer.time_estimators, work, ARCH, 20.0)
     assert seen == [(category, {"N_Q": 128})]
     assert metrics["Mine Time (µs)"] == 10.0
     assert metrics["Mine TFLOPS/s"] == pytest.approx(gflops / 10.0 * 1e3)

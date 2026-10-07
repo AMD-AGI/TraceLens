@@ -17,10 +17,10 @@ import pytest
 from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.perf_model import aten_mm
 from TraceLens.PerfModel.time_models import (
-    builtin_origami_model,
+    external_time_model,
     gemm_simulator_model,
+    op_work,
     origami_perf_model,
-    predict_time,
 )
 from TraceLens.Reporting.generate_perf_report_pytorch import (
     generate_perf_report_pytorch,
@@ -61,20 +61,19 @@ def test_model_gets_category_a_copy_of_params_and_arch():
         return 12
 
     gemm = _mm()
-    assert predict_time(model, gemm, ARCH) == 12.0
+    assert external_time_model(model)(op_work(gemm), ARCH) == 12.0
     assert seen["category"] == "GEMM"
     assert (seen["params"]["N"], seen["params"]["K"]) == (32, 64)
     assert seen["arch"] is ARCH
     assert gemm.param_details["M"] == 128
 
 
-def test_predict_time_returns_none_without_a_prediction():
+def test_model_returning_none_gives_no_prediction():
     def model(category, params, arch):
         return None
 
-    assert predict_time(model, _mm(), ARCH) is None
-    assert predict_time(len, SimpleNamespace(category="GEMM"), ARCH) is None
-    assert predict_time(len, SimpleNamespace(param_details={}), ARCH) is None
+    assert external_time_model(model)(op_work(_mm()), ARCH) is None
+    assert external_time_model(len)(op_work(_mm(), bwd=True), ARCH) is None
 
 
 @pytest.mark.parametrize(
@@ -107,14 +106,6 @@ def test_origami_model_passes_gemm_shape_to_the_simulator():
     sim.assert_called_with(
         ARCH, 128, 32, 64, 1, "bf16", None, enable_origami=True, backend="simulator"
     )
-
-
-def test_jax_gemm_model_is_registered_only_when_enabled(monkeypatch):
-    monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
-    assert builtin_origami_model(False) is None
-    assert builtin_origami_model(True) is not None
-    monkeypatch.setenv("GEMM_SIMULATOR_PATH", "sim.py")
-    assert builtin_origami_model(False) is not None
 
 
 def test_set_specialized_perf_model():

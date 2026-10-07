@@ -12,8 +12,8 @@ from itertools import chain
 import pandas as pd
 
 from ..PerfModel import perf_model
-from ..PerfModel.time_models import builtin_origami_model, predict_time
-from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
+from ..PerfModel.time_models import add_time_estimates, default_time_estimators, op_work
+from ..PerfModel.utils import build_perf_metrics_dict
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 
@@ -554,23 +554,14 @@ class JaxAnalyses:
             event_copy, arch=arch, enable_origami=enable_origami
         )
 
-        gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
+        work = op_work(perf_model, bwd)
         time = event[TraceEventUtils.TraceKeys.Duration]
 
-        bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
-
-        # Return metrics
-        dict_metrics = build_perf_metrics_dict(gflops, bytes_moved, time)
-
-        origami = builtin_origami_model(enable_origami)
-        if origami is not None:
-            add_simulation_time_columns(
-                dict_metrics,
-                predict_time(origami, perf_model, arch),
-                gflops,
-                bytes_moved,
-                time,
-            )
+        dict_metrics = build_perf_metrics_dict(work.gflops, work.bytes_moved, time)
+        dict_metrics["Compute Spec"] = work.compute_spec or ""
+        add_time_estimates(
+            dict_metrics, default_time_estimators(enable_origami), work, arch, time
+        )
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
