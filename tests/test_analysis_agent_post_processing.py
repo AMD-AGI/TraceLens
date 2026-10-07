@@ -149,7 +149,7 @@ This standalone roofline analysis shows GPU computation at 84.24% of the 2494.24
 
 **Reasoning for Slowdown:** This stage carries the largest share of end-to-end GPU time in the whole compute set.
 
-**Resolution:** Fusing the FC1 and FC2 stages keeps the intermediate activation on-chip and removes a DRAM round-trip.
+**Resolution:** Fusing the FC1 and FC2 stages keeps the intermediate activation on-chip and removes a round-trip through global memory.
 
 **Impact estimate:**
 <!-- impact-begin kind=detail_estimate low=3.8 high=11.41 rehydrated=true -->

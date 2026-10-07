@@ -120,7 +120,7 @@ Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].b
 
 ### Unfused multi-stage MoE GEMMs (`moe_unfused` only)
 - **Symptoms:** Multiple sequential expert-GEMM kernel launches per token group (e.g. `*_gemm1_*` followed by `*_gemm2_*`).
-- **Reasoning:** Each launch pays kernel-launch overhead and cannot share on-chip memory across the FC1 -> activation -> FC2 chain; intermediate activations must round-trip through DRAM.
+- **Reasoning:** Each launch pays kernel-launch overhead and cannot share on-chip memory across the FC1 -> activation -> FC2 chain; intermediate activations must round-trip through global memory.
 - **Algorithmic:** Switch to a fused MoE expert kernel that combines the per-stage GEMMs (and ideally activation) in a single launch.
 - **Kernel:** If a fused variant is unavailable, apply the standard per-bound-type tuning from the table above to each stage independently.
 
