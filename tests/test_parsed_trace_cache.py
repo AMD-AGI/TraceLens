@@ -9,6 +9,7 @@
 import gzip
 import json
 import os
+import pickle
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -21,8 +22,9 @@ from TraceLens.parsed_trace_cache import (
     cache_enabled,
     freeze,
     get_frozen,
+    load_cached,
 )
-from TraceLens.util import DataLoader
+from TraceLens.util import DataLoader, copy_trace_events
 from conftest import assign_trace_groups, trace_group_id, trace_path_from_params
 
 
@@ -66,7 +68,11 @@ def test_parsed_trace_cache_is_enabled_under_pytest():
 
 def test_frozen_parse_rejects_inplace_writes():
     frozen = freeze(
-        {"traceEvents": [{"name": "kernel", "args": {"x": 1}}], "meta": {"rank": 0}}
+        {
+            "traceEvents": [{"name": "kernel", "args": {"x": 1, "dims": [2, 4]}}],
+            "meta": {"rank": 0},
+            "pair": (1, {"n": 2}),
+        }
     )
     with pytest.raises(TypeError, match="immutable"):
         frozen["meta"] = {}
@@ -79,7 +85,16 @@ def test_frozen_parse_rejects_inplace_writes():
     with pytest.raises(TypeError, match="immutable"):
         frozen["traceEvents"].pop()
     with pytest.raises(TypeError, match="immutable"):
+        frozen["pair"][1]["n"] = 3
+    with pytest.raises(TypeError, match="immutable"):
         frozen.clear()
+
+    restored = pickle.loads(pickle.dumps(frozen))
+    assert restored == frozen
+    assert type(restored) is type(frozen)
+    assert type(restored["traceEvents"]) is type(frozen["traceEvents"])
+    with pytest.raises(TypeError, match="immutable"):
+        restored["traceEvents"][0]["args"]["x"] = 2
 
 
 def test_loads_return_the_frozen_parse_and_do_not_reread(tmp_path):
@@ -114,6 +129,17 @@ def test_loads_return_the_frozen_parse_and_do_not_reread(tmp_path):
     event["args"]["rank"] = 3
     assert "children" not in first["traceEvents"][0]
     assert "rank" not in first["traceEvents"][0]["args"]
+
+    copied = copy_trace_events(first)
+    copied["traceEvents"][0]["args"]["stream_index"] = 0
+    assert copied["traceEvents"][0]["args"] is not first["traceEvents"][0]["args"]
+    assert "stream_index" not in first["traceEvents"][0]["args"]
+    assert copy_trace_events({"meta": 1}) == {"meta": 1}
+    mixed = copy_trace_events({"traceEvents": [{"name": "bare"}, "skip"]})
+    assert mixed["traceEvents"] == [{"name": "bare"}, "skip"]
+    assert load_cached(str(tmp_path / "absent.json"), lambda: {"traceEvents": []}) == {
+        "traceEvents": []
+    }
 
 
 def test_rewritten_file_is_a_cache_miss(tmp_path):

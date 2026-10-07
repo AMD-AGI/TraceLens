@@ -57,6 +57,16 @@ class FrozenDict(_Immutable, dict):
     setdefault = _Immutable._reject
     update = _Immutable._reject
 
+    def __reduce__(self):
+        # pickle rebuilds a dict by calling __setitem__, which this class rejects.
+        return (FrozenDict._from_items, (list(self.items()),))
+
+    @staticmethod
+    def _from_items(items):
+        obj = dict.__new__(FrozenDict)
+        dict.update(obj, items)
+        return obj
+
 
 class FrozenList(_Immutable, list):
     __setitem__ = _Immutable._reject
@@ -69,6 +79,15 @@ class FrozenList(_Immutable, list):
     remove = _Immutable._reject
     reverse = _Immutable._reject
     sort = _Immutable._reject
+
+    def __reduce__(self):
+        return (FrozenList._from_items, (list(self),))
+
+    @staticmethod
+    def _from_items(items):
+        obj = list.__new__(FrozenList)
+        list.extend(obj, items)
+        return obj
 
 
 def freeze(obj: Any) -> Any:

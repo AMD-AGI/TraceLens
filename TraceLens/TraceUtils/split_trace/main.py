@@ -157,7 +157,7 @@ import os
 
 import pandas as pd
 
-from TraceLens.util import DataLoader
+from TraceLens.util import DataLoader, copy_trace_events
 from TraceLens.TraceUtils.utils.annotation_utils import (
     ITERATION_BACKUP_PATTERNS,  # noqa: F401
     ITERATION_PATTERNS,  # noqa: F401
@@ -265,7 +265,7 @@ def _load_and_detect(args):
     nothing to split: no GPU work, a NOT_SPLITTABLE result, or a DEGRADED result
     without ``--allow-degraded``.
     """
-    trace_json = DataLoader.load_data(get_filename(args.trace_path))
+    trace_json = copy_trace_events(DataLoader.load_data(get_filename(args.trace_path)))
     events = trace_json.get("traceEvents", [])
     trace_index = EventIndex(events)
     print(f"Loaded {len(events)} events")

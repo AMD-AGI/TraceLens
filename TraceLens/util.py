@@ -385,6 +385,29 @@ def _normalize_xprof_trace(trace: dict) -> dict:
     return trace
 
 
+def copy_trace_events(trace: dict) -> dict:
+    """Return a trace whose events and ``args`` can be updated without touching *trace*.
+
+    Nested values such as ``Input Dims`` stay shared. Trace splitting writes
+    ``stream_index`` onto the loaded events and then serializes those events, so
+    it needs this copy when the loader returned a frozen cached parse.
+    """
+    events = trace.get("traceEvents")
+    if not isinstance(events, list):
+        return dict(trace)
+    copied_events = []
+    for event in events:
+        if isinstance(event, dict):
+            event = dict(event)
+            args = event.get("args")
+            if isinstance(args, dict):
+                event["args"] = dict(args)
+        copied_events.append(event)
+    copied = dict(trace)
+    copied["traceEvents"] = copied_events
+    return copied
+
+
 def detach_event_args(event: dict) -> dict:
     """Give *event* its own mutable ``args`` dict and return it.
 

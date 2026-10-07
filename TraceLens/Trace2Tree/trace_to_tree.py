@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Any, Callable, Dict, Optional
 
-from ..util import JaxProfileProcessor, TraceEventUtils
+from ..util import JaxProfileProcessor, TraceEventUtils, detach_event_args
 
 logger = logging.getLogger(__name__)
 
@@ -253,9 +253,13 @@ class BaseTraceToTree(ABC):
         for stream, events in dict_stream2events.items():
             for i, event in enumerate(events):
                 dict_stream_index2event[(stream, i)] = event
-                event[TraceEventUtils.TraceKeys.Args][
-                    TraceEventUtils.ArgNames.StreamIndex
-                ] = i
+                # A plain dict is shared with the caller's events (trace
+                # splitting serializes those). A frozen cached args dict is
+                # copied so the write stays on this tree.
+                args = event.get(TraceEventUtils.TraceKeys.Args)
+                if type(args) is not dict:
+                    args = detach_event_args(event)
+                args[TraceEventUtils.ArgNames.StreamIndex] = i
         # now we set this dict in the perf_analyzer
         self.dict_stream_index2event = dict_stream_index2event
 

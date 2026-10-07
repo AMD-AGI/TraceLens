@@ -773,6 +773,9 @@ def test_dataloader_save_preprocessed_json(tmp_path):
     DataLoader.load_data(str(trace_path), save_preprocessed=True)
 
     assert json.loads(trace_path.read_text()) == payload
+    # Pytest leaves the parse cache on, so this is the uncached writer.
+    DataLoader._load_data_uncached(str(trace_path), save_preprocessed=True)
+    assert json.loads(trace_path.read_text()) == payload
 
 
 @patch("TraceLens.util.suppress_native_hlo_logs")
