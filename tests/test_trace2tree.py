@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from copy import deepcopy
 from typing import Dict, List
@@ -33,6 +35,7 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     find_execution_details,
     get_subtree_events,
     is_multistream,
+    load_capture_folder,
     make_connections,
     update_subtree_uids_and_timestamps,
     verify_subtree_events,
@@ -1007,6 +1010,38 @@ class TestTraceCaptureMergeHelpers:
         tree = make_connections(tree, graph_filtered, capture_filtered)
         assert kernel["parent"] == updated[0]["UID"]
         assert capture_filtered[0]["args"]["correlation"] == 99
+
+    def test_load_capture_folder_keys_by_role_and_rank(self, tmp_path):
+        entries = [
+            ("DecodeCudaGraphRunner_bs_8_dense_rank0.json.gz", 8, None),
+            ("DecodeCudaGraphRunner_bs_8_sparse_rank0.json.gz", 8, None),
+            ("EAGLEDraftCudaGraphRunner_bs_8_rank0.json.gz", 8, "drafter"),
+            ("DecodeCudaGraphRunner_bs_8_rank1.json.gz", 8, None),
+        ]
+        metadata = []
+        for name, bs, role in entries:
+            (tmp_path / name).write_text("")
+            entry = {"file": name, "batch_size": bs, "mode": "FULL"}
+            if role:
+                entry["capture_type"] = role
+            metadata.append(entry)
+        metadata_path = tmp_path / "execution_details.json"
+        metadata_path.write_text(json.dumps(metadata))
+
+        capture_map, batch_sizes = load_capture_folder(
+            str(tmp_path), str(metadata_path), replay_rank=0
+        )
+        assert capture_map == {
+            "target_8_FULL": str(tmp_path / entries[1][0]),
+            "drafter_8_FULL": str(tmp_path / entries[2][0]),
+        }
+        assert batch_sizes == {"target": [8, 8], "drafter": [8]}
+
+        # No capture of the replay rank: fall back to all ranks.
+        capture_map, _ = load_capture_folder(
+            str(tmp_path), str(metadata_path), replay_rank=5
+        )
+        assert capture_map["target_8_FULL"] == str(tmp_path / entries[3][0])
 
     def test_align_streams_multistream(self):
         graph_events = [

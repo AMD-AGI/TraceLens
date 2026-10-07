@@ -28,6 +28,12 @@ from utils.arch_utils import list_platforms, load_arch
 from TraceLens.Agent.Analysis.utils.classify_kernels import (
     classify_kernel,
 )
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    classify_graph_capture_trace,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+)
 from TraceLens.TreePerf import TreePerfAnalyzer
 from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
 
@@ -809,6 +815,11 @@ def main():
         default=True,
         help="Disable pseudo-op augmentation (enabled by default).",
     )
+    parser.add_argument(
+        "--capture-folder",
+        default=None,
+        help="Graph capture traces to merge into the replay trace (graph_capture mode).",
+    )
 
     args = parser.parse_args()
 
@@ -939,11 +950,28 @@ def main():
     try:
         print(f"  Loading trace: {trace_path}")
         print(f"  Pseudo ops: {'enabled' if enable_pseudo_ops else 'disabled'}")
-        analyzer = TreePerfAnalyzer.from_file(
-            trace_path,
-            add_python_func=True,
-            enable_pseudo_ops=enable_pseudo_ops,
-        )
+        merged_tree = None
+        if args.capture_folder:
+            classify_graph_capture_trace(args.capture_folder)
+            merged_tree = merge_capture_trace_into_graph(
+                args.capture_folder,
+                os.path.join(args.capture_folder, "execution_details.json"),
+                trace_path,
+            )
+        # The merged tree is already built; rebuilding it would drop the merge.
+        if merged_tree is not None:
+            analyzer = TreePerfAnalyzer(
+                tree=merged_tree,
+                add_python_func=True,
+                enable_pseudo_ops=enable_pseudo_ops,
+                rebuild_tree=False,
+            )
+        else:
+            analyzer = TreePerfAnalyzer.from_file(
+                trace_path,
+                add_python_func=True,
+                enable_pseudo_ops=enable_pseudo_ops,
+            )
         tree = analyzer.tree
         print(f"  ✓ Trace loaded successfully")
         print(f"  ✓ Tree has {len(tree.events)} events")
@@ -1488,6 +1516,7 @@ def main():
     manifest = {
         "platform": platform,
         "trace_path": trace_path,
+        "capture_folder_path": args.capture_folder,
         "output_dir": output_dir,
         "comparison_scope": comparison_scope,
         "gpu_utilization": gpu_utilization_metrics,

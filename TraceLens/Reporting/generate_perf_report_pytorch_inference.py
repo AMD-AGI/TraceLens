@@ -30,13 +30,28 @@ from TraceLens.Reporting.reporting_utils import (
     write_report_outputs,
 )
 from TraceLens.util import TraceEventUtils
+from TraceLens.TraceIndex.scanner import extract_rank
 from TraceLens.TraceUtils.utils.annotation_utils import (
     CAPTURE_PATTERN,
+    SPEC_ROLE_DRAFTER,
+    SPEC_ROLE_DRAFTER_EXTEND,
+    SPEC_ROLE_TARGET,
     CaptureAnnotation,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
+
+# Constants
+# Capture role from the file name: SGLang runner classes (EAGLEDraftExtend*,
+# EAGLEDraft*, DraftDecode*) and the vLLM speculator (graph_capture_rank_0_speculator.*).
+CAPTURE_ROLE_PATTERNS = [
+    (re.compile(r"DraftExtend"), SPEC_ROLE_DRAFTER_EXTEND),
+    (re.compile(r"Draft|_speculator"), SPEC_ROLE_DRAFTER),
+]
+# DecodeCudaGraphRunner_bs_32_rank0.json.gz: SGLang names captures by request
+# batch size, while the most common first dim counts tokens (bs x draft tokens).
+SGLANG_RUNNER_BS_PATTERN = re.compile(r"^\w*CudaGraphRunner_bs_(\d+)_")
 
 
 def perf_report_sanity_check(
@@ -195,7 +210,7 @@ def find_capture_annotation_events(events):
 
 def classify_graph_capture_trace(input_folder: str):
     """
-    Return {file, batch_size, mode} for a single graph-capture trace file.
+    Return {file, batch_size, mode, capture_type} for a single graph-capture trace file.
     Supports .json, .json.gz, and .zip (containing a .json).
     """
     execution_details_path = os.path.join(input_folder, "execution_details.json")
@@ -258,12 +273,18 @@ def classify_graph_capture_trace(input_folder: str):
     print(f"Found {len(trace_files)} graph-capture trace file(s) in {input_folder}\n")
 
     results = []
+    target_bs_by_tokens = {}
+    legacy_extends = []
     for filepath in trace_files:
         trace_json = load_trace(filepath)
         events = trace_json.get("traceEvents", [])
         dummy_roots = find_dummy_run_roots(events)
         annotation_roots = find_capture_annotation_events(events)
         basename = os.path.basename(filepath)
+        role = next(
+            (r for p, r in CAPTURE_ROLE_PATTERNS if p.search(basename)),
+            SPEC_ROLE_TARGET,
+        )
 
         if annotation_roots and len(annotation_roots) == len(dummy_roots):
             cap = CaptureAnnotation(annotation_roots[0]["name"])
@@ -271,17 +292,48 @@ def classify_graph_capture_trace(input_folder: str):
             print(
                 f"batch_size: {batch_size}, mode: {mode} parsed from annotation, num_captures: {count_stream_begin_captures(events)}"
             )
-            results.append({"file": basename, "batch_size": batch_size, "mode": mode})
+            results.append(
+                {
+                    "file": basename,
+                    "batch_size": batch_size,
+                    "mode": mode,
+                    "capture_type": role,
+                }
+            )
             continue
 
         num_captures = count_stream_begin_captures(events)
         mode = infer_mode_from_captures(num_captures)
-        batch_size = most_common_first_dim(events)
+        tokens = most_common_first_dim(events)
+        runner_bs = SGLANG_RUNNER_BS_PATTERN.match(basename)
+        batch_size = int(runner_bs.group(1)) if runner_bs else tokens
         print(
-            f"batch_size: {batch_size}, mode: {mode} inferred, num_captures: {num_captures}"
+            f"batch_size: {batch_size}, mode: {mode}, capture_type: {role} inferred, num_captures: {num_captures}"
         )
+        entry = {
+            "file": basename,
+            "batch_size": batch_size,
+            "mode": mode,
+            "capture_type": role,
+        }
+        if role == SPEC_ROLE_TARGET:
+            target_bs_by_tokens[(extract_rank(basename), tokens)] = batch_size
+        if role == SPEC_ROLE_DRAFTER_EXTEND and not runner_bs:
+            legacy_extends.append((entry, tokens))
+            continue
+        results.append(entry)
 
-        results.append({"file": basename, "batch_size": batch_size, "mode": mode})
+    # Legacy *_capture_{idx}_* draft-extend files carry no batch size; their
+    # token count equals that of the same-rank target capture of the same bs.
+    for entry, tokens in legacy_extends:
+        batch_size = target_bs_by_tokens.get((extract_rank(entry["file"]), tokens))
+        if batch_size is None:
+            print(
+                f"Warning: no target capture with {tokens} tokens for {entry['file']}"
+            )
+            continue
+        entry["batch_size"] = batch_size
+        results.append(entry)
     with open(f"{input_folder}/execution_details.json", "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults written to {input_folder}/execution_details.json")

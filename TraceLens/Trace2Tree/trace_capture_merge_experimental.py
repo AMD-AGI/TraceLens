@@ -24,6 +24,15 @@ import TraceLens
 
 UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
+from ..TraceIndex.scanner import extract_rank
+from ..TraceUtils.utils.annotation_utils import (
+    SPEC_ROLE_TARGET,
+    find_known_annotations,
+    find_spec_decode_annotations,
+    parse_annotation,
+    spec_decode_batch_sizes,
+    spec_decode_role,
+)
 
 
 def get_subtree_events(tree, event, cat_filter=None, name_filter=None):
@@ -538,10 +547,14 @@ def find_execution_roots(graph_tree):
     """Find iteration-annotation root events (vLLM / SGLang / ATOM) in the graph tree.
 
     Primary (detailed) patterns are tried first, and native (backup) patterns are used only when no primary root is found.
+    Spec-decode roots (verify, draft, draft_extend) are always added.
     """
-    from ..TraceUtils.utils.annotation_utils import find_known_annotations
-
-    return find_known_annotations(graph_tree.events)
+    roots = {
+        e[UID]: e
+        for e in find_known_annotations(graph_tree.events)
+        + find_spec_decode_annotations(graph_tree.events)
+    }
+    return sorted(roots.values(), key=lambda e: e.get("ts", 0))
 
 
 def find_graph_roots_under_execution(execution_root, graphlaunch_events):
@@ -588,33 +601,42 @@ def build_execution_graph_root_map(graph_tree):
 def load_capture_folder(
     capture_folder: str,
     metadata_json_path: str,
-) -> Tuple[Dict[str, List[Tuple[Any, List]]], List[int]]:
-    """Load capture traces from a folder and group by ``{batch_size}_{mode}``.
+    replay_rank: Optional[int] = None,
+) -> Tuple[Dict[str, str], Dict[str, List[int]]]:
+    """Load capture traces from a folder and group by ``{role}_{batch_size}_{mode}``.
 
     Args:
         capture_folder: Directory containing ``graph_capture_rank_0*`` trace files.
         metadata_json_path: Path to a JSON file — a list of objects each with
-            ``file``, ``batch_size``, and ``mode`` keys.
+            ``file``, ``batch_size``, ``mode`` and optional ``capture_type``
+            (``SPEC_ROLE_*``, default target) keys.
+        replay_rank: When set and some captures belong to this rank, only
+            those captures are used.
 
     Returns:
-        Dictionary keyed by ``"{batch_size}_{mode}"`` whose values are lists of
-        ``(capture_tree, capture_roots)`` tuples.
+        Dictionary keyed by ``"{role}_{batch_size}_{mode}"`` whose values are
+        capture file paths, and the captured batch sizes per role.
     """
 
     with open(metadata_json_path, "r") as f:
         metadata_list = json.load(f)
+    if any(extract_rank(e["file"]) == replay_rank for e in metadata_list):
+        metadata_list = [
+            e for e in metadata_list if extract_rank(e["file"]) == replay_rank
+        ]
 
-    result: Dict[str, List[Tuple[Any, List]]] = {}
-    batch_sizes = []
+    result: Dict[str, str] = {}
+    batch_sizes: Dict[str, List[int]] = defaultdict(list)
     for entry in metadata_list:
         filename = entry["file"]
         batch_size = entry["batch_size"]
         mode = entry["mode"]
+        role = entry.get("capture_type", SPEC_ROLE_TARGET)
         if not (mode in ["FULL", "PIECEWISE"] and isinstance(batch_size, int)):
             print("Warning: invalid batch size or mode, skipping: {}".format(entry))
             continue
-        key = "{}_{}".format(batch_size, mode)
-        batch_sizes.append(int(batch_size))
+        key = "{}_{}_{}".format(role, batch_size, mode)
+        batch_sizes[role].append(int(batch_size))
         filepath = os.path.join(capture_folder, filename)
         if not os.path.isfile(filepath):
             print("Warning: capture file not found, skipping: {}".format(filepath))
@@ -651,9 +673,7 @@ def find_execution_details(execution_root) -> Optional[str]:
     Returns ``None`` when no integer batch size can be determined.
     """
     name = execution_root["name"]
-    from ..TraceUtils.utils.annotation_utils import IterationAnnotation
-
-    ann = IterationAnnotation(name)
+    ann = parse_annotation(name)
     if ann.matched and ann.batch_size is not None:
         return str(ann.batch_size)
     parts = name.split("_")
@@ -685,12 +705,19 @@ def merge_capture_trace_into_graph(
     execution_graph_root_map = build_execution_graph_root_map(graph_tree)
 
     capture_map, capture_batch_sizes = load_capture_folder(
-        capture_folder, metadata_json_path
+        capture_folder,
+        metadata_json_path,
+        extract_rank(os.path.basename(graph_tree_filepath)),
+    )
+    spec_batch_sizes = spec_decode_batch_sizes(
+        [root for root, _ in execution_graph_root_map]
     )
 
     # ── Per-execution-root merge loop ──
     merge_failed = False
-    for execution_root, graph_roots in execution_graph_root_map:
+    for (execution_root, graph_roots), spec_batch_size in zip(
+        execution_graph_root_map, spec_batch_sizes
+    ):
         print("Processing execution root: {}".format(execution_root["name"]))
         if len(graph_roots) == 0:
             print(
@@ -701,7 +728,8 @@ def merge_capture_trace_into_graph(
             continue
 
         # ── Resolve capture tree + roots for this execution root ──
-        batch_size = find_execution_details(execution_root)
+        role = spec_decode_role(execution_root["name"]) or SPEC_ROLE_TARGET
+        batch_size = spec_batch_size or find_execution_details(execution_root)
         if batch_size is None:
             print(
                 "Warning: could not determine batch size for execution root {}".format(
@@ -710,12 +738,12 @@ def merge_capture_trace_into_graph(
             )
             continue
         closest_batch_size = find_closest_batch_size(
-            int(batch_size), capture_batch_sizes
+            int(batch_size), capture_batch_sizes[role]
         )
         if closest_batch_size is None:
             print(
-                "Warning: no capture batch size found for batch size {}".format(
-                    batch_size
+                "Warning: no {} capture batch size found for batch size {}".format(
+                    role, batch_size
                 )
             )
             continue
@@ -724,8 +752,8 @@ def merge_capture_trace_into_graph(
         # the capture trace's StreamBeginCapture count.  Try both modes
         # and use whichever is available; when both exist, prefer the one
         # matching the graph launch count.
-        full_key = "{}_FULL".format(closest_batch_size)
-        piece_key = "{}_PIECEWISE".format(closest_batch_size)
+        full_key = "{}_{}_FULL".format(role, closest_batch_size)
+        piece_key = "{}_{}_PIECEWISE".format(role, closest_batch_size)
         if full_key in capture_map and piece_key in capture_map:
             str_key = piece_key if len(graph_roots) != 1 else full_key
         elif full_key in capture_map:
@@ -734,7 +762,9 @@ def merge_capture_trace_into_graph(
             str_key = piece_key
         else:
             print(
-                "Warning: no capture trace for batch size {}".format(closest_batch_size)
+                "Warning: no {} capture trace for batch size {}".format(
+                    role, closest_batch_size
+                )
             )
             continue
         filepath = capture_map[str_key]

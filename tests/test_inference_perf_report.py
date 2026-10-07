@@ -628,6 +628,40 @@ class TestInferenceZipPhase8:
         details = json.loads((capture_dir / "execution_details.json").read_text())
         assert details[0]["batch_size"] == 4
 
+    def test_classify_sglang_spec_decode_captures(self, tmp_path):
+        """Runner names give request bs; legacy draft-extend resolves via tokens."""
+        capture_dir = tmp_path / "cap"
+        capture_dir.mkdir()
+        files = {
+            # name: tokens (most common first dim)
+            "DecodeCudaGraphRunner_bs_7_rank0.json.gz": 42,
+            "EAGLEDraftCudaGraphRunner_bs_7_rank0.json.gz": 7,
+            "EAGLEDraftExtendCudaGraphRunner_capture_6_rank0.json.gz": 42,
+            "EAGLEDraftExtendCudaGraphRunner_capture_9_rank0.json.gz": 30,
+            "graph_capture_rank_0.json.gz": 16,
+        }
+        for name, tokens in files.items():
+            events = [
+                _mk_event("cuda_runtime", "hipStreamBeginCapture", 0, 10, 1, 1, {}),
+                _mk_event(
+                    "cpu_op", "aten::mm", 20, 5, 1, 1, {"Input Dims": [[tokens, 8]]}
+                ),
+            ]
+            with gzip.open(capture_dir / name, "wt", encoding="utf-8") as f:
+                json.dump({"traceEvents": events}, f)
+        classify_graph_capture_trace(str(capture_dir))
+        details = json.loads((capture_dir / "execution_details.json").read_text())
+        got = {d["file"]: (d["capture_type"], d["batch_size"]) for d in details}
+        assert got == {
+            "DecodeCudaGraphRunner_bs_7_rank0.json.gz": ("target", 7),
+            "EAGLEDraftCudaGraphRunner_bs_7_rank0.json.gz": ("drafter", 7),
+            "EAGLEDraftExtendCudaGraphRunner_capture_6_rank0.json.gz": (
+                "drafter_extend",
+                7,
+            ),
+            "graph_capture_rank_0.json.gz": ("target", 16),
+        }
+
 
 @pytest.mark.parametrize("dirpath,trace_gz", _discover_inference_cases())
 def test_inference_fixture_full_report(dirpath, trace_gz, tmp_path):

@@ -458,7 +458,23 @@ TraceLens_generate_perf_report_pytorch_inference \
 When `--capture_folder` is set, TraceLens first classifies the capture traces
 (writing an `execution_details.json` in the folder if one isn't already present),
 then merges the matching subtrees into the graph tree before running the standard
-analysis.
+analysis. Each `execution_details.json` entry lists `file`, `batch_size`, `mode`
+and `capture_type` (`target`, `drafter` or `drafter_extend`; `target` when
+absent). Captures from the same rank as the replay trace are preferred.
+
+### Speculative decoding
+
+For SGLang EAGLE/MTP runs, the `step[VERIFY bs=N]` (`step[TARGET_VERIFY bs=N]` on
+older builds) roots merge with the target captures, and the `draft` and
+`draft_extend` stage spans merge with the drafter and draft-extend captures.
+The stage spans carry no batch size, so they borrow `N` from the adjacent verify
+root. SGLang captures are keyed by request batch size, taken from the
+`*CudaGraphRunner_bs_N_*` file name. A roofline-patched verify label
+(`step[TARGET_VERIFY bs=N c_sq=... c_sqsq=...]`) is also an iteration root, so the
+trace splitter splits on it; it counts as a decode step. `step[DRAFT ...]` spans and stages without a
+graph launch aren't merged. vLLM speculator captures
+(`graph_capture_rank_0_speculator.*`) are classified as `drafter`, which keeps them
+from replacing target captures; the speculator's replay graphs aren't merged yet.
 
 ```{note}
 `--capture_folder` and `--comparison_json_path` can't be used together: the

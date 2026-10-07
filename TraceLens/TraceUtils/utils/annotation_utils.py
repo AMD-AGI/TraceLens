@@ -12,6 +12,7 @@ and populates its fields from whichever registered pattern matches:
 - ``CaptureAnnotation``   -> graph-capture annotations
 """
 
+import bisect
 import re
 from functools import lru_cache
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
@@ -39,9 +40,11 @@ VLLM_NATIVE_PATTERN = re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d
 # step[DECODE bs=64 g_sq=128 g_sqsq=256 g_sqsk=262144 g_sk=131072]  <- MTP: g_sq > bs
 # step[MIXED bs=2 c=1 g=1 c_sq=5 c_sk=8 c_sqsq=25 c_sqsk=40
 #     g_sq=1 g_sk=12 g_sqsq=1 g_sqsk=12]
+# step[TARGET_VERIFY bs=32 c_sq=128 c_sqsq=512 c_sqsk=188244 c_sk=47061]
 # Case-insensitive: some builds emit lowercase phases (``step[decode bs=1]``).
 SGLANG_DETAILED_PATTERN = re.compile(
-    r"step\[(?:EXTEND|DECODE|MIXED)\b[^\]]*sqsq=\d+[^\]]*\]", re.IGNORECASE
+    r"step\[(?:EXTEND|DECODE|MIXED|(?:TARGET_)?VERIFY)\b[^\]]*sqsq=\d+[^\]]*\]",
+    re.IGNORECASE,
 )
 # step[EXTEND bs=2 toks=14721]
 # step[DECODE bs=64]
@@ -49,6 +52,22 @@ SGLANG_DETAILED_PATTERN = re.compile(
 SGLANG_NATIVE_PATTERN = re.compile(
     r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]", re.IGNORECASE
 )
+
+# Spec-decode roots that replay graphs. The drafter graphs replay directly under
+# the draft / draft_extend stage spans; step[DRAFT bs=N] only wraps eager
+# draft-model forwards, so it is not a root.
+# Native VERIFY parses as sglang_native but stays out of the backup tier so
+# native-trace splits are unchanged; the detailed label is a primary-tier root.
+# step[VERIFY bs=32]
+# step[TARGET_VERIFY bs=7]  <- older builds
+SGLANG_VERIFY_PATTERN = re.compile(r"step\[(?:TARGET_)?VERIFY\b[^\]]*\]", re.IGNORECASE)
+SPEC_ROLE_TARGET = "target"
+SPEC_ROLE_DRAFTER = "drafter"
+SPEC_ROLE_DRAFTER_EXTEND = "drafter_extend"
+SGLANG_SPEC_STAGE_ROLES = {
+    "draft": SPEC_ROLE_DRAFTER,
+    "draft_extend": SPEC_ROLE_DRAFTER_EXTEND,
+}
 
 # prefill[bs=2 tok=14721 ctx=[7803, 6918]]
 # prefill[bs=6 tok=17408 ctx=[4096, 4096, 4096]...+3]  <- ctx truncated past 5
@@ -136,7 +155,8 @@ def _fill_sglang_native(ann, name):
         return False
     kind_word, bs = m.group(1).upper(), int(m.group(2))
     toks = int(m.group(3) or 0)
-    if kind_word == "DECODE":
+    # VERIFY carries no per-request draft-token count, so g_sq is requests here.
+    if kind_word in ("DECODE", "VERIFY", "TARGET_VERIFY"):
         ann.generation_requests = ann.generation_sum = ann.g_sq = bs
     else:  # EXTEND / MIXED treated as prefill; toks = total prompt tokens.
         ann.context_requests = bs
@@ -164,6 +184,10 @@ def _fill_sglang_detailed(ann, name):
     )
     if mode == "DECODE":
         ann.generation_requests, ann.generation_sum = bs, ann.g_sq
+    # Verify is a decode step, but its draft tokens are tree-masked against each
+    # other, so the roofline patch emits them as c_* for the causal correction.
+    elif mode in ("VERIFY", "TARGET_VERIFY"):
+        ann.generation_requests, ann.generation_sum = bs, ann.c_sq
     elif mode == "EXTEND":
         ann.context_requests, ann.context_sum = bs, ann.c_sq
     else:  # MIXED: c=/g= are per-group request counts.
@@ -236,6 +260,7 @@ class IterationAnnotation:
         ("vllm_native", VLLM_NATIVE_PATTERN, _fill_vllm_native),
         ("sglang_detailed", SGLANG_DETAILED_PATTERN, _fill_sglang_detailed),
         ("sglang_native", SGLANG_NATIVE_PATTERN, _fill_sglang_native),
+        ("sglang_native", SGLANG_VERIFY_PATTERN, _fill_sglang_native),
         ("atom_detailed", ATOM_DETAILED_PATTERN, _fill_atom),
         ("atom_native", ATOM_NATIVE_PATTERN, _fill_atom),
         ("diffusion_native", DIFFUSION_NATIVE_PATTERN, _fill_diffusion),
@@ -392,6 +417,67 @@ def find_known_annotations(annotations: List[dict]) -> List[dict]:
             matches.sort(key=lambda x: x.get("ts", 0))
             return matches
     return []
+
+
+def spec_decode_role(name: str) -> Optional[str]:
+    """Capture role (``SPEC_ROLE_*``) a spec-decode root replays, else ``None``."""
+    if SGLANG_VERIFY_PATTERN.match(name):
+        return SPEC_ROLE_TARGET
+    return SGLANG_SPEC_STAGE_ROLES.get(name)
+
+
+def find_spec_decode_annotations(annotations: List[dict]) -> List[dict]:
+    """Spec-decode roots (verify + drafter stages), sorted by timestamp.
+
+    Untiered, unlike ``find_known_annotations``: these roots coexist with
+    detailed prefill roots, which would otherwise hide them.
+    """
+    matches = [
+        e
+        for e in annotations
+        if e.get("cat") == ANNOTATION_CAT and spec_decode_role(e.get("name", ""))
+    ]
+    matches.sort(key=lambda x: x.get("ts", 0))
+    return matches
+
+
+def spec_decode_batch_sizes(roots: List[dict]) -> List[Optional[int]]:
+    """Request batch size per root, aligned with *roots*.
+
+    Requests, not tokens: SGLang captures are keyed by request bs, while a
+    detailed verify label's ``batch_size`` counts draft tokens.
+    Drafter stage spans carry no batch size; they take it from the VERIFY root
+    closest in time, which belongs to the same iteration. ``None`` for roots
+    that are not spec-decode roots or have no VERIFY to borrow from.
+    """
+
+    def requests(root):
+        ann = parse_annotation(root["name"])
+        return ann.context_requests + ann.generation_requests
+
+    verify = sorted(
+        (r for r in roots if SGLANG_VERIFY_PATTERN.match(r.get("name", ""))),
+        key=lambda r: r["ts"],
+    )
+    starts = [r["ts"] for r in verify]
+
+    def gap(a, b):
+        return max(0, b["ts"] - a["ts"] - a["dur"], a["ts"] - b["ts"] - b["dur"])
+
+    sizes = []
+    for root in roots:
+        role = spec_decode_role(root.get("name", ""))
+        if role == SPEC_ROLE_TARGET:
+            sizes.append(requests(root))
+            continue
+        i = bisect.bisect_left(starts, root["ts"])
+        nearby = verify[max(i - 1, 0) : i + 1]
+        if role is None or not nearby:
+            sizes.append(None)
+            continue
+        nearest = min(nearby, key=lambda v: gap(root, v))
+        sizes.append(requests(nearest))
+    return sizes
 
 
 # --- family keys ------------------------------------------------------------

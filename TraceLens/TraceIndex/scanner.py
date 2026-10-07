@@ -15,7 +15,10 @@ from typing import Optional
 from TraceLens.TraceIndex.models import TraceRecord
 from TraceLens.TraceIndex.utils import classify_skip, normalize_path, rel_to
 
-RANK_RE = re.compile(r"(?:^|[^A-Za-z])rank[-_]?(\d+)(?:[^0-9]|$)", re.IGNORECASE)
+# rank0.123.pt.trace.json.gz, graph_capture_rank_0.123..., 123.45-TP-0.trace.json.gz (SGLang)
+RANK_RE = re.compile(
+    r"(?:^|[^A-Za-z])(?:rank[-_]?|TP-)(\d+)(?:[^0-9]|$)", re.IGNORECASE
+)
 
 
 def is_json_gz(path: Path) -> bool:
