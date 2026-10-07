@@ -3073,6 +3073,30 @@ def _materialize_external_input_constants(graph: ComputationGraph) -> Computatio
                 constant=True,
                 extra_metadata={"external_inputs": [str(name)]},
             )
+            # An op that reads its own buffer and nothing else -- no operation
+            # predecessor, no parameter -- still gets the module's chain input
+            # docked on it when it happens to be the module's FIRST step.
+            # ``self.inv_freq[None, :, None]`` opens a rotary embedding and uses
+            # ``x`` for nothing but a device, so the operand it actually reads is
+            # the buffer. Put that edge FIRST: shape rules read the first operand,
+            # and reading the chain input there sized the whole rotary chain from
+            # the hidden state. The chain edge stays, so the op still has a
+            # non-constant source once the render filter drops the constants.
+            if not block.operation_predecessors and not block.param_inputs:
+                insert_at = next(
+                    (
+                        position
+                        for position, link in enumerate(graph.links)
+                        if link[1] == index
+                    ),
+                    None,
+                )
+                if insert_at is not None:
+                    graph.links.insert(insert_at, (leaf, index))
+                    for frame in graph.inline_frames:
+                        if index in frame.node_indices:
+                            frame.node_indices.append(leaf)
+                    continue
             new_links.append((leaf, index))
             # The leaf is an internal operand of its consumer, so it must live in
             # the same inline frame(s) — otherwise it lands in the parent namespace
@@ -3830,7 +3854,15 @@ def _append_step_link(
     elif last_index is not None:
         graph.links.append((last_index, step_index))
     elif input_index is not None:
-        graph.links.append((input_index, step_index))
+        # The FIRST step of a module normally opens on what the module was
+        # handed. Not always: a rotary embedding opens on
+        # ``self.inv_freq[None, :, None]``, which reads its own buffer and uses
+        # ``x`` for nothing but a device. That step already has the operand it
+        # reads, and handing it the chain input as well gives a one-operand op
+        # two -- the shape rule reads the first, so the unsqueeze reported the
+        # hidden state's shape and the whole rotary chain was sized from it.
+        if not _node_has_incoming_links(graph, step_index):
+            graph.links.append((input_index, step_index))
 
 
 def _node_has_outgoing_links(graph: ComputationGraph, index: int) -> bool:
