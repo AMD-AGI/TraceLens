@@ -44,7 +44,9 @@ class TraceHealthReport:
 
     def log_findings(self) -> None:
         for f in self.findings:
-            if f.level in ("warn", "error"):
+            if f.level == "error":
+                raise ValueError(f"[trace_health:{f.check_id}] {f.message}")
+            elif f.level == "warn":
                 warnings.warn(
                     f"[trace_health:{f.check_id}] {f.message}",
                     UserWarning,
