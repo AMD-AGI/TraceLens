@@ -6118,9 +6118,21 @@ class _ForwardOperationExtractor:
             if label is None:
                 return right or left, [*left_external, *right_external]
             # A comparison over only host-scalar operands (index bookkeeping such
-            # as a branch predicate) resolves both sides to no producer; emit
-            # nothing, mirroring the ``ast.BinOp`` empty-operand guard.
-            if not left and not right:
+            # as a branch predicate, ``seq_len == 1``) is not a tensor op; emit
+            # nothing, mirroring the ``ast.BinOp`` empty-operand guard. Testing
+            # that by "neither side resolved to a producer" caught more than it
+            # meant to: a TENSOR parameter has no internal producer either, so
+            # ``attention_mask == 0`` -- the padding mask MiniMax's
+            # ``build_block_mask`` builds and then ``&``s with its block
+            # selection -- emitted nothing, the ``&`` lost an operand, and
+            # ``attention_mask`` reached no op in that frame at all. Ask what the
+            # operands ARE, which is what the rule always meant.
+            if (
+                not left
+                and not right
+                and self._is_host_scalar_expr(node.left)
+                and self._is_host_scalar_expr(node.comparators[0])
+            ):
                 return None, [*left_external, *right_external]
             producer = self._emit(
                 node,
