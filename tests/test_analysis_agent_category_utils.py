@@ -553,7 +553,6 @@ def test_standalone_gemm_epilogue_full_estimate():
     assert est["estimation"] == "full"
     assert est["category"] == "kernel_fusion"
     assert est["type"] == "kernel_fusion"
-    assert est["affected_gpu_kernels"] == ["Cijk_gemm", "ew_add"]
 
 
 def test_standalone_skip_below_min_impact_score():
@@ -1795,6 +1794,7 @@ def test_compute_fusion_comparative_rows_trace2_uses_trace2_baseline():
         perf_rows2={tuple(_KEY): _perf_row()},
         baseline2_ms=50.0,
     )
+    assert est["op_keys"] == [_KEY]
     assert est["rows_trace1"][0]["pct_e2e"] == "20.00"
     assert est["rows_trace2"][0]["pct_e2e"] == "10.00"
     assert "rows" not in est
@@ -1852,11 +1852,63 @@ def test_driver_fusion_main_ok_with_estimate(tmp_path, monkeypatch):
     assert metrics["status"] == "OK"
     assert metrics["candidate_count"] == 1
     assert metrics["platform"] == "MI300X"
-    assert "high_confidence_kernel_map" in metrics
+    # Name and module hint match but only one GEMM: medium confidence, not emitted.
+    assert metrics["impact_estimates"][0]["confidence"] == "medium"
+    assert metrics["impact_estimates"][0]["op_keys"] == [mm_key, add_key]
+    assert metrics["high_confidence_op_keys"] == []
     rows = metrics["impact_estimates"][0]["rows"]
     assert [r["operation"] for r in rows] == ["aten::mm", "aten::add"]
     assert [r["time_ms"] for r in rows] == ["15.000", "15.000"]
     assert [r["pct_e2e"] for r in rows] == ["15.00", "15.00"]
+
+
+def test_driver_fusion_main_emits_only_high_confidence_op_keys(tmp_path, monkeypatch):
+    base = str(tmp_path)
+    mm_key = ["aten::mm", "x", "y", "z", "", "", "", ""]
+    add_key = ["aten::add", "x", "y", "z", "", "", "", ""]
+
+    def candidate(name, kernels, total_us, op_keys):
+        return {
+            "module_name": name,
+            "base_name": name,
+            "instance_count": 1,
+            "kernel_count": len(kernels),
+            "total_kernel_time_us": total_us,
+            "kernels": [
+                {
+                    "name": kn,
+                    "type": "GEMM" if kn.startswith("Cijk") else "Elementwise",
+                    "dur_us": total_us / len(kernels),
+                    "perf_key": mm_key if kn.startswith("Cijk") else add_key,
+                }
+                for kn in kernels
+            ],
+            "ops": [
+                _op_group(k, [kn], total_us / len(kernels), 1)
+                for k, kn in zip(op_keys, kernels)
+            ],
+        }
+
+    other_thread = mm_key[:-1] + ["t_other"]
+    high_keys = [mm_key, other_thread, add_key]
+    candidates = [
+        # Two GEMMs + an elementwise tail with an "mlp" name: high confidence.
+        candidate("mlp_high", ["Cijk_a", "Cijk_b", "ew_a"], 30000.0, high_keys),
+        # One GEMM only: medium confidence.
+        candidate("mlp_medium", ["Cijk_c", "ew_c"], 30000.0, [mm_key, add_key]),
+        # High confidence but its savings fall under the impact gate: no estimate.
+        candidate("mlp_gated", ["Cijk_d", "Cijk_e", "ew_d"], 3000.0, high_keys),
+    ]
+    _write_fusion_inputs(base, candidates)
+    monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
+    kernel_fusion_analysis.main()
+    metrics = _read_metrics(base, "kernel_fusion")
+    by_name = {e["operation"]: e for e in metrics["impact_estimates"]}
+    assert set(by_name) == {"mlp_high", "mlp_medium"}
+    assert by_name["mlp_high"]["confidence"] == "high"
+    assert by_name["mlp_medium"]["confidence"] == "medium"
+    assert metrics["high_confidence_op_keys"] == high_keys
+    assert by_name["mlp_medium"]["op_keys"] == [mm_key, add_key]
 
 
 # ----- multi_kernel_analysis.main() end-to-end -----

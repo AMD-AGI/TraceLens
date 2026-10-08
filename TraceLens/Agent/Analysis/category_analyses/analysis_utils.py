@@ -19,10 +19,9 @@ This module provides common functions for:
 import ast
 import json
 import os
-import re
 import sys
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -426,29 +425,19 @@ def calculate_efficiency(
     return result
 
 
-def _load_fusion_map(output_dir: str) -> Dict[str, str]:
-    """Load high-confidence GPU kernel name -> fusion candidate name mapping."""
+def _load_fusion_op_keys(output_dir: str) -> Set[tuple]:
+    """Load the perf-row keys of the ops covered by high-confidence fusion candidates."""
     if not output_dir:
-        return {}
+        return set()
     path = os.path.join(output_dir, "category_data", "kernel_fusion_metrics.json")
     if not os.path.exists(path):
-        return {}
+        return set()
     try:
         with open(path, "r") as f:
-            return json.load(f).get("high_confidence_kernel_map", {})
-    except (json.JSONDecodeError, KeyError):
-        return {}
-
-
-def _match_fusion_op(kd_str: str, fusion_map: Dict[str, str]) -> Optional[str]:
-    """Match kernel_details_summary against fusion kernel map with prefix fallback."""
-    for kn in re.findall(r"'name':\s*'([^']+)'", kd_str):
-        if kn in fusion_map:
-            return fusion_map[kn]
-        for fk, bn in fusion_map.items():
-            if fk.startswith(kn) or kn.startswith(fk):
-                return bn
-    return None
+            keys = json.load(f).get("high_confidence_op_keys", [])
+    except json.JSONDecodeError:
+        return set()
+    return {tuple(key) for key in keys}
 
 
 def _parse_call_stack(call_stack_full: str) -> List[str]:
@@ -556,7 +545,7 @@ def build_operation_metrics(
     """
     peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
     maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
-    fusion_map = _load_fusion_map(metadata.get("output_dir", ""))
+    fusion_op_keys = _load_fusion_op_keys(metadata.get("output_dir", ""))
     e2e_ms_total = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
 
     # Calculate category total for % of category (kept for analyzer screening)
@@ -656,11 +645,13 @@ def build_operation_metrics(
 
         op_metric["library"] = classify_kernel_library(op_name, kd_str)
 
-        if fusion_map and kd_str:
-            matched = _match_fusion_op(kd_str, fusion_map)
-            if matched:
-                op_metric["fusion_flagged"] = True
-                op_metric["fusion_candidate_name"] = matched
+        if fusion_op_keys and (
+            perf_row_key(
+                op_name, *(row.get(c) for c in PERF_ARG_COLS + PERF_THREAD_COLS)
+            )
+            in fusion_op_keys
+        ):
+            op_metric["fusion_flagged"] = True
 
         # After fusion_flagged is set: the ladder reads it to skip fused rows.
         score = _row_impact_score(op_metric, e2e_ms_total, comparison_scope)

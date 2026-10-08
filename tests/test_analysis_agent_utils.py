@@ -26,7 +26,6 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     _extract_call_chain,
     _extract_kernel_names,
     _extract_module_chain,
-    _match_fusion_op,
     _parse_call_stack,
     _resolve_peak_maf,
     build_category_findings,
@@ -2776,17 +2775,64 @@ def test_extract_call_chain_filters_dispatch_internals():
     ]
 
 
-# ----- analysis_utils: _match_fusion_op -----
+# ----- analysis_utils: build_operation_metrics fusion flagging -----
 
 
-def test_match_fusion_op_exact_and_prefix():
-    assert _match_fusion_op("[{'name': 'k1'}]", {"k1": "base"}) == "base"
-    # Prefix fallback: trace kernel name longer than the map key.
-    assert _match_fusion_op("[{'name': 'k1_long'}]", {"k1": "base"}) == "base"
+_FUSION_ADD_KEY = ["aten::add", "[[1, 12, 5, 5]]", "['float']", "", "", "p", "", "t1"]
 
 
-def test_match_fusion_op_no_match_returns_none():
-    assert _match_fusion_op("[{'name': 'other'}]", {"k1": "base"}) is None
+def _write_fusion_op_keys(out_dir, keys):
+    cat_dir = os.path.join(out_dir, "category_data")
+    os.makedirs(cat_dir, exist_ok=True)
+    with open(os.path.join(cat_dir, "kernel_fusion_metrics.json"), "w") as f:
+        json.dump({"high_confidence_op_keys": keys}, f)
+
+
+def _fusion_ops_df():
+    base = {
+        "Input Dims": "[[1, 12, 5, 5]]",
+        "Input type": "['float']",
+        "Input Strides": "",
+        "Concrete Inputs": "",
+        "process_name": "p",
+        "process_label": "",
+        "kernel_details_summary": "[{'name': 'vectorized_add'}]",
+        "count": 1,
+    }
+    rows = [
+        {"name": "aten::add", "thread_name": "t1", **base},
+        {"name": "aten::add", "thread_name": "t2", **base},
+        {**base, "name": "aten::mul", "thread_name": "t1"},
+    ]
+    df = pd.DataFrame(rows)
+    df["Kernel Time (µs)_sum"] = [300.0, 200.0, 100.0]
+    return df
+
+
+def _flagged_by_row(tmp_path, keys):
+    if keys is not None:
+        _write_fusion_op_keys(str(tmp_path), keys)
+    meta = {
+        "peak_hbm_bw_tbs": 5.3,
+        "max_achievable_tflops": {"matrix_bf16": 708},
+        "gpu_utilization": {"total_time_ms": 1000.0},
+        "output_dir": str(tmp_path),
+    }
+    ops = build_operation_metrics(_fusion_ops_df(), meta, {})
+    return {(o["name"], o["time_ms"]): bool(o.get("fusion_flagged")) for o in ops}
+
+
+def test_build_operation_metrics_flags_row_matching_op_key(tmp_path):
+    flagged = _flagged_by_row(tmp_path, [_FUSION_ADD_KEY])
+    assert flagged[("aten::add", 0.3)] is True
+    # Same name + args on another thread is a different row.
+    assert flagged[("aten::add", 0.2)] is False
+    # Shares the kernel name with the fused op, but is a different op.
+    assert flagged[("aten::mul", 0.1)] is False
+
+
+def test_build_operation_metrics_no_fusion_metrics_flags_nothing(tmp_path):
+    assert not any(_flagged_by_row(tmp_path, None).values())
 
 
 # ----- analysis_utils: build_operation_metrics call-chain cap -----
@@ -5183,13 +5229,9 @@ def test_analysis_utils_efficiency_and_fusion(tmp_path):
     fusion_dir = tmp_path / "category_data"
     fusion_dir.mkdir()
     (fusion_dir / "kernel_fusion_metrics.json").write_text(
-        json.dumps({"high_confidence_kernel_map": {"gemm_kernel": "fused_gemm"}})
+        json.dumps({"high_confidence_op_keys": [["aten::mm", "x", "y"]]})
     )
-    assert au._load_fusion_map(str(tmp_path))["gemm_kernel"] == "fused_gemm"
-    assert (
-        au._match_fusion_op("{'name': 'gemm_kernel'}", {"gemm_kernel": "fused"})
-        == "fused"
-    )
+    assert au._load_fusion_op_keys(str(tmp_path)) == {("aten::mm", "x", "y")}
 
 
 def test_orchestrator_comparative_main(tmp_path, monkeypatch):

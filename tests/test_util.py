@@ -1439,7 +1439,7 @@ def test_pftrace_parser_validation_errors(tmp_path):
 
 
 class TestAnalysisUtilsPhase13:
-    def test_efficiency_memory_bound_and_fusion_map_empty(self, tmp_path):
+    def test_efficiency_memory_bound_and_fusion_keys_empty(self, tmp_path):
         row = pd.Series(
             {
                 "FLOPS/Byte": 0.5,
@@ -1453,7 +1453,7 @@ class TestAnalysisUtilsPhase13:
             row, peak_maf_or_maf_dict={"matrix_fp16": 100.0}, peak_hbm_bw=5300
         )
         assert eff["bound_type"] == "memory"
-        assert au._load_fusion_map(str(tmp_path)) == {}
+        assert au._load_fusion_op_keys(str(tmp_path)) == set()
 
 
 class TestAnalysisUtilsPhase7:
@@ -1489,8 +1489,7 @@ class TestAnalysisUtilsPhase7:
                 }
             )
         )
-        loaded = au._load_fusion_map(str(tmp_path))
-        assert isinstance(loaded, dict)
+        assert au._load_fusion_op_keys(str(tmp_path)) == set()
 
         ops = [
             {

@@ -90,6 +90,7 @@ with an HTML comment and an `####` heading:
 
 The five labels below must appear **in this order**, each on its own line with a
 blank line between them. The validator checks for these as substring matches.
+Fusion tier (`tier=fusion`): the same labels except **Reasoning for Slowdown:**, which fusion blocks omit.
 
 | Label | Purpose |
 |-------|---------|

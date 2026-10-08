@@ -2369,9 +2369,9 @@ class TestPush95Phase2:
         fusion_dir = tmp_path / "category_data"
         fusion_dir.mkdir()
         (fusion_dir / "kernel_fusion_metrics.json").write_text(
-            json.dumps({"high_confidence_kernel_map": {"gemm_a": "fused_a"}})
+            json.dumps({"high_confidence_op_keys": [["aten::mm", "x", "y"]]})
         )
-        assert au._load_fusion_map(str(tmp_path))["gemm_a"] == "fused_a"
+        assert au._load_fusion_op_keys(str(tmp_path)) == {("aten::mm", "x", "y")}
 
         ops = [{"kernel_names": ["a", "b"], "base_name": "Block", "instance_count": 2}]
         assert len(kfa._filter_and_dedup(ops)) == 1

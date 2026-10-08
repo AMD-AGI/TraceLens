@@ -375,9 +375,6 @@ def _comparative_estimate(
         "modeled_kernel_count": len(t1_kernels),
         "delta_kernel_count": candidate.get("delta", 0),
         "confidence": _classify_confidence(candidate, enriched_t1),
-        "affected_gpu_kernels": [
-            k.get("name", k.get("kernel_name", "")) for k in t1_kernels
-        ],
         "fusion_type": "matrix_compute" if has_matrix_ops else "memory_bound",
     }
 
@@ -512,7 +509,6 @@ def _standalone_estimate(
         "kernel_count": len(kernels),
         "modeled_kernel_count": len(modeled),
         "confidence": _classify_confidence(candidate, enriched),
-        "affected_gpu_kernels": [e["name"] for e in enriched],
         "fusion_type": "matrix_compute" if has_matrix_ops else "memory_bound",
     }
 
@@ -555,8 +551,8 @@ def compute_fusion_impact_estimates(
     and a warning is emitted.
 
     Each estimate includes a deterministic ``confidence`` level (high / medium /
-    low) and the list of GPU kernel names (``affected_gpu_kernels``) so that
-    downstream compute-category scripts can skip fusion-covered operations.
+    low) and the perf keys of its launching ops (``op_keys``) so that downstream
+    compute-category scripts can skip fusion-covered operations.
 
     ``perf_rows`` (``load_perf_rows`` of the unified perf summary) supplies each
     kernel's perf data. Each estimate also carries its detail-table ``rows``
@@ -614,6 +610,8 @@ def compute_fusion_impact_estimates(
             estimate["rows"] = build_rows(
                 candidate["ops"], perf_rows, baseline_ms, *peaks
             )
+        ops = candidate["ops_trace1" if is_comparative else "ops"]
+        estimate["op_keys"] = [g["perf_key"] for g in ops if g["perf_key"]]
         estimates.append(estimate)
 
     return sorted(estimates, key=lambda x: x["impact_score"], reverse=True)
@@ -836,14 +834,13 @@ def main():
     if warnings:
         metrics["warnings"] = warnings
 
-    high_confidence_kernel_map: Dict[str, str] = {}
-    for est in impact_estimates:
-        if est.get("confidence") == "high":
-            op_name = est["operation"]
-            for kn in est.get("affected_gpu_kernels", []):
-                if kn:
-                    high_confidence_kernel_map[kn] = op_name
-    metrics["high_confidence_kernel_map"] = high_confidence_kernel_map
+    high_confidence_op_keys = [
+        key
+        for est in impact_estimates
+        if est.get("confidence") == "high"
+        for key in est["op_keys"]
+    ]
+    metrics["high_confidence_op_keys"] = high_confidence_op_keys
 
     output_path = write_metrics_json(metrics, args.output_dir, "kernel_fusion")
     print(f"Kernel fusion analysis complete:")
@@ -851,9 +848,7 @@ def main():
     print(f"  With estimates: {len(impact_estimates)}")
     print(f"  Total impact_score (mid): {total_impact_score:.2f}")
     high_count = sum(1 for e in impact_estimates if e.get("confidence") == "high")
-    print(
-        f"  High confidence: {high_count}, kernel map entries: {len(high_confidence_kernel_map)}"
-    )
+    print(f"  High confidence: {high_count}, op keys: {len(high_confidence_op_keys)}")
     if warnings:
         print(f"  Warnings: {len(warnings)}")
     print(f"  Metrics written to: {output_path}")
