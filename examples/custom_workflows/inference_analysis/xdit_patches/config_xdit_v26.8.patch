@@ -1,6 +1,6 @@
 --- a/xfuser/config/args.py
 +++ b/xfuser/config/args.py
-@@ -143,6 +143,8 @@
+@@ -145,6 +145,8 @@
      # Model runner specific
      num_iterations: int = 1
      profile: bool = False
@@ -9,7 +9,7 @@
      profile_wait: int = 2
      profile_warmup: int = 2
      profile_active: int = 1
-@@ -661,6 +663,16 @@
+@@ -695,6 +697,16 @@
              help="active argument for torch.profiler.schedule. Only used with --profile.",
          )
          parser.add_argument(
@@ -26,7 +26,7 @@
              "--warmup_calls",
              help="The number of full pipe calls to warmup the model.",
              default=0,
-@@ -820,6 +832,11 @@
+@@ -911,6 +923,11 @@
      def from_runner_args(cls, args: dict):
          attrs = [attr.name for attr in dataclasses.fields(cls)]
          engine_args = cls(**{arg_name: arg_value for arg_name, arg_value in args.items() if arg_name in attrs})
@@ -48,7 +48,7 @@
  import functools
  from PIL.Image import Image
  from typing import Callable, List, Optional, Tuple, Generator
-@@ -125,6 +126,7 @@
+@@ -139,6 +140,7 @@
      cross_attention_backend: bool = False
      supports_sparse_attention_backends: bool = False
      supports_sparge_attention_backends: bool = False
@@ -56,7 +56,7 @@
      supports_distilled_weights: bool = False
  
  @dataclass(frozen=True)
-@@ -435,7 +437,7 @@
+@@ -513,7 +515,7 @@
          warmup_steps = self._get_compile_warmup_steps(input_args)
          if warmup_steps is not None:
              compile_args["num_inference_steps"] = warmup_steps
@@ -65,7 +65,7 @@
  
  
      def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
-@@ -520,16 +522,21 @@
+@@ -598,16 +600,21 @@
              active=self.config.profile_active,
          )
          num_repetitions = self.config.profile_wait + self.config.profile_warmup + self.config.profile_active
@@ -89,7 +89,7 @@
                      if self.config.batch_size: # Run in batched mode
                          output, batch_timings = self._run_pipe_batched(input_args)
                          timing = sum(batch_timings)
-@@ -616,6 +623,37 @@
+@@ -698,6 +705,37 @@
          elapsed_time = start.elapsed_time(end) / 1000  # Convert to seconds
          return out, elapsed_time
  
@@ -129,7 +129,7 @@
          use_compile = self.config.use_torch_compile
 --- a/xfuser/model_executor/models/runner_models/flux.py
 +++ b/xfuser/model_executor/models/runner_models/flux.py
-@@ -56,6 +56,7 @@
+@@ -54,6 +54,7 @@
          enable_tiling=True,
          enable_slicing=True,
          fully_shard_degree=True,
@@ -137,25 +137,25 @@
      )
      default_input_values = DefaultInputValues(
          height=1024,
-@@ -241,6 +242,7 @@
-         enable_slicing=True,
+@@ -267,6 +268,7 @@
          use_parallel_vae=True,
          use_fbcache=True,
+         pipefusion_parallel_degree=True,
 +        profile_capture_phase=True,
      )
      default_input_values = DefaultInputValues(
          height=1024,
-@@ -352,6 +354,7 @@
-         use_parallel_vae=True,
+@@ -417,6 +419,7 @@
          fully_shard_degree=True,
          use_fbcache=True,
+         pipefusion_parallel_degree=True,
 +        profile_capture_phase=True,
      )
  
      default_input_values = DefaultInputValues(
 --- a/xfuser/model_executor/models/runner_models/ltx.py
 +++ b/xfuser/model_executor/models/runner_models/ltx.py
-@@ -59,6 +59,7 @@
+@@ -58,6 +58,7 @@
          ring_degree=True,
          enable_tiling=True,
          enable_slicing=True,
@@ -163,7 +163,7 @@
      )
  
      _STG_SCALE = 1.0
-@@ -191,7 +192,7 @@
+@@ -196,7 +197,7 @@
          # two steps to warmup the torch compiler
          compile_args = copy.deepcopy(input_args)
          compile_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic
@@ -172,7 +172,7 @@
  
      def save_output(self, output: DiffusionOutput) -> None:
          pipe_args = output.pipe_args
-@@ -238,6 +239,7 @@
+@@ -251,6 +252,7 @@
          enable_tiling=True,
          enable_slicing=True,
          use_fp8_gemms=True,
@@ -180,7 +180,7 @@
      )
  
      def _load_model(self) -> DiffusionPipeline:
-@@ -325,7 +327,7 @@
+@@ -344,7 +346,7 @@
          # two steps to warmup the torch compiler
          compile_args = copy.deepcopy(input_args)
          compile_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic
