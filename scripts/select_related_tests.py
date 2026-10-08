@@ -8,9 +8,11 @@
 """Choose pytest files for a pull request from the paths it changes.
 
 A test is related when it imports a changed module, directly or through another
-module, or when its source names a changed data path. Changes that can break
-collection for the rest of the suite run every test: package metadata,
-``tests/conftest.py``, and modules imported while loading ``TraceLens``.
+module, when loading it runs a package ``__init__`` that imports the changed
+module, or when its source names a changed path, including pieces passed to
+``os.path.join``. Changes that can break collection for the rest of the suite
+run every test: package metadata, ``tests/conftest.py``, and modules imported
+while loading ``TraceLens``.
 """
 
 from __future__ import annotations
@@ -109,6 +111,9 @@ class _ImportCollector(ast.NodeVisitor):
             arg = node.args[0]
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                 self.imports.add(arg.value)
+        suffix = _path_join_suffix(node)
+        if suffix:
+            self.paths.add(suffix)
         self.generic_visit(node)
 
     def visit_Constant(self, node):
@@ -138,7 +143,7 @@ def select_related_tests(repo_root, changed_paths):
     if _touches_package_import_cone(changed, modules, resolved):
         return Selection("all", ())
 
-    dependents = _dependents(resolved)
+    dependents = _dependents(resolved, modules)
     seeds = set()
     for path in changed:
         seeds.update(
@@ -393,12 +398,24 @@ def _longest_known_prefix(name, aliases):
     return None
 
 
-def _dependents(resolved):
+def _dependents(resolved, modules):
+    """Reverse import edges, plus the package ``__init__`` that runs on import.
+
+    Importing ``pkg.sub`` executes ``pkg/__init__.py``. A test of ``pkg.sub``
+    therefore runs every module that ``pkg/__init__.py`` imports, even when the
+    test never names those modules.
+    """
+    packages = {
+        name for name, rel in modules.items() if Path(rel).name == "__init__.py"
+    }
     dependents = defaultdict(set)
     for module, deps in resolved.items():
         for dep in deps:
             if dep != module:
                 dependents[dep].add(module)
+            parent = dep.rpartition(".")[0]
+            if parent in packages and parent != module:
+                dependents[parent].add(module)
     return dependents
 
 
@@ -496,9 +513,54 @@ def _literal_matches_path(literal, changed):
         return False
     lit = lit.strip("/")
     changed = changed.strip("/")
-    return (
-        lit == changed or changed.startswith(lit + "/") or lit.startswith(changed + "/")
-    )
+    if lit == changed or changed.startswith(lit + "/") or lit.startswith(changed + "/"):
+        return True
+    # A relative tail such as eval_utils/workflow_scripted_evals.py.
+    filename = lit.rsplit("/", 1)[-1]
+    return "." in filename and (changed == lit or changed.endswith("/" + lit))
+
+
+def _path_join_suffix(node):
+    """Constant path tail of an ``os.path.join`` or ``Path.joinpath`` call.
+
+    Dynamic arguments reset the tail, so ``join(root, "eval_utils", "file.py")``
+    still yields ``eval_utils/file.py``.
+    """
+    if not isinstance(node, ast.Call) or not _is_path_join(node):
+        return None
+    parts = []
+    for arg in node.args:
+        piece = _constant_path_piece(arg)
+        if piece is None:
+            parts = []
+            continue
+        parts.extend(part for part in piece.strip("/").split("/") if part)
+    # Directory-only tails such as ``TraceLens/TraceUtils`` are import roots,
+    # not a claim that every file under them is covered by this test.
+    if len(parts) < 2 or "." not in parts[-1]:
+        return None
+    suffix = "/".join(parts)
+    if len(suffix) < 8:
+        return None
+    return suffix
+
+
+def _constant_path_piece(node):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value.replace("\\", "/")
+    if isinstance(node, ast.Call):
+        return _path_join_suffix(node)
+    return None
+
+
+def _is_path_join(node):
+    func = node.func
+    if isinstance(func, ast.Name) and func.id in {"join", "joinpath", "Path"}:
+        return True
+    if isinstance(func, ast.Attribute) and func.attr in {"join", "joinpath"}:
+        # ``" ".join(...)`` is string joining, not a filesystem path.
+        return not isinstance(func.value, ast.Constant)
+    return False
 
 
 def _relative_module(package, level, module):

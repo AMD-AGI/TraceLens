@@ -107,9 +107,79 @@ def test_data_path_string_selects_the_test_that_names_it(tmp_path):
     assert selection.test_files == ("tests/test_reads_trace.py",)
 
 
+def test_sibling_import_runs_package_init_dependencies(tmp_path):
+    _write(tmp_path / "TraceLens" / "__init__.py", '"""package"""\n')
+    _write(
+        tmp_path / "TraceLens" / "sub" / "__init__.py",
+        "from .shared import value\n",
+    )
+    _write(tmp_path / "TraceLens" / "sub" / "shared.py", "value = 1\n")
+    _write(tmp_path / "TraceLens" / "sub" / "other.py", "def other():\n    return 2\n")
+    _write(
+        tmp_path / "tests" / "test_other.py",
+        "from TraceLens.sub.other import other\n\n"
+        "def test_other():\n    assert other() == 2\n",
+    )
+    _write(
+        tmp_path / "tests" / "test_shared.py",
+        "from TraceLens.sub.shared import value\n\n"
+        "def test_shared():\n    assert value == 1\n",
+    )
+
+    shared = selector.select_related_tests(tmp_path, ["TraceLens/sub/shared.py"])
+    other = selector.select_related_tests(tmp_path, ["TraceLens/sub/other.py"])
+
+    assert shared.mode == "selected"
+    assert "tests/test_other.py" in shared.test_files
+    assert "tests/test_shared.py" in shared.test_files
+    assert other.test_files == ("tests/test_other.py",)
+
+
+def test_path_join_tail_selects_the_loader(tmp_path):
+    _write(tmp_path / "TraceLens" / "__init__.py", '"""package"""\n')
+    _write(
+        tmp_path / "TraceLens" / "evals" / "eval_utils" / "workflow_scripted_evals.py",
+        "def grade():\n    return 1\n",
+    )
+    _write(
+        tmp_path / "tests" / "test_loads_eval.py",
+        "import os\n\n"
+        "def test_loads():\n"
+        '    os.path.join("eval_utils", "workflow_scripted_evals.py")\n',
+    )
+
+    selection = selector.select_related_tests(
+        tmp_path,
+        ["TraceLens/evals/eval_utils/workflow_scripted_evals.py"],
+    )
+
+    assert selection.mode == "selected"
+    assert selection.test_files == ("tests/test_loads_eval.py",)
+
+
 def test_conftest_and_metadata_run_full_suite(tmp_path):
     assert selector.select_related_tests(tmp_path, ["tests/conftest.py"]).mode == "all"
     assert selector.select_related_tests(tmp_path, ["setup.py"]).mode == "all"
+
+
+def test_detect_utils_change_includes_batch_phase_tests():
+    selection = selector.select_related_tests(
+        ROOT, ["TraceLens/TraceUtils/utils/detect_utils.py"]
+    )
+    assert selection.mode == "selected"
+    assert "tests/test_batch_phase.py" in selection.test_files
+    assert "tests/test_kernel_source_cli.py" not in selection.test_files
+
+
+def test_joined_eval_path_includes_eval_harness():
+    selection = selector.select_related_tests(
+        ROOT,
+        [
+            "TraceLens/Agent/Analysis/skills/analysis-orchestrator/"
+            "evals/eval_utils/workflow_scripted_evals.py"
+        ],
+    )
+    assert "tests/test_analysis_agent_evals.py" in selection.test_files
 
 
 def test_kernel_source_cli_change_stays_narrow():
