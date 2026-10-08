@@ -47,6 +47,7 @@ _ANCHOR_LINK_RE = re.compile(r"#detailed-analysis-compute-p(\d+)")
 _CATEGORY_ATTR_RE = re.compile(r"\bcategory=(\S+)")
 _LIBRARY_PARENS_RE = re.compile(r"\(([^()]+)\)\s*$")
 _FLOAT_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_PRIORITY_PREFIX_RE = re.compile(r"^(?:[🔴🟡🟢]\s*)?(?:P\d+:\s*)?")
 _NULL_CELLS = {"", "-", "—", "–"}
 
 # Data-table header labels, normalized (lowercased, stripped) -> logical field.
@@ -250,7 +251,7 @@ class AnalysisMdParser:
             lib_m = _LIBRARY_PARENS_RE.search(heading) if heading else None
             library = lib_m.group(1).strip() if lib_m else None
         elif heading:
-            title = heading.lstrip("#").strip()
+            title = _PRIORITY_PREFIX_RE.sub("", heading.lstrip("#").strip())
 
         prose = {"identification": None, "reasoning": None, "resolution": None}
         for label, body in _LABEL_RE.findall(block):

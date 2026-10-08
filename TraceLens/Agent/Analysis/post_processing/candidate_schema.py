@@ -71,7 +71,9 @@ class ComputeTask(TypedDict):
 
 
 class FusionTask(TypedDict):
-    """One kernel-fusion candidate; ``operation`` is the heading text as written.
+    """One kernel-fusion candidate; ``operation`` is the heading's pattern name.
+
+    The severity color and ``P<N>:`` prefix are stripped from the heading.
 
     ``reasoning`` is always null (fusion blocks carry no such label) and
     ``priority`` is the rank within fusion by ``impact.mid``.

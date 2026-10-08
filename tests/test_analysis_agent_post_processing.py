@@ -1130,7 +1130,7 @@ _FUSION_MD = """# Owl - MI300X Standalone Analysis
 """
 
 _FUSION_P2_GOLDEN = {
-    "operation": "🟡 P2: Unfused MLP Activation",
+    "operation": "Unfused MLP Activation",
     "members": [
         {
             "kernel_launcher_path": "torch/nn/modules/linear.py(124): forward",
@@ -1187,7 +1187,7 @@ def test_fusion_tier_golden(tmp_path):
     p1, p2 = report["fusion_optimizations"]
     assert p2 == _FUSION_P2_GOLDEN
     assert p1["priority"] == 1
-    assert p1["operation"] == "🔴 P1: Unfused Attention"
+    assert p1["operation"] == "Unfused Attention"
     assert p1["reasoning"] is None
     assert p1["impact"] == {"mid": 13.5, "low": 11.5, "high": 15.5}
     assert p1["resolution"].startswith("Call a vendor library's fused attention")
@@ -1197,6 +1197,13 @@ def test_fusion_tier_golden(tmp_path):
     assert softmax["flops_per_byte"] is None
     assert softmax["efficiency_percent"] is None
     assert softmax["bound"] is None
+
+
+def test_fusion_operation_strips_only_present_priority_prefix(tmp_path):
+    md = _FUSION_MD.replace("#### 🔴 P1: Unfused Attention", "#### Unfused RMSNorm")
+    md = md.replace("#### 🟡 P2: Unfused MLP Activation", "#### P3: Unfused RoPE")
+    tasks = _render_text(md, tmp_path)[0]["fusion_optimizations"]
+    assert sorted(t["operation"] for t in tasks) == ["Unfused RMSNorm", "Unfused RoPE"]
 
 
 def test_fusion_members_have_no_impact_score_or_library(tmp_path):

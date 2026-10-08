@@ -206,9 +206,9 @@ Found N kernel fusion opportunities across M module types.
 <!-- reasoning-candidate tier=fusion rank=1 -->
 #### <Pattern Name>
 
-**Identification:** <1-2 sentences: how this fusion candidate was surfaced>
-<!-- [standalone] (source: `fusion_candidates.json` → `module_name`, `has_fused_kernel`, `kernels[]`) -->
-<!-- [comparative] (source: `fusion_candidates.json` → `module_name`, `kernel_count_trace1`, `kernel_count_trace2`, `kernels_trace1[]`, `kernels_trace2[]`) -->
+**Identification:** <3-4 sentences: the module and how many times it runs; its parent module and call site (the nearest module in the call stack and its first frame); each distinct launch path in the Data rows (Trace 1 in comparative) with the ops launched from it, skipping `Not found`; then how this fusion candidate was surfaced (kernel sequence, no fused kernel)>
+<!-- [standalone] (source: `fusion_candidates.json` → `module_name`, `parent_chain`, `has_fused_kernel`, `kernels[]`; `kernel_fusion_metrics.json` → `rows[].kernel_path`) -->
+<!-- [comparative] (source: `fusion_candidates.json` → `module_name`, `parent_chain`, `kernel_count_trace1`, `kernel_count_trace2`, `kernels_trace1[]`, `kernels_trace2[]`; `kernel_fusion_metrics.json` → `rows_trace1[].kernel_path`) -->
 
 **Data:**
 
