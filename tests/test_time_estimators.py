@@ -66,12 +66,12 @@ class TestRoofline:
     def test_compute_bound(self):
         est = roofline_estimator(_work(gflops=1.0, bytes_moved=1e3), ARCH)
         assert est.time_us == pytest.approx(1e9 / 500e12 * 1e6)
-        assert est.extra_columns == {"Roofline Bound": "COMPUTE_BOUND"}
+        assert est.extra_columns == {"Bound": "COMPUTE_BOUND"}
 
     def test_memory_bound(self):
         est = roofline_estimator(_work(gflops=1e-6, bytes_moved=1e9), ARCH)
         assert est.time_us == pytest.approx(1e9 / 5000e9 * 1e6)
-        assert est.extra_columns == {"Roofline Bound": "MEMORY_BOUND"}
+        assert est.extra_columns == {"Bound": "MEMORY_BOUND"}
 
     @pytest.mark.parametrize(
         "work, arch",
@@ -114,6 +114,45 @@ class TestExternalModel:
         model = external_time_model(lambda category, params, arch: 1.0)
         assert model(_work(category=None), ARCH) is None
         assert model(_work(params=None), ARCH) is None
+
+    def test_time_estimate_passes_through(self):
+        estimate = TimeEstimate(2.0, {"Config": "256x128"})
+        model = external_time_model(lambda category, params, arch: estimate)
+        assert model(_work(), ARCH) is estimate
+
+
+class TestEstimatorErrors:
+    @pytest.fixture(autouse=True)
+    def _fresh(self, monkeypatch):
+        from TraceLens.PerfModel import time_models
+
+        monkeypatch.setattr(time_models, "_estimator_warnings", set())
+
+    def test_failing_model_only_loses_its_own_columns(self):
+        def broken(category, params, arch):
+            raise ValueError("unsupported dtype")
+
+        estimators = {
+            "Roofline": roofline_estimator,
+            "Broken": external_time_model(broken),
+            "Fine": external_time_model(lambda category, params, arch: 4.0),
+        }
+        metrics = {}
+        with pytest.warns(RuntimeWarning, match="'Broken' failed on a GEMM op"):
+            add_time_estimates(metrics, estimators, _work(), ARCH, 8.0)
+        assert "Roofline Time (µs)" in metrics
+        assert metrics["Fine Time (µs)"] == 4.0
+        assert not [col for col in metrics if "Broken" in col]
+
+    def test_warns_once_per_model_category_and_error(self):
+        estimators = {"Broken": lambda work, arch: 1 / 0}
+        with pytest.warns(RuntimeWarning):
+            add_time_estimates({}, estimators, _work(), ARCH, 8.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            add_time_estimates({}, estimators, _work(), ARCH, 8.0)
+        with pytest.warns(RuntimeWarning, match="SDPA_fwd"):
+            add_time_estimates({}, estimators, _work(category="SDPA_fwd"), ARCH, 8.0)
 
 
 class TestOrigamiEstimator:
@@ -266,7 +305,7 @@ class TestColumns:
         add_time_estimate_columns(
             metrics,
             "Roofline",
-            TimeEstimate(2.0, {"Roofline Bound": "X"}),
+            TimeEstimate(2.0, {"Bound": "X"}),
             4.0,
             2e6,
             8.0,
@@ -486,6 +525,46 @@ def test_report_has_sdpa_tile_columns_only_with_the_flag(tmp_path, monkeypatch):
     assert "GEMM Simulator Time (µs)_first" not in sdpa.columns
     assert label not in tiled["GEMM"].columns
     assert (tiled["GEMM"]["GEMM Simulator Time (µs)_first"] == 3.0).all()
+
+
+def test_report_keeps_ops_when_a_model_fails_and_shows_extra_columns(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
+    ext = tmp_path / "ext.py"
+    ext.write_text(
+        "from TraceLens.PerfModel.time_models import TimeEstimate\n"
+        "def configured(category, params, arch):\n"
+        "    if category != 'GEMM':\n"
+        "        return None\n"
+        "    return TimeEstimate(3.0, {'Config': f\"{params['M']}x{params['N']}\"})\n"
+        "def broken(category, params, arch):\n"
+        "    raise ValueError('unsupported')\n"
+        "time_models = {'Configured': configured, 'Broken': broken}\n"
+    )
+    with pytest.warns(RuntimeWarning, match="'Broken' failed"):
+        dfs = generate_perf_report_pytorch(
+            profile_json_path=str(TRACE),
+            output_csvs_dir=str(tmp_path / "csvs"),
+            extension_file=str(ext),
+            gpu_arch=ARCH,
+            collective_analysis=False,
+        )
+    for df in (
+        dfs["GEMM"],
+        dfs["unified_perf_summary"].query("`op category` == 'GEMM'"),
+    ):
+        assert df["Roofline Time (µs)_first"].notna().all()
+        assert (df["Configured Time (µs)_first"] == 3.0).all()
+        columns = list(df.columns)
+        config = columns.index("Configured Config_first")
+        assert columns.index("Configured TB/s_first") < config
+        assert config < columns.index("Pct Configured_mean")
+        assert not [col for col in columns if "Broken" in col]
+    gemm = dfs["GEMM"].iloc[0]
+    assert gemm["Configured Config_first"] == (
+        f"{int(gemm['param: M'])}x{int(gemm['param: N'])}"
+    )
 
 
 def test_report_shows_every_registered_model(tmp_path, monkeypatch):

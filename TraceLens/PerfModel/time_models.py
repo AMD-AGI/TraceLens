@@ -14,9 +14,11 @@ estimator is a function::
         return TimeEstimate(time_us, extra_columns) or time_us or None
 
 Each estimator writes one column group, ``<label> Time (µs)``,
-``<label> TFLOPS/s``, ``<label> TB/s``, any extra columns (named
-``<label> ...``), and ``Pct <label>``. Roofline, Origami, GEMM Simulator
-(when ``GEMM_SIMULATOR_PATH`` is set), and the SDPA tile model are built in.
+``<label> TFLOPS/s``, ``<label> TB/s``, any extra columns (``{"Bound": ...}``
+becomes ``<label> Bound``), and ``Pct <label>``. An estimator that raises
+gets no columns for that op, with a one-time warning. Roofline, Origami,
+GEMM Simulator (when ``GEMM_SIMULATOR_PATH`` is set), and the SDPA tile model
+are built in.
 
 External time models use a simpler signature and are adapted with
 :func:`external_time_model`::
@@ -30,12 +32,14 @@ External time models use a simpler signature and are adapted with
 ``"SDPA_fwd"``, ...), or its ``bwd_category`` (``"SDPA_bwd"``, ...) for a
 backward op, ``params`` is a copy of its ``param_details`` (for a
 GEMM: M, N, K, B, dtype_A_B, ...), and ``arch`` is the GPU arch dict or
-``None``. Return ``None`` for ops the model does not handle. A proprietary
+``None``. Return ``None`` for ops the model does not handle, or a
+``TimeEstimate`` to add extra columns. A proprietary
 library call belongs in an ``--extension_file``, not in this repository.
 """
 
 import inspect
 import os
+import warnings
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Optional
@@ -152,7 +156,9 @@ def time_estimate_group_columns(columns, label, labels):
 def add_time_estimate_columns(
     dict_metrics, label, estimate, gflops, bytes_moved, busy_kernel_time
 ):
-    """Write ``label``'s column group for ``estimate``; skip a missing estimate."""
+    """Write ``label``'s column group for ``estimate``; skip a missing estimate.
+
+    An extra column ``name`` is written as ``<label> <name>``."""
     if isinstance(estimate, TimeEstimate):
         time_us, extra_columns = estimate.time_us, estimate.extra_columns
     else:
@@ -161,19 +167,44 @@ def add_time_estimate_columns(
         return
     dict_metrics[f"{label} Time (µs)"] = time_us
     add_duration_rate_columns(dict_metrics, gflops, bytes_moved, time_us, prefix=label)
-    dict_metrics.update(extra_columns)
+    for name, value in extra_columns.items():
+        dict_metrics[f"{label} {name}"] = value
     dict_metrics[f"Pct {label}"] = (
         (time_us / busy_kernel_time) * 100 if busy_kernel_time > 0 else float("nan")
     )
 
 
+_estimator_warnings = set()
+
+
+def _warn_estimator_failed(label, work, error):
+    key = (label, work.category, type(error).__name__)
+    if key in _estimator_warnings:
+        return
+    _estimator_warnings.add(key)
+    warnings.warn(
+        f"Time model {label!r} failed on a {work.category} op "
+        f"({type(error).__name__}: {error}); its columns are left empty for that "
+        "op. Shown once per model, category and error type.",
+        RuntimeWarning,
+    )
+
+
 def add_time_estimates(dict_metrics, estimators, work, arch, busy_kernel_time):
-    """Run each ``{label: estimator}`` on ``work`` and write its column group."""
+    """Run each ``{label: estimator}`` on ``work`` and write its column group.
+
+    An estimator that raises gets no columns for this op; the others and the
+    measured metrics are unaffected."""
     for label, estimator in estimators.items():
+        try:
+            estimate = estimator(work, arch)
+        except Exception as error:
+            _warn_estimator_failed(label, work, error)
+            continue
         add_time_estimate_columns(
             dict_metrics,
             label,
-            estimator(work, arch),
+            estimate,
             work.gflops,
             work.bytes_moved,
             busy_kernel_time,
@@ -199,20 +230,24 @@ def roofline_estimator(work, arch):
     # bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
     memory_time_us = (work.bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
     bound = "COMPUTE_BOUND" if compute_time_us >= memory_time_us else "MEMORY_BOUND"
-    return TimeEstimate(max(compute_time_us, memory_time_us), {"Roofline Bound": bound})
+    return TimeEstimate(max(compute_time_us, memory_time_us), {"Bound": bound})
 
 
 def external_time_model(model):
     """Adapt ``model(category, params, arch)`` to the estimator interface.
 
-    A backward op is passed its perf model's ``bwd_category`` (``"SDPA_bwd"``,
-    ...) with the forward params; ops without one (GEMM) are skipped."""
+    The model returns a time in µs, a :class:`TimeEstimate` to add extra
+    columns, or None. A backward op is passed its perf model's
+    ``bwd_category`` (``"SDPA_bwd"``, ...) with the forward params; ops
+    without one (GEMM) are skipped."""
 
     def estimate(work, arch):
         if work.category is None or work.params is None:
             return None
-        time_us = model(work.category, dict(work.params), arch)
-        return None if time_us is None else float(time_us)
+        result = model(work.category, dict(work.params), arch)
+        if result is None or isinstance(result, TimeEstimate):
+            return result
+        return float(result)
 
     estimate.time_model = model
     return estimate

@@ -2086,14 +2086,15 @@ class TreePerfAnalyzer:
                     perf_cols.extend(cols)
             for label in self.kernel_filters:
                 perf_cols.extend([f"{label} Kernel Time (µs)", f"{label} TFLOPS/s"])
+            estimate_prefixes = tuple(f"{label} " for label in self.time_estimators)
 
             if include_perf_metrics and has_own_perf_model:
                 # Has own perf model - compute forward metrics
                 try:
                     metrics = self.compute_perf_metrics(event, bwd=False)
-                    for col in perf_cols:
-                        if col in metrics:
-                            row[col] = metrics[col]
+                    for col, value in metrics.items():
+                        if col in perf_cols or col.startswith(estimate_prefixes):
+                            row[col] = value
                     # Extract perf model params (e.g., M, N, K for GEMM)
                     perf_params = {
                         k.replace("param: ", ""): v
@@ -2123,9 +2124,9 @@ class TreePerfAnalyzer:
                 # 1:1 backward op - use forward's backward metrics
                 try:
                     metrics = self.compute_perf_metrics(linked_fwd_event, bwd=True)
-                    for col in perf_cols:
-                        if col in metrics:
-                            row[col] = metrics[col]
+                    for col, value in metrics.items():
+                        if col in perf_cols or col.startswith(estimate_prefixes):
+                            row[col] = value
                     # Extract perf model params
                     perf_params = {
                         k.replace("param: ", ""): v
@@ -2201,6 +2202,15 @@ class TreePerfAnalyzer:
         col_order.extend(["duration_us", "has_perf_model", "is_recompute"])
         if include_perf_metrics:
             col_order.extend(perf_cols)
+            labels = sorted(self.time_estimators, key=len, reverse=True)
+            for col in df.columns:
+                label = next((n for n in labels if col.startswith(f"{n} ")), None)
+                if label is None or col in col_order:
+                    continue
+                pct = f"Pct {label}"
+                col_order.insert(
+                    col_order.index(pct) if pct in col_order else len(col_order), col
+                )
             col_order.append("perf_params")
         if include_kernel_details:
             col_order.append("kernel_details")

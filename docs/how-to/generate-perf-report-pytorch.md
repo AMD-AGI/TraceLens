@@ -239,7 +239,25 @@ time_models = {"MyModel": gemm_model}
 
 Each registered label gets its own column group, `<label> Time (µs)`,
 `<label> TFLOPS/s`, `<label> TB/s`, and `Pct <label>`, next to the roofline
-and Origami columns; the summary sheets pick up every label. Keep the import
+and Origami columns; the summary sheets pick up every label.
+
+To report more than the time, such as the kernel configuration the model
+picked, return a `TimeEstimate`. Each extra column is written under the label,
+so this adds `MyModel Config`:
+
+```python
+from TraceLens.PerfModel.time_models import TimeEstimate
+
+def gemm_model(category, params, arch):
+    if category != "GEMM":
+        return None
+    result = my_library.gemm(params["M"], params["N"], params["K"], ...)
+    return TimeEstimate(result.time_us, {"Config": result.config})
+```
+
+If a model raises, TraceLens leaves that model's columns empty for the op,
+keeps the op's other metrics, and prints one warning per model, category, and
+error type. Returning `None` is still the way to skip ops on purpose. Keep the import
 and call of a proprietary library in the extension file. A placeholder is in
 `examples/external_perf_model_stub.py`. From Python, register a model with
 `TreePerfAnalyzer.register_time_model(label, fn)`.
