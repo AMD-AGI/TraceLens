@@ -83,6 +83,10 @@ jobs:
     runs-on: ubuntu-latest
     # rocm-origami is required by roofline / Origami perf-model tests.
     container: rocm/dev-ubuntu-24.04:7.2.1
+    defaults:
+      run:
+        # This image runs steps with dash. The test step needs bash for pipefail and mapfile.
+        shell: bash
     env:
       TEST_MODE: ${{ needs.select-pr-tests.outputs.mode }}
     strategy:
