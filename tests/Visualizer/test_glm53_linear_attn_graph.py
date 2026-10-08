@@ -388,7 +388,7 @@ def test_glm53_hyperconnection_expands_mhc_math():
     assert "Sigmoid" in labels
     assert "Softmax" in labels
     assert "Sum" in labels
-    assert any(frame.label == "Loop · 19 iterations" for frame in graph.inline_frames)
+    assert any(frame.label == "loop iterations: 19" for frame in graph.inline_frames)
     assert set(graph.output_ports) == {"post", "comb", "collapsed"}
     carried_out_index = graph.loop_carried_nodes["@op_l291_c19_divide"]
     assert graph.nodes[carried_out_index].label == "Loop out"
@@ -1267,7 +1267,7 @@ def test_glm53_expert_helper_stays_inside_loop_without_cycle():
     ]
     assert helper_nodes
     assert all(
-        "/Glm5NextTextMoE/Loop_288_iterations/_apply_gate" in node.get("namespace", "")
+        "/Glm5NextTextMoE/loop_iterations_288/_apply_gate" in node.get("namespace", "")
         for node in helper_nodes
     )
     _assert_export_is_acyclic(graph["nodes"])
@@ -1308,7 +1308,7 @@ def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
         node
         for node in graph["nodes"]
         if node["id"].startswith(f"{prefix}/mlp/")
-        and node.get("namespace", "").endswith("/Glm5NextTextMoE/Loop_288_iterations")
+        and node.get("namespace", "").endswith("/Glm5NextTextMoE/loop_iterations_288")
         and any(
             attr.get("key") == "synthetic" and attr.get("value") == "@input"
             for attr in node.get("attrs", [])

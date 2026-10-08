@@ -477,7 +477,7 @@ def is_transparent_loop_wrapper(node: BlockNode) -> bool:
     A wrapper whose forward reduces to some setup ops and a single loop (for
     example an expert-dispatch module: ``final = zeros_like(...); ...; for expert
     in hit: ...``) adds no grouping value beyond the loop it contains — the loop
-    already renders as its own ``Loop_N_iterations`` frame. Flattening the wrapper
+    already renders as its own ``loop_iterations_<count>`` frame. Flattening the wrapper
     lets that loop sit directly under the parent module.
 
     A wrapper is *not* transparent when a non-loop step forms its own frame (a

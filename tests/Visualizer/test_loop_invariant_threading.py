@@ -820,7 +820,8 @@ def test_every_tensor_entering_a_multi_input_module_is_named():
     expert_groups = [
         ns
         for ns in _group_namespaces(nodes)
-        if "SparseMoeBlock" in ns and "/Loop_" in ns and ns.endswith("iterations")
+        # Loop frames read ``loop_iterations_<count>``: fixed prefix, count last.
+        if "SparseMoeBlock" in ns and "/loop_iterations_" in ns
     ]
     assert expert_groups, "expected the expert-loop groups"
     for namespace in expert_groups:

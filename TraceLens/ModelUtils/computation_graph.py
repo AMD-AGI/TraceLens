@@ -4074,6 +4074,13 @@ def _first_graph_index_for_module(
     return attr_last_index.get(first.attr_name)
 
 
+def _loop_frame_label(loop_detail: str) -> str:
+    """``loop: 288 iterations`` / ``loop: repeated`` -> ``loop iterations: <count>``."""
+    body = loop_detail.split(":", 1)[1].strip() if ":" in loop_detail else ""
+    count = body[: -len(" iterations")] if body.endswith(" iterations") else body
+    return f"loop iterations: {count or 'repeated'}"
+
+
 def _add_loop_frames(graph: ComputationGraph) -> None:
     """Group contiguous loop-body operations without introducing graph cycles."""
     active_detail: str | None = None
@@ -4085,7 +4092,16 @@ def _add_loop_frames(graph: ComputationGraph) -> None:
             graph.inline_frames.append(
                 InlineFrameSpec(
                     frame_id=f"loop:{graph.nodes[active_indices[0]].key}",
-                    label=active_detail.replace("loop:", "Loop ·", 1).strip(),
+                    # ``Loop · 288 iterations`` sanitises to
+                    # ``Loop_288_iterations``, which buries the count in the
+                    # middle of the name -- a reader (or a parser) has to know
+                    # the shape of the phrase to find it. Put the count last
+                    # after a fixed prefix, so every loop frame reads
+                    # ``loop_iterations_<count>`` and the count is simply the
+                    # tail. Two sibling loops with the same count still get
+                    # distinct namespaces: ``_duplicate_frame_labels`` falls
+                    # back to the frame id when a label repeats.
+                    label=_loop_frame_label(active_detail),
                     node_indices=list(active_indices),
                 )
             )

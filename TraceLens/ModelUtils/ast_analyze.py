@@ -4458,7 +4458,7 @@ def _loop_iteration_count_of(
     self_values: dict,
     name_value_ast: dict[str, ast.expr],
 ) -> int | None:
-    """Resolve a loop's static trip count for the ``Loop_N_iterations`` label.
+    """Resolve a loop's static trip count for the ``loop_iterations_<count>`` frame.
 
     A literal ``range(...)`` bound wins. Otherwise a data-dependent iterable
     (``for expert_idx in hit:`` where ``hit`` is a ``nonzero()`` selection) can
@@ -7106,7 +7106,7 @@ class _ForwardOperationExtractor:
         return ast.unparse(elt)
 
     def _loop_iteration_count(self, node: ast.For) -> int | None:
-        """Static trip count for the ``Loop_N_iterations`` label (see module helper)."""
+        """Static trip count for the ``loop_iterations_<count>`` frame (see module helper)."""
         return _loop_iteration_count_of(node, self.self_values, self._name_value_ast)
 
     def _annotate_operations_since(self, start: int, detail: str) -> None:
@@ -11813,7 +11813,7 @@ def _walk_forward_stmt(
         # in this method's graph. Preserve their call-site loop context too so
         # their expanded children remain inside the source loop. Resolve the same
         # static trip count the extractor uses so the helper ops share the loop's
-        # `Loop_N_iterations` frame instead of fragmenting into `Loop_repeated`.
+        # `loop_iterations_<count>` frame instead of fragmenting into `loop_iterations_repeated`.
         count = _loop_iteration_count_of(node, self_values or {}, name_value_ast or {})
         loop_detail = (
             f"loop: {count} iterations" if count is not None else "loop: repeated"
