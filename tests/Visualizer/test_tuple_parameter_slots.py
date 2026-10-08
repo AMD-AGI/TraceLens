@@ -88,7 +88,12 @@ class TestBothRotarySlotsAreRead:
             assert ports, f"{boundary['id']} reaches no consumer"
 
     def test_each_rotary_frame_reads_both(self, nodes: list[dict]) -> None:
-        """Every ``apply_rotary_pos_emb`` frame multiplies by cos AND sin."""
+        """Every ``apply_rotary_pos_emb`` frame multiplies by cos AND sin.
+
+        Each component arrives on its own tile now, so the two
+        ``repeat_interleave`` ops read two DISTINCT producers rather than two
+        ports of one.
+        """
         frames: dict[str, set[str]] = {}
         by_id = {str(n["id"]): n for n in nodes}
         for node in nodes:
@@ -100,10 +105,12 @@ class TestBothRotarySlotsAreRead:
             frame = node_id.rsplit(":@op_", 1)[0]
             for edge in node.get("incomingEdges", []) or []:
                 source = by_id.get(str(edge.get("sourceNodeId")), {})
-                if "position_embeddings" in str(source.get("label") or ""):
-                    frames.setdefault(frame, set()).add(
-                        str(edge.get("sourceNodeOutputId"))
-                    )
+                label = str(source.get("label") or "")
+                if label.startswith("position_embeddings"):
+                    frames.setdefault(frame, set()).add(label)
         assert frames, "expected rotary frames reading position_embeddings"
-        for frame, slots in frames.items():
-            assert slots == {"0", "1"}, (frame, slots)
+        for frame, components in frames.items():
+            assert components == {
+                "position_embeddings.cos",
+                "position_embeddings.sin",
+            }, (frame, components)

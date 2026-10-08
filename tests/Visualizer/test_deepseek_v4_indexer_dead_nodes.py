@@ -583,10 +583,13 @@ def test_deepseek_v4_model_scope_rotary_emb_expands_not_opaque_leaf():
         str(node.get("id", "")) == "decoder/@input:position_embeddings"
         for node in nodes
     ), "the loop wrapper must not show an input node"
+    # A tuple crosses as one boundary PER COMPONENT
+    # (``@input:position_embeddings.cos`` / ``.sin``), so match that family
+    # rather than the single name it used to cross under.
     boundaries = [
         node
         for node in nodes
-        if str(node.get("id", "")).endswith("/@input:position_embeddings")
+        if "/@input:position_embeddings" in str(node.get("id", ""))
     ]
     assert boundaries, "no variant position_embeddings boundary"
     # The decoder group names what it is handed just outside itself, so the

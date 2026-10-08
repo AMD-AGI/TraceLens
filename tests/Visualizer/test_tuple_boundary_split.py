@@ -194,3 +194,68 @@ class TestAPassThroughTakesEveryComponent:
         assert _sources_of(nodes, "box/inner/@input:position_embeddings.cos") == [
             "box/@input:position_embeddings.cos"
         ]
+
+
+class TestAddressingVersusForwarding:
+    """Which component a consumer wants is read from how it ADDRESSES them.
+
+    A mirror chain forwards a tuple by handing the next mirror its single
+    output, sometimes as two parallel edges off the same port. Counting edges,
+    or trusting a bare port ``"0"``, reads that as "component 0" and the other
+    component reaches nothing -- which is how ``sin`` disappeared behind
+    DeepSeek's ``l813`` mirror and MiniMax's attention boundary.
+    """
+
+    def _forwarder(self, edges: list[str]) -> list[dict]:
+        nodes = _bundle([])
+        nodes.append(
+            _tile(
+                "box/inner/@input:position_embeddings",
+                "position_embeddings",
+                "@input",
+                [("box/@input:position_embeddings", port) for port in edges],
+            )
+        )
+        for port in ("0", "1"):
+            nodes.append(
+                _tile(
+                    f"box/inner/@op_use{port}",
+                    f"Use{port}",
+                    None,
+                    [("box/inner/@input:position_embeddings", port)],
+                )
+            )
+        return nodes
+
+    def test_two_parallel_edges_off_one_port_are_not_an_address(self) -> None:
+        nodes = self._forwarder(["0", "0"])
+        _split_tuple_boundary_slots(nodes)
+        assert _sources_of(nodes, "box/inner/@op_use1") == [
+            "box/inner/@input:position_embeddings.sin"
+        ]
+
+    def test_a_single_edge_off_port_zero_is_not_an_address(self) -> None:
+        nodes = self._forwarder(["0"])
+        _split_tuple_boundary_slots(nodes)
+        assert _sources_of(nodes, "box/inner/@op_use1") == [
+            "box/inner/@input:position_embeddings.sin"
+        ]
+
+    def test_addressing_every_component_is_honoured(self) -> None:
+        """Edges naming distinct components are mapped, not re-fanned."""
+        nodes = self._forwarder(["0", "1"])
+        _split_tuple_boundary_slots(nodes)
+        assert _sources_of(nodes, "box/inner/@op_use0") == [
+            "box/inner/@input:position_embeddings.cos"
+        ]
+        assert _sources_of(nodes, "box/inner/@op_use1") == [
+            "box/inner/@input:position_embeddings.sin"
+        ]
+
+    def test_an_op_addressing_one_component_still_gets_that_one(self) -> None:
+        """Only a BOUNDARY forwards a tuple; an op reads the part it named."""
+        nodes = _bundle(["0"])
+        _split_tuple_boundary_slots(nodes)
+        assert _sources_of(nodes, "box/@op_reader0") == [
+            "box/@input:position_embeddings.cos"
+        ]

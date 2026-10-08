@@ -4644,15 +4644,27 @@ def _tuple_slot_producers(
     return list(zip(edges, producers, slots))
 
 
-def _reads_several_ports(node_id: str, nodes: list[dict[str, Any]]) -> bool:
-    """True when something reads *node_id* at two or more distinct ports."""
+def _passes_whole_tuple(node: dict[str, Any], nodes: list[dict[str, Any]]) -> bool:
+    """True when this BOUNDARY carries a whole tuple further in, not one part.
+
+    Two tells, both read off what its own consumers ask it for: several distinct
+    ports means several components, and a port NAMED for the tensor rather than
+    numbered means the tensor entire -- which is how a mirror chain forwards a
+    tuple, one mirror handing the next its single output.
+
+    Only a boundary is asked this; an op's output ports say nothing about which
+    component it reads.
+    """
+    if _node_attr(node, "synthetic") not in {"@input", "@input_mirror"}:
+        return False
+    node_id = str(node.get("id"))
     ports = {
         str(edge.get("sourceNodeOutputId") or "0")
         for other in nodes
         for edge in (other.get("incomingEdges") or [])
         if str(edge.get("sourceNodeId")) == node_id
     }
-    return len(ports) >= 2
+    return len(ports) >= 2 or any(not port.isdigit() for port in ports)
 
 
 def _split_tuple_boundary_slots(nodes: list[dict[str, Any]]) -> None:
@@ -4689,7 +4701,8 @@ def _split_one_tuple_boundary(nodes: list[dict[str, Any]]) -> bool:
     """Split the first tuple boundary that can be split soundly."""
     by_id = {str(node.get("id")): node for node in nodes}
     for node in nodes:
-        if _node_attr(node, "synthetic") != "@input":
+        kind = _node_attr(node, "synthetic")
+        if kind not in {"@input", "@input_mirror"}:
             continue
         node_id = str(node.get("id", ""))
         components = _tuple_slot_producers(node, by_id)
@@ -4704,7 +4717,9 @@ def _split_one_tuple_boundary(nodes: list[dict[str, Any]]) -> bool:
             # upstream ``position_embeddings.cos``) keeps it rather than being
             # qualified twice.
             name = slot if slot.startswith(f"{base}.") else f"{base}.{slot}"
-            tile_id = f"{prefix}/@input:{name}" if prefix else f"@input:{name}"
+            token = "@input_mirror" if kind == "@input_mirror" else "@input"
+            suffix = f"{name}^{name}" if kind == "@input_mirror" else name
+            tile_id = f"{prefix}/{token}:{suffix}" if prefix else f"{token}:{suffix}"
             if tile_id in by_id:
                 break
             attrs = [
@@ -4750,14 +4765,26 @@ def _split_one_tuple_boundary(nodes: list[dict[str, Any]]) -> bool:
             ]
             if not mine:
                 continue
-            # A consumer that re-exposes several ports of its own is passing the
-            # WHOLE tuple further in, so it needs every component -- not just the
-            # one its single edge happened to name. Reading that edge's port as a
-            # component index handed it one tensor while it claimed two
-            # downstream, and the other component reached nothing at all.
-            if len(mine) < len(slot_ids) and _reads_several_ports(
-                str(other.get("id")), nodes
-            ):
+            # Does this consumer address the components, or is it carrying the
+            # whole tuple on? It addresses them only if its edges name DISTINCT
+            # components; a mirror chain forwards a tuple as two parallel edges
+            # off the same port, which names one component twice and is not an
+            # address at all. Counting edges instead sent both of those to
+            # component 0, so ``sin`` reached neither op behind that mirror.
+            addressed = [str(edge.get("sourceNodeOutputId") or "0") for edge in mine]
+            names_components = len(set(addressed)) == len(addressed) and all(
+                (port.isdigit() and int(port) < len(slot_ids)) or port in by_slot_name
+                for port in addressed
+            )
+            # Addressing SOME components is not addressing them: a boundary
+            # forwarding the tuple reads a single edge off port "0", which means
+            # "the producer's one output" and not "component 0". Treating that
+            # as an address handed it ``cos`` alone and left ``sin`` reaching
+            # nothing. An op is never asked -- ``_passes_whole_tuple`` answers
+            # False for anything that is not a boundary -- so an op addressing
+            # component 0 still gets exactly component 0.
+            addresses_all = names_components and len(set(addressed)) == len(slot_ids)
+            if not addresses_all and _passes_whole_tuple(other, nodes):
                 fanned = []
                 for ordinal, tile_id in enumerate(slot_ids):
                     spread = dict(mine[0])
