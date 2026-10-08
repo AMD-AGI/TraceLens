@@ -65,10 +65,10 @@ The orchestrator runs against a PyTorch profiler trace. Collection is workload-s
 ### Establish a hardware baseline
 
 Roofline analysis compares each measured kernel against your GPU's max-achievable
-TFLOPS and HBM bandwidth, so it needs a `<platform>.json` arch file for your
+TFLOPS and memory bandwidth, so it needs a `<platform>.json` arch file for your
 hardware. Bundled arch files ship with the package. If your platform isn't
 included, or you want stack-specific measured values instead of published specs,
-generate benchmark-derived peak TFLOPS and HBM bandwidth with the GPU
+generate benchmark-derived peak TFLOPS and memory bandwidth with the GPU
 microbenchmarking suite. It writes the arch JSON in the shape the roofline
 expects.
 

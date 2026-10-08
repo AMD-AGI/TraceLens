@@ -18,7 +18,7 @@ This enables efficient performance analysis and comparison without processing ma
 
 BASIC USAGE
 ───────────────────────────────────────────────────────────────────────────────
-    python -m TraceLens.TraceUtils.trace_split.main <trace_path> -o <output_dir> [OPTIONS]
+    python -m TraceLens.TraceUtils.split_trace.main <trace_path> -o <output_dir> [OPTIONS]
 
 REQUIRED ARGUMENTS
 ───────────────────────────────────────────────────────────────────────────────
@@ -64,7 +64,7 @@ QUICK EXAMPLES
 
 1. EXTRACT ALL ITERATIONS SEPARATELY
 
-   $ python -m TraceLens.TraceUtils.trace_split.main trace.json.gz -o ./output --store-single-iteration
+   $ python -m TraceLens.TraceUtils.split_trace.main trace.json.gz -o ./output --store-single-iteration
 
    → One trace file per iteration in ./output/
 
@@ -72,7 +72,7 @@ QUICK EXAMPLES
 
 2. EXTRACT SPECIFIC ITERATION RANGE (combined)
 
-   $ python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \\
+   $ python -m TraceLens.TraceUtils.split_trace.main trace.json.gz \\
      -o ./output \\
      --iterations 10:20
 
@@ -82,7 +82,7 @@ QUICK EXAMPLES
 
 3. FIND AND EXTRACT STEADY STATE REGION (recommended)
 
-   $ python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \\
+   $ python -m TraceLens.TraceUtils.split_trace.main trace.json.gz \\
      -o ./steady_state_analysis \\
      --find-steady-state
 
@@ -99,7 +99,7 @@ QUICK EXAMPLES
 
 4. SPLIT STEADY-STATE STEPS BY PHASE
 
-   $ python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \\
+   $ python -m TraceLens.TraceUtils.split_trace.main trace.json.gz \\
      -o ./phase_split \\
      --divide-phases
 
@@ -157,12 +157,14 @@ import os
 
 import pandas as pd
 
-from ...util import DataLoader
-from ..utils.annotation_utils import (
+from TraceLens.util import DataLoader
+from TraceLens.TraceUtils.utils.annotation_utils import (
     ITERATION_BACKUP_PATTERNS,  # noqa: F401
     ITERATION_PATTERNS,  # noqa: F401
     IterationAnnotation,
 )
+from ..utils.detect_utils import BOOKEND_NAMES
+from .startup_transient import trim_startup_transient
 
 SERVING_KINDS = {
     "vllm_detailed",
@@ -174,7 +176,7 @@ SERVING_KINDS = {
 }
 
 # Re-exports for tests and downstream callers.
-from . import (  # noqa: F401
+from TraceLens.TraceUtils.split_trace import (  # noqa: F401
     DetectStatus,
     ExtractContext,
     TraceData,
@@ -196,7 +198,7 @@ from . import (  # noqa: F401
     infer_batch_sizes_from_shapes,
     parse_range,
 )
-from ...util import GPU_KERNEL_CATEGORIES
+from TraceLens.util import GPU_KERNEL_CATEGORIES
 
 MANIFEST_NAME = "split_manifest.json"
 
@@ -249,10 +251,6 @@ def _conservation(events: list, per_iteration_details: list | None, args) -> dic
     return report
 
 
-# Bookend roots are the warmup/wrapup spans, excluded from the analysis window.
-_BOOKEND_NAMES = {"warmup", "wrapup"}
-
-
 def _base_name(trace_path: str) -> str:
     name = os.path.basename(trace_path)
     return name.replace(".pt.trace", "").replace(".json.gz", "").replace(".json", "")
@@ -275,6 +273,7 @@ def _load_and_detect(args):
         return None
 
     detection = find_iteration_roots(events, trace_index=trace_index)
+    detection = trim_startup_transient(detection, trace_index)
     print(
         f"\nDetection: {detection.method} -> {len(detection.roots)} roots, "
         f"status={detection.status.name}, phase_confidence="
@@ -350,16 +349,14 @@ def _extract_iterations(detection, ctx, args, start, end):
             end,
         )
         return details, details
-    if args.iterations != "all":
-        details = extract_and_save_single_trace(
-            iteration_roots[start:end],
-            ctx,
-            start,
-            end,
-            uid_map=detection.diagnostics.get("_events_by_uid", {}),
-        )
-        return details, None
-    return [], None
+    details = extract_and_save_single_trace(
+        iteration_roots[start:end],
+        ctx,
+        start,
+        end,
+        uid_map=detection.diagnostics.get("_events_by_uid", {}),
+    )
+    return details, None
 
 
 def _working_roots(iteration_roots, args, start, end):
@@ -371,7 +368,7 @@ def _working_roots(iteration_roots, args, start, end):
         source = iteration_roots[start:end]
     else:
         source = iteration_roots
-    return [r for r in source if r.get("name") not in _BOOKEND_NAMES]
+    return [r for r in source if r.get("name") not in BOOKEND_NAMES]
 
 
 def _has_serving_annotations(working_roots) -> bool:

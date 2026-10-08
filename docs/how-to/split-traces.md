@@ -57,9 +57,9 @@ Splitting proceeds in four stages:
 ```text
 trace.json.gz
    └─ Detect iteration roots   detects the iteration markers i.e. where to split
-      └─ Find steady state  finds the window of splits that are steady state (peak concurrency/stable runtime)
+      └─ Find steady state   finds the window of splits that are steady state (peak concurrency/stable runtime)
       └─ Divide phases   divides splits into prefill/decode/prefilldecode (only for LLM inference)
-   └─ Extract extract the splits. creates traces from splits
+   └─ Extract extract   the splits. creates traces from splits
 ```
 
 Detection and extraction always run. Finding the steady-state region and dividing
@@ -68,11 +68,18 @@ operate on the iterations found in the first stage.
 
 ## Split a trace
 
-Invoke the splitter as a module (it is also installed as the
-`TraceLens_split_inference_trace` console script):
+Invoke the splitter as a module, as the installed `TraceLens_split_trace`
+console script, or as a direct script invocation:
 
 ```bash
-python -m TraceLens.TraceUtils.trace_split.main trace.json.gz -o ./output [OPTIONS]
+# As a module
+python -m TraceLens.TraceUtils.split_trace.main trace.json.gz -o ./output [OPTIONS]
+
+# As the installed console script
+TraceLens_split_trace trace.json.gz -o ./output [OPTIONS]
+
+# As a direct script invocation
+python TraceLens/TraceUtils/split_trace/main.py trace.json.gz -o ./output [OPTIONS]
 ```
 
 `--store-single-iteration`, `--find-steady-state`, and `--divide-phases` can all
@@ -174,6 +181,11 @@ The detector that fires depends on what the trace contains:
 | Branch descent | There are no usable annotations, but the call tree has a frame whose children repeat | Training loops, diffusion denoise, `torch.compile` workloads |
 | Sibling roots | Branch descent finds no repeating children, but the top-level frames repeat | Workloads with sparse call-stack information |
 
+### Profiler-start transient trim
+
+In TP, each rank starts it's profiler independently. Ranks whose profiler starts earlier or get through the start-up steps faster, reach the first collective and are forced to wait for the other ranks to complete. Since this collective is a GPU kernel, it inflates the GPU time of the trace, meaning the total GPU runtime % of other kernels is deflated, reducing impact ratings in TraceLens analysis. Because this behavior skews analysis and is not representative of the workload, we want to drop these events from analysis. The simplest approach is to drop this first iteration entirely. 
+The trace splitter removes this initial iteration if it is dominated by stalling from these profiling delays. After the splits are made, the first iteration's per-kernel-name GPU duration is compared against the median of the same kernel in later iterations, separately for collective ops and everything else. The first iteration is dropped when the difference between a collective op's first iteration time and the collective op's median time for the rest of the iterations is far greater than that of other non-collective operations. 
+
 ## Extraction and the split manifest
 
 Once the roots are known, each iteration is given a *tile*. A tile is the span between one root
@@ -193,6 +205,10 @@ result. Its key fields are:
 | `gpu_event_retention` | The fraction of GPU kernels that survived extraction. This should be `1.0`, meaning every kernel is accounted for across the slices. |
 | `gpu_events_duplicated` | Whether any kernel was claimed by more than one slice, which indicates a tiling error. |
 | `gap_fill` | Whether tiling was used. |
+| `startup_transient_trimmed` | Whether iteration 0 was dropped. |
+| `startup_transient_kernel` | The collective kernel name whose inflation triggered the trim, when trimmed. |
+| `startup_transient_collective_ratio` | Iteration 0's duration for that kernel, divided by its median over later iterations. |
+| `startup_transient_noise_ratio` | The worst same-ratio seen among non-collective kernels, i.e. the ratio ceiling the collective ratio had to clear. |
 
 A per-iteration `execution_details` file records the same accounting for each
 slice.

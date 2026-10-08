@@ -16,7 +16,7 @@ from TraceLens.Trace2Tree.util import (
     _entry_roots,
     _reattach_worker_threads,
 )
-from TraceLens.TraceUtils.trace_split.root_detection import (
+from TraceLens.TraceUtils.split_trace.root_detection import (
     detect_from_branch_descent,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (

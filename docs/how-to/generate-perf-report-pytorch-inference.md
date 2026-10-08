@@ -1,5 +1,5 @@
 <!--
-Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
@@ -356,7 +356,7 @@ In addition, `--profile` must be set to enable xDiT profiling.
 ## Split inference traces (optional)
 
 Large traces can be split into steady-state windows or per-step files before
-report generation, using `TraceLens.TraceUtils.trace_split.main`.
+report generation, using `TraceLens.TraceUtils.split_trace.main`.
 Splitting assumes vLLM v0.14 or higher (tested through v0.24), SGLang v0.5.9, or
 ATOM 0.1.3 or higher, or use of the provided patches, so that annotations (batch
 size, request counts, and so on) are present in the execution-step metadata.
@@ -370,7 +370,7 @@ prefill-decode from decode-only steps. This is the recommended option for large
 traces where you want a few representative steps extracted automatically:
 
 ```bash
-python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \
+python -m TraceLens.TraceUtils.split_trace.main trace.json.gz \
     -o ./steady_state_analysis \
     --find-steady-state --num-steps 256
 ```
@@ -402,7 +402,7 @@ and uses it as the reference ratio, overriding the empirical estimate.
 capture a representative mix:
 
 ```bash
-python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \
+python -m TraceLens.TraceUtils.split_trace.main trace.json.gz \
     -o ./steady_state_analysis \
     --find-steady-state --num-steps 256 \
     --CONC 32 --OSL 1024 --R 0.8
@@ -412,14 +412,14 @@ python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \
 use when you want to analyze an isolated execution step:
 
 ```bash
-python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \
+python -m TraceLens.TraceUtils.split_trace.main trace.json.gz \
     -o ./output --store-single-iteration
 ```
 
 **Limit the steady-state search to a window** with `--iterations`:
 
 ```bash
-python -m TraceLens.TraceUtils.trace_split.main trace.json.gz \
+python -m TraceLens.TraceUtils.split_trace.main trace.json.gz \
     -o ./output --iterations 10:20 --find-steady-state --num-steps 256 \
     --CONC 32 --OSL 1024 --R 0.8
 ```
@@ -460,11 +460,6 @@ When `--capture_folder` is set, TraceLens first classifies the capture traces
 then merges the matching subtrees into the graph tree before running the standard
 analysis.
 
-```{note}
-`--capture_folder` and `--comparison_json_path` can't be used together: the
-TraceDiff comparison doesn't support graph-capture traces.
-```
-
 ## Inference-oriented options
 
 The inference report shares most options with the PyTorch report (output paths,
@@ -474,7 +469,7 @@ relevant to serving traces:
 | Argument                     | Default   | Description                                                                                                                                         |
 | ---------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--profile_json_path`      | required  | Path to the graph-replay `torch.profiler` trace (`.json` or `.json.gz`).                                                                       |
-| `--capture_folder PATH`    | `None`  | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). Mutually exclusive with `--comparison_json_path`. |
+| `--capture_folder PATH`    | `None`  | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). |
 | `--group_by_parent_module` | `False` | Group kernel-launcher summaries by parent `nn.Module` in addition to operation name.                                                               |
 | `--group_by_num_kernels`   | `False` | Group summary rows by the number of kernels.                                                                                                        |
 | `--include_call_stack`     | `False` | Add the CPU call stack to the report.                                                                                                               |

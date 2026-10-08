@@ -6,6 +6,7 @@
 
 import os
 import math
+import shutil
 from collections import Counter
 import logging
 import numpy as np
@@ -14,6 +15,7 @@ import pytest
 np.random.seed(42)
 
 from TraceLens.TreePerf import JaxTreePerfAnalyzer
+from TraceLens.util import DataLoader, JaxProfileProcessor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -51,6 +53,16 @@ def conv_events(perf_analyzer):
         [perf_analyzer.get_event_perf_model_name(event) for event in events]
     )
     assert result == {"jax_conv": 10}
+    # Perf models read dims from args. get_kernel_launchers writes them as a
+    # side effect; attach them here so these tests do not depend on that test
+    # having already run on this worker.
+    for event in events:
+        meta = JaxTreePerfAnalyzer.get_event_metadata(event)
+        args = event.get("args")
+        if not isinstance(args, dict):
+            event["args"] = {}
+            args = event["args"]
+        args.update(meta)
     return events
 
 
@@ -102,15 +114,17 @@ def test_num_tree_events(perf_analyzer):
 
 
 def test_tree_event_cats(perf_analyzer):
-    """GPU event counts (kernel, memcpy) must match; host-side may vary by backend."""
     result = Counter([event["cat"] for event in perf_analyzer.tree.events])
-    assert result["kernel"] == 25
-    assert result["memcpy"] == 53
-    # Host-side (cpu_op, python function, Unknown) can differ between xprof and
-    # tensorboard-plugin-profile; only assert the total matches
-    host_cats = {"cpu_op", "python function", "Unknown"}
-    host_total = sum(result.get(c, 0) for c in host_cats)
-    assert host_total == sum(result.values()) - 25 - 53
+    # xprof 2.23 names derived rows "XLA Ops - from #<stream>" and
+    # "Framework Name Scope - from #<stream>". Those match by prefix, so they
+    # are python function / cpu_op instead of Unknown.
+    assert result == {
+        "Unknown": 4658,
+        "cpu_op": 1147,
+        "python function": 20,
+        "memcpy": 53,
+        "kernel": 25,
+    }
 
 
 def test_kernel_event_cats(perf_analyzer):
@@ -231,6 +245,26 @@ def test_conv_event_metrics(perf_analyzer, conv_events, rand_conv_idx):
     assert math.isclose(
         578416648 / (1024 * 1024), dict_perf_metrics["Data Moved (MB)"], rel_tol=1e-5
     )
+
+
+def test_xprof_preserves_hlo_linking_and_sidecars(tmp_path):
+    """xprof 2.23 streaming traces drop hlo_op; the loader must keep it."""
+    src = JAX_CONV_MINIMAL_LEGACY
+    copied = tmp_path / "trace.xplane.pb"
+    shutil.copy(src, copied)
+
+    trace = DataLoader.load_data(str(copied))
+    events = trace["traceEvents"]
+    assert events
+    assert all(event.get("ph") != "i" for event in events)
+    assert any("hlo_op" in (event.get("args") or {}) for event in events)
+    assert any("correlation_id" in (event.get("args") or {}) for event in events)
+
+    hlo_ops = JaxProfileProcessor.process_protobuf_file(
+        str(copied), "jit_forward_3d_conv"
+    )
+    assert hlo_ops
+    assert list(tmp_path.glob("*hlo_proto.pb"))
 
 
 def test_conv_perf_metrics(perf_analyzer, conv_events):
