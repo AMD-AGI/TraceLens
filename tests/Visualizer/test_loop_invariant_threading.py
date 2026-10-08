@@ -1051,19 +1051,19 @@ def test_vision_range_docks_the_grid_it_is_sized_from():
 
 
 @pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-M3", "zai-org/GLM-5.3-Flash"])
-def test_loop_ports_bracket_the_body_which_names_both_kinds_of_input(model_id):
-    """Every loop body names what it carries, ported or not.
+def test_a_loop_body_names_both_of_its_ends(model_id):
+    """Every loop shows its body and names both ends; none draws a cycle.
 
-    ``Loop in``/``Loop out`` make the back edge legible, and that edge is the
-    only cycle the graph allows. A loop that carries one value AND is handed
-    nothing else folds them away -- the two boxes say less than the ``{N}x_``
-    group name already does, so the seed feeds the body directly and the body
-    feeds its consumer directly, which is how the heterogeneous decoder has
-    always rendered. A body handed several tensors keeps its ports, because
-    which of them is the recurrence is exactly what the back edge says.
+    ``Loop in``/``Loop out`` made the back edge legible, and that edge was the
+    only cycle the graph allowed. Two boxes plus a cycle say less than the
+    body's own ends do once those are named for the direction they face, so the
+    ports fold away everywhere: the seed feeds the body directly and the body
+    feeds its consumer directly.
 
-    Either way the body keeps its own boundaries and they name the value, so the
-    loop always says what it carries.
+    An accumulator is not a recurrence. ``get_vision_position_ids`` appends to a
+    list and concatenates afterwards, so it has an exit and no entry; its exit
+    keeps the tensor's plain name, because calling it a ``loop out`` would claim
+    a back edge the source has not got.
     """
     pytest.importorskip("huggingface_hub")
     graph, by_id = _build_nodes(model_id)
@@ -1075,47 +1075,26 @@ def test_loop_ports_bracket_the_body_which_names_both_kinds_of_input(model_id):
                 continue
             prefix, rest = node["id"].split(token, 1)
             carried.setdefault(f"{prefix}{rest}", {})[side] = node
-    # Folded means its ports are GONE, which is a structural fact rather than
-    # a naming one: both ends of a folded body are simply named for the tensor.
-    ported = {
-        "".join(node["id"].split("@loop_carried_in:", 1))
-        for node in graph["nodes"]
-        if "@loop_carried_in:" in node["id"]
-    }
     assert carried, "expected at least one loop body"
-    folded = {key: sides for key, sides in carried.items() if key not in ported}
-    # A ported loop brackets its body: both ends still named, and the entry
-    # boundary reads the port rather than the seed directly.
+
+    assert not [
+        node for node in graph["nodes"] if "@loop_carried" in str(node["id"])
+    ], "no loop keeps its ports"
+
     for key, sides in carried.items():
-        if key in folded:
-            continue
         variable = key.rsplit(":", 1)[-1]
-        # A ported body may name only one end -- GLM's position-ids helper has an
-        # exit boundary and no entry one, which is why the fold demands both --
-        # but whichever ends exist carry the tensor's own name.
+        if set(sides) == {"in", "out"}:
+            assert str(sides["in"].get("label")) == f"loop in: {variable}"
+            assert str(sides["out"].get("label")) == f"loop out: {variable}"
+            # The marker the ports used to carry lives on the ends now, so a
+            # pass can still find the recurrence without reading labels.
+            for node in sides.values():
+                assert _node_attr(node, "loop_carried"), node["id"]
+        else:
+            # Exit only: an accumulator, named for the tensor and nothing more.
+            assert set(sides) == {"out"}, (key, sorted(sides))
+            assert str(sides["out"].get("label")) == variable
+            assert _node_attr(sides["out"], "loop_carried") is None
+        # Whichever ends exist are wired.
         for node in sides.values():
-            assert str(node.get("label")) == variable, (key, node["id"])
-        if "in" in sides:
-            entry_sources = [
-                by_id.get(str(edge["sourceNodeId"]))
-                for edge in sides["in"].get("incomingEdges", []) or []
-            ]
-            assert any(
-                source is not None
-                and _node_attr(source, "synthetic") == "@loop_carried"
-                for source in entry_sources
-            ), key
-    for key, sides in folded.items():
-        assert set(sides) == {"in", "out"}, (key, sorted(sides))
-        variable = key.rsplit(":", 1)[-1]
-        # Both ends carry the tensor's own name; the direction says which end.
-        assert str(sides["in"].get("label")) == variable
-        assert str(sides["out"].get("label")) == variable
-        # Both ends are wired: the body reads what comes in and produces what
-        # goes out, with nothing circling back between them.
-        for side, node in sides.items():
-            assert node.get("incomingEdges"), (side, node["id"])
-            for edge in node["incomingEdges"]:
-                source = by_id.get(str(edge["sourceNodeId"]))
-                assert source is not None
-                assert _node_attr(source, "synthetic") != "@loop_carried"
+            assert node.get("incomingEdges"), node["id"]

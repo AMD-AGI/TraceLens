@@ -2712,94 +2712,133 @@ def _name_repeat_group_inputs_outside_it(nodes: list[dict[str, Any]]) -> None:
     nodes.extend(additions)
 
 
-def _fold_simple_loop_ports(nodes: list[dict[str, Any]]) -> None:
-    """A loop carrying ONE value shows its body, not a cycle around it.
+def _name_loop_body_ends(nodes: list[dict[str, Any]]) -> None:
+    """Both ends of a loop body say which end they are.
 
-    ``Loop in`` and ``Loop out`` exist to make the back edge legible, and the
-    back edge is the only cycle the graph is allowed. For a loop that carries a
-    single value with a clear way in and out, those two boxes plus the edge
-    that closes them say less than the ``{N}x_`` group name already does -- the
-    heterogeneous decoder has rendered this way all along, seeded straight from
-    its producer and feeding straight into its consumer, with no back edge.
+    With the ports gone the back edge goes with them, and direction alone is a
+    thin thing to hang a recurrence on -- especially where several tensors enter
+    the body and only one of them comes back round. The names carry it instead:
+    ``loop in: hidden_states`` and ``loop out: hidden_states``, the same tensor
+    named the same way at both ends.
 
-    So fold the ports away and wire the seed to whatever the entry port fed and
-    whatever fed the exit port to its consumers. The body's own boundaries stay
-    and keep the tensor's own name on both sides -- which end is which is given
-    by the direction, the way every other block says it. Nothing here creates an
-    edge, so the graph strictly loses its one cycle rather than gaining
-    anything.
+    An accumulator is left alone. ``get_vision_position_ids`` appends to a list
+    and concatenates afterwards, so it has an exit and no entry; calling its
+    exit a ``loop out`` would claim a recurrence the source has not got.
+    """
+    ends: dict[tuple[str, str, str], dict[str, dict[str, Any]]] = {}
+    for node in nodes:
+        node_id = str(node["id"])
+        for token, side in (("@body_in:", "in"), ("@body_out:", "out")):
+            if token not in node_id:
+                continue
+            prefix, rest = node_id.split(token, 1)
+            loop_id, _, variable = rest.partition(":")
+            ends.setdefault((prefix, loop_id, variable), {})[side] = node
+    for (_prefix, loop_id, variable), sides in ends.items():
+        if set(sides) != {"in", "out"}:
+            continue
+        for side, node in sides.items():
+            node["label"] = f"loop {side}: {variable}"
+            # The ports carried the ``@loop_carried`` marker; they are gone, so
+            # the body ends carry it. Invisible to the reader, and it keeps the
+            # recurrence something a pass can still find without parsing labels.
+            _set_node_attr(node, "loop_carried", f"{loop_id}:{variable}")
 
-    Loops carrying several values keep their ports: with more than one value in
-    flight, which output returns to which input is exactly what the reader
-    cannot infer, and that is what the back edges are for.
+
+def _name_iterated_block_ends(nodes: list[dict[str, Any]]) -> None:
+    """An iterated block names both its ends for the value it carries round.
+
+    A heterogeneous loop synthesizes no ports at all -- its variants run
+    DIFFERENT modules by iteration, so one carried abstraction would
+    misrepresent them -- and it has no ``@body_in``/``@body_out`` pair either.
+    What it has is the variant's own ``@input`` and ``@output``, and those ARE
+    the loop's ends: DeepSeek's decoder layer takes ``hidden_states`` and
+    returns the same tensor for the next iteration to take.
+
+    They read as unrelated today. The entry says ``hidden_states`` and the exit
+    says ``result`` -- a generic name for the one tensor that comes back round,
+    so nothing on screen pairs them. Name the exit for what the entry carries,
+    and say which end each is.
+
+    Scoped to a variant sitting DIRECTLY inside a ``{N}x_`` repeat group: that
+    is what makes it an iteration rather than an ordinary module. A block whose
+    exit carries a different shape from its entry is not returning what it was
+    handed, so it is left alone.
+    """
+    for namespace in {str(node.get("namespace") or "") for node in nodes}:
+        container = _repeat_group_container(namespace)
+        if container is None:
+            continue
+        # The iterated block is the repeat group itself when the group renders
+        # one body, or a child that is ITSELF a ``{N}x_`` variant when the group
+        # splits into variants running different modules. A plain child is a
+        # module INSIDE the body -- a layernorm preserves its shape, so shape
+        # alone would have called it a loop end.
+        if namespace != container:
+            tail = namespace[len(container) + 1 :]
+            if "/" in tail or not _REPEAT_SEGMENT_RE.match(tail):
+                continue
+        members = [n for n in nodes if str(n.get("namespace") or "") == namespace]
+        entry = next(
+            (
+                n
+                for n in members
+                if _node_attr(n, "synthetic") == "@input"
+                and str(n["id"]).rsplit("/", 1)[-1] == "@input"
+            ),
+            None,
+        )
+        exit_tile = next(
+            (
+                n
+                for n in members
+                if _node_attr(n, "synthetic") == "@output"
+                and str(n["id"]).rsplit("/", 1)[-1] == "@output"
+            ),
+            None,
+        )
+        if entry is None or exit_tile is None:
+            continue
+        carried = str(entry.get("label") or "").strip()
+        if not carried or carried.startswith("loop "):
+            continue
+        # What comes back round is what went in: same shape, or it is not the
+        # value the next iteration takes.
+        if _node_attr(entry, "output_shape") != _node_attr(exit_tile, "output_shape"):
+            continue
+        entry["label"] = f"loop in: {carried}"
+        exit_tile["label"] = f"loop out: {carried}"
+        for node in (entry, exit_tile):
+            _set_node_attr(node, "loop_carried", f"{container}:{carried}")
+
+
+def _fold_loop_ports(nodes: list[dict[str, Any]]) -> None:
+    """A loop shows its body and names both ends; it does not draw a cycle.
+
+    ``Loop in``/``Loop out`` existed to make the back edge legible, and that
+    edge was the only cycle the graph allowed. Two boxes and a cycle say less
+    than the body's own boundaries do once those are named for the direction
+    they face -- and a cycle drawn around a body costs every reader who has to
+    work out that it is not real dataflow.
+
+    So fold the ports away: the seed feeds the body directly and the body feeds
+    its consumer directly, exactly as the heterogeneous decoder has always
+    rendered. :func:`_name_loop_body_ends` then names what remains.
     """
     by_id = {str(n["id"]): n for n in nodes}
     pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    carried_per_loop: dict[tuple[str, str], set[str]] = {}
     for node in nodes:
         node_id = str(node["id"])
         if "@loop_carried_in:" not in node_id:
             continue
-        prefix, rest = node_id.split("@loop_carried_in:", 1)
-        loop_id, _, variable = rest.partition(":")
-        carried_per_loop.setdefault((prefix, loop_id), set()).add(variable)
-    for node in nodes:
-        node_id = str(node["id"])
-        if "@loop_carried_in:" not in node_id:
-            continue
-        prefix, rest = node_id.split("@loop_carried_in:", 1)
-        loop_id, _, variable = rest.partition(":")
-        if len(carried_per_loop.get((prefix, loop_id), ())) != 1:
-            continue  # several values in flight: keep the ports
         exit_port = by_id.get(
             node_id.replace("@loop_carried_in:", "@loop_carried_out:")
         )
         if exit_port is None:
             continue
-        # Fold only when the BODY already names the value BOTH ways. GLM's
-        # position-ids helper has an exit boundary and no entry one, so folding
-        # its ports would leave what it carries IN with nothing naming it at
-        # all -- worse than the two boxes this removes.
-        wanted = f"{loop_id}:{variable}"
-        body_tiles = [
-            other
-            for other in nodes
-            for token in ("@body_in:", "@body_out:")
-            if token in str(other["id"])
-            and str(other["id"]).split(token, 1)[1] == wanted
-        ]
-        named_sides = {
-            token
-            for other in body_tiles
-            for token in ("@body_in:", "@body_out:")
-            if token in str(other["id"])
-        }
-        if len(named_sides) < 2:
-            continue
-        # Carrying one value is not the same as being handed one. A body that
-        # reads several tensors needs its ports: with more than one tensor
-        # entering, which of them is the recurrence is exactly what the reader
-        # cannot infer, and that is what the back edge says. DeepSeek's expert
-        # loop is handed four tensors besides the accumulator it carries.
-        body_namespace = next(
-            (
-                str(tile.get("namespace") or "")
-                for tile in body_tiles
-                if "@body_in:" in str(tile["id"])
-            ),
-            "",
-        )
-        if body_namespace:
-            entering = [
-                other
-                for other in nodes
-                if str(other.get("namespace") or "") == body_namespace
-                and _node_attr(other, "synthetic") == "@input"
-            ]
-            if len(entering) > 1:
-                continue
         pairs.append((node, exit_port))
     if not pairs:
+        _name_loop_body_ends(nodes)
         return
 
     doomed = {str(entry["id"]) for entry, _ in pairs} | {
@@ -2845,6 +2884,7 @@ def _fold_simple_loop_ports(nodes: list[dict[str, Any]]) -> None:
             deduped.append(edge)
         node["incomingEdges"] = deduped
     nodes[:] = [n for n in nodes if str(n["id"]) not in doomed]
+    _name_loop_body_ends(nodes)
 
 
 def _fold_same_scope_mirrors(nodes: list[dict[str, Any]]) -> None:
@@ -8694,7 +8734,8 @@ def build_merged_model_graph(
 
     # Runs last of the loop passes: the body boundaries above are derived FROM
     # the ports, so they must exist before the ports can be folded away.
-    _fold_simple_loop_ports(nodes)
+    _fold_loop_ports(nodes)
+    _name_iterated_block_ends(nodes)
 
     # After every boundary pass has placed its tiles: a mirror is only
     # redundant once its neighbours are final.

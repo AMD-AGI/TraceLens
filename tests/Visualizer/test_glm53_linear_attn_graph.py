@@ -1332,9 +1332,10 @@ def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
     # than on one variant, so this does not depend on which MoE variant comes
     # first.
     assert carried, "the expert loop must name the value it carries"
-    assert {str(n.get("label")) for n in carried} == {"final"}, [
-        n.get("label") for n in carried
-    ]
+    assert {str(n.get("label")) for n in carried} == {
+        "loop in: final",
+        "loop out: final",
+    }, [n.get("label") for n in carried]
     assert any("@body_in:" in n["id"] for n in carried), "no entry end"
     assert any("@body_out:" in n["id"] for n in carried), "no exit end"
     assert all(len(node.get("incomingEdges", [])) <= 1 for node in loop_inputs)
@@ -1426,10 +1427,20 @@ def test_glm53_loop_carried_pairs_are_well_formed():
     assert folded, "expected at least one folded loop"
     for key in folded:
         variable, sides = key[2], carried[key]
+        if set(sides) == {"out"}:
+            # An accumulator, not a recurrence: ``get_vision_position_ids``
+            # appends per iteration and concatenates afterwards, so it has an
+            # exit and no entry. Its exit keeps the tensor's plain name --
+            # calling it a ``loop out`` would claim a back edge it has not got.
+            assert str(by_id[sides["out"]].get("label")) == variable
+            assert by_id[sides["out"]].get("incomingEdges"), sides["out"]
+            continue
         assert set(sides) == {"in", "out"}, (variable, sides)
-        # Both ends carry the tensor's own name; the direction says which end.
-        assert str(by_id[sides["in"]].get("label")) == variable
-        assert str(by_id[sides["out"]].get("label")) == variable
+        # Both ends name the SAME tensor and say which end they are. Direction
+        # alone was a thin thing to hang a recurrence on once the back edge
+        # went, especially where several tensors enter and one comes back.
+        assert str(by_id[sides["in"]].get("label")) == f"loop in: {variable}"
+        assert str(by_id[sides["out"]].get("label")) == f"loop out: {variable}"
         # Both ends sit inside the body they bracket, and each is wired.
         assert by_id[sides["in"]].get("incomingEdges"), sides["in"]
         assert by_id[sides["out"]].get("incomingEdges"), sides["out"]
@@ -1701,21 +1712,13 @@ def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
     ]
     assert len(entry) == 1, [n["id"] for n in entry]
     entry_node = entry[0]
-    assert str(entry_node.get("label")) == "hidden_states"
+    assert str(entry_node.get("label")) == "loop in: hidden_states"
 
-    # The body reads the loop's entry port; the port takes the seed from the embed
-    # and the back edge from the exit port, which is what the ports are for.
+    # With the ports gone the body's entry reads the seed itself: there is no
+    # port in between, and no back edge to make legible.
     sources = {e["sourceNodeId"] for e in entry_node.get("incomingEdges", []) or []}
-    assert len(sources) == 1, sources
-    (port_id,) = sources
-    assert "@loop_carried_in:" in port_id, port_id
-    port_sources = {
-        e["sourceNodeId"] for e in by_id[port_id].get("incomingEdges", []) or []
-    }
-    assert port_sources == {
-        "visual/@input:initial",
-        port_id.replace("@loop_carried_in:", "@loop_carried_out:"),
-    }, port_sources
+    assert sources == {"visual/@input:initial"}, sources
+    assert not any("@loop_carried" in str(n["id"]) for n in nodes), "ports are gone"
     seed = by_id["visual/@input:initial"]
     assert {e["sourceNodeId"] for e in seed.get("incomingEdges", []) or []} == {
         "visual/seq:1:patch_embed:patch_embed:0/@output"
@@ -3620,13 +3623,11 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
         if "visual/@body_in:" in n["id"] and n["id"].endswith(":hidden_states")
     ]
     assert len(vision_in) == 1, vision_in
-    assert str(by_id[vision_in[0]].get("label")) == "hidden_states"
-    vision_ports = [
-        n["id"]
-        for n in nodes
-        if "@loop_carried" in n["id"] and n["id"].endswith(":hidden_states")
-    ]
-    assert len(vision_ports) == 2, vision_ports
+    assert str(by_id[vision_in[0]].get("label")) == "loop in: hidden_states"
+    # This used to contrast with the vision block, which kept a port pair. No
+    # loop keeps one now -- the body's own ends name the direction instead -- so
+    # the heterogeneous decoder is no longer the exception, it is the rule.
+    assert not [n["id"] for n in nodes if "@loop_carried" in n["id"]]
     # The loop-invariant cos/sin inputs are still wired into the loop body. Each
     # crossing enters a module (the rotary producer -> the visual block section),
     # so the hierarchy-aware same-name collapse KEEPS the visual/@input:cos/sin
