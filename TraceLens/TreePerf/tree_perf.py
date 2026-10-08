@@ -170,6 +170,46 @@ class TreePerfAnalyzer:
     ) -> "TreePerfAnalyzer":
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
+        #
+        # PyTorch Chrome traces carry run metadata as top-level JSON fields.
+        # Field presence varies by profiler version, profiler options, and backend, e.g.
+        # {
+        #   "schemaVersion": 1,          # usually present
+        #   "deviceProperties": [{       # usually present for GPU traces
+        #     "id": 0,
+        #     "name": "AMD Instinct MI210",
+        #     "totalGlobalMem": 68702699520,
+        #     "computeMajor": 9,
+        #     "computeMinor": 0,
+        #     "maxThreadsPerBlock": 1024,
+        #     "maxThreadsPerMultiprocessor": 2048,
+        #     "regsPerBlock": 131072,
+        #     "warpSize": 64,
+        #     "sharedMemPerBlock": 65536,
+        #     "maxSharedMemoryPerMultiProcessor": 65536,
+        #     "numSms": 104
+        #   }],
+        #   "distributedInfo": {         # optional; distributed profiler traces
+        #     "backend": "nccl",
+        #     "rank": 0,
+        #     "world_size": 1,
+        #     "pg_count": 7,
+        #     "pg_config": [{
+        #       "pg_name": "0",
+        #       "pg_desc": "default_pg",
+        #       "backend_config": "cuda:nccl",
+        #       "pg_size": 1,
+        #       "ranks": [0]
+        #     }]
+        #   },
+        #   "record_shapes": 1,              # optional; profiler option/version dependent
+        #   "with_stack": 1,                 # optional; profiler option/version dependent
+        #   "roctracer_version": 4.1,        # optional; ROCm traces only
+        #   "hip_runtime_version": 70253211, # optional; ROCm traces only
+        #   "hip_driver_version": 70253211,  # optional; ROCm traces only
+        #   "traceEvents": [...]             # required event payload
+        # }
+        # load_trace_events separates these from the Chrome "M" metadata events.
         data, trace_metadata = DataLoader.load_trace_events(
             profile_filepath,
             capture_trace_filepath=capture_trace_filepath,
