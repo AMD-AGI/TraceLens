@@ -61,25 +61,31 @@ def _ports_read_from(nodes: list[dict], node_id: str) -> collections.Counter:
     return ports
 
 
-def _attention_boundary(nodes: list[dict]) -> dict:
+def _attention_boundaries(nodes: list[dict]) -> list[dict]:
+    """The attention's ``position_embeddings`` crossings, one per component."""
     found = [
         node
         for node in nodes
-        if str(node.get("id", "")).endswith("self_attn/@input:position_embeddings")
+        if "self_attn/@input:position_embeddings" in str(node.get("id", ""))
     ]
-    assert found, "expected the attention's position_embeddings boundary"
-    return found[0]
+    assert found, "expected the attention's position_embeddings boundaries"
+    return found
 
 
 class TestBothRotarySlotsAreRead:
-    def test_the_boundary_carries_both_slots(self, nodes: list[dict]) -> None:
-        edges = _attention_boundary(nodes).get("incomingEdges", []) or []
-        assert len(edges) == 2, edges
+    def test_each_component_crosses_on_its_own_tile(self, nodes: list[dict]) -> None:
+        """A tuple is two tensors, so it crosses as two tiles, not one with two ports."""
+        labels = {str(node.get("label")) for node in _attention_boundaries(nodes)}
+        assert labels == {
+            "position_embeddings.cos",
+            "position_embeddings.sin",
+        }, labels
 
-    def test_both_slots_are_consumed(self, nodes: list[dict]) -> None:
-        """Slot 0 (``cos``) was read by nothing; only slot 1 ever was."""
-        ports = _ports_read_from(nodes, str(_attention_boundary(nodes)["id"]))
-        assert set(ports) == {"0", "1"}, dict(ports)
+    def test_every_component_is_consumed(self, nodes: list[dict]) -> None:
+        """``cos`` was read by nothing; only ``sin`` ever was."""
+        for boundary in _attention_boundaries(nodes):
+            ports = _ports_read_from(nodes, str(boundary["id"]))
+            assert ports, f"{boundary['id']} reaches no consumer"
 
     def test_each_rotary_frame_reads_both(self, nodes: list[dict]) -> None:
         """Every ``apply_rotary_pos_emb`` frame multiplies by cos AND sin."""

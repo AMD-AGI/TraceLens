@@ -102,13 +102,23 @@ def test_deepseek_v4_attention_invariant_inputs_are_sourced():
     pytest.importorskip("huggingface_hub")
     graph, by_id = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
 
-    for boundary in (
-        "decoder/self_attn/@input:position_embeddings",
-        "decoder/self_attn/@input:attention_mask",
-    ):
-        node = by_id.get(boundary)
-        assert node is not None, f"missing boundary {boundary}"
-        assert node.get("incomingEdges"), f"{boundary} still floats"
+    # ``position_embeddings`` is a TUPLE, so it crosses as one boundary per
+    # component (``position_embeddings.cos`` / ``.sin``) rather than one tile
+    # re-exposing them as ports. Each must still be sourced.
+    components = [
+        node
+        for node in graph["nodes"]
+        if str(node.get("id", "")).startswith(
+            "decoder/self_attn/@input:position_embeddings"
+        )
+    ]
+    assert components, "missing the position_embeddings boundaries"
+    for node in components:
+        assert node.get("incomingEdges"), f"{node['id']} still floats"
+
+    mask = by_id.get("decoder/self_attn/@input:attention_mask")
+    assert mask is not None, "missing boundary decoder/self_attn/@input:attention_mask"
+    assert mask.get("incomingEdges"), "attention_mask still floats"
 
     assert _floating_namespaced_inputs(graph["nodes"]) == []
 
@@ -585,43 +595,45 @@ def test_a_tuple_boundary_names_each_component(model_id):
     """``position_embeddings`` is one name for two tensors, so it shows two.
 
     The decoder is handed ``(cos, sin)`` and unpacks them. Both arrived on one
-    tile, on the same input slot, and the tile declared no ports -- so it
-    showed no shape at all (there is no single shape to show) while consumers
+    tile, on the same input slot, and the tile declared no ports -- so it showed
+    no shape at all (there is no single shape to show) while consumers
     downstream were already addressing port 1 for ``sin``, a port nothing had
-    defined. A tile that takes one component off the tuple reports THAT
-    component, not the activation default that would otherwise stand in.
+    defined.
+
+    Naming the components as PORTS of one tile fixed the shapes but left a node
+    with two outputs, which the viewer does not draw legibly and which shows the
+    reader no name for either component. Each component is its own tile now,
+    named ``<param>.<component>`` and carrying that component's own shape.
     """
     pytest.importorskip("huggingface_hub")
     graph, by_id = _build_nodes(model_id)
 
-    tuples = [
+    components = [
         node
         for node in graph["nodes"]
-        if str(node.get("label")) == "position_embeddings"
-        and len(node.get("outputsMetadata") or []) > 1
+        if str(node.get("label", "")).startswith("position_embeddings.")
     ]
-    assert tuples, "expected the position_embeddings boundaries to name cos/sin"
-    for node in tuples:
-        labels = [
-            next(
-                (a["value"] for a in port.get("attrs", []) if a["key"] == "port_label"),
-                "",
-            )
-            for port in node["outputsMetadata"]
-        ]
-        assert labels == ["cos", "sin"], (node["id"], labels)
-        for port in node["outputsMetadata"]:
-            shape = next(
-                (a["value"] for a in port.get("attrs", []) if a["key"] == "shape"), ""
-            )
-            assert shape, (node["id"], port["id"])
+    assert components, "expected per-component position_embeddings boundaries"
 
-    # Each incoming edge lands on its own slot: two tensors are not one input.
-    for node in tuples:
-        slots = [
-            str(e.get("targetNodeInputId")) for e in node.get("incomingEdges") or []
-        ]
-        assert len(set(slots)) == len(slots), (node["id"], slots)
+    suffixes = {str(node["label"]).split(".", 1)[1] for node in components}
+    assert suffixes == {"cos", "sin"}, suffixes
+
+    for node in components:
+        shape = next(
+            (
+                attr["value"]
+                for attr in node.get("attrs", []) or []
+                if attr["key"] == "output_shape"
+            ),
+            "",
+        )
+        assert shape, node["id"]
+        # One component, one producer: a tile standing for a single tensor is
+        # not fed by two.
+        assert len(node.get("incomingEdges") or []) == 1, (
+            node["id"],
+            node.get("incomingEdges"),
+        )
 
 
 @pytest.mark.parametrize(

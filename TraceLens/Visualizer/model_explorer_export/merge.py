@@ -4612,6 +4612,192 @@ def _producer_output_spec(
     return known.get(str(predecessors[0]))
 
 
+def _tuple_slot_producers(
+    node: dict[str, Any], by_id: dict[str, dict[str, Any]]
+) -> list[tuple[dict[str, Any], dict[str, Any], str]] | None:
+    """``(edge, producer, slot name)`` per component when *node* carries a tuple.
+
+    Recognised the same way :func:`_declare_tuple_boundary_ports` recognises one:
+    several producers that are themselves NAMED boundaries and carry distinct
+    names. Several unrelated ops landing on one boundary (MiniMax's
+    ``block_indices``, fed by an ``Expand``, an ``attention_mask`` and a
+    ``masked_fill``) is a different defect, and inventing slot names for it would
+    paper over that.
+    """
+    named_boundary = {"@output", "@output_mirror", "@input", "@input_mirror"}
+    edges = list(node.get("incomingEdges", []) or [])
+    if len(edges) < 2:
+        return None
+    if len({str(edge.get("sourceNodeId")) for edge in edges}) != len(edges):
+        return None
+    producers = [by_id.get(str(edge.get("sourceNodeId"))) for edge in edges]
+    if any(producer is None for producer in producers):
+        return None
+    if any(
+        _node_attr(producer, "synthetic") not in named_boundary
+        for producer in producers
+    ):
+        return None
+    slots = [str(producer.get("label") or "").strip() for producer in producers]
+    if not all(slots) or len(set(slots)) != len(slots):
+        return None
+    return list(zip(edges, producers, slots))
+
+
+def _reads_several_ports(node_id: str, nodes: list[dict[str, Any]]) -> bool:
+    """True when something reads *node_id* at two or more distinct ports."""
+    ports = {
+        str(edge.get("sourceNodeOutputId") or "0")
+        for other in nodes
+        for edge in (other.get("incomingEdges") or [])
+        if str(edge.get("sourceNodeId")) == node_id
+    }
+    return len(ports) >= 2
+
+
+def _split_tuple_boundary_slots(nodes: list[dict[str, Any]]) -> None:
+    """A boundary carrying a tuple is drawn as one tile per component.
+
+    ``position_embeddings`` is one PARAMETER but two tensors. Drawn as a single
+    tile re-exposing them as two output ports, it can publish only one shape for
+    two tensors, and the reader sees neither name -- which component a port
+    carries is an ordinal nothing on screen shows.
+
+    One tile per component instead, named ``<param>.<component>`` after the
+    producer that fills it and carrying that producer's own shape. A consumer
+    that read component ``k`` reads the k-th tile at its only port.
+
+    A boundary that passes the whole tuple further in takes one edge PER
+    component rather than a single edge off component 0 -- without that it
+    carried one tensor while claiming two downstream, and the other component
+    reached nothing. Doing so makes it a tuple boundary in turn, so the split
+    walks the chain; each round strictly replaces a bundle, and the chain of
+    boundaries a tensor crosses is finite.
+    """
+    for _round in range(8):
+        if not _split_one_tuple_boundary(nodes):
+            return
+
+
+def _split_one_tuple_boundary(nodes: list[dict[str, Any]]) -> bool:
+    """Split the first tuple boundary that can be split soundly."""
+    by_id = {str(node.get("id")): node for node in nodes}
+    for node in nodes:
+        if _node_attr(node, "synthetic") != "@input":
+            continue
+        node_id = str(node.get("id", ""))
+        components = _tuple_slot_producers(node, by_id)
+        if components is None:
+            continue
+        base = str(node.get("label") or "").strip() or "input"
+        prefix = node_id.rsplit("/", 1)[0] if "/" in node_id else ""
+        slot_ids: list[str] = []
+        additions: list[dict[str, Any]] = []
+        for index, (edge, producer, slot) in enumerate(components):
+            # A component already carrying the qualified name (a mirror of an
+            # upstream ``position_embeddings.cos``) keeps it rather than being
+            # qualified twice.
+            name = slot if slot.startswith(f"{base}.") else f"{base}.{slot}"
+            tile_id = f"{prefix}/@input:{name}" if prefix else f"@input:{name}"
+            if tile_id in by_id:
+                break
+            attrs = [
+                dict(attr)
+                for attr in (node.get("attrs") or [])
+                if attr.get("key") not in {"output_shape", "output_dtype"}
+            ]
+            # The component carries exactly its producer's tensor, so it carries
+            # that producer's shape -- not the one shape a bundle had to pick.
+            for key in ("output_shape", "output_dtype"):
+                value = _node_attr(producer, key)
+                if value:
+                    attrs.append({"key": key, "value": value})
+            additions.append(
+                {
+                    "id": tile_id,
+                    "label": name,
+                    "namespace": node.get("namespace"),
+                    "attrs": attrs,
+                    "style": node.get("style"),
+                    "incomingEdges": [dict(edge)],
+                }
+            )
+            slot_ids.append(tile_id)
+        if len(slot_ids) != len(components):
+            continue
+
+        by_slot_name = {
+            str(tile["label"]).rsplit(".", 1)[-1]: tile["id"] for tile in additions
+        }
+        # Work out every consumer's new edge BEFORE committing: a consumer whose
+        # port names no component cannot be re-pointed, and guessing would hand a
+        # reader the wrong tensor.
+        planned: list[
+            tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]
+        ] = []
+        sound = True
+        for other in nodes:
+            mine = [
+                edge
+                for edge in (other.get("incomingEdges") or [])
+                if str(edge.get("sourceNodeId")) == node_id
+            ]
+            if not mine:
+                continue
+            # A consumer that re-exposes several ports of its own is passing the
+            # WHOLE tuple further in, so it needs every component -- not just the
+            # one its single edge happened to name. Reading that edge's port as a
+            # component index handed it one tensor while it claimed two
+            # downstream, and the other component reached nothing at all.
+            if len(mine) < len(slot_ids) and _reads_several_ports(
+                str(other.get("id")), nodes
+            ):
+                fanned = []
+                for ordinal, tile_id in enumerate(slot_ids):
+                    spread = dict(mine[0])
+                    spread["sourceNodeId"] = tile_id
+                    spread["sourceNodeOutputId"] = "0"
+                    spread["targetNodeInputId"] = str(ordinal)
+                    fanned.append(spread)
+                planned.append((other, mine, fanned))
+                continue
+            replacements: list[dict[str, Any]] = []
+            for edge in mine:
+                port = str(edge.get("sourceNodeOutputId") or "0")
+                if port.isdigit() and int(port) < len(slot_ids):
+                    target = slot_ids[int(port)]
+                elif port in by_slot_name:
+                    target = by_slot_name[port]
+                else:
+                    sound = False
+                    break
+                moved = dict(edge)
+                moved["sourceNodeId"] = target
+                moved["sourceNodeOutputId"] = "0"
+                replacements.append(moved)
+            if not sound:
+                break
+            planned.append((other, mine, replacements))
+        if not sound or not planned:
+            continue
+
+        for other, mine, replacements in planned:
+            rebuilt: list[dict[str, Any]] = []
+            inserted = False
+            for existing in other.get("incomingEdges") or []:
+                if any(existing is edge for edge in mine):
+                    if not inserted:
+                        rebuilt.extend(replacements)
+                        inserted = True
+                else:
+                    rebuilt.append(existing)
+            other["incomingEdges"] = rebuilt
+        nodes[:] = [item for item in nodes if str(item.get("id")) != node_id]
+        nodes.extend(additions)
+        return True
+    return False
+
+
 def _name_a_boundary_for_its_mirror(nodes: list[dict[str, Any]]) -> None:
     """A boundary fed by a tensor's own mirror carries that tensor's name.
 
@@ -8467,6 +8653,7 @@ def build_merged_model_graph(
     # these boundaries in the first place.
     _share_one_tile_per_entering_tensor(nodes)
     _name_a_boundary_for_its_mirror(nodes)
+    _split_tuple_boundary_slots(nodes)
     _order_model_inputs(nodes)
     _topologically_order_nodes(nodes)
     _give_loop_body_its_own_boundaries(nodes)
