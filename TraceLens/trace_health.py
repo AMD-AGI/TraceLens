@@ -19,11 +19,10 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
+from .util import GPU_KERNEL_CATEGORIES, GRAPH_LAUNCH_NAMES
+
 logger = logging.getLogger(__name__)
 
-# Constants
-_GPU_CATS = frozenset({"kernel", "gpu_memcpy", "gpu_memset"})
-_GRAPH_LAUNCH_PATTERN = "graphlaunch"
 _MIN_KERNEL_COUNT = 10
 
 
@@ -81,12 +80,11 @@ def run_trace_health_check(
 
     for event in events:
         cat = event.get("cat", "")
-        if cat in _GPU_CATS:
+        if cat in GPU_KERNEL_CATEGORIES:
             kernel_count += 1
         if cat == "python_function":
             has_python_func = True
-        name = event.get("name", "")
-        if _GRAPH_LAUNCH_PATTERN in name.lower():
+        if event.get("name") in GRAPH_LAUNCH_NAMES:
             graph_launch_count += 1
 
     findings: List[TraceHealthFinding] = []

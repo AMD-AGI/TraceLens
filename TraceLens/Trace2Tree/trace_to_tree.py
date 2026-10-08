@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Any, Callable, Dict, Optional
 
-from ..util import JaxProfileProcessor, TraceEventUtils
+from ..util import GRAPH_LAUNCH_NAMES, JaxProfileProcessor, TraceEventUtils
 
 logger = logging.getLogger(__name__)
 
@@ -761,10 +761,9 @@ class TraceToTree(BaseTraceToTree):
         Name = TraceEventUtils.TraceKeys.Name
         events_by_uid = self.events_by_uid
         name2event_uids = self.name2event_uids
-        graph_launch_names = {"cudaGraphLaunch", "hipGraphLaunch"}
         for runtime_uid in self.runtime_event_uids:
             runtime_event = events_by_uid[runtime_uid]
-            if runtime_event["name"] in graph_launch_names:
+            if runtime_event["name"] in GRAPH_LAUNCH_NAMES:
                 corresponding_gpu_events = self._get_graph_gpu_events(runtime_event)
             else:
                 gpu_evt = self._find_corresponding_output_event(runtime_event)

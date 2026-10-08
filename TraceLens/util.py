@@ -16,8 +16,6 @@ import tempfile
 import zipfile
 from collections import Counter, defaultdict, deque
 
-from .trace_health import run_trace_health_check
-
 try:
     from enum import StrEnum
 except ImportError:
@@ -467,6 +465,8 @@ class DataLoader:
         events = data.get("traceEvents", [])
 
         if os.environ.get("TRACELENS_SKIP_HEALTH_CHECK") != "1":
+            from .trace_health import run_trace_health_check
+
             report = run_trace_health_check(events, metadata, capture_trace_filepath)
             report.log_findings()
 
@@ -1263,6 +1263,7 @@ class TraceEventUtils:
 GPU_KERNEL_CATEGORIES = tuple(TraceEventUtils.GpuEventCategories)
 GPU_USER_ANNOTATION = TraceEventUtils.GpuUserAnnotation.GpuUserAnnotation
 GPU_EVENT_CATEGORIES = (*GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION)
+GRAPH_LAUNCH_NAMES = frozenset({"cudaGraphLaunch", "hipGraphLaunch"})
 
 
 class RocprofParser:
