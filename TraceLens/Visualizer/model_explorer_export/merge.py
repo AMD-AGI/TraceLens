@@ -4674,7 +4674,13 @@ def _split_tuple_boundary_slots(nodes: list[dict[str, Any]]) -> None:
     walks the chain; each round strictly replaces a bundle, and the chain of
     boundaries a tensor crosses is finite.
     """
-    for _round in range(8):
+    # One boundary per round, so the bound must cover every boundary in the
+    # graph rather than the depth of one chain: DeepSeek alone needs 8, and a
+    # cap that low would silently leave the next model's bundles unsplit -- or,
+    # worse, split one chain only part-way. Each round strictly replaces a
+    # bundle with its components, so the node count is the real termination
+    # proof and this is only a guard against a cycle.
+    for _round in range(len(nodes) + 1):
         if not _split_one_tuple_boundary(nodes):
             return
 
