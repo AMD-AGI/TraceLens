@@ -33,7 +33,7 @@ from ..PerfModel.torch_op_mapping import (
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
-from .. import trace_health
+from .. import trace_check
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils, merge_intervals
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
@@ -287,7 +287,7 @@ class TreePerfAnalyzer:
         self.gpu_only = self.check_gpu_only()
         if rebuild_tree:
             self.tree.build_tree(add_python_func=add_python_func)
-            trace_health.check_kernels_dropped(self.tree).log_findings()
+            trace_check.run_post_tree_checks(self.tree).log_findings()
 
         # Apply pseudo-op extensions
         if enable_pseudo_ops:
@@ -3059,7 +3059,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             metadata_events=metadata_events if metadata_events is not None else {},
             pb_file_name=pb_file_name,
         )
-        trace_health.check_kernels_dropped(self.tree).log_findings()
+        trace_check.run_post_tree_checks(self.tree).log_findings()
         self.gpu_event_filter = JaxAnalyses.default_gpu_event_filter
         self.gpu_event_analyser = JaxGPUEventAnalyser(self.tree.events)
         self.jax_op_to_perf_model_class_map = jax_op_to_perf_model_class_map

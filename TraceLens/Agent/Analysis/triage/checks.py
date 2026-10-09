@@ -25,6 +25,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
+from TraceLens import trace_check
 from TraceLens.util import DataLoader
 
 # ---------------------------------------------------------------------------
@@ -522,19 +523,10 @@ def check_trace_size(run_dir, _stream_file):
     trace_path = resolve_trace_path(run_dir)
     if not trace_path or not os.path.exists(trace_path):
         return None
-    size = os.path.getsize(trace_path)
-    if size < _MIN_TRACE_BYTES:
-        return FindingDraft(
-            "Trace files too small (< 100KB)",
-            f"Trace file is {size:,} bytes — may be empty or warmup-only",
-            "Profiling window too short or no GPU ops captured",
-        )
-    if size > _MAX_TRACE_BYTES:
-        return FindingDraft(
-            "Trace files too large (> 5GB)",
-            f"Trace file is {size / 1e9:.1f} GB — consider splitting",
-            "Too many steps are being analyzed; reduce profiling window",
-        )
+    report = trace_check.run_trace_checks([], filepath=trace_path)
+    for f in report.findings:
+        if f.check_id == "trace_file_size":
+            return FindingDraft(f.message, f.message, f.message)
     return None
 
 
@@ -542,12 +534,10 @@ def check_no_gpu_kernels(run_dir, _stream_file):
     events = _load_events(resolve_trace_path(run_dir))
     if events is None:
         return None
-    if not any(e.get("cat") == "kernel" for e in events):
-        return FindingDraft(
-            "No GPU kernel events in trace",
-            "Trace contains no events with cat='kernel'",
-            "Ensure ProfilerActivity.CUDA is enabled in profiler config",
-        )
+    report = trace_check.run_trace_checks(events)
+    for f in report.findings:
+        if f.check_id == "kernels_present":
+            return FindingDraft(f.message, f.message, f.message)
     return None
 
 
@@ -649,20 +639,10 @@ def check_missing_cpu_op_shapes(run_dir, _stream_file):
     events = _first_load_capture_event_set(capture_folder)
     if events is None:
         return None
-    cpu_ops = [e for e in events if e.get("cat") == "cpu_op"]
-    if not cpu_ops:
-        return FindingDraft(
-            "Trace missing cpu_op events with input shapes",
-            f"Capture file has zero cpu_op events ({capture_folder})",
-            "Profile with cpu_callstack and record_shapes enabled in profiler config",
-        )
-    with_shapes = sum(1 for e in cpu_ops if "Input Dims" in (e.get("args") or {}))
-    if with_shapes < _MIN_CPU_OP_SHAPES:
-        return FindingDraft(
-            "Trace missing cpu_op events with input shapes",
-            f"Only {with_shapes} of {len(cpu_ops)} cpu_op events carry 'Input Dims' in capture trace",
-            "Profile with cpu_callstack and record_shapes enabled in profiler config",
-        )
+    report = trace_check.run_trace_checks(events)
+    for f in report.findings:
+        if f.check_id == "cpu_op_shapes_missing":
+            return FindingDraft(f.message, f.message, f.message)
     return None
 
 

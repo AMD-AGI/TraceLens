@@ -1035,6 +1035,13 @@ def generate_perf_report_pytorch(
         dict_name2df, xlsx_path=output_xlsx_path, csvs_dir=output_csvs_dir
     )
 
+    if os.environ.get("TRACELENS_DETAILED_HEALTH_CHECKS") == "1":
+        from TraceLens import trace_check
+
+        trace_check.run_post_report_checks(
+            dict_name2df, framework="pytorch"
+        ).log_findings()
+
     return dict_name2df
 
 

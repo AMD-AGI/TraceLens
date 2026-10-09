@@ -265,14 +265,11 @@ def _load_and_detect(args):
     nothing to split: no GPU work, a NOT_SPLITTABLE result, or a DEGRADED result
     without ``--allow-degraded``.
     """
-    trace_json = DataLoader.load_data(get_filename(args.trace_path))
-    events = trace_json.get("traceEvents", [])
+    events, metadata = DataLoader.load_trace_events(get_filename(args.trace_path))
+    trace_json = dict(metadata)
+    trace_json["traceEvents"] = events
     trace_index = EventIndex(events)
     print(f"Loaded {len(events)} events")
-
-    if sum(k.get("dur", 0) for k in trace_index.kernels) == 0:
-        print("No GPU work in trace; nothing to split.")
-        return None
 
     detection = find_iteration_roots(events, trace_index=trace_index)
     print(
