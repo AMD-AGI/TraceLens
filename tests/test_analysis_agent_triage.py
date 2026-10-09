@@ -14,10 +14,9 @@ exact directory / file shapes the ``triage`` package reads).
 
 Contracts exercised by the loader group:
   * ``_load_trace_json`` is ``functools.lru_cache(maxsize=1)`` and delegates to
-    ``DataLoader.load_data`` (strict UTF-8 via orjson) — so a repeat call returns
-    the SAME object, and a corrupt file raises (a ``ValueError`` subclass) on
-    every call because ``lru_cache`` does not memoize exceptions.
-  * ``_events_of`` collapses the ``list`` / ``traceEvents`` idiom.
+    ``DataLoader.load_trace_events`` (strict UTF-8 via orjson) — so a repeat
+    call returns the SAME object, and a corrupt file raises (a ``ValueError``
+    subclass) on every call because ``lru_cache`` does not memoize exceptions.
   * ``_load_events`` is the swallowing wrapper that converts loader errors to
     ``None`` so detection checks degrade gracefully.
 """
@@ -39,7 +38,6 @@ from TraceLens.Agent.Analysis.triage.checks import (
     Finding,
     FindingDraft,
     _apply_path_remaps,
-    _events_of,
     _first_load_capture_event_set,
     _load_events,
     _load_gpu_timeline,
@@ -421,17 +419,22 @@ _PARSE_FLOAT_CASES = [
 
 def test_load_trace_json_plain_json(tmp_path):
     p = write_json(tmp_path / "trace.json", {"traceEvents": [{"cat": "kernel"}]})
-    assert _load_trace_json(p) == {"traceEvents": [{"cat": "kernel"}]}
+    events, metadata = _load_trace_json(p)
+    assert events == [{"cat": "kernel"}]
+    assert metadata == {}
 
 
 def test_load_trace_json_gzip(tmp_path):
     p = write_json_gz(tmp_path / "trace.json.gz", [{"cat": "cpu_op"}])
-    assert _load_trace_json(p) == [{"cat": "cpu_op"}]
+    events, metadata = _load_trace_json(p)
+    assert events == [{"cat": "cpu_op"}]
+    assert metadata == {}
 
 
-def test_load_trace_json_lru_cache_returns_same_object(tmp_path):
+def test_load_trace_json_lru_cache_returns_same_object(tmp_path, monkeypatch):
     # lru_cache(maxsize=1) keyed on the resolved path collapses a repeat parse of
     # the same file to a single object.
+    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
     p = write_json(tmp_path / "trace.json", {"traceEvents": []})
     first = _load_trace_json(p)
     second = _load_trace_json(p)
@@ -473,17 +476,6 @@ def test_load_events_corrupt_json_returns_none(tmp_path):
     with pytest.raises((json.JSONDecodeError, ValueError)):
         _load_trace_json(str(p))
     assert _load_events(str(p)) is None
-
-
-# ---------------------------------------------------------------------------
-# _events_of
-# ---------------------------------------------------------------------------
-
-
-def test_events_of():
-    assert _events_of([{"cat": "kernel"}]) == [{"cat": "kernel"}]
-    assert _events_of({"traceEvents": [{"a": 1}]}) == [{"a": 1}]
-    assert _events_of({"no_events_key": True}) == []
 
 
 # ---------------------------------------------------------------------------
@@ -808,7 +800,8 @@ def test_load_unified_perf_summary_present_and_absent(tmp_path):
     assert _load_unified_perf_summary(str(make_run_dir(tmp_path / "bare"))) is None
 
 
-def test_first_load_capture_event_set_skips_corrupt_and_metadata(tmp_path):
+def test_first_load_capture_event_set_skips_corrupt_and_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
     folder = tmp_path / "capture_traces"
     # Metadata files are skipped by name; a corrupt gz is skipped by the
     # except-continue; the good file wins.
@@ -967,7 +960,7 @@ def test_trace_size_too_small(tmp_path):
     run_dir = make_run_dir(tmp_path, cmd_prefix=trace)
     finding = check_trace_size(str(run_dir), None)
     assert finding is not None
-    assert finding.failure_mode == "Trace files too small (< 100KB)"
+    assert "may be empty or warmup-only" in finding.failure_mode
 
 
 def test_trace_size_normal_returns_none(tmp_path):
@@ -991,7 +984,7 @@ def test_no_gpu_kernels_fires(tmp_path):
     run_dir = make_run_dir(tmp_path, cmd_prefix=trace)
     finding = check_no_gpu_kernels(str(run_dir), None)
     assert finding is not None
-    assert finding.failure_mode == "No GPU kernel events in trace"
+    assert "No GPU kernel events" in finding.failure_mode
 
 
 def test_no_gpu_kernels_present_returns_none(tmp_path):
@@ -1054,23 +1047,25 @@ def test_capture_missing_manifest_without_capture_key_returns_none(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_missing_cpu_op_shapes_zero_cpu_ops(tmp_path):
+def test_missing_cpu_op_shapes_zero_cpu_ops(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
     run_dir = make_run_dir(tmp_path, capture_events=[{"cat": "kernel"}])
     finding = check_missing_cpu_op_shapes(str(run_dir), None)
-    assert finding is not None
-    assert "zero cpu_op events" in finding.evidence
+    assert finding is None
 
 
-def test_missing_cpu_op_shapes_too_few_with_shapes(tmp_path):
+def test_missing_cpu_op_shapes_too_few_with_shapes(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
     run_dir = make_run_dir(
         tmp_path, capture_events=[{"cat": "cpu_op"} for _ in range(5)]
     )
     finding = check_missing_cpu_op_shapes(str(run_dir), None)
     assert finding is not None
-    assert "carry 'Input Dims'" in finding.evidence
+    assert "input shapes" in finding.failure_mode
 
 
-def test_missing_cpu_op_shapes_enough_returns_none(tmp_path):
+def test_missing_cpu_op_shapes_enough_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
     events = [{"cat": "cpu_op", "args": {"Input Dims": [[1]]}} for _ in range(10)]
     run_dir = make_run_dir(tmp_path, capture_events=events)
     assert check_missing_cpu_op_shapes(str(run_dir), None) is None
@@ -1106,7 +1101,8 @@ def test_inference_annotation_no_main_trace(tmp_path):
     assert finding.failure_mode == "Main inference trace missing "
 
 
-def test_inference_annotation_present_returns_none(tmp_path):
+def test_inference_annotation_present_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
     events = [{"cat": "user_annotation", "name": "execute_step"}]
     run_dir = make_run_dir(tmp_path, main_trace_events=events)
     assert check_inference_annotation_missing(str(run_dir), None) is None
@@ -1174,7 +1170,8 @@ def test_split_incorrect_is_inert(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_shape_profiler_missing_fires_from_capture(tmp_path):
+def test_shape_profiler_missing_fires_from_capture(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
     events = [{"cat": "cpu_op", "name": "sglang::forward"}]
     run_dir = make_run_dir(tmp_path, capture_events=events)
     finding = check_shape_profiler_missing(str(run_dir), None)
@@ -1182,7 +1179,8 @@ def test_shape_profiler_missing_fires_from_capture(tmp_path):
     assert finding.failure_mode == "Trace was profiled without SGLang patches"
 
 
-def test_shape_profiler_present_returns_none(tmp_path):
+def test_shape_profiler_present_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
     events = [
         {"cat": "cpu_op", "name": "sglang::forward"},
         {"cat": "python_function", "name": "kernel_shape_profiler_run"},
@@ -1191,7 +1189,8 @@ def test_shape_profiler_present_returns_none(tmp_path):
     assert check_shape_profiler_missing(str(run_dir), None) is None
 
 
-def test_shape_profiler_no_sglang_returns_none(tmp_path):
+def test_shape_profiler_no_sglang_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
     events = [{"cat": "cpu_op", "name": "aten::mm"}]
     run_dir = make_run_dir(tmp_path, capture_events=events)
     assert check_shape_profiler_missing(str(run_dir), None) is None

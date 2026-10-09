@@ -74,8 +74,9 @@ class JaxNcclAnalyser:
 
         for node, protobuf_filepath in self.node_to_pb_file_mapping.items():
             print(f"Loading node {node} from {protobuf_filepath}")
-            pb_data = DataLoader.load_data(protobuf_filepath, save_preprocessed=False)
-            trace_events = pb_data["traceEvents"]
+            trace_events, _ = DataLoader.load_trace_events(
+                protobuf_filepath, save_preprocessed=False
+            )
             linking_key = "correlation_id"
             categorizer = TraceEventUtils.prepare_event_categorizer(trace_events)
             metadata_events, other_events = TraceEventUtils.split_event_list(

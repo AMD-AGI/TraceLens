@@ -33,6 +33,7 @@ from ..PerfModel.torch_op_mapping import (
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
+from .. import trace_check
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils, merge_intervals
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
@@ -169,7 +170,7 @@ class TreePerfAnalyzer:
     ) -> "TreePerfAnalyzer":
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
-        data = DataLoader.load_data(profile_filepath)
+        #
         # PyTorch Chrome traces carry run metadata as top-level JSON fields.
         # Field presence varies by profiler version, profiler options, and backend, e.g.
         # {
@@ -208,11 +209,11 @@ class TreePerfAnalyzer:
         #   "hip_driver_version": 70253211,  # optional; ROCm traces only
         #   "traceEvents": [...]             # required event payload
         # }
-        # Keep these trace-level fields separate from Chrome "M" metadata events.
-        trace_metadata = {
-            key: value for key, value in data.items() if key != "traceEvents"
-        }
-        data = data["traceEvents"]
+        # load_trace_events separates these from the Chrome "M" metadata events.
+        data, trace_metadata = DataLoader.load_trace_events(
+            profile_filepath,
+            capture_trace_filepath=capture_trace_filepath,
+        )
 
         categorizer = (
             TraceToTree.default_categorizer
@@ -287,6 +288,7 @@ class TreePerfAnalyzer:
         self.gpu_only = self.check_gpu_only()
         if rebuild_tree:
             self.tree.build_tree(add_python_func=add_python_func)
+            trace_check.run_post_tree_checks(self.tree).log_findings()
 
         # Apply pseudo-op extensions
         if enable_pseudo_ops:
@@ -2999,8 +3001,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         *args,
         **kwargs,
     ) -> "JaxTreePerfAnalyzer":
-        data = DataLoader.load_data(profile_filepath)
-        data_pb = data["traceEvents"]
+        data_pb, _ = DataLoader.load_trace_events(profile_filepath)
+
         categorizer = TraceEventUtils.prepare_event_categorizer(data_pb)
         metadata_events, events = TraceEventUtils.split_event_list(data_pb)
         linking_key = "correlation_id"
@@ -3058,6 +3060,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             metadata_events=metadata_events if metadata_events is not None else {},
             pb_file_name=pb_file_name,
         )
+        trace_check.run_post_tree_checks(self.tree).log_findings()
         self.gpu_event_filter = JaxAnalyses.default_gpu_event_filter
         self.gpu_event_analyser = JaxGPUEventAnalyser(self.tree.events)
         self.jax_op_to_perf_model_class_map = jax_op_to_perf_model_class_map

@@ -172,6 +172,13 @@ def generate_perf_report_jax(
         csvs_dir=output_csvs_dir,
     )
 
+    if os.environ.get("TRACELENS_DETAILED_HEALTH_CHECKS") == "1":
+        from TraceLens import trace_check
+
+        trace_check.run_trace_checks(
+            pre_report=False, dfs=dict_name2df, framework="jax"
+        ).log_findings()
+
     return dict_name2df
 
 

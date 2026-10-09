@@ -452,6 +452,27 @@ class DataLoader:
                 json.dump(parsed, writefile)
         return parsed
 
+    @staticmethod
+    def load_trace_events(
+        filepath,
+        save_preprocessed=False,
+        capture_trace_filepath=None,
+    ):
+        data = DataLoader.load_data(filepath, save_preprocessed=save_preprocessed)
+        if isinstance(data, list):
+            return data, {}
+        metadata = {k: v for k, v in data.items() if k != "traceEvents"}
+        events = data.get("traceEvents", [])
+
+        if os.environ.get("TRACELENS_SKIP_HEALTH_CHECK") != "1":
+            from . import trace_check
+
+            trace_check.run_trace_checks(
+                events, metadata, capture_trace_filepath, filepath=filepath
+            ).log_findings()
+
+        return events, metadata
+
 
 class JaxProfileProcessor:
     gemm_columns = ["Batch", "M", "N", "K", "Beta", "Type"]
@@ -1243,6 +1264,7 @@ class TraceEventUtils:
 GPU_KERNEL_CATEGORIES = tuple(TraceEventUtils.GpuEventCategories)
 GPU_USER_ANNOTATION = TraceEventUtils.GpuUserAnnotation.GpuUserAnnotation
 GPU_EVENT_CATEGORIES = (*GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION)
+GRAPH_LAUNCH_NAMES = frozenset({"cudaGraphLaunch", "hipGraphLaunch"})
 
 
 class RocprofParser:
