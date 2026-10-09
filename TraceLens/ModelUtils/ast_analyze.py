@@ -9357,6 +9357,40 @@ def _dict_registry_constructor_name(node: ast.AST) -> str | None:
     return None
 
 
+def _unbuilt_init_statements(func: ast.FunctionDef, config: dict[str, Any]) -> set[int]:
+    """Nodes of ``__init__`` branches the config rules out, by ``id``.
+
+    ``GPT2Block.__init__`` builds its cross-attention only when asked::
+
+        if config.add_cross_attention:
+            self.crossattention = GPT2Attention(..., is_cross_attention=True)
+
+    GPT-2's checkpoint leaves that key out, and its config class defaults it to
+    False -- so the module is never built. Walking every branch regardless
+    registered it anyway, and the submodule that does not exist came to be 39%
+    of the drawn graph.
+
+    Only a condition that resolves to a real boolean decides anything; anything
+    unresolved keeps BOTH arms, as before. This reads the condition, not the
+    statement, so no class or attribute name is named here.
+    """
+    unbuilt: set[int] = set()
+
+    def bury(stmts: list[ast.stmt]) -> None:
+        for stmt in stmts:
+            for node in ast.walk(stmt):
+                unbuilt.add(id(node))
+
+    for node in ast.walk(func):
+        if not isinstance(node, ast.If):
+            continue
+        decided = _config_value(node.test, config, {})
+        if not isinstance(decided, bool):
+            continue
+        bury(node.orelse if decided else node.body)
+    return unbuilt
+
+
 def _parse_init(
     func: ast.FunctionDef,
     *,
@@ -9411,7 +9445,11 @@ def _parse_init(
         else:
             unresolved_activations.pop(attr, None)
 
+    unbuilt = _unbuilt_init_statements(func, config or {})
+
     for node in ast.walk(func):
+        if id(node) in unbuilt:
+            continue
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Attribute) and _is_self_attr(
