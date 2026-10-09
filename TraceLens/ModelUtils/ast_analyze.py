@@ -3241,6 +3241,10 @@ class ClassStructure:
     forward_step_details: dict[str, list[str]] = field(default_factory=dict)
     side_inputs: dict[str, list[SideInputSpec]] = field(default_factory=dict)
     init_assignment_options: dict[str, list[str]] = field(default_factory=dict)
+    # Submodules assigned ONLY inside an `__init__` branch the config rules
+    # out, so no instance has them. A forward that calls one cannot run --
+    # the model raises -- which is what makes the call safe to drop.
+    unbuilt_attrs: frozenset[str] = frozenset()
     forward_input_name: str | None = None
     forward_operations: dict[str, ForwardOperation] = field(default_factory=dict)
     forward_step_predecessors: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -8958,6 +8962,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         multi_op_method_order: dict[str, list[str]] = {}
         multi_op_method_step_predecessor_args: dict[str, dict[str, dict[str, str]]] = {}
         forward_step_return_producers: dict[str, list[str | None]] = {}
+        unbuilt_attrs: frozenset[str] = frozenset()
         init_func = next(
             (
                 item
@@ -8984,6 +8989,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 init_assignment_options,
                 unresolved_activation_refs,
                 unresolved_module_dict_class_refs,
+                unbuilt_attrs,
             ) = _parse_init(
                 init_func,
                 config=self._init_config_for_class(node.name),
@@ -9288,6 +9294,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             init_assignments=init_assignments,
             init_details=init_details,
             init_assignment_options=init_assignment_options,
+            unbuilt_attrs=unbuilt_attrs,
             forward_calls=forward_calls,
             norm_before=norm_before,
             attention_inputs=attention_inputs,
@@ -9402,6 +9409,7 @@ def _parse_init(
     dict[str, list[str]],
     dict[str, tuple[str, str]],
     dict[str, str],
+    frozenset[str],
 ]:
     assignments: dict[str, str] = {}
     details: dict[str, list[str]] = {}
@@ -9465,13 +9473,39 @@ def _parse_init(
             ):
                 record_assignment(target.attr, node.value)
 
+    # An attr assigned only inside a ruled-out branch is built by no instance.
+    # One also assigned in a live branch is built, so it is not listed.
+    unbuilt_attrs: set[str] = set()
+    for node in ast.walk(func):
+        if id(node) not in unbuilt:
+            continue
+        targets: list[ast.AST] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        for target in targets:
+            if (
+                isinstance(target, ast.Attribute)
+                and _is_self_attr(target, target.attr)
+                and target.attr not in assignments
+            ):
+                unbuilt_attrs.add(target.attr)
+
     # A statically-resolved assignment to the same attr wins over a dict-registry
     # placeholder (a later plain ``self.x = Foo()`` overriding a switch arm).
     for attr in list(unresolved_dict_refs):
         if attr in assignments:
             unresolved_dict_refs.pop(attr, None)
 
-    return assignments, details, options, unresolved_activations, unresolved_dict_refs
+    return (
+        assignments,
+        details,
+        options,
+        unresolved_activations,
+        unresolved_dict_refs,
+        frozenset(unbuilt_attrs),
+    )
 
 
 def _subscript_index_operands(index: ast.AST) -> list[ast.AST]:
@@ -12428,6 +12462,14 @@ def _build_components(decoder: ClassStructure) -> list[BlockComponent]:
             )
             continue
         if attr in decoder.init_assignments:
+            continue
+        # A call to a submodule the config never builds is not a step. GPT-2's
+        # block calls `self.crossattention(...)` under a RUNTIME guard
+        # (`encoder_hidden_states is not None`) that no config can decide, but
+        # the module is built only under `if config.add_cross_attention` -- which
+        # its checkpoint leaves off, so the model raises there rather than
+        # running it. Drawn as a step it reads as computation that happens.
+        if attr in decoder.unbuilt_attrs:
             continue
         if _inline_forward_step(attr):
             continue

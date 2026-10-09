@@ -49,14 +49,20 @@ class Block(nn.Module):
         else:
             self.fallback = Attention()
 
-    def forward(self, x):
-        return self.attn(x)
+    def forward(self, x, encoder_hidden_states=None):
+        x = self.attn(x)
+        if encoder_hidden_states is not None:
+            x = self.crossattention(x)
+        return x
 """
 
 
+def _block(config: dict):
+    return analyze_source(SOURCE, config=config).class_registry["Block"]
+
+
 def _assignments(config: dict) -> dict[str, str]:
-    analysis = analyze_source(SOURCE, config=config)
-    return dict(analysis.class_registry["Block"].init_assignments or {})
+    return dict(_block(config).init_assignments or {})
 
 
 class TestAFalseConditionBuildsNothing:
@@ -83,6 +89,35 @@ class TestATrueConditionStillBuilds:
     def test_an_enabled_module_is_registered(self) -> None:
         built = _assignments({"add_cross_attention": True, "use_extra": True})
         assert built.get("crossattention") == "Attention"
+
+
+class TestCallingAModuleThatWasNeverBuilt:
+    """The forward still calls it, under a condition no config can decide.
+
+    GPT-2 guards the call with ``if encoder_hidden_states is not None`` -- a
+    RUNTIME test. But the module is built only under ``add_cross_attention``, so
+    reaching that call raises; the model says so itself. Drawn as a step it reads
+    as computation that happens, and in GPT-2 it was the last piece of a
+    cross-attention tower the checkpoint cannot instantiate.
+    """
+
+    def test_it_is_recorded_as_unbuilt(self) -> None:
+        block = _block({"add_cross_attention": False, "use_extra": True})
+        assert "crossattention" in block.unbuilt_attrs
+
+    def test_it_is_not_a_block_component(self) -> None:
+        analysis = analyze_source(
+            SOURCE, config={"add_cross_attention": False, "use_extra": True}
+        )
+        names = {component.attr_name for component in analysis.block_components}
+        assert "crossattention" not in names, names
+
+    def test_a_built_module_is_still_a_component(self) -> None:
+        analysis = analyze_source(
+            SOURCE, config={"add_cross_attention": True, "use_extra": True}
+        )
+        names = {component.attr_name for component in analysis.block_components}
+        assert "crossattention" in names, names
 
 
 class TestAnUndecidableBranchKeepsBothArms:
