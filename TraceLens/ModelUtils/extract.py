@@ -2067,13 +2067,19 @@ def load_architecture(
             # switched-OFF branch reads as `None` rather than `False` -- merely
             # unresolved, so it gets drawn.
             config = _with_declared_defaults(config, source_files)
+            # Modeling code reads the config OBJECT's attribute names, and the
+            # object answers a name the serialized dict spells differently --
+            # that is what `attribute_map` is for. Give the dict those names so
+            # `config.<attr>` resolves without a list of synonyms it might use.
+            declared = declared_config_aliases(source_files)
+            config = apply_config_attribute_aliases(config, declared)
             code_analysis = analyze_sources(
                 read_sources(source_files),
                 config=config,
                 all_tensor_ops=all_tensor_ops,
                 # The model's configuration module sits beside its modeling one
                 # rather than being analysed, so its renames are read from there.
-                declared_aliases=declared_config_aliases(source_files),
+                declared_aliases=declared,
             )
 
     spec = parse_architecture(

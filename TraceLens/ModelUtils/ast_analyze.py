@@ -3939,26 +3939,6 @@ def _inline_forward_step(attr_name: str) -> bool:
 # realistic expert counts (e.g. ``num_experts=288``).
 _LOOP_COUNT_MAX = 100_000
 
-# A config *object* attribute name (what modeling code reads) mapped to the
-# serialized config-dict keys it may be aliased to. Mirrors the synonym lists in
-# ``extract._infer_ffn_and_moe`` so ``config.<attr>`` resolves against the raw
-# config dict for any model using these conventional names.
-_CONFIG_ATTR_ALIASES: dict[str, tuple[str, ...]] = {
-    "num_experts": ("n_routed_experts", "moe_num_experts", "num_local_experts"),
-    "num_experts_per_tok": (
-        "num_experts_per_token",
-        "moe_top_k",
-        "num_selected_experts",
-    ),
-    "num_local_experts": ("num_experts", "n_routed_experts", "moe_num_experts"),
-}
-
-# A config attribute mapped to a (nested-dict-key, inner-key) pair.
-_CONFIG_NESTED_ALIASES: dict[str, tuple[str, str]] = {
-    "linear_lower_bound": ("linear_attn_config", "gate_lower_bound"),
-}
-
-
 # Predicates that are definitionally False in the forward this analysis reads.
 # We document the EAGER forward, where the tracing/scripting/compiling guards all
 # take their else-arm. That is a fact about what is being modelled, not a guess
@@ -4178,20 +4158,6 @@ def _config_value(
             direct = config.get(node.attr, _UNKNOWN)
             if direct is not _UNKNOWN:
                 return direct
-            # Modeling code reads the transformers config *object* attribute
-            # (e.g. ``config.num_experts``), whose name a config class often
-            # aliases to a different serialized key (``n_routed_experts``). The
-            # raw config dict only has the serialized key, so consult the same
-            # well-known synonym lists ``extract._infer_*`` uses.
-            for alias in _CONFIG_ATTR_ALIASES.get(node.attr, ()):
-                aliased = config.get(alias, _UNKNOWN)
-                if aliased is not _UNKNOWN:
-                    return aliased
-            nested_key = _CONFIG_NESTED_ALIASES.get(node.attr)
-            if nested_key is not None:
-                nested = config.get(nested_key[0])
-                if isinstance(nested, dict):
-                    return nested.get(nested_key[1], _UNKNOWN)
             return _UNKNOWN
         if isinstance(node.value, ast.Name) and node.value.id == "self":
             resolved = self_values.get(node.attr, _UNKNOWN)
