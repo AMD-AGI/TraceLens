@@ -31,6 +31,7 @@ from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis, LayerVaria
 from TraceLens.ModelUtils.config_resolve import (
     apply_config_attribute_aliases,
     declared_config_aliases,
+    declared_config_defaults,
     load_checkpoint_config,
 )
 from TraceLens.ModelUtils.github import (
@@ -142,6 +143,54 @@ def _get(config: dict[str, Any], *keys: str) -> Any:
         if key in config and config[key] is not None:
             return config[key]
     return None
+
+
+def _config_keys_anywhere(config: Any) -> set[str]:
+    """Every key the checkpoint states, at any nesting depth."""
+    found: set[str] = set()
+    if isinstance(config, dict):
+        for key, value in config.items():
+            found.add(str(key))
+            found |= _config_keys_anywhere(value)
+    elif isinstance(config, list):
+        for item in config:
+            found |= _config_keys_anywhere(item)
+    return found
+
+
+def _with_declared_defaults(
+    config: dict[str, Any], source_files: list[Any]
+) -> dict[str, Any]:
+    """Fill in defaults for keys the checkpoint states NOWHERE.
+
+    Only keys absent at every depth. A key the checkpoint gives inside a
+    sub-config is already stated: GLM keeps ``image_size`` 448 in its
+    ``vision_config`` while the vision config CLASS defaults it to 336, and
+    writing that default at the top level shadows the real value -- the nested
+    registration that would have supplied 448 only fills what is still missing.
+    """
+    by_model_type = declared_config_defaults(source_files)
+    if not by_model_type:
+        return config
+    return _section_with_defaults(config, by_model_type)
+
+
+def _section_with_defaults(
+    section: dict[str, Any], by_model_type: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Fill one config section from the class declaring ITS ``model_type``."""
+    declared = by_model_type.get(str(section.get("model_type") or ""), {})
+    # A key this section states at any depth is already answered; writing a
+    # default over it would shadow the real value with the class's placeholder.
+    stated = _config_keys_anywhere(section)
+    merged: dict[str, Any] = {
+        key: value for key, value in declared.items() if key not in stated
+    }
+    merged.update(section)
+    for key, value in list(merged.items()):
+        if isinstance(value, dict) and value.get("model_type"):
+            merged[key] = _section_with_defaults(value, by_model_type)
+    return merged
 
 
 def _declared_get(
@@ -2013,6 +2062,11 @@ def load_architecture(
                 register_kernel_search_root(code_path)
             for source_file in source_files:
                 register_kernel_search_root(source_file)
+            # A checkpoint records only what differs from the defaults, and the
+            # defaults are stated by the model's own config class. Without them a
+            # switched-OFF branch reads as `None` rather than `False` -- merely
+            # unresolved, so it gets drawn.
+            config = _with_declared_defaults(config, source_files)
             code_analysis = analyze_sources(
                 read_sources(source_files),
                 config=config,

@@ -174,6 +174,79 @@ def declared_config_aliases(paths: Iterable[str | Path]) -> dict[str, str]:
     return declared
 
 
+def declared_config_defaults(
+    paths: Iterable[str | Path],
+) -> dict[str, dict[str, Any]]:
+    """Defaults the model's own config classes declare for keys a checkpoint omits.
+
+    A checkpoint's ``config.json`` only records what differs from the defaults,
+    and the defaults live in the configuration class::
+
+        class GPT2Config(PreTrainedConfig):
+            reorder_and_upcast_attn: bool = False
+            add_cross_attention: bool = False
+
+    Without them those keys read as ``None``, which is not ``False``: a branch
+    the model CANNOT take looks merely unresolved, so it gets drawn. That is how
+    GPT-2 came to render a whole cross-attention subtree it never builds, and an
+    upcast attention path its config switches off.
+
+    Returned per ``model_type``, because a default belongs to the config class
+    that declares it and nowhere else. ``Glm5NextVisionConfig`` defaults
+    ``num_heads`` to 16 and ``image_size`` to 336 while the text tower has 64
+    heads and the checkpoint's vision section says 448; writing either into one
+    flat namespace claims a name globally, which is the same mistake as a table
+    of spellings. Each class states its ``model_type``, and so does each section
+    of the checkpoint, so the two can simply be matched.
+
+    Only scalar literals are taken -- a config VALUE, not the machinery around it
+    (``attribute_map``, ``keys_to_ignore_at_inference``).
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    for directory in {Path(path).parent for path in paths}:
+        try:
+            candidates = sorted(directory.glob("*.py"))
+        except OSError:
+            continue
+        for candidate in candidates:
+            try:
+                tree = ast.parse(candidate.read_text(encoding="utf-8"))
+            except (OSError, SyntaxError, ValueError):
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                model_type: str | None = None
+                defaults: dict[str, Any] = {}
+                for statement in node.body:
+                    if isinstance(statement, ast.Assign):
+                        targets = [
+                            t.id for t in statement.targets if isinstance(t, ast.Name)
+                        ]
+                        if "model_type" in targets:
+                            try:
+                                model_type = str(ast.literal_eval(statement.value))
+                            except (ValueError, TypeError, SyntaxError):
+                                model_type = None
+                        continue
+                    if not isinstance(statement, ast.AnnAssign):
+                        continue
+                    target = statement.target
+                    if not isinstance(target, ast.Name) or statement.value is None:
+                        continue
+                    try:
+                        value = ast.literal_eval(statement.value)
+                    except (ValueError, TypeError, SyntaxError):
+                        continue
+                    if not isinstance(value, (bool, int, float, str, type(None))):
+                        continue
+                    defaults[target.id] = value
+                # A class that does not say which config it is cannot be placed.
+                if model_type and defaults:
+                    seen.setdefault(model_type, {}).update(defaults)
+    return seen
+
+
 def apply_config_attribute_aliases(
     overlay: dict[str, Any], declared: dict[str, str] | None = None
 ) -> dict[str, Any]:
