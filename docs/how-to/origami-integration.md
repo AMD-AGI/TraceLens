@@ -135,10 +135,10 @@ params = {"M": 4096, "N": 4096, "K": 4096, "B": 1, "simulation_dtype": "bf16"}
 print(origami_gemm_model("GEMM", params, arch))  # time in µs
 ```
 
-For attention, `SDPA.get_simulation_time_func` and
-`SDPA.get_simulation_time_bwd_func` in `TraceLens.PerfModel.perf_model` take
-the shape directly and run the SDPA tile model. Pass
-`gemm_time=origami_helper.gemm_time_us` to time the tiles with Origami.
+For attention, `sdpa_fwd_time_us` and `sdpa_bwd_time_us` in
+`TraceLens.PerfModel.sdpa_tile` take the shape directly and run the SDPA tile
+model. Pass `gemm_time=origami_helper.gemm_time_us` to time the tiles with
+Origami.
 
 ## Python API
 

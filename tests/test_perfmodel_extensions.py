@@ -149,7 +149,7 @@ from TraceLens.PerfModel.utils import (
     parse_bool,
     torch_dtype_map,
 )
-from TraceLens.PerfModel import origami_helper
+from TraceLens.PerfModel import origami_helper, sdpa_tile
 from TraceLens.TreePerf import tree_perf
 
 _GDN_ANNOTATION = (
@@ -1861,7 +1861,7 @@ class TestSdpaExtendedCoverage:
             return_value=1.0,
         ):
             with patch.object(perf_model.Softmax, "get_time", return_value=0.5):
-                t = perf_model.SDPA.get_simulation_time_func(
+                t = sdpa_tile.sdpa_fwd_time_us(
                     self._ARCH,
                     "bf16",
                     "c10::BFloat16",
@@ -1879,7 +1879,7 @@ class TestSdpaExtendedCoverage:
     def test_sdpa_simulation_time_func_qkt_none(self, monkeypatch):
         with patch.object(origami_helper, "gemm_time_us", return_value=None):
             assert (
-                perf_model.SDPA.get_simulation_time_func(
+                sdpa_tile.sdpa_fwd_time_us(
                     self._ARCH,
                     "bf16",
                     "c10::BFloat16",
@@ -1894,7 +1894,7 @@ class TestSdpaExtendedCoverage:
                 is None
             )
 
-    def test_sdpa_get_simulation_time_on_model(self):
+    def test_sdpa_tile_time_on_model(self):
         event = _sdpa_event(
             perf_model.flash_attention,
             [2, 64, 8, 64],
@@ -1904,12 +1904,11 @@ class TestSdpaExtendedCoverage:
             strides=[[32768, 512, 64, 1]] * 3,
         )
         model = perf_model.flash_attention(event, arch=self._ARCH)
-        with patch.object(
-            perf_model.SDPA,
-            "get_simulation_time_func",
-            return_value=42.0,
-        ):
-            assert model.get_simulation_time() == 42.0
+        gemm_time = lambda *a, **k: 1.0
+        with patch.object(sdpa_tile, "sdpa_fwd_time_us", return_value=42.0) as fwd:
+            assert sdpa_tile.sdpa_tile_time_us(model, self._ARCH, gemm_time) == 42.0
+        assert fwd.call_args.args[9] is True
+        assert fwd.call_args.kwargs["gemm_time"] is gemm_time
 
     def test_sdpa_bwd_simulation_time_func(self, monkeypatch):
         with patch.object(
@@ -1918,7 +1917,7 @@ class TestSdpaExtendedCoverage:
             return_value=2.0,
         ):
             with patch.object(perf_model.Softmax, "get_time", return_value=1.0):
-                t = perf_model.SDPA.get_simulation_time_bwd_func(
+                t = sdpa_tile.sdpa_bwd_time_us(
                     self._ARCH,
                     "bf16",
                     "c10::BFloat16",
@@ -1941,7 +1940,10 @@ class TestSdpaExtendedCoverage:
             },
         }
         model = perf_model.vllm_unified_attention_with_output(event)
-        assert model.get_simulation_time() is None or model.get_simulation_time() >= 0
+        assert (
+            sdpa_tile.sdpa_tile_time_us(model, None, origami_helper.gemm_time_us)
+            is None
+        )
 
 
 class TestConvBiasAndNormExtendedCoverage:
@@ -2348,7 +2350,6 @@ class TestPerfModelExhaustiveSweep:
                     "get_compute_precision",
                     "get_maf_type",
                     "get_time",
-                    "get_simulation_time",
                 ):
                     if hasattr(obj, meth):
                         try:
@@ -2560,7 +2561,7 @@ class TestPerfModelPhase11:
             "gemm_time_us",
             side_effect=[1.0, None],
         ):
-            t = perf_model.SDPA.get_simulation_time_func(
+            t = sdpa_tile.sdpa_fwd_time_us(
                 _ARCH,
                 "fp16",
                 "c10::Half",
@@ -3137,7 +3138,10 @@ class TestPerfModelPhase6:
         }
         model = perf_model.aten__scaled_dot_product_flash_attention(event, arch=_ARCH)
         with patch.object(origami_helper, "gemm_time_us", return_value=None):
-            assert model.get_simulation_time() is None
+            assert (
+                sdpa_tile.sdpa_tile_time_us(model, _ARCH, origami_helper.gemm_time_us)
+                is None
+            )
 
     def test_flash_attention_backward_flops(self):
         model = perf_model.flash_attention_backward(_flash_bwd_event())
@@ -3363,7 +3367,10 @@ class TestPerfModelPhase9:
 
         model = perf_model.flash_attention_backward(_flash_bwd_event())
         with patch.object(origami_helper, "gemm_time_us", return_value=None):
-            assert model.get_simulation_time() is None
+            assert (
+                sdpa_tile.sdpa_tile_time_us(model, _ARCH, origami_helper.gemm_time_us)
+                is None
+            )
 
 
 class TestMoeExtensionsBoost:
@@ -4005,7 +4012,7 @@ class TestPerfModelPush95Coverage:
     def test_sdpa_simulation_via_origami_gemm(self):
         with patch.object(origami_helper, "gemm_time_us", return_value=2.0):
             with patch.object(perf_model.Softmax, "get_time", return_value=0.25):
-                t = perf_model.SDPA.get_simulation_time_func(
+                t = sdpa_tile.sdpa_fwd_time_us(
                     _ARCH,
                     "bf16",
                     "c10::BFloat16",

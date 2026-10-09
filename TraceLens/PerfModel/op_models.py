@@ -51,7 +51,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from . import origami_helper
+from . import origami_helper, sdpa_tile
 from .utils import add_duration_rate_columns, torch_dtype_map
 
 # Built-in labels come first in summaries, in this order; others follow in
@@ -275,17 +275,12 @@ def origami_gemm_model(category, params, arch):
 
 
 def sdpa_tile_origami_op_model(work, arch):
-    """TraceLens's attention tile model, with Origami timing each tile GEMM
-    (see ``SDPA.get_simulation_time_func``). Origami only models GEMMs; the
-    tiling is TraceLens's own."""
-    simulate = getattr(
-        work.perf_model,
-        "get_simulation_time_bwd" if work.bwd else "get_simulation_time",
-        None,
+    """TraceLens's attention tile model (``sdpa_tile.py``), with Origami
+    timing each tile GEMM. Origami only models GEMMs; the tiling is
+    TraceLens's own."""
+    return sdpa_tile.sdpa_tile_time_us(
+        work.perf_model, arch, origami_helper.gemm_time_us, bwd=work.bwd
     )
-    if simulate is None:
-        return None
-    return simulate(gemm_time=origami_helper.gemm_time_us)
 
 
 def default_op_models(enable_origami_gemm=False, enable_origami_sdpa_tile=False):

@@ -592,11 +592,6 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
             return self._core_model().get_compute_precision()
         return super().get_compute_precision()
 
-    def get_simulation_time(self, gemm_time=None):
-        if self.param_details.get("_fallback_core"):
-            return self._core_model().get_simulation_time(gemm_time=gemm_time)
-        return None
-
 
 class aiter_paged_attention_ragged(InferenceAttention):
     """
