@@ -633,15 +633,13 @@ class TaskGrouper:
             mid = bucket["findings"][ordered_fi[0]]["mid"]
         else:
             mid = sum(m["impact_score"] for m in members)
-        low = self._sum_optional(bucket["findings"][fi]["low"] for fi in ordered_fi)
-        high = self._sum_optional(bucket["findings"][fi]["high"] for fi in ordered_fi)
 
         prose = self._accumulate_prose(ordered_fi, bucket["findings"])
 
         return {
             "operation": bucket["operation"],
             "members": members,
-            "impact": {"mid": mid, "low": low, "high": high},
+            "impact": {"mid": mid},
             **prose,
         }
 
@@ -715,8 +713,3 @@ class TaskGrouper:
         if not kept:
             return blocks[0][:cap], True
         return "\n\n".join(kept), clipped
-
-    @staticmethod
-    def _sum_optional(values) -> "float | None":
-        present = [v for v in values if v is not None]
-        return sum(present) if present else None
