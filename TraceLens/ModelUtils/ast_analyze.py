@@ -1559,11 +1559,26 @@ _DATA_MOVEMENT_NAMES = frozenset(
         "triu",
         "tril",
         "matmul",
+        "addmm",
         "bmm",
         "einsum",
     }
     | _METHOD_CHAIN_OPS
 )
+
+
+def _is_size_call(node: ast.AST) -> bool:
+    """``x.size()`` / ``x.size(0)`` -- the call spelling of ``x.shape``.
+
+    Returns a ``torch.Size`` (a tuple of ints) or a single int, so it is host
+    bookkeeping either way. ``.shape`` was already read as host; the call form
+    was not, which is how GPT-2's ``x.size()[:-1]`` became a tensor ``Slice``.
+    """
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "size"
+    )
 
 
 def _assign_target(stmt: ast.AST) -> str | None:
@@ -3702,6 +3717,11 @@ _TENSOR_METHOD_LABELS = {
 _FUNCTION_LABELS = {
     "linear": "Linear",
     "matmul": "MatMul",
+    # `addmm(bias, mat1, mat2)` is `bias + mat1 @ mat2` -- a fused affine
+    # projection, which is how every GPT-2 `Conv1D` does its work. Labelled as
+    # the contraction it is; the graph-level pass that sees a learned-constant
+    # operand relabels it `Linear`, exactly as it does for a plain matmul.
+    "addmm": "MatMul",
     "pad": "Pad",
     "topk": "TopK",
     "zeros_like": "Zeros like",
@@ -5491,8 +5511,19 @@ class _ForwardOperationExtractor:
             return isinstance(value, int) and not isinstance(value, bool)
         if isinstance(node, ast.Subscript):
             base = node.value
-            return isinstance(base, ast.Attribute) and base.attr == "shape"
+            if isinstance(base, ast.Attribute) and base.attr == "shape":
+                return True
+            # ``x.size()[:-1]`` is ``x.shape[:-1]`` spelled as a call, and reads
+            # the same way: a slice of a shape is still a shape.
+            return _is_size_call(base)
         if isinstance(node, ast.BinOp):
+            # A tuple display cannot take part in tensor arithmetic -- adding one
+            # concatenates sequences. ``size_out = x.size()[:-1] + (self.nf,)``
+            # builds the shape a later ``view`` is given, so emitting it as a
+            # tensor Add leaves a node nothing consumes (and a Slice claiming the
+            # shape is a tensor). That is every Conv1D in GPT-2.
+            if isinstance(node.left, ast.Tuple) or isinstance(node.right, ast.Tuple):
+                return True
             return self._is_host_scalar_expr(node.left) and self._is_host_scalar_expr(
                 node.right
             )

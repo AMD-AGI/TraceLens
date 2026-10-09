@@ -3901,6 +3901,22 @@ class ShapeInferencer:
                 out_features = self.context.dims.get(
                     Symbol.EXPERTS.value, Symbol.EXPERTS.value
                 )
+            if out_features is None and _detail_value(details, "raw_op") == "addmm":
+                # `addmm(bias, x, weight)` is an affine projection that stores
+                # its weight [in, out] -- the TRANSPOSE of `F.linear`'s
+                # [out, in] -- so the output width is the column axis, not the
+                # row one. That is how every GPT-2 `Conv1D` projects, and both
+                # of its learned operands reach the op as constant leaves whose
+                # shapes are not resolved yet, so the weight is read the way a
+                # materialized constant is.
+                weight_names = [
+                    name for name in external_inputs if "weight" in str(name).lower()
+                ]
+                weight = self.constant_spec(
+                    node, root=root, names=weight_names or external_inputs
+                )
+                if weight is not None and len(weight.shape) >= 2:
+                    out_features = weight.shape[-1]
             if out_features is None and operation_label == "linear":
                 # `F.linear(x, w)` reads out features from w's row axis; stacked expert
                 # weights (E, out, in) are indexed per expert before the call.
