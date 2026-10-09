@@ -90,6 +90,7 @@ with an HTML comment and an `####` heading:
 
 The five labels below must appear **in this order**, each on its own line with a
 blank line between them. The validator checks for these as substring matches.
+Fusion tier (`tier=fusion`): the same labels except **Reasoning for Slowdown:**, which fusion blocks omit.
 
 | Label | Purpose |
 |-------|---------|
@@ -282,7 +283,7 @@ Two bullets — low and high. Wrap in `kind=detail_estimate` markers (see
 § Impact markers).
 
 ```markdown
-<!-- impact-begin kind=detail_estimate low=<impact_score_low> high=<impact_score_high> -->
+<!-- impact-begin kind=detail_estimate low=<impact_score_low> mid=<impact_score> high=<impact_score_high> -->
 - Low end impact_score: <impact_score_low>
 - High end impact_score: <impact_score_high>
 <!-- impact-end -->
@@ -310,7 +311,7 @@ The block between them is exactly the `impact_score`-based markdown you would ot
 | `kind` | Where | Required attributes | Optional attributes |
 |--------|-------|--------------------|---------------------|
 | `p_item` | Around every P-item `**Impact**` line in `## Recommendations`. | `low`, `mid`, `high` (all three; use `null` only for system-tier non-quantifiable). | `category` is reserved for the orchestrator template; sub-agents do **not** emit it. |
-| `detail_estimate` | Around the two-bullet `Low end ... / High end ...` block under `**Impact estimate:**` in each `## Detailed Analysis` candidate. Skip only for system-tier non-quantifiable estimates. | `low`, `high` (impact_score values, % of E2E). | none |
+| `detail_estimate` | Around the two-bullet `Low end ... / High end ...` block under `**Impact estimate:**` in each `## Detailed Analysis` candidate. Skip only for system-tier non-quantifiable estimates. | `low`, `mid`, `high` (impact_score values, % of E2E). | none |
 | `op_row` | After the last row of each compute-tier `**Data:**` table (see § Operations Table Schema → Per-row impact marker). | `rank`, `impacts` (CSV of per-row `impact_score`, one per data row in table order; `—` for null). | none |
 
 ### Value-source rule

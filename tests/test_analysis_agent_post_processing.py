@@ -41,7 +41,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
 )
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     _find_data_table,
-    _iter_compute_candidate_blocks,
+    _iter_candidate_blocks,
 )
 
 # Constants
@@ -129,7 +129,7 @@ This standalone roofline analysis shows GPU computation at 84.24% of the 2494.24
 **Resolution:** Tile-size and wave-occupancy tuning, or narrowing precision to FP8/FP4, lowers the compute floor.
 
 **Impact estimate:**
-<!-- impact-begin kind=detail_estimate low=7.38 high=9.83 rehydrated=true -->
+<!-- impact-begin kind=detail_estimate low=7.38 mid=8.6 high=9.83 rehydrated=true -->
 - Low end (75% roofline): 184.075 ms savings (7.38% E2E)
 - High end (100% roofline): 245.184 ms savings (9.83% E2E)
 <!-- impact-end -->
@@ -152,7 +152,7 @@ This standalone roofline analysis shows GPU computation at 84.24% of the 2494.24
 **Resolution:** Fusing the FC1 and FC2 stages keeps the intermediate activation on-chip and removes an HBM round-trip.
 
 **Impact estimate:**
-<!-- impact-begin kind=detail_estimate low=3.8 high=11.41 rehydrated=true -->
+<!-- impact-begin kind=detail_estimate low=3.8 mid=7.6 high=11.41 rehydrated=true -->
 - Low end (75% roofline): 94.781 ms savings (3.80% E2E)
 - High end (100% roofline): 284.593 ms savings (11.41% E2E)
 <!-- impact-end -->
@@ -292,7 +292,7 @@ _AGENTIC_NULL_OP_MD = """# Null Op - MI300X Standalone Analysis
 """
 
 # Agentic report whose op_row CSV carries a spec-legal ``—`` null for the second
-# row; that row must fall back to its own %E2E while the first takes the marker.
+# row; that row scores 0.0 while the first takes the marker.
 _NULL_CSV_ENTRY_MD = """# Null CSV - MI300X Standalone Analysis
 
 <!-- report-begin kind=report_mode mode=agentic -->
@@ -316,6 +316,89 @@ _NULL_CSV_ENTRY_MD = """# Null CSV - MI300X Standalone Analysis
 
 **Resolution:** fix
 """
+
+# Two fusion blocks: Identification + Resolution, no Reasoning label, no op_row
+# marker, and a detail_estimate carrying mid. The softmax row has no perf model,
+# so its metric cells are null.
+_FUSION_MD = """# ExampleNet - OTHER_GPU Standalone Analysis
+
+<!-- report-begin kind=report_mode mode=agentic -->
+<!-- report-end -->
+
+## Detailed Analysis
+
+### Kernel Fusion Insights
+
+<a id="detailed-analysis-fusion-P1"></a>
+<!-- reasoning-candidate tier=fusion rank=1 -->
+#### 🔴 P1: Unfused Attention
+
+**Identification:** Attention runs as separate bmm and softmax kernels.
+
+**Data:**
+
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
+| aten::bmm | (16,64,64) bf16<br>(16,64,64) bf16 | model.py(10): forward | gemm_kernel_a | 40.000 | 4.00 | 100 | 60.00 | 50.00% of 5.3 TB/s | memory-bound |
+| aten::_softmax | (16,64,64) bf16 | functional.py(20): softmax | softmax_kernel_a | 150.000 | 15.00 | 100 | — | — | — |
+
+**Resolution:** Call a fused attention kernel if one exists; otherwise write one.
+
+**Impact estimate:**
+<!-- impact-begin kind=detail_estimate low=11.5 mid=13.5 high=15.5 -->
+- Low end impact_score: 11.50
+- High end impact_score: 15.50
+<!-- impact-end -->
+
+<a id="detailed-analysis-fusion-P2"></a>
+<!-- reasoning-candidate tier=fusion rank=2 -->
+#### 🟡 P2: Unfused Activation
+
+**Identification:** The activation runs as a separate elementwise kernel after a GEMM.
+
+**Data:**
+
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
+| aten::addmm | (64,) bf16<br>(16,64) bf16<br>(64,64) bf16 | linear.py(30): forward | gemm_kernel_b | 12.000 | 1.20 | 100 | 700.00 | 60.00% of 700 TFLOPS | compute-bound |
+
+**Resolution:** Fold the activation into the GEMM epilogue.
+
+**Impact estimate:**
+<!-- impact-begin kind=detail_estimate low=1.0 mid=1.25 high=1.5 -->
+- Low end impact_score: 1.00
+- High end impact_score: 1.50
+<!-- impact-end -->
+"""
+
+_FUSION_P2_GOLDEN = {
+    "operation": "Unfused Activation",
+    "members": [
+        {
+            "kernel_launcher_path": "linear.py(30): forward",
+            "library": None,
+            "category": None,
+            "analysis_md_rank": "P2",
+            "kernel_name": ["gemm_kernel_b"],
+            "args_shapes": ["(64,)", "(16,64)", "(64,64)"],
+            "args_datatypes": ["bf16", "bf16", "bf16"],
+            "time_ms": 12.0,
+            "count": 100,
+            "pct_e2e": 1.2,
+            "flops_per_byte": 700.0,
+            "efficiency_percent": 60.0,
+            "efficiency_peak_value": 700.0,
+            "efficiency_peak_unit": "TFLOPS",
+            "bound": "compute-bound",
+        },
+    ],
+    "impact": {"mid": 1.25, "low": 1.0, "high": 1.5},
+    "identification": "The activation runs as a separate elementwise kernel after a GEMM.",
+    "reasoning": None,
+    "resolution": "Fold the activation into the GEMM epilogue.",
+    "prose_truncated": False,
+    "priority": 2,
+}
 
 # (name, md, mode, has_op_row, n_warn) — the inline replacement for the disk
 # fixture matrix. Corpus-wide smoke/determinism/faithfulness tests iterate this.
@@ -367,13 +450,13 @@ def _assert_schema_valid(report):
         "executive_summary",
         "top_operations",
         "compute_optimizations",
+        "fusion_optimizations",
         "appendix",
     }
     # No dropped/forbidden top-level fields (envelope rules §2).
     assert "schema_version" not in report
     assert "source_md_sha256" not in report
     assert "perf_plot" not in report
-    assert "fusion_optimizations" not in report
     assert "system_notes" not in report
     assert "top_bottleneck_category" not in report
 
@@ -416,6 +499,9 @@ def _assert_schema_valid(report):
             # roofline field explicitly dropped (§2.1).
             assert "roofline_attainment_pct" not in m
 
+    keys = list(report)
+    assert keys.index("fusion_optimizations") == keys.index("compute_optimizations") + 1
+
 
 # --------------------------------------------------------------------------- #
 # Independent md reparse for grouping-faithfulness.
@@ -433,7 +519,7 @@ def _reparse_rows(md_text):
     """Independently pull (operation, kernel_names, time_ms, pct_e2e) per row."""
     lines = md_text.splitlines()
     rows = []
-    for start, end in _iter_compute_candidate_blocks(md_text):
+    for start, end in _iter_candidate_blocks(md_text, "compute"):
         table = _find_data_table(lines, start, end)
         if table is None:
             continue
@@ -752,16 +838,14 @@ def test_pct_e2e_fallback_when_no_op_row(tmp_path):
                 )
 
 
-def test_null_csv_entry_falls_back_per_row(tmp_path):
-    # op_row CSV = "3.5,—": row 0 takes the marker, row 1's — falls back to pct_e2e.
-    # A raw float("—") here would crash the render; the null must map cleanly.
+def test_null_csv_entry_scores_zero(tmp_path):
+    # op_row CSV = "3.5,—": the — row scores 0.0 (a raw float("—") would crash).
     report, _ = _render_text(_NULL_CSV_ENTRY_MD, tmp_path)
     members = report["compute_optimizations"][0]["members"]
-    by_kernel = {m["kernel_name"][0]: m for m in members}
-    assert by_kernel["k_a"]["impact_score"] == pytest.approx(3.5)
-    assert by_kernel["k_b"]["impact_score"] == pytest.approx(
-        by_kernel["k_b"]["pct_e2e"] * HEURISTIC_FRACTION_MID
-    )
+    assert {m["kernel_name"][0]: m["impact_score"] for m in members} == {
+        "k_a": 3.5,
+        "k_b": 0.0,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1039,3 +1123,42 @@ def test_no_compute_findings_empty_list(tmp_path):
     report, _ = _render_text(md, tmp_path)
     assert report["compute_optimizations"] == []
     _assert_schema_valid(report)
+
+
+# --------------------------------------------------------------------------- #
+# Fusion tier.
+# --------------------------------------------------------------------------- #
+
+
+def test_fusion_tier_golden(tmp_path):
+    report, _ = _render_text(_FUSION_MD, tmp_path)
+    _assert_schema_valid(report)
+    p1, p2 = report["fusion_optimizations"]
+    assert p2 == _FUSION_P2_GOLDEN
+    assert p1["operation"] == "Unfused Attention"
+    assert p1["impact"] == {"mid": 13.5, "low": 11.5, "high": 15.5}
+    softmax = p1["members"][1]
+    assert softmax["flops_per_byte"] is None
+    assert softmax["efficiency_percent"] is None
+    assert softmax["bound"] is None
+
+
+def test_fusion_priority_is_impact_order_then_rank(tmp_path):
+    # md rank P1 now has the smaller mid, so the P2 block is emitted first.
+    low_p1 = _FUSION_MD.replace("mid=13.5", "mid=0.5")
+    tasks = _render_text(low_p1, tmp_path)[0]["fusion_optimizations"]
+    assert [t["members"][0]["analysis_md_rank"] for t in tasks] == ["P2", "P1"]
+    assert [t["priority"] for t in tasks] == [1, 2]
+
+    # Equal mids fall back to md rank.
+    tied = _FUSION_MD.replace("mid=13.5", "mid=1.25")
+    tasks = _render_text(tied, tmp_path)[0]["fusion_optimizations"]
+    assert [t["members"][0]["analysis_md_rank"] for t in tasks] == ["P1", "P2"]
+
+
+def test_fusion_blocks_do_not_change_compute_tasks(tmp_path):
+    base, _ = _render_text(_AGENTIC_MD, tmp_path)
+    both, _ = _render_text(_AGENTIC_MD + "\n" + _FUSION_MD, tmp_path)
+    assert base["fusion_optimizations"] == []
+    assert both["compute_optimizations"] == base["compute_optimizations"]
+    assert len(both["fusion_optimizations"]) == 2

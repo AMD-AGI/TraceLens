@@ -1021,13 +1021,19 @@ def test_check_marker_detail_estimates_complete(tmp_path):
         "## Detailed Analysis\n"
         "### Compute Kernel Insights\n"
         "#### Kernel P1: First\n"
-        "<!-- impact-begin kind=detail_estimate low=1 high=5 -->\n"
+        "<!-- impact-begin kind=detail_estimate low=1 mid=3 high=5 -->\n"
+        "body\n"
+        "<!-- impact-end -->\n"
+        "### Kernel Fusion Insights\n"
+        "#### Fusion P1: First\n"
+        "<!-- impact-begin kind=detail_estimate low=1 mid=3 high=5 -->\n"
         "body\n"
         "<!-- impact-end -->\n"
     )
     out = _write_report(tmp_path, text)
     rows = workflow._check_marker_detail_estimates(out)
-    assert rows[0]["result"] == "PASS"
+    assert [r["result"] for r in rows] == ["PASS", "PASS"]
+    assert rows[1]["index"] == "marker_eval_3_fusion_P1"
 
 
 def test_check_marker_detail_estimates_sentinel_passes(tmp_path):
@@ -1632,7 +1638,7 @@ def _valid_output_dir(tmp_path, comparison_scope="standalone"):
         "### Compute Kernel Insights\n"
         "<!-- reasoning-candidate tier=compute rank=1 -->\n"
         "#### Kernel P1: Fix gemm\n"
-        "<!-- impact-begin kind=detail_estimate low=1 high=5 -->\n"
+        "<!-- impact-begin kind=detail_estimate low=1 mid=3 high=5 -->\n"
         "body\n<!-- impact-end -->\n"
         "## Appendix\n"
         "Model: TestNet dense 7B fp16\n"

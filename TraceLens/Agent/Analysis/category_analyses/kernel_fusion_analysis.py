@@ -15,12 +15,9 @@ unified_perf_summary.csv and projecting fused kernel time via roofline model.
 import argparse
 import json
 import os
-import re
 import sys
-from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
-import numpy as np
 import pandas as pd
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -32,9 +29,12 @@ from analysis_utils import (
     TARGET_HIGH,
     TARGET_LOW,
     TARGET_MID,
-    parse_first_shape,
+    calculate_efficiency,
+    format_args,
+    format_kernel_names,
+    load_perf_rows,
+    perf_float,
     perf_report_csv_dir,
-    shape_aware_lookup,
     write_metrics_json,
 )
 from utils.arch_utils import load_arch
@@ -46,6 +46,7 @@ MAX_FUSION_KERNEL_COUNT = (
 MIN_IMPACT_SCORE = (
     2.0  # Drop estimates whose best-case impact_score is below this threshold
 )
+NO_VALUE = "—"  # Table cell for a value the perf report does not provide
 OVERLAP_EFFICIENCY = 0.85  # Memory/compute pipeline overlap fraction (0 = no overlap, 1 = perfect overlap)
 
 _MATRIX_SPECS = frozenset(
@@ -100,35 +101,6 @@ def _is_norm_kernel(kernel_info: dict) -> bool:
         return True
     name = kernel_info.get("name", kernel_info.get("kernel_name", "")).lower()
     return any(p in name for p in _NORM_NAME_PATTERNS)
-
-
-def build_kernel_perf_lookup(csv_path: str) -> Dict[str, Dict]:
-    """
-    Build GPU kernel name -> {shape -> perf metrics} lookup from unified_perf_summary.csv.
-
-    Keyed by (kernel_name, input_shape) so the same kernel launched with
-    different tensor shapes gets separate perf entries.
-    """
-    df = pd.read_csv(csv_path)
-    lookup: Dict[str, Dict] = defaultdict(dict)
-    for _, row in df.iterrows():
-        kd = row.get("kernel_details_summary", "")
-        if pd.isna(kd):
-            continue
-        kernel_names = re.findall(r"'name':\s*'([^']+)'", str(kd))
-        shape = parse_first_shape(row.get("Input Dims"))
-        for kn in kernel_names:
-            if shape in lookup[kn]:
-                continue
-            entry = {}
-            for col in ("Data Moved (MB)", "GFLOPS", "FLOPS/Byte", "Compute Spec"):
-                val = row.get(col)
-                if val is not None and not (isinstance(val, float) and np.isnan(val)):
-                    entry[col] = val
-                else:
-                    entry[col] = None
-            lookup[kn][shape] = entry
-    return dict(lookup)
 
 
 def _is_matrix_op(kernel_info: dict) -> bool:
@@ -273,6 +245,78 @@ def _classify_confidence(candidate: dict, enriched: list) -> str:
     return "low"
 
 
+def _efficiency_cells(eff: dict) -> tuple:
+    """(Efficiency, Bound) table cells from a ``calculate_efficiency`` result."""
+    bound = eff["bound_type"]
+    bound_cell = f"{bound}-bound" if bound else NO_VALUE
+    pct = eff["efficiency_percent"]
+    if pct is None or bound is None:
+        return NO_VALUE, bound_cell
+    peak, unit = (
+        (eff["resolved_peak_maf"], "TFLOPS")
+        if bound == "compute"
+        else (eff["resolved_peak_hbm_bw"], "TB/s")
+    )
+    return f"{pct:.2f}% of {peak:g} {unit}", bound_cell
+
+
+def build_rows(
+    ops: List[dict],
+    perf_rows: Dict[tuple, pd.Series],
+    baseline_ms: float,
+    peak_bw_tbs: float,
+    peak_maf_tflops: dict,
+    fill_efficiency: bool = True,
+) -> List[dict]:
+    """Detail-table rows, one per launching op + args, as finished cells.
+
+    Time, %E2E, Count and Kernel Name come from the candidate's own ops
+    (summed over its instances). Args, Kernel Path, FLOPS/Byte, Efficiency and
+    Bound describe the op signature and come from its ``perf_rows`` entry.
+    ``fill_efficiency=False`` leaves Efficiency and Bound empty (trace 2 on a
+    platform whose peaks are unknown).
+    """
+    rows = []
+    for g in ops:
+        key = g["perf_key"]
+        perf = perf_rows.get(tuple(key)) if key else None
+        eff = (
+            calculate_efficiency(perf, peak_bw_tbs, peak_maf_tflops)
+            if perf is not None
+            else None
+        )
+        efficiency, bound = (
+            _efficiency_cells(eff) if eff and fill_efficiency else (NO_VALUE,) * 2
+        )
+        entry_point = perf.get("entry_point") if perf is not None else None
+        time_ms = g["time_us"] / 1000
+        rows.append(
+            {
+                "operation": key[0] if key else NO_VALUE,
+                "args": (key and format_args(key[1], key[2])) or NO_VALUE,
+                "kernel_path": (
+                    entry_point if isinstance(entry_point, str) else "Not found"
+                ),
+                "kernel_name": format_kernel_names(g["kernel_names"])[1],
+                "time_ms": f"{time_ms:.3f}",
+                "pct_e2e": (
+                    f"{time_ms / baseline_ms * 100:.2f}"
+                    if baseline_ms > 0
+                    else NO_VALUE
+                ),
+                "count": g["count"],
+                "flops_per_byte": (
+                    f"{eff['flops_per_byte']:.2f}"
+                    if eff and eff["flops_per_byte"]
+                    else NO_VALUE
+                ),
+                "efficiency": efficiency,
+                "bound": bound,
+            }
+        )
+    return rows
+
+
 def _comparative_estimate(
     candidate: dict,
     min_savings_ms: float,
@@ -331,9 +375,6 @@ def _comparative_estimate(
         "modeled_kernel_count": len(t1_kernels),
         "delta_kernel_count": candidate.get("delta", 0),
         "confidence": _classify_confidence(candidate, enriched_t1),
-        "affected_gpu_kernels": [
-            k.get("name", k.get("kernel_name", "")) for k in t1_kernels
-        ],
         "fusion_type": "matrix_compute" if has_matrix_ops else "memory_bound",
     }
 
@@ -342,7 +383,7 @@ def _comparative_estimate(
 
 def _standalone_estimate(
     candidate: dict,
-    kernel_lookup: Dict[str, dict],
+    perf_rows: Dict[tuple, pd.Series],
     peak_bw_bytes_s: float,
     vector_maf: float,
     matrix_maf: float,
@@ -368,19 +409,21 @@ def _standalone_estimate(
     for k in kernels:
         kname = k.get("name", k.get("kernel_name", ""))
         dur_us = k.get("dur_us", 0)
-        perf = shape_aware_lookup(kernel_lookup, kname, candidate.get("input_dims"))
-        dm = perf.get("Data Moved (MB)")
-        gf = perf.get("GFLOPS")
+        key = k.get("perf_key")
+        perf = perf_rows.get(tuple(key)) if key else None
+        dm = perf_float(perf, "Data Moved (MB)")
+        gf = perf_float(perf, "GFLOPS")
+        compute_spec = perf.get("Compute Spec") if perf is not None else None
         enriched.append(
             {
                 "name": kname,
                 "type": k.get("type", k.get("kernel_type", "Unknown")),
                 "dur_us": dur_us,
-                "data_moved_mb": float(dm) if dm is not None else None,
+                "data_moved_mb": dm,
                 "data_in_mb": k.get("data_in_mb"),
                 "data_out_mb": k.get("data_out_mb"),
-                "gflops": float(gf) if gf is not None else None,
-                "compute_spec": perf.get("Compute Spec"),
+                "gflops": gf,
+                "compute_spec": compute_spec if isinstance(compute_spec, str) else None,
                 "has_perf_data": dm is not None,
             }
         )
@@ -437,12 +480,12 @@ def _standalone_estimate(
     gap_low = (TARGET_LOW / TARGET_HIGH) * gap_high
     gap_mid = (TARGET_MID / TARGET_HIGH) * gap_high
 
-    savings_high_ms = total_savings_us * instance_count / 1000
+    time_ms = candidate["total_kernel_time_us"] / 1000
+    savings_high_ms = gap_high * time_ms
 
     if savings_high_ms < min_savings_ms:
         return None
 
-    time_ms = current_per_instance_us * instance_count / 1000
     impact_score_high = gap_high * time_ms / baseline_ms * 100
     impact_score_low = gap_low * time_ms / baseline_ms * 100
     impact_score_mid = gap_mid * time_ms / baseline_ms * 100
@@ -466,7 +509,6 @@ def _standalone_estimate(
         "kernel_count": len(kernels),
         "modeled_kernel_count": len(modeled),
         "confidence": _classify_confidence(candidate, enriched),
-        "affected_gpu_kernels": [e["name"] for e in enriched],
         "fusion_type": "matrix_compute" if has_matrix_ops else "memory_bound",
     }
 
@@ -481,12 +523,15 @@ def _standalone_estimate(
 
 def compute_fusion_impact_estimates(
     candidates: List[dict],
-    kernel_lookup: Dict[str, dict],
+    perf_rows: Dict[tuple, pd.Series],
     peak_bw_tbs: float,
     peak_maf_tflops: dict,
     min_savings_ms: float = 0.1,
     baseline_ms: float = 0,
     is_comparative: bool = False,
+    perf_rows2: Optional[Dict[tuple, pd.Series]] = None,
+    baseline2_ms: float = 0,
+    same_platform: bool = False,
 ) -> List[dict]:
     """Compute kernel_fusion savings for all candidates.
 
@@ -506,8 +551,14 @@ def compute_fusion_impact_estimates(
     and a warning is emitted.
 
     Each estimate includes a deterministic ``confidence`` level (high / medium /
-    low) and the list of GPU kernel names (``affected_gpu_kernels``) so that
-    downstream compute-category scripts can skip fusion-covered operations.
+    low) and the perf keys of its launching ops (``op_keys``) so that downstream
+    compute-category scripts can skip fusion-covered operations.
+
+    ``perf_rows`` (``load_perf_rows`` of the unified perf summary) supplies each
+    kernel's perf data. Each estimate also carries its detail-table ``rows``
+    (standalone) or ``rows_trace1`` / ``rows_trace2`` (comparative, trace 2 from
+    ``perf_rows2`` and ``baseline2_ms``). Trace 2 Efficiency and Bound are filled
+    only when ``same_platform``.
 
     If ``baseline_ms`` is missing or non-positive, ``impact_score`` is undefined;
     this function returns an empty list and emits a stderr warning.
@@ -534,15 +585,34 @@ def compute_fusion_impact_estimates(
         else:
             estimate = _standalone_estimate(
                 candidate,
-                kernel_lookup,
+                perf_rows,
                 peak_bw_bytes_s,
                 vector_maf,
                 matrix_maf,
                 min_savings_ms,
                 baseline_ms,
             )
-        if estimate is not None:
-            estimates.append(estimate)
+        if estimate is None:
+            continue
+        peaks = (peak_bw_tbs, peak_maf_tflops)
+        if is_comparative:
+            estimate["rows_trace1"] = build_rows(
+                candidate["ops_trace1"], perf_rows, baseline_ms, *peaks
+            )
+            estimate["rows_trace2"] = build_rows(
+                candidate["ops_trace2"],
+                perf_rows2,
+                baseline2_ms,
+                *peaks,
+                fill_efficiency=same_platform,
+            )
+        else:
+            estimate["rows"] = build_rows(
+                candidate["ops"], perf_rows, baseline_ms, *peaks
+            )
+        ops = candidate["ops_trace1" if is_comparative else "ops"]
+        estimate["op_keys"] = [g["perf_key"] for g in ops if g["perf_key"]]
+        estimates.append(estimate)
 
     return sorted(estimates, key=lambda x: x["impact_score"], reverse=True)
 
@@ -708,15 +778,34 @@ def main():
     peak_bw_tbs = arch["peak_hbm_bw_tbs"]
     peak_maf_tflops = arch["max_achievable_tflops"]
 
-    kernel_lookup = build_kernel_perf_lookup(csv_path)
+    perf_rows = load_perf_rows(csv_path)
+    perf_rows2 = None
+    baseline2_ms = 0
+    if is_comparative:
+        csv_path2 = os.path.join(
+            args.output_dir, "perf_report_trace2_csvs", "unified_perf_summary.csv"
+        )
+        # Trace 2's perf CSV is optional; without it Trace 2 perf cells render as "—".
+        perf_rows2 = (
+            load_perf_rows(csv_path2, with_thread=False)
+            if os.path.isfile(csv_path2)
+            else {}
+        )
+        baseline2_ms = manifest.get("trace2_gpu_utilization", {}).get(
+            "total_time_ms", 0
+        )
+    same_platform = manifest.get("platform2") == platform
 
     impact_estimates = compute_fusion_impact_estimates(
         candidates,
-        kernel_lookup,
+        perf_rows,
         peak_bw_tbs,
         peak_maf_tflops,
         baseline_ms=baseline_ms,
         is_comparative=is_comparative,
+        perf_rows2=perf_rows2,
+        baseline2_ms=baseline2_ms,
+        same_platform=same_platform,
     )
 
     if is_comparative:
@@ -735,20 +824,23 @@ def main():
         "total_impact_score": round(total_impact_score, 2),
         "platform": platform,
         "peak_hbm_bw_tbs": peak_bw_tbs,
+        "baseline_ms": baseline_ms,
         "impact_estimates": impact_estimates,
     }
+
+    if is_comparative:
+        metrics["baseline2_ms"] = baseline2_ms
 
     if warnings:
         metrics["warnings"] = warnings
 
-    high_confidence_kernel_map: Dict[str, str] = {}
-    for est in impact_estimates:
-        if est.get("confidence") == "high":
-            op_name = est["operation"]
-            for kn in est.get("affected_gpu_kernels", []):
-                if kn:
-                    high_confidence_kernel_map[kn] = op_name
-    metrics["high_confidence_kernel_map"] = high_confidence_kernel_map
+    high_confidence_op_keys = [
+        key
+        for est in impact_estimates
+        if est.get("confidence") == "high"
+        for key in est["op_keys"]
+    ]
+    metrics["high_confidence_op_keys"] = high_confidence_op_keys
 
     output_path = write_metrics_json(metrics, args.output_dir, "kernel_fusion")
     print(f"Kernel fusion analysis complete:")
@@ -756,9 +848,7 @@ def main():
     print(f"  With estimates: {len(impact_estimates)}")
     print(f"  Total impact_score (mid): {total_impact_score:.2f}")
     high_count = sum(1 for e in impact_estimates if e.get("confidence") == "high")
-    print(
-        f"  High confidence: {high_count}, kernel map entries: {len(high_confidence_kernel_map)}"
-    )
+    print(f"  High confidence: {high_count}, op keys: {len(high_confidence_op_keys)}")
     if warnings:
         print(f"  Warnings: {len(warnings)}")
     print(f"  Metrics written to: {output_path}")

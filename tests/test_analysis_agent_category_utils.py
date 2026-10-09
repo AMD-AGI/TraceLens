@@ -46,6 +46,7 @@ from TraceLens.Agent.Analysis.category_analyses.kernel_fusion_analysis import (
     _roofline_savings_us,
     _split_into_subgroups,
     _standalone_estimate,
+    build_rows,
     compute_fusion_impact_estimates,
 )
 from TraceLens.Agent.Analysis.category_analyses.multi_kernel_analysis import (
@@ -138,6 +139,25 @@ from tests.test_conv_backward_bytes import (
 from tests.test_dit_fused_ln_modulate import _fused_ln_fwd_event
 from tests.test_evoformer_attention_ops import _event as _evoformer_event
 from tests.test_trace2tree import _add_gpu_chain, _mk_event
+
+# Constants
+# Perf row keys: name, the four args columns, then the three thread columns.
+_MM_KEY = ["aten::mm", "((16, 64), (64, 8))", "('bf16', 'bf16')", "z"] + [""] * 4
+_ADD_KEY = ["aten::add", "((16, 8), (16, 8))", "('bf16', 'bf16')", "z"] + [""] * 4
+
+
+def _op_group(perf_key, kernel_names, time_us, count):
+    return {
+        "perf_key": perf_key,
+        "kernel_names": kernel_names,
+        "time_us": time_us,
+        "count": count,
+    }
+
+
+def _name_key(name):
+    return [name, "", ""]
+
 
 # ----- classify_kernel: representative rule hits -----
 
@@ -396,19 +416,23 @@ def test_roofline_savings_overlap_blend():
 
 
 def _lookup(**entries):
-    """Build a kernel_lookup keyed by name with a single shape=None entry each."""
-    table = {}
-    for name, (dm, gf, spec) in entries.items():
-        table[name] = {
-            None: {"Data Moved (MB)": dm, "GFLOPS": gf, "Compute Spec": spec}
+    """Build perf_rows keyed by ``_name_key``; ``_standalone`` keys each kernel by its name."""
+    return {
+        tuple(_name_key(name)): {
+            "Data Moved (MB)": dm,
+            "GFLOPS": gf,
+            "Compute Spec": spec,
         }
-    return table
+        for name, (dm, gf, spec) in entries.items()
+    }
 
 
 STD_ARGS = dict(peak_bw_bytes_s=1e12, vector_maf=1.0, matrix_maf=700.0)
 
 
 def _standalone(candidate, lookup, min_savings_ms=0.01, baseline_ms=1.0):
+    for k in candidate["kernels"]:
+        k["perf_key"] = _name_key(k["name"])
     return _standalone_estimate(
         candidate,
         lookup,
@@ -496,14 +520,20 @@ def test_standalone_skip_below_modeled_frac():
 
 
 def _golden_candidate():
-    return {
+    candidate = {
         "base_name": "mlp_block",
         "instance_count": 1,
+        "total_kernel_time_us": 200,
         "kernels": [
             {"name": "Cijk_gemm", "type": "GEMM", "dur_us": 100},
             {"name": "ew_add", "type": "Elementwise", "dur_us": 100},
         ],
     }
+    candidate["ops"] = []
+    for k in candidate["kernels"]:
+        k["perf_key"] = _name_key(k["name"])
+        candidate["ops"].append(_op_group(k["perf_key"], [k["name"]], 100.0, 1))
+    return candidate
 
 
 def _golden_lookup():
@@ -522,7 +552,6 @@ def test_standalone_gemm_epilogue_full_estimate():
     assert est["estimation"] == "full"
     assert est["category"] == "kernel_fusion"
     assert est["type"] == "kernel_fusion"
-    assert est["affected_gpu_kernels"] == ["Cijk_gemm", "ew_add"]
 
 
 def test_standalone_skip_below_min_impact_score():
@@ -607,12 +636,16 @@ def test_compute_fusion_comparative_dispatch_and_sort():
         "kernels_trace1": [{"name": "k", "type": "Elementwise"}],
         "total_kernel_time_us_trace1": 6_000,
         "total_kernel_time_us_trace2": 3_000,
+        "ops_trace1": [],
+        "ops_trace2": [],
     }
     large = {
         "base_name": "large",
         "kernels_trace1": [{"name": "k", "type": "GEMM"}],
         "total_kernel_time_us_trace1": 20_000,
         "total_kernel_time_us_trace2": 5_000,
+        "ops_trace1": [],
+        "ops_trace2": [],
     }
     out = compute_fusion_impact_estimates(
         [small, large],
@@ -625,6 +658,34 @@ def test_compute_fusion_comparative_dispatch_and_sort():
     assert len(out) == 2
     assert out[0]["operation"] == "large"
     assert out[0]["impact_score"] >= out[1]["impact_score"]
+
+
+def test_build_rows():
+    perf = pd.Series(
+        {
+            "entry_point": "torch.mm",
+            "FLOPS/Byte": 12.345,
+            "Pct Roofline_mean": 50.0,
+            "Roofline Bound": "COMPUTE_BOUND",
+        }
+    )
+    ops = [_op_group(_MM_KEY, ["k1", "k2"], 2500.0, 3), _op_group(None, ["k"], 10.0, 1)]
+    matched, unmatched = build_rows(
+        ops, {tuple(_MM_KEY): perf}, 100.0, 5.3, {"matrix_bf16": 1300.0}
+    )
+    assert matched["operation"] == "aten::mm"
+    assert matched["args"] == "(16,64) bf16<br>(64,8) bf16"
+    assert (matched["time_ms"], matched["pct_e2e"], matched["count"]) == (
+        "2.500",
+        "2.50",
+        3,
+    )
+    assert (matched["kernel_path"], matched["flops_per_byte"]) == ("torch.mm", "12.35")
+    assert matched["efficiency"] == "50.00% of 1300 TFLOPS"
+    assert matched["bound"] == "compute-bound"
+    assert unmatched["operation"] == unmatched["args"] == "—"
+    assert unmatched["efficiency"] == unmatched["bound"] == "—"
+    assert unmatched["kernel_path"] == "Not found"
 
 
 # ----- classify_memcpy_severity -----
@@ -1587,14 +1648,14 @@ def _write_fusion_inputs(base, candidates):
         )
     pd.DataFrame(
         {
-            "kernel_details_summary": [
-                "[{'name': 'Cijk_gemm', 'mean_duration_us': 100.0}]"
-            ],
-            "Input Dims": ["[[1, 2]]"],
-            "Data Moved (MB)": [1.0],
-            "GFLOPS": [None],
-            "FLOPS/Byte": [None],
-            "Compute Spec": ["matrix_bf16"],
+            "name": [_MM_KEY[0], _ADD_KEY[0]],
+            "Input Dims": [_MM_KEY[1], _ADD_KEY[1]],
+            "Input type": [_MM_KEY[2], _ADD_KEY[2]],
+            "Input Strides": [_MM_KEY[3], _ADD_KEY[3]],
+            "Data Moved (MB)": [1.0, 1.0],
+            "GFLOPS": [None, None],
+            "FLOPS/Byte": [None, None],
+            "Compute Spec": ["matrix_bf16", None],
         }
     ).to_csv(os.path.join(csv_dir, "unified_perf_summary.csv"), index=False)
 
@@ -1626,10 +1687,19 @@ def test_driver_fusion_main_ok_with_estimate(tmp_path, monkeypatch):
         "base_name": "mlp_block",
         "instance_count": 1,
         "kernel_count": 2,
-        "total_kernel_time_us": 3000.0,
+        "total_kernel_time_us": 30000.0,
         "kernels": [
-            {"name": "Cijk_gemm", "type": "GEMM", "dur_us": 1500},
-            {"name": "ew_add", "type": "Elementwise", "dur_us": 1500},
+            {"name": "gemm_a", "type": "GEMM", "dur_us": 1500, "perf_key": _MM_KEY},
+            {
+                "name": "ew_a",
+                "type": "Elementwise",
+                "dur_us": 1500,
+                "perf_key": _ADD_KEY,
+            },
+        ],
+        "ops": [
+            _op_group(_MM_KEY, ["gemm_a"], 15000.0, 1),
+            _op_group(_ADD_KEY, ["ew_a"], 15000.0, 1),
         ],
     }
     _write_fusion_inputs(base, [candidate])
@@ -1639,7 +1709,53 @@ def test_driver_fusion_main_ok_with_estimate(tmp_path, monkeypatch):
     assert metrics["status"] == "OK"
     assert metrics["candidate_count"] == 1
     assert metrics["platform"] == "MI300X"
-    assert "high_confidence_kernel_map" in metrics
+    assert "high_confidence_op_keys" in metrics
+
+
+def test_driver_fusion_main_emits_only_high_confidence_op_keys(tmp_path, monkeypatch):
+    def candidate(name, n_gemm, total_us):
+        gemms = [f"gemm_{i}" for i in range(n_gemm)]
+        dur = total_us / (n_gemm + 1)
+        kernels = [(g, "GEMM", _MM_KEY) for g in gemms] + [
+            ("ew", "Elementwise", _ADD_KEY)
+        ]
+        return {
+            "module_name": name,
+            "base_name": name,
+            "instance_count": 1,
+            "kernel_count": n_gemm + 1,
+            "total_kernel_time_us": total_us,
+            "kernels": [
+                {"name": n, "type": t, "dur_us": dur, "perf_key": key}
+                for n, t, key in kernels
+            ],
+            "ops": [
+                _op_group(_MM_KEY, gemms, dur * n_gemm, 1),
+                _op_group(_ADD_KEY, ["ew"], dur, 1),
+            ],
+        }
+
+    base = str(tmp_path)
+    # Two GEMMs + an elementwise tail in an "mlp" module is high confidence, one GEMM
+    # is medium, and the small high-confidence candidate fails the impact gate.
+    _write_fusion_inputs(
+        base,
+        [
+            candidate("mlp_high", 2, 30000.0),
+            candidate("mlp_medium", 1, 30000.0),
+            candidate("mlp_gated", 2, 3000.0),
+        ],
+    )
+    monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
+    kernel_fusion_analysis.main()
+    metrics = _read_metrics(base, "kernel_fusion")
+    by_name = {e["operation"]: e for e in metrics["impact_estimates"]}
+    assert {n: e["confidence"] for n, e in by_name.items()} == {
+        "mlp_high": "high",
+        "mlp_medium": "medium",
+    }
+    assert by_name["mlp_medium"]["op_keys"] == [_MM_KEY, _ADD_KEY]
+    assert metrics["high_confidence_op_keys"] == [_MM_KEY, _ADD_KEY]
 
 
 # ----- multi_kernel_analysis.main() end-to-end -----

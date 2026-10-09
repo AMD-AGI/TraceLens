@@ -50,7 +50,7 @@ Use vendor-agnostic terminology in all narrative text (Insight, Action, Impact):
 - "compiler fusion" or "graph-level fusion" — not "torch.compile", "Inductor", or other framework-specific names
 - Focus on operation semantics, not vendor implementation details
 
-**Exception:** When quoting kernel names from the candidates for identification in the Kernels table, use the actual name as-is.
+**Exception:** When quoting kernel names from the candidates for identification in the Kernel Name column, use the actual name as-is.
 
 ---
 
@@ -73,8 +73,11 @@ Then read `<output_dir>/category_data/kernel_fusion_metrics.json`. The `impact_e
 - `bound_type`: "compute" or "memory"
 - `fusion_type`: "matrix_compute" or "memory_bound"
 - `confidence`: "high" or "medium"
-- `time_ms`: Total candidate time across all instances
+- `time_ms`: Total candidate time across all instances (summed from the real kernels of every instance)
 - `warning`: Present when some kernels lack perf models
+- `rows` (standalone) or `rows_trace1` / `rows_trace2` (comparative): the finished Data-table rows, one per launching op and args, with the keys `operation`, `args`, `kernel_path`, `kernel_name`, `time_ms`, `pct_e2e`, `count`, `flops_per_byte`, `efficiency`, `bound`. Copy them verbatim into the Data table; do not recompute or reformat any cell.
+
+The file also has `baseline_ms` (Trace 1 E2E GPU time in ms) and, in comparative mode, `baseline2_ms` (Trace 2 E2E).
 
 If `impact_estimates` is empty (or `status` is `NO_DATA`), skip Steps 2-4 entirely. Write **only** the three-line fallback file shown at the end of Step 4 — no P-item cards, no Detailed Analysis blocks, no Impact Summary table. Just the `# heading`, blank line, and the single sentence "No kernel fusion opportunities detected."
 
@@ -179,7 +182,7 @@ Found N kernel fusion opportunities across M module types.
 
 ## Recommendations
 
-### 🔴 P1: <Pattern Name> (<time_ms> ms, <instance_count> instances)
+### 🔴 P1: <Pattern Name>
 
 **Insight**: <Module name, what it launches, how many instances, why it's fusable>
 <!-- [comparative] Also state: how many kernels in trace1 vs trace2. -->
@@ -201,35 +204,38 @@ Found N kernel fusion opportunities across M module types.
 ## Detailed Analysis
 
 <!-- reasoning-candidate tier=fusion rank=1 -->
-#### <Pattern Name> (<time_ms> ms, <instance_count> instances)
+#### <Pattern Name>
 
-**Identification:** <1-2 sentences: how this fusion candidate was surfaced>
-<!-- [standalone] (source: `fusion_candidates.json` → `module_name`, `has_fused_kernel`, `kernels[]`) -->
-<!-- [comparative] (source: `fusion_candidates.json` → `module_name`, `kernel_count_trace1`, `kernel_count_trace2`, `kernels_trace1[]`, `kernels_trace2[]`) -->
+**Identification:** <3-4 sentences: the module and how many times it runs; its parent module and call site (the nearest module in the call stack and its first frame); each distinct launch path in the Data rows (Trace 1 in comparative) with the ops launched from it, skipping `Not found`; then how this fusion candidate was surfaced (kernel sequence, no fused kernel)>
+<!-- [standalone] (source: `fusion_candidates.json` → `module_name`, `parent_chain`, `has_fused_kernel`, `kernels[]`; `kernel_fusion_metrics.json` → `rows[].kernel_path`) -->
+<!-- [comparative] (source: `fusion_candidates.json` → `module_name`, `parent_chain`, `kernel_count_trace1`, `kernel_count_trace2`, `kernels_trace1[]`, `kernels_trace2[]`; `kernel_fusion_metrics.json` → `rows_trace1[].kernel_path`) -->
 
-<!-- [standalone] Single kernel table: -->
 **Data:**
 
-| Kernel | Type | Duration (us) | Perf model |
-|--------|------|--------------|------------|
-| <kernel name (truncated to ~60 chars)> | <type> | X.X | Yes/No |
+<!-- [standalone] Single Data table: -->
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
+| <rows[].operation> | <rows[].args> | <rows[].kernel_path> | <rows[].kernel_name> | <rows[].time_ms> | <rows[].pct_e2e> | <rows[].count> | <rows[].flops_per_byte> | <rows[].efficiency> | <rows[].bound> |
 
-<!-- [comparative] Two kernel tables — you MUST include BOTH: -->
-**Trace1 kernels:**
+<!-- [comparative] Two Data tables with the same columns — you MUST include BOTH, each labelled with that trace's E2E ms. Do NOT add a totals line: -->
+**Trace 1** (E2E <baseline_ms> ms):
 
-| Kernel | Type | Duration (us) |
-|--------|------|--------------|
-| <kernel name (truncated to ~60 chars)> | <type> | X.X |
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
+| <rows_trace1[] cells, same order> |
 
-**Trace2 kernels:**
+**Trace 2** (E2E <baseline2_ms> ms):
 
-| Kernel | Type | Duration (us) |
-|--------|------|--------------|
-| <kernel name (truncated to ~60 chars)> | <type> | X.X |
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
+| <rows_trace2[] cells, same order> |
+
+**Resolution:** <What to change, in this order: if a vendor library has a fused implementation of this pattern, change the model code to call it; otherwise write a custom fused kernel. Vendor-agnostic wording, no library named.>
+<!-- [comparative] Resolution may also name what Trace 2 does differently (e.g. runs this layer as one fused kernel). -->
 
 **Impact estimate:**
 <!-- [standalone] -->
-<!-- impact-begin kind=detail_estimate low=<impact_score_low> high=<impact_score_high> -->
+<!-- impact-begin kind=detail_estimate low=<impact_score_low> mid=<impact_score> high=<impact_score_high> -->
 - Low end impact_score: X.XX
 - High end impact_score: X.XX
 - Coverage: M of N kernels modelled
@@ -239,7 +245,7 @@ Found N kernel fusion opportunities across M module types.
 <!-- When partial coverage, append to Coverage: "(K kernel(s) use measured trace time)". -->
 
 <!-- [comparative] -->
-<!-- impact-begin kind=detail_estimate low=<impact_score_low> high=<impact_score_high> -->
+<!-- impact-begin kind=detail_estimate low=<impact_score_low> mid=<impact_score> high=<impact_score_high> -->
 - Low end impact_score: X.XX
 - High end impact_score: X.XX
 - Fusion pattern: compute/memory-bound, matrix_compute/memory_bound
@@ -300,6 +306,7 @@ If validation fails, fix the findings file and re-run. Max 2 retries.
 |------------|--------|
 | Module names | `module_name`, `base_name` fields |
 | Kernel names, types, durations | `kernels[]` (standalone) or `kernels_trace1[]`/`kernels_trace2[]` (comparative) |
+| Per-op shapes, kernel path, efficiency | `rows[]` (standalone) or `rows_trace1[]`/`rows_trace2[]` (comparative) in `kernel_fusion_metrics.json` |
 | Instance count | `instance_count` field |
 | Architecture context | `parent_chain` field |
 | Already-fused status | `has_fused_kernel` field |
@@ -310,7 +317,7 @@ If validation fails, fix the findings file and re-run. Max 2 retries.
 
 | NOT Observable | Why | Instead Say |
 |----------------|-----|-------------|
-| Tensor shapes | Not in candidate JSON | "Cannot assess data flow from candidate data" |
+| Data flow between kernels | Shapes are in `rows[].args`, but not which tensor feeds which kernel | "Cannot assess data flow from candidate data" |
 | Whether kernels share intermediate tensors | Would need data flow analysis | "Likely fusable based on module structure" |
 | Root cause of decomposition | Could be framework, compiler, or intentional | "Module launches N separate kernels that may be fusable" |
 | Why trace2 is fused | Architectural difference could be compile flags, library version, etc. | "Trace2 demonstrates a fused path exists; trace1 can adopt the same approach" |

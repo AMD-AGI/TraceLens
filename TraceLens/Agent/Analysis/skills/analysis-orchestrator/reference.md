@@ -338,7 +338,8 @@ Execute the TraceLens Agentic Mode orchestrator preparation script:
   --trace-path <trace_path> \
   --platform <platform> \
   --output-dir <output_dir> \
-  --comparison-scope <comparison_scope>
+  --comparison-scope <comparison_scope> \
+  [--platform2 <platform2>]   # comparative only
 ```
 
 This script performs:

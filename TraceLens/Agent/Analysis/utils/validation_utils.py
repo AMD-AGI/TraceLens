@@ -73,6 +73,7 @@ _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE = (
     "FLOPS/Byte (T1)",
     "Bound (T1)",
 )
+
 _TIME_DISCREPANCY_THRESHOLD = 10  # percent
 _ROLLUP_IMPACT_TOL = 0.02  # ms; matches 2-decimal rounding in generate_priority_data
 _MARKER_NUMERIC_TOL = 0.005  # ms; half a ULP at 2-decimal marker rendering
@@ -230,6 +231,9 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
             _validate_compute_data_tables(content, filepath, comparison_scope)
         )
 
+    if tier == "fusion":
+        errors.extend(_validate_fusion_data_tables(content))
+
     # Marker structure (folded in from the former Level-4 validate_markers).
     file_class = "category_findings" if tier == "compute" else "system_findings"
     errors.extend(
@@ -273,7 +277,9 @@ def _scan_args_cells(content):
 
 
 def _load_valid_args(*metrics_paths):
-    """Build set of operations[].args strings from one or more metrics JSONs."""
+    """Build set of Args strings from one or more metrics JSONs: operations[].args,
+    plus the rendered fusion rows' args (kernel_fusion_metrics.json
+    impact_estimates[].rows / rows_trace1 / rows_trace2)."""
     valid = set()
     for p in metrics_paths:
         try:
@@ -285,6 +291,13 @@ def _load_valid_args(*metrics_paths):
             op["args"]
             for op in d.get("operations", [])
             if isinstance(op.get("args"), str)
+        )
+        valid.update(
+            row["args"]
+            for est in d.get("impact_estimates", [])
+            for key in ("rows", "rows_trace1", "rows_trace2")
+            for row in est.get(key, [])
+            if isinstance(row.get("args"), str)
         )
     return valid
 
@@ -311,8 +324,8 @@ def _load_compute_data_metrics(metrics_path):
     return args, paths, kernel_names
 
 
-def _iter_compute_candidate_blocks(content):
-    """Yield (start, end) line-index range for each tier=compute candidate block."""
+def _iter_candidate_blocks(content, tier):
+    """Yield (start, end) line-index range for each candidate block of ``tier``."""
     lines = content.splitlines()
     starts = [
         (idx, _CANDIDATE_RE.search(line))
@@ -320,7 +333,7 @@ def _iter_compute_candidate_blocks(content):
         if _CANDIDATE_RE.search(line)
     ]
     for i, (idx, m) in enumerate(starts):
-        if "tier=compute" not in m.group(0):
+        if f"tier={tier}" not in m.group(0):
             continue
         end = starts[i + 1][0] if i + 1 < len(starts) else len(lines)
         yield idx, end
@@ -381,7 +394,7 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
     )
     lines = content.splitlines()
     errors = []
-    for start, end in _iter_compute_candidate_blocks(content):
+    for start, end in _iter_candidate_blocks(content, "compute"):
         table = _find_data_table(lines, start, end)
         if table is None:
             errors.append(
@@ -434,6 +447,31 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
                         f"operations[].kernel_name_trunc in {cat_metrics_basename} "
                         f"(paste verbatim): {cells[kn_idx]}"
                     )
+    return errors
+
+
+def _validate_fusion_data_tables(content):
+    """For each <!-- reasoning-candidate tier=fusion --> block: the first
+    **Data:** table must start with the canonical fusion columns, in order.
+    """
+    lines = content.splitlines()
+    errors = []
+    for start, end in _iter_candidate_blocks(content, "fusion"):
+        table = _find_data_table(lines, start, end)
+        if table is None:
+            errors.append(
+                f"fusion-tier reasoning-candidate block at line {start + 1}: "
+                f"no **Data:** table found"
+            )
+            continue
+        header_line, header_cols, _ = table
+        n_cols = len(_COMPUTE_DATA_REQUIRED_COLS_STANDALONE)
+        if tuple(header_cols[:n_cols]) != _COMPUTE_DATA_REQUIRED_COLS_STANDALONE:
+            errors.append(
+                f"fusion Data table at line {header_line}: header must start "
+                f"with the {n_cols} canonical columns in order "
+                f"{list(_COMPUTE_DATA_REQUIRED_COLS_STANDALONE)}; got {header_cols}"
+            )
     return errors
 
 
@@ -942,7 +980,7 @@ class MarkerValidator:
     KNOWN_KINDS = {"p_item", "detail_estimate", "top_ops", "op_row"}
     REQUIRED_ATTRS_BY_KIND = {
         "p_item": ("low", "mid", "high"),
-        "detail_estimate": ("low", "high"),
+        "detail_estimate": ("low", "mid", "high"),
         "op_row": ("rank", "impacts"),
     }
     # Compute findings files that do NOT need a p_item marker.
@@ -1076,7 +1114,7 @@ class MarkerValidator:
         """
         lines = text.splitlines()
         errors = []
-        for start, end in _iter_compute_candidate_blocks(text):
+        for start, end in _iter_candidate_blocks(text, "compute"):
             table = _find_data_table(lines, start, end)
             if table is None:
                 continue
