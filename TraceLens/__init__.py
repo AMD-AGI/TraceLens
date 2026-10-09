@@ -19,13 +19,8 @@ from .util import DataLoader, TraceEventUtils, JaxProfileProcessor
 from .PerfModel import *
 from .EventReplay.event_replay import EventReplayer
 from .TraceDiff.trace_diff import TraceDiff
-from .trace_health import (
-    TraceHealthReport,
-    check_kernels_dropped,
-    run_trace_health_check,
-)
 from .Reporting import *
-from . import EventReplay, PerfModel, Reporting
+from . import EventReplay, PerfModel, Reporting, trace_health
 
 __all__ = [
     "TreePerfAnalyzer",
@@ -47,7 +42,6 @@ __all__ = [
     "JaxProfileProcessor",
     "JaxProfileProcessor",
     "TraceDiff",
-    "TraceHealthReport",
-    "run_trace_health_check",
+    "trace_health",
     "Reporting",
 ]
