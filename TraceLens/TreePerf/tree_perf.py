@@ -278,7 +278,9 @@ class TreePerfAnalyzer:
         self.python_path = python_path
         self.enable_origami_gemm = enable_origami_gemm
         self.enable_origami_sdpa_tile = enable_origami_sdpa_tile
-        self.op_models = default_op_models(enable_origami_gemm, enable_origami_sdpa_tile)
+        self.op_models = default_op_models(
+            enable_origami_gemm, enable_origami_sdpa_tile
+        )
         self.kernel_filters = {}
         self.inductor_cache_dir = inductor_cache_dir
         self.event_to_category = event_to_category
@@ -657,9 +659,7 @@ class TreePerfAnalyzer:
         # Pct <label> depends on the measured time, so aggregate it.
         labels = op_model_labels(df_perf_metrics.columns)
         for label in labels:
-            for col in op_model_group_columns(
-                df_perf_metrics.columns, label, labels
-            ):
+            for col in op_model_group_columns(df_perf_metrics.columns, label, labels):
                 dict_agg[col] = agg_metrics if col == f"Pct {label}" else "first"
         for label in kernel_filter_labels(df_perf_metrics.columns):
             if f"{label} TFLOPS/s" in df_perf_metrics.columns:

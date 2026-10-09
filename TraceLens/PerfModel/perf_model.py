@@ -1836,7 +1836,14 @@ class SDPA:
         num_waves = math.ceil(total_num_blocks / arch["num_cus"])
 
         qkt_time = SDPA.tile_gemm_time(
-            arch, block_N_Q, block_N_KV, d_h, dtype, force_to_l1, enable_origami, gemm_time
+            arch,
+            block_N_Q,
+            block_N_KV,
+            d_h,
+            dtype,
+            force_to_l1,
+            enable_origami,
+            gemm_time,
         )
         if qkt_time is None:
             return None
@@ -1852,7 +1859,14 @@ class SDPA:
             num_cus=1,
         )
         pv_time = SDPA.tile_gemm_time(
-            arch, block_N_Q, d_h, block_N_KV, dtype, force_to_l1, enable_origami, gemm_time
+            arch,
+            block_N_Q,
+            d_h,
+            block_N_KV,
+            dtype,
+            force_to_l1,
+            enable_origami,
+            gemm_time,
         )
         if pv_time is None:
             return None
@@ -1984,7 +1998,14 @@ class SDPA:
         num_waves = math.ceil(total_num_blocks / arch["num_cus"])
 
         qkt_fwd_time = SDPA.tile_gemm_time(
-            arch, block_N_Q, block_N_KV, d_h, dtype, force_to_l1, enable_origami, gemm_time
+            arch,
+            block_N_Q,
+            block_N_KV,
+            d_h,
+            dtype,
+            force_to_l1,
+            enable_origami,
+            gemm_time,
         )
         if qkt_fwd_time is None:
             return None
@@ -1993,7 +2014,14 @@ class SDPA:
 
         # B = B * H_Q, M = N_Q, N = d_H, K = N_KV
         pv_fwd_time = SDPA.tile_gemm_time(
-            arch, block_N_Q, d_h, block_N_KV, dtype, force_to_l1, enable_origami, gemm_time
+            arch,
+            block_N_Q,
+            d_h,
+            block_N_KV,
+            dtype,
+            force_to_l1,
+            enable_origami,
+            gemm_time,
         )
         if pv_fwd_time is None:
             return None

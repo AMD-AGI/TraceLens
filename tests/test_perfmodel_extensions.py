@@ -576,7 +576,6 @@ class TestGemmBaseCoverage:
         model = perf_model.aten_mm(_gemm_event("aten::mm", (4, 8), (8, 16)))
         assert origami_gemm_model(model.category, model.param_details, None) is None
 
-
     def test_origami_simulation_mocked(self, monkeypatch):
         mock_origami = MagicMock()
         mock_origami.data_type_t.BFloat16 = "bf16_dtype"
@@ -2039,7 +2038,6 @@ class TestGroupedGemmAndPrimusCoverage:
 
 
 class TestGemmExtendedCoverage:
-
 
     def test_jax_gemm_mixed_dtype_warns(self):
         event = {
@@ -3554,7 +3552,6 @@ class TestPerfModelExtensionsBoost:
 
 class TestPerfModelPush95:
 
-
     def test_aten_scaled_mm_output_bpe_branches(self):
         for dtype in ("c10::Float8_e4m3fn", "c10::BFloat16"):
             event = {
@@ -4039,7 +4036,6 @@ class TestMoeExtensionsSweep:
 
 class TestPerfModelPush95Coverage:
 
-
     def test_gemm_origami_unsupported_dtype(self, monkeypatch):
         mock_origami = MagicMock()
         mock_origami.data_type_t = MagicMock()
@@ -4518,7 +4514,6 @@ class TestPerfModelFinalCoverage:
         with pytest.warns(UserWarning):
             model.bytes()
 
-
     def test_aten_reduce_edge_cases(self):
         empty = perf_model.aten_reduce(
             {"name": "aten::sum", "args": {"Input Dims": [None]}}
@@ -4865,7 +4860,6 @@ class TestPerfModelDeepCoverage2:
         g = perf_model.primus_turbo_grouped_gemm(zipped)
         assert g.flops() > 0
         assert g.get_compute_precision() == "bf16"
-
 
     def test_fused_rope_and_cross_entropy_precision(self):
         rope = perf_model.fused_rope_fwd(

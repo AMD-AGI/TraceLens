@@ -541,7 +541,11 @@ class JaxAnalyses:
 
     @staticmethod
     def gemm_perf_metrics(
-        event, op_params, bwd: bool = False, arch=None, enable_origami_gemm: bool = False
+        event,
+        op_params,
+        bwd: bool = False,
+        arch=None,
+        enable_origami_gemm: bool = False,
     ):
         perf_model_class = JaxAnalyses.get_perf_model(event)
         # the class structure of the perf_model class doesn't make it easy to add additional parameters to the event,
@@ -550,9 +554,7 @@ class JaxAnalyses:
         event_copy[TraceEventUtils.JaxKernelEventArgs.hlo_op] = op_params
         # the perf model needs a kernel names field
         event_copy["kernel_names"] = [event[TraceEventUtils.TraceKeys.Name]]
-        perf_model = perf_model_class(
-            event_copy, arch=arch
-        )
+        perf_model = perf_model_class(event_copy, arch=arch)
 
         work = op_work(perf_model, bwd)
         time = event[TraceEventUtils.TraceKeys.Duration]

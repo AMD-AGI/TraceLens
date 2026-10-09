@@ -64,12 +64,20 @@ def add_simulation_time_columns(
     label="Origami",
 ):
     """
-    Add simulated time columns (Origami, or ``label`` for other op models)
+    Add simulated time columns (Origami, or ``label`` for other op models).
+    For dict outputs with extra columns, use
+    ``TraceLens.PerfModel.op_models.add_op_model_columns``.
     """
-    from .op_models import add_op_model_columns
-
-    add_op_model_columns(
-        dict_metrics, label, simulated_time, gflops, bytes_moved, busy_kernel_time
+    if not simulated_time:
+        return
+    dict_metrics[f"{label} Time (µs)"] = simulated_time
+    add_duration_rate_columns(
+        dict_metrics, gflops, bytes_moved, simulated_time, prefix=label
+    )
+    dict_metrics[f"Pct {label}"] = (
+        (simulated_time / busy_kernel_time) * 100
+        if busy_kernel_time > 0
+        else float("nan")
     )
 
 

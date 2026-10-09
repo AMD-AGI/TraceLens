@@ -166,9 +166,10 @@ class TestOrigamiGemm:
         assert sim.call_args.kwargs["enable_origami"] is True
 
     def test_without_origami_enabled_gives_no_time(self):
-        assert perf_model.GEMM.get_simulation_time_func(
-            ARCH, 4, 8, 16, 1, "bf16"
-        ) == (None, None)
+        assert perf_model.GEMM.get_simulation_time_func(ARCH, 4, 8, 16, 1, "bf16") == (
+            None,
+            None,
+        )
 
     def test_default_op_models_order(self):
         assert list(default_op_models()) == ["Roofline"]
