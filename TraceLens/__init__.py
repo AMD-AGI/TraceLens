@@ -20,7 +20,7 @@ from .PerfModel import *
 from .EventReplay.event_replay import EventReplayer
 from .TraceDiff.trace_diff import TraceDiff
 from .Reporting import *
-from . import EventReplay, PerfModel, Reporting, trace_health
+from . import EventReplay, PerfModel, Reporting, trace_check
 
 __all__ = [
     "TreePerfAnalyzer",
@@ -42,6 +42,6 @@ __all__ = [
     "JaxProfileProcessor",
     "JaxProfileProcessor",
     "TraceDiff",
-    "trace_health",
+    "trace_check",
     "Reporting",
 ]
