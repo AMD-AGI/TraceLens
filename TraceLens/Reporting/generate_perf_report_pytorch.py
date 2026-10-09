@@ -1038,8 +1038,8 @@ def generate_perf_report_pytorch(
     if os.environ.get("TRACELENS_DETAILED_HEALTH_CHECKS") == "1":
         from TraceLens import trace_check
 
-        trace_check.run_post_report_checks(
-            dict_name2df, framework="pytorch"
+        trace_check.run_trace_checks(
+            pre_report=False, dfs=dict_name2df, framework="pytorch"
         ).log_findings()
 
     return dict_name2df

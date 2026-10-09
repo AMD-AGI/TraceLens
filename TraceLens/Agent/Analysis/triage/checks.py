@@ -523,10 +523,11 @@ def check_trace_size(run_dir, _stream_file):
     trace_path = resolve_trace_path(run_dir)
     if not trace_path or not os.path.exists(trace_path):
         return None
-    report = trace_check.run_trace_checks([], filepath=trace_path)
-    for f in report.findings:
-        if f.check_id == "trace_file_size":
-            return FindingDraft(f.message, f.message, f.message)
+    findings = trace_check._check_trace_file_size({"filepath": trace_path})
+    if findings:
+        return FindingDraft(
+            findings[0].message, findings[0].message, findings[0].message
+        )
     return None
 
 
@@ -534,10 +535,11 @@ def check_no_gpu_kernels(run_dir, _stream_file):
     events = _load_events(resolve_trace_path(run_dir))
     if events is None:
         return None
-    report = trace_check.run_trace_checks(events)
-    for f in report.findings:
-        if f.check_id == "kernels_present":
-            return FindingDraft(f.message, f.message, f.message)
+    findings = trace_check._check_kernels_present({"events": events})
+    if findings:
+        return FindingDraft(
+            findings[0].message, findings[0].message, findings[0].message
+        )
     return None
 
 
@@ -639,10 +641,11 @@ def check_missing_cpu_op_shapes(run_dir, _stream_file):
     events = _first_load_capture_event_set(capture_folder)
     if events is None:
         return None
-    report = trace_check.run_trace_checks(events)
-    for f in report.findings:
-        if f.check_id == "cpu_op_shapes_missing":
-            return FindingDraft(f.message, f.message, f.message)
+    findings = trace_check._check_cpu_op_shapes_basic({"events": events})
+    if findings:
+        return FindingDraft(
+            findings[0].message, findings[0].message, findings[0].message
+        )
     return None
 
 
