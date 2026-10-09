@@ -4121,6 +4121,62 @@ def _node_output_dims(node: dict[str, Any], port: str) -> list[str] | None:
     return None
 
 
+def _dock_nullary_ops_on_what_sizes_them(nodes: list[dict[str, Any]]) -> None:
+    """An op taking no tensor operand reads the tensor its SIZES came from.
+
+    ``torch.arange`` builds a tensor out of sizes; its schema has no tensor
+    argument at all. GLM's ``get_vision_position_ids`` is driven entirely by
+    host data read off ``grid_thw.tolist()``, so the frame's first op is an
+    ``arange`` with no tensor to read -- and an op with no producer docks on
+    whatever chain runs past it. That handed the arange the vision activation,
+    and the boundary tiles built to carry it then asserted, all the way up, that
+    the frame reads ``hidden_states``: a tensor its call
+    (``get_vision_position_ids(grid_thw, ...)``) is never passed.
+
+    Leaving it rootless is not the answer either -- a range sized by the model's
+    own data depends on that data, which is why it is docked at all. The op
+    already records WHICH parameter it reads from the boundary, so dock it
+    there: the grid, not the activation.
+
+    The op's own schema decides whether this applies, so nothing here names an
+    operation. Only an edge from a synthetic boundary moves; an edge from a real
+    producer is a dependency something built on purpose.
+    """
+    by_id = {str(node.get("id")): node for node in nodes}
+    for node in nodes:
+        ceiling, variadic = _operand_ceiling(_node_attr(node, "raw_op") or "")
+        if variadic or ceiling != 0:
+            continue
+        param = _node_attr(node, "boundary_input")
+        edges = node.get("incomingEdges") or []
+        docked = [
+            edge
+            for edge in edges
+            if _is_synthetic_input(by_id.get(str(edge.get("sourceNodeId")), {}))
+        ]
+        if not param or not docked:
+            continue
+        namespace = str(node.get("namespace") or "")
+        carrier = next(
+            (
+                str(other["id"])
+                for other in nodes
+                if str(other.get("label") or "") == param
+                and _is_synthetic_input(other)
+                and (
+                    namespace == str(other.get("namespace") or "")
+                    or namespace.startswith(f"{other.get('namespace')}/")
+                )
+            ),
+            None,
+        )
+        if carrier is None:
+            continue
+        moved = [edge for edge in edges if edge not in docked]
+        moved.append(_source_edge((carrier, "0"), param))
+        node["incomingEdges"] = moved
+
+
 def _drop_unconsumed_input_boundaries(nodes: list[dict[str, Any]]) -> None:
     """Remove a frame ``@input`` tile that nothing inside the frame reads.
 
@@ -8699,6 +8755,10 @@ def build_merged_model_graph(
 
     # Runs after threading, which is what connects an outer boundary to its deep
     # consumer: only then is the skipped path visible to walk.
+    # An op taking no tensor operand reads what SIZES it, not the chain it
+    # happens to sit on. Runs before the levels are filled in so the tiles
+    # are materialised for the tensor it really reads.
+    _dock_nullary_ops_on_what_sizes_them(nodes)
     _insert_missing_boundary_levels(nodes)
     # The mirror of that pass for the leaving side, run right beside it so both
     # walls of a block are decided by the same state of the graph.
