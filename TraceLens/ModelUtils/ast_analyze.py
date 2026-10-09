@@ -24,6 +24,7 @@ _log = logging.getLogger(__name__)
 
 from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis
 from TraceLens.ModelUtils.config_resolve import apply_config_attribute_aliases
+from TraceLens.ModelUtils.github import pinned_module_origin
 
 DECODER_CLASS_RE = re.compile(
     r"(DecoderLayer|DecoderBlock|TransformerBlock|ModelBlock|Block)$",
@@ -471,10 +472,18 @@ def _module_origin(module: str) -> str | None:
 
     Falls back to ``find_spec`` for anything a plain path walk cannot express
     (namespace packages, zip imports), which is rare and keeps prior behaviour.
+
+    A model read at a pinned commit is asked for FIRST. Its modeling file comes
+    from that commit, so the helpers it imports have to as well -- resolving
+    those through ``sys.path`` reads whatever version of the library is
+    installed, which is two revisions of one library describing one model.
     """
     parts = module.split(".")
     if not parts or not all(parts):
         return None
+    pinned = pinned_module_origin(module)
+    if pinned:
+        return pinned
     for entry in sys.path:
         base = Path(entry) if entry else Path.cwd()
         try:

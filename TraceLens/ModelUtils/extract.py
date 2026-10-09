@@ -1924,24 +1924,20 @@ def parse_architecture(
         name=display_name,
         model_type=model_type,
         architectures=[str(a) for a in architectures],
-        hidden_size=_as_int(_get(config, "hidden_size", "n_embd", "d_model")),
-        num_hidden_layers=_as_int(
-            _get(config, "num_hidden_layers", "n_layer", "num_layers")
-        ),
-        intermediate_size=_as_int(
-            _get(config, "intermediate_size", "n_inner", "ffn_dim")
-        ),
-        vocab_size=_as_int(_get(config, "vocab_size")),
+        hidden_size=_as_int(_declared_get(config, "hidden_size", declared)),
+        num_hidden_layers=_as_int(_declared_get(config, "num_hidden_layers", declared)),
+        intermediate_size=_as_int(_declared_get(config, "intermediate_size", declared)),
+        vocab_size=_as_int(_declared_get(config, "vocab_size", declared)),
         max_position_embeddings=_as_int(
-            _get(config, "max_position_embeddings", "max_seq_len", "seq_length")
+            _declared_get(config, "max_position_embeddings", declared)
         ),
         num_attention_heads=_as_int(
             _declared_get(config, "num_attention_heads", declared)
         ),
         num_key_value_heads=_as_int(
-            _get(config, "num_key_value_heads", "num_kv_heads")
+            _declared_get(config, "num_key_value_heads", declared)
         ),
-        head_dim=_as_int(_get(config, "head_dim")),
+        head_dim=_as_int(_declared_get(config, "head_dim", declared)),
         tie_word_embeddings=_as_bool(_get(config, "tie_word_embeddings")),
         source_path=source,
         raw_config=config,

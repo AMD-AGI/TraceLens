@@ -195,6 +195,71 @@ def fetch_github_file(
     return cache_file
 
 
+# Repos whose source answers for a module the analysed model imports, as
+# (ref, prefix) where *prefix* is the path under which the repo lays out its
+# top-level packages (`src` for transformers). One entry per model analysed.
+_PINNED_MODULE_SOURCES: list[tuple[GitHubRef, str]] = []
+# Modules no registered repo publishes, so the fallback is not re-priced.
+_PINNED_MODULE_MISSES: set[str] = set()
+
+
+def register_pinned_module_source(ref: GitHubRef, subpath: str, module: str) -> None:
+    """Record that *ref* supplies the modules around *module*, read at ITS commit.
+
+    A model's modeling file is read at a pinned commit, but everything it
+    imports -- ``vision_utils``, ``masking_utils``, ``activations``, its own
+    ``configuration_*`` -- resolves through ``sys.path`` to whatever version of
+    the library happens to be INSTALLED. That is two revisions of one library
+    describing one model, and the helpers are where several of a graph's frames
+    come from.
+
+    *subpath* and *module* are the same file named two ways
+    (``src/transformers/models/x/modeling_x.py`` and
+    ``transformers.models.x.modeling_x``), which is what says where the repo
+    keeps its top-level packages: strip as many trailing path segments as the
+    module has dotted parts.
+    """
+    parts = [part for part in module.split(".") if part]
+    segments = Path(subpath).parts
+    if not parts or len(segments) < len(parts):
+        return
+    prefix = "/".join(segments[: len(segments) - len(parts)])
+    entry = (ref, prefix)
+    if entry not in _PINNED_MODULE_SOURCES:
+        _PINNED_MODULE_SOURCES.insert(0, entry)
+
+
+def pinned_module_origin(module: str) -> str | None:
+    """File defining *module* in a registered pinned repo, fetching it if needed.
+
+    Returns ``None`` when no registered repo publishes it, so the caller falls
+    back to the installed library. Best effort per module: a model that imports
+    something the pinned repo does not have still resolves it, just not pinned.
+    """
+    parts = [part for part in module.split(".") if part]
+    if not parts or module in _PINNED_MODULE_MISSES:
+        return None
+    for ref, prefix in _PINNED_MODULE_SOURCES:
+        base = f"{prefix}/" if prefix else ""
+        relative = "/".join(parts)
+        candidates = (f"{base}{relative}.py", f"{base}{relative}/__init__.py")
+        # Everything already on disk first. A package misses the module spelling
+        # and hits the package one, so trying them in order would spend a request
+        # on that miss EVERY run -- the fetched file is cached but the 404 is not.
+        for candidate in candidates:
+            cached = cached_file_path(ref, candidate)
+            if cached.is_file():
+                return str(cached)
+        for candidate in candidates:
+            found = fetch_github_file(ref, candidate)
+            if found is not None:
+                return str(found)
+    # A module no registered repo publishes stays absent for this analysis, so
+    # the fallback to the installed library is paid for once.
+    _PINNED_MODULE_MISSES.add(module)
+    return None
+
+
 def _fetch_single_file(ref: GitHubRef) -> Path:
     if not ref.subpath.endswith(".py"):
         raise ValueError(f"Expected a Python file path in GitHub URL: {ref.display}")

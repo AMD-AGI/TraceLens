@@ -17,6 +17,7 @@ from typing import Any
 from TraceLens.ModelUtils.github import (
     GitHubRef,
     fetch_github_file,
+    register_pinned_module_source,
     fetch_github_source,
     find_modeling_files,
     is_github_url,
@@ -197,6 +198,16 @@ def _fetch_own_package(ref: GitHubRef, subpath: str, path: Path) -> None:
         fetch_github_file(ref, (package / relative / "__init__.py").as_posix())
 
 
+def _modeling_module_name(model_type: str) -> str:
+    """Dotted name of a transformers-native modeling module.
+
+    Must agree with what the analyser resolves imports against
+    (``ast_analyze._analyzed_base_module``): the pair of this name and the repo
+    path is what says where the repo keeps its top-level packages.
+    """
+    return "transformers.models.{0}.modeling_{0}".format(model_type.replace("-", "_"))
+
+
 def _transformers_modeling_path(model_type: str) -> Path | None:
     """Locate installed transformers modeling file for a model_type."""
     try:
@@ -249,6 +260,9 @@ def _fetch_versioned_transformers_file(
                 continue
             if path.is_file():
                 _fetch_own_package(ref, subpath, path)
+                register_pinned_module_source(
+                    ref, subpath, _modeling_module_name(model_type)
+                )
                 return path, ref.display
     return None
 
@@ -311,6 +325,9 @@ def _transformers_github_modeling_file(
             continue
         if path.is_file():
             _fetch_own_package(ref, subpath, path)
+            register_pinned_module_source(
+                ref, subpath, _modeling_module_name(model_type)
+            )
             return path, ref.display
     return None
 
