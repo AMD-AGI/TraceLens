@@ -1072,10 +1072,12 @@ def test_heuristic_linear_out_features():
     ctx.dims[Symbol.INTERMEDIATE.value] = 11008
     ctx.dims[Symbol.VOCAB.value] = 32000
     ctx.dims[Symbol.EXPERTS.value] = 64
-    assert _heuristic_linear_out_features("lm_head", ctx) == 32000
+    # `lm_head` and `router` answered for no pinned model, so they are no
+    # longer named here; the width comes from the module's own constructor.
+    assert _heuristic_linear_out_features("lm_head", ctx) is None
+    assert _heuristic_linear_out_features("router", ctx) is None
     assert _heuristic_linear_out_features("gate_proj", ctx) == 11008
     assert _heuristic_linear_out_features("o_proj", ctx) == 4096
-    assert _heuristic_linear_out_features("router", ctx) == 64
     assert _heuristic_linear_out_features("expert_proj", ctx) == 11008
     assert _heuristic_linear_out_features("something_proj", ctx) == 4096
     assert _heuristic_linear_out_features(None, ctx) is None

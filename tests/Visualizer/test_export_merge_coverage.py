@@ -2221,9 +2221,9 @@ def test_shape_misc_helper_error_and_fallback_paths():
     )
     assert aliases["linear_head_dim"] == 4
     assert "x" not in aliases
-    assert _heuristic_linear_out_features("lm_head", ShapeContext({"V": 101})) == 101
+    assert _heuristic_linear_out_features("lm_head", ShapeContext({"V": 101})) is None
     assert _heuristic_linear_out_features("gate_proj", ShapeContext({"I": 32})) == 32
-    assert _heuristic_linear_out_features("router", ShapeContext({"E": 8})) == 8
+    assert _heuristic_linear_out_features("router", ShapeContext({"E": 8})) is None
     assert _heuristic_linear_out_features("custom_proj", ShapeContext({"H": 16})) == 16
     assert _heuristic_linear_out_features(None, ShapeContext()) is None
 

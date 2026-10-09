@@ -7653,17 +7653,29 @@ def _is_conv(node: ModelGraphNode) -> bool:
 def _heuristic_linear_out_features(
     attr: str | None, context: ShapeContext
 ) -> DimExpr | None:
+    """Last-resort width for a Linear whose own constructor could not be found.
+
+    :meth:`_lookup_linear_spec` reads the real ``nn.Linear(in, out)`` from the
+    owning class, which is where this should come from. It misses only where the
+    owning class cannot be resolved -- a projection inside an expert list -- and
+    then these names are all that is left.
+
+    Measured against the pinned models, exactly these answer for something:
+    ``gate_proj``, ``up_proj``, ``down_proj``, ``gate_up_proj`` and the routed
+    expert projections. The rest of what this used to list -- ``lm_head``,
+    ``w1``/``w2``/``w3``, ``router``, and ``q_proj``/``k_proj``/``v_proj``/
+    ``o_proj`` -- answered for nothing, and the attention ones were wrong as
+    well as unused: under grouped-query or latent attention a ``q_proj`` is
+    ``heads * head_dim`` and a ``k_proj`` narrower still, neither of them the
+    hidden width this claimed.
+    """
     if not attr:
         return None
     lowered = attr.lower()
-    if lowered in {"lm_head", "embed_out"}:
-        return context.dims.get(Symbol.VOCAB.value)
-    if lowered in {"gate_proj", "up_proj", "w1", "w3"}:
+    if lowered in {"gate_proj", "up_proj"}:
         return context.dims.get(Symbol.INTERMEDIATE.value)
-    if lowered in {"down_proj", "w2", "o_proj", "q_proj", "k_proj", "v_proj"}:
+    if lowered == "down_proj":
         return context.dims.get(Symbol.HIDDEN.value)
-    if lowered in {"router", "gate"} or lowered.endswith("_gate"):
-        return context.dims.get(Symbol.EXPERTS.value)
     if "expert" in lowered and "proj" in lowered:
         return context.dims.get(Symbol.INTERMEDIATE.value)
     if lowered.endswith("_proj"):
