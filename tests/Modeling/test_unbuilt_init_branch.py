@@ -120,6 +120,87 @@ class TestCallingAModuleThatWasNeverBuilt:
         assert "crossattention" in names, names
 
 
+class TestAnArmThatCallsOneCannotBeTaken:
+    """GPT-2 guards its cross-attention with a RUNTIME test.
+
+    ``is_cross_attention = encoder_hidden_states is not None`` -- no config
+    decides it, so neither arm can be ruled out by the config. But the arm calls
+    ``self.q_attn(...)``, which exists only for cross-attention and which
+    nothing constructs the class to need, and the model raises there rather than
+    computing. Drawn anyway, that arm brought GPT-2's 2x-wide cross-attention
+    projection with it, which is how a 12-head attention reported 36 heads.
+    """
+
+    SOURCE = """
+import torch
+import torch.nn as nn
+
+
+class Attention(nn.Module):
+    def __init__(self, config, is_cross_attention=False):
+        super().__init__()
+        self.c_attn = nn.Linear(4, 4)
+        if is_cross_attention:
+            self.q_attn = nn.Linear(4, 4)
+
+    def forward(self, x, encoder_hidden_states=None):
+        is_cross = encoder_hidden_states is not None
+        if is_cross:
+            q = self.q_attn(x)
+            q = torch.sigmoid(q)
+        else:
+            q = torch.tanh(x)
+        return q
+
+
+class Block(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.attn = Attention(config)
+
+    def forward(self, x):
+        return self.attn(x)
+"""
+
+    @staticmethod
+    def _ops(unbuilt: frozenset[str]) -> set[str]:
+        import ast
+
+        from TraceLens.ModelUtils.ast_analyze import (
+            _forward_operations_from_forward,
+        )
+
+        tree = ast.parse(TestAnArmThatCallsOneCannotBeTaken.SOURCE)
+        forward = next(
+            item
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == "Attention"
+            for item in node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        )
+        analysis = _forward_operations_from_forward(
+            forward,
+            self_values={},
+            all_tensor_ops=True,
+            unbuilt_attrs=unbuilt,
+        )
+        return {str(op.label) for op in analysis.operations}
+
+    def test_the_arm_is_not_drawn(self) -> None:
+        """``sigmoid`` is only reachable through the module nothing builds."""
+        ops = self._ops(frozenset({"q_attn"}))
+        assert "Sigmoid" not in ops, ops
+
+    def test_the_arm_the_model_takes_is(self) -> None:
+        ops = self._ops(frozenset({"q_attn"}))
+        assert "Tanh" in ops, ops
+
+    def test_both_arms_remain_when_the_module_is_built(self) -> None:
+        """Nothing unbuilt, so neither arm can be ruled out."""
+        ops = self._ops(frozenset())
+        assert {"Sigmoid", "Tanh"} <= ops, ops
+
+
 class TestAnUndecidableBranchKeepsBothArms:
     def test_a_key_the_config_does_not_state_decides_nothing(self) -> None:
         """Unresolved is not False -- that distinction is the whole point."""

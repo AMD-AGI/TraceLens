@@ -4698,6 +4698,7 @@ class _ForwardOperationExtractor:
         *,
         self_values: dict[str, Any],
         all_tensor_ops: bool,
+        unbuilt_attrs: frozenset[str] = frozenset(),
         param_names: set[str] | None = None,
         host_scalar_params: set[str] | None = None,
         config: dict[str, Any] | None = None,
@@ -4785,6 +4786,11 @@ class _ForwardOperationExtractor:
         # nothing overrides, or a literal the call site passed. A branch on one
         # has a known outcome, so only the live arm is emitted.
         self.param_values: dict[str, Any] = dict(param_values or {})
+        # Submodules no instance has, because the only `__init__` branch that
+        # builds them is one the config rules out. A statement calling one
+        # cannot run -- the model raises instead -- so an arm containing such a
+        # call is an arm the model never takes, whatever guards it.
+        self.unbuilt_attrs: frozenset[str] = frozenset(unbuilt_attrs or ())
         # Locals bound to a literal ``torch.<dtype>``. A call given ``dtype=dtype``
         # names a local, and the local is where the answer is.
         self.local_dtypes: dict[str, str] = {}
@@ -5468,6 +5474,23 @@ class _ForwardOperationExtractor:
                     if node.id in self.shape_unpack_tokens:
                         return False
         return True
+
+    def _calls_unbuilt_submodule(self, stmts: list[ast.stmt]) -> bool:
+        """Whether any statement here calls a submodule no instance has."""
+        if not self.unbuilt_attrs:
+            return False
+        for stmt in stmts:
+            for node in ast.walk(stmt):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and _is_self_attr(func, func.attr)
+                    and func.attr in self.unbuilt_attrs
+                ):
+                    return True
+        return False
 
     def _is_host_scalar_expr(self, node: ast.AST) -> bool:
         """A pure host-side integer expression (shape math / index bookkeeping).
@@ -7620,6 +7643,17 @@ class _ForwardOperationExtractor:
                     outcome = _config_value(
                         stmt.test, self.config, self.self_values, self.param_values
                     )
+                if not isinstance(outcome, bool):
+                    # No config decides this test -- GPT-2 guards its
+                    # cross-attention with `encoder_hidden_states is not None`.
+                    # But an arm that calls a submodule NO instance has cannot
+                    # run whatever the test says, and the model agrees: it
+                    # raises there rather than computing. So the other arm is
+                    # the one taken.
+                    if self._calls_unbuilt_submodule(stmt.body):
+                        outcome = False
+                    elif stmt.orelse and self._calls_unbuilt_submodule(stmt.orelse):
+                        outcome = True
                 if outcome is True:
                     self.statements(stmt.body, condition=condition)
                     if self._statements_terminate(stmt.body):
@@ -8626,12 +8660,14 @@ def _forward_operations_from_forward(
     class_methods: dict[str, ast.FunctionDef] | None = None,
     is_free_function_body: bool = False,
     param_values: dict[str, Any] | None = None,
+    unbuilt_attrs: frozenset[str] = frozenset(),
 ) -> ForwardAnalysis:
     # The primary parameter is the main path, so only the extra ones can identify
     # which step consumes a side feed.
     primary = _primary_forward_input_name(func)
     extractor = _ForwardOperationExtractor(
         self_values=self_values,
+        unbuilt_attrs=unbuilt_attrs,
         all_tensor_ops=all_tensor_ops,
         param_names=_forward_input_names(func) - {primary} if primary else set(),
         host_scalar_params=_host_scalar_param_names(func),
@@ -9058,6 +9094,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 analysis = _forward_operations_from_forward(
                     resolved_forward_func,
                     self_values=values,
+                    unbuilt_attrs=unbuilt_attrs,
                     all_tensor_ops=self.all_tensor_ops,
                     config=self._config_for_class(node.name),
                     module_functions=self.module_functions,
@@ -9199,6 +9236,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 analysis = _forward_operations_from_forward(
                     resolved_forward_func,
                     self_values=values,
+                    unbuilt_attrs=unbuilt_attrs,
                     all_tensor_ops=self.all_tensor_ops,
                     config=self._config_for_class(node.name),
                     module_functions=self.module_functions,
@@ -9254,6 +9292,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 probed = _forward_operations_from_forward(
                     resolved_forward_func,
                     self_values=values,
+                    unbuilt_attrs=unbuilt_attrs,
                     all_tensor_ops=self.all_tensor_ops,
                     config=self._config_for_class(node.name),
                     module_functions=self.module_functions,
