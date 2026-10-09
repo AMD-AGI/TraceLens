@@ -19,8 +19,10 @@ downstream-parser-compatible report recovering only what a graph-collapsed trace
 still carries: device-kernel name, time, and %E2E. Every other cell is an em
 dash (intentionally unrecoverable, not missing). The output matches the
 default-agent `analysis.md` contract that `parse_analysis_md` reads:
-`#### P{rank}:` headings, a `reasoning-candidate` marker, and an
-`impact-begin kind=p_item category=unknown` marker per P-item.
+top-of-report `report-begin kind=report_mode mode=deterministic-fallback` and
+`kind=warning` markers, then per P-item a `#### P{rank}:` heading, a
+`reasoning-candidate` marker, an `impact-begin kind=p_item category=unknown`
+marker, and a one-value `impact-begin kind=op_row` marker.
 """
 
 import argparse
@@ -147,7 +149,17 @@ def render_fallback_report(unified_perf_csv: Path, graph_replay_fraction: float)
         max_pct=f"{GRAPH_REPLAY_FRACTION_MAX:.0%}",
         drop_note=drop_note,
     )
-    lines = ["# Deterministic Fallback Analysis", "", banner, ""]
+    lines = [
+        "# Deterministic Fallback Analysis",
+        "",
+        "<!-- report-begin kind=report_mode mode=deterministic-fallback -->",
+        "<!-- report-end -->",
+        "",
+        "<!-- report-begin kind=warning -->",
+        banner,
+        "<!-- report-end -->",
+        "",
+    ]
 
     for rank, row in enumerate(filtered, start=1):
         op = row["op"]
@@ -163,6 +175,7 @@ def render_fallback_report(unified_perf_csv: Path, graph_replay_fraction: float)
             "<!-- impact-begin kind=p_item category=unknown "
             f"low={low} mid={mid} high={high} -->"
         )
+        lines.append("<!-- impact-end -->")
         lines.append("")
         lines.append("**Data:**")
         lines.append("")
@@ -174,6 +187,8 @@ def render_fallback_report(unified_perf_csv: Path, graph_replay_fraction: float)
             f"{row['percent']:.2f} | {group_count[op]} | — | — | "
             f"— |"
         )
+        lines.append(f"<!-- impact-begin kind=op_row rank={rank} impacts={mid} -->")
+        lines.append("<!-- impact-end -->")
         lines.append("")
 
     return "\n".join(lines) + "\n"
