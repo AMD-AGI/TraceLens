@@ -465,9 +465,11 @@ class DataLoader:
         events = data.get("traceEvents", [])
 
         if os.environ.get("TRACELENS_SKIP_HEALTH_CHECK") != "1":
-            from .trace_health import run_trace_health_check
+            from . import trace_health
 
-            report = run_trace_health_check(events, metadata, capture_trace_filepath)
+            report = trace_health.run_trace_health_check(
+                events, metadata, capture_trace_filepath
+            )
             report.log_findings()
 
         return events, metadata
