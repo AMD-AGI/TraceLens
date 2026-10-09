@@ -261,6 +261,53 @@ def _check_cpu_op_shapes_basic(ctx) -> List[TraceCheck]:
     return []
 
 
+def _check_cpu_op_shapes_detailed(ctx) -> List[TraceCheck]:
+    events, thr = ctx["events"], ctx["thr"]
+    cpu_ops = [e for e in events if e.get("cat") == "cpu_op"]
+    if not cpu_ops:
+        return []
+    with_shapes = sum(
+        1
+        for e in cpu_ops
+        if (e.get("args") or {}).get("Input Dims")
+        and any(d for d in (e.get("args") or {}).get("Input Dims", []))
+    )
+    coverage = with_shapes / len(cpu_ops)
+    if coverage < thr.shape_coverage_fail:
+        return [
+            TraceCheck(
+                Status.WARN,
+                f"Only {coverage:.0%} of cpu_ops have shapes (< {thr.shape_coverage_fail:.0%}).",
+            )
+        ]
+    if coverage < thr.shape_coverage_warn:
+        return [
+            TraceCheck(
+                Status.WARN,
+                f"{coverage:.0%} of cpu_ops have shapes (< {thr.shape_coverage_warn:.0%}).",
+            )
+        ]
+    return []
+
+
+def _check_cpu_gpu_ratio(ctx) -> List[TraceCheck]:
+    events, thr = ctx["events"], ctx["thr"]
+    cpu_ops = sum(1 for e in events if e.get("cat") == "cpu_op")
+    gpu_events = sum(1 for e in events if e.get("cat") in GPU_KERNEL_CATEGORIES)
+    if gpu_events == 0 or cpu_ops == 0:
+        return []
+    ratio = cpu_ops / gpu_events
+    if not (thr.cpu_gpu_ratio_min <= ratio <= thr.cpu_gpu_ratio_max):
+        return [
+            TraceCheck(
+                Status.WARN,
+                f"Suspicious CPU:GPU event ratio {ratio:.2f} "
+                f"(expected {thr.cpu_gpu_ratio_min}–{thr.cpu_gpu_ratio_max}).",
+            )
+        ]
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Detailed pre-report checks (TRACELENS_DETAILED_HEALTH_CHECKS=1)
 # ---------------------------------------------------------------------------
@@ -665,12 +712,6 @@ def _check_attention_kernel_count(ctx) -> List[TraceCheck]:
 # ---------------------------------------------------------------------------
 # Check registry and public API
 # ---------------------------------------------------------------------------
-# Each entry: (check_fn, phase, detailed, framework)
-# check_fn accepts (events, thr, ctx) for pre-report or (dfs, sheets, thr, ctx) for post-report.
-# Basic checks (detailed=False) always run.
-# Detailed checks (detailed=True) require TRACELENS_DETAILED_HEALTH_CHECKS=1.
-# framework: None = all frameworks, "pytorch" = PyTorch only, "jax" = JAX only.
-
 # Each entry: (fn, pre_report, detailed, framework)
 # fn accepts a single ctx dict.
 # pre_report: True = pre-report check, False = post-report check.
@@ -684,6 +725,8 @@ CHECK_REGISTRY = [
     (_check_graph_mode, True, False, None),
     (_check_cpu_op_shapes_basic, True, False, "pytorch"),
     # Pre-report, detailed
+    (_check_cpu_op_shapes_detailed, True, True, "pytorch"),
+    (_check_cpu_gpu_ratio, True, True, "pytorch"),
     (_check_kernels_dropped_windowed, True, True, None),
     (_check_runtime_variability, True, True, None),
     (_check_gpu_busy_idle, True, True, None),
