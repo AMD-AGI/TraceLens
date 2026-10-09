@@ -223,9 +223,11 @@ TraceLens_generate_perf_report_pytorch \
 ### Add an op model
 
 A *perf model* says what work an op does: its parameters, FLOPs, and bytes.
-An *op model* says what that work costs on a GPU, such as a predicted time
-from your own library. TraceLens reports each op model under a label, next
-to the measured metrics and the roofline.
+An *op model* takes that description and returns anything you want reported
+per op: usually a predicted time, but also values such as the kernel
+configuration a library would pick, an occupancy estimate, or a flag.
+TraceLens reports each op model under a label, next to the measured metrics
+and the roofline.
 
 The contract:
 
@@ -247,7 +249,8 @@ def my_model(category, params, arch):
   when the GEMM's kernel name parses. `dtype_A_B` holds the trace's dtype
   strings, such as `"c10::BFloat16"`;
   `TraceLens.PerfModel.utils.torch_dtype_map` turns them into `"bf16"`.
-- `arch` is the report's GPU arch dict, or `None` without one.
+- `arch` is the report's GPU arch dict, or `None` without one. A model is
+  free to ignore it and target another GPU.
 - A dict's `time_us` is optional. Every other key becomes a `<label> <key>`
   column. Only scalars (numbers, strings, bools) are written.
 - The model is called once per op launch, so the same shape can arrive many
@@ -283,25 +286,6 @@ kernel time); the summary sheets pick up every label (see the
 [column reference](../reference/perf-report-columns.md#op-model-columns)).
 Keep the import and call of a proprietary library in the extension file. A
 placeholder is in `examples/external_op_model_stub.py`.
-
-To predict for a GPU other than the traced one, bind the target arch in the
-model instead of using `arch`, and register one label per GPU:
-
-```python
-from functools import partial
-from TraceLens.Reporting.reporting_utils import resolve_gpu_arch
-
-MI300X = resolve_gpu_arch(gpu_arch_platform="MI300X")
-OTHER_GPU = resolve_gpu_arch(gpu_arch_json_path="other_gpu.json")
-
-def gemm_model(category, params, arch, target_arch):
-    ...
-
-op_models = {
-    "MyModel MI300X": partial(gemm_model, target_arch=MI300X),
-    "MyModel Other": partial(gemm_model, target_arch=OTHER_GPU),
-}
-```
 
 From Python, register a model with
 `TreePerfAnalyzer.register_op_model(label, fn)`, then

@@ -4,12 +4,14 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Op models: what an op's work costs on a GPU.
+"""Op models: per-op values computed from an op's work.
 
 A *perf model* (:mod:`TraceLens.PerfModel.perf_model`) says what work an op
-does: its shapes, FLOPs and bytes. An *op model* says what that work costs on
-a GPU. :class:`TreePerfAnalyzer` measures an op, describes its work as an
-:class:`OpWork`, and runs every registered op model on it::
+does: its shapes, FLOPs and bytes. An *op model* takes that work and returns
+anything to report for the op, usually a predicted time but also values such
+as a kernel configuration. :class:`TreePerfAnalyzer` measures an op,
+describes its work as an :class:`OpWork`, and runs every registered op model
+on it::
 
     def op_model(work, arch):
         return None or time_us or {"time_us": time_us, "Tile": "256x128x64"}
