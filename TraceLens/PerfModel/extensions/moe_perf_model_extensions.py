@@ -34,6 +34,20 @@ DTYPE_TO_BYTES = {
 }
 
 
+def _wider_compute_precision(input_dtype, weight_dtype):
+    """
+    Compute precision of a GEMM whose activations and weights differ in width.
+
+    A narrow-weight kernel such as Triton's bf16 x mxfp4 matmul_ogs upcasts the
+    weights and multiplies at the activation width, so its roof is the wider
+    dtype's matrix peak, not the weight dtype's. Falls back to the weight
+    dtype when the wider spelling has no simulation equivalent.
+    """
+    known = [d for d in (input_dtype, weight_dtype) if d in DTYPE_TO_BYTES]
+    wider = torch_dtype_map(max(known, key=DTYPE_TO_BYTES.get)) if known else None
+    return wider or torch_dtype_map(weight_dtype)
+
+
 # ==============================================================================
 # MoE Performance Models
 # ==============================================================================
@@ -692,7 +706,9 @@ class moe_triton_unfused_up(UnfusedMoE_Up):
     def get_compute_precision(self):
         """Return the compute precision for this operation."""
         dtype = self.param_details.get("weight_dtype")
-        return torch_dtype_map(dtype) if dtype else None
+        if not dtype:
+            return None
+        return _wider_compute_precision(self.param_details.get("input_dtype"), dtype)
 
     def get_maf_type(self):
         """Return the MAF type for this operation (matrix for MoE)."""
@@ -823,7 +839,9 @@ class moe_triton_unfused_down(UnfusedMoE_Down):
     def get_compute_precision(self):
         """Return the compute precision for this operation."""
         dtype = self.param_details.get("weight_dtype")
-        return torch_dtype_map(dtype) if dtype else None
+        if not dtype:
+            return None
+        return _wider_compute_precision(self.param_details.get("input_dtype"), dtype)
 
     def get_maf_type(self):
         """Return the MAF type for this operation (matrix for MoE)."""
