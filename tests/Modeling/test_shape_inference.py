@@ -387,7 +387,7 @@ class Norm(nn.Module):
 class Router(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.weight = nn.Parameter(torch.zeros(config.num_local_experts, config.hidden_size))
+        self.weight = nn.Parameter(torch.zeros(config.n_routed_experts, config.hidden_size))
 
     def forward(self, hidden_states):
         router_logits = F.linear(hidden_states, self.weight)

@@ -91,34 +91,15 @@ class Symbol(str, Enum):
     VISION_GRID = "Img"
 
 
-# Config attribute names modeling code reads for each symbolic dimension. Registered as
-# fallbacks, so a key the checkpoint config actually defines always wins.
-_SPEC_DIM_ALIASES: dict[Symbol, tuple[str, ...]] = {
-    Symbol.HIDDEN: ("hidden_size", "hidden_dim", "d_model", "model_dim", "embed_dim"),
-    Symbol.VOCAB: ("vocab_size",),
-    Symbol.HEADS: ("num_attention_heads", "num_heads", "n_heads", "num_query_heads"),
-    Symbol.KV_HEADS: ("num_key_value_heads", "num_kv_heads", "n_kv_heads"),
-    Symbol.HEAD_DIM: ("head_dim", "attention_head_dim", "qk_head_dim"),
-    Symbol.INTERMEDIATE: (
-        "intermediate_size",
-        "ffn_hidden_size",
-        "ffn_dim",
-        "moe_intermediate_size",
-    ),
-    Symbol.EXPERTS: (
-        "num_experts",
-        "num_local_experts",
-        "n_routed_experts",
-        "num_routed_experts",
-        "moe_num_experts",
-    ),
-    Symbol.EXPERTS_PER_TOK: (
-        "num_experts_per_tok",
-        "num_experts_per_token",
-        "moe_top_k",
-        "num_selected_experts",
-    ),
-}
+# Dimensions that vary with the INPUT rather than the checkpoint. Every other
+# symbol above is fixed the moment a checkpoint is chosen, so it must resolve to
+# a number -- this is what says which letters are legitimately still letters in a
+# rendered shape. It is not a guess about any model's spelling: a batch is a
+# batch everywhere, which is why this partition can be stated once while the
+# NAMES a model reads its constants under have to come from the model.
+_RUNTIME_SYMBOLS: frozenset[Symbol] = frozenset(
+    {Symbol.BATCH, Symbol.SEQ, Symbol.VISION_PATCH, Symbol.VISION_GRID}
+)
 
 
 @dataclass(frozen=True)
@@ -301,13 +282,16 @@ class ShapeContext:
                 dims.setdefault(alias, nested)
 
         # Modeling code reads names that the checkpoint config spells differently
-        # (`config.num_local_experts` against `n_routed_experts`, say).
-        for symbol, aliases in _SPEC_DIM_ALIASES.items():
-            resolved = dims.get(symbol.value)
-            if not isinstance(resolved, int):
-                continue
-            for alias in aliases:
-                dims.setdefault(alias, resolved)
+        # (`config.num_local_experts` against `n_routed_experts`, say). The model
+        # says which, so read its declaration rather than registering a list of
+        # spellings models MIGHT use: such a list has to claim a name globally,
+        # and `n_heads` is GLM's sparse indexer head count (`self.n_heads =
+        # config.index_n_heads`, 32), not another word for its 64 attention
+        # heads. Registering the guess first shadowed the real value.
+        for read_name, actual_key in _model_declared_aliases(spec).items():
+            value = dims.get(actual_key)
+            if isinstance(value, int):
+                dims.setdefault(read_name, value)
 
         # Fold ``__init__`` self-attribute scalars (e.g.
         # ``self.qkv_dim = self.head_dim * self.num_heads``) so shape expressions
@@ -5977,6 +5961,59 @@ def _multi_output_slice_shape(
         shape=_replace_dim(source.shape, resolved_dim, out_size),
         dtype=source.dtype,
     )
+
+
+def _model_declared_aliases(spec: ArchitectureSpec) -> dict[str, str]:
+    """Renames the model's own config classes declare: read name -> real key.
+
+    A config class states its aliases itself::
+
+        class DeepseekV4Config(PretrainedConfig):
+            attribute_map = {"num_local_experts": "n_routed_experts"}
+
+    so modeling code reading ``config.num_local_experts`` resolves against a
+    checkpoint that spells it ``n_routed_experts``. ``attribute_map`` is the
+    transformers API for exactly this, which is why it is the thing to read --
+    and reading it beats guessing, because a guess has no way to know that GLM's
+    VISION tower renames ``num_attention_heads`` to ``num_heads`` while its text
+    tower does not.
+
+    Read from source, never imported: analysis does not run model code, and a
+    checkpoint's configuration module is the checkpoint's code.
+    """
+    import ast as _pyast
+
+    declared: dict[str, str] = {}
+    directories = {Path(path).parent for path in (spec.code_paths or [])}
+    for directory in sorted(directories):
+        try:
+            candidates = sorted(directory.glob("*.py"))
+        except OSError:
+            continue
+        for path in candidates:
+            try:
+                tree = _pyast.parse(path.read_text(encoding="utf-8"))
+            except (OSError, SyntaxError, ValueError):
+                continue
+            for node in _pyast.walk(tree):
+                if not isinstance(node, _pyast.ClassDef):
+                    continue
+                for statement in node.body:
+                    if not isinstance(statement, _pyast.Assign):
+                        continue
+                    if not any(
+                        isinstance(target, _pyast.Name) and target.id == "attribute_map"
+                        for target in statement.targets
+                    ):
+                        continue
+                    if not isinstance(statement.value, _pyast.Dict):
+                        continue
+                    for key, value in zip(statement.value.keys, statement.value.values):
+                        if isinstance(key, _pyast.Constant) and isinstance(
+                            value, _pyast.Constant
+                        ):
+                            declared.setdefault(str(key.value), str(value.value))
+    return declared
 
 
 def _collect_init_scalar_attrs(

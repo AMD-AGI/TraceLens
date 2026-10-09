@@ -1107,14 +1107,14 @@ def unresolved_config_dims(nodes: list[dict[str, Any]]) -> list[str]:
     resolve, and in a shape a bare letter is indistinguishable from a real
     runtime axis, so the reader cannot tell a resolved graph from a broken one.
 
-    Which symbols are constants is not a list kept here: it is exactly those
-    that have config aliases, read from the shape machinery itself, so a symbol
-    added there is covered automatically and a runtime one is never flagged.
+    Which symbols are constants is not a list kept here: it is every symbol the
+    shape machinery does not call a runtime axis, read from there, so a symbol
+    added is covered automatically and a runtime one is never flagged.
     """
-    from TraceLens.ModelUtils.shape_inference import Symbol, _SPEC_DIM_ALIASES
+    from TraceLens.ModelUtils.shape_inference import _RUNTIME_SYMBOLS, Symbol
 
     config_symbols = {
-        symbol.value: symbol for symbol in Symbol if symbol in _SPEC_DIM_ALIASES
+        symbol.value: symbol for symbol in Symbol if symbol not in _RUNTIME_SYMBOLS
     }
     offenders: dict[str, list[str]] = {}
     for node in nodes:
@@ -1131,20 +1131,19 @@ def unresolved_config_dims(nodes: list[dict[str, Any]]) -> list[str]:
                 offenders.setdefault(token, []).append(f"{node['id']} -> {shape}")
     messages: list[str] = []
     for token, hits in sorted(offenders.items()):
-        keys = " / ".join(_SPEC_DIM_ALIASES[config_symbols[token]])
+        name = config_symbols[token].name.lower().replace("_", " ")
         shown = "\n    ".join(hits[:4])
         more = f"\n    ... and {len(hits) - 4} more" if len(hits) > 4 else ""
         messages.append(
-            f"{len(hits)} node(s) render the bare symbol {token!r} "
-            f"({config_symbols[token].name.lower().replace('_', ' ')}). {token!r} is a "
-            f"CONFIG CONSTANT, not a runtime axis: it must resolve from the "
-            f"checkpoint config via {keys}. None of those was found, so every shape "
-            f"built from it carries the letter instead of a number -- and in a "
-            f"rendered shape the letter is indistinguishable from a genuine runtime "
-            f"axis like B, S, Img or Pv, so the reader cannot tell a resolved graph "
-            f"from a broken one.\n"
-            f"  Fix the config resolution (or add the checkpoint's own key to "
-            f"_SPEC_DIM_ALIASES[Symbol.{config_symbols[token].name}]); do not ship a "
-            f"graph with it.\n    {shown}{more}"
+            f"{len(hits)} node(s) render the bare symbol {token!r} ({name}). "
+            f"{token!r} is a CONFIG CONSTANT, not a runtime axis: the checkpoint "
+            f"fixes it, so it must resolve to a number. It did not, so every shape "
+            f"built from it carries the letter instead -- and in a rendered shape the "
+            f"letter is indistinguishable from a genuine runtime axis like B, S, Img "
+            f"or Pv, so the reader cannot tell a resolved graph from a broken one.\n"
+            f"  Fix the config resolution: check that the checkpoint config states "
+            f"this dimension, and that the model's own config class declares any "
+            f"rename the modeling code reads it under (``attribute_map``). Do not "
+            f"ship a graph with it.\n    {shown}{more}"
         )
     return messages
