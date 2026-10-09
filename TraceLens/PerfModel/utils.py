@@ -146,24 +146,6 @@ def name2bpe(name):
     return dict_dtype2bpe.get(name.lower(), None)
 
 
-def simulation_dtype_map(dtype):
-    """
-    This function maps a PyTorch data type to a simulation data type.
-    Args:
-        dtype (str): The name of the pytorch data type.
-    Returns:
-        str: The name of the PyTorch data type.
-    """
-    dict_dtype2simulation = {
-        "fp32": "float",
-        "fp64": "double",
-        "fp16": "c10::half",
-        "bf16": "c10::bfloat16",
-        "fp8": "c10::float8_e4m3fnuz",
-    }
-    return dict_dtype2simulation.get(dtype.lower(), None)
-
-
 # Keys are stored without a namespace, because torch_dtype_map strips one off
 # its input before looking it up. That way "c10::Half" and the already-stripped
 # "half" take the same path, and a new c10 spelling of a type already listed

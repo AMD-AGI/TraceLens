@@ -47,7 +47,6 @@ from TraceLens.PerfModel.utils import (
     optional_int,
     parse_bool,
     rates_for_duration,
-    simulation_dtype_map,
     torch_dtype_map,
 )
 
@@ -83,7 +82,6 @@ class TestPerfModelUtils:
     def test_name2bpe_and_dtype_maps(self):
         assert name2bpe("c10::BFloat16") == 2
         assert name2bpe("unknown") is None
-        assert simulation_dtype_map("bf16") == "c10::bfloat16"
         assert torch_dtype_map("c10::bfloat16") == "bf16"
 
     @pytest.mark.parametrize(

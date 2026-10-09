@@ -311,9 +311,10 @@ TraceLens's SDPA tile model: it times one Q·Kᵀ tile and one P·V tile on one
 CU with Origami, scales them by the number of waves, and adds softmax and
 memory terms. Its columns are labeled `SDPA Tile Origami`. It needs
 `num_cus`, `gemm_units_per_cu`, and `mem_bw_gbps` in the arch, and
-`l1_bw_gbps` for backward. To time the tiles with another GEMM model, pass
-`gemm_time` to `SDPA.get_simulation_time_func` (see
-`SDPA.tile_gemm_time`).
+`l1_bw_gbps` for backward. The tile model times its tiles with whatever
+GEMM model it's given as `gemm_time`; the op model passes Origami's. To use
+another GEMM model, pass your own `gemm_time` to
+`SDPA.get_simulation_time_func` (see `SDPA.tile_gemm_time`).
 
 ### Add a kernel filter
 

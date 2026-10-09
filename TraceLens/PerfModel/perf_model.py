@@ -6,7 +6,6 @@
 
 import ast
 import math
-import sys
 import warnings
 from math import prod
 
@@ -23,15 +22,13 @@ class GEMM:
 
     category = "GEMM"
     bwd_category = None
-    _origami_import_error_printed = False
 
-    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+    def __init__(self, event, arch=None, python_path=None):
         self.event = event
         # parse kernel info (e.g. transpose) before kernel params since it can be needed
         self.parsed_kernel_info = None
         self.arch = arch
         self.python_path = python_path
-        self.enable_origami = enable_origami
         kernel_names = []
         if "kernel_names" in event and len(event["kernel_names"]) > 0:
             kernel_names = event["kernel_names"]
@@ -135,80 +132,6 @@ class GEMM:
         )
         bytes_bias_grad = self.M * self.N if self.bias else 0
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
-
-    @staticmethod
-    def get_simulation_time_func(
-        arch,
-        M,
-        N,
-        K,
-        B,
-        dtype,
-        python_path=None,
-        force_to_l1=False,
-        num_cus=None,
-        enable_origami=False,
-    ):
-        """GEMM time in µs from Origami, or ``(None, None)`` unless
-        ``enable_origami``."""
-        if not enable_origami:
-            return None, None
-        # try to use Origami for estimating performance
-        try:
-            # assumes this PR has completed
-            # https://github.com/ROCm/rocm-libraries/pull/3903
-            import origami
-
-            from .origami_helper import OrigamiHelper
-
-            # origami simulation requires an architecture file including GPU name and clock speed
-            # clock can be from https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html
-            # for example: {"name": "MI300X", "freq_mhz": 1207}
-
-            dtype_map = {
-                "fp32": origami.data_type_t.Float,
-                "fp16": origami.data_type_t.Half,
-                "bf16": origami.data_type_t.BFloat16,
-                "fp64": origami.data_type_t.Double,
-                "fp8": origami.data_type_t.Float8_fnuz,
-            }
-            origami_dtype = dtype_map.get(dtype)
-            if origami_dtype is None:
-                warnings.warn(
-                    f"Unsupported dtype '{dtype}' for Origami simulation; skipping simulation.",
-                    RuntimeWarning,
-                )
-                return None, None
-            dtype = origami_dtype
-
-            hardware = OrigamiHelper.get_hardware(arch)
-            if force_to_l1:
-                # origami will have an FA model really soon
-                # until it is available, just make the L1 and L2 really big
-                hardware.lds_capacity = 1024 * 1024 * 1024 * 1024
-                hardware.L2_capacity = 1024 * 1024 * 1024 * 1024
-
-            helper = OrigamiHelper(
-                M, N, K, B, dtype, dtype, dtype, hardware, num_cus=num_cus
-            )
-
-            simulation_time = helper.get_simulation_time()
-            return (
-                simulation_time,
-                f"Origami simulation for M:{M},N:{N},K:{K},B:{B},dtype:{dtype}, arch:{arch}",
-            )
-
-        except ImportError as e:
-            if not GEMM._origami_import_error_printed:
-                print(
-                    "TraceLens: Origami is enabled but the 'origami' package "
-                    f"could not be imported: {e}. Install rocm-origami (or ensure "
-                    "the Origami Python bindings are on PYTHONPATH), or disable "
-                    "Origami simulation.",
-                    file=sys.stderr,
-                )
-                GEMM._origami_import_error_printed = True
-            return None, None
 
 
 class aten_mm(GEMM):
@@ -595,9 +518,6 @@ class tex_ts_te_gemm_ts(GEMM):
     https://github.com/ROCm/TransformerEngine/blob/e9772d4d18b2980e8e0643c94591a94cad9bb8b7/transformer_engine/pytorch/csrc/extensions/gemm.cpp#L10
 
     """
-
-    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
-        super().__init__(event, arch, python_path, enable_origami=enable_origami)
 
     def get_param_details(self, event):
         input_dims = event["args"]["Input Dims"]
@@ -1627,7 +1547,7 @@ class SDPA:
     category = "SDPA_fwd"
     bwd_category = "SDPA_bwd"
 
-    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+    def __init__(self, event, arch=None, python_path=None):
         # S = QK^T
         # P = softmax(S)
         # O = PV
@@ -1635,7 +1555,6 @@ class SDPA:
         self.param_details = self.get_param_details(event)
         self.arch = arch
         self.python_path = python_path
-        self.enable_origami = enable_origami
         self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h_qk, self.d_h_v = (
             self.param_details[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
@@ -1811,14 +1730,12 @@ class SDPA:
         N_KV,
         d_h,
         fa=True,
-        enable_origami=False,
         gemm_time=None,
     ):
         """SDPA tile model: the attention split into one Q·Kᵀ and one P·V tile
         GEMM on one CU, scaled by the number of waves, plus softmax and memory
         terms. ``gemm_time`` times each tile GEMM (see
-        :meth:`tile_gemm_time`); by default Origami does, when
-        ``enable_origami``."""
+        :meth:`tile_gemm_time`); without it there is no time."""
         force_to_l1 = False
         block_N_Q = N_Q
         block_N_KV = N_KV
@@ -1842,7 +1759,6 @@ class SDPA:
             d_h,
             dtype,
             force_to_l1,
-            enable_origami,
             gemm_time,
         )
         if qkt_time is None:
@@ -1865,7 +1781,6 @@ class SDPA:
             block_N_KV,
             dtype,
             force_to_l1,
-            enable_origami,
             gemm_time,
         )
         if pv_time is None:
@@ -1884,27 +1799,16 @@ class SDPA:
         return qkt_time + softmax_time + pv_time + mem_time
 
     @staticmethod
-    def tile_gemm_time(
-        arch, M, N, K, dtype, force_to_l1=False, enable_origami=False, gemm_time=None
-    ):
-        """Time in µs of one tile GEMM on one CU, or None.
+    def tile_gemm_time(arch, M, N, K, dtype, force_to_l1=False, gemm_time=None):
+        """Time in µs of one tile GEMM on one CU, or None without a GEMM model.
 
-        ``gemm_time(arch, M, N, K, B, dtype, force_to_l1, num_cus)`` plugs in
-        any GEMM model; without it Origami is used when ``enable_origami``.
+        ``gemm_time(arch, M, N, K, B, dtype, force_to_l1, num_cus)`` is the
+        GEMM model, for example :func:`origami_helper.gemm_time_us`.
         ``force_to_l1`` asks the model to treat the operands as cache
         resident, as in flash attention."""
-        if gemm_time is not None:
-            return gemm_time(
-                arch,
-                M=M,
-                N=N,
-                K=K,
-                B=1,
-                dtype=dtype,
-                force_to_l1=force_to_l1,
-                num_cus=1,
-            )
-        time_us, _ = GEMM.get_simulation_time_func(
+        if gemm_time is None:
+            return None
+        return gemm_time(
             arch,
             M=M,
             N=N,
@@ -1913,9 +1817,7 @@ class SDPA:
             dtype=dtype,
             force_to_l1=force_to_l1,
             num_cus=1,
-            enable_origami=enable_origami,
         )
-        return time_us
 
     def get_simulation_time(self, gemm_time=None):
         simulated_time = None
@@ -1938,7 +1840,6 @@ class SDPA:
                     self.N_KV,
                     self.d_h,
                     fa,
-                    enable_origami=self.enable_origami,
                     gemm_time=gemm_time,
                 )
             except Exception as error:
@@ -1951,9 +1852,8 @@ class SDPA:
 
     def _warn_simulation_skipped(self, error, gemm_time, bwd):
         """Warn once per op type and error type, if a simulation was asked for."""
-        requested = getattr(self, "enable_origami", False) or gemm_time is not None
         key = (type(self).__name__, bwd, type(error).__name__)
-        if not requested or key in SDPA._simulation_warnings:
+        if gemm_time is None or key in SDPA._simulation_warnings:
             return
         SDPA._simulation_warnings.add(key)
         warnings.warn(
@@ -1975,7 +1875,6 @@ class SDPA:
         N_KV,
         d_h,
         fa=True,
-        enable_origami=False,
         gemm_time=None,
     ):
         """Backward SDPA tile model; see :meth:`get_simulation_time_func`."""
@@ -2004,7 +1903,6 @@ class SDPA:
             d_h,
             dtype,
             force_to_l1,
-            enable_origami,
             gemm_time,
         )
         if qkt_fwd_time is None:
@@ -2020,7 +1918,6 @@ class SDPA:
             block_N_KV,
             dtype,
             force_to_l1,
-            enable_origami,
             gemm_time,
         )
         if pv_fwd_time is None:
@@ -2135,7 +2032,6 @@ class SDPA:
                     self.N_KV,
                     self.d_h,
                     fa,
-                    enable_origami=self.enable_origami,
                     gemm_time=gemm_time,
                 )
             except Exception as error:
@@ -2243,9 +2139,6 @@ class flash_attention_backward(SDPA):
 
     category = "SDPA_bwd"
 
-    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
-        super().__init__(event, arch, python_path, enable_origami=enable_origami)
-
     @staticmethod
     def get_param_details(event):
         # Argument order: dout (0), q (1), k (2), v (3), out, softmax_lse, ...
@@ -2300,8 +2193,8 @@ class flash_attention_backward(SDPA):
 
 
 class flash_attention_varlen_forward(SDPA):
-    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
-        super().__init__(event, arch, python_path, enable_origami=enable_origami)
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
         self.num_seqs_q, self.num_seqs_kv, self.max_seqlen_q, self.max_seqlen_kv = (
             self.param_details[key]
             for key in ["num_seqs_q", "num_seqs_kv", "max_seqlen_q", "max_seqlen_kv"]
@@ -2405,8 +2298,8 @@ class flash_attention_varlen_forward(SDPA):
 class flash_attention_varlen_backward(SDPA):
     category = "SDPA_bwd"
 
-    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
-        super().__init__(event, arch, python_path, enable_origami=enable_origami)
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
         self.num_seqs_q, self.num_seqs_kv, self.max_seqlen_q, self.max_seqlen_kv = (
             self.param_details[key]
             for key in ["num_seqs_q", "num_seqs_kv", "max_seqlen_q", "max_seqlen_kv"]
@@ -3178,8 +3071,8 @@ class aiter__fmha_v3_varlen_fwd(SDPA):
     inference flows that inject chunk annotations.
     """
 
-    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
-        super().__init__(event, arch, python_path, enable_origami=enable_origami)
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
         self.num_seqs_q = self.param_details["num_seqs_q"]
         self.num_seqs_kv = self.param_details["num_seqs_kv"]
         self.max_seqlen_q = self.param_details["max_seqlen_q"]
@@ -3229,8 +3122,8 @@ class aiter__fmha_v3_varlen_forward(SDPA):
     arg indices shift by +1.
     """
 
-    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
-        super().__init__(event, arch, python_path, enable_origami=enable_origami)
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
         self.num_seqs_q = self.param_details["num_seqs_q"]
         self.num_seqs_kv = self.param_details["num_seqs_kv"]
         self.max_seqlen_q = self.param_details["max_seqlen_q"]
@@ -3277,8 +3170,8 @@ class aiter__fmha_v3_varlen_bwd(SDPA):
 
     category = "SDPA_bwd"
 
-    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
-        super().__init__(event, arch, python_path, enable_origami=enable_origami)
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
         self.num_seqs_q = self.param_details["num_seqs_q"]
         self.num_seqs_kv = self.param_details["num_seqs_kv"]
         self.max_seqlen_q = self.param_details["max_seqlen_q"]
@@ -3331,8 +3224,8 @@ class aiter__fmha_v3_varlen_backward(SDPA):
 
     category = "SDPA_bwd"
 
-    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
-        super().__init__(event, arch, python_path, enable_origami=enable_origami)
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
         self.num_seqs_q = self.param_details["num_seqs_q"]
         self.num_seqs_kv = self.param_details["num_seqs_kv"]
         self.max_seqlen_q = self.param_details["max_seqlen_q"]

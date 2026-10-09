@@ -550,8 +550,7 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
     category = "SDPA_fwd"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
-        self.enable_origami = enable_origami
+    def __init__(self, event, arch=None, python_path=None):
         super().__init__(event, arch, python_path)
 
     @staticmethod
@@ -565,7 +564,6 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
             self.event,
             self.arch,
             self.python_path,
-            enable_origami=self.enable_origami,
         )
 
     @staticmethod

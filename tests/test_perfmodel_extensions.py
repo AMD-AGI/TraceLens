@@ -147,9 +147,9 @@ from TraceLens.PerfModel.utils import (
     add_simulation_time_columns,
     name2bpe,
     parse_bool,
-    simulation_dtype_map,
     torch_dtype_map,
 )
+from TraceLens.PerfModel import origami_helper
 from TraceLens.TreePerf import tree_perf
 
 _GDN_ANNOTATION = (
@@ -527,7 +527,6 @@ class TestUtilsCoverage:
         assert name2bpe(name) == bpe
 
     def test_dtype_maps_extended(self):
-        assert simulation_dtype_map("fp64") == "double"
         assert torch_dtype_map("c10::float8_e4m3fn") == "fp8"
         assert torch_dtype_map("mxfp4") == "fp4"
 
@@ -583,41 +582,27 @@ class TestGemmBaseCoverage:
         mock_helper_cls.get_hardware.return_value = MagicMock(N_CU=304)
         mock_helper_cls.return_value.get_simulation_time.return_value = 99.0
         with patch.dict(sys.modules, {"origami": mock_origami}):
-            with patch(
-                "TraceLens.PerfModel.origami_helper.OrigamiHelper", mock_helper_cls
-            ):
-                t, cmd = perf_model.GEMM.get_simulation_time_func(
-                    _ARCH,
-                    4,
-                    8,
-                    16,
-                    1,
-                    "bf16",
-                    enable_origami=True,
-                    force_to_l1=True,
-                    num_cus=64,
+            with patch.object(origami_helper, "OrigamiHelper", mock_helper_cls):
+                t = origami_helper.gemm_time_us(
+                    _ARCH, 4, 8, 16, 1, "bf16", force_to_l1=True, num_cus=64
                 )
         assert t == 99.0
-        assert "Origami" in cmd
         mock_helper_cls.assert_called_once()
+        assert mock_helper_cls.call_args.args[4] == "bf16_dtype"
         assert mock_helper_cls.call_args.kwargs["num_cus"] == 64
         assert mock_helper_cls.get_hardware.return_value.N_CU == 304
 
-    def test_origami_unsupported_dtype(self, monkeypatch):
-        mock_origami = MagicMock()
-        with patch.dict(sys.modules, {"origami": mock_origami}):
-            t, _ = perf_model.GEMM.get_simulation_time_func(
-                _ARCH, 4, 8, 16, 1, "unknown_dtype", enable_origami=True
-            )
+    def test_origami_unsupported_dtype(self):
+        with pytest.warns(RuntimeWarning, match="Unsupported dtype"):
+            t = origami_helper.gemm_time_us(_ARCH, 4, 8, 16, 1, "unknown_dtype")
         assert t is None
 
-    def test_origami_import_error(self, monkeypatch):
-        perf_model.GEMM._origami_import_error_printed = False
+    def test_origami_import_error(self, monkeypatch, capsys):
+        monkeypatch.setattr(origami_helper, "_import_error_printed", False)
         with patch.dict(sys.modules, {"origami": None}):
-            t, _ = perf_model.GEMM.get_simulation_time_func(
-                _ARCH, 4, 8, 16, 1, "bf16", enable_origami=True
-            )
-        assert t is None
+            assert origami_helper.gemm_time_us(_ARCH, 4, 8, 16, 1, "bf16") is None
+            assert origami_helper.gemm_time_us(_ARCH, 4, 8, 16, 1, "bf16") is None
+        assert capsys.readouterr().err.count("could not be imported") == 1
 
 
 class TestGemmVariantsCoverage:
@@ -1871,9 +1856,9 @@ class TestSdpaExtendedCoverage:
 
     def test_sdpa_simulation_time_func(self, monkeypatch):
         with patch.object(
-            perf_model.GEMM,
-            "get_simulation_time_func",
-            return_value=(1.0, "cmd"),
+            origami_helper,
+            "gemm_time_us",
+            return_value=1.0,
         ):
             with patch.object(perf_model.Softmax, "get_time", return_value=0.5):
                 t = perf_model.SDPA.get_simulation_time_func(
@@ -1888,13 +1873,12 @@ class TestSdpaExtendedCoverage:
                     128,
                     64,
                     fa=True,
+                    gemm_time=origami_helper.gemm_time_us,
                 )
         assert t > 0
 
     def test_sdpa_simulation_time_func_qkt_none(self, monkeypatch):
-        with patch.object(
-            perf_model.GEMM, "get_simulation_time_func", return_value=(None, None)
-        ):
+        with patch.object(origami_helper, "gemm_time_us", return_value=None):
             assert (
                 perf_model.SDPA.get_simulation_time_func(
                     self._ARCH,
@@ -1907,6 +1891,7 @@ class TestSdpaExtendedCoverage:
                     64,
                     64,
                     32,
+                    gemm_time=origami_helper.gemm_time_us,
                 )
                 is None
             )
@@ -1930,9 +1915,9 @@ class TestSdpaExtendedCoverage:
 
     def test_sdpa_bwd_simulation_time_func(self, monkeypatch):
         with patch.object(
-            perf_model.GEMM,
-            "get_simulation_time_func",
-            return_value=(2.0, "cmd"),
+            origami_helper,
+            "gemm_time_us",
+            return_value=2.0,
         ):
             with patch.object(perf_model.Softmax, "get_time", return_value=1.0):
                 t = perf_model.SDPA.get_simulation_time_bwd_func(
@@ -1946,6 +1931,7 @@ class TestSdpaExtendedCoverage:
                     128,
                     128,
                     64,
+                    gemm_time=origami_helper.gemm_time_us,
                 )
         assert t > 0
 
@@ -2235,10 +2221,10 @@ class TestTreePerfInitKwargs:
             event={"name": "op"},
             arch={},
             python_path=None,
-            enable_origami=True,
+            inductor_cache_dir="/tmp/cache",
         )
         assert kwargs["event"]["name"] == "op"
-        assert "enable_origami" not in kwargs
+        assert "inductor_cache_dir" not in kwargs
 
     def test_perf_model_init_kwargs_with_var_keyword(self):
         class FlexibleModel:
@@ -2250,10 +2236,8 @@ class TestTreePerfInitKwargs:
             event={"name": "op"},
             arch={},
             python_path="path",
-            enable_origami=False,
             inductor_cache_dir="/tmp/cache",
         )
-        assert kwargs["enable_origami"] is False
         assert kwargs["inductor_cache_dir"] == "/tmp/cache"
 
     def test_perf_model_init_kwargs_broken_signature(self):
@@ -2261,7 +2245,7 @@ class TestTreePerfInitKwargs:
             __init__ = 42
 
         kwargs = tree_perf._perf_model_init_kwargs(
-            Broken, event={}, arch=None, python_path=None, enable_origami=True
+            Broken, event={}, arch=None, python_path=None
         )
         assert kwargs["event"] == {}
 
@@ -2372,17 +2356,10 @@ class TestPerfModelExhaustiveSweep:
                     "get_maf_type",
                     "get_time",
                     "get_simulation_time",
-                    "get_simulation_time_func",
                 ):
                     if hasattr(obj, meth):
                         try:
-                            fn = getattr(obj, meth)
-                            if meth == "get_simulation_time_func":
-                                fn(_ARCH, 4, 8, 16, 1, "bf16")
-                            elif meth == "get_simulation_time":
-                                fn()
-                            else:
-                                fn()
+                            getattr(obj, meth)()
                         except (
                             NotImplementedError,
                             TypeError,
@@ -2586,9 +2563,9 @@ class TestPerfModelPhase11:
         assert perf_model.Softmax.bytes_bwd(4, 8, 2) > 0
 
         with patch.object(
-            perf_model.GEMM,
-            "get_simulation_time_func",
-            side_effect=[(1.0, "qkt"), (None, None)],
+            origami_helper,
+            "gemm_time_us",
+            side_effect=[1.0, None],
         ):
             t = perf_model.SDPA.get_simulation_time_func(
                 _ARCH,
@@ -2602,6 +2579,7 @@ class TestPerfModelPhase11:
                 64,
                 32,
                 fa=True,
+                gemm_time=origami_helper.gemm_time_us,
             )
             assert t is None
 
@@ -3166,9 +3144,7 @@ class TestPerfModelPhase6:
             }
         }
         model = perf_model.aten__scaled_dot_product_flash_attention(event, arch=_ARCH)
-        with patch.object(
-            perf_model.GEMM, "get_simulation_time_func", return_value=(None, None)
-        ):
+        with patch.object(origami_helper, "gemm_time_us", return_value=None):
             assert model.get_simulation_time() is None
 
     def test_flash_attention_backward_flops(self):
@@ -3394,9 +3370,7 @@ class TestPerfModelPhase9:
     def test_flash_attention_backward_simulation_none(self):
 
         model = perf_model.flash_attention_backward(_flash_bwd_event())
-        with patch.object(
-            perf_model.GEMM, "get_simulation_time_func", return_value=(None, None)
-        ):
+        with patch.object(origami_helper, "gemm_time_us", return_value=None):
             assert model.get_simulation_time() is None
 
 
@@ -4036,21 +4010,8 @@ class TestMoeExtensionsSweep:
 
 class TestPerfModelPush95Coverage:
 
-    def test_gemm_origami_unsupported_dtype(self, monkeypatch):
-        mock_origami = MagicMock()
-        mock_origami.data_type_t = MagicMock()
-        with patch.dict(sys.modules, {"origami": mock_origami}):
-            with patch("TraceLens.PerfModel.origami_helper.OrigamiHelper"):
-                with pytest.warns(RuntimeWarning, match="Unsupported dtype"):
-                    t, _ = perf_model.GEMM.get_simulation_time_func(
-                        _ARCH, 4, 8, 16, 1, "unknown_dtype", enable_origami=True
-                    )
-        assert t is None
-
     def test_sdpa_simulation_via_origami_gemm(self):
-        with patch.object(
-            perf_model.GEMM, "get_simulation_time_func", return_value=(2.0, "cmd")
-        ):
+        with patch.object(origami_helper, "gemm_time_us", return_value=2.0):
             with patch.object(perf_model.Softmax, "get_time", return_value=0.25):
                 t = perf_model.SDPA.get_simulation_time_func(
                     _ARCH,
@@ -4064,7 +4025,7 @@ class TestPerfModelPush95Coverage:
                     128,
                     64,
                     fa=True,
-                    enable_origami=True,
+                    gemm_time=origami_helper.gemm_time_us,
                 )
         assert t > 0
 

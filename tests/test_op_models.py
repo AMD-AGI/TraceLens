@@ -17,7 +17,7 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel import origami_helper, perf_model
 from TraceLens.PerfModel.op_models import (
     OpWork,
     add_op_model_columns,
@@ -156,20 +156,16 @@ class TestOrigamiGemm:
     def test_forward_gemms_only(self):
         params = {**_work().params, "dtype_A_B": ("c10::BFloat16",)}
         origami = external_op_model(origami_gemm_model)
-        with patch.object(
-            perf_model.GEMM, "get_simulation_time_func", return_value=(7.0, "cmd")
-        ) as sim:
+        with patch.object(origami_helper, "gemm_time_us", return_value=7.0) as sim:
             assert origami(_work(params=params), ARCH) == 7.0
             assert origami(_work(params=params, category=None), ARCH) is None
             assert origami(_work(category="SDPA_fwd", params={}), ARCH) is None
             assert origami_gemm_model("GEMM", params, None) is None
-        assert sim.call_args.kwargs["enable_origami"] is True
+        sim.assert_called_once()
+        assert sim.call_args.args[5] == "bf16"
 
-    def test_without_origami_enabled_gives_no_time(self):
-        assert perf_model.GEMM.get_simulation_time_func(ARCH, 4, 8, 16, 1, "bf16") == (
-            None,
-            None,
-        )
+    def test_tile_gemm_without_origami_enabled_gives_no_time(self):
+        assert perf_model.SDPA.tile_gemm_time(ARCH, 4, 8, 16, "bf16") is None
 
     def test_default_op_models_order(self):
         assert list(default_op_models()) == ["Roofline"]
@@ -189,30 +185,42 @@ class TestOrigamiGemm:
 
 
 class TestSdpaTile:
-    def test_uses_the_class_simulation_for_forward_and_backward(self):
+    def test_uses_the_class_simulation_with_origami_gemms(self):
         pm = SimpleNamespace(
-            get_simulation_time=lambda: 2.0, get_simulation_time_bwd=lambda: 5.0
+            get_simulation_time=lambda gemm_time: (gemm_time, "fwd"),
+            get_simulation_time_bwd=lambda gemm_time: (gemm_time, "bwd"),
         )
-        assert sdpa_tile_origami_op_model(_work(perf_model=pm), ARCH) == 2.0
-        assert sdpa_tile_origami_op_model(_work(perf_model=pm, bwd=True), ARCH) == 5.0
+        gemm_time = origami_helper.gemm_time_us
+        assert sdpa_tile_origami_op_model(_work(perf_model=pm), ARCH) == (
+            gemm_time,
+            "fwd",
+        )
+        assert sdpa_tile_origami_op_model(_work(perf_model=pm, bwd=True), ARCH) == (
+            gemm_time,
+            "bwd",
+        )
         assert sdpa_tile_origami_op_model(_work(perf_model=object()), ARCH) is None
 
-    def test_tile_gemms_use_origami_by_default(self):
+    def test_tile_gemms_use_the_given_gemm_model(self):
         calls = []
 
         def fake_gemm(*args, **kwargs):
             calls.append(kwargs)
-            return 1.0, "cmd"
+            return 1.0
 
         arch = {**ARCH, "num_cus": 304}
         with patch.object(
-            perf_model.GEMM, "get_simulation_time_func", side_effect=fake_gemm
+            origami_helper, "gemm_time_us", side_effect=fake_gemm
         ), patch.object(perf_model.Softmax, "get_time", return_value=0.0):
             args = (arch, "bf16", None, "c10::BFloat16", 1024, 1, 8, 128, 128, 64)
-            perf_model.SDPA.get_simulation_time_func(*args, enable_origami=True)
-            perf_model.SDPA.get_simulation_time_bwd_func(*args, enable_origami=True)
+            perf_model.SDPA.get_simulation_time_func(
+                *args, gemm_time=origami_helper.gemm_time_us
+            )
+            perf_model.SDPA.get_simulation_time_bwd_func(
+                *args, gemm_time=origami_helper.gemm_time_us
+            )
         assert len(calls) == 4
-        assert all(c["enable_origami"] and c["num_cus"] == 1 for c in calls)
+        assert all(c["num_cus"] == 1 for c in calls)
 
     def test_tile_gemms_can_use_another_gemm_model(self):
         shapes = []
@@ -222,9 +230,9 @@ class TestSdpaTile:
             return 2.0
 
         arch = {**ARCH, "num_cus": 304}
-        with patch.object(
-            perf_model.GEMM, "get_simulation_time_func"
-        ) as origami, patch.object(perf_model.Softmax, "get_time", return_value=0.0):
+        with patch.object(origami_helper, "gemm_time_us") as origami, patch.object(
+            perf_model.Softmax, "get_time", return_value=0.0
+        ):
             args = (arch, "bf16", None, "c10::BFloat16", 1024, 1, 8, 256, 256, 64)
             fwd = perf_model.SDPA.get_simulation_time_func(*args, gemm_time=gemm_time)
         origami.assert_not_called()
@@ -245,19 +253,15 @@ class TestSimulationWarning:
         monkeypatch.setattr(perf_model.SDPA, "_simulation_warnings", set())
 
     def test_warns_once_when_a_requested_simulation_fails(self):
-        model = _Attention({}, arch={"name": "mi300x"}, enable_origami=True)
+        model = _Attention({}, arch={"name": "mi300x"})
+        gemm_time = lambda *a, **k: 1.0
         with pytest.warns(RuntimeWarning, match="_Attention: no simulated time"):
-            assert model.get_simulation_time() is None
+            assert model.get_simulation_time(gemm_time=gemm_time) is None
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            assert model.get_simulation_time() is None
+            assert model.get_simulation_time(gemm_time=gemm_time) is None
         with pytest.warns(RuntimeWarning, match="no simulated backward time"):
-            assert model.get_simulation_time_bwd() is None
-
-    def test_a_gemm_time_function_counts_as_asked_for(self):
-        model = _Attention({}, arch={"name": "mi300x"})
-        with pytest.warns(RuntimeWarning, match="_Attention: no simulated time"):
-            assert model.get_simulation_time(gemm_time=lambda *a, **k: 1.0) is None
+            assert model.get_simulation_time_bwd(gemm_time=gemm_time) is None
 
     def test_silent_when_no_simulation_was_asked_for(self):
         model = _Attention({}, arch={"name": "mi300x"})
@@ -474,9 +478,7 @@ def test_report_shows_every_kernel_filter(tmp_path):
 
 @pytest.mark.parametrize("enable_origami_gemm", [False, True])
 def test_report_has_origami_columns_only_with_the_flag(tmp_path, enable_origami_gemm):
-    with patch.object(
-        perf_model.GEMM, "get_simulation_time_func", return_value=(5.0, "cmd")
-    ):
+    with patch.object(origami_helper, "gemm_time_us", return_value=5.0):
         dfs = generate_perf_report_pytorch(
             profile_json_path=str(TRACE),
             output_csvs_dir=str(tmp_path / "csvs"),
@@ -503,7 +505,7 @@ def test_report_has_sdpa_tile_columns_only_with_the_flag(tmp_path):
 
     def report(out, **flags):
         with patch.object(
-            perf_model.GEMM, "get_simulation_time_func", return_value=(3.0, "cmd")
+            origami_helper, "gemm_time_us", return_value=3.0
         ), patch.object(perf_model.Softmax, "get_time", return_value=0.0):
             return generate_perf_report_pytorch(
                 profile_json_path=str(TRACE),

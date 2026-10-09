@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel import origami_helper
 from TraceLens.PerfModel.perf_model import aten_mm
 from TraceLens.PerfModel.op_models import (
     external_op_model,
@@ -93,13 +93,11 @@ def test_extension_file_registers_external_model(report_module):
 
 def test_origami_model_passes_gemm_shape_to_origami():
     gemm = _mm()
-    with patch.object(
-        perf_model.GEMM, "get_simulation_time_func", return_value=(7.0, "cmd")
-    ) as sim:
+    with patch.object(origami_helper, "gemm_time_us", return_value=7.0) as sim:
         assert origami_gemm_model("GEMM", gemm.param_details, ARCH) == 7.0
         assert origami_gemm_model("SDPA_fwd", gemm.param_details, ARCH) is None
         assert origami_gemm_model("GEMM", gemm.param_details, None) is None
-    sim.assert_called_once_with(ARCH, 128, 32, 64, 1, "bf16", enable_origami=True)
+    sim.assert_called_once_with(ARCH, 128, 32, 64, 1, "bf16")
 
 
 def test_set_external_op_model():
@@ -115,9 +113,7 @@ def test_set_external_op_model():
 
 
 def test_report_has_origami_and_external_columns_for_gemms(tmp_path):
-    with patch.object(
-        perf_model.GEMM, "get_simulation_time_func", return_value=(1.0, "cmd")
-    ):
+    with patch.object(origami_helper, "gemm_time_us", return_value=1.0):
         dfs = generate_perf_report_pytorch(
             profile_json_path=str(TRACE),
             output_csvs_dir=str(tmp_path / "csvs"),

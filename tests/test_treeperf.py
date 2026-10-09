@@ -25,7 +25,7 @@ from TraceLens.Reporting.pftrace_hip_activity_analysis import (
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
-from TraceLens.PerfModel.perf_model import GEMM
+from TraceLens.PerfModel import origami_helper
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf import (
     GPUEventAnalyser,
@@ -416,9 +416,7 @@ class TestJaxAnalyses:
             "mem_bw_gbps": 5300,
             "max_achievable_tflops": {"matrix_bf16": 700},
         }
-        with patch.object(
-            GEMM, "get_simulation_time_func", return_value=(9.0, "cmd")
-        ) as sim:
+        with patch.object(origami_helper, "gemm_time_us", return_value=9.0) as sim:
             metrics = JaxAnalyses.gemm_perf_metrics(
                 gemm_event,
                 {**op_params, "Type": "bf16"},
@@ -428,7 +426,7 @@ class TestJaxAnalyses:
         assert metrics["Compute Spec"] == "matrix_bf16"
         assert metrics["Roofline Time (µs)"] > 0
         assert metrics["Origami Time (µs)"] == 9.0
-        assert sim.call_args.kwargs["enable_origami"] is True
+        assert sim.call_args.args[5] == "bf16"
         with pytest.raises(NotImplementedError):
             JaxAnalyses.JaxGemm(
                 {

@@ -127,13 +127,11 @@ def get_max_achievable_tflops(perf_model, arch):
 
 
 def _perf_model_init_kwargs(
-    perf_model_class, event, arch, python_path, enable_origami, inductor_cache_dir=None
+    perf_model_class, event, arch, python_path, inductor_cache_dir=None
 ):
     """
-    Build keyword args for perf model construction. Only passes enable_origami
-    and inductor_cache_dir when the model's __init__ declares them or accepts **kwargs.
-    A perf model's ``enable_origami`` turns on Origami for its own simulation,
-    which only the SDPA tile model has.
+    Build keyword args for perf model construction. Only passes
+    inductor_cache_dir when the model's __init__ declares it or accepts **kwargs.
     """
     kwargs = {
         "event": event,
@@ -147,8 +145,6 @@ def _perf_model_init_kwargs(
     has_var_keyword = any(
         p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
     )
-    if "enable_origami" in sig.parameters or has_var_keyword:
-        kwargs["enable_origami"] = enable_origami
     if "inductor_cache_dir" in sig.parameters or has_var_keyword:
         kwargs["inductor_cache_dir"] = inductor_cache_dir
     return kwargs
@@ -485,7 +481,6 @@ class TreePerfAnalyzer:
                 event,
                 self.arch,
                 self.python_path,
-                self.enable_origami_sdpa_tile,
                 self.inductor_cache_dir,
             )
         )
@@ -3570,7 +3565,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 event,
                 self.arch,
                 self.python_path,
-                self.enable_origami_sdpa_tile,
                 self.inductor_cache_dir,
             )
         )
