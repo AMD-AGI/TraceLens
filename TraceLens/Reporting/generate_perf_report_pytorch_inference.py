@@ -396,12 +396,12 @@ def apply_extension(perf_analyzer, extension_path):
     extension = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(extension)
 
-    if hasattr(extension, "external_perf_model"):
-        print(f"Applying external perf model from {extension_path}")
-        perf_analyzer.set_external_perf_model(extension.external_perf_model)
+    if hasattr(extension, "external_op_model"):
+        print(f"Applying external op model from {extension_path}")
+        perf_analyzer.set_external_op_model(extension.external_op_model)
 
     for attr, register in (
-        ("time_models", "register_time_model"),
+        ("op_models", "register_op_model"),
         ("kernel_filters", "register_kernel_filter"),
     ):
         if not hasattr(extension, attr):
@@ -551,14 +551,13 @@ def generate_perf_report_pytorch(
     precomputed_diff_stats: Optional[str] = None,
     comparison_augmented_tree: Optional[TraceToTree] = None,
     extension_file: Optional[str] = None,
-    # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
+    # unused; kept for backward compatibility
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
     gpu_arch_platform: Optional[str] = None,
     gpu_arch: Optional[dict] = None,
-    enable_origami: bool = False,
-    # GEMM backend for the SDPA tile model: "origami", "simulator", or None (off)
-    sdpa_tile_model: Optional[str] = None,
+    enable_origami_gemm: bool = False,
+    enable_origami_sdpa_tile: bool = False,
     group_by_parent_module: bool = False,
     group_by_num_kernels: bool = False,
     include_call_stack: bool = False,
@@ -587,8 +586,8 @@ def generate_perf_report_pytorch(
             add_python_func=add_python_func,
             enable_pseudo_ops=enable_pseudo_ops,
             rebuild_tree=False,
-            enable_origami=enable_origami,
-            sdpa_tile_model=sdpa_tile_model,
+            enable_origami_gemm=enable_origami_gemm,
+            enable_origami_sdpa_tile=enable_origami_sdpa_tile,
         )
     else:
         perf_analyzer = TreePerfAnalyzer.from_file(
@@ -598,8 +597,8 @@ def generate_perf_report_pytorch(
             include_unlinked_kernels=include_unlinked_kernels,
             add_python_func=add_python_func,
             enable_pseudo_ops=enable_pseudo_ops,
-            enable_origami=enable_origami,
-            sdpa_tile_model=sdpa_tile_model,
+            enable_origami_gemm=enable_origami_gemm,
+            enable_origami_sdpa_tile=enable_origami_sdpa_tile,
         )
 
         graph_launch_events = [
@@ -1334,28 +1333,29 @@ def main():
         "--extension_file",
         type=str,
         default=None,
-        help="Path to the extension file containing custom extensions for TraceTree and PerfModel.",
+        help="Python file with custom hooks: tree post-processing, perf models, "
+        "op categories, op models (op_models, external_op_model), and kernel filters.",
     )
 
     parser.add_argument(
         "--python_path",
         type=str,
         default=None,
-        help="Path to the python executable for gemm simulator",
+        help="Unused; kept so existing command lines still parse.",
     )
     add_gpu_arch_cli_args(parser)
     parser.add_argument(
-        "--enable-origami",
+        "--enable-origami-gemm",
         action="store_true",
         default=False,
-        help="Use Origami for simulated GEMM times when a GPU arch JSON is provided",
+        help="Add Origami GEMM times (Origami columns) when a GPU arch is given.",
     )
     parser.add_argument(
-        "--sdpa-tile-model",
-        choices=["origami", "simulator"],
-        default=None,
-        help="Add SDPA Tile (<backend>) columns from TraceLens's attention tile model, "
-        "timing each tile GEMM with Origami or the GEMM simulator (GEMM_SIMULATOR_PATH).",
+        "--enable-origami-sdpa-tile",
+        action="store_true",
+        default=False,
+        help="Add attention times from TraceLens's SDPA tile model, with Origami "
+        "timing each tile GEMM (SDPA Tile Origami columns), when a GPU arch is given.",
     )
 
     parser.add_argument(
@@ -1447,8 +1447,8 @@ def main():
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
         gpu_arch_platform=args.gpu_arch_platform,
-        enable_origami=args.enable_origami,
-        sdpa_tile_model=args.sdpa_tile_model,
+        enable_origami_gemm=args.enable_origami_gemm,
+        enable_origami_sdpa_tile=args.enable_origami_sdpa_tile,
         group_by_parent_module=args.group_by_parent_module,
         group_by_num_kernels=args.group_by_num_kernels,
         include_call_stack=args.include_call_stack,

@@ -6,9 +6,6 @@
 
 import ast
 import math
-import os
-import re
-import subprocess
 import sys
 import warnings
 from math import prod
@@ -26,7 +23,6 @@ class GEMM:
 
     category = "GEMM"
     bwd_category = None
-    cache_gemm_results = {}  # This is used to cache gemm results
     _origami_import_error_printed = False
 
     def __init__(self, event, arch=None, python_path=None, enable_origami=False):
@@ -152,166 +148,67 @@ class GEMM:
         force_to_l1=False,
         num_cus=None,
         enable_origami=False,
-        backend=None,
     ):
-        """GEMM time in µs from ``backend``: ``"simulator"`` runs the script at
-        ``GEMM_SIMULATOR_PATH``, ``"origami"`` runs Origami when
-        ``enable_origami``. ``None`` picks the simulator when that variable is
-        set, else Origami."""
-        if backend is None:
-            backend = "simulator" if "GEMM_SIMULATOR_PATH" in os.environ else "origami"
-        if backend not in ("simulator", "origami"):
-            raise ValueError(f"Unknown GEMM simulation backend: {backend!r}")
-        if backend == "simulator":
-            if not os.path.exists(os.environ.get("GEMM_SIMULATOR_PATH", "")):
-                raise ValueError(
-                    f"GEMM_SIMULATOR_PATH does not exist: {os.environ.get('GEMM_SIMULATOR_PATH')}"
+        """GEMM time in µs from Origami, or ``(None, None)`` unless
+        ``enable_origami``."""
+        if not enable_origami:
+            return None, None
+        # try to use Origami for estimating performance
+        try:
+            # assumes this PR has completed
+            # https://github.com/ROCm/rocm-libraries/pull/3903
+            import origami
+
+            from .origami_helper import OrigamiHelper
+
+            # origami simulation requires an architecture file including GPU name and clock speed
+            # clock can be from https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html
+            # for example: {"name": "MI300X", "freq_mhz": 1207}
+
+            dtype_map = {
+                "fp32": origami.data_type_t.Float,
+                "fp16": origami.data_type_t.Half,
+                "bf16": origami.data_type_t.BFloat16,
+                "fp64": origami.data_type_t.Double,
+                "fp8": origami.data_type_t.Float8_fnuz,
+            }
+            origami_dtype = dtype_map.get(dtype)
+            if origami_dtype is None:
+                warnings.warn(
+                    f"Unsupported dtype '{dtype}' for Origami simulation; skipping simulation.",
+                    RuntimeWarning,
                 )
-            missing_inputs = []
-            if M is None:
-                missing_inputs.append("M")
-            if N is None:
-                missing_inputs.append("N")
-            if K is None:
-                missing_inputs.append("K")
-            if B is None:
-                B = 1
-            if dtype is None:
-                missing_inputs.append("dtype")
-            if "name" not in arch:
-                missing_inputs.append("arch['name']")
-            assert (
-                not missing_inputs
-            ), f"Invalid inputs: {', '.join(missing_inputs)} are missing or None"
-            # assume that gemm simulator path is given in the environment variable GEMM_SIMULATOR_PATH
-            GEMM_SIMULATOR_PATH = os.environ.get("GEMM_SIMULATOR_PATH")
-            GEMM_SIMULATOR_PATH, gemm_executable = os.path.split(GEMM_SIMULATOR_PATH)
+                return None, None
+            dtype = origami_dtype
 
-            cmd = [
-                gemm_executable,
-                "-b",
-                str(B),
-                "-m",
-                str(M),
-                "-n",
-                str(N),
-                "-k",
-                str(K),
-                "--dtype",
-                dtype,
-                "-d",
-                "1",
-                "-a",
-                arch["name"],
-            ]
+            hardware = OrigamiHelper.get_hardware(arch)
+            if force_to_l1:
+                # origami will have an FA model really soon
+                # until it is available, just make the L1 and L2 really big
+                hardware.lds_capacity = 1024 * 1024 * 1024 * 1024
+                hardware.L2_capacity = 1024 * 1024 * 1024 * 1024
 
-            # Windows does need a python executable for running the gemm simulator
-            if not python_path and os.name == "nt":
-                raise AssertionError(
-                    "Python executable path need to be specified in Windows for running the GEMM simulator."
-                )
-            # Add the python executable path if it is given
-            if python_path:
-                cmd.insert(0, python_path)
-            else:
-                cmd.insert(0, "python")  # default to python3
-
-            if "freq_mhz" in arch:
-                cmd.append("--freq_mhz")
-                cmd.append(str(arch["freq_mhz"]))
-
-            if num_cus:
-                cmd.append("--cus")
-                cmd.append(str(num_cus))
-
-            if "mem_bw_gbps" in arch:
-                cmd.append("--hbm_bw")
-                # In case of flash attention when everything happens in cache, we change the
-                # memory bw to l1 bandwidth so as to simulate the same
-                mem_bw = arch["mem_bw_gbps"] if not force_to_l1 else arch["l1_bw_gbps"]
-                if num_cus and num_cus != arch["num_cus"]:
-                    mem_bw = round(mem_bw / arch["num_cus"] * num_cus)
-                cmd.append(str(mem_bw))
-
-            # Check if the result is already in the cache
-            cache_key = tuple(cmd)
-            if cache_key in GEMM.cache_gemm_results:
-                return GEMM.cache_gemm_results[cache_key], " ".join(cmd)
-
-            # Run the command
-            result = subprocess.run(
-                cmd, cwd=GEMM_SIMULATOR_PATH, capture_output=True, text=True
+            helper = OrigamiHelper(
+                M, N, K, B, dtype, dtype, dtype, hardware, num_cus=num_cus
             )
-            stdout = result.stdout
-            stderr = result.stderr
-            log = re.findall(r"Time=\d+\.\d+", stdout)
-            if len(log) > 0:
-                simulation_time = float(re.sub("Time=", "", str(log[0])))
-                # Cache the result
-                GEMM.cache_gemm_results[cache_key] = simulation_time
-                return simulation_time, " ".join(cmd)
-            else:
-                raise AssertionError("Failed to simulate ", cmd, stdout, stderr)
-        else:
-            if not enable_origami:
-                return None, None
-            # try to use Origami for estimating performance
-            try:
-                # assumes this PR has completed
-                # https://github.com/ROCm/rocm-libraries/pull/3903
-                import origami
 
-                from .origami_helper import OrigamiHelper
+            simulation_time = helper.get_simulation_time()
+            return (
+                simulation_time,
+                f"Origami simulation for M:{M},N:{N},K:{K},B:{B},dtype:{dtype}, arch:{arch}",
+            )
 
-                # origami simulation requires an architecture file including GPU name and clock speed
-                # clock can be from https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html
-                # for example: {"name": "MI300X", "freq_mhz": 1207}
-
-                dtype_map = {
-                    "fp32": origami.data_type_t.Float,
-                    "fp16": origami.data_type_t.Half,
-                    "bf16": origami.data_type_t.BFloat16,
-                    "fp64": origami.data_type_t.Double,
-                    "fp8": origami.data_type_t.Float8_fnuz,
-                }
-                origami_dtype = dtype_map.get(dtype)
-                if origami_dtype is None:
-                    warnings.warn(
-                        f"Unsupported dtype '{dtype}' for Origami simulation; skipping simulation.",
-                        RuntimeWarning,
-                    )
-                    return None, None
-                dtype = origami_dtype
-
-                hardware = OrigamiHelper.get_hardware(arch)
-                if num_cus is not None:
-                    hardware.N_CU = num_cus
-                if force_to_l1:
-                    # origami will have an FA model really soon
-                    # until it is available, just make the L1 and L2 really big
-                    hardware.lds_capacity = 1024 * 1024 * 1024 * 1024
-                    hardware.L2_capacity = 1024 * 1024 * 1024 * 1024
-
-                # todo - allow user to override num_cus and other properties
-                helper = OrigamiHelper(M, N, K, B, dtype, dtype, dtype, hardware)
-
-                simulation_time = helper.get_simulation_time()
-                return (
-                    simulation_time,
-                    f"Origami simulation for M:{M},N:{N},K:{K},B:{B},dtype:{dtype}, arch:{arch}",
+        except ImportError as e:
+            if not GEMM._origami_import_error_printed:
+                print(
+                    "TraceLens: Origami is enabled but the 'origami' package "
+                    f"could not be imported: {e}. Install rocm-origami (or ensure "
+                    "the Origami Python bindings are on PYTHONPATH), or disable "
+                    "Origami simulation.",
+                    file=sys.stderr,
                 )
-
-            except ImportError as e:
-                if not GEMM._origami_import_error_printed:
-                    print(
-                        "TraceLens: enable_origami is set but the 'origami' package "
-                        f"could not be imported: {e}. Install rocm-origami (or ensure "
-                        "the Origami Python bindings are on PYTHONPATH), or disable "
-                        "Origami simulation.",
-                        file=sys.stderr,
-                    )
-                    GEMM._origami_import_error_printed = True
-                return None, None
+                GEMM._origami_import_error_printed = True
+            return None, None
 
 
 class aten_mm(GEMM):
@@ -1915,8 +1812,13 @@ class SDPA:
         d_h,
         fa=True,
         enable_origami=False,
-        backend=None,
+        gemm_time=None,
     ):
+        """SDPA tile model: the attention split into one Q·Kᵀ and one P·V tile
+        GEMM on one CU, scaled by the number of waves, plus softmax and memory
+        terms. ``gemm_time`` times each tile GEMM (see
+        :meth:`tile_gemm_time`); by default Origami does, when
+        ``enable_origami``."""
         force_to_l1 = False
         block_N_Q = N_Q
         block_N_KV = N_KV
@@ -1933,18 +1835,8 @@ class SDPA:
         total_num_blocks = num_blocks_N_Q * B * H_Q
         num_waves = math.ceil(total_num_blocks / arch["num_cus"])
 
-        qkt_time, _ = GEMM.get_simulation_time_func(
-            arch,
-            M=block_N_Q,
-            K=d_h,
-            N=block_N_KV,
-            B=1,
-            dtype=dtype,
-            python_path=python_path,
-            force_to_l1=force_to_l1,
-            num_cus=1,
-            enable_origami=enable_origami,
-            backend=backend,
+        qkt_time = SDPA.tile_gemm_time(
+            arch, block_N_Q, block_N_KV, d_h, dtype, force_to_l1, enable_origami, gemm_time
         )
         if qkt_time is None:
             return None
@@ -1959,18 +1851,8 @@ class SDPA:
             force_to_l1=force_to_l1,
             num_cus=1,
         )
-        pv_time, _ = GEMM.get_simulation_time_func(
-            arch,
-            M=block_N_Q,
-            K=block_N_KV,
-            N=d_h,
-            B=1,
-            dtype=dtype,
-            python_path=python_path,
-            force_to_l1=force_to_l1,
-            num_cus=1,
-            enable_origami=enable_origami,
-            backend=backend,
+        pv_time = SDPA.tile_gemm_time(
+            arch, block_N_Q, d_h, block_N_KV, dtype, force_to_l1, enable_origami, gemm_time
         )
         if pv_time is None:
             return None
@@ -1987,7 +1869,41 @@ class SDPA:
         )
         return qkt_time + softmax_time + pv_time + mem_time
 
-    def get_simulation_time(self, backend=None):
+    @staticmethod
+    def tile_gemm_time(
+        arch, M, N, K, dtype, force_to_l1=False, enable_origami=False, gemm_time=None
+    ):
+        """Time in µs of one tile GEMM on one CU, or None.
+
+        ``gemm_time(arch, M, N, K, B, dtype, force_to_l1, num_cus)`` plugs in
+        any GEMM model; without it Origami is used when ``enable_origami``.
+        ``force_to_l1`` asks the model to treat the operands as cache
+        resident, as in flash attention."""
+        if gemm_time is not None:
+            return gemm_time(
+                arch,
+                M=M,
+                N=N,
+                K=K,
+                B=1,
+                dtype=dtype,
+                force_to_l1=force_to_l1,
+                num_cus=1,
+            )
+        time_us, _ = GEMM.get_simulation_time_func(
+            arch,
+            M=M,
+            N=N,
+            K=K,
+            B=1,
+            dtype=dtype,
+            force_to_l1=force_to_l1,
+            num_cus=1,
+            enable_origami=enable_origami,
+        )
+        return time_us
+
+    def get_simulation_time(self, gemm_time=None):
         simulated_time = None
         if self.arch is not None:
             try:
@@ -2008,24 +1924,20 @@ class SDPA:
                     self.N_KV,
                     self.d_h,
                     fa,
-                    enable_origami=self.enable_origami or backend == "origami",
-                    backend=backend,
+                    enable_origami=self.enable_origami,
+                    gemm_time=gemm_time,
                 )
             except Exception as error:
                 # Origami/GEMM may not support all dtypes on a given arch JSON; omit simulated time.
-                self._warn_simulation_skipped(error, backend, bwd=False)
+                self._warn_simulation_skipped(error, gemm_time, bwd=False)
                 simulated_time = None
         return simulated_time
 
     _simulation_warnings = set()
 
-    def _warn_simulation_skipped(self, error, backend, bwd):
+    def _warn_simulation_skipped(self, error, gemm_time, bwd):
         """Warn once per op type and error type, if a simulation was asked for."""
-        requested = (
-            getattr(self, "enable_origami", False)
-            or backend in ("origami", "simulator")
-            or (backend is None and "GEMM_SIMULATOR_PATH" in os.environ)
-        )
+        requested = getattr(self, "enable_origami", False) or gemm_time is not None
         key = (type(self).__name__, bwd, type(error).__name__)
         if not requested or key in SDPA._simulation_warnings:
             return
@@ -2050,8 +1962,9 @@ class SDPA:
         d_h,
         fa=True,
         enable_origami=False,
-        backend=None,
+        gemm_time=None,
     ):
+        """Backward SDPA tile model; see :meth:`get_simulation_time_func`."""
         force_to_l1 = False
         block_N_Q = N_Q
         block_N_KV = N_KV
@@ -2070,18 +1983,8 @@ class SDPA:
         total_num_blocks = num_blocks_N_KV * B * H_Q
         num_waves = math.ceil(total_num_blocks / arch["num_cus"])
 
-        qkt_fwd_time, _ = GEMM.get_simulation_time_func(
-            arch,
-            M=block_N_Q,
-            K=d_h,
-            N=block_N_KV,
-            B=1,
-            dtype=dtype,
-            python_path=python_path,
-            force_to_l1=force_to_l1,
-            num_cus=1,
-            enable_origami=enable_origami,
-            backend=backend,
+        qkt_fwd_time = SDPA.tile_gemm_time(
+            arch, block_N_Q, block_N_KV, d_h, dtype, force_to_l1, enable_origami, gemm_time
         )
         if qkt_fwd_time is None:
             return None
@@ -2089,18 +1992,8 @@ class SDPA:
         qkt_fwd_time = num_waves * qkt_fwd_time
 
         # B = B * H_Q, M = N_Q, N = d_H, K = N_KV
-        pv_fwd_time, _ = GEMM.get_simulation_time_func(
-            arch,
-            M=block_N_Q,
-            K=block_N_KV,
-            N=d_h,
-            B=1,
-            dtype=dtype,
-            python_path=python_path,
-            force_to_l1=force_to_l1,
-            num_cus=1,
-            enable_origami=enable_origami,
-            backend=backend,
+        pv_fwd_time = SDPA.tile_gemm_time(
+            arch, block_N_Q, d_h, block_N_KV, dtype, force_to_l1, enable_origami, gemm_time
         )
         if pv_fwd_time is None:
             return None
@@ -2112,7 +2005,7 @@ class SDPA:
             qkt_time = qkt_fwd_time
             pv_time = pv_fwd_time
 
-        # We don't need to go to the gemm simulator to calculate these,
+        # We don't need to model these GEMMs again,
         # as we already have the times
         p_grad_time = qkt_fwd_time
         v_grad_time = pv_fwd_time
@@ -2189,7 +2082,7 @@ class SDPA:
         )
         return simulated_time
 
-    def get_simulation_time_bwd(self, backend=None):
+    def get_simulation_time_bwd(self, gemm_time=None):
         simulated_time = None
         if self.arch is not None:
             try:
@@ -2214,11 +2107,11 @@ class SDPA:
                     self.N_KV,
                     self.d_h,
                     fa,
-                    enable_origami=self.enable_origami or backend == "origami",
-                    backend=backend,
+                    enable_origami=self.enable_origami,
+                    gemm_time=gemm_time,
                 )
             except Exception as error:
-                self._warn_simulation_skipped(error, backend, bwd=True)
+                self._warn_simulation_skipped(error, gemm_time, bwd=True)
                 simulated_time = None
         return simulated_time
 
@@ -4510,20 +4403,20 @@ def jax_dtype2bpe(name):
 
 def jax_dtype_map(dtype):
     """
-    This function maps a Jax data type to the gemm simulator data type.
+    This function maps a Jax data type to the TraceLens precision name.
     Args:
         dtype (str): The name of the Jax data type.
     Returns:
-        str: The name of the gemm simulator data type.
+        str: The precision name, such as "fp16".
     """
-    dict_jax_dtype2gemmsimulator = {
+    dict_jax_dtype2precision = {
         "f32": "fp32",
         "f16": "fp16",
         "bf16": "bf16",
         "f8": "fp8",
         "fp8": "fp8",
     }
-    return dict_jax_dtype2gemmsimulator.get(dtype.lower(), None)
+    return dict_jax_dtype2precision.get(dtype.lower(), None)
 
 
 def dtype_jax2torch(dtype):

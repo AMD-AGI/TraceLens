@@ -147,7 +147,7 @@ def generate_perf_report_jax(
     gpu_arch_json_path: Optional[str] = None,
     gpu_arch_platform: Optional[str] = None,
     gpu_arch: Optional[dict] = None,
-    enable_origami: bool = False,
+    enable_origami_gemm: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     gpu_arch_json = resolve_gpu_arch(
         gpu_arch_json_path=gpu_arch_json_path,
@@ -159,7 +159,7 @@ def generate_perf_report_jax(
         profile_path,
         kernel_metadata_keyword_filters=kernel_metadata_keyword_filters,
         arch=gpu_arch_json,
-        enable_origami=enable_origami,
+        enable_origami_gemm=enable_origami_gemm,
     )
 
     # Write all DataFrames to separate sheets in an Excel workbook
@@ -214,10 +214,10 @@ def main():
     )
     add_gpu_arch_cli_args(parser)
     parser.add_argument(
-        "--enable-origami",
+        "--enable-origami-gemm",
         action="store_true",
         default=False,
-        help="Use Origami for simulated GEMM times when a GPU arch JSON is provided",
+        help="Add Origami GEMM times (Origami columns) when a GPU arch is given",
     )
 
     args = parser.parse_args()
@@ -229,7 +229,7 @@ def main():
         kernel_metadata_keyword_filters=args.kernel_metadata_keyword_filters,
         gpu_arch_json_path=args.gpu_arch_json_path,
         gpu_arch_platform=args.gpu_arch_platform,
-        enable_origami=args.enable_origami,
+        enable_origami_gemm=args.enable_origami_gemm,
     )
 
 

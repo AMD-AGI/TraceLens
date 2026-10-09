@@ -423,12 +423,12 @@ class TestJaxAnalyses:
                 gemm_event,
                 {**op_params, "Type": "bf16"},
                 arch=arch,
-                enable_origami=True,
+                enable_origami_gemm=True,
             )
         assert metrics["Compute Spec"] == "matrix_bf16"
         assert metrics["Roofline Time (µs)"] > 0
         assert metrics["Origami Time (µs)"] == 9.0
-        assert sim.call_args.kwargs["backend"] == "origami"
+        assert sim.call_args.kwargs["enable_origami"] is True
         with pytest.raises(NotImplementedError):
             JaxAnalyses.JaxGemm(
                 {
@@ -483,14 +483,6 @@ class TestTreePerfAnalyzer:
         total, kernel_uids = analyzer.loop_and_aggregate_kernels(cpu_ops)
         assert total == 50
         assert len(kernel_uids) == 1
-
-    def test_non_data_mov_filter(self):
-        kernel = _make_gpu_event(1, 0, 10, "kernel", "aten::mm")
-        data_mov = _make_gpu_event(
-            2, 0, 10, "kernel", "at::native::direct_copy_kernel_cuda"
-        )
-        assert TreePerfAnalyzer.non_data_mov_filter(kernel) is True
-        assert TreePerfAnalyzer.non_data_mov_filter(data_mov) is False
 
     def test_get_df_gpu_timeline_from_synthetic_trace(self):
         analyzer = _build_analyzer(_mk_pytorch_trace())

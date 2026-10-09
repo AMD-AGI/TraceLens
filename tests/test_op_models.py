@@ -4,11 +4,11 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Time estimators: OpWork, the built-in estimators, registration, columns."""
+"""Op models: OpWork, the built-in op models, registration, columns."""
 
+import importlib.util
 import math
 import warnings
-from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,21 +18,18 @@ import pandas as pd
 import pytest
 
 from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.time_models import (
+from TraceLens.PerfModel.op_models import (
     OpWork,
-    TimeEstimate,
-    add_time_estimate_columns,
-    add_time_estimates,
-    class_simulation_time,
-    default_time_estimators,
-    external_time_model,
-    gemm_simulator_estimator,
+    add_op_model_columns,
+    add_op_model_outputs,
+    default_op_models,
+    external_op_model,
+    op_model_group_columns,
+    op_model_labels,
     op_work,
-    origami_estimator,
-    roofline_estimator,
-    sdpa_tile_estimator,
-    time_estimate_group_columns,
-    time_estimate_labels,
+    origami_gemm_model,
+    roofline_op_model,
+    sdpa_tile_origami_op_model,
 )
 from TraceLens.Reporting.generate_perf_report_pytorch import (
     apply_extension,
@@ -64,14 +61,14 @@ def _work(**kw):
 
 class TestRoofline:
     def test_compute_bound(self):
-        est = roofline_estimator(_work(gflops=1.0, bytes_moved=1e3), ARCH)
-        assert est.time_us == pytest.approx(1e9 / 500e12 * 1e6)
-        assert est.extra_columns == {"Bound": "COMPUTE_BOUND"}
+        output = roofline_op_model(_work(gflops=1.0, bytes_moved=1e3), ARCH)
+        assert output["time_us"] == pytest.approx(1e9 / 500e12 * 1e6)
+        assert output["Bound"] == "COMPUTE_BOUND"
 
     def test_memory_bound(self):
-        est = roofline_estimator(_work(gflops=1e-6, bytes_moved=1e9), ARCH)
-        assert est.time_us == pytest.approx(1e9 / 5000e9 * 1e6)
-        assert est.extra_columns == {"Bound": "MEMORY_BOUND"}
+        output = roofline_op_model(_work(gflops=1e-6, bytes_moved=1e9), ARCH)
+        assert output["time_us"] == pytest.approx(1e9 / 5000e9 * 1e6)
+        assert output["Bound"] == "MEMORY_BOUND"
 
     @pytest.mark.parametrize(
         "work, arch",
@@ -86,7 +83,7 @@ class TestRoofline:
         ],
     )
     def test_skips_without_inputs(self, work, arch):
-        assert roofline_estimator(work, arch) is None
+        assert roofline_op_model(work, arch) is None
 
 
 class TestExternalModel:
@@ -99,159 +96,111 @@ class TestExternalModel:
             return 3
 
         work = _work()
-        assert external_time_model(model)(work, ARCH) == 3.0
+        assert external_op_model(model)(work, ARCH) == 3.0
         assert seen["category"] == "GEMM"
         assert seen["arch"] is ARCH
         assert seen["params"] is not work.params
         assert work.params["M"] == 4
 
     def test_backward_gets_the_backward_category(self):
-        model = external_time_model(lambda category, params, arch: len(category))
+        model = external_op_model(lambda category, params, arch: len(category))
         assert model(_work(category="SDPA_bwd", bwd=True), ARCH) == 8.0
         assert model(_work(category=None, bwd=True), ARCH) is None
 
     def test_skips_unknown_category(self):
-        model = external_time_model(lambda category, params, arch: 1.0)
+        model = external_op_model(lambda category, params, arch: 1.0)
         assert model(_work(category=None), ARCH) is None
         assert model(_work(params=None), ARCH) is None
 
-    def test_time_estimate_passes_through(self):
-        estimate = TimeEstimate(2.0, {"Config": "256x128"})
-        model = external_time_model(lambda category, params, arch: estimate)
-        assert model(_work(), ARCH) is estimate
+    def test_dict_output_passes_through(self):
+        output = {"time_us": 2.0, "Config": "256x128"}
+        model = external_op_model(lambda category, params, arch: output)
+        assert model(_work(), ARCH) is output
 
 
-class TestEstimatorErrors:
+class TestOpModelErrors:
     @pytest.fixture(autouse=True)
     def _fresh(self, monkeypatch):
-        from TraceLens.PerfModel import time_models
+        from TraceLens.PerfModel import op_models
 
-        monkeypatch.setattr(time_models, "_estimator_warnings", set())
+        monkeypatch.setattr(op_models, "_op_model_warnings", set())
 
     def test_failing_model_only_loses_its_own_columns(self):
         def broken(category, params, arch):
             raise ValueError("unsupported dtype")
 
-        estimators = {
-            "Roofline": roofline_estimator,
-            "Broken": external_time_model(broken),
-            "Fine": external_time_model(lambda category, params, arch: 4.0),
+        models = {
+            "Roofline": roofline_op_model,
+            "Broken": external_op_model(broken),
+            "Fine": external_op_model(lambda category, params, arch: 4.0),
         }
         metrics = {}
         with pytest.warns(RuntimeWarning, match="'Broken' failed on a GEMM op"):
-            add_time_estimates(metrics, estimators, _work(), ARCH, 8.0)
+            add_op_model_outputs(metrics, models, _work(), ARCH, 8.0)
         assert "Roofline Time (µs)" in metrics
         assert metrics["Fine Time (µs)"] == 4.0
         assert not [col for col in metrics if "Broken" in col]
 
     def test_warns_once_per_model_category_and_error(self):
-        estimators = {"Broken": lambda work, arch: 1 / 0}
+        models = {"Broken": lambda work, arch: 1 / 0}
         with pytest.warns(RuntimeWarning):
-            add_time_estimates({}, estimators, _work(), ARCH, 8.0)
+            add_op_model_outputs({}, models, _work(), ARCH, 8.0)
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            add_time_estimates({}, estimators, _work(), ARCH, 8.0)
+            add_op_model_outputs({}, models, _work(), ARCH, 8.0)
         with pytest.warns(RuntimeWarning, match="SDPA_fwd"):
-            add_time_estimates({}, estimators, _work(category="SDPA_fwd"), ARCH, 8.0)
+            add_op_model_outputs({}, models, _work(category="SDPA_fwd"), ARCH, 8.0)
 
 
-class TestOrigamiEstimator:
+class TestOrigamiGemm:
     def test_forward_gemms_only(self):
         params = {**_work().params, "dtype_A_B": ("c10::BFloat16",)}
-        attention = SimpleNamespace(get_simulation_time=lambda **kw: 2.0)
+        origami = external_op_model(origami_gemm_model)
         with patch.object(
             perf_model.GEMM, "get_simulation_time_func", return_value=(7.0, "cmd")
         ) as sim:
-            assert origami_estimator()(_work(params=params), ARCH) == 7.0
-            assert (
-                origami_estimator()(_work(params=params, category=None), ARCH) is None
-            )
-            sdpa = _work(category="SDPA_fwd", params={}, perf_model=attention)
-            assert origami_estimator()(sdpa, ARCH) is None
-        assert sim.call_args.kwargs["backend"] == "origami"
+            assert origami(_work(params=params), ARCH) == 7.0
+            assert origami(_work(params=params, category=None), ARCH) is None
+            assert origami(_work(category="SDPA_fwd", params={}), ARCH) is None
+            assert origami_gemm_model("GEMM", params, None) is None
+        assert sim.call_args.kwargs["enable_origami"] is True
 
-    def test_default_estimators_order(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
-        assert list(default_time_estimators()) == ["Roofline"]
-        assert list(default_time_estimators(True)) == ["Roofline", "Origami"]
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", "sim.py")
-        assert list(default_time_estimators(True, sdpa_tile_model="origami")) == [
-            "Roofline",
-            "Origami",
-            "GEMM Simulator",
-            "SDPA Tile (Origami)",
-        ]
-        assert list(default_time_estimators(sdpa_tile_model="simulator")) == [
-            "Roofline",
-            "GEMM Simulator",
-            "SDPA Tile (GEMM Simulator)",
-        ]
-
-    def test_sdpa_tile_model_options(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
-        with pytest.raises(ValueError, match="GEMM_SIMULATOR_PATH"):
-            default_time_estimators(sdpa_tile_model="simulator")
-        with pytest.raises(ValueError, match="backend"):
-            sdpa_tile_estimator("other")
-
-
-class TestSdpaTileEstimator:
-    def test_uses_the_class_simulation_for_forward_and_backward(self):
-        pm = SimpleNamespace(
-            get_simulation_time=lambda backend=None: {"origami": 2.0}[backend],
-            get_simulation_time_bwd=lambda backend=None: {"origami": 5.0}[backend],
-        )
-        estimate = sdpa_tile_estimator("origami")
-        assert estimate(_work(perf_model=pm), ARCH) == 2.0
-        assert estimate(_work(perf_model=pm, bwd=True), ARCH) == 5.0
-        assert estimate(_work(perf_model=object()), ARCH) is None
-
-
-class TestGemmSimulatorEstimator:
-    def test_class_simulation_gets_the_backend(self):
-        class WithBackend:
-            def get_simulation_time(self, backend=None):
-                return {"origami": 1.0, "simulator": 2.0}[backend]
-
-        class Legacy:
-            def get_simulation_time(self):
-                return 3.0
-
-        assert class_simulation_time(WithBackend(), False, "simulator") == 2.0
-        assert class_simulation_time(WithBackend(), False, "origami") == 1.0
-        assert class_simulation_time(Legacy(), False, "origami") == 3.0
-        assert class_simulation_time(Legacy(), False, "simulator") is None
-        assert class_simulation_time(object(), False, "origami") is None
-
-    def test_gemm_params_use_the_simulator(self):
-        params = {**_work().params, "dtype_A_B": ("c10::BFloat16",)}
-        pm = SimpleNamespace(category="GEMM", param_details=params)
-        work = _work(perf_model=pm, params=params)
-        with patch.object(
-            perf_model.GEMM, "get_simulation_time_func", return_value=(7.0, "cmd")
-        ) as sim:
-            assert gemm_simulator_estimator()(work, ARCH) == 7.0
-            backward = replace(work, bwd=True, category=None)
-            assert gemm_simulator_estimator()(backward, ARCH) is None
-        assert sim.call_args.kwargs["backend"] == "simulator"
-
-    def test_unknown_backend(self):
-        with pytest.raises(ValueError, match="backend"):
-            perf_model.GEMM.get_simulation_time_func(
-                ARCH, 4, 8, 16, 1, "bf16", backend="other"
-            )
-
-    def test_origami_backend_ignores_the_simulator_path(self, monkeypatch):
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", "/nonexistent/sim.py")
+    def test_without_origami_enabled_gives_no_time(self):
         assert perf_model.GEMM.get_simulation_time_func(
-            ARCH, 4, 8, 16, 1, "bf16", backend="origami"
+            ARCH, 4, 8, 16, 1, "bf16"
         ) == (None, None)
 
-    def test_sdpa_passes_the_backend_to_its_tile_gemms(self):
-        backends = []
+    def test_default_op_models_order(self):
+        assert list(default_op_models()) == ["Roofline"]
+        assert list(default_op_models(enable_origami_gemm=True)) == [
+            "Roofline",
+            "Origami",
+        ]
+        assert list(default_op_models(enable_origami_sdpa_tile=True)) == [
+            "Roofline",
+            "SDPA Tile Origami",
+        ]
+        assert list(default_op_models(True, True)) == [
+            "Roofline",
+            "Origami",
+            "SDPA Tile Origami",
+        ]
 
-        def fake_gemm(*args, backend=None, **kwargs):
-            backends.append(backend)
+
+class TestSdpaTile:
+    def test_uses_the_class_simulation_for_forward_and_backward(self):
+        pm = SimpleNamespace(
+            get_simulation_time=lambda: 2.0, get_simulation_time_bwd=lambda: 5.0
+        )
+        assert sdpa_tile_origami_op_model(_work(perf_model=pm), ARCH) == 2.0
+        assert sdpa_tile_origami_op_model(_work(perf_model=pm, bwd=True), ARCH) == 5.0
+        assert sdpa_tile_origami_op_model(_work(perf_model=object()), ARCH) is None
+
+    def test_tile_gemms_use_origami_by_default(self):
+        calls = []
+
+        def fake_gemm(*args, **kwargs):
+            calls.append(kwargs)
             return 1.0, "cmd"
 
         arch = {**ARCH, "num_cus": 304}
@@ -259,9 +208,27 @@ class TestGemmSimulatorEstimator:
             perf_model.GEMM, "get_simulation_time_func", side_effect=fake_gemm
         ), patch.object(perf_model.Softmax, "get_time", return_value=0.0):
             args = (arch, "bf16", None, "c10::BFloat16", 1024, 1, 8, 128, 128, 64)
-            perf_model.SDPA.get_simulation_time_func(*args, backend="simulator")
-            perf_model.SDPA.get_simulation_time_bwd_func(*args, backend="simulator")
-        assert backends == ["simulator"] * 4
+            perf_model.SDPA.get_simulation_time_func(*args, enable_origami=True)
+            perf_model.SDPA.get_simulation_time_bwd_func(*args, enable_origami=True)
+        assert len(calls) == 4
+        assert all(c["enable_origami"] and c["num_cus"] == 1 for c in calls)
+
+    def test_tile_gemms_can_use_another_gemm_model(self):
+        shapes = []
+
+        def gemm_time(arch, M, N, K, B, dtype, force_to_l1, num_cus):
+            shapes.append((M, N, K, B, num_cus))
+            return 2.0
+
+        arch = {**ARCH, "num_cus": 304}
+        with patch.object(
+            perf_model.GEMM, "get_simulation_time_func"
+        ) as origami, patch.object(perf_model.Softmax, "get_time", return_value=0.0):
+            args = (arch, "bf16", None, "c10::BFloat16", 1024, 1, 8, 256, 256, 64)
+            fwd = perf_model.SDPA.get_simulation_time_func(*args, gemm_time=gemm_time)
+        origami.assert_not_called()
+        assert shapes == [(128, 256, 64, 1, 1), (128, 64, 256, 1, 1)]
+        assert fwd > 4.0
 
 
 class _Attention(perf_model.SDPA):
@@ -274,23 +241,22 @@ class _Attention(perf_model.SDPA):
 class TestSimulationWarning:
     @pytest.fixture(autouse=True)
     def _fresh(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         monkeypatch.setattr(perf_model.SDPA, "_simulation_warnings", set())
 
     def test_warns_once_when_a_requested_simulation_fails(self):
         model = _Attention({}, arch={"name": "mi300x"}, enable_origami=True)
         with pytest.warns(RuntimeWarning, match="_Attention: no simulated time"):
-            assert model.get_simulation_time(backend="origami") is None
+            assert model.get_simulation_time() is None
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            assert model.get_simulation_time(backend="origami") is None
+            assert model.get_simulation_time() is None
         with pytest.warns(RuntimeWarning, match="no simulated backward time"):
-            assert model.get_simulation_time_bwd(backend="origami") is None
+            assert model.get_simulation_time_bwd() is None
 
-    def test_explicit_origami_backend_counts_as_asked_for(self):
+    def test_a_gemm_time_function_counts_as_asked_for(self):
         model = _Attention({}, arch={"name": "mi300x"})
         with pytest.warns(RuntimeWarning, match="_Attention: no simulated time"):
-            assert model.get_simulation_time(backend="origami") is None
+            assert model.get_simulation_time(gemm_time=lambda *a, **k: 1.0) is None
 
     def test_silent_when_no_simulation_was_asked_for(self):
         model = _Attention({}, arch={"name": "mi300x"})
@@ -300,12 +266,12 @@ class TestSimulationWarning:
 
 
 class TestColumns:
-    def test_estimate_with_extra_columns(self):
+    def test_dict_output_with_extra_columns(self):
         metrics = {}
-        add_time_estimate_columns(
+        add_op_model_columns(
             metrics,
             "Roofline",
-            TimeEstimate(2.0, {"Bound": "X"}),
+            {"time_us": 2.0, "Bound": "X"},
             4.0,
             2e6,
             8.0,
@@ -320,26 +286,51 @@ class TestColumns:
         assert metrics["Roofline TFLOPS/s"] == pytest.approx(2000.0)
         assert metrics["Pct Roofline"] == 25.0
 
-    @pytest.mark.parametrize("estimate", [None, 0, 0.0])
-    def test_missing_estimate_writes_nothing(self, estimate):
+    def test_dict_output_without_a_time_keeps_its_columns(self):
         metrics = {}
-        add_time_estimate_columns(metrics, "X", estimate, 1.0, 1.0, 1.0)
+        add_op_model_columns(
+            metrics, "Tiles", {"Tile": "256x128", "Waves": 3}, 4.0, 2e6, 8.0
+        )
+        assert metrics["Tiles Tile"] == "256x128"
+        assert metrics["Tiles Waves"] == 3
+        assert math.isnan(metrics["Tiles Time (µs)"])
+        assert math.isnan(metrics["Pct Tiles"])
+        assert "Tiles TFLOPS/s" not in metrics
+
+    def test_only_scalar_values_are_written(self):
+        metrics = {}
+        add_op_model_columns(
+            metrics,
+            "X",
+            {"time_us": 1.0, "Name": "a", "N": 2, "Ok": True, "List": [1], "D": {}},
+            1.0,
+            1.0,
+            1.0,
+        )
+        assert {"X Name", "X N", "X Ok"} <= set(metrics)
+        assert "X List" not in metrics and "X D" not in metrics
+
+    @pytest.mark.parametrize("output", [None, 0, 0.0, {}, {"time_us": None}])
+    def test_missing_output_writes_nothing(self, output):
+        metrics = {}
+        add_op_model_columns(metrics, "X", output, 1.0, 1.0, 1.0)
         assert metrics == {}
 
     def test_zero_measured_time_gives_nan_pct(self):
         metrics = {}
-        add_time_estimate_columns(metrics, "X", 1.0, 1.0, None, 0)
+        add_op_model_columns(metrics, "X", 1.0, 1.0, None, 0)
         assert math.isnan(metrics["Pct X"])
         assert math.isnan(metrics["X TB/s"])
 
     def test_labels_put_builtins_first(self):
         columns = []
-        for label in ("Mine", "External", "Origami", "Roofline"):
+        for label in ("Mine", "External", "SDPA Tile Origami", "Origami", "Roofline"):
             columns += [f"{label} Time (µs)", f"Pct {label}"]
         columns += ["Non-Data-Mov Kernel Time (µs)", "Pct Nothing"]
-        assert time_estimate_labels(columns) == [
+        assert op_model_labels(columns) == [
             "Roofline",
             "Origami",
+            "SDPA Tile Origami",
             "External",
             "Mine",
         ]
@@ -353,30 +344,30 @@ class TestColumns:
             "Pct GEMM",
             "Pct GEMM Sim",
         ]
-        labels = time_estimate_labels(columns)
-        assert time_estimate_group_columns(columns, "GEMM", labels) == [
+        labels = op_model_labels(columns)
+        assert op_model_group_columns(columns, "GEMM", labels) == [
             "GEMM Time (µs)",
             "GEMM TB/s",
             "Pct GEMM",
         ]
-        assert time_estimate_group_columns(columns, "GEMM Sim", labels) == [
+        assert op_model_group_columns(columns, "GEMM Sim", labels) == [
             "GEMM Sim Time (µs)",
             "GEMM Sim TB/s",
             "Pct GEMM Sim",
         ]
 
 
-def test_extension_time_models_dict(tmp_path):
+def test_extension_op_models_dict(tmp_path):
     ext = tmp_path / "ext.py"
-    ext.write_text("time_models = {'A': lambda c, p, a: 1.0, 'B': None}\n")
+    ext.write_text("op_models = {'A': lambda c, p, a: 1.0, 'B': None}\n")
     registered = []
     analyzer = SimpleNamespace(
-        register_time_model=lambda label, model: registered.append((label, model))
+        register_op_model=lambda label, model: registered.append((label, model))
     )
     apply_extension(analyzer, str(ext))
     assert [label for label, _ in registered] == ["A", "B"]
 
-    ext.write_text("time_models = [1]\n")
+    ext.write_text("op_models = [1]\n")
     with pytest.raises(TypeError):
         apply_extension(analyzer, str(ext))
 
@@ -409,22 +400,39 @@ def test_external_model_sees_the_op_direction(bwd, category, gflops):
         seen.append((category, params))
         return 10.0
 
-    analyzer = SimpleNamespace(arch=ARCH, time_estimators={})
-    TreePerfAnalyzer.register_time_model(analyzer, "Mine", model)
+    analyzer = SimpleNamespace(arch=ARCH, op_models={})
+    TreePerfAnalyzer.register_op_model(analyzer, "Mine", model)
     metrics = {}
     work = op_work(_FakeAttention(), bwd=bwd)
-    add_time_estimates(metrics, analyzer.time_estimators, work, ARCH, 20.0)
+    add_op_model_outputs(metrics, analyzer.op_models, work, ARCH, 20.0)
     assert seen == [(category, {"N_Q": 128})]
     assert metrics["Mine Time (µs)"] == 10.0
     assert metrics["Mine TFLOPS/s"] == pytest.approx(gflops / 10.0 * 1e3)
     assert metrics["Pct Mine"] == 50.0
 
 
+def _example_filter():
+    spec = importlib.util.spec_from_file_location(
+        "kernel_filter_example", REPO / "examples/kernel_filter_example.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.non_data_mov_filter
+
+
+def test_example_kernel_filter():
+    keep = _example_filter()
+    assert keep({"name": "Cijk_Alik_Bljk_gemm"})
+    assert not keep({"name": "void at::native::direct_copy_kernel_cuda<...>"})
+    assert not keep({"name": "batched_transpose_32x32"})
+
+
 def test_register_kernel_filter():
+    keep = _example_filter()
     analyzer = SimpleNamespace(kernel_filters={})
     register = partial(TreePerfAnalyzer.register_kernel_filter, analyzer)
-    register("NDM", TreePerfAnalyzer.non_data_mov_filter)
-    assert analyzer.kernel_filters == {"NDM": TreePerfAnalyzer.non_data_mov_filter}
+    register("NDM", keep)
+    assert analyzer.kernel_filters == {"NDM": keep}
     with pytest.raises(TypeError):
         register("Bad", 1)
     register("NDM", None)
@@ -436,8 +444,7 @@ def test_kernel_filter_labels():
     assert kernel_filter_labels(columns) == ["A"]
 
 
-def test_report_shows_every_kernel_filter(tmp_path, monkeypatch):
-    monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
+def test_report_shows_every_kernel_filter(tmp_path):
     ext = tmp_path / "ext.py"
     ext.write_text(
         "kernel_filters = {'All': lambda k: True, 'Empty': lambda k: False}\n"
@@ -464,44 +471,36 @@ def test_report_shows_every_kernel_filter(tmp_path, monkeypatch):
     )
 
 
-@pytest.mark.parametrize("enable_origami", [False, True])
-def test_report_has_gemm_simulator_columns_next_to_origami(
-    tmp_path, monkeypatch, enable_origami
-):
-    monkeypatch.setenv("GEMM_SIMULATOR_PATH", "sim.py")
-
-    def fake_gemm(*args, backend=None, **kwargs):
-        return {"simulator": 3.0, "origami": 5.0}[backend], "cmd"
-
+@pytest.mark.parametrize("enable_origami_gemm", [False, True])
+def test_report_has_origami_columns_only_with_the_flag(tmp_path, enable_origami_gemm):
     with patch.object(
-        perf_model.GEMM, "get_simulation_time_func", side_effect=fake_gemm
+        perf_model.GEMM, "get_simulation_time_func", return_value=(5.0, "cmd")
     ):
         dfs = generate_perf_report_pytorch(
             profile_json_path=str(TRACE),
             output_csvs_dir=str(tmp_path / "csvs"),
             gpu_arch=ARCH,
-            enable_origami=enable_origami,
+            enable_origami_gemm=enable_origami_gemm,
             collective_analysis=False,
         )
     for df in (
         dfs["GEMM"],
         dfs["unified_perf_summary"].query("`op category` == 'GEMM'"),
     ):
-        assert (df["GEMM Simulator Time (µs)_first"] == 3.0).all()
-        assert "Pct GEMM Simulator_mean" in df.columns
-        if enable_origami:
+        if enable_origami_gemm:
             assert (df["Origami Time (µs)_first"] == 5.0).all()
+            assert "Pct Origami_mean" in df.columns
         else:
             assert (
                 df.get("Origami Time (µs)_first", pd.Series(dtype=float)).isna().all()
             )
+    assert "Origami Time (µs)_first" not in dfs["SDPA_fwd"].columns
 
 
-def test_report_has_sdpa_tile_columns_only_with_the_flag(tmp_path, monkeypatch):
-    monkeypatch.setenv("GEMM_SIMULATOR_PATH", "sim.py")
+def test_report_has_sdpa_tile_columns_only_with_the_flag(tmp_path):
     arch = {**ARCH, "num_cus": 304}
 
-    def report(sdpa_tile_model, out):
+    def report(out, **flags):
         with patch.object(
             perf_model.GEMM, "get_simulation_time_func", return_value=(3.0, "cmd")
         ), patch.object(perf_model.Softmax, "get_time", return_value=0.0):
@@ -509,38 +508,36 @@ def test_report_has_sdpa_tile_columns_only_with_the_flag(tmp_path, monkeypatch):
                 profile_json_path=str(TRACE),
                 output_csvs_dir=str(tmp_path / out),
                 gpu_arch=arch,
-                sdpa_tile_model=sdpa_tile_model,
                 collective_analysis=False,
+                **flags,
             )
 
-    label = "SDPA Tile (GEMM Simulator) Time (µs)_first"
-    plain = report(None, "plain")
-    assert "GEMM Simulator Time (µs)_first" not in plain["SDPA_fwd"].columns
-    assert label not in plain["SDPA_fwd"].columns
+    label = "SDPA Tile Origami Time (µs)_first"
+    gemm_only = report("gemm", enable_origami_gemm=True)
+    assert label not in gemm_only["SDPA_fwd"].columns
 
-    tiled = report("simulator", "tiled")
+    tiled = report("tiled", enable_origami_sdpa_tile=True)
     sdpa = tiled["SDPA_fwd"]
     assert (sdpa[label] > 0).all()
-    assert "Pct SDPA Tile (GEMM Simulator)_mean" in sdpa.columns
-    assert "GEMM Simulator Time (µs)_first" not in sdpa.columns
+    assert "Pct SDPA Tile Origami_mean" in sdpa.columns
+    assert "Origami Time (µs)_first" not in sdpa.columns
     assert label not in tiled["GEMM"].columns
-    assert (tiled["GEMM"]["GEMM Simulator Time (µs)_first"] == 3.0).all()
+    assert "Origami Time (µs)_first" not in tiled["GEMM"].columns
 
 
-def test_report_keeps_ops_when_a_model_fails_and_shows_extra_columns(
-    tmp_path, monkeypatch
-):
-    monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
+def test_report_keeps_ops_when_a_model_fails_and_shows_extra_columns(tmp_path):
     ext = tmp_path / "ext.py"
     ext.write_text(
-        "from TraceLens.PerfModel.time_models import TimeEstimate\n"
         "def configured(category, params, arch):\n"
         "    if category != 'GEMM':\n"
         "        return None\n"
-        "    return TimeEstimate(3.0, {'Config': f\"{params['M']}x{params['N']}\"})\n"
+        "    return {'time_us': 3.0, 'Config': f\"{params['M']}x{params['N']}\"}\n"
+        "def tiles_only(category, params, arch):\n"
+        "    return {'Tile': '64x64'} if category == 'GEMM' else None\n"
         "def broken(category, params, arch):\n"
         "    raise ValueError('unsupported')\n"
-        "time_models = {'Configured': configured, 'Broken': broken}\n"
+        "op_models = {'Configured': configured, 'Tiles': tiles_only, "
+        "'Broken': broken}\n"
     )
     with pytest.warns(RuntimeWarning, match="'Broken' failed"):
         dfs = generate_perf_report_pytorch(
@@ -556,6 +553,8 @@ def test_report_keeps_ops_when_a_model_fails_and_shows_extra_columns(
     ):
         assert df["Roofline Time (µs)_first"].notna().all()
         assert (df["Configured Time (µs)_first"] == 3.0).all()
+        assert (df["Tiles Tile_first"] == "64x64").all()
+        assert df["Tiles Time (µs)_first"].isna().all()
         columns = list(df.columns)
         config = columns.index("Configured Config_first")
         assert columns.index("Configured TB/s_first") < config
@@ -567,13 +566,12 @@ def test_report_keeps_ops_when_a_model_fails_and_shows_extra_columns(
     )
 
 
-def test_report_shows_every_registered_model(tmp_path, monkeypatch):
-    monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
+def test_report_shows_every_registered_model(tmp_path):
     ext = tmp_path / "ext.py"
     ext.write_text(
         "def gemm_only(category, params, arch):\n"
         "    return 3.0 if category == 'GEMM' else None\n"
-        "time_models = {'ModelA': gemm_only, 'ModelB': lambda c, p, a: 4.0}\n"
+        "op_models = {'ModelA': gemm_only, 'ModelB': lambda c, p, a: 4.0}\n"
     )
     dfs = generate_perf_report_pytorch(
         profile_json_path=str(TRACE),

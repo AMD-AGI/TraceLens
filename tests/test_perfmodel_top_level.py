@@ -285,3 +285,20 @@ class TestOrigamiHelper:
             hardware=hardware,
         )
         assert helper.get_simulation_time() > 0
+
+    @pytest.mark.parametrize("name", ["mi300x", "mi355x"])
+    def test_origami_helper_times_one_cu(self, name):
+        import origami
+
+        from TraceLens.PerfModel.origami_helper import OrigamiHelper
+
+        bf16 = origami.data_type_t.BFloat16
+
+        def time_us(num_cus):
+            hardware = OrigamiHelper.get_hardware({"name": name, "freq_mhz": 2100})
+            helper = OrigamiHelper(
+                128, 4096, 128, 1, bf16, bf16, bf16, hardware, num_cus=num_cus
+            )
+            return helper.get_simulation_time()
+
+        assert time_us(1) > time_us(None) > 0

@@ -61,7 +61,7 @@ def perf_report(tmp_path_factory):
         output_xlsx_path=None,
         output_csvs_dir=csv_dir,
         gpu_arch_json_path=arch_path,
-        enable_origami=True,
+        enable_origami_gemm=True,
     )
 
     return csv_dir

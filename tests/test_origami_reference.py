@@ -57,6 +57,10 @@ EXPECTED_GEMM_TIME_US = {
     (141, 30522, 512): 24.797284449747668,
 }
 
+# SDPA Tile Origami Time (µs) per row of the SDPA_fwd sheet (both rows are
+# N_Q = N_KV = 141, d_h = 64, bf16).
+EXPECTED_SDPA_TILE_TIME_US = [22.766573765418155, 22.766573765418155]
+
 
 @pytest.fixture(scope="module")
 def origami_report(tmp_path_factory):
@@ -64,7 +68,7 @@ def origami_report(tmp_path_factory):
         profile_json_path=TRACE,
         output_csvs_dir=str(tmp_path_factory.mktemp("origami_reference")),
         gpu_arch=ARCH,
-        enable_origami=True,
+        enable_origami_gemm=True,
         collective_analysis=False,
     )
 
@@ -78,6 +82,22 @@ def test_origami_gemm_times_match_reference(origami_report):
         for _, row in df.iterrows()
     }
     assert got == pytest.approx(EXPECTED_GEMM_TIME_US, rel=1e-9)
+
+
+@pytest.fixture(scope="module")
+def sdpa_tile_report(tmp_path_factory):
+    return generate_perf_report_pytorch(
+        profile_json_path=TRACE,
+        output_csvs_dir=str(tmp_path_factory.mktemp("sdpa_tile_reference")),
+        gpu_arch=ARCH,
+        enable_origami_sdpa_tile=True,
+        collective_analysis=False,
+    )
+
+
+def test_sdpa_tile_origami_times_match_reference(sdpa_tile_report):
+    times = sdpa_tile_report["SDPA_fwd"]["SDPA Tile Origami Time (µs)_first"]
+    assert list(times) == pytest.approx(EXPECTED_SDPA_TILE_TIME_US, rel=1e-9)
 
 
 def test_origami_gemm_rates_follow_time(origami_report):

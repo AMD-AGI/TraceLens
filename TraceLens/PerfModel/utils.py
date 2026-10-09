@@ -64,11 +64,11 @@ def add_simulation_time_columns(
     label="Origami",
 ):
     """
-    Add simulated time columns (Origami, or ``label`` for other simulators)
+    Add simulated time columns (Origami, or ``label`` for other op models)
     """
-    from .time_models import add_time_estimate_columns
+    from .op_models import add_op_model_columns
 
-    add_time_estimate_columns(
+    add_op_model_columns(
         dict_metrics, label, simulated_time, gflops, bytes_moved, busy_kernel_time
     )
 

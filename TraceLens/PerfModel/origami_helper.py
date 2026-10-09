@@ -28,7 +28,10 @@ class OrigamiHelper:
         hardware: origami.hardware_t,
         mx_block_size=0,
         streamk=False,
+        num_cus=None,
     ):
+        """``num_cus`` times the GEMM on that many CUs. ``hardware`` must keep
+        the full GPU's CU count: the matrix instruction is chosen from it."""
         self._m = m
         self._n = n
         self._k = k
@@ -76,6 +79,10 @@ class OrigamiHelper:
 
         # Create Origami problem_t based on problem metadata
         self._problem = self._make_problem()
+
+        if num_cus is not None:
+            self._hardware.N_CU = num_cus
+            self._N_CU = num_cus
 
         # Run Origami solution selection
         self._result = origami.select_config(

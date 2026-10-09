@@ -12,7 +12,7 @@ from itertools import chain
 import pandas as pd
 
 from ..PerfModel import perf_model
-from ..PerfModel.time_models import add_time_estimates, default_time_estimators, op_work
+from ..PerfModel.op_models import add_op_model_outputs, default_op_models, op_work
 from ..PerfModel.utils import build_perf_metrics_dict
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
@@ -419,7 +419,7 @@ class JaxAnalyses:
         pb_file_name,
         module_name: str = "jit_train_step",
         arch: dict = None,
-        enable_origami: bool = False,
+        enable_origami_gemm: bool = False,
     ):
         all_profile_events = DataLoader.load_data(filename_path=pb_file_name)[
             "traceEvents"
@@ -475,7 +475,7 @@ class JaxAnalyses:
                 ],
                 False,
                 arch,
-                enable_origami=enable_origami,
+                enable_origami_gemm=enable_origami_gemm,
             )
             for event in gpu_0_gemms
         ]
@@ -541,7 +541,7 @@ class JaxAnalyses:
 
     @staticmethod
     def gemm_perf_metrics(
-        event, op_params, bwd: bool = False, arch=None, enable_origami: bool = False
+        event, op_params, bwd: bool = False, arch=None, enable_origami_gemm: bool = False
     ):
         perf_model_class = JaxAnalyses.get_perf_model(event)
         # the class structure of the perf_model class doesn't make it easy to add additional parameters to the event,
@@ -551,7 +551,7 @@ class JaxAnalyses:
         # the perf model needs a kernel names field
         event_copy["kernel_names"] = [event[TraceEventUtils.TraceKeys.Name]]
         perf_model = perf_model_class(
-            event_copy, arch=arch, enable_origami=enable_origami
+            event_copy, arch=arch
         )
 
         work = op_work(perf_model, bwd)
@@ -559,8 +559,8 @@ class JaxAnalyses:
 
         dict_metrics = build_perf_metrics_dict(work.gflops, work.bytes_moved, time)
         dict_metrics["Compute Spec"] = work.compute_spec or ""
-        add_time_estimates(
-            dict_metrics, default_time_estimators(enable_origami), work, arch, time
+        add_op_model_outputs(
+            dict_metrics, default_op_models(enable_origami_gemm), work, arch, time
         )
 
         for key, value in perf_model.param_details.items():

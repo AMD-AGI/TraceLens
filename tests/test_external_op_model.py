@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Time models: built-in Origami and an extension-registered external model."""
+"""Op models: built-in Origami and an extension-registered external model."""
 
 import importlib
 from functools import partial
@@ -16,11 +16,10 @@ import pytest
 
 from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.perf_model import aten_mm
-from TraceLens.PerfModel.time_models import (
-    external_time_model,
-    gemm_simulator_model,
+from TraceLens.PerfModel.op_models import (
+    external_op_model,
     op_work,
-    origami_perf_model,
+    origami_gemm_model,
 )
 from TraceLens.Reporting.generate_perf_report_pytorch import (
     generate_perf_report_pytorch,
@@ -28,7 +27,7 @@ from TraceLens.Reporting.generate_perf_report_pytorch import (
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 REPO = Path(__file__).resolve().parents[1]
-STUB = REPO / "examples" / "external_perf_model_stub.py"
+STUB = REPO / "examples" / "external_op_model_stub.py"
 TRACE = (
     REPO
     / "tests"
@@ -61,7 +60,7 @@ def test_model_gets_category_a_copy_of_params_and_arch():
         return 12
 
     gemm = _mm()
-    assert external_time_model(model)(op_work(gemm), ARCH) == 12.0
+    assert external_op_model(model)(op_work(gemm), ARCH) == 12.0
     assert seen["category"] == "GEMM"
     assert (seen["params"]["N"], seen["params"]["K"]) == (32, 64)
     assert seen["arch"] is ARCH
@@ -72,7 +71,7 @@ def test_model_returning_none_gives_no_prediction():
     def model(category, params, arch):
         return None
 
-    assert external_time_model(model)(op_work(_mm()), ARCH) is None
+    assert external_op_model(model)(op_work(_mm()), ARCH) is None
 
 
 @pytest.mark.parametrize(
@@ -84,45 +83,38 @@ def test_model_returning_none_gives_no_prediction():
 )
 def test_extension_file_registers_external_model(report_module):
     registered = []
-    analyzer = SimpleNamespace(set_external_perf_model=registered.append)
+    analyzer = SimpleNamespace(set_external_op_model=registered.append)
     importlib.import_module(report_module).apply_extension(analyzer, str(STUB))
     assert len(registered) == 1
-    assert registered[0](
-        "GEMM", {"M": 1, "N": 1, "K": 1, "B": 1}, None
-    ) == pytest.approx(2e-8)
+    output = registered[0]("GEMM", {"M": 1, "N": 1, "K": 1, "B": 1}, None)
+    assert output["time_us"] == pytest.approx(2e-8)
+    assert output["Transpose"] == "unknown"
 
 
-def test_origami_model_passes_gemm_shape_to_the_simulator():
+def test_origami_model_passes_gemm_shape_to_origami():
     gemm = _mm()
     with patch.object(
         perf_model.GEMM, "get_simulation_time_func", return_value=(7.0, "cmd")
     ) as sim:
-        assert origami_perf_model("GEMM", gemm.param_details, ARCH) == 7.0
-        assert origami_perf_model("SDPA_fwd", gemm.param_details, ARCH) is None
-        assert origami_perf_model("GEMM", gemm.param_details, None) is None
-        assert gemm_simulator_model("GEMM", gemm.param_details, ARCH) == 7.0
-    assert [c.kwargs["backend"] for c in sim.call_args_list] == ["origami", "simulator"]
-    sim.assert_called_with(
-        ARCH, 128, 32, 64, 1, "bf16", None, enable_origami=True, backend="simulator"
-    )
+        assert origami_gemm_model("GEMM", gemm.param_details, ARCH) == 7.0
+        assert origami_gemm_model("SDPA_fwd", gemm.param_details, ARCH) is None
+        assert origami_gemm_model("GEMM", gemm.param_details, None) is None
+    sim.assert_called_once_with(ARCH, 128, 32, 64, 1, "bf16", enable_origami=True)
 
 
-def test_set_external_perf_model():
-    analyzer = SimpleNamespace(time_estimators={})
-    analyzer.register_time_model = partial(
-        TreePerfAnalyzer.register_time_model, analyzer
-    )
-    TreePerfAnalyzer.set_external_perf_model(analyzer, len)
-    assert list(analyzer.time_estimators) == ["External"]
-    assert analyzer.time_estimators["External"].time_model is len
-    TreePerfAnalyzer.set_external_perf_model(analyzer, None)
-    assert analyzer.time_estimators == {}
+def test_set_external_op_model():
+    analyzer = SimpleNamespace(op_models={})
+    analyzer.register_op_model = partial(TreePerfAnalyzer.register_op_model, analyzer)
+    TreePerfAnalyzer.set_external_op_model(analyzer, len)
+    assert list(analyzer.op_models) == ["External"]
+    assert analyzer.op_models["External"].external_model is len
+    TreePerfAnalyzer.set_external_op_model(analyzer, None)
+    assert analyzer.op_models == {}
     with pytest.raises(TypeError):
-        TreePerfAnalyzer.set_external_perf_model(analyzer, "not a function")
+        TreePerfAnalyzer.set_external_op_model(analyzer, "not a function")
 
 
-def test_report_has_origami_and_external_columns_for_gemms(tmp_path, monkeypatch):
-    monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
+def test_report_has_origami_and_external_columns_for_gemms(tmp_path):
     with patch.object(
         perf_model.GEMM, "get_simulation_time_func", return_value=(1.0, "cmd")
     ):
@@ -131,7 +123,7 @@ def test_report_has_origami_and_external_columns_for_gemms(tmp_path, monkeypatch
             output_csvs_dir=str(tmp_path / "csvs"),
             extension_file=str(STUB),
             gpu_arch=ARCH,
-            enable_origami=True,
+            enable_origami_gemm=True,
             collective_analysis=False,
         )
     summary = dfs["unified_perf_summary"]
@@ -145,10 +137,10 @@ def test_report_has_origami_and_external_columns_for_gemms(tmp_path, monkeypatch
     expected = 2 * p["M"] * p["N"] * p["K"] * p["B"] / 1e8
     assert gemms.iloc[0]["External Time (µs)_first"] == pytest.approx(expected)
     assert "External Time (µs)_first" in dfs["GEMM"].columns
+    assert "External Transpose_first" in dfs["GEMM"].columns
 
 
-def test_report_without_models_has_no_simulated_columns(tmp_path, monkeypatch):
-    monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
+def test_report_without_models_has_no_simulated_columns(tmp_path):
     dfs = generate_perf_report_pytorch(
         profile_json_path=str(TRACE),
         output_csvs_dir=str(tmp_path / "csvs"),

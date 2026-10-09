@@ -2286,7 +2286,6 @@ class TestPush95Phase2:
         assert "memcpy_summary" in mk and "nccl_summary" in mk
 
     def test_gemm_origami_import_error_path(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         perf_model.GEMM._origami_import_error_printed = False
         import builtins
 

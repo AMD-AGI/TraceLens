@@ -94,7 +94,7 @@ from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
     vllm_rocm_aiter_triton_add_rmsnorm_pad,
 )
 from TraceLens.PerfModel import kernel_name_parser, perf_model
-from TraceLens.PerfModel.time_models import origami_perf_model
+from TraceLens.PerfModel.op_models import origami_gemm_model
 from tests.fixtures.perfmodel import (
     _ARCH,
     _GDN,
@@ -574,44 +574,14 @@ class TestGemmBaseCoverage:
 
     def test_origami_time_without_arch(self):
         model = perf_model.aten_mm(_gemm_event("aten::mm", (4, 8), (8, 16)))
-        assert origami_perf_model(model.category, model.param_details, None) is None
+        assert origami_gemm_model(model.category, model.param_details, None) is None
 
-    def test_gemm_simulator_path_invalid(self, monkeypatch):
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", "/nonexistent/sim.py")
-        with pytest.raises(ValueError, match="does not exist"):
-            perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
-
-    def test_gemm_simulator_success(self, monkeypatch, tmp_path):
-        sim_dir = tmp_path / "simdir"
-        sim_dir.mkdir()
-        sim = sim_dir / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-            run.return_value = MagicMock(stdout="Time=42.5\n", stderr="")
-            t, cmd = perf_model.GEMM.get_simulation_time_func(
-                _ARCH, 4, 8, 16, 1, "bf16", num_cus=64, force_to_l1=True
-            )
-        assert t == 42.5
-        assert "run_gemm.py" in cmd
-
-    def test_gemm_simulator_failure(self, monkeypatch, tmp_path):
-        sim_dir = tmp_path / "simdir"
-        sim_dir.mkdir()
-        sim = sim_dir / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-            run.return_value = MagicMock(stdout="", stderr="fail")
-            with pytest.raises(AssertionError):
-                perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
 
     def test_origami_simulation_mocked(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         mock_origami = MagicMock()
         mock_origami.data_type_t.BFloat16 = "bf16_dtype"
         mock_helper_cls = MagicMock()
-        mock_helper_cls.get_hardware.return_value = MagicMock(N_CU=64)
+        mock_helper_cls.get_hardware.return_value = MagicMock(N_CU=304)
         mock_helper_cls.return_value.get_simulation_time.return_value = 99.0
         with patch.dict(sys.modules, {"origami": mock_origami}):
             with patch(
@@ -631,9 +601,10 @@ class TestGemmBaseCoverage:
         assert t == 99.0
         assert "Origami" in cmd
         mock_helper_cls.assert_called_once()
+        assert mock_helper_cls.call_args.kwargs["num_cus"] == 64
+        assert mock_helper_cls.get_hardware.return_value.N_CU == 304
 
     def test_origami_unsupported_dtype(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         mock_origami = MagicMock()
         with patch.dict(sys.modules, {"origami": mock_origami}):
             t, _ = perf_model.GEMM.get_simulation_time_func(
@@ -642,7 +613,6 @@ class TestGemmBaseCoverage:
         assert t is None
 
     def test_origami_import_error(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         perf_model.GEMM._origami_import_error_printed = False
         with patch.dict(sys.modules, {"origami": None}):
             t, _ = perf_model.GEMM.get_simulation_time_func(
@@ -1901,7 +1871,6 @@ class TestSdpaExtendedCoverage:
         assert model.bytes() > 0
 
     def test_sdpa_simulation_time_func(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         with patch.object(
             perf_model.GEMM,
             "get_simulation_time_func",
@@ -1924,7 +1893,6 @@ class TestSdpaExtendedCoverage:
         assert t > 0
 
     def test_sdpa_simulation_time_func_qkt_none(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         with patch.object(
             perf_model.GEMM, "get_simulation_time_func", return_value=(None, None)
         ):
@@ -1962,7 +1930,6 @@ class TestSdpaExtendedCoverage:
             assert model.get_simulation_time() == 42.0
 
     def test_sdpa_bwd_simulation_time_func(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         with patch.object(
             perf_model.GEMM,
             "get_simulation_time_func",
@@ -2071,35 +2038,8 @@ class TestGroupedGemmAndPrimusCoverage:
         assert model.flops() > 0
 
 
-class TestGemmSimulatorExtendedCoverage:
-    def test_gemm_simulator_missing_inputs(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        with pytest.raises(AssertionError, match="Invalid inputs"):
-            perf_model.GEMM.get_simulation_time_func(_ARCH, None, 8, 16, 1, "bf16")
+class TestGemmExtendedCoverage:
 
-    def test_gemm_simulator_cache_hit(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-            run.return_value = MagicMock(stdout="Time=10.0\n", stderr="")
-            t1, _ = perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
-            t2, _ = perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
-        assert t1 == t2 == 10.0
-        run.assert_called_once()
-
-    def test_gemm_simulator_windows_requires_python(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        with patch("TraceLens.PerfModel.perf_model.os.name", "nt"):
-            with pytest.raises(AssertionError, match="Windows"):
-                perf_model.GEMM.get_simulation_time_func(
-                    _ARCH, 4, 8, 16, 1, "bf16", python_path=None
-                )
 
     def test_jax_gemm_mixed_dtype_warns(self):
         event = {
@@ -2501,17 +2441,6 @@ class TestPerfModelRemaining:
         }
         model = perf_model.primus_turbo_grouped_gemm(event)
         assert model.flops() > 0
-
-    def test_gemm_simulator_invalid_arch(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        with pytest.raises(AssertionError, match="Invalid inputs"):
-            perf_model.GEMM.get_simulation_time_func(
-                {"freq_mhz": 2200}, None, 8, 16, 1, "bf16"
-            )
-        perf_model.GEMM.cache_gemm_results.clear()
 
 
 class _GroupedGemmNoBwdOverride(perf_model.GroupedGemm):
@@ -3624,28 +3553,7 @@ class TestPerfModelExtensionsBoost:
 
 
 class TestPerfModelPush95:
-    def test_gemm_simulator_missing_required_inputs(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        with pytest.raises(AssertionError, match="Invalid inputs"):
-            perf_model.GEMM.get_simulation_time_func(
-                {"name": "mi300x"}, None, 8, 16, 1, "bf16"
-            )
 
-    def test_gemm_simulator_force_to_l1_and_scaled_cus(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        arch = dict(_ARCH)
-        with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-            run.return_value = MagicMock(stdout="Time=3.3\n", stderr="")
-            t, _ = perf_model.GEMM.get_simulation_time_func(
-                arch, 4, 8, 16, 1, "bf16", num_cus=64, force_to_l1=True
-            )
-        assert t == 3.3
 
     def test_aten_scaled_mm_output_bpe_branches(self):
         for dtype in ("c10::Float8_e4m3fn", "c10::BFloat16"):
@@ -3947,22 +3855,6 @@ def test_moe_ck_and_gptq_extended():
     assert moe_ext.moe_gptq_awq_down(gptq).flops() > 0
 
 
-def test_gemm_simulator_clears_cache(monkeypatch, tmp_path):
-    perf_model.GEMM.cache_gemm_results.clear()
-    sim_dir = tmp_path / "simdir"
-    sim_dir.mkdir()
-    sim = sim_dir / "run_gemm.py"
-    sim.write_text("# stub\n")
-    monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-    with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-        run.return_value = MagicMock(stdout="Time=42.5\n", stderr="")
-        t, _ = perf_model.GEMM.get_simulation_time_func(
-            _ARCH, 4, 8, 16, 1, "bf16", num_cus=64, force_to_l1=True
-        )
-    assert t == 42.5
-    perf_model.GEMM.cache_gemm_results.clear()
-
-
 def test_untested_perf_extensions():
 
     blockscale = {
@@ -4146,41 +4038,9 @@ class TestMoeExtensionsSweep:
 
 
 class TestPerfModelPush95Coverage:
-    @pytest.mark.parametrize(
-        "missing,kwargs",
-        [
-            ("M", {"M": None, "N": 8, "K": 16, "B": 1, "dtype": "bf16"}),
-            ("N", {"M": 4, "N": None, "K": 16, "B": 1, "dtype": "bf16"}),
-            ("K", {"M": 4, "N": 8, "K": None, "B": 1, "dtype": "bf16"}),
-            ("dtype", {"M": 4, "N": 8, "K": 16, "B": 1, "dtype": None}),
-            ("arch['name']", {"M": 4, "N": 8, "K": 16, "B": 1, "dtype": "bf16"}),
-        ],
-    )
-    def test_gemm_simulator_missing_inputs(
-        self, monkeypatch, tmp_path, missing, kwargs
-    ):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        arch = dict(_ARCH) if "arch['name']" not in missing else {"freq_mhz": 2200}
-        with pytest.raises(AssertionError, match="Invalid inputs"):
-            perf_model.GEMM.get_simulation_time_func(arch, **kwargs)
-        perf_model.GEMM.cache_gemm_results.clear()
 
-    def test_gemm_simulator_subprocess_failure(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-            run.return_value = MagicMock(stdout="", stderr="fail")
-            with pytest.raises(AssertionError, match="Failed to simulate"):
-                perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
-        perf_model.GEMM.cache_gemm_results.clear()
 
     def test_gemm_origami_unsupported_dtype(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         mock_origami = MagicMock()
         mock_origami.data_type_t = MagicMock()
         with patch.dict(sys.modules, {"origami": mock_origami}):
@@ -4191,18 +4051,15 @@ class TestPerfModelPush95Coverage:
                     )
         assert t is None
 
-    def test_sdpa_simulation_via_subprocess_gemm(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-            run.return_value = MagicMock(stdout="Time=2.0\n", stderr="")
+    def test_sdpa_simulation_via_origami_gemm(self):
+        with patch.object(
+            perf_model.GEMM, "get_simulation_time_func", return_value=(2.0, "cmd")
+        ):
             with patch.object(perf_model.Softmax, "get_time", return_value=0.25):
                 t = perf_model.SDPA.get_simulation_time_func(
                     _ARCH,
                     "bf16",
-                    "/usr/bin/python3",
+                    None,
                     "c10::BFloat16",
                     1024,
                     2,
@@ -4211,9 +4068,9 @@ class TestPerfModelPush95Coverage:
                     128,
                     64,
                     fa=True,
+                    enable_origami=True,
                 )
         assert t > 0
-        perf_model.GEMM.cache_gemm_results.clear()
 
     @pytest.mark.parametrize(
         "cls,event",
@@ -4661,28 +4518,6 @@ class TestPerfModelFinalCoverage:
         with pytest.warns(UserWarning):
             model.bytes()
 
-    def test_gemm_simulator_with_python_path(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        try:
-            with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-                run.return_value = MagicMock(stdout="Time=5.5\n", stderr="")
-                t, cmd = perf_model.GEMM.get_simulation_time_func(
-                    _ARCH,
-                    4,
-                    8,
-                    16,
-                    None,
-                    "bf16",
-                    python_path="/usr/bin/python3",
-                    num_cus=64,
-                )
-            assert t == 5.5
-            assert "/usr/bin/python3" in cmd
-        finally:
-            perf_model.GEMM.cache_gemm_results.clear()
 
     def test_aten_reduce_edge_cases(self):
         empty = perf_model.aten_reduce(
@@ -5031,10 +4866,6 @@ class TestPerfModelDeepCoverage2:
         assert g.flops() > 0
         assert g.get_compute_precision() == "bf16"
 
-    def test_gemm_simulator_default_batch_and_invalid_path(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(tmp_path / "missing.py"))
-        with pytest.raises(ValueError, match="does not exist"):
-            perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
 
     def test_fused_rope_and_cross_entropy_precision(self):
         rope = perf_model.fused_rope_fwd(

@@ -36,15 +36,15 @@ from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils, merge_intervals
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
-from ..PerfModel.time_models import (
-    add_time_estimates,
-    default_time_estimators,
-    external_time_model,
+from ..PerfModel.op_models import (
+    add_op_model_outputs,
+    default_op_models,
+    external_op_model,
     get_compute_spec,
+    op_model_columns,
+    op_model_group_columns,
+    op_model_labels,
     op_work,
-    time_estimate_group_columns,
-    time_estimate_labels,
-    time_model_columns,
 )
 from ..PerfModel.utils import (
     build_perf_metrics_dict,
@@ -132,6 +132,8 @@ def _perf_model_init_kwargs(
     """
     Build keyword args for perf model construction. Only passes enable_origami
     and inductor_cache_dir when the model's __init__ declares them or accepts **kwargs.
+    A perf model's ``enable_origami`` turns on Origami for its own simulation,
+    which only the SDPA tile model has.
     """
     kwargs = {
         "event": event,
@@ -257,12 +259,12 @@ class TreePerfAnalyzer:
         tree_postprocess_extension=None,
         rebuild_tree=True,
         detect_recompute=False,
-        enable_origami=False,
+        enable_origami_gemm=False,
         inductor_cache_dir=None,
         pb_file_name=None,
         metadata_events=None,
         kernel_metadata_keyword_filters=None,
-        sdpa_tile_model=None,
+        enable_origami_sdpa_tile=False,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
@@ -274,10 +276,9 @@ class TreePerfAnalyzer:
         self.add_python_func = add_python_func
         self.arch = arch
         self.python_path = python_path
-        self.enable_origami = enable_origami
-        self.time_estimators = default_time_estimators(
-            enable_origami, python_path, sdpa_tile_model
-        )
+        self.enable_origami_gemm = enable_origami_gemm
+        self.enable_origami_sdpa_tile = enable_origami_sdpa_tile
+        self.op_models = default_op_models(enable_origami_gemm, enable_origami_sdpa_tile)
         self.kernel_filters = {}
         self.inductor_cache_dir = inductor_cache_dir
         self.event_to_category = event_to_category
@@ -305,30 +306,31 @@ class TreePerfAnalyzer:
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
 
-    def register_time_model(self, label, model):
-        """Report ``model(category, params, arch)`` as ``<label> Time (µs)``.
+    def register_op_model(self, label, model):
+        """Report op model ``model(category, params, arch)`` under ``label``:
+        ``<label> Time (µs)`` and its other columns.
 
-        See :mod:`TraceLens.PerfModel.time_models`. ``None`` removes the label.
+        See :mod:`TraceLens.PerfModel.op_models`. ``None`` removes the label.
         Registering an existing label replaces its model.
         """
         if model is None:
-            self.time_estimators.pop(label, None)
+            self.op_models.pop(label, None)
         elif not callable(model):
-            raise TypeError(f"time model {label!r} must be callable or None")
+            raise TypeError(f"op model {label!r} must be callable or None")
         else:
-            self.time_estimators[label] = external_time_model(model)
+            self.op_models[label] = external_op_model(model)
 
-    def set_external_perf_model(self, model):
-        """Report ``model(category, params, arch)`` as ``External Time (µs)``."""
-        self.register_time_model("External", model)
+    def set_external_op_model(self, model):
+        """Report op model ``model(category, params, arch)`` as ``External``."""
+        self.register_op_model("External", model)
 
     def register_kernel_filter(self, label, keep_kernel):
         """Report the busy time of the op's kernels for which ``keep_kernel(kernel)``
         is true as ``<label> Kernel Time (µs)``, with ``<label> TFLOPS/s``.
 
-        For example, ``register_kernel_filter("Non-Data-Mov",
-        TreePerfAnalyzer.non_data_mov_filter)`` leaves out copy and transpose
-        kernels. ``None`` removes the label.
+        For example, ``register_kernel_filter("Non-Data-Mov", lambda kernel:
+        "direct_copy_kernel" not in kernel["name"])`` leaves out copy kernels.
+        ``None`` removes the label.
         """
         if keep_kernel is None:
             self.kernel_filters.pop(label, None)
@@ -413,14 +415,9 @@ class TreePerfAnalyzer:
         list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernel_uids]
         return self.GPUEventAnalyser(list_kernels).compute_metrics()["busy_time"]
 
-    @staticmethod
-    def non_data_mov_filter(event):
-        DATA_MOVEMENT_PATTERNS = ["at::native::direct_copy_kernel_cuda", "transpose_"]
-        return not any(pattern in event["name"] for pattern in DATA_MOVEMENT_PATTERNS)
-
     def compute_perf_metrics(self, event, bwd=False, perf_model_class=None):
-        """Perf metrics for one op: measure it, model its work, then add one
-        column group per registered time estimator."""
+        """Perf metrics for one op: measure it, model its work, then add the
+        columns of each registered op model."""
         busy_kernel_time, filtered_busy_times = self._measure_op_time(event, bwd)
         perf_model = self._build_perf_model(event, perf_model_class)
         work = op_work(perf_model, bwd)
@@ -434,8 +431,8 @@ class TreePerfAnalyzer:
                 work.gflops, None, busy_time
             )
         dict_metrics["Compute Spec"] = work.compute_spec or ""
-        add_time_estimates(
-            dict_metrics, self.time_estimators, work, self.arch, busy_kernel_time
+        add_op_model_outputs(
+            dict_metrics, self.op_models, work, self.arch, busy_kernel_time
         )
 
         for key, value in perf_model.param_details.items():
@@ -486,7 +483,7 @@ class TreePerfAnalyzer:
                 event,
                 self.arch,
                 self.python_path,
-                self.enable_origami,
+                self.enable_origami_sdpa_tile,
                 self.inductor_cache_dir,
             )
         )
@@ -656,11 +653,11 @@ class TreePerfAnalyzer:
         # Compute Spec - static for same args
         if "Compute Spec" in df_perf_metrics.columns:
             dict_agg["Compute Spec"] = "first"
-        # Time estimates depend only on the op's params, so take the first;
+        # Op-model outputs depend only on the op's params, so take the first;
         # Pct <label> depends on the measured time, so aggregate it.
-        labels = time_estimate_labels(df_perf_metrics.columns)
+        labels = op_model_labels(df_perf_metrics.columns)
         for label in labels:
-            for col in time_estimate_group_columns(
+            for col in op_model_group_columns(
                 df_perf_metrics.columns, label, labels
             ):
                 dict_agg[col] = agg_metrics if col == f"Pct {label}" else "first"
@@ -2079,14 +2076,14 @@ class TreePerfAnalyzer:
                 "Roofline Bound",
                 "Pct Roofline",
             ]
-            for label in self.time_estimators:
+            for label in self.op_models:
                 if label == "Roofline":
                     continue
-                for cols in time_model_columns(label):
+                for cols in op_model_columns(label):
                     perf_cols.extend(cols)
             for label in self.kernel_filters:
                 perf_cols.extend([f"{label} Kernel Time (µs)", f"{label} TFLOPS/s"])
-            estimate_prefixes = tuple(f"{label} " for label in self.time_estimators)
+            estimate_prefixes = tuple(f"{label} " for label in self.op_models)
 
             if include_perf_metrics and has_own_perf_model:
                 # Has own perf model - compute forward metrics
@@ -2202,7 +2199,7 @@ class TreePerfAnalyzer:
         col_order.extend(["duration_us", "has_perf_model", "is_recompute"])
         if include_perf_metrics:
             col_order.extend(perf_cols)
-            labels = sorted(self.time_estimators, key=len, reverse=True)
+            labels = sorted(self.op_models, key=len, reverse=True)
             for col in df.columns:
                 label = next((n for n in labels if col.startswith(f"{n} ")), None)
                 if label is None or col in col_order:
@@ -2312,13 +2309,13 @@ class TreePerfAnalyzer:
             if col in df_temp.columns:
                 agg_dict[col] = "first"
 
-        # Time estimates other than roofline (placed below).
+        # Op models other than roofline (placed below).
         # Keep the flattened "_first" names in unified_perf_summary for visibility.
-        labels = time_estimate_labels(df_temp.columns)
+        labels = op_model_labels(df_temp.columns)
         for label in labels:
             if label == "Roofline":
                 continue
-            for col in time_estimate_group_columns(df_temp.columns, label, labels):
+            for col in op_model_group_columns(df_temp.columns, label, labels):
                 agg_dict[col] = agg_metrics if col == f"Pct {label}" else "first"
 
         # Time-varying metrics - mean/std (varies per instance)
@@ -3028,12 +3025,12 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         tree_postprocess_extension=None,
         rebuild_tree=False,
         detect_recompute=False,
-        enable_origami=False,
+        enable_origami_gemm=False,
         inductor_cache_dir=None,
         pb_file_name=None,
         metadata_events=None,
         kernel_metadata_keyword_filters: list[str] = None,
-        sdpa_tile_model=None,
+        enable_origami_sdpa_tile=False,
     ):
         super().__init__(
             tree=tree,
@@ -3047,9 +3044,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             tree_postprocess_extension=tree_postprocess_extension,
             rebuild_tree=False,
             detect_recompute=detect_recompute,
-            enable_origami=enable_origami,
+            enable_origami_gemm=enable_origami_gemm,
             inductor_cache_dir=inductor_cache_dir,
-            sdpa_tile_model=sdpa_tile_model,
+            enable_origami_sdpa_tile=enable_origami_sdpa_tile,
         )
         self.pb_file_name = pb_file_name
         self.tree.build_tree(
@@ -3573,7 +3570,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 event,
                 self.arch,
                 self.python_path,
-                self.enable_origami,
+                self.enable_origami_sdpa_tile,
                 self.inductor_cache_dir,
             )
         )
@@ -3585,8 +3582,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             work.gflops, work.bytes_moved, busy_kernel_time
         )
         dict_metrics["Compute Spec"] = work.compute_spec or ""
-        add_time_estimates(
-            dict_metrics, self.time_estimators, work, self.arch, busy_kernel_time
+        add_op_model_outputs(
+            dict_metrics, self.op_models, work, self.arch, busy_kernel_time
         )
 
         for key, value in perf_model.param_details.items():
