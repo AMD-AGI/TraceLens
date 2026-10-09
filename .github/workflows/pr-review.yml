@@ -129,8 +129,15 @@ jobs:
           EOF
           model_flag=""
           if [ -n "${PR_REVIEW_MODEL:-}" ]; then model_flag="--model $PR_REVIEW_MODEL"; fi
+          # Headless runner: no human to approve tool use, and $WORK is under
+          # runner.temp (outside the checkout), so grant tools up front and add
+          # $WORK as a writable dir. The job holds no GitHub write token and the
+          # contract above forbids gh mutations, so the review can only read the
+          # repo, read the evidence, and write its card.
           claude -p "Read .claude/skills/review-pr/SKILL.md and follow it for PR #$PR in $REPO. Evidence is already collected in $WORK; do not re-run fetch.sh." \
             --append-system-prompt "$CI_CONTRACT" \
+            --dangerously-skip-permissions \
+            --add-dir "$WORK" \
             --output-format stream-json --verbose \
             $model_flag
           test -s "$WORK/card.md" || { echo "review produced no card.md"; exit 1; }
