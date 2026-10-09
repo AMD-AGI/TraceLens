@@ -35,7 +35,7 @@ class aiter_fused_allreduce_rmsnorm(CustomCollective):
         e.g. [(1,), (), (4, 7168), (4, 7168), (4, 7168), (4, 7168), (7168,), (), (), ()]
 
     FLOPs: residual-add + RMSNorm (allreduce is bandwidth-bound, not counted).
-    Bytes: HBM traffic per GPU (read inp+res_inp+weight, write res_out+out).
+    Bytes: memory traffic per GPU (read inp+res_inp+weight, write res_out+out).
     """
 
     def __init__(self, event, arch=None, python_path=None):
@@ -69,7 +69,7 @@ class aiter_fused_allreduce_rmsnorm(CustomCollective):
         return add_flops + rms_flops
 
     def bytes(self):
-        # HBM traffic per GPU (inter-GPU allreduce bandwidth is separate)
+        # memory traffic per GPU (inter-GPU allreduce bandwidth is separate)
         # Reads:  inp, res_inp, weight
         # Writes: res_out, out
         bytes_read = 2 * self.num_elems * self.bpe_in + self.num_channels * self.bpe_in
@@ -125,7 +125,7 @@ class custom_ar_all_reduce(CustomCollective):
         e.g. [(), (4, 7168), (4, 7168), (), ()]
 
     FLOPs: None — purely inter-GPU communication, no on-chip compute.
-    Bytes: HBM traffic per GPU (read inp + write out).
+    Bytes: memory traffic per GPU (read inp + write out).
     """
 
     def __init__(self, event, arch=None, python_path=None):
@@ -151,7 +151,7 @@ class custom_ar_all_reduce(CustomCollective):
         return 0
 
     def bytes(self):
-        # HBM traffic per GPU: read inp + write out
+        # memory traffic per GPU: read inp + write out
         return 2 * self.num_elems * self.bpe_in
 
 
@@ -177,7 +177,7 @@ class sgl_kernel_all_reduce_reg(custom_ar_all_reduce):
     Expected Input type from trace:
         ['Scalar', 'c10::BFloat16', 'c10::BFloat16']
 
-    flops/bytes inherited from custom_ar_all_reduce (FLOPs=0; HBM bytes per GPU
+    flops/bytes inherited from custom_ar_all_reduce (FLOPs=0; memory bytes per GPU
     = 2 * num_elems * bpe_in for the local read+write; inter-GPU bandwidth is
     a separate concern from the on-chip roofline).
     """
@@ -192,7 +192,7 @@ class sgl_kernel_qr_all_reduce(custom_ar_all_reduce):
         python/sglang/srt/distributed/device_communicators/quick_all_reduce.py        # QuickAllReduce.quick_all_reduce
 
     SGLang's QuickReduce all-reduce variant. Launches `quickreduce::allreduce_prototype_twoshot<...>`
-    or related kernels. Same per-GPU HBM accounting as the registered
+    or related kernels. Same per-GPU memory accounting as the registered
     all-reduce: read local input, write allreduced output.
 
     Signature: qr_all_reduce(fa, inp, out, quant_level, cast_bf2half) -> None
@@ -211,8 +211,8 @@ class sgl_kernel_qr_all_reduce(custom_ar_all_reduce):
 
     flops/bytes inherited from custom_ar_all_reduce (uses indices [1]/[2] for
     inp/out shape and dtype; trailing scalars are ignored). This deliberately
-    counts only the BF16 HBM traffic; intra-kernel int4 quant for higher
-    `quant_level` reduces inter-GPU bytes but not the HBM read/write step
+    counts only the BF16 memory traffic; intra-kernel int4 quant for higher
+    `quant_level` reduces inter-GPU bytes but not the memory read/write step
     modeled here.
     """
 
@@ -226,7 +226,7 @@ class custom_ar_qr_all_reduce(custom_ar_all_reduce):
         vllm/distributed/device_communicators/quick_all_reduce.py # QuickAllReduce.quick_all_reduce
         csrc/custom_all_reduce/quick_all_reduce.cu                # quickreduce::allreduce_prototype_*
 
-    vLLM's QuickReduce all-reduce variant.  Same per-GPU HBM accounting as a plain
+    vLLM's QuickReduce all-reduce variant.  Same per-GPU memory accounting as a plain
     custom all-reduce: read local input, write the allreduced output.
 
     Signature: qr_all_reduce(fa, inp, out, quant_level, cast_bf2half) -> None
@@ -248,7 +248,7 @@ class custom_ar_qr_all_reduce(custom_ar_all_reduce):
 
     flops/bytes inherited from custom_ar_all_reduce (uses Input Dims[1] for
     `op_shape` and Input type[1] for dtype; trailing scalar args are ignored).
-    The HBM read+write is BF16 regardless of the inter-GPU codec; modeled as
+    The memory read+write is BF16 regardless of the inter-GPU codec; modeled as
     `2 * num_elems * bpe_in` bytes per GPU.
     """
 
@@ -269,7 +269,7 @@ class aiter_reduce_scatter(CustomCollective):
         e.g. [(), (8, 7168), (4, 7168)]
 
     FLOPs: None — purely inter-GPU communication.
-    Bytes: HBM traffic per GPU (read inp + write out).
+    Bytes: memory traffic per GPU (read inp + write out).
     """
 
     def __init__(self, event, arch=None, python_path=None):
@@ -316,7 +316,7 @@ class aiter_all_gather_reg(CustomCollective):
         e.g. [(), (4, 7168), (8, 7168)]
 
     FLOPs: None — purely inter-GPU communication.
-    Bytes: HBM traffic per GPU (read inp shard + write full out).
+    Bytes: memory traffic per GPU (read inp shard + write full out).
     """
 
     def __init__(self, event, arch=None, python_path=None):
