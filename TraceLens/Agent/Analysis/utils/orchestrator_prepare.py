@@ -1288,7 +1288,7 @@ def main():
         # Create metadata JSON
         metadata = {
             "platform": platform,
-            "peak_hbm_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
+            "peak_mem_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
             "max_achievable_tflops": platform_specs["max_achievable_tflops"],
             "memory_gb": platform_specs.get("memory_gb"),
             "trace_path": trace_path,
@@ -1324,7 +1324,7 @@ def main():
 
     cpu_idle_metadata = {
         "platform": platform,
-        "peak_hbm_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
+        "peak_mem_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
         "max_achievable_tflops": platform_specs["max_achievable_tflops"],
         "memory_gb": platform_specs.get("memory_gb"),
         "trace_path": trace_path,
@@ -1377,7 +1377,7 @@ def main():
         # Create multi-kernel metadata
         multi_kernel_metadata = {
             "platform": platform,
-            "peak_hbm_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
+            "peak_mem_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
             "max_achievable_tflops": platform_specs["max_achievable_tflops"],
             "memory_gb": platform_specs.get("memory_gb"),
             "trace_path": trace_path,

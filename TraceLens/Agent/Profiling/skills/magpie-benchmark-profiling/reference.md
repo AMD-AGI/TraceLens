@@ -198,7 +198,7 @@ Before running the benchmark, ask the user whether they want to profile a target
 
 #### Common profiler flags (apply for both Option A and Option B)
 
-The flags below must be applied **regardless** of whether the user chooses targeted-window or full-benchmark profiling. They enable graph-capture tracing, detailed annotations, and shape discovery that are required for downstream TraceLens analysis.
+The flags below must be applied **regardless** of whether the user chooses targeted-window or full-benchmark profiling. They enable graph-capture tracing, detailed annotations, and kernel shape recording that are required for downstream TraceLens analysis.
 
 ##### Common vLLM flags
 
@@ -223,9 +223,20 @@ Both flags take the same form on every supported version: they come from the Tra
 
 ##### Common SGLang flags
 
-Apply **three** edits regardless of profiling mode:
+Apply **four** edits regardless of profiling mode. Kernel shapes come from the TraceLens **kernel shape tool** (`TraceLens/TraceUtils/kernel_shape_tool/`), not from SGLang's patch-based shape discovery, so do **not** add `--enable-shape-discovery-for-cuda-graph-profile` or the `shape_discovery` request field.
 
-**1. Add profiling env vars to the user's YAML config.**
+**1. Make the kernel shape tool visible inside the container.**
+
+Magpie only bind-mounts the HF cache, the workspace, the model directory and the InferenceX checkout (at `/opt/InferenceX`), so copy the tool into the InferenceX checkout. That checkout is `<magpie_repo>/InferenceX` unless the YAML sets `inferencex_path`:
+
+```bash
+ssh <node> "cp -r <TraceLens_repo>/TraceLens/TraceUtils/kernel_shape_tool \
+  <magpie_repo>/InferenceX/kernel_shape_tool"
+```
+
+The tool wraps Triton/aiter/FlashInfer kernel launchers as `sglang_profiler::*` custom ops while the torch profiler is running, so they carry `Input Dims` / `Input type` / `Input Strides` in the trace. It patches no SGLang source and works on stock and TraceLens-patched images alike.
+
+**2. Add profiling env vars to the user's YAML config.**
 
 ```yaml
 benchmark:
@@ -233,7 +244,14 @@ benchmark:
     SGLANG_PROFILE_WITH_STACK: "True"
     SGLANG_PROFILE_RECORD_SHAPES: "True"
     SGLANG_GRAPH_BATCH_CAPTURE: "True"
+    TRACELENS_SHAPE_DISCOVERY: "1"
+    PYTHONPATH: "/opt/InferenceX/kernel_shape_tool"
 ```
+
+`PYTHONPATH` and `TRACELENS_SHAPE_DISCOVERY` activate the kernel shape tool: CPython auto-imports the tool's `sitecustomize.py` in the server and every TP worker, and the flag turns its hooks on. Two things to check:
+
+- Magpie passes `envs` with `docker run -e`, which **replaces** any `PYTHONPATH` the image sets. Check with `ssh <node> "docker image inspect --format '{{json .Config.Env}}' <image>"`; if the image already has `PYTHONPATH`, keep its entries after the tool, e.g. `"/opt/InferenceX/kernel_shape_tool:<image PYTHONPATH>"`.
+- The tool directory must come **first**: CPython imports only the first `sitecustomize` it finds on `sys.path`.
 
 These enable call-stack capture and tensor shape recording in the profiler trace, which are required for TraceLens roofline analysis and kernel attribution.
 
@@ -244,29 +262,29 @@ These enable call-stack capture and tensor shape recording in the profiler trace
 
 Note the plural in `SGLANG_PROFILE_RECORD_SHAPES` — the singular form is silently ignored, and since upstream defaults the real variable to `True`, a misspelling is easy to miss.
 
-**2. Add graph-capture profiling flags as `EXTRA_SGLANG_ARGS` in the user's YAML config.**
+**3. Add the graph-capture profiling flag as `EXTRA_SGLANG_ARGS` in the user's YAML config.**
 
 ```yaml
 benchmark:
   envs:
-    EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph --enable-shape-discovery-for-cuda-graph-profile"
+    EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph"
 ```
 
-If the YAML already has an `EXTRA_SGLANG_ARGS` field with existing flags, **append** these flags to the existing value rather than replacing it.
+If the YAML already has an `EXTRA_SGLANG_ARGS` field with existing flags, **append** this flag to the existing value rather than replacing it.
 
 - `--enable-profile-cuda-graph` — makes CUDA graph-replayed operations individually traced rather than appearing as a single opaque graph-launch kernel. Without this flag, the profiler cannot see inside replayed graphs and roofline analysis is incomplete.
-- `--enable-shape-discovery-for-cuda-graph-profile` — records tensor shapes for operations inside CUDA graphs, enabling accurate roofline modelling of graph-replayed kernels.
 
-**3. Patch `benchmark_serving.py` to enable shape discovery and roofline annotations in the profile request body.**
+The graph-capture traces are also where graph-replayed kernels get their shapes: those kernels run no Python during replay, so the kernel shape tool can only record them while the graphs are captured.
 
-The file is at `<magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py`. The existing code has `"num_steps": 1` hardcoded in the `extra_body` dict. Add `shape_discovery` and `detailed_annotations` flags:
+**4. Patch `benchmark_serving.py` to enable roofline annotations in the profile request body.**
+
+The file is at `<magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py`. The existing code has `"num_steps": 1` hardcoded in the `extra_body` dict. Add the `detailed_annotations` flag:
 
 ```bash
-ssh <node> "sed -i 's/\"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/\"shape_discovery\": True, \"detailed_annotations\": True, \"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/' \
+ssh <node> "sed -i 's/\"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/\"detailed_annotations\": True, \"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/' \
   <magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py"
 ```
 
-- `shape_discovery: True` — enables tensor shape recording for CUDA graph operations during profiling.
 - `detailed_annotations: True` — adds FLOPs and memory bandwidth annotations needed for roofline analysis.
 
 ##### Common ATOM flags
@@ -370,11 +388,11 @@ Replace `10` with a different multiplier if the user requests it.
 
 ###### SGLang targeted window
 
-SGLang profiling is controlled **client-side** via the `/start_profile` HTTP endpoint, not via server CLI args. The benchmark client (`benchmark_serving.py`) sends a POST to `/start_profile` with an `extra_body` dict. The common SGLang flags (env vars, `EXTRA_SGLANG_ARGS`, `shape_discovery`, `detailed_annotations`) were already applied in the shared section above. Apply **two** additional edits for targeted windowing:
+SGLang profiling is controlled **client-side** via the `/start_profile` HTTP endpoint, not via server CLI args. The benchmark client (`benchmark_serving.py`) sends a POST to `/start_profile` with an `extra_body` dict. The common SGLang flags (kernel shape tool, env vars, `EXTRA_SGLANG_ARGS`, `detailed_annotations`) were already applied in the shared section above. Apply **two** additional edits for targeted windowing:
 
 **1. Patch `benchmark_serving.py` to set `start_step` and `num_steps`.**
 
-The common section already patched `benchmark_serving.py` to add `shape_discovery` and `detailed_annotations`. Now apply a second sed to set the targeted window parameters:
+The common section already patched `benchmark_serving.py` to add `detailed_annotations`. Now apply a second sed to set the targeted window parameters:
 
 ```bash
 ssh <node> "sed -i 's/\"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/\"start_step\": <DELAY>, \"num_steps\": <MAX>, \"merge_profiles\": False, \"profile_by_stage\": False/' \
@@ -415,7 +433,7 @@ Two consequences worth stating to the user before the run:
 
 Do **not** add `start_step`/`delay_iterations` args or increase `num_prompts`. The common flags from the shared section above **still apply** and must be present:
 - **vLLM:** No `delay_iterations` / `max_iterations` — the profiler captures everything from start to finish. The common vLLM flags (`capture_torch_profiler`, `detailed_trace_annotation`) must be in `EXTRA_VLLM_ARGS`.
-- **SGLang:** `num_steps` stays at `1` (or user can manually increase it without setting `start_step`). The common SGLang flags (env vars `SGLANG_PROFILE_WITH_STACK`/`SGLANG_PROFILE_RECORD_SHAPES`, `EXTRA_SGLANG_ARGS` with graph-capture flags, and the `shape_discovery`/`detailed_annotations` patch to `benchmark_serving.py`) must all be applied.
+- **SGLang:** `num_steps` stays at `1` (or user can manually increase it without setting `start_step`). The common SGLang flags (the kernel shape tool copy plus `TRACELENS_SHAPE_DISCOVERY`/`PYTHONPATH`, env vars `SGLANG_PROFILE_WITH_STACK`/`SGLANG_PROFILE_RECORD_SHAPES`/`SGLANG_GRAPH_BATCH_CAPTURE`, `EXTRA_SGLANG_ARGS` with `--enable-profile-cuda-graph`, and the `detailed_annotations` patch to `benchmark_serving.py`) must all be applied.
 - **ATOM:** No change from Option A — ATOM has no targeted-window mechanism either way. The common ATOM flags (`ATOM_PROFILER_MORE`, `ATOM_ENABLE_DETAILED_ANNOTATION`, and `EXTRA_ATOM_ARGS` with `--mark-trace`) must be applied.
 - `num_prompts` stays at `CONC` — keeps the trace to a manageable size since every iteration is profiled.
 
@@ -441,7 +459,7 @@ ssh <node> "cd <magpie_repo>/InferenceX && \
 
 Then edit the user's YAML config to remove the profiler flags from `EXTRA_VLLM_ARGS` (or restore the original value if it had pre-existing flags).
 
-**For SGLang:** The YAML config was modified (to add profiling env vars and `EXTRA_SGLANG_ARGS`) and `benchmark_serving.py` was patched (common flags). If using targeted window (Option A), `benchmark_lib.sh` was also patched. Back up the remote files before patching:
+**For SGLang:** The YAML config was modified (to add profiling env vars and `EXTRA_SGLANG_ARGS`), the kernel shape tool was copied into the InferenceX checkout, and `benchmark_serving.py` was patched (common flags). If using targeted window (Option A), `benchmark_lib.sh` was also patched. Back up the remote files before patching:
 
 ```bash
 ssh <node> "cd <magpie_repo>/InferenceX && \
@@ -454,10 +472,11 @@ After the benchmark completes, restore the remote files:
 ```bash
 ssh <node> "cd <magpie_repo>/InferenceX && \
   mv benchmarks/benchmark_lib.sh.bak benchmarks/benchmark_lib.sh && \
-  mv utils/bench_serving/benchmark_serving.py.bak utils/bench_serving/benchmark_serving.py"
+  mv utils/bench_serving/benchmark_serving.py.bak utils/bench_serving/benchmark_serving.py && \
+  rm -rf kernel_shape_tool"
 ```
 
-Then edit the user's YAML config to remove the profiling env vars (`SGLANG_PROFILE_WITH_STACK`, `SGLANG_PROFILE_RECORD_SHAPES`, `SGLANG_GRAPH_BATCH_CAPTURE`) and the `EXTRA_SGLANG_ARGS` profiler flags (or restore the original values if they had pre-existing content).
+Then edit the user's YAML config to remove the profiling env vars (`SGLANG_PROFILE_WITH_STACK`, `SGLANG_PROFILE_RECORD_SHAPES`, `SGLANG_GRAPH_BATCH_CAPTURE`, `TRACELENS_SHAPE_DISCOVERY`, `PYTHONPATH`) and the `EXTRA_SGLANG_ARGS` profiler flags (or restore the original values if they had pre-existing content).
 
 **For ATOM:** Only the YAML config was modified (to add `ATOM_PROFILER_MORE`, `ATOM_ENABLE_DETAILED_ANNOTATION`, and `EXTRA_ATOM_ARGS`). No remote script is patched in either profiling mode, so there is nothing to back up or restore — just remove those entries from the YAML (or restore the original values if they had pre-existing content).
 
@@ -530,6 +549,7 @@ for cat, cnt in sorted(cats.items(), key=lambda x: -x[1])[:10]:
 | Each file > 100KB | SGLang: EXTEND ~4-5MB, DECODE ~150KB. vLLM: ~100-150MB per rank for large models with graph replay | Profiling window too short or no GPU ops |
 | `kernel` category present | Hundreds to thousands of kernel events | `ProfilerActivity.CUDA` not captured |
 | Multiple event categories | `cpu_op`, `kernel`, `cuda_runtime`, `python_function` | Partial trace; re-run |
+| SGLang: `sglang_profiler::*` `cpu_op` events with `Input Dims` | Present in the per-rank traces and in `capture_traces/` | Kernel shape tool inactive: check the tool was copied under the InferenceX checkout, `TRACELENS_SHAPE_DISCOVERY=1` is set, and the tool is first on `PYTHONPATH` |
 
 **SGLang trace naming convention:**
 - `<id>-TP-{rank}-DECODE.trace.json.gz` — decode phase per rank

@@ -130,6 +130,10 @@ def _base_from_demangled(name: str) -> str:
         if not cls:
             return ""
         return ("~" + cls) if "dtor" in placeholder else cls
+    # A name cut off with "..." keeps only part of its "<...>"; drop that so we
+    # don't read the bare name out of the leftover template text.
+    if n.endswith("...") and "<" in n:
+        n = n.split("<", 1)[0]
     if "::" in n:
         n = n.rsplit("::", 1)[-1]
     return n

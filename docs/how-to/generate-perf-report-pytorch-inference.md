@@ -1,5 +1,5 @@
 <!--
-Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
@@ -476,11 +476,6 @@ graph launch aren't merged. vLLM speculator captures
 (`graph_capture_rank_0_speculator.*`) are classified as `drafter`, which keeps them
 from replacing target captures; the speculator's replay graphs aren't merged yet.
 
-```{note}
-`--capture_folder` and `--comparison_json_path` can't be used together: the
-TraceDiff comparison doesn't support graph-capture traces.
-```
-
 ## Inference-oriented options
 
 The inference report shares most options with the PyTorch report (output paths,
@@ -490,7 +485,7 @@ relevant to serving traces:
 | Argument                     | Default   | Description                                                                                                                                         |
 | ---------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--profile_json_path`      | required  | Path to the graph-replay `torch.profiler` trace (`.json` or `.json.gz`).                                                                       |
-| `--capture_folder PATH`    | `None`  | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). Mutually exclusive with `--comparison_json_path`. |
+| `--capture_folder PATH`    | `None`  | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). |
 | `--group_by_parent_module` | `False` | Group kernel-launcher summaries by parent `nn.Module` in addition to operation name.                                                               |
 | `--group_by_num_kernels`   | `False` | Group summary rows by the number of kernels.                                                                                                        |
 | `--include_call_stack`     | `False` | Add the CPU call stack to the report.                                                                                                               |

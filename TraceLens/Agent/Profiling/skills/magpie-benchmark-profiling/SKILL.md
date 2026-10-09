@@ -33,7 +33,7 @@ Follow **[reference.md](reference.md)** for every step (SSH/conda prompts, `buil
 ```
 0. Gather execution environment (node, conda env, conda prefix)
 1. Read benchmark YAML; optionally build TraceLens-patched Docker image (vLLM, SGLang, or ATOM)
-2. Ensure torch profiler enabled; apply common graph/capture flags; choose targeted vs full profiling
+2. Ensure torch profiler enabled; apply common graph/capture flags (SGLang: kernel shape tool, not shape discovery); choose targeted vs full profiling
 3. Run: python -m Magpie benchmark --benchmark-config <yaml> (long-running; monitor via docker)
 4. Monitor container / logs on the remote node
 5. Verify trace files and GPU kernel categories in torch_trace/

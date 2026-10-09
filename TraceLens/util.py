@@ -412,7 +412,7 @@ class DataLoader:
         elif filename_path.endswith("json.gz"):
             import gzip
 
-            with gzip.open(filename_path, "r") as fin:
+            with gzip.open(filename_path, "rb") as fin:
                 data = fin.read()  # Keep as bytes for orjson
         elif filename_path.endswith("json"):
             with open(filename_path, "rb") as fin:  # Read as bytes for orjson
@@ -421,18 +421,25 @@ class DataLoader:
             raise ValueError("Unknown file type", filename_path)
 
         # Use orjson for faster parsing (23% faster than stdlib json)
-        # Falls back to json if orjson not available
+        # Falls back to json if orjson not available. rocprofv3 HIP API string
+        # args can embed invalid UTF-8; retry those traces with replacement.
         try:
             import orjson
 
-            parsed = orjson.loads(data)
+            try:
+                parsed = orjson.loads(data)
+            except orjson.JSONDecodeError:
+                if not isinstance(data, bytes):
+                    raise
+                data = data.decode("utf-8", errors="replace").encode("utf-8")
+                parsed = orjson.loads(data)
         except ImportError:
             logger.warning(
                 "orjson not available, falling back to standard json. "
                 "Install orjson for faster JSON parsing: pip install orjson"
             )
             if isinstance(data, bytes):
-                data = data.decode("utf-8")
+                data = data.decode("utf-8", errors="replace")
             parsed = json.loads(data)
         if filename_path.endswith("pb"):
             parsed = _normalize_xprof_trace(parsed)
