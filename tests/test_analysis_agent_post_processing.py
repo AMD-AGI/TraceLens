@@ -371,35 +371,6 @@ _FUSION_MD = """# ExampleNet - OTHER_GPU Standalone Analysis
 <!-- impact-end -->
 """
 
-_FUSION_P2_GOLDEN = {
-    "operation": "Unfused Activation",
-    "members": [
-        {
-            "kernel_launcher_path": "linear.py(30): forward",
-            "library": None,
-            "category": None,
-            "analysis_md_rank": "P2",
-            "kernel_name": ["gemm_kernel_b"],
-            "args_shapes": ["(64,)", "(16,64)", "(64,64)"],
-            "args_datatypes": ["bf16", "bf16", "bf16"],
-            "time_ms": 12.0,
-            "count": 100,
-            "pct_e2e": 1.2,
-            "flops_per_byte": 700.0,
-            "efficiency_percent": 60.0,
-            "efficiency_peak_value": 700.0,
-            "efficiency_peak_unit": "TFLOPS",
-            "bound": "compute-bound",
-        },
-    ],
-    "impact": {"mid": 1.25, "low": 1.0, "high": 1.5},
-    "identification": "The activation runs as a separate elementwise kernel after a GEMM.",
-    "reasoning": None,
-    "resolution": "Fold the activation into the GEMM epilogue.",
-    "prose_truncated": False,
-    "priority": 2,
-}
-
 # (name, md, mode, has_op_row, n_warn) — the inline replacement for the disk
 # fixture matrix. Corpus-wide smoke/determinism/faithfulness tests iterate this.
 _MATRIX = [
@@ -1134,7 +1105,35 @@ def test_fusion_tier_golden(tmp_path):
     report, _ = _render_text(_FUSION_MD, tmp_path)
     _assert_schema_valid(report)
     p1, p2 = report["fusion_optimizations"]
-    assert p2 == _FUSION_P2_GOLDEN
+    expected_p2 = {
+        "operation": "Unfused Activation",
+        "members": [
+            {
+                "kernel_launcher_path": "linear.py(30): forward",
+                "library": None,
+                "category": None,
+                "analysis_md_rank": "P2",
+                "kernel_name": ["gemm_kernel_b"],
+                "args_shapes": ["(64,)", "(16,64)", "(64,64)"],
+                "args_datatypes": ["bf16", "bf16", "bf16"],
+                "time_ms": 12.0,
+                "count": 100,
+                "pct_e2e": 1.2,
+                "flops_per_byte": 700.0,
+                "efficiency_percent": 60.0,
+                "efficiency_peak_value": 700.0,
+                "efficiency_peak_unit": "TFLOPS",
+                "bound": "compute-bound",
+            },
+        ],
+        "impact": {"mid": 1.25, "low": 1.0, "high": 1.5},
+        "identification": "The activation runs as a separate elementwise kernel after a GEMM.",
+        "reasoning": None,
+        "resolution": "Fold the activation into the GEMM epilogue.",
+        "prose_truncated": False,
+        "priority": 2,
+    }
+    assert p2 == expected_p2
     assert p1["operation"] == "Unfused Attention"
     assert p1["impact"] == {"mid": 13.5, "low": 11.5, "high": 15.5}
     softmax = p1["members"][1]

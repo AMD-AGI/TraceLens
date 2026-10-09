@@ -111,15 +111,6 @@ from TraceLens.Agent.Analysis.utils.classify_kernels import (
 )
 
 # Constants
-_FUSION_HEADER = (
-    "| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | "
-    "FLOPS/Byte | Efficiency | Bound |"
-)
-_FUSION_SEP = "|---|---|---|---|---|---|---|---|---|---|"
-_FUSION_ROW = (
-    "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
-    "50.00% of 5.3 TB/s | memory-bound |"
-)
 _ATTN_PERF_ROWS = {
     ("qk",): {"op category": "GEMM"},
     ("pv",): {"op category": "GEMM"},
@@ -132,7 +123,6 @@ _OP_ARGS = {
     "Concrete Inputs": [""],
 }
 _CSV_ARGS = {c: str(au.list_to_tuple(v)) for c, v in _OP_ARGS.items()}
-_FUSION_ADD_KEY = ["aten::add", "[[16, 64]]", "['float']", "", "", "p", "", "t1"]
 
 # ----- Fixtures: minimal output dir layout for analysis_utils -----
 
@@ -1752,10 +1742,14 @@ def test_compute_data_tables_missing_data_table(tmp_path):
 # ----- _validate_fusion_data_tables / _iter_candidate_blocks -----
 
 
-def _fusion_block(header=_FUSION_HEADER, tier="fusion"):
+def _fusion_block(header=_STANDALONE_HEADER, tier="fusion"):
+    row = (
+        "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
+        "50.00% of 5.3 TB/s | memory-bound |"
+    )
     return (
         f"<!-- reasoning-candidate tier={tier} rank=1 -->\n"
-        f"**Data:**\n\n{header}\n{_FUSION_SEP}\n{_FUSION_ROW}\n"
+        f"**Data:**\n\n{header}\n{_SEP}\n{row}\n"
     )
 
 
@@ -2624,10 +2618,11 @@ def test_extract_call_chain_filters_dispatch_internals():
 
 
 def test_build_operation_metrics_flags_row_matching_op_key(tmp_path):
+    add_key = ["aten::add", "[[16, 64]]", "['float']", "", "", "p", "", "t1"]
     cat_dir = tmp_path / "category_data"
     cat_dir.mkdir()
     (cat_dir / "kernel_fusion_metrics.json").write_text(
-        json.dumps({"high_confidence_op_keys": [_FUSION_ADD_KEY]})
+        json.dumps({"high_confidence_op_keys": [add_key]})
     )
     row = {
         "Input Dims": "[[16, 64]]",

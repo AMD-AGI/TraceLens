@@ -146,19 +146,6 @@ _MM_KEY = ["aten::mm", "((16, 64), (64, 8))", "('bf16', 'bf16')", "z"] + [""] * 
 _ADD_KEY = ["aten::add", "((16, 8), (16, 8))", "('bf16', 'bf16')", "z"] + [""] * 4
 
 
-def _op_group(perf_key, kernel_names, time_us, count):
-    return {
-        "perf_key": perf_key,
-        "kernel_names": kernel_names,
-        "time_us": time_us,
-        "count": count,
-    }
-
-
-def _name_key(name):
-    return [name, "", ""]
-
-
 # ----- classify_kernel: representative rule hits -----
 
 
@@ -415,6 +402,10 @@ def test_roofline_savings_overlap_blend():
 # ----- _standalone_estimate -----
 
 
+def _name_key(name):
+    return [name, "", ""]
+
+
 def _lookup(**entries):
     """Build perf_rows keyed by ``_name_key``; ``_standalone`` keys each kernel by its name."""
     return {
@@ -517,6 +508,15 @@ def test_standalone_skip_below_modeled_frac():
     }
     lookup = _lookup(ew_modeled=(1.0, None, None))
     assert _standalone(candidate, lookup) is None
+
+
+def _op_group(perf_key, kernel_names, time_us, count):
+    return {
+        "perf_key": perf_key,
+        "kernel_names": kernel_names,
+        "time_us": time_us,
+        "count": count,
+    }
 
 
 def _golden_candidate():
