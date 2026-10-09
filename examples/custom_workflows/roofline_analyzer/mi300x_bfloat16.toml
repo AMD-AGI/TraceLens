@@ -12,7 +12,7 @@ max_achievable_teraflops = 708  # TFLOPS
 [excel]
 sheet_name = "gemm"
 flops_per_byte_column = "FLOPS/Byte_first"
-performance_column = "Non-Data-Mov TFLOPS/s_mean"
+performance_column = "TFLOPS/s_mean"
 
 [output]
 prefix = "export-roofline"

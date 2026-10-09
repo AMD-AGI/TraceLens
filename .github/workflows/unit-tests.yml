@@ -33,7 +33,8 @@ on:
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
-    # rocm-origami is required by roofline / Origami perf-model tests.
+    # rocm-origami is required by roofline / Origami perf-model tests. It is pinned
+    # because tests/test_origami_reference.py holds results for that exact version.
     container: rocm/dev-ubuntu-24.04:7.2.1
     strategy:
       fail-fast: false
@@ -68,7 +69,7 @@ jobs:
           python -m venv .venv
           . .venv/bin/activate
           python -m pip install --upgrade pip
-          pip install '.[jax,kernel_source]' pytest pytest-xdist pytest-split pytest-cov openpyxl orjson rocm-origami
+          pip install '.[jax,kernel_source]' pytest pytest-xdist pytest-split pytest-cov openpyxl orjson rocm-origami==0.0.3
 
       - name: Run unit tests
         run: |

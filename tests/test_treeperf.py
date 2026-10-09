@@ -25,6 +25,7 @@ from TraceLens.Reporting.pftrace_hip_activity_analysis import (
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
+from TraceLens.PerfModel import origami_helper
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf import (
     GPUEventAnalyser,
@@ -408,6 +409,24 @@ class TestJaxAnalyses:
         metrics = JaxAnalyses.gemm_perf_metrics(gemm_event, op_params)
         assert metrics["GFLOPS"] > 0
         assert metrics["param: M"] == 128
+        assert "Roofline Time (µs)" not in metrics
+
+        arch = {
+            "name": "mi300x",
+            "mem_bw_gbps": 5300,
+            "max_achievable_tflops": {"matrix_bf16": 700},
+        }
+        with patch.object(origami_helper, "gemm_time_us", return_value=9.0) as sim:
+            metrics = JaxAnalyses.gemm_perf_metrics(
+                gemm_event,
+                {**op_params, "Type": "bf16"},
+                arch=arch,
+                enable_origami_gemm=True,
+            )
+        assert metrics["Compute Spec"] == "matrix_bf16"
+        assert metrics["Roofline Time (µs)"] > 0
+        assert metrics["Origami Time (µs)"] == 9.0
+        assert sim.call_args.args[5] == "bf16"
         with pytest.raises(NotImplementedError):
             JaxAnalyses.JaxGemm(
                 {
@@ -463,14 +482,6 @@ class TestTreePerfAnalyzer:
         assert total == 50
         assert len(kernel_uids) == 1
 
-    def test_non_data_mov_filter(self):
-        kernel = _make_gpu_event(1, 0, 10, "kernel", "aten::mm")
-        data_mov = _make_gpu_event(
-            2, 0, 10, "kernel", "at::native::direct_copy_kernel_cuda"
-        )
-        assert TreePerfAnalyzer.non_data_mov_filter(kernel) is True
-        assert TreePerfAnalyzer.non_data_mov_filter(data_mov) is False
-
     def test_get_df_gpu_timeline_from_synthetic_trace(self):
         analyzer = _build_analyzer(_mk_pytorch_trace())
         df = analyzer.get_df_gpu_timeline()
@@ -504,7 +515,7 @@ class TestTreePerfAnalyzer:
         analyzer = _build_analyzer(_mk_pytorch_trace())
         calls = []
 
-        def fake_compute(event, bwd=False, non_data_mov=False, perf_model_class=None):
+        def fake_compute(event, bwd=False, perf_model_class=None):
             calls.append(bwd)
             return {"bwd": bwd}
 
@@ -2213,6 +2224,11 @@ class TestTreePerfFinalCoverage:
             df_raw, agg_metrics=["mean", "std"]
         )
         assert isinstance(summary, pd.DataFrame)
+        for col in ("Origami Time (µs)", "Origami TFLOPS/s", "Origami TB/s"):
+            assert f"{col}_first" in summary.columns
+        assert "Pct Origami_mean" in summary.columns
+        assert "Non-Data-Mov TFLOPS/s_mean" in summary.columns
+        assert "Non-Data-Mov Kernel Time (µs)_sum" in summary.columns
 
     def test_collect_unified_perf_events_with_python_stack(self):
         analyzer = _build_analyzer(self._nn_module_trace(), add_python_func=True)

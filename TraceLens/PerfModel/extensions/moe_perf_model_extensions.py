@@ -50,10 +50,9 @@ class FusedMoE:
     category = "MoE_fused"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
 
     @staticmethod
     def flops_func(num_tokens, hidden_dim, inter_dim, topk, gated):
@@ -155,8 +154,8 @@ class moe_aiter_fused_1stage(FusedMoE):
     TO DO: Expand support for other AITER MoE kernels.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -269,8 +268,8 @@ class moe_aiter_fused_blockscale(FusedMoE):
     Used by SGLang and other frameworks that call AITER's fused MoE directly (without a vLLM wrapper).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -568,7 +567,7 @@ class moe_triton_unfused_up(UnfusedMoE_Up):
     LIMITATION: Perf. model assumes that the inter_dim is equal to the hidden_dim. (Not available in Trace)
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.param_details = self.get_param_details(event)
 
@@ -709,7 +708,7 @@ class moe_triton_unfused_down(UnfusedMoE_Down):
     LIMITATION: Perf. model assumes that the inter_dim is equal to the hidden_dim. (Not available in Trace)
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.param_details = self.get_param_details(event)
 
@@ -836,10 +835,9 @@ class moe_aiter_unfused_up(UnfusedMoE_Up):
     Handles aiter::moe_cktile2stages_gemm1_ck launches (CK-tile 2-stage GEMM1).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -944,10 +942,9 @@ class moe_aiter_unfused_down(UnfusedMoE_Down):
     Handles aiter::moe_cktile2stages_gemm2_ck launches (CK-tile 2-stage GEMM2).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1051,10 +1048,9 @@ class moe_aiter_ck_stage1(UnfusedMoE_Up):
     allowing direct extraction of hidden_dim and inter_dim from weight shapes.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1155,10 +1151,9 @@ class moe_aiter_ck_stage2(UnfusedMoE_Down):
     at different arg positions: inter_states[0], w1[1], w2[2], ..., out[6].
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1304,10 +1299,9 @@ class moe_flydsl_stage1(UnfusedMoE_Up):
     inherited from the parent aiter::fused_moe_ op.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1367,10 +1361,9 @@ class moe_flydsl_stage2(UnfusedMoE_Down):
     inherited from the parent aiter::fused_moe_ op.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1454,10 +1447,9 @@ class moe_triton_invoke_grouped_gemm:
     category = "MoE_unfused"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1573,7 +1565,7 @@ class moe_gptq_awq_up(UnfusedMoE_Up):
         MoE GEMM gated  - True for up projection (SwiGLU)
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.param_details = self.get_param_details(event)
 
@@ -1661,7 +1653,7 @@ class moe_gptq_awq_down(UnfusedMoE_Down):
         MoE GEMM gated  - False for down projection
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.param_details = self.get_param_details(event)
 
@@ -1817,10 +1809,9 @@ class BiasedGroupedTopk:
     bwd_category = None
     sheet_category = "MoE_aux"
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1887,10 +1878,9 @@ class MoeSortScatterGather:
     bwd_category = None
     sheet_category = "MoE_aux"
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod

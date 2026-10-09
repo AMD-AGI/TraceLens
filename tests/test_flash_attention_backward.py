@@ -17,9 +17,12 @@ Covers:
 - flops() returns more than flash_attention forward flops for the same shapes
 - bytes() with no argument resolves dtype from param_details
 - bytes() with explicit bytes_per_element
-- fa flag in get_simulation_time_bwd recognises flash_attention_backward
+- fa flag in the backward tile model recognises flash_attention_backward
 """
 
+from unittest.mock import patch
+
+from TraceLens.PerfModel import sdpa_tile
 from TraceLens.PerfModel.perf_model import (
     SDPA,
     flash_attention,
@@ -174,7 +177,7 @@ def test_get_param_details_dtype():
 
 
 def test_d_h_set_to_d_h_qk():
-    """__init__ must set self.d_h = self.d_h_qk for get_simulation_time_bwd_func."""
+    """__init__ must set self.d_h = self.d_h_qk for the SDPA tile model."""
     m = flash_attention_backward(_bwd_event())
     assert m.d_h == m.d_h_qk
 
@@ -233,12 +236,13 @@ def test_bytes_matches_bytes_bwd():
 
 
 # ---------------------------------------------------------------------------
-# fa flag in get_simulation_time_bwd
+# fa flag in the backward tile model
 # ---------------------------------------------------------------------------
 
 
 def test_fa_flag_is_true_for_flash_attention_backward():
-    """get_simulation_time_bwd must treat flash_attention_backward as a flash-attention op."""
+    """The backward tile model treats flash_attention_backward as flash attention."""
     m = flash_attention_backward(_bwd_event())
-    fa = type(m).__name__ in ("flash_attention", "flash_attention_backward")
-    assert fa is True
+    with patch.object(sdpa_tile, "sdpa_bwd_time_us", return_value=1.0) as bwd:
+        sdpa_tile.sdpa_tile_time_us(m, {"name": "mi300x"}, lambda *a, **k: 1.0, True)
+    assert bwd.call_args.args[9] is True

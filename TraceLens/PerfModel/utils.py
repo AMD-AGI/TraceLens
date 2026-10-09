@@ -27,31 +27,54 @@ def optional_float(value, default=0.0):
         return default
 
 
+def rates_for_duration(gflops, bytes_moved, time_us):
+    """Return ``(tflops_per_s, tb_per_s)`` implied by a duration in microseconds.
+
+    ``time_us`` is any duration estimate: measured kernel time, the roofline
+    ceiling, or an Origami simulation. A missing or non-positive duration
+    yields NaN for both rates. A missing ``bytes_moved`` yields NaN TB/s.
+    """
+    if time_us is None or not (time_us > 0):
+        return float("nan"), float("nan")
+    tflops_per_s = (gflops / 1e3) / (time_us / 1e6)
+    if bytes_moved is None:
+        tb_per_s = float("nan")
+    else:
+        tb_per_s = (bytes_moved / 1e12) / (time_us / 1e6)
+    return tflops_per_s, tb_per_s
+
+
+def add_duration_rate_columns(dict_metrics, gflops, bytes_moved, time_us, prefix):
+    """Write ``"{prefix} TFLOPS/s"`` and ``"{prefix} TB/s"`` for ``time_us``.
+
+    ``prefix`` names the estimate, for example ``"Roofline"`` or ``"Origami"``.
+    """
+    tflops_per_s, tb_per_s = rates_for_duration(gflops, bytes_moved, time_us)
+    dict_metrics[f"{prefix} TFLOPS/s"] = tflops_per_s
+    dict_metrics[f"{prefix} TB/s"] = tb_per_s
+    return tflops_per_s, tb_per_s
+
+
 def add_simulation_time_columns(
     dict_metrics,
     simulated_time,
     gflops,
     bytes_moved,
     busy_kernel_time,
+    label="Origami",
 ):
     """
-    Add simulated time columns when using Origami
+    Add simulated time columns (Origami, or ``label`` for other op models).
+    For dict outputs with extra columns, use
+    ``TraceLens.PerfModel.op_models.add_op_model_columns``.
     """
     if not simulated_time:
         return
-    dict_metrics["Origami Time (µs)"] = simulated_time
-    dict_metrics["Origami TFLOPS/s"] = (
-        (gflops / 1e3) / (simulated_time / 1e6) if simulated_time > 0 else float("nan")
+    dict_metrics[f"{label} Time (µs)"] = simulated_time
+    add_duration_rate_columns(
+        dict_metrics, gflops, bytes_moved, simulated_time, prefix=label
     )
-    if bytes_moved is not None:
-        dict_metrics["Origami TB/s"] = (
-            (bytes_moved / 1e12) / (simulated_time / 1e6)
-            if simulated_time > 0
-            else float("nan")
-        )
-    else:
-        dict_metrics["Origami TB/s"] = float("nan")
-    dict_metrics["Pct Origami"] = (
+    dict_metrics[f"Pct {label}"] = (
         (simulated_time / busy_kernel_time) * 100
         if busy_kernel_time > 0
         else float("nan")
@@ -63,11 +86,7 @@ def build_perf_metrics_dict(gflops, bytes_moved, busy_kernel_time):
     Build the standard GFLOPS/TFLOPS/TB-per-s metrics dict shared by the
     PyTorch and JAX perf-metric code paths.
     """
-    tflops_per_s = (
-        (gflops / 1e3) / (busy_kernel_time / 1e6)
-        if busy_kernel_time > 0
-        else float("nan")
-    )
+    tflops_per_s, tb_per_s = rates_for_duration(gflops, bytes_moved, busy_kernel_time)
     dict_metrics = {
         "GFLOPS": gflops,
         "Kernel Time (µs)": busy_kernel_time,
@@ -78,11 +97,7 @@ def build_perf_metrics_dict(gflops, bytes_moved, busy_kernel_time):
         dict_metrics["FLOPS/Byte"] = (
             (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float("nan")
         )
-        dict_metrics["TB/s"] = (
-            (bytes_moved / 1e12) / (busy_kernel_time / 1e6)
-            if busy_kernel_time > 0
-            else float("nan")
-        )
+        dict_metrics["TB/s"] = tb_per_s
     else:
         dict_metrics["Data Moved (MB)"] = float("nan")
         dict_metrics["FLOPS/Byte"] = float("nan")
@@ -129,24 +144,6 @@ def name2bpe(name):
     if name is None:
         return None
     return dict_dtype2bpe.get(name.lower(), None)
-
-
-def simulation_dtype_map(dtype):
-    """
-    This function maps a PyTorch data type to a simulation data type.
-    Args:
-        dtype (str): The name of the pytorch data type.
-    Returns:
-        str: The name of the PyTorch data type.
-    """
-    dict_dtype2simulation = {
-        "fp32": "float",
-        "fp64": "double",
-        "fp16": "c10::half",
-        "bf16": "c10::bfloat16",
-        "fp8": "c10::float8_e4m3fnuz",
-    }
-    return dict_dtype2simulation.get(dtype.lower(), None)
 
 
 # Keys are stored without a namespace, because torch_dtype_map strips one off

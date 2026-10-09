@@ -74,7 +74,6 @@ from tests.fixtures.reporting import (
     _write_trace,
 )
 from tests.test_trace2tree import _mk_event
-from unittest.mock import patch
 from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.extensions import (
     attention_perf_model_extensions as aext,
@@ -106,7 +105,7 @@ from tests.fixtures.agent import (
     _kernel_event,
     _write_minimal_orchestrator_csvs,
 )
-from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION
+from tests.fixtures.perfmodel import _GDN_ANNOTATION
 from TraceLens.Trace2Tree.extensions import pseudo_ops_registry as por
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from pathlib import Path
@@ -2284,24 +2283,6 @@ class TestPush95Phase2:
             open(os.path.join(out, "category_data", "multi_kernel_data.json")).read()
         )
         assert "memcpy_summary" in mk and "nccl_summary" in mk
-
-    def test_gemm_origami_import_error_path(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
-        perf_model.GEMM._origami_import_error_printed = False
-        import builtins
-
-        real_import = builtins.__import__
-
-        def fake_import(name, *args, **kwargs):
-            if name == "origami":
-                raise ImportError("no origami")
-            return real_import(name, *args, **kwargs)
-
-        with patch.object(builtins, "__import__", fake_import):
-            t, _ = perf_model.GEMM.get_simulation_time_func(
-                _ARCH, 4, 8, 16, 1, "bf16", enable_origami=True
-            )
-        assert t is None
 
     def test_orchestrator_comparative_main(self, tmp_path, monkeypatch):
 
