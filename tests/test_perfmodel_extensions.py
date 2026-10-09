@@ -1864,7 +1864,6 @@ class TestSdpaExtendedCoverage:
                 t = perf_model.SDPA.get_simulation_time_func(
                     self._ARCH,
                     "bf16",
-                    None,
                     "c10::BFloat16",
                     1024,
                     2,
@@ -1883,7 +1882,6 @@ class TestSdpaExtendedCoverage:
                 perf_model.SDPA.get_simulation_time_func(
                     self._ARCH,
                     "bf16",
-                    None,
                     "c10::BFloat16",
                     1024,
                     1,
@@ -1923,7 +1921,6 @@ class TestSdpaExtendedCoverage:
                 t = perf_model.SDPA.get_simulation_time_bwd_func(
                     self._ARCH,
                     "bf16",
-                    None,
                     "c10::BFloat16",
                     2048,
                     2,
@@ -2213,14 +2210,13 @@ class TestCustomCollectivesPerfModels:
 class TestTreePerfInitKwargs:
     def test_perf_model_init_kwargs_without_optional_params(self):
         class SimpleModel:
-            def __init__(self, event, arch=None, python_path=None):
+            def __init__(self, event, arch=None):
                 self.event = event
 
         kwargs = tree_perf._perf_model_init_kwargs(
             SimpleModel,
             event={"name": "op"},
             arch={},
-            python_path=None,
             inductor_cache_dir="/tmp/cache",
         )
         assert kwargs["event"]["name"] == "op"
@@ -2235,7 +2231,6 @@ class TestTreePerfInitKwargs:
             FlexibleModel,
             event={"name": "op"},
             arch={},
-            python_path="path",
             inductor_cache_dir="/tmp/cache",
         )
         assert kwargs["inductor_cache_dir"] == "/tmp/cache"
@@ -2244,9 +2239,7 @@ class TestTreePerfInitKwargs:
         class Broken:
             __init__ = 42
 
-        kwargs = tree_perf._perf_model_init_kwargs(
-            Broken, event={}, arch=None, python_path=None
-        )
+        kwargs = tree_perf._perf_model_init_kwargs(Broken, event={}, arch=None)
         assert kwargs["event"] == {}
 
 
@@ -2570,7 +2563,6 @@ class TestPerfModelPhase11:
             t = perf_model.SDPA.get_simulation_time_func(
                 _ARCH,
                 "fp16",
-                None,
                 "c10::Half",
                 1000,
                 1,
@@ -4016,7 +4008,6 @@ class TestPerfModelPush95Coverage:
                 t = perf_model.SDPA.get_simulation_time_func(
                     _ARCH,
                     "bf16",
-                    None,
                     "c10::BFloat16",
                     1024,
                     2,

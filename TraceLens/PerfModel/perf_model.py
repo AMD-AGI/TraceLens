@@ -23,12 +23,11 @@ class GEMM:
     category = "GEMM"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         # parse kernel info (e.g. transpose) before kernel params since it can be needed
         self.parsed_kernel_info = None
         self.arch = arch
-        self.python_path = python_path
         kernel_names = []
         if "kernel_names" in event and len(event["kernel_names"]) > 0:
             kernel_names = event["kernel_names"]
@@ -654,7 +653,7 @@ class CONV:
     category = "CONV_fwd"
     bwd_category = "CONV_bwd"
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.x_shape, self.w_shape = (
@@ -1063,9 +1062,9 @@ class ConvBias_(CONV):
     # Cache to store forward pass parameters for backward pass lookup
     fwd_pass_cache = {}
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         # Call parent init first
-        super().__init__(event, arch, python_path, **kwargs)
+        super().__init__(event, arch, **kwargs)
 
         # Cache forward pass parameters for backward pass using sequence number
         seq_num = event["args"].get("Sequence number")
@@ -1275,9 +1274,9 @@ class ConvBiasReLU_(CONV):
     # Cache to store forward pass parameters for backward pass lookup
     fwd_pass_cache = {}
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         # Call parent init first
-        super().__init__(event, arch, python_path, **kwargs)
+        super().__init__(event, arch, **kwargs)
 
         # Cache forward pass parameters for backward pass using sequence number
         seq_num = event["args"].get("Sequence number")
@@ -1547,14 +1546,13 @@ class SDPA:
     category = "SDPA_fwd"
     bwd_category = "SDPA_bwd"
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         # S = QK^T
         # P = softmax(S)
         # O = PV
         self.event = event
         self.param_details = self.get_param_details(event)
         self.arch = arch
-        self.python_path = python_path
         self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV, self.d_h_qk, self.d_h_v = (
             self.param_details[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
@@ -1721,7 +1719,6 @@ class SDPA:
     def get_simulation_time_func(
         arch,
         dtype,
-        python_path,
         dtype_A_B,
         bytes,
         B,
@@ -1831,7 +1828,6 @@ class SDPA:
                 simulated_time = SDPA.get_simulation_time_func(
                     self.arch,
                     dtype,
-                    self.python_path,
                     self.param_details["dtype_A_B"][0],
                     bytes,
                     self.B,
@@ -1866,7 +1862,6 @@ class SDPA:
     def get_simulation_time_bwd_func(
         arch,
         dtype,
-        python_path,
         dtype_A_B,
         bytes,
         B,
@@ -2023,7 +2018,6 @@ class SDPA:
                 simulated_time = SDPA.get_simulation_time_bwd_func(
                     self.arch,
                     dtype,
-                    self.python_path,
                     self.param_details["dtype_A_B"][0],
                     bytes,
                     self.B,
@@ -2193,8 +2187,8 @@ class flash_attention_backward(SDPA):
 
 
 class flash_attention_varlen_forward(SDPA):
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         self.num_seqs_q, self.num_seqs_kv, self.max_seqlen_q, self.max_seqlen_kv = (
             self.param_details[key]
             for key in ["num_seqs_q", "num_seqs_kv", "max_seqlen_q", "max_seqlen_kv"]
@@ -2298,8 +2292,8 @@ class flash_attention_varlen_forward(SDPA):
 class flash_attention_varlen_backward(SDPA):
     category = "SDPA_bwd"
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         self.num_seqs_q, self.num_seqs_kv, self.max_seqlen_q, self.max_seqlen_kv = (
             self.param_details[key]
             for key in ["num_seqs_q", "num_seqs_kv", "max_seqlen_q", "max_seqlen_kv"]
@@ -3071,8 +3065,8 @@ class aiter__fmha_v3_varlen_fwd(SDPA):
     inference flows that inject chunk annotations.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         self.num_seqs_q = self.param_details["num_seqs_q"]
         self.num_seqs_kv = self.param_details["num_seqs_kv"]
         self.max_seqlen_q = self.param_details["max_seqlen_q"]
@@ -3122,8 +3116,8 @@ class aiter__fmha_v3_varlen_forward(SDPA):
     arg indices shift by +1.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         self.num_seqs_q = self.param_details["num_seqs_q"]
         self.num_seqs_kv = self.param_details["num_seqs_kv"]
         self.max_seqlen_q = self.param_details["max_seqlen_q"]
@@ -3170,8 +3164,8 @@ class aiter__fmha_v3_varlen_bwd(SDPA):
 
     category = "SDPA_bwd"
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         self.num_seqs_q = self.param_details["num_seqs_q"]
         self.num_seqs_kv = self.param_details["num_seqs_kv"]
         self.max_seqlen_q = self.param_details["max_seqlen_q"]
@@ -3224,8 +3218,8 @@ class aiter__fmha_v3_varlen_backward(SDPA):
 
     category = "SDPA_bwd"
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         self.num_seqs_q = self.param_details["num_seqs_q"]
         self.num_seqs_kv = self.param_details["num_seqs_kv"]
         self.max_seqlen_q = self.param_details["max_seqlen_q"]
@@ -3457,7 +3451,7 @@ class UnaryElementwise:
     bwd_category = None
     sheet_category = "UnaryElementwise"
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
@@ -3616,7 +3610,7 @@ class BinaryElementwise:
     bwd_category = None
     sheet_category = "BinaryElementwise"
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
@@ -3760,10 +3754,9 @@ class Reduce:
     bwd_category = None
     sheet_category = "Reduce"
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
         self.num_input_elems = self.param_details["num_input_elems"]
         self.num_output_elems = self.param_details["num_output_elems"]
@@ -4009,11 +4002,10 @@ class GroupedGemm:
     category = "GroupedGEMM_fwd"
     bwd_category = "GroupedGEMM_bwd"
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.arch = arch
-        self.python_path = python_path
         self.M, self.K, self.G, self.N = (
             self.param_details[key] for key in ["M", "K", "G", "N"]
         )
@@ -4493,7 +4485,7 @@ class jax_conv:
         int: the number of flops
     """
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.param_details = self.get_param_details(event)
         self.x_shape = self.param_details["input_shape"]
@@ -4584,7 +4576,7 @@ class Normalization:
     bwd_category = "NORM_bwd"
     sheet_category = "Normalization"
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
@@ -5315,10 +5307,9 @@ class MoEComm:
     category = "MoE_comm_fwd"
     bwd_category = "MoE_comm_bwd"
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
         self.num_tokens = self.param_details["num_tokens"]
         self.hidden_dim = self.param_details["hidden_dim"]
@@ -5388,10 +5379,9 @@ class CausalConv1d:
     category = "SSM_fwd"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
         input_types = event["args"].get("Input type", [])
         dtype = input_types[0] if input_types else "c10::BFloat16"
@@ -5472,10 +5462,9 @@ class FusedRoPE:
     category = "RoPE_fwd"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
         input_types = event["args"].get("Input type", [])
         dtype = input_types[0] if input_types else "c10::BFloat16"
@@ -5537,10 +5526,9 @@ class CrossEntropy:
     category = "CrossEntropy_fwd"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
         input_types = event["args"].get("Input type", [])
         dtype = input_types[0] if input_types else "c10::BFloat16"
@@ -5628,10 +5616,9 @@ class MambaSSD:
     category = "SSM_fwd"
     bwd_category = "SSM_bwd"
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
         input_types = event["args"].get("Input type", [])
         dtype = input_types[0] if input_types else "c10::BFloat16"

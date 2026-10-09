@@ -443,8 +443,6 @@ def generate_perf_report_pytorch(
     # enrich the report. Mutually exclusive with comparison_json_path.
     precomputed_diff_stats: Optional[str] = None,
     extension_file: Optional[str] = None,
-    # unused; kept for backward compatibility
-    python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
     gpu_arch_platform: Optional[str] = None,
     gpu_arch: Optional[dict] = None,
@@ -465,7 +463,6 @@ def generate_perf_report_pytorch(
     perf_analyzer = TreePerfAnalyzer.from_file(
         profile_filepath=profile_json_path,
         arch=gpu_arch_json,
-        python_path=python_path,
         include_unlinked_kernels=include_unlinked_kernels,
         enable_pseudo_ops=enable_pseudo_ops,
         add_python_func=add_python_func,
@@ -829,7 +826,6 @@ def generate_perf_report_pytorch(
         if comparison_json_path and not df_unified_perf.empty:
             perf_analyzer2 = TreePerfAnalyzer.from_file(
                 profile_filepath=comparison_json_path,
-                python_path=perf_analyzer.python_path,
                 include_unlinked_kernels=perf_analyzer.include_unlinked_kernels,
                 enable_pseudo_ops=enable_pseudo_ops,
                 add_python_func=perf_analyzer.add_python_func,
@@ -1191,12 +1187,6 @@ def main():
         "op categories, op models (op_models, external_op_model), and kernel filters.",
     )
 
-    parser.add_argument(
-        "--python_path",
-        type=str,
-        default=None,
-        help="Unused; kept so existing command lines still parse.",
-    )
     add_gpu_arch_cli_args(parser)
     parser.add_argument(
         "--group_by_num_kernels",
@@ -1280,7 +1270,6 @@ def main():
         comparison_json_path=args.comparison_json_path,
         precomputed_diff_stats=args.precomputed_diff_stats,
         extension_file=args.extension_file,
-        python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
         gpu_arch_platform=args.gpu_arch_platform,
         group_by_num_kernels=args.group_by_num_kernels,

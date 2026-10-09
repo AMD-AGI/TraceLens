@@ -212,7 +212,7 @@ class TestSdpaTile:
         with patch.object(
             origami_helper, "gemm_time_us", side_effect=fake_gemm
         ), patch.object(perf_model.Softmax, "get_time", return_value=0.0):
-            args = (arch, "bf16", None, "c10::BFloat16", 1024, 1, 8, 128, 128, 64)
+            args = (arch, "bf16", "c10::BFloat16", 1024, 1, 8, 128, 128, 64)
             perf_model.SDPA.get_simulation_time_func(
                 *args, gemm_time=origami_helper.gemm_time_us
             )
@@ -233,7 +233,7 @@ class TestSdpaTile:
         with patch.object(origami_helper, "gemm_time_us") as origami, patch.object(
             perf_model.Softmax, "get_time", return_value=0.0
         ):
-            args = (arch, "bf16", None, "c10::BFloat16", 1024, 1, 8, 256, 256, 64)
+            args = (arch, "bf16", "c10::BFloat16", 1024, 1, 8, 256, 256, 64)
             fwd = perf_model.SDPA.get_simulation_time_func(*args, gemm_time=gemm_time)
         origami.assert_not_called()
         assert shapes == [(128, 256, 64, 1, 1), (128, 64, 256, 1, 1)]

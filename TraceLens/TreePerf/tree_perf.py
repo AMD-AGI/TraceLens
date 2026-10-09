@@ -126,9 +126,7 @@ def get_max_achievable_tflops(perf_model, arch):
     return maf_specs.get(compute_spec)
 
 
-def _perf_model_init_kwargs(
-    perf_model_class, event, arch, python_path, inductor_cache_dir=None
-):
+def _perf_model_init_kwargs(perf_model_class, event, arch, inductor_cache_dir=None):
     """
     Build keyword args for perf model construction. Only passes
     inductor_cache_dir when the model's __init__ declares it or accepts **kwargs.
@@ -136,7 +134,6 @@ def _perf_model_init_kwargs(
     kwargs = {
         "event": event,
         "arch": arch,
-        "python_path": python_path,
     }
     try:
         sig = inspect.signature(perf_model_class.__init__)
@@ -248,7 +245,6 @@ class TreePerfAnalyzer:
         add_python_func=False,
         arch=None,
         jax=False,
-        python_path=None,
         event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer,
         include_unlinked_kernels=False,
         enable_pseudo_ops=False,
@@ -271,7 +267,6 @@ class TreePerfAnalyzer:
             add_python_func = True
         self.add_python_func = add_python_func
         self.arch = arch
-        self.python_path = python_path
         self.enable_origami_gemm = enable_origami_gemm
         self.enable_origami_sdpa_tile = enable_origami_sdpa_tile
         self.op_models = default_op_models(
@@ -480,7 +475,6 @@ class TreePerfAnalyzer:
                 perf_model_class,
                 event,
                 self.arch,
-                self.python_path,
                 self.inductor_cache_dir,
             )
         )
@@ -3013,7 +3007,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         add_python_func=False,
         arch=None,
         jax=True,
-        python_path=None,
         event_to_category: Callable[[dict], str] = TraceEventUtils.default_categorizer,
         include_unlinked_kernels=False,
         enable_pseudo_ops=False,
@@ -3032,7 +3025,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             add_python_func=add_python_func,
             arch=arch,
             jax=jax,
-            python_path=python_path,
             event_to_category=event_to_category,
             include_unlinked_kernels=include_unlinked_kernels,
             enable_pseudo_ops=enable_pseudo_ops,
@@ -3564,7 +3556,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 perf_model_class,
                 event,
                 self.arch,
-                self.python_path,
                 self.inductor_cache_dir,
             )
         )

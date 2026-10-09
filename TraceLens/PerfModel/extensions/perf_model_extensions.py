@@ -474,7 +474,7 @@ class GroupQuant(BinaryElementwise):
     category = "GroupQuant"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
@@ -579,9 +579,6 @@ class vllm_triton_per_token_group_quant_fp8(GroupQuant):
         Input type: (dtype_x, 'Scalar')
         Concrete Inputs: often ('', '<group_size>') e.g. ('', '128')
     """
-
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
-        super().__init__(event, arch, python_path, **kwargs)
 
     @staticmethod
     def get_param_details(event):
@@ -1003,8 +1000,8 @@ class sgl_kernel_rotary_embedding(FusedRoPE):
         flops = 3 * rotated_elems ; bytes = 2 * rotated_elems * bpe (read+write q, k).
     """
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
-        super().__init__(event, arch, python_path, **kwargs)
+    def __init__(self, event, arch=None, **kwargs):
+        super().__init__(event, arch, **kwargs)
         qdtype = event["args"]["Input type"][1]
         self.q_bpe = name2bpe(qdtype) if name2bpe(qdtype) is not None else 2
         self._qdtype = qdtype
@@ -1057,10 +1054,9 @@ class sglang_store_cache:
     category = "InferenceAttention"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
         self.nelems = self.param_details["nelems"]
         dtype = self.param_details["dtype"]
@@ -1105,10 +1101,9 @@ class mixed_sample_outer_exponential:
     category = "elementwise"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
         self.T = self.param_details["T"]
         self.V = self.param_details["V"]
@@ -1190,8 +1185,8 @@ class aiter_fused_qk_rope_cat_and_cache_mla(FusedRoPE):
 
     sheet_category = "FusedRoPE"
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
-        super().__init__(event, arch, python_path, **kwargs)
+    def __init__(self, event, arch=None, **kwargs):
+        super().__init__(event, arch, **kwargs)
         self.bpe_in = name2bpe(self.param_details["dtype_in"])
         self.bpe_kv = name2bpe(self.param_details["dtype_kv"])
 
@@ -1406,10 +1401,9 @@ class _MHCBase:
     bwd_category = None
     sheet_category = "mHC"
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
         self.M = self.param_details["M"]
         self.n = self.param_details["n"]
