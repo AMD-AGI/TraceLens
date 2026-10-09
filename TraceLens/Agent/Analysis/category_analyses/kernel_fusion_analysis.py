@@ -32,6 +32,7 @@ from analysis_utils import (
     TARGET_HIGH,
     TARGET_LOW,
     TARGET_MID,
+    get_peak_mem_bw_tbs,
     parse_first_shape,
     perf_report_csv_dir,
     shape_aware_lookup,
@@ -579,16 +580,17 @@ def load_arch_config(output_dir: str, platform: str) -> dict:
             if fname.endswith("_metadata.json"):
                 with open(os.path.join(metadata_dir, fname), "r") as f:
                     meta = json.load(f)
-                if "peak_hbm_bw_tbs" in meta and "max_achievable_tflops" in meta:
+                peak_mem_bw_tbs = get_peak_mem_bw_tbs(meta)
+                if peak_mem_bw_tbs is not None and "max_achievable_tflops" in meta:
                     return {
-                        "peak_hbm_bw_tbs": meta["peak_hbm_bw_tbs"],
+                        "peak_mem_bw_tbs": peak_mem_bw_tbs,
                         "max_achievable_tflops": meta["max_achievable_tflops"],
                     }
 
     try:
         arch = load_arch(platform)
         return {
-            "peak_hbm_bw_tbs": arch["mem_bw_gbps"] / 1000,
+            "peak_mem_bw_tbs": arch["mem_bw_gbps"] / 1000,
             "max_achievable_tflops": arch["max_achievable_tflops"],
         }
     except FileNotFoundError:
@@ -705,7 +707,7 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    peak_bw_tbs = arch["peak_hbm_bw_tbs"]
+    peak_bw_tbs = arch["peak_mem_bw_tbs"]
     peak_maf_tflops = arch["max_achievable_tflops"]
 
     kernel_lookup = build_kernel_perf_lookup(csv_path)
@@ -734,7 +736,7 @@ def main():
         "estimated_count": len(impact_estimates),
         "total_impact_score": round(total_impact_score, 2),
         "platform": platform,
-        "peak_hbm_bw_tbs": peak_bw_tbs,
+        "peak_mem_bw_tbs": peak_bw_tbs,
         "impact_estimates": impact_estimates,
     }
 
