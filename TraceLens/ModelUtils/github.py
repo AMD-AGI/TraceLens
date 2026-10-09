@@ -155,22 +155,56 @@ def _fetch_archive(ref: GitHubRef, cache_dir: Path) -> Path:
     )
 
 
-def _fetch_single_file(ref: GitHubRef) -> Path:
-    if not ref.subpath.endswith(".py"):
-        raise ValueError(f"Expected a Python file path in GitHub URL: {ref.display}")
+def cached_file_path(
+    ref: GitHubRef, subpath: str, *, cache_root: Path | None = None
+) -> Path:
+    """Where a file at ``subpath`` lives once fetched, mirroring the repo layout.
 
-    cache_file = CACHE_ROOT / ref.slug / ref.subpath.replace("/", "__")
+    A modeling module names its neighbours relatively (``from .configuration_x
+    import X``), so the cache has to reproduce the directory structure they are
+    named against -- flattening the path puts them in one directory under names
+    no import resolves.
+    """
+    root = cache_root or CACHE_ROOT
+    return root / ref.slug / Path(subpath)
+
+
+def fetch_github_file(
+    ref: GitHubRef, subpath: str, *, cache_root: Path | None = None
+) -> Path | None:
+    """Fetch one file from the repo at this ref, or ``None`` if it is not there.
+
+    Best effort by design: a caller asking for a module that an import NAMES
+    cannot know whether the repo spells it ``x.py`` or ``x/__init__.py``, nor
+    whether it exists at this ref at all.
+    """
+    cache_file = cached_file_path(ref, subpath, cache_root=cache_root)
     if cache_file.is_file():
         return cache_file
 
     raw_url = (
         f"https://raw.githubusercontent.com/{ref.owner}/{ref.repo}/"
-        f"{ref.ref}/{ref.subpath}"
+        f"{ref.ref}/{subpath}"
     )
-    data = _download_bytes(raw_url)
+    try:
+        data = _download_bytes(raw_url)
+    except (urllib.error.HTTPError, urllib.error.URLError):
+        return None
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     cache_file.write_bytes(data)
     return cache_file
+
+
+def _fetch_single_file(ref: GitHubRef) -> Path:
+    if not ref.subpath.endswith(".py"):
+        raise ValueError(f"Expected a Python file path in GitHub URL: {ref.display}")
+
+    fetched = fetch_github_file(ref, ref.subpath)
+    if fetched is None:
+        raise FileNotFoundError(
+            f"Could not download {ref.subpath} from {ref.owner}/{ref.repo}@{ref.ref}"
+        )
+    return fetched
 
 
 def fetch_github_source(

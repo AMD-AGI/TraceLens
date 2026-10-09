@@ -117,6 +117,11 @@ class ArchitectureSpec:
     decoder_class: str | None = None
     stack_model_class: str | None = None
     code_sources: list[str] = field(default_factory=list)
+    # Where that source actually sits. `code_sources` is overwritten below with
+    # provenance LABELS (`github://...@<sha>/...`, `hf://<id>`), which read well
+    # in a fact sheet but name no file, so anything wanting to read the model's
+    # own code -- its configuration module, say -- has nothing to open.
+    code_paths: list[str] = field(default_factory=list)
     analysis_notes: list[str] = field(default_factory=list)
     custom_blocks: list[str] = field(default_factory=list)
     export_block_trees: list[tuple[str, BlockNode]] = field(default_factory=list)
@@ -1440,6 +1445,7 @@ def _merge_code_analysis(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None
     spec.block_components = list(analysis.block_components)
     spec.forward_sequence = list(analysis.forward_sequence)
     spec.code_sources = list(analysis.source_files)
+    spec.code_paths = [str(source) for source in analysis.source_files]
     spec.analysis_notes = list(analysis.notes)
     spec.custom_blocks = list(analysis.custom_blocks)
     spec.class_registry = dict(analysis.class_registry)

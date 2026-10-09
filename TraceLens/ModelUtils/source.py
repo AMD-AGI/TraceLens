@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from TraceLens.ModelUtils.github import (
+    GitHubRef,
+    fetch_github_file,
     fetch_github_source,
     find_modeling_files,
     is_github_url,
@@ -146,6 +148,55 @@ def _download_repo_files(
     return paths
 
 
+def _own_package_imports(text: str) -> list[str]:
+    """Module names a file imports from its OWN directory.
+
+    ``modeling_glm5_next.py`` says ``from .configuration_glm5_next import
+    Glm5NextConfig``. That neighbour is part of the model -- it states the head
+    counts and the names the modeling code reads them under -- but fetching one
+    file from GitHub leaves it behind, so the model's own configuration source
+    is read from whatever transformers version happens to be installed, at a
+    different revision from the pinned modeling file.
+
+    Only level-1 imports: the model's directory is the model's code, while
+    ``from ...cache_utils import Cache`` reaches into the library around it and
+    following those would fetch transformers a file at a time.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    modules: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.level != 1:
+            continue
+        # `from . import x` names modules in the names list, not a module.
+        named = [node.module] if node.module else [a.name for a in node.names]
+        for module in named:
+            if module and module not in modules:
+                modules.append(str(module))
+    return modules
+
+
+def _fetch_own_package(ref: GitHubRef, subpath: str, path: Path) -> None:
+    """Fetch the model directory's other modules at the SAME commit as the file.
+
+    Best effort: a name may be a package rather than a module, or absent at this
+    ref. Fetched files land beside the modeling file under their real names, so
+    an import that reads them resolves against the pinned source.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    package = Path(subpath).parent
+    for module in _own_package_imports(text):
+        relative = Path(*module.split("."))
+        if fetch_github_file(ref, (package / relative.with_suffix(".py")).as_posix()):
+            continue
+        fetch_github_file(ref, (package / relative / "__init__.py").as_posix())
+
+
 def _transformers_modeling_path(model_type: str) -> Path | None:
     """Locate installed transformers modeling file for a model_type."""
     try:
@@ -197,6 +248,7 @@ def _fetch_versioned_transformers_file(
             except Exception:
                 continue
             if path.is_file():
+                _fetch_own_package(ref, subpath, path)
                 return path, ref.display
     return None
 
@@ -258,6 +310,7 @@ def _transformers_github_modeling_file(
         except Exception:
             continue
         if path.is_file():
+            _fetch_own_package(ref, subpath, path)
             return path, ref.display
     return None
 
