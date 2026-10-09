@@ -21,6 +21,16 @@ from TraceLens.PerfModel.benchmarking.microbench_utils import (
     resolve_physical_device,
 )
 
+# These modules import torch; without it they stay None and the tests that use them skip in _require_torch.
+try:
+    from TraceLens.PerfModel.benchmarking import (
+        fp4fp6_helpers,
+        microbench,
+        microbench_rocprof,
+    )
+except ImportError:
+    fp4fp6_helpers = microbench = microbench_rocprof = None
+
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
@@ -37,23 +47,17 @@ def _require_cuda_gpu():
 
 def _import_microbench():
     _require_torch()
-    from TraceLens.PerfModel.benchmarking import microbench as mb
-
-    return mb
+    return microbench
 
 
 def _import_microbench_rocprof():
     _require_torch()
-    from TraceLens.PerfModel.benchmarking import microbench_rocprof as rp
-
-    return rp
+    return microbench_rocprof
 
 
 def _import_fp4fp6_helpers():
     _require_torch()
-    from TraceLens.PerfModel.benchmarking import fp4fp6_helpers as fp
-
-    return fp
+    return fp4fp6_helpers
 
 
 class TestMicrobenchUtils:

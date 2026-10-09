@@ -35,6 +35,19 @@ except Exception:  # pragma: no cover
 # https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
 MX_BLOCK = 32
 
+# (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) tried for every shape; the
+# fastest is kept. num_stages=None leaves Triton's backend default. The first
+# entry is the original fixed tile, which suits gfx950; on RDNA4 the smaller
+# BLOCK_K tiles are much faster, and single-stage (no software pipelining)
+# helps further.
+MX_TILE_CONFIGS: Tuple[Tuple[int, int, int, int, Optional[int]], ...] = (
+    (128, 128, 256, 8, None),
+    (128, 128, 128, 8, None),
+    (128, 128, 64, 8, None),
+    (64, 128, 64, 4, None),
+    (128, 128, 64, 4, 1),
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -296,20 +309,6 @@ def _launch_scaled_gemm(
         num_warps=num_warps,
         **launch_opts,
     )
-
-
-# (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) tried for every shape; the
-# fastest is kept. num_stages=None leaves Triton's backend default. The first
-# entry is the original fixed tile, which suits gfx950; on RDNA4 the smaller
-# BLOCK_K tiles are much faster, and single-stage (no software pipelining)
-# helps further.
-MX_TILE_CONFIGS: Tuple[Tuple[int, int, int, int, Optional[int]], ...] = (
-    (128, 128, 256, 8, None),
-    (128, 128, 128, 8, None),
-    (128, 128, 64, 8, None),
-    (64, 128, 64, 4, None),
-    (128, 128, 64, 4, 1),
-)
 
 
 def _bench_best_tile(m: int, n: int, k: int, run, *, warmup, rep, do_bench_fn):
