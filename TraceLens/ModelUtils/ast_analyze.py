@@ -4830,6 +4830,9 @@ class _ForwardOperationExtractor:
         # reshape target. Record the literal so ``view(hidden_shape)`` expands to
         # its dims rather than the un-resolvable variable name.
         self.shape_tuple_vars: dict[str, ast.Tuple] = {}
+        # name -> (leading-axes token, trailing dim expressions), for a
+        # shape assembled by concatenation rather than as one tuple.
+        self.shape_concat_vars: dict[str, tuple[str, list[ast.expr]]] = {}
         # ``input_shape = x.shape[:-1]`` — a shape *slice* local (multiple leading
         # axes) used as a starred prefix (``view(*input_shape, -1, head_dim)`` or
         # ``hidden_shape = (*input_shape, -1, head_dim)``). Record the resolver
@@ -7090,6 +7093,21 @@ class _ForwardOperationExtractor:
             for target in targets:
                 if isinstance(target, ast.Name):
                     self.shape_tuple_vars[target.id] = value
+        # A shape built by CONCATENATION rather than as one tuple:
+        # ``size_out = x.size()[:-1] + (self.nf,)``, which is how every GPT-2
+        # ``Conv1D`` states the shape it restores after its projection. Left
+        # unrecognised, ``view(size_out)`` rendered as the single token
+        # ``size_out`` and the result stayed rank-1.
+        if (
+            len(targets) == 1
+            and isinstance(targets[0], ast.Name)
+            and isinstance(value, ast.BinOp)
+            and isinstance(value.op, ast.Add)
+            and isinstance(value.right, ast.Tuple)
+        ):
+            prefix = _shape_slice_token(value.left)
+            if prefix is not None:
+                self.shape_concat_vars[targets[0].id] = (prefix, list(value.right.elts))
 
     def _format_shape_args(self, args: list[ast.expr]) -> str:
         """Render ``view``/``reshape``/``expand`` args, expanding shape locals."""
@@ -7111,6 +7129,12 @@ class _ForwardOperationExtractor:
         target tuple is assembled from local variables.
         """
         inner = arg.value if isinstance(arg, ast.Starred) else arg
+        if isinstance(inner, ast.Name) and inner.id in self.shape_concat_vars:
+            prefix, elts = self.shape_concat_vars[inner.id]
+            out: list[str] = ["*" + prefix]
+            for elt in elts:
+                out.extend(self._expand_shape_arg(elt))
+            return out
         if isinstance(inner, ast.Name) and inner.id in self.shape_tuple_vars:
             out: list[str] = []
             for elt in self.shape_tuple_vars[inner.id].elts:
@@ -9786,6 +9810,13 @@ def _shape_slice_token(value: ast.AST) -> str | None:
     if not isinstance(value, ast.Subscript):
         return None
     base = value.value
+    # ``x.size()[:-1]`` is ``x.shape[:-1]`` written as a call -- GPT-2's `Conv1D`
+    # spells it that way -- so it names the same axes and renders the same token.
+    if _is_size_call(base) and isinstance(base, ast.Call):
+        owner = base.func.value if isinstance(base.func, ast.Attribute) else None
+        if owner is None or base.args:
+            return None
+        base = ast.Attribute(value=owner, attr="shape", ctx=ast.Load())
     if not (
         isinstance(base, ast.Attribute)
         and base.attr == "shape"
