@@ -1130,6 +1130,33 @@ def _bind_meta_op_args(
     return tuple(bound), {}
 
 
+def _neutral_scalar_args(torch: Any, name: str) -> list[tuple[str, Any]]:
+    """Non-tensor parameters of ``aten::<name>``, filled with neutral values.
+
+    Read from the op's real schema, so nothing here names an operation. Used
+    only to ask whether an op preserves its input's shape, where the value of a
+    dropout probability or a training flag cannot change the answer.
+    """
+    try:
+        schemas = torch._C._jit_get_schemas_for_operator(f"aten::{name}")
+    except Exception:  # noqa: BLE001
+        return []
+    neutral = {"float": 0.0, "bool": False, "int": 1}
+    for schema in schemas:
+        args: list[tuple[str, Any]] = []
+        for argument in schema.arguments:
+            kind = str(argument.type)
+            if kind == "Tensor":
+                continue
+            if kind not in neutral:
+                args = []
+                break
+            args.append((argument.name, neutral[kind]))
+        if args:
+            return args
+    return []
+
+
 def _run_meta_op(
     torch: Any,
     fn: Any,
@@ -1575,6 +1602,11 @@ class ShapeInferencer:
         self._tensor_specs: dict[str, TensorSpec] = {}
         self._tiling_slot_ids: set[str] = set()
         self._boundary_shapes: dict[str, tuple] = {}
+        # Shape of the tensor each inlined frame was HANDED, keyed by the
+        # frame's id prefix. A frame's forward can reshape by its own input
+        # parameter, which is a different tensor from the one being
+        # reshaped, and parameter names like `x` repeat across frames.
+        self._frame_entry_shapes: dict[str, tuple] = {}
         self._last_input_sources: list[str] = []
         self._owner_classes: dict[int, dict[str, str]] = {}
         # CPython reuses an object's address once it is freed, so a cache keyed
@@ -1861,6 +1893,43 @@ class ShapeInferencer:
                 best = attr_name
         return best
 
+    @staticmethod
+    def _frame_prefix(node_id: str) -> str:
+        """The frame a node belongs to: its id without the op segment."""
+        head, sep, _ = str(node_id).rpartition(":@op_")
+        return head if sep else ""
+
+    def _record_frame_entry(self, node: Any, inputs: list[TensorSpec]) -> None:
+        """Remember what a frame was handed, the first time it reads anything.
+
+        Ops are inferred in forward order, so the first op of a frame reads the
+        tensor the frame was given. ``setdefault`` keeps that one.
+        """
+        if not inputs or not inputs[0].shape:
+            return
+        prefix = self._frame_prefix(getattr(node, "id", ""))
+        if prefix:
+            self._frame_entry_shapes.setdefault(prefix, tuple(inputs[0].shape))
+
+    def _frame_entry_shape(
+        self, node: Any, owner: str | None
+    ) -> tuple[str, tuple] | None:
+        """``(parameter name, shape)`` of what this node's frame was handed.
+
+        ``None`` unless the owning class names its forward input, since without
+        that name there is nothing for a reshape to have referred to.
+        """
+        structure = (getattr(self.spec, "class_registry", None) or {}).get(owner or "")
+        parameter = getattr(structure, "forward_input_name", None)
+        if not parameter:
+            return None
+        shape = self._frame_entry_shapes.get(
+            self._frame_prefix(getattr(node, "id", ""))
+        )
+        if shape is None:
+            return None
+        return str(parameter), shape
+
     def _entry_spec_for(
         self, node: ModelGraphNode, root: BlockNode | None
     ) -> TensorSpec | None:
@@ -2122,6 +2191,7 @@ class ShapeInferencer:
         # ANOTHER tensor resolves against that tensor rather than against
         # whatever is being reshaped.
         self._boundary_shapes = {}
+        self._frame_entry_shapes = {}
         self._last_input_sources: list[str] = []
         # Multi-output nodes whose published slices genuinely divide the parent,
         # and so may be read as a consumer's operand (see
@@ -2144,6 +2214,7 @@ class ShapeInferencer:
         for node_id in order:
             node = node_by_id[node_id]
             input_specs, input_labels = self._gather_input_specs(graph, node_id)
+            self._record_frame_entry(node, input_specs)
             descriptor = self._descriptor_frame_input(node, self._last_input_sources)
             if descriptor is not None:
                 input_specs = descriptor
@@ -3123,11 +3194,23 @@ class ShapeInferencer:
             )
             if owner_scalars:
                 view_dims = {**self.context.dims, **owner_scalars}
+            # A reshape can name the FRAME's own input rather than the tensor it
+            # is reshaping. GPT-2's `Conv1D` flattens to `[B*S, in]`, projects,
+            # then restores `x.size()[:-1] + (nf,)` -- the leading axes of the
+            # `x` it was handed, which is `[B, S, in]`. Reading them from the
+            # source instead gives `[B*S, nf]`: self-consistent, one axis short,
+            # and the `split(..., dim=2)` that follows then has no axis 2.
+            # Scoped to this frame, because `x` names a different tensor in every
+            # other one.
+            frame_shapes = dict(self._boundary_shapes)
+            entry = self._frame_entry_shape(node, owner)
+            if entry is not None:
+                frame_shapes[entry[0]] = entry[1]
             resolved = _resolve_view_shape(
                 shape_detail,
                 source,
                 view_dims,
-                self._boundary_shapes,
+                frame_shapes,
                 _shape_snapshot_tokens(details),
             )
             if resolved is not None:
@@ -4020,6 +4103,9 @@ class ShapeInferencer:
             triton_spec = self._triton_op_shape(node, inputs)
             if triton_spec is not None:
                 return triton_spec
+            preserved = self._shape_preserving_torch_op(node, inputs)
+            if preserved is not None:
+                return preserved
             _log.warning(
                 "No shape inference rule for %s (label=%r, class=%r); "
                 "passing through input shape",
@@ -4117,6 +4203,69 @@ class ShapeInferencer:
                 return None
             resolved.append(int(value))
         return tuple(resolved)
+
+    def _shape_preserving_torch_op(
+        self, node: ModelGraphNode, inputs: list[TensorSpec]
+    ) -> TensorSpec | None:
+        """Ask torch whether an op keeps its input's shape, using stand-in sizes.
+
+        ``nn.Dropout`` has no symbolic rule and cannot be meta-executed on
+        ``[B, S, 768]``, because ``B`` and ``S`` are not numbers. But the only
+        question that matters is whether the output has the SAME shape as the
+        input, and substituting a size for each symbol answers it -- then the
+        real symbolic shape is carried through unchanged.
+
+        This is what the fallback already did; the difference is that torch has
+        now said so, rather than the shape being passed through with a warning
+        because nothing knew. Distinct stand-ins per symbol, so an op that
+        permutes or collapses axes cannot look shape-preserving by coincidence.
+        One tensor operand only: with several there is no single input shape for
+        the output to have preserved.
+        """
+        if len(inputs) != 1 or not inputs[0].shape:
+            return None
+        try:
+            import torch
+        except ImportError:
+            return None
+        stand_ins: dict[Any, int] = {}
+        sizes: list[int] = []
+        for dim in inputs[0].shape:
+            concrete = self._concrete_dim(dim)
+            if concrete is not None and concrete > 0:
+                sizes.append(int(concrete))
+                continue
+            # Distinct and >1, so a transpose or a flatten cannot come back
+            # looking like the shape it started with.
+            sizes.append(stand_ins.setdefault(dim, 2 + 2 * len(stand_ins) + 1))
+        try:
+            meta = torch.zeros(
+                sizes, dtype=_torch_dtype(torch, inputs[0].dtype), device="meta"
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        details = [str(item) for item in node.metadata.get("details", [])]
+        scalar_args = _op_scalar_detail_args(details, self.context.dims)
+        for name in self._op_callable_candidates(node):
+            fn = _resolve_meta_op_callable(torch, name)
+            if fn is None:
+                continue
+            out = _run_meta_op(torch, fn, name, [meta], scalar_args)
+            if out is None:
+                # The op's own schema says what else it takes. `aten::dropout`
+                # is `(Tensor input, float p, bool train)` with no defaults, so
+                # a bare call cannot run it. Neutral values are sound HERE and
+                # only here: the answer being read off is whether the shape
+                # changed, which no probability or training flag decides.
+                out = _run_meta_op(
+                    torch, fn, name, [meta], _neutral_scalar_args(torch, name)
+                )
+            if out is None:
+                continue
+            shape = _first_tensor_shape(out)
+            if shape is not None and tuple(shape) == tuple(sizes):
+                return inputs[0]
+        return None
 
     def _symbolise_concrete(self, shape: tuple[int, ...]) -> tuple[Any, ...]:
         from TraceLens.ModelUtils.meta_trace import symbolise_meta_shape
@@ -5529,6 +5678,10 @@ def _resolve_view_shape(
 
     leading: tuple[DimExpr, ...] = ()
     trailing_start = 0
+    # Whether the leading axes came from a tensor the caller named, rather than
+    # from the tensor being reshaped. Only then is an unresolvable trailing axis
+    # safe to settle by element conservation.
+    used_named_prefix = False
 
     # Detect starred prefix like ``*foo.shape[:-1]`` or ``*foo.shape[:-N]``.
     first = parts[0]
@@ -5552,6 +5705,25 @@ def _resolve_view_shape(
             if parts[1:] == ["-1"] and len(source.shape) > 2:
                 while len(leading) >= 1 and len(source.shape[len(leading) :]) < 2:
                     leading = source.shape[: len(leading) - 1]
+            # The star names a TENSOR, which is not always the one being
+            # reshaped. When the caller knows that tensor's shape -- a frame's
+            # own input, say -- those are the axes the model asked for, and the
+            # source's are a different tensor's. GPT-2's `Conv1D` restores the
+            # leading axes of the `[B, S, in]` it was handed from a `[B*S, nf]`
+            # projection, so reading the source drops an axis.
+            # Only for a SNAPSHOT token -- a shape local bound earlier, which
+            # records what that tensor measured THEN. An inline
+            # `*x.shape[:-1]` written in the reshape itself names the tensor
+            # being reshaped, and reading elsewhere gave MiniMax's attention a
+            # fourth axis and then a second batch axis.
+            named_prefix = (
+                (named_shapes or {}).get(first[1:].split(".shape", 1)[0].strip())
+                if first[1:] in (snapshots or ())
+                else None
+            )
+            if named_prefix is not None and -len(named_prefix) <= cut < 0:
+                leading = tuple(named_prefix[:cut])
+                used_named_prefix = True
         else:
             leading = source.shape
         trailing_start = 1
@@ -5608,6 +5780,20 @@ def _resolve_view_shape(
             if -len(source.shape) <= axis < len(source.shape):
                 resolved.append(source.shape[axis])
                 continue
+        # A single unresolvable axis is still determined when the LEADING axes
+        # came from a named tensor: those are known, and a reshape conserves
+        # elements, which is exactly what ``-1`` means. GPT-2's `Conv1D`
+        # restores `(*x.shape[:-1], self.nf)` where `nf` is a CONSTRUCTOR
+        # argument no config states.
+        #
+        # Only then. Guessing an axis from a source whose leading dims are
+        # themselves a fallback produces nonsense -- measured: GLM's
+        # `[B, S, 4096]` collapsed to `[B*S*4096]` and MiniMax grew a second
+        # batch axis. Returning None leaves those to a fallback that is right.
+        if used_named_prefix and neg_index is None:
+            neg_index = len(resolved)
+            resolved.append("-1")
+            continue
         # Cannot resolve — give up
         return None
 

@@ -7097,6 +7097,13 @@ class _ForwardOperationExtractor:
         inner = arg.value if isinstance(arg, ast.Starred) else arg
         if isinstance(inner, ast.Name) and inner.id in self.shape_concat_vars:
             prefix, elts = self.shape_concat_vars[inner.id]
+            # Bound EARLIER, so it records what that tensor measured then --
+            # GPT-2 rebinds `x` between building `size_out` and using it. Mark
+            # it a snapshot so the resolver knows it may read the named tensor
+            # rather than the one being reshaped.
+            snapshots = getattr(self, "_pending_shape_snapshots", None)
+            if snapshots is not None and prefix not in snapshots:
+                snapshots.append(prefix)
             out: list[str] = ["*" + prefix]
             for elt in elts:
                 out.extend(self._expand_shape_arg(elt))

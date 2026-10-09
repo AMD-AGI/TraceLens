@@ -82,6 +82,18 @@ MODEL_PINS: dict[str, ModelPin] = {
         revision="60d8d70770c6776ff598c94bb586a859a38244f1",
         transformers="5.16.1",
     ),
+    # A decoder-only model of the pre-Llama generation, and the only one here
+    # that is not a recent MoE. It covers what the others cannot: `Conv1D`
+    # projections (`addmm` against a `[in, out]` weight, the transpose of
+    # `F.linear`'s layout), a shape restored by tuple CONCATENATION rather than
+    # written as one tuple, and a config that states none of its own switches --
+    # `add_cross_attention` and `reorder_and_upcast_attn` live in the config
+    # CLASS, and reading them as `None` rather than `False` drew a whole
+    # cross-attention tower the checkpoint cannot build.
+    "openai-community/gpt2": ModelPin(
+        revision="607a30d783dfa663caf39e06633721c8d4cfcd7e",
+        transformers="5.16.1",
+    ),
     # Kimi's code does not run under the transformers installed here, so its
     # graph is built in an environment of its own. Those libraries are pinned
     # too: ``fla-core`` supplies the linear-attention kernels the model imports
