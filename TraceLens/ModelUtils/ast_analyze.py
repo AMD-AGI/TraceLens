@@ -8800,9 +8800,13 @@ class _ModelAstVisitor(ast.NodeVisitor):
         vision_scoped_classes: set[str] | None = None,
         vision_config: dict[str, Any] | None = None,
         module_functions: dict[str, ast.FunctionDef] | None = None,
+        declared_aliases: dict[str, str] | None = None,
     ) -> None:
         self.classes: dict[str, ClassStructure] = {}
         self.config = dict(config or {})
+        # What the model's own config classes say they rename, so a sub-config
+        # dict can answer the canonical names its config OBJECT would.
+        self.declared_aliases = dict(declared_aliases or {})
         self.all_tensor_ops = all_tensor_ops
         self.activation_param_bindings = activation_param_bindings or {}
         self.vision_scoped_classes = set(vision_scoped_classes or ())
@@ -8837,9 +8841,19 @@ class _ModelAstVisitor(ast.NodeVisitor):
         config leaves the top level unchanged.
         """
         if class_name in self.vision_scoped_classes and self.vision_config:
-            return {**self.config, **apply_config_attribute_aliases(self.vision_config)}
+            return {
+                **self.config,
+                **apply_config_attribute_aliases(
+                    self.vision_config, self.declared_aliases
+                ),
+            }
         if self.text_config:
-            return {**self.config, **apply_config_attribute_aliases(self.text_config)}
+            return {
+                **self.config,
+                **apply_config_attribute_aliases(
+                    self.text_config, self.declared_aliases
+                ),
+            }
         return self.config
 
     def _init_config_for_class(self, class_name: str) -> dict[str, Any]:
@@ -8856,7 +8870,12 @@ class _ModelAstVisitor(ast.NodeVisitor):
         in BOTH. Narrower than :meth:`_config_for_class` on purpose.
         """
         if class_name in self.vision_scoped_classes and self.vision_config:
-            return {**self.config, **apply_config_attribute_aliases(self.vision_config)}
+            return {
+                **self.config,
+                **apply_config_attribute_aliases(
+                    self.vision_config, self.declared_aliases
+                ),
+            }
         return self.config
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
@@ -12664,6 +12683,7 @@ def analyze_source(
     filename: str = "<model>",
     config: dict[str, Any] | None = None,
     all_tensor_ops: bool = False,
+    declared_aliases: dict[str, str] | None = None,
 ) -> CodeAnalysis:
     """Analyze one modeling file and return extracted block structure."""
     config = _with_resolved_attn_implementation(config)
@@ -12683,6 +12703,7 @@ def analyze_source(
             (config or {}).get("vision_config") if isinstance(config, dict) else None
         ),
         module_functions=_module_forward_functions(tree, config, parsed_registry),
+        declared_aliases=declared_aliases,
     )
     visitor.visit(tree)
     finalize_class_registry(visitor.classes)
@@ -12782,6 +12803,7 @@ def analyze_sources(
     *,
     config: dict[str, Any] | None = None,
     all_tensor_ops: bool = False,
+    declared_aliases: dict[str, str] | None = None,
 ) -> CodeAnalysis:
     """Analyze multiple files and merge into one CodeAnalysis."""
     merged = CodeAnalysis()
@@ -12793,6 +12815,7 @@ def analyze_sources(
             filename=str(path),
             config=config,
             all_tensor_ops=all_tensor_ops,
+            declared_aliases=declared_aliases,
         )
         registries.append(partial.class_registry)
         merged.source_files.extend(partial.source_files)

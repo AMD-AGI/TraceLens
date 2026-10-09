@@ -22,6 +22,7 @@ from collections import Counter
 from collections.abc import Sequence
 from typing import Any, TYPE_CHECKING
 
+from TraceLens.ModelUtils.config_resolve import declared_config_aliases
 from TraceLens.ModelUtils.extract import (
     architecture_section_trees,
     find_vision_tower,
@@ -5966,54 +5967,13 @@ def _multi_output_slice_shape(
 def _model_declared_aliases(spec: ArchitectureSpec) -> dict[str, str]:
     """Renames the model's own config classes declare: read name -> real key.
 
-    A config class states its aliases itself::
-
-        class DeepseekV4Config(PretrainedConfig):
-            attribute_map = {"num_local_experts": "n_routed_experts"}
-
-    so modeling code reading ``config.num_local_experts`` resolves against a
-    checkpoint that spells it ``n_routed_experts``. ``attribute_map`` is the
-    transformers API for exactly this, which is why it is the thing to read --
-    and reading it beats guessing, because a guess has no way to know that GLM's
-    VISION tower renames ``num_attention_heads`` to ``num_heads`` while its text
-    tower does not.
-
-    Read from source, never imported: analysis does not run model code, and a
-    checkpoint's configuration module is the checkpoint's code.
+    Modeling code reads ``config.num_local_experts`` against a checkpoint that
+    spells it ``n_routed_experts``; the model says so itself in its config
+    class's ``attribute_map``, which is read rather than guessed because a
+    guessed list has to claim a name globally and ``n_heads`` is GLM's sparse
+    indexer head count, not another word for its attention heads.
     """
-    import ast as _pyast
-
-    declared: dict[str, str] = {}
-    directories = {Path(path).parent for path in (spec.code_paths or [])}
-    for directory in sorted(directories):
-        try:
-            candidates = sorted(directory.glob("*.py"))
-        except OSError:
-            continue
-        for path in candidates:
-            try:
-                tree = _pyast.parse(path.read_text(encoding="utf-8"))
-            except (OSError, SyntaxError, ValueError):
-                continue
-            for node in _pyast.walk(tree):
-                if not isinstance(node, _pyast.ClassDef):
-                    continue
-                for statement in node.body:
-                    if not isinstance(statement, _pyast.Assign):
-                        continue
-                    if not any(
-                        isinstance(target, _pyast.Name) and target.id == "attribute_map"
-                        for target in statement.targets
-                    ):
-                        continue
-                    if not isinstance(statement.value, _pyast.Dict):
-                        continue
-                    for key, value in zip(statement.value.keys, statement.value.values):
-                        if isinstance(key, _pyast.Constant) and isinstance(
-                            value, _pyast.Constant
-                        ):
-                            declared.setdefault(str(key.value), str(value.value))
-    return declared
+    return declared_config_aliases(spec.code_paths or [])
 
 
 def _collect_init_scalar_attrs(

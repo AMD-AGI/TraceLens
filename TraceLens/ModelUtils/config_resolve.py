@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import ast
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -115,39 +117,85 @@ def normalize_config(
     return normalized
 
 
-# Canonical HF config attribute names and the aliases a ``PretrainedConfig``
-# subclass commonly stores them under (its ``attribute_map``). A vision config
-# such as ``Glm4vVisionConfig``/``Glm5NextVisionConfig`` stores only
-# ``num_heads``, yet its config *object* answers ``config.num_attention_heads``
-# through that map. A plain dict does not, so overlaying such a sub-config onto a
-# parent that defines the canonical name would let the parent's value leak.
-_CONFIG_ATTRIBUTE_ALIASES: dict[str, tuple[str, ...]] = {
-    "num_attention_heads": ("num_heads", "n_heads", "num_query_heads"),
-    "num_key_value_heads": ("num_kv_heads",),
-    "hidden_size": ("n_embd", "d_model", "hidden_dim"),
-}
+def declared_config_aliases(paths: Iterable[str | Path]) -> dict[str, str]:
+    """Renames the model's own config classes declare: canonical name -> key.
+
+    A config class states its aliases itself, which is what ``attribute_map``
+    is for::
+
+        class Glm5NextVisionConfig(PretrainedConfig):
+            attribute_map = {"num_attention_heads": "num_heads"}
+
+    so the config OBJECT answers ``config.num_attention_heads`` while storing
+    only ``num_heads``. A plain dict does not, which is why a sub-config has to
+    be given those names before it is overlaid on its parent.
+
+    Reading the declaration beats listing names a config MIGHT store a value
+    under, because such a list claims a name globally and a name is not global:
+    GLM's vision tower renames ``num_attention_heads`` while its text tower does
+    not, and ``n_heads`` is GLM's sparse indexer head count rather than another
+    word for its attention heads.
+
+    Parsed from source, never imported -- a checkpoint's configuration module is
+    the checkpoint's own code, and analysis does not run model code. Scans the
+    directories holding the model's source, since the configuration module sits
+    beside the modeling one rather than being analysed itself.
+    """
+    declared: dict[str, str] = {}
+    directories = {Path(path).parent for path in paths}
+    for directory in sorted(directories):
+        try:
+            candidates = sorted(directory.glob("*.py"))
+        except OSError:
+            continue
+        for candidate in candidates:
+            try:
+                tree = ast.parse(candidate.read_text(encoding="utf-8"))
+            except (OSError, SyntaxError, ValueError):
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                for statement in node.body:
+                    if not isinstance(statement, ast.Assign):
+                        continue
+                    if not any(
+                        isinstance(target, ast.Name) and target.id == "attribute_map"
+                        for target in statement.targets
+                    ):
+                        continue
+                    if not isinstance(statement.value, ast.Dict):
+                        continue
+                    for key, value in zip(statement.value.keys, statement.value.values):
+                        if isinstance(key, ast.Constant) and isinstance(
+                            value, ast.Constant
+                        ):
+                            declared.setdefault(str(key.value), str(value.value))
+    return declared
 
 
-def apply_config_attribute_aliases(overlay: dict[str, Any]) -> dict[str, Any]:
-    """Backfill canonical HF config keys from their aliases within *overlay*.
+def apply_config_attribute_aliases(
+    overlay: dict[str, Any], declared: dict[str, str] | None = None
+) -> dict[str, Any]:
+    """Backfill the canonical names a sub-config answers to but does not store.
 
-    Returns a new dict where each canonical name in ``_CONFIG_ATTRIBUTE_ALIASES``
-    that is absent (or falsy) is populated from the first present alias. This
-    mirrors ``PretrainedConfig.attribute_map`` so that when a nested sub-config
-    (a ``vision_config`` storing ``num_heads``) is merged onto a parent config
-    that defines the canonical name (text ``num_attention_heads``), the overlay
-    shadows the parent instead of the parent leaking through. The input is left
-    unchanged.
+    *declared* is what the model's own config classes say
+    (:func:`declared_config_aliases`). Each canonical name absent (or falsy)
+    from *overlay* is populated from the key the model says holds it, so that
+    merging a nested sub-config (a ``vision_config`` storing ``num_heads``) onto
+    a parent defining the canonical name (text ``num_attention_heads``) lets the
+    overlay shadow the parent instead of the parent leaking through.
+
+    The input is left unchanged. With nothing declared this is a copy: a model
+    that renames nothing needs no backfill.
     """
     resolved = dict(overlay)
-    for canonical, aliases in _CONFIG_ATTRIBUTE_ALIASES.items():
+    for canonical, key in (declared or {}).items():
         if resolved.get(canonical):
             continue
-        for alias in aliases:
-            value = resolved.get(alias)
-            if value:
-                resolved[canonical] = value
-                break
+        value = resolved.get(key)
+        if value:
+            resolved[canonical] = value
     return resolved
 
 

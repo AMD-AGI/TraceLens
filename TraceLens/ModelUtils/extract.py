@@ -30,6 +30,7 @@ from TraceLens.ModelUtils.block_tree import (
 from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis, LayerVariant
 from TraceLens.ModelUtils.config_resolve import (
     apply_config_attribute_aliases,
+    declared_config_aliases,
     load_checkpoint_config,
 )
 from TraceLens.ModelUtils.github import (
@@ -141,6 +142,21 @@ def _get(config: dict[str, Any], *keys: str) -> Any:
         if key in config and config[key] is not None:
             return config[key]
     return None
+
+
+def _declared_get(
+    config: dict[str, Any], canonical: str, declared: dict[str, str]
+) -> Any:
+    """Read *canonical*, falling back to the key the MODEL says holds it.
+
+    A config class states renames in ``attribute_map``, so a checkpoint storing
+    its head count as ``n_head`` is read through the model's own declaration
+    rather than through a list of spellings a checkpoint might use.
+    """
+    value = _get(config, canonical)
+    if value is None and canonical in declared:
+        value = _get(config, declared[canonical])
+    return value
 
 
 def _as_int(value: Any) -> int | None:
@@ -1672,7 +1688,12 @@ def vision_scoped_config(spec: ArchitectureSpec) -> dict[str, Any]:
     vision_config = config.get("vision_config")
     if not isinstance(vision_config, dict):
         return dict(config)
-    return {**config, **apply_config_attribute_aliases(vision_config)}
+    return {
+        **config,
+        **apply_config_attribute_aliases(
+            vision_config, declared_config_aliases(spec.code_paths or [])
+        ),
+    }
 
 
 # HF VLMs mark image positions in ``input_ids`` with a reserved token id. The
@@ -1883,6 +1904,13 @@ def parse_architecture(
     code_analysis: CodeAnalysis | None = None,
 ) -> ArchitectureSpec:
     """Convert a config dict into an ArchitectureSpec."""
+    # A checkpoint need not store a canonical name under that name -- GPT-2 keeps
+    # its head count in `n_head` -- but its config class says which key holds it.
+    # Reading that declaration beats guessing spellings, which cannot tell a
+    # genuine rename from a name that means something else in this model.
+    declared = declared_config_aliases(
+        (code_analysis.source_files if code_analysis else None) or []
+    )
     model_type = str(_get(config, "model_type") or "unknown")
     architectures = _get(config, "architectures") or []
     if not isinstance(architectures, list):
@@ -1907,7 +1935,9 @@ def parse_architecture(
         max_position_embeddings=_as_int(
             _get(config, "max_position_embeddings", "max_seq_len", "seq_length")
         ),
-        num_attention_heads=_as_int(_get(config, "num_attention_heads", "n_head")),
+        num_attention_heads=_as_int(
+            _declared_get(config, "num_attention_heads", declared)
+        ),
         num_key_value_heads=_as_int(
             _get(config, "num_key_value_heads", "num_kv_heads")
         ),
@@ -1991,6 +2021,9 @@ def load_architecture(
                 read_sources(source_files),
                 config=config,
                 all_tensor_ops=all_tensor_ops,
+                # The model's configuration module sits beside its modeling one
+                # rather than being analysed, so its renames are read from there.
+                declared_aliases=declared_config_aliases(source_files),
             )
 
     spec = parse_architecture(
