@@ -23,8 +23,6 @@ from .util import GPU_KERNEL_CATEGORIES, GRAPH_LAUNCH_NAMES
 
 logger = logging.getLogger(__name__)
 
-_MIN_KERNEL_COUNT = 10
-
 
 @dataclass
 class TraceHealthFinding:
@@ -74,44 +72,48 @@ def run_trace_health_check(
     if trace_metadata is None:
         trace_metadata = {}
 
-    kernel_count = 0
+    has_kernel = False
     has_python_func = False
-    graph_launch_count = 0
+    has_graph_launch = False
 
     for event in events:
-        cat = event.get("cat", "")
-        if cat in GPU_KERNEL_CATEGORIES:
-            kernel_count += 1
-        if cat == "python_function":
+        if not has_kernel and event.get("cat", "") in GPU_KERNEL_CATEGORIES:
+            has_kernel = True
+        if not has_python_func and event.get("cat") == "python_function":
             has_python_func = True
-        if event.get("name") in GRAPH_LAUNCH_NAMES:
-            graph_launch_count += 1
+        if not has_graph_launch and event.get("name") in GRAPH_LAUNCH_NAMES:
+            has_graph_launch = True
+        if has_kernel and has_python_func and has_graph_launch:
+            break
 
     findings: List[TraceHealthFinding] = []
-    findings.extend(_check_kernels_present(kernel_count))
-    findings.extend(_check_call_stack_exists(trace_metadata, has_python_func))
-    findings.extend(_check_graph_mode(graph_launch_count, capture_trace_filepath))
-    return TraceHealthReport(findings=findings)
-
-
-def _check_kernels_present(kernel_count: int) -> List[TraceHealthFinding]:
-    if kernel_count == 0:
-        return [
+    if not has_kernel:
+        findings.append(
             TraceHealthFinding(
                 "kernels_present",
                 "error",
                 "No GPU kernel events found in trace.",
             )
-        ]
-    if kernel_count < _MIN_KERNEL_COUNT:
-        return [
+        )
+    if not has_python_func and trace_metadata.get("with_stack") != 1:
+        findings.append(
             TraceHealthFinding(
-                "kernels_present",
+                "call_stack_missing",
                 "warn",
-                f"Only {kernel_count} GPU kernel events found (expected >= {_MIN_KERNEL_COUNT}).",
+                "Trace does not contain call stack data (with_stack=False or not set). "
+                "Pass with_stack=True to the profiler for call-stack-based analysis.",
             )
-        ]
-    return []
+        )
+    if has_graph_launch and capture_trace_filepath is None:
+        findings.append(
+            TraceHealthFinding(
+                "graph_mode_no_capture",
+                "warn",
+                "Trace contains graph launch event(s) but no capture trace "
+                "was provided. Graph-mode analysis will be limited.",
+            )
+        )
+    return TraceHealthReport(findings=findings)
 
 
 def check_kernels_dropped(tree) -> TraceHealthReport:
@@ -142,38 +144,3 @@ def check_kernels_dropped(tree) -> TraceHealthReport:
             )
         ]
     )
-
-
-def _check_call_stack_exists(
-    trace_metadata: Dict[str, Any], has_python_func: bool
-) -> List[TraceHealthFinding]:
-    if trace_metadata.get("with_stack") == 1:
-        return []
-    if has_python_func:
-        return []
-    return [
-        TraceHealthFinding(
-            "call_stack_missing",
-            "warn",
-            "Trace does not contain call stack data (with_stack=False or not set). "
-            "Pass with_stack=True to the profiler for call-stack-based analysis.",
-        )
-    ]
-
-
-def _check_graph_mode(
-    graph_launch_count: int, capture_trace_filepath: Optional[str]
-) -> List[TraceHealthFinding]:
-    if graph_launch_count == 0:
-        return []
-    if capture_trace_filepath is not None:
-        return []
-    return [
-        TraceHealthFinding(
-            "graph_mode_no_capture",
-            "warn",
-            f"Trace contains {graph_launch_count} graph launch event(s) "
-            f"but no capture trace was provided. "
-            f"Graph-mode analysis will be limited.",
-        )
-    ]
