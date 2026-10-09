@@ -86,7 +86,9 @@ def test_hybrid_and_moe_note_branches():
             "model_type": "custom",
             "num_hidden_layers": 8,
             "hidden_act": "silu",
-            "hybrid_block_types": ["a", "b"],
+            # `layer_types` is the name models state; `hybrid_block_types`
+            # was a guessed alternate no model used.
+            "layer_types": ["a", "b"],
             "first_k_dense_replace": 2,
             "moe_layer_start_index": 3,
             "moe_layer_interval": 2,
@@ -94,7 +96,7 @@ def test_hybrid_and_moe_note_branches():
         },
         "fixture",
     )
-    # num_experts absent but hybrid_block_types present -> Hybrid (line 322)
+    # num_experts absent but layer_types present -> Hybrid
     assert spec.decoder_type == "Hybrid"
     assert any("First 2 layers are dense" in note for note in spec.moe_notes)
     assert any("MoE from layer 3" in note for note in spec.moe_notes)

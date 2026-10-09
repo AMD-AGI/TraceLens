@@ -1290,7 +1290,9 @@ def test_additional_attention_inference_branches():
             "num_attention_heads": 8,
             "num_key_value_heads": 1,
             "use_sliding_window": True,
-            "sliding_window_size": 64,
+            # The name models actually state; the alternate spelling this
+            # fixture used was read by no model and has been retired.
+            "sliding_window": 64,
         },
         "fixture",
     )

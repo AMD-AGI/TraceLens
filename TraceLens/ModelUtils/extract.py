@@ -309,7 +309,7 @@ def _infer_attention(config: dict[str, Any], spec: ArchitectureSpec) -> None:
             spec.attention_type = "MHA"
 
     if _as_bool(_get(config, "use_sliding_window")):
-        window = _as_int(_get(config, "sliding_window", "sliding_window_size"))
+        window = _as_int(_get(config, "sliding_window"))
         max_window_layers = _as_int(_get(config, "max_window_layers"))
         if max_window_layers and spec.num_hidden_layers:
             global_layers = spec.num_hidden_layers - max_window_layers
@@ -320,9 +320,12 @@ def _infer_attention(config: dict[str, Any], spec: ArchitectureSpec) -> None:
         elif window:
             spec.layer_notes.append(f"Sliding window attention (window={window})")
 
-    if _as_bool(_get(config, "attention_bias", "use_bias", "bias")):
+    if _as_bool(_get(config, "attention_bias")):
         spec.attention_notes.append("Attention projections use bias")
 
+    # Both spellings are in USE, not guessed: MiniMax-M3 states `use_qk_norm`
+    # and neither config class declares a rename for it, so this is the
+    # model's own key rather than an alias something could resolve.
     if _get(config, "qk_norm", "use_qk_norm") is True:
         spec.attention_notes.append("QK-Norm enabled")
         spec.norm_notes.append("QK-Norm inside attention")
@@ -330,6 +333,9 @@ def _infer_attention(config: dict[str, Any], spec: ArchitectureSpec) -> None:
 
 def _infer_positional(config: dict[str, Any], spec: ArchitectureSpec) -> None:
     model_type = (spec.model_type or "").lower()
+    # Three DIFFERENT keys, not three spellings of one: a parameters dict, a
+    # scaling dict and a bare theta. Any of them present means the model has
+    # rope, which is what is being asked here.
     rope = _get(config, "rope_parameters", "rope_scaling", "rope_theta")
 
     if _get(config, "position_embedding_type") == "nope" or "nope" in model_type:
@@ -358,7 +364,11 @@ def _infer_positional(config: dict[str, Any], spec: ArchitectureSpec) -> None:
 
 def _infer_ffn_and_moe(config: dict[str, Any], spec: ArchitectureSpec) -> None:
     hidden_act = str(
-        _get(config, "hidden_act", "activation_function") or "silu"
+        # GPT-2 states `activation_function`, and `GPT2Config` declares no
+        # rename for it -- it is that model's own key, not an alias. Both
+        # spellings are read because both are in use.
+        _get(config, "hidden_act", "activation_function")
+        or "silu"
     ).lower()
     if hidden_act in {"silu", "swish"}:
         spec.ffn_type = "SwiGLU"
@@ -400,9 +410,7 @@ def _infer_ffn_and_moe(config: dict[str, Any], spec: ArchitectureSpec) -> None:
     spec.num_experts = num_experts
     spec.num_experts_per_tok = experts_per_tok
     spec.num_shared_experts = shared_experts
-    spec.moe_intermediate_size = _as_int(
-        _get(config, "moe_intermediate_size", "expert_intermediate_size")
-    )
+    spec.moe_intermediate_size = _as_int(_get(config, "moe_intermediate_size"))
 
     if num_experts and num_experts > 1:
         spec.decoder_type = "Sparse MoE"
@@ -413,12 +421,12 @@ def _infer_ffn_and_moe(config: dict[str, Any], spec: ArchitectureSpec) -> None:
             spec.moe_notes.append(
                 f"{experts_per_tok}/{num_experts} experts active (~{active_ratio:.1f}%)"
             )
-    elif _get(config, "layer_types", "block_types", "hybrid_block_types"):
+    elif _get(config, "layer_types"):
         spec.decoder_type = "Hybrid"
     else:
         spec.decoder_type = "Dense"
 
-    first_k_dense = _as_int(_get(config, "first_k_dense_replace", "num_dense_layers"))
+    first_k_dense = _as_int(_get(config, "first_k_dense_replace"))
     moe_layer_start = _as_int(_get(config, "moe_layer_start_index"))
     moe_layer_interval = _as_int(_get(config, "moe_layer_interval"))
     mlp_only_layers = _get(config, "mlp_only_layers")
@@ -432,7 +440,7 @@ def _infer_ffn_and_moe(config: dict[str, Any], spec: ArchitectureSpec) -> None:
     if isinstance(mlp_only_layers, list) and mlp_only_layers:
         spec.moe_notes.append(f"Dense FFN on layer indices: {mlp_only_layers}")
 
-    layer_types = _get(config, "layer_types", "block_types")
+    layer_types = _get(config, "layer_types")
     if isinstance(layer_types, list) and layer_types:
         from collections import Counter
 
@@ -449,9 +457,7 @@ def _config_has_ffn_layer_variation(config: dict[str, Any]) -> bool:
         and len({str(item) for item in mlp_layer_types}) > 1
     ):
         return True
-    first_k_dense = (
-        _as_int(_get(config, "first_k_dense_replace", "num_dense_layers")) or 0
-    )
+    first_k_dense = _as_int(_get(config, "first_k_dense_replace")) or 0
     num_experts = _as_int(
         _get(
             config,
@@ -481,7 +487,7 @@ def _resolve_attention_from_config_lists(
     decoder_class: str | None,
 ) -> str | None:
     """Map config.layer_types entries to the attention class a decoder layer builds."""
-    layer_types = _get(config, "layer_types", "block_types")
+    layer_types = _get(config, "layer_types")
     if not isinstance(layer_types, list) or layer_idx >= len(layer_types):
         return None
     block_type = str(layer_types[layer_idx] or "").strip().lower()
@@ -534,7 +540,7 @@ def _resolve_ffn_from_config_lists(
 
 def _config_has_per_layer_typing(config: dict[str, Any]) -> bool:
     """True when config encodes per-layer module selection beyond a flat layer_types list."""
-    if isinstance(_get(config, "layer_types", "block_types"), list):
+    if isinstance(_get(config, "layer_types"), list):
         return False
     for container in [
         config,
@@ -660,7 +666,7 @@ def _infer_layer_variants(
     if not num_layers:
         return
 
-    layer_types = _get(config, "layer_types", "block_types")
+    layer_types = _get(config, "layer_types")
     has_config_layer_lists = isinstance(layer_types, list) and layer_types
     has_ffn_layer_variation = _config_has_ffn_layer_variation(config)
 
@@ -1280,10 +1286,8 @@ def _config_moe_layer(layer_idx: int, config: dict[str, Any]) -> bool:
         if 0 <= layer_idx < len(moe_pattern):
             return bool(_as_int(moe_pattern[layer_idx]) or 0)
         return False
-    first_k_dense = (
-        _as_int(_get(config, "first_k_dense_replace", "num_dense_layers")) or 0
-    )
-    moe_freq = _as_int(_get(config, "moe_layer_freq", "moe_layer_interval")) or 1
+    first_k_dense = _as_int(_get(config, "first_k_dense_replace")) or 0
+    moe_freq = _as_int(_get(config, "moe_layer_freq")) or 1
     return layer_idx >= first_k_dense and layer_idx % moe_freq == 0
 
 
@@ -1310,7 +1314,7 @@ def _infer_norm(config: dict[str, Any], spec: ArchitectureSpec) -> None:
         spec.norm_placement = "Post-Norm (inside residual)"
         spec.norm_notes.append("Sandwich / post-norm variant")
 
-    if _get(config, "post_norm", "use_post_norm") is True:
+    if _get(config, "post_norm") is True:
         spec.norm_placement = "Post-Norm"
 
 
@@ -1992,7 +1996,7 @@ def parse_architecture(
         raw_config=config,
     )
 
-    total_params = _get(config, "total_params", "num_parameters")
+    total_params = _get(config, "total_params")
     if total_params:
         spec.total_params_hint = str(total_params)
 
