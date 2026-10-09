@@ -4352,8 +4352,16 @@ def _flatten_control_flow_body(stmts: list[ast.stmt]) -> list[ast.stmt]:
 
 
 def _self_config_values(
-    init_func: ast.FunctionDef | None, config: dict[str, Any]
+    init_func: ast.FunctionDef | None,
+    config: dict[str, Any],
+    param_values: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Integer/boolean ``self.<attr>`` values an ``__init__`` settles.
+
+    *param_values* supplies constructor arguments whose value is known -- see
+    :func:`_settled_ctor_defaults` -- so ``self.is_cross_attention =
+    is_cross_attention`` resolves instead of staying unknown.
+    """
     values: dict[str, Any] = {}
     if init_func is None:
         return values
@@ -4364,7 +4372,7 @@ def _self_config_values(
         value_node = stmt.value
         if value_node is None:
             continue
-        value = _config_value(value_node, config, values)
+        value = _config_value(value_node, config, values, param_values)
         for target in targets:
             if isinstance(target, ast.Attribute) and _is_self_attr(target, target.attr):
                 if value is not _UNKNOWN:
@@ -8842,12 +8850,15 @@ class _ModelAstVisitor(ast.NodeVisitor):
         vision_config: dict[str, Any] | None = None,
         module_functions: dict[str, ast.FunctionDef] | None = None,
         declared_aliases: dict[str, str] | None = None,
+        ctor_defaults: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.classes: dict[str, ClassStructure] = {}
         self.config = dict(config or {})
         # What the model's own config classes say they rename, so a sub-config
         # dict can answer the canonical names its config OBJECT would.
         self.declared_aliases = dict(declared_aliases or {})
+        # Constructor arguments no construction site overrides, per class.
+        self.ctor_defaults = dict(ctor_defaults or {})
         self.all_tensor_ops = all_tensor_ops
         self.activation_param_bindings = activation_param_bindings or {}
         self.vision_scoped_classes = set(vision_scoped_classes or ())
@@ -8991,6 +9002,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 init_func,
                 config=self._init_config_for_class(node.name),
                 param_bindings=self.activation_param_bindings.get(node.name),
+                param_values=self.ctor_defaults.get(node.name),
             )
         if forward_func is not None:
             forward_input_name = _primary_forward_input_name(forward_func)
@@ -9005,7 +9017,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
             ) = _parse_forward(
                 resolved_forward_func,
                 self_values=_self_config_values(
-                    init_func, self._config_for_class(node.name)
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
                 ),
                 config=self._config_for_class(node.name),
             )
@@ -9037,7 +9051,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
             }
             if _is_moe_gate_class(node.name, forward_calls):
                 values = _self_config_values(
-                    init_func, self._config_for_class(node.name)
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
                 )
                 analysis = _forward_operations_from_forward(
                     resolved_forward_func,
@@ -9085,7 +9101,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 forward_calls,
                 init_assignments,
                 self_values=_self_config_values(
-                    init_func, self._config_for_class(node.name)
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
                 ),
                 all_tensor_ops=self.all_tensor_ops,
             )
@@ -9101,7 +9119,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 forward_calls,
                 init_assignments,
                 self_values=_self_config_values(
-                    init_func, self._config_for_class(node.name)
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
                 ),
                 all_tensor_ops=self.all_tensor_ops,
             )
@@ -9119,7 +9139,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 self.module_functions,
                 forward_calls,
                 self_values=_self_config_values(
-                    init_func, self._config_for_class(node.name)
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
                 ),
                 all_tensor_ops=self.all_tensor_ops,
                 # A free function is most often called from a ``forward``, so the
@@ -9170,7 +9192,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 or delegates_to_siblings
             ):
                 values = _self_config_values(
-                    init_func, self._config_for_class(node.name)
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
                 )
                 analysis = _forward_operations_from_forward(
                     resolved_forward_func,
@@ -9223,7 +9247,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     )
             elif forward_func is not None:
                 values = _self_config_values(
-                    init_func, self._config_for_class(node.name)
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
                 )
                 probed = _forward_operations_from_forward(
                     resolved_forward_func,
@@ -9361,7 +9387,11 @@ def _dict_registry_constructor_name(node: ast.AST) -> str | None:
     return None
 
 
-def _unbuilt_init_statements(func: ast.FunctionDef, config: dict[str, Any]) -> set[int]:
+def _unbuilt_init_statements(
+    func: ast.FunctionDef,
+    config: dict[str, Any],
+    param_values: dict[str, Any] | None = None,
+) -> set[int]:
     """Nodes of ``__init__`` branches the config rules out, by ``id``.
 
     ``GPT2Block.__init__`` builds its cross-attention only when asked::
@@ -9385,10 +9415,11 @@ def _unbuilt_init_statements(func: ast.FunctionDef, config: dict[str, Any]) -> s
             for node in ast.walk(stmt):
                 unbuilt.add(id(node))
 
+    settled = _self_config_values(func, config, param_values)
     for node in ast.walk(func):
         if not isinstance(node, ast.If):
             continue
-        decided = _config_value(node.test, config, {})
+        decided = _config_value(node.test, config, settled, param_values)
         if not isinstance(decided, bool):
             continue
         bury(node.orelse if decided else node.body)
@@ -9400,6 +9431,7 @@ def _parse_init(
     *,
     config: dict[str, Any] | None = None,
     param_bindings: dict[str, str] | None = None,
+    param_values: dict[str, Any] | None = None,
 ) -> tuple[
     dict[str, str],
     dict[str, list[str]],
@@ -9450,7 +9482,7 @@ def _parse_init(
         else:
             unresolved_activations.pop(attr, None)
 
-    unbuilt = _unbuilt_init_statements(func, config or {})
+    unbuilt = _unbuilt_init_statements(func, config or {}, param_values)
 
     for node in ast.walk(func):
         if id(node) in unbuilt:
@@ -9897,6 +9929,88 @@ def _activation_registry_lookup_for_assignment(
             if found is not None:
                 return found
     return None
+
+
+def _settled_ctor_defaults(
+    tree: ast.AST, config: dict[str, Any] | None = None
+) -> dict[str, dict[str, Any]]:
+    """``{class: {param: value}}`` for constructor parameters nobody overrides.
+
+    A parameter's default is NOT its value in general -- any caller may pass
+    something else, which is why inferring one was previously refused. But when
+    every construction site in the model leaves a parameter out, the default is
+    what the model builds with, and that is evidence rather than a guess.
+
+    GPT-2 turns on a whole arm of its attention this way::
+
+        def __init__(self, config, is_cross_attention=False, layer_idx=None):
+            ...
+            if self.is_cross_attention:
+                self.c_attn = Conv1D(2 * self.embed_dim, self.embed_dim)
+                self.q_attn = Conv1D(self.embed_dim, self.embed_dim)
+            else:
+                self.c_attn = Conv1D(3 * self.embed_dim, self.embed_dim)
+
+    Once the block stops building a cross-attention module, the only remaining
+    construction passes no ``is_cross_attention`` -- so the arm drawn was one
+    the model cannot reach, and it took the 2x-wide projection with it, which
+    is how a 12-head attention came to report 36 heads.
+
+    Only literal defaults, and only for classes actually constructed: a class
+    nobody builds says nothing about what it would be built with.
+    """
+    declared: dict[str, dict[str, Any]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        init_func = _class_init_method(node)
+        if init_func is None:
+            continue
+        names = [arg.arg for arg in init_func.args.args][1:]
+        defaults = init_func.args.defaults
+        padding = len(names) - len(defaults)
+        settled: dict[str, Any] = {}
+        for index, name in enumerate(names):
+            if index < padding:
+                continue
+            try:
+                settled[name] = ast.literal_eval(defaults[index - padding])
+            except (ValueError, TypeError, SyntaxError):
+                continue
+        if settled:
+            declared[node.name] = (settled, names)
+
+    built: set[str] = set()
+    overridden: dict[str, set[str]] = {}
+    # A construction inside a branch the config rules out is not a construction.
+    # GPT-2 passes `is_cross_attention=True` exactly once, from the arm that
+    # builds the cross-attention module -- the arm its checkpoint switches off.
+    # Counting it would make the parameter look overridden by a call that never
+    # runs, which is the whole question being asked.
+    unreachable: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__":
+            unreachable |= _unbuilt_init_statements(node, config or {})
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call) or id(call) in unreachable:
+            continue
+        class_name = _call_class_name(call)
+        if not class_name or class_name not in declared:
+            continue
+        built.add(class_name)
+        _, names = declared[class_name]
+        passed = overridden.setdefault(class_name, set())
+        passed.update(names[: len(call.args)])
+        passed.update(kw.arg for kw in call.keywords if kw.arg)
+
+    return {
+        class_name: {
+            param: value
+            for param, value in declared[class_name][0].items()
+            if param not in overridden.get(class_name, set())
+        }
+        for class_name in built
+    }
 
 
 def _collect_activation_param_bindings(
@@ -12828,6 +12942,7 @@ def analyze_source(
         ),
         module_functions=_module_forward_functions(tree, config, parsed_registry),
         declared_aliases=declared_aliases,
+        ctor_defaults=_settled_ctor_defaults(tree, config),
     )
     visitor.visit(tree)
     finalize_class_registry(visitor.classes)

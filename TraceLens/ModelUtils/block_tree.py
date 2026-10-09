@@ -2678,6 +2678,15 @@ def build_block_node(
         attr
         for attr, val in (class_overrides or {}).items()
         if val is SUBMODULE_OMITTED and "." not in attr
+    ) | frozenset(
+        # A submodule assigned only inside an `__init__` branch the config rules
+        # out is missing from EVERY instance, not just this variant. GPT-2's
+        # `q_attn` exists only for cross-attention, and nothing constructs the
+        # class that way; the forward still calls it under a RUNTIME guard
+        # (`encoder_hidden_states is not None`) that no config decides, and the
+        # model raises there rather than running it.
+        getattr(cls, "unbuilt_attrs", frozenset())
+        or frozenset()
     )
     dead_steps = (
         _dead_forward_steps(cls, omitted_attrs) if omitted_attrs else frozenset()
@@ -2844,7 +2853,7 @@ def build_block_node(
             if class_overrides
             else _NO_SUBMODULE_OVERRIDE
         )
-        if override is SUBMODULE_OMITTED:
+        if override is SUBMODULE_OMITTED or base_attr in omitted_attrs:
             continue
         child_class = (
             override
