@@ -248,7 +248,7 @@ TraceLens/Visualizer/
 ## Tests
 
 ```bash
-python3 -m pytest tests/Visualizer/ tests/Modeling/
+python3 -m pytest tests/Visualizer/ tests/ModelUtils/
 ```
 
 
