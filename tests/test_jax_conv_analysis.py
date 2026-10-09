@@ -53,6 +53,16 @@ def conv_events(perf_analyzer):
         [perf_analyzer.get_event_perf_model_name(event) for event in events]
     )
     assert result == {"jax_conv": 10}
+    # Perf models read dims from args. get_kernel_launchers writes them as a
+    # side effect; attach them here so these tests do not depend on that test
+    # having already run on this worker.
+    for event in events:
+        meta = JaxTreePerfAnalyzer.get_event_metadata(event)
+        args = event.get("args")
+        if not isinstance(args, dict):
+            event["args"] = {}
+            args = event["args"]
+        args.update(meta)
     return events
 
 

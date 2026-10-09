@@ -410,7 +410,7 @@ class aiter_rmsnorm2d_fwd_with_add_ck(RMSNorm):
         e.g. [(4, 7168), (4, 7168), (4, 7168), (4, 7168), (7168,), (), ()]
 
     FLOPs: residual-add (num_elems) + RMSNorm (inherited from RMSNorm.flops()).
-    Bytes: HBM traffic per GPU (read input+residual_in+weight, write out+residual_out).
+    Bytes: memory traffic per GPU (read input+residual_in+weight, write out+residual_out).
     """
 
     @staticmethod
@@ -462,7 +462,7 @@ class aiter_add_rmsnorm(aiter_rmsnorm2d_fwd_with_add_ck):
         e.g. [(4, 7168), (4, 7168), (4, 7168), (4, 7168), (7168,), ()]
 
     FLOPs: residual-add (num_elems) + RMSNorm (inherited from RMSNorm.flops()).
-    Bytes: HBM traffic per GPU (read input+residual_in+weight, write out+residual_out).
+    Bytes: memory traffic per GPU (read input+residual_in+weight, write out+residual_out).
 
     get_param_details, flops, and bytes are inherited from aiter_rmsnorm2d_fwd_with_add_ck.
     """
