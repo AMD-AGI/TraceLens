@@ -1024,29 +1024,16 @@ def test_check_marker_detail_estimates_complete(tmp_path):
         "<!-- impact-begin kind=detail_estimate low=1 mid=3 high=5 -->\n"
         "body\n"
         "<!-- impact-end -->\n"
-    )
-    out = _write_report(tmp_path, text)
-    rows = workflow._check_marker_detail_estimates(out)
-    assert rows[0]["result"] == "PASS"
-
-
-def test_check_marker_detail_estimates_fusion_checked_without_compute_p_headers(
-    tmp_path,
-):
-    text = (
-        "## Detailed Analysis\n"
-        "### Compute Kernel Insights\n"
-        "No compute findings.\n"
         "### Kernel Fusion Insights\n"
-        "#### 🔴 P1: Unfused RMSNorm\n"
+        "#### Fusion P1: First\n"
         "<!-- impact-begin kind=detail_estimate low=1 mid=3 high=5 -->\n"
         "body\n"
         "<!-- impact-end -->\n"
     )
     out = _write_report(tmp_path, text)
     rows = workflow._check_marker_detail_estimates(out)
-    assert [r["result"] for r in rows] == ["PASS"]
-    assert rows[0]["index"] == "marker_eval_3_fusion_P1"
+    assert [r["result"] for r in rows] == ["PASS", "PASS"]
+    assert rows[1]["index"] == "marker_eval_3_fusion_P1"
 
 
 def test_check_marker_detail_estimates_sentinel_passes(tmp_path):

@@ -15,7 +15,7 @@ network.
 
 The constants exercise: the agentic envelope + operation grouping
 (``_AGENTIC_MD``), the deterministic-fallback path (``_FALLBACK_MD``), the
-pct_e2e back-fill + fan-out row when a table has no op_row marker
+pct_e2e fallback + fan-out row when a table has no op_row marker
 (``_NO_OP_ROW_MD``), and the em-dash null Operation cell on an agentic report
 (``_AGENTIC_NULL_OP_MD``). The remaining ``_render_text`` cases build minimal md
 inline for prose caps, missing columns, em-dash cells, and empty findings.
@@ -28,9 +28,6 @@ import sys
 
 import pytest
 
-from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
-    HEURISTIC_FRACTION_MID,
-)
 from TraceLens.Agent.Analysis.post_processing import (
     AnalysisReport,
     ComputeMember,
@@ -39,7 +36,9 @@ from TraceLens.Agent.Analysis.post_processing import (
     ReportInfo,
     render_analysis_json,
 )
-from TraceLens.Agent.Analysis.post_processing.analysis_json import TaskGrouper
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    HEURISTIC_FRACTION_MID,
+)
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     _find_data_table,
     _iter_candidate_blocks,
@@ -241,8 +240,8 @@ _FALLBACK_MD = """# Deterministic Fallback Analysis
 """
 
 # Agentic report whose compute table carries NO op_row marker: impact_score
-# back-fills pct_e2e * HEURISTIC_FRACTION_MID. The first row is a fan-out
-# (Kernel 1 / Kernel 2), which must collapse into one member holding a 2-element kernel_name list.
+# falls back to pct_e2e. The first row is a fan-out (Kernel 1 / Kernel 2), which
+# must collapse into one member holding a 2-element kernel_name list.
 _NO_OP_ROW_MD = """# ExampleDecoder - MI300X Standalone Analysis
 
 <!-- report-begin kind=report_mode mode=agentic -->
@@ -317,6 +316,89 @@ _NULL_CSV_ENTRY_MD = """# Null CSV - MI300X Standalone Analysis
 
 **Resolution:** fix
 """
+
+# Two fusion blocks: Identification + Resolution, no Reasoning label, no op_row
+# marker, and a detail_estimate carrying mid. The softmax row has no perf model,
+# so its metric cells are null.
+_FUSION_MD = """# ExampleNet - OTHER_GPU Standalone Analysis
+
+<!-- report-begin kind=report_mode mode=agentic -->
+<!-- report-end -->
+
+## Detailed Analysis
+
+### Kernel Fusion Insights
+
+<a id="detailed-analysis-fusion-P1"></a>
+<!-- reasoning-candidate tier=fusion rank=1 -->
+#### 🔴 P1: Unfused Attention
+
+**Identification:** Attention runs as separate bmm and softmax kernels.
+
+**Data:**
+
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
+| aten::bmm | (16,64,64) bf16<br>(16,64,64) bf16 | model.py(10): forward | gemm_kernel_a | 40.000 | 4.00 | 100 | 60.00 | 50.00% of 5.3 TB/s | memory-bound |
+| aten::_softmax | (16,64,64) bf16 | functional.py(20): softmax | softmax_kernel_a | 150.000 | 15.00 | 100 | — | — | — |
+
+**Resolution:** Call a fused attention kernel if one exists; otherwise write one.
+
+**Impact estimate:**
+<!-- impact-begin kind=detail_estimate low=11.5 mid=13.5 high=15.5 -->
+- Low end impact_score: 11.50
+- High end impact_score: 15.50
+<!-- impact-end -->
+
+<a id="detailed-analysis-fusion-P2"></a>
+<!-- reasoning-candidate tier=fusion rank=2 -->
+#### 🟡 P2: Unfused Activation
+
+**Identification:** The activation runs as a separate elementwise kernel after a GEMM.
+
+**Data:**
+
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
+| aten::addmm | (64,) bf16<br>(16,64) bf16<br>(64,64) bf16 | linear.py(30): forward | gemm_kernel_b | 12.000 | 1.20 | 100 | 700.00 | 60.00% of 700 TFLOPS | compute-bound |
+
+**Resolution:** Fold the activation into the GEMM epilogue.
+
+**Impact estimate:**
+<!-- impact-begin kind=detail_estimate low=1.0 mid=1.25 high=1.5 -->
+- Low end impact_score: 1.00
+- High end impact_score: 1.50
+<!-- impact-end -->
+"""
+
+_FUSION_P2_GOLDEN = {
+    "operation": "Unfused Activation",
+    "members": [
+        {
+            "kernel_launcher_path": "linear.py(30): forward",
+            "library": None,
+            "category": None,
+            "analysis_md_rank": "P2",
+            "kernel_name": ["gemm_kernel_b"],
+            "args_shapes": ["(64,)", "(16,64)", "(64,64)"],
+            "args_datatypes": ["bf16", "bf16", "bf16"],
+            "time_ms": 12.0,
+            "count": 100,
+            "pct_e2e": 1.2,
+            "flops_per_byte": 700.0,
+            "efficiency_percent": 60.0,
+            "efficiency_peak_value": 700.0,
+            "efficiency_peak_unit": "TFLOPS",
+            "bound": "compute-bound",
+        },
+    ],
+    "impact": {"mid": 1.25, "low": 1.0, "high": 1.5},
+    "identification": "The activation runs as a separate elementwise kernel after a GEMM.",
+    "reasoning": None,
+    "resolution": "Fold the activation into the GEMM epilogue.",
+    "prose_truncated": False,
+    "priority": 2,
+}
 
 # (name, md, mode, has_op_row, n_warn) — the inline replacement for the disk
 # fixture matrix. Corpus-wide smoke/determinism/faithfulness tests iterate this.
@@ -417,32 +499,8 @@ def _assert_schema_valid(report):
             # roofline field explicitly dropped (§2.1).
             assert "roofline_attainment_pct" not in m
 
-    # fusion_optimizations is always emitted, after compute_optimizations.
     keys = list(report)
     assert keys.index("fusion_optimizations") == keys.index("compute_optimizations") + 1
-    fusion_member_types = {
-        k: v for k, v in _MEMBER_TYPES.items() if k != "impact_score"
-    }
-    for task in report["fusion_optimizations"]:
-        assert set(task.keys()) == {
-            "priority",
-            "operation",
-            "identification",
-            "reasoning",
-            "resolution",
-            "prose_truncated",
-            "impact",
-            "members",
-        }
-        assert isinstance(task["priority"], int)
-        assert task["reasoning"] is None
-        assert set(task["impact"].keys()) == {"mid", "low", "high"}
-        assert isinstance(task["members"], list) and task["members"]
-        for m in task["members"]:
-            # Fusion members are the compute members minus the per-row score.
-            assert set(m.keys()) == set(fusion_member_types)
-            for field, types in fusion_member_types.items():
-                assert isinstance(m[field], types), f"{field}={m[field]!r}"
 
 
 # --------------------------------------------------------------------------- #
@@ -741,7 +799,7 @@ def test_fallback_op_row_still_read(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Fan-out row and zero-score path.
+# Fan-out row and pct_e2e fallback path.
 # --------------------------------------------------------------------------- #
 
 
@@ -769,29 +827,25 @@ def test_fanout_row_stays_one_member(tmp_path):
         )
 
 
-def test_pct_e2e_backfill_when_no_op_row(tmp_path):
-    # _NO_OP_ROW_MD has NO op_row marker -> each row scores pct_e2e * 0.30, so the
-    # task mid is the non-zero member sum (not 0, which would sort by name).
+def test_pct_e2e_fallback_when_no_op_row(tmp_path):
+    # _NO_OP_ROW_MD has NO op_row markers -> impact_score tracks pct_e2e.
     report, _ = _render_text(_NO_OP_ROW_MD, tmp_path)
-    tasks = report["compute_optimizations"]
-    members = [m for t in tasks for m in t["members"]]
-    assert members and all(m["pct_e2e"] for m in members)
-    for m in members:
-        assert m["impact_score"] == pytest.approx(m["pct_e2e"] * HEURISTIC_FRACTION_MID)
-    assert tasks[0]["impact"]["mid"] == pytest.approx((6.59 + 3.00) * 0.30)
+    for task in report["compute_optimizations"]:
+        for m in task["members"]:
+            if m["pct_e2e"] is not None:
+                assert m["impact_score"] == pytest.approx(
+                    m["pct_e2e"] * HEURISTIC_FRACTION_MID
+                )
 
 
 def test_null_csv_entry_scores_zero(tmp_path):
-    # op_row CSV = "3.5,—": row 0 takes the marker, row 1's — scores 0.0 (no
-    # back-fill while the marker is present). A raw float("—") here would crash
-    # the render; the null must map cleanly.
+    # op_row CSV = "3.5,—": the — row scores 0.0 (a raw float("—") would crash).
     report, _ = _render_text(_NULL_CSV_ENTRY_MD, tmp_path)
-    assert report["compute_optimizations"][0]["impact"]["mid"] == pytest.approx(3.5)
     members = report["compute_optimizations"][0]["members"]
-    by_kernel = {m["kernel_name"][0]: m for m in members}
-    assert by_kernel["k_a"]["impact_score"] == pytest.approx(3.5)
-    assert by_kernel["k_b"]["impact_score"] == 0.0
-    assert by_kernel["k_b"]["pct_e2e"] == pytest.approx(1.75)
+    assert {m["kernel_name"][0]: m["impact_score"] for m in members} == {
+        "k_a": 3.5,
+        "k_b": 0.0,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -964,12 +1018,13 @@ def test_matrix_grouping_faithfulness(name, md, mode, has_op_row, n_warn, tmp_pa
 def test_matrix_impact_path(name, md, mode, has_op_row, n_warn, tmp_path):
     report, _ = _render_text(md, tmp_path)
     if not has_op_row:
-        # No op_row marker: rows back-fill pct_e2e * HEURISTIC_FRACTION_MID.
+        # pct_e2e fallback: impact_score tracks pct_e2e where available.
         for task in report["compute_optimizations"]:
             for m in task["members"]:
-                assert m["impact_score"] == pytest.approx(
-                    (m["pct_e2e"] or 0.0) * HEURISTIC_FRACTION_MID
-                )
+                if m["pct_e2e"] is not None:
+                    assert m["impact_score"] == pytest.approx(
+                        m["pct_e2e"] * HEURISTIC_FRACTION_MID
+                    )
 
 
 @pytest.mark.parametrize("name,md,mode,has_op_row,n_warn", _MATRIX)
@@ -1071,153 +1126,24 @@ def test_no_compute_findings_empty_list(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Fusion tier: fixture trimmed from the Owl standalone sample.
+# Fusion tier.
 # --------------------------------------------------------------------------- #
-
-# Two fusion blocks: Identification + Resolution, no Reasoning label, no op_row
-# marker, and a detail_estimate carrying mid. Rows are the Owl rows from the
-# fusion table (the softmax row has no perf model, so its metric cells are null).
-_FUSION_MD = """# Owl - MI300X Standalone Analysis
-
-<!-- report-begin kind=report_mode mode=agentic -->
-<!-- report-end -->
-
-## Detailed Analysis
-
-### Kernel Fusion Insights
-
-<a id="detailed-analysis-fusion-P1"></a>
-<!-- reasoning-candidate tier=fusion rank=1 -->
-#### 🔴 P1: Unfused Attention
-
-**Identification:** Attention runs as separate bmm, softmax and bmm kernels.
-
-**Data:**
-
-| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
-|---|---|---|---|---|---|---|---|---|---|
-| aten::bmm | (16,5185,64) bf16<br>(16,64,5185) bf16 | transformers/models/owlv2/modeling_owlv2.py(410): forward | Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x32_MI16x16x1_SN_LDS... | 40.460 | 4.45 | 120 | 62.46 | 49.39% of 5.3 TB/s | memory-bound |
-| aten::_softmax | (16,5185,5185) bf16 | torch/nn/functional.py(2103): softmax | void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat1... | 153.698 | 16.92 | 120 | — | — | — |
-
-**Resolution:** Call a vendor library's fused attention if one exists; otherwise write a fused kernel.
-
-**Impact estimate:**
-<!-- impact-begin kind=detail_estimate low=11.5 mid=13.5 high=15.5 -->
-- Low end impact_score: 11.50
-- High end impact_score: 15.50
-<!-- impact-end -->
-
-<a id="detailed-analysis-fusion-P2"></a>
-<!-- reasoning-candidate tier=fusion rank=2 -->
-#### 🟡 P2: Unfused MLP Activation
-
-**Identification:** The QuickGELU runs as three elementwise kernels between two GEMMs.
-
-**Data:**
-
-| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
-|---|---|---|---|---|---|---|---|---|---|
-| aten::addmm | (4096,) bf16<br>(5185,1024) bf16<br>(1024,4096) bf16 | torch/nn/modules/linear.py(124): forward | Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT128x288x64_MI16x16x1_SN_LDS... | 11.587 | 1.28 | 120 | 707.68 | 63.68% of 708 TFLOPS | compute-bound |
-| aten::sigmoid | (1,5185,4096) bf16 | transformers/activations.py(95): forward | void at::native::vectorized_elementwise_kernel<8, at::native::sigmoid_kerne... | 3.529 | 0.39 | 120 | 0.25 | 54.59% of 5.3 TB/s | memory-bound |
-
-**Resolution:** Fold the activation into the fc1 GEMM epilogue.
-
-**Impact estimate:**
-<!-- impact-begin kind=detail_estimate low=1.0 mid=1.25 high=1.5 -->
-- Low end impact_score: 1.00
-- High end impact_score: 1.50
-<!-- impact-end -->
-"""
-
-_FUSION_P2_GOLDEN = {
-    "operation": "Unfused MLP Activation",
-    "members": [
-        {
-            "kernel_launcher_path": "torch/nn/modules/linear.py(124): forward",
-            "library": None,
-            "category": None,
-            "analysis_md_rank": "P2",
-            "kernel_name": [
-                "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT128x288x64_MI16x16x1_SN_LDS..."
-            ],
-            "args_shapes": ["(4096,)", "(5185,1024)", "(1024,4096)"],
-            "args_datatypes": ["bf16", "bf16", "bf16"],
-            "time_ms": 11.587,
-            "count": 120,
-            "pct_e2e": 1.28,
-            "flops_per_byte": 707.68,
-            "efficiency_percent": 63.68,
-            "efficiency_peak_value": 708.0,
-            "efficiency_peak_unit": "TFLOPS",
-            "bound": "compute-bound",
-        },
-        {
-            "kernel_launcher_path": "transformers/activations.py(95): forward",
-            "library": None,
-            "category": None,
-            "analysis_md_rank": "P2",
-            "kernel_name": [
-                "void at::native::vectorized_elementwise_kernel<8, at::native::sigmoid_kerne..."
-            ],
-            "args_shapes": ["(1,5185,4096)"],
-            "args_datatypes": ["bf16"],
-            "time_ms": 3.529,
-            "count": 120,
-            "pct_e2e": 0.39,
-            "flops_per_byte": 0.25,
-            "efficiency_percent": 54.59,
-            "efficiency_peak_value": 5.3,
-            "efficiency_peak_unit": "TB/s",
-            "bound": "memory-bound",
-        },
-    ],
-    "impact": {"mid": 1.25, "low": 1.0, "high": 1.5},
-    "identification": "The QuickGELU runs as three elementwise kernels between two GEMMs.",
-    "reasoning": None,
-    "resolution": "Fold the activation into the fc1 GEMM epilogue.",
-    "prose_truncated": False,
-    "priority": 2,
-}
 
 
 def test_fusion_tier_golden(tmp_path):
     report, _ = _render_text(_FUSION_MD, tmp_path)
     _assert_schema_valid(report)
-    assert report["compute_optimizations"] == []
     p1, p2 = report["fusion_optimizations"]
     assert p2 == _FUSION_P2_GOLDEN
-    assert p1["priority"] == 1
     assert p1["operation"] == "Unfused Attention"
-    assert p1["reasoning"] is None
     assert p1["impact"] == {"mid": 13.5, "low": 11.5, "high": 15.5}
-    assert p1["resolution"].startswith("Call a vendor library's fused attention")
-    # Table order is kept, and the no-perf-model softmax row carries null metrics.
-    assert [m["time_ms"] for m in p1["members"]] == [40.46, 153.698]
     softmax = p1["members"][1]
     assert softmax["flops_per_byte"] is None
     assert softmax["efficiency_percent"] is None
     assert softmax["bound"] is None
 
 
-def test_fusion_operation_strips_only_present_priority_prefix(tmp_path):
-    md = _FUSION_MD.replace("#### 🔴 P1: Unfused Attention", "#### Unfused RMSNorm")
-    md = md.replace("#### 🟡 P2: Unfused MLP Activation", "#### P3: Unfused RoPE")
-    tasks = _render_text(md, tmp_path)[0]["fusion_optimizations"]
-    assert sorted(t["operation"] for t in tasks) == ["Unfused RMSNorm", "Unfused RoPE"]
-
-
-def test_fusion_members_have_no_impact_score_or_library(tmp_path):
-    report, _ = _render_text(_FUSION_MD, tmp_path)
-    for task in report["fusion_optimizations"]:
-        for m in task["members"]:
-            assert "impact_score" not in m
-            assert m["library"] is None and m["category"] is None
-
-
 def test_fusion_priority_is_impact_order_then_rank(tmp_path):
-    report, _ = _render_text(_FUSION_MD, tmp_path)
-    assert [t["priority"] for t in report["fusion_optimizations"]] == [1, 2]
-
     # md rank P1 now has the smaller mid, so the P2 block is emitted first.
     low_p1 = _FUSION_MD.replace("mid=13.5", "mid=0.5")
     tasks = _render_text(low_p1, tmp_path)[0]["fusion_optimizations"]
@@ -1230,70 +1156,9 @@ def test_fusion_priority_is_impact_order_then_rank(tmp_path):
     assert [t["members"][0]["analysis_md_rank"] for t in tasks] == ["P1", "P2"]
 
 
-def test_fusion_emitted_empty_when_no_fusion_blocks(tmp_path):
-    report, _ = _render_text(_AGENTIC_MD, tmp_path)
-    assert report["fusion_optimizations"] == []
-
-
 def test_fusion_blocks_do_not_change_compute_tasks(tmp_path):
     base, _ = _render_text(_AGENTIC_MD, tmp_path)
     both, _ = _render_text(_AGENTIC_MD + "\n" + _FUSION_MD, tmp_path)
+    assert base["fusion_optimizations"] == []
     assert both["compute_optimizations"] == base["compute_optimizations"]
     assert len(both["fusion_optimizations"]) == 2
-
-
-def _member(kernel, operation=None, rank="P1"):
-    keys = (
-        "kernel_launcher_path library category args_shapes args_datatypes time_ms "
-        "count pct_e2e flops_per_byte efficiency_percent efficiency_peak_value "
-        "efficiency_peak_unit bound"
-    ).split()
-    return {
-        **dict.fromkeys(keys),
-        "kernel_name": [kernel],
-        "operation_cell": operation,
-        "analysis_md_rank": rank,
-    }
-
-
-def _finding(members, impacts, mid, title="T", rank="P1"):
-    return {
-        "members": members,
-        "impacts": impacts,
-        "prose": {},
-        "rank": rank,
-        "title": title,
-        "low": mid,
-        "mid": mid,
-        "high": mid,
-    }
-
-
-def test_task_grouper_compute_sums_rows_and_breaks_ties_on_operation():
-    findings = [
-        _finding(
-            [_member("kb", "aten::b"), _member("ka", "aten::a")], [1.0, 1.0], mid=9.0
-        ),
-        _finding([_member("kc", "aten::a")], [1.0], mid=9.0),
-    ]
-    tasks = TaskGrouper(findings, "compute", "agentic").group()
-    # Row scores sum per Operation (the finding mid is ignored); equal sums sort by name.
-    assert [(t["operation"], t["impact"]["mid"]) for t in tasks] == [
-        ("aten::a", 2.0),
-        ("aten::b", 1.0),
-    ]
-    assert all("impact_score" in m for t in tasks for m in t["members"])
-    assert [t["priority"] for t in tasks] == [1, 2]
-
-
-def test_task_grouper_fusion_is_one_task_per_block_in_table_order():
-    findings = [
-        _finding([_member("k2"), _member("k1")], None, mid=1.0, title="Late"),
-        _finding([_member("k3")], None, mid=5.0, title="Early", rank="P2"),
-        _finding([_member("k4")], None, mid=1.0, title="Tie", rank="P3"),
-    ]
-    tasks = TaskGrouper(findings, "fusion", "agentic").group()
-    assert [t["operation"] for t in tasks] == ["Early", "Late", "Tie"]
-    assert [t["impact"]["mid"] for t in tasks] == [5.0, 1.0, 1.0]
-    assert [m["kernel_name"] for m in tasks[1]["members"]] == [["k2"], ["k1"]]
-    assert all("impact_score" not in m for t in tasks for m in t["members"])

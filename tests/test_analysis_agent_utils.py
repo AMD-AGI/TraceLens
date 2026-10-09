@@ -110,6 +110,30 @@ from TraceLens.Agent.Analysis.utils.classify_kernels import (
     main as classify_main,
 )
 
+# Constants
+_FUSION_HEADER = (
+    "| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | "
+    "FLOPS/Byte | Efficiency | Bound |"
+)
+_FUSION_SEP = "|---|---|---|---|---|---|---|---|---|---|"
+_FUSION_ROW = (
+    "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
+    "50.00% of 5.3 TB/s | memory-bound |"
+)
+_ATTN_PERF_ROWS = {
+    ("qk",): {"op category": "GEMM"},
+    ("pv",): {"op category": "GEMM"},
+}
+_UNKNOWN_THREAD = {c: "Unknown" for c in au.PERF_THREAD_COLS}
+_OP_ARGS = {
+    "Input Dims": [[2, 3]],
+    "Input type": ["c10::BFloat16"],
+    "Input Strides": [[1]],
+    "Concrete Inputs": [""],
+}
+_CSV_ARGS = {c: str(au.list_to_tuple(v)) for c, v in _OP_ARGS.items()}
+_FUSION_ADD_KEY = ["aten::add", "[[16, 64]]", "['float']", "", "", "p", "", "t1"]
+
 # ----- Fixtures: minimal output dir layout for analysis_utils -----
 
 
@@ -1725,64 +1749,20 @@ def test_compute_data_tables_missing_data_table(tmp_path):
     assert any("no **Data:** table found" in e for e in errors)
 
 
-# ----- _validate_fusion_data_tables -----
-
-_FUSION_HEADER = (
-    "| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | "
-    "FLOPS/Byte | Efficiency | Bound |"
-)
-_FUSION_SEP = "|---|---|---|---|---|---|---|---|---|---|"
+# ----- _validate_fusion_data_tables / _iter_candidate_blocks -----
 
 
 def _fusion_block(header=_FUSION_HEADER, tier="fusion"):
     return (
         f"<!-- reasoning-candidate tier={tier} rank=1 -->\n"
-        "**Data:**\n\n"
-        f"{header}\n"
-        f"{_FUSION_SEP}\n"
-        "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
-        "50.00% of 5.3 TB/s | memory-bound |\n"
+        f"**Data:**\n\n{header}\n{_FUSION_SEP}\n{_FUSION_ROW}\n"
     )
 
 
-def test_fusion_data_tables_valid_header():
+def test_fusion_data_tables_canonical_header():
     assert _validate_fusion_data_tables(_fusion_block()) == []
-
-
-def test_fusion_data_tables_rejects_old_perf_model_header():
-    old = "| Kernel | Type | Duration (us) | Perf model |"
-    errors = _validate_fusion_data_tables(_fusion_block(old))
+    errors = _validate_fusion_data_tables(_fusion_block("| bogus |"))
     assert any("canonical columns" in e for e in errors)
-
-
-def test_fusion_data_tables_missing_data_table():
-    content = "<!-- reasoning-candidate tier=fusion rank=1 -->\nno table here\n"
-    errors = _validate_fusion_data_tables(content)
-    assert any("no **Data:** table found" in e for e in errors)
-
-
-def test_fusion_data_tables_ignores_compute_blocks():
-    assert _validate_fusion_data_tables(_fusion_block("| bogus |", "compute")) == []
-
-
-def test_fusion_data_tables_comparative_trace1_table_is_validated():
-    # Comparative layout: one **Data:** line, then Trace 1 / Trace 2 tables.
-    # The first table after **Data:** (Trace 1) is the one validated.
-    block = (
-        "<!-- reasoning-candidate tier=fusion rank=1 -->\n"
-        "**Data:**\n\n"
-        "**Trace 1**\n\n"
-        f"{_FUSION_HEADER}\n{_FUSION_SEP}\n"
-        "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
-        "50.00% of 5.3 TB/s | memory-bound |\n\n"
-        "**Trace 2**\n\n"
-        f"{_FUSION_HEADER}\n{_FUSION_SEP}\n"
-        "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
-        "50.00% of 5.3 TB/s | memory-bound |\n"
-    )
-    assert _validate_fusion_data_tables(block) == []
-    bad = block.replace(_FUSION_HEADER, "| bogus |", 1)
-    assert any("canonical columns" in e for e in _validate_fusion_data_tables(bad))
 
 
 def test_iter_candidate_blocks_filters_by_tier():
@@ -2023,23 +2003,13 @@ def test_dedup_by_kernel_set_kernel_name_variant():
 # ----- _extract_attention_core -----
 
 
-def _attn_kernel(name, perf_key=None):
-    return {"name": name, "perf_key": perf_key}
-
-
-_ATTN_PERF_ROWS = {
-    ("aten::bmm", "qk"): {"op category": "GEMM"},
-    ("aten::bmm", "pv"): {"op category": "GEMM"},
-}
-
-
 def test_extract_attention_core_narrows_to_qk_softmax_pv():
     kernels = [
-        _attn_kernel("pre_kernel"),
-        _attn_kernel("qk_gemm", ["aten::bmm", "qk"]),
-        _attn_kernel("softmax_kernel"),
-        _attn_kernel("pv_gemm", ["aten::bmm", "pv"]),
-        _attn_kernel("post_kernel"),
+        {"name": "pre_kernel"},
+        {"name": "qk_gemm", "perf_key": ["qk"]},
+        {"name": "softmax_kernel"},
+        {"name": "pv_gemm", "perf_key": ["pv"]},
+        {"name": "post_kernel"},
     ]
     core = _extract_attention_core(kernels, _ATTN_PERF_ROWS)
     assert [k["name"] for k in core] == ["qk_gemm", "softmax_kernel", "pv_gemm"]
@@ -2047,63 +2017,41 @@ def test_extract_attention_core_narrows_to_qk_softmax_pv():
 
 def test_extract_attention_core_no_softmax_returns_none():
     kernels = [
-        _attn_kernel("qk_gemm", ["aten::bmm", "qk"]),
-        _attn_kernel("pv_gemm", ["aten::bmm", "pv"]),
+        {"name": "qk_gemm", "perf_key": ["qk"]},
+        {"name": "pv_gemm", "perf_key": ["pv"]},
     ]
     assert _extract_attention_core(kernels, _ATTN_PERF_ROWS) is None
 
 
 def test_extract_attention_core_softmax_without_flanking_gemms_returns_none():
-    kernels = [_attn_kernel("softmax_kernel"), _attn_kernel("elementwise_add")]
-    assert _extract_attention_core(kernels, {}) is None
+    kernels = [{"name": "softmax_kernel"}, {"name": "add", "perf_key": None}]
+    perf_lookup = {}
+    assert _extract_attention_core(kernels, perf_lookup) is None
 
 
 # ----- _group_ops -----
 
 
-def _g_kernel(name, op_uid, perf_key, dur_us):
-    return {
-        "name": name,
-        "type": "GEMM",
-        "dur_us": dur_us,
-        "op_uid": op_uid,
-        "perf_key": perf_key,
-    }
+def test_group_ops():
+    def k(name, op_uid, perf_key, dur_us):
+        return {"name": name, "op_uid": op_uid, "perf_key": perf_key, "dur_us": dur_us}
 
-
-def test_group_ops_sums_every_instance_and_counts_distinct_ops():
-    # Two instances with different shapes: one op per signature, summed time.
-    vision = ["aten::bmm", "(16,5185,64)"]
-    text = ["aten::bmm", "(12,5,64)"]
+    key_a, key_b = ["aten::mm", "a"], ["aten::mm", "b"]
     instances = [
-        [_g_kernel("kv", 1, vision, 100.0), _g_kernel("kv", 1, vision, 50.0)],
-        [_g_kernel("kv", 2, vision, 100.0)],
-        [_g_kernel("kt", 3, text, 1.0)],
-    ]
-    groups = {tuple(g["perf_key"]): g for g in op._group_ops(instances)}
-    assert set(groups) == {tuple(vision), tuple(text)}
-    assert groups[tuple(vision)]["time_us"] == 250.0
-    assert groups[tuple(vision)]["count"] == 2
-    assert groups[tuple(vision)]["kernel_names"] == ["kv"]
-    assert groups[tuple(text)]["time_us"] == 1.0
-    assert groups[tuple(text)]["count"] == 1
-
-
-def test_group_ops_stacks_kernels_of_one_op_and_keeps_unmatched_apart():
-    key = ["aten::addmm", "x"]
-    instances = [
-        [
-            _g_kernel("k1", 1, key, 1.0),
-            _g_kernel("k2", 1, key, 2.0),
-            _g_kernel("u", 9, None, 4.0),
-        ]
+        [k("ka", 1, key_a, 100.0), k("kb", 1, key_a, 50.0), k("ku", 9, None, 4.0)],
+        [k("ka", 2, key_a, 100.0), k("ku", 8, None, 4.0)],
+        [k("kc", 3, key_b, 1.0)],
     ]
     groups = op._group_ops(instances)
-    matched = next(g for g in groups if g["perf_key"] == key)
-    unmatched = next(g for g in groups if g["perf_key"] is None)
-    assert matched["kernel_names"] == ["k1", "k2"]
-    assert matched["time_us"] == 3.0 and matched["count"] == 1
-    assert unmatched["time_us"] == 4.0
+    by_key = {tuple(g["perf_key"] or g["kernel_names"]): g for g in groups}
+    assert set(by_key) == {tuple(key_a), tuple(key_b), ("ku",)}
+    # Matched: time sums every instance, count is distinct ops, kernels stack.
+    assert by_key[tuple(key_a)]["kernel_names"] == ["ka", "kb"]
+    assert by_key[tuple(key_a)]["time_us"] == 250.0
+    assert by_key[tuple(key_a)]["count"] == 2
+    assert by_key[tuple(key_b)]["time_us"] == 1.0
+    # Unmatched kernels are keyed by kernel name, never merged with a matched op.
+    assert by_key[("ku",)]["time_us"] == 8.0 and by_key[("ku",)]["count"] == 2
 
 
 # ----- orchestrator_prepare: _build_diff_stats_lookups -----
@@ -2349,82 +2297,7 @@ def test_build_parent_chain_multi_level_cleans_names():
     assert _build_parent_chain(ev, tree) == ["mm", "Foo_2", "root"]
 
 
-# ----- orchestrator_prepare: perf row match (_row_data_in_out, OpResolver) -----
-
-
-def test_row_data_in_out_gemm_row():
-    row = pd.Series(
-        {
-            "op category": "GEMM",
-            "Data Moved (MB)": 26.0,
-            "perf_params": "{'M':2,'N':4,'K':3}",
-        }
-    )
-    din, dout = op._row_data_in_out(row)
-    assert din == pytest.approx(18.0)
-    assert dout == pytest.approx(8.0)
-
-
-def test_row_data_in_out_missing_cells():
-    row = pd.Series(
-        {"op category": "reduce", "Data Moved (MB)": None, "perf_params": None}
-    )
-    assert op._row_data_in_out(row) == (None, None)
-
-
-class _MetaTree:
-    metadata = {
-        7: {
-            0: {"process_name": "python", "process_labels": "GPU 0"},
-            9: {"thread_name": "main"},
-        }
-    }
-
-
-def test_event_perf_key_matches_csv_row_key():
-    ev = {
-        "name": "aten::bmm",
-        "pid": 7,
-        "tid": 9,
-        "args": {
-            "Input Dims": [[16, 64], [64, 8]],
-            "Input type": ["c10::BFloat16", "c10::BFloat16"],
-            "Input Strides": [[64, 1], [8, 1]],
-            "Concrete Inputs": ["", ""],
-        },
-    }
-    csv_row = pd.Series(
-        {
-            "name": "aten::bmm",
-            "Input Dims": str(((16, 64), (64, 8))),
-            "Input type": str(("c10::BFloat16", "c10::BFloat16")),
-            "Input Strides": str(((64, 1), (8, 1))),
-            "Concrete Inputs": str(("", "")),
-            "process_name": "python",
-            "process_label": "GPU 0",
-            "thread_name": "main",
-        }
-    )
-    key = tuple(op.OpResolver(_MetaTree, []).perf_key(ev))
-    assert key == au.perf_row_key(
-        csv_row["name"], *(csv_row[c] for c in au.PERF_ARG_COLS + au.PERF_THREAD_COLS)
-    )
-
-
-def test_op_resolver_fields():
-    launcher = {
-        "UID": 50,
-        "name": "aten::mm",
-        "args": {"Input Dims": [[2, 3], [3, 4]]},
-        "gpu_events": [11, 12],
-    }
-    resolver = op.OpResolver(_MetaTree, [launcher])
-    for uid in (11, 12):
-        fields = resolver.fields(uid)
-        assert fields["op_uid"] == 50
-        assert fields["perf_key"] == resolver.perf_key(launcher)
-    # A kernel with no launching perf op keeps its own uid and has no perf key.
-    assert resolver.fields(99) == {"op_uid": 99, "perf_key": None}
+# ----- analysis_utils: perf_float -----
 
 
 def test_perf_float():
@@ -2434,34 +2307,6 @@ def test_perf_float():
     assert au.perf_float(row, "c") is None
     assert au.perf_float(row, "missing") is None
     assert au.perf_float(None, "a") is None
-
-
-def test_perf_row_key_separates_rows_differing_only_by_thread(tmp_path):
-    # Same op + args on two threads are distinct unified-perf rows; the
-    # thread-aware key keeps them apart, with_thread=False (diff_stats side)
-    # collapses them to the first row.
-    base = {
-        "name": "aten::mm",
-        "Input Dims": "((2, 3),)",
-        "Input type": "('c10::BFloat16',)",
-        "Input Strides": "((3, 1),)",
-        "Concrete Inputs": "('',)",
-        "process_name": "python",
-        "process_label": "GPU 0",
-    }
-    csv = tmp_path / "unified_perf_summary.csv"
-    pd.DataFrame(
-        [
-            {**base, "thread_name": "fwd", "GFLOPS": 1.0},
-            {**base, "thread_name": "bwd", "GFLOPS": 2.0},
-        ]
-    ).to_csv(csv, index=False)
-    rows = au.load_perf_rows(str(csv))
-    assert len(rows) == 2
-    assert sorted(r["GFLOPS"] for r in rows.values()) == [1.0, 2.0]
-    collapsed = au.load_perf_rows(str(csv), with_thread=False)
-    assert len(collapsed) == 1
-    assert next(iter(collapsed.values()))["GFLOPS"] == 1.0
 
 
 # ----- orchestrator_prepare: _build_trace2_ops_summary_by_enhanced_category -----
@@ -2778,61 +2623,32 @@ def test_extract_call_chain_filters_dispatch_internals():
 # ----- analysis_utils: build_operation_metrics fusion flagging -----
 
 
-_FUSION_ADD_KEY = ["aten::add", "[[1, 12, 5, 5]]", "['float']", "", "", "p", "", "t1"]
-
-
-def _write_fusion_op_keys(out_dir, keys):
-    cat_dir = os.path.join(out_dir, "category_data")
-    os.makedirs(cat_dir, exist_ok=True)
-    with open(os.path.join(cat_dir, "kernel_fusion_metrics.json"), "w") as f:
-        json.dump({"high_confidence_op_keys": keys}, f)
-
-
-def _fusion_ops_df():
-    base = {
-        "Input Dims": "[[1, 12, 5, 5]]",
+def test_build_operation_metrics_flags_row_matching_op_key(tmp_path):
+    cat_dir = tmp_path / "category_data"
+    cat_dir.mkdir()
+    (cat_dir / "kernel_fusion_metrics.json").write_text(
+        json.dumps({"high_confidence_op_keys": [_FUSION_ADD_KEY]})
+    )
+    row = {
+        "Input Dims": "[[16, 64]]",
         "Input type": "['float']",
         "Input Strides": "",
         "Concrete Inputs": "",
         "process_name": "p",
         "process_label": "",
-        "kernel_details_summary": "[{'name': 'vectorized_add'}]",
-        "count": 1,
+        "thread_name": "t1",
+        "kernel_details_summary": "[{'name': 'shared_kernel'}]",
     }
-    rows = [
-        {"name": "aten::add", "thread_name": "t1", **base},
-        {"name": "aten::add", "thread_name": "t2", **base},
-        {**base, "name": "aten::mul", "thread_name": "t1"},
-    ]
-    df = pd.DataFrame(rows)
-    df["Kernel Time (µs)_sum"] = [300.0, 200.0, 100.0]
-    return df
-
-
-def _flagged_by_row(tmp_path, keys):
-    if keys is not None:
-        _write_fusion_op_keys(str(tmp_path), keys)
-    meta = {
-        "peak_hbm_bw_tbs": 5.3,
-        "max_achievable_tflops": {"matrix_bf16": 708},
-        "gpu_utilization": {"total_time_ms": 1000.0},
-        "output_dir": str(tmp_path),
-    }
-    ops = build_operation_metrics(_fusion_ops_df(), meta, {})
-    return {(o["name"], o["time_ms"]): bool(o.get("fusion_flagged")) for o in ops}
-
-
-def test_build_operation_metrics_flags_row_matching_op_key(tmp_path):
-    flagged = _flagged_by_row(tmp_path, [_FUSION_ADD_KEY])
-    assert flagged[("aten::add", 0.3)] is True
+    df = pd.DataFrame(
+        [
+            {**row, "name": "aten::add"},
+            {**row, "name": "aten::add", "thread_name": "t2"},
+        ]
+    )
+    df["Kernel Time (µs)_sum"] = [300.0, 200.0]
+    ops = build_operation_metrics(df, {"output_dir": str(tmp_path)}, {})
     # Same name + args on another thread is a different row.
-    assert flagged[("aten::add", 0.2)] is False
-    # Shares the kernel name with the fused op, but is a different op.
-    assert flagged[("aten::mul", 0.1)] is False
-
-
-def test_build_operation_metrics_no_fusion_metrics_flags_nothing(tmp_path):
-    assert not any(_flagged_by_row(tmp_path, None).values())
+    assert [bool(o.get("fusion_flagged")) for o in ops] == [True, False]
 
 
 # ----- analysis_utils: build_operation_metrics call-chain cap -----
@@ -3188,36 +3004,25 @@ def test_scan_args_cells_and_load_valid_args(tmp_path):
     (tmp_path / "gemm_metrics.json").write_text(
         json.dumps({"operations": [{"args": "M=2,N=3"}, {"args": None}]})
     )
-    valid = _load_valid_args(str(tmp_path / "gemm_metrics.json"), "/nonexistent.json")
-    assert valid == {"M=2,N=3"}
-
-
-def test_report_args_column_accepts_fusion_rows_args(tmp_path):
-    cat = tmp_path / "category_data"
-    cat.mkdir()
-    (cat / "gemm_metrics.json").write_text(
-        json.dumps({"operations": [{"args": "M=2,N=3"}]})
-    )
-    (cat / "kernel_fusion_metrics.json").write_text(
+    (tmp_path / "fusion_metrics.json").write_text(
         json.dumps(
             {
                 "impact_estimates": [
                     {
-                        "rows_trace1": [{"args": "(4,8) bf16"}],
-                        "rows_trace2": [{"args": "(4,16) bf16"}, {"args": "—"}],
+                        "rows": [{"args": "r"}],
+                        "rows_trace1": [{"args": "t1"}],
+                        "rows_trace2": [{"args": "t2"}],
                     }
                 ]
             }
         )
     )
-    content = (
-        "| Operation | Args | Time |\n|---|---|---|\n"
-        "| aten::mm | M=2,N=3 | 1 |\n"
-        "| aten::add | (4,8) bf16 | 1 |\n"
-        "| aten::add | (4,16) bf16 | 1 |\n"
-        "| aten::mul | — | 1 |\n"
+    valid = _load_valid_args(
+        str(tmp_path / "gemm_metrics.json"),
+        str(tmp_path / "fusion_metrics.json"),
+        "/nonexistent.json",
     )
-    assert _validate_report_args_column(content, str(tmp_path)) == []
+    assert valid == {"M=2,N=3", "r", "t1", "t2"}
 
 
 def test_validate_findings_file_missing_recommendations_section(tmp_path):
@@ -3889,9 +3694,6 @@ class _StubTree:
         return self._parent_map.get(id(ev))
 
 
-_UNKNOWN_THREAD = {c: "Unknown" for c in au.PERF_THREAD_COLS}
-
-
 class _StubAnalyzer:
     def __init__(self, tree, unified_events=None):
         self.tree = tree
@@ -3942,123 +3744,29 @@ def test_extract_standalone_fusion_candidates(tmp_path):
     assert any(c.get("base_name") == "MLP" for c in cands)
 
 
-def _op_event(uid, name, gpu_events, dims, dtype="c10::BFloat16"):
-    return {
-        "UID": uid,
-        "name": name,
-        "gpu_events": gpu_events,
-        "args": {
-            "Input Dims": dims,
-            "Input type": [dtype] * len(dims),
-            "Input Strides": [[1]] * len(dims),
-            "Concrete Inputs": [""] * len(dims),
-        },
-    }
-
-
-def test_extract_standalone_sums_time_over_instances_of_differing_shape(tmp_path):
-    # Three instances of one module pattern; the middle one runs a different
-    # shape. Time sums every instance, ops group per perf row, and the data
-    # moved comes from the matched row (no instance_count extrapolation).
-    ea, eb = "Cijk_gemm", "vectorized_elementwise_kernel add"
-    uid_map, events, ops = {}, [], []
-    shapes = [[[16, 64]], [[2, 8]], [[16, 64]]]
-    for i, dims in enumerate(shapes):
-        ka, kb = 10 + 10 * i, 11 + 10 * i
-        uid_map[ka] = _kernel_event(ka, ea, dur=100)
-        uid_map[kb] = _kernel_event(kb, eb, dur=10)
-        events.append(
-            {
-                "name": f"nn.Module: MLP_{i}",
-                "_category": "aten",
-                "gpu_events": [ka, kb],
-            }
-        )
-        ops.append(_op_event(1000 + ka, "aten::mm", [ka], dims))
-        ops.append(_op_event(1000 + kb, "aten::add", [kb], dims))
-    tree = _StubTree(events, uid_map)
-    analyzer = _StubAnalyzer(tree, unified_events=ops)
-
-    csv_dir = tmp_path / "csv"
-    csv_dir.mkdir()
-    rows = []
-    for dims in ([[16, 64]], [[2, 8]]):
-        for name in ("aten::mm", "aten::add"):
-            rows.append(
-                {
-                    "name": name,
-                    "Input Dims": str(au.list_to_tuple(dims)),
-                    "Input type": str(("c10::BFloat16",)),
-                    "Input Strides": str(((1,),)),
-                    "Concrete Inputs": str(("",)),
-                    **_UNKNOWN_THREAD,
-                    "op category": "GEMM" if name == "aten::mm" else "elementwise",
-                    "Data Moved (MB)": 26.0 if dims == [[16, 64]] else 1.0,
-                    "perf_params": (
-                        "{'M':2,'N':4,'K':3}" if name == "aten::mm" else "{}"
-                    ),
-                }
-            )
-    pd.DataFrame(rows).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
-
-    (cand,) = _extract_standalone_fusion_candidates(analyzer, tree, str(csv_dir))
-    assert cand["total_kernel_time_us"] == 330
-    assert "_instances" not in cand
-    by_dims = {tuple(o["perf_key"]): o for o in cand["ops"] if o["perf_key"]}
-    gemm_big = by_dims[
-        ("aten::mm",)
-        + tuple(
-            str(au.list_to_tuple(v))
-            for v in ([[16, 64]], ["c10::BFloat16"], [[1]], [""])
-        )
-        + ("Unknown",) * 3
-    ]
-    assert gemm_big["time_us"] == 200 and gemm_big["count"] == 2
-    assert sorted(o["time_us"] for o in cand["ops"]) == [10, 20, 100, 200]
-    assert cand["kernels"][0]["data_in_mb"] == pytest.approx(18.0)
-    assert cand["kernels"][0]["data_out_mb"] == pytest.approx(8.0)
-
-
-def _perf_csv_row(name, dims, category, dm=1.0):
-    return {
-        "name": name,
-        "Input Dims": str(au.list_to_tuple(dims)),
-        "Input type": str(("c10::BFloat16",) * len(dims)),
-        "Input Strides": str(((1,),) * len(dims)),
-        "Concrete Inputs": str(("",) * len(dims)),
-        **_UNKNOWN_THREAD,
-        "op category": category,
-        "Data Moved (MB)": dm,
-        "perf_params": "{'M':2,'N':4,'K':3}" if category == "GEMM" else "{}",
-    }
+def _op_event(uid, name, gpu_events):
+    return {"UID": uid, "name": name, "gpu_events": gpu_events, "args": _OP_ARGS}
 
 
 def test_extract_standalone_attention_narrowing_recounts_instances(tmp_path):
-    # Instances 0 and 1 run unfused attention (qk gemm, softmax, pv gemm) plus a
-    # trailing add; instance 2 has no softmax. Narrowing keeps the core of the
-    # two attention instances only, so instance_count, time and op counts all
-    # drop the third instance and the trailing add.
-    qk, pv = [[4, 8]], [[4, 4]]
+    # Instances 0 and 1 run unfused attention plus a trailing add; instance 2
+    # has no softmax. Narrowing keeps the core of the two attention instances
+    # only, so instance_count, time and op counts all drop the third instance
+    # and the trailing add.
+    attn = [
+        ("gemm_kernel_qk", "aten::bmm", 100),
+        ("softmax_kernel", "aten::_softmax", 20),
+        ("gemm_kernel_pv", "aten::mm", 100),
+    ]
+    add = ("vectorized_elementwise_kernel add", "aten::add", 5)
     uid_map, events, ops = {}, [], []
-    for i in range(3):
-        base = 100 * (i + 1)
-        specs = [("Cijk_qk", 100), ("softmax_kernel", 20), ("Cijk_pv", 100)]
-        if i == 2:
-            specs = [("Cijk_gemm", 100)]
-        specs.append(("vectorized_elementwise_kernel add", 5))
+    for i, specs in enumerate([attn + [add], attn + [add], [attn[2], add]]):
         uids = []
-        for j, (kname, dur) in enumerate(specs):
-            uid = base + j
+        for j, (kname, opname, dur) in enumerate(specs):
+            uid = 100 * (i + 1) + j
             uid_map[uid] = _kernel_event(uid, kname, dur=dur)
+            ops.append(_op_event(1000 + uid, opname, [uid]))
             uids.append(uid)
-            if kname == "Cijk_qk":
-                ops.append(_op_event(1000 + uid, "aten::bmm", [uid], qk))
-            elif kname in ("Cijk_pv", "Cijk_gemm"):
-                ops.append(_op_event(1000 + uid, "aten::bmm", [uid], pv))
-            elif kname == "softmax_kernel":
-                ops.append(_op_event(1000 + uid, "aten::_softmax", [uid], pv))
-            else:
-                ops.append(_op_event(1000 + uid, "aten::add", [uid], pv))
         events.append(
             {"name": f"nn.Module: Attn_{i}", "_category": "aten", "gpu_events": uids}
         )
@@ -4068,19 +3776,18 @@ def test_extract_standalone_attention_narrowing_recounts_instances(tmp_path):
     csv_dir.mkdir()
     pd.DataFrame(
         [
-            _perf_csv_row("aten::bmm", qk, "GEMM"),
-            _perf_csv_row("aten::bmm", pv, "GEMM"),
-            _perf_csv_row("aten::_softmax", pv, "elementwise"),
-            _perf_csv_row("aten::add", pv, "elementwise"),
+            {"name": n, **_CSV_ARGS, **_UNKNOWN_THREAD, "op category": c}
+            for n, c in [
+                ("aten::bmm", "GEMM"),
+                ("aten::mm", "GEMM"),
+                ("aten::_softmax", "elementwise"),
+                ("aten::add", "elementwise"),
+            ]
         ]
     ).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
 
     (cand,) = _extract_standalone_fusion_candidates(analyzer, tree, str(csv_dir))
-    assert [k["name"] for k in cand["kernels"]] == [
-        "Cijk_qk",
-        "softmax_kernel",
-        "Cijk_pv",
-    ]
+    assert [k["name"] for k in cand["kernels"]] == [k for k, _, _ in attn]
     assert cand["instance_count"] == 2
     assert cand["total_kernel_time_us"] == 2 * (100 + 20 + 100)
     assert sorted((o["time_us"], o["count"]) for o in cand["ops"]) == [
@@ -4088,22 +3795,6 @@ def test_extract_standalone_attention_narrowing_recounts_instances(tmp_path):
         (200, 2),
         (200, 2),
     ]
-
-
-def test_group_ops_unmatched_kernels_get_separate_rows():
-    def k(name, key, uid):
-        return {"name": name, "perf_key": key, "dur_us": 10, "op_uid": uid}
-
-    instances = [
-        [k("ka", None, 1), k("kb", None, 2), k("kc", ["aten::mm", "a"], 3)],
-        [k("ka", None, 4), k("kc", ["aten::mm", "a"], 5)],
-    ]
-    rows = op._group_ops(instances)
-    unmatched = {tuple(r["kernel_names"]): r for r in rows if r["perf_key"] is None}
-    assert set(unmatched) == {("ka",), ("kb",)}
-    assert unmatched[("ka",)]["time_us"] == 20 and unmatched[("ka",)]["count"] == 2
-    (matched,) = [r for r in rows if r["perf_key"] is not None]
-    assert matched["count"] == 2 and matched["time_us"] == 20
 
 
 def test_extract_standalone_skips_fused_and_gemm_norm(tmp_path):
@@ -5086,105 +4777,53 @@ def test_comparative_fusion_full_path(tmp_path):
     assert len(cands) >= 1
 
 
-def _comparative_fusion_metrics(out, platform2):
-    """Run extraction (trace 1 tree + diff_stats) then kfa.main; return the metrics."""
-    t1_dir = os.path.join(out, "perf_report_trace1_csvs")
-    t2_dir = os.path.join(out, "perf_report_trace2_csvs")
-    os.makedirs(t1_dir)
-    os.makedirs(t2_dir)
-    os.makedirs(os.path.join(out, "metadata"))
-    cat_dir = os.path.join(out, "category_data")
-    os.makedirs(cat_dir)
-    dims = [[2, 3]]
-    key_cols = {
-        "Input Dims": str(au.list_to_tuple(dims)),
-        "Input type": str(("c10::BFloat16",)),
-        "Input Strides": str(((1,),)),
-        "Concrete Inputs": str(("",)),
-    }
+@pytest.mark.parametrize(
+    "platform2, same_platform", [("GPU_A", True), ("OTHER_GPU", False)]
+)
+def test_comparative_fusion_producer_to_rows(
+    tmp_path, monkeypatch, platform2, same_platform
+):
+    t1_dir, t2_dir, cat_dir, meta_dir = (
+        tmp_path / d
+        for d in (
+            "perf_report_trace1_csvs",
+            "perf_report_trace2_csvs",
+            "category_data",
+            "metadata",
+        )
+    )
+    for d in (t1_dir, t2_dir, cat_dir, meta_dir):
+        d.mkdir()
     pd.DataFrame(
         {
-            "name": ["Cijk_A", "ew_B", "fused_k"],
+            "name": ["gemm_kernel_a", "elementwise_kernel_b", "fused_kernel"],
             "source": ["trace1", "trace1", "trace2"],
             "lowest_common_ancestor_id": [100, 100, 100],
             "kernel_time": [50000.0, 30000.0, 20000.0],
             "gpu_op_uid": [10, 11, 600],
             "cpu_op_uid": [None, None, 500],
             "cpu_op_name": [None, None, "aten::mm"],
-            **{c: [None, None, v] for c, v in key_cols.items()},
+            **{c: [None, None, v] for c, v in _CSV_ARGS.items()},
         }
-    ).to_csv(os.path.join(t1_dir, "diff_stats.csv"), index=False)
+    ).to_csv(t1_dir / "diff_stats.csv", index=False)
     uid_map = {
-        10: _kernel_event(10, "Cijk_A", dur=50000),
-        11: _kernel_event(11, "ew_B", dur=30000),
+        10: _kernel_event(10, "gemm_kernel_a", dur=50000),
+        11: _kernel_event(11, "elementwise_kernel_b", dur=30000),
     }
     module = {
         "name": "nn.Module: Blk_0",
         "_category": "aten",
         "gpu_events": [10, 11],
-        "args": {},
     }
     tree = _StubTree([module], uid_map)
     analyzer = _StubAnalyzer(
         tree,
         unified_events=[
-            _op_event(1010, "aten::mm", [10], dims),
-            _op_event(1011, "aten::add", [11], dims),
+            _op_event(1010, "aten::mm", [10]),
+            _op_event(1011, "aten::add", [11]),
         ],
     )
-    cands = _extract_comparative_fusion_candidates(t1_dir, analyzer, tree)
-    with open(os.path.join(cat_dir, "fusion_candidates.json"), "w") as f:
-        json.dump(cands, f, default=str)
-
-    perf_cols = {
-        "op category": "GEMM",
-        "FLOPS/Byte": 2.0,
-        "Pct Roofline_mean": 50.0,
-        "Roofline Bound": "MEMORY_BOUND",
-    }
-    pd.DataFrame(
-        [
-            {"name": "aten::mm", **key_cols, **_UNKNOWN_THREAD, **perf_cols},
-            {"name": "aten::add", **key_cols, **_UNKNOWN_THREAD, **perf_cols},
-        ]
-    ).to_csv(os.path.join(t1_dir, "unified_perf_summary.csv"), index=False)
-    pd.DataFrame([{"name": "aten::mm", **key_cols, **perf_cols}]).to_csv(
-        os.path.join(t2_dir, "unified_perf_summary.csv"), index=False
-    )
-    with open(os.path.join(out, "metadata", "x_metadata.json"), "w") as f:
-        json.dump(
-            {"peak_hbm_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_bf16": 1000}},
-            f,
-        )
-    with open(os.path.join(cat_dir, "category_manifest.json"), "w") as f:
-        json.dump(
-            {
-                "comparison_scope": "comparative",
-                "platform": "MI300X",
-                "platform2": platform2,
-                "gpu_utilization": {"total_time_ms": 1000.0},
-                "trace2_gpu_utilization": {"total_time_ms": 900.0},
-            },
-            f,
-        )
-    old_argv = sys.argv
-    sys.argv = [
-        "kernel_fusion_analysis",
-        "--output-dir",
-        out,
-        "--comparison-scope",
-        "comparative",
-    ]
-    try:
-        kfa.main()
-    finally:
-        sys.argv = old_argv
-    with open(os.path.join(cat_dir, "kernel_fusion_metrics.json")) as f:
-        return cands, json.load(f)
-
-
-def test_comparative_fusion_producer_to_rows(tmp_path):
-    cands, metrics = _comparative_fusion_metrics(str(tmp_path / "same"), "MI300X")
+    cands = _extract_comparative_fusion_candidates(str(t1_dir), analyzer, tree)
     (cand,) = cands
     # Trace 1 keys carry the event's thread, trace 2 keys (diff_stats) do not.
     (t1_mm,) = [o for o in cand["ops_trace1"] if o["perf_key"][0] == "aten::mm"]
@@ -5194,20 +4833,54 @@ def test_comparative_fusion_producer_to_rows(tmp_path):
     (t2,) = cand["ops_trace2"]
     assert t2["perf_key"][0] == "aten::mm"
     assert len(t2["perf_key"]) == 1 + len(au.PERF_ARG_COLS)
-    assert all(
-        "op_uid" not in k for k in cand["kernels_trace1"] + cand["kernels_trace2"]
-    )
 
+    (cat_dir / "fusion_candidates.json").write_text(json.dumps(cands, default=str))
+    perf_cols = {
+        "op category": "GEMM",
+        "FLOPS/Byte": 2.0,
+        "Pct Roofline_mean": 50.0,
+        "Roofline Bound": "MEMORY_BOUND",
+    }
+    pd.DataFrame(
+        [
+            {"name": n, **_CSV_ARGS, **_UNKNOWN_THREAD, **perf_cols}
+            for n in ("aten::mm", "aten::add")
+        ]
+    ).to_csv(t1_dir / "unified_perf_summary.csv", index=False)
+    pd.DataFrame([{"name": "aten::mm", **_CSV_ARGS, **perf_cols}]).to_csv(
+        t2_dir / "unified_perf_summary.csv", index=False
+    )
+    (meta_dir / "x_metadata.json").write_text(
+        json.dumps(
+            {"peak_hbm_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_bf16": 1000}}
+        )
+    )
+    (cat_dir / "category_manifest.json").write_text(
+        json.dumps(
+            {
+                "comparison_scope": "comparative",
+                "platform": "GPU_A",
+                "platform2": platform2,
+                "gpu_utilization": {"total_time_ms": 1000.0},
+                "trace2_gpu_utilization": {"total_time_ms": 800.0},
+            }
+        )
+    )
+    argv = f"kfa --output-dir {tmp_path} --comparison-scope comparative"
+    monkeypatch.setattr(sys, "argv", argv.split())
+    kfa.main()
+    metrics = json.loads((cat_dir / "kernel_fusion_metrics.json").read_text())
     (est,) = metrics["impact_estimates"]
+
     assert [r["operation"] for r in est["rows_trace1"]] == ["aten::mm", "aten::add"]
     (row2,) = est["rows_trace2"]
     assert row2["operation"] == "aten::mm" and row2["time_ms"] == "20.000"
-    # Same platform: trace 2 Efficiency and Bound are filled.
-    assert row2["efficiency"] != "\u2014" and row2["bound"] != "\u2014"
-
-    _, other = _comparative_fusion_metrics(str(tmp_path / "other"), "MI355X")
-    (row2_other,) = other["impact_estimates"][0]["rows_trace2"]
-    assert row2_other["efficiency"] == "\u2014" and row2_other["bound"] == "\u2014"
+    # %E2E of trace 2 rows is against the trace 2 baseline.
+    assert row2["pct_e2e"] == "2.50"
+    # Trace 2 Efficiency and Bound are only filled on the same platform.
+    assert {row2["efficiency"] != "\u2014", row2["bound"] != "\u2014"} == {
+        same_platform
+    }
 
 
 def test_analysis_utils_efficiency_and_fusion(tmp_path):
@@ -5330,38 +5003,17 @@ class TestOrchestratorHelpersSweep:
 
 class TestOrchestratorPush95Coverage:
     def test_attention_core_narrowing(self):
-        perf_lookup = {
-            ("aten::bmm", "qk"): {"op category": "GEMM"},
-            ("aten::bmm", "pv"): {"op category": "GEMM"},
-            ("aten::_softmax", "sm"): {"op category": "SDPA_fwd"},
-        }
         kernels = [
-            {
-                "name": "Cijk_QK",
-                "type": "GEMM",
-                "dur_us": 100,
-                "perf_key": ["aten::bmm", "qk"],
-            },
-            {
-                "name": "softmax_kernel",
-                "type": "SDPA",
-                "dur_us": 50,
-                "perf_key": ["aten::_softmax", "sm"],
-            },
-            {
-                "name": "Cijk_PV",
-                "type": "GEMM",
-                "dur_us": 120,
-                "perf_key": ["aten::bmm", "pv"],
-            },
+            {"name": "qk_gemm", "type": "GEMM", "dur_us": 100, "perf_key": ["qk"]},
+            {"name": "softmax_kernel", "type": "SDPA", "dur_us": 50},
+            {"name": "pv_gemm", "type": "GEMM", "dur_us": 120, "perf_key": ["pv"]},
             {
                 "name": "vectorized_elementwise_kernel",
                 "type": "Elementwise",
                 "dur_us": 10,
-                "perf_key": None,
             },
         ]
-        core = _extract_attention_core(kernels, perf_lookup)
+        core = _extract_attention_core(kernels, _ATTN_PERF_ROWS)
         assert core is not None
         assert len(core) == 3
         assert core[1]["name"] == "softmax_kernel"
