@@ -22,7 +22,13 @@ from collections import defaultdict
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from category_analyses.analysis_utils import parse_first_shape, shape_aware_lookup
+from category_analyses.analysis_utils import (
+    PERF_ARG_COLS,
+    PERF_THREAD_COLS,
+    load_perf_rows,
+    perf_float,
+    perf_row_key,
+)
 from utils.arch_utils import list_platforms, load_arch
 
 from TraceLens.Agent.Analysis.utils.classify_kernels import (
@@ -30,6 +36,7 @@ from TraceLens.Agent.Analysis.utils.classify_kernels import (
 )
 from TraceLens.TreePerf import TreePerfAnalyzer
 from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
+from TraceLens.TreePerf.tree_perf import event_process_thread_names
 
 CATEGORY_SKILL_MAP = {
     "cpu_idle": "cpu-idle-analyzer",
@@ -122,6 +129,64 @@ def _build_parent_chain(ev, tree) -> list:
     return parent_chain
 
 
+class OpResolver:
+    """Resolves a GPU kernel UID to its launching perf-report op and perf row key."""
+
+    def __init__(self, tree, perf_ops: list):
+        self.tree = tree
+        self.kernel_op = {
+            uid: ev for ev in perf_ops for uid in ev.get("gpu_events", [])
+        }
+
+    def perf_key(self, ev) -> list:
+        """The perf-summary row key (op name, args, thread) of a perf-report op event."""
+        args = ev.get("args", {})
+        thread = event_process_thread_names(self.tree, ev)
+        return list(
+            perf_row_key(
+                ev.get("name"),
+                *(args.get(c) for c in PERF_ARG_COLS),
+                *(thread[c] for c in PERF_THREAD_COLS),
+            )
+        )
+
+    def fields(self, uid) -> dict:
+        """Launching-op identity of kernel ``uid``: its op UID and perf row key."""
+        op = self.kernel_op.get(uid)
+        if op is None:
+            return {"op_uid": uid, "perf_key": None}
+        return {"op_uid": op.get("UID", uid), "perf_key": self.perf_key(op)}
+
+
+def _group_ops(instances: list) -> list:
+    """Group kernels from every instance by launching op (perf row key).
+
+    ``time_us`` sums the kernels' durations over all instances; ``count`` is the
+    number of distinct op invocations. Kernel names stack in first-seen order.
+    Kernels with no perf row are not merged: each kernel name gets its own group.
+    """
+    groups: dict = {}
+    op_uids: dict = defaultdict(set)
+    for kernels in instances:
+        for k in kernels:
+            kname = k.get("name", k.get("kernel_name", ""))
+            # A kernel with no perf row is its own row, keyed by kernel name.
+            key = tuple(k["perf_key"]) if k.get("perf_key") else (None, kname)
+            g = groups.setdefault(
+                key,
+                {
+                    "perf_key": k.get("perf_key"),
+                    "kernel_names": [],
+                    "time_us": 0.0,
+                },
+            )
+            if kname not in g["kernel_names"]:
+                g["kernel_names"].append(kname)
+            g["time_us"] += k["dur_us"]
+            op_uids[key].add(k["op_uid"])
+    return [{**g, "count": len(op_uids[key])} for key, g in groups.items()]
+
+
 def _dedup_by_kernel_set(candidates: list, kernels_field: str, score_fn) -> list:
     """Deduplicate fusion candidates with identical kernel name tuples.
 
@@ -191,11 +256,20 @@ def _build_diff_stats_lookups(df):
                 "gpu_op_uid": uid,
             }
         elif row["source"] == "trace2":
+            # Trace 2 has no tree here: its launching op comes from the row itself.
+            op_uid = row.get("cpu_op_uid")
             lca_to_t2[lca_id].append(
                 {
                     "name": kname,
                     "type": ktype,
                     "dur_us": dur_us,
+                    "op_uid": row.get("gpu_op_uid") if pd.isna(op_uid) else op_uid,
+                    "perf_key": list(
+                        perf_row_key(
+                            row.get("cpu_op_name"),
+                            *(row.get(c) for c in PERF_ARG_COLS),
+                        )
+                    ),
                 }
             )
 
@@ -233,7 +307,6 @@ def _make_comparative_candidate(
     t1_kernels,
     t2_kernels,
     parent_chain=None,
-    input_dims=None,
     lca_id=None,
 ):
     """Build a comparative candidate dict from trace1/trace2 kernel lists."""
@@ -258,7 +331,6 @@ def _make_comparative_candidate(
         "has_fused_kernel": _has_fused_kernel(t1_kernels),
         "total_kernel_time_us_trace1": sum(k["dur_us"] for k in t1_kernels),
         "total_kernel_time_us_trace2": sum(k["dur_us"] for k in t2_kernels),
-        "input_dims": input_dims,
     }
     if lca_id is not None:
         candidate["lca_id"] = int(lca_id)
@@ -299,7 +371,10 @@ def _extract_comparative_fusion_candidates(
         return []
 
     categorizer = analyzer.event_to_category
+    resolver = OpResolver(tree, analyzer.collect_unified_perf_events())
     seen_base: dict = {}
+    instances_t1: dict = {}  # base -> kernels of every instance, per trace
+    instances_t2: dict = {}
 
     for ev in tree.events:
         if categorizer(ev) in _SKIP_CATEGORIES:
@@ -318,7 +393,7 @@ def _extract_comparative_fusion_candidates(
         for uid in gpu_uids:
             info = uid_to_t1.get(uid)
             if info is not None:
-                t1_kernels.append(info)
+                t1_kernels.append({**info, **resolver.fields(uid)})
                 matched_lca_ids.add(info["lca_id"])
 
         if len(t1_kernels) < 2:
@@ -339,6 +414,8 @@ def _extract_comparative_fusion_candidates(
             seen_base[base]["instance_count"] += 1
             seen_base[base]["total_kernel_time_us_trace1"] += t1_time
             seen_base[base]["total_kernel_time_us_trace2"] += t2_time
+            instances_t1[base].append(t1_kernels)
+            instances_t2[base].append(t2_kernels)
             continue
 
         candidate = _make_comparative_candidate(
@@ -347,9 +424,10 @@ def _extract_comparative_fusion_candidates(
             t1_kernels=t1_kernels,
             t2_kernels=t2_kernels,
             parent_chain=_build_parent_chain(ev, tree),
-            input_dims=ev.get("args", {}).get("Input Dims"),
         )
         seen_base[base] = candidate
+        instances_t1[base] = [t1_kernels]
+        instances_t2[base] = [t2_kernels]
 
     candidates = [
         c
@@ -367,6 +445,14 @@ def _extract_comparative_fusion_candidates(
         ),
     )
 
+    for c in candidates:
+        c["ops_trace1"] = _group_ops(instances_t1[c["base_name"]])
+        c["ops_trace2"] = _group_ops(instances_t2[c["base_name"]])
+    # Trace 2 kernel dicts are shared between candidates, so strip only after all grouping.
+    for c in candidates:
+        for k in c["kernels_trace1"] + c["kernels_trace2"]:
+            k.pop("op_uid", None)
+
     return candidates
 
 
@@ -383,30 +469,13 @@ def _is_fusion_eligible(name):
     )
 
 
-def _build_kernel_perf_lookup(csv_path):
-    """GPU kernel name -> {shape -> {op_category, data_in_mb, data_out_mb}} from perf CSV."""
-    df = pd.read_csv(csv_path)
-    lookup = defaultdict(dict)
-    for _, row in df.iterrows():
-        kd = row.get("kernel_details_summary", "")
-        if pd.isna(kd):
-            continue
-        cat = row.get("op category", "")
-        dm = row.get("Data Moved (MB)")
-        dm = float(dm) if dm is not None and not pd.isna(dm) else None
-        pp = row.get("perf_params", "")
-        if pd.isna(pp):
-            pp = ""
-        data_in, data_out = _compute_data_in_out(cat, pp, dm)
-        shape = parse_first_shape(row.get("Input Dims"))
-        for kn in re.findall(r"'name':\s*'([^']+)'", str(kd)):
-            if shape not in lookup[kn]:
-                lookup[kn][shape] = {
-                    "op_category": cat,
-                    "data_in_mb": data_in,
-                    "data_out_mb": data_out,
-                }
-    return dict(lookup)
+def _row_data_in_out(row):
+    """(data_in_mb, data_out_mb) of a perf-summary row."""
+    dm = perf_float(row, "Data Moved (MB)")
+    pp = row.get("perf_params", "")
+    return _compute_data_in_out(
+        row.get("op category", ""), "" if pd.isna(pp) else pp, dm
+    )
 
 
 def _is_gemm_norm_only(entry):
@@ -434,24 +503,13 @@ def _is_gemm_norm_only(entry):
     )
 
 
-def _prefix_lookup(lookup, kname):
-    """Look up by exact key, falling back to prefix match for truncated CSV names."""
-    result = lookup.get(kname)
-    if result is not None:
-        return result
-    for csv_name in lookup:
-        if kname.startswith(csv_name) or csv_name.startswith(kname):
-            return lookup[csv_name]
-    return None
-
-
-def _extract_attention_core(kernels, perf_lookup):
+def _extract_attention_core(kernels, perf_rows):
     """If kernels contain unfused attention (softmax), return just QKt+softmax+PV."""
     name_key = "name" if "name" in (kernels[0] if kernels else {}) else "kernel_name"
 
     def is_gemm(k):
-        entries = _prefix_lookup(perf_lookup, k.get(name_key, "")) or {}
-        return any(e.get("op_category") == "GEMM" for e in entries.values())
+        row = perf_rows.get(tuple(k["perf_key"] or ()))
+        return row is not None and row.get("op category") == "GEMM"
 
     for i, k in enumerate(kernels):
         if "softmax" not in k.get(name_key, "").lower():
@@ -473,27 +531,10 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
     seen_base = {}
     base_order = []
     categorizer = analyzer.event_to_category
+    collected_events = analyzer.collect_unified_perf_events()
+    resolver = OpResolver(tree, collected_events)
 
-    for ev in tree.events:
-        if categorizer(ev) in _SKIP_CATEGORIES:
-            continue
-        gpu_uids = ev.get("gpu_events", [])
-        if len(gpu_uids) < 2:
-            continue
-        name = ev.get("name", "")
-        base = _strip_module_index(name)
-        if not base:
-            continue
-
-        if base in seen_base:
-            seen_base[base]["instance_count"] += 1
-            seen_base[base]["total_kernel_time_us"] += sum(
-                tree.get_UID2event(u).get("dur", 0)
-                for u in gpu_uids
-                if categorizer(tree.get_UID2event(u)) == "kernel"
-            )
-            continue
-
+    def module_kernels(gpu_uids):
         kernels = []
         for uid in gpu_uids:
             try:
@@ -508,10 +549,30 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
                             "dur_us": k.get("dur", 0),
                             "eligible": _is_fusion_eligible(kname),
                             "gpu_op_uid": uid,
+                            **resolver.fields(uid),
                         }
                     )
             except (KeyError, IndexError):
                 continue
+        return kernels
+
+    for ev in tree.events:
+        if categorizer(ev) in _SKIP_CATEGORIES:
+            continue
+        gpu_uids = ev.get("gpu_events", [])
+        if len(gpu_uids) < 2:
+            continue
+        name = ev.get("name", "")
+        base = _strip_module_index(name)
+        if not base:
+            continue
+
+        kernels = module_kernels(gpu_uids)
+        if base in seen_base:
+            seen_base[base]["instance_count"] += 1
+            seen_base[base]["_instances"].append(kernels)
+            continue
+
         if len(kernels) < 2:
             continue
 
@@ -531,14 +592,12 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
             "kernel_type_signature": type_sig,
             "kernel_type_summary": type_summary,
             "has_fused_kernel": _has_fused_kernel(kernels),
-            "total_kernel_time_us": sum(k["dur_us"] for k in kernels),
-            "input_dims": ev.get("args", {}).get("Input Dims"),
+            "_instances": [kernels],
         }
         seen_base[base] = entry
         base_order.append(base)
 
     # Sibling sequence extraction
-    collected_events = analyzer.collect_unified_perf_events()
     parent_groups = defaultdict(list)
     for ev in collected_events:
         gpu_uids = ev.get("gpu_events", [])
@@ -560,6 +619,7 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
                     "kernel_name": kname,
                     "dur_us": k.get("dur", 0),
                     "gpu_op_uid": gpu_uids[0],
+                    **resolver.fields(gpu_uids[0]),
                 }
             )
         except (KeyError, IndexError):
@@ -578,18 +638,15 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
         sbase = _strip_module_index(pname)
         if sbase in seen_sibling_bases:
             seen_sibling_bases[sbase]["instance_count"] += 1
-            seen_sibling_bases[sbase]["total_time_us"] += sum(
-                c["dur_us"] for c in children
-            )
+            seen_sibling_bases[sbase]["_instances"].append(children)
             continue
         entry = {
             "ancestor_name": pname,
             "base_name": sbase,
             "sequence": children,
             "kernel_type_signature": [c["kernel_type"] for c in children],
-            "total_time_us": sum(c["dur_us"] for c in children),
             "instance_count": 1,
-            "input_dims": parent_evt.get("args", {}).get("Input Dims"),
+            "_instances": [children],
         }
         seen_sibling_bases[sbase] = entry
         sibling_seqs.append(entry)
@@ -618,48 +675,48 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
                 "kernel_type_signature": s["kernel_type_signature"],
                 "kernel_type_summary": {},
                 "has_fused_kernel": False,
-                "total_kernel_time_us": s["total_time_us"],
                 "source": "sibling_sequence",
-                "input_dims": s.get("input_dims"),
+                "_instances": s["_instances"],
             }
         )
 
-    # Post-process: attention narrowing + data movement enrichment
-    csv_path = os.path.join(trace1_csv_dir, "unified_perf_summary.csv")
-    if os.path.exists(csv_path):
-        perf_lookup = _build_kernel_perf_lookup(csv_path)
+    # Post-process: attention narrowing, dedup, data movement from the matched row
+    perf_rows = load_perf_rows(os.path.join(trace1_csv_dir, "unified_perf_summary.csv"))
 
-        for c in fusion_candidates:
-            core = _extract_attention_core(c.get("kernels", []), perf_lookup)
-            if core is not None:
-                c["kernels"] = core
-                c["kernel_count"] = len(core)
-                c["eligible_kernel_count"] = len(core)
-                c["kernel_type_signature"] = [
-                    k.get("type", k.get("kernel_type", "Unknown")) for k in core
-                ]
-                c["total_kernel_time_us"] = sum(
-                    k.get("dur_us", 0) for k in core
-                ) * c.get("instance_count", 1)
+    for c in fusion_candidates:
+        core = _extract_attention_core(c["kernels"], perf_rows)
+        if core is not None:
+            c["_instances"] = [
+                inst_core
+                for inst in c["_instances"]
+                if (inst_core := _extract_attention_core(inst, perf_rows)) is not None
+            ]
+            c["instance_count"] = len(c["_instances"])
+            c["kernels"] = core
+            c["kernel_count"] = len(core)
+            c["eligible_kernel_count"] = len(core)
+            c["kernel_type_signature"] = [
+                k.get("type", k.get("kernel_type", "Unknown")) for k in core
+            ]
 
-        fusion_candidates = _dedup_by_kernel_set(
-            fusion_candidates,
-            kernels_field="kernels",
-            score_fn=lambda c: (
-                c.get("module_name", "").startswith("nn.Module:"),
-                len(c.get("parent_chain", [])),
-            ),
-        )
+    fusion_candidates = _dedup_by_kernel_set(
+        fusion_candidates,
+        kernels_field="kernels",
+        score_fn=lambda c: (
+            c.get("module_name", "").startswith("nn.Module:"),
+            len(c.get("parent_chain", [])),
+        ),
+    )
 
-        for c in fusion_candidates:
-            for k in c.get("kernels", []):
-                if k.get("data_in_mb") is not None:
-                    continue
-                kname = k.get("name", k.get("kernel_name", ""))
-                entry = shape_aware_lookup(perf_lookup, kname, c.get("input_dims"))
-                if entry.get("data_in_mb") is not None:
-                    k["data_in_mb"] = entry["data_in_mb"]
-                    k["data_out_mb"] = entry["data_out_mb"]
+    for c in fusion_candidates:
+        instances = c.pop("_instances")
+        c["total_kernel_time_us"] = sum(k["dur_us"] for inst in instances for k in inst)
+        c["ops"] = _group_ops(instances)
+        for k in c["kernels"]:
+            k.pop("op_uid", None)
+            row = perf_rows.get(tuple(k["perf_key"] or ()))
+            if row is not None:
+                k["data_in_mb"], k["data_out_mb"] = _row_data_in_out(row)
 
     print(
         f"  ✓ Fusion candidates: {len(seen_base)} unique module types, "
@@ -800,6 +857,14 @@ def main():
         help=(
             "standalone: read <output-dir>/perf_report_csvs (single trace). "
             "comparative: trace 1 from perf_report_trace1_csvs, trace 2 from perf_report_trace2_csvs."
+        ),
+    )
+    parser.add_argument(
+        "--platform2",
+        default=None,
+        help=(
+            "Platform of trace 2 (comparative only). Fusion fills trace 2 "
+            "Efficiency/Bound only when it equals --platform."
         ),
     )
     parser.add_argument(
@@ -1495,6 +1560,7 @@ def main():
         "time_metric_note": "Use gpu_kernel_time_ms for bottleneck prioritization. cpu_duration_ms includes sync/launch overhead.",
     }
     if comparison_scope == "comparative" and trace2_gpu_utilization is not None:
+        manifest["platform2"] = args.platform2
         manifest["trace2_gpu_utilization"] = trace2_gpu_utilization
         manifest["trace2_ops_summary_by_category"] = trace2_ops_summary_by_category
 

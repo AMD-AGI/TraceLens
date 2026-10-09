@@ -8,8 +8,11 @@
 
 The contract between the ``render_analysis_json`` producer and any downstream
 consumer of ``analysis.json``. Additive-only: a drifted field surfaces as a
-``TypedDict`` mismatch at the read boundary, never a silent mis-parse. Compute
-tier only; no fusion/system task currnetly``.
+``TypedDict`` mismatch at the read boundary, never a silent mis-parse. Carries
+the compute and fusion tiers (standalone only); there is no system task yet.
+``impact.mid`` is not additive across tiers: medium/low-confidence fusion
+candidates do not null out their compute rows, so the same time can appear in
+both ``compute_optimizations`` and ``fusion_optimizations``.
 """
 
 from typing import Optional, TypedDict
@@ -21,17 +24,15 @@ except ImportError:
 
 
 class Impact(TypedDict):
-    """Task-level impact estimate; ``mid`` is the point estimate."""
+    """Task-level impact estimate (% E2E). No low/high band: a finding split
+    across tasks has no per-task band, so per-finding bands live in the md only."""
 
     mid: float
-    low: Optional[float]
-    high: Optional[float]
 
 
-class ComputeMember(TypedDict):
-    """One data-table row within a compute task (array-of-structs member)."""
+class TaskMember(TypedDict):
+    """One data-table row within a task (array-of-structs member)."""
 
-    impact_score: float
     kernel_launcher_path: Optional[str]
     library: Optional[str]
     category: Optional[str]
@@ -49,6 +50,12 @@ class ComputeMember(TypedDict):
     bound: Optional[str]
 
 
+class ComputeMember(TaskMember):
+    """A compute task member; adds the per-row ``impact_score``."""
+
+    impact_score: float
+
+
 class ComputeTask(TypedDict):
     """An operation-grouped compute optimization task."""
 
@@ -60,6 +67,25 @@ class ComputeTask(TypedDict):
     prose_truncated: bool
     impact: Impact
     members: list[ComputeMember]
+
+
+class FusionTask(TypedDict):
+    """One kernel-fusion candidate; ``operation`` is the heading's pattern name.
+
+    The severity color and ``P<N>:`` prefix are stripped from the heading.
+
+    ``reasoning`` is always null (fusion blocks carry no such label) and
+    ``priority`` is the rank within fusion by ``impact.mid``.
+    """
+
+    priority: int
+    operation: Optional[str]
+    identification: Optional[str]
+    reasoning: Optional[str]
+    resolution: Optional[str]
+    prose_truncated: bool
+    impact: Impact
+    members: list[TaskMember]
 
 
 class ReportInfo(TypedDict):
@@ -104,4 +130,5 @@ class AnalysisReport(TypedDict):
     executive_summary: NotRequired[ExecutiveSummary]
     top_operations: NotRequired[list[TopOperationRow]]
     compute_optimizations: list[ComputeTask]
+    fusion_optimizations: list[FusionTask]
     appendix: NotRequired[Appendix]

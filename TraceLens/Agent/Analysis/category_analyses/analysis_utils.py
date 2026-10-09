@@ -19,14 +19,14 @@ This module provides common functions for:
 import ast
 import json
 import os
-import re
 import sys
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
 
+from TraceLens.NcclAnalyser.nccl_analyser import list_to_tuple
 from TraceLens.PerfModel.utils import torch_dtype_map
 
 TARGET_HIGH = 100.0
@@ -87,6 +87,8 @@ _CALL_CHAIN_SKIP = frozenset(
 )
 
 _KERNEL_NAME_TRUNC_LEN = 75
+PERF_ARG_COLS = ("Input Dims", "Input type", "Input Strides", "Concrete Inputs")
+PERF_THREAD_COLS = ("process_name", "process_label", "thread_name")
 
 
 def _eff_bucket(pct):
@@ -423,29 +425,19 @@ def calculate_efficiency(
     return result
 
 
-def _load_fusion_map(output_dir: str) -> Dict[str, str]:
-    """Load high-confidence GPU kernel name -> fusion candidate name mapping."""
+def _load_fusion_op_keys(output_dir: str) -> Set[tuple]:
+    """Load the perf-row keys of the ops covered by high-confidence fusion candidates."""
     if not output_dir:
-        return {}
+        return set()
     path = os.path.join(output_dir, "category_data", "kernel_fusion_metrics.json")
     if not os.path.exists(path):
-        return {}
+        return set()
     try:
         with open(path, "r") as f:
-            return json.load(f).get("high_confidence_kernel_map", {})
-    except (json.JSONDecodeError, KeyError):
-        return {}
-
-
-def _match_fusion_op(kd_str: str, fusion_map: Dict[str, str]) -> Optional[str]:
-    """Match kernel_details_summary against fusion kernel map with prefix fallback."""
-    for kn in re.findall(r"'name':\s*'([^']+)'", kd_str):
-        if kn in fusion_map:
-            return fusion_map[kn]
-        for fk, bn in fusion_map.items():
-            if fk.startswith(kn) or kn.startswith(fk):
-                return bn
-    return None
+            keys = json.load(f).get("high_confidence_op_keys", [])
+    except json.JSONDecodeError:
+        return set()
+    return {tuple(key) for key in keys}
 
 
 def _parse_call_stack(call_stack_full: str) -> List[str]:
@@ -480,6 +472,29 @@ def _extract_call_chain(call_stack_full: str) -> List[str]:
     ]
 
 
+def format_kernel_names(kernels: List[str]) -> tuple:
+    """Render kernel names for a table cell.
+
+    Returns ``(full, trunc)``: a lone kernel is its bare name; several are
+    ``Kernel 1: ...<br>Kernel 2: ...``. ``trunc`` clips each individual name to
+    ``_KERNEL_NAME_TRUNC_LEN`` chars.
+    """
+
+    def _trunc(name: str) -> str:
+        return (
+            name[:_KERNEL_NAME_TRUNC_LEN] + "..."
+            if len(name) > _KERNEL_NAME_TRUNC_LEN
+            else name
+        )
+
+    if len(kernels) == 1:
+        return kernels[0], _trunc(kernels[0])
+
+    full = "<br>".join(f"Kernel {i+1}: {k}" for i, k in enumerate(kernels))
+    trunc = "<br>".join(f"Kernel {i+1}: {_trunc(k)}" for i, k in enumerate(kernels))
+    return full, trunc
+
+
 def _extract_kernel_names(call_stack_full: str) -> tuple:
     """Extract GPU kernel name(s) from call_stack_full.
 
@@ -511,19 +526,7 @@ def _extract_kernel_names(call_stack_full: str) -> tuple:
     if not kernels:
         return "", ""
 
-    def _trunc(name: str) -> str:
-        return (
-            name[:_KERNEL_NAME_TRUNC_LEN] + "..."
-            if len(name) > _KERNEL_NAME_TRUNC_LEN
-            else name
-        )
-
-    if len(kernels) == 1:
-        return kernels[0], _trunc(kernels[0])
-
-    full = "<br>".join(f"Kernel {i+1}: {k}" for i, k in enumerate(kernels))
-    trunc = "<br>".join(f"Kernel {i+1}: {_trunc(k)}" for i, k in enumerate(kernels))
-    return full, trunc
+    return format_kernel_names(kernels)
 
 
 def build_operation_metrics(
@@ -542,7 +545,7 @@ def build_operation_metrics(
     """
     peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
     maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
-    fusion_map = _load_fusion_map(metadata.get("output_dir", ""))
+    fusion_op_keys = _load_fusion_op_keys(metadata.get("output_dir", ""))
     e2e_ms_total = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
 
     # Calculate category total for % of category (kept for analyzer screening)
@@ -642,11 +645,13 @@ def build_operation_metrics(
 
         op_metric["library"] = classify_kernel_library(op_name, kd_str)
 
-        if fusion_map and kd_str:
-            matched = _match_fusion_op(kd_str, fusion_map)
-            if matched:
-                op_metric["fusion_flagged"] = True
-                op_metric["fusion_candidate_name"] = matched
+        if fusion_op_keys and (
+            perf_row_key(
+                op_name, *(row.get(c) for c in PERF_ARG_COLS + PERF_THREAD_COLS)
+            )
+            in fusion_op_keys
+        ):
+            op_metric["fusion_flagged"] = True
 
         # After fusion_flagged is set: the ladder reads it to skip fused rows.
         score = _row_impact_score(op_metric, e2e_ms_total, comparison_scope)
@@ -935,21 +940,6 @@ def build_category_findings(
     return findings
 
 
-def parse_first_shape(dims_str):
-    """Extract first input tensor shape as a hashable tuple from an Input Dims string."""
-    if dims_str is None or (isinstance(dims_str, float) and pd.isna(dims_str)):
-        return None
-    try:
-        parsed = ast.literal_eval(str(dims_str))
-        return (
-            tuple(parsed[0])
-            if parsed and isinstance(parsed[0], (list, tuple))
-            else None
-        )
-    except Exception:
-        return None
-
-
 def format_args(input_dims_str, input_type_str) -> Optional[str]:
     """Render "(d1,d2,...) dtype<br>..." from Input Dims + Input type strings.
 
@@ -982,20 +972,42 @@ def format_args(input_dims_str, input_type_str) -> Optional[str]:
     return "<br>".join(parts) or None
 
 
-def shape_aware_lookup(table, kname, input_dims=None):
-    """Look up perf metrics by (kernel_name, shape), fall back to any entry for that name.
+def perf_row_key(name, *args) -> tuple:
+    """Key of one unified_perf_summary.csv row: op name + its arg (and thread) columns.
 
-    Uses prefix matching as fallback when exact key misses, since trace kernel
-    names can be longer than the truncated names stored in perf CSV lookups.
+    Each part is normalized to the CSV's string form (``str`` of the tuple-ified
+    value; missing -> ``""``), so a raw trace event's args and a CSV cell yield
+    the same key.
     """
-    shapes = table.get(kname, {})
-    if not shapes:
-        for csv_name in table:
-            if kname.startswith(csv_name) or csv_name.startswith(kname):
-                shapes = table[csv_name]
-                break
-    shape_key = parse_first_shape(input_dims) if input_dims else None
-    return shapes.get(shape_key) or next(iter(shapes.values()), {})
+    return tuple(
+        (
+            ""
+            if a is None or (isinstance(a, float) and pd.isna(a))
+            else str(list_to_tuple(a))
+        )
+        for a in (name, *args)
+    )
+
+
+def load_perf_rows(csv_path: str, with_thread: bool = True) -> Dict[tuple, pd.Series]:
+    """unified_perf_summary.csv rows keyed by ``perf_row_key`` (first row wins).
+
+    The key is name, the args, then the thread columns; ``with_thread=False`` drops
+    the thread for a trace whose events carry no thread (diff_stats), so rows that
+    differ only by thread collapse onto the first one.
+    """
+    cols = PERF_ARG_COLS + PERF_THREAD_COLS if with_thread else PERF_ARG_COLS
+    rows: Dict[tuple, pd.Series] = {}
+    for _, row in pd.read_csv(csv_path).iterrows():
+        key = perf_row_key(row["name"], *(row.get(c) for c in cols))
+        rows.setdefault(key, row)
+    return rows
+
+
+def perf_float(perf, col) -> Optional[float]:
+    """A numeric cell of a perf-summary row; None if the row or the cell is missing."""
+    val = perf.get(col) if perf is not None else None
+    return None if val is None or pd.isna(val) else float(val)
 
 
 def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:

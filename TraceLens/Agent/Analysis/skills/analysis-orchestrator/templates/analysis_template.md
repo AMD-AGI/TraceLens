@@ -53,7 +53,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 
    DETAILED ANALYSIS (§Detailed Analysis only):
    - Compute / System blocks: **Identification:** / **Data:** / **Reasoning for Slowdown:** / **Resolution:** / **Impact estimate:**
-   - Kernel Fusion blocks:    **Identification:** / **Data:** / **Impact estimate:**
+   - Kernel Fusion blocks:    **Identification:** / **Data:** / **Resolution:** / **Impact estimate:**
 
 10. Detailed Analysis: three subsections (`### Compute Kernel Insights`, `### Kernel Fusion Insights`, `### System-Level Insights`) with `#### 🔴/🟡/🟢 Pn: <Brief Title>` blocks matching card titles and order.
 11. Model and appendix: Use `model_info["model"]` from `metadata/model_info.json` for the
@@ -206,7 +206,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 
 <!-- Populate from system_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
 <!-- Each finding uses Insight / Action / Impact / Confidence format, with Impact from kernel_fusion_metrics.json. -->
-<!-- P1/P2/P3+ ordered by confidence then kernel time. -->
+<!-- P1/P2/P3+ ordered by impact_score, highest first. -->
 <!-- Icon mapping by CONFIDENCE (not priority number): 🔴 high → 🟡 medium → 🟢 low. -->
 <!-- If no findings or kernel_fusion category not in manifest, replace the cards below with: "No kernel fusion opportunities detected." -->
 
@@ -404,43 +404,27 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- === COMPARATIVE Kernel Fusion === -->
 > **Note:** Kernel fusion analysis is experimental.
 
-<!-- Paste reasoning blocks from kernel_fusion_findings.md, ordered by confidence then kernel time (matching card order). -->
-<!-- Each block uses three required labels: **Identification:**, **Data:**, **Impact estimate:** -->
+<!-- Paste reasoning blocks from kernel_fusion_findings.md, ordered by impact_score, highest first (matching card order). -->
+<!-- Comparative: replace the single Data table with a **Trace 1** (E2E <ms> ms) table and a **Trace 2** (E2E <ms> ms) table. -->
 <!-- If kernel_fusion category is not in the manifest or findings are empty, show "No fusion impact estimates available." -->
 
 <a id="detailed-analysis-fusion-P1"></a>
 <!-- reasoning-candidate tier=fusion rank=1 -->
-#### 🔴/🟡/🟢 P1: <Candidate Name> (<time_ms> ms, <instance_count> instances)
+#### 🔴/🟡/🟢 P1: <Candidate Name>
 
 **Identification:**
 
 **Data:**
 
-| Kernel | Type | Duration (us) | Perf model |
-|--------|------|--------------|------------|
-| <kernel name (truncated to ~60 chars)> | <type> | X.X | Yes/No |
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
+| <op> | <args> | <kernel path> | <kernel name (truncated)> | X.XXX | X.XX | N | X.XX | X.XX% of Y TFLOPS/TB/s | compute/memory-bound |
+
+**Resolution:**
 
 **Impact estimate:**
 
-<a id="detailed-analysis-fusion-P2"></a>
-<!-- reasoning-candidate tier=fusion rank=2 -->
-#### 🔴/🟡/🟢 P2: <Candidate Name> (<time_ms> ms, <instance_count> instances)
-
-**Identification:**
-
-**Data:**
-
-| Kernel | Type | Duration (us) | Perf model |
-|--------|------|--------------|------------|
-| <kernel name (truncated to ~60 chars)> | <type> | X.X | Yes/No |
-
-**Impact estimate:**
-
-<a id="detailed-analysis-fusion-P3"></a>
-<!-- reasoning-candidate tier=fusion rank=3 -->
-#### 🔴/🟡/🟢 P3: <Candidate Name> (<time_ms> ms, <instance_count> instances)
-
-*Repeat the same Identification + Data + Impact estimate format for each candidate, with anchors `detailed-analysis-fusion-PN`.*
+<!-- Repeat per candidate with anchor detailed-analysis-fusion-PN. -->
 
 ### System-Level Insights
 
