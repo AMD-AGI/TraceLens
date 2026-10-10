@@ -52,14 +52,15 @@ def test_cli_gate_flags_precompiled(capsys):
 
 
 def test_cli_triton_generated_is_non_patchable(capsys):
-    # A generated-Triton path resolves to a non-patchable verdict.
+    # A generated-Triton path resolves to a non-patchable verdict, but the
+    # cache path itself is still reported (known but not editable).
     code, data = _run(
         capsys,
         ["--triton-kernel-file", "/tmp/torchinductor_u/abc.py:10:triton_kernel"],
     )
     assert code == 0
     assert data["patchable"] is False
-    assert data["source_file"] in ("", "/tmp/torchinductor_u/abc.py")
+    assert data["source_file"] == "/tmp/torchinductor_u/abc.py"
 
 
 def test_cli_native_resolve_miss(capsys, tmp_path):

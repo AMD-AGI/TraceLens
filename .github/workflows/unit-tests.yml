@@ -15,6 +15,7 @@ on:
       - "setup.py"
       - "MANIFEST.in"
       - ".coveragerc"
+      - ".test_durations"
       - "codecov.yml"
       - ".github/workflows/unit-tests.yml"
   pull_request:
@@ -25,17 +26,99 @@ on:
       - "setup.py"
       - "MANIFEST.in"
       - ".coveragerc"
+      - ".test_durations"
       - "codecov.yml"
       - ".github/workflows/unit-tests.yml"
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      modelutils: ${{ steps.filter.outputs.modelutils }}
+      visualizer: ${{ steps.filter.outputs.visualizer }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Detect relevant changes
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          python - << 'PY'
+          import os
+          import subprocess
+
+          def matches(path, prefixes):
+              return any(path == prefix or path.startswith(prefix) for prefix in prefixes)
+
+          # Shared test inputs both suites read. A change here can move either result.
+          shared = (
+              "tests/model_pins.py",
+              "tests/fixtures/",
+              "tests/conftest.py",
+              "setup.py",
+              "MANIFEST.in",
+              ".github/workflows/unit-tests.yml",
+          )
+          modelutils_paths = ("TraceLens/ModelUtils/", "tests/ModelUtils/") + shared
+          visualizer_paths = ("TraceLens/Visualizer/", "tests/Visualizer/") + shared
+
+          event = os.environ["EVENT_NAME"]
+          before = os.environ.get("BEFORE", "")
+          if event == "push" and (not before or set(before) == {"0"}):
+              # A new branch has no parent to diff against.
+              modelutils = visualizer = True
+          else:
+              if event == "push":
+                  base = before
+              else:
+                  base = subprocess.check_output(
+                      ["git", "merge-base", "HEAD", "origin/main"], text=True
+                  ).strip()
+              files = subprocess.check_output(
+                  ["git", "diff", "--name-only", base, "HEAD"], text=True
+              ).splitlines()
+              modelutils = any(matches(path, modelutils_paths) for path in files)
+              visualizer = any(matches(path, visualizer_paths) for path in files)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"modelutils={'true' if modelutils else 'false'}\n")
+              handle.write(f"visualizer={'true' if visualizer else 'false'}\n")
+          print(f"modelutils={modelutils} visualizer={visualizer}")
+          PY
+
   unit-tests:
     runs-on: ubuntu-latest
     # rocm-origami is required by roofline / Origami perf-model tests.
     container: rocm/dev-ubuntu-24.04:7.2.1
+    strategy:
+      fail-fast: false
+      matrix:
+        # Four shards is the smallest split that can reach the longest test:
+        # each runner has 4 cores, and 16 workers cover the suite's total work.
+        # ModelUtils and Visualizer are separate jobs below, so they are not
+        # part of this split and these runners do not install torch.
+        shard: [1, 2, 3, 4]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          filter: blob:none
+
+      - name: Restore test durations
+        uses: actions/cache/restore@v4
+        with:
+          path: .test_durations
+          # Never hits on this run. The prefix picks up the merged file from the
+          # previous run. A miss leaves the checked-in file in place.
+          key: test-durations-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            test-durations-
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -48,56 +131,246 @@ jobs:
           python -m venv .venv
           . .venv/bin/activate
           python -m pip install --upgrade pip
-          pip install . pytest pytest-xdist pytest-cov openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
-          # CPU torch + transformers are required by the Visualizer / ModelUtils
-          # unit tests under tests/ModelUtils and tests/Visualizer (FX tracing, shape
-          # inference, HF source introspection). Pinned to the versions the tests
-          # were validated against.
-          pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.14.0'
-          pip install 'transformers==5.16.1' 'huggingface_hub==1.30.0'
-          pip install '.[jax,kernel_source]' pytest pytest-xdist pytest-cov openpyxl orjson rocm-origami
+          pip install '.[jax,kernel_source]' pytest pytest-xdist pytest-split pytest-cov openpyxl orjson rocm-origami
 
       - name: Run unit tests
         run: |
           . .venv/bin/activate
           python -m pytest tests/ -v --tb=short -n auto --dist worksteal \
+            --ignore=tests/ModelUtils --ignore=tests/Visualizer \
+            --splits 4 --group ${{ matrix.shard }} \
+            --splitting-algorithm least_duration \
+            --durations-path .test_durations \
+            --store-durations \
             -m "not gpu" --durations=20 \
             --cov=./TraceLens --cov-config=.coveragerc \
-            --cov-report=xml --cov-fail-under=95 \
+            --cov-report=xml \
             --junitxml=junit.xml -o junit_family=legacy
+          test -s .coverage
 
-      - name: Upload coverage report
+      - name: Upload coverage data
         uses: actions/upload-artifact@v6
         with:
-          name: coverage-report
-          path: coverage.xml
+          name: coverage-data-${{ matrix.shard }}
+          path: .coverage
+          include-hidden-files: true
           if-no-files-found: error
 
       - name: Upload junit report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v6
         with:
-          name: junit-report
+          name: junit-report-${{ matrix.shard }}
           path: junit.xml
+          if-no-files-found: error
+
+      - name: Upload test durations
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-durations-${{ matrix.shard }}
+          path: .test_durations
+          include-hidden-files: true
+          if-no-files-found: error
+
+  modelutils-tests:
+    needs: changes
+    if: needs.changes.outputs.modelutils == 'true'
+    runs-on: ubuntu-latest
+    # Same image as the main suite so CPU torch and the rest of the toolchain match.
+    container: rocm/dev-ubuntu-24.04:7.2.1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          filter: blob:none
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          apt update && apt install -y python3-venv git
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install '.[jax,kernel_source]' pytest pytest-xdist pytest-cov openpyxl orjson rocm-origami
+          # CPU torch + transformers are required by the ModelUtils unit tests
+          # (FX tracing, shape inference, HF source introspection). Pinned to
+          # the versions the tests were validated against.
+          pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.14.0'
+          pip install 'transformers==5.16.1' 'huggingface_hub==1.30.0'
+
+      - name: Run ModelUtils tests
+        run: |
+          . .venv/bin/activate
+          python -m pytest tests/ModelUtils -v --tb=short -n auto --dist worksteal \
+            -m "not gpu" --durations=20 \
+            --cov=./TraceLens --cov-config=.coveragerc \
+            --cov-report=xml \
+            --junitxml=junit.xml -o junit_family=legacy
+          test -s .coverage
+
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-data-modelutils
+          path: .coverage
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - name: Upload junit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: junit-report-modelutils
+          path: junit.xml
+          if-no-files-found: error
+
+  visualizer-tests:
+    needs: changes
+    if: needs.changes.outputs.visualizer == 'true'
+    runs-on: ubuntu-latest
+    container: rocm/dev-ubuntu-24.04:7.2.1
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two shards. Each runner has 4 cores, and the suite is a few hundred
+        # tests dominated by session-scoped graph builds. Two machines split
+        # that work; another shard would mostly repeat the torch install and
+        # those builds.
+        shard: [1, 2]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          filter: blob:none
+
+      - name: Restore test durations
+        uses: actions/cache/restore@v4
+        with:
+          path: .test_durations_visualizer
+          key: visualizer-test-durations-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            visualizer-test-durations-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          apt update && apt install -y python3-venv git
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install '.[jax,kernel_source]' pytest pytest-xdist pytest-split pytest-cov openpyxl orjson rocm-origami
+          # CPU torch + transformers are required by the Visualizer unit tests
+          # (FX tracing, shape inference, HF source introspection). Pinned to
+          # the versions the tests were validated against.
+          pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.14.0'
+          pip install 'transformers==5.16.1' 'huggingface_hub==1.30.0'
+
+      - name: Run Visualizer tests
+        run: |
+          . .venv/bin/activate
+          if [ ! -f .test_durations_visualizer ]; then
+            echo '{}' > .test_durations_visualizer
+          fi
+          python -m pytest tests/Visualizer -v --tb=short -n auto --dist worksteal \
+            --splits 2 --group ${{ matrix.shard }} \
+            --splitting-algorithm least_duration \
+            --durations-path .test_durations_visualizer \
+            --store-durations \
+            -m "not gpu" --durations=20 \
+            --cov=./TraceLens --cov-config=.coveragerc \
+            --cov-report=xml \
+            --junitxml=junit.xml -o junit_family=legacy
+          test -s .coverage
+
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-data-visualizer-${{ matrix.shard }}
+          path: .coverage
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - name: Upload junit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: junit-report-visualizer-${{ matrix.shard }}
+          path: junit.xml
+          if-no-files-found: error
+
+      - name: Upload test durations
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-durations-visualizer-${{ matrix.shard }}
+          path: .test_durations_visualizer
+          include-hidden-files: true
           if-no-files-found: error
 
   codecov:
     name: Codecov
-    needs: unit-tests
+    needs: [unit-tests, changes, modelutils-tests, visualizer-tests]
+    if: >-
+      always() &&
+      needs.unit-tests.result == 'success' &&
+      needs.changes.result == 'success' &&
+      (needs.modelutils-tests.result == 'success' || needs.modelutils-tests.result == 'skipped') &&
+      (needs.visualizer-tests.result == 'success' || needs.visualizer-tests.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          filter: blob:none
 
-      - name: Download coverage report
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Download coverage data
         uses: actions/download-artifact@v8
         with:
-          name: coverage-report
+          pattern: coverage-data-*
+          merge-multiple: false
 
-      - name: Download junit report
+      - name: Download junit reports
         uses: actions/download-artifact@v8
         with:
-          name: junit-report
+          pattern: junit-report-*
+          merge-multiple: false
+
+      - name: Combine coverage
+        run: |
+          python -m pip install --upgrade pip coverage
+          python -m coverage combine coverage-data-*/.coverage
+          python - << 'PY'
+          import subprocess
+          from pathlib import Path
+
+          # A suite that did not run has no measurements. Leave its package out
+          # of the 95% gate so an unrelated change is not failed for 0% on code
+          # this workflow deliberately did not execute. When the suite did run,
+          # its data is in the combine and the package counts.
+          omit = []
+          if not Path("coverage-data-modelutils").is_dir():
+              omit.append("*/ModelUtils/*")
+          if not any(Path(".").glob("coverage-data-visualizer-*")):
+              omit.extend(["*/Visualizer/*", "*/Visualizer/*/*"])
+          omit_arg = ["--omit=" + ",".join(omit)] if omit else []
+          subprocess.run(["python", "-m", "coverage", "xml", *omit_arg], check=True)
+          subprocess.run(
+              ["python", "-m", "coverage", "report", "--fail-under=95", *omit_arg],
+              check=True,
+          )
+          PY
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -108,13 +381,95 @@ jobs:
           fail_ci_if_error: true
           verbose: true
 
+      - name: List junit reports
+        id: junit
+        run: |
+          files=$(find junit-report-* -name junit.xml | sort | paste -sd, -)
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: junit.xml
+          files: ${{ steps.junit.outputs.files }}
           report_type: test_results
           flags: unit
           fail_ci_if_error: true
           verbose: true
+
+      - name: Download test durations
+        uses: actions/download-artifact@v8
+        with:
+          pattern: test-durations-*
+          merge-multiple: false
+
+      - name: Merge test durations
+        run: |
+          python - << 'PY'
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          paths = sorted(
+              path
+              for path in Path(".").glob("test-durations-*/.test_durations")
+              if path.parent.name.removeprefix("test-durations-").isdigit()
+          )
+          if len(paths) != 4:
+              raise SystemExit(f"expected 4 duration files, found {[str(p) for p in paths]}")
+          maps = [json.loads(path.read_text()) for path in paths]
+          merged = {}
+          for key in set().union(*(item.keys() for item in maps)):
+              counts = Counter(item[key] for item in maps if key in item)
+              # The shard that ran a test is the only one with a new time.
+              merged[key] = min(counts, key=lambda value: (counts[value], value))
+          Path(".test_durations").write_text(json.dumps(merged, indent=4, sort_keys=True) + "\n")
+          print(f"merged {len(merged)} durations from {len(paths)} shards")
+          PY
+
+      - name: Save test durations
+        uses: actions/cache/save@v4
+        with:
+          path: .test_durations
+          key: test-durations-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Merge visualizer test durations
+        id: visualizer-durations
+        run: |
+          python - << 'PY'
+          import json
+          import os
+          from collections import Counter
+          from pathlib import Path
+
+          paths = sorted(Path(".").glob("test-durations-visualizer-*/.test_durations_visualizer"))
+          out = Path(os.environ["GITHUB_OUTPUT"])
+          if not paths:
+              with out.open("a", encoding="utf-8") as handle:
+                  handle.write("save=false\n")
+              print("visualizer suite did not run")
+          else:
+              if len(paths) != 2:
+                  raise SystemExit(
+                      f"expected 2 visualizer duration files, found {[str(p) for p in paths]}"
+                  )
+              maps = [json.loads(path.read_text()) for path in paths]
+              merged = {}
+              for key in set().union(*(item.keys() for item in maps)):
+                  counts = Counter(item[key] for item in maps if key in item)
+                  merged[key] = min(counts, key=lambda value: (counts[value], value))
+              Path(".test_durations_visualizer").write_text(
+                  json.dumps(merged, indent=4, sort_keys=True) + "\n"
+              )
+              with out.open("a", encoding="utf-8") as handle:
+                  handle.write("save=true\n")
+              print(f"merged {len(merged)} visualizer durations from {len(paths)} shards")
+          PY
+
+      - name: Save visualizer test durations
+        if: steps.visualizer-durations.outputs.save == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .test_durations_visualizer
+          key: visualizer-test-durations-${{ github.run_id }}-${{ github.run_attempt }}

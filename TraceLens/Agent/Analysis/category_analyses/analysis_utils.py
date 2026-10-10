@@ -230,7 +230,7 @@ def calculate_efficiency_with_validation(
     achieved_tflops: Optional[float],
     achieved_tbps: Optional[float],
     peak_maf: float,
-    peak_hbm_bw: float,
+    peak_mem_bw: float,
 ) -> Dict[str, Any]:
     """
     Calculate both compute and memory efficiency with validation.
@@ -239,7 +239,7 @@ def calculate_efficiency_with_validation(
         achieved_tflops: Achieved TFLOPS
         achieved_tbps: Achieved TB/s
         peak_maf: Peak MAF in TFLOPS
-        peak_hbm_bw: Peak HBM bandwidth in TB/s
+        peak_mem_bw: Peak memory bandwidth in TB/s
 
     Returns:
         Dict with efficiency values and any warnings
@@ -248,7 +248,7 @@ def calculate_efficiency_with_validation(
         achieved_tflops, peak_maf, "Compute efficiency"
     )
 
-    memory_result = validate_efficiency(achieved_tbps, peak_hbm_bw, "Memory bandwidth")
+    memory_result = validate_efficiency(achieved_tbps, peak_mem_bw, "Memory bandwidth")
 
     warnings = []
     if compute_result["warning"]:
@@ -351,7 +351,7 @@ def standalone_efficiency(result: Dict[str, Any], row: pd.Series) -> None:
 
 def calculate_efficiency(
     row: pd.Series,
-    peak_hbm_bw: float,
+    peak_mem_bw: float,
     peak_maf_or_maf_dict,
     comparison_scope: str = "standalone",
 ) -> Dict[str, Optional[float]]:
@@ -360,7 +360,7 @@ def calculate_efficiency(
 
     Args:
         row: DataFrame row with operation metrics
-        peak_hbm_bw: Peak HBM bandwidth in TB/s
+        peak_mem_bw: Peak memory bandwidth in TB/s
         peak_maf_or_maf_dict: Either a float or a dict (max_achievable_tflops)
             for resolving the precision-aware peak
         comparison_scope:
@@ -378,7 +378,7 @@ def calculate_efficiency(
         "flops_per_byte": None,
         "compute_spec": None,
         "resolved_peak_maf": None,
-        "resolved_peak_hbm_bw": None,
+        "resolved_peak_mem_bw": None,
         "warning": None,
         "is_anomaly": False,
     }
@@ -406,7 +406,7 @@ def calculate_efficiency(
     else:
         peak_maf = peak_maf_or_maf_dict
     result["resolved_peak_maf"] = round(peak_maf, 2) if peak_maf else None
-    result["resolved_peak_hbm_bw"] = round(peak_hbm_bw, 2) if peak_hbm_bw else None
+    result["resolved_peak_mem_bw"] = round(peak_mem_bw, 2) if peak_mem_bw else None
 
     roofline_bound = row.get("Roofline Bound")
     if isinstance(roofline_bound, str):
@@ -540,7 +540,7 @@ def build_operation_metrics(
         category_config: Optional extra_fields / operation_classifier
         comparison_scope: ``"standalone"`` or ``"comparative"``
     """
-    peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
+    peak_mem_bw = get_peak_mem_bw_tbs(metadata, default=1)
     maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
     fusion_map = _load_fusion_map(metadata.get("output_dir", ""))
     e2e_ms_total = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
@@ -570,7 +570,7 @@ def build_operation_metrics(
         )
 
         efficiency = calculate_efficiency(
-            row, peak_hbm_bw, maf, comparison_scope=comparison_scope
+            row, peak_mem_bw, maf, comparison_scope=comparison_scope
         )
 
         op_metric = {
@@ -648,6 +648,13 @@ def build_operation_metrics(
                 op_metric["fusion_flagged"] = True
                 op_metric["fusion_candidate_name"] = matched
 
+        # After fusion_flagged is set: the ladder reads it to skip fused rows.
+        score = _row_impact_score(op_metric, e2e_ms_total, comparison_scope)
+        op_metric["impact_score"] = round(score["impact_score"], 2) if score else None
+        op_metric["impact_estimate_method"] = (
+            score["impact_estimate_method"] if score else None
+        )
+
         cs_raw = row.get("call_stack_full")
         cs_str = "" if cs_raw is None or pd.isna(cs_raw) else str(cs_raw)
 
@@ -679,6 +686,44 @@ def build_operation_metrics(
             op.pop("_raw_call_stack", None)
 
     return operations
+
+
+def _row_impact_score(
+    op: dict, baseline_ms: float, comparison_scope: str
+) -> Optional[dict]:
+    """Per-op impact ladder: the single owner of which estimate method applies.
+
+    Returns ``{"impact_score", "impact_estimate_method"}`` (unrounded mid + method)
+    or ``None`` when no method applies. The ``min_impact_score`` noise floor and the
+    low/high band spread are envelope concerns of the caller, not the ladder: a row
+    may legitimately carry a sub-floor score. The mid is unrounded so callers derive
+    the band from it exactly (``low``/``high`` are fixed ratios of the mid).
+    """
+    if op.get("fusion_flagged"):
+        return None
+    time_ms = op.get("time_ms", 0)
+    if time_ms <= 0:
+        return None
+
+    eff = op.get("efficiency", {})
+    eff_pct = eff.get("efficiency_percent")
+    if eff_pct is not None and not eff.get("is_anomaly") and baseline_ms > 0:
+        gap_mid = (TARGET_MID / TARGET_HIGH) * max(0, 1 - eff_pct / TARGET_HIGH)
+        return {
+            "impact_score": gap_mid * time_ms / baseline_ms * 100,
+            "impact_estimate_method": "quantified",
+        }
+
+    if comparison_scope == "standalone":
+        pct = op.get("percent_of_total")
+        if pct is None or pct <= 0:
+            return None
+        return {
+            "impact_score": pct * HEURISTIC_FRACTION_MID,
+            "impact_estimate_method": "heuristic",
+        }
+
+    return None
 
 
 def compute_impact_estimates(
@@ -733,25 +778,19 @@ def compute_impact_estimates(
 
     estimates = []
     for op in operations:
-        if op.get("fusion_flagged"):
+        score = _row_impact_score(
+            op, baseline_ms if baseline_ok else 0, comparison_scope
+        )
+        if score is None:
             continue
-        time_ms = op.get("time_ms", 0)
-        if time_ms <= 0:
-            continue
-        eff = op.get("efficiency", {})
-        eff_pct = eff.get("efficiency_percent")
-
-        if eff_pct is not None and not eff.get("is_anomaly") and baseline_ok:
-            gap_high = max(0, 1 - eff_pct / TARGET_HIGH)
-            gap_low = (TARGET_LOW / TARGET_HIGH) * gap_high
-            gap_mid = (TARGET_MID / TARGET_HIGH) * gap_high
-
-            impact_score_high = gap_high * time_ms / baseline_ms * 100
-            impact_score_low = gap_low * time_ms / baseline_ms * 100
-            impact_score_mid = gap_mid * time_ms / baseline_ms * 100
-
+        impact_score_mid = score["impact_score"]
+        time_ms = op["time_ms"]
+        if score["impact_estimate_method"] == "quantified":
+            impact_score_high = impact_score_mid * (TARGET_HIGH / TARGET_MID)
+            impact_score_low = impact_score_mid * (TARGET_LOW / TARGET_MID)
             if impact_score_high < min_impact_score:
                 continue
+            eff = op.get("efficiency", {})
             estimates.append(
                 {
                     "operation": op.get("name", "Unknown"),
@@ -761,28 +800,21 @@ def compute_impact_estimates(
                     "impact_score": round(impact_score_mid, 2),
                     "impact_score_low": round(impact_score_low, 2),
                     "impact_score_high": round(impact_score_high, 2),
-                    "efficiency_pct": round(eff_pct, 2),
+                    "efficiency_pct": round(eff.get("efficiency_percent"), 2),
                     "bound_type": eff.get("bound_type"),
                     "library": op.get("library"),
                     "time_ms": round(time_ms, 3),
                 }
             )
-        # Heuristic fallback, NOT the default path: reached only when the
-        # quantified branch above did not apply -- i.e. the op has no perf model
-        # (efficiency_percent is None), its efficiency is anomalous, or baseline_ms
-        # was non-positive. Standalone only; comparative efficiency is a t2/t1
-        # ratio, not a roofline gap.
-        elif comparison_scope == "standalone":
-            pct = op.get("percent_of_total")
-            if pct is None or pct <= 0:
-                continue
+        else:
+            pct = op["percent_of_total"]
             estimates.append(
                 {
                     "operation": op.get("name", "Unknown"),
                     "category": category,
                     "type": "unmodeled_significant",
                     "estimate_method": "heuristic",
-                    "impact_score": round(pct * HEURISTIC_FRACTION_MID, 2),
+                    "impact_score": round(impact_score_mid, 2),
                     "impact_score_low": round(pct * HEURISTIC_FRACTION_LOW, 2),
                     "impact_score_high": round(pct * HEURISTIC_FRACTION_HIGH, 2),
                     "efficiency_pct": None,
@@ -986,8 +1018,18 @@ def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
     return output_path
 
 
+def get_peak_mem_bw_tbs(metadata: dict, default: Optional[float] = None):
+    """Return peak memory bandwidth (TB/s) from metadata.
+
+    Also accepts the legacy ``peak_hbm_bw_tbs`` key found in older metadata files.
+    """
+    if "peak_mem_bw_tbs" in metadata:
+        return metadata["peak_mem_bw_tbs"]
+    return metadata.get("peak_hbm_bw_tbs", default)
+
+
 def get_peak_specs(metadata: dict) -> dict:
-    """Extract peak MAF and HBM bandwidth from metadata dict.
+    """Extract peak MAF and memory bandwidth from metadata dict.
 
     Handles both the dict-style max_achievable_tflops and the legacy
     scalar peak_bf16_maf_tflops formats.
@@ -998,7 +1040,7 @@ def get_peak_specs(metadata: dict) -> dict:
             if isinstance(metadata.get("max_achievable_tflops"), dict)
             else metadata.get("peak_bf16_maf_tflops")
         ),
-        "peak_hbm_bw_tbs": metadata.get("peak_hbm_bw_tbs"),
+        "peak_mem_bw_tbs": get_peak_mem_bw_tbs(metadata),
     }
 
 
