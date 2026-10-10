@@ -5704,6 +5704,10 @@ def _append_section(
         inline_expansion=inline_expansion,
         exclude_carried_from=exclude_carried_from,
     )
+    # Before the namespaces are built from these labels: a loop whose count is
+    # a model input's row count can name that axis instead of reading
+    # "repeated".
+    _name_loop_frames_for_the_axis_they_walk(computation, spec=spec)
     skip_variant_root_input = _skip_variant_root_input(component)
     section_nodes = _computation_nodes(
         computation,
@@ -6520,6 +6524,51 @@ def _append_vision_section(
     )
     _wire_vision_passthrough_inputs(nodes, spec=spec)
     return exits[0] if exits else None
+
+
+# What a loop frame is called when its trip count is not a constant. Produced by
+# ``computation_graph._loop_frame_label`` from the ``loop: repeated`` detail.
+_REPEATED_LOOP_LABEL = "loop iterations: repeated"
+
+
+def _name_loop_frames_for_the_axis_they_walk(
+    computation: "ComputationGraph", *, spec: Any
+) -> None:
+    """A loop over a model input's rows is named for the axis it walks.
+
+    GLM's vision position-ids helper runs once per image::
+
+        for (t, h, w), merge_size in zip(grid_thw.tolist(), ...)
+
+    The trip count is not a constant, so the frame read
+    ``loop_iterations_repeated`` -- true, and uninformative. The rows of a
+    vision grid descriptor ARE the image axis: the same wiring that gives that
+    tensor its boundary shapes it ``[Img, columns]``. So the loop can say
+    ``Img``, which is the count, rather than decline to say anything.
+
+    Only for a tensor whose leading axis the shape machinery has actually
+    named -- a loop over something else keeps ``repeated``, because inventing a
+    symbol for it would assert a count nobody established.
+    """
+    passthrough = vision_tower_passthrough_inputs(spec)
+    if not passthrough:
+        return
+    for frame in computation.inline_frames:
+        if str(frame.label) != _REPEATED_LOOP_LABEL:
+            continue
+        walked = {
+            detail.split(":", 1)[1].strip()
+            for index in frame.node_indices
+            if 0 <= index < len(computation.nodes)
+            for detail in (
+                computation.nodes[index].block.details
+                if computation.nodes[index].block is not None
+                else []
+            )
+            if detail.startswith("loop_rows_of:")
+        }
+        if walked & set(passthrough):
+            frame.label = f"loop iterations: {Symbol.VISION_GRID.value}"
 
 
 def _grid_descriptor_columns(nodes: list[dict[str, Any]], boundary_id: str) -> int:

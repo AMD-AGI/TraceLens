@@ -4482,6 +4482,29 @@ def _loop_iteration_count_of(
     return bound if bound is not None and 0 <= bound <= _LOOP_COUNT_MAX else None
 
 
+def _loop_row_source_name(node: ast.For) -> str | None:
+    """The tensor whose ROWS a loop walks, when it walks them on the host.
+
+    ``for (t, h, w), merge_size in zip(grid_thw.tolist(), ...)`` runs once per
+    row of the grid. ``.tolist()`` moves the value to the host, so the body
+    reads Python numbers rather than slices of a tensor -- but how MANY times it
+    runs is still a property of the tensor those numbers came from, and that is
+    what a reader wants from the loop's name.
+
+    The first such receiver answers: a ``zip`` walks sequences in step, so any
+    of them measures the loop.
+    """
+    for inner in ast.walk(node.iter):
+        if (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr == "tolist"
+            and isinstance(inner.func.value, ast.Name)
+        ):
+            return inner.func.value.id
+    return None
+
+
 def _collect_name_value_ast(func: ast.FunctionDef) -> dict[str, ast.expr]:
     """Map each simple ``name = expr`` binding in a function to its value AST.
 
@@ -7833,6 +7856,16 @@ class _ForwardOperationExtractor:
                     else "loop: repeated"
                 )
                 self._annotate_operations_since(before, detail)
+                # No static count, but the loop walks a tensor's rows: say
+                # WHOSE, so a stage that knows that tensor's shape can name the
+                # axis instead of leaving the frame to read "repeated".
+                row_source = (
+                    _loop_row_source_name(stmt) if iteration_count is None else None
+                )
+                if row_source:
+                    self._annotate_operations_since(
+                        before, f"loop_rows_of: {row_source}"
+                    )
                 # Decide BEFORE injecting: the injection below adds the row as
                 # a predecessor of the body's ops, so asking afterwards whether
                 # anything reads it always says yes.
