@@ -1,0 +1,5544 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""Build computation graphs from block trees."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+from TraceLens.ModelUtils.block_tree import (
+    BlockNode,
+    CombineSegment,
+    ComputationSegment,
+    FanOutSegment,
+    PortStyle,
+    ResidualAddSegment,
+    SeqSegment,
+    SideCombineSegment,
+    SideFeedSegment,
+    TensorPortsSegment,
+    collect_function_steps,
+    flatten_computation_segments,
+    inline_block_frame_label,
+    inline_block_frame_sublabel,
+    inline_composite_steps,
+    inline_wrapper_step_label,
+    is_kernel_pipeline_tree,
+    is_straight_line_module,
+    is_transparent_inline_expansion,
+    is_transparent_loop_wrapper,
+    is_method_wrapper,
+    wrapper_bullet_lines,
+)
+from TraceLens.ModelUtils.ast_analyze import (
+    FORWARD_METHOD_INPUT,
+    is_method_input,
+    method_input_param,
+    SideInputSpec,
+    SYNTHETIC_ATTENTION,
+    is_forward_operation,
+)
+from TraceLens.ModelUtils.basic_ops import BasicOpFilter, keep_detail_graph_node
+from TraceLens.ModelUtils.shape_inference import _operand_ceiling
+
+SYNTHETIC_INPUT = "@input"
+SYNTHETIC_OUTPUT = "@output"
+SYNTHETIC_LOOP_CARRIED = "@loop_carried"
+SYNTHETIC_HIDDEN = (
+    "@hidden_states"  # legacy alias; replaced by SYNTHETIC_INPUT in graphs
+)
+SYNTHETIC_TENSOR = "@tensor"
+
+
+def _maybe_inline(
+    step: BlockNode,
+    *,
+    basic_ops: BasicOpFilter | None = None,
+    inline_expansion: bool = True,
+) -> tuple[list[BlockNode], BlockNode | None]:
+    """Conditionally inline composite steps; returns ``([step], None)`` when disabled."""
+    if not inline_expansion:
+        return [step], None
+    return inline_composite_steps(step, basic_ops=basic_ops)
+
+
+@dataclass
+class GraphNodeSpec:
+    """One vertex in a computation graph."""
+
+    key: str
+    block: BlockNode | None = None
+    label: str = ""
+    sublabel: str | None = None
+    port_label: str | None = None
+    port_style: PortStyle | None = None
+    synthetic: str | None = None
+    # A constant / learned-weight / buffer operand. Kept as a first-class node in
+    # the exported JSON (so profiler-style operand annotation can pick up its
+    # shape), but dropped at HTML render time so the drawn picture stays free of
+    # constants (owner rule "never show constants" -- enforced in rendering, not
+    # by deleting data).
+    constant: bool = False
+    # Extra key/values merged verbatim into the node's exported metadata. Used by
+    # synthetic split output-port nodes to carry their output ordinal and the
+    # parent split's ``details`` so shape inference can size each slice.
+    extra_metadata: dict[str, Any] | None = None
+
+
+@dataclass
+class InlineFrameSpec:
+    """Dotted frame around steps expanded inline from a linear composite sub-block."""
+
+    frame_id: str
+    label: str
+    sublabel: str | None = None
+    node_indices: list[int] = field(default_factory=list)
+    transparent: bool = False
+
+
+@dataclass
+class ComputationGraph:
+    """Directed graph built from a block tree."""
+
+    nodes: list[GraphNodeSpec] = field(default_factory=list)
+    links: list[tuple[int, int]] = field(default_factory=list)
+    link_port_labels: dict[tuple[int, int], str] = field(default_factory=dict)
+    # Almost always a single output-port id per (source, target) link. A list
+    # appears only when one consumer reassembles two different slices of the
+    # same multi-output producer in one expression (``torch.cat((q_pass,
+    # q_rot), dim=-1)``): that pair then carries two parallel edges, one port
+    # per repeat, consumed in order (see ``_merge_link_output_port`` /
+    # ``adapter._incoming_edges``).
+    link_output_ports: dict[tuple[int, int], str | list[str]] = field(
+        default_factory=dict
+    )
+    inline_frames: list[InlineFrameSpec] = field(default_factory=list)
+    side_effect_frame_ids: set[str] = field(default_factory=set)
+    excluded_output_indices: set[int] = field(default_factory=set)
+    primary_output_index: int | None = None
+    output_node_index: int | None = None
+    output_ports: dict[str, int] = field(default_factory=dict)
+    primary_output_port: str | None = None
+    loop_carried_nodes: dict[str, int] = field(default_factory=dict)
+    # A frame's ``@method_input`` edge that could not be resolved when the frame
+    # was chained, because the argument feeding it had not been emitted yet.
+    # ``(consumer index, producer attr, wrong source)``; resolved by
+    # ``_resolve_deferred_method_inputs`` once every node exists.
+    deferred_method_inputs: list[tuple[int, str, int | None]] = field(
+        default_factory=list
+    )
+    attr_output_indices: dict[str, int] = field(default_factory=dict)
+    dead_node_indices: set[int] = field(default_factory=set)
+
+
+def _operation_tile_label(label: str) -> str:
+    """Use ordinary operation names instead of symbolic combine glyphs."""
+    return {
+        "+": "Add",
+        "×": "Multiply",
+        "*": "Multiply",
+        "ƒ": "Function",
+    }.get(label, label)
+
+
+def _add_node(
+    graph: ComputationGraph,
+    *,
+    key: str,
+    block: BlockNode | None = None,
+    label: str | None = None,
+    sublabel: str | None = None,
+    port_label: str | None = None,
+    port_style: PortStyle | None = None,
+    synthetic: str | None = None,
+    constant: bool = False,
+    extra_metadata: dict[str, Any] | None = None,
+) -> int:
+    display = label if label is not None else (block.label if block else key)
+    spec = GraphNodeSpec(
+        key=key,
+        block=block,
+        label=display,
+        sublabel=sublabel,
+        port_label=port_label,
+        port_style=port_style,
+        synthetic=synthetic,
+        constant=constant,
+        extra_metadata=extra_metadata,
+    )
+    graph.nodes.append(spec)
+    return len(graph.nodes) - 1
+
+
+def _add_method_wrapper_node(
+    graph: ComputationGraph,
+    step: BlockNode,
+    *,
+    key: str,
+) -> int:
+    label, _attr = wrapper_bullet_lines(step)
+    return _add_node(graph, key=key, block=step, label=label, sublabel=None)
+
+
+def _multi_return_slot_key(attr_name: str, ordinal: int) -> str:
+    """Key under which a multi-return wrapper's per-ordinal producer index is
+    stashed in ``attr_last_index``, alongside its flat (last-write-wins) entry.
+
+    Uses a separator that can never appear in an AST-derived ``attr_name``, so
+    it can share the same flat dict without colliding with any real attr.
+    """
+    return f"{attr_name}\x00slot{ordinal}"
+
+
+def _track_attr_index(
+    attr_last_index: dict[str, int],
+    attr_name: str,
+    index: int,
+    *,
+    block: "BlockNode | None" = None,
+) -> None:
+    attr_last_index[attr_name] = index
+    if block is None:
+        return
+    order = block.forward_return_order
+    if len(order) < 2:
+        return
+    # A fully inline-expanded, multi-return composite (``cos, sin =
+    # self.rotary_emb(...)``) has no node of its own -- ``index`` here is just
+    # whichever of its internal producers happened to build last (the
+    # sequential-fallback tail). A sibling step that names this wrapper as a
+    # predecessor at a *specific* return ordinal (``operation_predecessor_ports``)
+    # must dock onto that slot's own producer, not the tail, else two distinct
+    # return values collapse onto one physical node with fabricated ordinal
+    # ports. Stash each resolved slot's producer index now, while it is still
+    # available in ``attr_last_index``, for ``_operation_source_indices`` to
+    # prefer over the flat (tail) entry.
+    for ordinal in range(len(order)):
+        slot_attr = _return_slot_attr_by_ordinal(block, ordinal)
+        if slot_attr is None:
+            continue
+        slot_index = attr_last_index.get(slot_attr)
+        if slot_index is not None:
+            attr_last_index[_multi_return_slot_key(attr_name, ordinal)] = slot_index
+
+
+def _rebuild_attr_last_index(graph: ComputationGraph) -> dict[str, int]:
+    attr_last_index: dict[str, int] = dict(graph.attr_output_indices)
+    for index, spec in enumerate(graph.nodes):
+        if spec.block is not None:
+            _track_attr_index(attr_last_index, spec.block.attr_name, index)
+    return attr_last_index
+
+
+def _normalize_param_name(name: str) -> str:
+    """Normalize a parameter name for fuzzy matching.
+
+    Handles differences between call-site variable names (e.g. ``topk_indices``)
+    and forward-method parameter names (e.g. ``top_k_index``).
+    """
+    return name.replace("indices", "index").replace("_", "").rstrip("s")
+
+
+def _build_module_param_entries(
+    graph: ComputationGraph,
+) -> dict[str, dict[str, int]]:
+    """Map each expanded module to ``{param_name: first_graph_index}``.
+
+    Uses inline frames (keyed by module attr) and ``param_inputs`` on
+    individual pipeline steps to find arg-specific entry points.
+    """
+    result: dict[str, dict[str, int]] = {}
+    for frame in graph.inline_frames:
+        entries: dict[str, int] = {}
+        for index in frame.node_indices:
+            block = graph.nodes[index].block
+            if block is None:
+                continue
+            for param in block.param_inputs:
+                entries.setdefault(param, index)
+        if entries:
+            result[frame.frame_id] = entries
+    return result
+
+
+def _host_size_param_readers(
+    graph: ComputationGraph,
+) -> dict[str, dict[str, list[int]]]:
+    """Per frame, EVERY op that reads a parameter only to size itself.
+
+    :func:`_build_module_param_entries` keeps one entry point per parameter,
+    because a rebound activation reaches its later readers through the op that
+    rebound it. A size dependency is not rebound and not carried along the tensor
+    edge: GLM splits q, k and v by the same ``lengths.tolist()``, so all three
+    read ``cu_seqlens`` directly and only the first was drawn, leaving the other
+    two apparently split by nothing.
+    """
+    result: dict[str, dict[str, list[int]]] = {}
+    for frame in graph.inline_frames:
+        readers: dict[str, list[int]] = {}
+        for index in frame.node_indices:
+            block = graph.nodes[index].block
+            if block is None:
+                continue
+            for param in _block_host_params(block):
+                if param in block.param_inputs:
+                    readers.setdefault(param, []).append(index)
+        if readers:
+            result[frame.frame_id] = readers
+    return result
+
+
+def _block_host_params(block: "BlockNode") -> set[str]:
+    """Parameters an op declared as size-only reads (its ``host_params:`` detail)."""
+    names: set[str] = set()
+    for detail in block.details or ():
+        text = str(detail).strip()
+        if text.startswith("host_params:"):
+            names.update(
+                item.strip()
+                for item in text.split(":", 1)[1].split(",")
+                if item.strip()
+            )
+    return names
+
+
+def _build_module_param_ordinal_entries(
+    graph: ComputationGraph,
+) -> dict[str, dict[str, list[tuple[int, int]]]]:
+    """Map each expanded module to ``{param: [(entry_index, ordinal), ...]}``.
+
+    A tuple-unpacked side arg (``cos, sin = position_embeddings`` inside an
+    inline-expanded ``apply_rotary_pos_emb_vision`` frame) feeds one op per slot,
+    each tagged with its ordinal (``boundary_input_ordinal``). The flat
+    :func:`_build_module_param_entries` records only the first index for the whole
+    param, so the second slot's consumer is left unwired. This records the first
+    consumer of *each* ordinal so the side-arg producer can fan out one port per
+    slot — mirroring :func:`_add_forward_param_inputs`, which does the same for a
+    module built in isolation.
+    """
+    result: dict[str, dict[str, list[tuple[int, int]]]] = {}
+    for frame in graph.inline_frames:
+        # First consumer per (param, ordinal), in frame order.
+        seen: dict[tuple[str, int], int] = {}
+        order: list[tuple[str, int]] = []
+        for index in frame.node_indices:
+            block = graph.nodes[index].block
+            if block is None or block.boundary_input_ordinal is None:
+                continue
+            param = block.boundary_input_name
+            if param is None or param not in block.param_inputs:
+                continue
+            key = (param, block.boundary_input_ordinal)
+            if key not in seen:
+                seen[key] = index
+                order.append(key)
+        if not order:
+            continue
+        entries: dict[str, list[tuple[int, int]]] = {}
+        for param, ordinal in order:
+            entries.setdefault(param, []).append((seen[(param, ordinal)], ordinal))
+        # Only a genuine multi-slot fan-out needs special handling; a lone slot
+        # rides the ordinary single-entry path unchanged.
+        result[frame.frame_id] = {
+            param: consumers
+            for param, consumers in entries.items()
+            if len(consumers) >= 2
+        }
+        if not result[frame.frame_id]:
+            del result[frame.frame_id]
+    return result
+
+
+def _module_param_entries_for_step(
+    step_node: "BlockNode",
+    block_index_by_id: dict[int, int],
+) -> dict[str, int]:
+    """Map a real recursively-expanded submodule's own params to their entry op.
+
+    :func:`_build_module_param_entries` only indexes ``graph.inline_frames``
+    (a free-function frame or other "linear composite" splice). A genuine
+    submodule (``MiniMaxM3VLExperts``, expanded as its own namespace with real
+    ``@input``/``@output`` boundary tiles, not spliced inline) reads its own
+    secondary forward parameter directly in one of its descendant ops
+    (``F.one_hot(top_k_index, ...)``) with no entry there at all, so that arg
+    would otherwise fall back to the module's generic first entry point
+    (``torch.zeros_like(hidden_states)``) -- misattributing the edge onto an op
+    that never reads it and leaving the real reader orphaned. Walk the
+    module's own descendant ops (mirroring how :func:`_first_graph_index_for_module`
+    finds its single first op) and index every one's ``param_inputs``.
+    """
+    entries: dict[str, int] = {}
+    for step in collect_function_steps(step_node):
+        index = block_index_by_id.get(id(step))
+        if index is None:
+            continue
+        for param in step.param_inputs:
+            entries.setdefault(param, index)
+    return entries
+
+
+def _resolve_primary_input(
+    consumer_attr: str,
+    root: "BlockNode",
+    attr_last_index: dict[str, int],
+    input_index: int | None,
+    last_index: int | None,
+) -> int | None:
+    """Find the graph index for the consumer's primary (non-side) input.
+
+    Inspects ``forward_step_predecessor_args`` to find which predecessor
+    provides the primary input (the one that maps to @method_input inside
+    the expanded pipeline), and resolves it via *attr_last_index*.
+    Falls back to *last_index* → *input_index* when data is unavailable.
+    """
+    arg_map = root.forward_step_predecessor_args.get(consumer_attr)
+    if not arg_map:
+        return last_index if last_index is not None else input_index
+
+    # Build the set of param names that have dedicated pipeline entry points.
+    # The primary input is the arg NOT in this set.
+    child = next((c for c in root.children if c.attr_name == consumer_attr), None)
+    if child is None:
+        return last_index if last_index is not None else input_index
+
+    side_params: set[str] = set()
+    for gc in child.children:
+        side_params.update(gc.param_inputs)
+
+    for arg_name, pred in arg_map.items():
+        if _normalize_param_name(arg_name) in {
+            _normalize_param_name(p) for p in side_params
+        }:
+            continue
+        # This is the primary (non-side) input.
+        if is_method_input(pred):
+            return input_index
+        resolved = attr_last_index.get(pred)
+        if resolved is not None:
+            return resolved
+
+    return last_index if last_index is not None else input_index
+
+
+def _first_op_entry_params(module: "BlockNode") -> set[str]:
+    """Param names the module's first forward op reads directly from method input.
+
+    A module-call side arg (``cu_seqlens``/``position_embeddings`` on an
+    attention block) with no dedicated pipeline entry otherwise falls back to the
+    module's first op. But a leading ``RMSNorm`` reads only ``hidden_states``;
+    dumping the side args onto its first ``Cast`` fabricates inputs it never
+    takes — and when the producer runs later (an attention kernel that feeds
+    ``cu_seqlens``), a downstream→entry back-edge. Only args the first op
+    actually consumes from the method input belong on the fallback target. When
+    the first op's arg map is unknown (empty), the caller stays permissive.
+    """
+    children = [child for child in module.children if child.attr_name]
+    if not children:
+        return set()
+    first = min(children, key=lambda child: child.forward_order or 0)
+    arg_map = (module.forward_step_predecessor_args or {}).get(first.attr_name, {})
+    entry = {
+        _normalize_param_name(name)
+        for name, src in arg_map.items()
+        if is_method_input(src)
+    }
+    if not arg_map:
+        # The first forward step is an inline op (e.g. ``position_ids[..., None]``)
+        # rather than a submodule call, so it has no entry in
+        # ``forward_step_predecessor_args``. Deriving the entry params from its own
+        # ``param_inputs`` (the forward parameters it reads directly) lets the
+        # section-1b skip-guard drop caller args the op never consumes, instead of
+        # dumping every caller arg onto it. A submodule-call first child carries no
+        # ``param_inputs`` here, so this leaves that (permissive) path unchanged.
+        entry |= {_normalize_param_name(name) for name in (first.param_inputs or ())}
+    return entry
+
+
+def _resolve_return_slot_source(
+    producer: "BlockNode",
+    arg_name: str,
+    attr_last_index: dict[str, int],
+    default: int,
+) -> int:
+    """When *producer* is multi-return, find the graph index of the specific
+    return slot that matches *arg_name* (with normalized fallback)."""
+    normalized = _normalize_param_name(arg_name)
+    order = producer.forward_return_order or []
+    for slot_name, producer_attr in producer.forward_return_slots.items():
+        if _normalize_param_name(slot_name) == normalized:
+            # Prefer this producer instance's own per-ordinal slot index over the
+            # flat ``producer_attr`` entry. Two calls of the same multi-return
+            # submodule (``cos, sin = self.rotary_emb(...)`` invoked at l545 and
+            # again at l554) inline-expand into identical internal op attr_names,
+            # so ``attr_last_index[producer_attr]`` collides on whichever instance
+            # built last -- a sibling reading l545's ``cos`` would dock onto
+            # l554's producer. ``_multi_return_slot_key`` is scoped by the call
+            # site's own (suffixed) attr_name, disambiguating the instances -- the
+            # same key ``_operation_source_indices`` uses for a slot named via
+            # ``operation_predecessor_ports``.
+            if slot_name in order:
+                slot_index = attr_last_index.get(
+                    _multi_return_slot_key(producer.attr_name, order.index(slot_name))
+                )
+                if slot_index is not None:
+                    return slot_index
+            resolved = attr_last_index.get(producer_attr)
+            if resolved is not None:
+                return resolved
+    return default
+
+
+def _return_slot_attr_by_ordinal(producer: "BlockNode", ordinal: int) -> str | None:
+    """Producer attr for *producer*'s return-tuple slot at position *ordinal*.
+
+    A fully inline-expanded, multi-return submodule (straight-line, so it never
+    materializes a single node of its own) still records its own return-tuple
+    order and per-slot internal producers. A consumer that reads one specific
+    slot (``compressed_kv`` = ordinal 0 of ``compressed_kv, block_bias =
+    self.compressor(...)``) needs the matching slot's producer, not the
+    (nonexistent) module-call node.
+    """
+    order = producer.forward_return_order
+    slots = producer.forward_return_slots
+    if not order or not slots or ordinal < 0 or ordinal >= len(order):
+        return None
+    return slots.get(order[ordinal])
+
+
+def _lookup_param_entry(
+    param_entries: dict[str, int],
+    arg_name: str,
+    default: int,
+) -> int:
+    """Look up an arg-specific pipeline entry, with fuzzy fallback."""
+    exact = param_entries.get(arg_name)
+    if exact is not None:
+        return exact
+    normalized = _normalize_param_name(arg_name)
+    for param, index in param_entries.items():
+        if _normalize_param_name(param) == normalized:
+            return index
+    return default
+
+
+def _positional_alias_for_arg_name(
+    arg_name: str,
+    arg_map: dict[str, str],
+    callee_param_names: list[str],
+) -> str | None:
+    """Resolve a call argument to the callee's own parameter name at that position.
+
+    ``arg_map`` keys are the CALLER's local variable names, in call-site
+    argument order (built positionally, then by keyword, in
+    ``_ForwardOperationExtractor`` / ``ast_analyze.py``). A real submodule call
+    whose own ``forward()`` names a parameter differently
+    (``self.experts(hidden_states, selected_experts, routing_weights)`` calling
+    ``Experts.forward(self, hidden_states, top_k_index, top_k_weights)``)
+    leaves a name-based ``param_entries`` lookup (keyed by the callee's own
+    parameter names) with no match for ``selected_experts``/``routing_weights``.
+    Recover it structurally, by call position, instead of renaming ``arg_map``
+    itself -- other lookups depend on it staying keyed by the caller's own
+    local variable names (e.g. a locally reassigned name such as
+    ``query_states = self.q_norm(query_states)``).
+
+    Requires the call site to pass no MORE arguments than the callee's own
+    forward declares. A caller may legitimately supply fewer than the
+    callee's full parameter list (a trailing defaulted parameter such as
+    ``unsqueeze_dim=1`` is never threaded through ``arg_map`` at all), so
+    positional alignment still holds when ``arg_map`` is shorter. But a
+    caller that threads an EXTRA side value the callee never names as its
+    own parameter (a repeated block group's forward is called with
+    ``hidden_states, cu_seqlens, position_embeddings`` -- 3 declared params
+    -- while ``max_seqlen`` also rides along in ``arg_map`` because it
+    shares a producer with ``cu_seqlens``) has no real positional
+    correspondence at all: aligning by index would walk the extra name onto
+    whichever parameter happens to occupy that slot, misattributing the edge
+    onto an unrelated op instead of leaving it at the module's real entry
+    point.
+    """
+    if len(arg_map) > len(callee_param_names):
+        return None
+    try:
+        position = list(arg_map.keys()).index(arg_name)
+    except ValueError:
+        return None
+    if position < len(callee_param_names):
+        return callee_param_names[position]
+    return None
+
+
+def _lookup_ordinal_entries(
+    param_ordinal_entries: dict[str, list[tuple[int, int]]],
+    arg_name: str,
+) -> list[tuple[int, int]] | None:
+    """Look up a param's tuple-unpack slot consumers, with fuzzy fallback."""
+    exact = param_ordinal_entries.get(arg_name)
+    if exact is not None:
+        return exact
+    normalized = _normalize_param_name(arg_name)
+    for param, consumers in param_ordinal_entries.items():
+        if _normalize_param_name(param) == normalized:
+            return consumers
+    return None
+
+
+def _is_kernel_block(block: Any) -> bool:
+    """True when the node was built from a kernel detected in the code.
+
+    The builder records that as a ``kernel:`` detail; reading it here keeps this
+    pass from having to recognise the class names the builder happens to use.
+    """
+    if block is None:
+        return False
+    return any(
+        str(line).lower().startswith("kernel:") for line in (block.details or [])
+    )
+
+
+SYNTHETIC_KERNEL_PORT = "@kernel_port"
+SYNTHETIC_KERNEL_PORT_IN = "@kernel_port_in"
+SYNTHETIC_KERNEL_PORT_OUT = "@kernel_port_out"
+
+
+def _secondary_input_index(graph: ComputationGraph, param: str) -> int:
+    """The boundary tile for a non-primary forward parameter, created on demand.
+
+    Keyed exactly as :func:`_add_forward_param_inputs` keys it, so a parameter read
+    both by a plain op and by a kernel docks on ONE shared tile rather than two.
+    """
+    key = f"{SYNTHETIC_INPUT}:{param}"
+    for index, spec in enumerate(graph.nodes):
+        if spec.key == key:
+            return index
+    return _add_node(graph, key=key, label=param, synthetic=SYNTHETIC_INPUT)
+
+
+def _declared_input_names(block: "BlockNode | None") -> list[str]:
+    """Input names a kernel block declares in its ``inputs:`` detail."""
+    if block is None:
+        return []
+    for detail in block.details:
+        if detail.startswith("inputs:"):
+            raw = detail.split(":", 1)[1].strip()
+            return [name.strip() for name in raw.split(",") if name.strip()]
+    return []
+
+
+def _kernel_input_names(spec: NodeSpec) -> list[str]:
+    """Extract declared input names from a kernel block's ``inputs:`` detail."""
+    return _declared_input_names(spec.block)
+
+
+def _declared_operand_names(block: "BlockNode | None") -> set[str]:
+    """Operand names declared by a step OR by whatever it expands into.
+
+    A wrapper-expanded attention step is a small pipeline: the ``inputs:`` list
+    lives on the atomic core leaf inside it, not on the step node the call site
+    names. Asking only the step node would answer "declares nothing" for exactly
+    the kernels that declare the most.
+    """
+    names: set[str] = set()
+    stack = [block]
+    while stack:
+        node = stack.pop()
+        if node is None:
+            continue
+        names.update(name.strip().lower() for name in _declared_input_names(node))
+        stack.extend(node.children or ())
+    return names
+
+
+def _kernel_stage_attr(attr: str) -> str:
+    """The stage a decomposed sub-step belongs to.
+
+    ``introspect_kernel_op_substeps`` names a stage's parts
+    ``<stage>_sub_<n>``, and the value a stage produces comes out of its last
+    part -- but the call site named the STAGE, so a lookup by producer has to
+    climb back to it.
+    """
+    head, separator, tail = attr.rpartition("_sub_")
+    return head if separator and tail.isdigit() else attr
+
+
+def _kernel_port_roles(spec: NodeSpec) -> dict[str, str]:
+    """``caller-side port name -> the wrapper parameter it supplies``.
+
+    Read from the ``operand_role`` detail the block tree stamped out of the
+    wrapper's resolved ``port_map``. The role is an IDENTITY fixed when the
+    port was bound; a consumer that needs to know which operand a port carries
+    asks for this rather than reading the port's display label, which exists to
+    be renamed.
+    """
+    if spec.block is None:
+        return {}
+    for detail in spec.block.details:
+        if not detail.startswith("operand_role:"):
+            continue
+        roles: dict[str, str] = {}
+        parameters: list[str] = []
+        for item in detail.split(":", 1)[1].split(","):
+            caller, _, param = item.strip().partition("=")
+            if not caller or not param:
+                continue
+            parameters.append(param)
+            # One caller tensor can supply SEVERAL parameters -- DeepSeek hands
+            # a single ``kv`` to both ``key`` and ``value``, which ``port_split``
+            # then draws as two ports named for those roles. Keep the first
+            # binding; the split ports are resolved by their own name below.
+            roles.setdefault(caller, param)
+        # A port produced by the split is named for the role it carries, so it
+        # answers for itself.
+        for param in parameters:
+            roles.setdefault(param, param)
+        return roles
+    return {}
+
+
+def _kernel_operand_parameters(spec: NodeSpec) -> dict[str, str]:
+    """``producing step -> the parameter this kernel binds it to``.
+
+    Recorded from the call site (``chunk_kda_fwd_intra(q=q, gk=g, ...)``), which
+    is the only place the kernel's own name for an operand appears.
+    """
+    if spec.block is None:
+        return {}
+    for detail in spec.block.details:
+        if not detail.startswith("operand:"):
+            continue
+        bindings: dict[str, str] = {}
+        for item in detail.split(":", 1)[1].split(","):
+            producer, _, parameter = item.strip().partition("=")
+            if producer and parameter:
+                bindings[producer] = parameter
+        return bindings
+    return {}
+
+
+def _prefer_activation_followup(
+    attr_last_index: dict[str, int], attr: str, index: int
+) -> int:
+    """Prefer a split-out activation follow-up node over its base step.
+
+    Some block-tree expansions (``_short_convolution_block_node`` and friends in
+    ``block_tree.py``) split one semantic forward call into two back-to-back
+    sibling graph nodes: the base step tracked under its own ``attr`` and an
+    activation follow-up tracked under the structural ``f"{attr}_activation"``
+    name. A provenance chain captured at the AST level only ever names the
+    original call (the source only has one call node), so resolving straight
+    through ``attr_last_index`` would wire onto the base step and leave the
+    activation follow-up looking unconsumed. When a later node is tracked
+    under the ``_activation``-suffixed name, prefer it as the true producer.
+    """
+    follow_index = attr_last_index.get(f"{attr}_activation")
+    if follow_index is not None and follow_index > index:
+        return follow_index
+    return index
+
+
+def _kernel_port_split(spec: NodeSpec) -> dict[str, list[str]]:
+    """Map a shared input label to the distinct kernel-param ports it fans into.
+
+    A wrapper-expanded attention kernel stamps ``port_split: kv=key,value`` when its
+    interface feeds two kernel parameters (``key``/``value``) from one caller tensor
+    (``kv``). The single ``kv`` producer must then dock onto TWO role-labeled ports
+    -- sdpa reads key and value as separate operands -- so this returns
+    ``{"kv": ["key", "value"]}``. Empty when the kernel declares no split. Keyed
+    structurally on the stamped detail, never on a param-name allow-list."""
+    if spec.block is None:
+        return {}
+    out: dict[str, list[str]] = {}
+    for detail in spec.block.details:
+        if detail.startswith("port_split:"):
+            body = detail.split(":", 1)[1].strip()
+            caller, _, roles = body.partition("=")
+            role_list = [r.strip() for r in roles.split(",") if r.strip()]
+            if caller.strip() and role_list:
+                out[caller.strip().lower()] = role_list
+    return out
+
+
+def _kernel_port_repeats(
+    spec: NodeSpec,
+) -> dict[str, list[tuple[str, tuple[str, ...]]]]:
+    """Per-port head-repeat op chains a wrapper-expanded kernel records.
+
+    A grouped-query attention core carries, per repeated key/value port label, the
+    introspected ``repeat_kv`` shape ops (unsqueeze/expand/reshape) to interpose
+    between that port's producer and the port. Read straight off the core block's
+    structured field; empty for every non-repeating kernel."""
+    if spec.block is None:
+        return {}
+    return dict(getattr(spec.block, "kernel_port_repeats", {}) or {})
+
+
+def _inherit_kernel_frames(
+    graph: ComputationGraph, kernel_index: int, port_index: int
+) -> None:
+    """Place a kernel's port node in the same inline frames as the kernel.
+
+    Node namespaces are derived purely from inline-frame membership, not from the
+    node key. A port node created after the fact belongs to no frame, so it would
+    otherwise land at the section root instead of beside its kernel. When the
+    kernel is deep inside an inline-expanded submodule (e.g. a vision attention),
+    that stray root-level port is then mirrored into the submodule's own boundary
+    diagram and wired back into the kernel — a cycle. Inheriting the kernel's
+    frames keeps the port local so no cross-boundary mirror is created.
+    """
+    for frame in graph.inline_frames:
+        if kernel_index in frame.node_indices:
+            frame.node_indices.append(port_index)
+
+
+def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
+    """Insert port nodes for every input on kernel tiles.
+
+    For every kernel (attention/GPU kernel) node, create a port node per
+    incoming edge and rewire:
+    ``source → kernel`` becomes ``source → port_node(label) → kernel``.
+
+    Labeled edges use their explicit label.  Unlabeled edges are matched
+    against the kernel's declared ``inputs:`` list: any input name not
+    already claimed by a labeled edge is assigned in order.
+    """
+    kernel_indices = [
+        index for index, spec in enumerate(graph.nodes) if _is_kernel_block(spec.block)
+    ]
+    for kernel_index in kernel_indices:
+        kernel_spec = graph.nodes[kernel_index]
+        declared_names = _kernel_input_names(kernel_spec)
+
+        # First pass: collect labeled and unlabeled edges.
+        labeled: list[tuple[int, str]] = []
+        unlabeled_sources: list[int] = []
+        for source, target in graph.links:
+            if target != kernel_index:
+                continue
+            label = graph.link_port_labels.get((source, target))
+            if label:
+                labeled.append((source, label))
+            else:
+                unlabeled_sources.append(source)
+
+        # Determine which declared names are already used by labeled edges.
+        # Compound labels like "query/key/value" represent a bundled tensor
+        # and do NOT claim the individual names (those go to separate inputs).
+        used_names: set[str] = set()
+        for _, lbl in labeled:
+            if "/" not in lbl:
+                used_names.add(lbl.strip().lower())
+
+        # Remaining declared names, in declaration order, for unlabeled edges.
+        remaining = [name for name in declared_names if name.lower() not in used_names]
+
+        all_inputs: list[tuple[int, str]] = []
+        seen_labels: dict[str, int] = {}
+
+        for source, label in labeled:
+            count = seen_labels.get(label, 0)
+            seen_labels[label] = count + 1
+            if count > 0:
+                label = f"{label}_{count + 1}"
+            all_inputs.append((source, label))
+
+        # What the KERNEL calls each operand beats what produced it: a Triton
+        # stage's label is a glyph for the arithmetic it does, which names
+        # nothing a reader can use and may not even be printable. The bare
+        # parameter name is what the kernel itself says; if that name turns out
+        # to be taken in this scope, the render qualifies it by the box the
+        # value came out of -- qualifying every port up front would shout the
+        # kernel's name at a reader who can already see it.
+        operand_parameters = _kernel_operand_parameters(kernel_spec)
+        port_roles = _kernel_port_roles(kernel_spec)
+        for idx, source in enumerate(unlabeled_sources):
+            src_spec = graph.nodes[source]
+            source_attr = (
+                str(src_spec.block.attr_name) if src_spec.block is not None else ""
+            )
+            # A decomposed kernel stage produces its value from its LAST
+            # sub-step (``forward_l2norm_fwd_q_sub_3``), and the call site
+            # named the stage, not the sub-step -- so ask the stage too.
+            parameter = operand_parameters.get(source_attr) or operand_parameters.get(
+                _kernel_stage_attr(source_attr)
+            )
+            if parameter:
+                label = parameter
+            elif idx < len(remaining):
+                label = remaining[idx]
+            else:
+                label = src_spec.label or f"input_{len(all_inputs)}"
+            count = seen_labels.get(label, 0)
+            seen_labels[label] = count + 1
+            if count > 0:
+                label = f"{label}_{count + 1}"
+            all_inputs.append((source, label))
+
+        # Fan a shared producer into its distinct role ports: a ``kv`` input that
+        # feeds both the ``key`` and ``value`` kernel parameters becomes two
+        # parallel edges from the one producer, each to its own role-labeled port.
+        # This is the only place a single source legitimately drives several input
+        # ports, so it is done here (after positional/labelled naming) rather than
+        # fabricated upstream.
+        split_map = _kernel_port_split(kernel_spec)
+        if split_map:
+            expanded: list[tuple[int, str]] = []
+            for source, label in all_inputs:
+                roles = split_map.get(label.strip().lower())
+                if roles:
+                    expanded.extend((source, role) for role in roles)
+                else:
+                    expanded.append((source, label))
+            all_inputs = expanded
+
+        repeat_map = _kernel_port_repeats(kernel_spec)
+        if all_inputs:
+            remove_in: set[tuple[int, int]] = {
+                (src, kernel_index) for src, _ in all_inputs
+            }
+            graph.links = [lk for lk in graph.links if lk not in remove_in]
+
+            for source, label in all_inputs:
+                graph.link_port_labels.pop((source, kernel_index), None)
+                # Preserve the producer's output ordinal: a kernel input reading a
+                # specific slice of a multi-output producer (``value_states`` is
+                # ordinal 1 of an ``expand_kv`` split) must keep that port so the
+                # new source→port edge docks the right slice instead of defaulting
+                # to slice 0.
+                source_port = graph.link_output_ports.get((source, kernel_index))
+                safe_label = label.replace("/", "_")
+
+                # A grouped-query key/value port interposes the wrapper's introspected
+                # ``repeat_kv`` shape ops between its producer and the port: the head
+                # expansion (``[B, kv, S, D] -> [B, kv*n, S, D]``) the opaque wrapper
+                # hid becomes visible unsqueeze/expand/reshape nodes on THIS branch
+                # only (query / mask carry no chain). Each op is a real block node so
+                # the existing shape rules grow the head axis; the last op then feeds
+                # the port, which keeps its role label and drives the kernel.
+                feed_source = source
+                feed_port = source_port
+                for op_pos, (op_label, op_details) in enumerate(
+                    repeat_map.get(label.strip().lower(), [])
+                ):
+                    op_block = BlockNode(
+                        attr_name=f"@kernel_repeat:{safe_label}:{op_pos}",
+                        class_name=op_label,
+                        role="operation",
+                        label=op_label,
+                        details=list(op_details),
+                        is_basic=True,
+                    )
+                    op_index = _add_node(
+                        graph,
+                        key=f"@kernel_in:{kernel_index}:{safe_label}:repeat{op_pos}:{op_label}",
+                        block=op_block,
+                        label=op_label,
+                    )
+                    _inherit_kernel_frames(graph, kernel_index, op_index)
+                    graph.links.append((feed_source, op_index))
+                    if feed_port is not None:
+                        graph.link_output_ports[(feed_source, op_index)] = feed_port
+                    feed_source = op_index
+                    # After the first op the chain is a plain single-output tensor;
+                    # the producer-ordinal only applied to the original edge.
+                    feed_port = None
+
+                # The role is the operand's identity; the label is what a
+                # reader sees. Keeping them apart lets the label be qualified
+                # later without a downstream check losing track of which
+                # operand this port supplies.
+                role = port_roles.get(label) or port_roles.get(label.rsplit("_", 1)[0])
+                port_index = _add_node(
+                    graph,
+                    key=f"@kernel_in:{kernel_index}:{safe_label}",
+                    label=label,
+                    synthetic=SYNTHETIC_KERNEL_PORT_IN,
+                    extra_metadata={"operand_role": role} if role else None,
+                )
+                _inherit_kernel_frames(graph, kernel_index, port_index)
+                graph.links.append((feed_source, port_index))
+                if feed_port is not None:
+                    graph.link_output_ports[(feed_source, port_index)] = feed_port
+                graph.links.append((port_index, kernel_index))
+
+
+def _add_kernel_output_port_nodes(graph: ComputationGraph) -> None:
+    """Insert one port node per *distinct* output on kernels with ≥2 outputs.
+
+    A kernel that genuinely returns several tensors (an eager attention handing
+    back both ``attn_output`` and ``attn_weights``) fans each real output — keyed
+    by the output ordinal its edges carry — to its own named port tile.
+
+    A kernel with a *single* output read by several consumers is different: sdpa
+    returns exactly one tensor (``scaled_dot_product_attention`` has one output;
+    its wrapper's second tuple slot is literally ``None``), and that one
+    ``attn_output`` may be read at several downstream sites (e.g. two slices of a
+    following interleaved-RoPE step). All those edges carry the *same* output
+    ordinal. Splitting per outgoing edge would fabricate phantom
+    ``Slice``/``Slice_2`` output ports for a one-output kernel. Group the outgoing
+    edges by output ordinal and only materialize port tiles when the kernel drives
+    more than one distinct output, so a single output stays a single output that
+    simply fans out.
+    """
+    kernel_indices = [
+        index for index, spec in enumerate(graph.nodes) if _is_kernel_block(spec.block)
+    ]
+    for kernel_index in kernel_indices:
+        # Group this kernel's outgoing edges by the output ordinal each reads. A
+        # missing ordinal is the kernel's sole/primary output ("0").
+        targets_by_ordinal: dict[str, list[int]] = {}
+        ordinal_order: list[str] = []
+        for source, target in graph.links:
+            if source != kernel_index:
+                continue
+            raw = graph.link_output_ports.get((source, target))
+            ordinal = str(raw) if raw is not None else "0"
+            if ordinal not in targets_by_ordinal:
+                targets_by_ordinal[ordinal] = []
+                ordinal_order.append(ordinal)
+            targets_by_ordinal[ordinal].append(target)
+
+        # One (or zero) distinct output: a single tensor fanned to its consumers —
+        # nothing to split.
+        if len(ordinal_order) < 2:
+            continue
+
+        seen_labels: dict[str, int] = {}
+        for ordinal in ordinal_order:
+            targets = targets_by_ordinal[ordinal]
+            label = None
+            for target in targets:
+                label = graph.link_port_labels.get((kernel_index, target))
+                if label:
+                    break
+            if not label:
+                label = graph.nodes[targets[0]].label or f"output_{ordinal}"
+            count = seen_labels.get(label, 0)
+            seen_labels[label] = count + 1
+            if count > 0:
+                label = f"{label}_{count + 1}"
+            safe_label = label.replace("/", "_")
+            port_index = _add_node(
+                graph,
+                key=f"@kernel_out:{kernel_index}:{safe_label}",
+                label=label,
+                synthetic=SYNTHETIC_KERNEL_PORT_OUT,
+            )
+            _inherit_kernel_frames(graph, kernel_index, port_index)
+            remove_out = {(kernel_index, target) for target in targets}
+            graph.links = [lk for lk in graph.links if lk not in remove_out]
+            for target in targets:
+                graph.link_port_labels.pop((kernel_index, target), None)
+                graph.link_output_ports.pop((kernel_index, target), None)
+            graph.links.append((kernel_index, port_index))
+            for target in targets:
+                graph.links.append((port_index, target))
+            for port_name, src in list(graph.output_ports.items()):
+                if src == kernel_index and port_name == label:
+                    graph.output_ports[port_name] = port_index
+
+
+def _has_inline_attention_child(block: BlockNode) -> bool:
+    """True when *block* directly owns an inline-expanded attention kernel.
+
+    Straight-line inline sub-blocks (norms, MLPs, expert helpers) have their
+    edges wired during node creation, so re-applying the predecessor passes to
+    them only duplicates inputs.  An attention kernel is different: its q/k/v and
+    output edges live in the owning block's ``forward_step_predecessors`` /
+    ``operation_predecessors`` and are only materialised by these passes.  When
+    such a kernel is flattened into an ancestor graph (e.g. a vision attention
+    inside its vision model, rather than built as its own nested diagram), the
+    owning block must be re-visited or the kernel docks to a spurious parameter
+    boundary and forms a cycle.
+    """
+    return any(
+        child.attr_name == SYNTHETIC_ATTENTION
+        for child in (getattr(block, "children", []) or [])
+    )
+
+
+def _has_multi_return_predecessor_ref(block: BlockNode) -> bool:
+    """True when *block* has a child that names a sibling multi-return
+    submodule call as a predecessor.
+
+    A straight-line child (e.g. ``self.rotary_emb(...)`` returning ``cos,
+    sin``) that is itself fully inline-expanded (no single node of its own)
+    is still named, by attr, as the predecessor of another sibling step --
+    either directly (``operation_predecessors``, an inline op reading it) or
+    through the owning block's own ``forward_step_predecessors`` /
+    ``forward_step_predecessor_args`` (a nested frame call, e.g.
+    ``apply_rotary_pos_emb(x, cos=rotary_emb, sin=rotary_emb)``). Resolving
+    *which* return slot (``cos`` vs ``sin``) the consumer actually wants
+    requires the same per-slot redirect sections 1/1b apply for ``root`` --
+    so this block must be revisited too, exactly like an inline attention
+    owner.
+    """
+    multi_return_attrs = {
+        child.attr_name
+        for child in getattr(block, "children", []) or []
+        if child.attr_name and len(child.forward_return_order) >= 2
+    }
+    if not multi_return_attrs:
+        return False
+    for child in block.children:
+        if child.attr_name in multi_return_attrs:
+            continue
+        if is_forward_operation(child.attr_name) and any(
+            pred in multi_return_attrs for pred in child.operation_predecessors
+        ):
+            return True
+    for preds in block.forward_step_predecessors.values():
+        if any(pred in multi_return_attrs for pred in preds):
+            return True
+    for arg_map in block.forward_step_predecessor_args.values():
+        if any(pred in multi_return_attrs for pred in arg_map.values()):
+            return True
+    return False
+
+
+class DroppedSubmoduleProducerError(RuntimeError):
+    """A forward operation references a submodule producer that never emitted a node.
+
+    The safety net behind the ``qkv`` extraction fix (Part A2): historically a
+    dropped submodule call (e.g. ``qkv`` when a method chain hid it) was wired at
+    the ``source_index is None`` choke point by silently skipping the edge, so the
+    consumer fell back to reading the module boundary. Raising here converts any
+    such future silent drop into a detectable error naming the missing producer.
+    """
+
+
+def _leaf_submodule_producers(wiring_blocks: list[BlockNode]) -> set[str]:
+    """Attr names of leaf submodule calls that must emit exactly one node.
+
+    A leaf submodule child (no children of its own, not a forward operation --
+    e.g. a fused ``qkv`` Linear) renders as a single node. If such a name is
+    referenced as an operation predecessor but has no emitted node, it was
+    silently dropped. Inline-expanded modules (``q_norm`` etc.) are excluded: they
+    have children, so their own attr legitimately maps to no single node.
+    """
+    producers: set[str] = set()
+    for block in wiring_blocks:
+        for child in getattr(block, "children", []) or []:
+            if (
+                child.attr_name
+                and not is_forward_operation(child.attr_name)
+                and not (getattr(child, "children", []) or [])
+            ):
+                producers.add(child.attr_name)
+    return producers
+
+
+def _iter_wiring_blocks(root: BlockNode) -> list[BlockNode]:
+    """Return *root* plus descendant blocks that need re-visiting.
+
+    See :func:`_has_inline_attention_child` for why straight-line descendants are
+    otherwise deliberately excluded — visiting them would re-wire edges already
+    created at node-construction time. The two exceptions
+    (:func:`_has_inline_attention_child`, :func:`_has_multi_return_predecessor_ref`)
+    name a real gap in that node-construction-time wiring: a nested block whose
+    own child reads a *sibling* multi-return submodule call (an inline
+    attention kernel's q/k/v/output, or a per-slot argument such as
+    ``apply_rotary_pos_emb(cos=rotary_emb, sin=rotary_emb)``) needs the same
+    return-slot redirect sections 1/1b apply for ``root`` -- construction time
+    only resolves the single ``@method_input`` case, not a fan-out to a
+    specific return slot of a fully inline-expanded sibling.
+    """
+    blocks: list[BlockNode] = [root]
+    seen: set[int] = {id(root)}
+    stack = list(getattr(root, "children", []) or [])
+    while stack:
+        block = stack.pop()
+        if block is None or id(block) in seen:
+            continue
+        seen.add(id(block))
+        if _has_inline_attention_child(block) or _has_multi_return_predecessor_ref(
+            block
+        ):
+            blocks.append(block)
+        stack.extend(getattr(block, "children", []) or [])
+    return blocks
+
+
+def _attn_pipeline_container(key: str) -> str | None:
+    """Return the ``@attn_pipeline`` container prefix of a node key, or ``None``.
+
+    Two nodes belong to the same expanded attention pipeline iff their keys
+    share this prefix.
+    """
+    marker = "@attn_pipeline"
+    index = key.rfind(marker)
+    if index == -1:
+        return None
+    return key[: index + len(marker)]
+
+
+def _reroute_wrapper_kernel_output_edges(graph: ComputationGraph) -> None:
+    """Move a wrapper-expanded attention kernel's output edges onto its tail.
+
+    A dispatched attention wrapper (``sdpa_attention_forward``) is expanded into
+    a ``<kernel> -> transpose -> contiguous`` pipeline whose ENTRY keeps
+    ``SYNTHETIC_ATTENTION`` so the caller's query/key/value/mask provenance docks
+    onto the compiled primitive. Its real *result*, though, is the pipeline tail
+    (the post-kernel layout ops). A consumer OUTSIDE the pipeline that named the
+    attention call as its predecessor resolves to that entry, leaving the layout
+    ops with no consumer (dead). Reroute every such entry->external edge to the
+    tail; edges to nodes INSIDE the same pipeline (the tail chain itself) are
+    left untouched, and a wrapper with no post-kernel tail (entry == tail) is a
+    no-op. Rerouting (rather than adding) keeps each consumer's single operand
+    edge single.
+    """
+    containers: dict[str, list[int]] = {}
+    for index, spec in enumerate(graph.nodes):
+        container = _attn_pipeline_container(spec.key)
+        if container is not None:
+            containers.setdefault(container, []).append(index)
+
+    for member_indices in containers.values():
+        members = set(member_indices)
+        entry = next(
+            (
+                i
+                for i in member_indices
+                if graph.nodes[i].block is not None
+                and graph.nodes[i].block.attr_name == SYNTHETIC_ATTENTION
+            ),
+            None,
+        )
+        if entry is None:
+            continue
+        # The tail is the one pipeline member consumed by nothing else inside the
+        # pipeline. Only reroute when exactly one such sink exists and it is not
+        # the entry itself (i.e. there really are post-kernel ops to keep alive).
+        consumed_internally = {
+            src for src, dst in graph.links if src in members and dst in members
+        }
+        sinks = [i for i in member_indices if i not in consumed_internally]
+        if len(sinks) != 1 or sinks[0] == entry:
+            continue
+        tail = sinks[0]
+        for position, (src, dst) in enumerate(graph.links):
+            if src != entry or dst in members:
+                continue
+            new_link = (tail, dst)
+            graph.links[position] = new_link
+            for meta in (graph.link_port_labels, graph.link_output_ports):
+                if (src, dst) in meta:
+                    value = meta.pop((src, dst))
+                    meta.setdefault(new_link, value)
+
+
+def _wire_all_predecessor_edges(
+    graph: ComputationGraph,
+    root: BlockNode,
+    *,
+    input_index: int | None = None,
+    skip_forward_links: bool = False,
+    exclude_carried_from: frozenset[int] | None = None,
+) -> None:
+    """Uniform predecessor-based edge wiring for all node types.
+
+    Consolidates the four former post-hoc wiring passes into one entry point:
+      1. Inline-op predecessor edges  (was ``_wire_operation_predecessor_links``)
+      2. Attention provenance edges   (was ``_wire_attention_provenance_links``)
+      3. Loop frames                  (structural, interleaved for ordering)
+      4. Multi-input op forward links (was ``_wire_multi_input_op_forward_links``)
+      5. Loop-carried nodes           (structural, interleaved for ordering)
+      6. Inline-frame dangling outputs(was ``_wire_inline_frame_dangling_outputs``)
+    """
+    attr_last_index = _rebuild_attr_last_index(graph)
+    block_index_by_id = _build_block_index_map(graph)
+
+    # A kernel-pipeline attention step's *result* is materialized as a separate
+    # ``@attn_output`` sibling node (or, absent one, the pipeline's own tail),
+    # not a node literally named ``SYNTHETIC_ATTENTION`` -- but other steps'
+    # AST-recorded predecessors (e.g. an output-norm reading ``o = <attention
+    # call>``) still name it by that original key. Alias the key so those
+    # consumer edges resolve to the real producer instead of being dropped.
+    if SYNTHETIC_ATTENTION not in attr_last_index:
+        attention_source = attr_last_index.get("@attn_output") or attr_last_index.get(
+            "@attn_pipeline"
+        )
+        if attention_source is not None:
+            attr_last_index[SYNTHETIC_ATTENTION] = attention_source
+
+    # A nested module that is inline-expanded into this graph keeps its own
+    # operation/forward-step predecessor metadata describing data flow among
+    # nodes that now live directly in this graph.  Wire predecessor edges for
+    # the root *and* every such descendant so flattened kernels (e.g. a vision
+    # attention's ``@attention``) keep their real q/k/v and output edges.
+    wiring_blocks = _iter_wiring_blocks(root)
+
+    # Leaf submodule producers (e.g. a fused ``qkv`` Linear) that must each emit a
+    # node; used by the A2 recurrence guard to catch a silently-dropped producer.
+    leaf_submodule_producers = _leaf_submodule_producers(wiring_blocks)
+
+    # Build per-module param entry indices from inline frames so that
+    # side-fed arguments land on the correct expanded pipeline node.  Graph-wide
+    # and independent of which block we are wiring, so build it once.
+    module_param_entries = _build_module_param_entries(graph)
+    host_size_readers = _host_size_param_readers(graph)
+    module_param_ordinal_entries = _build_module_param_ordinal_entries(graph)
+
+    # --- 1. Inline-op predecessor edges ---
+    # ``attr_last_index`` is one flat dict shared across the whole recursive
+    # expansion, keyed by bare submodule/local-variable attribute name. Two
+    # unrelated composites can legitimately reuse the same bare name at
+    # different nesting depths (an attention module's own ``kv_norm``
+    # alongside a nested compressor's own, distinct ``kv_norm``); each name
+    # is only correctly resolved from *within its own scope*, at the moment
+    # that scope's own steps are being built. By the time this section
+    # re-derives edges from the final, flat snapshot, an inner scope's
+    # binding may have (correctly, per its own use) shadowed an outer scope's
+    # identically-named one, or vice-versa. A single-tensor-operand op's
+    # sole predecessor was already resolved and wired correctly, in its own
+    # scope, at build time; track which targets already have an edge so a
+    # stale/foreign-scope re-resolution here is never appended as a second,
+    # spurious edge onto an op that can only ever have one tensor operand.
+    prewired_targets = {t for _s, t in graph.links}
+    for block in wiring_blocks:
+        steps_by_attr = _forward_steps_by_attr(block)
+        last_forward_order = max(
+            (child.forward_order or 0 for child in block.children), default=0
+        )
+        for child in block.children:
+            if not is_forward_operation(child.attr_name):
+                continue
+            if not child.operation_predecessors:
+                continue
+            target_index = attr_last_index.get(child.attr_name)
+            if target_index is None:
+                continue
+            if (
+                len(child.operation_predecessors) == 1
+                and target_index in prewired_targets
+            ):
+                continue
+            module_preds = [
+                pred
+                for pred in child.operation_predecessors
+                if not is_method_input(pred) and not is_forward_operation(pred)
+            ]
+            multi_input = len(child.operation_predecessors) >= 2
+            # A predecessor read at several distinct output ordinals of the same
+            # producer within one expression (``torch.cat((q_pass, q_rot))``
+            # reassembling a split) repeats that producer's attr in
+            # ``operation_predecessors``; track how many times each has been
+            # seen so far in this loop to pick the matching ordinal, in read
+            # order, out of ``operation_predecessor_ports``'s per-producer tuple.
+            pred_occurrence: dict[str, int] = {}
+            for pred in child.operation_predecessors:
+                if is_method_input(pred):
+                    source_index = input_index
+                else:
+                    source_index = attr_last_index.get(pred)
+                pred_ordinals = child.operation_predecessor_ports.get(pred, ())
+                occurrence = pred_occurrence.get(pred, 0)
+                pred_occurrence[pred] = occurrence + 1
+                consumed_ordinal = (
+                    pred_ordinals[occurrence]
+                    if occurrence < len(pred_ordinals)
+                    else None
+                )
+                resolved_flattened_slot = False
+                if source_index is None:
+                    # A fully inline-expanded, multi-return submodule (straight-
+                    # line, so it never materializes a single node of its own --
+                    # e.g. ``compressed_kv, block_bias = self.compressor(...)``)
+                    # names itself here but has no ``attr_last_index`` entry.
+                    # Resolve straight to the specific return slot's own
+                    # producer via the callee's own return-tuple metadata instead
+                    # of dropping the edge.
+                    pred_node = steps_by_attr.get(pred)
+                    if pred_node is not None and consumed_ordinal is not None:
+                        slot_attr = _return_slot_attr_by_ordinal(
+                            pred_node, consumed_ordinal
+                        )
+                        if slot_attr is not None:
+                            source_index = attr_last_index.get(slot_attr)
+                            if source_index is not None:
+                                resolved_flattened_slot = True
+                if source_index is None:
+                    # A2 recurrence guard: a leaf submodule producer referenced
+                    # here must have emitted a node. If it did not, it was silently
+                    # dropped (the historical ``qkv`` bug) -- fail loudly naming it
+                    # instead of skipping the edge and falling back to ``@input``.
+                    if pred in leaf_submodule_producers:
+                        raise DroppedSubmoduleProducerError(
+                            f"operation {child.attr_name!r} references submodule "
+                            f"producer {pred!r} that was never emitted as a node"
+                        )
+                    continue
+                # A consumer reading a specific return slot of an inline-expanded
+                # tuple-returning free function (``query_states`` = ordinal 0 of
+                # ``apply_rotary_pos_emb_vision``) must dock onto that slot's
+                # internal producer, not the frame's last op (which
+                # ``attr_last_index[call_attr]`` resolves to). Redirect to the
+                # per-ordinal producer and skip the port tag — the internal op has
+                # a single output, so no fan-out ordinal applies.
+                return_producers = block.forward_step_return_producers.get(pred)
+                if return_producers is None:
+                    # A fully inline-expanded, multi-return SUBMODULE call
+                    # (straight-line, e.g. ``compressed_kv, block_bias =
+                    # self.compressor(...)``) is not a ``multi_op_methods``/free
+                    # function, so it never populates the block's own
+                    # ``forward_step_return_producers``. ``attr_last_index[pred]``
+                    # still resolved above (to the frame's sequential-fallback
+                    # tail), so build the per-ordinal producer list straight from
+                    # the callee's own return-tuple metadata instead.
+                    pred_node = steps_by_attr.get(pred)
+                    if (
+                        pred_node is not None
+                        and len(pred_node.forward_return_order) >= 2
+                    ):
+                        candidate = [
+                            pred_node.forward_return_slots.get(slot)
+                            for slot in pred_node.forward_return_order
+                        ]
+                        if all(attr is not None for attr in candidate):
+                            return_producers = candidate
+                slot_resolved = resolved_flattened_slot
+                if (
+                    return_producers
+                    and consumed_ordinal is not None
+                    and consumed_ordinal < len(return_producers)
+                ):
+                    # Prefer this call site's own per-ordinal slot index
+                    # (``_multi_return_slot_key``) over the raw producer attr's
+                    # flat entry. The raw attr name is one of *this frame's own*
+                    # internal steps, so a scope-snapshot restore elsewhere
+                    # (``_add_linear_pipeline_chain``'s ``outer_bindings``) pops
+                    # it back out of ``attr_last_index`` once the frame's own
+                    # steps are done building -- by the time this post-hoc
+                    # wiring pass runs, ``attr_last_index.get(raw_attr)`` can
+                    # already be ``None`` (or, for a name reused by another
+                    # scope, someone else's index), silently collapsing every
+                    # ordinal onto the same (wrong) fallback. The slot key is
+                    # synthesized (a separator no real attr name can contain)
+                    # and stashed *before* that restore, so it always survives.
+                    resolved = attr_last_index.get(
+                        _multi_return_slot_key(pred, consumed_ordinal)
+                    )
+                    if resolved is None:
+                        resolved = attr_last_index.get(
+                            return_producers[consumed_ordinal]
+                        )
+                    if resolved is not None and resolved != source_index:
+                        # The consumer was chained onto the frame's last op by the
+                        # source-order sequential fallback in ``_add_chain`` (a
+                        # tuple-returning free function ends on its ordinal-1
+                        # producer, but the ordinal-0 consumer sits next in source
+                        # order). Drop that stale frame-tail edge before docking
+                        # onto the correct per-ordinal producer, else the consumer
+                        # reads both slots.
+                        stale_link = (source_index, target_index)
+                        if stale_link in graph.links:
+                            graph.links.remove(stale_link)
+                            graph.link_output_ports.pop(stale_link, None)
+                            graph.link_port_labels.pop(stale_link, None)
+                        source_index = resolved
+                        slot_resolved = True
+                    elif resolved is not None:
+                        slot_resolved = True
+                link = (source_index, target_index)
+                # A consumer that reads a specific slice of a multi-output op
+                # (``comb_w`` = ordinal 2 of a split) tags its edge with that
+                # ordinal, so the split can later fan out into one named output
+                # port per slice with its own shape.
+                port_str = (
+                    str(consumed_ordinal)
+                    if consumed_ordinal is not None and not slot_resolved
+                    else None
+                )
+                if link not in graph.links:
+                    graph.links.append(link)
+                    if port_str is not None:
+                        graph.link_output_ports[link] = port_str
+                elif port_str is not None and not _link_output_port_recorded(
+                    graph.link_output_ports.get(link), port_str
+                ):
+                    # The link already exists but this occurrence names a
+                    # genuinely different output ordinal of the same producer --
+                    # a second slice feeding the same consumer, not a duplicate.
+                    # Add a parallel edge instead of collapsing onto the first.
+                    graph.links.append(link)
+                    graph.link_output_ports[link] = _merge_link_output_port(
+                        graph.link_output_ports.get(link), port_str
+                    )
+                if multi_input and link not in graph.link_port_labels:
+                    source_label = (
+                        graph.nodes[source_index].label
+                        if source_index < len(graph.nodes)
+                        else None
+                    )
+                    if source_label:
+                        graph.link_port_labels[link] = source_label
+            if (
+                len(module_preds) >= 2
+                and (child.forward_order or 0) < last_forward_order
+            ):
+                graph.excluded_output_indices.add(target_index)
+
+    # --- 1b. Module-call predecessor edges from forward_step_predecessors ---
+    for block in wiring_blocks:
+        if not block.forward_step_predecessors:
+            continue
+        steps_by_attr = _forward_steps_by_attr(block)
+        pred_arg_maps = block.forward_step_predecessor_args
+        pred_ordinal_maps = block.forward_step_predecessor_ordinals
+
+        for step_attr, preds in block.forward_step_predecessors.items():
+            step_node = steps_by_attr.get(step_attr)
+            if step_node is None:
+                continue
+            default_target = _first_graph_index_for_module(
+                step_node, attr_last_index, block_index_by_id
+            )
+            if default_target is None:
+                default_target = attr_last_index.get(step_attr)
+            if default_target is None:
+                continue
+            arg_map = pred_arg_maps.get(step_attr, {})
+            ordinal_map = pred_ordinal_maps.get(step_attr, {})
+            param_entries = module_param_entries.get(step_attr, {})
+            if not param_entries:
+                param_entries = _module_param_entries_for_step(
+                    step_node, block_index_by_id
+                )
+            param_ordinal_entries = module_param_ordinal_entries.get(step_attr, {})
+            entry_params = _first_op_entry_params(step_node)
+            multi = len(preds) >= 2
+
+            # Build (pred, arg_name) pairs.  When an arg_map is available,
+            # iterate over its entries so that two args from the same
+            # predecessor produce two separate edges (e.g. topk_indices and
+            # topk_weights both sourced from gate).
+            if arg_map:
+                pairs: list[tuple[str, str | None]] = [
+                    (src, name) for name, src in arg_map.items()
+                ]
+                # An arg_map that names only *some* predecessors must not
+                # suppress the rest.  The attention interface records an arg
+                # name only for operands that read a specific output slot of a
+                # tuple-returning producer (``key_states``/``value_states`` from
+                # ``expand_kv``); single-output operands such as
+                # ``query_states`` (a plain ``transpose``) and
+                # ``attention_mask`` (``build_attention_mask_from_topk``) get no
+                # entry.  Those predecessors still carry a real data edge — wire
+                # each uncovered one positionally (arg_name ``None``) so a
+                # declared kernel port is not left unwired and its producing
+                # chain pruned as a dead branch.  General: fires for any module
+                # whose forward_step_predecessors outnumber its named args; a
+                # module with a complete arg_map (vision attention) or an empty
+                # one (linear attention) is unaffected.
+                covered = set(arg_map.values())
+                pairs.extend((pred, None) for pred in preds if pred not in covered)
+            else:
+                pairs = [(pred, None) for pred in preds]
+
+            for pred, arg_name in pairs:
+                if is_method_input(pred):
+                    # A descendant wiring block (an inline-expanded nested module
+                    # such as a vision attention) is visited only to wire its
+                    # flattened kernel edges; its steps' ``@method_input`` was
+                    # already bound to the module's real argument by the inline
+                    # pipeline chain at node-construction time. Mapping it to the
+                    # enclosing graph's global input here would add a second,
+                    # spurious edge — e.g. the attention's first op ``qkv`` reading
+                    # both ``norm1`` (its true arg) and the raw block input.
+                    if block is not root:
+                        continue
+                    # The boundary token can name WHICH parameter it carries
+                    # (``@method_input:attention_mask``). Collapsing every one of
+                    # them onto the module's single primary ``@input`` makes a
+                    # step handed a secondary forward parameter report the primary
+                    # tensor as that operand's producer -- an attention mask port
+                    # showing ``hidden_states``, at the primary's shape.
+                    #
+                    # Only a step that DECLARES the parameter among its own
+                    # operands gets its own boundary tile. That declaration is what
+                    # makes the primary-input answer provably wrong, and it is also
+                    # what makes the tile sourceable: a parameter the step merely
+                    # closes over may have no producer anywhere in this graph (a
+                    # vision tower's ``grid_thw``), and minting a boundary for it
+                    # would orphan the tile instead of wiring anything.
+                    param = method_input_param(pred)
+                    declared = _declared_operand_names(step_node)
+                    if (
+                        param
+                        and param.lower() in declared
+                        and param != _input_label_for(root)
+                    ):
+                        source_index = _secondary_input_index(graph, param)
+                    else:
+                        source_index = input_index
+                else:
+                    source_index = attr_last_index.get(pred)
+                    # Scope-aware correction. ``attr_last_index`` is flat and
+                    # last-write-wins across the whole recursive expansion, so a
+                    # bare producer name that also exists inside a *sibling*
+                    # submodule (this attention's own ``kv_proj`` vs a nested
+                    # compressor's identically-named ``kv_proj``) can resolve to
+                    # the foreign scope's instance -- fabricating a spurious
+                    # cross-box edge (compressor output -> this module's input)
+                    # and, with it, an illegal rendered group cycle. When ``pred``
+                    # names one of THIS block's own direct forward steps, its
+                    # producer is definitionally in that step's subtree; if the
+                    # flat pick landed outside it, redirect onto this instance's
+                    # own output node.
+                    sibling = steps_by_attr.get(pred)
+                    if sibling is not None and source_index is not None:
+                        src_block = (
+                            graph.nodes[source_index].block
+                            if source_index < len(graph.nodes)
+                            else None
+                        )
+                        in_scope = src_block is not None and _is_in_subtree(
+                            src_block, sibling
+                        )
+                        if not in_scope:
+                            scoped = _scoped_producer_index(sibling, graph)
+                            if scoped is not None:
+                                source_index = scoped
+                    # An activation follow-up (``_short_convolution_block_node``
+                    # and friends) is a sibling *leaf* right after ``pred``'s own
+                    # step, not inside its subtree, so the scope check above
+                    # always resolves onto the base step; only after settling on
+                    # the right instance do we redirect onto its activation
+                    # follow-up when one exists.
+                    if source_index is not None:
+                        source_index = _prefer_activation_followup(
+                            attr_last_index, pred, source_index
+                        )
+                if source_index is None:
+                    continue
+                # When the predecessor is a multi-return module, resolve the
+                # arg name to the specific return-slot producer so the edge
+                # starts from the correct pipeline node.
+                ordinal_slot_resolved = False
+                if arg_name and source_index is not None:
+                    pred_node = steps_by_attr.get(pred)
+                    if pred_node is not None and pred_node.forward_return_slots:
+                        source_index = _resolve_return_slot_source(
+                            pred_node,
+                            arg_name,
+                            attr_last_index,
+                            source_index,
+                        )
+                    # ``pred_node.forward_return_slots`` is keyed by the
+                    # CALLEE's own return-tuple variable names (``q_embed``,
+                    # ``k_embed``); ``arg_name`` here is the CALLER's local
+                    # name for the slot it read (``query_states``,
+                    # ``key_states``), so the lookup above misses for an
+                    # inlined free-function frame (``apply_rotary_pos_emb``)
+                    # and ``source_index`` stays the frame's last op (the
+                    # OTHER slot's producer). ``ordinal_map`` already carries
+                    # this call's own caller-side ordinal for ``arg_name``
+                    # (0 for ``query_states``, 1 for ``key_states``); redirect
+                    # onto that ordinal's real internal producer via
+                    # ``forward_step_return_producers`` -- the same per-slot
+                    # map ``operation_predecessor_ports`` consumers use above
+                    # -- instead of every multi-return-slot consumer reading
+                    # the module-call step (the attention kernel, a Merge
+                    # phi, ...) collapsing onto one slot.
+                    if (
+                        source_index == attr_last_index.get(pred)
+                        and arg_name in ordinal_map
+                    ):
+                        return_producers = block.forward_step_return_producers.get(pred)
+                        ordinal = ordinal_map[arg_name]
+                        if return_producers and 0 <= ordinal < len(return_producers):
+                            # Prefer the call site's own per-ordinal slot key
+                            # over the raw producer attr's flat entry -- see the
+                            # matching comment in section 1 above; the raw attr
+                            # is one of this frame's own internal steps and can
+                            # already be popped (or reused by another scope) by
+                            # the time this post-hoc pass runs.
+                            resolved = attr_last_index.get(
+                                _multi_return_slot_key(pred, ordinal)
+                            )
+                            if resolved is None:
+                                resolved = attr_last_index.get(
+                                    return_producers[ordinal]
+                                )
+                            if resolved is not None:
+                                source_index = resolved
+                                ordinal_slot_resolved = True
+                # A tuple-unpacked side arg (``position_embeddings`` ->
+                # ``cos, sin`` inside an inline-expanded rope frame) feeds one op
+                # per slot. Fan the producer out to each slot's consumer with its
+                # ordinal, so port1's ``sin`` op is wired too instead of dropped
+                # onto the single first-slot entry.
+                fan_out = (
+                    _lookup_ordinal_entries(param_ordinal_entries, arg_name)
+                    if arg_name
+                    else None
+                )
+                if fan_out:
+                    # When the tuple producer is a multi-return module whose slots
+                    # trace to *distinct* internal producers (``cos, sin =
+                    # self.recomposition_frequencies(...)`` in the rope embedding),
+                    # dock each consumer onto its own slot's producer instead of
+                    # aliasing every slot onto the single last-slot tail. Each such
+                    # producer has a single output, so its edge carries port "0";
+                    # slots that share one producer keep the fan-out ordinal port so
+                    # a genuine tuple-returning op still splits by ordinal.
+                    pred_node = steps_by_attr.get(pred)
+                    slot_order = (
+                        pred_node.forward_return_order
+                        if pred_node is not None
+                        else None
+                    ) or []
+                    # When each slot traces to its own distinct internal
+                    # producer (``cos, sin = self.recomposition_frequencies(...)``
+                    # → two separate ops), every producer is single-output so its
+                    # edge must read port "0", not the tuple ordinal. The genuine
+                    # tuple-returning case (all slots share one producer) keeps the
+                    # ordinal port so the op fans out by slice.
+                    distinct_slot_producers = False
+                    if pred_node is not None and pred_node.forward_return_slots:
+                        producer_ids = {
+                            pred_node.forward_return_slots.get(s) for s in slot_order
+                        }
+                        producer_ids.discard(None)
+                        distinct_slot_producers = len(producer_ids) > 1
+                    for consumer_index, ordinal in fan_out:
+                        slot_source = source_index
+                        slot_port = str(ordinal)
+                        if (
+                            pred_node is not None
+                            and pred_node.forward_return_slots
+                            and 0 <= ordinal < len(slot_order)
+                        ):
+                            resolved = _resolve_return_slot_source(
+                                pred_node,
+                                slot_order[ordinal],
+                                attr_last_index,
+                                source_index,
+                            )
+                            if resolved != source_index:
+                                slot_source = resolved
+                                slot_port = "0"
+                            elif distinct_slot_producers:
+                                # Last slot's producer coincides with the frame
+                                # tail (``attr_last_index[pred]``); it is still a
+                                # distinct single-output op, so read port "0"
+                                # instead of the ordinal (which would dangle — the
+                                # op has no port matching the tuple index).
+                                slot_port = "0"
+                        slot_link = (slot_source, consumer_index)
+                        if slot_link not in graph.links:
+                            graph.links.append(slot_link)
+                        graph.link_output_ports[slot_link] = slot_port
+                        if (
+                            multi
+                            and arg_name
+                            and slot_link not in graph.link_port_labels
+                        ):
+                            graph.link_port_labels[slot_link] = arg_name
+                    continue
+                # Resolve arg-specific target when the predecessor maps to a
+                # named parameter with its own pipeline entry point.
+                if arg_name:
+                    target_index = _lookup_param_entry(
+                        param_entries, arg_name, default_target
+                    )
+                    if (
+                        target_index == default_target
+                        and arg_name not in param_entries
+                        and _normalize_param_name(arg_name)
+                        not in {_normalize_param_name(p) for p in param_entries}
+                        and len(step_node.forward_param_inputs) > 1
+                    ):
+                        # A caller/callee parameter-name mismatch on a genuine
+                        # multi-parameter submodule call (not this frame's own
+                        # inline steps) -- the name-based lookup above never had
+                        # a chance. Fall back to the callee's own parameter name
+                        # at this call position (see
+                        # ``_positional_alias_for_arg_name``). Restricted to
+                        # callees with more than one of their own forward
+                        # parameters: a single-parameter callee (a norm reading
+                        # only ``hidden_states``) has no positional ambiguity to
+                        # resolve -- its sole argument already belongs at
+                        # ``default_target`` regardless of what the caller
+                        # happened to name it, and redirecting onto whatever
+                        # entry ``param_entries`` (built from the callee's own
+                        # descendant ops) happens to key by that single
+                        # parameter name would misattribute the edge onto an
+                        # arbitrary internal op instead of the module's real
+                        # entry point.
+                        alias = _positional_alias_for_arg_name(
+                            arg_name, arg_map, step_node.forward_param_inputs
+                        )
+                        if alias is not None:
+                            target_index = _lookup_param_entry(
+                                param_entries, alias, default_target
+                            )
+                else:
+                    target_index = default_target
+                # A side arg with no dedicated entry point must not be dumped onto
+                # the module's first op when that op does not read it: the norm at
+                # a block's head takes only ``hidden_states``, and binding
+                # ``cu_seqlens``/``position_embeddings`` there both misrepresents
+                # the norm and, since the kernel that produces ``cu_seqlens`` runs
+                # later, closes a cycle. Skip only when we positively know the
+                # first op's inputs (``entry_params`` non-empty).
+                #
+                # This mismatch check only makes sense for a genuine EXTRA side
+                # arg living alongside a primary one (``multi`` -- 2+ declared
+                # predecessors): ``entry_params`` is named in the CALLEE's own
+                # parameter vocabulary (e.g. KimiMLP's ``x``), while ``arg_name``
+                # is named in the CALLER's local-variable vocabulary at the call
+                # site (e.g. ``identity`` aliasing ``hidden_states`` before
+                # ``self.shared_experts(identity)``). Those two naming domains
+                # only coincidentally match, so when there is a single declared
+                # predecessor it IS the primary argument by construction --
+                # comparing its caller-side name against the callee's own
+                # parameter name would spuriously fail and drop a real edge.
+                if (
+                    multi
+                    and arg_name is not None
+                    and target_index == default_target
+                    and entry_params
+                    and _normalize_param_name(arg_name) not in entry_params
+                ):
+                    continue
+                if _graph_node_takes_no_tensor_operand(graph, target_index):
+                    # A segment's parameter edge defaults onto its first op; when
+                    # that op is a zero-operand generator (``torch.arange(...)``)
+                    # it takes no tensor operand, so this edge is spurious -- the
+                    # parameter's genuine consumer is wired via the inline
+                    # pipeline's own input threading.
+                    continue
+                if _graph_node_reads_a_boundary_slot(graph, target_index):
+                    # This op reads ONE SLOT of a tuple boundary parameter and
+                    # nothing else. Inside ``apply_rotary_pos_emb(x, cos, sin)``,
+                    # ``cos.repeat_interleave(...)`` reads ``position_embeddings``
+                    # slot 0; dumping the caller's argument on it handed it the
+                    # wrong tensor, and -- because it then already had an incoming
+                    # edge -- the boundary pass skipped it as already fed. Slot 1
+                    # wired correctly and slot 0 reached no op at all, so ``cos``
+                    # vanished from a graph whose source multiplies by it.
+                    continue
+                link = (source_index, target_index)
+                if link not in graph.links:
+                    graph.links.append(link)
+                # Every op that reads this parameter only as a SIZE reads it
+                # directly; the entry point above is just the first of them.
+                for extra in host_size_readers.get(step_attr, {}).get(
+                    arg_name or "", ()
+                ):
+                    if extra == target_index:
+                        continue
+                    extra_link = (source_index, extra)
+                    if extra_link not in graph.links:
+                        graph.links.append(extra_link)
+                # A module call reading a specific slot of a multi-output
+                # producer (``k_norm(key_states)`` where ``key_states`` is
+                # ordinal 1 of an ``unbind``) tags its edge with that ordinal so
+                # the producer fans out into one port per consumed slot instead
+                # of docking every consumer onto slot 0. Skip the port tag when
+                # the source was already redirected onto the ordinal's own
+                # per-slot producer above: that producer has a single output,
+                # so tagging it with the tuple ordinal would dangle instead of
+                # naming a real port.
+                if (
+                    arg_name is not None
+                    and arg_name in ordinal_map
+                    and not ordinal_slot_resolved
+                ):
+                    graph.link_output_ports[link] = str(ordinal_map[arg_name])
+                if multi and link not in graph.link_port_labels and arg_name:
+                    graph.link_port_labels[link] = arg_name
+
+    # --- 2. Attention provenance edges ---
+    if root.attention_inputs:
+        targets = [
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.block is not None and spec.block.attr_name == SYNTHETIC_ATTENTION
+        ]
+        for target_index in targets:
+            # A kernel that declares its own ``inputs:`` list normally has its
+            # edges wired by predecessor tracking, so a declared port is skipped
+            # here to avoid double-wiring. But that tracking is positional: when
+            # a port's value comes from a call the extractor recorded provenance
+            # for, positional order can attach the wrong tensor entirely (an
+            # attention mask built by ``self.indexer.build_block_mask(...)`` was
+            # wired to the neighbouring position-ids expand). Provenance is the
+            # model's own dataflow, so when the chain resolves to a real node it
+            # wins; a declared port with no resolvable chain still falls through
+            # to predecessor tracking exactly as before.
+            kernel_declared = {
+                n.lower() for n in _kernel_input_names(graph.nodes[target_index])
+            }
+
+            # A producer that feeds nothing is about to be pruned as unreachable,
+            # taking this port's real source with it and leaving the port to be
+            # wired positionally to a neighbouring op instead.
+            linked_sources = {source for source, _target in graph.links}
+
+            ports_by_source: dict[int, list[str]] = {}
+            for port, chain in root.attention_inputs.items():
+                if kernel_declared and port.lower() in kernel_declared:
+                    resolved = next(
+                        (
+                            attr_last_index[attr]
+                            for attr in reversed(chain)
+                            if attr in attr_last_index
+                        ),
+                        None,
+                    )
+                    # Declared ports are normally wired by predecessor tracking,
+                    # and overriding that would re-merge ports which were
+                    # deliberately split. Step in only when this port's recorded
+                    # producer is an orphan -- nothing consumes it -- because
+                    # that is the case predecessor tracking cannot get right.
+                    if resolved is None or resolved in linked_sources:
+                        continue
+
+                # Follow the provenance chain (actual data-flow from AST
+                # analysis) to find the last graph node in the chain.
+                matched_attr = next(
+                    (attr for attr in reversed(chain) if attr in attr_last_index),
+                    None,
+                )
+                source_index = (
+                    attr_last_index[matched_attr] if matched_attr is not None else None
+                )
+                if source_index is not None:
+                    source_index = _prefer_activation_followup(
+                        attr_last_index, matched_attr, source_index
+                    )
+                if source_index is None or source_index == target_index:
+                    continue
+                ports_by_source.setdefault(source_index, []).append(port)
+            for source_index, ports in ports_by_source.items():
+                link = (source_index, target_index)
+                if link not in graph.links:
+                    graph.links.append(link)
+                graph.link_port_labels[link] = "/".join(ports)
+
+    # --- 2b. Kernel input/output port nodes ---
+    _add_kernel_port_nodes(graph)
+
+    # --- 3. Loop frames (structural pass, must precede forward links) ---
+    _add_loop_frames(graph)
+
+    # --- 4. Multi-input op forward links ---
+    if not skip_forward_links:
+        _wire_multi_input_op_forward_links(
+            graph, root, attr_last_index, block_index_by_id
+        )
+
+    # --- 5. Loop-carried nodes (must precede inline-frame pass) ---
+    _add_loop_carried_nodes(graph, root, exclude_carried_from)
+
+    # --- 6. Inline-frame dangling outputs ---
+    if not skip_forward_links:
+        _wire_inline_frame_dangling_outputs(graph)
+
+    # --- 7. Frame entries whose argument was emitted after the frame ---
+    _resolve_deferred_method_inputs(graph)
+
+
+def _wire_multi_input_op_forward_links(
+    graph: ComputationGraph,
+    root: BlockNode,
+    attr_last_index: dict[str, int],
+    block_index_by_id: dict[int, int] | None = None,
+) -> None:
+    """Connect multi-input ops to the next forward step once all operands are wired."""
+    steps_by_attr = _forward_steps_by_attr(root)
+    ordered_steps = sorted(
+        root.children,
+        key=lambda step: (step.forward_order or 0, step.attr_name),
+    )
+
+    live_returns = root.referenced_return_producers
+    for step in ordered_steps:
+        if not step.operation_predecessors:
+            continue
+        if step.attr_name in live_returns:
+            continue
+        source_index = attr_last_index.get(step.attr_name)
+        if source_index is None or _node_has_outgoing_links(graph, source_index):
+            continue
+
+        pred_orders = [
+            steps_by_attr[pred].forward_order or 0
+            for pred in step.operation_predecessors
+            if pred in steps_by_attr
+        ]
+        if not pred_orders:
+            continue
+
+        min_consumer_order = max(pred_orders) + 1
+        consumer = next(
+            (
+                candidate
+                for candidate in ordered_steps
+                if (candidate.forward_order or 0) >= min_consumer_order
+                and candidate.attr_name != step.attr_name
+            ),
+            None,
+        )
+        if consumer is None:
+            continue
+        named = consumer.operation_predecessors
+        if named and step.attr_name not in named:
+            continue
+
+        target_index = _first_graph_index_for_module(
+            consumer, attr_last_index, block_index_by_id
+        )
+        if target_index is None:
+            target_index = attr_last_index.get(consumer.attr_name)
+        if target_index is None:
+            continue
+        # Only bridge to a consumer that is genuinely waiting for an input. If it
+        # already reads something (its boundary parameter or another producer), the
+        # source is a terminal side-effect — e.g. an unconsumed cache-update ``Cast``
+        # of ``last_recurrent_state`` — and forcing an edge would misattribute it.
+        if _node_has_incoming_links(graph, target_index):
+            continue
+        if (source_index, target_index) not in graph.links:
+            graph.links.append((source_index, target_index))
+
+
+def _inline_frame_exit_index(
+    graph: ComputationGraph, member_indices: set[int]
+) -> int | None:
+    exit_candidates = [
+        source
+        for source, target in graph.links
+        if source in member_indices and target not in member_indices
+    ]
+    if exit_candidates:
+        return exit_candidates[-1]
+
+    sources_inside = {
+        source for source, _target in graph.links if source in member_indices
+    }
+    dangling = [index for index in member_indices if index not in sources_inside]
+    return dangling[-1] if dangling else None
+
+
+def _link_output_port_recorded(existing: str | list[str] | None, port: str) -> bool:
+    """True when ``port`` is already the (or one of the) recorded output port(s)
+    of a graph link.
+
+    A single (source, target) node pair ordinarily carries one output port, but
+    a consumer that reassembles two different slices of the same multi-output
+    producer in one expression (``torch.cat((q_pass, q_rot), dim=-1)``) needs
+    two parallel edges between that same pair, each tagged with its own slice.
+    ``graph.link_output_ports`` stores those as a list in that rare case; every
+    other link keeps the plain single-string value it always had.
+    """
+    if existing is None:
+        return False
+    if isinstance(existing, list):
+        return port in existing
+    return existing == port
+
+
+def _merge_link_output_port(
+    existing: str | list[str] | None, port: str
+) -> str | list[str]:
+    """Record an additional output port on a link, promoting to a list only
+    when a second, genuinely different port is added (see
+    ``_link_output_port_recorded``)."""
+    if existing is None:
+        return port
+    if isinstance(existing, list):
+        if port not in existing:
+            existing.append(port)
+        return existing
+    if existing == port:
+        return existing
+    return [existing, port]
+
+
+def _resolve_deferred_method_inputs(graph: ComputationGraph) -> None:
+    """Point each frame's ``@method_input`` at the argument it was actually passed.
+
+    That entry is otherwise resolved by CHAIN POSITION -- the last node emitted
+    before the call -- which coincides with the real argument only while nothing
+    is added to the caller ahead of it. A frame can even be chained BEFORE its
+    argument exists, and the fallback then points it at an unrelated tensor and
+    leaves the real one with no consumer.
+
+    The caller's argument is recorded, so those cases are set aside during
+    construction and re-pointed here, with the attr map complete.
+    """
+    if not graph.deferred_method_inputs:
+        return
+    attr_last_index = _rebuild_attr_last_index(graph)
+    for consumer_index, producer_attr, wrong_index in graph.deferred_method_inputs:
+        source_index = attr_last_index.get(producer_attr)
+        if source_index is None or source_index == wrong_index:
+            continue
+        if not (0 <= consumer_index < len(graph.nodes)):
+            continue
+        rebuilt = [
+            (src, dst)
+            for src, dst in graph.links
+            if not (dst == consumer_index and src == wrong_index)
+        ]
+        if (source_index, consumer_index) not in rebuilt:
+            rebuilt.append((source_index, consumer_index))
+        graph.links = rebuilt
+    graph.deferred_method_inputs = []
+
+
+def _wire_inline_frame_dangling_outputs(graph: ComputationGraph) -> None:
+    """No-op: previously connected dead-end inline-frame nodes to the frame
+    exit, but this fabricated edges not present in the model.  Dead-end nodes
+    now remain unconnected, reflecting the actual data flow."""
+
+
+def _graph_node_reads_a_boundary_slot(
+    graph: ComputationGraph, index: int | None
+) -> bool:
+    """True when the node reads one SLOT of a tuple boundary parameter, only.
+
+    ``cos``/``sin`` inside ``apply_rotary_pos_emb(x, cos, sin)`` each name one
+    slot of the caller's ``position_embeddings`` and read nothing else, so the
+    boundary supplies their operand and no other edge should.
+    """
+    if index is None or not (0 <= index < len(graph.nodes)):
+        return False
+    block = graph.nodes[index].block
+    return (
+        block is not None
+        and block.boundary_input_ordinal is not None
+        and not block.operation_predecessors
+    )
+
+
+def _graph_node_takes_no_tensor_operand(
+    graph: ComputationGraph, index: int | None
+) -> bool:
+    """True when the node at ``index`` is a pure zero-operand generator.
+
+    ``torch.arange``/``zeros``/``ones``/``full`` and kin fabricate a tensor from
+    host scalars alone -- their operand-arity ceiling is zero, so they take *no*
+    tensor operand. The cross-scope predecessor pass defaults a module/segment's
+    parameter edges onto the segment's first op; when that first op is such a
+    generator (``get_visible_tokens`` opens with
+    ``torch.arange(valid_keys.shape[-1])``), dumping the segment input onto it
+    fabricates a data edge the op never takes -- and the input's real consumer is
+    already wired through the inline pipeline's own input threading. Keyed purely
+    on the operand-ceiling-0 contract (never on the op name), so it drops only
+    definitionally-spurious edges and never a legitimate operand on any model.
+    """
+    if index is None or not (0 <= index < len(graph.nodes)):
+        return False
+    block = graph.nodes[index].block
+    if block is None:
+        return False
+    ceiling, variadic = _operand_ceiling(_raw_op_from_details(block.details))
+    return ceiling == 0 and not variadic
+
+
+def _operation_source_indices(
+    step: BlockNode,
+    attr_last_index: dict[str, int] | None,
+    *,
+    chain_input_index: int | None = None,
+) -> list[int]:
+    """Nodes an operation reads from, when its forward names them outright.
+
+    Ordinarily a dedupe-by-identity: each source node appears once, even if
+    ``operation_predecessors`` names it more than once. But a node that reads
+    two different output ordinals of the *same* multi-output producer in one
+    expression (``torch.cat((q_pass, q_rot), dim=-1)`` reassembling a split)
+    legitimately needs two parallel edges from that one source -- allow up to
+    as many repeats as ``operation_predecessor_ports`` records distinct
+    ordinals for that predecessor, so the second slice's edge is not dropped.
+
+    When the ordinal instead names a slot of a fully inline-expanded,
+    multi-return *composite* (``cos, sin = self.rotary_emb(...)``), those
+    slots live on two distinct physical nodes, not two ports of one node --
+    ``_track_attr_index`` stashed each slot's own producer index under
+    ``_multi_return_slot_key``, so prefer that over the composite's flat
+    (last-write, tail-node) entry.
+    """
+    if attr_last_index is None:
+        return []
+    sources: list[int] = []
+    seen_counts: dict[str, int] = {}
+    ports = step.operation_predecessor_ports
+    for predecessor in step.operation_predecessors:
+        if is_method_input(predecessor):
+            if chain_input_index is not None:
+                sources.append(chain_input_index)
+            continue
+        source_index = attr_last_index.get(predecessor)
+        if source_index is None:
+            continue
+        source_index = _prefer_activation_followup(
+            attr_last_index, predecessor, source_index
+        )
+        ordinals = ports.get(predecessor, ())
+        limit = max(len(ordinals), 1)
+        occurrence = seen_counts.get(predecessor, 0)
+        seen_counts[predecessor] = occurrence + 1
+        if occurrence >= limit:
+            continue
+        if occurrence < len(ordinals):
+            slot_index = attr_last_index.get(
+                _multi_return_slot_key(predecessor, ordinals[occurrence])
+            )
+            if slot_index is not None:
+                source_index = slot_index
+        sources.append(source_index)
+    return sources
+
+
+def _raw_op_from_details(details: list[str]) -> str:
+    """The underlying torch op name threaded as a ``raw_op: <name>`` detail.
+
+    Mirrors ``adapter.py``'s own extraction of this detail onto the rendered
+    node's ``raw_op`` attr (the name the type-check keys its arity lookup on) so
+    the wiring pass can ask the same "how many tensor operands does this op
+    really take" question before the node is ever rendered.
+    """
+    for detail in details:
+        name, sep, value = detail.partition(":")
+        if sep and name.strip() == "raw_op":
+            return value.strip()
+    return ""
+
+
+def _reads_only_module_constants(step: BlockNode) -> bool:
+    """True when a step's only operand is a module constant/buffer read.
+
+    Used (unlike :func:`_reads_only_a_side_parameter`) to pick a *module's own
+    entry point* rather than to gate a straight-line chain's fallback edge, so
+    it must draw a narrower line: a straight-line composite's leading side
+    computation (a grouped linear's own ``self.weight.view(...)`` — reads only
+    ``self.weight`` via ``external_inputs``, no forward-declared parameter, no
+    chain predecessor) is not a real entry point and must be skipped past. A
+    genuine forward-parameter read (``cos.repeat_interleave(...)`` as the first
+    op of a *multi*-parameter free function such as ``apply_rotary_pos_emb``)
+    reads a real caller-supplied tensor via ``param_inputs`` — it is not a side
+    computation just because it is not whichever parameter a given caller edge
+    happens to be wiring right now, so it must stay eligible to be picked.
+    """
+    if not is_forward_operation(step.attr_name) or step.operation_predecessors:
+        return False
+    if step.param_inputs:
+        return False
+    if not step.external_inputs:
+        return False
+    if step.output_names:
+        return True
+    ceiling, variadic = _operand_ceiling(_raw_op_from_details(step.details))
+    return ceiling is not None and not variadic and ceiling <= 1
+
+
+def _reads_only_a_side_parameter(step: BlockNode) -> bool:
+    """True when an operation's operands are a side input rather than the chain.
+
+    Three cases have no source among the steps they sit between, so falling back
+    to the previous step (or forking from the enclosing call's input) would draw
+    a dataflow edge the forward never performs:
+
+    * a forward parameter read (``param_inputs``); or
+    * a *multi-output* op (``output_names``) whose sole operand is a module
+      parameter/buffer the AST surfaced as an external read — e.g.
+      ``pre_b, post_b, comb_b = self.base.split(...)`` or
+      ``pre_scale, post_scale, comb_scale = self.scale.unbind(0)``. The parameter
+      is the receiver being fanned out; there is no chain predecessor.
+    * a *single*-output op whose AST-recorded operands are *only*
+      ``external_inputs`` (no ``param_inputs``, no chain ``operation_predecessors``
+      at all) *and* whose own operand contract has room for only one tensor
+      operand in total — e.g. ``inv_freq_expanded = self.inv_freq[None, :,
+      None].expand(position_ids.shape[0], -1, 1)``: every size argument resolves
+      to a host scalar or a literal, ``expand`` takes exactly one tensor operand
+      (:func:`TraceLens.ModelUtils.shape_inference._operand_ceiling`, resolved
+      from the op's real parameters -- never its name), and that operand is
+      already the buffer, so there is genuinely no room for a chain input.
+
+    The former single-output restriction (requiring ``output_names``) was a
+    defensive guess against a *different* op shape: a single-output op that
+    reads a ``self.param`` while *also* implicitly continuing the chain
+    (``x = x * self.weight``), where the AST might not record ``x`` as a
+    predecessor. That risk is real for a *binary* op (``mul`` takes two tensor
+    operands) -- an empty ``operation_predecessors`` there may just mean the
+    chain read was missed, so it still falls back to the previous step. It does
+    not apply to a *unary* op (arity ceiling of 1): there is no second tensor
+    slot for an implicit chain operand to occupy.
+    """
+    if not is_forward_operation(step.attr_name) or step.operation_predecessors:
+        return False
+    if step.param_inputs:
+        return True
+    if not step.external_inputs:
+        return False
+    if step.output_names:
+        return True
+    ceiling, variadic = _operand_ceiling(_raw_op_from_details(step.details))
+    return ceiling is not None and not variadic and ceiling <= 1
+
+
+def _is_pure_generator_source(step: BlockNode) -> bool:
+    """True for a forward op that fabricates a tensor from host scalars alone.
+
+    ``torch.arange(n)`` (and kin such as ``torch.zeros(shape)``) read *no* tensor
+    operand -- every argument is a host scalar: a length, a dtype, a device. Such
+    an op is a genuine dataflow *source*, with no predecessor to chain from. The
+    sequential fallback must therefore not draw a spine edge into it: doing so
+    both fabricates a tensor operand the op never takes (tripping the operand
+    arity check) and lets the op inherit the previous step's shape instead of its
+    own generated one.
+
+    The test keys on the op's real operand contract -- an arity ceiling of zero
+    tensor operands, resolved from its actual parameters via
+    :func:`TraceLens.ModelUtils.shape_inference._operand_ceiling` -- never on the
+    op name. It is deliberately narrower than :func:`_reads_only_a_side_parameter`
+    (which reads a *side* parameter and is also consulted for constant-closure
+    roots): a pure generator reads nothing at all, so it must stay a visible,
+    non-constant source rather than be folded into the constant closure.
+    """
+    if not is_forward_operation(step.attr_name) or step.operation_predecessors:
+        return False
+    if step.param_inputs or step.external_inputs:
+        return False
+    ceiling, variadic = _operand_ceiling(_raw_op_from_details(step.details))
+    return ceiling == 0 and not variadic
+
+
+def _is_local_operation_port(spec: GraphNodeSpec) -> bool:
+    """True for an external scalar/config operand docked beside one operation."""
+    return spec.synthetic == SYNTHETIC_TENSOR and ":external:" in spec.key
+
+
+def _condition_detail(block: BlockNode | None) -> str | None:
+    if block is None:
+        return None
+    return next(
+        (detail for detail in block.details if detail.startswith("condition: ")),
+        None,
+    )
+
+
+def _add_conditional_alternative_links(graph: ComputationGraph) -> None:
+    """Join complementary assignment branches while keeping the bypass on the side."""
+    for earlier, earlier_spec in enumerate(graph.nodes):
+        earlier_block = earlier_spec.block
+        condition = _condition_detail(earlier_block)
+        if earlier_block is None or condition is None:
+            continue
+        expression = condition.removeprefix("condition: ")
+        complement = (
+            expression.removeprefix("not (").removesuffix(")")
+            if expression.startswith("not (") and expression.endswith(")")
+            else f"not ({expression})"
+        )
+        for later in range(earlier + 1, len(graph.nodes)):
+            later_block = graph.nodes[later].block
+            if (
+                later_block is None
+                or _condition_detail(later_block) != f"condition: {complement}"
+                or later_block.operation_predecessors
+                != earlier_block.operation_predecessors
+            ):
+                continue
+            if (earlier, later) not in graph.links:
+                graph.links.append((earlier, later))
+            break
+
+
+def _add_chain(
+    graph: ComputationGraph,
+    steps: list[BlockNode],
+    *,
+    port_label: str | None = None,
+    port_style: PortStyle | None = None,
+    key_prefix: str,
+    attr_last_index: dict[str, int] | None = None,
+    basic_ops: BasicOpFilter | None = None,
+    inline_expansion: bool = True,
+) -> tuple[int | None, int | None]:
+    """Add a sequential chain, inlining straight-line composite wrappers."""
+    first_index: int | None = None
+    previous: int | None = None
+    for index, step in enumerate(steps):
+        step_port = port_label if index == 0 and first_index is None else None
+        step_port_style = port_style if index == 0 and first_index is None else None
+
+        if is_method_wrapper(step):
+            node_index = _add_method_wrapper_node(
+                graph,
+                step,
+                key=f"{key_prefix}:{step.attr_name}:{index}",
+            )
+            if attr_last_index is not None:
+                _track_attr_index(attr_last_index, step.attr_name, node_index)
+            if first_index is None:
+                first_index = node_index
+            if previous is not None:
+                graph.links.append((previous, node_index))
+            previous = node_index
+            continue
+
+        expanded_steps, wrapper = _maybe_inline(
+            step, basic_ops=basic_ops, inline_expansion=inline_expansion
+        )
+        if wrapper is not None:
+            chain_indices, tail = _add_linear_pipeline_chain(
+                graph,
+                expanded_steps,
+                wrapper=wrapper,
+                key_prefix=f"{key_prefix}:{step.attr_name}",
+                attr_last_index=attr_last_index,
+                port_label=step_port,
+                port_style=step_port_style,
+                input_index=None,
+                last_index=previous,
+                inline_expansion=inline_expansion,
+            )
+            if first_index is None and chain_indices:
+                first_index = chain_indices[0]
+            previous = tail
+            if attr_last_index is not None:
+                _track_attr_index(
+                    attr_last_index, wrapper.attr_name, tail, block=wrapper
+                )
+                _track_attr_index(attr_last_index, step.attr_name, tail)
+            continue
+
+        for sub_index, sub_step in enumerate(expanded_steps):
+            node_index = _add_node(
+                graph,
+                key=f"{key_prefix}:{step.attr_name}:{sub_step.attr_name}:{sub_index}",
+                block=sub_step,
+                port_label=step_port if sub_index == 0 else None,
+                port_style=step_port_style if sub_index == 0 else None,
+            )
+            if attr_last_index is not None:
+                _track_attr_index(attr_last_index, sub_step.attr_name, node_index)
+            if first_index is None:
+                first_index = node_index
+            if previous is not None:
+                graph.links.append((previous, node_index))
+            previous = node_index
+        if expanded_steps and attr_last_index is not None:
+            _track_attr_index(attr_last_index, step.attr_name, previous)
+    return first_index, previous
+
+
+def _input_label_for(root: BlockNode) -> str:
+    return root.input_label or "hidden_states"
+
+
+def _add_forward_input(graph: ComputationGraph, root: BlockNode) -> int:
+    return _add_node(
+        graph,
+        key=SYNTHETIC_INPUT,
+        label=_input_label_for(root),
+        synthetic=SYNTHETIC_INPUT,
+    )
+
+
+def _needs_another_tensor_operand(block: BlockNode) -> bool:
+    """True when an op still has an operand slot its edges have not filled.
+
+    An op that already reads an activation usually owns its input that way, and a
+    parameter repeated by a nested expression must not dock a second edge. A
+    genuinely binary op is different: ``torch.arange(key_length) > position_ids``
+    takes two operands and has one producer, so skipping it dropped the parameter
+    read and the op silently computed against the wrong tensor.
+    """
+    ceiling, variadic = _operand_ceiling(_raw_op_from_details(block.details))
+    if variadic or ceiling is None:
+        return False
+    return len(block.operation_predecessors) < ceiling
+
+
+def _share_frame_param_source(graph: ComputationGraph) -> None:
+    """A second INDEPENDENT reader of a frame parameter reads the same source.
+
+    A frame gets ONE entry per parameter, on the reasoning that a rebound
+    activation reaches its later readers through the op that rebound it. That
+    holds while the later reader consumes the earlier one's result, and fails
+    when two ops read the parameter independently: ``key_valid.any(-1)`` and
+    ``key_valid.long()`` are two separate reads of the same tensor, and only the
+    first was given the entry. The second was left with NO operand at all, so it
+    had nothing to take a shape from and fell back to the module's working shape
+    -- which every op built on it then inherited.
+
+    Only a node with no incoming edge AND no activation predecessor is filled:
+    one that already reads something owns its input that way, and one whose
+    parameter reaches it through an earlier op must not dock a second edge.
+    """
+    frame_of_index: dict[int, str] = {}
+    for frame in graph.inline_frames:
+        for index in frame.node_indices:
+            frame_of_index[index] = frame.frame_id
+    incoming: dict[int, list[int]] = {}
+    for source, target in graph.links:
+        incoming.setdefault(target, []).append(source)
+    # Where each (frame, parameter) already enters from.
+    entry_source: dict[tuple[str, str], int] = {}
+    orphans: list[tuple[tuple[str, str], int]] = []
+    for index, spec in enumerate(graph.nodes):
+        block = spec.block
+        if block is None or not block.param_inputs:
+            continue
+        frame_id = frame_of_index.get(index)
+        if frame_id is None:
+            continue
+        for param in block.param_inputs:
+            # Only an op that NAMES this parameter as the one it reads straight
+            # from the boundary is part of this question. An op that merely
+            # mentions the parameter among several reads it through its own
+            # edges, and filling it would fabricate a dependency.
+            if block.boundary_input_name != param:
+                continue
+            key = (frame_id, param)
+            sources = incoming.get(index) or []
+            if sources:
+                entry_source.setdefault(key, sources[0])
+            elif not block.operation_predecessors:
+                # A generator fabricates its tensor from host scalars alone
+                # (``torch.arange(valid_keys.shape[-1])`` reads a parameter only
+                # to SIZE itself). It takes no tensor operand at all, so handing
+                # it one is a mis-wiring, not a repair.
+                if _graph_node_takes_no_tensor_operand(graph, index):
+                    continue
+                orphans.append((key, index))
+    for key, index in orphans:
+        source = entry_source.get(key)
+        if source is None or source == index:
+            continue
+        if (source, index) not in graph.links:
+            graph.links.append((source, index))
+
+
+def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
+    """Give each extra forward parameter its own boundary input.
+
+    A forward like ``forward(hidden_states, gate)`` reads two tensors, but only the
+    primary one arrives on the chain. The steps that open the other parameter's path
+    read a name that no node produces, so without an input of its own that path
+    starts from nothing and the parameter has nowhere to dock.
+    """
+    primary = _input_label_for(root)
+    incoming_count: dict[int, int] = {}
+    for _source, target in graph.links:
+        incoming_count[target] = incoming_count.get(target, 0) + 1
+    param_index: dict[str, int] = {}
+    # A tuple-unpacked boundary input (``cos, sin = position_embeddings``) feeds
+    # several ops, one per slot. Docking is tracked per ``(param, ordinal)`` so
+    # each slot reaches its own consumer (``position_embeddings`` port0 -> the
+    # ``cos`` unsqueeze, port1 -> the ``sin`` unsqueeze) instead of collapsing
+    # onto the first consumer of the whole tensor.
+    #
+    # A free function called from several independent call sites (e.g.
+    # ``apply_rotary_pos_emb(q, cos, sin)`` invoked once for ``q`` and again for
+    # ``kv``) is expanded into its own inline frame per call site, each reading
+    # the *same* shared ``(param, ordinal)`` boundary slot. Scoping the dedup key
+    # by the node's containing frame keeps those call sites independent so each
+    # one docks its own edge, while still deduping repeats of the same param
+    # within one call site's frame (the original ``one_hot(x).permute(...)``
+    # case this set was built for).
+    frame_of_index: dict[int, str] = {}
+    for frame in graph.inline_frames:
+        for frame_node_index in frame.node_indices:
+            frame_of_index[frame_node_index] = frame.frame_id
+    param_ordinal_consumers: set[tuple[str, str, int]] = set()
+    for index, spec in enumerate(list(graph.nodes)):
+        block = spec.block
+        if block is None or not is_forward_operation(block.attr_name):
+            continue
+        for param in block.param_inputs:
+            ordinal = (
+                block.boundary_input_ordinal
+                if block.boundary_input_name == param
+                else None
+            )
+            if (
+                param == primary
+                or block.boundary_input_name != param
+                or param not in root.forward_param_inputs
+                or incoming_count.get(index, 0) > len(block.operation_predecessors)
+            ):
+                continue
+            # A nested expression can repeat a parameter on each op it is
+            # extracted into (``one_hot(x).permute(...)``, or a reassigned
+            # tuple-unpack slot like ``cos = cos.repeat_interleave(...)``
+            # immediately followed by ``cos.unsqueeze(...)``): the later op's
+            # ``param_inputs`` leaks the original parameter reference even
+            # though the value already reaches it through the earlier op's own
+            # edge. An op that already has a real activation predecessor owns
+            # its input that way, so skip it here rather than docking a
+            # duplicate boundary edge -- this applies whether or not the
+            # parameter carries a tuple-unpack ordinal. An op with *no*
+            # activation predecessor is a genuine, independent reader of the
+            # boundary param (e.g. two unrelated statements each read
+            # ``attention_mask`` directly, or the ``cos``/``sin`` slot's own
+            # true entry point) and must get its own edge from the shared
+            # boundary tile, however many other ops already read the same
+            # param elsewhere.
+            if block.operation_predecessors and not _needs_another_tensor_operand(
+                block
+            ):
+                continue
+            if ordinal is not None:
+                scope = frame_of_index.get(index, "")
+                dedup_key = (scope, param, ordinal)
+                if dedup_key in param_ordinal_consumers:
+                    continue
+                param_ordinal_consumers.add(dedup_key)
+            source = param_index.get(param)
+            if source is None:
+                source = _add_node(
+                    graph,
+                    key=f"{SYNTHETIC_INPUT}:{param}",
+                    label=param,
+                    synthetic=SYNTHETIC_INPUT,
+                )
+                param_index[param] = source
+            if (source, index) not in graph.links:
+                graph.links.append((source, index))
+                if ordinal is not None:
+                    graph.link_output_ports[(source, index)] = str(ordinal)
+
+
+def _add_submodule_boundary_param_inputs(
+    graph: ComputationGraph, root: BlockNode, input_index: int | None
+) -> None:
+    """Give a plain submodule fed only by a bare secondary forward param its port.
+
+    ``q = self.wq_b(q_resid)`` hands a submodule a secondary forward parameter
+    that has no internal producer. :func:`_add_forward_param_inputs` only creates a
+    boundary for a param an *operation* reads (``attention_mask.to(...)``), so a
+    param consumed straight by a plain submodule call is missed: the submodule's
+    input collapses onto the frame's primary ``@input`` (``hidden_states``) and the
+    caller's ``q_resid`` argument has no port to dock onto (it then mis-lands, e.g.
+    surfacing as a wrong ``attention_mask`` mirror). Create a dedicated
+    ``@input:<param>`` boundary the submodule reads instead.
+
+    General and name-agnostic: driven by ``forward_step_boundary_params`` (the bare
+    forward params each submodule call reads). Only fires when the submodule has no
+    real primary predecessor — i.e. the bare param is its sole operand — so a
+    submodule that also takes the primary keeps its true input untouched.
+    """
+    boundary = root.forward_step_boundary_params
+    if not boundary:
+        return
+    primary = _input_label_for(root)
+    param_index: dict[str, int] = {}
+    for call_attr, params in boundary.items():
+        recorded_args = root.forward_step_predecessor_args.get(call_attr) or {}
+        secondary = [
+            param
+            for param in params
+            if param != primary and param in root.forward_param_inputs
+            # A param the extractor already resolved to a producer reads that
+            # producer, not a boundary.
+            and param not in recorded_args
+        ]
+        if len(secondary) != 1:
+            continue
+        has_predecessors = bool(root.forward_step_predecessors.get(call_attr))
+        # A method invoked on a child module (``self.indexer.build_block_mask(
+        # block_indices, attention_mask, ...)``) reads the caller's parameter IN
+        # ADDITION to its own operands, so its boundary is added alongside them
+        # rather than replacing a forward-input edge. Every other call keeps the
+        # original rule -- the bare param must be its SOLE operand -- because
+        # relaxing it there invents boundaries nothing can source.
+        is_submodule_method = any(
+            spec.block is not None
+            and spec.block.attr_name == call_attr
+            and any(
+                str(detail).startswith("method:")
+                for detail in (spec.block.details or ())
+            )
+            for spec in graph.nodes
+        )
+        if has_predecessors and not is_submodule_method:
+            continue
+        if (
+            root.forward_step_predecessor_args.get(call_attr)
+            and not is_submodule_method
+        ):
+            continue
+        param = secondary[0]
+        # A call expanded INLINE leaves no node carrying its own attr -- its ops
+        # are the nodes, under their own attrs -- so matching the attr alone
+        # found nothing and the boundary was never built. Kimi's
+        # ``get_unpad_data(attention_mask[:, -q_len:])`` is such a frame: its
+        # first op kept reading the module's ``hidden_states``, which then set
+        # the shape of everything the unpad path derives.
+        call_block = next(
+            (block for block in _iter_all_blocks(root) if block.attr_name == call_attr),
+            None,
+        )
+        member_indices = {
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.block is not None
+            and (
+                spec.block.attr_name == call_attr
+                or (call_block is not None and _is_in_subtree(spec.block, call_block))
+            )
+        }
+        if not member_indices:
+            continue
+        source = param_index.get(param)
+        if source is None:
+            source = _add_node(
+                graph,
+                key=f"{SYNTHETIC_INPUT}:{param}",
+                label=param,
+                synthetic=SYNTHETIC_INPUT,
+            )
+            param_index[param] = source
+        redirected = False
+        if input_index is not None and not has_predecessors:
+            for target in sorted(member_indices):
+                stale = (input_index, target)
+                if stale not in graph.links:
+                    continue
+                graph.links.remove(stale)
+                graph.link_output_ports.pop(stale, None)
+                graph.link_port_labels.pop(stale, None)
+                link = (source, target)
+                if link not in graph.links:
+                    graph.links.append(link)
+                redirected = True
+        if not redirected:
+            first = min(member_indices)
+            link = (source, first)
+            if link not in graph.links:
+                graph.links.append(link)
+
+
+def _iter_all_blocks(root: BlockNode) -> list[BlockNode]:
+    """Every ``BlockNode`` in *root*'s tree, root included, any nesting depth."""
+    blocks: list[BlockNode] = []
+    stack = [root]
+    while stack:
+        block = stack.pop()
+        if block is None:
+            continue
+        blocks.append(block)
+        stack.extend(getattr(block, "children", []) or [])
+    return blocks
+
+
+def _build_parent_attr_map(root: BlockNode) -> dict[int, tuple[BlockNode, str]]:
+    """Map ``id(child) -> (parent, child.attr_name)`` for every descendant of *root*."""
+    parent_of: dict[int, tuple[BlockNode, str]] = {}
+    stack = [root]
+    while stack:
+        block = stack.pop()
+        for child in getattr(block, "children", []) or []:
+            if child is None:
+                continue
+            parent_of[id(child)] = (block, child.attr_name)
+            stack.append(child)
+    return parent_of
+
+
+def _resolve_nested_boundary_param_producer(
+    owner: BlockNode,
+    param: str,
+    parent_of: dict[int, tuple[BlockNode, str]],
+) -> str | None:
+    """Trace a bare pass-through param up through nested submodule calls to a
+    real local producer's attr name, if one exists anywhere in the chain.
+
+    A submodule call (``self.indexer(hidden_states, q_residual, ...)``) only
+    knows ``q_residual`` as one of its own enclosing forward's bare parameters
+    (``forward_step_boundary_params``). When that enclosing module
+    (``compressor``) is itself inline-expanded into an ancestor's graph, the
+    real value (``q_a_norm``'s output, computed at the ancestor's own scope)
+    is recorded only in the ancestor's own ``forward_step_predecessor_args``
+    for *that* call site. Walk up one call site at a time, matching the same
+    parameter name forwarded unchanged, until a real producer is found or the
+    walk reaches root with no local producer (a genuine external input, left
+    for the existing boundary/kwargs-forwarding mechanisms to handle).
+    """
+    current, current_param, seen = owner, param, set()
+    while True:
+        if id(current) in seen:
+            return None
+        seen.add(id(current))
+        parent_info = parent_of.get(id(current))
+        if parent_info is None:
+            return None
+        parent, attr_name = parent_info
+        arg_map = parent.forward_step_predecessor_args.get(attr_name) or {}
+        if current_param in arg_map:
+            source = arg_map[current_param]
+            if is_method_input(source):
+                current, current_param = parent, _input_label_for(parent)
+                continue
+            return source
+        boundary = parent.forward_step_boundary_params.get(attr_name) or ()
+        if current_param in boundary:
+            current = parent
+            continue
+        return None
+
+
+def _add_nested_submodule_side_producers(
+    graph: ComputationGraph, root: BlockNode
+) -> None:
+    """Wire a nested submodule's bare boundary param to its real ancestor producer.
+
+    ``_add_submodule_boundary_param_inputs`` only resolves *root*'s own bare
+    forward parameters. When a straight-line composite child (``compressor``)
+    is inline-expanded into *root*'s graph, one of *its own* descendants
+    (``indexer``) can read a param (``q_residual``) that is not a genuine
+    external input at all -- it is a value computed by one of *root*'s other
+    steps (``q_a_norm``) and threaded, unchanged by name, through the
+    composite's own forward signature. That producer edge is never wired by
+    any existing pass: once ``compressor`` is flattened it has no single node
+    of its own, so predecessor wiring keyed on its attr name is skipped
+    entirely, leaving the nested submodule's boundary param unwired.
+
+    General and name-agnostic: driven purely by ``forward_step_predecessor_args``
+    / ``forward_step_boundary_params``, walked up however many nested call
+    sites forwarded the same parameter name unchanged.
+    """
+    parent_of = _build_parent_attr_map(root)
+    attr_last_index = _rebuild_attr_last_index(graph)
+    for owner in _iter_all_blocks(root):
+        boundary = owner.forward_step_boundary_params
+        if not boundary:
+            continue
+        for call_attr, params in boundary.items():
+            target_child = next(
+                (child for child in owner.children if child.attr_name == call_attr),
+                None,
+            )
+            if target_child is None:
+                continue
+            member_indices = {
+                index
+                for index, spec in enumerate(graph.nodes)
+                if spec.block is target_child
+            }
+            if not member_indices:
+                continue
+            for param in params:
+                producer = _resolve_nested_boundary_param_producer(
+                    owner, param, parent_of
+                )
+                if producer is None:
+                    continue
+                source = attr_last_index.get(producer)
+                if source is None:
+                    continue
+                for target in member_indices:
+                    link = (source, target)
+                    if link in graph.links:
+                        continue
+                    graph.links.append(link)
+                    graph.link_port_labels[link] = param
+
+
+def _propagate_constant_closure(graph: ComputationGraph, seed: set[int]) -> None:
+    """Tag ``seed`` nodes ``constant`` and forward-propagate the tag in place.
+
+    A forward op *every* one of whose operands is already constant is itself a
+    pure constant (e.g. ``comb_b.view(hc, hc)`` fed only by a weight ``split``),
+    so it is tagged too. Edges are left intact — the render filter drops the
+    whole constant closure together, and shape inference can still read a
+    tagged node's operand shapes from the surviving graph.
+    """
+    preds: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    for source, target in graph.links:
+        preds[target].append(source)
+    constant: set[int] = set(seed)
+    changed = True
+    while changed:
+        changed = False
+        for index, spec in enumerate(graph.nodes):
+            if index in constant:
+                continue
+            block = spec.block
+            if block is None or not is_forward_operation(block.attr_name):
+                continue
+            operands = preds[index]
+            if operands and all(source in constant for source in operands):
+                constant.add(index)
+                changed = True
+    for index in constant:
+        graph.nodes[index].constant = True
+
+
+def _has_constant_extent(block: Any) -> bool:
+    """True for a generator whose size comes only from config scalars.
+
+    ``torch.arange(self.local_blocks)`` reads no tensor and its length is the
+    same on every forward, so the tensor it produces is a constant -- and
+    constants are never drawn as compute. The extractor marks these while it
+    still has the config values to fold the bound; here we only read the mark.
+    """
+    return any(
+        str(detail).strip() == "constant_extent: true"
+        for detail in (getattr(block, "details", None) or ())
+    )
+
+
+def _tag_weight_only_ops(graph: ComputationGraph) -> ComputationGraph:
+    """Tag ``constant`` the ops whose value derives solely from module parameters/buffers.
+
+    Constants and learned weights are never *drawn*: ``F.linear`` shows its
+    activation input and hides ``self.weight``. Two mHC mapping ops slip past
+    that rule because the weight is their *only* operand and it is fanned out —
+    ``pre_b, post_b, comb_b = self.base.split(...)`` and
+    ``pre_scale, post_scale, comb_scale = self.scale.unbind(0)`` read a raw
+    ``nn.Parameter`` with no activation flowing through. Such an op (and any op
+    reachable only through it, e.g. ``comb_b.view(hc, hc)``) is a constant and
+    must not be drawn. Consumers that mix the result back with a real activation
+    (``pre_w * pre_scale + pre_b``) stay; they simply lose the hidden operand at
+    render time.
+
+    The op and its fan-out closure are tagged ``constant`` (kept in the JSON,
+    dropped by the render filter) rather than pruned. General: roots are every
+    forward op :func:`_reads_only_a_side_parameter` recognizes as reading *only*
+    a side parameter/buffer -- whether it fans out to several names (the
+    ``self.base.split(...)`` case above) or has one plain output (an
+    ``inv_freq_expanded = self.inv_freq[None, :, None].expand(...)`` whose other
+    "operands" are host scalars, not a chain read). Constant-ness is then
+    propagated to any op every one of whose operands is itself constant.
+    """
+    incoming: set[int] = {target for _source, target in graph.links}
+    roots: set[int] = set()
+    for index, spec in enumerate(graph.nodes):
+        block = spec.block
+        if block is None or not is_forward_operation(block.attr_name):
+            continue
+        if index in incoming:
+            continue
+        if _reads_only_a_side_parameter(block) or _has_constant_extent(block):
+            roots.add(index)
+    if not roots:
+        return graph
+    _propagate_constant_closure(graph, roots)
+    return graph
+
+
+def _tag_buffer_only_ops(graph: ComputationGraph) -> ComputationGraph:
+    """Tag ``constant`` a lone buffer-reading op and fold its buffer onto consumers.
+
+    ``freqs = position_ids * self.inv_freq.float()`` casts ``inv_freq`` in an op
+    that reads *no* activation — an empty ``operation_predecessors`` and a single
+    ``external_inputs`` buffer, with no fanned-out ``output_names``. On its own it
+    is a rootless node whose only real content is a hidden buffer (which the owner
+    rule keeps invisible from the drawn picture), and the source-order spine hands
+    it a neighbour's shape.
+
+    The buffer is folded onto every consumer's ``external_inputs`` — where the
+    elementwise shape rule can broadcast against the captured buffer width
+    (``[Pv, ?, 1] * inv_freq[16] -> [Pv, ?, 16]``), keeping the consumer's inferred
+    output shape identical — and the op is tagged ``constant`` rather than dropped:
+    it stays in the JSON (its ``constant`` output shape sizes from the buffer, so
+    the profiler-style operand annotation can explain the consumer's shape jump)
+    and its edge is kept, but the render filter drops it so the drawn consumer
+    keeps only its activation operand. Guarded so a consumer keeps at least one
+    other operand: a buffer op that is a consumer's *sole* input is a genuine spine
+    head, left alone (that single-output ``x = x * self.weight`` case
+    :func:`_tag_weight_only_ops` also deliberately spares).
+    """
+    preds: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    succs: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    for source, target in graph.links:
+        preds[target].append(source)
+        succs[source].append(target)
+
+    spurious_incoming: set[tuple[int, int]] = set()
+    for index, spec in enumerate(graph.nodes):
+        block = spec.block
+        if block is None or not is_forward_operation(block.attr_name):
+            continue
+        if not block.external_inputs:
+            continue
+        if block.param_inputs or block.operation_predecessors or block.output_names:
+            continue
+        consumers = succs[index]
+        if not consumers:
+            continue
+        # Every consumer must retain another operand once this op is filtered out
+        # of the render; a consumer whose only input is this buffer op is a real
+        # spine head.
+        if any(len(preds[consumer]) <= 1 for consumer in consumers):
+            continue
+        for consumer in consumers:
+            consumer_block = graph.nodes[consumer].block
+            if consumer_block is None:
+                continue
+            for name in block.external_inputs:
+                if name not in consumer_block.external_inputs:
+                    consumer_block.external_inputs.append(name)
+        spec.constant = True
+        # The op reads no activation operand (empty ``operation_predecessors`` /
+        # ``param_inputs``), so any incoming edge it carries is a source-order
+        # spine artifact — not a real dataflow edge. Drop it so the op becomes a
+        # true buffer source whose output shape sizes from the buffer (``[16]``)
+        # instead of passing through a neighbour's shape (``[Pv, 2, 1]``).
+        for source in preds[index]:
+            spurious_incoming.add((source, index))
+
+    if spurious_incoming:
+        graph.links = [link for link in graph.links if link not in spurious_incoming]
+
+    return graph
+
+
+def _tag_linear_weight_operands(
+    graph: ComputationGraph, root: BlockNode | None = None
+) -> ComputationGraph:
+    """Tag the weight argument of an ``F.linear`` op ``constant``, mirroring ``nn.Linear``.
+
+    ``F.linear(input, weight[, bias])`` records its operands in call order, so the
+    entries after the first are the weight (and optional bias). When such an
+    operand's producer reads a module parameter directly (``external_inputs``
+    names a ``self.<param>`` — a raw weight, a ``self.weight.float()`` cast, or a
+    per-expert ``self.gate_up_proj[expert_idx]`` gather) it is a learned weight
+    and, like the absorbed weight of an ``nn.Linear`` submodule, must not be
+    *drawn*. Only the activation operand (index 0) is a real activation.
+
+    The weight producer and its param-only closure are tagged ``constant`` rather
+    than pruned: the node and its weight *edge* stay in the exported JSON (so the
+    profiler-style operand annotation can report the weight's shape), but the
+    render filter drops every ``constant`` node so the drawn op keeps a single
+    input. The weight edge is kept, not bridged: a gathered weight shares its
+    routing-index predecessor with the activation gather, and that index (a real
+    activation) is not part of the constant closure, so it keeps its other
+    consumers and stays drawn.
+    """
+    weight_sources: set[int] = set()
+    for target, spec in enumerate(graph.nodes):
+        block = spec.block
+        if block is None or not is_forward_operation(block.attr_name):
+            continue
+        if not block.attr_name.endswith("_linear"):
+            continue
+        preds = block.operation_predecessors
+        if len(preds) < 2:
+            continue
+        weight_attrs = {attr for attr in preds[1:] if attr != preds[0]}
+        if not weight_attrs:
+            continue
+        for source, tgt in graph.links:
+            if tgt != target:
+                continue
+            source_block = graph.nodes[source].block
+            if source_block is None:
+                continue
+            # A learned-weight operand reads a module parameter directly; a
+            # computed weight (e.g. a LoRA delta) would not, so it is left drawn.
+            if source_block.attr_name in weight_attrs and source_block.external_inputs:
+                weight_sources.add(source)
+    if not weight_sources:
+        return graph
+    _propagate_constant_closure(graph, weight_sources)
+    return graph
+
+
+def _materialize_external_input_constants(graph: ComputationGraph) -> ComputationGraph:
+    """Materialize each op's unresolved ``self.<attr>`` constant as a leaf node.
+
+    Some constant operands never become their own graph node: a mixed op like the
+    axial-RoPE ``freqs = position_ids_expanded * self.inv_freq`` reads its buffer
+    directly, so ``inv_freq`` survives only as a bare string in ``external_inputs``
+    with no node or edge — which is why the ``Multiply``'s ``[Pv, 2, 1] ->
+    [Pv, 2, 16]`` jump looks unexplained. For every such name not already produced
+    for the op by a constant predecessor, add a leaf node tagged ``constant``
+    (sized downstream from the meta parameter/buffer registry) and wire it in as a
+    trailing operand so its shape shows up in the operand annotation. The render
+    filter drops every ``constant`` node, so the drawn op is unchanged.
+
+    A leaf is only added for a *non-constant* op: a constant op's own weight reads
+    are already dropped as a whole, so re-materializing them would be redundant.
+    """
+    provided: dict[int, set[str]] = {index: set() for index in range(len(graph.nodes))}
+    fed: set[int] = set()
+    for source, target in graph.links:
+        fed.add(target)
+        src = graph.nodes[source]
+        if not src.constant:
+            continue
+        if src.block is not None:
+            provided[target].update(src.block.external_inputs)
+        if src.extra_metadata:
+            provided[target].update(src.extra_metadata.get("external_inputs", []))
+
+    new_links: list[tuple[int, int]] = []
+    for index in range(len(graph.nodes)):
+        spec = graph.nodes[index]
+        block = spec.block
+        if block is None or not is_forward_operation(block.attr_name):
+            continue
+        # A constant op's weight reads are normally dropped wholesale by the
+        # render filter, so re-materializing them is redundant — EXCEPT a
+        # *sourceless* constant op (e.g. ``pre_b, post_b, comb_b =
+        # self.base.split(...)``), which would otherwise render with no input at
+        # all. Give those their root parameter leaf so the constant closure is
+        # well-formed (has a source) and drops as a unit at render time.
+        if spec.constant and index in fed:
+            continue
+        for name in block.external_inputs:
+            if name in provided[index]:
+                continue
+            provided[index].add(name)
+            leaf = _add_node(
+                graph,
+                key=f"{spec.key}:const:{name}",
+                block=None,
+                label=str(name).split(".")[-1],
+                constant=True,
+                extra_metadata={"external_inputs": [str(name)]},
+            )
+            # An op that reads its own buffer and nothing else -- no operation
+            # predecessor, no parameter -- still gets the module's chain input
+            # docked on it when it happens to be the module's FIRST step.
+            # ``self.inv_freq[None, :, None]`` opens a rotary embedding and uses
+            # ``x`` for nothing but a device, so the operand it actually reads is
+            # the buffer. Put that edge FIRST: shape rules read the first operand,
+            # and reading the chain input there sized the whole rotary chain from
+            # the hidden state. The chain edge stays, so the op still has a
+            # non-constant source once the render filter drops the constants.
+            if not block.operation_predecessors and not block.param_inputs:
+                insert_at = next(
+                    (
+                        position
+                        for position, link in enumerate(graph.links)
+                        if link[1] == index
+                    ),
+                    None,
+                )
+                if insert_at is not None:
+                    graph.links.insert(insert_at, (leaf, index))
+                    for frame in graph.inline_frames:
+                        if index in frame.node_indices:
+                            frame.node_indices.append(leaf)
+                    continue
+            new_links.append((leaf, index))
+            # The leaf is an internal operand of its consumer, so it must live in
+            # the same inline frame(s) — otherwise it lands in the parent namespace
+            # and its edge reads as *external* to the consumer's group, which makes
+            # the group-input injector mistake the consumer for a boundary entry
+            # (a spurious ``@input:<param>_N`` that would survive the render filter).
+            for frame in graph.inline_frames:
+                if index in frame.node_indices:
+                    frame.node_indices.append(leaf)
+    graph.links.extend(new_links)
+    return graph
+
+
+def add_forward_output(
+    graph: ComputationGraph,
+    *,
+    root: BlockNode | None = None,
+    label: str = "Output",
+) -> int | None:
+    """Append the graph boundary Output with one named port per return value."""
+    if graph.output_node_index is not None:
+        return graph.output_node_index
+    if not graph.nodes:
+        return None
+    if not any(spec.synthetic == SYNTHETIC_INPUT for spec in graph.nodes):
+        return None
+    attr_last_index = _rebuild_attr_last_index(graph)
+    input_index = next(
+        (
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.synthetic == SYNTHETIC_INPUT
+        ),
+        None,
+    )
+    ports: dict[str, int] = {}
+    if root is not None and root.forward_return_slots:
+        for slot in root.forward_return_order:
+            producer = root.forward_return_slots.get(slot)
+            if not producer:
+                continue
+            source = graph.loop_carried_nodes.get(producer)
+            if source is None:
+                source = (
+                    input_index
+                    if producer == FORWARD_METHOD_INPUT
+                    else attr_last_index.get(producer)
+                )
+            if source is not None:
+                ports[slot] = source
+
+    source_indices = {src for src, _target in graph.links}
+    exits = [
+        index
+        for index, spec in enumerate(graph.nodes)
+        if index not in source_indices
+        and spec.synthetic not in {SYNTHETIC_INPUT, SYNTHETIC_HIDDEN, SYNTHETIC_TENSOR}
+    ]
+    if not ports:
+        framed_indices = {
+            index for frame in graph.inline_frames for index in frame.node_indices
+        }
+        unframed_exits = [index for index in exits if index not in framed_indices]
+        if unframed_exits:
+            exits = unframed_exits
+        if graph.primary_output_index is not None:
+            exits = [graph.primary_output_index]
+        else:
+            exits = [
+                index for index in exits if index not in graph.excluded_output_indices
+            ]
+        ports = {
+            ("result" if len(exits) == 1 else f"result_{position + 1}"): index
+            for position, index in enumerate(exits)
+        }
+    if not ports:
+        return None
+    output_index = _add_node(
+        graph,
+        key=SYNTHETIC_OUTPUT,
+        label=label,
+        synthetic=SYNTHETIC_OUTPUT,
+    )
+    for port, source in ports.items():
+        graph.links.append((source, output_index))
+        graph.link_port_labels[(source, output_index)] = port
+    graph.output_node_index = output_index
+    graph.output_ports = ports
+    graph.primary_output_port = (
+        root.primary_return_slot
+        if root is not None and root.primary_return_slot in ports
+        else next(iter(ports))
+    )
+    return output_index
+
+
+def add_root_pipeline_frame(
+    graph: ComputationGraph,
+    block: BlockNode,
+    *,
+    label: str | None = None,
+) -> None:
+    """Group all non-input steps of a root block tree in one inline frame."""
+    if not is_straight_line_module(block):
+        return
+    indices = [
+        index
+        for index, spec in enumerate(graph.nodes)
+        if spec.synthetic not in {SYNTHETIC_INPUT, SYNTHETIC_OUTPUT, SYNTHETIC_HIDDEN}
+    ]
+    if len(indices) < 2:
+        return
+    graph.inline_frames.append(
+        InlineFrameSpec(
+            frame_id=block.attr_name,
+            label=label or inline_block_frame_label(block),
+            node_indices=indices,
+        )
+    )
+
+
+def _link_forward_input(
+    graph: ComputationGraph,
+    input_index: int,
+    target_index: int,
+) -> None:
+    """Link the synthetic forward input to a downstream node (residual/skip feeds stay solid)."""
+    graph.links.append((input_index, target_index))
+
+
+def _start_inline_frame(graph: ComputationGraph, wrapper: BlockNode) -> InlineFrameSpec:
+    frame = InlineFrameSpec(
+        frame_id=wrapper.attr_name,
+        label=inline_block_frame_label(wrapper),
+        sublabel=inline_block_frame_sublabel(wrapper),
+        transparent=(
+            is_transparent_inline_expansion(wrapper)
+            or is_transparent_loop_wrapper(wrapper)
+        ),
+    )
+    graph.inline_frames.append(frame)
+    return frame
+
+
+def _append_inline_frame_node(frame: InlineFrameSpec, node_index: int) -> None:
+    frame.node_indices.append(node_index)
+
+
+def _add_kernel_pipeline_merge_chain(
+    graph: ComputationGraph,
+    merge_steps: list[BlockNode],
+    *,
+    key_prefix: str,
+    attr_last_index: dict[str, int] | None = None,
+    inline_expansion: bool = True,
+) -> tuple[list[int], int | None]:
+    """Expand a kernel pipeline in its own sub-frame and append the output kernel step."""
+    if len(merge_steps) != 2:
+        return _add_linear_pipeline_chain(
+            graph,
+            merge_steps,
+            wrapper=merge_steps[0] if merge_steps else None,
+            key_prefix=key_prefix,
+            attr_last_index=attr_last_index,
+            inline_expansion=inline_expansion,
+        )
+
+    pipeline_step, output_step = merge_steps
+    inner_steps, pipeline_wrapper = _maybe_inline(
+        pipeline_step, inline_expansion=inline_expansion
+    )
+    pipeline_indices, pipeline_tail = _add_linear_pipeline_chain(
+        graph,
+        inner_steps,
+        wrapper=pipeline_wrapper,
+        key_prefix=f"{key_prefix}:pipeline",
+        attr_last_index=attr_last_index,
+        inline_expansion=inline_expansion,
+    )
+    output_index = _add_node(
+        graph,
+        key=f"{key_prefix}:output",
+        block=output_step,
+    )
+    linked_output = False
+    if attr_last_index is not None:
+        for pred_attr in output_step.kernel_predecessors:
+            pred_index = attr_last_index.get(pred_attr)
+            if pred_index is not None:
+                graph.links.append((pred_index, output_index))
+                linked_output = True
+    if not linked_output and pipeline_tail is not None:
+        graph.links.append((pipeline_tail, output_index))
+    if attr_last_index is not None:
+        _track_attr_index(attr_last_index, output_step.attr_name, output_index)
+        if pipeline_wrapper is not None:
+            _track_attr_index(
+                attr_last_index, pipeline_wrapper.attr_name, pipeline_tail
+            )
+    return list(pipeline_indices) + [output_index], output_index
+
+
+def _submodule_chain_input(
+    wrapper: BlockNode | None,
+    sub_step: BlockNode,
+    attr_last_index: dict[str, int] | None,
+    fallback: int | None,
+    *,
+    chain_input_index: int | None = None,
+) -> int | None:
+    """Resolve the graph index an inlined submodule really reads from.
+
+    ``_add_linear_pipeline_chain`` feeds each step from the previous sibling's
+    tail by default.  That is correct for a straight pipeline, but wrong for
+    parallel sibling submodules that both consume a shared upstream — e.g. an
+    attention block's ``q_norm`` and ``k_norm`` each read the ``qkv`` ``unbind``,
+    not one another, or an MLP's ``gate_proj`` and ``up_proj`` that both read the
+    block input.  Chaining them sequentially manufactures a spurious
+    ``gate_proj -> up_proj`` edge (and, for the norm case, a cycle).
+
+    The wrapper (the submodule's parent) records each step's real predecessors in
+    ``forward_step_predecessor_args``.  When those resolve to an already-emitted
+    sibling, feed from there.  When they resolve to the forward input and the
+    caller supplies ``chain_input_index``, feed from the block input instead of
+    the previous sibling.  Falls back to the caller's value whenever the mapping
+    is absent or unresolved, so genuine sequential chains are untouched.
+    """
+    if wrapper is None or attr_last_index is None:
+        return fallback
+    arg_map = (wrapper.forward_step_predecessor_args or {}).get(sub_step.attr_name)
+    if not arg_map:
+        return fallback
+    reads_input = False
+    for src in arg_map.values():
+        if src == FORWARD_METHOD_INPUT:
+            reads_input = True
+            continue
+        resolved = attr_last_index.get(src)
+        if resolved is not None:
+            return resolved
+    if reads_input and chain_input_index is not None:
+        return chain_input_index
+    return fallback
+
+
+def _add_linear_pipeline_chain(
+    graph: ComputationGraph,
+    steps: list[BlockNode],
+    *,
+    wrapper: BlockNode | None,
+    key_prefix: str,
+    attr_last_index: dict[str, int] | None = None,
+    port_label: str | None = None,
+    port_style: PortStyle | None = None,
+    input_index: int | None = None,
+    last_index: int | None = None,
+    fork_from_input: bool = False,
+    branch_from_input_dashed: bool = False,
+    inline_expansion: bool = True,
+) -> tuple[list[int], int | None]:
+    """Add a straight-line chain of nodes, optionally grouped in an inline frame."""
+    if not steps:
+        return [], last_index
+
+    frame = (
+        _start_inline_frame(graph, wrapper)
+        if wrapper is not None and len(steps) > 1
+        else None
+    )
+    indices: list[int] = []
+    chain_last = last_index
+    chain_input_index = last_index if last_index is not None else input_index
+
+    # A submodule attribute name (``kv_norm``) is scoped to the forward method
+    # that names it; two unrelated submodules can legitimately reuse the same
+    # bare attribute name at different nesting depths (an attention module's own
+    # ``kv_norm`` alongside a ``compressor`` submodule's own, distinct
+    # ``kv_norm``). ``attr_last_index`` is one flat dict shared across the whole
+    # recursive expansion, so promoting a step's own name into it here (needed
+    # so a *later sibling in this same steps list*, e.g. ``rotary_emb`` reading
+    # ``compressor``'s own ``kv_norm``, can resolve it) would otherwise
+    # permanently overwrite an ancestor scope's identically-named entry once
+    # this call returns -- corrupting an already-correctly-wired earlier
+    # consumer's edge (an attention's own ``kv = self.kv_norm(...).view(...)``)
+    # when ``_wire_all_predecessor_edges`` later re-resolves it from the
+    # now-stale ``graph.attr_output_indices`` snapshot. Snapshot each step's
+    # pre-call binding (or its absence) so it can be restored once this scope's
+    # own steps are done: the promotion stays visible within this call and
+    # anything nested under it, but does not leak into the caller's scope.
+    outer_bindings: dict[str, int] = {}
+    shadowed_absent: set[str] = set()
+    if attr_last_index is not None:
+        for sub_step in steps:
+            name = sub_step.attr_name
+            if name in outer_bindings or name in shadowed_absent:
+                continue
+            if name in attr_last_index:
+                outer_bindings[name] = attr_last_index[name]
+            else:
+                shadowed_absent.add(name)
+
+    for sub_index, sub_step in enumerate(steps):
+        inner_steps, inner_wrapper = _maybe_inline(
+            sub_step, inline_expansion=inline_expansion
+        )
+        if inner_wrapper is not None:
+            sibling_input = (
+                chain_last
+                if sub_index == 0
+                else _submodule_chain_input(
+                    wrapper, sub_step, attr_last_index, indices[-1]
+                )
+            )
+            inner_indices, inner_tail = _add_linear_pipeline_chain(
+                graph,
+                inner_steps,
+                wrapper=inner_wrapper,
+                key_prefix=f"{key_prefix}:{sub_step.attr_name}",
+                attr_last_index=attr_last_index,
+                input_index=input_index if sub_index == 0 else None,
+                last_index=sibling_input,
+                fork_from_input=fork_from_input and sub_index == 0,
+                branch_from_input_dashed=branch_from_input_dashed and sub_index == 0,
+                port_label=port_label if sub_index == 0 else None,
+                port_style=port_style if sub_index == 0 else None,
+                inline_expansion=inline_expansion,
+            )
+            if frame is not None:
+                for inner_index in inner_indices:
+                    _append_inline_frame_node(frame, inner_index)
+            if attr_last_index is not None:
+                _track_attr_index(attr_last_index, sub_step.attr_name, inner_tail)
+                _track_attr_index(
+                    attr_last_index,
+                    inner_wrapper.attr_name,
+                    inner_tail,
+                    block=inner_wrapper,
+                )
+            indices.extend(inner_indices)
+            chain_last = inner_tail
+            continue
+
+        step_index = _add_node(
+            graph,
+            key=f"{key_prefix}:{sub_step.attr_name}:{sub_index}",
+            block=sub_step,
+            label=inline_wrapper_step_label(wrapper, sub_step, sub_index),
+            sublabel="" if wrapper is not None else None,
+            port_label=port_label if sub_index == 0 else None,
+            port_style=port_style if sub_index == 0 else None,
+        )
+        if frame is not None:
+            _append_inline_frame_node(frame, step_index)
+        if attr_last_index is not None:
+            _track_attr_index(attr_last_index, sub_step.attr_name, step_index)
+
+        explicit_sources = _operation_source_indices(
+            sub_step,
+            attr_last_index,
+            chain_input_index=chain_input_index,
+        )
+        # This frame's entry was resolved by chain position. Where the caller
+        # recorded which producer it passes, prefer that -- resolving it now if
+        # it exists, and otherwise setting it aside, since a frame can be
+        # chained before the argument feeding it has been emitted.
+        if (
+            wrapper is not None
+            and attr_last_index is not None
+            and chain_input_index is not None
+            and chain_input_index in explicit_sources
+            and any(is_method_input(p) for p in (sub_step.operation_predecessors or ()))
+        ):
+            for detail in wrapper.details or ():
+                token = str(detail)
+                if not token.startswith("method_input_producer:"):
+                    continue
+                producer_attr = token.split(":", 1)[1].strip()
+                recorded_index = attr_last_index.get(producer_attr)
+                if recorded_index is None:
+                    graph.deferred_method_inputs.append(
+                        (step_index, producer_attr, chain_input_index)
+                    )
+                elif recorded_index != chain_input_index:
+                    explicit_sources = [
+                        recorded_index if src == chain_input_index else src
+                        for src in explicit_sources
+                    ]
+                break
+        # A consumer reading a specific slice of a multi-output producer
+        # (``up`` is ordinal 1 of a ``gate_up.chunk(2)``) must tag its edge with
+        # that ordinal so the split fans out into per-slice tiles and the right
+        # slice is docked -- otherwise the edge defaults to slice 0 and the
+        # unread slice is left dangling. A producer read at several distinct
+        # ordinals in this one expression (``torch.cat((q_pass, q_rot))``
+        # reassembling a split) repeats that source in ``explicit_sources``, one
+        # entry per ordinal (see ``_operation_source_indices``) -- consume the
+        # recorded ordinals in the same order so each repeat docks its own slot.
+        port_by_source: dict[int, list[int]] = {}
+        if attr_last_index is not None and sub_step.operation_predecessor_ports:
+            for pred_attr, ordinals in sub_step.operation_predecessor_ports.items():
+                pred_index = attr_last_index.get(pred_attr)
+                if pred_index is not None:
+                    port_by_source[pred_index] = list(ordinals)
+        source_use_count: dict[int, int] = {}
+        for source_index in explicit_sources:
+            link = (source_index, step_index)
+            graph.links.append(link)
+            ordinals = port_by_source.get(source_index)
+            if ordinals:
+                use_index = source_use_count.get(source_index, 0)
+                source_use_count[source_index] = use_index + 1
+                if use_index < len(ordinals):
+                    port_str = str(ordinals[use_index])
+                    graph.link_output_ports[link] = _merge_link_output_port(
+                        graph.link_output_ports.get(link), port_str
+                    )
+
+        # An attention kernel core (``SYNTHETIC_ATTENTION``) never takes a raw
+        # spine operand: its query/key/value/mask edges are supplied by the
+        # attention-provenance and ``forward_step_predecessor`` passes, keyed by
+        # its declared input ports. Spine-chaining it from the preceding step
+        # (a compressed-KV attention's last ``Merge``) would fabricate a first
+        # unlabeled edge that then claims the first declared port name in
+        # ``_add_kernel_port_nodes`` — rotating every kernel input off its true
+        # source. The atomic-leaf path skips this same edge via its
+        # ``forward_step_predecessors`` guard; mirror it here for the wrapper
+        # pipeline core so both dock identical, correctly-ordered ports.
+        if (
+            not explicit_sources
+            and not _reads_only_a_side_parameter(sub_step)
+            and not _is_pure_generator_source(sub_step)
+            and sub_step.attr_name != SYNTHETIC_ATTENTION
+        ):
+            if sub_index == 0:
+                if branch_from_input_dashed and input_index is not None:
+                    _link_forward_input(graph, input_index, step_index)
+                else:
+                    use_fork = fork_from_input and input_index is not None
+                    _append_step_link(
+                        graph,
+                        input_index=input_index,
+                        last_index=chain_last,
+                        step_index=step_index,
+                        fork_from_input=use_fork,
+                    )
+            else:
+                # Prefer the AST-recorded predecessor (a shared block input or a
+                # named sibling) over "previous call in source order", so parallel
+                # sibling leaves — an MLP's ``gate_proj`` and ``up_proj`` both off
+                # the block input — do not chain into one another.
+                resolved_source = _submodule_chain_input(
+                    wrapper,
+                    sub_step,
+                    attr_last_index,
+                    indices[-1],
+                    chain_input_index=chain_input_index,
+                )
+                graph.links.append((resolved_source, step_index))
+
+        _append_kernel_second_operand_link(
+            graph,
+            sub_step,
+            step_index=step_index,
+            attr_last_index=attr_last_index,
+            chain_input_index=chain_input_index,
+        )
+
+        indices.append(step_index)
+
+    if attr_last_index is not None and wrapper is not None and indices:
+        # Publish this composite's own multi-return slot producers (``cos``,
+        # ``sin``) into ``attr_last_index`` *before* the scope restore below
+        # pops this call's own step bindings. The caller (the recursive-call
+        # site above) also does this once control returns to it, but by then
+        # this call's own internal producer names (``@op_l157_..._multiply``)
+        # have already been popped/reverted -- too late for
+        # ``_track_attr_index`` to resolve each return ordinal's real
+        # producer, silently collapsing every slot onto the same (wrong,
+        # tail) one. Do it here, one level down, while those bindings are
+        # still live. The stashed slot keys use a separator that can never
+        # collide with a real attr name, so they are untouched by (and
+        # survive) the restore below.
+        _track_attr_index(
+            attr_last_index, wrapper.attr_name, indices[-1], block=wrapper
+        )
+
+    if attr_last_index is not None:
+        for name, value in outer_bindings.items():
+            attr_last_index[name] = value
+        for name in shadowed_absent:
+            attr_last_index.pop(name, None)
+
+    return indices, indices[-1]
+
+
+def _resolve_kernel_second_operand_index(
+    step: BlockNode,
+    attr_last_index: dict[str, int] | None,
+    *,
+    chain_input_index: int | None,
+) -> int | None:
+    """Resolve the optional second operand for an inline kernel sub-op."""
+    second = step.kernel_second_operand
+    if second is None:
+        return None
+    if second == "input":
+        return chain_input_index
+    if attr_last_index is None:
+        return None
+    return attr_last_index.get(second)
+
+
+def _append_kernel_second_operand_link(
+    graph: ComputationGraph,
+    step: BlockNode,
+    *,
+    step_index: int,
+    attr_last_index: dict[str, int] | None,
+    chain_input_index: int | None,
+) -> None:
+    source_index = _resolve_kernel_second_operand_index(
+        step,
+        attr_last_index,
+        chain_input_index=chain_input_index,
+    )
+    if source_index is None:
+        return
+    _append_operand_link(
+        graph,
+        source_index=source_index,
+        target_index=step_index,
+    )
+
+
+def _append_operand_link(
+    graph: ComputationGraph,
+    *,
+    source_index: int,
+    target_index: int,
+) -> None:
+    """Wire an explicit operand into its target tile."""
+    link = (source_index, target_index)
+    if link not in graph.links:
+        graph.links.append(link)
+
+
+def _add_side_producer_index(
+    graph: ComputationGraph,
+    producer: BlockNode,
+    *,
+    segment_index: int,
+    source_attr: str,
+    port_label: str | None,
+    port_style: PortStyle | None,
+    input_index: int | None,
+    attr_last_index: dict[str, int],
+    basic_ops: BasicOpFilter | None = None,
+    link_input: bool = True,
+    inline_expansion: bool = True,
+) -> int | None:
+    """Add a side-path producer, inlining straight-line output gates when possible."""
+    expanded_steps, wrapper = _maybe_inline(
+        producer, basic_ops=basic_ops, inline_expansion=inline_expansion
+    )
+    if wrapper is not None:
+        chain_indices, tail = _add_linear_pipeline_chain(
+            graph,
+            expanded_steps,
+            wrapper=wrapper,
+            key_prefix=f"sideproducer:{segment_index}:{source_attr}",
+            attr_last_index=attr_last_index,
+            port_label=port_label,
+            port_style=port_style or "inline",
+            input_index=input_index if link_input else None,
+            last_index=None,
+            branch_from_input_dashed=True,
+            inline_expansion=inline_expansion,
+        )
+        if tail is not None:
+            _track_attr_index(attr_last_index, wrapper.attr_name, tail, block=wrapper)
+            _track_attr_index(attr_last_index, source_attr, tail)
+        return tail
+
+    block = expanded_steps[0] if len(expanded_steps) == 1 else producer
+    source_index = _add_node(
+        graph,
+        key=f"sideproducer:{segment_index}:{source_attr}",
+        block=block,
+        port_label=port_label,
+        port_style=port_style,
+    )
+    if link_input and input_index is not None:
+        _link_forward_input(graph, input_index, source_index)
+    _track_attr_index(attr_last_index, source_attr, source_index)
+    return source_index
+
+
+def _ensure_side_chain_tail_index(
+    graph: ComputationGraph,
+    segment: SideFeedSegment,
+    side,
+    *,
+    segment_index: int,
+    input_index: int | None,
+    attr_last_index: dict[str, int],
+    root: BlockNode,
+    basic_ops: BasicOpFilter | None = None,
+    inline_expansion: bool = True,
+) -> int | None:
+    """Materialize a prior-step side chain, preserving g_a → g_b style gate pipelines."""
+    source_attr = side.source_chain[-1] if side.source_chain else None
+    if source_attr is None:
+        return None
+
+    cached = attr_last_index.get(source_attr)
+    if cached is not None:
+        return cached
+
+    chain = segment.side_producer_chains.get(source_attr)
+    if not chain:
+        producer = segment.side_producer_nodes.get(source_attr)
+        if producer is None:
+            return None
+        resolved_input = _resolve_primary_input(
+            source_attr, root, attr_last_index, input_index, None
+        )
+        return _add_side_producer_index(
+            graph,
+            producer,
+            segment_index=segment_index,
+            source_attr=source_attr,
+            port_label=side.port_label,
+            port_style="inline",
+            input_index=resolved_input,
+            attr_last_index=attr_last_index,
+            basic_ops=basic_ops,
+            inline_expansion=inline_expansion,
+        )
+
+    tail_index: int | None = None
+    for step in chain:
+        attr = step.attr_name
+        existing = attr_last_index.get(attr)
+        if existing is not None:
+            tail_index = existing
+            continue
+
+        if tail_index is None:
+            # Resolve the step's own primary (non-side) operand the same way a
+            # ``SideFeedSegment`` consumer's primary input is resolved, instead of
+            # assuming a chain step is always fed by the raw method input.
+            # ``root.input_fed_steps`` (the AST's "still reads the pristine
+            # method input" heuristic) is deliberately NOT consulted here: it
+            # also holds names that were reassigned by an intervening view/
+            # reshape on the same variable (its own docstring: "reshapes and
+            # views of the input still are the input") -- correct for labeling,
+            # but wrong for wiring when this step's real predecessor is that
+            # view/reshape op rather than the enclosing forward's raw input
+            # (e.g. ``hidden_states = hidden_states.view(...); self.gate(hidden_states)``:
+            # ``gate``'s true operand is the view's output, not the original
+            # boundary tensor). ``_resolve_primary_input`` already answers this
+            # precisely from the step's own recorded predecessor arg, falling
+            # back to the raw input only when the predecessor genuinely *is*
+            # ``FORWARD_METHOD_INPUT`` or is otherwise unresolvable.
+            resolved_input = _resolve_primary_input(
+                attr, root, attr_last_index, input_index, None
+            )
+            branch_from_input = resolved_input is not None
+            tail_index = _add_side_producer_index(
+                graph,
+                step,
+                segment_index=segment_index,
+                source_attr=attr,
+                port_label=side.port_label if attr == source_attr else None,
+                port_style="inline",
+                input_index=resolved_input,
+                attr_last_index=attr_last_index,
+                basic_ops=basic_ops,
+                link_input=branch_from_input,
+                inline_expansion=inline_expansion,
+            )
+            continue
+
+        step_index = _add_node(
+            graph,
+            key=f"sideproducer:{segment_index}:{attr}",
+            block=step,
+        )
+        graph.links.append((tail_index, step_index))
+        _track_attr_index(attr_last_index, attr, step_index)
+        tail_index = step_index
+
+    return tail_index
+
+
+def _consumer_port_label(sides: list) -> str | None:
+    if not sides:
+        return None
+    labels = [side.port_label for side in sides]
+    if len(set(labels)) == 1:
+        return labels[0]
+    return labels[0]
+
+
+def _upcoming_side_combine(
+    segments: list[ComputationSegment],
+    segment_index: int,
+) -> SideCombineSegment | None:
+    if segment_index + 1 >= len(segments):
+        return None
+    nxt = segments[segment_index + 1]
+    return nxt if isinstance(nxt, SideCombineSegment) else None
+
+
+def _side_source_tail_index(
+    segment: SideCombineSegment,
+    attr_last_index: dict[str, int],
+) -> int | None:
+    for side in segment.sides:
+        if side.source_kind != "prior_step" or not side.source_chain:
+            continue
+        index = attr_last_index.get(side.source_chain[-1])
+        if index is not None:
+            return index
+    return None
+
+
+def _should_fork_main_path_from_input(
+    segments: list[ComputationSegment],
+    segment_index: int,
+    last_index: int | None,
+    attr_last_index: dict[str, int],
+) -> bool:
+    """True when the next step should branch from input, not the router side-path tail."""
+    if last_index is None:
+        return False
+    side_combine = _upcoming_side_combine(segments, segment_index)
+    if side_combine is None:
+        return False
+    side_tail = _side_source_tail_index(side_combine, attr_last_index)
+    return side_tail is not None and side_tail == last_index
+
+
+def _append_step_link(
+    graph: ComputationGraph,
+    *,
+    input_index: int | None,
+    last_index: int | None,
+    step_index: int,
+    fork_from_input: bool,
+) -> None:
+    if fork_from_input:
+        if input_index is not None:
+            graph.links.append((input_index, step_index))
+    elif last_index is not None:
+        graph.links.append((last_index, step_index))
+    elif input_index is not None:
+        # The FIRST step of a module normally opens on what the module was
+        # handed. Not always: a rotary embedding opens on
+        # ``self.inv_freq[None, :, None]``, which reads its own buffer and uses
+        # ``x`` for nothing but a device. That step already has the operand it
+        # reads, and handing it the chain input as well gives a one-operand op
+        # two -- the shape rule reads the first, so the unsqueeze reported the
+        # hidden state's shape and the whole rotary chain was sized from it.
+        if not _node_has_incoming_links(graph, step_index):
+            graph.links.append((input_index, step_index))
+
+
+def _node_has_outgoing_links(graph: ComputationGraph, index: int) -> bool:
+    return any(source == index for source, _target in graph.links)
+
+
+def _node_has_incoming_links(graph: ComputationGraph, index: int) -> bool:
+    return any(target == index for _source, target in graph.links)
+
+
+def _forward_steps_by_attr(root: BlockNode) -> dict[str, BlockNode]:
+    by_attr = {step.attr_name: step for step in root.children if step.attr_name}
+    # A kernel-pipeline attention step (``chunk_kda`` and similar multi-substep
+    # kernels) is materialized under its own ``@attn_pipeline``/``@attn_output``
+    # nodes, not the original ``SYNTHETIC_ATTENTION`` step key its AST-recorded
+    # predecessor metadata (``forward_step_predecessors``) was captured under --
+    # ``_kernel_pipeline_block_nodes`` renames it while decomposing the call.
+    # Alias the original key back to the pipeline's entry node so producer edges
+    # traced by that key (q/k/v/gate projections feeding the kernel) still dock
+    # on the real materialized node instead of being silently dropped.
+    if SYNTHETIC_ATTENTION not in by_attr:
+        pipeline = by_attr.get("@attn_pipeline")
+        # Only fall back to this alias when the pipeline has no labeled tensor
+        # ports of its own. A pipeline that exposes ``tensor_input_labels`` is
+        # already wired port-by-port (each of q/k/v/gate/beta docked onto the
+        # specific substep that consumes it) by ``_add_tensor_ports_segment``;
+        # aliasing this key onto it here would additionally dump every one of
+        # those same producer edges onto whichever node happens to be the
+        # pipeline's first materialized descendant (typically its first
+        # kernel substep), duplicating -- and for every port but that one,
+        # misrouting -- the very edges the per-port pass already placed
+        # correctly.
+        if pipeline is not None and not pipeline.tensor_input_labels:
+            by_attr[SYNTHETIC_ATTENTION] = pipeline
+    return by_attr
+
+
+def _build_block_index_map(graph: ComputationGraph) -> dict[int, int]:
+    """Map ``id(BlockNode) -> first graph-node index`` for identity-scoped lookup.
+
+    ``attr_last_index`` is keyed by ``attr_name``, which repeats across module
+    instances built from the same source line (e.g. every ``Glm5NextRMSNorm``'s
+    ``Cast`` shares one attr_name), and keeps only the *last* occurrence. Scoping
+    a module's first-op lookup by the identity of its own ``BlockNode`` steps
+    routes each instance's boundary edges to its own node instead of collapsing
+    onto whichever instance happened to be emitted last.
+    """
+    index_by_id: dict[int, int] = {}
+    for index, spec in enumerate(graph.nodes):
+        if spec.block is not None:
+            index_by_id.setdefault(id(spec.block), index)
+    return index_by_id
+
+
+def _is_in_subtree(candidate: BlockNode, root: BlockNode) -> bool:
+    """True when *candidate* is *root* itself or any descendant of it (by identity)."""
+    target = id(candidate)
+    stack = [root]
+    seen: set[int] = set()
+    while stack:
+        block = stack.pop()
+        if block is None or id(block) in seen:
+            continue
+        if id(block) == target:
+            return True
+        seen.add(id(block))
+        stack.extend(getattr(block, "children", []) or [])
+    return False
+
+
+def _scoped_producer_index(
+    module: BlockNode,
+    graph: ComputationGraph,
+) -> int | None:
+    """Last graph-node index produced *within this module instance's own subtree*.
+
+    ``attr_last_index`` is one flat, last-write-wins map keyed by bare
+    ``attr_name``. Two unrelated submodules can legitimately reuse the same bare
+    name at different nesting depths (an attention module's own ``kv_proj``
+    alongside a nested compressor's own, distinct ``kv_proj``). When a consumer
+    names such a bare producer, the flat lookup can resolve to whichever instance
+    was emitted *last* -- a sibling submodule's inner node in a foreign scope,
+    not this consumer's own sibling. Given the intended producer's own
+    ``BlockNode`` (looked up by identity among the consumer's direct forward
+    steps), return its real output node: the last graph node whose block lies in
+    that producer's own subtree (preferring one carrying the producer's own
+    ``attr_name``, mirroring the flat map's "last write for this attr" semantics,
+    scoped to this instance). Identity-scoped, so it never crosses into another
+    same-named instance.
+    """
+    subtree_ids: set[int] = set()
+    stack = [module]
+    while stack:
+        block = stack.pop()
+        if block is None or id(block) in subtree_ids:
+            continue
+        subtree_ids.add(id(block))
+        stack.extend(getattr(block, "children", []) or [])
+    best_named: int | None = None
+    best_any: int | None = None
+    for index, spec in enumerate(graph.nodes):
+        if spec.block is None or id(spec.block) not in subtree_ids:
+            continue
+        best_any = index
+        if spec.block.attr_name == module.attr_name:
+            best_named = index
+    return best_named if best_named is not None else best_any
+
+
+def _first_graph_index_for_module(
+    module: BlockNode,
+    attr_last_index: dict[str, int],
+    block_index_by_id: dict[int, int] | None = None,
+) -> int | None:
+    steps = collect_function_steps(module)
+    if not steps:
+        return attr_last_index.get(module.attr_name)
+    # Select this module's entry op by forward order (as before), then resolve it
+    # to *its own* graph-node index by identity. ``attr_last_index`` is keyed by
+    # attr_name and keeps only the last occurrence, so instances built from the
+    # same source line (every RMSNorm's ``Cast``) otherwise collapse onto whichever
+    # was emitted last. Resolving by identity keeps the same target op — no earlier
+    # node is chosen — so wiring stays acyclic while the collision is removed.
+    #
+    # The literal first-by-forward-order op is not always a genuine entry point:
+    # a straight-line composite may open with a *chain* of module-constant-only
+    # ops (a grouped linear's own ``self.weight.view(...).transpose(...)`` — no
+    # forward-param read anywhere in the chain, only a constant/buffer operand
+    # and host-scalar axis args, each op merely feeding the next by name) before
+    # its first op that actually consumes a caller argument. Docking a caller's
+    # real edge on any op in that closure would fabricate a tensor operand it
+    # never takes; ``_reads_only_module_constants`` alone only recognizes the
+    # closure's own root (empty ``operation_predecessors``), not a later link in
+    # the same chain (whose own operand is a *local sibling* op, not directly a
+    # module constant) — so walk each candidate's operand closure, following
+    # only predecessors that are this module's own steps, and treat it as a
+    # non-entry point when every leaf the closure bottoms out at is itself
+    # constant-only. Skip past any such leading closure; fall back to the
+    # literal first when every step in the module qualifies (nothing to skip
+    # to).
+    ordered = sorted(steps, key=lambda step: step.forward_order or 0)
+    by_attr = {step.attr_name: step for step in ordered}
+    memo: dict[str, bool] = {}
+
+    def _fed_only_by_module_constants(step: "BlockNode", stack: set[str]) -> bool:
+        name = step.attr_name
+        cached = memo.get(name)
+        if cached is not None:
+            return cached
+        if name in stack:
+            # A cycle within this module's own steps should not occur; treat it
+            # as inconclusive rather than infinitely recursing.
+            return True
+        if _reads_only_module_constants(step):
+            memo[name] = True
+            return True
+        if not step.operation_predecessors:
+            memo[name] = False
+            return False
+        stack.add(name)
+        result = True
+        for pred in step.operation_predecessors:
+            if pred == FORWARD_METHOD_INPUT:
+                result = False
+                break
+            pred_step = by_attr.get(pred)
+            if pred_step is None or not _fed_only_by_module_constants(pred_step, stack):
+                result = False
+                break
+        stack.discard(name)
+        memo[name] = result
+        return result
+
+    first = next(
+        (step for step in ordered if not _fed_only_by_module_constants(step, set())),
+        ordered[0],
+    )
+    if block_index_by_id is not None and id(first) in block_index_by_id:
+        return block_index_by_id[id(first)]
+    return attr_last_index.get(first.attr_name)
+
+
+def _loop_frame_label(loop_detail: str) -> str:
+    """``loop: 288 iterations`` / ``loop: repeated`` -> ``loop iterations: <count>``."""
+    body = loop_detail.split(":", 1)[1].strip() if ":" in loop_detail else ""
+    count = body[: -len(" iterations")] if body.endswith(" iterations") else body
+    return f"loop iterations: {count or 'repeated'}"
+
+
+def _add_loop_frames(graph: ComputationGraph) -> None:
+    """Group contiguous loop-body operations without introducing graph cycles."""
+    active_detail: str | None = None
+    active_indices: list[int] = []
+
+    def flush() -> None:
+        nonlocal active_detail, active_indices
+        if active_detail is not None and len(active_indices) >= 2:
+            graph.inline_frames.append(
+                InlineFrameSpec(
+                    frame_id=f"loop:{graph.nodes[active_indices[0]].key}",
+                    # ``Loop · 288 iterations`` sanitises to
+                    # ``Loop_288_iterations``, which buries the count in the
+                    # middle of the name -- a reader (or a parser) has to know
+                    # the shape of the phrase to find it. Put the count last
+                    # after a fixed prefix, so every loop frame reads
+                    # ``loop_iterations_<count>`` and the count is simply the
+                    # tail. Two sibling loops with the same count still get
+                    # distinct namespaces: ``_duplicate_frame_labels`` falls
+                    # back to the frame id when a label repeats.
+                    label=_loop_frame_label(active_detail),
+                    node_indices=list(active_indices),
+                )
+            )
+        active_detail = None
+        active_indices = []
+
+    for index, spec in enumerate(graph.nodes):
+        loop_detail = next(
+            (
+                detail
+                for detail in (spec.block.details if spec.block is not None else [])
+                if detail.startswith("loop:")
+            ),
+            None,
+        )
+        if loop_detail != active_detail:
+            flush()
+            active_detail = loop_detail
+        if loop_detail is not None:
+            active_indices.append(index)
+    flush()
+
+
+def _collect_loop_carried(
+    root: BlockNode, exclude_carried_from: frozenset[int] | None = None
+) -> list:
+    """Gather loop_carried specs from root and all inlined children.
+
+    ``exclude_carried_from`` holds ``id()`` values of child blocks that are
+    independently re-exported as their own nested diagram. Such a child
+    materializes its own loop-carried boundary in that diagram, so pulling its
+    spec into this (ancestor) scope too would duplicate the loop with a boundary
+    that is only correct in the child's scope. Children whose loop is *only*
+    visible here — e.g. an inlined ``for blk in self.blocks`` ModuleList — are
+    still collected.
+    """
+    from TraceLens.ModelUtils.ast_analyze import LoopCarriedSpec
+
+    exclude = exclude_carried_from or frozenset()
+    specs: list[LoopCarriedSpec] = list(root.loop_carried)
+    for child in root.children:
+        if id(child) in exclude:
+            continue
+        specs.extend(child.loop_carried)
+    return specs
+
+
+def _add_loop_carried_nodes(
+    graph: ComputationGraph,
+    root: BlockNode,
+    exclude_carried_from: frozenset[int] | None = None,
+) -> None:
+    """Materialize acyclic loop-result boundaries for values updated by a loop."""
+    all_carried = _collect_loop_carried(root, exclude_carried_from)
+    if not all_carried:
+        return
+    attr_last_index = _rebuild_attr_last_index(graph)
+    input_index = next(
+        (
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.synthetic == SYNTHETIC_INPUT
+        ),
+        None,
+    )
+    for carried in all_carried:
+        # ``initial_producer is None`` marks an accumulator seeded by an empty
+        # literal: there is no node outside the loop to wire from, and the
+        # carried-in boundary is itself the origin.
+        seeded_empty = carried.initial_producer is None
+        initial_index = (
+            None
+            if seeded_empty
+            else (
+                input_index
+                if carried.initial_producer == FORWARD_METHOD_INPUT
+                else attr_last_index.get(carried.initial_producer)
+            )
+        )
+        updated_index = attr_last_index.get(carried.updated_producer)
+        if updated_index is None or (initial_index is None and not seeded_empty):
+            continue
+        member_indices = {
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.block is not None and spec.block.attr_name in carried.operation_ids
+        }
+        # A ``for blk in self.blocks: h = blk(h)`` loop carries its value through a
+        # ModuleList child expanded as an inline frame, whose interior nodes carry
+        # the child block's attr_name rather than the ModuleList's. Pull in every
+        # node of a frame whose id is a recorded loop member so the carried-in
+        # boundary reroutes the initial value into the loop body's real consumer.
+        for frame in graph.inline_frames:
+            if frame.frame_id in carried.operation_ids:
+                member_indices.update(frame.node_indices)
+        matching_frames = [
+            frame
+            for frame in graph.inline_frames
+            if member_indices and member_indices.issubset(set(frame.node_indices))
+        ]
+        loop_frame = (
+            min(matching_frames, key=lambda f: len(f.node_indices))
+            if matching_frames
+            else None
+        )
+        # The iteration count belongs in the "Loop in" label; when the trip count
+        # is not statically known, fall back to a symbolic ``N`` rather than a bare
+        # count so the loop still reads as bounded by some iteration variable.
+        count_token = (
+            str(carried.iteration_count) if carried.iteration_count is not None else "N"
+        )
+        iter_sublabel = (
+            f"{carried.variable} · {carried.iteration_count} iterations"
+            if carried.iteration_count is not None
+            else f"{carried.variable} · repeated"
+        )
+        in_node_index = _add_node(
+            graph,
+            key=f"@loop_carried_in:{carried.loop_id}:{carried.variable}",
+            label=f"Loop in - iterations:{count_token}",
+            sublabel=iter_sublabel,
+            synthetic=SYNTHETIC_LOOP_CARRIED,
+        )
+        out_node_index = _add_node(
+            graph,
+            key=f"@loop_carried_out:{carried.loop_id}:{carried.variable}",
+            label="Loop out",
+            sublabel=iter_sublabel,
+            synthetic=SYNTHETIC_LOOP_CARRIED,
+        )
+
+        rewired: list[tuple[int, int]] = []
+        for source, target in graph.links:
+            if source == updated_index and target not in member_indices:
+                # Route outgoing edges from the loop's updated value through
+                # the "out" boundary node.
+                rewired.append((out_node_index, target))
+                port = graph.link_port_labels.pop((source, target), None)
+                if port:
+                    graph.link_port_labels[(out_node_index, target)] = port
+                output_port = graph.link_output_ports.pop((source, target), None)
+                if output_port:
+                    graph.link_output_ports[(out_node_index, target)] = output_port
+            elif source == initial_index and target in member_indices:
+                # Route the initial value into the loop body through the "in"
+                # boundary node so the dependency is visible.
+                rewired.append((in_node_index, target))
+                port = graph.link_port_labels.pop((source, target), None)
+                if port:
+                    graph.link_port_labels[(in_node_index, target)] = port
+            else:
+                rewired.append((source, target))
+        graph.links = rewired
+        if initial_index is not None:
+            graph.links.append((initial_index, in_node_index))
+            graph.link_port_labels[(initial_index, in_node_index)] = "initial"
+        graph.links.append((updated_index, out_node_index))
+        graph.link_port_labels[(updated_index, out_node_index)] = "updated"
+        graph.links.append((out_node_index, in_node_index))
+        graph.link_port_labels[(out_node_index, in_node_index)] = "next iteration"
+        graph.loop_carried_nodes[carried.updated_producer] = out_node_index
+        if loop_frame is not None:
+            # Place the carried-boundary nodes in the same frame *stack* as the
+            # loop body's producer. The innermost loop frame is nested inside any
+            # enclosing composite frame (e.g. an inlined submodule); if the
+            # boundary nodes were added only to the innermost frame they would
+            # inherit a shallower namespace than the body and render as a
+            # separate sibling loop group one level too high. Adding them to
+            # every frame that already contains ``updated_index`` keeps the
+            # boundary and the body in one loop group.
+            for frame in graph.inline_frames:
+                if updated_index in frame.node_indices:
+                    frame.node_indices.extend([in_node_index, out_node_index])
+
+
+def _predecessor_map(graph: ComputationGraph) -> dict[int, list[int]]:
+    preds: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    for source, target in graph.links:
+        preds[target].append(source)
+    return preds
+
+
+def _live_node_indices_to_fixpoint(
+    graph: ComputationGraph,
+    seeds: list[int],
+) -> set[int]:
+    """Backward close seeds under predecessors until the live set reaches a fixed point.
+
+    Long operand chains and cyclic graphs both require repeated predecessor expansion.
+    Conditional alternative links are materialized first so branch recurrences are included.
+    """
+    _add_conditional_alternative_links(graph)
+    keep = set(seeds)
+    changed = True
+    while changed:
+        changed = False
+        preds = _predecessor_map(graph)
+        for index in list(keep):
+            for pred in preds[index]:
+                if pred not in keep:
+                    keep.add(pred)
+                    changed = True
+    return keep
+
+
+def _dead_node_indices(
+    graph: ComputationGraph,
+    root: BlockNode,
+    *,
+    strip_unused_return_branches: bool,
+) -> set[int]:
+    """Nodes not on any path feeding kept return values."""
+    if graph.primary_output_index is None or not root.primary_output_step:
+        return set()
+    if not strip_unused_return_branches or not root.multi_return_module:
+        return set()
+
+    seed_indices = [graph.primary_output_index]
+    referenced_returns = root.referenced_return_producers
+    if referenced_returns:
+        seed_indices.extend(
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.block is not None
+            and spec.block.attr_name in referenced_returns
+            and index not in seed_indices
+        )
+        seed_indices.extend(
+            index
+            for producer, index in graph.loop_carried_nodes.items()
+            if producer in referenced_returns and index not in seed_indices
+        )
+    keep = _live_node_indices_to_fixpoint(graph, seed_indices)
+
+    dead: set[int] = set()
+    for index, spec in enumerate(graph.nodes):
+        if index in keep:
+            continue
+        if spec.synthetic in {SYNTHETIC_INPUT, SYNTHETIC_OUTPUT}:
+            continue
+        dead.add(index)
+    return dead
+
+
+def _apply_dead_code_elimination(
+    graph: ComputationGraph,
+    root: BlockNode,
+    *,
+    strip_unused_return_branches: bool,
+) -> ComputationGraph:
+    """Remove unreachable nodes, iterating until the graph reaches a fixed point."""
+    if not strip_unused_return_branches or not root.multi_return_module:
+        graph.dead_node_indices = set()
+        return graph
+
+    max_passes = max(len(graph.nodes), 1) + 1
+    for _ in range(max_passes):
+        dead = _dead_node_indices(
+            graph,
+            root,
+            strip_unused_return_branches=True,
+        )
+        graph.dead_node_indices = dead
+        if not dead:
+            return graph
+        pruned = _strip_dead_nodes(graph)
+        if len(pruned.nodes) >= len(graph.nodes):
+            return pruned
+        graph = pruned
+
+    graph.dead_node_indices = _dead_node_indices(
+        graph,
+        root,
+        strip_unused_return_branches=True,
+    )
+    return graph
+
+
+def _prune_computation_nodes(
+    graph: ComputationGraph,
+    remove_indices: set[int],
+) -> ComputationGraph:
+    """Drop selected nodes and bridge links across removed vertices."""
+    if not remove_indices:
+        return graph
+
+    preds: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    succs: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    for source, target in graph.links:
+        preds[target].append(source)
+        succs[source].append(target)
+
+    def _expand_preds(index: int, visiting: frozenset[int] | None = None) -> list[int]:
+        if index not in remove_indices:
+            return [index]
+        active = visiting or frozenset()
+        if index in active:
+            return []
+        expanded: list[int] = []
+        for source in preds[index]:
+            expanded.extend(_expand_preds(source, active | {index}))
+        return expanded
+
+    def _expand_succs(index: int, visiting: frozenset[int] | None = None) -> list[int]:
+        if index not in remove_indices:
+            return [index]
+        active = visiting or frozenset()
+        if index in active:
+            return []
+        expanded: list[int] = []
+        for target in succs[index]:
+            expanded.extend(_expand_succs(target, active | {index}))
+        return expanded
+
+    # Surviving links keep their original ``graph.links`` order *and*
+    # multiplicity -- a consumer that reassembles two different slices of the
+    # same multi-output producer in one expression legitimately repeats the
+    # same (source, target) pair (one parallel edge per slice, ports recorded
+    # in ``link_output_ports`` as a list); collapsing that pair into a single
+    # entry here would silently drop the second slice's edge. Track a
+    # dedicated set of the *synthesized* bridge pairs only (the loop below),
+    # so those still collapse when multiple removed paths converge on the same
+    # (kept_source, kept_target) crossing -- a plain ``set`` for the surviving
+    # copy would also emit links in hash order, which silently reorders the
+    # incoming edges of untouched elementwise ops (an RMSNorm ``x * rsqrt``
+    # whose operands flip so the width-1 factor lands at ``inputs[0]``),
+    # corrupting shape inference.
+    bridged_links: list[tuple[int, int]] = []
+    bridge_pairs_added: set[tuple[int, int]] = set()
+    bridged_port_labels: dict[tuple[int, int], str] = {}
+    bridged_output_ports: dict[tuple[int, int], str | list[str]] = {}
+    for source, target in graph.links:
+        if source in remove_indices or target in remove_indices:
+            continue
+        bridged_links.append((source, target))
+        bridge_pairs_added.add((source, target))
+        port_label = graph.link_port_labels.get((source, target))
+        if port_label:
+            bridged_port_labels[(source, target)] = port_label
+        output_port = graph.link_output_ports.get((source, target))
+        if output_port:
+            bridged_output_ports[(source, target)] = output_port
+    for removed in remove_indices:
+        for source in preds[removed]:
+            for target in succs[removed]:
+                port_label = graph.link_port_labels.get(
+                    (source, removed)
+                ) or graph.link_port_labels.get((removed, target))
+                for kept_source in _expand_preds(source):
+                    for kept_target in _expand_succs(target):
+                        if kept_source == kept_target:
+                            continue
+                        bridge_key = (kept_source, kept_target)
+                        if bridge_key not in bridge_pairs_added:
+                            bridge_pairs_added.add(bridge_key)
+                            bridged_links.append(bridge_key)
+                        if (
+                            port_label
+                            and (kept_source, kept_target) not in bridged_port_labels
+                        ):
+                            bridged_port_labels[(kept_source, kept_target)] = port_label
+                        output_port = graph.link_output_ports.get(
+                            (source, removed)
+                        ) or graph.link_output_ports.get((removed, target))
+                        if (
+                            output_port
+                            and (kept_source, kept_target) not in bridged_output_ports
+                        ):
+                            bridged_output_ports[(kept_source, kept_target)] = (
+                                output_port
+                            )
+
+    old_to_new: dict[int, int] = {}
+    new_nodes: list[GraphNodeSpec] = []
+    for index, spec in enumerate(graph.nodes):
+        if index in remove_indices:
+            continue
+        old_to_new[index] = len(new_nodes)
+        new_nodes.append(spec)
+
+    def _remap(index: int | None) -> int | None:
+        if index is None:
+            return None
+        return old_to_new.get(index)
+
+    filtered = ComputationGraph(
+        nodes=new_nodes,
+        links=[
+            (kept_source, kept_target)
+            for source, target in bridged_links
+            if (kept_source := _remap(source)) is not None
+            and (kept_target := _remap(target)) is not None
+        ],
+        link_port_labels={
+            (kept_source, kept_target): label
+            for (source, target), label in bridged_port_labels.items()
+            if (kept_source := _remap(source)) is not None
+            and (kept_target := _remap(target)) is not None
+        },
+        link_output_ports={
+            (kept_source, kept_target): port
+            for (source, target), port in bridged_output_ports.items()
+            if (kept_source := _remap(source)) is not None
+            and (kept_target := _remap(target)) is not None
+        },
+        excluded_output_indices={
+            _remap(index)
+            for index in graph.excluded_output_indices
+            if _remap(index) is not None
+        },
+        primary_output_index=_remap(graph.primary_output_index),
+        output_node_index=_remap(graph.output_node_index),
+        output_ports={
+            port: kept
+            for port, index in graph.output_ports.items()
+            if (kept := _remap(index)) is not None
+        },
+        primary_output_port=graph.primary_output_port,
+        loop_carried_nodes={
+            producer: kept
+            for producer, index in graph.loop_carried_nodes.items()
+            if (kept := _remap(index)) is not None
+        },
+        attr_output_indices={
+            attr: kept
+            for attr, index in graph.attr_output_indices.items()
+            if (kept := _remap(index)) is not None
+        },
+        dead_node_indices=set(),
+    )
+
+    for frame in graph.inline_frames:
+        kept_indices = [
+            _remap(index) for index in frame.node_indices if _remap(index) is not None
+        ]
+        if len(kept_indices) >= 2:
+            filtered.inline_frames.append(
+                InlineFrameSpec(
+                    frame_id=frame.frame_id,
+                    label=frame.label,
+                    sublabel=frame.sublabel,
+                    node_indices=kept_indices,
+                    transparent=frame.transparent,
+                )
+            )
+
+    return filtered
+
+
+def _filter_graph_basic_only(graph: ComputationGraph) -> ComputationGraph:
+    """Drop modeled-op nodes and bridge links across removed vertices."""
+    remove_indices = {
+        index
+        for index, spec in enumerate(graph.nodes)
+        if not keep_detail_graph_node(
+            block=spec.block,
+            synthetic=spec.synthetic,
+            label=spec.label,
+            basic_only=True,
+        )
+    }
+    return _prune_computation_nodes(graph, remove_indices)
+
+
+def _strip_dead_nodes(graph: ComputationGraph) -> ComputationGraph:
+    """Remove branch tails that do not feed the primary return value."""
+    return _prune_computation_nodes(graph, set(graph.dead_node_indices))
+
+
+def _strip_dangling_leaves(
+    graph: ComputationGraph,
+    root: BlockNode | None = None,
+) -> ComputationGraph:
+    """Remove nodes with no outgoing edges that are not outputs or other sinks."""
+    source_indices = {source for source, _target in graph.links}
+    kept_sinks = {graph.primary_output_index, graph.output_node_index}
+    kept_sinks.update(graph.output_ports.values())
+    kept_sinks.update(graph.loop_carried_nodes.values())
+    # Keep attr_output_indices only for attrs that are referenced as return producers
+    # -- either read further downstream by the caller (``referenced_return_producers``)
+    # or bound to one of this module's own ``return a, b, ...`` tuple slots
+    # (``forward_return_slots``). A non-primary tuple slot (e.g. the ``cos`` half of
+    # ``return cos.to(...), sin.to(...)``) has no outgoing graph edge of its own at
+    # this point -- its only consumer is the ``@output`` port wiring that
+    # ``add_forward_output`` performs afterwards -- so without this it would be
+    # indistinguishable from a genuinely dangling leaf and get pruned here.
+    referenced = root.referenced_return_producers if root is not None else set()
+    return_producers = (
+        set(root.forward_return_slots.values()) if root is not None else set()
+    )
+    protected_attrs = referenced | return_producers
+    for attr, index in graph.attr_output_indices.items():
+        if attr in protected_attrs:
+            kept_sinks.add(index)
+    kept_sinks.discard(None)
+
+    sink_synthetics = {SYNTHETIC_OUTPUT, SYNTHETIC_LOOP_CARRIED}
+    # Never strip nodes inside inline frames — their internal topology must stay intact.
+    framed_indices: set[int] = set()
+    for frame in graph.inline_frames:
+        framed_indices.update(frame.node_indices)
+    # Keep nodes fed by framed nodes — stripping them would orphan the frame.
+    fed_by_frame: set[int] = set()
+    for src, tgt in graph.links:
+        if src in framed_indices and tgt not in framed_indices:
+            fed_by_frame.add(tgt)
+
+    dangling: set[int] = set()
+    for index, spec in enumerate(graph.nodes):
+        if index in source_indices:
+            continue
+        if index in kept_sinks:
+            continue
+        if index in framed_indices:
+            continue
+        if index in fed_by_frame:
+            continue
+        if spec.synthetic in sink_synthetics:
+            continue
+        # Only strip non-synthetic leaves (real ops with no consumers).
+        if spec.synthetic is not None:
+            continue
+        dangling.add(index)
+    if not dangling:
+        return graph
+    return _prune_computation_nodes(graph, dangling)
+
+
+def _producer_label_from_attr(attr_name: str) -> str:
+    """Map a modeling attr name to a short upstream operator label."""
+    lowered = attr_name.lower()
+    if "proj" in lowered:
+        return "Linear"
+    if "conv" in lowered:
+        return "Conv1d"
+    if "norm" in lowered:
+        return "RMSNorm"
+    return attr_name.replace("_", " ")
+
+
+def _tensor_port_input_sublabels(
+    attention_inputs: dict[str, list[str]],
+) -> dict[str, str]:
+    """Format per-port upstream hints like ``← Linear`` from provenance chains."""
+    labels: dict[str, str] = {}
+    for port, chain in attention_inputs.items():
+        if not chain:
+            continue
+        source = _producer_label_from_attr(chain[-1])
+        head = source.split(" in ", 1)[0]
+        labels[port] = f"← {head}"
+    return labels
+
+
+def _label_multi_input_kernel_edges(
+    graph: ComputationGraph,
+    step_entries: dict[str, int],
+    step_indices: dict[str, int],
+    tensor_links: list[tuple[int, int]],
+) -> None:
+    """Add port labels to incoming edges of kernel steps that have more than one input."""
+    all_kernel_indices = set(step_entries.values()) | set(step_indices.values())
+    inputs_per_target: dict[int, list[tuple[int, int]]] = {}
+    for source, target in graph.links:
+        if target in all_kernel_indices:
+            inputs_per_target.setdefault(target, []).append((source, target))
+    tensor_link_set = set(tensor_links)
+    for target, edges in inputs_per_target.items():
+        if len(edges) < 2:
+            continue
+        # What the KERNEL calls this operand, taken from its own call site,
+        # beats the label of whatever produced it -- a decomposed Triton stage
+        # is labelled with a glyph for the arithmetic it does, which names
+        # nothing and may not even be printable.
+        target_spec = graph.nodes[target] if target < len(graph.nodes) else None
+        operand_parameters = (
+            _kernel_operand_parameters(target_spec) if target_spec is not None else {}
+        )
+        for source, tgt in edges:
+            if (source, tgt) in graph.link_port_labels:
+                continue
+            source_spec = graph.nodes[source] if source < len(graph.nodes) else None
+            if source_spec is None:
+                continue
+            source_attr = (
+                str(source_spec.block.attr_name)
+                if source_spec.block is not None
+                else ""
+            )
+            parameter = operand_parameters.get(source_attr) or operand_parameters.get(
+                _kernel_stage_attr(source_attr)
+            )
+            if parameter:
+                label = parameter
+            elif (source, tgt) in tensor_link_set:
+                label = source_spec.label or ""
+            else:
+                label = source_spec.label or source_spec.key or ""
+            if label:
+                graph.link_port_labels[(source, tgt)] = label
+
+
+def _add_tensor_ports_segment(
+    graph: ComputationGraph,
+    segment: TensorPortsSegment,
+    *,
+    key_prefix: str,
+    port_sublabels: dict[str, str] | None = None,
+    inline_expansion: bool = True,
+) -> int | None:
+    """Add labeled tensor inputs fanning into the pipeline steps that consume them."""
+    if not segment.steps:
+        return None
+
+    step_indices: dict[str, int] = {}
+    step_entries: dict[str, int] = {}
+    input_operand_attrs: dict[str, list[str]] = {}
+    step_attr_indices: dict[str, dict[str, int]] = {}
+    for step_index, step in enumerate(segment.steps):
+        if step.children and len(step.children) >= 2:
+            attr_last_index: dict[str, int] = {}
+            input_operand_attrs[step.attr_name] = [
+                child.attr_name
+                for child in step.children
+                if child.kernel_second_operand == "input"
+            ]
+            sub_indices, sub_tail = _add_linear_pipeline_chain(
+                graph,
+                step.children,
+                wrapper=step,
+                key_prefix=f"{key_prefix}:pipeline:{step.attr_name}",
+                attr_last_index=attr_last_index,
+                inline_expansion=inline_expansion,
+            )
+            # ``_add_linear_pipeline_chain`` treats ``attr_last_index`` as a
+            # scope-tracking dict shared across nested recursive calls: any
+            # name it didn't already hold before this call is popped again on
+            # return (so a submodule's own attribute names don't leak into an
+            # unrelated sibling scope). That scrubs out exactly the substep
+            # bindings (``..._sub_3``) this lookup needs, since the dict was
+            # fresh/empty going in. Rebuild the mapping straight from the
+            # positional ``sub_indices`` this call returned instead -- each
+            # non-inlined child in ``step.children`` contributes exactly one
+            # index, in order, so this survives the scope restore above.
+            step_attr_indices[step.attr_name] = {
+                child.attr_name: index
+                for child, index in zip(step.children, sub_indices)
+            }
+            step_indices[step.attr_name] = (
+                sub_tail if sub_tail is not None else sub_indices[-1]
+            )
+            step_entries[step.attr_name] = sub_indices[0]
+            for pred_attr in step.kernel_predecessors:
+                pred_index = step_indices.get(pred_attr)
+                if pred_index is not None:
+                    graph.links.append((pred_index, sub_indices[0]))
+            continue
+
+        node_index = _add_node(
+            graph,
+            key=f"{key_prefix}:pipeline:{step.attr_name}:{step_index}",
+            block=step,
+        )
+        step_indices[step.attr_name] = node_index
+        step_entries[step.attr_name] = node_index
+        for pred_attr in step.kernel_predecessors:
+            pred_index = step_indices.get(pred_attr)
+            if pred_index is not None:
+                graph.links.append((pred_index, node_index))
+
+    default_target = segment.steps[0].attr_name
+    tensor_links: list[tuple[int, int]] = []
+    for label_index, label in enumerate(segment.labels):
+        target_attr = segment.targets.get(label, default_target)
+        target_index = step_entries.get(target_attr)
+        if target_index is None:
+            target_index = step_indices.get(target_attr)
+        if target_index is None:
+            continue
+        port_index = _add_node(
+            graph,
+            key=f"{key_prefix}:tensor:{label_index}",
+            label=label,
+            sublabel=(port_sublabels or {}).get(label),
+            synthetic=SYNTHETIC_TENSOR,
+        )
+        graph.links.append((port_index, target_index))
+        tensor_links.append((port_index, target_index))
+        for child_attr in input_operand_attrs.get(target_attr, []):
+            child_index = step_attr_indices.get(target_attr, {}).get(child_attr)
+            if child_index is not None:
+                graph.links.append((port_index, child_index))
+                tensor_links.append((port_index, child_index))
+
+    _label_multi_input_kernel_edges(graph, step_entries, step_indices, tensor_links)
+
+    return step_indices.get(segment.steps[-1].attr_name)
+
+
+def _side_slot_sources(
+    root: BlockNode,
+    sides: Sequence[SideInputSpec],
+    attr_last_index: dict[str, int],
+) -> dict[int, int]:
+    """Give each side feed its own slot of the module they all read.
+
+    ``topk_idx, topk_weight = self.gate(...)`` then
+    ``self.moe_infer(x, topk_idx, topk_weight)``: both side feeds trace back to
+    ``gate``, and resolving each to that module's LAST op handed the
+    aggregation the routing WEIGHTS twice while the expert INDICES never
+    arrived. The module publishes one producer per return slot, so an unpack
+    that consumes ALL of them maps side by side onto them in order -- the only
+    order a tuple can be unpacked in.
+
+    Requiring the counts to match keeps this to a full unpack. A call that
+    takes just one slot of a multi-slot return says nothing about WHICH, so it
+    keeps the module's own tail and the wiring is unchanged.
+    """
+    positions_by_attr: dict[str, list[int]] = {}
+    for position, side in enumerate(sides):
+        attr = side.source_chain[-1] if side.source_chain else None
+        if attr and side.source_kind != "forward_input":
+            positions_by_attr.setdefault(attr, []).append(position)
+
+    slot_sources: dict[int, int] = {}
+    for attr, positions in positions_by_attr.items():
+        producers = root.forward_step_return_producers.get(attr) or []
+        if len(positions) < 2 or len(positions) != len(producers):
+            continue
+        for ordinal, position in enumerate(positions):
+            resolved = attr_last_index.get(producers[ordinal])
+            if resolved is not None:
+                slot_sources[position] = resolved
+    return slot_sources
+
+
+def _fanout_merge_key_prefix(merge: BlockNode, segment_index: int) -> str:
+    """Stable node-id prefix for fan-out merge steps."""
+    if merge.class_name == "KernelPipeline" and merge.attr_name:
+        return merge.attr_name.lstrip("@")
+    return f"merge:{segment_index}"
+
+
+def build_computation_graph(
+    root: BlockNode,
+    *,
+    prefix_steps: list[BlockNode] | None = None,
+    include_input: bool = True,
+    basic_ops: BasicOpFilter | None = None,
+    strip_unused_return_branches: bool = False,
+    inline_expansion: bool = True,
+    exclude_carried_from: frozenset[int] | None = None,
+) -> ComputationGraph:
+    """Convert a block tree into a directed acyclic computation graph.
+
+    ``exclude_carried_from`` lists ``id()`` values of direct-child blocks that
+    the caller renders as their own nested diagram; their loop-carried specs are
+    materialized there and are skipped in this scope to avoid a duplicate loop.
+    """
+    graph = ComputationGraph()
+
+    if root.is_basic or not root.children:
+        input_index = _add_forward_input(graph, root) if include_input else None
+        node_index = _add_node(graph, key=root.attr_name, block=root)
+        if input_index is not None:
+            graph.links.append((input_index, node_index))
+            graph.primary_output_index = node_index
+            add_forward_output(graph, root=root)
+        return graph
+
+    resolved_include_input = include_input and not root.tensor_input_labels
+    segments = flatten_computation_segments(root)
+    input_index = _add_forward_input(graph, root) if resolved_include_input else None
+
+    last_index: int | None = None
+    attr_last_index: dict[str, int] = {}
+    for prefix_index, step in enumerate(prefix_steps or []):
+        if not is_method_wrapper(step):
+            continue
+        step_index = _add_method_wrapper_node(
+            graph,
+            step,
+            key=f"prefix:{step.attr_name}:{prefix_index}",
+        )
+        if last_index is not None:
+            graph.links.append((last_index, step_index))
+        elif input_index is not None:
+            graph.links.append((input_index, step_index))
+        last_index = step_index
+        _track_attr_index(attr_last_index, step.attr_name, step_index)
+
+    for segment_index, segment in enumerate(segments):
+        if isinstance(segment, TensorPortsSegment):
+            tail = _add_tensor_ports_segment(
+                graph,
+                segment,
+                key_prefix=f"{root.attr_name}:tensor{segment_index}",
+                port_sublabels=_tensor_port_input_sublabels(root.attention_inputs),
+                inline_expansion=inline_expansion,
+            )
+            if tail is not None:
+                last_index = tail
+                _track_attr_index(attr_last_index, segment.steps[-1].attr_name, tail)
+            continue
+
+        if isinstance(segment, FanOutSegment):
+            branch_tails: list[int] = []
+            branch_specs: list = []
+            for branch_index, branch in enumerate(segment.branches):
+                first_index, tail = _add_chain(
+                    graph,
+                    branch.steps,
+                    key_prefix=f"fan{segment_index}-{branch_index}",
+                    attr_last_index=attr_last_index,
+                    basic_ops=basic_ops,
+                    port_label=branch.port_label,
+                    port_style=branch.port_style or "floating",
+                    inline_expansion=inline_expansion,
+                )
+                branch_specs.append(branch)
+                if input_index is not None and first_index is not None:
+                    _link_forward_input(graph, input_index, first_index)
+                if tail is not None:
+                    branch_tails.append(tail)
+            merge_steps, merge_wrapper = _maybe_inline(
+                segment.merge, basic_ops=basic_ops, inline_expansion=inline_expansion
+            )
+            merge_key_prefix = _fanout_merge_key_prefix(segment.merge, segment_index)
+            if (
+                merge_wrapper is not None
+                and is_kernel_pipeline_tree(segment.merge)
+                and segment.merge.tensor_input_labels
+            ):
+                provenance = (
+                    segment.merge.attention_inputs or root.attention_inputs or {}
+                )
+                frame = _start_inline_frame(graph, merge_wrapper)
+                start_index = len(graph.nodes)
+                pipeline_tail = _add_tensor_ports_segment(
+                    graph,
+                    TensorPortsSegment(
+                        labels=list(segment.merge.tensor_input_labels),
+                        targets=dict(segment.merge.tensor_step_targets),
+                        steps=list(segment.merge.children),
+                    ),
+                    key_prefix=merge_key_prefix,
+                    port_sublabels=_tensor_port_input_sublabels(provenance),
+                    inline_expansion=inline_expansion,
+                )
+                for index in range(start_index, len(graph.nodes)):
+                    _append_inline_frame_node(frame, index)
+                port_index_by_label = {
+                    spec.label: index
+                    for index, spec in enumerate(graph.nodes)
+                    if spec.synthetic == SYNTHETIC_TENSOR
+                    and spec.key.startswith(f"{merge_key_prefix}:tensor:")
+                }
+                for tail, branch in zip(branch_tails, branch_specs):
+                    port_index = port_index_by_label.get(branch.port_label)
+                    if port_index is not None:
+                        graph.links.append((tail, port_index))
+                        graph.link_port_labels[(tail, port_index)] = branch.port_label
+                last_index = pipeline_tail
+                if pipeline_tail is not None:
+                    _track_attr_index(
+                        attr_last_index, merge_wrapper.attr_name, pipeline_tail
+                    )
+                continue
+            if (
+                merge_wrapper is not None
+                and len(merge_steps) == 2
+                and merge_steps[1].class_name == "KernelOutput"
+            ):
+                merge_indices, merge_tail = _add_kernel_pipeline_merge_chain(
+                    graph,
+                    merge_steps,
+                    key_prefix=merge_key_prefix,
+                    attr_last_index=attr_last_index,
+                    inline_expansion=inline_expansion,
+                )
+                merge_first = merge_indices[0] if merge_indices else None
+                if merge_first is not None:
+                    for tail in branch_tails:
+                        graph.links.append((tail, merge_first))
+                last_index = merge_tail
+                if merge_tail is not None:
+                    _track_attr_index(
+                        attr_last_index, merge_wrapper.attr_name, merge_tail
+                    )
+            elif merge_wrapper is not None:
+                merge_indices, merge_tail = _add_linear_pipeline_chain(
+                    graph,
+                    merge_steps,
+                    wrapper=merge_wrapper,
+                    key_prefix=merge_key_prefix,
+                    attr_last_index=attr_last_index,
+                    inline_expansion=inline_expansion,
+                )
+                merge_first = merge_indices[0] if merge_indices else None
+                if merge_first is not None:
+                    for tail in branch_tails:
+                        graph.links.append((tail, merge_first))
+                last_index = merge_tail
+                if merge_tail is not None:
+                    _track_attr_index(
+                        attr_last_index, merge_wrapper.attr_name, merge_tail
+                    )
+            else:
+                merge_index = _add_node(
+                    graph,
+                    key=merge_key_prefix,
+                    block=segment.merge,
+                )
+                for branch_offset, tail in enumerate(branch_tails):
+                    graph.links.append((tail, merge_index))
+                last_index = merge_index
+                _track_attr_index(attr_last_index, segment.merge.attr_name, merge_index)
+            continue
+
+        if isinstance(segment, SideCombineSegment):
+            from TraceLens.ModelUtils.ast_analyze import (
+                MOE_AGGREGATION_LABEL,
+                combine_op_from_step_details,
+            )
+
+            if (
+                combine_op_from_step_details(list(segment.consumer.details or []))
+                == MOE_AGGREGATION_LABEL
+            ):
+
+                agg_index = _add_node(
+                    graph,
+                    key=f"moe_agg:{segment_index}:{segment.consumer.attr_name}",
+                    label=MOE_AGGREGATION_LABEL,
+                )
+                if last_index is not None:
+                    graph.links.append((last_index, agg_index))
+                elif input_index is not None:
+                    graph.links.append((input_index, agg_index))
+                slot_sources = _side_slot_sources(root, segment.sides, attr_last_index)
+                for position, side in enumerate(segment.sides):
+                    if side.source_kind == "forward_input":
+                        if input_index is not None:
+                            _link_forward_input(graph, input_index, agg_index)
+                        continue
+                    source_attr = side.source_chain[-1] if side.source_chain else None
+                    if source_attr is None:
+                        continue
+                    source_index = slot_sources.get(
+                        position, attr_last_index.get(source_attr)
+                    )
+                    if source_index is None:
+                        continue
+                    link_key = (source_index, agg_index)
+                    if link_key not in graph.links:
+                        graph.links.append(link_key)
+                    if side.port_label and side.port_label != "router":
+                        graph.link_port_labels[link_key] = side.port_label
+                last_index = agg_index
+                _track_attr_index(
+                    attr_last_index, segment.consumer.attr_name, agg_index
+                )
+                continue
+
+            combine_index = _add_node(
+                graph,
+                key=f"sidecombine:{segment_index}:{segment.consumer.attr_name}",
+                label=_operation_tile_label(segment.op),
+            )
+            if last_index is not None:
+                graph.links.append((last_index, combine_index))
+            elif input_index is not None:
+                graph.links.append((input_index, combine_index))
+            for side in segment.sides:
+                if side.source_kind == "forward_input":
+                    if input_index is not None:
+                        _link_forward_input(graph, input_index, combine_index)
+                    continue
+                source_attr = side.source_chain[-1] if side.source_chain else None
+                if source_attr is None:
+                    continue
+                source_index = attr_last_index.get(source_attr)
+                if source_index is None:
+                    continue
+                graph.links.append((source_index, combine_index))
+            last_index = combine_index
+            _track_attr_index(
+                attr_last_index, segment.consumer.attr_name, combine_index
+            )
+            continue
+
+        if isinstance(segment, ResidualAddSegment):
+            module = segment.module
+            expanded_steps, wrapper = _maybe_inline(
+                module, basic_ops=basic_ops, inline_expansion=inline_expansion
+            )
+            if wrapper is not None:
+                _branch_indices, module_tail = _add_linear_pipeline_chain(
+                    graph,
+                    expanded_steps,
+                    wrapper=wrapper,
+                    key_prefix=f"residual_branch:{segment_index}:{module.attr_name}",
+                    attr_last_index=attr_last_index,
+                    input_index=input_index,
+                    last_index=None,
+                    branch_from_input_dashed=True,
+                    inline_expansion=inline_expansion,
+                )
+                if any(side.side_effect_call for side in segment.sides):
+                    graph.side_effect_frame_ids.add(wrapper.attr_name)
+                _track_attr_index(
+                    attr_last_index,
+                    wrapper.attr_name,
+                    module_tail,
+                    block=wrapper,
+                )
+                _track_attr_index(
+                    attr_last_index, module.attr_name, module_tail, block=module
+                )
+            else:
+                module_index = _add_node(
+                    graph,
+                    key=f"residual_branch:{segment_index}:{module.attr_name}",
+                    block=module,
+                )
+                if input_index is not None:
+                    _link_forward_input(graph, input_index, module_index)
+                _track_attr_index(
+                    attr_last_index, module.attr_name, module_index, block=module
+                )
+                module_tail = module_index
+            combine_index = _add_node(
+                graph,
+                key=f"residual_add:{segment_index}",
+                label="Add",
+            )
+            if last_index is not None:
+                graph.links.append((last_index, combine_index))
+            graph.links.append((module_tail, combine_index))
+            last_index = combine_index
+            continue
+
+        if isinstance(segment, SideFeedSegment):
+            consumer = segment.consumer
+            port_label = _consumer_port_label(segment.sides)
+
+            entry_index: int | None = None
+            if is_method_wrapper(consumer):
+                consumer_index = _add_method_wrapper_node(
+                    graph,
+                    consumer,
+                    key=f"sidefeed:{segment_index}:{consumer.attr_name}",
+                )
+                if port_label:
+                    graph.nodes[consumer_index].port_label = port_label
+                    graph.nodes[consumer_index].port_style = "inline"
+            else:
+                # A straight-line consumer expands into its own steps here too, so a
+                # side-fed module is not left as an opaque tile with nothing behind it.
+                expanded_steps, wrapper = _maybe_inline(
+                    consumer,
+                    basic_ops=basic_ops,
+                    inline_expansion=inline_expansion,
+                )
+                if wrapper is not None:
+                    # Resolve the primary input source from
+                    # forward_step_predecessor_args so the pipeline's
+                    # @method_input ops connect to the correct predecessor
+                    # instead of the overall forward method input.
+                    primary_input = _resolve_primary_input(
+                        consumer.attr_name,
+                        root,
+                        attr_last_index,
+                        input_index,
+                        last_index,
+                    )
+                    chain_indices, chain_tail = _add_linear_pipeline_chain(
+                        graph,
+                        expanded_steps,
+                        wrapper=wrapper,
+                        key_prefix=f"sidefeed:{segment_index}:{consumer.attr_name}",
+                        attr_last_index=attr_last_index,
+                        port_label=port_label,
+                        port_style="inline" if port_label else None,
+                        input_index=input_index,
+                        last_index=primary_input,
+                        inline_expansion=inline_expansion,
+                    )
+                    entry_index = chain_indices[0] if chain_indices else None
+                    consumer_index = chain_tail
+                else:
+                    consumer_index = _add_node(
+                        graph,
+                        key=f"sidefeed:{segment_index}:{consumer.attr_name}",
+                        block=consumer,
+                        port_label=port_label,
+                        port_style="inline" if port_label else None,
+                    )
+                    entry_index = consumer_index
+            if entry_index is None:
+                entry_index = consumer_index
+                # Edge wiring deferred to _wire_all_predecessor_edges via
+                # forward_step_predecessors; only track the node index here.
+            # Materialize side-chain producer nodes so they exist in the
+            # graph for the generic predecessor pass to wire up.
+            for side in segment.sides:
+                if side.source_kind == "forward_input":
+                    continue
+                if not side.source_chain:
+                    continue
+                _ensure_side_chain_tail_index(
+                    graph,
+                    segment,
+                    side,
+                    segment_index=segment_index,
+                    input_index=input_index,
+                    attr_last_index=attr_last_index,
+                    root=root,
+                    basic_ops=basic_ops,
+                    inline_expansion=inline_expansion,
+                )
+            last_index = consumer_index
+            _track_attr_index(attr_last_index, consumer.attr_name, consumer_index)
+            continue
+
+        if isinstance(segment, CombineSegment):
+            after_nodes = list(segment.after)
+            side = segment.side
+            if is_method_wrapper(side):
+                side_index = _add_method_wrapper_node(
+                    graph,
+                    side,
+                    key=f"side:{segment_index}",
+                )
+                if input_index is not None and segment.side_source == "forward_input":
+                    _link_forward_input(graph, input_index, side_index)
+                _track_attr_index(attr_last_index, side.attr_name, side_index)
+            else:
+                expanded_side, side_wrapper = _maybe_inline(
+                    side, basic_ops=basic_ops, inline_expansion=inline_expansion
+                )
+                if side_wrapper is not None:
+                    _side_indices, side_tail = _add_linear_pipeline_chain(
+                        graph,
+                        expanded_side,
+                        wrapper=side_wrapper,
+                        key_prefix=f"side:{segment_index}",
+                        attr_last_index=attr_last_index,
+                        port_label=segment.side_port_label,
+                        port_style=segment.side_port_style,
+                        input_index=input_index,
+                        last_index=None,
+                        branch_from_input_dashed=segment.side_source == "forward_input",
+                        inline_expansion=inline_expansion,
+                    )
+                    side_index = side_tail
+                    _track_attr_index(
+                        attr_last_index, side_wrapper.attr_name, side_index
+                    )
+                    _track_attr_index(attr_last_index, side.attr_name, side_index)
+                else:
+                    side_block = expanded_side[0] if len(expanded_side) == 1 else side
+                    side_index = _add_node(
+                        graph,
+                        key=f"side:{segment_index}",
+                        block=side_block,
+                        port_label=segment.side_port_label,
+                        port_style=segment.side_port_style,
+                    )
+                    _track_attr_index(attr_last_index, side.attr_name, side_index)
+                    if (
+                        input_index is not None
+                        and segment.side_source == "forward_input"
+                    ):
+                        _link_forward_input(graph, input_index, side_index)
+            if last_index is None:
+                continue
+
+            mult_index = _add_node(
+                graph,
+                key=f"combine:{segment_index}",
+                label=_operation_tile_label(segment.op),
+            )
+            graph.links.append((last_index, mult_index))
+            graph.links.append((side_index, mult_index))
+            first_after, tail = _add_chain(
+                graph,
+                after_nodes,
+                key_prefix=f"post:{segment_index}",
+                attr_last_index=attr_last_index,
+                inline_expansion=inline_expansion,
+                basic_ops=basic_ops,
+            )
+            if first_after is not None:
+                graph.links.append((mult_index, first_after))
+            last_index = tail
+            continue
+
+        if isinstance(segment, SeqSegment):
+            step = segment.step
+            if is_kernel_pipeline_tree(step) and step.tensor_input_labels:
+                # A kernel-pipeline step normally arrives as its own
+                # ``TensorPortsSegment`` (root itself is the pipeline) or as a
+                # ``FanOutSegment`` merge (>=2 clean q/k/v/... prep branches).
+                # When neither shape matches -- e.g. incomplete branch
+                # provenance keeps ``collect_computation_segments`` from
+                # splitting the pre-merge steps into named branches -- the
+                # pipeline still lands here as a plain ``SeqSegment`` step.
+                # Falling through to the generic ``_maybe_inline`` /
+                # ``_add_linear_pipeline_chain`` path below would treat its
+                # labeled q/k/v/g/beta ports as an ordinary flat op chain,
+                # losing the per-label routing entirely (every kernel-internal
+                # substep then gets no explicit predecessor and either spine-
+                # chains onto whatever step precedes it, or -- if it names no
+                # predecessor -- picks up nothing). Route it through the same
+                # tensor-ports wiring the other two shapes use instead.
+                provenance = step.attention_inputs or root.attention_inputs or {}
+                frame = _start_inline_frame(graph, step)
+                start_index = len(graph.nodes)
+                pipeline_key_prefix = f"seq:{segment_index}:{step.attr_name}"
+                pipeline_tail = _add_tensor_ports_segment(
+                    graph,
+                    TensorPortsSegment(
+                        labels=list(step.tensor_input_labels),
+                        targets=dict(step.tensor_step_targets),
+                        steps=list(step.children),
+                    ),
+                    key_prefix=pipeline_key_prefix,
+                    port_sublabels=_tensor_port_input_sublabels(provenance),
+                    inline_expansion=inline_expansion,
+                )
+                for index in range(start_index, len(graph.nodes)):
+                    _append_inline_frame_node(frame, index)
+                port_index_by_label = {
+                    spec.label: index
+                    for index, spec in enumerate(graph.nodes)
+                    if spec.synthetic == SYNTHETIC_TENSOR
+                    and spec.key.startswith(f"{pipeline_key_prefix}:tensor:")
+                }
+                for label, chain in provenance.items():
+                    port_index = port_index_by_label.get(label)
+                    if port_index is None:
+                        continue
+                    matched_attr = next(
+                        (attr for attr in reversed(chain) if attr in attr_last_index),
+                        None,
+                    )
+                    source_index = (
+                        attr_last_index[matched_attr]
+                        if matched_attr is not None
+                        else None
+                    )
+                    if source_index is not None:
+                        source_index = _prefer_activation_followup(
+                            attr_last_index, matched_attr, source_index
+                        )
+                    if source_index is None or source_index == port_index:
+                        continue
+                    link_key = (source_index, port_index)
+                    graph.links.append(link_key)
+                    graph.link_port_labels[link_key] = label
+                last_index = pipeline_tail
+                if pipeline_tail is not None:
+                    _track_attr_index(attr_last_index, step.attr_name, pipeline_tail)
+                continue
+            fork_from_input = (
+                _should_fork_main_path_from_input(
+                    segments,
+                    segment_index,
+                    last_index,
+                    attr_last_index,
+                )
+                or step.attr_name in root.input_fed_steps
+            )
+            if is_method_wrapper(step):
+                step_index = _add_method_wrapper_node(
+                    graph,
+                    step,
+                    key=f"seq:{segment_index}:{step.attr_name}",
+                )
+                # Edge wiring deferred to _wire_all_predecessor_edges via
+                # forward_step_predecessors; only track the node index here.
+                last_index = step_index
+                _track_attr_index(attr_last_index, step.attr_name, step_index)
+                continue
+            expanded_steps, wrapper = _maybe_inline(
+                step, basic_ops=basic_ops, inline_expansion=inline_expansion
+            )
+            if wrapper is not None:
+                # The inlined body's ``@method_input`` must bind to this step's
+                # primary (hidden_states) argument, not to whatever chain step
+                # happens to precede it.  In ``patch_embed -> rotary_pos_emb ->
+                # blocks`` the loop body reads ``hidden_states`` from
+                # ``patch_embed`` while ``rotary_pos_emb`` (the immediate
+                # predecessor) only supplies ``position_embeddings``; without
+                # this resolution the body would wrongly read the rotary output
+                # and the loop-carried-in boundary would find no consumer.
+                primary_input = _resolve_primary_input(
+                    step.attr_name,
+                    root,
+                    attr_last_index,
+                    input_index,
+                    last_index,
+                )
+                _step_indices, last_index = _add_linear_pipeline_chain(
+                    graph,
+                    expanded_steps,
+                    wrapper=wrapper,
+                    key_prefix=f"seq:{segment_index}:{step.attr_name}",
+                    attr_last_index=attr_last_index,
+                    input_index=input_index,
+                    last_index=primary_input,
+                    fork_from_input=fork_from_input,
+                    inline_expansion=inline_expansion,
+                )
+                _track_attr_index(
+                    attr_last_index, wrapper.attr_name, last_index, block=wrapper
+                )
+                continue
+            for sub_index, sub_step in enumerate(expanded_steps):
+                step_index = _add_node(
+                    graph,
+                    key=f"seq:{segment_index}:{step.attr_name}:{sub_step.attr_name}:{sub_index}",
+                    block=sub_step,
+                    label=inline_wrapper_step_label(None, sub_step, sub_index),
+                )
+                # An operation naming the steps it reads keeps those dataflow edges.
+                explicit_sources = _operation_source_indices(
+                    sub_step,
+                    attr_last_index,
+                    chain_input_index=input_index,
+                )
+                if explicit_sources:
+                    # A predecessor read at several distinct output ordinals of
+                    # the same producer within one expression (``torch.cat((q_pass,
+                    # q_rot))`` reassembling a split) repeats that source in
+                    # ``explicit_sources``; tag each repeat with its own ordinal
+                    # (mirroring ``_add_linear_pipeline_chain``) so
+                    # ``_wire_all_predecessor_edges`` -- which also walks this
+                    # same step as part of its containing block's inline wiring
+                    # -- recognizes the existing edges instead of appending
+                    # further untagged duplicates on top of them.
+                    port_by_source: dict[int, list[int]] = {}
+                    if sub_step.operation_predecessor_ports:
+                        for (
+                            pred_attr,
+                            ordinals,
+                        ) in sub_step.operation_predecessor_ports.items():
+                            pred_index = attr_last_index.get(pred_attr)
+                            if pred_index is not None:
+                                port_by_source[pred_index] = list(ordinals)
+                    source_use_count: dict[int, int] = {}
+                    for source_index in explicit_sources:
+                        link = (source_index, step_index)
+                        graph.links.append(link)
+                        ordinals = port_by_source.get(source_index)
+                        if ordinals:
+                            use_index = source_use_count.get(source_index, 0)
+                            source_use_count[source_index] = use_index + 1
+                            if use_index < len(ordinals):
+                                port_str = str(ordinals[use_index])
+                                graph.link_output_ports[link] = _merge_link_output_port(
+                                    graph.link_output_ports.get(link), port_str
+                                )
+                elif (
+                    not _reads_only_a_side_parameter(sub_step)
+                    and not _is_pure_generator_source(sub_step)
+                    and not sub_step.operation_predecessors
+                    and not root.forward_step_predecessors.get(sub_step.attr_name)
+                ):
+                    # Only spine-chain steps that name no predecessors. A step that
+                    # names producers (e.g. a gate ``view`` reading a side-producer
+                    # ``g_b_proj`` not yet materialized) gets its real edges from
+                    # ``_wire_all_predecessor_edges``; the sequential fallback would
+                    # otherwise fabricate an edge from whatever ``last_index`` is —
+                    # e.g. an unconsumed cache-update ``Cast`` sitting just before it.
+                    #
+                    # A submodule call with AST-recorded predecessors
+                    # (``forward_step_predecessors``) is likewise wired by section 1b
+                    # to its real inputs — parallel siblings like ``q_proj``,
+                    # ``k_proj``, ``v_proj`` all read ``hidden_states``, not one
+                    # another. Spine-chaining them here fabricates a spurious
+                    # ``q_proj -> k_proj`` edge (a two-input Linear).
+                    use_fork = fork_from_input and sub_index == 0
+                    _append_step_link(
+                        graph,
+                        input_index=input_index,
+                        last_index=last_index,
+                        step_index=step_index,
+                        fork_from_input=use_fork,
+                    )
+                last_index = step_index
+                _track_attr_index(attr_last_index, sub_step.attr_name, step_index)
+            if expanded_steps:
+                _track_attr_index(attr_last_index, step.attr_name, last_index)
+
+    graph.attr_output_indices.update(attr_last_index)
+    skip_fwd = strip_unused_return_branches and root.multi_return_module
+    _wire_all_predecessor_edges(
+        graph,
+        root,
+        input_index=input_index,
+        skip_forward_links=skip_fwd,
+        exclude_carried_from=exclude_carried_from,
+    )
+    _reroute_wrapper_kernel_output_edges(graph)
+    if root.primary_output_step:
+        for index, spec in enumerate(graph.nodes):
+            if (
+                spec.block is not None
+                and spec.block.attr_name == root.primary_output_step
+            ):
+                graph.primary_output_index = graph.loop_carried_nodes.get(
+                    root.primary_output_step, index
+                )
+                break
+        else:
+            graph.primary_output_index = last_index
+    else:
+        graph.primary_output_index = last_index
+    if resolved_include_input:
+        _add_forward_param_inputs(graph, root)
+        _share_frame_param_source(graph)
+        _add_submodule_boundary_param_inputs(graph, root, input_index)
+        _add_nested_submodule_side_producers(graph, root)
+    graph = _apply_dead_code_elimination(
+        graph,
+        root,
+        strip_unused_return_branches=strip_unused_return_branches,
+    )
+    graph = _strip_dangling_leaves(graph, root=root)
+    graph = _tag_weight_only_ops(graph)
+    graph = _tag_buffer_only_ops(graph)
+    graph = _tag_linear_weight_operands(graph, root=root)
+    graph = _materialize_external_input_constants(graph)
+    add_forward_output(graph, root=root)
+    _add_kernel_output_port_nodes(graph)
+    if basic_ops is not None and basic_ops.basic_only:
+        return _filter_graph_basic_only(graph)
+    return graph

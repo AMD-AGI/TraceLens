@@ -1,0 +1,13136 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""Inspect Hugging Face modeling code via Python AST (CPU-only)."""
+
+from __future__ import annotations
+
+import ast
+import copy
+import functools
+import importlib.util
+import logging
+import re
+import sys
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from collections.abc import Iterable
+from typing import Any, Literal
+
+_log = logging.getLogger(__name__)
+
+from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis
+from TraceLens.ModelUtils.config_resolve import apply_config_attribute_aliases
+from TraceLens.ModelUtils.github import pinned_module_origin
+
+DECODER_CLASS_RE = re.compile(
+    r"(DecoderLayer|DecoderBlock|TransformerBlock|ModelBlock|Block)$",
+    re.IGNORECASE,
+)
+MODEL_CLASS_RE = re.compile(r"(ForCausalLM|Model|PreTrainedModel)$", re.IGNORECASE)
+
+ATTENTION_CLASS_RE = re.compile(r"(Attention|Attn|MLA|LatentAttention)", re.IGNORECASE)
+MOE_CLASS_RE = re.compile(r"(MoE|Moe|Expert|SparseMoe|SharedExpert)", re.IGNORECASE)
+FFN_CLASS_RE = re.compile(r"(MLP|Mlp|FeedForward|FFN|SwiGLU|GatedMLP)", re.IGNORECASE)
+NORM_CLASS_RE = re.compile(r"(RMSNorm|LayerNorm|Norm)", re.IGNORECASE)
+
+# Attribute-name conventions that say what part a submodule plays in a
+# transformer block. These are naming conventions, not facts read out of the
+# code, so they are a last-resort signal and deliberately scoped.
+#
+# WHY THEY ARE NEEDED AT ALL -- the overview diagram:
+#   The overview is a hand-drawn-style summary of the architecture: an embedding,
+#   a repeated block of (norm -> attention -> norm -> FFN), a final norm, a head.
+#   Drawing it requires knowing which submodule is the attention and which is the
+#   feed-forward, so each can be placed on the spine, paired with the norm that
+#   feeds it, and coloured. That is a question about the ROLE a module plays in a
+#   conventional transformer, and a checkpoint answers it only by what it names
+#   things: nothing in the code distinguishes "the attention" from "the MLP"
+#   beyond the shapes and the names. Where the overview also has to invent a
+#   component the source never declares (a final norm implied by ``norm_type``, a
+#   head implied by ``vocab_size``), the role IS the only identity it has.
+#
+# WHY THE DETAILED GRAPH SHOULD NOT NEED THEM:
+#   The detailed graph draws what the forward actually does. Every node, edge and
+#   shape there is recovered from the AST and the live meta module tree, so a
+#   guess from an attribute name can only overrule evidence we already have. Role
+#   still leaks into that path today (grouping, namespace choice, a few
+#   structural filters); each such use is a place the renderer is trusting a name
+#   where it could be reading the code. Treat a new role test in the detailed
+#   path as a defect to be justified, not a pattern to copy.
+ATTR_ROLE_HINTS: dict[str, str] = {
+    "embed_tokens": "embedding",
+    "word_embeddings": "embedding",
+    "wte": "embedding",
+    "lm_head": "head",
+    "output": "head",
+    "embed_out": "head",
+    "rotary_emb": "positional",
+    "rotary_pos_emb": "positional",
+    "rotary_embedding": "positional",
+    "self_attn": "attention",
+    "self_attention": "attention",
+    "attn": "attention",
+    "attention": "attention",
+    "mlp": "ffn",
+    "feed_forward": "ffn",
+    "ffn": "ffn",
+    "block_sparse_moe": "moe",
+    "moe": "moe",
+    "experts": "moe",
+    "router": "router",
+    "gate": "router",
+    "input_layernorm": "norm",
+    "post_attention_layernorm": "norm",
+    "pre_feedforward_layernorm": "norm",
+    "post_feedforward_layernorm": "norm",
+    "post_norm": "norm",
+    "pre_norm": "norm",
+    "norm": "norm",
+}
+
+
+SYNTHETIC_ATTENTION = "@attention"
+FUNCTIONAL_SYNTHETIC_PREFIX = "@functional_"
+SYNTHETIC_FUNCTIONAL_LINEAR = f"{FUNCTIONAL_SYNTHETIC_PREFIX}linear"
+POSITIONAL_SYNTHETIC_PREFIX = "@positional_"
+_POSITIONAL_SOURCE_POS_RE = re.compile(
+    rf"^{re.escape(POSITIONAL_SYNTHETIC_PREFIX)}l(\d+)_"
+)
+# A bare call to a module-level free function that is neither a recognised tensor
+# op, a rope helper, nor an attention kernel (e.g. ``get_vision_position_ids(...)``).
+# The forward still runs real computation there, so it must render as its own node
+# rather than vanishing; the line number keeps repeated call sites distinct.
+FUNCTION_SYNTHETIC_PREFIX = "@fn_"
+_FUNCTION_SOURCE_POS_RE = re.compile(rf"^{re.escape(FUNCTION_SYNTHETIC_PREFIX)}l(\d+)_")
+# Trailing per-element discriminator appended by ``function_synthetic_attr`` /
+# ``positional_synthetic_attr`` / ``submodule_callsite_attr`` when one call site
+# is cloned across a ``map(lambda x: ..., (a, b))`` tuple -- both clones share the
+# lambda body's own line (and column), so the discriminator is what keeps them
+# from colliding on one key.
+_MAP_DISCRIMINATOR_RE = re.compile(r"@m\d+$")
+# Python builtins and scalar constructors that appear in a forward but never carry
+# a tensor the diagram should show as a computation node.
+_NON_TENSOR_BUILTINS = frozenset(
+    {
+        "len",
+        "int",
+        "float",
+        "bool",
+        "str",
+        "range",
+        "enumerate",
+        "zip",
+        "super",
+        "print",
+        "isinstance",
+        "issubclass",
+        "getattr",
+        "setattr",
+        "hasattr",
+        "delattr",
+        "type",
+        "min",
+        "max",
+        "sum",
+        "abs",
+        "round",
+        "list",
+        "tuple",
+        "dict",
+        "set",
+        "frozenset",
+        "sorted",
+        "reversed",
+        "map",
+        "filter",
+        "any",
+        "all",
+        "repr",
+        "format",
+        "iter",
+        "next",
+        "id",
+        "hash",
+        "vars",
+        "dir",
+        "callable",
+        "slice",
+        "object",
+    }
+)
+
+
+def positional_synthetic_attr(
+    func_name: str, lineno: int, discriminator: int | None = None
+) -> str:
+    """Synthetic attr for a rope helper called as a plain function in a forward.
+
+    The line number keeps each application site distinct, since a forward commonly
+    rotates queries and keys with separate calls to the same helper. ``discriminator``
+    mirrors ``function_synthetic_attr``'s -- see there for when it is needed.
+    """
+    base = f"{POSITIONAL_SYNTHETIC_PREFIX}l{lineno}_{func_name}"
+    return base if discriminator is None else f"{base}@m{discriminator}"
+
+
+def is_positional_synthetic(attr_name: str) -> bool:
+    return attr_name.startswith(POSITIONAL_SYNTHETIC_PREFIX)
+
+
+def positional_synthetic_source_pos(attr_name: str) -> tuple[int, int] | None:
+    """Source position of a traced rope call, for ordering it among sibling steps."""
+    match = _POSITIONAL_SOURCE_POS_RE.match(attr_name)
+    if match is None:
+        return None
+    return int(match.group(1)), 0
+
+
+def positional_display_label(attr_name_or_func: str) -> str:
+    """Display label for a traced rope function (apply_rotary_emb -> Apply rotary emb)."""
+    name = attr_name_or_func
+    if name.startswith(POSITIONAL_SYNTHETIC_PREFIX):
+        name = _POSITIONAL_SOURCE_POS_RE.sub("", name)
+        name = _MAP_DISCRIMINATOR_RE.sub("", name)
+    text = name.replace("_", " ").strip()
+    return text[:1].upper() + text[1:] if text else name
+
+
+def function_synthetic_attr(
+    func_name: str, lineno: int, discriminator: int | None = None
+) -> str:
+    """Synthetic attr for a bare free-function call traced in a forward.
+
+    Mirrors ``positional_synthetic_attr`` but for functions that are not rope
+    helpers, so a computed side-input (``get_vision_position_ids(...)``) becomes a
+    visible node instead of vanishing. The line number keeps each call site apart.
+
+    ``discriminator`` disambiguates two applications of the SAME call that share
+    one source line -- ``q, k = map(lambda x: rearrange(x, ...), (q, k))`` applies
+    one lambda body to each tuple element, so both synthesized calls are clones of
+    the exact same AST node (identical line AND column) and would otherwise
+    collide on one key, silently dropping one element's producer.
+    """
+    base = f"{FUNCTION_SYNTHETIC_PREFIX}l{lineno}_{func_name}"
+    return base if discriminator is None else f"{base}@m{discriminator}"
+
+
+def map_clone_base_attr(attr_name: str) -> str:
+    """Strip the ``@m{n}`` that tells apart clones of one ``map(lambda ...)`` call.
+
+    ``q, k = map(lambda x: rearrange(x, ...), (q, k))`` applies ONE call site to
+    each element, so the clones share everything the source says about them --
+    including the einops pattern. Lookups keyed by the call site need this to
+    reach that shared record.
+    """
+    return _MAP_DISCRIMINATOR_RE.sub("", attr_name)
+
+
+def is_function_synthetic(attr_name: str) -> bool:
+    return attr_name.startswith(FUNCTION_SYNTHETIC_PREFIX)
+
+
+def function_synthetic_source_pos(attr_name: str) -> tuple[int, int] | None:
+    """Source position of a traced free-function call, for ordering among siblings."""
+    match = _FUNCTION_SOURCE_POS_RE.match(attr_name)
+    if match is None:
+        return None
+    return int(match.group(1)), 0
+
+
+def function_display_label(attr_name_or_func: str) -> str:
+    """Display label for a traced free function (get_vision_position_ids ->
+    Get vision position ids)."""
+    name = attr_name_or_func
+    if name.startswith(FUNCTION_SYNTHETIC_PREFIX):
+        name = _FUNCTION_SOURCE_POS_RE.sub("", name)
+        name = _MAP_DISCRIMINATOR_RE.sub("", name)
+    text = name.replace("_", " ").strip()
+    return text[:1].upper() + text[1:] if text else name
+
+
+# A submodule/method call's step key is normally the bare child attr
+# (``self.norm(x)`` -> ``norm``). When the SAME child is called more than once in
+# a single forward (``cos = self.recomposition_frequencies(cos)`` then
+# ``sin = self.recomposition_frequencies(sin)``), that bare key collides: the
+# second call overwrites the first's predecessors and ``var_producer`` binding, so
+# one branch is dead-code-eliminated. Disambiguate repeated call sites with an
+# ``@l{lineno}`` suffix (mirroring the synthetic kinds) so each call keeps its own
+# wiring; strip it back to the base attr wherever the key indexes ``init_assignments``
+# / ``multi_op_methods`` (the child-class join point).
+_SUBMODULE_CALLSITE_RE = re.compile(r"@l(\d+)$")
+
+
+def submodule_callsite_attr(attr: str, lineno: int) -> str:
+    """Call-site-disambiguated step key for a repeated submodule/method call."""
+    return f"{attr}@l{lineno}"
+
+
+def submodule_callsite_source_pos(attr: str) -> tuple[int, int] | None:
+    """Source position encoded in a call-site step key, for ordering among siblings."""
+    match = _SUBMODULE_CALLSITE_RE.search(attr)
+    if match is None:
+        return None
+    return int(match.group(1)), 0
+
+
+def base_submodule_attr(attr: str) -> str:
+    """Strip a call-site ``@l{lineno}`` suffix back to the base child attr.
+
+    Safe for every key: the suffix is anchored to the end, synthetic attrs
+    (``@op_l..``/``@positional_l..``/``@fn_l..``) end in their function/op name
+    rather than a trailing ``@l\\d+``, and real submodule attrs are plain
+    identifiers. Only keys produced by ``submodule_callsite_attr`` are affected.
+    """
+    return _SUBMODULE_CALLSITE_RE.sub("", attr)
+
+
+def _is_emittable_free_function(func: ast.AST, target: str | None) -> bool:
+    """True for a bare ``foo(...)`` call to a module-level function worth showing.
+
+    Excludes Python builtins/scalar constructors (which never carry a tensor to
+    diagram). The callers check submodule/functional/attention/positional first, so
+    only genuinely unrecognised free functions reach this gate.
+    """
+    return (
+        isinstance(func, ast.Name)
+        and bool(target)
+        and target not in _NON_TENSOR_BUILTINS
+    )
+
+
+def _loop_list_accumulators(body: list[ast.stmt]) -> dict[str, ast.expr | None]:
+    """Names grown by ``name.append(x)`` / ``name.extend(x)`` inside a loop body.
+
+    A loop that builds a list and concatenates it afterwards
+    (``chunks = []`` / ``for ...: chunks.append(f(x))`` / ``torch.cat(chunks)``)
+    carries a value across iterations exactly as ``h = blk(h)`` does, but neither
+    of the usual signals fires: the seed is a list literal (no tensor producer)
+    and ``.append`` is a method call, not an assignment. Detect it structurally so
+    the loop still renders with a carried-in/out boundary instead of a body whose
+    ops appear to come from nowhere.
+
+    Maps the accumulator name to the appended expression (``None`` when the call
+    takes no single argument), so the caller can resolve what it carries.
+    """
+    found: dict[str, ast.expr | None] = {}
+    for stmt in body:
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr in {"append", "extend"}
+                and isinstance(func.value, ast.Name)
+            ):
+                found.setdefault(
+                    func.value.id, node.args[0] if len(node.args) == 1 else None
+                )
+    return found
+
+
+def _arm_emits_free_function(stmts: list[ast.stmt]) -> bool:
+    """True when this branch arm contains a bare free-function call we would draw.
+
+    Used to decide whether the two arms of an ``if`` could produce colliding
+    ``@fn_`` nodes. Mirrors the gate in ``_extract_self_calls_ordered``: a call
+    to a module-level function that is not a builtin/scalar constructor.
+    """
+    for stmt in stmts:
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            target = func.id if isinstance(func, ast.Name) else None
+            if _is_emittable_free_function(func, target):
+                return True
+    return False
+
+
+# Tensor methods that force a host round-trip: they materialise tensor contents
+# into Python objects, which only happens on CPU. A free function using any of
+# these (directly, or via another free function it calls) runs host-side work.
+_HOST_MATERIALIZE_METHODS = frozenset({"tolist", "item", "numpy", "cpu"})
+# Tensor attributes that read pure host metadata (a Python value), never tensor
+# data. Read as ``t.<attr>`` they must not resolve to ``t``'s producer -- they are
+# passed to host arguments (``device=``/``requires_grad=``), not consumed as a
+# tensor operand. ``dtype``/``shape`` are deliberately excluded (chained-selector
+# behaviour relied on elsewhere).
+_HOST_METADATA_ATTRS = frozenset(
+    {"device", "is_cuda", "is_cpu", "requires_grad", "ndim", "nbytes", "itemsize"}
+)
+# Reserved torch keyword arguments that control a result's *type/placement*, never
+# supply tensor data. ``seqlens.cumsum(dim=0, dtype=dtype)`` passes ``dtype`` (a
+# ``grid_thw.dtype`` read that resolves back to ``grid_thw``) purely as a dtype
+# spec: wiring its value as a tensor operand fabricates a phantom second edge onto
+# a single-operand op. These names are never a tensor input on any torch call, so
+# a keyword bearing one carries no dataflow edge regardless of what it resolves to.
+_NON_TENSOR_OP_KWARGS = frozenset(
+    {
+        "dtype",
+        "device",
+        "layout",
+        "requires_grad",
+        "pin_memory",
+        "memory_format",
+        "non_blocking",
+    }
+)
+
+
+def _call_forces_host(call: ast.Call) -> bool:
+    """True when a call is a tensor->host materialisation (``.tolist()``/``.to('cpu')``)."""
+    func = call.func
+    if not isinstance(func, ast.Attribute):
+        return False
+    if func.attr in _HOST_MATERIALIZE_METHODS:
+        return True
+    if func.attr == "to":
+        for arg in [*call.args, *(kw.value for kw in call.keywords)]:
+            if isinstance(arg, ast.Constant) and arg.value == "cpu":
+                return True
+    return False
+
+
+def _absolute_import_bindings(tree: ast.AST, current_module: str) -> dict[str, str]:
+    """Map imported names to ``absolute.module#symbol`` for one module's AST.
+
+    Resolves relative imports (``from ...vision_utils import x``) to their absolute
+    dotted module against *current_module* (the module the AST belongs to), so a
+    cross-file callee can be located with ``importlib.util.find_spec``.
+    """
+    parts = current_module.split(".")
+    bindings: dict[str, str] = {}
+    if not isinstance(tree, ast.Module):
+        return bindings
+    # ``from . import x`` resolves differently depending on what the current
+    # module IS. Inside a package's ``__init__`` the current package is that
+    # module itself, so ``from .short_conv import X`` in ``fla.modules.conv``
+    # means ``fla.modules.conv.short_conv``; inside a plain module it is the
+    # parent package. Treating every file as a plain module walked one level too
+    # far up and silently lost the symbol.
+    origin = _module_origin(current_module)
+    if not (origin and Path(origin).name == "__init__.py"):
+        parts = parts[:-1]
+
+    def _module_level(body: list[ast.stmt]) -> list[ast.stmt]:
+        """Module-level statements, seeing inside ``try``/``if`` wrappers.
+
+        An optional dependency is conventionally imported under ``try: ... except
+        ImportError:`` (or behind an ``if is_x_available():``), which is exactly
+        how a modeling file pulls in its kernel library. Reading only the bare
+        ``tree.body`` misses those, so the symbols they bind look unresolvable and
+        the classes they name never get parsed. Function bodies are NOT descended
+        into: a deferred import inside a forward is a different question.
+        """
+        flattened: list[ast.stmt] = []
+        for stmt in body:
+            flattened.append(stmt)
+            if isinstance(stmt, ast.Try):
+                flattened.extend(_module_level(stmt.body))
+                for handler in stmt.handlers:
+                    flattened.extend(_module_level(handler.body))
+                flattened.extend(_module_level(stmt.orelse))
+                flattened.extend(_module_level(stmt.finalbody))
+            elif isinstance(stmt, ast.If):
+                flattened.extend(_module_level(stmt.body))
+                flattened.extend(_module_level(stmt.orelse))
+        return flattened
+
+    for stmt in _module_level(tree.body):
+        if isinstance(stmt, ast.ImportFrom):
+            if stmt.level:
+                drop = stmt.level - 1
+                base = parts[: len(parts) - drop] if len(parts) >= drop else []
+                module = ".".join(
+                    base + (stmt.module.split(".") if stmt.module else [])
+                )
+            else:
+                module = stmt.module or ""
+            for alias in stmt.names:
+                if alias.name == "*":
+                    continue
+                bindings[alias.asname or alias.name] = f"{module}#{alias.name}"
+        elif isinstance(stmt, ast.Import):
+            for alias in stmt.names:
+                bindings[alias.asname or alias.name] = f"{alias.name}#{alias.name}"
+    return bindings
+
+
+def _module_origin(module: str) -> str | None:
+    """File defining *module*, located WITHOUT importing it or its parents.
+
+    ``importlib.util.find_spec`` has to import every parent package to read its
+    ``__path__``, so asking it for ``fla.modules`` executes ``fla/__init__.py``,
+    which pulls in a GPU kernel compiler. We only ever want to READ the file --
+    nothing here introspects a Triton kernel -- so walking ``sys.path`` for the
+    dotted name gets the source without running a line of third-party code.
+
+    Falls back to ``find_spec`` for anything a plain path walk cannot express
+    (namespace packages, zip imports), which is rare and keeps prior behaviour.
+
+    A model read at a pinned commit is asked for FIRST. Its modeling file comes
+    from that commit, so the helpers it imports have to as well -- resolving
+    those through ``sys.path`` reads whatever version of the library is
+    installed, which is two revisions of one library describing one model.
+    """
+    parts = module.split(".")
+    if not parts or not all(parts):
+        return None
+    pinned = pinned_module_origin(module)
+    if pinned:
+        return pinned
+    for entry in sys.path:
+        base = Path(entry) if entry else Path.cwd()
+        try:
+            candidate = base.joinpath(*parts)
+        except (TypeError, ValueError):
+            continue
+        package_init = candidate / "__init__.py"
+        if package_init.is_file():
+            return str(package_init)
+        module_file = candidate.with_suffix(".py")
+        if module_file.is_file():
+            return str(module_file)
+    try:
+        spec = importlib.util.find_spec(module)
+    except (ImportError, ValueError, ModuleNotFoundError, AttributeError):
+        return None
+    return spec.origin if spec is not None else None
+
+
+_ParsedModule = tuple[dict[str, ast.FunctionDef], dict[str, str]]
+
+
+class _ParsedModuleRegistry:
+    """Single authoritative store of parsed module symbols for one analysis.
+
+    Parses each importable module's source file at most once
+    (``importlib.util.find_spec`` origin + ``ast.parse``, no execution) and caches
+    ``(name -> ast.FunctionDef, absolute import bindings)``. The imported-free-function
+    resolver and the host-source resolver share one instance, so a sibling file is
+    read and parsed a single time per analysis instead of once per consumer. Seeded
+    trees — the analysed modeling file, whose source can differ from the installed
+    module — are held per-resolver rather than here, so sharing the spec-parse cache
+    is behaviour-preserving.
+    """
+
+    def __init__(self) -> None:
+        self._modules: dict[str, _ParsedModule | None] = {}
+
+    def load(self, module: str) -> _ParsedModule | None:
+        if module in self._modules:
+            return self._modules[module]
+        result: _ParsedModule | None = None
+        origin: str | None = None
+        try:
+            origin = _module_origin(module)
+        except (ImportError, AttributeError, ValueError):
+            origin = None
+        if origin and Path(origin).is_file():
+            try:
+                tree = ast.parse(Path(origin).read_text(encoding="utf-8"))
+            except (OSError, SyntaxError, ValueError):
+                tree = None
+            if isinstance(tree, ast.Module):
+                funcs = {
+                    node.name: node
+                    for node in tree.body
+                    if isinstance(node, ast.FunctionDef)
+                }
+                result = (funcs, _absolute_import_bindings(tree, module))
+        self._modules[module] = result
+        return result
+
+
+class _HostSourceResolver:
+    """Detects whether a free function runs host/CPU work by reading source ASTs.
+
+    Locates each callee's defining file with ``importlib.util.find_spec`` (no module
+    execution — spec.origin + ``ast.parse`` only) and walks it for host-materialisation
+    idioms, recursing into the free functions it calls. The analysed modeling file is
+    seeded directly so its local helpers resolve without a spec lookup. General across
+    models: any helper doing host-side index building is flagged, none are hardcoded.
+
+    Spec-resolved sibling modules are parsed through a shared
+    :class:`_ParsedModuleRegistry`; ``seed``-ed trees stay private to this resolver.
+    """
+
+    def __init__(self, registry: "_ParsedModuleRegistry | None" = None) -> None:
+        self._registry = registry if registry is not None else _ParsedModuleRegistry()
+        # Seeded trees (analysed file source, which may differ from the installed
+        # module) are private, so sharing the registry changes nothing observable.
+        self._seeds: dict[str, _ParsedModule | None] = {}
+
+    def seed(self, module: str | None, tree: ast.AST) -> None:
+        if not module or not isinstance(tree, ast.Module):
+            return
+        funcs = {
+            node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+        }
+        self._seeds[module] = (funcs, _absolute_import_bindings(tree, module))
+
+    def _load(self, module: str) -> _ParsedModule | None:
+        if module in self._seeds:
+            return self._seeds[module]
+        return self._registry.load(module)
+
+    def runs_on_host(
+        self, module: str, name: str, _seen: set[tuple[str, str]] | None = None
+    ) -> bool:
+        seen = _seen if _seen is not None else set()
+        key = (module, name)
+        if key in seen:
+            return False
+        seen.add(key)
+        loaded = self._load(module)
+        if loaded is None:
+            return False
+        funcs, imports = loaded
+        func = funcs.get(name)
+        if func is None:
+            # Imported (re-exported) here — follow it to the defining module.
+            binding = imports.get(name)
+            if binding:
+                dest, _, symbol = binding.partition("#")
+                if dest and dest != module:
+                    return self.runs_on_host(dest, symbol, seen)
+            return False
+        if any(
+            isinstance(node, ast.Call) and _call_forces_host(node)
+            for node in ast.walk(func)
+        ):
+            return True
+        for node in ast.walk(func):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                continue
+            callee = node.func.id
+            if callee in funcs:
+                if self.runs_on_host(module, callee, seen):
+                    return True
+            elif callee in imports:
+                dest, _, symbol = imports[callee].partition("#")
+                if dest and self.runs_on_host(dest, symbol, seen):
+                    return True
+        return False
+
+
+def _analyzed_base_module(config: dict[str, Any] | None) -> str | None:
+    """Dotted module of the analysed modeling file, for resolving its own imports."""
+    if not isinstance(config, dict):
+        return None
+    model_type = str(config.get("model_type") or "").strip().replace("-", "_")
+    if not model_type:
+        return None
+    return f"transformers.models.{model_type}.modeling_{model_type}"
+
+
+def _annotate_host_free_functions(
+    classes: dict[str, "ClassStructure"],
+    tree: ast.AST,
+    config: dict[str, Any] | None,
+    registry: "_ParsedModuleRegistry | None" = None,
+) -> None:
+    """Flag each traced free-function call that runs host/CPU work.
+
+    A ``get_vision_position_ids(...)`` side-input node built from a synthetic
+    function/positional attr gets ``forward_step_runs_on_host[attr] = True`` when the
+    callee (or something it transitively calls) materialises a tensor on the host.
+    Rope helpers (``apply_rotary_pos_emb_vision``) carry no such idiom -> stay False.
+    """
+    base_module = _analyzed_base_module(config)
+    resolver = _HostSourceResolver(registry)
+    resolver.seed(base_module, tree)
+    cache: dict[str, bool] = {}
+    for cls in classes.values():
+        attrs = set()
+        for mapping in (
+            cls.forward_step_details,
+            cls.forward_operations,
+            cls.forward_step_output_names,
+            cls.multi_op_methods,
+            cls.single_op_methods,
+            cls.forward_step_predecessors,
+        ):
+            attrs.update(mapping.keys())
+        attrs.update(cls.forward_calls)
+        for attr in attrs:
+            if not (is_function_synthetic(attr) or is_positional_synthetic(attr)):
+                continue
+            name = _synthetic_call_function_name(attr)
+            if not name or base_module is None:
+                continue
+            if name not in cache:
+                cache[name] = resolver.runs_on_host(base_module, name)
+            if cache[name]:
+                cls.forward_step_runs_on_host[attr] = True
+
+
+def _registry_dict_literal(
+    tree: ast.Module, name: str, _seen: set[str] | None = None
+) -> ast.Dict | None:
+    """Locate the dict literal a module-level registry name resolves to.
+
+    Handles one level of indirection (``ACT2FN = ClassInstantier(ACT2CLS)``) by
+    following a wrapper call's first argument back to its own module-level
+    assignment, so a registry alias resolves to the same literal as the name it
+    wraps.
+    """
+    seen = _seen if _seen is not None else set()
+    if name in seen:
+        return None
+    seen.add(name)
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        ):
+            continue
+        value = node.value
+        if isinstance(value, ast.Dict):
+            return value
+        if isinstance(value, ast.Call):
+            for arg in value.args:
+                if isinstance(arg, ast.Name):
+                    found = _registry_dict_literal(tree, arg.id, seen)
+                    if found is not None:
+                        return found
+    return None
+
+
+def _registry_entry_class_name(value: ast.expr) -> str | None:
+    """Return the class name a registry dict entry's value expression names.
+
+    An entry is either a bare class reference (``SqrtSoftplusActivation``,
+    ``nn.Sigmoid``) or a ``(cls, kwargs)`` tuple pairing one with constructor
+    kwargs (``ClassInstantier`` convention); either way only the class name
+    matters here.
+    """
+    if isinstance(value, ast.Name):
+        return value.id
+    if isinstance(value, ast.Attribute):
+        return value.attr
+    if isinstance(value, (ast.Tuple, ast.List)) and value.elts:
+        return _registry_entry_class_name(value.elts[0])
+    return None
+
+
+def _resolve_activation_registry_class(
+    registry_name: str,
+    key: str,
+    import_bindings: dict[str, str],
+    *,
+    all_tensor_ops: bool,
+) -> "ClassStructure | None":
+    """Load the concrete class an unrecognized activation-registry key selects.
+
+    ``self.act = ACT2FN[key]`` (or ``ACT2CLS[key]``) freezes in a real
+    ``nn.Module`` subclass; our curated ``_ACTIVATION_DISPLAY_NAMES`` table only
+    covers the common ones. For any other key: follow the *modeling file's own
+    import* of the registry name to its defining module (no hardcoded module
+    path -- whatever the file actually imports from), read that module's
+    registry-dict literal to find which class the key selects, and parse that
+    class's own source into a :class:`ClassStructure` the same way any other
+    submodule class is parsed, so its forward can be expanded instead of drawn
+    as one opaque box. Returns ``None`` when any step is not resolvable (no
+    import found, no importable source, key/class not found, or class defines
+    no ``forward``); the caller then keeps its title-cased placeholder leaf and
+    logs a warning.
+    """
+    binding = import_bindings.get(registry_name)
+    if not binding:
+        return None
+    module, _, _symbol = binding.partition("#")
+    if not module:
+        return None
+    origin = _module_origin(module)
+    if not origin or not Path(origin).is_file():
+        return None
+    try:
+        source = Path(origin).read_text(encoding="utf-8")
+        registry_tree = ast.parse(source, filename=origin)
+    except (OSError, SyntaxError, ValueError):
+        return None
+    dict_literal = _registry_dict_literal(registry_tree, registry_name)
+    if dict_literal is None:
+        return None
+    lowered = key.strip().lower()
+    class_name: str | None = None
+    for entry_key, entry_value in zip(dict_literal.keys, dict_literal.values):
+        if (
+            isinstance(entry_key, ast.Constant)
+            and isinstance(entry_key.value, str)
+            and entry_key.value.strip().lower() == lowered
+        ):
+            class_name = _registry_entry_class_name(entry_value)
+            break
+    if not class_name:
+        return None
+    try:
+        external_registry = build_class_registry(
+            source, filename=origin, all_tensor_ops=all_tensor_ops
+        )
+    except (SyntaxError, ValueError):
+        return None
+    resolved = external_registry.get(class_name)
+    if resolved is None or not any(
+        isinstance(item, ast.FunctionDef) and item.name == "forward"
+        for item in resolved.node.body
+    ):
+        return None
+    return resolved
+
+
+def _expand_unresolved_activation_classes(
+    classes: dict[str, "ClassStructure"],
+    tree: ast.AST,
+    config: dict[str, Any] | None,
+    *,
+    all_tensor_ops: bool,
+) -> None:
+    """Route an unrecognized activation-registry submodule through forward-expansion.
+
+    A curated activation (SiLU/GELU/Sigmoid/...) stays an atomic leaf by design.
+    Anything else selected through ``ACT2FN``/``ACT2CLS`` is a real ``nn.Module``
+    whose forward we can read like any other submodule's -- so resolve it
+    (structurally, via the modeling file's own imports; see
+    ``_resolve_activation_registry_class``) and register its class so the normal
+    block-tree expansion path picks it up instead of falling back to an opaque,
+    title-cased ``OperationKind.UNKNOWN`` leaf. When resolution or parsing fails
+    (dynamic key, no importable source, unparseable forward) the referencing
+    class keeps its placeholder name and a warning is logged so the gap stays
+    visible instead of silently mis-rendering.
+    """
+    base_module = _analyzed_base_module(config)
+    if base_module is None:
+        import_bindings: dict[str, str] = {}
+    elif isinstance(tree, ast.Module):
+        import_bindings = _absolute_import_bindings(tree, base_module)
+    else:
+        import_bindings = {}
+    resolved_cache: dict[tuple[str, str], "ClassStructure | None"] = {}
+
+    for cls in list(classes.values()):
+        for attr, (registry_name, key) in list(cls.unresolved_activation_refs.items()):
+            cache_key = (registry_name, key)
+            if cache_key not in resolved_cache:
+                resolved_cache[cache_key] = _resolve_activation_registry_class(
+                    registry_name,
+                    key,
+                    import_bindings,
+                    all_tensor_ops=all_tensor_ops,
+                )
+            resolved = resolved_cache[cache_key]
+            if resolved is None:
+                _log.warning(
+                    "Could not resolve activation registry entry %s[%r] "
+                    "(assigned to %s.%s) to an importable class with a "
+                    "parseable forward; rendering it as an opaque leaf.",
+                    registry_name,
+                    key,
+                    cls.name,
+                    attr,
+                )
+                continue
+            classes[resolved.name] = resolved
+            placeholder = cls.init_assignments.get(attr)
+            cls.init_assignments[attr] = resolved.name
+            options = cls.init_assignment_options.get(attr)
+            if options is not None:
+                cls.init_assignment_options[attr] = [
+                    resolved.name if option == placeholder else option
+                    for option in options
+                ]
+
+
+def _module_dict_registry_class_refs(tree: ast.AST) -> dict[str, list[str]]:
+    """Module-level ``{key: SomeClass, ...}`` dicts, by name -> class-ref names.
+
+    A registry dict maps runtime keys to *class references* (bare names or dotted
+    attributes), possibly with ``None`` placeholders for keys that construct
+    nothing. Any dict whose non-``None`` value is not a plain reference (a call, a
+    literal, a comprehension) is not a class registry and is skipped, so this only
+    matches the dict-of-classes idiom. Values keep source order; ``None`` entries
+    are dropped.
+    """
+    registries: dict[str, list[str]] = {}
+    if not isinstance(tree, ast.Module):
+        return registries
+    for stmt in tree.body:
+        if not (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and isinstance(stmt.value, ast.Dict)
+        ):
+            continue
+        names: list[str] = []
+        is_class_registry = True
+        for value in stmt.value.values:
+            if isinstance(value, ast.Constant) and value.value is None:
+                continue
+            if not isinstance(value, (ast.Name, ast.Attribute)):
+                is_class_registry = False
+                break
+            name = _expr_name(value)
+            if name is None:
+                is_class_registry = False
+                break
+            names.append(name.split(".")[-1])
+        if is_class_registry and names:
+            registries[stmt.targets[0].id] = list(dict.fromkeys(names))
+    return registries
+
+
+def _class_from_module_chain(
+    module: str,
+    symbol: str,
+    *,
+    all_tensor_ops: bool,
+    hops: int = 4,
+) -> "tuple[ClassStructure, ast.AST] | None":
+    """Follow a package's re-exports to the file that really defines *symbol*.
+
+    A library surfaces public names through ``__init__`` chains
+    (``fla.modules`` -> ``fla.modules.convolution`` -> ``fla.modules.conv`` ->
+    ``short_conv``), so the first file an import names usually only points
+    onward. Walk that chain -- bounded, and without importing anything -- until
+    the definition itself appears.
+    """
+    seen: set[tuple[str, str]] = set()
+    for _ in range(hops):
+        if (module, symbol) in seen:
+            return None
+        seen.add((module, symbol))
+        origin = _module_origin(module)
+        if not origin or not Path(origin).is_file():
+            return None
+        try:
+            source = Path(origin).read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            registry = build_class_registry(
+                source, filename=origin, all_tensor_ops=all_tensor_ops
+            )
+        except (SyntaxError, ValueError):
+            registry = {}
+        try:
+            module_tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            return None
+        resolved = registry.get(symbol)
+        if resolved is not None:
+            return resolved, module_tree
+        onward = _absolute_import_bindings(module_tree, module)
+        target = onward.get(symbol)
+        if not target:
+            return None
+        module, _, next_symbol = target.partition("#")
+        symbol = next_symbol or symbol
+    return None
+
+
+def _dispatches_to_imported_kernel(
+    structure: "ClassStructure", module_tree: ast.AST | None
+) -> bool:
+    """True when the class's forward hands its work to an imported callable.
+
+    Neither ``ShortConvolution.forward`` nor ``FusedRMSNormGated.forward`` builds
+    anything itself: one calls ``causal_conv1d``, the other ``rms_norm_gated``,
+    and both select a Triton or CUDA kernel. There is no tensor math to recover
+    by opening such a class, and expanding it strands the wiring its caller
+    already established -- so it is a KERNEL BOUNDARY and stays a leaf, the same
+    treatment a fused attention kernel gets.
+
+    The import can sit inside the forward OR at the top of the defining file, so
+    both are considered. A class whose forward does its own arithmetic is
+    expanded normally.
+    """
+    node = getattr(structure, "node", None)
+    if node is None:
+        return False
+    forward = next(
+        (
+            item
+            for item in getattr(node, "body", [])
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+    if forward is None:
+        return False
+    # A forward that is nothing but ``return <call>(...)`` performs no arithmetic
+    # of its own -- it names the routine that does the work, which for a kernel
+    # library is a compiled entry point (``FusedRMSNormGated`` delegates straight
+    # to ``rms_norm_gated``). Opening it yields a frame with no ops in it.
+    body = [
+        item
+        for item in forward.body
+        if not (isinstance(item, ast.Expr) and isinstance(item.value, ast.Constant))
+    ]
+    if (
+        len(body) == 1
+        and isinstance(body[0], ast.Return)
+        and isinstance(body[0].value, ast.Call)
+    ):
+        return True
+
+    imported: set[str] = set()
+    for scope in (module_tree, forward):
+        if scope is None:
+            continue
+        for stmt in ast.walk(scope):
+            if isinstance(stmt, ast.ImportFrom):
+                imported.update(alias.asname or alias.name for alias in stmt.names)
+    if not imported:
+        return False
+    for stmt in ast.walk(forward):
+        if isinstance(stmt, ast.Call) and isinstance(stmt.func, ast.Name):
+            if stmt.func.id in imported:
+                return True
+    return False
+
+
+def _register_imported_classes(
+    classes: dict[str, "ClassStructure"],
+    tree: ast.AST,
+    config: dict[str, Any] | None,
+    *,
+    all_tensor_ops: bool,
+) -> None:
+    """Parse submodule classes a modeling file imports from another package.
+
+    A decoder can build a submodule from a class it imports rather than defines
+    (``from fla.modules import FusedRMSNormGated``). Only imported FUNCTIONS were
+    resolved, so such a class stayed unknown and was described from its name. Its
+    source is on disk like any other, and is read without importing it -- which
+    matters precisely here, since these are kernel libraries whose package import
+    pulls in a GPU compiler we never need in order to read a class.
+
+    A class that merely dispatches to an imported kernel is deliberately NOT
+    registered: it is a boundary, not a composite, and opening it would replace
+    working wiring with an empty frame.
+    """
+    base_module = _analyzed_base_module(config)
+    if base_module is None or not isinstance(tree, ast.Module):
+        return
+    bindings = _absolute_import_bindings(tree, base_module)
+    if not bindings:
+        return
+    wanted: set[str] = set()
+    for cls in list(classes.values()):
+        for assigned in cls.init_assignments.values():
+            name = str(assigned).strip()
+            if name and name not in classes and name in bindings:
+                wanted.add(name)
+    for name in sorted(wanted):
+        module, _, symbol = bindings[name].partition("#")
+        found = _class_from_module_chain(
+            module, symbol or name, all_tensor_ops=all_tensor_ops
+        )
+        if found is None:
+            continue
+        resolved, module_tree = found
+        if resolved.name in classes:
+            continue
+        if _dispatches_to_imported_kernel(resolved, module_tree):
+            # Not registered -- opening it would replace working wiring with an
+            # empty frame. But say what it IS, on the attribute that builds it, so
+            # it renders as the GPU kernel it is instead of an unknown module.
+            # ``kernel:`` is the marker the graph classifier already reads; this
+            # just supplies it for a third-party kernel the same way TraceLens
+            # supplies it for the ones it synthesises itself.
+            for owner in classes.values():
+                for attr, assigned in owner.init_assignments.items():
+                    if str(assigned).strip() != name:
+                        continue
+                    existing = owner.init_details.setdefault(attr, [])
+                    if not any(line.lower().startswith("kernel:") for line in existing):
+                        existing.append(f"kernel: {resolved.name}")
+            continue
+        classes[resolved.name] = resolved
+
+
+def _resolve_module_dict_registry_classes(
+    classes: dict[str, "ClassStructure"],
+    tree: ast.AST,
+) -> None:
+    """Resolve ``self.x = REGISTRY[key](...)`` submodules to their real classes.
+
+    ``REGISTRY`` is a module-level ``{key: SomeClass}`` dict and the concrete
+    class is chosen at runtime by a config-derived key, so static analysis cannot
+    tell which arm a given layer takes. Register every class the dict can yield as
+    an option (in source order, ``None`` arms skipped) and adopt the first as the
+    attr's class, so the submodule expands into its real forward instead of
+    rendering as an opaque leaf named after the attr. When the dict is not found
+    or names no class we can parse, leave the placeholder and log a warning so the
+    gap stays visible. General: keys purely on the structural shape (module-level
+    dict literal of class references indexed in a constructor); no registry-name
+    or key allow-list.
+    """
+    registries = _module_dict_registry_class_refs(tree)
+    for cls in classes.values():
+        for attr, registry_name in list(cls.unresolved_module_dict_class_refs.items()):
+            candidates = [
+                name for name in registries.get(registry_name, []) if name in classes
+            ]
+            if not candidates:
+                _log.warning(
+                    "Could not resolve module-dict registry %s[...] (assigned to "
+                    "%s.%s) to a parseable class; rendering it as an opaque leaf.",
+                    registry_name,
+                    cls.name,
+                    attr,
+                )
+                continue
+            cls.init_assignments[attr] = candidates[0]
+            existing = cls.init_assignment_options.setdefault(attr, [])
+            for name in candidates:
+                if name not in existing:
+                    existing.append(name)
+            cls.init_details.setdefault(attr, [f"{registry_name}[…]"])
+
+
+def functional_synthetic_attr(op_name: str) -> str:
+    """Synthetic attr for a torch.nn.functional call (e.g. linear -> @functional_linear)."""
+    return f"{FUNCTIONAL_SYNTHETIC_PREFIX}{op_name}"
+
+
+def is_functional_synthetic(attr_name: str) -> bool:
+    return attr_name.startswith(FUNCTIONAL_SYNTHETIC_PREFIX)
+
+
+def functional_display_label(op_name_or_attr: str) -> str:
+    """Display label for a functional op (e.g. linear -> Linear, @functional_softmax -> Softmax)."""
+    name = op_name_or_attr
+    if name.startswith(FUNCTIONAL_SYNTHETIC_PREFIX):
+        name = name[len(FUNCTIONAL_SYNTHETIC_PREFIX) :]
+    return "".join(part.capitalize() for part in name.split("_") if part)
+
+
+def first_functional_synthetic_index(forward_calls: list[str]) -> int | None:
+    for index, call in enumerate(forward_calls):
+        if is_functional_synthetic(call):
+            return index
+    return None
+
+
+SYNTHETIC_GATE_ACTIVATION = "@gate_activation"
+SYNTHETIC_GATE_RESHAPE = "@gate_reshape"
+_GATE_ACTIVATION_NAMES = {
+    "sigmoid": "Sigmoid",
+    "softmax": "Softmax",
+    "tanh": "Tanh",
+}
+# Modeling code binds its activation from a registry keyed by config
+# (`self.act_fn = ACT2FN[config.hidden_act]`) instead of constructing it, so the
+# activation the checkpoint actually runs is only knowable from the config.
+_ACTIVATION_REGISTRY_NAMES = frozenset(
+    {"ACT2FN", "ACT2CLS", "ACT_FN", "ACTIVATION_REGISTRY"}
+)
+_ACTIVATION_DISPLAY_NAMES = {
+    "silu": "SiLU",
+    "swish": "SiLU",
+    "gelu": "GELU",
+    "gelu_new": "GELU",
+    "gelu_pytorch_tanh": "GELU",
+    "quick_gelu": "GELU",
+    "relu": "ReLU",
+    "relu6": "ReLU6",
+    "sigmoid": "Sigmoid",
+    "tanh": "Tanh",
+    "mish": "Mish",
+    "elu": "ELU",
+    "selu": "SELU",
+    "leaky_relu": "LeakyReLU",
+    "prelu": "PReLU",
+    "hardswish": "Hardswish",
+    "hardsigmoid": "Hardsigmoid",
+    "identity": "Identity",
+    "linear": "Identity",
+}
+_ACTIVATION_LEAF_CLASS_NAMES = frozenset(_ACTIVATION_DISPLAY_NAMES.values())
+
+# A gated norm's gate activation, once resolved generically from the module's
+# constructor kwarg or its own init/config symbol table, is stored on the node as
+# a tagged detail with this prefix. Consumers read the resolved value structurally
+# from the tag instead of matching detail text against a hardcoded activation set.
+GATE_ACTIVATION_DETAIL_PREFIX = "gate activation: "
+
+
+def _display_activation_name(raw: str) -> str:
+    """Canonical display name for an activation registry key (``silu`` -> ``SiLU``).
+
+    Resolves through the shared activation registry so every path (constructor
+    ``activation=`` kwarg, ``ACT2FN[self.x]`` forward reads) renders the same name;
+    an unknown key title-cases as a best-effort label rather than being dropped.
+    """
+    lowered = raw.strip().lower()
+    if lowered in _ACTIVATION_DISPLAY_NAMES:
+        return _ACTIVATION_DISPLAY_NAMES[lowered]
+    if lowered in _GATE_ACTIVATION_NAMES:
+        return _GATE_ACTIVATION_NAMES[lowered]
+    return raw.strip().replace("_", " ").title().replace(" ", "")
+
+
+FORWARD_OPERATION_PREFIX = "@op_"
+# Stands for the value a helper method receives, so operations reading its parameter
+# resolve to whatever feeds the chain the method is inlined into.
+FORWARD_METHOD_INPUT = "@method_input"
+# A frame's SECONDARY parameter gets its own boundary token
+# (``@method_input:attention_mask``) so several parameters no longer collapse onto
+# the primary's. Every block-level consumer treats it exactly like the shared
+# token -- the chain stays sourced as before -- and only the caller/callee arg
+# mapping tells them apart, which is the one place the distinction is needed.
+FORWARD_METHOD_INPUT_PREFIX = FORWARD_METHOD_INPUT + ":"
+
+
+def is_method_input(name: str) -> bool:
+    """True for the frame boundary token, shared or per-parameter."""
+    return name == FORWARD_METHOD_INPUT or str(name).startswith(
+        FORWARD_METHOD_INPUT_PREFIX
+    )
+
+
+def method_input_param(name: str) -> str | None:
+    """The parameter a per-parameter boundary token names, else ``None``."""
+    if str(name).startswith(FORWARD_METHOD_INPUT_PREFIX):
+        return str(name)[len(FORWARD_METHOD_INPUT_PREFIX) :]
+    return None
+
+
+_SYNTHETIC_ATTENTION_NAMES = {
+    "eager_attention_forward",
+    "flash_attention_forward",
+    "sdpa_attention_forward",
+    "attention_interface",
+}
+# Locals a forward assigns an attention implementation to before calling it, so the
+# call site names the variable rather than the kernel that actually runs.
+_ATTENTION_DISPATCH_NAMES = {
+    "attention_interface",
+    "attention_fn",
+    "attn_interface",
+    "all_attention_functions",
+}
+# Boolean helpers a forward branches on to pick a flash-attention code path
+# (``if is_flash_attention_requested(self.config): ...``). We resolve them from
+# the checkpoint's ``_attn_implementation`` so only the selected branch survives,
+# instead of walking both and leaving duplicated/dangling kernel plumbing.
+_FLASH_REQUEST_PREDICATES = {"is_flash_attention_requested"}
+# ``_attn_implementation`` values that route to a flash code path.
+_FLASH_IMPL_NAMES = {
+    "flash_attention_2",
+    "flash_attention_3",
+    "flash_attention",
+    "flash_attn",
+    "flash_attn_2",
+    "kernels-community/flash-attn",
+}
+_KERNEL_MERGE_NAME_RE = re.compile(
+    r"(attention|attn|recurrent|flash|sdpa|linear_attn|kernel|chunk)",
+    re.IGNORECASE,
+)
+# A metadata helper whose name merely *mentions* attention (e.g.
+# ``get_vision_attention_seqlens``) computes cu_seqlens/masks, not the attention
+# output. Its result head-noun (``seqlens``/``ids``/``mask``) or builder prefix
+# (``get_``/``build_``) marks it as plumbing, so it must not be swept into the
+# attention-kernel bucket by the substring match above.
+_KERNEL_MERGE_HELPER_RE = re.compile(
+    r"^(get|build|make|prepare|compute|create|update|_)_"
+    r"|(_seqlens?|_ids?|_masks?|_lengths?|_indices|_index|_sizes?|"
+    r"_positions?|_offsets?|_cache|_shapes?)$",
+    re.IGNORECASE,
+)
+_SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "Buffer", "getattr"})
+_SKIP_INIT_FORWARD_ATTRS = frozenset(
+    {
+        "config",
+        "layer_idx",
+        "layer_id",
+        "layers",
+        "layer",
+        "module",
+        "modules",
+        "training",
+        "gradient_checkpointing",
+        "gradient_checkpointing_func",
+        "device",
+        "dtype",
+    }
+)
+_SKIP_INIT_FORWARD_CLASS_NAMES = frozenset({"ModuleList", "Sequential", "ModuleDict"})
+
+
+def _append_forward_call(calls: list[str], attr: str) -> None:
+    if calls and calls[-1] == attr:
+        return
+    calls.append(attr)
+
+
+def _is_positional_function_call(func: ast.AST, target: str) -> bool:
+    """True for a bare call to a rope helper such as `apply_rotary_emb(q, freqs)`."""
+    if not isinstance(func, ast.Name):
+        return False
+    return bool(POSITIONAL_ATTR_RE.search(target))
+
+
+def _traced_free_function_arg_names(func: ast.FunctionDef) -> set[str]:
+    """Names passed positionally into a traced free-function node in ``func``.
+
+    A rope helper or other module-level free function (``get_vision_position_ids``)
+    renders as its own node; the plain-``Name`` tensors it reads are that node's
+    real sources. Collecting them lets a secondary forward input feeding one be
+    seeded as the method boundary so the edge starts from the input.
+
+    Calls nested inside a conditional are skipped: only unconditional free-function
+    nodes render (see ``_extract_self_calls_ordered``'s ``skip_free_fn``), so seeding
+    an input consumed only by a dropped-branch helper would resurrect otherwise-dead
+    ops (e.g. a per-chunk ``lengths`` subtract) with no visible consumer.
+    """
+    conditional_calls: set[int] = set()
+    for stmt in ast.walk(func):
+        if isinstance(stmt, ast.If):
+            for child in stmt.body + stmt.orelse:
+                for sub in ast.walk(child):
+                    if isinstance(sub, ast.Call):
+                        conditional_calls.add(id(sub))
+    names: set[str] = set()
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call) or id(node) in conditional_calls:
+            continue
+        callee = node.func
+        target = _expr_name(callee)
+        traced = (
+            bool(target)
+            and isinstance(callee, ast.Name)
+            and _is_positional_function_call(callee, target)
+        ) or _is_emittable_free_function(callee, target)
+        if not traced:
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.Name):
+                names.add(arg.id)
+    return names
+
+
+def _is_literal_true(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value is True
+
+
+def _call_undoes_rotation(node: ast.Call) -> bool:
+    """True when a rope call unrotates its input rather than rotating it."""
+    for keyword in node.keywords:
+        if keyword.arg == "inverse":
+            return _is_literal_true(keyword.value)
+    return any(_is_literal_true(arg) for arg in node.args[2:])
+
+
+def _positional_helper_functions(tree: ast.AST) -> list[str]:
+    """Module-level rope helpers defined in the source, e.g. `apply_rotary_emb`.
+
+    Their presence shows the architecture rotates positions even when the analyzer
+    cannot place the call site.
+    """
+    names: list[str] = []
+    for node in getattr(tree, "body", []):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if POSITIONAL_ATTR_RE.search(node.name):
+            names.append(node.name)
+    return names
+
+
+def _free_function_call_targets(funcs: dict[str, ast.FunctionDef]) -> set[str]:
+    """Bare-name call targets referenced anywhere in a set of function bodies.
+
+    Used to scope ``_imported_forward_functions``'s recursive import-following to
+    names a harvested module's own functions actually call, rather than every
+    name the module happens to import. A pure re-export module (no top-level
+    ``def``s of its own -- e.g. a package ``__init__.py``) contributes nothing
+    here, so none of its re-exports get chased just because one of them was
+    independently resolved from somewhere else.
+    """
+    names: set[str] = set()
+    for func in funcs.values():
+        for node in ast.walk(func):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                names.add(node.func.id)
+    return names
+
+
+def _imported_forward_functions(
+    tree: ast.AST,
+    base_module: str | None,
+    registry: "_ParsedModuleRegistry | None" = None,
+) -> dict[str, ast.FunctionDef]:
+    """Resolve imported free functions' definitions from their defining files.
+
+    A forward that calls a helper imported from a sibling file
+    (``from ...vision_utils import get_vision_position_ids``) otherwise renders the
+    call as one opaque tile, because the definition is not in this module's tree.
+    Locating the source (``importlib.util.find_spec`` + ``ast.parse``, no module
+    execution) lets the export inline the helper's computation like a local free
+    function. General: every imported name is followed to its module, none are
+    hardcoded. Sibling files are parsed once through the shared registry.
+    """
+    if not base_module or not isinstance(tree, ast.Module):
+        return {}
+    reg = registry if registry is not None else _ParsedModuleRegistry()
+
+    resolved: dict[str, ast.FunctionDef] = {}
+    seen_modules: set[str] = set()
+
+    def _resolve_binding(local_name: str, binding: str, depth: int) -> None:
+        dest, _, symbol = binding.partition("#")
+        if not dest:
+            return
+        loaded = reg.load(dest)
+        if loaded is None:
+            return
+        funcs, _ = loaded
+        func = funcs.get(symbol)
+        if isinstance(func, ast.FunctionDef):
+            resolved.setdefault(local_name, func)
+        _harvest_module(dest, depth)
+
+    def _harvest_module(module: str, depth: int) -> None:
+        # A resolved helper may call sibling free functions defined in (or imported
+        # into) its own module; harvesting them lets those nested calls inline too.
+        # Bounded depth keeps the pool from fanning out across the whole package.
+        if depth <= 0 or module in seen_modules:
+            return
+        seen_modules.add(module)
+        loaded = reg.load(module)
+        if loaded is None:
+            return
+        funcs, bindings = loaded
+        for fname, fdef in funcs.items():
+            resolved.setdefault(fname, fdef)
+        # Only chase bindings the module's own functions actually call. A module
+        # can import (and re-export) far more names than its own code ever uses --
+        # e.g. a package's ``__init__.py`` re-exporting its whole public surface,
+        # or a large module importing dozens of symbols only a few of which are
+        # referenced locally. Walking every binding regardless of use lets the
+        # recursion wander into an unrelated dependency and, on a bare-name
+        # collision, silently resolve one of *our* free-function names (like a
+        # model's own ``rearrange`` helper) to a same-named symbol from a
+        # completely different place -- with a different implementation and a
+        # different calling convention. Restricting to call targets keeps the
+        # harvest scoped to what the resolved helper(s) can actually reach.
+        called = _free_function_call_targets(funcs)
+        for name, binding in bindings.items():
+            if name not in called:
+                continue
+            _resolve_binding(name, binding, depth - 1)
+
+    for local_name, binding in _absolute_import_bindings(tree, base_module).items():
+        _resolve_binding(local_name, binding, depth=2)
+    return resolved
+
+
+def _module_forward_functions(
+    tree: ast.AST,
+    config: dict[str, Any] | None = None,
+    registry: "_ParsedModuleRegistry | None" = None,
+) -> dict[str, ast.FunctionDef]:
+    """Module-level ``def``s keyed by name, for expanding traced free-function calls.
+
+    A rope helper or other free function called from a forward
+    (``apply_rotary_pos_emb_vision(q, k, cos, sin)``) renders as an opaque tile
+    unless its body is available to inline. Collecting the definitions lets the
+    export show the computation it performs, like a submodule's forward. Helpers
+    imported from sibling files are resolved cross-file (``config`` supplies the
+    analysed module's dotted path) so they expand the same way; a local definition
+    always wins over an import on a name clash.
+    """
+    functions: dict[str, ast.FunctionDef] = {}
+    for node in getattr(tree, "body", []):
+        if isinstance(node, ast.FunctionDef):
+            functions.setdefault(node.name, node)
+    for name, func in _imported_forward_functions(
+        tree, _analyzed_base_module(config), registry
+    ).items():
+        functions.setdefault(name, func)
+    return functions
+
+
+_EINOPS_CALLS = frozenset({"rearrange", "repeat"})
+
+
+def _einops_step_details(func: ast.FunctionDef) -> dict[str, list[str]]:
+    """Detail lines for einops calls, whose pattern IS their shape rule.
+
+    ``rearrange(hidden_states, "b s ... -> (b s) ...")`` says exactly what
+    happens to every axis. einops itself is a third-party generic, so there is
+    no body worth reading -- but the pattern at the call site is a complete
+    specification, and without it the tensor passed through at a rank the call
+    just changed.
+    """
+    details: dict[str, list[str]] = {}
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id not in _EINOPS_CALLS or len(node.args) < 2:
+            continue
+        pattern = node.args[1]
+        if not isinstance(pattern, ast.Constant) or not isinstance(pattern.value, str):
+            continue
+        lines = [f"pattern: {pattern.value}"]
+        for keyword in node.keywords:
+            if keyword.arg:
+                lines.append(f"axis {keyword.arg}: {ast.unparse(keyword.value)}")
+        details[function_synthetic_attr(node.func.id, node.lineno)] = lines
+    return details
+
+
+def _positional_step_details(func: ast.FunctionDef) -> dict[str, list[str]]:
+    """Detail lines for traced rope calls, so an inverse rotation reads differently."""
+    details: dict[str, list[str]] = {}
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if not _is_positional_function_call(node.func, node.func.id):
+            continue
+        if _call_undoes_rotation(node):
+            details[positional_synthetic_attr(node.func.id, node.lineno)] = [
+                "inverse rotation"
+            ]
+    return details
+
+
+_METHOD_CHAIN_OPS = {
+    "view",
+    "transpose",
+    "reshape",
+    "contiguous",
+    "type",
+    "float",
+    "squeeze",
+    "unsqueeze",
+    "expand",
+    "split",
+    "mul",
+    "mul_",
+    "sum",
+    "sigmoid",
+}
+
+_DATA_MOVEMENT_NAMES = frozenset(
+    {
+        "cat",
+        "stack",
+        "split",
+        "view",
+        "reshape",
+        "transpose",
+        "permute",
+        "contiguous",
+        "squeeze",
+        "unsqueeze",
+        "flatten",
+        "pad",
+        "index_select",
+        "gather",
+        "rearrange",
+        "index_first_axis",
+        "pad_input",
+        "get_unpad_data",
+        "unpad_input",
+        "chunk",
+        "concat",
+        "where",
+        "masked_fill",
+        "softmax",
+        "dropout",
+        "clone",
+        "detach",
+        "to",
+        "expand",
+        "repeat",
+        "roll",
+        "triu",
+        "tril",
+        "matmul",
+        "addmm",
+        "bmm",
+        "einsum",
+    }
+    | _METHOD_CHAIN_OPS
+)
+
+
+def _is_size_call(node: ast.AST) -> bool:
+    """``x.size()`` / ``x.size(0)`` -- the call spelling of ``x.shape``.
+
+    Returns a ``torch.Size`` (a tuple of ints) or a single int, so it is host
+    bookkeeping either way. ``.shape`` was already read as host; the call form
+    was not, which is how GPT-2's ``x.size()[:-1]`` became a tensor ``Slice``.
+    """
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "size"
+    )
+
+
+def _assign_target(stmt: ast.AST) -> str | None:
+    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+        target = stmt.targets[0]
+        if isinstance(target, ast.Name):
+            return target.id
+    return None
+
+
+def _if_has_competing_assigns(if_node: ast.If) -> bool:
+    if_targets = {
+        _assign_target(stmt)
+        for branch_stmt in if_node.body
+        for stmt in ast.walk(branch_stmt)
+        if isinstance(stmt, ast.Assign)
+    }
+    if_targets.discard(None)
+    for branch_stmt in if_node.orelse:
+        for stmt in ast.walk(branch_stmt):
+            if not isinstance(stmt, ast.Assign):
+                continue
+            target = _assign_target(stmt)
+            if target is not None and target in if_targets:
+                return True
+    return False
+
+
+def _alternate_forward_dispatches(func: ast.FunctionDef) -> set[str]:
+    """Private helpers invoked only via early-return branches (alternate forward paths)."""
+    dispatches: set[str] = set()
+    for node in func.body:
+        if not isinstance(node, ast.If) or node.orelse:
+            continue
+        return_calls: list[str] = []
+        for stmt in node.body:
+            if isinstance(stmt, ast.Return) and stmt.value is not None:
+                _extract_self_calls_ordered(stmt.value, return_calls)
+        if len(return_calls) != 1:
+            continue
+        call = return_calls[0]
+        if call.startswith("_"):
+            dispatches.add(call)
+    return dispatches
+
+
+def _unwrap_expr(node: ast.AST) -> ast.AST:
+    # Strip trailing *bare* attribute accesses (``x.T``/``x.mT``/``x.data``) to reach
+    # the underlying call. Method *calls* in a chain (``x.reshape(...).unbind(0)``)
+    # are peeled by ``_extract_self_calls_ordered`` itself, which descends a
+    # non-producer method call's receiver as operand 0 — so chaining, a purely
+    # syntactic convenience, never hides the base producer regardless of which
+    # ``torch.Tensor`` methods appear in the chain (no method allowlist to keep up
+    # to date; see the receiver descent below).
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node
+
+
+def _extract_self_calls_ordered(
+    node: ast.AST,
+    out: list[str],
+    skip_free_fn: bool = False,
+    repeated_attrs: frozenset[str] = frozenset(),
+    module_attrs: frozenset[str] = frozenset(),
+) -> None:
+    """Collect self.module(...) calls in approximate evaluation order (inner-first).
+
+    ``skip_free_fn`` suppresses only the unrecognised free-function (``@fn_``) node
+    emission. Set it when the call lives inside a conditional branch: ``forward_calls``
+    is built branch-unaware (both arms of an ``if`` are walked), so an ``@fn_`` node
+    from a branch that config-resolution later drops would leak in and scramble the
+    surrounding wiring. Recognised ops/kernels/rope helpers are unaffected.
+
+    ``repeated_attrs`` names the self-submodule attrs called more than once in this
+    forward; each call to one gets a call-site ``@l{lineno}`` suffix so two calls to
+    the same child stay distinct steps (see ``submodule_callsite_attr``). Empty by
+    default, so single-call forwards keep bare keys (byte-identical).
+    """
+    node = _unwrap_expr(node)
+    if isinstance(node, ast.Call):
+        for arg in node.args:
+            _extract_self_calls_ordered(
+                arg, out, skip_free_fn, repeated_attrs, module_attrs
+            )
+        for keyword in node.keywords:
+            _extract_self_calls_ordered(
+                keyword.value, out, skip_free_fn, repeated_attrs, module_attrs
+            )
+
+        func = node.func
+        if isinstance(func, ast.Attribute) and _is_self_attr(func, func.attr):
+            attr = func.attr
+            if attr in repeated_attrs:
+                attr = submodule_callsite_attr(attr, node.lineno)
+            _append_forward_call(out, attr)
+            return
+        # ``self.<submodule>.<method>(...)`` -- a named method on a child module
+        # (``self.indexer.build_block_mask(...)``). The receiver is the submodule,
+        # not ``self``, so the test above never saw it and the call vanished: its
+        # result then had no recorded producer, and whatever read that result fell
+        # back to the op that happened to precede it -- wiring an attention
+        # kernel's mask port to an unrelated positional tensor. The call site
+        # disambiguates it from the module's own forward call.
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Attribute)
+            and isinstance(func.value.value, ast.Name)
+            and func.value.value.id == "self"
+            and func.value.attr in module_attrs
+        ):
+            _append_forward_call(
+                out, submodule_callsite_attr(func.value.attr, node.lineno)
+            )
+            return
+        functional_op = _functional_call_name(func)
+        if functional_op:
+            _append_forward_call(out, functional_synthetic_attr(functional_op))
+            return
+
+        target = _expr_name(func)
+        if target in _SYNTHETIC_ATTENTION_NAMES or _is_kernel_merge_call(func):
+            _append_forward_call(out, SYNTHETIC_ATTENTION)
+            return
+        # A ``map(lambda x: BODY(x), (a, b))`` idiom clones BODY's own call node
+        # once per tuple element (see ``_expand_map_lambda_tuple``); every clone
+        # shares BODY's original source position, so the discriminator stamped on
+        # the clone is what keeps their synthetic keys from colliding (mirrors
+        # ``_call_step_producer``).
+        discriminator = getattr(node, "_tracelens_map_discriminator", None)
+        if target and _is_positional_function_call(func, target):
+            # Rope helpers live at module level, so the block that applies them is
+            # the only place the diagram can show the rotation happening.
+            _append_forward_call(
+                out, positional_synthetic_attr(target, node.lineno, discriminator)
+            )
+            return
+        if not skip_free_fn and _is_emittable_free_function(func, target):
+            # Any other module-level free function still runs real computation the
+            # forward feeds downstream (``get_vision_position_ids(...)``); show it as
+            # its own node instead of dropping it.
+            _append_forward_call(
+                out, function_synthetic_attr(target, node.lineno, discriminator)
+            )
+            return
+        # No producer form matched: this is a tensor-method chain link
+        # (``.reshape(...)``/``.permute(...)``/``.unbind(0)``/``.to(dtype)`` — any
+        # ``torch.Tensor`` method returning a tensor, at *any* position in a chain).
+        # Chaining is a syntactic convenience: ``recv.op(*args)`` is equivalent to
+        # ``op(recv, *args)`` with ``recv`` as operand 0. Descend into the receiver
+        # so the base producer (``self.qkv(...)``) is still collected however long
+        # the chain is and whatever methods it uses. The link's own args were already
+        # visited above, so a producer passed as a method argument is not dropped
+        # either. Free-function calls (``func`` is an ``ast.Name``) don't reach here.
+        if isinstance(func, ast.Attribute):
+            _extract_self_calls_ordered(
+                func.value, out, skip_free_fn, repeated_attrs, module_attrs
+            )
+        return
+
+    if isinstance(node, ast.BinOp):
+        _extract_self_calls_ordered(
+            node.left, out, skip_free_fn, repeated_attrs, module_attrs
+        )
+        _extract_self_calls_ordered(
+            node.right, out, skip_free_fn, repeated_attrs, module_attrs
+        )
+        return
+
+    if isinstance(node, (ast.List, ast.Tuple)):
+        for elt in node.elts:
+            _extract_self_calls_ordered(
+                elt, out, skip_free_fn, repeated_attrs, module_attrs
+            )
+        return
+
+    if isinstance(node, ast.IfExp):
+        _extract_self_calls_ordered(
+            node.body, out, skip_free_fn, repeated_attrs, module_attrs
+        )
+        _extract_self_calls_ordered(
+            node.orelse, out, skip_free_fn, repeated_attrs, module_attrs
+        )
+        return
+
+    if isinstance(node, ast.Subscript):
+        _extract_self_calls_ordered(
+            node.value, out, skip_free_fn, repeated_attrs, module_attrs
+        )
+        return
+
+    if isinstance(node, ast.Compare):
+        _extract_self_calls_ordered(
+            node.left, out, skip_free_fn, repeated_attrs, module_attrs
+        )
+        for comparator in node.comparators:
+            _extract_self_calls_ordered(
+                comparator, out, skip_free_fn, repeated_attrs, module_attrs
+            )
+        return
+
+
+def _self_call_sites_in_expr(node: ast.AST) -> dict[str, set[int]]:
+    """Distinct source linenos calling each ``self.<attr>`` inside an expression."""
+    sites: dict[str, set[int]] = {}
+    for inner in ast.walk(node):
+        if not isinstance(inner, ast.Call) or not isinstance(inner.func, ast.Attribute):
+            continue
+        if _is_self_attr(inner.func, inner.func.attr):
+            sites.setdefault(inner.func.attr, set()).add(inner.lineno)
+            continue
+        # ``self.<sub>.<method>(...)`` is another call site of ``<sub>``: it runs
+        # that child's code just as its forward call does. Counting it keeps the
+        # two uses distinct steps (each gets an ``@l{lineno}`` key) instead of one
+        # silently shadowing the other.
+        receiver = inner.func.value
+        if isinstance(receiver, ast.Attribute) and _is_self_attr(
+            receiver, receiver.attr
+        ):
+            sites.setdefault(receiver.attr, set()).add(inner.lineno)
+    return sites
+
+
+def _merge_sequential_sites(
+    acc: dict[str, set[int]], nxt: dict[str, set[int]]
+) -> dict[str, set[int]]:
+    """Union call sites that execute one-after-another on the same path."""
+    out = {attr: set(sites) for attr, sites in acc.items()}
+    for attr, sites in nxt.items():
+        out.setdefault(attr, set()).update(sites)
+    return out
+
+
+def _merge_branch_sites(
+    body: dict[str, set[int]], orelse: dict[str, set[int]]
+) -> dict[str, set[int]]:
+    """Pick the busier branch per attr; mutually-exclusive arms don't both count."""
+    out: dict[str, set[int]] = {}
+    # Source order, not set order: the result is a dict whose own iteration
+    # order is read downstream, and a set's would vary with the hash seed.
+    merged_attrs = list(body) + [attr for attr in orelse if attr not in body]
+    for attr in merged_attrs:
+        body_sites = body.get(attr, set())
+        else_sites = orelse.get(attr, set())
+        out[attr] = body_sites if len(body_sites) >= len(else_sites) else else_sites
+    return out
+
+
+def _path_max_self_call_sites(stmts: list[ast.stmt]) -> dict[str, set[int]]:
+    """Max distinct co-executing ``self.<attr>`` call linenos along any one path.
+
+    ``ast.walk`` alone over-counts a child invoked once in each arm of an
+    ``if/else`` (only one arm runs), which would wrongly disambiguate a single
+    logical call (GLM's ``self.self_attn`` in its linear/full branches). Walking
+    the control flow — summing sequential statements but taking the *larger* arm of
+    a branch — counts only calls that can truly coexist, so genuinely repeated
+    straight-line calls (rotary ``recomposition_frequencies(cos)`` then ``(sin)``)
+    are still caught while branch alternatives are not.
+    """
+    result: dict[str, set[int]] = {}
+    for stmt in stmts:
+        if isinstance(stmt, ast.If):
+            stmt_sites = _merge_sequential_sites(
+                _self_call_sites_in_expr(stmt.test),
+                _merge_branch_sites(
+                    _path_max_self_call_sites(stmt.body),
+                    _path_max_self_call_sites(stmt.orelse),
+                ),
+            )
+        elif isinstance(stmt, (ast.For, ast.While)):
+            iter_or_test = getattr(stmt, "iter", None) or getattr(stmt, "test", None)
+            stmt_sites = _merge_sequential_sites(
+                _self_call_sites_in_expr(iter_or_test) if iter_or_test else {},
+                _merge_sequential_sites(
+                    _path_max_self_call_sites(stmt.body),
+                    _path_max_self_call_sites(stmt.orelse),
+                ),
+            )
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            stmt_sites = _path_max_self_call_sites(stmt.body)
+        elif isinstance(stmt, ast.Try):
+            stmt_sites = _path_max_self_call_sites(
+                stmt.body + stmt.orelse + stmt.finalbody
+            )
+        else:
+            stmt_sites = _self_call_sites_in_expr(stmt)
+        result = _merge_sequential_sites(result, stmt_sites)
+    return result
+
+
+def _submodule_method_step_details(
+    body: list[ast.stmt], module_attrs: frozenset[str]
+) -> dict[str, list[str]]:
+    """Record WHICH method a ``self.<sub>.<method>(...)`` step invokes.
+
+    The step key names the child module (so its class still resolves), but the
+    call runs a NAMED method, not that child's ``forward``. Without this the
+    renderer expands the child's forward for both uses, producing two identical
+    frames -- one of which is then dropped, taking the step's output with it.
+    """
+    details: dict[str, list[str]] = {}
+    for stmt in body:
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Call) or not isinstance(
+                node.func, ast.Attribute
+            ):
+                continue
+            receiver = node.func.value
+            if (
+                isinstance(receiver, ast.Attribute)
+                and _is_self_attr(receiver, receiver.attr)
+                and receiver.attr in module_attrs
+            ):
+                key = submodule_callsite_attr(receiver.attr, node.lineno)
+                details.setdefault(key, []).append(f"method: {node.func.attr}")
+    return details
+
+
+def named_method_operations(
+    cls: "ClassStructure", method_name: str
+) -> list[ForwardOperation]:
+    """Tensor ops of a NAMED method of *cls*, for a call made from another class.
+
+    ``multi_op_methods`` only covers ``self.<method>()`` calls a class makes on
+    itself. When one module calls a method on a CHILD module
+    (``self.indexer.build_block_mask(...)``) the callee lives in a different
+    class, so its body is never expanded and the call renders as one opaque box.
+    Parse it here from the child's own class AST; returns ``[]`` when the method
+    is absent or traces to nothing.
+    """
+    node = getattr(cls, "node", None)
+    if node is None:
+        return []
+    func = next(
+        (
+            item
+            for item in node.body
+            if isinstance(item, ast.FunctionDef) and item.name == method_name
+        ),
+        None,
+    )
+    if func is None:
+        return []
+    try:
+        analysis = _forward_operations_from_forward(
+            func, self_values={}, all_tensor_ops=True
+        )
+    except Exception:  # noqa: BLE001 - a helper we cannot trace stays a leaf
+        return []
+    # A method called on a CHILD module has its own primary parameter, which is
+    # not the child's ``forward`` input: ``self.indexer.build_block_mask(
+    # block_indices, ...)`` carries ``block_indices`` while the indexer's forward
+    # leads with ``hidden_states``. Stamp it so the boundary drawn for the call
+    # can name the tensor it actually carries.
+    primary = _primary_forward_input_name(func)
+    if not primary:
+        return list(analysis.operations)
+    # Only a parameter some op NAMES can be given a boundary inside the
+    # expansion; one no op reads has nothing to dock onto.
+    read = {n for op in analysis.operations for n in op.param_inputs}
+    secondary = [
+        arg.arg
+        for arg in func.args.posonlyargs + func.args.args
+        if arg.arg not in {"self", primary}
+        and arg.arg in read
+        and arg.annotation is not None
+        and any(
+            isinstance(x, ast.Attribute) and x.attr == "Tensor"
+            for x in ast.walk(arg.annotation)
+        )
+    ]
+    if secondary:
+        return [
+            replace(
+                operation,
+                details=(
+                    *operation.details,
+                    f"method_primary: {primary}",
+                    f"method_params: {', '.join(secondary)}",
+                ),
+            )
+            for operation in analysis.operations
+        ]
+    return [
+        replace(operation, details=(*operation.details, f"method_primary: {primary}"))
+        for operation in analysis.operations
+    ]
+
+
+def _invoked_submodule_attrs(body: list[ast.stmt]) -> frozenset[str]:
+    """Self attributes this forward calls as a module (``self.<attr>(...)``).
+
+    Used to tell a child MODULE apart from any other object hanging off ``self``
+    when a method is invoked on it (``self.indexer.build_block_mask(...)`` vs
+    ``self.config.get(...)``). Structural: an attribute this same forward already
+    invokes is a module by demonstration, so no name list is needed and a
+    non-module attribute can never be mistaken for one.
+    """
+    found: set[str] = set()
+    for stmt in body:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Call) and _is_self_attr(
+                node.func, getattr(node.func, "attr", "")
+            ):
+                found.add(node.func.attr)  # type: ignore[union-attr]
+    return frozenset(found)
+
+
+def _repeated_self_call_attrs(body: list[ast.stmt]) -> frozenset[str]:
+    """Self-submodule/method attrs called from >1 distinct site on one exec path.
+
+    Only these attrs receive call-site-disambiguated step keys; every other
+    forward keeps bare keys, so the common single-call case stays byte-identical.
+    Mutually-exclusive branch arms are not treated as repeats (see
+    ``_path_max_self_call_sites``).
+    """
+    sites = _path_max_self_call_sites(list(body))
+    return frozenset(attr for attr, linenos in sites.items() if len(linenos) > 1)
+
+
+def _self_attr_name(node: ast.AST | None) -> str | None:
+    """Return ``attr`` for a ``self.<attr>`` expression, else ``None``."""
+    if isinstance(node, ast.Attribute) and _is_self_attr(node, node.attr):
+        return node.attr
+    return None
+
+
+def _resolve_local_module_alias_calls(func: ast.FunctionDef) -> ast.FunctionDef:
+    """Rewrite ``expert(...)`` aliases of ``self.experts[i]`` (and ``for blk in
+    self.blocks``) as module calls.
+
+    Two idioms bind a ModuleList entry to a local variable before invoking it:
+
+    - subscript: ``expert = self.experts[i]; expert(...)``
+    - iteration: ``for blk in self.blocks: blk(...)`` (also
+      ``for i, blk in enumerate(self.blocks):``)
+
+    Resolving the alias to ``self.<attr>(...)`` lets the normal forward parser retain
+    the real submodule branch (routed expert, or the vision/decoder block body) instead
+    of collapsing the bare-name call into a phantom kernel tile and silently dropping it.
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(func):
+        # Subscript alias: ``expert = self.experts[i]``.
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            value = node.value
+            if (
+                isinstance(target, ast.Name)
+                and isinstance(value, ast.Subscript)
+                and isinstance(value.value, ast.Attribute)
+                and _is_self_attr(value.value, value.value.attr)
+            ):
+                aliases[target.id] = value.value.attr
+            continue
+        # Iteration alias: ``for blk in self.blocks`` / ``enumerate(self.blocks)``.
+        if isinstance(node, ast.For):
+            iterable = node.iter
+            if (
+                isinstance(iterable, ast.Call)
+                and isinstance(iterable.func, ast.Name)
+                and iterable.func.id in {"enumerate", "reversed"}
+                and iterable.args
+            ):
+                iterable = iterable.args[0]
+            # ``for layer in self.layers[: self.config.num_hidden_layers]`` walks
+            # a slice of the ModuleList. Slicing selects which entries run, not
+            # which module they are, so unwrap to the attribute -- otherwise the
+            # loop body's call resolves to no submodule at all and every tensor
+            # the loop hands each iteration (the attention mask, position ids)
+            # loses its recorded producer.
+            while isinstance(iterable, ast.Subscript):
+                iterable = iterable.value
+            attr = _self_attr_name(iterable)
+            if attr is None:
+                continue
+            loop_var = node.target
+            # ``for i, blk in enumerate(...)`` binds the element to the last element
+            # of the tuple; ``for blk in ...`` binds it directly.
+            if isinstance(loop_var, ast.Tuple) and loop_var.elts:
+                loop_var = loop_var.elts[-1]
+            if isinstance(loop_var, ast.Name):
+                aliases[loop_var.id] = attr
+    if not aliases:
+        return func
+
+    resolved = copy.deepcopy(func)
+
+    class AliasCallResolver(ast.NodeTransformer):
+        def visit_Call(self, node: ast.Call) -> ast.AST:
+            self.generic_visit(node)
+            if isinstance(node.func, ast.Name) and node.func.id in aliases:
+                node.func = ast.copy_location(
+                    ast.Attribute(
+                        value=ast.Name(id="self", ctx=ast.Load()),
+                        attr=aliases[node.func.id],
+                        ctx=ast.Load(),
+                    ),
+                    node.func,
+                )
+            return node
+
+    return AliasCallResolver().visit(resolved)
+
+
+def _functional_call_name(func: ast.AST) -> str | None:
+    """Return the op name for F.<op>(...) and torch.nn.functional.<op>(...)."""
+    if not isinstance(func, ast.Attribute):
+        return None
+    op_name = func.attr
+    value = func.value
+    if isinstance(value, ast.Name) and value.id == "F":
+        return op_name
+    if isinstance(value, ast.Attribute) and value.attr == "functional":
+        base = value.value
+        if isinstance(base, ast.Attribute) and base.attr == "nn":
+            if isinstance(base.value, ast.Name) and base.value.id == "torch":
+                return op_name
+    return None
+
+
+def _is_functional_linear_call(func: ast.AST) -> bool:
+    """True for F.linear(...) and torch.nn.functional.linear(...)."""
+    return _functional_call_name(func) == "linear"
+
+
+def _is_moe_gate_class(class_name: str, forward_calls: list[str]) -> bool:
+    if first_functional_synthetic_index(forward_calls) is None:
+        return False
+    if re.search(r"(?:Gate|Router)$", class_name):
+        return True
+    return bool(
+        MOE_CLASS_RE.search(class_name) and re.search(r"gate|router", class_name, re.I)
+    )
+
+
+def _stmt_value(stmt: ast.AST) -> ast.AST | None:
+    if isinstance(stmt, ast.Assign):
+        return stmt.value
+    if isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+        return stmt.value
+    if isinstance(stmt, ast.Return) and stmt.value is not None:
+        return stmt.value
+    return None
+
+
+COMBINE_DETAIL_PREFIX = "combine:"
+MOE_AGGREGATION_LABEL = "MoE aggregation"
+
+
+def combine_op_from_step_details(details: list[str] | None) -> str | None:
+    """Return a combine-operator symbol recorded by AST analysis (e.g. Σ)."""
+    if not details:
+        return None
+    prefix = f"{COMBINE_DETAIL_PREFIX} "
+    for item in details:
+        if item.startswith(prefix):
+            symbol = item[len(prefix) :].strip()
+            if symbol:
+                return symbol
+    return None
+
+
+def _subexpr_has_multiplication(node: ast.AST) -> bool:
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute):
+            if sub.func.attr in {"mul", "mul_", "multiply"}:
+                return True
+        if isinstance(sub, ast.BinOp) and isinstance(sub.op, (ast.Mult, ast.MatMult)):
+            return True
+    return False
+
+
+def _expr_is_weighted_sum(node: ast.AST) -> bool:
+    """True when an expression reduces a weighted tensor via sum()."""
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Call) or not isinstance(sub.func, ast.Attribute):
+            continue
+        if sub.func.attr != "sum":
+            continue
+        if _subexpr_has_multiplication(sub.func.value):
+            return True
+    return False
+
+
+def _detect_method_combine_op(
+    func: ast.FunctionDef, *, class_name: str = ""
+) -> str | None:
+    """Infer a combine-operator symbol from a helper method body."""
+    # A pure aggregation node returns the single combined tensor. A method that
+    # returns a tuple of several tensors (``pool_keys, pool_indices, pool_valid``)
+    # is doing more than a weighted sum — it merely *contains* one as an inner step,
+    # so it must expand into its full computation, not collapse to one ``Σ`` tile.
+    for node in reversed(func.body):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple):
+            if len(node.value.elts) > 1:
+                return None
+            break
+    weighted = False
+    for node in ast.walk(func):
+        value: ast.AST | None = None
+        if isinstance(node, ast.Return):
+            value = node.value
+        elif isinstance(node, ast.Assign):
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            value = node.value
+        if value is not None and _expr_is_weighted_sum(value):
+            weighted = True
+            break
+    moe_like = bool(re.search(r"(?i)moe", func.name) or MOE_CLASS_RE.search(class_name))
+    if moe_like and (
+        weighted or re.search(r"(?i)(?:infer|combin|aggregat)", func.name)
+    ):
+        return MOE_AGGREGATION_LABEL
+    if weighted:
+        return "Σ"
+    return None
+
+
+def _method_forward_step_details(
+    class_node: ast.ClassDef,
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+) -> dict[str, list[str]]:
+    """Attach AST-derived metadata to forward helper methods."""
+    method_funcs = {
+        item.name: item for item in class_node.body if isinstance(item, ast.FunctionDef)
+    }
+    details: dict[str, list[str]] = {}
+    for call_attr in forward_calls:
+        base = base_submodule_attr(call_attr)
+        if base in init_assignments:
+            continue
+        if call_attr.startswith("@") or call_attr == SYNTHETIC_ATTENTION:
+            continue
+        func = method_funcs.get(base)
+        if func is None:
+            continue
+        combine_op = _detect_method_combine_op(func, class_name=class_node.name)
+        if combine_op is None:
+            continue
+        details[call_attr] = [
+            f"method `{base}()`",
+            f"{COMBINE_DETAIL_PREFIX} {combine_op}",
+        ]
+    return details
+
+
+def _single_op_forward_methods(
+    class_node: ast.ClassDef,
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+    *,
+    self_values: dict[str, Any],
+    all_tensor_ops: bool,
+) -> dict[str, ForwardOperation]:
+    """Forward helper methods whose body is one primitive op, keyed by method name.
+
+    Such a method has no internals worth a frame of its own, so callers render the op
+    it performs instead of an opaque tile named after the method.
+    """
+    method_funcs = {
+        item.name: item for item in class_node.body if isinstance(item, ast.FunctionDef)
+    }
+    single: dict[str, ForwardOperation] = {}
+    for call_attr in forward_calls:
+        base = base_submodule_attr(call_attr)
+        if (
+            base in init_assignments
+            or call_attr.startswith("@")
+            or call_attr == SYNTHETIC_ATTENTION
+        ):
+            continue
+        func = method_funcs.get(base)
+        if func is None:
+            continue
+        # Combine-op methods drive side-input merge rendering, so leave them named.
+        if _detect_method_combine_op(func, class_name=class_node.name) is not None:
+            continue
+        operations = _forward_operations_from_forward(
+            func,
+            self_values=self_values,
+            all_tensor_ops=all_tensor_ops,
+        )
+        if len(operations.operations) == 1:
+            # Keyed by the base method name; two call sites of the same repeated
+            # method resolve here through ``base_submodule_attr`` in the block tree.
+            single[base] = operations.operations[0]
+    return single
+
+
+def _multi_op_forward_methods(
+    class_node: ast.ClassDef,
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+    *,
+    self_values: dict[str, Any],
+    all_tensor_ops: bool,
+) -> tuple[
+    dict[str, list[ForwardOperation]],
+    dict[str, tuple[dict[str, str], list[str], str | None]],
+    dict[str, str],
+    dict[str, dict[str, tuple[str, ...]]],
+    dict[str, list[str]],
+    dict[str, dict[str, dict[str, str]]],
+]:
+    """Forward helper methods with enough tensor operations to expand as a subgraph.
+
+    Also returns, per method, its ``(return_slots, return_order,
+    primary_return_slot)`` so a tuple-returning helper (``key_states,
+    value_states = self.expand_kv(...)``) exposes every return slot as its own
+    frame output — the consumer then docks the right slot onto each port instead
+    of collapsing parallel returns onto the frame tail — and its primary
+    parameter name so the frame's ``@input`` boundary is labelled after the
+    method's own first parameter. General: read off the method's own signature
+    and return statement, no class-name checks.
+
+    Also returns, per method, its full ``step_predecessors`` map -- this covers
+    step names the flattened operation list itself has no entry for (a
+    submodule invoked mid-expression inside the method, recorded only as a bare
+    predecessor NAME on whichever op reads its result), so the block tree can
+    still wire that submodule's own input once it resolves the name against the
+    class's submodule registry and builds it a sibling node.
+
+    Also returns, per method, the TRUE EVALUATION ORDER of its steps (ops *and*
+    any submodule call embedded mid-expression), merging the method's own flat
+    op list with such submodule-call names via ``_forward_calls_in_source_order``
+    -- the same general merge a top-level ``forward()`` gets for its own
+    ``forward_calls`` -- so the block tree can place a materialised submodule
+    child (``act_fn``) in its real position instead of arbitrarily first or
+    last, and each per-step ``step_predecessor_args`` map (arg name -> producer)
+    so that child's input edge resolves through the same
+    ``forward_step_predecessor_args`` mechanism an ordinary nested submodule
+    call already relies on (``_submodule_chain_input``).
+    """
+    method_funcs = {
+        item.name: item for item in class_node.body if isinstance(item, ast.FunctionDef)
+    }
+    expanded: dict[str, list[ForwardOperation]] = {}
+    returns: dict[str, tuple[dict[str, str], list[str], str | None]] = {}
+    inputs: dict[str, str] = {}
+    step_predecessors: dict[str, dict[str, tuple[str, ...]]] = {}
+    step_order: dict[str, list[str]] = {}
+    step_predecessor_args: dict[str, dict[str, dict[str, str]]] = {}
+    for call_attr in forward_calls:
+        base = base_submodule_attr(call_attr)
+        if (
+            base in init_assignments
+            or call_attr.startswith("@")
+            or call_attr == SYNTHETIC_ATTENTION
+        ):
+            continue
+        func = method_funcs.get(base)
+        if func is None:
+            continue
+        # Combine helpers (for example Kimi's moe_infer) are represented by their
+        # semantic aggregation node and side inputs, not flattened tensor ops.
+        if _detect_method_combine_op(func, class_name=class_node.name) is not None:
+            continue
+        operations = _forward_operations_from_forward(
+            func,
+            self_values=self_values,
+            all_tensor_ops=all_tensor_ops,
+        )
+        if len(operations.operations) > 1:
+            # Keyed by the base method name; two call sites of the same repeated
+            # method resolve here through ``base_submodule_attr`` in the block tree.
+            expanded[base] = operations.operations
+            if operations.step_predecessors:
+                step_predecessors[base] = dict(operations.step_predecessors)
+            if operations.step_predecessor_args:
+                step_predecessor_args[base] = dict(operations.step_predecessor_args)
+            # Submodule calls embedded mid-expression (``self.act_fn(gate)``) are
+            # recorded in ``step_predecessors`` but have no entry of their own in
+            # ``operations.operations`` (a submodule call is never a labelled
+            # tensor op). Resolve each such name against this class's own
+            # submodule registry and merge it into the method's op list in true
+            # evaluation order, so the block tree can place the materialised
+            # submodule child correctly relative to its producer/consumer ops.
+            op_attrs = {op.attr_name for op in operations.operations}
+            embedded_submodule_calls = [
+                name
+                for name in operations.step_predecessors
+                if name not in op_attrs
+                and base_submodule_attr(name) in init_assignments
+                and init_assignments[base_submodule_attr(name)]
+                not in _SKIP_INIT_CLASS_NAMES
+            ]
+            if embedded_submodule_calls:
+                step_order[base] = _forward_calls_in_source_order(
+                    func, embedded_submodule_calls, operations.operations
+                )
+            primary_input = _primary_forward_input_name(func)
+            if primary_input is not None:
+                inputs[base] = primary_input
+            if len(operations.return_order) >= 2:
+                op_attrs = {op.attr_name for op in operations.operations}
+                if all(
+                    producer in op_attrs
+                    for producer in operations.return_slots.values()
+                ):
+                    returns[base] = (
+                        dict(operations.return_slots),
+                        list(operations.return_order),
+                        operations.primary_return_slot,
+                    )
+    return (
+        expanded,
+        returns,
+        inputs,
+        step_predecessors,
+        step_order,
+        step_predecessor_args,
+    )
+
+
+def _synthetic_call_function_name(call_attr: str) -> str | None:
+    """Recover the source function name from a traced free-function synthetic attr.
+
+    ``@positional_l1615_apply_rotary_pos_emb_vision`` ->
+    ``apply_rotary_pos_emb_vision``.
+    """
+    if is_positional_synthetic(call_attr):
+        return _POSITIONAL_SOURCE_POS_RE.sub("", call_attr) or None
+    if is_function_synthetic(call_attr):
+        return _FUNCTION_SOURCE_POS_RE.sub("", call_attr) or None
+    return None
+
+
+def _free_function_param_list(func: ast.FunctionDef) -> list[str]:
+    return [arg.arg for arg in func.args.posonlyargs + func.args.args]
+
+
+def _inline_nested_free_functions(
+    analysis: "ForwardAnalysis",
+    module_functions: dict[str, ast.FunctionDef],
+    *,
+    self_values: dict[str, Any],
+    all_tensor_ops: bool,
+    class_nodes: Iterable[ast.AST] = (),
+    caller: ast.FunctionDef | None = None,
+    param_values: dict[str, Any] | None = None,
+    _seen: frozenset[str] = frozenset(),
+    _depth: int = 0,
+) -> list[ForwardOperation]:
+    """Flatten a free function's nested free-function calls into visible ops.
+
+    ``apply_rotary_pos_emb_vision`` calls ``rotate_half(q)``; the extractor
+    records that call as a synthetic predecessor (``@fn_l1575_rotate_half``) with
+    no operation of its own, so a naive expansion leaves the multiply that
+    consumes it pointing at a node that never renders. Splice the callee's ops in
+    (namespaced per call site so two calls do not collide), remap the callee's
+    ``@method_input`` to the producer feeding that call's primary arg, and rename
+    the callee's return op to the synthetic attr so the original consumer still
+    resolves. General: recurses to a bounded depth for any known free function.
+    """
+    operations = list(analysis.operations)
+    if _depth >= 8:
+        return operations
+    own = {op.attr_name for op in operations}
+    arg_maps = analysis.step_predecessor_args
+    ordinal_maps = analysis.step_predecessor_ordinals
+
+    # Synthetic predecessors that name a known free function and have no op yet.
+    nested_calls: list[str] = []
+
+    def _consider(pred: str) -> None:
+        if pred in own or pred in nested_calls:
+            return
+        name = _synthetic_call_function_name(pred)
+        if name and name in module_functions and name not in _seen:
+            nested_calls.append(pred)
+
+    for op in operations:
+        for pred in op.predecessors:
+            _consider(pred)
+    # A thin dispatcher's body may be only free-function calls whose results are
+    # returned or chained (``get_vision_attention_seqlens`` = cu_seqlens helper +
+    # max_seqlen helper), so no in-body op references them. Seed from the call
+    # chain (step predecessors, in dependency order) and the return producers so
+    # those calls still inline instead of leaving the frame an opaque tile.
+    for pred in analysis.step_predecessors:
+        _consider(pred)
+    for producer in analysis.return_slots.values():
+        if producer:
+            _consider(producer)
+    if not nested_calls:
+        return operations
+
+    expansions: dict[str, list[ForwardOperation]] = {}
+    for call_attr in nested_calls:
+        name = _synthetic_call_function_name(call_attr)
+        nested_func = module_functions[name]
+        bound = _nested_call_param_values(
+            nested_func, call_attr, caller, param_values or {}
+        )
+        nested_values = (
+            {
+                **_settled_param_defaults(nested_func, module_functions, class_nodes),
+                **bound,
+            }
+            if bound is not None
+            else {}
+        )
+        nested = _forward_operations_from_forward(
+            nested_func,
+            self_values=self_values,
+            all_tensor_ops=all_tensor_ops,
+            module_functions=module_functions,
+            is_free_function_body=True,
+            param_values=nested_values,
+        )
+        nested_ops = _inline_nested_free_functions(
+            nested,
+            module_functions,
+            self_values=self_values,
+            all_tensor_ops=all_tensor_ops,
+            class_nodes=class_nodes,
+            caller=nested_func,
+            param_values=nested_values,
+            _seen=_seen | {name},
+            _depth=_depth + 1,
+        )
+        if not nested_ops:
+            continue
+        params = _free_function_param_list(nested_func)
+        primary = params[0] if params else None
+        arg_map = arg_maps.get(call_attr, {})
+        # When two callee parameters are both fed by the *same* caller-side
+        # producer (``apply_rotary_pos_emb(x, cos=rotary_emb, sin=rotary_emb)``
+        # -- both trace to one multi-return submodule call), the substitution
+        # below collapses them onto one indistinguishable predecessor name.
+        # The call site's own per-arg ordinal (``cos``: 0, ``sin``: 1, from the
+        # producer's own return-tuple order) is available here; carry it onto
+        # the rewritten op as a predecessor port so downstream wiring can still
+        # tell which slot each op actually reads.
+        arg_ordinal_map = ordinal_maps.get(call_attr, {})
+        nested_attrs = {op.attr_name for op in nested_ops}
+        return_producer = None
+        if nested.primary_return_slot is not None:
+            return_producer = nested.return_slots.get(nested.primary_return_slot)
+        if return_producer is None:
+            return_producer = nested_ops[-1].attr_name
+        namespace = f"{call_attr}::"
+
+        def remap_attr(attr: str) -> str:
+            return call_attr if attr == return_producer else namespace + attr
+
+        def remap_pred(pred: str) -> str | None:
+            named = method_input_param(pred)
+            if named is not None:
+                # A SECONDARY parameter is fed by the call's argument for THAT
+                # parameter, not by the first one. Collapsing them made GLM's
+                # mask builder -- which slices ``attention_mask`` -- read the
+                # frame's primary (its ``config``-shaped first argument, the
+                # embedding) and report a [B, S, hidden] "mask".
+                return arg_map.get(named)
+            if pred == FORWARD_METHOD_INPUT:
+                # The callee's primary parameter is fed by this call's first arg.
+                return arg_map.get(primary) if primary else None
+            if pred in nested_attrs:
+                return remap_attr(pred)
+            return pred
+
+        rewritten: list[ForwardOperation] = []
+        for op in nested_ops:
+            preds = tuple(
+                p for p in (remap_pred(pred) for pred in op.predecessors) if p
+            )
+            # A callee secondary parameter (rare) is fed by a further call arg;
+            # turn it into a predecessor when a producer is known, else drop it.
+            extra_param_preds: list[str] = []
+            extra_param_ports: list[tuple[str, int]] = []
+            remaining_params: list[str] = []
+            for param in op.param_inputs:
+                producer = arg_map.get(param)
+                if producer:
+                    extra_param_preds.append(producer)
+                    # Two callee params sharing one producer (``cos``/``sin``
+                    # both from the same multi-return submodule call) need
+                    # their own slot ordinal recorded so this op's own
+                    # predecessor port distinguishes which return slot it
+                    # actually reads, instead of every consumer of that
+                    # producer name colliding on its sequential-fallback tail.
+                    if param in arg_ordinal_map:
+                        extra_param_ports.append((producer, arg_ordinal_map[param]))
+                elif param == primary:
+                    resolved = arg_map.get(primary) if primary else None
+                    if resolved:
+                        extra_param_preds.append(resolved)
+                else:
+                    remaining_params.append(param)
+            ports = tuple(
+                (remap_attr(attr) if attr in nested_attrs else attr, ordinal)
+                for attr, ordinal in op.predecessor_ports
+            ) + tuple(extra_param_ports)
+            rewritten.append(
+                replace(
+                    op,
+                    attr_name=remap_attr(op.attr_name),
+                    predecessors=tuple((*preds, *extra_param_preds)),
+                    param_inputs=tuple(remaining_params),
+                    predecessor_ports=ports,
+                )
+            )
+        expansions[call_attr] = rewritten
+
+    if not expansions:
+        return operations
+
+    # Emit each callee's ops just before the first original op that consumes it,
+    # so producers precede consumers in the rendered pipeline.
+    result: list[ForwardOperation] = []
+    emitted: set[str] = set()
+    for op in operations:
+        for pred in op.predecessors:
+            if pred in expansions and pred not in emitted:
+                result.extend(expansions[pred])
+                emitted.add(pred)
+        result.append(op)
+    for call_attr, ops in expansions.items():
+        if call_attr not in emitted:
+            result.extend(ops)
+    return result
+
+
+def _multi_op_free_functions(
+    module_functions: dict[str, ast.FunctionDef],
+    forward_calls: list[str],
+    *,
+    self_values: dict[str, Any],
+    all_tensor_ops: bool,
+    class_nodes: Iterable[ast.AST] = (),
+) -> tuple[
+    dict[str, list[ForwardOperation]],
+    dict[str, list[str]],
+    dict[str, tuple[dict[str, str], list[str], str | None]],
+    dict[str, str],
+    dict[str, list[LoopCarriedSpec]],
+]:
+    """Traced free-function calls whose body expands into a visible sub-pipeline.
+
+    Keyed by the synthetic call attr (``@positional_l1615_...``) so the block
+    tree renders the helper's computation inline instead of one opaque tile.
+    Mirrors ``_multi_op_forward_methods`` for module-level functions.
+
+    Also returns, for a tuple-returning helper, the ordered internal producer
+    attrs of its return slots (ordinal -> producer attr), so a consumer reading a
+    specific slot (``query_states`` = ordinal 0 of
+    ``apply_rotary_pos_emb_vision``) can dock onto the matching internal op
+    instead of the frame's last op. General: derived from the helper's own
+    ``return_order``/``return_slots``, no class-name checks.
+
+    The third dict mirrors ``multi_op_method_returns``'s own
+    ``(return_slots, return_order, primary_return_slot)`` shape for a
+    ``self.<method>()`` call, so a free-function call's own rendered
+    ``BlockNode`` (``_expanded_free_function_node``) can carry the same
+    ``forward_return_slots``/``forward_return_order`` metadata a method call's
+    does. Without it, ``_track_attr_index``/``_return_slot_attr_by_ordinal``
+    (which key off a *node's own* ``forward_return_order``, not the parent's
+    ``forward_step_return_producers``) have nothing to stash a per-ordinal slot
+    index from, so every consumer reading a specific return ordinal collapses
+    onto the frame's last op instead of its own slot's producer.
+
+    The fourth dict mirrors ``multi_op_method_inputs``'s own per-``self.method()``
+    entries: call attr -> the callee's own primary (first) parameter name, so the
+    free function's rendered frame is labelled after its own signature
+    (``apply_rotary_pos_emb_vision`` -> ``q``) instead of the class-level
+    ``forward_input_name`` fallback (``hidden_states``) that every frame's
+    ``@input`` resolution defaults to when nothing more specific is known.
+    """
+    expanded: dict[str, list[ForwardOperation]] = {}
+    return_producers: dict[str, list[str | None]] = {}
+    method_returns: dict[str, tuple[dict[str, str], list[str], str | None]] = {}
+    primary_params: dict[str, str] = {}
+    loop_carried: dict[str, list[LoopCarriedSpec]] = {}
+    for call_attr in forward_calls:
+        name = _synthetic_call_function_name(call_attr)
+        if name is None:
+            continue
+        func = module_functions.get(name)
+        if func is None:
+            continue
+        # Filtered, never raw: a default is in force only if no visible caller
+        # overrides it and the function is not entered from unparsed code.
+        settled = _settled_param_defaults(func, module_functions, class_nodes)
+        analysis = _forward_operations_from_forward(
+            func,
+            self_values=self_values,
+            all_tensor_ops=all_tensor_ops,
+            module_functions=module_functions,
+            is_free_function_body=True,
+            param_values=settled,
+        )
+        operations = _inline_nested_free_functions(
+            analysis,
+            module_functions,
+            self_values=self_values,
+            all_tensor_ops=all_tensor_ops,
+            class_nodes=class_nodes,
+            caller=func,
+            param_values=settled,
+            _seen=frozenset({name}),
+        )
+        # A free function whose body reduces to a *single* traced op (``index_first_axis``:
+        # ``return x[indices]`` -> one ``Index select``) still expands: rendering it as its
+        # underlying op is strictly better than an opaque ``@fn_..._index_first_axis`` tile
+        # that hides a real gather. Multi-op helpers already expanded; the threshold is
+        # ``>= 1`` so a lone real op is not the one case left opaque. (A body that traces to
+        # zero ops -- a pure pass-through -- still has nothing to expand and is skipped.)
+        if len(operations) >= 1:
+            expanded[call_attr] = operations
+            op_names = {op.attr_name for op in operations}
+            # Keep only the specs whose loop body survived inlining, so a carried
+            # boundary is never synthesised around ops that are not rendered.
+            surviving = [
+                spec
+                for spec in analysis.loop_carried
+                if spec.updated_producer in op_names
+            ]
+            if surviving:
+                loop_carried[call_attr] = surviving
+            primary = _primary_forward_input_name(func)
+            if primary:
+                primary_params[call_attr] = primary
+            if len(analysis.return_order) >= 2:
+                op_attrs = {op.attr_name for op in operations}
+                producers = [
+                    analysis.return_slots.get(slot) for slot in analysis.return_order
+                ]
+                # Publish per slot what IS known, each in its own position.
+                # Demanding that EVERY slot resolve threw away the ones that
+                # did: ``get_unpad_data`` returns (indices, cu_seqlens,
+                # max_seqlen), and where the cu_seqlens arm was not captured,
+                # ``indices`` lost its producer too -- so every consumer fell
+                # onto the helper's last op, the scalar ``.max()``, and a gather
+                # was shown reading a scalar. A slot left ``None`` simply keeps
+                # the old default for that slot alone.
+                placed: list[str | None] = [
+                    producer if (producer and producer in op_attrs) else None
+                    for producer in producers
+                ]
+                if any(placed):
+                    return_producers[call_attr] = placed
+                    method_returns[call_attr] = (
+                        dict(analysis.return_slots),
+                        list(analysis.return_order),
+                        analysis.primary_return_slot,
+                    )
+    return expanded, return_producers, method_returns, primary_params, loop_carried
+
+
+def _register_forward_calls(
+    stmt_calls: list[str],
+    calls: list[str],
+    norm_before: list[str],
+    pending_norm: str | None,
+) -> str | None:
+    for attr in stmt_calls:
+        if attr == SYNTHETIC_ATTENTION:
+            _append_forward_call(calls, attr)
+            pending_norm = None
+            continue
+
+        role = _classify_role(attr, "")
+        if role == "norm":
+            _append_forward_call(calls, attr)
+            pending_norm = attr
+            continue
+
+        if pending_norm is not None:
+            norm_before.append(attr)
+            pending_norm = None
+        _append_forward_call(calls, attr)
+    return pending_norm
+
+
+def parse_python_ast(source: str, filename: str = "<model>") -> ast.Module:
+    return ast.parse(source, filename=filename)
+
+
+def dump_ast(source: str, filename: str = "<model>") -> str:
+    tree = parse_python_ast(source, filename=filename)
+    return ast.dump(tree, indent=2, include_attributes=False)
+
+
+def _expr_name(node: ast.AST | None) -> str | None:
+    if node is None:
+        return None
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _expr_name(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    if isinstance(node, ast.Subscript):
+        return _expr_name(node.value)
+    if isinstance(node, ast.Call):
+        return _expr_name(node.func)
+    return None
+
+
+def _call_class_name(node: ast.Call) -> str | None:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _constructed_class_name(func: ast.expr) -> str | None:
+    """The class a call constructs: ``X(...)`` and ``X._from_config(...)`` -> ``X``.
+
+    Direct instantiation names the class on ``func`` itself; HF classmethod
+    constructors (``X._from_config``/``X.from_config``) name it on the attribute
+    receiver. ``pkg.Thing(...)`` (e.g. ``nn.Conv3d``) resolves to the package name,
+    which is harmless here since callers filter against the local class registry.
+    """
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        return func.value.id
+    return None
+
+
+def _call_uses_vision_config(call: ast.Call) -> bool:
+    """True when any argument references ``…vision_config`` (the nested sub-config)."""
+    for arg in list(call.args) + [kw.value for kw in call.keywords]:
+        for sub in ast.walk(arg):
+            if isinstance(sub, ast.Attribute) and sub.attr == "vision_config":
+                return True
+    return False
+
+
+def _vision_scoped_class_names(
+    tree: ast.AST, config: dict[str, Any] | None
+) -> set[str]:
+    """Local classes constructed under the vision tower (built with ``vision_config``).
+
+    A HF vision-language model instantiates its vision tower with the nested
+    ``vision_config`` (e.g. ``self.visual = XVisionModel._from_config(config.vision_config)``),
+    inside which ``hidden_size`` and the patch geometry differ from the text model.
+    Every module the tower builds inherits that sub-config, so its ``self.<attr> =
+    config.<attr>`` reads must resolve against ``vision_config``. Text-only repos
+    have no ``vision_config`` -> empty set -> the text path is provably untouched.
+
+    Scoping is by instantiation subtree, not class name: a shared class such as
+    ``RMSNorm`` used in both towers is included only through the vision subtree here,
+    and callers overlay the sub-config for those instances alone.
+    """
+    if not isinstance(config, dict) or not isinstance(
+        config.get("vision_config"), dict
+    ):
+        return set()
+    class_defs: dict[str, ast.ClassDef] = {
+        node.name: node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+    }
+    if not class_defs:
+        return set()
+    # Roots: any local class whose (class)method is called with ``config.vision_config``.
+    roots: list[str] = []
+    for cls in class_defs.values():
+        for call in ast.walk(cls):
+            if isinstance(call, ast.Call) and _call_uses_vision_config(call):
+                root = _constructed_class_name(call.func)
+                if root in class_defs and root not in roots:
+                    roots.append(root)
+    # BFS through ``__init__`` constructor calls, restricted to local classes.
+    scoped: set[str] = set()
+    frontier = list(roots)
+    while frontier:
+        name = frontier.pop()
+        if name in scoped or name not in class_defs:
+            continue
+        scoped.add(name)
+        init = next(
+            (
+                item
+                for item in class_defs[name].body
+                if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+            ),
+            None,
+        )
+        if init is None:
+            continue
+        for call in ast.walk(init):
+            if isinstance(call, ast.Call):
+                child = _constructed_class_name(call.func)
+                if child in class_defs and child not in scoped:
+                    frontier.append(child)
+    return scoped
+
+
+def _is_self_attr(node: ast.AST, attr: str) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+        and node.attr == attr
+    )
+
+
+POSITIONAL_ATTR_RE = re.compile(r"(rotary|rope|pos_emb)", re.I)
+POSITIONAL_CLASS_RE = re.compile(r"(Rotary|RoPE|PosEmb|RotaryEmbedding)", re.I)
+EMBEDDING_CLASS_RE = re.compile(r"Embedding", re.I)
+# `Head$` catches inference-repo names like ParallelHead. Attention classes are
+# classified earlier, so `AttentionHead` and friends never reach this test.
+HEAD_CLASS_RE = re.compile(r"(?:^|_)head$|Head$|LMHead|CausalLMOutput", re.I)
+_MOE_BLOCK_CLASS_RE = re.compile(
+    r"(?i)(?:^moe$|sparse_?moe(?:_?block)?$|moe_?block$|experts$)"
+)
+
+
+def _classify_role(attr_name: str, class_name: str) -> str:
+    """What part this submodule plays in a transformer block.
+
+    Answered from naming convention -- see :data:`ATTR_ROLE_HINTS` for why that
+    is the only thing available and which diagram actually needs the answer.
+    The layers below run most-specific first: an explicit attribute hint, then
+    tokens within the attribute name, then the class name. ``norm`` is tested
+    ahead of the other tokens on purpose (``attn_norm`` is a norm, not an
+    attention).
+
+    Returns ``"other"`` when nothing matches; callers must treat that as "not
+    known", never as a role of its own.
+    """
+    attr_key = attr_name.lower()
+    if _MOE_BLOCK_CLASS_RE.search(class_name):
+        return "moe"
+    if attr_key in ATTR_ROLE_HINTS:
+        return ATTR_ROLE_HINTS[attr_key]
+    tokens = [token for token in re.split(r"[_\W]+", attr_key) if token]
+    # `attn_norm` / `ffn_norm` must be norms. Matching attn/ffn first left the
+    # transformer overview with no (norm, module) pairs, so the block drew empty.
+    if any("norm" in token for token in tokens):
+        return "norm"
+    for token in tokens:
+        if token in {"attn", "attention"}:
+            return "attention"
+        if token in {"mlp", "ffn"}:
+            return "ffn"
+        if token in {"moe", "experts"}:
+            return "moe"
+        if token in {"router"}:
+            return "router"
+        if token in {"embed", "embedding"}:
+            return "embedding"
+    if attr_key in {"gate", "router"}:
+        return "router"
+    if POSITIONAL_ATTR_RE.search(attr_key):
+        return "positional"
+
+    if ATTENTION_CLASS_RE.search(class_name):
+        return "attention"
+    if MOE_CLASS_RE.search(class_name):
+        return "moe"
+    if FFN_CLASS_RE.search(class_name):
+        return "ffn"
+    if NORM_CLASS_RE.search(class_name):
+        return "norm"
+    if POSITIONAL_CLASS_RE.search(class_name):
+        return "positional"
+    if EMBEDDING_CLASS_RE.search(class_name) and "embed" in attr_key:
+        return "embedding"
+    if HEAD_CLASS_RE.search(class_name) or (
+        re.match(r"(?i)^Linear$", class_name) and "head" in attr_key
+    ):
+        return "head"
+    return "other"
+
+
+def ffn_role_for_class(attr_name: str, class_name: str) -> str:
+    """Tell an MoE block from a dense FFN when one attribute can hold either.
+
+    ``self.mlp`` is bound to a sparse block as often as a dense one, so the attribute
+    name cannot decide the role; a class named for the routed block does.
+    """
+    if _MOE_BLOCK_CLASS_RE.search(class_name):
+        return "moe"
+    if FFN_CLASS_RE.search(class_name):
+        return "ffn"
+    return _classify_role(attr_name, class_name)
+
+
+def displays_as_linear(attr_name: str, class_name: str | None) -> bool:
+    """True when a module should be drawn as a plain Linear op."""
+    return bool(class_name and re.match(r"(?i)^Linear$", class_name))
+
+
+def displays_as_pointwise_leaf(attr_name: str, class_name: str | None) -> bool:
+    """True when a submodule is a leaf the parent's own tensor math flows through."""
+    if displays_as_linear(attr_name, class_name):
+        return True
+    return bool(class_name) and class_name in _ACTIVATION_LEAF_CLASS_NAMES
+
+
+def _forward_owns_tensor_math(
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+) -> bool:
+    """True when a module's forward does its own tensor math over plain projections.
+
+    An MLP-style module computes its gating inline, so it has no submodule to carry
+    that math: dropping the operations would leave the diagram showing its
+    projections with nothing between them. A registered activation is pointwise and
+    carries no gating either, so it counts as a projection here. Modules that call
+    composite children (norms, attention, another MLP) leave the math to those
+    children, and their own statements are residual plumbing represented elsewhere.
+    """
+    module_calls = [
+        call for call in forward_calls if base_submodule_attr(call) in init_assignments
+    ]
+    if not module_calls:
+        return False
+    return all(
+        displays_as_pointwise_leaf(
+            base_submodule_attr(call), init_assignments[base_submodule_attr(call)]
+        )
+        for call in module_calls
+    )
+
+
+def _forward_delegates_to_nothing(class_name: str, forward_calls: list[str]) -> bool:
+    """True when a module computes everything in its own statements.
+
+    Rotary embeddings, normalization layers, activations, and small collapse heads
+    commonly own no child modules at all. Every computation they perform therefore
+    lives inline; retaining those operations is the only way to render their real
+    dataflow instead of an opaque class-name tile.
+    """
+    del class_name
+    return not forward_calls
+
+
+def _forward_delegates_only_to_sibling_methods(
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+    method_names: set[str],
+) -> bool:
+    """True when forward()'s only calls are helper methods on the same class.
+
+    A module can factor part of its own tensor math into sibling methods — e.g. a
+    rotary embedding whose ``forward`` computes ``cos``/``sin`` inline and then calls
+    ``self.recomposition_frequencies(...)`` to reshape them. Those calls are not
+    submodules, so the math does not live in a child; the ``forward`` still owns it.
+    Treat this like a forward that delegates to nothing so its inline operations
+    (the multiplies here) are retained instead of collapsing to an opaque tile.
+    """
+    if not forward_calls:
+        return False
+    for call in forward_calls:
+        base = base_submodule_attr(call)
+        if base in init_assignments:
+            return False  # a real submodule carries that part of the math
+        if is_positional_synthetic(call) or is_functional_synthetic(call):
+            return False  # positional/functional child, handled elsewhere
+        if base not in method_names:
+            return False  # unknown free call — don't assume inline ownership
+    return True
+
+
+def _forward_mixes_modules_and_inline_ops(
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+    parsed_operations: list[ForwardOperation],
+) -> bool:
+    """True when forward() calls submodules and also runs inline tensor math."""
+    module_calls = [
+        call
+        for call in forward_calls
+        if base_submodule_attr(call) in init_assignments
+        or is_positional_synthetic(call)
+        or is_functional_synthetic(call)
+        or is_function_synthetic(call)
+    ]
+    if not module_calls or not parsed_operations:
+        return False
+    inline_ops = sum(
+        1 for op in parsed_operations if is_forward_operation(op.attr_name)
+    )
+    # A single inline op is enough. When a forward calls a composite child and
+    # then combines its result inline (``left, right = self.split(x); return
+    # self.proj(right) + left``), that lone Add is real computation the module
+    # owns and must stay visible — it is not residual plumbing represented
+    # elsewhere. ``_forward_owns_tensor_math`` only fires when *every* module
+    # call is a pointwise leaf, so the composite-child + inline-op case reaches
+    # here as its sole retention path.
+    return inline_ops >= 1
+
+
+def _label_for(
+    role: str,
+    class_name: str,
+    attr_name: str,
+    classes: "dict[str, ClassStructure] | None" = None,
+) -> str:
+    if role == "embedding":
+        if attr_name == "embed_tokens":
+            return "Token Embedding"
+        return class_name if len(class_name) <= 24 else attr_name
+    if role == "head":
+        if displays_as_linear(attr_name, class_name):
+            return "Linear"
+        return class_name if len(class_name) <= 24 else attr_name
+    if role == "positional":
+        if class_name in {"RotaryEmbedding", "RotaryEmbeddingModule"}:
+            return class_name.replace("Embedding", " encoding").strip()
+        return class_name if len(class_name) <= 24 else attr_name
+    if displays_as_linear(attr_name, class_name):
+        return "Linear"
+    if role == "attention":
+        if re.search(r"Gated", class_name, re.I):
+            return "Gated Attention"
+        if re.search(r"Sliding|Window", class_name, re.I):
+            return "Sliding Window Attn"
+        return class_name.replace("Attention", " Attn").strip()
+    if role == "moe":
+        return class_name if len(class_name) <= 22 else "MoE block"
+    if role == "ffn":
+        if "SwiGLU" in class_name or "Gated" in class_name:
+            return "SwiGLU FFN"
+        return class_name if len(class_name) <= 22 else "FFN"
+    if role == "norm":
+        # Read what the norm actually computes; a LayerNorm centres its input and
+        # an RMSNorm does not. A torch builtin has no Python forward, so it is
+        # resolved by its exact module identity -- an API fact, not a substring
+        # guess. Anything still unresolved stays the neutral "Norm" rather than
+        # being labelled from how its class happens to be spelled.
+        kind = _norm_kind_from_forward((classes or {}).get(class_name))
+        if kind is None:
+            kind = {"LayerNorm": "LayerNorm", "RMSNorm": "RMSNorm"}.get(class_name)
+        if kind is None and class_name:
+            # Last resort, and only for a class with NO readable forward: a stub or
+            # an unparsed third-party norm. The name is the sole remaining signal,
+            # and dropping it would relabel a module its own author called
+            # ``...RMSNorm`` as a generic "Norm". Structural resolution above
+            # always wins, so a class whose forward contradicts its name is read
+            # correctly rather than by this.
+            if "RMS" in class_name:
+                kind = "RMSNorm"
+            elif "Layer" in class_name:
+                kind = "LayerNorm"
+        return kind or "Norm"
+    if role == "router":
+        return "Router"
+    return class_name if len(class_name) <= 24 else attr_name
+
+
+SideInputSource = Literal["forward_input", "prior_step"]
+
+
+@dataclass
+class SideInputSpec:
+    """Extra argument feeding a forward call from an earlier step or the block input."""
+
+    arg_name: str
+    port_label: str
+    source_chain: list[str]
+    source_kind: SideInputSource = "prior_step"
+    side_effect_call: bool = False
+
+
+@dataclass(frozen=True)
+class ForwardOperation:
+    """One primitive tensor operation recovered from a forward expression."""
+
+    attr_name: str
+    label: str
+    class_name: str
+    predecessors: tuple[str, ...] = ()
+    external_inputs: tuple[str, ...] = ()
+    details: tuple[str, ...] = ()
+    param_inputs: tuple[str, ...] = ()
+    # Ordered names a multi-output op was tuple-unpacked into
+    # (``pre_w, post_w, comb_w = ...split([hc, hc, hc * hc])`` -> these three).
+    # Non-empty only for split/chunk/unbind that feed distinct downstream reads;
+    # each name becomes one named output port with its own slice shape.
+    output_names: tuple[str, ...] = ()
+    # For a consumer of a multi-output op: which output ordinal of each producer
+    # this operation reads (``producer_attr -> ordinal``), so its edge can attach
+    # to the matching output port rather than the whole split.
+    predecessor_ports: tuple[tuple[str, int], ...] = ()
+    # For a ``param_inputs`` entry that is a tuple-unpacked alias of a secondary
+    # forward parameter (``cos, sin = position_embeddings``), the origin
+    # parameter's unpack ordinal (``position_embeddings`` -> 0 for ``cos``).
+    # Lets the boundary-input pass dock a per-slot edge instead of collapsing
+    # every alias onto the whole tensor's first consumer.
+    param_input_ordinals: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class LoopCarriedSpec:
+    """One value updated by a loop and consumed after its final iteration."""
+
+    loop_id: str
+    iteration_count: int | None
+    variable: str
+    # ``None`` for an accumulator seeded by an empty literal (``chunks = []``):
+    # nothing outside the loop produces the initial value, so the carried-in
+    # boundary IS the origin and simply has no incoming edge.
+    initial_producer: str | None
+    updated_producer: str
+    operation_ids: tuple[str, ...]
+
+
+@dataclass
+class ForwardAnalysis:
+    """Inline tensor ops recovered from one ``forward()`` plus return metadata."""
+
+    operations: list[ForwardOperation]
+    var_producer: dict[str, str]
+    step_predecessors: dict[str, tuple[str, ...]]
+    step_predecessor_args: dict[str, dict[str, str]]
+    step_predecessor_ordinals: dict[str, dict[str, int]]
+    step_output_names: dict[str, list[str]]
+    step_boundary_params: dict[str, tuple[str, ...]]
+    step_boundary_arg_params: dict[str, dict[str, tuple[str, int | None]]]
+    return_slots: dict[str, str]
+    return_order: list[str]
+    primary_return_slot: str | None
+    loop_carried: list[LoopCarriedSpec]
+
+
+@dataclass(frozen=True)
+class StackEntryDataflow:
+    """Source operations that transform embeddings into decoder-loop input."""
+
+    operations: tuple[ForwardOperation, ...]
+    output_producer: str
+    # Loop-invariant inputs handed to every iteration by keyword
+    # (``layer(hidden_states, position_embeddings=..., attention_mask=...)``):
+    # forward-parameter name the iterated module reads -> producer attr for it.
+    # Only entries whose producer is a materialised source operation are kept, so
+    # the merge can dock each producer onto the repeat group's boundary tile.
+    loop_invariant_inputs: dict[str, str] = field(default_factory=dict)
+    # Local forward variable -> the producer that made it. A generator op reads
+    # its extent from a tensor's shape (``torch.arange(inputs_embeds.shape[1])``),
+    # which is a real dependency even though no tensor flows along it; the merge
+    # needs this map to turn that name back into the node to draw an edge from.
+    var_producers: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class ClassStructure:
+    name: str
+    node: ast.ClassDef
+    init_assignments: dict[str, str]
+    init_details: dict[str, list[str]]
+    forward_calls: list[str]
+    norm_before: list[str]
+    attention_inputs: dict[str, list[str]] = field(default_factory=dict)
+    parallel_gates: list[str] = field(default_factory=list)
+    input_fed_calls: list[str] = field(default_factory=list)
+    gate_activations: dict[str, str] = field(default_factory=dict)
+    # Display name of the gate activation a *gated norm* applies to its gate input
+    # (``normalized * ACT2FN[self.activation](gate)``), resolved generically from
+    # this class's own init/config symbol table. ``None`` for a plain norm.
+    gate_activation: str | None = None
+    forward_step_details: dict[str, list[str]] = field(default_factory=dict)
+    side_inputs: dict[str, list[SideInputSpec]] = field(default_factory=dict)
+    init_assignment_options: dict[str, list[str]] = field(default_factory=dict)
+    # Submodules assigned ONLY inside an `__init__` branch the config rules
+    # out, so no instance has them. A forward that calls one cannot run --
+    # the model raises -- which is what makes the call safe to drop.
+    unbuilt_attrs: frozenset[str] = frozenset()
+    forward_input_name: str | None = None
+    forward_operations: dict[str, ForwardOperation] = field(default_factory=dict)
+    forward_step_predecessors: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    forward_step_predecessor_args: dict[str, dict[str, str]] = field(
+        default_factory=dict
+    )
+    forward_step_predecessor_ordinals: dict[str, dict[str, int]] = field(
+        default_factory=dict
+    )
+    forward_step_output_names: dict[str, list[str]] = field(default_factory=dict)
+    forward_step_boundary_params: dict[str, tuple[str, ...]] = field(
+        default_factory=dict
+    )
+    forward_step_boundary_arg_params: dict[str, dict[str, tuple[str, int | None]]] = (
+        field(default_factory=dict)
+    )
+    single_op_methods: dict[str, ForwardOperation] = field(default_factory=dict)
+    multi_op_methods: dict[str, list[ForwardOperation]] = field(default_factory=dict)
+    # For an inline-expanded forward *method* returning a tuple
+    # (``key_states, value_states = self.expand_kv(...)``): base method name ->
+    # ``(return_slots, return_order, primary_return_slot)``, so the method frame
+    # exposes every return slot as its own output port and consumers dock onto
+    # the matching slot instead of collapsing onto the frame tail.
+    multi_op_method_returns: dict[str, tuple[dict[str, str], list[str], str | None]] = (
+        field(default_factory=dict)
+    )
+    # For an inline-expanded forward *method*: base method name -> its primary
+    # (first non-``self``) parameter name, so the method frame's ``@input``
+    # boundary is labelled after the method's own parameter
+    # (``build_attention_mask_from_topk`` -> ``topk_indices``) instead of falling
+    # back to the generic ``hidden_states``.
+    multi_op_method_inputs: dict[str, str] = field(default_factory=dict)
+    # Loop-carried values recovered from an expanded free function's own body,
+    # keyed by its call attr. A helper that builds a list across a loop carries
+    # a value exactly as a class forward does, but its specs live on the
+    # callee's analysis -- without publishing them here the expanded frame
+    # renders the loop body with no carried-in/out boundary.
+    multi_op_method_loop_carried: dict[str, list[LoopCarriedSpec]] = field(
+        default_factory=dict
+    )
+    # For an inline-expanded forward *method*: base method name -> {step name ->
+    # predecessor attrs}, covering every step the method's own body extraction
+    # recorded a predecessor for -- including a submodule invoked mid-expression
+    # inside the method (``self.act_fn(gate)`` in ``return self.act_fn(gate) *
+    # up``), which the flattened ``ForwardOperation`` list never carries its own
+    # entry for (the extractor only leaves its bare name on the CONSUMING op's
+    # predecessors). The block tree resolves such a name against this class's own
+    # submodule registry and, when found, builds it a real sibling child; this
+    # map is what tells that child what feeds it, so it does not appear as a
+    # sourceless node when its own gate/branch happens not to be otherwise
+    # consumed.
+    multi_op_method_step_predecessors: dict[str, dict[str, tuple[str, ...]]] = field(
+        default_factory=dict
+    )
+    # For an inline-expanded forward *method*: base method name -> the TRUE
+    # EVALUATION ORDER of its steps, merging its flat op-attr list with the name
+    # of any submodule call embedded mid-expression (``act_fn`` in the example
+    # above) via ``_forward_calls_in_source_order`` -- the same general merge a
+    # class's own top-level ``forward()`` gets for ``forward_calls``. Only
+    # populated when the method has such an embedded submodule call; lets the
+    # block tree place that call's materialised sibling node in its real
+    # position (after its own producer, before its own consumer) instead of
+    # arbitrarily first or last in the frame's children.
+    multi_op_method_order: dict[str, list[str]] = field(default_factory=dict)
+    # For an inline-expanded forward *method*: base method name -> {step name ->
+    # {arg name -> producer attr}}, the method's own ``step_predecessor_args``.
+    # Set as ``forward_step_predecessor_args`` on the method's frame so a
+    # materialised submodule child's input resolves through
+    # ``_submodule_chain_input`` -- the same mechanism an ordinary nested
+    # submodule call already relies on -- instead of the frame's naive
+    # previous-sibling chaining, which would be wrong once the child is not the
+    # very first step.
+    multi_op_method_step_predecessor_args: dict[str, dict[str, dict[str, str]]] = field(
+        default_factory=dict
+    )
+    # For an inline-expanded free function returning a tuple
+    # (``q_embed, k_embed = apply_rotary_pos_emb_vision(...)``): call attr ->
+    # ordered internal producer attrs, so a consumer reading a specific return
+    # ordinal docks onto the matching internal op, not the frame's last op.
+    forward_step_return_producers: dict[str, list[str | None]] = field(
+        default_factory=dict
+    )
+    forward_return_slots: dict[str, str] = field(default_factory=dict)
+    forward_return_order: list[str] = field(default_factory=list)
+    primary_return_slot: str | None = None
+    forward_call_output_names: dict[str, str] = field(default_factory=dict)
+    referenced_return_producers: set[str] = field(default_factory=set)
+    loop_carried: list[LoopCarriedSpec] = field(default_factory=list)
+    forward_param_inputs: list[str] = field(default_factory=list)
+    dataflow_expanded: bool = False
+    # Synthetic free-function/positional call attr -> True when that call (or a
+    # function it transitively calls) runs host/CPU work (``.tolist()``/``.item()``).
+    forward_step_runs_on_host: dict[str, bool] = field(default_factory=dict)
+    # Submodule attr -> (registry_name, key) for a ``self.attr = ACT2FN[key]``-style
+    # assignment whose key is not one of the curated ``_ACTIVATION_DISPLAY_NAMES``
+    # (so its concrete class is unknown until resolved cross-file). Consumed by
+    # ``_expand_unresolved_activation_classes`` to chase the real class and expand
+    # its forward instead of rendering an opaque, title-cased placeholder leaf.
+    unresolved_activation_refs: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # Submodule attr -> module-level registry dict name for a
+    # ``self.attr = REGISTRY[key](...)`` assignment (``COMPRESSOR_CLASSES[...]``)
+    # whose callable is selected at runtime from a config-derived key, so static
+    # analysis cannot name the concrete class from the assignment alone. Consumed
+    # by ``_resolve_module_dict_registry_classes`` to chase the dict's own
+    # class-reference values and expand the submodule's forward instead of
+    # rendering an opaque leaf named after the attr.
+    unresolved_module_dict_class_refs: dict[str, str] = field(default_factory=dict)
+
+
+def stack_entry_dataflow(cls: ClassStructure) -> StackEntryDataflow | None:
+    """Recover the exact tensor-method chain feeding an iterated decoder module."""
+    forward = next(
+        (
+            item
+            for item in cls.node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+    if forward is None:
+        return None
+
+    decoder_loop: ast.For | None = None
+    input_name: str | None = None
+    for statement in forward.body:
+        if not isinstance(statement, ast.For):
+            continue
+        loop_names = {
+            node.id for node in ast.walk(statement.target) if isinstance(node, ast.Name)
+        }
+        loop_call = next(
+            (
+                call
+                for call in ast.walk(statement)
+                if isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id in loop_names
+                and call.args
+                and isinstance(call.args[0], ast.Name)
+            ),
+            None,
+        )
+        if loop_call is not None:
+            decoder_loop = statement
+            input_name = loop_call.args[0].id
+            break
+    if decoder_loop is None or input_name is None:
+        return None
+
+    init_func = next(
+        (
+            item
+            for item in cls.node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+        ),
+        None,
+    )
+    primary = _primary_forward_input_name(forward)
+    extractor = _ForwardOperationExtractor(
+        self_values=_self_config_values(init_func, {}),
+        all_tensor_ops=True,
+        param_names=_forward_input_names(forward) - {primary} if primary else set(),
+        host_scalar_params=_host_scalar_param_names(forward),
+    )
+    if primary:
+        extractor.var_producer[primary] = FORWARD_METHOD_INPUT
+    loop_index = forward.body.index(decoder_loop)
+    extractor.statements(forward.body[:loop_index])
+    output_producer = extractor.var_producer.get(input_name)
+    if output_producer is None:
+        return None
+    # A model whose hidden-state chain is a pure passthrough of a submodule call
+    # (``hidden_states = inputs_embeds``; ``inputs_embeds = self.embed_tokens(...)``,
+    # with no intervening tensor op) resolves ``output_producer`` to the bare
+    # submodule attr name (``embed_tokens``) rather than a synthesized ``@op_``
+    # id -- there is no extra dataflow to materialise, but the producer is still
+    # a legitimate, already-tracked source (the caller's ``module_sources`` map is
+    # keyed by exactly these submodule attrs). Accepting it here lets the caller
+    # correctly re-source the decoder loop's primary input; rejecting it (the
+    # previous behaviour) made this function return ``None``, which left the
+    # loop's primary input wrongly pinned to whatever OTHER stack-pre component
+    # (e.g. a loop-invariant positional embedding) happened to run last.
+    if (
+        not is_forward_operation(output_producer)
+        and output_producer not in cls.init_assignments
+    ):
+        return None
+
+    by_name = {operation.attr_name: operation for operation in extractor.operations}
+
+    # A backward walk from the primary loop input (``hidden_states``) alone drops
+    # every producer feeding the loop through a keyword argument
+    # (``position_embeddings=``, ``attention_mask=``). Those tensors are read by
+    # every iteration, so seed the live set from each loop keyword-arg name that
+    # resolves to a materialised source operation. Structural (any keyword whose
+    # value names a forward operation), never keyed on a specific parameter name.
+    loop_invariant_inputs: dict[str, str] = {}
+    for keyword in loop_call.keywords:
+        if keyword.arg is None:
+            continue
+        producers = {
+            producer
+            for name in _keyword_source_names(keyword.value, forward.body[:loop_index])
+            if (producer := extractor.var_producer.get(name)) is not None
+            and is_forward_operation(producer)
+            and producer in by_name
+        }
+        if len(producers) == 1:
+            loop_invariant_inputs[keyword.arg] = producers.pop()
+
+    live = {output_producer, *loop_invariant_inputs.values()}
+    pending = [output_producer, *loop_invariant_inputs.values()]
+    while pending:
+        producer = pending.pop()
+        operation = by_name.get(producer)
+        if operation is None:
+            continue
+        for predecessor in operation.predecessors:
+            if predecessor in by_name and predecessor not in live:
+                live.add(predecessor)
+                pending.append(predecessor)
+    operations = tuple(
+        operation for operation in extractor.operations if operation.attr_name in live
+    )
+    live_producers = {
+        name: producer
+        for name, producer in extractor.var_producer.items()
+        if producer in live or producer in cls.init_assignments
+    }
+    return StackEntryDataflow(
+        operations, output_producer, loop_invariant_inputs, live_producers
+    )
+
+
+def infer_forward_steps_from_init(cls: ClassStructure) -> list[str]:
+    """Infer a sequential forward pipeline from ``__init__`` submodule assignments.
+
+    Used when a class has submodule ``self.foo = ...`` assignments but no parsed
+    ``forward()`` body (common in test fixtures and some wrapper modules).
+    """
+    steps: list[str] = []
+    for attr, class_name in cls.init_assignments.items():
+        if class_name in _SKIP_INIT_CLASS_NAMES:
+            continue
+        if class_name in _SKIP_INIT_FORWARD_CLASS_NAMES:
+            continue
+        if attr in _SKIP_INIT_FORWARD_ATTRS or attr.startswith("_"):
+            continue
+        steps.append(attr)
+    return steps
+
+
+def effective_forward_calls(cls: ClassStructure) -> list[str]:
+    """Return parsed ``forward()`` module steps, falling back to inferred init order."""
+    steps = [step for step in cls.forward_calls if step not in _SKIP_INIT_CLASS_NAMES]
+    if not steps:
+        return infer_forward_steps_from_init(cls)
+    modules = [step for step in steps if not is_forward_operation(step)]
+    return modules if modules else steps
+
+
+_UNKNOWN = object()
+# A constructor attribute that is scalar-*typed* (an int/float/str/bool setting
+# built from config reads and arithmetic) but whose concrete value could not be
+# resolved -- e.g. ``self.qkv_dim = self.head_dim * self.num_heads`` when the
+# ``linear_head_dim`` config key is not serialized in a given checkpoint. Stored
+# so callers can tell "scalar setting, value unknown" from "genuine tensor
+# attribute (parameter/buffer), never recorded". ``_config_value`` normalizes it
+# back to ``_UNKNOWN`` so arithmetic/comparison folding stays value-based.
+_SCALAR_SETTING = object()
+# The dtype each shorthand cast names: ``x.long()`` is ``x.to(torch.int64)``
+# written shorter. Without these the shorthands were not casts, not layout
+# methods and not housekeeping -- so they neither rendered nor passed their
+# producer through, and the op reading one was left with no operand at all
+# (``key_valid.long().argmax(-1)`` reached nothing and had to guess its shape).
+_CAST_METHOD_DTYPES = {
+    "long": "int64",
+    "int": "int32",
+    "short": "int16",
+    "char": "int8",
+    "byte": "uint8",
+    "bool": "bool",
+    "half": "float16",
+    "bfloat16": "bfloat16",
+    "double": "float64",
+    "float": "float32",
+}
+
+_HOUSEKEEPING_METHODS = frozenset(
+    {
+        "view",
+        "reshape",
+        "flatten",
+        "type",
+        "float",
+        "to",
+        "type_as",
+        "unsqueeze",
+        "squeeze",
+        "expand",
+        "contiguous",
+        "transpose",
+        "permute",
+        "detach",
+        "clone",
+        "view_as_complex",
+        "view_as_real",
+        *_CAST_METHOD_DTYPES,
+    }
+)
+# Layout-only tensor methods: they rearrange or retype a tensor without computing
+# new values, so the exporter renders them differently from real math.
+# The shorthand casts that have no label of their own. ``float`` and ``to`` are
+# labelled Cast already and keep rendering as one; these do not, so they pass
+# their producer through rather than vanishing with it.
+_SHORTHAND_CAST_METHODS = frozenset(_CAST_METHOD_DTYPES) - {
+    "float",
+    "to",
+    "type",
+    "type_as",
+}
+
+
+_LAYOUT_ONLY_METHOD_LABELS = {
+    "view": "View",
+    "reshape": "Reshape",
+    "flatten": "Flatten",
+    "type": "Cast",
+    "float": "Cast",
+    "to": "Cast",
+    # ``x.type_as(y)`` casts ``x`` to ``y``'s dtype -- ``y`` only supplies a dtype
+    # reference (never real data), exactly like ``.to(dtype=...)``. Missing this
+    # entry left the call unrecognized (no label), which fell through to the
+    # generic call fallback and could resolve the reference operand as the
+    # producer instead of the receiver, orphaning the real computation feeding it.
+    "type_as": "Cast",
+    "unsqueeze": "Unsqueeze",
+    "squeeze": "Squeeze",
+    "expand": "Expand",
+    "contiguous": "Contiguous",
+    "transpose": "Transpose",
+    "permute": "Permute",
+    "detach": "Detach",
+    "clone": "Clone",
+    "view_as_complex": "View as complex",
+    "view_as_real": "View as real",
+    **{name: "Cast" for name in _CAST_METHOD_DTYPES},
+}
+
+# Split / Concat / Slice / Tile rearrange or replicate tensors without computing
+# new values. They stay visible in the graph (unlike the layout methods above,
+# which are optional) but share the white data-movement fill.
+LAYOUT_ONLY_LABELS = frozenset(_LAYOUT_ONLY_METHOD_LABELS.values()) | {
+    "Split",
+    "Concat",
+    "Slice",
+    "Tile",
+}
+
+# Keyed on the trailing call name, so `x.mean(...)` and `torch.mean(x)` both resolve.
+# ``x.new_empty(*sizes)`` and kin build a NEW tensor of the given sizes, taking
+# only dtype/device from the receiver. GLM's ``expand_kv`` allocates its key
+# buffer that way (``kv_nope.new_empty(*kv_nope.shape[:-1], qk_nope + qk_rope)``)
+# and then fills it with two ``copy_`` calls. With no node for the allocation the
+# buffer had no producer at all, so the first ``copy_`` spine-fell onto the
+# preceding op -- the undivided ``kv_nope`` -- and the key reached sdpa at the
+# latent width (512) instead of the head width (256).
+_NEW_TENSOR_METHOD_LABELS = {
+    "new_empty": "New empty",
+    "new_zeros": "New zeros",
+    "new_ones": "New ones",
+    "new_full": "New full",
+}
+_TENSOR_METHOD_LABELS = {
+    **_NEW_TENSOR_METHOD_LABELS,
+    # Reductions
+    # ``x.any(dim)`` / ``x.all(dim)`` are TENSOR reductions, not the Python
+    # builtins of the same name: they reduce that axis and answer bool. Unknown
+    # as methods, ``valid_keys.any(-1)`` was elided entirely, so the ``where``
+    # reading it took the un-reduced tensor as its condition and everything
+    # built from it inherited that shape.
+    # ``x.any(dim)`` / ``x.all(dim)`` are TENSOR reductions, not the Python
+    # builtins of the same name: they reduce that axis and answer bool. Unknown
+    # as methods, ``valid_keys.any(-1)`` was elided entirely, so the ``where``
+    # reading it took the un-reduced tensor as its condition and everything
+    # built from it inherited that shape.
+    # ``x.any(dim)`` / ``x.all(dim)`` are TENSOR reductions, not the Python
+    # builtins of the same name: they reduce that axis and answer bool. Unknown
+    # as methods, ``key_valid.any(-1)`` was elided entirely, so the ``where``
+    # reading it took the UN-reduced tensor as its condition and everything
+    # built from it inherited that shape.
+    "any": "Any",
+    "all": "All",
+    "amax": "Block max",
+    "amin": "Block min",
+    "sum": "Sum",
+    "mean": "Mean",
+    "prod": "Product",
+    "cumsum": "Cumulative sum",
+    "logsumexp": "LogSumExp",
+    "argmax": "ArgMax",
+    "argmin": "ArgMin",
+    "max": "Max",
+    "min": "Min",
+    "norm": "Norm",
+    "var": "Variance",
+    "std": "Std",
+    # Pointwise math
+    "sigmoid": "Sigmoid",
+    "softmax": "Softmax",
+    "log_softmax": "LogSoftmax",
+    "softplus": "Softplus",
+    "tanh": "Tanh",
+    "relu": "ReLU",
+    "silu": "SiLU",
+    "gelu": "GELU",
+    "erf": "Erf",
+    "exp": "Exp",
+    "log": "Log",
+    "log1p": "Log1p",
+    "sqrt": "Sqrt",
+    "rsqrt": "Reciprocal sqrt",
+    "square": "Square",
+    "pow": "Power",
+    "abs": "Abs",
+    "neg": "Negate",
+    "reciprocal": "Reciprocal",
+    "sign": "Sign",
+    "clamp": "Clamp",
+    "clip": "Clamp",
+    "nan_to_num": "NaN to num",
+    "maximum": "Maximum",
+    "minimum": "Minimum",
+    "where": "Where",
+    "one_hot": "One hot",
+    # Elementwise comparisons (each returns a boolean tensor; written as the
+    # method form ``a.ge(b)`` rather than the ``a >= b`` operator, so they reach
+    # the tensor-method label table rather than the BinOp/Compare path).
+    "ge": "Greater equal",
+    "gt": "Greater",
+    "le": "Less equal",
+    "lt": "Less",
+    "eq": "Equal",
+    "ne": "Not equal",
+    "cos": "Cosine",
+    "sin": "Sine",
+    # Indexing and assembly
+    "gather": "Gather",
+    "masked_fill": "Masked fill",
+    "masked_scatter": "Masked scatter",
+    "scatter": "Scatter",
+    "scatter_": "Scatter",
+    "scatter_add": "Scatter add",
+    "scatter_add_": "Scatter add",
+    "index_add": "Index add",
+    "index_add_": "Index add",
+    "nonzero": "Nonzero",
+    "split": "Split",
+    "chunk": "Chunk",
+    "unbind": "Unbind",
+    "stack": "Stack",
+    "repeat_interleave": "Repeat interleave",
+    "roll": "Roll",
+    "flip": "Flip",
+    "tril": "Lower triangle",
+    "triu": "Upper triangle",
+    # Contractions
+    "einsum": "Einsum",
+    "bmm": "BatchMatMul",
+    "mm": "MatMul",
+    # Layout-only (suppressed unless every tensor op is requested)
+    **_LAYOUT_ONLY_METHOD_LABELS,
+}
+_FUNCTION_LABELS = {
+    "linear": "Linear",
+    "matmul": "MatMul",
+    # `addmm(bias, mat1, mat2)` is `bias + mat1 @ mat2` -- a fused affine
+    # projection, which is how every GPT-2 `Conv1D` does its work. Labelled as
+    # the contraction it is; the graph-level pass that sees a learned-constant
+    # operand relabels it `Linear`, exactly as it does for a plain matmul.
+    "addmm": "MatMul",
+    "pad": "Pad",
+    "topk": "TopK",
+    "zeros_like": "Zeros like",
+    "ones_like": "Ones like",
+    "full_like": "Full like",
+    # The same family as ``arange`` and the ``*_like`` constructors above:
+    # a tensor built from host-scalar sizes, reading no tensor operand. GLM
+    # guarantees its decoder a mask with ``torch.ones(B, S, dtype=torch.bool)``
+    # when the builder returns None, and with no node for it the branch that
+    # actually runs was missing from the diagram entirely.
+    "ones": "Ones",
+    "zeros": "Zeros",
+    "empty": "Empty",
+    "full": "Full",
+    "causal_conv1d_fn": "Causal Conv1D",
+    "causal_conv1d_update": "Causal Conv1D update",
+    "cat": "Concat",
+    "outer": "Outer product",
+    "polar": "Polar",
+    # ``torch.arange`` builds an index tensor from host-scalar bounds (no tensor
+    # operand). It is a genuine source op -- ``entry_indices = torch.arange(T)``
+    # feeds ``entry_indices.view(...) >= threshold`` -- so it must materialize as a
+    # visible node, or the reader spine-falls onto the wrong producer. As a pure
+    # generator it has no incoming edge (exempted from the I2 no-source check like
+    # any leaf source).
+    "arange": "Arange",
+}
+# Tensor constructors whose POSITIONAL arguments are the sizes to build.
+_CONSTRUCTOR_SIZE_CALLS = frozenset(
+    {"ones", "zeros", "empty", "full", *_NEW_TENSOR_METHOD_LABELS}
+)
+# ...except the ``full`` pair, which take ``(size, fill_value)``: the size is ONE
+# argument and what follows it is a value, not an axis. Both spellings are the
+# same constructor, so both read the same way -- ``new_full((B, H, Q, K + 1),
+# float("-inf"))`` is a 4-D bias, and counting the fill value as a fifth axis
+# hands every consumer of MiniMax's sparse mask a rank it never has.
+_FILL_VALUE_CONSTRUCTORS = frozenset({"full", "new_full"})
+
+# Reductions whose axis decides the output shape, so the axis travels with the node.
+_REDUCTION_METHODS = frozenset(
+    {
+        "any",
+        "all",
+        "sum",
+        "mean",
+        "prod",
+        "amax",
+        "amin",
+        "max",
+        "min",
+        "cumsum",
+        "logsumexp",
+        "argmax",
+        "argmin",
+        "norm",
+        "var",
+        "std",
+    }
+)
+# The namespaces a tensor op is reached through when it is called as a free
+# function (``torch.cat(x, 1)``, ``F.pad(x, (1, 0))``) rather than as a method on
+# the tensor itself. Through one of these the tensor is the FIRST POSITIONAL
+# argument, so every later argument sits one place further along than the same
+# call spelled as a method.
+_TORCH_NAMESPACES = frozenset({"torch", "F", "torch.nn.functional", "nn.functional"})
+
+
+@functools.lru_cache(maxsize=None)
+def _schema_positional_names(op: str) -> tuple[str, ...]:
+    """Positional parameter names of an op's aten schema, ``self`` included.
+
+    ``sum`` answers ``(self, dim, keepdim)`` while ``norm`` answers
+    ``(self, p, dim, keepdim)``, ``var`` answers
+    ``(self, dim, unbiased, keepdim)`` and ``cat`` answers ``(tensors, dim)``.
+    The overload with the most positional parameters is the one that spells
+    every argument out; an op with no schema answers empty, and callers keep
+    whatever reading they had before.
+    """
+    try:
+        import torch
+
+        schemas = torch._C._jit_get_schemas_for_operator(f"aten::{op}")
+    except Exception:  # noqa: BLE001 - torch absent or no such operator
+        return ()
+    best: tuple[str, ...] = ()
+    for schema in schemas or ():
+        names = tuple(
+            str(arg.name)
+            for arg in getattr(schema, "arguments", [])
+            if not getattr(arg, "kwarg_only", False)
+        )
+        if len(names) > len(best):
+            best = names
+    return best
+
+
+def _positional_parameter_names(method: str) -> tuple[str, ...]:
+    """Positional parameter names of a tensor method, after ``self``."""
+    names = _schema_positional_names(method)
+    return names[1:] if names and names[0] == "self" else names
+
+
+def _calls_through_namespace(func: ast.AST) -> bool:
+    """True when an op is called as ``torch.op(tensor, ...)``, not ``tensor.op()``."""
+    if not isinstance(func, ast.Attribute):
+        return True
+    return _expr_name(func.value) in _TORCH_NAMESPACES
+
+
+def _schema_arguments(op: str, node: ast.Call) -> dict[str, ast.expr]:
+    """This call's arguments, keyed by the name the op's own schema gives them.
+
+    One table answers every spelling: positional (``x.sum(1, True)``), keyword
+    (``x.sum(dim=1, keepdim=True)``), mixed (``x.sum(1, keepdim=True)``) and
+    free-function (``torch.sum(x, 1, True)``). Counting positions by hand
+    instead mis-read every op whose arguments are not in the assumed order --
+    ``norm``'s first argument is the ORDER, ``var``'s second is ``unbiased``,
+    and ``F.pad`` was taken for a method because its namespace is not ``torch``.
+    """
+    names = _schema_positional_names(op)
+    if names and names[0] == "self" and not _calls_through_namespace(node.func):
+        names = names[1:]  # the receiver supplies ``self``
+    bound: dict[str, ast.expr] = {}
+    for index, argument in enumerate(node.args):
+        if index < len(names):
+            bound.setdefault(names[index], argument)
+    for keyword in node.keywords:
+        if keyword.arg:
+            bound.setdefault(keyword.arg, keyword.value)
+    return bound
+
+
+_DIM_DETAIL_METHODS = _REDUCTION_METHODS | {"unsqueeze", "squeeze", "gather"}
+
+# How far ``_extent_source_producers`` chases a generator bound through
+# intermediate host-scalar locals (``n_windows = compressed.shape[1] //
+# self.block`` is two hops). Bounded so a self-referential or deeply chained
+# assignment cannot spin; real extent chains in the models are 1-3 hops.
+_EXTENT_RESOLVE_DEPTH = 12
+_BINOP_LABELS = {
+    ast.Add: "Add",
+    ast.Sub: "Subtract",
+    ast.Mult: "Multiply",
+    ast.MatMult: "MatMul",
+    ast.Div: "Divide",
+    ast.FloorDiv: "Floor divide",
+    ast.Pow: "Power",
+    # Bitwise operators combine two tensors element-wise (mask logic such as
+    # ``pool_visible & pool_valid``); without a label they collapse to a
+    # pass-through that silently drops one operand and its producer subgraph.
+    ast.BitAnd: "Bitwise and",
+    ast.BitOr: "Bitwise or",
+    ast.BitXor: "Bitwise xor",
+}
+# Elementwise comparison *operators* (``entry_indices >= threshold``) each build
+# a boolean tensor. Unlike the method form (``a.ge(b)`` -> ``_TENSOR_METHOD_LABELS``)
+# the operator form reaches ``expression`` as an ``ast.Compare``; without a label
+# here it collapses to a pass-through that silently drops the mask it produces and
+# the whole integer/index producer subgraph feeding it (the ``future_mask`` fed to
+# ``masked_fill``). Mirrors the method-form labels above.
+# The torch function each comparison OPERATOR performs. The operator form carries
+# no callable name of its own, so an op built from ``a > b`` had no ``raw_op`` and
+# its operand arity could not be resolved -- which is how a parameter read as a
+# comparison's second operand was dropped. Python-to-torch operator
+# correspondence for arity resolution, not a model op registry.
+_COMPARE_OP_RAW = {
+    ast.Gt: "gt",
+    ast.GtE: "ge",
+    ast.Lt: "lt",
+    ast.LtE: "le",
+    ast.Eq: "eq",
+    ast.NotEq: "ne",
+}
+_COMPARE_OP_LABELS = {
+    ast.Gt: "Greater",
+    ast.GtE: "Greater equal",
+    ast.Lt: "Less",
+    ast.LtE: "Less equal",
+    ast.Eq: "Equal",
+    ast.NotEq: "Not equal",
+}
+
+
+def is_forward_operation(attr_name: str) -> bool:
+    # A free-function frame inlines its ops under a ``@fn_..::`` namespace
+    # (see ``_inline_nested_free_functions``); the op's identity is the final
+    # ``::``-separated segment, so a frame-scoped op is still a forward operation.
+    segment = attr_name.rsplit("::", 1)[-1]
+    return segment.startswith(FORWARD_OPERATION_PREFIX)
+
+
+def operation_display_label(label: str, *, class_name: str | None = None) -> str:
+    """Human-facing operator name for graph tiles and exports."""
+    text = (label or class_name or "").strip()
+    return text or "Op"
+
+
+def classify_matmul_label(*, external_inputs: list[str] | tuple[str, ...]) -> str:
+    """Name a GEMM-like op from its operands: Linear when a weight is involved, else MatMul."""
+    if external_inputs:
+        return "Linear"
+    return "MatMul"
+
+
+def _inline_forward_step(attr_name: str) -> bool:
+    return is_forward_operation(attr_name) or is_functional_synthetic(attr_name)
+
+
+# Upper bound on a loop's resolved static trip count. Keeps generated graphs
+# bounded for malformed or unexpectedly large configs while still admitting
+# realistic expert counts (e.g. ``num_experts=288``).
+_LOOP_COUNT_MAX = 100_000
+
+# Predicates that are definitionally False in the forward this analysis reads.
+# We document the EAGER forward, where the tracing/scripting/compiling guards all
+# take their else-arm. That is a fact about what is being modelled, not a guess
+# about what some caller might pass -- the distinction that makes resolving these
+# sound where inferring a parameter's value from its default was not.
+_EAGER_FALSE_PREDICATES = frozenset(
+    {"is_tracing", "is_scripting", "is_compiling", "is_exporting"}
+)
+
+
+def _is_eager_false_predicate(node: ast.AST) -> bool:
+    """True for ``torch.jit.is_tracing()`` and its siblings, called with no args."""
+    if not isinstance(node, ast.Call) or node.args or node.keywords:
+        return False
+    func = node.func
+    return isinstance(func, ast.Attribute) and func.attr in _EAGER_FALSE_PREDICATES
+
+
+def _names_a_device(node: ast.AST) -> bool:
+    """True when an expression names a DEVICE rather than a dtype.
+
+    ``x.to(inputs_embeds.device)``, ``x.to(torch.device("cuda"))`` and
+    ``x.to("cuda")`` all move a tensor without touching its dtype.
+    """
+    if isinstance(node, ast.Attribute) and node.attr == "device":
+        return True
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "device":
+            return True
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def _literal_dtype_token(node: ast.AST) -> str | None:
+    """The ``torch.<dtype>`` an expression names, or ``None``.
+
+    Resolves the one conditional this idiom actually uses:
+    ``grid_thw.dtype if torch.jit.is_tracing() else torch.int32`` is ``int32`` in
+    the forward we document. ``x.dtype`` names no dtype of its own and answers
+    ``None`` rather than reporting a dtype called "dtype".
+    """
+    if isinstance(node, ast.IfExp):
+        if _is_eager_false_predicate(node.test):
+            return _literal_dtype_token(node.orelse)
+        return None
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "torch"
+        and node.attr
+    ):
+        return f"torch.{node.attr}"
+    return None
+
+
+def _literal_param_defaults(func: ast.FunctionDef) -> dict[str, Any]:
+    """Parameters whose default is a plain literal, to that literal.
+
+    Only literals: anything computed is a value this analysis cannot stand behind.
+    """
+    defaults: dict[str, Any] = {}
+    positional = func.args.posonlyargs + func.args.args
+    paired = positional[len(positional) - len(func.args.defaults) :]
+    for arg, default in zip(paired, func.args.defaults):
+        if isinstance(default, ast.Constant):
+            defaults[arg.arg] = default.value
+    for arg, default in zip(func.args.kwonlyargs, func.args.kw_defaults):
+        if isinstance(default, ast.Constant):
+            defaults[arg.arg] = default.value
+    return defaults
+
+
+def _call_target_name(call: ast.Call) -> str | None:
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _settled_param_defaults(
+    func: ast.FunctionDef,
+    module_functions: dict[str, ast.FunctionDef] | None,
+    class_nodes: Iterable[ast.AST] = (),
+) -> dict[str, Any]:
+    """Defaults that are actually in force, because nothing overrides them.
+
+    A default is only the value in force if no caller supplies one. The one call
+    site being inlined cannot establish that, so every visible caller is asked --
+    module-level functions AND class methods, since a free function is most often
+    called from a ``forward``.
+
+    Two refusals, both learned the hard way:
+
+    * a ``f(**kwargs)`` call can supply any parameter without naming it, so a
+      function reached that way settles NOTHING. ``create_causal_mask`` is called
+      exactly once, as ``create_causal_mask(**mask_kwargs)``;
+    * a function with no visible caller at all is entered from code this analysis
+      never parsed, so its defaults say nothing about what it is really given.
+
+    Trusting ``create_causal_mask``'s ``position_ids=None`` resolved
+    ``if position_ids is not None`` to False and deleted
+    ``find_packed_sequence_indices`` from the graph -- live computation removed
+    because a default looked settled. Drawing a dead arm is the lesser error.
+    """
+    defaults = _literal_param_defaults(func)
+    if not defaults:
+        return {}
+    sources: list[ast.AST] = list((module_functions or {}).values())
+    sources.extend(class_nodes)
+    names = [arg.arg for arg in func.args.posonlyargs + func.args.args]
+    passed: set[str] = set()
+    callers = 0
+    for source in sources:
+        for node in ast.walk(source):
+            if not isinstance(node, ast.Call) or _call_target_name(node) != func.name:
+                continue
+            callers += 1
+            if any(keyword.arg is None for keyword in node.keywords):
+                return {}
+            passed.update(names[: len(node.args)])
+            passed.update(
+                keyword.arg for keyword in node.keywords if keyword.arg is not None
+            )
+    if not callers:
+        return {}
+    return {name: value for name, value in defaults.items() if name not in passed}
+
+
+def _bound_call_param_values(
+    func: ast.FunctionDef, call: ast.Call, caller_values: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Callee parameter values settled by THIS call site, or ``None`` if none can be.
+
+    An argument that is a literal, or a name the caller already settled, carries
+    its value across: ``get_vision_attention_seqlens`` defaults ``merge_temporal``
+    to False and forwards it by keyword, which is how the branch inside
+    ``get_vision_cu_seqlens`` becomes decidable two frames from the default.
+    """
+    if any(keyword.arg is None for keyword in call.keywords):
+        return None
+    names = [arg.arg for arg in func.args.posonlyargs + func.args.args]
+    bound: dict[str, Any] = {}
+
+    def resolve(value: ast.expr) -> Any:
+        if isinstance(value, ast.Constant):
+            return value.value
+        if isinstance(value, ast.Name) and value.id in caller_values:
+            return caller_values[value.id]
+        return _UNKNOWN
+
+    for index, arg in enumerate(call.args):
+        if index >= len(names):
+            break
+        settled = resolve(arg)
+        if settled is not _UNKNOWN:
+            bound[names[index]] = settled
+    for keyword in call.keywords:
+        if keyword.arg is None:
+            continue
+        settled = resolve(keyword.value)
+        if settled is not _UNKNOWN:
+            bound[keyword.arg] = settled
+    return bound
+
+
+def _synthetic_call_line(call_attr: str) -> int | None:
+    """Source line a traced free-function synthetic attr was called from."""
+    match = re.search(r"_l(\d+)_", call_attr)
+    return int(match.group(1)) if match else None
+
+
+def _nested_call_param_values(
+    callee: ast.FunctionDef,
+    call_attr: str,
+    caller: ast.FunctionDef | None,
+    caller_values: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Callee parameter values this particular call site settles.
+
+    The synthetic attr carries the call's line, so the right call is found by
+    position rather than by taking the first call to that name.
+    """
+    if caller is None:
+        return None
+    line = _synthetic_call_line(call_attr)
+    name = _synthetic_call_function_name(call_attr)
+    for node in ast.walk(caller):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != name:
+            continue
+        if line is not None and node.lineno != line:
+            continue
+        return _bound_call_param_values(callee, node, caller_values)
+    return None
+
+
+def _config_value(
+    node: ast.AST,
+    config: dict[str, Any],
+    self_values: dict[str, Any],
+    param_values: dict[str, Any] | None = None,
+) -> Any:
+    """Evaluate the small literal/config expression subset used by model constructors."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id == "config":
+            return config
+        if param_values is not None and node.id in param_values:
+            return param_values[node.id]
+        return _UNKNOWN
+    if isinstance(node, ast.Attribute):
+        if isinstance(node.value, ast.Name) and node.value.id == "config":
+            direct = config.get(node.attr, _UNKNOWN)
+            if direct is not _UNKNOWN:
+                return direct
+            return _UNKNOWN
+        if isinstance(node.value, ast.Name) and node.value.id == "self":
+            resolved = self_values.get(node.attr, _UNKNOWN)
+            if resolved is _UNKNOWN and node.attr == "config":
+                # HF modeling convention: a module holds its config object as
+                # ``self.config`` even when ``__init__`` never assigns it into the
+                # tracked symbol table (e.g. it reads ``config`` locally). Fall
+                # back to the config passed in so ``self.config.<key>`` predicates
+                # resolve at build time (config-branch liveness pruning). ``config``
+                # is ``{}`` when no config is threaded, which correctly leaves the
+                # predicate unresolved (empty dict → key lookups miss).
+                return config
+            # A scalar-typed-but-unresolved attribute carries no usable value for
+            # arithmetic/comparison folding; surface it as unknown here so the rest
+            # of ``_config_value`` never operates on the sentinel object.
+            return _UNKNOWN if resolved is _SCALAR_SETTING else resolved
+        base = _config_value(node.value, config, self_values, param_values)
+        if isinstance(base, dict):
+            return base.get(node.attr, _UNKNOWN)
+        return _UNKNOWN
+    if isinstance(node, ast.Call):
+        name = _expr_name(node.func)
+        if name == "getattr" and len(node.args) >= 2:
+            base = _config_value(node.args[0], config, self_values, param_values)
+            key = _config_value(node.args[1], config, self_values, param_values)
+            default = (
+                _config_value(node.args[2], config, self_values, param_values)
+                if len(node.args) >= 3
+                else _UNKNOWN
+            )
+            if isinstance(base, dict) and isinstance(key, str):
+                return base.get(key, default)
+        return _UNKNOWN
+    if isinstance(node, ast.BinOp):
+        left = _config_value(node.left, config, self_values, param_values)
+        right = _config_value(node.right, config, self_values, param_values)
+        if left is _UNKNOWN or right is _UNKNOWN:
+            return _UNKNOWN
+        try:
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, ast.FloorDiv):
+                return left // right
+            if isinstance(node.op, ast.Mod):
+                return left % right
+        except (TypeError, ValueError, ZeroDivisionError):
+            return _UNKNOWN
+        return _UNKNOWN
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        value = _config_value(node.operand, config, self_values, param_values)
+        return not value if value is not _UNKNOWN else _UNKNOWN
+    if isinstance(node, ast.BoolOp):
+        values = [
+            _config_value(value, config, self_values, param_values)
+            for value in node.values
+        ]
+        if isinstance(node.op, ast.And):
+            if any(value is False for value in values):
+                return False
+            return (
+                all(values)
+                if all(value is not _UNKNOWN for value in values)
+                else _UNKNOWN
+            )
+        if isinstance(node.op, ast.Or):
+            if any(value is True for value in values):
+                return True
+            return (
+                any(values)
+                if all(value is not _UNKNOWN for value in values)
+                else _UNKNOWN
+            )
+    if isinstance(node, ast.Compare):
+        left = _config_value(node.left, config, self_values, param_values)
+        comparators = [
+            _config_value(item, config, self_values, param_values)
+            for item in node.comparators
+        ]
+        if left is _UNKNOWN or any(item is _UNKNOWN for item in comparators):
+            return _UNKNOWN
+        values = [left, *comparators]
+        for index, op in enumerate(node.ops):
+            a, b = values[index], values[index + 1]
+            if isinstance(op, ast.Eq) and not (a == b):
+                return False
+            if isinstance(op, ast.NotEq) and not (a != b):
+                return False
+            if isinstance(op, ast.Gt) and not (a > b):
+                return False
+            if isinstance(op, ast.GtE) and not (a >= b):
+                return False
+            if isinstance(op, ast.Lt) and not (a < b):
+                return False
+            if isinstance(op, ast.LtE) and not (a <= b):
+                return False
+            if isinstance(op, ast.Is) and not (a is b):
+                return False
+            if isinstance(op, ast.IsNot) and not (a is not b):
+                return False
+        return True
+    return _UNKNOWN
+
+
+def _expr_is_scalar_typed(node: ast.AST, values: dict[str, Any]) -> bool:
+    """True when a constructor RHS builds a scalar setting, not a tensor/module.
+
+    Recognizes the expression shapes model ``__init__``s use for int/float/str
+    hyper-parameters: literals, ``config.<key>`` reads, references to other
+    already-recorded scalar attributes, arithmetic / comparison / boolean over
+    those, and host builtins (``len``/``int``/``getattr(config, ...)``). A tensor
+    or submodule assignment (``nn.Linear(...)``, ``nn.Parameter(...)``,
+    ``self.forget_gate(...)``, a bare passed-in ``weight`` name) matches none of
+    these, so it is *not* scalar-typed and stays a genuine tensor attribute. Kept
+    general -- structural, no attribute-name or config-key literals.
+    """
+    if isinstance(node, ast.Constant):
+        return not isinstance(node.value, bytes)
+    if isinstance(node, ast.Name):
+        return node.id == "config"
+    if isinstance(node, ast.Attribute):
+        if isinstance(node.value, ast.Name):
+            if node.value.id == "config":
+                return True
+            if node.value.id == "self":
+                return node.attr in values
+        return _expr_is_scalar_typed(node.value, values)
+    if isinstance(node, ast.BinOp):
+        return _expr_is_scalar_typed(node.left, values) and _expr_is_scalar_typed(
+            node.right, values
+        )
+    if isinstance(node, ast.UnaryOp):
+        return _expr_is_scalar_typed(node.operand, values)
+    if isinstance(node, (ast.BoolOp, ast.Compare)):
+        return True
+    if isinstance(node, ast.IfExp):
+        return _expr_is_scalar_typed(node.body, values) and _expr_is_scalar_typed(
+            node.orelse, values
+        )
+    if isinstance(node, ast.Call):
+        return _expr_name(node.func) in {
+            "len",
+            "int",
+            "float",
+            "bool",
+            "round",
+            "abs",
+            "min",
+            "max",
+            "sum",
+            "getattr",
+        }
+    return False
+
+
+def _flatten_control_flow_body(stmts: list[ast.stmt]) -> list[ast.stmt]:
+    """Flatten ``if``/``for``/``while``/``with``/``try`` bodies into one ordered,
+    straight-line statement list (never descending into a nested ``def``/class).
+
+    A constructor commonly guards its config-derived scalar assignments in a
+    ``try: self.x = config.x \\n except Exception: raise ...`` (or an
+    ``if cond: self.x = a \\n else: self.x = b``) block -- a defensive pattern,
+    not specific to any one model family. Walking only ``init_func.body``
+    misses every assignment nested one level inside such a block, silently
+    dropping it out of ``self_values`` -- which then makes the read-site
+    treat that name as an unresolved external tensor operand instead of a
+    scalar setting (see ``_self_attr_input``'s ``_SCALAR_SETTING`` handling).
+    Mirrors the existing control-flow-aware walk in
+    ``_path_max_self_call_sites`` above.
+    """
+    flat: list[ast.stmt] = []
+    for stmt in stmts:
+        flat.append(stmt)
+        if isinstance(stmt, ast.If):
+            flat.extend(_flatten_control_flow_body(stmt.body))
+            flat.extend(_flatten_control_flow_body(stmt.orelse))
+        elif isinstance(stmt, (ast.For, ast.While)):
+            flat.extend(_flatten_control_flow_body(stmt.body))
+            flat.extend(_flatten_control_flow_body(stmt.orelse))
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            flat.extend(_flatten_control_flow_body(stmt.body))
+        elif isinstance(stmt, ast.Try):
+            flat.extend(_flatten_control_flow_body(stmt.body))
+            for handler in stmt.handlers:
+                flat.extend(_flatten_control_flow_body(handler.body))
+            flat.extend(_flatten_control_flow_body(stmt.orelse))
+            flat.extend(_flatten_control_flow_body(stmt.finalbody))
+    return flat
+
+
+def _self_config_values(
+    init_func: ast.FunctionDef | None,
+    config: dict[str, Any],
+    param_values: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Integer/boolean ``self.<attr>`` values an ``__init__`` settles.
+
+    *param_values* supplies constructor arguments whose value is known -- see
+    :func:`_settled_ctor_defaults` -- so ``self.is_cross_attention =
+    is_cross_attention`` resolves instead of staying unknown.
+    """
+    values: dict[str, Any] = {}
+    if init_func is None:
+        return values
+    for stmt in _flatten_control_flow_body(init_func.body):
+        if not isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        value_node = stmt.value
+        if value_node is None:
+            continue
+        value = _config_value(value_node, config, values, param_values)
+        for target in targets:
+            if isinstance(target, ast.Attribute) and _is_self_attr(target, target.attr):
+                if value is not _UNKNOWN:
+                    values[target.attr] = value
+                elif _expr_is_scalar_typed(value_node, values):
+                    # Scalar-typed but unresolvable (config key absent / derived
+                    # from such): record under the sentinel so it is treated as a
+                    # setting, never fabricated as a tensor operand, yet is not
+                    # mistaken for a concrete value by the folding paths.
+                    values[target.attr] = _SCALAR_SETTING
+    return values
+
+
+def _range_iteration_count_of(node: ast.For, self_values: dict) -> int | None:
+    """Resolve a small static ``range(...)`` loop from constructor/config values."""
+    iterator = node.iter
+    if (
+        not isinstance(iterator, ast.Call)
+        or _expr_name(iterator.func) != "range"
+        or iterator.keywords
+        or not 1 <= len(iterator.args) <= 3
+    ):
+        return None
+    values = [_config_value(arg, {}, self_values) for arg in iterator.args]
+    if not all(isinstance(value, int) for value in values):
+        return None
+    try:
+        count = len(range(*values))
+    except (TypeError, ValueError):
+        return None
+    # Keep generated graphs bounded for malformed or unexpectedly large configs.
+    return count if 0 <= count <= _LOOP_COUNT_MAX else None
+
+
+def _num_classes_arg_of(call: ast.Call, self_values: dict) -> int | None:
+    """Resolve ``one_hot``'s ``num_classes`` (keyword or 2nd positional)."""
+    for keyword in call.keywords:
+        if keyword.arg == "num_classes":
+            resolved = _config_value(keyword.value, {}, self_values)
+            if isinstance(resolved, int) and not isinstance(resolved, bool):
+                return resolved
+    if len(call.args) >= 2:
+        resolved = _config_value(call.args[1], {}, self_values)
+        if isinstance(resolved, int) and not isinstance(resolved, bool):
+            return resolved
+    return None
+
+
+def _one_hot_bound_of(
+    expr: ast.expr | None,
+    seen: set[str],
+    name_value_ast: dict[str, ast.expr],
+    self_values: dict,
+) -> int | None:
+    """Follow an iterable's provenance to a ``one_hot(num_classes=...)`` width."""
+    if expr is None:
+        return None
+    if isinstance(expr, ast.Name):
+        if expr.id in seen:
+            return None
+        seen.add(expr.id)
+        return _one_hot_bound_of(
+            name_value_ast.get(expr.id), seen, name_value_ast, self_values
+        )
+    if isinstance(expr, ast.Call):
+        func = expr.func
+        is_one_hot = (_expr_name(func) == "one_hot") or (
+            isinstance(func, ast.Attribute) and func.attr == "one_hot"
+        )
+        if is_one_hot:
+            width = _num_classes_arg_of(expr, self_values)
+            if width is not None:
+                return width
+        candidates: list[ast.expr] = []
+        if isinstance(func, ast.Attribute):
+            candidates.append(func.value)
+        candidates.extend(expr.args)
+        for candidate in candidates:
+            width = _one_hot_bound_of(candidate, seen, name_value_ast, self_values)
+            if width is not None:
+                return width
+        return None
+    if isinstance(expr, (ast.Attribute, ast.Subscript)):
+        return _one_hot_bound_of(expr.value, seen, name_value_ast, self_values)
+    return None
+
+
+def _loop_iteration_count_of(
+    node: ast.For,
+    self_values: dict,
+    name_value_ast: dict[str, ast.expr],
+) -> int | None:
+    """Resolve a loop's static trip count for the ``loop_iterations_<count>`` frame.
+
+    A literal ``range(...)`` bound wins. Otherwise a data-dependent iterable
+    (``for expert_idx in hit:`` where ``hit`` is a ``nonzero()`` selection) can
+    still have a static *upper* bound when the selected tensor's width comes from
+    config — e.g. an expert-dispatch loop over
+    ``one_hot(top_k_index, num_classes=self.num_experts)``. Trace the iterable
+    back through simple ``name = expr`` bindings to that ``one_hot`` and resolve
+    ``num_classes``. Returns ``None`` for genuinely unbounded loops.
+    """
+    count = _range_iteration_count_of(node, self_values)
+    if count is not None:
+        return count
+    bound = _one_hot_bound_of(node.iter, set(), name_value_ast, self_values)
+    return bound if bound is not None and 0 <= bound <= _LOOP_COUNT_MAX else None
+
+
+def _collect_name_value_ast(func: ast.FunctionDef) -> dict[str, ast.expr]:
+    """Map each simple ``name = expr`` binding in a function to its value AST.
+
+    Used to trace a loop iterable's provenance (across statement boundaries and
+    nesting) back to the ``one_hot`` call that bounds an expert-dispatch loop.
+    """
+    name_value_ast: dict[str, ast.expr] = {}
+    for sub in ast.walk(func):
+        if isinstance(sub, ast.Assign):
+            for target in sub.targets:
+                if isinstance(target, ast.Name):
+                    name_value_ast[target.id] = sub.value
+    return name_value_ast
+
+
+class _MapLambdaParamSubstituter(ast.NodeTransformer):
+    """Replaces a lambda's own parameter Name with a caller-supplied expression."""
+
+    def __init__(self, param_name: str, replacement: ast.expr):
+        self.param_name = param_name
+        self.replacement = replacement
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:  # noqa: N802 (ast API name)
+        if node.id == self.param_name:
+            return copy.deepcopy(self.replacement)
+        return node
+
+
+def _comprehension_over_literal(
+    value: ast.expr,
+) -> tuple[ast.expr, str, ast.Tuple | ast.List] | None:
+    """``[BODY(t) for t in (a, b, ...)]`` as ``(body, loop var, literal)``.
+
+    Only the shape that is a FAN-OUT rather than a loop: one generator, a plain
+    name as its target, a literal tuple/list to walk, no filter. Anything else is
+    a real loop whose trip count this rewrite cannot speak for, and is left alone.
+    """
+    if not isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+        return None
+    if len(value.generators) != 1:
+        return None
+    generator = value.generators[0]
+    if generator.ifs or getattr(generator, "is_async", 0):
+        return None
+    if not isinstance(generator.target, ast.Name):
+        return None
+    if not isinstance(generator.iter, (ast.Tuple, ast.List)):
+        return None
+    return value.elt, generator.target.id, generator.iter
+
+
+def _clone_per_element(
+    body: ast.expr, param_name: str, iterable: ast.Tuple | ast.List
+) -> ast.Tuple:
+    """One clone of *body* per element, with *param_name* bound to that element."""
+    elements: list[ast.expr] = []
+    for index, item in enumerate(iterable.elts):
+        substituted = _MapLambdaParamSubstituter(param_name, item).visit(
+            copy.deepcopy(body)
+        )
+        ast.fix_missing_locations(substituted)
+        # Every clone shares the body's own source position (one textual call
+        # site applied N times), so the free-function/positional synthetic naming
+        # that keys on ``lineno`` alone would still collide. Stamp a
+        # discriminator any downstream call-producer lookup can key on.
+        substituted._tracelens_map_discriminator = index  # type: ignore[attr-defined]
+        elements.append(substituted)
+    return ast.Tuple(elts=elements, ctx=ast.Load())
+
+
+def _rebind_fanout_comprehension(
+    stmt: ast.stmt, bindings: dict[str, ast.expr]
+) -> ast.stmt:
+    """``xs = [BODY(t) for t in (a, b, c)]`` rebinds a, b and c to their own body.
+
+    GLM's vision attention splits its three tensors in one comprehension and then
+    reads the result back through ``zip(*splits)``. Expanding the fan-out alone
+    emits the three splits but binds them to ONE name, so the later comprehension
+    reaches only one and the other two are dead. Each element's natural name is
+    the one it was built from -- after this line ``q`` IS the split of ``q`` -- so
+    bind them that way, and record in *bindings* what the collecting name stands
+    for, which is what lets ``zip(*splits)`` resolve.
+    """
+    if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+        return stmt
+    collector = stmt.targets[0]
+    if not isinstance(collector, ast.Name):
+        return stmt
+    parsed = _comprehension_over_literal(stmt.value)
+    if parsed is None:
+        return stmt
+    body, param_name, iterable = parsed
+    if not all(isinstance(elt, ast.Name) for elt in iterable.elts):
+        return stmt
+    expanded = _clone_per_element(body, param_name, iterable)
+    names = ast.Tuple(
+        elts=[ast.Name(id=elt.id, ctx=ast.Load()) for elt in iterable.elts],
+        ctx=ast.Load(),
+    )
+    ast.fix_missing_locations(names)
+    bindings[collector.id] = names
+    rebound = ast.Assign(
+        targets=[
+            ast.Tuple(
+                elts=[ast.Name(id=elt.id, ctx=ast.Store()) for elt in iterable.elts],
+                ctx=ast.Store(),
+            )
+        ],
+        value=expanded,
+    )
+    return ast.copy_location(ast.fix_missing_locations(rebound), stmt)
+
+
+def _expand_zipped_literal_comprehension(
+    value: ast.expr, bindings: dict[str, ast.expr]
+) -> ast.expr | None:
+    """``[BODY(a, b, c) for a, b, c in zip(*names)]`` as ONE clone of BODY.
+
+    GLM's vision attention runs its kernel once per variable-length image. The
+    trip count is the image count, which is data-dependent -- so this is a real
+    loop and the body is emitted ONCE, reading each split. The clone count says
+    nothing about the iterable's length; it says the kernel consumes those three
+    tensors, which is what the diagram is for. Without it the kernel read only
+    one split and the other two were dead.
+    """
+    if not isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+        return None
+    if len(value.generators) != 1:
+        return None
+    generator = value.generators[0]
+    if generator.ifs or getattr(generator, "is_async", 0):
+        return None
+    target = generator.target
+    if not isinstance(target, (ast.Tuple, ast.List)):
+        return None
+    names = [elt.id for elt in target.elts if isinstance(elt, ast.Name)]
+    if len(names) != len(target.elts) or not names:
+        return None
+    call = generator.iter
+    if not (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "zip"
+        and len(call.args) == 1
+        and isinstance(call.args[0], ast.Starred)
+        and isinstance(call.args[0].value, ast.Name)
+    ):
+        return None
+    bound = bindings.get(call.args[0].value.id)
+    if not isinstance(bound, (ast.Tuple, ast.List)):
+        return None
+    if len(bound.elts) != len(names):
+        return None
+    body = copy.deepcopy(value.elt)
+    for name, element in zip(names, bound.elts):
+        body = _MapLambdaParamSubstituter(name, element).visit(body)
+    ast.fix_missing_locations(body)
+    return body
+
+
+def _expand_map_lambda_tuple(value: ast.expr) -> ast.expr:
+    """Rewrite ``map(lambda x: BODY(x), (a, b, ...))`` into ``BODY(a), BODY(b), ...``.
+
+    ``q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=...), (q, k))``
+    applies ONE lambda body to each element of a literal tuple/list. ``map`` is a
+    plain Python builtin the extractor never emits as its own step, so the whole
+    call resolves through the generic single-producer fallback, which takes the
+    LAST resolved argument producer for the entire expression -- both ``q`` and
+    ``k`` collapse onto ``k``'s producer, orphaning ``q``'s producer entirely.
+
+    Expanding the call up front into one clone of the lambda body per element
+    -- with the lambda's own parameter substituted by that element's actual
+    expression -- lets each element flow through the ordinary
+    ``a, b = expr(a), expr(b)`` parallel-tuple-assignment path with its own
+    identity, keyed on its own producer. General: any ``map(lambda <param>:
+    <body>, <tuple/list literal>)`` right-hand side, regardless of which
+    function the lambda body calls.
+
+    Returns *value* unchanged when it is not this exact shape (a single-param
+    lambda mapped over a literal tuple/list).
+    """
+    comprehension = _comprehension_over_literal(value)
+    if comprehension is not None:
+        body, param_name, iterable = comprehension
+        return _clone_per_element(body, param_name, iterable)
+    if not (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id == "map"
+        and len(value.args) == 2
+        and not value.keywords
+        and isinstance(value.args[0], ast.Lambda)
+    ):
+        return value
+    lam = value.args[0]
+    lam_args = lam.args
+    if lam_args.vararg or lam_args.kwonlyargs or lam_args.kwarg or lam_args.defaults:
+        return value
+    if len(lam_args.posonlyargs) + len(lam_args.args) != 1:
+        return value
+    param_name = (lam_args.posonlyargs or lam_args.args)[0].arg
+    iterable = value.args[1]
+    if not isinstance(iterable, (ast.Tuple, ast.List)):
+        return value
+
+    return _clone_per_element(lam.body, param_name, iterable)
+
+
+class _ForwardOperationExtractor:
+    """Recover primitive tensor operations and their data dependencies."""
+
+    def __init__(
+        self,
+        *,
+        self_values: dict[str, Any],
+        all_tensor_ops: bool,
+        unbuilt_attrs: frozenset[str] = frozenset(),
+        param_names: set[str] | None = None,
+        host_scalar_params: set[str] | None = None,
+        config: dict[str, Any] | None = None,
+        module_functions: dict[str, ast.FunctionDef] | None = None,
+        repeated_submodule_attrs: frozenset[str] | None = None,
+        submodule_attrs: frozenset[str] | None = None,
+        class_methods: dict[str, ast.FunctionDef] | None = None,
+        is_free_function_body: bool = False,
+        param_values: dict[str, Any] | None = None,
+    ) -> None:
+        self.self_values = self_values
+        self.all_tensor_ops = all_tensor_ops
+        self.config = dict(config or {})
+        # True only when the body being extracted is a module-level free
+        # function's own definition (``apply_rotary_pos_emb``), never a
+        # class's own top-level ``forward`` or a sibling class method. A
+        # free function's non-primary parameter can be sliced with no
+        # producer of its own at all (``k[..., rotary_dim:]`` where ``k`` is
+        # seeded only as a boundary alias) -- that case must still emit a
+        # visible Slice. A class's own forward reading a genuine forward
+        # parameter the same way (``cu_seqlens[1:] - cu_seqlens[:-1]``, pure
+        # host index bookkeeping) must NOT gain a new visible op from this,
+        # so the allowance below is scoped to free-function bodies only.
+        self.is_free_function_body = is_free_function_body
+        self.param_names = set(param_names or ())
+        self.host_scalar_params = set(host_scalar_params or ())
+        # Plain instance methods defined in the SAME class as the forward being
+        # traced (``append_visible_tail``, ``get_visible_tokens``, ...), keyed by
+        # name. A ``self.<method>(...)`` call site's positional args are the
+        # CALLER's local variable names; when the callee is one of these sibling
+        # methods, its own declared parameter names are what its inlined body's
+        # ops key their ``boundary_input``/entry-param lookups on. Resolving the
+        # call against the callee's real signature (mirroring
+        # ``_free_function_param_names`` below) keeps a caller/callee local-name
+        # mismatch from stranding an argument onto the callee's default target.
+        self.class_methods = dict(class_methods or {})
+        # Self-submodule attrs called more than once in this forward. A call to one
+        # gets a call-site ``@l{lineno}`` step key so two calls to the same child
+        # (rotary ``recomposition_frequencies(cos)`` then ``(sin)``) keep distinct
+        # predecessors/producer bindings instead of the second overwriting the first.
+        self.repeated_submodule_attrs = frozenset(repeated_submodule_attrs or ())
+        # Child modules this forward invokes, so a method called ON one
+        # (``self.indexer.build_block_mask(...)``) is recognised as that child's
+        # call rather than an untracked tensor-method chain link.
+        self.submodule_attrs = frozenset(submodule_attrs or ())
+        # Module-level free functions (``apply_rotary_pos_emb_vision``, ...) keyed
+        # by name, so a traced synthetic call can map its positional args to the
+        # callee's parameter names and route each to the producer feeding it.
+        self.module_functions = dict(module_functions or {})
+        self.operations: list[ForwardOperation] = []
+        self.var_producer: dict[str, str] = {}
+        self.var_module_origin: dict[str, str] = {}
+        # ``pre_w, post_w, comb_w = ...split(...)`` binds each unpacked local to
+        # the single split producer plus the output ordinal it selects. Consumers
+        # read one of these locals; the ordinal lets their edge attach to the
+        # matching named output port (see ForwardOperation.predecessor_ports).
+        self.var_output_ordinal: dict[str, int] = {}
+        # ``a, b = x.shape[:2]`` binds ``a``/``b`` to a source dim; record the
+        # positional read token (``x.shape[0]``) so a later ``view``/``reshape``
+        # arg naming ``a`` resolves to that axis instead of an opaque local.
+        self.shape_unpack_tokens: dict[str, str] = {}
+        # Locals holding a host-side integer (``number_of_pools = (seq_len + k - 1)
+        # // k``) rather than a tensor. Arithmetic over only these (and shape ints /
+        # config scalars / int literals) is index/shape bookkeeping — it must not
+        # emit fake tensor ops (Add/FloorDivide/Multiply) that dangle when their
+        # result feeds a size argument like ``torch.arange(n * k)``.
+        self.host_scalar_vars: set[str] = set()
+        # Loop variable -> the iterable it draws from. ``for t, h, w in
+        # grid_thw.tolist()`` makes ``t`` host data read off ``grid_thw``, so a
+        # range sized by ``t`` depends on that tensor.
+        self._loop_target_iters: dict[str, ast.AST] = {}
+        # Names bound by a ``for`` target. Such a name holds a different value
+        # each iteration -- often host data read off a tensor
+        # (``for t, h, w in grid_thw.tolist()``) -- so an extent built from one is
+        # never the data-independent constant ``_extent_is_data_independent``
+        # looks for, even when nothing recorded a producer for the iterable.
+        self._loop_bound_names: set[str] = set()
+        # Host-scalar locals whose value folds to a concrete int (``output_width =
+        # self.index_topk`` → 2048; ``output_width += self.index_kpool - 1``).
+        # Lets a slice/pad-to-constant (``topk_indices[..., :output_width]``)
+        # resize an axis to the folded width instead of aliasing through, and is
+        # kept a superset of the names in ``host_scalar_vars`` that resolve.
+        self.host_scalar_values: dict[str, int] = {}
+        # Parameters whose value is settled before this body runs -- a default
+        # nothing overrides, or a literal the call site passed. A branch on one
+        # has a known outcome, so only the live arm is emitted.
+        self.param_values: dict[str, Any] = dict(param_values or {})
+        # Submodules no instance has, because the only `__init__` branch that
+        # builds them is one the config rules out. A statement calling one
+        # cannot run -- the model raises instead -- so an arm containing such a
+        # call is an arm the model never takes, whatever guards it.
+        self.unbuilt_attrs: frozenset[str] = frozenset(unbuilt_attrs or ())
+        # Locals bound to a literal ``torch.<dtype>``. A call given ``dtype=dtype``
+        # names a local, and the local is where the answer is.
+        self.local_dtypes: dict[str, str] = {}
+        # Set while resolving the *base* of an in-place slice mutation
+        # (``key_states[..., :n].copy_(src)``): that subscript is an lvalue, so the
+        # range-slice must NOT materialise a resize ``Slice`` op — the base tensor
+        # is written into, not sliced-then-read.
+        self._suppress_slice_resize = False
+        # Ordered return producers captured as the return statement is walked, so a
+        # subscripted return element (``return pool_keys[:, keep], ...``) — which
+        # produces a gather op but binds no name — still docks its consumer. Keyed
+        # by the element's base name; the name-based ``_extract_forward_return_metadata``
+        # misses these because there is no local for the sliced value.
+        self.return_producer_order: list[str] = []
+        self.return_producer_slots: dict[str, str] = {}
+        # ``hidden_shape = (a, b, -1, self.head_dim)`` — a local tuple used as a
+        # reshape target. Record the literal so ``view(hidden_shape)`` expands to
+        # its dims rather than the un-resolvable variable name.
+        self.shape_tuple_vars: dict[str, ast.Tuple] = {}
+        # name -> (leading-axes token, trailing dim expressions), for a
+        # shape assembled by concatenation rather than as one tuple.
+        self.shape_concat_vars: dict[str, tuple[str, list[ast.expr]]] = {}
+        # ``input_shape = x.shape[:-1]`` — a shape *slice* local (multiple leading
+        # axes) used as a starred prefix (``view(*input_shape, -1, head_dim)`` or
+        # ``hidden_shape = (*input_shape, -1, head_dim)``). Record the resolver
+        # token ``x.shape[:-1]`` so the starred reference expands to the source's
+        # leading dims rather than the un-resolvable variable name.
+        self.shape_slice_tokens: dict[str, str] = {}
+        # ``name = expr`` bindings kept as raw AST so a loop's dynamic iterable
+        # (``for i in hit:`` where ``hit = ...nonzero()``) can be traced back to
+        # a config-resolvable static bound (see ``_loop_iteration_count``).
+        self._name_value_ast: dict[str, ast.expr] = {}
+        self.step_predecessors: dict[str, tuple[str, ...]] = {}
+        self.step_predecessor_args: dict[str, dict[str, str]] = {}
+        # arg_name -> output ordinal, when a submodule call reads a specific slot
+        # of a multi-output producer (``self.k_norm(key_states)`` where
+        # ``key_states`` is ordinal 1 of an ``unbind``). Parallel to
+        # ``step_predecessor_args``; lets the export fan the producer out into one
+        # port per consumed slot instead of collapsing every consumer onto slot 0.
+        self.step_predecessor_ordinals: dict[str, dict[str, int]] = {}
+        # producer attr -> ordered output names, for a tuple-unpacked synthetic
+        # call (``q_embed, k_embed = apply_rotary_pos_emb_vision(...)``) that is
+        # not an inline ``self.operations`` entry. Lets the export fan the
+        # positional/function node out into one named output port per slot.
+        self.step_output_names: dict[str, list[str]] = {}
+        # own-step attr -> forward parameter names it reads straight from the
+        # module boundary (``apply_rotary_pos_emb_vision(q, k, cos, sin)`` where
+        # ``cos, sin = position_embeddings``). These synthetics are their own
+        # chain node but read forward params that have no internal producer, so
+        # the cross-module predecessor pass needs them named to route the caller's
+        # producer (``rotary_pos_emb``) onto this consumer. Origins are the
+        # caller-visible parameter (``position_embeddings``), not the unpacked
+        # local, so the arg-name keys match the call site's keyword.
+        self.step_boundary_params: dict[str, tuple[str, ...]] = {}
+        # own-step attr -> {callee-parameter -> (boundary origin, ordinal|None)}
+        # for a traced free-function call whose body is inlined. Its ops read the
+        # callee's parameter names (``cos``/``sin``); this maps each such param
+        # back to the boundary forward input it was fed from at the call site
+        # (``position_embeddings``) and, for a tuple-unpacked boundary
+        # (``cos, sin = position_embeddings``), the ordinal so the boundary input
+        # fans out one port per slot (port0->cos-op, port1->sin-op).
+        self.step_boundary_arg_params: dict[str, dict[str, tuple[str, int | None]]] = {}
+        # unpacked-local -> the forward parameter it aliases
+        # (``cos``/``sin`` -> ``position_embeddings``). Populated as
+        # ``_propagate_param_alias`` registers the alias.
+        self.param_alias_origin: dict[str, str] = {}
+        # unpacked-local -> its ordinal within a tuple-unpacked boundary param
+        # (``cos`` -> 0, ``sin`` -> 1 for ``cos, sin = position_embeddings``), so
+        # a free-function frame can fan the boundary input out per slot.
+        self.param_alias_ordinal: dict[str, int] = {}
+        # When an ``if``/``else`` assigns the same variable to different producers
+        # (e.g. ``attn_output`` = flash ``@attention`` in one branch, a manual
+        # ``torch.cat`` in the other), only one survives ``var_producer`` after the
+        # merge. Downstream consumers would then orphan the losing branch's
+        # producer, turning a real runtime path into a dead-end node. Record the
+        # alternatives here (survivor → {losers}) and fold them into consumers'
+        # predecessors in a post-pass so both branches stay live and acyclic.
+        self.branch_alternatives: dict[str, set[str]] = {}
+        self.loop_carried: list[LoopCarriedSpec] = []
+        self._used_ids: set[str] = set()
+        # Subscript nodes materialised into their own op (``Slice``/``Unsqueeze``).
+        # The op owns the boundary param it read, so an enclosing expression must
+        # not re-attribute that param to itself (it reads the new op instead).
+        self._materialized_subscripts: set[int] = set()
+        self._pending_shape_snapshots: list[str] = []
+
+    @staticmethod
+    def _dedupe(values: list[str]) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(value for value in values if value))
+
+    def _operation_id(self, node: ast.AST, label: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+        line = getattr(node, "lineno", 0)
+        col = getattr(node, "col_offset", 0)
+        base = f"{FORWARD_OPERATION_PREFIX}l{line}_c{col}_{slug}"
+        candidate = base
+        counter = 2
+        while candidate in self._used_ids:
+            candidate = f"{base}_{counter}"
+            counter += 1
+        self._used_ids.add(candidate)
+        return candidate
+
+    def _host_only_param_refs(
+        self, node: ast.AST, raw_param_refs: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Of *raw_param_refs*, those this expression reads only on the host.
+
+        ``lengths.tolist()`` crosses to Python: what reaches the op is a list of
+        ints, not a tensor. A parameter whose every read here sits inside such a
+        materialisation is a size input. One read outside makes it a real
+        operand, so it is not listed.
+        """
+        if not raw_param_refs:
+            return ()
+        host_names = {
+            name.id
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and _call_forces_host(call)
+            for name in ast.walk(call)
+            if isinstance(name, ast.Name)
+        }
+        inside: set[str] = set()
+        outside: set[str] = set()
+        for name_node in ast.walk(node):
+            if not isinstance(name_node, ast.Name):
+                continue
+            if name_node.id not in raw_param_refs:
+                continue
+            (inside if name_node.id in host_names else outside).add(name_node.id)
+        return tuple(n for n in raw_param_refs if n in inside - outside)
+
+    def _emit(
+        self,
+        node: ast.AST,
+        label: str,
+        predecessors: list[str],
+        external_inputs: list[str],
+        *,
+        details: list[str] | None = None,
+        raw_op: str | None = None,
+        extra_param_refs: tuple[str, ...] = (),
+    ) -> str:
+        attr_name = self._operation_id(node, label)
+        if label.lower() in {"matmul", "matmull"}:
+            display = classify_matmul_label(external_inputs=external_inputs)
+        else:
+            display = operation_display_label(label)
+        emitted_details = list(details or ())
+        # Carry the underlying torch op name (the one the display label discards)
+        # so the downstream type-check can resolve the op's real operand arity from
+        # its actual function parameters -- keyed on the name the model itself
+        # calls, never a static op-name list. Threaded via the details channel
+        # (both build paths carry details) and lifted to a dedicated ``raw_op``
+        # node attr in ``merge._annotate_op_input_signatures``.
+        if raw_op:
+            emitted_details.append(f"raw_op: {raw_op}")
+        predecessor_ports = self._read_output_ports(node)
+        # ``_param_refs`` returns the raw name this expression reads, which may be
+        # a tuple-unpacked alias of a secondary forward parameter (``cos``, ``sin``
+        # aliasing ``position_embeddings``) rather than the boundary's own literal
+        # name. Downstream boundary-input wiring keys strictly on the class's own
+        # forward-parameter names (``root.forward_param_inputs``), so translate
+        # each alias back to its origin here -- the same translation already
+        # applied to a call step's own ``step_boundary_params`` -- and carry the
+        # alias's unpack ordinal alongside it so a per-slot edge can dock onto the
+        # right port instead of every alias colliding on the whole tensor.
+        raw_param_refs = self._param_refs(node)
+        if extra_param_refs:
+            # A parameter the op depends on without naming it in this expression:
+            # ``torch.arange(t)`` where ``t`` is a loop target over
+            # ``grid_thw.tolist()`` is sized by the GRID, so the op belongs
+            # downstream of it even though it never spells it.
+            raw_param_refs = tuple(dict.fromkeys((*raw_param_refs, *extra_param_refs)))
+        param_inputs = self._dedupe(
+            self.param_alias_origin.get(name, name) for name in raw_param_refs
+        )
+        # A parameter this op reads ONLY through a host materialisation
+        # (``torch.split(t, lengths.tolist(), dim=2)`` -- ``lengths`` stands for
+        # ``cu_seqlens``) is a SIZE dependency, not a tensor operand. The edge
+        # belongs in the graph, or the tensor's producer has no consumer and is
+        # pruned; but counting it as an operand makes a one-operand op look like
+        # it takes two. Record them so the exporter can type them as it types a
+        # constant.
+        host_params = self._host_only_param_refs(node, raw_param_refs)
+        if host_params:
+            emitted_details.append(
+                "host_params: "
+                + ", ".join(
+                    self._dedupe(
+                        self.param_alias_origin.get(name, name) for name in host_params
+                    )
+                )
+            )
+        param_input_ordinals = tuple(
+            (self.param_alias_origin.get(name, name), self.param_alias_ordinal[name])
+            for name in raw_param_refs
+            if name in self.param_alias_ordinal
+        )
+        self.operations.append(
+            ForwardOperation(
+                attr_name=attr_name,
+                label=display,
+                class_name=display,
+                predecessors=self._dedupe_predecessors(predecessors, predecessor_ports),
+                external_inputs=self._dedupe(external_inputs),
+                details=tuple(emitted_details),
+                param_inputs=param_inputs,
+                predecessor_ports=predecessor_ports,
+                param_input_ordinals=param_input_ordinals,
+            )
+        )
+        return attr_name
+
+    @staticmethod
+    def _dedupe_predecessors(
+        values: list[str], ports: tuple[tuple[str, int], ...]
+    ) -> tuple[str, ...]:
+        """Drop repeats, except a producer read at several distinct output
+        ordinals within this same expression keeps one entry per ordinal.
+
+        ``torch.cat((q_pass, q_rot), dim=-1)`` reassembling a ``torch.split``
+        reads the SAME split producer twice, at two different output slots.
+        A plain identity dedupe (as for every other predecessor list) would
+        collapse that to a single entry and silently drop the second slice's
+        edge. ``ports`` (see ``_read_output_ports``) records how many
+        distinct ordinals each producer here is actually read at, so this
+        keeps exactly that many copies -- one every other repeat of the same
+        producer (not backed by a distinct ordinal) is still deduped away.
+        """
+        repeat_needed: dict[str, int] = {}
+        for producer, _ordinal in ports:
+            repeat_needed[producer] = repeat_needed.get(producer, 0) + 1
+        kept: list[str] = []
+        seen_count: dict[str, int] = {}
+        for value in values:
+            if not value:
+                continue
+            limit = max(repeat_needed.get(value, 0), 1)
+            count = seen_count.get(value, 0)
+            if count < limit:
+                kept.append(value)
+                seen_count[value] = count + 1
+        return tuple(kept)
+
+    def _reassigns_its_own_arguments(self, stmt, value, operations_before, producer):
+        if len(self.operations) != operations_before:
+            return False
+        if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+            return False
+        target = stmt.targets[0]
+        if not isinstance(target, (ast.Tuple, ast.List)) or not isinstance(
+            value, ast.Call
+        ):
+            return False
+        receiver = value.func
+        if not (
+            isinstance(receiver, ast.Attribute)
+            and isinstance(receiver.value, ast.Name)
+            and receiver.value.id != "self"
+            and receiver.value.id in self.param_names
+        ):
+            return False
+        names = [elt.id for elt in target.elts if isinstance(elt, ast.Name)]
+        if len(names) != len(target.elts) or not names:
+            return False
+        leading = value.args[: len(names)]
+        if len(leading) != len(names):
+            return False
+        if [a.id if isinstance(a, ast.Name) else None for a in leading] != names:
+            return False
+        if not all(self.var_producer.get(n) for n in names):
+            return False
+        return producer is None or producer in {self.var_producer.get(n) for n in names}
+
+    def _emit_branch_select(
+        self,
+        node: ast.AST,
+        survivor_producer: str,
+        other_producer: str,
+        test: str,
+    ) -> str:
+        """Emit an explicit Merge (phi) node joining two mutually-exclusive branch
+        producers of one reassigned variable, and return its id.
+
+        The two producers come from the taken/not-taken arms of an ``if`` whose
+        predicate could not be statically resolved, so exactly one runs per
+        invocation. Rendering an explicit merge keeps both branch computations
+        reachable while giving downstream consumers a single tensor to read. The
+        node is built directly (not via ``_emit``) and carries no ``raw_op``,
+        so the arity type-check skips it (a phi legitimately takes N tensor
+        operands). It is labelled ``Merge``, NOT ``Select``: ``torch.select`` is
+        equivalent to slicing and removes a dimension, so borrowing that name for
+        a node whose output has the same shape as each arm reads as an op that
+        failed to do what it says. ``Merge`` is what a dataflow graph calls this
+        (TensorFlow's control flow uses the same name for the same thing --
+        forward whichever input is the live one), and it says which way the
+        edges run: the arms CONVERGE here. ``Branch`` would suggest the opposite,
+        and ``Phi`` is exact but only to readers who know SSA.
+        """
+        producers = self._dedupe([survivor_producer, other_producer])
+        if len(producers) < 2:
+            # Both arms resolve to the SAME producer, so there is nothing to
+            # choose between: a merge with one alternative computes nothing and
+            # renders as a box that passes its input straight through.
+            return producers[0] if producers else survivor_producer
+        attr_name = self._operation_id(node, "Merge")
+        self.operations.append(
+            ForwardOperation(
+                attr_name=attr_name,
+                label="Merge",
+                class_name="Merge",
+                predecessors=producers,
+                # NOT a ``condition:`` detail: that key is how
+                # ``block_tree._dead_forward_steps`` finds ops a variant's absent
+                # submodule makes unreachable, and a merge over a pruned arm is
+                # exactly the node that must SURVIVE such a variant -- it still
+                # has a live arm to forward, and pruning it orphans that arm.
+                details=(f"merge: {test}",),
+            )
+        )
+        return attr_name
+
+    def _read_output_ports(self, node: ast.AST) -> tuple[tuple[str, int], ...]:
+        """Producer→ordinal pairs for multi-output locals this expression reads.
+
+        When an operation reads ``comb_w`` (unpacked as ordinal 2 of a split), it
+        consumes that specific output port, not the whole split. Walk the
+        expression for such locals so the graph can wire the edge to the matching
+        port. An op that reassembles two different slices of the *same* split in
+        one expression (``torch.cat((q_pass, q_rot), dim=-1)``) reads it at two
+        distinct ordinals -- keep every distinct (producer, ordinal) pair, in
+        read order, so each slice keeps its own port instead of the second read
+        silently collapsing onto the first.
+        """
+        if not self.var_output_ordinal:
+            return ()
+        ports: list[tuple[str, int]] = []
+        seen: set[tuple[str, int]] = set()
+        for current in ast.walk(node):
+            if isinstance(current, ast.Name):
+                ordinal = self.var_output_ordinal.get(current.id)
+                if ordinal is None:
+                    continue
+                producer = self.var_producer.get(current.id)
+                if not producer:
+                    continue
+                key = (producer, ordinal)
+                if key not in seen:
+                    seen.add(key)
+                    ports.append(key)
+        return tuple(ports)
+
+    def _param_refs(self, node: ast.AST) -> tuple[str, ...]:
+        """Secondary forward parameters this operation's expression reads.
+
+        A nested call that becomes its own chain step (a submodule call such as
+        ``self.attn(...)``, or an attention/positional kernel) owns the params
+        passed to it: ``h + self.attn(norm1(h), cu_seqlens=cu_seqlens)`` must
+        not attribute ``cu_seqlens`` to the residual ``Add``. So we do not
+        descend into those sub-calls — only params read directly by this
+        operation's own expression count.
+        """
+        if not self.param_names:
+            return ()
+        names: list[str] = []
+
+        def _owns_own_step(call: ast.Call) -> bool:
+            func = call.func
+            if isinstance(func, ast.Attribute) and _is_self_attr(func, func.attr):
+                return True
+            method = func.attr if isinstance(func, ast.Attribute) else None
+            return self._call_step_producer(call, method) is not None
+
+        def _visit(current: ast.AST, is_root: bool) -> None:
+            # A host-side shape/size read (``position_ids.shape[0]``) reads a
+            # param only to compute a Python int, not as a tensor operand: the
+            # param it names there must not count as a param this operation
+            # *consumes* (which would wire the param onto the op as a spurious
+            # extra tensor edge downstream). Mirrors the other subtree-ownership
+            # skips below.
+            if not is_root and self._is_host_scalar_expr(current):
+                return
+            if (
+                not is_root
+                and isinstance(current, ast.Call)
+                and _owns_own_step(current)
+            ):
+                return
+            # A subscript already emitted as its own Slice/Unsqueeze op owns the
+            # boundary param it read; the enclosing op reads that op, not the param.
+            if (
+                not is_root
+                and isinstance(current, ast.Subscript)
+                and id(current) in self._materialized_subscripts
+            ):
+                return
+            if isinstance(current, ast.Name) and current.id in self.param_names:
+                # A rebound re-read (``k`` after ``q, k = q.float(), k.float()``)
+                # already flows into this op through ``predecessors`` -- the
+                # reassignment's own producer is resolved via ``var_producer``
+                # the same way any local variable is. Counting it *again* here
+                # as a raw param read wires a second, spurious edge straight
+                # from the caller's true external producer for ``k`` onto every
+                # op that re-reads the rebound name, alongside the (already
+                # correct) internal edge from the reassignment op itself. Only
+                # a name with no local producer yet -- the true first read of
+                # the raw parameter value, such as the reassignment statement's
+                # own RHS -- establishes the boundary read. General: keyed on
+                # whether this specific occurrence has already been resolved to
+                # a local producer, not on any name/class.
+                if not self.var_producer.get(current.id):
+                    names.append(current.id)
+            for child in ast.iter_child_nodes(current):
+                _visit(child, False)
+
+        _visit(node, True)
+        return self._dedupe(names)
+
+    def _call_step_producer(
+        self, node: ast.Call, method_name: str | None
+    ) -> str | None:
+        """Chain step a call *is*, for calls the diagram turns into their own node.
+
+        Mirrors the naming `_extract_self_calls_ordered` uses, so the producer recorded
+        here refers to the same node the forward chain will hold.
+        """
+        func = node.func
+        if method_name is not None and _is_self_attr(func, method_name):
+            if method_name in self.repeated_submodule_attrs:
+                return submodule_callsite_attr(method_name, node.lineno)
+            return method_name
+        # ``self.<sub>.<method>(...)`` produces a value just as the child's own
+        # call does; without this the extractor records no producer for it, so
+        # the call's arguments are never captured and whatever it returns
+        # appears to come from nowhere.
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Attribute)
+            and _is_self_attr(func.value, func.value.attr)
+            and func.value.attr in self.submodule_attrs
+        ):
+            return submodule_callsite_attr(func.value.attr, node.lineno)
+        target = _expr_name(func)
+        if target and (
+            target in _SYNTHETIC_ATTENTION_NAMES
+            or (isinstance(func, ast.Name) and _is_kernel_merge_call(func))
+        ):
+            return SYNTHETIC_ATTENTION
+        # A ``map(lambda x: BODY(x), (a, b))`` idiom clones BODY's own call node
+        # once per tuple element (see ``_expand_map_lambda_tuple``); every clone
+        # shares BODY's original source position, so the discriminator stamped on
+        # the clone is what keeps their synthetic keys from colliding.
+        discriminator = getattr(node, "_tracelens_map_discriminator", None)
+        if target and _is_positional_function_call(func, target):
+            return positional_synthetic_attr(target, node.lineno, discriminator)
+        if _is_emittable_free_function(func, target):
+            return function_synthetic_attr(target, node.lineno, discriminator)
+        return None
+
+    def _free_function_param_names(self, node: ast.Call) -> list[str] | None:
+        """Positional parameter names of the module-level function *node* calls.
+
+        Lets a traced free-function call align its call-site args with the
+        callee's signature (``apply_rotary_pos_emb_vision(q, k, cos, sin)``), so
+        each argument routes to the parameter it feeds once the body is inlined.
+        """
+        func = node.func
+        if not isinstance(func, ast.Name):
+            return None
+        definition = self.module_functions.get(func.id)
+        if definition is None:
+            return None
+        return [arg.arg for arg in definition.args.posonlyargs + definition.args.args]
+
+    def _class_method_param_names(self, method_name: str) -> list[str] | None:
+        """Positional parameter names of a same-class sibling method's own ``def``.
+
+        A ``self.append_visible_tail(topk_indices, visible_tokens, valid_keys)``
+        call site names its args after the CALLER's locals; the callee's own
+        parameter names (``topk_indices, token_visible, key_valid``) are what its
+        inlined body actually keys on. Resolving against the callee's real
+        signature — analogous to ``_free_function_param_names`` for module-level
+        functions — keeps a caller/callee name mismatch from losing an argument.
+
+        Deliberately scoped to a literal same-class sibling ``def`` only (its
+        body is inlined into THIS frame, so the frame's own steps key on the
+        callee's parameter names directly). A genuine ``nn.Module`` submodule
+        attribute is NOT resolved here: that submodule keeps its own separate
+        namespace/boundary, and OTHER machinery in this same extractor
+        (``var_producer``-style lookups for a locally reassigned name such as
+        ``query_states = self.q_norm(query_states)``) depends on the call's
+        ``arg_name_map`` staying keyed by the CALLER's own local variable names.
+        Resolving against the callee's own signature here would rename that key
+        and sever those same-forward lookups. A submodule caller/callee name
+        mismatch is instead resolved downstream, structurally, by ordinal
+        position (see ``_lookup_param_entry`` in ``computation_graph.py``).
+        """
+        definition = self.class_methods.get(method_name)
+        if definition is None:
+            return None
+        args = definition.args
+        names = [arg.arg for arg in args.posonlyargs + args.args]
+        if names and names[0] == "self":
+            names = names[1:]
+        return names
+
+    def _self_attr_input(self, node: ast.Attribute) -> tuple[str | None, list[str]]:
+        if isinstance(node.value, ast.Name) and node.value.id == "self":
+            # Attributes recorded by the constructor pass are settings, not tensor
+            # inputs. This covers concretely-resolved scalars (``self.hidden_size``
+            # = 4096) AND scalar-typed attributes whose value could not be resolved
+            # because a config key was absent (``self.qkv_dim = self.head_dim *
+            # self.num_heads`` when ``linear_head_dim`` is not serialized) -- both
+            # are stored, the latter under the ``_SCALAR_SETTING`` sentinel. A
+            # genuine tensor attribute (an ``nn.Parameter`` / ``register_buffer`` /
+            # submodule assignment) is never a scalar-typed constructor expression,
+            # so it is NOT recorded and remains a tensor input here (materialized as
+            # a Constant leaf). This keeps a scalar size/axis attribute used as an
+            # op argument (``torch.split(x, [self.qkv_dim] * 3, -1)``) off the
+            # tensor edges instead of fabricating a spurious rank-1 Constant operand.
+            if self.self_values.get(node.attr, _UNKNOWN) is not _UNKNOWN:
+                return None, []
+            return None, [node.attr]
+        return None, []
+
+    def _return_element_label(self, node: ast.AST) -> str | None:
+        """Base name of a return element, seeing through a trailing subscript
+        or a trailing housekeeping method call.
+
+        ``pool_keys[:, keep]`` -> ``pool_keys``; a bare ``pool_keys`` -> ``pool_keys``;
+        ``cos.to(dtype=x.dtype)`` -> ``cos``. Used to name the return slot a
+        subscripted/cast return produces -- without seeing through the call, a
+        tuple return like ``return cos.to(...), sin.to(...)`` (no bare-Name
+        elements) gets no slot names at all, so neither element becomes an
+        output port and its producer looks unconsumed.
+        """
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Subscript):
+            return self._return_element_label(node.value)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            receiver = node.func.value
+            # ``cos.to(...)`` is housekeeping ON a value, so the value names the
+            # slot. ``torch.where(...)`` has the same shape but its receiver is a
+            # MODULE, and naming the slot ``torch`` leaves the boundary standing
+            # for nothing: DeepSeek's indexer returns
+            # ``torch.where(invalid, ..., top_k_indices)`` and published an
+            # ``@output`` labelled ``torch`` that reported the section's
+            # activation geometry instead of the int64 indices wired into it.
+            # A receiver that names no traced value is such a module; the call
+            # itself is then what the slot is named for.
+            if (
+                isinstance(receiver, ast.Name)
+                and receiver.id != "self"
+                and receiver.id not in self.var_producer
+                and receiver.id not in self.param_names
+            ):
+                return node.func.attr or None
+            # Seeing through the call is right only when the call is
+            # HOUSEKEEPING -- a cast, a device move, a layout fix -- which hands
+            # back the same tensor. A call that TRANSFORMS it does not:
+            # ``(scores * weights).sum(dim=2)`` returns ``[B, S, T]`` while
+            # ``scores`` is ``[B, S, H, T]``, so naming that slot ``scores``
+            # collides with the local of the same name and publishes the tensor
+            # from BEFORE the reduction.
+            if node.func.attr not in _VALUE_PRESERVING_METHODS:
+                return node.func.attr or None
+            return self._return_element_label(receiver)
+        if isinstance(node, ast.BinOp):
+            # A returned element can be a scaled/combined tensor
+            # (``weights * self.routed_scaling_factor``): one side is the real
+            # local tensor being returned, the other a bare ``self.<attr>``/
+            # literal multiplier that has no base name of its own. See through
+            # to whichever side resolves to a name so this element still gets
+            # a return slot -- without one, ``_live_forward_steps`` never seeds
+            # from whatever produced it, and prunes it (and everything only it
+            # depends on) as if the return statement never read it at all.
+            return self._return_element_label(node.left) or self._return_element_label(
+                node.right
+            )
+        return None
+
+    def _extent_source_producers(
+        self, bounds: list[ast.AST]
+    ) -> tuple[list[str], list[str]]:
+        """Producers of the tensors whose extent a generator's size arguments read.
+
+        ``torch.arange(n_windows)`` reads no tensor *operand*, so it draws as a
+        rootless node -- but its length is a tensor's: ``n_windows`` was computed
+        from ``compressed.shape[1]``. Leaving the edge out asserts the range is
+        independent of the model's data when it is not, and leaves shape
+        inference nothing to resolve the generated axis against (GLM's
+        ``torch.arange(valid_keys.shape[-1])`` reported a literal
+        ``[valid_keys.shape[-1]]``).
+
+        Walk each recorded bound expression, resolving a plain name through the
+        shape-unpack tokens and through its own defining expression, and return
+        the producer of every tensor whose ``.shape`` (or ``len``) the extent
+        reads. A bound built only from config scalars and literals yields
+        nothing -- that range really is constant.
+        """
+        producers: list[str] = []
+        params: list[str] = []
+        visited: set[str] = set()
+
+        def record(base: str) -> None:
+            producer = self.var_producer.get(base)
+            if producer and producer not in producers:
+                producers.append(producer)
+
+        def walk(node: ast.AST, depth: int) -> None:
+            if depth > _EXTENT_RESOLVE_DEPTH:
+                return
+            base = _shape_read_base(node)
+            if base is not None:
+                record(base)
+                return
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name) and func.id == "len" and node.args:
+                    record(ast.unparse(node.args[0]))
+                    return
+                if isinstance(func, ast.Attribute):
+                    # A host materialisation of a tensor (``grid_thw.tolist()``)
+                    # carries that tensor's contents, so whatever is sized from
+                    # it depends on the tensor.
+                    walk(func.value, depth + 1)
+                for argument in node.args:
+                    walk(argument, depth + 1)
+                return
+            if isinstance(node, ast.Name):
+                if node.id in visited:
+                    return
+                visited.add(node.id)
+                if node.id in self.param_names:
+                    # The extent reads a forward PARAMETER of this frame, which
+                    # has no internal producer: it docks through the parameter
+                    # channel instead of an edge.
+                    if node.id not in params:
+                        params.append(node.id)
+                token = self.shape_unpack_tokens.get(node.id)
+                if token is not None:
+                    record(token.split(".shape", 1)[0])
+                iterable = self._loop_target_iters.get(node.id)
+                if iterable is not None:
+                    walk(iterable, depth + 1)
+                defining = self._name_value_ast.get(node.id)
+                if defining is not None:
+                    walk(defining, depth + 1)
+                return
+            for child in ast.iter_child_nodes(node):
+                walk(child, depth + 1)
+
+        for bound in bounds:
+            if bound is not None:
+                walk(bound, 0)
+        return producers, params
+
+    def _extent_is_data_independent(self, bounds: list[ast.AST]) -> bool:
+        """True when nothing in these size arguments can vary with the input.
+
+        Asks the structural question -- does this extent read any tensor? -- not
+        "can we compute the number", because a config attribute the class never
+        resolved is still the same on every forward. False as soon as a bound
+        reads a tensor's shape, a name some op produces, a forward parameter, or
+        a loop-bound name (host data read off a tensor still varies).
+        """
+        for bound in bounds:
+            if self._param_refs(bound):
+                return False
+            for node in ast.walk(bound):
+                if isinstance(node, ast.Attribute) and node.attr == "shape":
+                    return False
+                if isinstance(node, ast.Name):
+                    if (
+                        node.id in self.var_producer
+                        or node.id in self._loop_bound_names
+                    ):
+                        return False
+                    if node.id in self.shape_unpack_tokens:
+                        return False
+        return True
+
+    def _calls_unbuilt_submodule(self, stmts: list[ast.stmt]) -> bool:
+        """Whether any statement here calls a submodule no instance has."""
+        if not self.unbuilt_attrs:
+            return False
+        for stmt in stmts:
+            for node in ast.walk(stmt):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and _is_self_attr(func, func.attr)
+                    and func.attr in self.unbuilt_attrs
+                ):
+                    return True
+        return False
+
+    def _is_host_scalar_expr(self, node: ast.AST) -> bool:
+        """A pure host-side integer expression (shape math / index bookkeeping).
+
+        True for int literals, shape-unpacked locals (``seq_len`` from
+        ``x.shape[:2]``), integer config scalars (``self.index_kpool``), ``len(...)``,
+        ``<tensor>.shape[i]``, and arithmetic combining only these. Such expressions
+        compute Python ints for sizes/offsets, not tensors, so emitting them as
+        tensor ops would leave dangling nodes. Requires *every* operand to be host
+        scalar — a tensor operand (``pool_indices + offsets``) makes it False.
+        """
+        if isinstance(node, ast.Constant):
+            return isinstance(node.value, int) and not isinstance(node.value, bool)
+        if isinstance(node, ast.Name):
+            return (
+                node.id in self.shape_unpack_tokens
+                or node.id in self.host_scalar_vars
+                or node.id in self.host_scalar_params
+            )
+        if isinstance(node, ast.Attribute):
+            value = _config_value(node, self.config, self.self_values)
+            return isinstance(value, int) and not isinstance(value, bool)
+        if isinstance(node, ast.Subscript):
+            base = node.value
+            if isinstance(base, ast.Attribute) and base.attr == "shape":
+                return True
+            # ``x.size()[:-1]`` is ``x.shape[:-1]`` spelled as a call, and reads
+            # the same way: a slice of a shape is still a shape.
+            return _is_size_call(base)
+        if isinstance(node, ast.BinOp):
+            # A tuple display cannot take part in tensor arithmetic -- adding one
+            # concatenates sequences. ``size_out = x.size()[:-1] + (self.nf,)``
+            # builds the shape a later ``view`` is given, so emitting it as a
+            # tensor Add leaves a node nothing consumes (and a Slice claiming the
+            # shape is a tensor). That is every Conv1D in GPT-2.
+            if isinstance(node.left, ast.Tuple) or isinstance(node.right, ast.Tuple):
+                return True
+            return self._is_host_scalar_expr(node.left) and self._is_host_scalar_expr(
+                node.right
+            )
+        if isinstance(node, ast.UnaryOp):
+            return self._is_host_scalar_expr(node.operand)
+        if isinstance(node, ast.Call):
+            func_name = node.func.id if isinstance(node.func, ast.Name) else None
+            # ``len(...)`` is always a Python int. ``min``/``max``/``int``/... over
+            # host-scalar arguments (``select_k = min(self.index_topk //
+            # self.index_kpool, scores.shape[-1])``) is size/budget bookkeeping,
+            # not a tensor reduction -- a bare-builtin call whose every argument is
+            # itself host-scalar stays host-scalar. A method / namespaced reduction
+            # (``scores.min()``, ``torch.max(t)``) is NOT a bare Name and operates
+            # on tensors, so it is excluded and still emits a real op.
+            if func_name == "len":
+                return True
+            if func_name in {"min", "max", "int", "abs", "round", "sum"}:
+                return bool(node.args) and all(
+                    self._is_host_scalar_expr(arg) for arg in node.args
+                )
+            return False
+        return False
+
+    def _fold_host_int(self, node: ast.AST) -> int | None:
+        """Fold a host-scalar expression to a concrete non-negative int, else None.
+
+        Resolves int literals, previously-folded host-scalar locals
+        (``host_scalar_values``), integer ``self.<attr>``/``config.<attr>``
+        scalars (via the constructor-resolved ``self_values`` and the config
+        dict), and ``+ - * // %`` / unary-sign arithmetic over those. Used to give
+        a slice/pad-to-constant bound (``topk_indices[..., :output_width]``) its
+        concrete width so shape inference can resize the axis. Returns *None* for
+        anything not statically resolvable (kept general — no name allowlist).
+        """
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, int) and not isinstance(node.value, bool):
+                return node.value
+            return None
+        if isinstance(node, ast.Name):
+            return self.host_scalar_values.get(node.id)
+        if isinstance(node, ast.Attribute):
+            value = _config_value(node, self.config, self.self_values)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+            return None
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+            operand = self._fold_host_int(node.operand)
+            if operand is None:
+                return None
+            return -operand if isinstance(node.op, ast.USub) else operand
+        if isinstance(node, ast.BinOp):
+            left = self._fold_host_int(node.left)
+            right = self._fold_host_int(node.right)
+            if left is None or right is None:
+                return None
+            try:
+                if isinstance(node.op, ast.Add):
+                    return left + right
+                if isinstance(node.op, ast.Sub):
+                    return left - right
+                if isinstance(node.op, ast.Mult):
+                    return left * right
+                if isinstance(node.op, ast.FloorDiv):
+                    return left // right
+                if isinstance(node.op, ast.Mod):
+                    return left % right
+            except (TypeError, ValueError, ZeroDivisionError):
+                return None
+        return None
+
+    def _record_host_scalar(self, target: ast.AST, value: ast.AST) -> None:
+        """Fold ``target = value``/``target += …`` to an int and cache it, if host-scalar."""
+        if not isinstance(target, ast.Name):
+            return
+        folded = self._fold_host_int(value)
+        if folded is not None and folded >= 0:
+            self.host_scalar_values[target.id] = folded
+        else:
+            # A reassignment to a now-unresolvable value must not keep the stale int.
+            self.host_scalar_values.pop(target.id, None)
+        resolved = _literal_dtype_token(value)
+        if resolved is not None:
+            self.local_dtypes[target.id] = resolved
+        else:
+            self.local_dtypes.pop(target.id, None)
+
+    def _dtype_token(self, value: ast.AST) -> str | None:
+        """The ``torch.<dtype>`` a ``dtype=`` argument names, following locals.
+
+        ``seqlens.cumsum(dim=0, dtype=dtype)`` spells a local, and the local is
+        where the answer is. Returns ``None`` -- say nothing -- for
+        ``dtype=x.dtype``, which merely points at another tensor's.
+        """
+        direct = _literal_dtype_token(value)
+        if direct is not None:
+            return direct
+        if isinstance(value, ast.Name):
+            return self.local_dtypes.get(value.id)
+        return None
+
+    def _subscript_resize_dims(self, index: ast.AST) -> list[tuple[int, int]]:
+        """Axes a bounded range-slice (``x[..., :output_width]``) resizes to a constant.
+
+        Returns ``(axis, size)`` pairs for each ``ast.Slice`` element whose bound(s)
+        fold to a concrete int — ``:B`` → size ``B``; ``a:b`` → size ``b - a`` — so
+        shape inference can set that axis to the folded width instead of passing the
+        source axis through unchanged. Axes after an ``Ellipsis`` are numbered from
+        the end (``x[..., :B]`` resizes ``-1``). Slices with a non-static or full
+        (``:``) bound, and integer selects (handled by ``_subscript_select_dims``),
+        are skipped. Returns ``[]`` when nothing resolves — the caller then aliases.
+        """
+        elts = index.elts if isinstance(index, ast.Tuple) else [index]
+        ellipsis_at = next(
+            (
+                pos
+                for pos, elt in enumerate(elts)
+                if isinstance(elt, ast.Constant) and elt.value is Ellipsis
+            ),
+            None,
+        )
+        resize: list[tuple[int, int]] = []
+        for pos, elt in enumerate(elts):
+            if not isinstance(elt, ast.Slice) or elt.step is not None:
+                continue
+            if elt.upper is None:
+                continue
+            upper = self._fold_host_int(elt.upper)
+            if upper is None:
+                continue
+            if elt.lower is None:
+                size = upper
+            else:
+                lower = self._fold_host_int(elt.lower)
+                if lower is None:
+                    continue
+                size = upper - lower
+            if size < 0:
+                continue
+            if ellipsis_at is None or pos < ellipsis_at:
+                axis = pos
+            else:
+                axis = -(len(elts) - pos)
+            resize.append((axis, size))
+        return resize
+
+    @staticmethod
+    def _shape_relative_expr(bound: ast.AST, base_ast: ast.AST) -> str | None:
+        """Rewrite ``<base>.shape[k]`` refs in an arithmetic slice bound to a ``shape[k]`` symbol.
+
+        ``rotate_half`` slices ``x[..., : x.shape[-1] // 2]``: the bound cannot fold
+        to a static int at extraction (it reads ``x.shape``) but IS concrete at shape
+        inference, which knows ``x``'s shape. Returns a normalized expression string
+        (``shape[-1] // 2``) when ``bound`` is pure integer arithmetic over the sliced
+        operand's OWN ``.shape[...]`` and int constants; ``None`` for any other
+        reference (a config symbol, a different tensor's shape), leaving the slice
+        descriptive/pass-through. General: only the operand's own shape is resolvable
+        from the operand's inferred shape alone.
+        """
+        base_dump = ast.dump(base_ast)
+        ok = True
+
+        def _const_int_index(idx: ast.AST) -> int | None:
+            if isinstance(idx, ast.Constant) and isinstance(idx.value, int):
+                return idx.value
+            if (
+                isinstance(idx, ast.UnaryOp)
+                and isinstance(idx.op, ast.USub)
+                and isinstance(idx.operand, ast.Constant)
+                and isinstance(idx.operand.value, int)
+            ):
+                return -idx.operand.value
+            return None
+
+        class _Rewriter(ast.NodeTransformer):
+            def visit_Subscript(self, n: ast.Subscript):
+                v = n.value
+                if (
+                    isinstance(v, ast.Attribute)
+                    and v.attr == "shape"
+                    and ast.dump(v.value) == base_dump
+                ):
+                    axis = _const_int_index(n.slice)
+                    if axis is not None:
+                        return ast.copy_location(
+                            ast.Subscript(
+                                value=ast.Name(id="shape", ctx=ast.Load()),
+                                slice=ast.Constant(value=axis),
+                                ctx=ast.Load(),
+                            ),
+                            n,
+                        )
+                return self.generic_visit(n)
+
+        rewritten = _Rewriter().visit(ast.parse(ast.unparse(bound), mode="eval").body)
+
+        # Validate: only ``shape[int]`` reads, int constants, and +/-/*//// arithmetic.
+        for sub in ast.walk(rewritten):
+            if isinstance(sub, ast.Subscript):
+                if not (isinstance(sub.value, ast.Name) and sub.value.id == "shape"):
+                    ok = False
+            elif isinstance(sub, ast.Name):
+                if sub.id != "shape":
+                    ok = False
+            elif isinstance(sub, ast.BinOp):
+                if not isinstance(
+                    sub.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Div)
+                ):
+                    ok = False
+            elif isinstance(sub, ast.Constant):
+                if not isinstance(sub.value, int):
+                    ok = False
+            elif isinstance(
+                sub,
+                (
+                    ast.UnaryOp,
+                    ast.operator,
+                    ast.unaryop,
+                    ast.expr_context,
+                    ast.Expression,
+                ),
+            ):
+                # Operator / context marker nodes (``FloorDiv``, ``USub``, ``Load`` …)
+                # yielded by ``ast.walk`` carry no operands to validate.
+                continue
+            else:
+                ok = False
+        if not ok:
+            return None
+        # Require at least one shape reference — a bound of pure constants would
+        # already have folded via ``_subscript_resize_dims``.
+        if not any(
+            isinstance(s, ast.Name) and s.id == "shape" for s in ast.walk(rewritten)
+        ):
+            return None
+        return ast.unparse(rewritten)
+
+    def _subscript_shape_relative_dims(
+        self, node: ast.Subscript
+    ) -> list[tuple[int, str | None, str | None]]:
+        """Axes a range-slice narrows using bounds over the operand's OWN shape.
+
+        Returns ``(axis, lower_expr, upper_expr)`` per ``ast.Slice`` element whose
+        present bound(s) are pure arithmetic over ``<this operand>.shape[k]`` (a
+        ``None`` bound stays ``None``); shape inference evaluates the exprs against the
+        operand's concrete shape to size the axis. Skips an element whose present bound
+        is NOT shape-relative (a plain symbol we cannot size). ``[]`` when nothing is
+        shape-relative — caller falls back to a descriptive pass-through slice.
+        """
+        base_ast = node.value
+        index = node.slice
+        elts = index.elts if isinstance(index, ast.Tuple) else [index]
+        ellipsis_at = next(
+            (
+                pos
+                for pos, elt in enumerate(elts)
+                if isinstance(elt, ast.Constant) and elt.value is Ellipsis
+            ),
+            None,
+        )
+        out: list[tuple[int, str | None, str | None]] = []
+        for pos, elt in enumerate(elts):
+            if not isinstance(elt, ast.Slice) or elt.step is not None:
+                continue
+            if elt.lower is None and elt.upper is None:
+                continue
+            lower_expr = (
+                self._shape_relative_expr(elt.lower, base_ast)
+                if elt.lower is not None
+                else None
+            )
+            upper_expr = (
+                self._shape_relative_expr(elt.upper, base_ast)
+                if elt.upper is not None
+                else None
+            )
+            if elt.lower is not None and lower_expr is None:
+                continue
+            if elt.upper is not None and upper_expr is None:
+                continue
+            if lower_expr is None and upper_expr is None:
+                continue
+            if ellipsis_at is None or pos < ellipsis_at:
+                axis = pos
+            else:
+                axis = -(len(elts) - pos)
+            out.append((axis, lower_expr, upper_expr))
+        return out
+
+    @staticmethod
+    def _subscript_narrows_range(index: ast.AST) -> bool:
+        """True when a subscript contains a partial range slice on some axis.
+
+        A partial ``ast.Slice`` -- one with a ``lower``, ``upper``, or ``step``
+        bound (``x[:, :, -seq_len:]``, ``x[..., 1:]``, ``x[::2]``) -- narrows or
+        strides that axis, so it is a real ``Slice`` op even when the bound is a
+        symbol that cannot fold to a static width. A full ``:`` (all bounds
+        ``None``) and a bare ellipsis carry no narrowing and stay pass-through.
+        Foldable bounded slices are handled first by ``_subscript_resize_dims``;
+        this catches the non-foldable remainder so the op is never dropped.
+        """
+        elts = index.elts if isinstance(index, ast.Tuple) else [index]
+        return any(
+            isinstance(elt, ast.Slice)
+            and (elt.lower is not None or elt.upper is not None or elt.step is not None)
+            for elt in elts
+        )
+
+    def expression(self, node: ast.AST) -> tuple[str | None, list[str]]:
+        if isinstance(node, ast.Name):
+            return self.var_producer.get(node.id), []
+        if isinstance(node, ast.Attribute):
+            producer, external = self._self_attr_input(node)
+            if producer is not None or external:
+                return producer, external
+            # A pure host-metadata attribute (``index_scores.device``,
+            # ``x.is_cuda``, ``x.requires_grad``, ``x.ndim``) reads a property of the
+            # tensor, not the tensor's data: it is a Python value handed to a host
+            # argument (``torch.arange(n, device=index_scores.device)``), never a
+            # tensor operand. Falling through to "preserve the computation behind
+            # chained property access" (meant for data selectors like
+            # ``.topk(...).indices``) would hand back the base tensor's producer as
+            # if the metadata read were that tensor -- so ``arange`` would take
+            # ``index_scores`` as a bogus operand and every downstream reader of the
+            # generated indices would dock onto it. Mirrors the ``.shape[i]``
+            # Subscript guard below. ``.dtype``/``.shape`` stay preserved (the
+            # existing chained-selector behaviour relied on elsewhere).
+            if node.attr in _HOST_METADATA_ATTRS:
+                return None, []
+            # Preserve the computation behind result selectors such as
+            # ``tensor.topk(...).indices`` and chained dtype/shape properties.
+            return self.expression(node.value)
+        if isinstance(node, ast.Constant):
+            return None, []
+        if isinstance(node, ast.Subscript):
+            # A host-side shape read (``x.shape[i]``) is index bookkeeping, not a
+            # tensor read: it computes a Python int, not data. Without this guard
+            # the fallback below ("preserve the computation behind chained
+            # property access", meant for selectors like ``.topk(...).indices``)
+            # also fires for ``.shape[i]`` and hands back the BASE tensor's own
+            # producer as if the shape read were that tensor itself -- so a
+            # downstream host-int expression built from it (``num_key_blocks =
+            # -(-k_len // self.block_size)``) fails its own host-scalar check and
+            # gets materialized as a real op reading the base tensor as a bogus
+            # operand. Mirrors the ``ast.BinOp`` guard above.
+            if self._is_host_scalar_expr(node):
+                return None, []
+            base, base_external = self.expression(node.value)
+            # Advanced indexing (``x[idx]`` where ``idx`` is a tensor, e.g.
+            # ``pool_indices[batch_idx, selected]`` or a boolean mask) is a gather:
+            # the index tensor is a genuine data consumer, not slicing. Plain
+            # slices/ints/``None``/``...`` carry no producer and stay pass-through.
+            index_producers: list[str] = []
+            index_external: list[str] = []
+            for operand in _subscript_index_operands(node.slice):
+                producer, operand_external = self.expression(operand)
+                if producer:
+                    index_producers.append(producer)
+                index_external.extend(operand_external)
+            if index_producers:
+                producer = self._emit(
+                    node,
+                    "Gather",
+                    [value for value in (base, *index_producers) if value],
+                    [*base_external, *index_external],
+                )
+                return producer, []
+            # Advanced indexing whose index operand is a tensor-valued *parameter*
+            # with no internal producer of its own -- ``index_first_axis(x,
+            # indices): return x[indices]``, where ``indices`` is the free
+            # function's own secondary tensor parameter. The internal-producer
+            # ``Gather`` path above cannot fire (a parameter names no upstream op),
+            # yet this is a genuine gather, not a slice: emit it as a dedicated
+            # ``Index select`` op with its own shape rule -- never the overloaded
+            # ``gather`` label, which single-index/no-``dim`` uses for many
+            # non-row-gather shapes. Structural discriminator, mirroring the
+            # free-function / param-alias tensor-operand handling the narrows-range
+            # ``Slice`` branch below already relies on: an index operand that reads
+            # a parameter (``_param_refs``), is not a literal integer select, and is
+            # not a host scalar; the base is a real tensor operand; and the context
+            # is one where an unproduced parameter genuinely IS a tensor value (a
+            # free-function body, or a secondary-input tuple-unpack alias).
+            subscript_is_param_alias = (
+                isinstance(node.value, ast.Name)
+                and node.value.id in self.param_alias_origin
+            )
+            if (
+                isinstance(node.ctx, ast.Load)
+                and (base is not None or base_external)
+                and (self.is_free_function_body or subscript_is_param_alias)
+                and any(
+                    not _is_int_index(operand)
+                    and not self._is_host_scalar_expr(operand)
+                    and self._param_refs(operand)
+                    for operand in _subscript_index_operands(node.slice)
+                )
+            ):
+                self._materialized_subscripts.add(id(node))
+                producer = self._emit(
+                    node,
+                    "Index select",
+                    [base] if base else [],
+                    base_external,
+                )
+                return producer, []
+            # A pure slice that selects a single index along a non-sole axis
+            # (``freq[:, 0]``) drops that axis: a real ``Slice`` op, not an alias.
+            # Materialising it keeps a later ``cat([freq_h, freq_w])`` reading two
+            # distinct producers instead of the same base twice. A boundary param
+            # read directly (``position_ids[..., None]``) has no producer but wires
+            # through ``param_inputs``; still worth its own op.
+            reads_param = bool(self._param_refs(node))
+            if base is not None or base_external or reads_param:
+                base_predecessors = [base] if base else []
+                select_dims = _subscript_select_dims(node.slice)
+                if select_dims:
+                    self._materialized_subscripts.add(id(node))
+                    select_details = [
+                        "select_dim: " + ", ".join(str(dim) for dim in select_dims)
+                    ]
+                    # Which column, not just which axis: the only record of how
+                    # wide a descriptor tensor is can be the set of columns its
+                    # readers take (see ``_subscript_select_indices``).
+                    select_indices = _subscript_select_indices(node.slice)
+                    if select_indices:
+                        select_details.append(
+                            "select_index: "
+                            + ", ".join(str(value) for value in select_indices)
+                        )
+                    producer = self._emit(
+                        node,
+                        "Slice",
+                        base_predecessors,
+                        base_external,
+                        details=select_details,
+                    )
+                    return producer, []
+                # A bounded range-slice to a config-derived constant width
+                # (``topk_indices[..., :output_width]``) resizes that axis to the
+                # folded size — a real ``Slice``, not a pass-through alias, so the
+                # axis reads its true width even when the source axis was inflated
+                # by proven data-dependent internals upstream. Skip a host-scalar
+                # shape read (``hidden_states.shape[:2]``): it is index bookkeeping
+                # and must emit no tensor op.
+                step_dims = (
+                    []
+                    if self._is_host_scalar_expr(node)
+                    else _subscript_step_dims(node.slice)
+                )
+                if step_dims:
+                    self._materialized_subscripts.add(id(node))
+                    producer = self._emit(
+                        node,
+                        "Slice",
+                        base_predecessors,
+                        base_external,
+                        details=[
+                            "step_dim: "
+                            + ", ".join(
+                                f"{axis}={start}:{step}"
+                                for axis, start, step in step_dims
+                            )
+                        ],
+                    )
+                    return producer, []
+                resize_dims = (
+                    []
+                    if self._suppress_slice_resize or self._is_host_scalar_expr(node)
+                    else self._subscript_resize_dims(node.slice)
+                )
+                if resize_dims:
+                    self._materialized_subscripts.add(id(node))
+                    producer = self._emit(
+                        node,
+                        "Slice",
+                        base_predecessors,
+                        base_external,
+                        details=[
+                            "resize_dim: "
+                            + ", ".join(f"{axis}={size}" for axis, size in resize_dims)
+                        ],
+                    )
+                    return producer, []
+                # A range slice whose bound is arithmetic over the operand's OWN
+                # shape (``rotate_half``'s ``x[..., : x.shape[-1] // 2]``) narrows the
+                # axis to a width that is not a static int at extraction but IS
+                # concrete at shape inference. Emit a ``shape_slice`` detail carrying
+                # the per-axis lower/upper expressions (over a ``shape`` symbol) so the
+                # inferencer sizes the axis instead of passing the shape through.
+                shape_rel_dims = (
+                    []
+                    if self._suppress_slice_resize or self._is_host_scalar_expr(node)
+                    else self._subscript_shape_relative_dims(node)
+                )
+                if shape_rel_dims:
+                    self._materialized_subscripts.add(id(node))
+                    producer = self._emit(
+                        node,
+                        "Slice",
+                        base_predecessors,
+                        base_external,
+                        details=[
+                            "shape_slice: "
+                            + ", ".join(
+                                f"{axis}={lo or ''}|{up or ''}"
+                                for axis, lo, up in shape_rel_dims
+                            )
+                        ],
+                    )
+                    return producer, []
+                # A partial range slice whose bound does not fold to a static width
+                # (``mixed_qkv[:, :, -seq_len:]``) still narrows/strides an axis: a
+                # real ``Slice`` op, not a silent alias. The bound is symbolic, so
+                # the detail is descriptive only (shape inference cannot size it and
+                # passes the shape through), but the op stays visible in the graph.
+                # Require a real upstream tensor producer OR a genuine param read
+                # (``reads_param``) in one of two shapes: a range slice over a host
+                # read with no producer and no param binding (``cu_seqlens[1:] -
+                # cu_seqlens[:-1]`` index bookkeeping, read directly off a class's
+                # own top-level ``forward`` parameter) has nothing to slice and must
+                # stay pass-through, not become an orphan op -- ``cu_seqlens``
+                # genuinely is a real forward parameter there too, so ``reads_param``
+                # alone cannot tell the two cases apart. Two structural shapes DO
+                # still need the visible ``Slice``, though: (1) a free function's own
+                # non-primary tensor parameter (``k_rot, k_pass = k[..., :rotary_dim],
+                # k[..., rotary_dim:]`` in ``apply_rotary_pos_emb`` when only ``q`` is
+                # seeded as the boundary input) has no producer of its own at this
+                # point either, but IS a real tensor operand; and (2) a *secondary*
+                # forward input's tuple-unpack alias sliced down before being passed
+                # on (``cos, sin = position_embeddings; ... cos[..., :self.head_dim]``,
+                # a smaller rotary width for one submodule) is likewise a real operand
+                # with no producer of its own -- unlike ``cu_seqlens``, its own name
+                # is never itself the function's top-level parameter, only an alias
+                # registered by ``_propagate_param_alias``, which is exactly what
+                # distinguishes it from the index-bookkeeping case. ``is_free_function_body``
+                # covers (1); ``is_param_alias`` covers (2).
+                # Skip host-scalar shape reads too, as the resize branch does.
+                is_param_alias = (
+                    isinstance(node.value, ast.Name)
+                    and node.value.id in self.param_alias_origin
+                )
+                if (
+                    (
+                        base is not None
+                        or (
+                            reads_param
+                            and (self.is_free_function_body or is_param_alias)
+                        )
+                    )
+                    and not self._suppress_slice_resize
+                    and not self._is_host_scalar_expr(node)
+                    and self._subscript_narrows_range(node.slice)
+                ):
+                    self._materialized_subscripts.add(id(node))
+                    producer = self._emit(
+                        node,
+                        "Slice",
+                        base_predecessors,
+                        base_external,
+                        details=[f"slice: {ast.unparse(node.slice)}"],
+                    )
+                    return producer, []
+                # ``x[..., None]`` / ``x[:, None]`` inserts a size-1 axis: an
+                # unsqueeze, not a pass-through, so downstream broadcasting sees
+                # the new axis.
+                if _subscript_inserts_axis(node.slice):
+                    unsqueeze_dims = _none_insert_dims(node.slice)
+                    if unsqueeze_dims:
+                        self._materialized_subscripts.add(id(node))
+                        producer = None
+                        predecessors = base_predecessors
+                        external = base_external
+                        for unsqueeze_dim in unsqueeze_dims:
+                            producer = self._emit(
+                                node,
+                                "Unsqueeze",
+                                predecessors,
+                                external,
+                                details=[f"dim: {unsqueeze_dim}"],
+                            )
+                            predecessors = [producer] if producer else []
+                            external = []
+                        return producer, []
+            return base, base_external
+        if isinstance(node, ast.UnaryOp):
+            return self.expression(node.operand)
+        if isinstance(node, ast.IfExp):
+            left, left_external = self.expression(node.body)
+            right, right_external = self.expression(node.orelse)
+            return right or left, [*left_external, *right_external]
+        if isinstance(node, (ast.Tuple, ast.List)):
+            producers: list[str] = []
+            external: list[str] = []
+            for item in node.elts:
+                producer, item_external = self.expression(item)
+                if producer:
+                    producers.append(producer)
+                external.extend(item_external)
+            return (producers[-1] if producers else None), external
+        if isinstance(node, ast.Dict):
+            # A tensor value bound inside a dict literal is a real producer just
+            # like a tuple/list element: ``position_embeddings = {'main':
+            # self.rotary_emb(...), 'compress': self.rotary_emb(...)}`` runs the
+            # submodule calls and the dict variable carries their result. Without
+            # this the whole assignment is dropped and any later consumer of the
+            # dict (a decoder layer reading ``position_embeddings``) is sourceless.
+            producers = []
+            external = []
+            for item in node.values:
+                producer, item_external = self.expression(item)
+                if producer:
+                    producers.append(producer)
+                external.extend(item_external)
+            return (producers[-1] if producers else None), external
+        if isinstance(node, ast.Compare):
+            # An elementwise comparison operator (``entry_indices.view(...) >=
+            # threshold``) produces a boolean tensor consumed as a real operand of
+            # a downstream tensor op (``index_scores.masked_fill(future_mask,
+            # ...)``). Written as an operator it never reaches the tensor-method
+            # label table (which only covers the ``a.ge(b)`` method form), so
+            # without this branch the whole comparison -- and, once it dead-ends,
+            # its integer/index producer chain (``arange``/``view``/floor-div/
+            # ``unsqueeze``) -- is pruned and the consumer loses its mask operand.
+            # A chained comparison (``a < b < c``) is uncommon in model code; fall
+            # back to a pass-through rather than fabricate an operand for it.
+            label = (
+                _COMPARE_OP_LABELS.get(type(node.ops[0]))
+                if len(node.ops) == 1
+                else None
+            )
+            left, left_external = self.expression(node.left)
+            right, right_external = self.expression(node.comparators[0])
+            if label is None:
+                return right or left, [*left_external, *right_external]
+            # A comparison over only host-scalar operands (index bookkeeping such
+            # as a branch predicate, ``seq_len == 1``) is not a tensor op; emit
+            # nothing, mirroring the ``ast.BinOp`` empty-operand guard. Testing
+            # that by "neither side resolved to a producer" caught more than it
+            # meant to: a TENSOR parameter has no internal producer either, so
+            # ``attention_mask == 0`` -- the padding mask MiniMax's
+            # ``build_block_mask`` builds and then ``&``s with its block
+            # selection -- emitted nothing, the ``&`` lost an operand, and
+            # ``attention_mask`` reached no op in that frame at all. Ask what the
+            # operands ARE, which is what the rule always meant.
+            if (
+                not left
+                and not right
+                and self._is_host_scalar_expr(node.left)
+                and self._is_host_scalar_expr(node.comparators[0])
+            ):
+                return None, [*left_external, *right_external]
+            producer = self._emit(
+                node,
+                label,
+                [value for value in (left, right) if value],
+                [*left_external, *right_external],
+                raw_op=_COMPARE_OP_RAW.get(type(node.ops[0])),
+            )
+            return producer, []
+        if isinstance(node, ast.BinOp):
+            # Host-side integer arithmetic (shape/index math) is not a tensor op.
+            if self._is_host_scalar_expr(node):
+                return None, []
+            left, left_external = self.expression(node.left)
+            right, right_external = self.expression(node.right)
+            label = _BINOP_LABELS.get(type(node.op))
+            if label is None:
+                return right or left, [*left_external, *right_external]
+            direct_module_predecessors = [
+                operand.func.attr
+                for operand in (node.left, node.right)
+                if isinstance(operand, ast.Call)
+                and isinstance(operand.func, ast.Attribute)
+                and _is_self_attr(operand.func, operand.func.attr)
+            ]
+            # An arithmetic op that reads a secondary forward parameter as a whole
+            # tensor operand (``causal_threshold = (position_ids + 1) //
+            # self.compress_rate``) is a genuine tensor op even though its operands
+            # have no *internal* producer yet -- the param flows in through the
+            # module's ``@input`` boundary (``param_inputs``), exactly like the
+            # rotary ops that read ``position_ids``. Without this it dead-ends and a
+            # downstream reader (``causal_threshold.unsqueeze(-1)`` -> the
+            # ``future_mask`` comparison) spine-falls onto the wrong producer.
+            # Keyed on a *bare-Name* param read (a full-tensor operand), so a
+            # sliced param used for index bookkeeping (``cu_seqlens[1:] -
+            # cu_seqlens[:-1]``) stays a pass-through and never becomes a spurious op.
+            reads_full_param = any(
+                isinstance(operand, ast.Name)
+                and operand.id in self.param_names
+                and not self.var_producer.get(operand.id)
+                for operand in (node.left, node.right)
+            )
+            if (
+                not left
+                and not right
+                and not direct_module_predecessors
+                and not reads_full_param
+            ):
+                return None, [*left_external, *right_external]
+            producer = self._emit(
+                node,
+                label,
+                [
+                    *[value for value in (left, right) if value],
+                    *direct_module_predecessors,
+                ],
+                [*left_external, *right_external],
+            )
+            return producer, []
+        if not isinstance(node, ast.Call):
+            return None, []
+        # A host-scalar builtin call (``min``/``max``/``len`` over shape/config
+        # ints) computes a Python size, not a tensor: emitting it as an op would
+        # dangle a fake reduction node and mis-wire its result onto whatever size
+        # argument reads it (``scores.topk(select_k, ...)``). Mirrors the BinOp
+        # host-scalar guard above.
+        if self._is_host_scalar_expr(node):
+            return None, []
+
+        method_name: str | None = None
+        base_producer: str | None = None
+        external: list[str] = []
+        if isinstance(node.func, ast.Attribute):
+            method_name = node.func.attr
+            owner_name = _expr_name(node.func.value)
+            is_namespace_call = owner_name in _TORCH_NAMESPACES
+            if not is_namespace_call:
+                base_producer, base_external = self.expression(node.func.value)
+                external.extend(base_external)
+
+        call_name = (_expr_name(node.func) or method_name or "").split(".")[-1]
+        functional_name = _functional_call_name(node.func)
+        registry_activation: str | None = None
+        if isinstance(node.func, ast.Subscript):
+            registry_name = _expr_name(node.func.value)
+            activation_key = _config_value(node.func.slice, {}, self.self_values)
+            if registry_name in _ACTIVATION_REGISTRY_NAMES and isinstance(
+                activation_key, str
+            ):
+                registry_activation = _ACTIVATION_DISPLAY_NAMES.get(
+                    activation_key.lower(), activation_key
+                )
+        # ``self.norm(x)`` runs a submodule that happens to share a tensor method's
+        # name; it is a chain step, so it must not be relabelled as that method.
+        submodule_call = isinstance(node.func, ast.Attribute) and _is_self_attr(
+            node.func, method_name
+        )
+        # A tensor-method label (``x.float()`` -> Cast, ``x.sum()`` -> Sum, ...)
+        # only applies to an attribute-style dispatch on some tensor/namespace
+        # value. A bare builtin ``Name`` call that merely shares its name with a
+        # tensor method (``float("-inf")``, a Python scalar cast, not
+        # ``x.float()``) must not be relabelled as that tensor op -- it has no
+        # tensor operand at all, and would otherwise materialize a spurious
+        # zero-input op node.
+        label = (
+            None
+            if submodule_call
+            else registry_activation
+            or _FUNCTION_LABELS.get(functional_name or call_name)
+            or (
+                _TENSOR_METHOD_LABELS.get(call_name)
+                if isinstance(node.func, ast.Attribute)
+                else None
+            )
+        )
+        housekeeping = not submodule_call and (
+            call_name in _HOUSEKEEPING_METHODS or call_name == "zeros_like"
+        )
+
+        def _collect_call_arg_producers(arg: ast.AST) -> tuple[list[str], list[str]]:
+            if isinstance(arg, (ast.List, ast.Tuple)):
+                producers: list[str] = []
+                external: list[str] = []
+                for item in arg.elts:
+                    producer, item_external = self.expression(item)
+                    if producer:
+                        producers.append(producer)
+                    external.extend(item_external)
+                return producers, external
+            producer, arg_external = self.expression(arg)
+            return ([producer] if producer else []), list(arg_external)
+
+        arg_producers: list[str] = []
+        arg_name_map: dict[str, str] = {}
+        arg_ordinal_map: dict[str, int] = {}
+        positional_producers: list[list[str]] = []
+
+        def _record_arg_ordinal(name: str, producer: str, arg_node: ast.AST) -> None:
+            # If this arg reads a specific output slot of its producer (an
+            # unpacked ``unbind``/``split`` local), remember the slot against the
+            # arg name so the module-call edge can start from that port.
+            for prod, ordinal in self._read_output_ports(arg_node):
+                if prod == producer:
+                    arg_ordinal_map[name] = ordinal
+                    break
+
+        if not (housekeeping and method_name is not None):
+            # Skip self/cls first positional arg for submodule calls.
+            start = 0
+            if (
+                submodule_call
+                and node.args
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "self"
+            ):
+                start = 1
+            # ``self.append_visible_tail(topk_indices, visible_tokens, valid_keys)``
+            # names its args after the CALLER's locals; when the callee is a
+            # sibling method inlined from its own ``def``, its body keys entry
+            # params on ITS OWN parameter names (``token_visible``, ``key_valid``,
+            # ...). Resolve those names once so a caller/callee mismatch doesn't
+            # strand an argument onto the callee's default target.
+            callee_param_names = (
+                self._class_method_param_names(method_name)
+                if submodule_call and method_name is not None
+                else self._free_function_param_names(node)
+            )
+            for idx, arg in enumerate(node.args):
+                # A host-scalar positional (``key_states.shape[2]``) is an int size
+                # read, not a tensor operand: it must contribute no producer, or the
+                # shape's base tensor is fabricated as a data dependency / @input.
+                if self._is_host_scalar_expr(arg):
+                    positional_producers.append([])
+                    continue
+                # The same reserved type/placement argument the keyword path skips,
+                # passed POSITIONALLY: ``prepare_cu_seqlens_from_lens(lens, dtype)``
+                # binds its second argument to a ``dtype`` parameter, which carries a
+                # ``torch.dtype`` and never tensor data. Wiring it would put a second
+                # operand on the single-operand ``cumsum``/``pad`` inside that callee.
+                bound_param = None
+                if callee_param_names is not None and idx >= start:
+                    offset = idx - start
+                    if offset < len(callee_param_names):
+                        bound_param = callee_param_names[offset]
+                if bound_param in _NON_TENSOR_OP_KWARGS:
+                    positional_producers.append([])
+                    continue
+                # The argument READS a tensor but hands over its dtype or device,
+                # not its data: ``build_block_mask(..., query_states.dtype,
+                # query_states.device, ...)``. Resolving the callee's parameter
+                # names needs its signature, which is unavailable for a method on
+                # a CHILD module -- but the expression itself is unambiguous. Left
+                # to contribute a producer, it draws a data edge from the rope
+                # into the callee, which then counts as one of its inputs.
+                if isinstance(arg, ast.Attribute) and arg.attr in {"dtype", "device"}:
+                    positional_producers.append([])
+                    continue
+                # A tensor constructor's positional arguments are SIZES, not
+                # operands: ``torch.zeros(keep.shape, ...)`` reads ``keep``'s
+                # extent, never its data. Left to contribute a producer it draws
+                # a data edge into an op whose parameters take no tensor at all,
+                # which reads as a mis-wired argument. The extent machinery below
+                # recovers the same dependency and marks the edge as an extent.
+                if call_name in _CONSTRUCTOR_SIZE_CALLS:
+                    positional_producers.append([])
+                    continue
+                producers, arg_external = _collect_call_arg_producers(arg)
+                positional_producers.append(producers)
+                arg_producers.extend(producers)
+                external.extend(arg_external)
+                if submodule_call and idx >= start and len(producers) == 1:
+                    positional_index = idx - start
+                    name = None
+                    if callee_param_names is not None and positional_index < len(
+                        callee_param_names
+                    ):
+                        name = callee_param_names[positional_index]
+                    if name is None:
+                        name = _arg_name(arg, positional_index)
+                    arg_name_map[name] = producers[0]
+                    _record_arg_ordinal(name, producers[0], arg)
+            for keyword in node.keywords:
+                # A reserved type/placement keyword (``dtype=``/``device=``) never
+                # supplies tensor data: ``cumsum(dim=0, dtype=grid_thw.dtype)`` must
+                # not wire ``grid_thw`` as a second operand onto a single-operand op.
+                if keyword.arg in _NON_TENSOR_OP_KWARGS:
+                    continue
+                # Likewise skip a host-scalar keyword (``kv_length=key_states.shape[2]``):
+                # mapping it to the shape's base tensor producer fabricates a phantom
+                # @input port on the callee frame (the "key_states" defect).
+                if self._is_host_scalar_expr(keyword.value):
+                    continue
+                producer, arg_external = self.expression(keyword.value)
+                if producer:
+                    arg_producers.append(producer)
+                    if submodule_call and keyword.arg:
+                        arg_name_map[keyword.arg] = producer
+                        _record_arg_ordinal(keyword.arg, producer, keyword.value)
+                external.extend(arg_external)
+        if label is None:
+            # A call that becomes its own chain step is what later reads of its result
+            # depend on; without this they resolve to whatever fed the call instead, and
+            # an operation reading the result looks like it has no source at all.
+            own_step = self._call_step_producer(node, method_name)
+            if own_step is not None:
+                self.step_predecessors[own_step] = self._dedupe(
+                    [value for value in (base_producer, *arg_producers) if value]
+                )
+                # A dispatched attention interface call
+                # (``attention_interface(self, q, k, v, mask, ...)``) is a bare
+                # local, not a ``self.<attr>`` submodule call, so the positional
+                # arg-name/ordinal capture above was skipped. Record each tensor
+                # operand's name and output ordinal here so the kernel's ports
+                # dock onto the correct producer slot — ``value_states`` = slot 1
+                # of a tuple-returning ``expand_kv`` — instead of two operands
+                # collapsing onto one producer under dedupe and the remaining
+                # ports sliding onto the wrong sources. General: reads operands
+                # straight off whichever call the source spells out.
+                if own_step == SYNTHETIC_ATTENTION and not arg_name_map:
+                    attn_start = (
+                        1
+                        if node.args
+                        and isinstance(node.args[0], ast.Name)
+                        and node.args[0].id == "self"
+                        else 0
+                    )
+                    for arg in node.args[attn_start:]:
+                        if not isinstance(arg, ast.Name):
+                            continue
+                        arg_producer = self.var_producer.get(arg.id)
+                        if arg_producer is None:
+                            continue
+                        # Only an operand that reads a *specific output slot* of a
+                        # multi-output producer (``value_states`` = slot 1 of a
+                        # tuple-returning ``expand_kv``) needs its port docked; a
+                        # single-output operand (``g`` from ``self.forget_gate``)
+                        # carries no slot and must not be published as a step
+                        # predecessor arg, or it perturbs how the enclosing frame's
+                        # child submodule (forget_gate) is expanded downstream.
+                        recorded_before = arg.id in arg_ordinal_map
+                        _record_arg_ordinal(arg.id, arg_producer, arg)
+                        if arg.id in arg_ordinal_map and not recorded_before:
+                            arg_name_map.setdefault(arg.id, arg_producer)
+                # A traced free-function node (rope helper, ...) is expanded into
+                # its body's ops when the callee is known; map each positional arg
+                # to the callee's parameter name so the cross-module predecessor
+                # pass can route producers onto the matching per-parameter entry of
+                # the inlined pipeline (``q``->query_states, ``k``->key_states).
+                if not arg_name_map and (
+                    is_positional_synthetic(own_step) or is_function_synthetic(own_step)
+                ):
+                    param_names = self._free_function_param_names(node)
+                    boundary_arg_map: dict[str, tuple[str, int | None]] = {}
+                    if param_names:
+                        for idx, producers in enumerate(positional_producers):
+                            if idx >= len(param_names):
+                                continue
+                            callee_param = param_names[idx]
+                            if len(producers) == 1:
+                                arg_name_map[callee_param] = producers[0]
+                                _record_arg_ordinal(
+                                    callee_param, producers[0], node.args[idx]
+                                )
+                                continue
+                            # No internal producer: the arg reads straight from a
+                            # boundary forward input (``cos``/``sin``, aliased to
+                            # ``position_embeddings``). Map the callee parameter to
+                            # that origin and its unpack ordinal so the inlined
+                            # frame fans the boundary input out one port per slot.
+                            # A unary wrapper (``-sin``) is a transparent
+                            # pass-through here too, mirroring ``expression()``'s
+                            # own ``ast.UnaryOp`` handling (which just recurses
+                            # into the operand): the boundary alias underneath is
+                            # still the same tensor, so unwrap it before checking
+                            # whether it is a tracked param alias.
+                            arg = node.args[idx]
+                            while isinstance(arg, ast.UnaryOp):
+                                arg = arg.operand
+                            if isinstance(arg, ast.Name) and arg.id in self.param_names:
+                                boundary_arg_map[callee_param] = (
+                                    self.param_alias_origin.get(arg.id, arg.id),
+                                    self.param_alias_ordinal.get(arg.id),
+                                )
+                    if boundary_arg_map:
+                        self.step_boundary_arg_params[own_step] = boundary_arg_map
+                if arg_name_map:
+                    self.step_predecessor_args[own_step] = arg_name_map
+                if arg_ordinal_map:
+                    self.step_predecessor_ordinals[own_step] = arg_ordinal_map
+                # A synthetic that is its own node may read forward parameters that
+                # have no internal producer (``apply_rotary_pos_emb_vision(..., cos,
+                # sin)`` where ``cos, sin = position_embeddings``). Record the
+                # caller-visible origin (``position_embeddings``) so the cross-module
+                # predecessor pass can route the producer feeding that parameter onto
+                # this consumer, the way ``cu_seqlens`` reaches the kernel.
+                boundary = self._dedupe(
+                    [
+                        self.param_alias_origin.get(name, name)
+                        for name in self._param_refs(node)
+                    ]
+                )
+                if boundary:
+                    self.step_boundary_params[own_step] = boundary
+                return own_step, external
+            producers = [value for value in (base_producer, *arg_producers) if value]
+            return (producers[-1] if producers else None), external
+
+        if housekeeping and (
+            not self.all_tensor_ops or call_name in _SHORTHAND_CAST_METHODS
+        ):
+            # A shorthand cast (``x.long()``, ``x.bool()``) carries the same value
+            # in another dtype, and carries NO label -- so in detailed mode it fell
+            # through to the generic call handling and produced nothing at all, not
+            # even its own producer. The op reading it was then left with no
+            # operand and had to guess its shape: ``key_valid.long().argmax(-1)``
+            # reported the module's working shape instead of the tensor's.
+            return (
+                base_producer or (arg_producers[0] if arg_producers else None),
+                external,
+            )
+
+        details: list[str] = []
+        extra_param_refs: tuple[str, ...] = ()
+        # Size arguments of a generator call, kept as AST so the tensors their
+        # extent reads can be recovered as real predecessors below.
+        extent_bounds: list[ast.AST] = []
+        if call_name == "linear" and any(
+            isinstance(item, ast.Call)
+            and isinstance(item.func, ast.Attribute)
+            and item.func.attr in {"type", "float", "to"}
+            for arg in node.args
+            for item in ast.walk(arg)
+        ):
+            details.append("dtype: torch.float32")
+        if call_name in {"view", "reshape", "expand"}:
+            details.append("shape: " + self._format_shape_args(node.args))
+            if getattr(self, "_pending_shape_snapshots", None):
+                details.append(
+                    "shape_snapshots: " + ", ".join(self._pending_shape_snapshots)
+                )
+        if call_name in {"split", "chunk"}:
+            bound = _schema_arguments(call_name, node)
+            # The same quantity is spelled ``split_size`` by ``split``, ``chunks``
+            # by ``chunk`` and ``split_size_or_sections`` by the Python wrapper.
+            size = next(
+                (
+                    bound[name]
+                    for name in (
+                        "split_size",
+                        "split_sizes",
+                        "chunks",
+                        "split_size_or_sections",
+                    )
+                    if name in bound
+                ),
+                None,
+            )
+            if size is not None:
+                details.append(f"split_size: {ast.unparse(size)}")
+            if "dim" in bound:
+                details.append(f"dim: {ast.unparse(bound['dim'])}")
+        if call_name == "transpose":
+            # Both axes, however they are spelled -- ``x.transpose(1, 2)``,
+            # ``x.transpose(dim0=1, dim1=2)`` and ``torch.transpose(x, 1, 2)``
+            # name the same swap. Requiring two POSITIONAL arguments recorded
+            # neither axis for the keyword spelling, leaving the swap invisible.
+            bound = _schema_arguments(call_name, node)
+            if "dim0" in bound and "dim1" in bound:
+                details.append(f"dim0: {ast.unparse(bound['dim0'])}")
+                details.append(f"dim1: {ast.unparse(bound['dim1'])}")
+        if call_name == "permute":
+            arg_start = 1 if _calls_through_namespace(node.func) else 0
+            dims_args = node.args[arg_start:]
+            if not dims_args:
+                # ``x.permute(dims=(0, 2, 1))`` names the order by keyword.
+                keyword_dims = next(
+                    (kw.value for kw in node.keywords if kw.arg == "dims"), None
+                )
+                if keyword_dims is not None:
+                    dims_args = [keyword_dims]
+            # ``permute`` accepts either varargs (``x.permute(0, 2, 1, 3)``) or a
+            # single tuple/list (``x.permute((0, 2, 1, 3))``); flatten both to a
+            # comma-joined dims spec so shape inference can reorder the axes.
+            if len(dims_args) == 1 and isinstance(dims_args[0], (ast.Tuple, ast.List)):
+                dims_args = list(dims_args[0].elts)
+            if dims_args:
+                details.append(
+                    "dims: " + ", ".join(ast.unparse(arg) for arg in dims_args)
+                )
+        if call_name == "einsum":
+            if node.args and isinstance(node.args[0], ast.Constant):
+                details.append(f"equation: {node.args[0].value}")
+        if call_name == "flatten":
+            # ``Tensor.flatten(start_dim=0, end_dim=-1)`` /
+            # ``torch.flatten(t, start_dim, end_dim)`` collapse the axes in
+            # ``[start_dim, end_dim]`` into one. Record both so shape inference
+            # can compute the merged extent instead of passing the tensor
+            # through unchanged (which left phantom rank, e.g. topk_indices).
+            bound = _schema_arguments(call_name, node)
+            span = [name for name in ("start_dim", "end_dim") if name in bound]
+            for name in span:
+                details.append(f"{name}: {ast.unparse(bound[name])}")
+            if not span:
+                # ``x.flatten()`` with no span at all collapses EVERY axis into
+                # one. Say so here, where the call site is in hand: further
+                # down, a missing ``start_dim`` is indistinguishable from an
+                # argument we failed to capture, and shape inference rightly
+                # refuses to guess -- which left ``attention_mask.flatten()``
+                # at rank 3 and everything derived from it wrong.
+                details.append("flatten_all: true")
+        if call_name == "pad":
+            # ``F.pad(x, (1, 0))`` widens the LAST axis by left+right (and the
+            # next axis up for each further pair). Record the amounts so shape
+            # inference reports the padded extent; ``cu_seqlens`` is a ``[B+1]``
+            # tensor precisely because of this call, and passing the tensor
+            # through reported it one short.
+            pad_arg = _schema_arguments(call_name, node).get("pad")
+            if isinstance(pad_arg, (ast.Tuple, ast.List)):
+                details.append(
+                    "pad: " + ", ".join(ast.unparse(item) for item in pad_arg.elts)
+                )
+
+        if call_name == "arange":
+            # ``torch.arange(end)`` / ``(start, end)`` / ``(start, end, step)``
+            # fabricates a 1-D range tensor whose length is
+            # ``ceil((end - start) / step)``. Record the bound expressions so shape
+            # inference can size the generated axis (symbolically when a bound is a
+            # runtime length such as ``compressed_len``/``n_windows``) instead of
+            # inheriting a neighbour's shape.
+            positional = list(node.args)
+            if len(positional) == 1:
+                details.append(f"arange_stop: {ast.unparse(positional[0])}")
+                extent_bounds.append(positional[0])
+            elif len(positional) >= 2:
+                details.append(f"arange_start: {ast.unparse(positional[0])}")
+                details.append(f"arange_stop: {ast.unparse(positional[1])}")
+                extent_bounds.extend(positional[:2])
+                if len(positional) >= 3:
+                    details.append(f"arange_step: {ast.unparse(positional[2])}")
+            for keyword in node.keywords:
+                bound = {
+                    "start": "arange_start",
+                    "end": "arange_stop",
+                    "step": "arange_step",
+                }.get(keyword.arg)
+                if bound is not None:
+                    details.append(f"{bound}: {ast.unparse(keyword.value)}")
+                    if bound != "arange_step":
+                        extent_bounds.append(keyword.value)
+        if call_name not in _CONSTRUCTOR_SIZE_CALLS:
+            # Any call given an explicit dtype produces that dtype, not its
+            # input's. ``seqlens.cumsum(dim=0, dtype=torch.int32)`` is how a
+            # cumulative sum of segment lengths stays an int32 offset tensor;
+            # without this the whole chain reports whatever flowed in. The
+            # constructor branch below records its own ``dtype:`` already.
+            for keyword in node.keywords:
+                if keyword.arg != "dtype":
+                    continue
+                resolved = self._dtype_token(keyword.value)
+                if resolved is not None:
+                    details.append(f"dtype: {resolved}")
+                break
+        if call_name in _CONSTRUCTOR_SIZE_CALLS:
+            # ``torch.ones(B, S, dtype=torch.bool)`` / ``torch.zeros((B, S))`` /
+            # ``torch.full(size, value)``: the sizes are host scalars, so record
+            # the expressions and let shape inference resolve them the way it
+            # resolves an ``arange`` bound. ``full``/``new_full`` take their fill
+            # value after the size, so only the first argument describes the
+            # shape there.
+            sizes: list[ast.expr] = []
+            positional = list(node.args)
+            if call_name in _FILL_VALUE_CONSTRUCTORS:
+                positional = positional[:1]
+            for arg in positional:
+                if isinstance(arg, (ast.Tuple, ast.List)):
+                    sizes.extend(arg.elts)
+                else:
+                    sizes.append(arg)
+            if not sizes and positional:
+                # ``torch.full((), value)``: an empty size tuple is a scalar,
+                # which is a shape, not a missing one. Say so explicitly --
+                # "no sizes recorded" and "zero sizes" mean different things.
+                details.append("sizes: ()")
+            for index, size in enumerate(sizes):
+                details.append(f"size{index}: {ast.unparse(size)}")
+                extent_bounds.append(size)
+            for keyword in node.keywords:
+                if keyword.arg == "dtype":
+                    details.append(f"dtype: {ast.unparse(keyword.value)}")
+        if call_name in _DIM_DETAIL_METHODS:
+            # Which positional argument is ``dim`` and which is ``keepdim`` comes
+            # from the op's own schema, never from assuming argument 0 is the
+            # axis: ``x.norm(2, dim=-1)`` passes the ORDER first, and
+            # ``x.var(-1, False)`` passes ``unbiased`` where ``sum`` takes
+            # ``keepdim``. Reading position 0 as the axis mislabelled the first
+            # and reading position 1 as ``keepdim`` would mislabel the second.
+            if _schema_positional_names(call_name):
+                bound = _schema_arguments(call_name, node)
+                for name in ("dim", "keepdim"):
+                    if name in bound:
+                        details.append(f"{name}: {ast.unparse(bound[name])}")
+            else:
+                # No schema to consult: keep the long-standing reading.
+                if node.args:
+                    details.append(f"dim: {ast.unparse(node.args[0])}")
+                for keyword in node.keywords:
+                    if keyword.arg in {"dim", "keepdim"}:
+                        details.append(f"{keyword.arg}: {ast.unparse(keyword.value)}")
+        if call_name == "topk":
+            # ``x.topk(k, dim=...)`` / ``torch.topk(x, k, dim=...)``: this call's own
+            # k sets the output width. A MoE gate picks experts-per-token with one
+            # topk and, on the way there, takes a different k over the expert groups
+            # (``.view(-1, n_group, per_group).topk(2, dim=-1)``), so the model-wide
+            # experts-per-token is the right default but the wrong answer here.
+            bound = _schema_arguments(call_name, node)
+            k_value = bound.get("k")
+            if k_value is not None:
+                details.append(f"k: {ast.unparse(k_value)}")
+            # ``k`` narrows the axis ``dim`` names, which is the LAST axis only
+            # by default. A gate that takes its top groups with
+            # ``scores.topk(2, dim=1)`` narrows axis 1, and applying ``k`` to the
+            # trailing axis instead reports a width the tensor never had.
+            if "dim" in bound:
+                details.append(f"dim: {ast.unparse(bound['dim'])}")
+        if call_name in _CAST_METHOD_DTYPES and call_name != "float":
+            # ``x.long()`` takes no argument: the method name IS the dtype.
+            details.append(f"dtype: {_CAST_METHOD_DTYPES[call_name]}")
+        if call_name in {"type", "float", "to", "type_as"}:
+            # ``x.type_as(y)`` names its target dtype indirectly, via the tensor
+            # ``y`` it copies the dtype from. Recording that reference expression
+            # is enough: a non-concrete dtype expr resolves to the module's
+            # working precision, which is exactly what the "compute in float32,
+            # cast back" idiom (`return output.type_as(x)`) restores. Without
+            # this the downcast carries no dtype and float32 leaks downstream,
+            # which in turn makes a genuine later upcast look like a no-op.
+            # ``.to()`` moves a tensor between devices as readily as between
+            # dtypes, and ``x.to(inputs_embeds.device)`` names a DEVICE. Recording
+            # that as the target dtype makes a pure device move report whatever
+            # the device expression unparses to, and the cast-elision pass then
+            # keeps it as a dtype change it is not. An explicit ``dtype=`` wins;
+            # a positional naming a device means this call changes no dtype.
+            keyword_dtype = next(
+                (kw.value for kw in node.keywords if kw.arg == "dtype"), None
+            )
+            positional = node.args[0] if node.args else None
+            if keyword_dtype is not None:
+                details.append(f"dtype: {ast.unparse(keyword_dtype)}")
+            elif positional is not None and _names_a_device(positional):
+                pass
+            elif positional is not None:
+                details.append(f"dtype: {ast.unparse(positional)}")
+            elif call_name == "float":
+                details.append("dtype: float32")
+            else:
+                details.append("dtype cast")
+        if (
+            call_name.endswith("_")
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+        ):
+            details.append(f"mutates: {node.func.value.id}")
+        if label in {"Concat", "Stack"}:
+            # The assembly axis drives the output width; record it so shape
+            # inference sums (concat) or tiles along the right dim.
+            dim_arg = _schema_arguments(
+                "cat" if label == "Concat" else "stack", node
+            ).get("dim")
+            if dim_arg is not None:
+                details.append(f"dim: {ast.unparse(dim_arg)}")
+            else:
+                # ``torch.cat([a, b])`` and ``torch.stack([a, b])`` assemble along
+                # axis 0, not the trailing one. Saying nothing let the shape rule
+                # fall back to its own default, which for concat was the LAST
+                # axis -- the one case where leaving the argument out changes the
+                # answer.
+                details.append("dim: 0")
+        emit_predecessors = [
+            value for value in (base_producer, *arg_producers) if value
+        ]
+        if extent_bounds and not emit_predecessors:
+            # A generator takes its size, not its content, from a tensor, so it
+            # has no operand to dock onto and would otherwise render rootless --
+            # hiding a real dependency and leaving the generated axis
+            # unresolvable. Recover the tensors its extent reads.
+            extent_producers, extent_params = self._extent_source_producers(
+                extent_bounds
+            )
+            if extent_params:
+                extra_param_refs = tuple(extent_params)
+            if extent_producers:
+                emit_predecessors.extend(extent_producers)
+                # These edges carry an EXTENT, not an operand: ``arange``'s
+                # parameters take no tensor at all, so the operand-arity check
+                # must discount them rather than read them as mis-wired
+                # arguments. Record how many of the wired edges are extent-only.
+                details.append(f"extent_inputs: {len(extent_producers)}")
+            elif self._extent_is_data_independent(extent_bounds):
+                # No tensor sets this range's extent and every bound is pure host
+                # bookkeeping over config scalars (``torch.arange(self.local_blocks)``,
+                # ``torch.arange(self.index_kpool - 1)``), so the tensor it produces
+                # is the same on every forward. That is a constant, and constants are
+                # never drawn as compute -- mark it so the constant closure covers it
+                # and everything reachable only through it. The test is "no tensor
+                # sets this extent", not "we can compute the number": a config
+                # attribute this class never resolved is still data-independent,
+                # while a host value read off real data (a ``.tolist()`` loop
+                # target) is not host-scalar and is correctly left alone.
+                details.append("constant_extent: true")
+        if label == "Concat" and len(emit_predecessors) >= 2:
+            # ``cat([freq_hw, freq_hw])`` concatenates one tensor with itself: the
+            # deduped edge would collapse to a single-input concat that looks
+            # inert. It is really a Tile (repeat k along the concat dim). A repeat
+            # of the same producer *string* is not automatically a repeat of the
+            # same value, though: reassembling two different slices of one
+            # multi-output split (``torch.cat((q_pass, q_rot), dim=-1)``) shares a
+            # producer but reads two distinct output ordinals from it, so it is a
+            # genuine concatenation of two different tensors, not a self-repeat.
+            distinct = dict.fromkeys(emit_predecessors)
+            ordinal_counts: dict[str, int] = {}
+            for producer, _ordinal in self._read_output_ports(node):
+                ordinal_counts[producer] = ordinal_counts.get(producer, 0) + 1
+            multi_ordinal_producers = {
+                producer for producer, count in ordinal_counts.items() if count > 1
+            }
+            if len(distinct) == 1 and not (set(distinct) & multi_ordinal_producers):
+                label = "Tile"
+                details.append(f"repeat: {len(emit_predecessors)}")
+        producer = self._emit(
+            node,
+            label,
+            emit_predecessors,
+            external,
+            details=details,
+            # The raw callable/method name the model itself calls at this site
+            # (``transpose``/``cat``/``view``/...), read straight from the AST --
+            # not a static op list. The display label discards it; the type-check
+            # needs it to resolve the op's real operand arity from its parameters.
+            raw_op=functional_name or call_name,
+            extra_param_refs=extra_param_refs,
+        )
+        return producer, []
+
+    @staticmethod
+    def _target_names(stmt: ast.Assign | ast.AnnAssign) -> list[str]:
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        names: list[str] = []
+        for target in targets:
+            if isinstance(target, ast.Name):
+                names.append(target.id)
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                names.extend(
+                    item.id for item in target.elts if isinstance(item, ast.Name)
+                )
+        return names
+
+    def _bind(self, stmt: ast.Assign | ast.AnnAssign, producer: str | None) -> None:
+        if producer is None:
+            return
+        for name in self._target_names(stmt):
+            previous_producer = self.var_producer.get(name)
+            self.var_producer[name] = producer
+            # A reassignment drops any stale tuple-unpack ordinal: ``up`` bound to
+            # chunk slice 1 by ``gate, up = x.chunk(2)`` becomes a fresh single-
+            # output value after ``up = up.clamp(...)``. Without clearing, a later
+            # read of ``up`` would still dock onto slice 1 of the chunk and the
+            # real (reassigned) producer's edge would carry a dangling port.
+            # ``_record_output_unpack`` re-stamps genuine unpack targets right
+            # after this. General: any single-name reassignment -- EXCEPT when the
+            # resolved producer is the exact same step this name already pointed
+            # to (a pure housekeeping pass-through: ``k_rot = k_rot.view(...)``
+            # resolves straight back to its own base producer when the view/expand
+            # itself is elided under ``all_tensor_ops=False``, see the
+            # ``housekeeping`` short-circuit in ``expression()``). That rebind
+            # still reads the exact same multi-output slot as before, so clearing
+            # the ordinal here would misroute a later consumer onto ordinal 0 of
+            # the shared producer instead of the slot this name actually names.
+            if producer != previous_producer:
+                self.var_output_ordinal.pop(name, None)
+
+    _MULTI_OUTPUT_LABELS = frozenset({"Split", "Chunk", "Unbind"})
+
+    def _record_output_unpack(
+        self, stmt: ast.Assign | ast.AnnAssign, producer: str | None
+    ) -> None:
+        """Record a ``a, b, c = <split/chunk/unbind>`` tuple-unpack.
+
+        A single split op produces several tensors; unpacking names them. Tag each
+        unpacked local with its output ordinal (so consumers wire to the matching
+        port) and stamp the ordered names onto the producer op (so the graph can
+        render one named output port per slice with its own shape). General: fires
+        for any multi-output tensor call, not just the GLM hyperconnection splits.
+        """
+        if producer is None or not isinstance(stmt, ast.Assign):
+            return
+        if len(stmt.targets) != 1:
+            return
+        target = stmt.targets[0]
+        if not isinstance(target, (ast.Tuple, ast.List)):
+            return
+        names = [elt.id for elt in target.elts if isinstance(elt, ast.Name)]
+        if len(names) < 2 or len(names) != len(target.elts):
+            return
+        # A tuple-returning positional kernel
+        # (``q_embed, k_embed = apply_rotary_pos_emb_vision(...)``) is its own
+        # chain node, not an inline ``self.operations`` entry. Record the ordered
+        # output names against the producer attr (threaded to the block node) and
+        # stamp each local's ordinal explicitly, so consumers wire to the matching
+        # port and the node fans out one named output per slot. General: fires for
+        # any multi-output positional synthetic, no class-name checks.
+        if is_positional_synthetic(producer):
+            self.step_output_names[producer] = names
+            for ordinal, name in enumerate(names):
+                self.var_output_ordinal[name] = ordinal
+            return
+        for index, operation in enumerate(self.operations):
+            if operation.attr_name != producer:
+                continue
+            if operation.label not in self._MULTI_OUTPUT_LABELS:
+                return
+            # An inline op's outputs are named by the unpack of ITS OWN call. A
+            # later statement that merely RESOLVES to it as producer is a
+            # different call, and naming its results here renames the op's real
+            # slots: Kimi's ``key_states, value_states = past_key_values.update(
+            # key_states, value_states, ...)`` -- a method on a forward parameter,
+            # which produces no op of its own -- traced back through its arguments
+            # to the earlier ``k_pass, value_states = torch.split(...)`` and
+            # relabelled that split's first slice ``key_states``. The split then
+            # looked like a producer of ``key_states``, so the branch phi joined
+            # it and the attention read a key one concat too early. The op's attr
+            # carries the line it was extracted from; require it to fall inside
+            # the unpacking statement. A SPAN, not one line: GLM's vision
+            # ``query_states, key_states, value_states = (self.qkv(x).reshape(...)
+            # .permute(...).unbind(0))`` puts its unbind three lines below the
+            # assignment, and that unpack does name those slices.
+            where = _OPERATION_SOURCE_POS_RE.match(str(operation.attr_name))
+            if where is not None and not (
+                stmt.lineno <= int(where.group(1)) <= (stmt.end_lineno or stmt.lineno)
+            ):
+                return
+            self.operations[index] = replace(operation, output_names=tuple(names))
+            for ordinal, name in enumerate(names):
+                self.var_output_ordinal[name] = ordinal
+            return
+        # A tuple-unpack of a submodule/method call expanded as its own frame
+        # (``key_states, value_states = self.expand_kv(...)``). The producer is
+        # not an inline op in this scope, so tag each unpacked local with its
+        # return ordinal and publish the ordered slot names. A consumer reading a
+        # specific local (``value_states``) then docks onto the matching frame
+        # return slot instead of collapsing every local onto the frame tail (and
+        # being dropped by predecessor dedupe). General: fires for any
+        # tuple-returning call, no class-name checks.
+        if isinstance(stmt.value, ast.Call):
+            self.step_output_names[producer] = names
+            for ordinal, name in enumerate(names):
+                self.var_output_ordinal[name] = ordinal
+
+    def _sole_param_behind(self, value: ast.AST) -> str | None:
+        """The one tracked parameter a local is computed from, if there is just one.
+
+        ``lengths = cu_seqlens[1:] - cu_seqlens[:-1]`` is still ``cu_seqlens``:
+        those range slices over a bare forward parameter are deliberately kept
+        pass-through as index bookkeeping, so they leave no op behind and the
+        local would otherwise stand for nothing -- and whatever reads it (GLM's
+        per-image ``torch.split``, sized by exactly this) records no dependency,
+        leaving ``cu_seqlens``'s producer with no consumer and its frames pruned.
+
+        Every name in the expression must be the SAME parameter: a value built
+        from two tensors aliases neither, and one mixing in a local with its own
+        producer has a real op behind it instead.
+        """
+        if not self.param_names or not isinstance(value, (ast.BinOp, ast.UnaryOp)):
+            return None
+        names = {
+            n.id
+            for n in ast.walk(value)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        }
+        if len(names) != 1:
+            return None
+        only = next(iter(names))
+        if only not in self.param_names or self.var_producer.get(only) is not None:
+            return None
+        return self.param_alias_origin.get(only, only)
+
+    def _propagate_param_alias(self, targets: list[ast.expr], value: ast.AST) -> None:
+        """Carry a secondary forward-input's param status onto unpacked locals.
+
+        ``cos, sin = position_embeddings`` (and the plain ``x = position_embeddings``
+        rename) binds new names that alias a forward parameter but are otherwise
+        invisible to ``_param_refs`` — its gate only recognizes names literally in
+        ``self.param_names``. Without this, downstream reads of ``cos``/``sin`` (the
+        rotary path) resolve to nothing and the operation is dropped. When the RHS
+        is itself a param (or an already-registered alias), register every unpacked
+        target name as a param alias so ``_param_refs`` attributes it like the
+        original forward input. This is general: any secondary forward input renamed
+        or unpacked into locals is tracked.
+
+        A forward input keyed by a config value before being unpacked
+        (``cos, sin = position_embeddings[self.rope_layer_type]``, where
+        ``position_embeddings`` is a ``{"main": (cos, sin), "compress": (cos, sin)}``
+        dict from the model) still boils down to the same boundary crossing: the
+        key is a host-side string/attribute read, never itself a tensor operand,
+        so the unpack targets alias the OUTER parameter the same way they would if
+        it had no dict layer at all. Recognize a single-level subscript of a
+        tracked param the same as a bare name.
+        """
+        origin_name: str | None = None
+        if isinstance(value, ast.Name) and value.id in self.param_names:
+            origin_name = value.id
+        elif (
+            isinstance(value, ast.Subscript)
+            and isinstance(value.value, ast.Name)
+            and value.value.id in self.param_names
+        ):
+            origin_name = value.value.id
+        else:
+            origin_name = self._sole_param_behind(value)
+        if origin_name is None:
+            return
+        # The RHS may itself be an alias (``pe = position_embeddings; cos, sin = pe``);
+        # resolve to the original forward parameter so every unpacked local points
+        # back at the caller-visible name.
+        origin = self.param_alias_origin.get(origin_name, origin_name)
+        for target in targets:
+            if isinstance(target, (ast.Tuple, ast.List)):
+                # ``cos, sin = position_embeddings`` -> cos is slot 0, sin slot 1.
+                for ordinal, element in enumerate(target.elts):
+                    if isinstance(element, ast.Name):
+                        self.param_names.add(element.id)
+                        self.param_alias_origin[element.id] = origin
+                        self.param_alias_ordinal[element.id] = ordinal
+            elif isinstance(target, ast.Name):
+                # A plain rename (``pe = position_embeddings``) carries the RHS's
+                # own ordinal forward, if it had one. A subscripted RHS
+                # (``pe = position_embeddings[self.rope_layer_type]``) has no
+                # ordinal of its own to inherit.
+                self.param_names.add(target.id)
+                self.param_alias_origin[target.id] = origin
+                inherited = (
+                    self.param_alias_ordinal.get(origin_name)
+                    if isinstance(value, ast.Name)
+                    else None
+                )
+                if inherited is not None:
+                    self.param_alias_ordinal[target.id] = inherited
+
+    def _track_shape_assignment(self, targets: list[ast.expr], value: ast.AST) -> None:
+        """Record shape-derived locals so reshape args resolve to real axes.
+
+        Two patterns feed reshape targets: unpacking a tensor's shape
+        (``a, b = x.shape[:2]``) and building a dim tuple from those unpacked
+        names (``hidden_shape = (a, b, -1, self.head_dim)``). Neither is a tensor
+        producer, so both are invisible to the data-flow tracking; capturing them
+        here lets ``_format_shape_args`` expand ``view(hidden_shape)`` into
+        ``x.shape[0], x.shape[1], -1, self.head_dim`` for the shape inferencer.
+        """
+        if len(targets) == 1 and isinstance(targets[0], (ast.Tuple, ast.List)):
+            base = _shape_read_base(value)
+            if base is not None:
+                for index, elt in enumerate(targets[0].elts):
+                    if isinstance(elt, ast.Name):
+                        self.shape_unpack_tokens[elt.id] = f"{base}.shape[{index}]"
+        if len(targets) == 1 and isinstance(targets[0], ast.Name):
+            token = _single_shape_index_token(value)
+            if token is not None:
+                self.shape_unpack_tokens[targets[0].id] = token
+            slice_token = _shape_slice_token(value)
+            if slice_token is not None:
+                self.shape_slice_tokens[targets[0].id] = slice_token
+        if isinstance(value, ast.Tuple):
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    self.shape_tuple_vars[target.id] = value
+        # A shape built by CONCATENATION rather than as one tuple:
+        # ``size_out = x.size()[:-1] + (self.nf,)``, which is how every GPT-2
+        # ``Conv1D`` states the shape it restores after its projection. Left
+        # unrecognised, ``view(size_out)`` rendered as the single token
+        # ``size_out`` and the result stayed rank-1.
+        if (
+            len(targets) == 1
+            and isinstance(targets[0], ast.Name)
+            and isinstance(value, ast.BinOp)
+            and isinstance(value.op, ast.Add)
+            and isinstance(value.right, ast.Tuple)
+        ):
+            prefix = _shape_slice_token(value.left)
+            if prefix is not None:
+                self.shape_concat_vars[targets[0].id] = (prefix, list(value.right.elts))
+
+    def _format_shape_args(self, args: list[ast.expr]) -> str:
+        """Render ``view``/``reshape``/``expand`` args, expanding shape locals."""
+        self._pending_shape_snapshots = []
+        parts: list[str] = []
+        for arg in args:
+            parts.extend(self._expand_shape_arg(arg))
+        return ", ".join(parts)
+
+    def _expand_shape_arg(self, arg: ast.expr) -> list[str]:
+        """Expand one reshape arg into resolver tokens, unfolding starred and
+        bare shape-tuple / shape-slice locals.
+
+        ``view(*hidden_shape)`` and ``view(hidden_shape)`` both expand the local
+        dim tuple ``hidden_shape = (*input_shape, -1, self.head_dim)``; a starred
+        shape-slice local ``*input_shape`` (``input_shape = x.shape[:-1]``) becomes
+        the resolver's ``*x.shape[:-1]`` prefix. This lets the shape inferencer
+        recover the real 4-D reshape instead of passing the source through when the
+        target tuple is assembled from local variables.
+        """
+        inner = arg.value if isinstance(arg, ast.Starred) else arg
+        if isinstance(inner, ast.Name) and inner.id in self.shape_concat_vars:
+            prefix, elts = self.shape_concat_vars[inner.id]
+            # Bound EARLIER, so it records what that tensor measured then --
+            # GPT-2 rebinds `x` between building `size_out` and using it. Mark
+            # it a snapshot so the resolver knows it may read the named tensor
+            # rather than the one being reshaped.
+            snapshots = getattr(self, "_pending_shape_snapshots", None)
+            if snapshots is not None and prefix not in snapshots:
+                snapshots.append(prefix)
+            out: list[str] = ["*" + prefix]
+            for elt in elts:
+                out.extend(self._expand_shape_arg(elt))
+            return out
+        if isinstance(inner, ast.Name) and inner.id in self.shape_tuple_vars:
+            out: list[str] = []
+            for elt in self.shape_tuple_vars[inner.id].elts:
+                out.extend(self._expand_shape_arg(elt))
+            return out
+        if (
+            isinstance(arg, ast.Starred)
+            and isinstance(inner, ast.Name)
+            and inner.id in self.shape_slice_tokens
+        ):
+            return ["*" + self.shape_slice_tokens[inner.id]]
+        return [self._render_shape_dim(arg)]
+
+    def _render_shape_dim(self, elt: ast.expr) -> str:
+        """One reshape dim as a resolver-friendly token.
+
+        Unpacked shape locals (``batch_size`` → ``x.shape[0]``) keep their source
+        axis; ``self.head_dim``-style config attributes resolve to their concrete
+        int (the global ``head_dim`` is a zero placeholder here); everything else
+        is left as source text for the shape inferencer to interpret.
+        """
+        if isinstance(elt, ast.Name) and elt.id in self.shape_unpack_tokens:
+            # An unpacked shape local (``seq_length = hidden_states.shape[0]``)
+            # is a SNAPSHOT: it records what that tensor measured where the local
+            # was bound, which may be a different tensor from whatever is being
+            # reshaped here. An inline ``x.shape[i]`` written in the reshape
+            # itself is not -- it reads x as it is now. Note which is which so
+            # the resolver knows when it may look the name up elsewhere.
+            token = self.shape_unpack_tokens[elt.id]
+            snapshots = getattr(self, "_pending_shape_snapshots", None)
+            if snapshots is not None and token not in snapshots:
+                snapshots.append(token)
+            return token
+        resolved = _config_value(elt, {}, self.self_values)
+        if isinstance(resolved, int) and not isinstance(resolved, bool):
+            return str(resolved)
+        return ast.unparse(elt)
+
+    def _loop_iteration_count(self, node: ast.For) -> int | None:
+        """Static trip count for the ``loop_iterations_<count>`` frame (see module helper)."""
+        return _loop_iteration_count_of(node, self.self_values, self._name_value_ast)
+
+    def _annotate_operations_since(self, start: int, detail: str) -> None:
+        for index in range(start, len(self.operations)):
+            operation = self.operations[index]
+            self.operations[index] = ForwardOperation(
+                **{
+                    **operation.__dict__,
+                    "details": (*operation.details, detail),
+                }
+            )
+
+    def _inject_iterator_predecessor(self, before: int, iterable_producer: str) -> None:
+        """Add the loop iterator as a predecessor of operations that use the loop var."""
+        for index in range(before, len(self.operations)):
+            op = self.operations[index]
+            if iterable_producer not in op.predecessors:
+                self.operations[index] = ForwardOperation(
+                    **{
+                        **op.__dict__,
+                        "predecessors": (iterable_producer, *op.predecessors),
+                    }
+                )
+                break
+
+    @staticmethod
+    def _assigned_names(statements: list[ast.stmt]) -> set[str]:
+        names: set[str] = set()
+        for statement in statements:
+            for node in ast.walk(statement):
+                if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    targets = (
+                        node.targets if isinstance(node, ast.Assign) else [node.target]
+                    )
+                    for target in targets:
+                        if isinstance(target, ast.Name):
+                            names.add(target.id)
+                        elif isinstance(target, (ast.Tuple, ast.List)):
+                            names.update(
+                                item.id
+                                for item in target.elts
+                                if isinstance(item, ast.Name)
+                            )
+                elif isinstance(node, ast.AugAssign) and isinstance(
+                    node.target, ast.Name
+                ):
+                    names.add(node.target.id)
+                elif (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr.endswith("_")
+                    and isinstance(node.func.value, ast.Name)
+                ):
+                    names.add(node.func.value.id)
+        return names
+
+    def _apply_branch_alternatives(self) -> None:
+        """Fold ``if``/``else`` branch producers into their common consumers.
+
+        After an if/else merge only the survivor's producer lives in
+        ``var_producer``. A later statement consuming the merged variable then
+        depends only on that survivor, orphaning the other branch's producer.
+        Expand every consumer's predecessors to include the recorded
+        alternatives so both runtime paths stay live (no dead-end promoted to a
+        spurious output) and the graph stays acyclic.
+        """
+        if not self.branch_alternatives:
+            return
+
+        def expand(preds: tuple[str, ...]) -> tuple[str, ...]:
+            result: list[str] = []
+            for pred in preds:
+                result.append(pred)
+                for alt in sorted(self.branch_alternatives.get(pred, ())):
+                    if alt != pred:
+                        result.append(alt)
+            return self._dedupe(result)
+
+        for index, operation in enumerate(self.operations):
+            new_preds = expand(operation.predecessors)
+            if new_preds != operation.predecessors:
+                self.operations[index] = ForwardOperation(
+                    **{**operation.__dict__, "predecessors": new_preds}
+                )
+        for step, preds in list(self.step_predecessors.items()):
+            new_preds = expand(preds)
+            if new_preds != preds:
+                self.step_predecessors[step] = new_preds
+
+    def _reconstruct_attention_step(self, body: list[ast.stmt]) -> None:
+        """Wire the attention kernel's q/k/v when the taken branch hid the call.
+
+        The extractor records ``step_predecessors[@attention]`` when it visits the
+        ``attention_interface(self, query, key, value, ...)`` call. But that call
+        can live in a branch or comprehension the extractor does not descend into
+        — a dispatched attention often runs the eager path as
+        ``[interface(self, q, k, v, ...) for q, k, v in zip(*splits)]`` while the
+        flash branch spells the operands out positionally. Either way the kernel
+        collapses to one ``@attention`` node whose real inputs are the same three
+        tensors, and ``var_producer`` already holds each one's final producer
+        (through the trailing ``transpose``/``unsqueeze`` reshapes, and including a
+        ``value`` tensor that flows only through such ops).
+
+        When ``@attention`` is a forward call but carries no predecessors, recover
+        them from the first attention-interface call in source order: resolve each
+        positional tensor operand to its producer and record it, named after the
+        operand so the kernel port is labelled ``query_states``/``key_states``/
+        ``value_states``. General: no branch or comprehension shape is assumed —
+        the operands are read straight off whichever call the source spells out.
+        """
+        existing = self.step_predecessors.get(SYNTHETIC_ATTENTION)
+        if existing:
+            return
+        call = next(
+            (
+                node
+                for stmt in body
+                for node in ast.walk(stmt)
+                if isinstance(node, ast.Call)
+                and _expr_name(node.func) in _SYNTHETIC_ATTENTION_NAMES
+            ),
+            None,
+        )
+        if call is None:
+            return
+        start = (
+            1
+            if call.args
+            and isinstance(call.args[0], ast.Name)
+            and call.args[0].id == "self"
+            else 0
+        )
+        predecessors: list[str] = []
+        arg_names: dict[str, str] = {}
+        for arg in call.args[start:]:
+            if not isinstance(arg, ast.Name):
+                continue
+            producer = self.var_producer.get(arg.id)
+            if producer is None:
+                continue
+            predecessors.append(producer)
+            arg_names.setdefault(arg.id, producer)
+        if not predecessors:
+            return
+        self.step_predecessors[SYNTHETIC_ATTENTION] = self._dedupe(predecessors)
+        if arg_names:
+            self.step_predecessor_args[SYNTHETIC_ATTENTION] = arg_names
+
+    def _drop_phantom_attention_steps(self) -> None:
+        """Remove attention kernel steps that carry no predecessors.
+
+        A real attention call always reads query/key/value tensors, so a
+        ``@attention`` step with an empty predecessor list is never a genuine
+        call at this scope. It appears when a forward loops over a submodule
+        (``for blk in self.blocks: blk(...)``) whose *own* forward runs
+        attention: analysing the loop body hoists that inner kernel up to the
+        enclosing forward, where it has nothing to read. Left in place it becomes
+        a phantom top-level attention node that the exporter later mirrors into
+        the real nested attention diagram, wiring the kernel's own outputs back
+        to its inputs and forming a cycle. The genuine attention still lives
+        (with its q/k/v predecessors) inside the submodule's own analysis.
+        """
+        phantom = {
+            step
+            for step, preds in self.step_predecessors.items()
+            if step == SYNTHETIC_ATTENTION and not preds
+        }
+        if not phantom:
+            return
+        for step in phantom:
+            self.step_predecessors.pop(step, None)
+            self.step_predecessor_args.pop(step, None)
+        for step, preds in list(self.step_predecessors.items()):
+            if any(pred in phantom for pred in preds):
+                self.step_predecessors[step] = tuple(
+                    pred for pred in preds if pred not in phantom
+                )
+        self.operations = [
+            operation
+            for operation in self.operations
+            if operation.attr_name not in phantom
+        ]
+        for index, operation in enumerate(self.operations):
+            if any(pred in phantom for pred in operation.predecessors):
+                self.operations[index] = ForwardOperation(
+                    **{
+                        **operation.__dict__,
+                        "predecessors": tuple(
+                            pred
+                            for pred in operation.predecessors
+                            if pred not in phantom
+                        ),
+                    }
+                )
+
+    @staticmethod
+    def _statements_terminate(statements: list[ast.stmt]) -> bool:
+        if not statements:
+            return False
+        final = statements[-1]
+        if isinstance(final, (ast.Return, ast.Raise)):
+            return True
+        return (
+            isinstance(final, ast.If)
+            and bool(final.orelse)
+            and _ForwardOperationExtractor._statements_terminate(final.body)
+            and _ForwardOperationExtractor._statements_terminate(final.orelse)
+        )
+
+    def _resolve_flash_request_predicate(self, test: ast.expr) -> bool | None:
+        """Resolve ``if is_flash_attention_requested(config):`` from the checkpoint.
+
+        A vision/attention forward commonly branches between a fused flash kernel
+        and a per-chunk fallback on this transformers helper. Walking both branches
+        leaves the graph with duplicated attention plumbing (a phantom ``cat`` from
+        the branch that does not run). Resolve the predicate here from
+        ``config._attn_implementation`` — defaulting to ``sdpa`` (the transformers
+        default) when unset — so only the selected branch survives. Returns the
+        boolean the predicate evaluates to, or ``None`` when *test* is not one of
+        these predicates (leaving the general ``_config_value`` path in charge).
+
+        General: keys off the shared transformers predicate name, not any model.
+        """
+        return _resolve_flash_predicate(test, self.config)
+
+    def statements(
+        self, statements: list[ast.stmt], *, condition: str | None = None
+    ) -> None:
+        for stmt in statements:
+            if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
+                stmt = _rebind_fanout_comprehension(stmt, self._name_value_ast)
+                value = _expand_zipped_literal_comprehension(
+                    stmt.value, self._name_value_ast
+                ) or _expand_map_lambda_tuple(stmt.value)
+                targets = (
+                    stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+                )
+                # Parallel tuple assignment (``q, k = q.float(), k.float()``) binds
+                # each target to its OWN right-hand element's producer. The generic
+                # path takes a single producer for the whole RHS (the last element),
+                # which collapses every target onto it — so ``q`` would wrongly point
+                # at ``k.float()``. Element-wise binding keeps each name's true
+                # source. General: any equal-arity ``a, b = x, y`` assignment.
+                # A slice/index assignment (``new_kv[:, :, ratio:] = chunk_kv[...]``)
+                # mutates the base tensor in place -- semantically identical to
+                # ``new_kv[:, :, ratio:].copy_(chunk_kv[...])`` (the pattern the
+                # ``ast.Expr`` in-place-method handler below already covers), just
+                # spelled with assignment syntax instead of an explicit ``.copy_()``
+                # call. The target is a Subscript, not a Name, so the generic
+                # ``_bind`` path below (which only understands Name/Tuple/List
+                # targets) silently drops it: the RHS operand (``chunk_kv``'s real
+                # producer) gets resolved by ``self.expression`` but is never wired
+                # to anything, and the mutated variable's ``var_producer`` entry is
+                # never rebound, so later reads of it keep resolving to its
+                # original allocation. Emit the mutation as a real "Copy" op reading
+                # [prior base, the target slice's current value, the RHS operand(s)]
+                # and rebind the root name so downstream reads (and the eventual
+                # return) chain through it. General: any single Subscript-target
+                # assignment, no class/name-specific checks.
+                if (
+                    isinstance(stmt, ast.Assign)
+                    and len(targets) == 1
+                    and isinstance(targets[0], ast.Subscript)
+                ):
+                    root = _subscript_root_name(targets[0])
+                    if root is not None:
+                        self._suppress_slice_resize = True
+                        try:
+                            base_producer, base_external = self.expression(targets[0])
+                        finally:
+                            self._suppress_slice_resize = False
+                        rhs_producer, rhs_external = self.expression(value)
+                        producer = self._emit(
+                            stmt,
+                            _inplace_label("copy_"),
+                            [
+                                predecessor
+                                for predecessor in (
+                                    self.var_producer.get(root),
+                                    base_producer,
+                                    rhs_producer,
+                                )
+                                if predecessor
+                            ],
+                            [*base_external, *rhs_external],
+                        )
+                        self.var_producer[root] = producer
+                        self.var_output_ordinal.pop(root, None)
+                        continue
+                if (
+                    isinstance(stmt, ast.Assign)
+                    and len(targets) == 1
+                    and isinstance(targets[0], (ast.Tuple, ast.List))
+                    and isinstance(value, (ast.Tuple, ast.List))
+                    and len(targets[0].elts) == len(value.elts)
+                ):
+                    element_producers = [
+                        self.expression(element)[0] for element in value.elts
+                    ]
+                    self._track_shape_assignment(targets, value)
+                    self._propagate_param_alias(targets, value)
+                    for element_target, element_producer in zip(
+                        targets[0].elts, element_producers
+                    ):
+                        if (
+                            isinstance(element_target, ast.Name)
+                            and element_producer is not None
+                        ):
+                            self.var_producer[element_target.id] = element_producer
+                            # Parallel reassignment also drops any stale ordinal.
+                            self.var_output_ordinal.pop(element_target.id, None)
+                    continue
+                operations_before = len(self.operations)
+                producer, _ = self.expression(value)
+                if self._reassigns_its_own_arguments(
+                    stmt, value, operations_before, producer
+                ):
+                    continue
+                if producer is None and self._is_host_scalar_expr(value):
+                    for target in targets:
+                        if isinstance(target, ast.Name):
+                            self.host_scalar_vars.add(target.id)
+                for target in targets:
+                    self._record_host_scalar(target, value)
+                self._track_shape_assignment(targets, value)
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        self._name_value_ast[target.id] = value
+                self._propagate_param_alias(targets, value)
+                direct_module = (
+                    value.func.attr
+                    if isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Attribute)
+                    and isinstance(value.func.value, ast.Name)
+                    and value.func.value.id == "self"
+                    else None
+                )
+                if direct_module is not None:
+                    for target in targets:
+                        if isinstance(target, ast.Name):
+                            self.var_module_origin[target.id] = direct_module
+                if (
+                    producer is None
+                    and isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Attribute)
+                    and isinstance(value.func.value, ast.Name)
+                    and any(
+                        isinstance(target, (ast.Tuple, ast.List)) for target in targets
+                    )
+                ):
+                    producer = self.var_module_origin.get(value.func.value.id)
+                self._bind(stmt, producer)
+                self._record_output_unpack(stmt, producer)
+                continue
+            if isinstance(stmt, ast.AugAssign):
+                # ``output_width += self.index_kpool - 1`` over host scalars is
+                # index bookkeeping: fold the accumulation and emit no tensor op
+                # (an empty-predecessor Add would dangle). Only a genuine tensor
+                # accumuland (target bound to a real producer) emits an op.
+                if (
+                    isinstance(stmt.target, ast.Name)
+                    and stmt.target.id not in self.var_producer
+                    and self._is_host_scalar_expr(stmt.value)
+                ):
+                    combined = ast.BinOp(left=stmt.target, op=stmt.op, right=stmt.value)
+                    self._record_host_scalar(stmt.target, combined)
+                    self.host_scalar_vars.add(stmt.target.id)
+                    continue
+                left, left_external = self.expression(stmt.target)
+                right, right_external = self.expression(stmt.value)
+                label = _BINOP_LABELS.get(type(stmt.op))
+                if label:
+                    producer = self._emit(
+                        stmt,
+                        label,
+                        [value for value in (left, right) if value],
+                        [*left_external, *right_external],
+                    )
+                    if isinstance(stmt.target, ast.Name):
+                        self.var_producer[stmt.target.id] = producer
+                continue
+            if isinstance(stmt, ast.Expr):
+                value = stmt.value
+                # An in-place write into a slice (``key_states[..., :n].copy_(src)``)
+                # mutates the base tensor: its new value depends on ``src``. The base
+                # is a Subscript, not a Name, so the plain-owner rebind below misses
+                # it and ``src`` (e.g. an ``expand_kv`` Split) is dropped. Emit the
+                # mutation as a real op reading [prior base, operands] and rebind the
+                # root tensor name so downstream reads (and the return) carry it.
+                if (
+                    isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Attribute)
+                    and _is_inplace_method(value.func.attr)
+                    and isinstance(value.func.value, ast.Subscript)
+                ):
+                    root = _subscript_root_name(value.func.value)
+                    if root is not None:
+                        self._suppress_slice_resize = True
+                        try:
+                            base_producer, base_external = self.expression(
+                                value.func.value
+                            )
+                        finally:
+                            self._suppress_slice_resize = False
+                        operand_producers: list[str] = []
+                        operand_external: list[str] = []
+                        for operand in (
+                            *value.args,
+                            *(kw.value for kw in value.keywords),
+                        ):
+                            operand_producer, ext = self.expression(operand)
+                            if operand_producer:
+                                operand_producers.append(operand_producer)
+                            operand_external.extend(ext)
+                        producer = self._emit(
+                            value,
+                            _inplace_label(value.func.attr),
+                            [
+                                producer
+                                for producer in (
+                                    self.var_producer.get(root),
+                                    base_producer,
+                                    *operand_producers,
+                                )
+                                if producer
+                            ],
+                            [*base_external, *operand_external],
+                        )
+                        self.var_producer[root] = producer
+                        continue
+                producer, _ = self.expression(value)
+                if (
+                    producer
+                    and isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Attribute)
+                ):
+                    owner = value.func.value
+                    if isinstance(owner, ast.Name):
+                        self.var_producer[owner.id] = producer
+                continue
+            if isinstance(stmt, ast.Return) and stmt.value is not None:
+                elements = (
+                    stmt.value.elts
+                    if isinstance(stmt.value, ast.Tuple)
+                    else [stmt.value]
+                )
+                for element in elements:
+                    producer, _ = self.expression(element)
+                    label = self._return_element_label(element)
+                    if label and producer and label not in self.return_producer_slots:
+                        self.return_producer_slots[label] = producer
+                        self.return_producer_order.append(label)
+                continue
+            if isinstance(stmt, ast.If):
+                outcome = self._resolve_flash_request_predicate(stmt.test)
+                if outcome is None:
+                    # Prune a build-time-resolvable config predicate (e.g.
+                    # ``if self.config.hidden_act == 'situ':``) down to its live
+                    # arm; the dead arm's ops never enter the sequence. Threading
+                    # ``self.config`` (not ``{}``) lets ``self.config.<key>`` resolve
+                    # even when ``__init__`` did not bind ``self.config`` locally.
+                    outcome = _config_value(
+                        stmt.test, self.config, self.self_values, self.param_values
+                    )
+                if not isinstance(outcome, bool):
+                    # No config decides this test -- GPT-2 guards its
+                    # cross-attention with `encoder_hidden_states is not None`.
+                    # But an arm that calls a submodule NO instance has cannot
+                    # run whatever the test says, and the model agrees: it
+                    # raises there rather than computing. So the other arm is
+                    # the one taken.
+                    if self._calls_unbuilt_submodule(stmt.body):
+                        outcome = False
+                    elif stmt.orelse and self._calls_unbuilt_submodule(stmt.orelse):
+                        outcome = True
+                if outcome is True:
+                    self.statements(stmt.body, condition=condition)
+                    if self._statements_terminate(stmt.body):
+                        break
+                elif outcome is False:
+                    self.statements(stmt.orelse, condition=condition)
+                    if self._statements_terminate(stmt.orelse):
+                        break
+                else:
+                    test = ast.unparse(stmt.test)
+                    before_env = dict(self.var_producer)
+                    before_host = dict(self.host_scalar_values)
+                    before = len(self.operations)
+                    self.statements(stmt.body, condition=test)
+                    body_env = dict(self.var_producer)
+                    body_host = dict(self.host_scalar_values)
+                    for index in range(before, len(self.operations)):
+                        op = self.operations[index]
+                        self.operations[index] = ForwardOperation(
+                            **{
+                                **op.__dict__,
+                                "details": (*op.details, f"condition: {test}"),
+                            }
+                        )
+                    self.var_producer = dict(before_env)
+                    self.host_scalar_values = dict(before_host)
+                    before_else = len(self.operations)
+                    self.statements(stmt.orelse, condition=f"not ({test})")
+                    else_env = dict(self.var_producer)
+                    else_host = dict(self.host_scalar_values)
+                    for index in range(before_else, len(self.operations)):
+                        op = self.operations[index]
+                        self.operations[index] = ForwardOperation(
+                            **{
+                                **op.__dict__,
+                                "details": (*op.details, f"condition: not ({test})"),
+                            }
+                        )
+                    survivor_env = else_env if stmt.orelse else body_env
+                    other_env = body_env if stmt.orelse else else_env
+                    # A variable assigned in both mutually-exclusive branches to
+                    # different producers is the output of exactly one branch per
+                    # invocation. Join them with an explicit Merge (phi) node so
+                    # the merged variable's consumers read a single tensor while
+                    # both branch computations stay reachable (they feed the
+                    # Merge). When the survivor branch merely passes a boundary
+                    # parameter through (no op producer) but the other branch
+                    # computes a real op (``topk_indices = self.indexer(...)`` vs
+                    # ``= prev_topk_indices``), adopt the real producer so the
+                    # merged variable wires to the visible computation.
+                    # Source order, not set order: this loop EMITS Merge nodes,
+                    # so a set would let the hash seed decide what each one is
+                    # called and in which order they appear.
+                    merged_variables = list(survivor_env) + [
+                        variable
+                        for variable in other_env
+                        if variable not in survivor_env
+                    ]
+                    for variable in merged_variables:
+                        survivor_producer = survivor_env.get(variable)
+                        other_producer = other_env.get(variable)
+                        if (
+                            survivor_producer
+                            and other_producer
+                            and survivor_producer != other_producer
+                        ):
+                            survivor_env[variable] = self._emit_branch_select(
+                                stmt,
+                                survivor_producer,
+                                other_producer,
+                                test,
+                            )
+                        elif not survivor_producer and other_producer:
+                            survivor_env[variable] = other_producer
+                    self.var_producer = survivor_env
+                    # Host scalars that survive with a single unambiguous value are
+                    # kept; a name that folds to different constants on each branch
+                    # is ambiguous, so drop it (a later slice bound then declines to
+                    # fold rather than resize to a branch-specific width).
+                    survivor_host = else_host if stmt.orelse else body_host
+                    other_host = body_host if stmt.orelse else else_host
+                    self.host_scalar_values = {
+                        name: value
+                        for name, value in survivor_host.items()
+                        if other_host.get(name, value) == value
+                    }
+                continue
+            if isinstance(stmt, ast.For):
+                iteration_count = self._loop_iteration_count(stmt)
+                iterable_producer, _iterable_external = self.expression(stmt.iter)
+                row_producer = iterable_producer
+                if iterable_producer is not None:
+                    # Record WHAT each iteration binds, not just that the value
+                    # is iterated. The render names a boundary after whatever
+                    # produced it, so without this the tile carrying ``hit``
+                    # into an expert loop reads ``Nonzero`` -- the op outside
+                    # the body -- and nothing says it is indexed per iteration.
+                    bound = ""
+                    if isinstance(stmt.target, ast.Name):
+                        bound = stmt.target.id
+                    elif isinstance(stmt.target, (ast.Tuple, ast.List)):
+                        bound = ", ".join(
+                            elt.id
+                            for elt in stmt.target.elts
+                            if isinstance(elt, ast.Name)
+                        )
+                    marker = f"loop iterator: {bound}" if bound else "loop iterator"
+                    for index, operation in enumerate(self.operations):
+                        if operation.attr_name != iterable_producer:
+                            continue
+                        self.operations[index] = ForwardOperation(
+                            **{
+                                **operation.__dict__,
+                                "details": (*operation.details, marker),
+                            }
+                        )
+                        break
+                    # Each iteration takes ONE ROW of the iterable, and that
+                    # row select is a real op. Binding the target straight to
+                    # the iterable makes the loop variable BE the whole tensor:
+                    # every op indexed by it reports the iterable's shape, and
+                    # nothing in the body tells one iteration from the next.
+                    # ``.tolist()`` moves the value to host, so a loop over it
+                    # walks Python numbers, not rows of a tensor: there is no
+                    # row to select (GLM's vision position-ids helper iterates
+                    # ``zip(grid_thw.tolist(), ...)`` purely for its sizes).
+                    iterates_host_values = any(
+                        isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr == "tolist"
+                        for inner in ast.walk(stmt.iter)
+                    )
+                    if (
+                        is_forward_operation(iterable_producer)
+                        and not iterates_host_values
+                    ):
+                        # The row select happens ONCE PER ITERATION, so it
+                        # belongs to the loop body: loop frames group contiguous
+                        # nodes sharing this detail, and without it this op
+                        # would sit among the body's and split the frame in two.
+                        loop_detail = (
+                            f"loop: {iteration_count} iterations"
+                            if iteration_count is not None
+                            else "loop: repeated"
+                        )
+                        row_producer = self._emit(
+                            # The ITERABLE expression, not the whole ``for``:
+                            # an op takes its parameter references from the node
+                            # it is given, and the statement covers the entire
+                            # body -- so this select absorbed every param the
+                            # body reads and, being the first consumer, claimed
+                            # their boundary slots from the ops that use them.
+                            stmt.iter,
+                            "Slice",
+                            [iterable_producer],
+                            [],
+                            details=["select_dim: 0", marker, loop_detail],
+                        )
+                    if isinstance(stmt.target, ast.Name):
+                        self.var_producer[stmt.target.id] = row_producer
+                    elif isinstance(stmt.target, (ast.Tuple, ast.List)):
+                        for elt in stmt.target.elts:
+                            if isinstance(elt, ast.Name):
+                                self.var_producer[elt.id] = row_producer
+                for target in ast.walk(stmt.target):
+                    if isinstance(target, ast.Name):
+                        self._loop_target_iters[target.id] = stmt.iter
+                for target in ast.walk(stmt.target):
+                    if isinstance(target, ast.Name):
+                        self._loop_bound_names.add(target.id)
+                before_env = dict(self.var_producer)
+                before = len(self.operations)
+                self.statements(stmt.body, condition=condition)
+                detail = (
+                    f"loop: {iteration_count} iterations"
+                    if iteration_count is not None
+                    else "loop: repeated"
+                )
+                self._annotate_operations_since(before, detail)
+                # Decide BEFORE injecting: the injection below adds the row as
+                # a predecessor of the body's ops, so asking afterwards whether
+                # anything reads it always says yes.
+                if row_producer != iterable_producer and not any(
+                    row_producer in operation.predecessors
+                    for operation in self.operations[before:]
+                ):
+                    # A loop whose body never reads the value it iterates (GLM's
+                    # vision position-ids helper walks a grid only to count) has
+                    # nothing to select a row FOR, so drawing the select would
+                    # add a node nothing consumes.
+                    self.operations = [
+                        operation
+                        for operation in self.operations
+                        if operation.attr_name != row_producer
+                    ]
+                    for name, producer in list(self.var_producer.items()):
+                        if producer == row_producer:
+                            self.var_producer[name] = iterable_producer
+                    row_producer = iterable_producer
+                if iterable_producer is not None:
+                    # Ops that do not NAME the loop variable still depend on the
+                    # iterable, exactly as before: the row select changes what
+                    # the loop TARGET resolves to, not this blanket dependency.
+                    # Injecting the row here instead cost the GLM expert gather
+                    # its weights-table operand.
+                    self._inject_iterator_predecessor(before, iterable_producer)
+                operation_ids = tuple(
+                    operation.attr_name for operation in self.operations[before:]
+                )
+                loop_id = f"loop_l{stmt.lineno}_c{stmt.col_offset}"
+                # A list grown with ``.append`` carries across iterations even
+                # though nothing rebinds the name: register it so the loop gets
+                # the same carried-in/out boundary a reassigned tensor gets.
+                for variable, appended in _loop_list_accumulators(stmt.body).items():
+                    if variable in before_env or not operation_ids:
+                        # Already a tracked tensor producer -- the reassignment
+                        # path below handles it and would otherwise double-count.
+                        continue
+                    updated = None
+                    if isinstance(appended, ast.Name):
+                        updated = self.var_producer.get(appended.id)
+                    if updated is None:
+                        # The appended value is an expression, so the last op the
+                        # body produced is what this iteration contributes.
+                        updated = operation_ids[-1]
+                    self.loop_carried.append(
+                        LoopCarriedSpec(
+                            loop_id=loop_id,
+                            iteration_count=iteration_count,
+                            variable=variable,
+                            initial_producer=None,
+                            updated_producer=updated,
+                            operation_ids=operation_ids,
+                        )
+                    )
+                for variable in sorted(self._assigned_names(stmt.body)):
+                    initial = before_env.get(variable)
+                    updated = self.var_producer.get(variable)
+                    if initial and updated and initial != updated:
+                        member_ids = operation_ids
+                        if updated not in member_ids:
+                            # A ``for blk in self.blocks: h = blk(h)`` loop carries
+                            # its value through a ModuleList child, not an inline op,
+                            # so the child never lands in ``operation_ids``. Register
+                            # it as a loop member so the carried-in boundary gets a
+                            # real consumer (mirroring inline-op loops).
+                            member_ids = (*operation_ids, updated)
+                        self.loop_carried.append(
+                            LoopCarriedSpec(
+                                loop_id=loop_id,
+                                iteration_count=iteration_count,
+                                variable=variable,
+                                initial_producer=initial,
+                                updated_producer=updated,
+                                operation_ids=member_ids,
+                            )
+                        )
+                continue
+            if isinstance(stmt, ast.With):
+                self.statements(stmt.body, condition=condition)
+
+
+_OPERATION_SOURCE_POS_RE = re.compile(r"^@op_l(\d+)_c(\d+)_")
+
+
+def _self_call_source_positions(func: ast.FunctionDef) -> dict[str, tuple[int, int]]:
+    """First source position each `self.<attr>(...)` call is made at."""
+    positions: dict[str, tuple[int, int]] = {}
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        if not isinstance(target, ast.Attribute):
+            continue
+        if not (isinstance(target.value, ast.Name) and target.value.id == "self"):
+            continue
+        where = (node.lineno, node.col_offset)
+        if positions.get(target.attr, where) >= where:
+            positions[target.attr] = where
+    return positions
+
+
+def _functional_synthetic_source_positions(
+    func: ast.FunctionDef,
+) -> dict[str, tuple[int, int]]:
+    """First source position each ``F.<op>(...)`` maps to a functional synthetic attr."""
+    positions: dict[str, tuple[int, int]] = {}
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        functional_op = _functional_call_name(node.func)
+        if not functional_op:
+            continue
+        attr = functional_synthetic_attr(functional_op)
+        where = (node.lineno, node.col_offset)
+        if attr not in positions or where < positions[attr]:
+            positions[attr] = where
+    return positions
+
+
+def _kernel_merge_source_position(
+    func: ast.FunctionDef, config: dict[str, Any] | None = None
+) -> tuple[int, int] | None:
+    """Source position of the kernel the synthetic merge node stands for.
+
+    This ranks the kernel among the forward's other ops, so it must be the call
+    that RUNS: taking the first in the whole body puts the node before operands
+    it consumes. GLM's vision attention spells the kernel out once per arm of
+    ``if is_flash_attention_requested(...)``, flash arm first -- ranked there the
+    kernel sorted ahead of the per-image ``torch.split`` calls feeding it, its
+    inputs read as a backward edge, and the kernel and its ``cat`` were dropped.
+    """
+    live, _dropped = _split_resolved_dropped_stmts(list(func.body), config)
+    positions = [
+        (node.lineno, node.col_offset)
+        for stmt in live
+        for node in ast.walk(stmt)
+        if isinstance(node, ast.Call) and _is_kernel_merge_call(node.func)
+    ]
+    return min(positions) if positions else None
+
+
+def _module_calls_for_forward_merge(
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+    *,
+    parsed_operations: list[ForwardOperation],
+) -> list[str]:
+    """Submodule/synthetic calls to interleave with parsed tensor ops.
+
+    When inline ops were recovered from ``forward()``, drop redundant functional
+    synthetics (``@functional_linear``) that duplicate the same ``F.linear(...)``.
+    """
+    drop_functional = bool(parsed_operations)
+    return [
+        call
+        for call in forward_calls
+        if call in init_assignments
+        or is_positional_synthetic(call)
+        or is_function_synthetic(call)
+        or call == SYNTHETIC_ATTENTION
+        or not call.startswith("@")
+        or (is_functional_synthetic(call) and not drop_functional)
+    ]
+
+
+def _forward_node_eval_order(func: ast.FunctionDef) -> dict[tuple[int, int], int]:
+    """Rank every source position by the order the forward actually evaluates it.
+
+    Python evaluates a call's arguments before the call itself, so a nested
+    ``self.norm1(x)`` inside ``self.attn(self.norm1(x), ...)`` runs first. A raw
+    ``(line, col)`` sort assumes the nested call merely sits further right on the
+    same line, which breaks when the enclosing call spans multiple lines and the
+    argument lands on a *later* line than the call it feeds. A post-order walk
+    (children before parent) captures the true evaluation order regardless of
+    line breaks; visiting the parent last lets it win a shared position so an
+    operation node outranks the operand Name it reuses the column of.
+    """
+    order: dict[tuple[int, int], int] = {}
+    counter = 0
+
+    def _walk(node: ast.AST) -> None:
+        nonlocal counter
+        for child in ast.iter_child_nodes(node):
+            _walk(child)
+        line = getattr(node, "lineno", None)
+        if line is not None:
+            order[(line, getattr(node, "col_offset", 0))] = counter
+            counter += 1
+
+    for stmt in func.body:
+        _walk(stmt)
+    return order
+
+
+def _forward_calls_in_source_order(
+    func: ast.FunctionDef,
+    module_calls: list[str],
+    operations: list[ForwardOperation],
+    config: dict[str, Any] | None = None,
+) -> list[str]:
+    """Merge submodule calls and parsed tensor ops into the order the forward runs them.
+
+    Ordering follows true evaluation order (arguments before their enclosing
+    call), so nested calls run first even when a multi-line call pushes them onto
+    a later source line.
+    """
+    eval_order = _forward_node_eval_order(func)
+    unplaceable = min(eval_order.values(), default=0) - 1
+
+    # A synthetic call (rope helper, functional op, kernel merge) records only the
+    # line it fired on with a placeholder column, so its exact ``(line, col)`` is
+    # rarely a key in ``eval_order``. Falling back to the *last* evaluation rank on
+    # that source line places the synthetic after its own arguments — the call
+    # completes once its operands are ready — which keeps ``apply_rotary`` behind
+    # the reshape/permute/q_norm it consumes instead of floating to the front.
+    line_last_rank: dict[int, int] = {}
+    for (line, _col), rank in eval_order.items():
+        if rank > line_last_rank.get(line, -1):
+            line_last_rank[line] = rank
+
+    def _rank_for(where: tuple[int, int] | None) -> int | None:
+        if where is None:
+            return None
+        rank = eval_order.get(where)
+        if rank is not None:
+            return rank
+        return line_last_rank.get(where[0])
+
+    ordered: list[tuple[float, str]] = []
+    call_positions = _self_call_source_positions(func)
+    functional_positions = _functional_synthetic_source_positions(func)
+    kernel_position = _kernel_merge_source_position(func, config)
+    fallback = 0
+    for call in module_calls:
+        where = (
+            call_positions.get(call)
+            or call_positions.get(base_submodule_attr(call))
+            or functional_positions.get(call)
+            or positional_synthetic_source_pos(call)
+            or function_synthetic_source_pos(call)
+            or submodule_callsite_source_pos(call)
+        )
+        if where is None and call == SYNTHETIC_ATTENTION:
+            where = kernel_position
+        rank = _rank_for(where)
+        if rank is None:
+            # A call the walk cannot place keeps its parsed order ahead of the ops.
+            rank = unplaceable - fallback
+            fallback += 1
+        ordered.append((rank, call))
+    tail = max(eval_order.values(), default=0) + 1
+    for op in operations:
+        match = _OPERATION_SOURCE_POS_RE.match(op.attr_name)
+        where = (int(match.group(1)), int(match.group(2))) if match else None
+        rank = _rank_for(where)
+        ordered.append((tail if rank is None else rank, op.attr_name))
+    ordered.sort(key=lambda item: item[0])
+    source_order = [name for _rank, name in ordered]
+    operation_by_name = {operation.attr_name: operation for operation in operations}
+    remaining = list(source_order)
+    result: list[str] = []
+    while remaining:
+        ready = next(
+            (
+                name
+                for name in remaining
+                if all(
+                    predecessor not in remaining
+                    for predecessor in operation_by_name.get(
+                        name,
+                        ForwardOperation(name, name, name),
+                    ).predecessors
+                )
+            ),
+            remaining[0],
+        )
+        result.append(ready)
+        remaining.remove(ready)
+    return result
+
+
+def _return_value_names(value: ast.AST) -> list[str]:
+    if isinstance(value, ast.Tuple):
+        return [elt.id for elt in value.elts if isinstance(elt, ast.Name)]
+    if isinstance(value, ast.Name):
+        return [value.id]
+    # ``return BaseModelOutputWithPooling(last_hidden_state=x, pooler_output=y)``
+    # — a HuggingFace ``ModelOutput`` dataclass wrapper. Its keyword arguments
+    # name the real tensor producers (dataclass fields are always built by
+    # keyword in this codebase); without unwrapping it the forward looks like it
+    # returns nothing, so ``forward_return_slots`` stays empty and the graph
+    # falls back to exporting every dangling node as a spurious output.
+    # POSITIONAL args are deliberately NOT read as field names here: a plain
+    # method/function call used directly as the return value (``return
+    # output.type_as(x)``, ``return rotate_half(x)``) passes its real operands
+    # positionally, and treating the operand's own name as the return slot's
+    # name would misattribute the module's output to that operand's producer
+    # instead of the call's own result.
+    if isinstance(value, ast.Call):
+        names: list[str] = []
+        for keyword in value.keywords:
+            if isinstance(keyword.value, ast.Name):
+                names.append(keyword.value.id)
+        return names
+    return []
+
+
+def _extract_forward_return_metadata(
+    func: ast.FunctionDef,
+    var_producer: dict[str, str],
+    step_predecessors: dict[str, tuple[str, ...]] | None = None,
+    multi_output_slots: set[str] | None = None,
+) -> tuple[dict[str, str], list[str], str | None]:
+    """Map ``return (a, b, c)`` names to the inline ops that produce them."""
+    return_order: list[str] = []
+    returns_call_wrapper = False
+    for stmt in reversed(func.body):
+        if isinstance(stmt, ast.Return) and stmt.value is not None:
+            return_order = _return_value_names(stmt.value)
+            # A ``ModelOutput``/dataclass wrapper (``return BaseModelOutputWithPooling(
+            # last_hidden_state=x, pooler_output=y)``) is accessed by field, so the
+            # caller typically reads one terminal. A bare ``return (a, b)`` tuple is
+            # unpacked positionally, so every element is a real output and must not
+            # be collapsed onto its most-downstream member.
+            returns_call_wrapper = isinstance(stmt.value, ast.Call)
+            break
+    slots = {name: var_producer[name] for name in return_order if name in var_producer}
+    input_name = _primary_forward_input_name(func)
+    # When one returned tensor is data-derived from another — ``last_hidden_state``
+    # feeds ``pooler_output = self.merger(last_hidden_state)`` in a vision tower's
+    # ``BaseModelOutputWithPooling`` — the *downstream* slot is the module's real
+    # result; the upstream one is an intermediate a caller may also expose. Prefer
+    # the unique most-downstream returned tensor (the one no other returned tensor
+    # descends from) so the parent wires the true output (the merger), not the
+    # intermediate. Ambiguous fan-out (``hidden_states, past_key_values`` — a cache
+    # side-channel not on the main chain) leaves several terminals; fall back then.
+    terminal = (
+        _sole_terminal_return_slot(
+            slots, step_predecessors or {}, multi_output_slots or set()
+        )
+        if returns_call_wrapper
+        else None
+    )
+    if terminal is not None:
+        # The intermediate slots are subsumed by the terminal — they are ancestors
+        # on its data chain, so they stay live via its producer and must not become
+        # separate (dead, no-consumer) output ports. Expose the terminal alone.
+        return {terminal: slots[terminal]}, [terminal], terminal
+    # A tuple return's last value is often the continuation (``post, comb,
+    # collapsed``). The first value is the continuation when it is the module's
+    # actual result (``attn_output, attn_weights``). Prefer a tensor the forward
+    # names as the main hidden state before falling back to the last slot.
+    main_names = {"hidden_states", "hidden_state", "attn_output", "output", "result"}
+    primary = (
+        input_name
+        if input_name in return_order
+        else next((name for name in return_order if name in main_names), None)
+    )
+    if primary is None:
+        primary = return_order[-1] if return_order else None
+    return slots, return_order, primary
+
+
+def _sole_terminal_return_slot(
+    slots: dict[str, str],
+    step_predecessors: dict[str, tuple[str, ...]],
+    multi_output_slots: set[str] | None = None,
+) -> str | None:
+    """The one returned slot every other returned slot is a data-ancestor of.
+
+    Returns ``None`` unless exactly one slot is downstream of all the others, so a
+    genuine multi-output return (parallel tensors, or a cache side-channel) keeps
+    the source-order heuristics instead of arbitrarily promoting one branch.
+    """
+    if len(slots) < 2:
+        return None
+    # A returned slot that names a slice of a multi-output op
+    # (``k_nope, value_states = torch.split(...)`` -> ``return key_states,
+    # value_states``) is a genuine parallel tensor, not an intermediate on
+    # another slot's chain — even though it shares its producer op with a
+    # sibling slice that a downstream slot *does* consume. Ancestry is tracked
+    # per producer attr, which cannot tell the two slices apart, so never
+    # collapse when any slot is such a slice; keep every slot as its own return.
+    if multi_output_slots and any(name in multi_output_slots for name in slots):
+        return None
+    producers = {name: producer for name, producer in slots.items()}
+
+    def _ancestors(producer: str) -> set[str]:
+        seen: set[str] = set()
+        stack = list(step_predecessors.get(producer, ()))
+        while stack:
+            step = stack.pop()
+            if step in seen:
+                continue
+            seen.add(step)
+            stack.extend(step_predecessors.get(step, ()))
+        return seen
+
+    other_producers = set(producers.values())
+    terminals = [
+        name
+        for name, producer in producers.items()
+        # A terminal is not an ancestor of any *other* returned producer.
+        if not any(
+            producer in _ancestors(other)
+            for other in other_producers
+            if other != producer
+        )
+    ]
+    if len(terminals) != 1:
+        return None
+    # The lone terminal must actually sit downstream of the others, not merely be
+    # disconnected from them — require every other producer among its ancestors.
+    terminal = terminals[0]
+    ancestors = _ancestors(producers[terminal])
+    if all(
+        producer == producers[terminal] or producer in ancestors
+        for producer in other_producers
+    ):
+        return terminal
+    return None
+
+
+def _live_forward_steps(
+    *,
+    operations: dict[str, ForwardOperation],
+    return_slots: dict[str, str],
+    step_predecessors: dict[str, tuple[str, ...]] | None = None,
+) -> set[str]:
+    """Backward closure of ops and submodule steps that feed returned values."""
+    if not return_slots:
+        return set(operations.keys())
+    step_predecessors = step_predecessors or {}
+
+    def _seed(step: str, _seen: set[str] | None = None) -> list[str]:
+        """Resolve a producer step to operation steps.
+
+        A returned value may be produced by a non-op step — a sibling helper
+        method such as a rotary embedding's ``recomposition_frequencies``. Such a
+        step is not itself tensor math, but the ops feeding it (the inline
+        multiplies) are live and must not be pruned, so bridge through the
+        recorded ``step_predecessors``.
+        """
+        if step in operations:
+            return [step]
+        _seen = _seen or set()
+        if step in _seen:
+            return []
+        _seen.add(step)
+        seeds: list[str] = []
+        for pred in step_predecessors.get(step, ()):
+            seeds.extend(_seed(pred, _seen))
+        return seeds
+
+    live_ops: set[str] = set()
+    pending = [seed for producer in return_slots.values() for seed in _seed(producer)]
+    while pending:
+        step = pending.pop()
+        if step in live_ops:
+            continue
+        live_ops.add(step)
+        operation = operations.get(step)
+        if operation is None:
+            continue
+        for pred in operation.predecessors:
+            # A predecessor that is not itself an op is a non-op step -- a
+            # positional/functional synthetic call (an inlined ``apply_rotary``
+            # frame) or a submodule -- whose real tensor input is recorded in
+            # ``step_predecessors``, not in this op's ``predecessors``. Bridge
+            # through it with ``_seed`` so the ops feeding that step stay live.
+            # Without this, an op consumed *only* by such a step (e.g. the
+            # ``.view().transpose()`` that a rotary reads) is wrongly pruned as
+            # dead, and its dangling ``step_predecessors`` reference then docks
+            # the consumer on the preceding submodule instead (phantom rank).
+            for seeded in _seed(pred):
+                if seeded not in live_ops:
+                    pending.append(seeded)
+    live = set(live_ops)
+    for step in live_ops:
+        operation = operations.get(step)
+        if operation is None:
+            continue
+        for pred in operation.predecessors:
+            if pred not in operations:
+                live.add(pred)
+    return live
+
+
+def _prune_forward_pipeline(
+    *,
+    forward_calls: list[str],
+    operations: dict[str, ForwardOperation],
+    return_slots: dict[str, str],
+    step_predecessors: dict[str, tuple[str, ...]] | None = None,
+) -> tuple[list[str], dict[str, ForwardOperation]]:
+    if len(return_slots) < 2:
+        return forward_calls, operations
+    live = _live_forward_steps(
+        operations=operations,
+        return_slots=return_slots,
+        step_predecessors=step_predecessors,
+    )
+    pruned_operations = {name: op for name, op in operations.items() if name in live}
+    pruned_calls = [
+        step for step in forward_calls if step not in operations or step in live
+    ]
+    return pruned_calls, pruned_operations
+
+
+def _self_module_call_attr(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        if _is_self_attr(node.func, node.func.attr):
+            return node.func.attr
+    return None
+
+
+def _forward_call_output_names(forward_func: ast.FunctionDef) -> dict[str, str]:
+    """Map ``module_attr -> local variable`` the caller binds its result to.
+
+    Modules that return a bare expression (`return self.weight * hidden_states`)
+    expose no tensor name of their own, so the name the caller gives the result is
+    the only source-derived label available for that boundary.
+    """
+    names: dict[str, str] = {}
+    for node in ast.walk(forward_func):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        attr = _self_module_call_attr(node.value) if node.value is not None else None
+        if attr is None:
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+            continue
+        # A reassigned spine variable keeps the first binding: later statements
+        # rebind the same name for unrelated steps.
+        names.setdefault(attr, targets[0].id)
+    return names
+
+
+def _module_return_unpacks(
+    forward_func: ast.FunctionDef,
+    init_assignments: dict[str, str],
+    registry: dict[str, ClassStructure],
+) -> dict[str, dict[str, str]]:
+    """Map ``module_attr -> {local_var: producing_step}`` for tuple unpacks."""
+    unpacks: dict[str, dict[str, str]] = {}
+    for stmt in forward_func.body:
+        if not isinstance(stmt, ast.Assign):
+            continue
+        target = stmt.targets[0]
+        if not isinstance(target, ast.Tuple) or not isinstance(stmt.value, ast.Call):
+            continue
+        module_attr = _self_module_call_attr(stmt.value)
+        if module_attr is None or module_attr not in init_assignments:
+            continue
+        callee = registry.get(init_assignments[module_attr])
+        if callee is None or not callee.forward_return_order:
+            continue
+        if len(target.elts) != len(callee.forward_return_order):
+            continue
+        mapping: dict[str, str] = {}
+        for elt, slot_name in zip(target.elts, callee.forward_return_order):
+            if not isinstance(elt, ast.Name):
+                mapping = {}
+                break
+            producer = callee.forward_return_slots.get(slot_name)
+            if producer is None:
+                mapping = {}
+                break
+            mapping[elt.id] = producer
+        if mapping:
+            unpacks[module_attr] = mapping
+    return unpacks
+
+
+def _expression_at_operation_line(
+    func: ast.FunctionDef,
+    attr_name: str,
+    operation_label: str,
+) -> ast.AST | None:
+    match = _OPERATION_SOURCE_POS_RE.match(attr_name)
+    if match is None:
+        return None
+    target_line = int(match.group(1))
+    target_col = int(match.group(2))
+    for stmt in func.body:
+        for node in ast.walk(stmt):
+            if (
+                getattr(node, "lineno", None) != target_line
+                or getattr(node, "col_offset", None) != target_col
+            ):
+                continue
+            label: str | None = None
+            if isinstance(node, ast.BinOp):
+                raw_label = _BINOP_LABELS.get(type(node.op))
+                label = operation_display_label(raw_label) if raw_label else None
+            elif isinstance(node, ast.Call):
+                call_name = (_expr_name(node.func) or "").split(".")[-1]
+                raw_label = _FUNCTION_LABELS.get(
+                    _functional_call_name(node.func) or call_name
+                ) or _TENSOR_METHOD_LABELS.get(call_name)
+                label = operation_display_label(raw_label) if raw_label else None
+            if label == operation_label:
+                return node
+        if getattr(stmt, "lineno", None) != target_line:
+            continue
+        if isinstance(stmt, ast.Return):
+            return stmt.value
+        if isinstance(stmt, ast.Assign):
+            return stmt.value
+        if isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            return stmt.value
+        if isinstance(stmt, ast.AugAssign):
+            return stmt.value
+    return None
+
+
+def _vars_read_in_expr(node: ast.AST | None) -> set[str]:
+    if node is None:
+        return set()
+    return {item.id for item in ast.walk(node) if isinstance(item, ast.Name)}
+
+
+def _latest_module_assignment_before(
+    func: ast.FunctionDef,
+    variable: str,
+    *,
+    line: int,
+    column: int,
+) -> str | None:
+    latest: tuple[tuple[int, int], str | None] | None = None
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        position = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+        if position >= (line, column):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        names: list[str] = []
+        for target in targets:
+            if isinstance(target, ast.Name):
+                names.append(target.id)
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                names.extend(
+                    item.id for item in target.elts if isinstance(item, ast.Name)
+                )
+        if variable not in names:
+            continue
+        value = node.value
+        module = _self_module_call_attr(value)
+        if latest is None or position > latest[0]:
+            latest = (position, module)
+    return latest[1] if latest is not None else None
+
+
+def _refine_forward_operation_predecessors(
+    forward_func: ast.FunctionDef,
+    forward_operations: dict[str, ForwardOperation],
+    *,
+    module_unpacks: dict[str, dict[str, str]],
+) -> dict[str, ForwardOperation]:
+    if not module_unpacks:
+        return forward_operations
+    refined: dict[str, ForwardOperation] = {}
+    for name, operation in forward_operations.items():
+        match = _OPERATION_SOURCE_POS_RE.match(name)
+        position = (
+            (int(match.group(1)), int(match.group(2)))
+            if match is not None
+            else (10**9, 10**9)
+        )
+        expr = _expression_at_operation_line(forward_func, name, operation.label)
+        vars_read = _vars_read_in_expr(expr)
+        predecessors: list[str] = []
+        for pred in operation.predecessors:
+            var_map = module_unpacks.get(pred)
+            if var_map:
+                mapped = [
+                    producer
+                    for var, producer in var_map.items()
+                    if var in vars_read
+                    and _latest_module_assignment_before(
+                        forward_func,
+                        var,
+                        line=position[0],
+                        column=position[1],
+                    )
+                    == pred
+                ]
+                if mapped:
+                    predecessors.extend(mapped)
+                    continue
+            predecessors.append(pred)
+        refined[name] = ForwardOperation(
+            attr_name=operation.attr_name,
+            label=operation.label,
+            class_name=operation.class_name,
+            predecessors=tuple(dict.fromkeys(predecessors)),
+            external_inputs=operation.external_inputs,
+            details=operation.details,
+            param_inputs=operation.param_inputs,
+            output_names=operation.output_names,
+            predecessor_ports=operation.predecessor_ports,
+        )
+    return refined
+
+
+def _apply_forward_analysis(
+    forward_func: ast.FunctionDef,
+    analysis: ForwardAnalysis,
+    *,
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+) -> tuple[
+    list[str], dict[str, ForwardOperation], dict[str, str], list[str], str | None
+]:
+    operations = {op.attr_name: op for op in analysis.operations}
+    pruned_calls, pruned_operations = _prune_forward_pipeline(
+        forward_calls=forward_calls,
+        operations=operations,
+        return_slots=analysis.return_slots,
+        step_predecessors=analysis.step_predecessors,
+    )
+    return (
+        pruned_calls,
+        pruned_operations,
+        analysis.return_slots,
+        analysis.return_order,
+        analysis.primary_return_slot,
+    )
+
+
+def finalize_class_registry(registry: dict[str, ClassStructure]) -> None:
+    """Resolve submodule return unpacks and refine inline op predecessors."""
+    referenced: dict[str, set[str]] = {}
+    for cls in registry.values():
+        forward_func = next(
+            (
+                item
+                for item in cls.node.body
+                if isinstance(item, ast.FunctionDef) and item.name == "forward"
+            ),
+            None,
+        )
+        if forward_func is None:
+            continue
+        for module_attr, var_map in _module_return_unpacks(
+            forward_func,
+            cls.init_assignments,
+            registry,
+        ).items():
+            callee_name = cls.init_assignments.get(module_attr)
+            if callee_name is None:
+                continue
+            referenced.setdefault(callee_name, set()).update(var_map.values())
+
+    for cls in registry.values():
+        cls.referenced_return_producers = set(referenced.get(cls.name, set()))
+        if not cls.forward_operations:
+            continue
+        forward_func = next(
+            (
+                item
+                for item in cls.node.body
+                if isinstance(item, ast.FunctionDef) and item.name == "forward"
+            ),
+            None,
+        )
+        if forward_func is None:
+            continue
+        module_unpacks = _module_return_unpacks(
+            forward_func, cls.init_assignments, registry
+        )
+        cls.forward_operations = _refine_forward_operation_predecessors(
+            forward_func,
+            cls.forward_operations,
+            module_unpacks=module_unpacks,
+        )
+        _publish_submodule_return_producers(cls, registry)
+
+
+def _publish_submodule_return_producers(
+    cls: ClassStructure, registry: dict[str, ClassStructure]
+) -> None:
+    """Say which op inside a submodule produces each slot of its return tuple.
+
+    ``_, routing_weights, selected_experts = self.gate(hidden_states)`` reads two
+    slots of one call. The caller records the ordinals it read, but the edge can
+    only start from an op, and every slot resolved to the gate's LAST op -- so
+    the experts' ``one_hot`` was handed the routing WEIGHTS where the model
+    passes it the expert INDICES, and the router published one tensor twice
+    under one name instead of its two distinct returns.
+
+    The callee already knows the answer: its ``forward_return_order`` names the
+    slots and ``forward_return_slots`` names the op behind each. Publishing them
+    in call order lets a consumer reading ordinal 2 dock onto that slot's own
+    producer (the ``topk``), the same way an inline-expanded method or free
+    function already does. A submodule the export keeps opaque has no internal
+    op to dock onto, so the lookup finds nothing and the wiring is unchanged.
+    """
+    for module_attr, callee_name in cls.init_assignments.items():
+        callee = registry.get(callee_name)
+        if callee is None or len(callee.forward_return_order) < 2:
+            continue
+        producers = [
+            callee.forward_return_slots.get(slot)
+            for slot in callee.forward_return_order
+        ]
+        if any(producer is None for producer in producers):
+            continue
+        cls.forward_step_return_producers.setdefault(
+            module_attr, [producer for producer in producers if producer is not None]
+        )
+
+
+def _forward_operations_from_forward(
+    func: ast.FunctionDef,
+    *,
+    self_values: dict[str, Any],
+    all_tensor_ops: bool,
+    config: dict[str, Any] | None = None,
+    module_functions: dict[str, ast.FunctionDef] | None = None,
+    class_methods: dict[str, ast.FunctionDef] | None = None,
+    is_free_function_body: bool = False,
+    param_values: dict[str, Any] | None = None,
+    unbuilt_attrs: frozenset[str] = frozenset(),
+) -> ForwardAnalysis:
+    # The primary parameter is the main path, so only the extra ones can identify
+    # which step consumes a side feed.
+    primary = _primary_forward_input_name(func)
+    extractor = _ForwardOperationExtractor(
+        self_values=self_values,
+        unbuilt_attrs=unbuilt_attrs,
+        all_tensor_ops=all_tensor_ops,
+        param_names=_forward_input_names(func) - {primary} if primary else set(),
+        host_scalar_params=_host_scalar_param_names(func),
+        config=config,
+        module_functions=module_functions,
+        repeated_submodule_attrs=_repeated_self_call_attrs(func.body),
+        submodule_attrs=_invoked_submodule_attrs(func.body),
+        class_methods=class_methods,
+        is_free_function_body=is_free_function_body,
+        param_values=param_values,
+    )
+    # An operation reading the primary parameter partway through the forward reads the
+    # value arriving at the chain, not the previous step. Naming it lets those reads
+    # resolve to the chain input instead of silently inheriting the wrong producer.
+    if primary:
+        extractor.var_producer[primary] = FORWARD_METHOD_INPUT
+    # A secondary forward input consumed by a traced free-function node is that
+    # node's real source; seed it as the method boundary so the edge starts from
+    # the input instead of dangling. Gated to those args so ordinary side-inputs
+    # (handed straight to a submodule) keep flowing through param attribution.
+    # A param that is REASSIGNED in the body (``q, k = q.float(), k.float()``
+    # inside ``apply_rotary_pos_emb_vision``) must NOT be seeded: the seed would
+    # bind its first read to the shared ``@method_input`` (the *primary*'s
+    # boundary), so ``k.float()`` would spuriously read the primary ``q`` before
+    # ``k`` is rebound. Such a param already docks through its own boundary
+    # (``param_names``) and flows normally after its assignment; only pure
+    # pass-through params (never reassigned) need the seed.
+    reassigned = _ForwardOperationExtractor._assigned_names(func.body)
+    for name in (
+        _traced_free_function_arg_names(func) & _forward_input_names(func)
+    ) - reassigned:
+        token = (
+            FORWARD_METHOD_INPUT
+            if name == primary
+            else f"{FORWARD_METHOD_INPUT_PREFIX}{name}"
+        )
+        extractor.var_producer.setdefault(name, token)
+    extractor.statements(func.body)
+    extractor._apply_branch_alternatives()
+    extractor._reconstruct_attention_step(func.body)
+    extractor._drop_phantom_attention_steps()
+    return_slots, return_order, primary_return_slot = _extract_forward_return_metadata(
+        func,
+        extractor.var_producer,
+        extractor.step_predecessors,
+        set(extractor.var_output_ordinal),
+    )
+    # Fill slots the name-based extraction missed — subscripted return elements
+    # (``return pool_keys[:, keep], ...``) whose producer was captured while the
+    # return statement was walked. Preserves source order so each consumer docks
+    # onto its own slice op instead of the frame's last op (which would orphan the
+    # others).
+    for label in extractor.return_producer_order:
+        producer = extractor.return_producer_slots.get(label)
+        if producer and label not in return_slots:
+            return_slots[label] = producer
+            if label not in return_order:
+                return_order.append(label)
+    # The name-based pass keeps only bare-``Name`` tuple elements, so a submodule
+    # call used directly as a return element (``return self.o_proj(attn_output),
+    # attn_weights``) is recovered by the loop above but APPENDED out of position
+    # and never chosen as the primary (its base label ``self`` is not a recognised
+    # main-output name, so the primary fell through to the weak last-element
+    # default -- the side output ``attn_weights``). Re-derive the order from the
+    # return statement's real element sequence so a positional consumer (a decoder
+    # unpacking ``attn_output, attn_weights``) reads the right slot, and when the
+    # primary was only that weak fallback, promote the first returned submodule
+    # call: an inlined ``self.<proj>(...)`` return element IS the module's computed
+    # output, whereas a bare-``Name`` sibling is a side output.
+    return_stmt = next(
+        (
+            stmt
+            for stmt in reversed(func.body)
+            if isinstance(stmt, ast.Return) and stmt.value is not None
+        ),
+        None,
+    )
+    if return_stmt is not None and isinstance(return_stmt.value, ast.Tuple):
+        source_order = [
+            extractor._return_element_label(elt) for elt in return_stmt.value.elts
+        ]
+        reordered = [label for label in source_order if label in return_slots]
+        # Only trust the reordering when it accounts for exactly the recorded
+        # slots, so a partially-parsed return can't silently drop one.
+        if set(reordered) == set(return_order):
+            return_order = reordered
+        input_name = _primary_forward_input_name(func)
+        main_names = {
+            "hidden_states",
+            "hidden_state",
+            "attn_output",
+            "output",
+            "result",
+        }
+        primary_is_strong = (
+            primary_return_slot in main_names or primary_return_slot == input_name
+        )
+        if not primary_is_strong:
+            submodule_call_slot = next(
+                (
+                    extractor._return_element_label(elt)
+                    for elt in return_stmt.value.elts
+                    if isinstance(elt, ast.Call)
+                    and isinstance(elt.func, ast.Attribute)
+                    and extractor._return_element_label(elt) in return_slots
+                ),
+                None,
+            )
+            if submodule_call_slot is not None:
+                primary_return_slot = submodule_call_slot
+    if primary_return_slot is None and return_order:
+        primary_return_slot = return_order[-1]
+    return ForwardAnalysis(
+        operations=extractor.operations,
+        var_producer=dict(extractor.var_producer),
+        step_predecessors=dict(extractor.step_predecessors),
+        step_predecessor_args=dict(extractor.step_predecessor_args),
+        step_predecessor_ordinals=dict(extractor.step_predecessor_ordinals),
+        step_output_names=dict(extractor.step_output_names),
+        step_boundary_params=dict(extractor.step_boundary_params),
+        step_boundary_arg_params=dict(extractor.step_boundary_arg_params),
+        return_slots=return_slots,
+        return_order=return_order,
+        primary_return_slot=primary_return_slot,
+        loop_carried=list(extractor.loop_carried),
+    )
+
+
+def expand_class_forward_dataflow(
+    cls: ClassStructure,
+    registry: dict[str, ClassStructure],
+) -> None:
+    """Populate all source tensor-method steps for one selected class."""
+    if cls.dataflow_expanded:
+        return
+    forward = next(
+        (
+            item
+            for item in cls.node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+    if forward is None:
+        return
+    cls.dataflow_expanded = True
+    cls.forward_param_inputs = [
+        arg.arg
+        for arg in forward.args.posonlyargs + forward.args.args
+        if arg.arg != "self"
+    ]
+    init_func = next(
+        (
+            item
+            for item in cls.node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+        ),
+        None,
+    )
+    class_methods = {
+        item.name: item for item in cls.node.body if isinstance(item, ast.FunctionDef)
+    }
+    analysis = _forward_operations_from_forward(
+        forward,
+        self_values=_self_config_values(init_func, {}),
+        all_tensor_ops=True,
+        class_methods=class_methods,
+    )
+    if not analysis.operations:
+        return
+    module_calls = _module_calls_for_forward_merge(
+        cls.forward_calls,
+        cls.init_assignments,
+        parsed_operations=analysis.operations,
+    )
+    merged_calls = _forward_calls_in_source_order(
+        forward, module_calls, analysis.operations
+    )
+    (
+        cls.forward_calls,
+        cls.forward_operations,
+        cls.forward_return_slots,
+        cls.forward_return_order,
+        cls.primary_return_slot,
+    ) = _apply_forward_analysis(
+        forward,
+        analysis,
+        forward_calls=merged_calls,
+        init_assignments=cls.init_assignments,
+    )
+    cls.forward_step_predecessors = dict(analysis.step_predecessors)
+    cls.forward_step_predecessor_args = dict(analysis.step_predecessor_args)
+    cls.forward_step_predecessor_ordinals = dict(analysis.step_predecessor_ordinals)
+    cls.forward_step_output_names = dict(analysis.step_output_names)
+    cls.forward_step_boundary_params = dict(analysis.step_boundary_params)
+    cls.forward_step_boundary_arg_params = dict(analysis.step_boundary_arg_params)
+    cls.forward_operations = _refine_forward_operation_predecessors(
+        forward,
+        cls.forward_operations,
+        module_unpacks=_module_return_unpacks(forward, cls.init_assignments, registry),
+    )
+
+
+# Backwards-compatible alias used internally.
+_ClassInfo = ClassStructure
+
+
+class _ModelAstVisitor(ast.NodeVisitor):
+    def __init__(
+        self,
+        *,
+        config: dict[str, Any] | None = None,
+        all_tensor_ops: bool = False,
+        activation_param_bindings: dict[str, dict[str, str]] | None = None,
+        vision_scoped_classes: set[str] | None = None,
+        vision_config: dict[str, Any] | None = None,
+        module_functions: dict[str, ast.FunctionDef] | None = None,
+        declared_aliases: dict[str, str] | None = None,
+        ctor_defaults: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        self.classes: dict[str, ClassStructure] = {}
+        self.config = dict(config or {})
+        # What the model's own config classes say they rename, so a sub-config
+        # dict can answer the canonical names its config OBJECT would.
+        self.declared_aliases = dict(declared_aliases or {})
+        # Constructor arguments no construction site overrides, per class.
+        self.ctor_defaults = dict(ctor_defaults or {})
+        self.all_tensor_ops = all_tensor_ops
+        self.activation_param_bindings = activation_param_bindings or {}
+        self.vision_scoped_classes = set(vision_scoped_classes or ())
+        self.vision_config = dict(vision_config or {})
+        # A multimodal composite config nests the decoder's own settings under
+        # ``text_config`` (``index_topk``/``index_kpool`` live there, not at the
+        # top level). Overlay it for the text path so a class resolves
+        # ``config.index_topk`` to its real value instead of ``_UNKNOWN``. Derived
+        # here (not a constructor arg) so both entry points pick it up. Empty for
+        # a flat single-modality config, making the overlay a no-op.
+        self.text_config = (
+            dict((config or {}).get("text_config") or {})
+            if isinstance(config, dict)
+            else {}
+        )
+        self.module_functions = dict(module_functions or {})
+        # Class bodies seen so far, so a free function's call sites can be found:
+        # it is most often called from a ``forward``, and a default is only in
+        # force if no caller supplies one.
+        self._seen_class_nodes: list[ast.AST] = []
+
+    def _class_nodes_for_call_sites(self) -> list[ast.AST]:
+        return list(self._seen_class_nodes)
+
+    def _config_for_class(self, class_name: str) -> dict[str, Any]:
+        """Config a class resolves ``self.<attr> = config.<attr>`` against.
+
+        Vision-tower classes overlay ``vision_config`` (vision wins, because
+        ``hidden_size`` exists at both levels: 4096 text vs 1024 vision). Every
+        other class — the text path — overlays ``text_config`` when the composite
+        config nests it, so decoder-only settings (``index_topk``) resolve; a flat
+        config leaves the top level unchanged.
+        """
+        if class_name in self.vision_scoped_classes and self.vision_config:
+            return {
+                **self.config,
+                **apply_config_attribute_aliases(
+                    self.vision_config, self.declared_aliases
+                ),
+            }
+        if self.text_config:
+            return {
+                **self.config,
+                **apply_config_attribute_aliases(
+                    self.text_config, self.declared_aliases
+                ),
+            }
+        return self.config
+
+    def _init_config_for_class(self, class_name: str) -> dict[str, Any]:
+        """Config an ``__init__`` body resolves ``config.<attr>`` against.
+
+        Applies the VISION overlay only. A vision-tower class is handed the
+        nested ``vision_config`` at runtime, so its ``ACT2FN[config.hidden_act]``
+        must read the vision value, not the text tower's -- reading the wrong
+        scope renders a bogus activation as an opaque leaf.
+
+        Every other class keeps the raw config: :func:`_parse_init` already
+        searches the nested sub-configs itself, so flattening ``text_config``
+        over the top level here would change which scope wins for a key present
+        in BOTH. Narrower than :meth:`_config_for_class` on purpose.
+        """
+        if class_name in self.vision_scoped_classes and self.vision_config:
+            return {
+                **self.config,
+                **apply_config_attribute_aliases(
+                    self.vision_config, self.declared_aliases
+                ),
+            }
+        return self.config
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        if node not in self._seen_class_nodes:
+            self._seen_class_nodes.append(node)
+        init_assignments: dict[str, str] = {}
+        init_details: dict[str, list[str]] = {}
+        init_assignment_options: dict[str, list[str]] = {}
+        forward_calls: list[str] = []
+        norm_before: list[str] = []
+        attention_inputs: dict[str, list[str]] = {}
+        parallel_gates: list[str] = []
+        input_fed_calls: list[str] = []
+        gate_activations: dict[str, str] = {}
+        forward_step_details: dict[str, list[str]] = {}
+        side_inputs: dict[str, list[SideInputSpec]] = {}
+        forward_input_name: str | None = None
+        forward_operations: dict[str, ForwardOperation] = {}
+        forward_step_predecessors: dict[str, tuple[str, ...]] = {}
+        forward_step_predecessor_args: dict[str, dict[str, str]] = {}
+        forward_step_predecessor_ordinals: dict[str, dict[str, int]] = {}
+        forward_step_output_names: dict[str, list[str]] = {}
+        forward_step_boundary_params: dict[str, tuple[str, ...]] = {}
+        forward_step_boundary_arg_params: dict[
+            str, dict[str, tuple[str, int | None]]
+        ] = {}
+        forward_return_slots: dict[str, str] = {}
+        forward_return_order: list[str] = []
+        primary_return_slot: str | None = None
+        forward_call_output_names: dict[str, str] = {}
+        forward_loop_carried: list[LoopCarriedSpec] = []
+        single_op_methods: dict[str, ForwardOperation] = {}
+        multi_op_methods: dict[str, list[ForwardOperation]] = {}
+        multi_op_method_returns: dict[
+            str, tuple[dict[str, str], list[str], str | None]
+        ] = {}
+        multi_op_method_inputs: dict[str, str] = {}
+        multi_op_method_loop_carried: dict[str, list[LoopCarriedSpec]] = {}
+        multi_op_method_step_predecessors: dict[str, dict[str, tuple[str, ...]]] = {}
+        multi_op_method_order: dict[str, list[str]] = {}
+        multi_op_method_step_predecessor_args: dict[str, dict[str, dict[str, str]]] = {}
+        forward_step_return_producers: dict[str, list[str | None]] = {}
+        unbuilt_attrs: frozenset[str] = frozenset()
+        init_func = next(
+            (
+                item
+                for item in node.body
+                if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+            ),
+            None,
+        )
+        forward_func = next(
+            (
+                item
+                for item in node.body
+                if isinstance(item, ast.FunctionDef) and item.name == "forward"
+            ),
+            None,
+        )
+
+        unresolved_activation_refs: dict[str, tuple[str, str]] = {}
+        unresolved_module_dict_class_refs: dict[str, str] = {}
+        if init_func is not None:
+            (
+                init_assignments,
+                init_details,
+                init_assignment_options,
+                unresolved_activation_refs,
+                unresolved_module_dict_class_refs,
+                unbuilt_attrs,
+            ) = _parse_init(
+                init_func,
+                config=self._init_config_for_class(node.name),
+                param_bindings=self.activation_param_bindings.get(node.name),
+                param_values=self.ctor_defaults.get(node.name),
+            )
+        if forward_func is not None:
+            forward_input_name = _primary_forward_input_name(forward_func)
+            forward_call_output_names = _forward_call_output_names(forward_func)
+            resolved_forward_func = _resolve_local_module_alias_calls(forward_func)
+            (
+                forward_calls,
+                norm_before,
+                attention_inputs,
+                side_inputs,
+                parsed_step_details,
+            ) = _parse_forward(
+                resolved_forward_func,
+                self_values=_self_config_values(
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
+                ),
+                config=self._config_for_class(node.name),
+            )
+            alternate = _alternate_forward_dispatches(forward_func)
+            if alternate:
+                forward_calls = [
+                    call for call in forward_calls if call not in alternate
+                ]
+            input_fed_calls = _input_fed_calls_from_forward(forward_func)
+            parallel_gates = _parallel_gates_from_forward(forward_func)
+            if forward_calls and parallel_gates:
+                # Routers like MoE `gate` run on hidden_states as the main path, not in parallel.
+                parallel_gates = [
+                    gate for gate in parallel_gates if gate != forward_calls[0]
+                ]
+            gate_activations = _parallel_gate_activations_from_forward(
+                forward_func, parallel_gates
+            )
+            forward_step_details = dict(parsed_step_details)
+            # Plain instance methods defined in this same class (not ``__init__``
+            # submodule attrs). A ``self.<method>(...)`` call site's args are the
+            # CALLER's local names; resolving against the callee's own signature
+            # (when it is one of these) keeps a caller/callee name mismatch from
+            # stranding an argument (see ``_class_method_param_names``).
+            class_methods = {
+                item.name: item
+                for item in node.body
+                if isinstance(item, ast.FunctionDef)
+            }
+            if _is_moe_gate_class(node.name, forward_calls):
+                values = _self_config_values(
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
+                )
+                analysis = _forward_operations_from_forward(
+                    resolved_forward_func,
+                    self_values=values,
+                    unbuilt_attrs=unbuilt_attrs,
+                    all_tensor_ops=self.all_tensor_ops,
+                    config=self._config_for_class(node.name),
+                    module_functions=self.module_functions,
+                    class_methods=class_methods,
+                )
+                if analysis.operations:
+                    forward_step_predecessors = dict(analysis.step_predecessors)
+                    forward_step_predecessor_args = dict(analysis.step_predecessor_args)
+                    forward_step_predecessor_ordinals = dict(
+                        analysis.step_predecessor_ordinals
+                    )
+                    forward_step_output_names = dict(analysis.step_output_names)
+                    forward_step_boundary_params = dict(analysis.step_boundary_params)
+                    forward_step_boundary_arg_params = dict(
+                        analysis.step_boundary_arg_params
+                    )
+                    forward_loop_carried = list(analysis.loop_carried)
+                    (
+                        forward_calls,
+                        forward_operations,
+                        forward_return_slots,
+                        forward_return_order,
+                        primary_return_slot,
+                    ) = _apply_forward_analysis(
+                        forward_func,
+                        analysis,
+                        forward_calls=forward_calls,
+                        init_assignments=init_assignments,
+                    )
+                    forward_step_details.update(
+                        {
+                            op.attr_name: list(op.details)
+                            for op in forward_operations.values()
+                        }
+                    )
+            forward_step_details.update(
+                _method_forward_step_details(node, forward_calls, init_assignments)
+            )
+            single_op_methods = _single_op_forward_methods(
+                node,
+                forward_calls,
+                init_assignments,
+                self_values=_self_config_values(
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
+                ),
+                all_tensor_ops=self.all_tensor_ops,
+            )
+            (
+                multi_op_methods,
+                multi_op_method_returns,
+                multi_op_method_inputs,
+                multi_op_method_step_predecessors,
+                multi_op_method_order,
+                multi_op_method_step_predecessor_args,
+            ) = _multi_op_forward_methods(
+                node,
+                forward_calls,
+                init_assignments,
+                self_values=_self_config_values(
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
+                ),
+                all_tensor_ops=self.all_tensor_ops,
+            )
+            # Traced free-function calls (rope helpers, ...) expand from their
+            # module-level definition. Keys are synthetic attrs (``@positional_``/
+            # ``@function_``), disjoint from method names, so they share the same
+            # ``multi_op_methods`` rendering path in the block tree.
+            (
+                free_fn_methods,
+                free_fn_return_producers,
+                free_fn_method_returns,
+                free_fn_primary_params,
+                free_fn_loop_carried,
+            ) = _multi_op_free_functions(
+                self.module_functions,
+                forward_calls,
+                self_values=_self_config_values(
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
+                ),
+                all_tensor_ops=self.all_tensor_ops,
+                # A free function is most often called from a ``forward``, so the
+                # class bodies are where its real call sites are.
+                class_nodes=self._class_nodes_for_call_sites(),
+            )
+            multi_op_methods.update(free_fn_methods)
+            forward_step_return_producers.update(free_fn_return_producers)
+            # Same shape as ``multi_op_method_returns``'s own per-``self.method()``
+            # entries -- merging here lets ``_expanded_free_function_node`` read a
+            # free function's return-slot metadata off the same dict a method
+            # call's expansion already does (see ``_multi_op_free_functions``).
+            multi_op_method_returns.update(free_fn_method_returns)
+            # Same shape as ``multi_op_method_inputs``'s own per-``self.method()``
+            # entries -- merging here lets the free-function frame carry its own
+            # primary parameter name as its ``input_label`` the same way a
+            # ``self.<method>()`` expansion's frame already does.
+            multi_op_method_inputs.update(free_fn_primary_params)
+            multi_op_method_loop_carried.update(free_fn_loop_carried)
+            # A tuple-returning *method* expanded inline (``pool_keys,
+            # pool_indices, pool_valid = self.get_pooled_states(...)``) exposes
+            # the same ordinal→producer mapping as a free function: publish its
+            # ordered internal producers so a consumer reading a specific return
+            # ordinal docks onto that slot's producer instead of every consumer
+            # collapsing onto the frame's last op (which strands the other slots
+            # as dead nodes). General: driven off the method's own return tuple,
+            # no class-name checks.
+            for method_base, (
+                ret_slots,
+                ret_order,
+                _ret_primary,
+            ) in multi_op_method_returns.items():
+                producers = [ret_slots.get(slot) for slot in ret_order]
+                if len(producers) >= 2 and all(p is not None for p in producers):
+                    forward_step_return_producers.setdefault(
+                        method_base, [p for p in producers if p is not None]
+                    )
+            delegates_inline = _forward_delegates_to_nothing(node.name, forward_calls)
+            method_names = {
+                item.name for item in node.body if isinstance(item, ast.FunctionDef)
+            }
+            delegates_to_siblings = _forward_delegates_only_to_sibling_methods(
+                forward_calls, init_assignments, method_names
+            )
+            if (
+                _forward_owns_tensor_math(forward_calls, init_assignments)
+                or delegates_inline
+                or delegates_to_siblings
+            ):
+                values = _self_config_values(
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
+                )
+                analysis = _forward_operations_from_forward(
+                    resolved_forward_func,
+                    self_values=values,
+                    unbuilt_attrs=unbuilt_attrs,
+                    all_tensor_ops=self.all_tensor_ops,
+                    config=self._config_for_class(node.name),
+                    module_functions=self.module_functions,
+                    class_methods=class_methods,
+                )
+                if analysis.operations:
+                    forward_step_predecessors = dict(analysis.step_predecessors)
+                    forward_step_predecessor_args = dict(analysis.step_predecessor_args)
+                    forward_step_predecessor_ordinals = dict(
+                        analysis.step_predecessor_ordinals
+                    )
+                    forward_step_output_names = dict(analysis.step_output_names)
+                    forward_step_boundary_params = dict(analysis.step_boundary_params)
+                    forward_step_boundary_arg_params = dict(
+                        analysis.step_boundary_arg_params
+                    )
+                    forward_loop_carried = list(analysis.loop_carried)
+                    module_calls = _module_calls_for_forward_merge(
+                        forward_calls,
+                        init_assignments,
+                        parsed_operations=analysis.operations,
+                    )
+                    merged_calls = _forward_calls_in_source_order(
+                        resolved_forward_func,
+                        module_calls,
+                        analysis.operations,
+                        self._config_for_class(node.name),
+                    )
+                    (
+                        forward_calls,
+                        forward_operations,
+                        forward_return_slots,
+                        forward_return_order,
+                        primary_return_slot,
+                    ) = _apply_forward_analysis(
+                        forward_func,
+                        analysis,
+                        forward_calls=merged_calls,
+                        init_assignments=init_assignments,
+                    )
+                    forward_step_details.update(
+                        {
+                            op.attr_name: list(op.details)
+                            for op in forward_operations.values()
+                        }
+                    )
+            elif forward_func is not None:
+                values = _self_config_values(
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
+                )
+                probed = _forward_operations_from_forward(
+                    resolved_forward_func,
+                    self_values=values,
+                    unbuilt_attrs=unbuilt_attrs,
+                    all_tensor_ops=self.all_tensor_ops,
+                    config=self._config_for_class(node.name),
+                    module_functions=self.module_functions,
+                    class_methods=class_methods,
+                )
+                if _forward_mixes_modules_and_inline_ops(
+                    forward_calls,
+                    init_assignments,
+                    probed.operations,
+                ):
+                    forward_step_predecessors = dict(probed.step_predecessors)
+                    forward_step_predecessor_args = dict(probed.step_predecessor_args)
+                    forward_step_predecessor_ordinals = dict(
+                        probed.step_predecessor_ordinals
+                    )
+                    forward_step_output_names = dict(probed.step_output_names)
+                    forward_step_boundary_params = dict(probed.step_boundary_params)
+                    forward_step_boundary_arg_params = dict(
+                        probed.step_boundary_arg_params
+                    )
+                    forward_loop_carried = list(probed.loop_carried)
+                    module_calls = _module_calls_for_forward_merge(
+                        forward_calls,
+                        init_assignments,
+                        parsed_operations=probed.operations,
+                    )
+                    merged_calls = _forward_calls_in_source_order(
+                        resolved_forward_func,
+                        module_calls,
+                        probed.operations,
+                        self._config_for_class(node.name),
+                    )
+                    (
+                        forward_calls,
+                        forward_operations,
+                        forward_return_slots,
+                        forward_return_order,
+                        primary_return_slot,
+                    ) = _apply_forward_analysis(
+                        forward_func,
+                        probed,
+                        forward_calls=merged_calls,
+                        init_assignments=init_assignments,
+                    )
+                    forward_step_details.update(
+                        {
+                            op.attr_name: list(op.details)
+                            for op in forward_operations.values()
+                        }
+                    )
+
+        # Structural (never class-name keyed): resolves an activation only when the
+        # forward actually gates the normalized result through an activation
+        # registry; a plain norm returns ``None``.
+        gate_activation = _gated_norm_activation_from_forward(
+            forward_func, init_func, self._config_for_class(node.name)
+        )
+        self.classes[node.name] = ClassStructure(
+            name=node.name,
+            node=node,
+            init_assignments=init_assignments,
+            init_details=init_details,
+            init_assignment_options=init_assignment_options,
+            unbuilt_attrs=unbuilt_attrs,
+            forward_calls=forward_calls,
+            norm_before=norm_before,
+            attention_inputs=attention_inputs,
+            parallel_gates=parallel_gates,
+            input_fed_calls=input_fed_calls,
+            gate_activations=gate_activations,
+            gate_activation=gate_activation,
+            forward_step_details=forward_step_details,
+            side_inputs=side_inputs,
+            forward_input_name=forward_input_name,
+            forward_operations=forward_operations,
+            forward_step_predecessors=forward_step_predecessors,
+            forward_step_predecessor_args=forward_step_predecessor_args,
+            forward_step_predecessor_ordinals=forward_step_predecessor_ordinals,
+            forward_step_output_names=forward_step_output_names,
+            forward_step_boundary_params=forward_step_boundary_params,
+            forward_step_boundary_arg_params=forward_step_boundary_arg_params,
+            single_op_methods=single_op_methods,
+            multi_op_methods=multi_op_methods,
+            multi_op_method_returns=multi_op_method_returns,
+            multi_op_method_inputs=multi_op_method_inputs,
+            multi_op_method_loop_carried=multi_op_method_loop_carried,
+            multi_op_method_step_predecessors=multi_op_method_step_predecessors,
+            multi_op_method_order=multi_op_method_order,
+            multi_op_method_step_predecessor_args=multi_op_method_step_predecessor_args,
+            forward_step_return_producers=forward_step_return_producers,
+            forward_return_slots=forward_return_slots,
+            forward_return_order=forward_return_order,
+            primary_return_slot=primary_return_slot,
+            forward_call_output_names=forward_call_output_names,
+            loop_carried=forward_loop_carried,
+            forward_param_inputs=(
+                [
+                    arg.arg
+                    for arg in forward_func.args.posonlyargs + forward_func.args.args
+                    if arg.arg != "self"
+                ]
+                if forward_func is not None
+                else []
+            ),
+            unresolved_activation_refs=unresolved_activation_refs,
+            unresolved_module_dict_class_refs=unresolved_module_dict_class_refs,
+        )
+        self.generic_visit(node)
+
+
+def _dict_registry_constructor_name(node: ast.AST) -> str | None:
+    """Registry-dict name for a ``REGISTRY[key](...)`` submodule constructor.
+
+    Matches a call whose callable is looked up from a subscripted bare name
+    (``COMPRESSOR_CLASSES[self.layer_type](config)``), including such a call as
+    one arm of a config switch (``... if cond else None``). Returns the registry
+    name so a post-pass can resolve it against the module's own dict-of-classes
+    literal; ``None`` when the assignment is not of this shape. Purely
+    structural -- no registry-name or key allow-list.
+    """
+    if isinstance(node, ast.IfExp):
+        return _dict_registry_constructor_name(
+            node.body
+        ) or _dict_registry_constructor_name(node.orelse)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Subscript)
+        and isinstance(node.func.value, ast.Name)
+    ):
+        return node.func.value.id
+    return None
+
+
+def _unbuilt_init_statements(
+    func: ast.FunctionDef,
+    config: dict[str, Any],
+    param_values: dict[str, Any] | None = None,
+) -> set[int]:
+    """Nodes of ``__init__`` branches the config rules out, by ``id``.
+
+    ``GPT2Block.__init__`` builds its cross-attention only when asked::
+
+        if config.add_cross_attention:
+            self.crossattention = GPT2Attention(..., is_cross_attention=True)
+
+    GPT-2's checkpoint leaves that key out, and its config class defaults it to
+    False -- so the module is never built. Walking every branch regardless
+    registered it anyway, and the submodule that does not exist came to be 39%
+    of the drawn graph.
+
+    Only a condition that resolves to a real boolean decides anything; anything
+    unresolved keeps BOTH arms, as before. This reads the condition, not the
+    statement, so no class or attribute name is named here.
+    """
+    unbuilt: set[int] = set()
+
+    def bury(stmts: list[ast.stmt]) -> None:
+        for stmt in stmts:
+            for node in ast.walk(stmt):
+                unbuilt.add(id(node))
+
+    settled = _self_config_values(func, config, param_values)
+    for node in ast.walk(func):
+        if not isinstance(node, ast.If):
+            continue
+        decided = _config_value(node.test, config, settled, param_values)
+        if not isinstance(decided, bool):
+            continue
+        bury(node.orelse if decided else node.body)
+    return unbuilt
+
+
+def _parse_init(
+    func: ast.FunctionDef,
+    *,
+    config: dict[str, Any] | None = None,
+    param_bindings: dict[str, str] | None = None,
+    param_values: dict[str, Any] | None = None,
+) -> tuple[
+    dict[str, str],
+    dict[str, list[str]],
+    dict[str, list[str]],
+    dict[str, tuple[str, str]],
+    dict[str, str],
+    frozenset[str],
+]:
+    assignments: dict[str, str] = {}
+    details: dict[str, list[str]] = {}
+    options: dict[str, list[str]] = {}
+    unresolved_activations: dict[str, tuple[str, str]] = {}
+    unresolved_dict_refs: dict[str, str] = {}
+
+    def record_assignment(attr: str, value: ast.AST) -> None:
+        class_names = _assignment_class_names(
+            value, config=config, param_bindings=param_bindings
+        )
+        if not class_names:
+            # A ``REGISTRY[key](...)`` constructor names no class statically; the
+            # concrete class is resolved later from the module-level dict literal.
+            registry = _dict_registry_constructor_name(value)
+            if registry is not None and attr not in assignments:
+                unresolved_dict_refs.setdefault(attr, registry)
+            return
+        # A registry lookup is the fallback arm of a config switch whose other arm
+        # constructs a real module (`SituAndMul` vs `ACT2FN[...]`), so it must not
+        # displace that module regardless of which arm the walk reaches last.
+        if attr in assignments and _activation_registry_class_name(
+            value, config, param_bindings
+        ):
+            return
+        attr_options = options.setdefault(attr, [])
+        for class_name in class_names:
+            if class_name not in attr_options:
+                attr_options.append(class_name)
+        assignments[attr] = class_names[0]
+        details[attr] = _assignment_details(value, class_names[0])
+        # Track a registry-selected key our curated display-name table does not
+        # recognize, so it can be chased to its real class after the fact instead
+        # of staying a permanently opaque, title-cased placeholder leaf. A later
+        # assignment to the same attr that resolves cleanly clears the tracking.
+        lookup = _activation_registry_lookup_for_assignment(
+            value, config, param_bindings
+        )
+        if lookup is not None and lookup[1] not in _ACTIVATION_DISPLAY_NAMES:
+            unresolved_activations[attr] = lookup
+        else:
+            unresolved_activations.pop(attr, None)
+
+    unbuilt = _unbuilt_init_statements(func, config or {}, param_values)
+
+    for node in ast.walk(func):
+        if id(node) in unbuilt:
+            continue
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Attribute) and _is_self_attr(
+                    target, target.attr
+                ):
+                    record_assignment(target.attr, node.value)
+        elif isinstance(node, ast.AnnAssign):
+            target = node.target
+            if (
+                isinstance(target, ast.Attribute)
+                and _is_self_attr(target, target.attr)
+                and node.value is not None
+            ):
+                record_assignment(target.attr, node.value)
+
+    # An attr assigned only inside a ruled-out branch is built by no instance.
+    # One also assigned in a live branch is built, so it is not listed.
+    unbuilt_attrs: set[str] = set()
+    for node in ast.walk(func):
+        if id(node) not in unbuilt:
+            continue
+        targets: list[ast.AST] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        for target in targets:
+            if (
+                isinstance(target, ast.Attribute)
+                and _is_self_attr(target, target.attr)
+                and target.attr not in assignments
+            ):
+                unbuilt_attrs.add(target.attr)
+
+    # A statically-resolved assignment to the same attr wins over a dict-registry
+    # placeholder (a later plain ``self.x = Foo()`` overriding a switch arm).
+    for attr in list(unresolved_dict_refs):
+        if attr in assignments:
+            unresolved_dict_refs.pop(attr, None)
+
+    return (
+        assignments,
+        details,
+        options,
+        unresolved_activations,
+        unresolved_dict_refs,
+        frozenset(unbuilt_attrs),
+    )
+
+
+def _subscript_index_operands(index: ast.AST) -> list[ast.AST]:
+    """Slice operands that could be *tensor* indices (advanced indexing).
+
+    Returns the per-axis operands of a subscript, dropping the ones that can never
+    be a tensor: ``Slice`` (``a:b``), ``Constant`` (ints, ``None``, ``...``), and
+    ``Starred``. A ``Tuple`` slice (``x[i, j]``) is unpacked to its axes. The caller
+    resolves each survivor through ``expression`` — only those bound to a traced
+    tensor become gather inputs; scalar names (``layer_idx``) resolve to nothing.
+    """
+    if isinstance(index, ast.Tuple):
+        operands = list(index.elts)
+    else:
+        operands = [index]
+    return [
+        operand
+        for operand in operands
+        if not isinstance(operand, (ast.Slice, ast.Constant, ast.Starred))
+    ]
+
+
+def _is_int_index(node: ast.AST) -> bool:
+    """True for a literal integer axis-index (``x[:, 0]`` or ``x[:, -1]``), not
+    ``None``/``...``/bool.
+
+    A negative literal parses as ``UnaryOp(USub, Constant(n))``, not a bare
+    ``Constant`` — unwrap that one level so ``x[..., -1]`` is recognised as an
+    integer select exactly like its positive-index sibling ``x[..., 1]``.
+    """
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        node = node.operand
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, int)
+        and not isinstance(node.value, bool)
+    )
+
+
+def _subscript_step_dims(index: ast.AST) -> list[tuple[int, int, int]]:
+    """Axes a *strided* range-slice (``x[..., 0::2]``) thins, as (axis, start, step).
+
+    Interleaved RoPE halves a tensor with ``x[..., 0::2]`` / ``x[..., 1::2]``.
+    ``_subscript_resize_dims`` deliberately skips any slice carrying a step, so
+    without this the axis passed through at full width and the following
+    ``stack``/``flatten`` pair reported twice the real interleave width.
+
+    Only a statically known step over an unbounded range is reported -- enough
+    for the interleave idiom -- and axes after an ``Ellipsis`` are numbered from
+    the end, matching the sibling helpers.
+    """
+    elts = index.elts if isinstance(index, ast.Tuple) else [index]
+    ellipsis_at = next(
+        (
+            pos
+            for pos, elt in enumerate(elts)
+            if isinstance(elt, ast.Constant) and elt.value is Ellipsis
+        ),
+        None,
+    )
+    steps: list[tuple[int, int, int]] = []
+    for pos, elt in enumerate(elts):
+        if not isinstance(elt, ast.Slice) or elt.step is None:
+            continue
+        if elt.upper is not None:
+            continue
+        step = elt.step.value if isinstance(elt.step, ast.Constant) else None
+        if not isinstance(step, int) or step <= 1:
+            continue
+        if elt.lower is None:
+            start = 0
+        elif isinstance(elt.lower, ast.Constant) and isinstance(elt.lower.value, int):
+            start = elt.lower.value
+        else:
+            continue
+        if start < 0:
+            continue
+        axis = pos if ellipsis_at is None or pos < ellipsis_at else pos - len(elts)
+        steps.append((axis, start, step))
+    return steps
+
+
+def _subscript_select_dims(index: ast.AST) -> list[int]:
+    """Axes an integer *select* drops from a multi-axis subscript (``x[:, c]``).
+
+    A single index alongside a range slice (``freq[:, 0]``) selects one position
+    and drops that axis — a genuine ``Slice`` op. A bare leading index (``x[0]``)
+    with no accompanying ``:``/``...`` carries no dropped axis and stays a
+    pass-through alias, so this returns ``[]`` for that. ``Ellipsis`` unambiguously
+    stands for "every preceding axis", so a bare trailing integer index after one
+    (``packed_states[..., -1]``) is just as much a genuine drop-that-axis select
+    as ``x[..., 0]`` even with no explicit ``:`` slice alongside it — the trailing
+    axes are numbered from the end so ``x[..., 0]``/``x[..., -1]`` both drop ``-1``.
+    """
+    elts = index.elts if isinstance(index, ast.Tuple) else [index]
+    if len(elts) < 2:
+        return []
+    ellipsis_at = next(
+        (
+            pos
+            for pos, elt in enumerate(elts)
+            if isinstance(elt, ast.Constant) and elt.value is Ellipsis
+        ),
+        None,
+    )
+    if ellipsis_at is None:
+        if not any(isinstance(elt, ast.Slice) for elt in elts):
+            return []
+        return [pos for pos, elt in enumerate(elts) if _is_int_index(elt)]
+    tail = elts[ellipsis_at + 1 :]
+    return [
+        -(len(tail) - offset) for offset, elt in enumerate(tail) if _is_int_index(elt)
+    ]
+
+
+# Methods that hand back the same tensor: a cast, a device move, a layout fix.
+# Anything else transforms the value, so the result is not the receiver and must
+# not be named for it (see ``_return_element_label``).
+_VALUE_PRESERVING_METHODS = frozenset(
+    {
+        "to",
+        "type",
+        "type_as",
+        "float",
+        "double",
+        "half",
+        "bfloat16",
+        "long",
+        "int",
+        "bool",
+        "contiguous",
+        "detach",
+        "clone",
+        "cpu",
+        "cuda",
+    }
+)
+
+
+def _subscript_select_indices(index: ast.AST) -> list[int]:
+    """The POSITIONS an integer select takes, parallel to ``_subscript_select_dims``.
+
+    ``grid[:, 2]`` drops axis 1 (what ``_subscript_select_dims`` reports) and reads
+    column 2 (what this reports). The column matters when the selects are what tell
+    us how wide the tensor is: a grid descriptor read as ``grid[:, 0]``, ``[:, 1]``,
+    ``[:, 2]`` has three columns, and nothing else in the graph says so.
+    """
+    elts = index.elts if isinstance(index, ast.Tuple) else [index]
+    if len(elts) < 2:
+        return []
+    values: list[int] = []
+    for elt in elts:
+        if not _is_int_index(elt):
+            continue
+        node = elt
+        sign = 1
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            node, sign = node.operand, -1
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            values.append(sign * node.value)
+    return values
+
+
+def _subscript_inserts_axis(index: ast.AST) -> bool:
+    """True when a subscript inserts a size-1 axis via ``None`` (``x[..., None]``)."""
+    elts = index.elts if isinstance(index, ast.Tuple) else [index]
+    return any(isinstance(elt, ast.Constant) and elt.value is None for elt in elts)
+
+
+def _none_insert_dims(index: ast.AST) -> tuple[int, ...]:
+    """Each axis at which a ``None`` inserts a size-1 dim, in the order applied.
+
+    ``x[..., None]`` appends (dim ``-1``); ``x[None]`` prepends (dim ``0``);
+    ``x[:, None]`` inserts at that position. A subscript may insert SEVERAL:
+    ``first_key[:, None, None]`` adds two axes, and resolving only the
+    single-``None`` case made that one a pass-through -- the tensor kept its old
+    rank, and the broadcast against it, the advanced index reading the result and
+    the concat at the end of the chain all inherited the missing axes.
+    Applying the axes in order is what torch does.
+    """
+    elts = index.elts if isinstance(index, ast.Tuple) else [index]
+    dims: list[int] = []
+    for pos, elt in enumerate(elts):
+        if not (isinstance(elt, ast.Constant) and elt.value is None):
+            continue
+        has_ellipsis_before = any(
+            isinstance(item, ast.Constant) and item.value is Ellipsis
+            for item in elts[:pos]
+        )
+        dims.append(-1 if has_ellipsis_before else pos)
+    return tuple(dims)
+
+
+def _is_inplace_method(name: str) -> bool:
+    """True for tensor in-place mutators (``copy_``, ``add_``, ``masked_fill_``…).
+
+    These end in a single trailing underscore; dunders and private helpers are
+    excluded so only genuine mutating tensor methods qualify.
+    """
+    return (
+        len(name) > 1
+        and name.endswith("_")
+        and not name.endswith("__")
+        and not name.startswith("_")
+    )
+
+
+def _subscript_root_name(expr: ast.AST) -> str | None:
+    """Root local tensor name of a (possibly nested) subscript, else ``None``.
+
+    ``key_states[..., :n]`` → ``"key_states"``; ``self.cache[i]`` (rooted at an
+    attribute, not a local) → ``None`` so only local tensors get rebound.
+    """
+    while isinstance(expr, ast.Subscript):
+        expr = expr.value
+    return expr.id if isinstance(expr, ast.Name) else None
+
+
+def _shape_read_base(value: ast.AST) -> str | None:
+    """Source-tensor expression of a ``<tensor>.shape`` / ``.shape[:k]`` read.
+
+    ``hidden_states.shape[:2]`` and ``hidden_states.shape`` both return
+    ``"hidden_states"``; anything that is not a shape read returns ``None``.
+    """
+    node = value
+    if isinstance(node, ast.Subscript):
+        node = node.value
+    if (
+        isinstance(node, ast.Attribute)
+        and node.attr == "shape"
+        and not _is_self_attr(node, node.attr)
+    ):
+        return ast.unparse(node.value)
+    return None
+
+
+def _single_shape_index_token(value: ast.AST) -> str | None:
+    """Positional-axis read bound to a scalar local, as a resolver token.
+
+    ``seq_length = hidden_states.shape[0]`` reads one axis into a plain name (not a
+    tuple unpack), so it escapes ``_shape_read_base``'s ``a, b = x.shape[:2]``
+    path. Returning ``"hidden_states.shape[0]"`` lets ``_render_shape_dim`` expand a
+    later ``reshape(seq_length, 3, self.num_heads, -1)`` into
+    ``hidden_states.shape[0], 3, 16, -1`` -- which the shape inferencer resolves by
+    copying the source's leading axis. Returns ``None`` unless *value* is exactly a
+    ``<tensor>.shape[<int>]`` read.
+    """
+    if not isinstance(value, ast.Subscript):
+        return None
+    base = value.value
+    if not (
+        isinstance(base, ast.Attribute)
+        and base.attr == "shape"
+        and not _is_self_attr(base, base.attr)
+    ):
+        return None
+    index = value.slice
+    if (
+        isinstance(index, ast.Constant)
+        and isinstance(index.value, int)
+        and not isinstance(index.value, bool)
+    ):
+        return f"{ast.unparse(base.value)}.shape[{index.value}]"
+    return None
+
+
+def _shape_slice_token(value: ast.AST) -> str | None:
+    """Leading-axes shape slice bound to a local, as a resolver-friendly token.
+
+    ``input_shape = hidden_states.shape[:-1]`` reads *several* leading axes into a
+    single name that is later spread with a star (``view(*input_shape, -1, D)`` or
+    inside ``hidden_shape = (*input_shape, -1, D)``). Returning
+    ``"hidden_states.shape[:-1]"`` lets the reshape-arg expander emit the starred
+    prefix ``*hidden_states.shape[:-1]``, which the shape inferencer resolves to
+    the source's leading dims. Returns ``None`` unless *value* is exactly a
+    ``<tensor>.shape[:<int>]`` slice with a static integer bound.
+    """
+    if not isinstance(value, ast.Subscript):
+        return None
+    base = value.value
+    # ``x.size()[:-1]`` is ``x.shape[:-1]`` written as a call -- GPT-2's `Conv1D`
+    # spells it that way -- so it names the same axes and renders the same token.
+    if _is_size_call(base) and isinstance(base, ast.Call):
+        owner = base.func.value if isinstance(base.func, ast.Attribute) else None
+        if owner is None or base.args:
+            return None
+        base = ast.Attribute(value=owner, attr="shape", ctx=ast.Load())
+    if not (
+        isinstance(base, ast.Attribute)
+        and base.attr == "shape"
+        and not _is_self_attr(base, base.attr)
+    ):
+        return None
+    sl = value.slice
+    if (
+        not isinstance(sl, ast.Slice)
+        or sl.lower is not None
+        or sl.step is not None
+        or sl.upper is None
+    ):
+        return None
+    upper_txt = ast.unparse(sl.upper)
+    if not re.fullmatch(r"-?\d+", upper_txt):
+        return None
+    return f"{ast.unparse(base.value)}.shape[:{upper_txt}]"
+
+
+def _inplace_label(method: str) -> str:
+    """Display label for an in-place mutator, reusing the out-of-place op's label."""
+    base = method[:-1]
+    return (
+        _TENSOR_METHOD_LABELS.get(base)
+        or _FUNCTION_LABELS.get(base)
+        or base.replace("_", " ").title()
+    )
+
+
+def _activation_registry_lookup(
+    node: ast.AST,
+    config: dict[str, Any] | None,
+    param_bindings: dict[str, str] | None = None,
+) -> tuple[str, str] | None:
+    """Return ``(registry_name, key)`` for an ``ACT2FN[key]``-style subscript.
+
+    Resolves the config/param-bound key to its lowercased string value but does
+    not judge whether that key is one of the curated display names -- callers
+    that only want the display name use :func:`_activation_registry_class_name`;
+    callers that need to chase an *unrecognized* key to its real class (see
+    ``_expand_unresolved_activation_classes``) use this directly.
+    """
+    if not isinstance(node, ast.Subscript):
+        return None
+    registry = (_expr_name(node.value) or "").rsplit(".", 1)[-1]
+    if registry not in _ACTIVATION_REGISTRY_NAMES:
+        return None
+    key = node.slice
+    name: object = None
+    if isinstance(key, ast.Constant):
+        name = key.value
+    elif isinstance(key, ast.Attribute):
+        name = (config or {}).get(key.attr)
+    elif isinstance(key, ast.Name):
+        # ``self.act_fn = ACT2FN[hidden_act]`` where ``hidden_act`` is a constructor
+        # parameter; the activation is only knowable from how the class is
+        # instantiated (e.g. ``Merger(hidden_act=config.hidden_act)``).
+        name = (param_bindings or {}).get(key.id)
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return registry, name.strip().lower()
+
+
+def _activation_registry_class_name(
+    node: ast.AST,
+    config: dict[str, Any] | None,
+    param_bindings: dict[str, str] | None = None,
+) -> str | None:
+    """Resolve an activation-registry lookup to the activation the config selects."""
+    resolved = _activation_registry_lookup(node, config, param_bindings)
+    if resolved is None:
+        return None
+    _registry, lowered = resolved
+    if lowered in _ACTIVATION_DISPLAY_NAMES:
+        return _ACTIVATION_DISPLAY_NAMES[lowered]
+    return lowered.replace("_", " ").title().replace(" ", "")
+
+
+def _activation_registry_lookup_for_assignment(
+    value: ast.AST,
+    config: dict[str, Any] | None,
+    param_bindings: dict[str, str] | None,
+) -> tuple[str, str] | None:
+    """Recover the activation-registry lookup behind an init assignment's value.
+
+    Mirrors just the shapes ``_assignment_class_names`` walks to reach a plain
+    ``ACT2FN[key]`` subscript (a direct assignment, or one arm of a config-switch
+    ``IfExp``/list of candidates) -- enough to let an unrecognized key be chased
+    to its real class after the fact, without re-implementing that whole walk.
+    """
+    if isinstance(value, ast.Subscript):
+        return _activation_registry_lookup(value, config, param_bindings)
+    if isinstance(value, ast.IfExp):
+        return _activation_registry_lookup_for_assignment(
+            value.body, config, param_bindings
+        ) or _activation_registry_lookup_for_assignment(
+            value.orelse, config, param_bindings
+        )
+    if isinstance(value, (ast.List, ast.Tuple)):
+        for item in value.elts:
+            found = _activation_registry_lookup_for_assignment(
+                item, config, param_bindings
+            )
+            if found is not None:
+                return found
+    return None
+
+
+def _settled_ctor_defaults(
+    tree: ast.AST, config: dict[str, Any] | None = None
+) -> dict[str, dict[str, Any]]:
+    """``{class: {param: value}}`` for constructor parameters nobody overrides.
+
+    A parameter's default is NOT its value in general -- any caller may pass
+    something else, which is why inferring one was previously refused. But when
+    every construction site in the model leaves a parameter out, the default is
+    what the model builds with, and that is evidence rather than a guess.
+
+    GPT-2 turns on a whole arm of its attention this way::
+
+        def __init__(self, config, is_cross_attention=False, layer_idx=None):
+            ...
+            if self.is_cross_attention:
+                self.c_attn = Conv1D(2 * self.embed_dim, self.embed_dim)
+                self.q_attn = Conv1D(self.embed_dim, self.embed_dim)
+            else:
+                self.c_attn = Conv1D(3 * self.embed_dim, self.embed_dim)
+
+    Once the block stops building a cross-attention module, the only remaining
+    construction passes no ``is_cross_attention`` -- so the arm drawn was one
+    the model cannot reach, and it took the 2x-wide projection with it, which
+    is how a 12-head attention came to report 36 heads.
+
+    Only literal defaults, and only for classes actually constructed: a class
+    nobody builds says nothing about what it would be built with.
+    """
+    declared: dict[str, dict[str, Any]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        init_func = _class_init_method(node)
+        if init_func is None:
+            continue
+        names = [arg.arg for arg in init_func.args.args][1:]
+        defaults = init_func.args.defaults
+        padding = len(names) - len(defaults)
+        settled: dict[str, Any] = {}
+        for index, name in enumerate(names):
+            if index < padding:
+                continue
+            try:
+                settled[name] = ast.literal_eval(defaults[index - padding])
+            except (ValueError, TypeError, SyntaxError):
+                continue
+        if settled:
+            declared[node.name] = (settled, names)
+
+    built: set[str] = set()
+    overridden: dict[str, set[str]] = {}
+    # A construction inside a branch the config rules out is not a construction.
+    # GPT-2 passes `is_cross_attention=True` exactly once, from the arm that
+    # builds the cross-attention module -- the arm its checkpoint switches off.
+    # Counting it would make the parameter look overridden by a call that never
+    # runs, which is the whole question being asked.
+    unreachable: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__":
+            unreachable |= _unbuilt_init_statements(node, config or {})
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call) or id(call) in unreachable:
+            continue
+        class_name = _call_class_name(call)
+        if not class_name or class_name not in declared:
+            continue
+        built.add(class_name)
+        _, names = declared[class_name]
+        passed = overridden.setdefault(class_name, set())
+        passed.update(names[: len(call.args)])
+        passed.update(kw.arg for kw in call.keywords if kw.arg)
+
+    return {
+        class_name: {
+            param: value
+            for param, value in declared[class_name][0].items()
+            if param not in overridden.get(class_name, set())
+        }
+        for class_name in built
+    }
+
+
+def _collect_activation_param_bindings(
+    tree: ast.AST, config: dict[str, Any] | None
+) -> dict[str, dict[str, str]]:
+    """Map ``{class_name: {ctor_param: activation_key}}`` from instantiation sites.
+
+    A submodule may select its activation from a constructor parameter, e.g.
+    ``self.act_fn = ACT2FN[hidden_act]``. The activation is only knowable from how
+    the class is *instantiated* — ``Merger(hidden_act=config.hidden_act)`` in some
+    parent's ``__init__`` — and that site is often a different (later) class. This
+    pre-pass walks every ``__init__`` and records, for each submodule constructed
+    there, the config-resolved value of each keyword argument that names an
+    activation, keyed by the submodule's parameter name.
+    """
+    config = dict(config or {})
+    # Vision submodules resolve their config args against ``vision_config``; fall
+    # back to it so ``hidden_act=config.hidden_act`` resolves even when the value
+    # only lives in the nested sub-config.
+    sub_config = config.get("vision_config")
+    fallbacks = [config]
+    if isinstance(sub_config, dict):
+        fallbacks.append(sub_config)
+    bindings: dict[str, dict[str, str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        init_func = _class_init_method(node)
+        if init_func is None:
+            continue
+        for call in ast.walk(init_func):
+            if not isinstance(call, ast.Call):
+                continue
+            class_name = _call_class_name(call)
+            if not class_name:
+                continue
+            for keyword in call.keywords:
+                if keyword.arg is None:
+                    continue
+                resolved: Any = _UNKNOWN
+                for cfg in fallbacks:
+                    resolved = _config_value(keyword.value, cfg, {})
+                    if resolved is not _UNKNOWN:
+                        break
+                if isinstance(resolved, str) and resolved.strip():
+                    bindings.setdefault(class_name, {})[keyword.arg] = resolved
+    return bindings
+
+
+def _assignment_class_names(
+    node: ast.AST,
+    *,
+    config: dict[str, Any] | None = None,
+    param_bindings: dict[str, str] | None = None,
+) -> list[str]:
+    """Return every constructible module class represented by an assignment."""
+    if isinstance(node, ast.IfExp):
+        names = _assignment_class_names(
+            node.body, config=config, param_bindings=param_bindings
+        ) + _assignment_class_names(
+            node.orelse, config=config, param_bindings=param_bindings
+        )
+        return list(dict.fromkeys(names))
+    if isinstance(node, ast.ListComp):
+        return _assignment_class_names(
+            node.elt, config=config, param_bindings=param_bindings
+        )
+    if isinstance(node, ast.Subscript):
+        activation = _activation_registry_class_name(node, config, param_bindings)
+        return [activation] if activation else []
+    if isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Name) and node.func.id == "getattr":
+            return []
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "Parameter":
+            return []
+        if isinstance(node.func, (ast.Name, ast.Attribute)) and _expr_name(
+            node.func
+        ) in {
+            "ModuleList",
+            "nn.ModuleList",
+            "torch.nn.ModuleList",
+        }:
+            if node.args:
+                return _assignment_class_names(
+                    node.args[0], config=config, param_bindings=param_bindings
+                )
+            return []
+        class_name = _call_class_name(node)
+        if class_name in _SKIP_INIT_CLASS_NAMES:
+            return []
+        return [class_name] if class_name else []
+    if isinstance(node, (ast.List, ast.Tuple)):
+        names: list[str] = []
+        for item in node.elts:
+            names.extend(
+                _assignment_class_names(
+                    item, config=config, param_bindings=param_bindings
+                )
+            )
+        return list(dict.fromkeys(names))
+    return []
+
+
+def _assignment_class_name(
+    node: ast.AST,
+    *,
+    config: dict[str, Any] | None = None,
+) -> str | None:
+    """Return the preferred module class for backwards-compatible callers."""
+    names = _assignment_class_names(node, config=config)
+    if names:
+        return names[0]
+    return None
+
+
+def _assignment_details(node: ast.AST, class_name: str) -> list[str]:
+    details: list[str] = []
+    if not isinstance(node, ast.Call):
+        return details
+
+    for keyword in node.keywords:
+        if keyword.arg in {"num_experts", "top_k", "num_experts_per_tok"}:
+            value = (
+                ast.literal_eval(keyword.value) if _is_literal(keyword.value) else None
+            )
+            if value is not None:
+                details.append(f"{keyword.arg}={value}")
+        if keyword.arg == "activation" and _is_literal(keyword.value):
+            raw = ast.literal_eval(keyword.value)
+            if isinstance(raw, str) and raw.strip():
+                # A gate activation selected by a constructor kwarg
+                # (``FusedRMSNormGated(..., activation='sigmoid')``). Tag it so a
+                # consumer recovers the resolved name structurally, without
+                # re-matching the detail text against an activation name set.
+                details.append(
+                    f"{GATE_ACTIVATION_DETAIL_PREFIX}{_display_activation_name(raw)}"
+                )
+
+    if re.search(r"SharedExpert|shared", class_name, re.I):
+        details.append("shared expert path")
+    return details
+
+
+def _is_literal(node: ast.AST) -> bool:
+    try:
+        ast.literal_eval(node)
+        return True
+    except Exception:
+        return False
+
+
+def _dedupe_chain(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def _chains_from_expr(
+    value: ast.AST, var_chains: dict[str, list[str]]
+) -> list[list[str]]:
+    """Collect provenance chains from variable references inside an expression."""
+    chains: list[list[str]] = []
+    if isinstance(value, ast.Name):
+        chain = var_chains.get(value.id, [])
+        if chain:
+            chains.append(list(chain))
+    elif isinstance(value, ast.Call):
+        for arg in value.args:
+            chains.extend(_chains_from_expr(arg, var_chains))
+        for keyword in value.keywords:
+            chains.extend(_chains_from_expr(keyword.value, var_chains))
+        if isinstance(value.func, ast.Attribute):
+            chains.extend(_chains_from_expr(value.func.value, var_chains))
+    elif isinstance(value, (ast.Tuple, ast.List)):
+        for elt in value.elts:
+            chains.extend(_chains_from_expr(elt, var_chains))
+    elif isinstance(value, ast.BinOp):
+        chains.extend(_chains_from_expr(value.left, var_chains))
+        chains.extend(_chains_from_expr(value.right, var_chains))
+    return chains
+
+
+def _merge_chains_from_value(
+    value: ast.AST,
+    var_chains: dict[str, list[str]],
+    stmt_calls: list[str],
+) -> list[str]:
+    """Merge input-variable provenance with self-module calls from an assignment."""
+    merged: list[str] = []
+    for chain in _chains_from_expr(value, var_chains):
+        merged.extend(chain)
+    merged = _dedupe_chain(merged)
+    for call in stmt_calls:
+        if call not in merged:
+            merged.append(call)
+    if merged:
+        return merged
+    if stmt_calls:
+        return list(stmt_calls)
+    if isinstance(value, ast.Name):
+        return list(var_chains.get(value.id, []))
+    return []
+
+
+def _trace_var_chain(
+    value: ast.AST,
+    var_chains: dict[str, list[str]],
+    stmt_calls: list[str],
+) -> list[str]:
+    return _merge_chains_from_value(value, var_chains, stmt_calls)
+
+
+def _tuple_source_names(value: ast.AST) -> list[str] | None:
+    """Names of inputs when a tuple assignment maps 1:1 over an input tuple."""
+    if (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id == "map"
+    ):
+        if len(value.args) < 2 or not isinstance(value.args[1], (ast.Tuple, ast.List)):
+            return None
+        names: list[str] = []
+        for elt in value.args[1].elts:
+            if isinstance(elt, ast.Name):
+                names.append(elt.id)
+            else:
+                return None
+        return names
+    if isinstance(value, (ast.Tuple, ast.List)):
+        names = []
+        for elt in value.elts:
+            if isinstance(elt, ast.Name):
+                names.append(elt.id)
+            else:
+                return None
+        return names
+    return None
+
+
+def _submodule_rooted_trailing_ops(value: ast.AST, chain: list[str]) -> list[str]:
+    """Synthetic op attrs for the trailing inline tensor-method chain of an assignment,
+    but only when that chain wraps the submodule call the provenance chain already ends on.
+
+    A variable produced by ``self.q_b_proj(q_resid).view(shape).transpose(1, 2)`` really
+    ends at the ``transpose`` op, but the submodule-call provenance chain stops at
+    ``q_b_proj`` and drops the ``.view().transpose()`` -- so a consumer that docks on the
+    chain's last node (the attention kernel reading ``query_states``) attaches to the
+    pre-view projection (3-D ``[B, S, H*D]``) instead of the real 4-D ``[B, H, S, D]``
+    result. Walk the outer method-call chain and rebuild the same
+    ``@op_l{line}_c{col}_{slug}`` ids the forward extractor stamps (``_operation_id``), so
+    the provenance chain can be extended to the true final producer.
+
+    Structural guard: the peeled inner base must be a ``self.<submodule>(...)`` call whose
+    attribute is already the tail of ``chain``. This ties the trailing ops to the *same*
+    value the chain represents (the ``x = self.proj(...).view().transpose()`` shape),
+    and excludes a later separate statement that re-derives the variable from a bare name
+    (e.g. vision's ``query_states = query_states.transpose(0, 1).unsqueeze(0)``, whose
+    peeled base is a ``Name`` -- its ports reach the kernel by a declared-input route that
+    must not be perturbed). Keyed on the extractor's own emitted-op table
+    (``_TENSOR_METHOD_LABELS``), not a fix-specific op allow-list. Returned in application
+    order (innermost first); ids for ops the extractor suppressed never match
+    ``attr_last_index`` at docking time and are simply skipped.
+    """
+    if not chain:
+        return []
+    collected: list[str] = []
+    node = value
+    while (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _TENSOR_METHOD_LABELS
+        and not _is_self_attr(node.func, node.func.attr)
+    ):
+        label = _TENSOR_METHOD_LABELS[node.func.attr]
+        slug = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+        line = getattr(node, "lineno", 0)
+        col = getattr(node, "col_offset", 0)
+        collected.append(f"{FORWARD_OPERATION_PREFIX}l{line}_c{col}_{slug}")
+        node = node.func.value
+    if not collected:
+        return []
+    # The peeled base must be the submodule call the chain already terminates on.
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and _is_self_attr(node.func, node.func.attr)
+        and node.func.attr in chain
+    ):
+        return []
+    collected.reverse()
+    return collected
+
+
+def _record_assign_targets(
+    node: ast.Assign,
+    stmt_calls: list[str],
+    var_chains: dict[str, list[str]],
+) -> None:
+    chain = _merge_chains_from_value(node.value, var_chains, stmt_calls)
+
+    def assign_one(target: ast.AST, provenance: list[str]) -> None:
+        if not isinstance(target, ast.Name):
+            return
+        if provenance:
+            var_chains[target.id] = list(provenance)
+        elif isinstance(node.value, ast.Name):
+            var_chains[target.id] = list(var_chains.get(node.value.id, []))
+
+    target = node.targets[0]
+    if isinstance(target, ast.Tuple):
+        source_names = _tuple_source_names(node.value)
+        # ``q, k = map(lambda x: rearrange(x, ...), (q, k))`` applies the SAME
+        # lambda body once per element; that body's call becomes its own node
+        # (``_expand_map_lambda_tuple``/``_call_step_producer``), so each
+        # element's true provenance chain ends at THAT step, not at its
+        # pre-map source. ``stmt_calls`` cannot see it (built by
+        # ``_extract_self_calls_ordered``, which never descends into a lambda
+        # body), so resolve it directly from the expanded per-element clones.
+        # Only set (and only aligned with ``source_names``) when *node.value*
+        # is actually this map idiom -- ``_expand_map_lambda_tuple`` returns
+        # any other value unchanged.
+        expanded = _expand_map_lambda_tuple(node.value)
+        expanded_elements = (
+            expanded.elts
+            if isinstance(expanded, ast.Tuple) and expanded is not node.value
+            else None
+        )
+        if source_names is not None and len(source_names) == len(target.elts):
+            zipped = True
+            for index, (elt, source_name) in enumerate(zip(target.elts, source_names)):
+                if not isinstance(elt, ast.Name):
+                    zipped = False
+                    break
+                source_chain = list(var_chains.get(source_name, []))
+                if expanded_elements is not None:
+                    # ``stmt_calls`` is built from the WHOLE expanded tuple (every
+                    # clone's calls flattened into one shared list), so blanket
+                    # -appending it here would cross-contaminate each element's
+                    # chain with its sibling's own clone call (``q``'s chain
+                    # picking up ``k``'s discriminated rearrange id, and vice
+                    # versa). Extract only this element's own clone subtree's
+                    # calls instead -- each clone is keyed on its own stamped
+                    # discriminator, so this stays distinct per element even when
+                    # the lambda body itself nests more than one call.
+                    own_calls: list[str] = []
+                    _extract_self_calls_ordered(expanded_elements[index], own_calls)
+                    for call in own_calls:
+                        if call not in source_chain:
+                            source_chain.append(call)
+                else:
+                    for call in stmt_calls:
+                        if call not in source_chain:
+                            source_chain.append(call)
+                assign_one(elt, source_chain or list(stmt_calls))
+            if zipped:
+                return
+        for elt in target.elts:
+            assign_one(elt, chain)
+        return
+    assign_one(target, chain)
+
+
+_KERNEL_PRODUCER_SKIP_KWARGS = frozenset(
+    {
+        "initial_state",
+        "recurrent_state",
+        "A_log",
+        "dt_bias",
+        "cu_seqlens",
+        "cache",
+        "output_final_state",
+        "use_qk_l2norm_in_kernel",
+        "use_gate_in_kernel",
+        "use_beta_sigmoid_in_kernel",
+        "safe_gate",
+        "lower_bound",
+        "transpose_state_layout",
+        "attention_mask",
+        "position_ids",
+        "past_key_values",
+        "cache_params",
+    }
+)
+
+
+def _is_data_movement_call(func: ast.AST) -> bool:
+    name = _expr_name(func)
+    if not name:
+        return False
+    base = name.split(".")[-1]
+    return base in _DATA_MOVEMENT_NAMES
+
+
+def _is_kernel_merge_call(func: ast.AST) -> bool:
+    if _is_data_movement_call(func):
+        return False
+    if (
+        isinstance(func, ast.Attribute)
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "self"
+    ):
+        return False
+    if _is_functional_linear_call(func):
+        return False
+    name = _expr_name(func) or ""
+    base = name.split(".")[-1]
+    if base in _SYNTHETIC_ATTENTION_NAMES:
+        return True
+    if _KERNEL_MERGE_HELPER_RE.search(base):
+        return False
+    return bool(_KERNEL_MERGE_NAME_RE.search(base))
+
+
+def _collect_kernel_producers(
+    call: ast.Call,
+    var_chains: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    producers: dict[str, list[str]] = {}
+
+    def consider(label: str, arg: ast.AST) -> None:
+        if not isinstance(arg, ast.Name):
+            return
+        chain = var_chains.get(arg.id, [])
+        if chain:
+            producers[label] = list(chain)
+
+    # Collect in CALL-ARGUMENT order: positional args first, then keywords.
+    # This order is the one the kernel's inputs are physically wired in (the
+    # merged-graph predecessor pass links producers in call order), so the
+    # declared ``inputs:`` list must match it — otherwise the positional
+    # port-matcher scrambles labels whenever a kernel mixes positional tensors
+    # with keyword tensors (e.g. ``kernel(query, key, value, g=g, beta=beta)``
+    # would declare ``g,beta,query,key,value`` and mislabel every port).
+    args = call.args
+    start = 1 if args and isinstance(args[0], ast.Name) and args[0].id == "self" else 0
+    for index, arg in enumerate(args[start:], start=start):
+        if isinstance(arg, ast.Name):
+            consider(arg.id, arg)
+        else:
+            consider(f"in{index - start}", arg)
+
+    for keyword in call.keywords:
+        if keyword.arg in _KERNEL_PRODUCER_SKIP_KWARGS:
+            continue
+        if isinstance(keyword.value, ast.Attribute):
+            continue
+        if keyword.arg:
+            consider(keyword.arg, keyword.value)
+
+    return producers
+
+
+_KERNEL_DETAIL_SKIP_KWARGS = frozenset(
+    {
+        "initial_state",
+        "recurrent_state",
+        "output_final_state",
+        "cu_seqlens",
+        "cu_seqlens_cpu",
+        "cache",
+        "attention_mask",
+        "position_ids",
+        "past_key_values",
+        "cache_params",
+        "cp_context",
+        "chunk_indices",
+        "return_intermediate_states",
+        "disable_recompute",
+        "scale",
+        "chunk_size",
+        "state_v_first",
+    }
+)
+
+
+def _collect_external_imports(tree: ast.AST) -> dict[str, str]:
+    """Collect top-level imported names from a modeling module (including guarded imports)."""
+    bindings: dict[str, str] = {}
+
+    def register(name: str, module: str, symbol: str) -> None:
+        bindings[name] = f"{module}#{symbol}" if module else symbol
+
+    def walk_stmts(stmts: list[ast.stmt]) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, ast.ImportFrom):
+                module = stmt.module or ""
+                for alias in stmt.names:
+                    if alias.name == "*":
+                        continue
+                    register(alias.asname or alias.name, module, alias.name)
+            elif isinstance(stmt, ast.Import):
+                for alias in stmt.names:
+                    name = alias.asname or alias.name
+                    register(name, alias.name, alias.name)
+            elif isinstance(stmt, ast.Try):
+                walk_stmts(stmt.body)
+                for handler in stmt.handlers:
+                    walk_stmts(handler.body)
+                walk_stmts(stmt.orelse)
+                walk_stmts(stmt.finalbody)
+
+    if isinstance(tree, ast.Module):
+        walk_stmts(tree.body)
+    return bindings
+
+
+def _enrich_kernel_import_details(
+    classes: dict[str, ClassStructure],
+    imports: dict[str, str],
+) -> None:
+    """Attach ``import:`` metadata to synthetic attention steps from modeling imports."""
+    for cls in classes.values():
+        details = cls.forward_step_details.get(SYNTHETIC_ATTENTION)
+        if not details:
+            continue
+        if any(line.startswith("import:") for line in details):
+            continue
+        kernel = kernel_name_from_step_details(details)
+        if not kernel:
+            continue
+        import_ref = imports.get(kernel)
+        if import_ref:
+            cls.forward_step_details[SYNTHETIC_ATTENTION] = [
+                *details,
+                f"import: {import_ref}",
+            ]
+
+
+def _resolve_flash_predicate(
+    test: ast.expr, config: dict[str, Any] | None
+) -> bool | None:
+    """Evaluate ``is_flash_attention_requested(config)`` from the checkpoint.
+
+    Module-level twin of ``_ForwardOperationExtractor._resolve_flash_request_predicate``
+    so passes that only hold a ``config`` dict (not the extractor) can resolve the
+    same predicate. Returns the boolean the predicate evaluates to, or ``None`` when
+    *test* is not one of these flash-request predicates. General: keys off the shared
+    transformers predicate name, not any model.
+    """
+    node = test
+    negate = False
+    while isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        negate = not negate
+        node = node.operand
+    if not isinstance(node, ast.Call):
+        return None
+    if _expr_name(node.func) not in _FLASH_REQUEST_PREDICATES:
+        return None
+    is_flash = resolved_attn_implementation(config) in _FLASH_IMPL_NAMES
+    return (not is_flash) if negate else is_flash
+
+
+def _split_resolved_dropped_stmts(
+    stmts: list[ast.stmt], config: dict[str, Any] | None
+) -> tuple[list[ast.stmt], list[ast.stmt]]:
+    """Partition forward statements into the ones that run and the ones dropped.
+
+    Resolves ``if is_flash_attention_requested(config):`` branches from the
+    checkpoint (undecidable branches are conservatively treated as *resolved*, so
+    nothing there is ever mislabelled dead). Only these flash-request predicates
+    are resolved; every other ``If`` keeps both arms as resolved.
+    """
+    resolved: list[ast.stmt] = []
+    dropped: list[ast.stmt] = []
+
+    def walk(body: list[ast.stmt]) -> None:
+        for stmt in body:
+            if isinstance(stmt, ast.If):
+                verdict = _resolve_flash_predicate(stmt.test, config)
+                if verdict is None:
+                    walk(stmt.body)
+                    walk(stmt.orelse)
+                    continue
+                taken = stmt.body if verdict else stmt.orelse
+                untaken = stmt.orelse if verdict else stmt.body
+                dropped.extend(untaken)
+                walk(taken)
+            else:
+                resolved.append(stmt)
+
+    walk(stmts)
+    return resolved, dropped
+
+
+def _loaded_names(stmts: list[ast.stmt]) -> set[str]:
+    names: set[str] = set()
+    for stmt in stmts:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                names.add(node.id)
+    return names
+
+
+def _forward_func_of(cls_node: ast.ClassDef) -> ast.FunctionDef | None:
+    return next(
+        (
+            item
+            for item in cls_node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+
+
+def _flag_unused_interface_inputs(
+    classes: dict[str, ClassStructure],
+    config: dict[str, Any] | None,
+) -> None:
+    """Flag interface inputs a module declares but its selected impl never reads.
+
+    A dispatched-attention module takes packed-attention metadata by keyword
+    (``cu_seqlens``, ``max_seqlen``) that only the flash code path consumes; the
+    default sdpa/eager path ignores some of it. Once ``is_flash_attention_requested``
+    resolves to the non-flash branch, such a parameter is a genuine part of the
+    module's *interface* yet dead in *this* implementation. Rather than fabricate a
+    live data edge for it, drop it from the wired kernel inputs and record it as an
+    ``unused_interface_inputs`` detail so the graph stays honest about the interface.
+
+    General: keys off forward-signature params referenced only in dropped branches,
+    for any config-dispatched attention module — no model or parameter names baked in.
+    """
+    for cls in classes.values():
+        details = cls.forward_step_details.get(SYNTHETIC_ATTENTION)
+        if not details:
+            continue
+        forward = _forward_func_of(cls.node)
+        if forward is None:
+            continue
+        resolved_stmts, dropped_stmts = _split_resolved_dropped_stmts(
+            forward.body, config
+        )
+        if not dropped_stmts:
+            continue
+        interface = _forward_input_names(forward)
+        referenced_resolved = _loaded_names(resolved_stmts)
+        referenced_dropped = _loaded_names(dropped_stmts)
+        dead = sorted(
+            name
+            for name in interface
+            if name in referenced_dropped and name not in referenced_resolved
+        )
+        if not dead:
+            continue
+        for name in dead:
+            cls.attention_inputs.pop(name, None)
+        cls.forward_step_details[SYNTHETIC_ATTENTION] = [
+            *details,
+            f"unused_interface_inputs: {','.join(dead)}",
+        ]
+
+
+def _callee_surface_boundary_params(callee: ClassStructure) -> tuple[str, ...]:
+    """Boundary-param names the callee reads at *its own* top level.
+
+    A param a class only passes further down to another submodule
+    (``compressor``'s ``position_ids``) is threaded by that submodule's own
+    boundary handling and never surfaces as a top-level ``@input`` tile; a param
+    an inline/synthetic step reads directly (a rotary helper's
+    ``position_embeddings``, the attention kernel's ``attention_mask``) does. Only
+    the latter need hoisting when a parent forwards them through ``**kwargs``, so
+    keep boundary params attached to steps that are *not* submodule calls.
+    """
+    surface: list[str] = []
+    for step, params in callee.forward_step_boundary_params.items():
+        if base_submodule_attr(step) in callee.init_assignments:
+            continue
+        for name in params:
+            if name not in surface:
+                surface.append(name)
+    return tuple(surface)
+
+
+def _forward_kwargs_boundary_params(classes: dict[str, ClassStructure]) -> None:
+    """Thread a child's boundary inputs that reach it through forwarded ``**kwargs``.
+
+    A module can hand its variadic ``**kwargs`` straight to a child
+    (``self.self_attn(self.input_layernorm(x), **kwargs)``); the child names
+    ``position_embeddings``/``attention_mask`` explicitly and consumes them as its
+    own boundary inputs, but the intermediate module lists neither in its
+    signature, so nothing at the intermediate scope feeds the child's ``@input``
+    tiles and they render sourceless. For every forward that forwards its
+    ``**kwargs`` into a submodule call, add that child's own top-level
+    boundary-param names to this module's ``forward_step_boundary_params`` for the
+    step, so the enclosing caller -- which does supply them by keyword -- reaches
+    the child through the normal boundary-threading machinery. General: keyed on
+    the presence of ``**kwargs`` forwarding and the child's declared params, no
+    model or parameter names baked in.
+    """
+    for cls in classes.values():
+        forward = _forward_func_of(cls.node)
+        if forward is None or forward.args.kwarg is None:
+            continue
+        kwargs_name = forward.args.kwarg.arg
+        boundary_keys = set(cls.forward_step_boundary_params) | set(
+            cls.forward_step_predecessors
+        )
+        for call in ast.walk(forward):
+            if not isinstance(call, ast.Call):
+                continue
+            if not (
+                isinstance(call.func, ast.Attribute)
+                and _is_self_attr(call.func, call.func.attr)
+            ):
+                continue
+            if not any(
+                kw.arg is None
+                and isinstance(kw.value, ast.Name)
+                and kw.value.id == kwargs_name
+                for kw in call.keywords
+            ):
+                continue
+            attr = base_submodule_attr(call.func.attr)
+            callee = classes.get(cls.init_assignments.get(attr, ""))
+            if callee is None:
+                continue
+            surface = _callee_surface_boundary_params(callee)
+            if not surface:
+                continue
+            # A param already satisfied by an explicit positional/keyword argument
+            # at the call site is bound there, not forwarded through ``**kwargs``.
+            callee_forward = _forward_func_of(callee.node)
+            ordered = (
+                _ordered_forward_params(callee_forward)
+                if callee_forward is not None
+                else []
+            )
+            bound = {
+                ordered[idx] for idx in range(len(call.args)) if idx < len(ordered)
+            }
+            bound.update(kw.arg for kw in call.keywords if kw.arg)
+            forwarded = [name for name in surface if name not in bound]
+            if not forwarded:
+                continue
+            # The step key the boundary machinery reads matches the call-site attr
+            # (``@l{lineno}``-suffixed for a repeated child); fall back to the plain
+            # attr when the step recorded no suffix.
+            key = next(
+                (k for k in boundary_keys if base_submodule_attr(k) == attr),
+                attr,
+            )
+            existing = tuple(cls.forward_step_boundary_params.get(key, ()))
+            cls.forward_step_boundary_params[key] = existing + tuple(
+                name for name in forwarded if name not in existing
+            )
+
+
+def _ordered_forward_params(func: ast.FunctionDef) -> list[str]:
+    """Positional forward parameter names in order, excluding ``self``."""
+    return [
+        arg.arg for arg in func.args.posonlyargs + func.args.args if arg.arg != "self"
+    ]
+
+
+def _max_real_return_arity(func: ast.FunctionDef) -> int | None:
+    """Count the real (non-``None``) tensor slots the function returns.
+
+    Reads every ``return`` statement's value: a tuple contributes one per element
+    that is not the literal ``None`` (a ``None`` slot is a placeholder the caller
+    unpacks but never uses as a tensor), a bare expression contributes one. The
+    max across returns is the number of tensor outputs the function can hand back.
+    Returns ``None`` when the function has no value-bearing ``return``.
+    """
+    best: int | None = None
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Return) or node.value is None:
+            continue
+        value = node.value
+        if isinstance(value, ast.Tuple):
+            count = sum(
+                0 if (isinstance(elt, ast.Constant) and elt.value is None) else 1
+                for elt in value.elts
+            )
+        else:
+            count = 1
+        best = count if best is None else max(best, count)
+    return best
+
+
+def _attention_wrapper_candidates(
+    kernel: str, config: dict[str, Any] | None
+) -> list[tuple[str, str]]:
+    """(module, function) sites the resolved kernel's wrapper could be defined in.
+
+    ``ALL_ATTENTION_FUNCTIONS`` is the runtime registry transformers dispatches a
+    named implementation (``"sdpa"``, ``"flash_attention_2"``, …) through, so its
+    entry's ``__module__``/``__name__`` point at the exact wrapper the model runs —
+    introspected, never hardcoded. ``"eager"`` is special-cased by transformers and
+    is not in the registry; it runs the analysed modeling file's own
+    ``eager_attention_forward``, so fall back to the base module by the same
+    ``<kernel>_attention_forward`` naming the library uses.
+    """
+    candidates: list[tuple[str, str]] = []
+    try:
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        fn = ALL_ATTENTION_FUNCTIONS[kernel]
+    except Exception:
+        fn = None
+    if fn is not None:
+        module = getattr(fn, "__module__", None)
+        name = getattr(fn, "__name__", None)
+        if module and name:
+            candidates.append((module, name))
+    base = _analyzed_base_module(config)
+    if base:
+        for name in (kernel, f"{kernel}_attention_forward"):
+            candidates.append((base, name))
+    return candidates
+
+
+def _resolve_attention_wrapper_source(
+    kernel: str,
+    config: dict[str, Any] | None,
+    resolver: "_HostSourceResolver",
+) -> tuple[str, str, ast.FunctionDef] | None:
+    """Locate the resolved kernel's wrapper as ``(module, name, func)`` from source.
+
+    Walks the registry/config-derived candidate sites (never a per-kernel table)
+    and returns the first whose module loads and defines the named wrapper, so a
+    single resolution feeds both the return-arity read and the ``wrapper_expand:``
+    location the graph stamps for subtree expansion. ``None`` when no wrapper source
+    can be located.
+    """
+    for module, name in _attention_wrapper_candidates(kernel, config):
+        loaded = resolver._load(module)
+        if loaded is None:
+            continue
+        func = loaded[0].get(name)
+        if func is None:
+            continue
+        return module, name, func
+    return None
+
+
+def _attention_kernel_return_arity(
+    kernel: str,
+    config: dict[str, Any] | None,
+    resolver: "_HostSourceResolver",
+) -> int | None:
+    """Real tensor-return count of the resolved attention wrapper, from source AST.
+
+    The dispatched interface (``attention_interface(...)``) resolves to a wrapper
+    whose return arity is kernel-specific: SDPA's ``sdpa_attention_forward`` returns
+    ``(attn_output, None)`` — one real tensor — while the model's own
+    ``eager_attention_forward`` returns ``(attn_output, attn_weights)`` — two. We
+    read that wrapper's ``return`` from source (never executing it) so the graph
+    advertises exactly the tensor outputs the kernel actually produces, dropping a
+    slot the wrapper fills with ``None``. General: the count comes from whatever
+    wrapper the registry/config selects, with no per-kernel table.
+
+    Returns ``None`` when no wrapper source can be located (arity left unknown).
+    """
+    resolved = _resolve_attention_wrapper_source(kernel, config, resolver)
+    if resolved is None:
+        return None
+    return _max_real_return_arity(resolved[2])
+
+
+def _resolve_dispatched_attention_kernel(
+    classes: dict[str, ClassStructure],
+    config: dict[str, Any] | None,
+) -> None:
+    """Name the kernel a dispatched attention call runs, from the checkpoint config.
+
+    A forward that calls ``ALL_ATTENTION_FUNCTIONS[config._attn_implementation]``
+    through a local variable leaves the AST with nothing but the variable's name.
+    The checkpoint says which implementation that variable resolves to.
+
+    When the checkpoint leaves ``_attn_implementation`` unset we resolve it to
+    ``"sdpa"`` — the transformers default when nothing is configured — so a
+    dispatched-attention step still names the kernel that actually runs instead
+    of leaving the call site's opaque dispatch variable.
+
+    Having named the kernel we introspect *its* wrapper's return arity (SDPA →
+    one tensor, eager → two) and (a) record it as an ``outputs: N`` detail so the
+    type-check can verify the rendered node never advertises more output ports
+    than the kernel really returns, and (b) trim the recorded unpack names to that
+    arity so an ``attn_output, attn_weights = attention_interface(...)`` whose
+    second slot the wrapper fills with ``None`` does not fan out a phantom second
+    output. General: arity comes from the resolved wrapper's own source.
+    """
+    resolved = resolved_attn_implementation(config)
+    resolver = _HostSourceResolver()
+    wrapper = _resolve_attention_wrapper_source(resolved, config, resolver)
+    arity = _max_real_return_arity(wrapper[2]) if wrapper is not None else None
+    # ``wrapper_expand: module#symbol`` records where the resolved kernel's wrapper
+    # is defined so the block tree can expand its real body (``repeat_kv`` →
+    # ``scaled_dot_product_attention`` → ``transpose`` → ``contiguous``) instead of
+    # rendering a single opaque leaf, keeping the primitive itself atomic. The
+    # location comes from the same registry/config resolution as the arity — never a
+    # per-kernel table — and is inert for a kernel with no expandable wrapper source.
+    wrapper_expand = f"{wrapper[0]}#{wrapper[1]}" if wrapper is not None else None
+    # Which MODULE provides the implementation this kernel actually runs, read by
+    # following the wrapper's own body through the import graph (sdpa ->
+    # ``torch.nn.functional``; flash -> ``transformers`` -> ``flash_attn``; flex ->
+    # a local shim -> ``torch.nn.attention.flex_attention``). That is the
+    # structural form of "is this torch's own attention or an outside library's",
+    # a question about where the code lives rather than what it is called.
+    provider: str | None = None
+    if wrapper is not None:
+        from TraceLens.ModelUtils.attention_wrapper import _providing_module
+
+        provider = _providing_module(wrapper[0], wrapper[2])
+    for cls in classes.values():
+        details = cls.forward_step_details.get(SYNTHETIC_ATTENTION)
+        if not details:
+            continue
+        kernel = kernel_name_from_step_details(details)
+        if kernel is None or kernel.lower() not in _ATTENTION_DISPATCH_NAMES:
+            continue
+        rewritten = [
+            f"kernel: {resolved}" if line.startswith("kernel:") else line
+            for line in details
+            if not line.startswith(("outputs:", "wrapper_expand:", "kernel_provider:"))
+        ]
+        if arity is not None:
+            rewritten.append(f"outputs: {arity}")
+        if wrapper_expand is not None:
+            rewritten.append(f"wrapper_expand: {wrapper_expand}")
+        if provider:
+            rewritten.append(f"kernel_provider: {provider}")
+        cls.forward_step_details[SYNTHETIC_ATTENTION] = rewritten
+        if arity is not None:
+            names = cls.forward_step_output_names.get(SYNTHETIC_ATTENTION)
+            if names is not None and len(names) > arity:
+                cls.forward_step_output_names[SYNTHETIC_ATTENTION] = names[:arity]
+
+
+def _kernel_call_detail_lines(call: ast.Call) -> list[str]:
+    """Capture kernel name and keyword arguments from a modeling forward call."""
+    kernel_name = _expr_name(call.func) or "kernel"
+    lines = [f"kernel: {kernel_name.split('.')[-1]}"]
+    for keyword in call.keywords:
+        if keyword.arg in _KERNEL_DETAIL_SKIP_KWARGS or keyword.arg is None:
+            continue
+        if isinstance(keyword.value, ast.Constant):
+            value = repr(keyword.value.value)
+        elif isinstance(keyword.value, ast.Name):
+            value = keyword.value.id
+        elif isinstance(keyword.value, ast.Attribute):
+            value = _expr_name(keyword.value) or ast.unparse(keyword.value)
+        else:
+            value = ast.unparse(keyword.value)
+        lines.append(f"kwarg: {keyword.arg}={value}")
+    return lines
+
+
+def _inject_kernel_merge(
+    node: ast.AST,
+    var_chains: dict[str, list[str]],
+    stmt_calls: list[str],
+    attention_inputs: dict[str, list[str]],
+    forward_step_details: dict[str, list[str]],
+) -> None:
+    if len(attention_inputs) >= 2:
+        return
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        producers = _collect_kernel_producers(call, var_chains)
+        if not producers:
+            continue
+        is_named_kernel = _is_kernel_merge_call(call.func)
+        is_generic_external = (
+            not isinstance(call.func, ast.Attribute)
+            and len(producers) >= 3
+            and _expr_name(call.func) is not None
+        )
+        if not (is_named_kernel or is_generic_external):
+            continue
+        if _is_data_movement_call(call.func):
+            continue
+        if SYNTHETIC_ATTENTION not in stmt_calls:
+            stmt_calls.append(SYNTHETIC_ATTENTION)
+        attention_inputs.update(producers)
+        forward_step_details[SYNTHETIC_ATTENTION] = _kernel_call_detail_lines(call)
+        return
+
+
+def _dedupe_kernel_merge_calls(calls: list[str]) -> list[str]:
+    if SYNTHETIC_ATTENTION not in calls:
+        return calls
+    first = calls.index(SYNTHETIC_ATTENTION)
+    without = [call for call in calls if call != SYNTHETIC_ATTENTION]
+    without.insert(first, SYNTHETIC_ATTENTION)
+    return without
+
+
+def kernel_name_from_step_details(details: list[str]) -> str | None:
+    for item in details:
+        if item.startswith("kernel:"):
+            return item.split(":", 1)[1].strip()
+    return None
+
+
+# Keep-atomic, return-arity, the display label and now node COLORING are all
+# derived structurally: the keep-atomic gate resolves the kernel through
+# ``ALL_ATTENTION_FUNCTIONS`` and introspects the wrapper AST
+# (``_resolve_dispatched_attention_kernel``), arity comes from the wrapper's own
+# return statement (``_max_real_return_arity``), the label is the resolved callee
+# qualname (``attention_kernel_label``), and the color follows the provider module
+# resolved below. No attention marker list survives.
+#
+# Coloring was the last holdout, on the grounds that ``flex_attention`` reaches
+# its torch op through a ``torch.compile`` singleton behind a conditional import.
+# It does -- but that import is an ordinary binding the import table already
+# records (``_absolute_import_bindings`` deliberately reads imports nested in
+# ``if``/``try``), and the singleton is selected by a plain ternary whose other
+# arm is the torch symbol itself. Following a local binding's arms resolves it
+# with no guesswork, and the result is checked against the real installed
+# transformers source rather than assumed.
+def is_torch_provided_attention(details: list[str]) -> bool:
+    """True when the attention implementation this step runs lives inside torch.
+
+    "torch's own attention" vs "an outside library's fused kernel" is a question
+    about where the implementation is DEFINED, and the import graph answers it --
+    so this reads the resolved provider module
+    (:func:`attention_kernel_provider_module`) and asks whether its root package is
+    ``torch``. No marker list: ``sdpa`` resolves through its wrapper to
+    ``torch.nn.functional``, ``flex_attention`` through a local shim and a
+    conditionally-imported binding to ``torch.nn.attention.flex_attention``, while
+    flash-attn, xformers and Transformer Engine resolve outside torch.
+
+    An unresolvable step reads as NOT torch, which is the safe way round: an
+    attention nobody could resolve is far more often an outside fused kernel than
+    a torch call, and that is also how it is drawn.
+    """
+    provider = attention_kernel_provider_module(details)
+    return bool(provider) and provider.split(".")[0] == "torch"
+
+
+def is_kernel_pipeline_step(
+    details: list[str],
+    attention_inputs: dict[str, list[str]] | None = None,
+) -> bool:
+    """True when a synthetic attention step has an importable multi-input kernel pipeline."""
+    from TraceLens.ModelUtils.kernel_pipeline import parse_kernel_import
+
+    if not kernel_name_from_step_details(details):
+        return False
+    if parse_kernel_import(details) is None:
+        return False
+    kwarg_tensors = sum(
+        1
+        for line in details
+        if line.startswith("kwarg:")
+        and "=" in line
+        and not line.split("=", 1)[1].strip().startswith("self.")
+    )
+    inputs = attention_inputs or {}
+    return len(inputs) >= 2 or kwarg_tensors >= 2
+
+
+def is_attention_wrapper_expandable(details: list[str] | None) -> bool:
+    """True when a dispatched attention step records an expandable wrapper location.
+
+    ``_resolve_dispatched_attention_kernel`` stamps ``wrapper_expand: module#symbol``
+    onto a step whose resolved kernel is a real Python wrapper (SDPA's
+    ``sdpa_attention_forward``) whose body can be introspected into its live ops
+    (``repeat_kv`` -> ``scaled_dot_product_attention`` -> ``transpose`` ->
+    ``contiguous``). A kernel with no such source (a fused library kernel, an
+    unresolved dispatch variable, or a non-attention output constructor) never
+    carries the marker, so the block tree keeps rendering it as an atomic leaf.
+    """
+    if not details:
+        return False
+    return any(line.startswith("wrapper_expand:") for line in details)
+
+
+def attention_wrapper_expand_location(details: list[str]) -> tuple[str, str] | None:
+    """Split a ``wrapper_expand: module#symbol`` detail into ``(module, symbol)``."""
+    for line in details:
+        if line.startswith("wrapper_expand:"):
+            value = line.split(":", 1)[1].strip()
+            module, _, symbol = value.partition("#")
+            if module and symbol:
+                return module, symbol
+    return None
+
+
+def attention_wrapper_gqa_groups(details: list[str]) -> int | None:
+    """Read the ``gqa_groups: N`` repeat factor stamped onto a wrapper step."""
+    for line in details:
+        if line.startswith("gqa_groups:"):
+            try:
+                return int(line.split(":", 1)[1].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def attention_kernel_label(details: list[str]) -> str:
+    """Label an attention leaf with its real resolved kernel (``sdpa``,
+    ``recurrent_kimi_delta_attention``, …), not the generic word "Attention".
+
+    ``_resolve_dispatched_attention_kernel`` rewrites the dispatch call
+    (``kernel: attention_interface``) into the concrete kernel it selected
+    (``kernel: sdpa``), so by the time we label we usually have the real name --
+    show it raw. Fall back to "Attention" only when no kernel resolves, or when
+    the recorded "kernel" is still an unresolved dispatch *variable* / synthetic
+    wrapper name rather than a kernel that actually runs.
+    """
+    kernel = kernel_name_from_step_details(details)
+    if not kernel:
+        return "Attention"
+    if kernel.lower() in (_ATTENTION_DISPATCH_NAMES | _SYNTHETIC_ATTENTION_NAMES):
+        return "Attention"
+    return kernel
+
+
+def attention_kernel_provider_module(details: list[str]) -> str | None:
+    """The module providing the attention implementation this step runs.
+
+    Either resolved from the dispatched wrapper's body
+    (``kernel_provider:``, stamped by :func:`_resolve_dispatched_attention_kernel`)
+    or, for a kernel the modeling file imports and calls directly, the module it
+    was imported from (``import: fla.ops.kda#...``). ``None`` when neither is
+    known, which the consumer must read as "not resolvable" rather than as any
+    particular provider.
+    """
+    for line in details:
+        if line.startswith("kernel_provider:"):
+            value = line.split(":", 1)[1].strip()
+            if value:
+                return value
+    for line in details:
+        if line.startswith("import:"):
+            payload = line.split(":", 1)[1].strip()
+            if "#" in payload:
+                return payload.partition("#")[0].strip() or None
+            if "." in payload:
+                return payload.rsplit(".", 1)[0].strip() or None
+            return payload or None
+    return None
+
+
+def attention_kernel_details(
+    details: list[str],
+    attention_inputs: dict[str, list[str]] | None = None,
+) -> list[str]:
+    kernel = kernel_name_from_step_details(details)
+
+    if kernel and kernel.lower() in _SYNTHETIC_ATTENTION_NAMES:
+        return []
+
+    if kernel:
+        lines = [f"kernel: {kernel}"]
+        if attention_inputs:
+            lines.append(f"inputs: {','.join(attention_inputs.keys())}")
+        # Interface inputs the module declares but this resolved kernel never reads
+        # (e.g. ``max_seqlen`` under sdpa) are surfaced as a distinct flag rather than
+        # a wired input port — see ``_flag_unused_interface_inputs``. The resolved
+        # wrapper's real tensor-return count (``outputs: N``, stamped by
+        # ``_resolve_dispatched_attention_kernel``) is carried through so the
+        # type-check can verify the node advertises no more output ports than that.
+        for line in details:
+            if line.startswith(("unused_interface_inputs:", "outputs:")):
+                lines.append(line)
+        provider = attention_kernel_provider_module(details)
+        if provider:
+            lines.append(f"kernel_provider: {provider}")
+        return lines
+
+    # The kernel could not be named, but this step IS an attention kernel -- that
+    # much the extraction established. Say so, so the graph does not have to fall
+    # back to recognising the class name, and so an unresolved attention is not
+    # quietly assumed to be a torch call.
+    return ["kernel: attention"]
+
+
+def _capture_attention_inputs(
+    node: ast.AST,
+    var_chains: dict[str, list[str]],
+    attention_inputs: dict[str, list[str]],
+    forward_input_names: set[str] | None = None,
+    name_value_ast: dict[str, ast.expr] | None = None,
+) -> None:
+    forward_input_names = forward_input_names or set()
+    name_value_ast = name_value_ast or {}
+
+    def _extended(arg_id: str, chain: list[str]) -> list[str]:
+        rhs = name_value_ast.get(arg_id)
+        if rhs is None:
+            return chain
+        trailing = _submodule_rooted_trailing_ops(rhs, chain)
+        if not trailing:
+            return chain
+        return _dedupe_chain(chain + trailing)
+
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        target = _expr_name(call.func)
+        if target not in _SYNTHETIC_ATTENTION_NAMES:
+            continue
+        start = (
+            1
+            if call.args
+            and isinstance(call.args[0], ast.Name)
+            and call.args[0].id == "self"
+            else 0
+        )
+        # A tensor that arrives as a forward parameter of the attention module
+        # (``attention_mask``) has no provenance chain -- no prior op in THIS
+        # forward produced it -- but it is every bit as real an operand as one
+        # that does. The empty chain is the marker the cross-module predecessor
+        # pass reads to thread such a boundary input back to its producer. Whether
+        # the call writes it positionally or by keyword is a calling convention,
+        # not a fact about the tensor, so both scans record it the same way;
+        # recognising it only in the keyword scan left a positional
+        # ``attention_interface(self, q, k, v, attention_mask, ...)`` declaring an
+        # operand port that no edge ever reached.
+        for index, arg in enumerate(call.args[start:], start=start):
+            if not isinstance(arg, ast.Name):
+                continue
+            chain = var_chains.get(arg.id, [])
+            if chain:
+                attention_inputs[arg.id] = _extended(arg.id, list(chain))
+            elif arg.id in forward_input_names:
+                attention_inputs.setdefault(arg.id, [])
+        # Packed-attention metadata (``cu_seq_lens_q=cu_seqlens``,
+        # ``max_length_q=max_seqlen``) reaches the kernel by keyword and is a real
+        # kernel input. General: any attention-interface keyword whose value is a
+        # module forward input or a prior-step tensor.
+        for keyword in call.keywords:
+            value = keyword.value
+            if not isinstance(value, ast.Name):
+                continue
+            chain = var_chains.get(value.id, [])
+            if chain:
+                attention_inputs[value.id] = list(chain)
+            elif value.id in forward_input_names:
+                attention_inputs.setdefault(value.id, [])
+        return
+
+
+def _arg_name(arg: ast.AST, index: int) -> str:
+    if isinstance(arg, ast.Subscript):
+        return _arg_name(arg.value, index)
+    if isinstance(arg, ast.Name):
+        return arg.id
+    return f"arg{index}"
+
+
+def _is_forward_input_ref(
+    name: str,
+    var_chains: dict[str, list[str]],
+    forward_input_names: set[str],
+) -> bool:
+    if name in forward_input_names:
+        chain = var_chains.get(name)
+        if chain:
+            return False
+        return True
+    if name in var_chains and not var_chains[name]:
+        return True
+    return False
+
+
+def _arg_provenance(
+    arg: ast.AST,
+    var_chains: dict[str, list[str]],
+    forward_input_names: set[str],
+) -> tuple[list[str], SideInputSource | None]:
+    if isinstance(arg, ast.Subscript):
+        return _arg_provenance(arg.value, var_chains, forward_input_names)
+    if not isinstance(arg, ast.Name):
+        return [], None
+    if _is_forward_input_ref(arg.id, var_chains, forward_input_names):
+        return [], "forward_input"
+    chain = list(var_chains.get(arg.id, []))
+    if chain:
+        return chain, "prior_step"
+    return [], None
+
+
+def _side_port_label(
+    arg: ast.AST,
+    *,
+    arg_index: int,
+    source_chain: list[str],
+    source_kind: SideInputSource,
+    callee: str,
+) -> str:
+    if source_kind == "forward_input":
+        return _arg_name(arg, arg_index)
+    if isinstance(arg, ast.Name):
+        lowered = arg.id.lower()
+        if "topk" in lowered or lowered in {"topk_idx", "topk_weight"}:
+            if "weight" in lowered:
+                return "top_k_weights"
+            return "top_k_index"
+        if lowered == "router_logits":
+            return "router_logits"
+    if source_chain and _classify_role(source_chain[-1], "") == "router":
+        return "router"
+    return _arg_name(arg, arg_index)
+
+
+def _capture_call_side_inputs(
+    node: ast.AST,
+    var_chains: dict[str, list[str]],
+    forward_input_names: set[str],
+    side_inputs: dict[str, list[SideInputSpec]],
+    prior_calls: list[str],
+) -> None:
+    """Record non-primary arguments that bypass the sequential main path."""
+    discarded_call = node.value if isinstance(node, ast.Expr) else None
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        if not isinstance(call.func, ast.Attribute) or not _is_self_attr(
+            call.func, call.func.attr
+        ):
+            continue
+        callee = call.func.attr
+        if callee.startswith("@") or callee in _SYNTHETIC_ATTENTION_NAMES:
+            continue
+        if not call.args:
+            continue
+
+        main_chain, main_kind = _arg_provenance(
+            call.args[0], var_chains, forward_input_names
+        )
+        specs: list[SideInputSpec] = []
+        seen: set[tuple[str, tuple[str, ...], SideInputSource]] = set()
+
+        if main_kind == "forward_input" and prior_calls and callee != prior_calls[0]:
+            arg0_name = _arg_name(call.args[0], 0)
+            if arg0_name not in forward_input_names or call is discarded_call:
+                key = (arg0_name, tuple(), "forward_input")
+                if key not in seen:
+                    seen.add(key)
+                    specs.append(
+                        SideInputSpec(
+                            arg_name=arg0_name,
+                            port_label=arg0_name,
+                            source_chain=[],
+                            source_kind="forward_input",
+                            side_effect_call=call is discarded_call,
+                        )
+                    )
+
+        for arg_index, arg in enumerate(call.args[1:], start=1):
+            chain, source_kind = _arg_provenance(arg, var_chains, forward_input_names)
+            if source_kind is None:
+                continue
+            if source_kind == "prior_step" and chain == main_chain:
+                continue
+            if source_kind == "forward_input" and main_kind == "forward_input":
+                continue
+            port_label = _side_port_label(
+                arg,
+                arg_index=arg_index,
+                source_chain=chain,
+                source_kind=source_kind,
+                callee=callee,
+            )
+            key = (port_label, tuple(chain), source_kind)
+            if key in seen:
+                continue
+            seen.add(key)
+            specs.append(
+                SideInputSpec(
+                    arg_name=(
+                        port_label
+                        if port_label in {"top_k_index", "top_k_weights"}
+                        else _arg_name(arg, arg_index)
+                    ),
+                    port_label=port_label,
+                    source_chain=chain,
+                    source_kind=source_kind,
+                )
+            )
+
+        if not specs:
+            continue
+        existing = side_inputs.setdefault(callee, [])
+        for spec in specs:
+            duplicate = any(
+                item.port_label == spec.port_label
+                and item.source_chain == spec.source_chain
+                and item.source_kind == spec.source_kind
+                and item.side_effect_call == spec.side_effect_call
+                for item in existing
+            )
+            if not duplicate:
+                existing.append(spec)
+
+
+def _capture_augassign_module_input(
+    node: ast.AugAssign,
+    var_chains: dict[str, list[str]],
+    forward_input_names: set[str],
+    side_inputs: dict[str, list[SideInputSpec]],
+) -> None:
+    """Keep a module's input branch when its output is accumulated with ``+=``."""
+    for call in ast.walk(node.value):
+        if (
+            not isinstance(call, ast.Call)
+            or not isinstance(call.func, ast.Attribute)
+            or not _is_self_attr(call.func, call.func.attr)
+            or not call.args
+        ):
+            continue
+        _chain, source_kind = _arg_provenance(
+            call.args[0],
+            var_chains,
+            forward_input_names,
+        )
+        if source_kind != "forward_input":
+            continue
+        callee = call.func.attr
+        arg_name = _arg_name(call.args[0], 0)
+        spec = SideInputSpec(
+            arg_name=arg_name,
+            port_label=arg_name,
+            source_chain=[],
+            source_kind="forward_input",
+        )
+        existing = side_inputs.setdefault(callee, [])
+        if not any(
+            item.port_label == spec.port_label
+            and item.source_chain == spec.source_chain
+            and item.source_kind == spec.source_kind
+            for item in existing
+        ):
+            existing.append(spec)
+
+
+# Annotations that say a parameter carries a Python number, not a tensor. The
+# model states this itself (``q_length: int``), and a bare ``int`` / ``float`` /
+# ``bool`` is unambiguous in a way ``torch.BoolTensor`` or an unannotated
+# parameter is not -- so only these count.
+_HOST_SCALAR_ANNOTATIONS = frozenset({"int", "float", "bool"})
+
+
+def _host_scalar_param_names(func: ast.AST) -> set[str]:
+    """Parameters a function annotates as a Python number rather than a tensor.
+
+    ``current_length - q_length`` is host arithmetic over two such parameters, so
+    it takes no tensor operand. Without this the names resolved to no producer
+    and the subtraction fell back onto the chain's tensor input -- giving
+    ``q_positions`` the hidden state's rank, which the ``<=`` against it, the
+    ``&`` after that and everything downstream inherited.
+    """
+    names: set[str] = set()
+    arguments = getattr(func, "args", None)
+    if arguments is None:
+        return names
+    for argument in (
+        *getattr(arguments, "posonlyargs", []),
+        *getattr(arguments, "args", []),
+        *getattr(arguments, "kwonlyargs", []),
+    ):
+        annotation = getattr(argument, "annotation", None)
+        if (
+            isinstance(annotation, ast.Name)
+            and annotation.id in _HOST_SCALAR_ANNOTATIONS
+        ):
+            names.add(argument.arg)
+    return names
+
+
+def _forward_input_names(func: ast.FunctionDef) -> set[str]:
+    names: set[str] = set()
+    args = func.args
+    for arg in args.posonlyargs + args.args:
+        if arg.arg != "self":
+            names.add(arg.arg)
+    return names
+
+
+def _keyword_source_names(value: ast.expr, pre_loop: list[ast.stmt]) -> list[str]:
+    """Forward locals a loop keyword argument's value could come from.
+
+    Usually the value just names one (``attention_mask=causal_mask``). A model
+    with several layer types picks per layer from a dict built before the loop
+    (``attention_mask=causal_mask_mapping[layer.block_type]``); every entry of
+    that dict is a candidate, and when they all turn out to be the same tensor
+    the loop is handed one thing by a longer route. Reading only the subscript
+    would make the producer invisible, and with it everything that built it.
+    """
+    if isinstance(value, ast.Name):
+        return [value.id]
+    if not (isinstance(value, ast.Subscript) and isinstance(value.value, ast.Name)):
+        return []
+    names: list[str] = []
+    # The dict is often built inside a guard (``if not isinstance(...): mapping =
+    # {...}``), so walk nested statements rather than only the top level.
+    for statement in ast.walk(ast.Module(body=list(pre_loop), type_ignores=[])):
+        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+            continue
+        target = statement.targets[0]
+        if not (isinstance(target, ast.Name) and target.id == value.value.id):
+            continue
+        if not isinstance(statement.value, ast.Dict):
+            continue
+        names = [
+            item.id for item in statement.value.values if isinstance(item, ast.Name)
+        ]
+    return names
+
+
+def _primary_forward_input_name(func: ast.FunctionDef) -> str | None:
+    """Return the first forward parameter name (typically the hidden-state tensor)."""
+    for arg in func.args.posonlyargs + func.args.args:
+        if arg.arg != "self":
+            return arg.arg
+    return None
+
+
+def kernel_kwarg_ports(details: list[str]) -> dict[str, str]:
+    """Map kwarg parameter names to variable names from modeling AST kwarg lines."""
+    ports: dict[str, str] = {}
+    for line in details:
+        if not line.startswith("kwarg:"):
+            continue
+        payload = line.split(":", 1)[1].strip()
+        if "=" not in payload:
+            continue
+        param, value = payload.split("=", 1)
+        param = param.strip()
+        value = value.strip()
+        if value and not value.startswith("self."):
+            ports[param] = value
+    return ports
+
+
+def tensor_input_label_order(
+    details: list[str],
+    attention_inputs: dict[str, list[str]],
+) -> list[str]:
+    """Order tensor input labels from kwarg AST lines, then remaining provenance keys."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for line in details:
+        if not line.startswith("kwarg:"):
+            continue
+        payload = line.split(":", 1)[1].strip()
+        if "=" not in payload:
+            continue
+        param = payload.split("=", 1)[0].strip()
+        if param in attention_inputs and param not in seen:
+            ordered.append(param)
+            seen.add(param)
+    for key in attention_inputs:
+        if key not in seen:
+            ordered.append(key)
+            seen.add(key)
+    return ordered
+
+
+def _parallel_gates_from_forward(func: ast.FunctionDef) -> list[str]:
+    """Modules invoked directly on forward inputs (e.g. output gate from hidden_states)."""
+    input_names = _forward_input_names(func)
+    gates: list[str] = []
+    for node in func.body:
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            if not isinstance(call.func, ast.Attribute) or not _is_self_attr(
+                call.func, call.func.attr
+            ):
+                continue
+            if not call.args or not isinstance(call.args[0], ast.Name):
+                continue
+            if call.args[0].id not in input_names:
+                continue
+            attr = call.func.attr
+            if attr in gates:
+                continue
+            if re.search(r"gate|g_proj", attr, re.I):
+                gates.append(attr)
+    return gates
+
+
+def _input_fed_calls_from_forward(func: ast.FunctionDef) -> list[str]:
+    """Submodule calls whose main argument is still the value the forward received.
+
+    Such a call reads the forward input, not the result of the call before it, so the
+    chain has to branch at the input rather than run the two steps in series. A name
+    stops counting once it has been rebound to something a submodule produced;
+    reshapes and views of the input still are the input.
+    """
+    pristine = set(_forward_input_names(func))
+    if not pristine:
+        return []
+    fed: list[str] = []
+    for stmt in func.body:
+        for call in ast.walk(stmt):
+            if not isinstance(call, ast.Call):
+                continue
+            if not isinstance(call.func, ast.Attribute) or not _is_self_attr(
+                call.func, call.func.attr
+            ):
+                continue
+            if not call.args or not isinstance(call.args[0], ast.Name):
+                continue
+            if call.args[0].id in pristine and call.func.attr not in fed:
+                fed.append(call.func.attr)
+        # Read the arguments before the targets rebind, so `x = self.block(x)` still
+        # counts as reading the input rather than the value it is about to hold.
+        value = (
+            _stmt_value(stmt) if isinstance(stmt, (ast.Assign, ast.AnnAssign)) else None
+        )
+        if value is None:
+            continue
+        produced: list[str] = []
+        _extract_self_calls_ordered(value, produced)
+        if not produced:
+            continue
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        for target in targets:
+            for name in ast.walk(target):
+                if isinstance(name, ast.Name):
+                    pristine.discard(name.id)
+    return fed
+
+
+def _parallel_gate_activation(func: ast.FunctionDef, gate_attr: str) -> str | None:
+    """Detect activation applied to a parallel output gate (e.g. g_proj(...).sigmoid())."""
+    gate_vars: set[str] = set()
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            target = node.targets[0].id
+            value = node.value
+            if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
+                if _is_self_attr(value.func, gate_attr):
+                    gate_vars.add(target)
+        if isinstance(node, ast.AnnAssign) and node.value is not None:
+            target = node.target
+            if isinstance(target, ast.Name):
+                value = node.value
+                if isinstance(value, ast.Call) and isinstance(
+                    value.func, ast.Attribute
+                ):
+                    if _is_self_attr(value.func, gate_attr):
+                        gate_vars.add(target.id)
+
+    for node in ast.walk(func):
+        src = (
+            _stmt_value(node)
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Return))
+            else None
+        )
+        if src is None:
+            continue
+        if isinstance(src, ast.Call) and isinstance(src.func, ast.Attribute):
+            activation = _GATE_ACTIVATION_NAMES.get(src.func.attr)
+            if activation is None:
+                continue
+            inner = src.func.value
+            if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute):
+                if _is_self_attr(inner.func, gate_attr):
+                    return activation
+            if isinstance(inner, ast.Name) and inner.id in gate_vars:
+                return activation
+    return None
+
+
+def _gated_norm_activation_from_forward(
+    forward: ast.FunctionDef | None,
+    init_func: ast.FunctionDef | None,
+    config: dict[str, Any] | None,
+) -> str | None:
+    """Resolve the gate activation of a *gated norm* module from its forward AST.
+
+    Structural signal (no class-name matching): the forward multiplies its
+    normalized result by a gate argument passed through an activation registry,
+    i.e. ``normalized * ACT2FN[self.<x>](<gate>)``. The activation key ``self.<x>``
+    is resolved generically against the module's own init/config symbol table
+    (``self.activation = "silu"`` or ``self.activation = config.<y>``). Returns the
+    display name, or ``None`` when the module is not a gated norm. When the gate
+    pattern *is* present but the key cannot be resolved, warns rather than guessing.
+    """
+    if forward is None:
+        return None
+    self_values = _self_config_values(init_func, config or {})
+    forward_params = _forward_input_names(forward)
+
+    def _resolve_registry_call(call: ast.Call) -> tuple[bool, str | None]:
+        """(*is_gate_activation_call*, *display_name_or_None*) for ``ACT2FN[...](gate)``."""
+        func_node = call.func
+        if not isinstance(func_node, ast.Subscript):
+            return False, None
+        registry = (_expr_name(func_node.value) or "").rsplit(".", 1)[-1]
+        if registry not in _ACTIVATION_REGISTRY_NAMES:
+            return False, None
+        # The activated tensor must trace back to a forward argument (the gate),
+        # not to the normalized main path -- that is what makes this a *gate*
+        # activation rather than an ordinary activation on the hidden states.
+        if not any(
+            isinstance(name, ast.Name) and name.id in forward_params
+            for arg in call.args
+            for name in ast.walk(arg)
+        ):
+            return False, None
+        resolved = _config_value(func_node.slice, config or {}, self_values)
+        if isinstance(resolved, str) and resolved.strip():
+            return True, _display_activation_name(resolved)
+        return True, None
+
+    pattern_present = False
+    for node in ast.walk(forward):
+        if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult)):
+            continue
+        for operand in (node.left, node.right):
+            if not isinstance(operand, ast.Call):
+                continue
+            is_gate_call, display = _resolve_registry_call(operand)
+            if not is_gate_call:
+                continue
+            if display is not None:
+                return display
+            pattern_present = True
+    if pattern_present:
+        _log.warning(
+            "gated norm %s applies a gate activation whose key could not be "
+            "resolved from its init/config symbol table; leaving it unlabelled",
+            getattr(forward, "name", "forward"),
+        )
+    return None
+
+
+def _parallel_gate_activations_from_forward(
+    func: ast.FunctionDef,
+    parallel_gates: list[str],
+) -> dict[str, str]:
+    activations: dict[str, str] = {}
+    for gate_attr in parallel_gates:
+        activation = _parallel_gate_activation(func, gate_attr)
+        if activation:
+            activations[gate_attr] = activation
+    return activations
+
+
+def _parse_forward(
+    func: ast.FunctionDef,
+    self_values: dict | None = None,
+    config: dict | None = None,
+) -> tuple[
+    list[str],
+    list[str],
+    dict[str, list[str]],
+    dict[str, list[SideInputSpec]],
+    dict[str, list[str]],
+]:
+    calls: list[str] = []
+    norm_before: list[str] = []
+    pending_norm: str | None = None
+    var_chains: dict[str, list[str]] = {}
+    attention_inputs: dict[str, list[str]] = {}
+    side_inputs: dict[str, list[SideInputSpec]] = {}
+    forward_step_details: dict[str, list[str]] = {}
+    forward_input_names = _forward_input_names(func)
+    self_values = self_values or {}
+    config = config or {}
+    name_value_ast = _collect_name_value_ast(func)
+    repeated_attrs = _repeated_self_call_attrs(func.body)
+    module_attrs = _invoked_submodule_attrs(func.body)
+
+    for node in func.body:
+        pending_norm = _walk_forward_stmt(
+            node,
+            calls,
+            norm_before,
+            pending_norm,
+            var_chains,
+            attention_inputs,
+            side_inputs,
+            forward_input_names,
+            forward_step_details,
+            self_values,
+            name_value_ast,
+            repeated_attrs=repeated_attrs,
+            module_attrs=module_attrs,
+            config=config,
+        )
+    forward_step_details.update(_positional_step_details(func))
+    forward_step_details.update(_einops_step_details(func))
+    for _key, _detail in _submodule_method_step_details(
+        func.body, module_attrs
+    ).items():
+        forward_step_details.setdefault(_key, []).extend(_detail)
+    return (
+        _dedupe_kernel_merge_calls(calls),
+        norm_before,
+        attention_inputs,
+        side_inputs,
+        forward_step_details,
+    )
+
+
+def _walk_forward_stmt(
+    node: ast.AST,
+    calls: list[str],
+    norm_before: list[str],
+    pending_norm: str | None,
+    var_chains: dict[str, list[str]],
+    attention_inputs: dict[str, list[str]],
+    side_inputs: dict[str, list[SideInputSpec]],
+    forward_input_names: set[str],
+    forward_step_details: dict[str, list[str]],
+    self_values: dict | None = None,
+    name_value_ast: dict[str, ast.expr] | None = None,
+    in_conditional: bool = False,
+    repeated_attrs: frozenset[str] = frozenset(),
+    module_attrs: frozenset[str] = frozenset(),
+    config: dict | None = None,
+) -> str | None:
+    if isinstance(node, ast.Assign):
+        stmt_calls: list[str] = []
+        # ``q, k = map(lambda x: BODY(x), (q, k))`` applies one lambda body to
+        # each tuple element; rewritten into an equivalent per-element ``Tuple``
+        # (see ``_expand_map_lambda_tuple``) so the existing ``ast.Tuple``
+        # handling below walks each clone's own call and materializes a real
+        # step for it (each clone stays distinct via its stamped discriminator).
+        # Every other consumer of ``node.value`` still reads the untouched map()
+        # call -- only call *extraction* needs the expanded shape.
+        # The same two comprehension rewrites the operation extractor applies
+        # have to happen HERE too, against THIS walk's own binding map: the
+        # attention step and its operands are captured on this path, and a kernel
+        # called inside a comprehension is invisible to it otherwise.
+        if name_value_ast is not None:
+            node = _rebind_fanout_comprehension(node, name_value_ast)
+        expanded_value = _expand_zipped_literal_comprehension(
+            node.value, name_value_ast or {}
+        ) or _expand_map_lambda_tuple(node.value)
+        _extract_self_calls_ordered(
+            expanded_value,
+            stmt_calls,
+            in_conditional,
+            repeated_attrs,
+            module_attrs,
+        )
+        _inject_kernel_merge(
+            expanded_value,
+            var_chains,
+            stmt_calls,
+            attention_inputs,
+            forward_step_details,
+        )
+        _capture_attention_inputs(
+            ast.Assign(targets=node.targets, value=expanded_value),
+            var_chains,
+            attention_inputs,
+            forward_input_names,
+            name_value_ast,
+        )
+        _capture_call_side_inputs(
+            node, var_chains, forward_input_names, side_inputs, calls
+        )
+        # Read RHS provenance before rebinding assignment targets. In
+        # ``x = self.block(x, aux)`` the first ``x`` is still the forward input;
+        # treating the newly produced chain as its source invents a residual merge.
+        _record_assign_targets(node, stmt_calls, var_chains)
+        return _register_forward_calls(stmt_calls, calls, norm_before, pending_norm)
+
+    if isinstance(node, ast.AnnAssign) and node.value is not None:
+        stmt_calls = []
+        _extract_self_calls_ordered(
+            node.value, stmt_calls, in_conditional, repeated_attrs, module_attrs
+        )
+        _inject_kernel_merge(
+            node.value,
+            var_chains,
+            stmt_calls,
+            attention_inputs,
+            forward_step_details,
+        )
+        _capture_attention_inputs(
+            node, var_chains, attention_inputs, forward_input_names, name_value_ast
+        )
+        _capture_call_side_inputs(
+            node, var_chains, forward_input_names, side_inputs, calls
+        )
+        if isinstance(node.target, ast.Name):
+            chain = _trace_var_chain(node.value, var_chains, stmt_calls)
+            if chain:
+                var_chains[node.target.id] = chain
+        return _register_forward_calls(stmt_calls, calls, norm_before, pending_norm)
+
+    if isinstance(node, ast.Expr):
+        stmt_calls = []
+        _extract_self_calls_ordered(
+            node.value, stmt_calls, in_conditional, repeated_attrs, module_attrs
+        )
+        _inject_kernel_merge(
+            node.value,
+            var_chains,
+            stmt_calls,
+            attention_inputs,
+            forward_step_details,
+        )
+        _capture_attention_inputs(
+            node, var_chains, attention_inputs, forward_input_names, name_value_ast
+        )
+        _capture_call_side_inputs(
+            node, var_chains, forward_input_names, side_inputs, calls
+        )
+        return _register_forward_calls(stmt_calls, calls, norm_before, pending_norm)
+
+    if isinstance(node, ast.AugAssign):
+        stmt_calls = []
+        _extract_self_calls_ordered(
+            node.value, stmt_calls, in_conditional, repeated_attrs, module_attrs
+        )
+        _inject_kernel_merge(
+            node.value,
+            var_chains,
+            stmt_calls,
+            attention_inputs,
+            forward_step_details,
+        )
+        _capture_call_side_inputs(
+            node, var_chains, forward_input_names, side_inputs, calls
+        )
+        _capture_augassign_module_input(
+            node,
+            var_chains,
+            forward_input_names,
+            side_inputs,
+        )
+        return _register_forward_calls(stmt_calls, calls, norm_before, pending_norm)
+
+    if isinstance(node, ast.Return) and node.value is not None:
+        stmt_calls = []
+        _extract_self_calls_ordered(
+            node.value, stmt_calls, in_conditional, repeated_attrs, module_attrs
+        )
+        _inject_kernel_merge(
+            node.value,
+            var_chains,
+            stmt_calls,
+            attention_inputs,
+            forward_step_details,
+        )
+        _capture_attention_inputs(
+            node, var_chains, attention_inputs, forward_input_names, name_value_ast
+        )
+        _capture_call_side_inputs(
+            node, var_chains, forward_input_names, side_inputs, calls
+        )
+        return _register_forward_calls(stmt_calls, calls, norm_before, pending_norm)
+
+    if isinstance(node, ast.If):
+        # Both arms are walked into the same ordered ``calls`` list regardless of
+        # which one actually executes. When there IS a second arm (``orelse``),
+        # an unrecognised free-function (``@fn_``) call from either arm could
+        # collide with the other arm's -- unlike a ``self.<attr>`` submodule
+        # producer (joined by an explicit ``Merge`` phi, see
+        # ``_emit_branch_select``), a free-function node has no branch-select
+        # mechanism, so both would otherwise leak into the sequence as if
+        # unconditional. Suppressing them there is safe: `skip_free_fn` only
+        # drops the ``@fn_`` node emission, not the op(s) the call's *result*
+        # feeds (those still emit via ``_emit`` with a ``condition:`` detail).
+        # A single-armed ``if cond: ...`` (no ``else``) has no alternative arm
+        # to collide with -- it is exactly one, condition-tagged block, so a
+        # free-function call inside it is as real as any other op there and
+        # must not be suppressed (that previously orphaned the op reading its
+        # result: the op kept its edge target, but the target node was never
+        # built).
+        # A build-time-resolvable config predicate (e.g.
+        # ``if self.config.hidden_act == 'situ':``) selects exactly one arm; walk
+        # only the live arm so the dead arm's calls never enter the flat sequence
+        # (mirrors the forward-operations pruning in ``statements``). When the
+        # predicate is not statically resolvable, both arms are flattened as
+        # before -- a ``self.<attr>`` producer assigned in both is still joined by
+        # a ``Merge`` phi downstream, and free-function collisions are suppressed.
+        # ``is_flash_attention_requested(self.config)`` resolves against the
+        # checkpoint's attention implementation rather than by reading a config
+        # key out of the test, so it needs its own resolver first -- exactly as
+        # the operation extractor's ``statements`` walk does it. Without this the
+        # walk entered the DEAD flash arm, and because ``_capture_attention_inputs``
+        # stops at the first interface call it finds, GLM's vision tower reported
+        # the varlen branch it never runs.
+        outcome = _resolve_flash_predicate(node.test, config)
+        if outcome is None:
+            outcome = _config_value(node.test, config or {}, self_values or {})
+        if outcome is True:
+            branch = list(node.body)
+            branch_in_conditional = in_conditional
+        elif outcome is False:
+            branch = list(node.orelse)
+            branch_in_conditional = in_conditional
+        else:
+            branch = node.body + node.orelse
+            # Only a genuine collision justifies dropping the ``@fn_`` node: that
+            # needs BOTH arms to contain a free-function call. When just one arm
+            # does (``if isinstance(mask, dict): ... else: mask = build(...)``),
+            # it is exactly one condition-tagged block, no different from a
+            # single-armed ``if`` -- suppressing it there left the call rendered
+            # as one opaque tile named after the callee, hiding its real ops.
+            colliding_free_fns = _arm_emits_free_function(
+                node.body
+            ) and _arm_emits_free_function(node.orelse)
+            branch_in_conditional = in_conditional or colliding_free_fns
+        for child in branch:
+            pending_norm = _walk_forward_stmt(
+                child,
+                calls,
+                norm_before,
+                pending_norm,
+                var_chains,
+                attention_inputs,
+                side_inputs,
+                forward_input_names,
+                forward_step_details,
+                self_values,
+                name_value_ast,
+                in_conditional=branch_in_conditional,
+                repeated_attrs=repeated_attrs,
+                module_attrs=module_attrs,
+                config=config,
+            )
+        return pending_norm
+
+    if isinstance(node, ast.For):
+        first_loop_call = len(calls)
+        for child in node.body:
+            pending_norm = _walk_forward_stmt(
+                child,
+                calls,
+                norm_before,
+                pending_norm,
+                var_chains,
+                attention_inputs,
+                side_inputs,
+                forward_input_names,
+                forward_step_details,
+                self_values,
+                name_value_ast,
+                in_conditional=in_conditional,
+                repeated_attrs=repeated_attrs,
+                module_attrs=module_attrs,
+                config=config,
+            )
+        # Tensor operations are annotated by _ForwardOperationExtractor, but
+        # expanded helper calls (for example `_apply_gate()`) are not operations
+        # in this method's graph. Preserve their call-site loop context too so
+        # their expanded children remain inside the source loop. Resolve the same
+        # static trip count the extractor uses so the helper ops share the loop's
+        # `loop_iterations_<count>` frame instead of fragmenting into `loop_iterations_repeated`.
+        count = _loop_iteration_count_of(node, self_values or {}, name_value_ast or {})
+        loop_detail = (
+            f"loop: {count} iterations" if count is not None else "loop: repeated"
+        )
+        for call in calls[first_loop_call:]:
+            details = forward_step_details.setdefault(call, [])
+            if not any(detail.startswith("loop:") for detail in details):
+                details.append(loop_detail)
+        return pending_norm
+
+    if isinstance(node, ast.With):
+        for child in node.body:
+            pending_norm = _walk_forward_stmt(
+                child,
+                calls,
+                norm_before,
+                pending_norm,
+                var_chains,
+                attention_inputs,
+                side_inputs,
+                forward_input_names,
+                forward_step_details,
+                self_values,
+                name_value_ast,
+                in_conditional=in_conditional,
+                repeated_attrs=repeated_attrs,
+                module_attrs=module_attrs,
+                config=config,
+            )
+        return pending_norm
+
+    return pending_norm
+
+
+def _decoder_class_score(info: ClassStructure) -> int:
+    score = 0
+    if DECODER_CLASS_RE.search(info.name):
+        score += 10
+    if any(
+        _classify_role(a, c) == "attention" for a, c in info.init_assignments.items()
+    ):
+        score += 5
+    if any(
+        _classify_role(a, c) in {"ffn", "moe"} for a, c in info.init_assignments.items()
+    ):
+        score += 3
+    if info.forward_calls:
+        score += 2
+    return score
+
+
+def _pick_decoder_class(classes: dict[str, ClassStructure]) -> ClassStructure | None:
+    ranked: list[tuple[int, ClassStructure]] = []
+    for info in classes.values():
+        score = _decoder_class_score(info)
+        if score > 0:
+            ranked.append((score, info))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked[0][1]
+
+
+def _model_class_score(info: ClassStructure) -> int:
+    """Rank stack/backbone classes so a vision tower cannot beat the language model.
+
+    Name matching alone is not enough: multimodal repos name both the ViT and the
+    text backbone ``*Model`` / ``*PreTrainedModel``, and dict order follows file
+    order. Owning an embedding plus a decoder-layer child is the language stack.
+    """
+    if not info.init_assignments:
+        return 0
+    score = 0
+    if MODEL_CLASS_RE.search(info.name):
+        score += 10
+    roles = {
+        _classify_role(attr, class_name)
+        for attr, class_name in info.init_assignments.items()
+    }
+    if "embedding" in roles:
+        score += 5
+    if "head" in roles:
+        score += 3
+    if "norm" in roles:
+        score += 1
+    if any(
+        DECODER_CLASS_RE.search(class_name)
+        for class_name in info.init_assignments.values()
+    ):
+        score += 8
+    return score
+
+
+def _pick_model_class(classes: dict[str, ClassStructure]) -> ClassStructure | None:
+    ranked: list[tuple[int, ClassStructure]] = []
+    for info in classes.values():
+        score = _model_class_score(info)
+        if score > 0:
+            ranked.append((score, info))
+    if ranked:
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return ranked[0][1]
+    return _pick_model_class_by_structure(classes)
+
+
+def _pick_model_class_by_structure(
+    classes: dict[str, ClassStructure],
+) -> ClassStructure | None:
+    """Find the class that owns the stack when its name follows no known convention.
+
+    Inference repos often name it plainly (`Transformer`), so the token embedding it
+    owns, rather than its name, is what identifies it.
+    """
+    ranked: list[tuple[int, str, ClassStructure]] = []
+    for info in classes.values():
+        if DECODER_CLASS_RE.search(info.name) or not info.init_assignments:
+            continue
+        roles = {
+            _classify_role(attr, class_name)
+            for attr, class_name in info.init_assignments.items()
+        }
+        if "embedding" not in roles:
+            continue
+        ranked.append((int("head" in roles) + int("norm" in roles), info.name, info))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return ranked[0][2]
+
+
+def _pick_causal_lm_class(
+    classes: dict[str, ClassStructure],
+    config: dict[str, Any] | None = None,
+) -> ClassStructure | None:
+    """Return the top-level checkpoint class (the one owning the output head).
+
+    The config's ``architectures`` list names the concrete class the checkpoint
+    instantiates -- ``LlamaForCausalLM`` for a plain LM, but ``*ForConditionalGeneration``
+    (or any custom name) for a multimodal wrapper. Prefer that authoritative key:
+    the ``ForCausalLM``-substring heuristic below silently returns ``None`` for every
+    non-causal wrapper, which drops its ``lm_head`` from the exported stack. Fall back
+    to the name heuristic only when the config does not name a parsed class.
+    """
+    architectures = (
+        config.get("architectures") if isinstance(config, dict) else None
+    ) or []
+    for arch in architectures:
+        info = classes.get(arch)
+        if info is not None:
+            return info
+    for info in classes.values():
+        if info.name.endswith("ForCausalLM") or "ForCausalLM" in info.name:
+            return info
+    return None
+
+
+def _looks_like_stack(info: ClassStructure) -> bool:
+    """True when a class is itself the language stack (owns embeddings/decoder layers).
+
+    A multimodal wrapper's ``.model`` is often a container that builds its real
+    sub-stacks through ``_from_config`` (opaque factory calls that leave no class
+    name to follow). Such a container owns neither the token embedding nor a decoder
+    layer directly, so it must not be mistaken for the stack -- the bottom-up
+    structural pick finds the true language model instead.
+    """
+    for attr, class_name in info.init_assignments.items():
+        if _classify_role(attr, class_name) == "embedding":
+            return True
+        if DECODER_CLASS_RE.search(class_name):
+            return True
+    return False
+
+
+def _pick_stack_model_class(
+    classes: dict[str, ClassStructure],
+    causal_lm: ClassStructure | None,
+) -> ClassStructure | None:
+    if causal_lm is not None:
+        for attr in ("model", "transformer", "language_model"):
+            child = causal_lm.init_assignments.get(attr)
+            if child and child in classes and _looks_like_stack(classes[child]):
+                return classes[child]
+    return _pick_model_class(classes)
+
+
+def _is_positional_module(attr_name: str, class_name: str) -> bool:
+    return _classify_role(attr_name, class_name) == "positional"
+
+
+def _find_positional_module(
+    registry: dict[str, ClassStructure],
+    stack_model: ClassStructure | None,
+    decoder: ClassStructure | None,
+) -> tuple[str, str] | None:
+    """Locate a rotary/positional submodule declared in modeling code."""
+    search_roots: list[ClassStructure] = []
+    if stack_model is not None:
+        search_roots.append(stack_model)
+    if decoder is not None:
+        search_roots.append(decoder)
+
+    for root in search_roots:
+        order = set(root.forward_calls)
+        for attr, class_name in root.init_assignments.items():
+            if class_name in _SKIP_INIT_CLASS_NAMES:
+                continue
+            if not _is_positional_module(attr, class_name):
+                continue
+            if order and attr not in order:
+                continue
+            return attr, class_name
+
+    for info in registry.values():
+        for attr, class_name in info.init_assignments.items():
+            if class_name in _SKIP_INIT_CLASS_NAMES:
+                continue
+            if _is_positional_module(attr, class_name):
+                return attr, class_name
+    return None
+
+
+def _stack_component(
+    *,
+    attr_name: str,
+    class_name: str,
+    role: str,
+    forward_order: int | None,
+    details: list[str] | None = None,
+) -> BlockComponent:
+    return BlockComponent(
+        attr_name=attr_name,
+        class_name=class_name,
+        role=role,
+        label=_label_for(role, class_name, attr_name),
+        forward_order=forward_order,
+        details=list(details or []),
+    )
+
+
+def build_stack_components(
+    *,
+    stack_model: ClassStructure | None,
+    causal_lm: ClassStructure | None,
+    decoder: ClassStructure | None,
+    registry: dict[str, ClassStructure],
+) -> tuple[list[BlockComponent], list[BlockComponent]]:
+    """Build pre-decoder and post-decoder stack segments from model AST."""
+    pre: list[BlockComponent] = []
+    tail: list[BlockComponent] = []
+
+    if stack_model is not None:
+        order = {attr: idx for idx, attr in enumerate(stack_model.forward_calls)}
+        for attr, class_name in stack_model.init_assignments.items():
+            if class_name in _SKIP_INIT_CLASS_NAMES:
+                continue
+            role = _classify_role(attr, class_name)
+            if role != "embedding":
+                continue
+            pre.append(
+                _stack_component(
+                    attr_name=attr,
+                    class_name=class_name,
+                    role=role,
+                    forward_order=order.get(attr, 0),
+                    details=stack_model.init_details.get(attr, []),
+                )
+            )
+
+        positional = _find_positional_module(registry, stack_model, decoder)
+        if positional is not None:
+            attr, class_name = positional
+            pre.append(
+                _stack_component(
+                    attr_name=attr,
+                    class_name=class_name,
+                    role="positional",
+                    forward_order=order.get(attr, 1),
+                    details=registry.get(class_name, stack_model).init_details.get(
+                        attr, []
+                    ),
+                )
+            )
+
+        if "norm" in stack_model.init_assignments:
+            attr = "norm"
+            class_name = stack_model.init_assignments[attr]
+            tail.append(
+                _stack_component(
+                    attr_name=attr,
+                    class_name=class_name,
+                    role="norm",
+                    forward_order=order.get(attr),
+                    details=stack_model.init_details.get(attr, []),
+                )
+            )
+
+    # Collect the output head(s). A ForCausalLM / ForConditionalGeneration wrapper
+    # owns the vocab projection (``lm_head``); the stack model may ALSO own its own
+    # head-role reduction (e.g. a hyper-connection head that runs inside the stack
+    # before the wrapper's projection). Take head-role children from BOTH so neither
+    # is dropped -- the stack's heads run first, then the wrapper's. Inference repos
+    # without a wrapper hang the head off the stack itself, which the stack pass still
+    # covers. ``owner_base`` keeps every wrapper head sorted after the stack heads
+    # since forward orders from two different owners are not otherwise comparable.
+    seen_heads: set[tuple[str, str]] = set()
+    for owner_base, head_owner in ((0, stack_model), (1000, causal_lm)):
+        if head_owner is None:
+            continue
+        order = {attr: idx for idx, attr in enumerate(head_owner.forward_calls)}
+        for attr, class_name in head_owner.init_assignments.items():
+            if class_name in _SKIP_INIT_CLASS_NAMES:
+                continue
+            if _classify_role(attr, class_name) != "head":
+                continue
+            if (attr, class_name) in seen_heads:
+                continue
+            seen_heads.add((attr, class_name))
+            tail.append(
+                _stack_component(
+                    attr_name=attr,
+                    class_name=class_name,
+                    role="head",
+                    forward_order=owner_base + order.get(attr, 0),
+                    details=head_owner.init_details.get(attr, []),
+                )
+            )
+
+    pre.sort(
+        key=lambda comp: (
+            {"embedding": 0, "positional": 1}.get(comp.role, 99),
+            comp.forward_order if comp.forward_order is not None else 999,
+            comp.attr_name,
+        )
+    )
+    tail.sort(
+        key=lambda comp: (
+            comp.forward_order is None,
+            comp.forward_order if comp.forward_order is not None else 999,
+            {"norm": 0, "head": 1}.get(comp.role, 99),
+            comp.attr_name,
+        )
+    )
+    return pre, tail
+
+
+def _infer_attention_type_from_class(
+    info: ClassStructure | None, all_classes: dict[str, ClassStructure]
+) -> str | None:
+    if info is None:
+        return None
+
+    attn_attr = next(
+        (
+            attr
+            for attr, cls in info.init_assignments.items()
+            if _classify_role(attr, cls) == "attention"
+        ),
+        None,
+    )
+    if not attn_attr:
+        return None
+
+    class_name = info.init_assignments[attn_attr]
+    if re.search(r"Latent|MLA", class_name, re.I):
+        return "MLA"
+
+    attn_class = all_classes.get(class_name)
+    if attn_class:
+        joined = " ".join(
+            f"{attr} {cls}" for attr, cls in attn_class.init_assignments.items()
+        )
+        if re.search(r"kv_lora|q_lora|latent", joined, re.I):
+            return "MLA"
+        if re.search(r"num_key_value_heads|k_proj", joined, re.I):
+            # Can't know GQA vs MHA from AST alone unless config merged later.
+            pass
+
+    if re.search(r"Grouped|GQA", class_name, re.I):
+        return "GQA"
+    if re.search(r"MultiQuery|MQA", class_name, re.I):
+        return "MQA"
+    return None
+
+
+def _norm_kind_from_forward(structure: "ClassStructure | None") -> str | None:
+    """RMSNorm vs LayerNorm read from what the forward actually computes.
+
+    A LayerNorm CENTRES its input -- it subtracts a mean before scaling. An
+    RMSNorm never does: it divides by the root mean square only. That difference
+    lives in the forward body, so it identifies the norm without sniffing the
+    class name. Returns *None* for a norm with no readable Python forward (a
+    torch builtin), which the caller resolves by its exact torch identity rather
+    than by a substring guess.
+    """
+    node = getattr(structure, "node", None)
+    if node is None:
+        return None
+    forward = next(
+        (
+            item
+            for item in getattr(node, "body", [])
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+    if forward is None:
+        return None
+
+    def _is_mean(expr: ast.AST) -> bool:
+        return any(
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr == "mean"
+            for inner in ast.walk(expr)
+        )
+
+    saw_mean = False
+    for sub in ast.walk(forward):
+        if (
+            isinstance(sub, ast.BinOp)
+            and isinstance(sub.op, ast.Sub)
+            and _is_mean(sub.right)
+        ):
+            return "LayerNorm"
+        if _is_mean(sub) if isinstance(sub, ast.Call) else False:
+            saw_mean = True
+    return "RMSNorm" if saw_mean else None
+
+
+def _infer_norm_from_ast(
+    decoder: ClassStructure,
+    classes: dict[str, ClassStructure] | None = None,
+) -> tuple[str | None, str | None]:
+    norm_classes = [
+        cls
+        for attr, cls in decoder.init_assignments.items()
+        if _classify_role(attr, cls) == "norm"
+    ]
+    # Read each norm's own forward; fall back to torch's exact module identity for
+    # a builtin that has no Python body. Neither path sniffs a substring of the
+    # class name.
+    kinds = {
+        kind
+        for cls in norm_classes
+        for kind in (
+            _norm_kind_from_forward((classes or {}).get(cls))
+            or {"LayerNorm": "LayerNorm", "RMSNorm": "RMSNorm"}.get(cls),
+        )
+        if kind
+    }
+    norm_type = None
+    if len(kinds) == 1:
+        norm_type = next(iter(kinds))
+    elif "RMSNorm" in kinds:
+        norm_type = "RMSNorm"
+
+    placement = None
+    if decoder.norm_before:
+        placement = "Pre-Norm"
+    elif decoder.forward_calls and norm_classes:
+        # If norms appear in init but never immediately precede modules in forward,
+        # assume post-norm style wiring.
+        norm_attrs = {
+            a
+            for a, c in decoder.init_assignments.items()
+            if _classify_role(a, c) == "norm"
+        }
+        first_module = decoder.forward_calls[0] if decoder.forward_calls else None
+        if first_module and first_module not in norm_attrs:
+            placement = "Post-Norm (inside residual)"
+        else:
+            placement = "Pre-Norm"
+    return norm_type, placement
+
+
+def _build_components(decoder: ClassStructure) -> list[BlockComponent]:
+    components: list[BlockComponent] = []
+    order_map = {attr: idx for idx, attr in enumerate(decoder.forward_calls)}
+    forward_attrs = set(decoder.forward_calls)
+
+    for attr, class_name in decoder.init_assignments.items():
+        if class_name in _SKIP_INIT_CLASS_NAMES:
+            continue
+        if attr not in forward_attrs:
+            continue
+        role = _classify_role(attr, class_name)
+        if role in {"router"} and attr not in decoder.forward_calls:
+            continue
+        label = _label_for(role, class_name, attr)
+        components.append(
+            BlockComponent(
+                attr_name=attr,
+                class_name=class_name,
+                role=role,
+                label=label,
+                forward_order=order_map.get(attr),
+                details=decoder.init_details.get(attr, []),
+            )
+        )
+
+    for index, attr in enumerate(decoder.forward_calls):
+        if attr == SYNTHETIC_ATTENTION:
+            step_details = decoder.forward_step_details.get(attr, [])
+            components.append(
+                BlockComponent(
+                    attr_name=attr,
+                    class_name="AttentionOp",
+                    role="attention",
+                    label=attention_kernel_label(step_details),
+                    forward_order=index,
+                    details=attention_kernel_details(
+                        step_details, decoder.attention_inputs
+                    ),
+                )
+            )
+            continue
+        if attr in decoder.init_assignments:
+            continue
+        # A call to a submodule the config never builds is not a step. GPT-2's
+        # block calls `self.crossattention(...)` under a RUNTIME guard
+        # (`encoder_hidden_states is not None`) that no config can decide, but
+        # the module is built only under `if config.add_cross_attention` -- which
+        # its checkpoint leaves off, so the model raises there rather than
+        # running it. Drawn as a step it reads as computation that happens.
+        if attr in decoder.unbuilt_attrs:
+            continue
+        if _inline_forward_step(attr):
+            continue
+        role = _classify_role(attr, attr)
+        components.append(
+            BlockComponent(
+                attr_name=attr,
+                class_name=attr,
+                role=role,
+                label=attr.replace("_", " "),
+                forward_order=index,
+                details=[f"method `{attr}()`"],
+            )
+        )
+
+    components.sort(
+        key=lambda comp: (
+            comp.forward_order is None,
+            comp.forward_order if comp.forward_order is not None else 999,
+            comp.attr_name,
+        )
+    )
+    return components
+
+
+def decoder_type_for_components(components: list[BlockComponent]) -> str | None:
+    """Name the decoder flavor implied by the roles of a layer's submodules."""
+    roles = {comp.role for comp in components}
+    if "moe" in roles:
+        return "Sparse MoE"
+    if len([comp for comp in components if comp.role == "attention"]) > 1:
+        return "Hybrid"
+    if "ffn" in roles:
+        return "Dense"
+    return None
+
+
+def expand_conditional_block_components(
+    decoder: ClassStructure,
+    components: list[BlockComponent],
+) -> list[BlockComponent]:
+    """Include alternate submodule classes selected by conditional __init__ branches."""
+    expanded: list[BlockComponent] = []
+    seen: set[tuple[str, str]] = set()
+    order_map = {comp.attr_name: comp.forward_order for comp in components}
+    ffn_order = order_map.get("block_sparse_moe")
+    if ffn_order is None:
+        ffn_order = order_map.get("mlp")
+
+    for comp in components:
+        class_names = decoder.init_assignment_options.get(comp.attr_name) or [
+            comp.class_name
+        ]
+        for class_name in class_names:
+            key = (comp.attr_name, class_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            if class_name == comp.class_name:
+                expanded.append(comp)
+                continue
+            role = _classify_role(comp.attr_name, class_name)
+            expanded.append(
+                BlockComponent(
+                    attr_name=comp.attr_name,
+                    class_name=class_name,
+                    role=role,
+                    label=_label_for(role, class_name, comp.attr_name),
+                    forward_order=order_map.get(comp.attr_name),
+                    details=list(decoder.init_details.get(comp.attr_name, [])),
+                )
+            )
+
+    for attr in ("mlp", "block_sparse_moe"):
+        if attr in order_map:
+            continue
+        class_names = decoder.init_assignment_options.get(attr, [])
+        for class_name in class_names:
+            key = (attr, class_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            role = _classify_role(attr, class_name)
+            expanded.append(
+                BlockComponent(
+                    attr_name=attr,
+                    class_name=class_name,
+                    role=role,
+                    label=_label_for(role, class_name, attr),
+                    forward_order=ffn_order,
+                    details=list(decoder.init_details.get(attr, [])),
+                )
+            )
+    expanded.sort(
+        key=lambda comp: (
+            comp.forward_order is None,
+            comp.forward_order if comp.forward_order is not None else 999,
+            comp.attr_name,
+            comp.class_name,
+        )
+    )
+    return expanded
+
+
+def _unparse_expr(node: ast.AST) -> str:
+    if hasattr(ast, "unparse"):
+        return ast.unparse(node)
+    return ""
+
+
+def _class_init_method(class_node: ast.ClassDef) -> ast.FunctionDef | None:
+    for item in class_node.body:
+        if isinstance(item, ast.FunctionDef) and item.name == "__init__":
+            return item
+    return None
+
+
+def _is_module_list(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and (
+        (isinstance(node.func, ast.Name) and node.func.id == "ModuleList")
+        or (isinstance(node.func, ast.Attribute) and node.func.attr == "ModuleList")
+    )
+
+
+def _parse_layer_module_list(value: ast.AST) -> tuple[str, str, str] | None:
+    list_comp: ast.ListComp | None = None
+    if (
+        _is_module_list(value)
+        and value.args
+        and isinstance(value.args[0], ast.ListComp)
+    ):
+        list_comp = value.args[0]
+    elif isinstance(value, ast.ListComp):
+        list_comp = value
+    if list_comp is None or not isinstance(list_comp.elt, ast.Call):
+        return None
+    decoder_class = _call_class_name(list_comp.elt)
+    if not decoder_class or not list_comp.generators:
+        return None
+    gen = list_comp.generators[0]
+    loop_var = gen.target.id if isinstance(gen.target, ast.Name) else None
+    if not loop_var:
+        return None
+    count_expr = _unparse_expr(gen.iter)
+    return decoder_class, loop_var, count_expr
+
+
+def _find_layer_loop_in_init(
+    init_func: ast.FunctionDef,
+) -> tuple[str, str, str, str] | None:
+    for node in init_func.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Attribute) or not _is_self_attr(
+                target, target.attr
+            ):
+                continue
+            parsed = _parse_layer_module_list(node.value)
+            if parsed:
+                decoder_class, loop_var, count_expr = parsed
+                return target.attr, decoder_class, loop_var, count_expr
+    return None
+
+
+def _assignment_targets_role_attr(stmt: ast.Assign) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    for target in stmt.targets:
+        if isinstance(target, ast.Attribute) and _is_self_attr(target, target.attr):
+            class_name = _assignment_class_name(stmt.value)
+            if class_name:
+                found.append((target.attr, class_name))
+    return found
+
+
+def _if_chain_nodes(if_node: ast.If) -> list[ast.If]:
+    chain = [if_node]
+    cursor = if_node
+    while len(cursor.orelse) == 1 and isinstance(cursor.orelse[0], ast.If):
+        cursor = cursor.orelse[0]
+        chain.append(cursor)
+    return chain
+
+
+def _if_chain_references_layer_idx(if_node: ast.If) -> bool:
+    for node in _if_chain_nodes(if_node):
+        if "layer_idx" in _unparse_expr(node.test):
+            return True
+        for stmt in node.body:
+            if isinstance(stmt, ast.If) and _if_chain_references_layer_idx(stmt):
+                return True
+    return False
+
+
+def _collect_layer_init_conditionals(
+    if_node: ast.If,
+) -> list[tuple[str, str, str]]:
+    if not _if_chain_references_layer_idx(if_node):
+        return []
+
+    results: list[tuple[str, str, str]] = []
+    for index, node in enumerate(_if_chain_nodes(if_node)):
+        branch = "elif" if index > 0 else "if"
+        cond = _unparse_expr(node.test)
+        condition_label = f"{branch} {cond}"
+        for stmt in node.body:
+            if isinstance(stmt, ast.Assign):
+                for attr, class_name in _assignment_targets_role_attr(stmt):
+                    if _classify_role(attr, class_name) in {"attention", "ffn", "moe"}:
+                        results.append((attr, class_name, condition_label))
+            elif isinstance(stmt, ast.If):
+                results.extend(_collect_layer_init_conditionals(stmt))
+    final_else = _if_chain_nodes(if_node)[-1].orelse
+    if not (len(final_else) == 1 and isinstance(final_else[0], ast.If)):
+        for stmt in final_else:
+            if isinstance(stmt, ast.Assign):
+                for attr, class_name in _assignment_targets_role_attr(stmt):
+                    if _classify_role(attr, class_name) in {"attention", "ffn", "moe"}:
+                        results.append((attr, class_name, "else"))
+    return results
+
+
+def _extract_decoder_layer_conditionals(
+    decoder: ClassStructure,
+) -> list[tuple[str, str, str]]:
+    init_func = _class_init_method(decoder.node)
+    if init_func is None:
+        return []
+    results: list[tuple[str, str, str]] = []
+    for stmt in init_func.body:
+        if isinstance(stmt, ast.If):
+            results.extend(_collect_layer_init_conditionals(stmt))
+    return results
+
+
+def build_layer_repeat_lines(
+    *,
+    stack_model: ClassStructure | None,
+    decoder: ClassStructure | None,
+    num_layers: int | None = None,
+) -> list[str]:
+    """Summarize how decoder layers are constructed and selected in __init__."""
+    if stack_model is None or decoder is None:
+        return []
+    init_func = _class_init_method(stack_model.node)
+    if init_func is None:
+        return []
+    loop = _find_layer_loop_in_init(init_func)
+    if loop is None:
+        return []
+    layer_attr, decoder_class, loop_var, count_expr = loop
+    if num_layers is not None:
+        count_display = str(num_layers)
+        range_display = f"range({num_layers})"
+    else:
+        count_display = "N"
+        range_display = count_expr
+    lines = [f"{count_display} × {decoder_class} ({loop_var} in {range_display})"]
+    del layer_attr
+    for attr, class_name, condition in _extract_decoder_layer_conditionals(decoder):
+        lines.append(f"{attr} → {class_name} ({condition})")
+    return lines
+
+
+def build_class_registry(
+    source: str,
+    *,
+    filename: str = "<model>",
+    config: dict[str, Any] | None = None,
+    all_tensor_ops: bool = False,
+) -> dict[str, ClassStructure]:
+    """Return all class structures discovered in one modeling file."""
+    tree = parse_python_ast(source, filename=filename)
+    activation_param_bindings = _collect_activation_param_bindings(tree, config)
+    visitor = _ModelAstVisitor(
+        config=config,
+        all_tensor_ops=all_tensor_ops,
+        activation_param_bindings=activation_param_bindings,
+        module_functions=_module_forward_functions(tree, config),
+    )
+    visitor.visit(tree)
+    return visitor.classes
+
+
+def merge_class_registries(
+    *registries: dict[str, ClassStructure]
+) -> dict[str, ClassStructure]:
+    merged: dict[str, ClassStructure] = {}
+    for registry in registries:
+        merged.update(registry)
+    return merged
+
+
+def resolved_attn_implementation(config: dict[str, Any] | None) -> str:
+    """Which attention implementation the checkpoint runs.
+
+    A checkpoint that configures nothing runs ``"sdpa"`` -- the transformers
+    default. Several passes need this answer (which kernel the dispatch variable
+    resolves to, whether a flash-request predicate is true, whether a branch
+    guarded on the implementation is live), and they must all give the SAME one.
+    """
+    implementation = (config or {}).get("_attn_implementation")
+    if isinstance(implementation, str) and implementation.strip():
+        return implementation.strip().lower()
+    return "sdpa"
+
+
+def _with_resolved_attn_implementation(
+    config: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """*config* with its attention implementation spelled out.
+
+    Leaving the key absent made the SAME fact readable two ways: the kernel
+    resolver and the flash predicate both defaulted it to ``"sdpa"``, while a
+    forward branching on ``self.config._attn_implementation == "flash_attention_2"``
+    saw an unresolvable test and kept BOTH arms. Kimi then rendered the padding
+    and slicing that only the flash path performs. Writing the default in once
+    means nobody has to remember to apply it.
+    """
+    if config is None:
+        return None
+    existing = config.get("_attn_implementation")
+    if isinstance(existing, str) and existing.strip():
+        return config
+    return {**config, "_attn_implementation": resolved_attn_implementation(config)}
+
+
+def analyze_source(
+    source: str,
+    *,
+    filename: str = "<model>",
+    config: dict[str, Any] | None = None,
+    all_tensor_ops: bool = False,
+    declared_aliases: dict[str, str] | None = None,
+) -> CodeAnalysis:
+    """Analyze one modeling file and return extracted block structure."""
+    config = _with_resolved_attn_implementation(config)
+    tree = parse_python_ast(source, filename=filename)
+    external_imports = _collect_external_imports(tree)
+    activation_param_bindings = _collect_activation_param_bindings(tree, config)
+    vision_scoped = _vision_scoped_class_names(tree, config)
+    # One authoritative parsed-symbol store shared by every source resolver in this
+    # analysis, so each sibling file is read and parsed exactly once.
+    parsed_registry = _ParsedModuleRegistry()
+    visitor = _ModelAstVisitor(
+        config=config,
+        all_tensor_ops=all_tensor_ops,
+        activation_param_bindings=activation_param_bindings,
+        vision_scoped_classes=vision_scoped,
+        vision_config=(
+            (config or {}).get("vision_config") if isinstance(config, dict) else None
+        ),
+        module_functions=_module_forward_functions(tree, config, parsed_registry),
+        declared_aliases=declared_aliases,
+        ctor_defaults=_settled_ctor_defaults(tree, config),
+    )
+    visitor.visit(tree)
+    finalize_class_registry(visitor.classes)
+    _annotate_host_free_functions(visitor.classes, tree, config, parsed_registry)
+    _enrich_kernel_import_details(visitor.classes, external_imports)
+    _resolve_dispatched_attention_kernel(visitor.classes, config)
+    _forward_kwargs_boundary_params(visitor.classes)
+    _flag_unused_interface_inputs(visitor.classes, config)
+    _expand_unresolved_activation_classes(
+        visitor.classes, tree, config, all_tensor_ops=all_tensor_ops
+    )
+    _register_imported_classes(
+        visitor.classes, tree, config, all_tensor_ops=all_tensor_ops
+    )
+    _resolve_module_dict_registry_classes(visitor.classes, tree)
+
+    decoder = _pick_decoder_class(visitor.classes)
+    causal_lm = _pick_causal_lm_class(visitor.classes, config)
+    stack_model = _pick_stack_model_class(visitor.classes, causal_lm)
+    model = stack_model or _pick_model_class(visitor.classes)
+    analysis = CodeAnalysis(source_files=[filename])
+    analysis.class_registry = dict(visitor.classes)
+    analysis.external_imports = dict(external_imports)
+    analysis.positional_helpers = _positional_helper_functions(tree)
+
+    if model is not None:
+        analysis.model_class = model.name
+    if stack_model is not None:
+        analysis.stack_model_class = stack_model.name
+    if causal_lm is not None:
+        analysis.causal_lm_class = causal_lm.name
+
+    if decoder is None:
+        analysis.notes.append("No decoder layer class found in AST")
+        if stack_model is not None or causal_lm is not None:
+            analysis.stack_pre, analysis.stack_tail = build_stack_components(
+                stack_model=stack_model,
+                causal_lm=causal_lm,
+                decoder=None,
+                registry=visitor.classes,
+            )
+        return analysis
+
+    analysis.decoder_class = decoder.name
+    analysis.block_components = _build_components(decoder)
+    analysis.forward_sequence = list(decoder.forward_calls)
+    analysis.stack_pre, analysis.stack_tail = build_stack_components(
+        stack_model=stack_model,
+        causal_lm=causal_lm,
+        decoder=decoder,
+        registry=visitor.classes,
+    )
+
+    attn_type = _infer_attention_type_from_class(decoder, visitor.classes)
+    if attn_type:
+        analysis.attention_type = attn_type
+        analysis.attention_class = next(
+            (
+                cls
+                for attr, cls in decoder.init_assignments.items()
+                if _classify_role(attr, cls) == "attention"
+            ),
+            None,
+        )
+
+    analysis.decoder_type = (
+        decoder_type_for_components(analysis.block_components) or analysis.decoder_type
+    )
+
+    for comp in analysis.block_components:
+        if comp.role == "ffn" and "SwiGLU" in comp.class_name:
+            analysis.ffn_type = "SwiGLU"
+        if comp.role == "other":
+            analysis.custom_blocks.append(comp.class_name)
+
+    norm_type, norm_placement = _infer_norm_from_ast(decoder, visitor.classes)
+    analysis.norm_type = norm_type
+    analysis.norm_placement = norm_placement
+
+    if analysis.custom_blocks:
+        analysis.notes.append(
+            "Custom blocks: " + ", ".join(sorted(set(analysis.custom_blocks)))
+        )
+    if analysis.forward_sequence:
+        analysis.notes.append("Forward order: " + " → ".join(analysis.forward_sequence))
+
+    analysis.layer_repeat_lines = build_layer_repeat_lines(
+        stack_model=stack_model,
+        decoder=decoder,
+    )
+
+    return analysis
+
+
+def analyze_sources(
+    sources: dict[Path, str],
+    *,
+    config: dict[str, Any] | None = None,
+    all_tensor_ops: bool = False,
+    declared_aliases: dict[str, str] | None = None,
+) -> CodeAnalysis:
+    """Analyze multiple files and merge into one CodeAnalysis."""
+    merged = CodeAnalysis()
+    registries: list[dict[str, ClassStructure]] = []
+    best_decoder_score = 0
+    for path, text in sources.items():
+        partial = analyze_source(
+            text,
+            filename=str(path),
+            config=config,
+            all_tensor_ops=all_tensor_ops,
+            declared_aliases=declared_aliases,
+        )
+        registries.append(partial.class_registry)
+        merged.source_files.extend(partial.source_files)
+        merged.notes.extend(partial.notes)
+        merged.external_imports.update(partial.external_imports)
+        merged.positional_helpers.extend(partial.positional_helpers)
+
+        # Multimodal repos ship several modeling files; the language decoder can live
+        # in any of them, so rank candidates across files instead of taking the first.
+        decoder_info = partial.class_registry.get(partial.decoder_class or "")
+        decoder_score = _decoder_class_score(decoder_info) if decoder_info else 0
+        if partial.decoder_class and decoder_score > best_decoder_score:
+            best_decoder_score = decoder_score
+            merged.decoder_class = partial.decoder_class
+            merged.block_components = partial.block_components
+            merged.forward_sequence = partial.forward_sequence
+            merged.layer_repeat_lines = list(partial.layer_repeat_lines)
+            merged.attention_class = partial.attention_class
+            merged.attention_type = partial.attention_type
+            merged.decoder_type = partial.decoder_type
+            merged.ffn_type = partial.ffn_type
+            merged.norm_type = partial.norm_type
+            merged.norm_placement = partial.norm_placement
+            merged.custom_blocks = list(partial.custom_blocks)
+
+    merged.class_registry = merge_class_registries(*registries)
+    # Re-pick graph-owning classes from the combined registry. First-file-wins
+    # lets a vision modeling file stamp a ViT backbone (or leave these unset).
+    causal_lm = _pick_causal_lm_class(merged.class_registry, config)
+    stack_model = _pick_stack_model_class(merged.class_registry, causal_lm)
+    model = stack_model or _pick_model_class(merged.class_registry)
+    if causal_lm is not None:
+        merged.causal_lm_class = causal_lm.name
+    if stack_model is not None:
+        merged.stack_model_class = stack_model.name
+    if model is not None:
+        merged.model_class = model.name
+    merged.custom_blocks = sorted(set(merged.custom_blocks))
+    merged.positional_helpers = sorted(set(merged.positional_helpers))
+    return merged

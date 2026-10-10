@@ -1,0 +1,2143 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""Extract architecture metadata from Hugging Face configs (CPU-only, no weights)."""
+
+from __future__ import annotations
+
+import ast
+import json
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from TraceLens.ModelUtils.meta_trace import MetaModuleGroup
+
+from TraceLens.ModelUtils.ast_analyze import analyze_sources, dump_ast
+from TraceLens.ModelUtils.basic_ops import BasicOpFilter
+from TraceLens.ModelUtils.block_tree import (
+    SUBMODULE_OMITTED,
+    BlockNode,
+    build_block_node,
+    build_full_detailed_block_trees,
+    is_method_wrapper,
+)
+from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis, LayerVariant
+from TraceLens.ModelUtils.config_resolve import (
+    apply_config_attribute_aliases,
+    declared_config_aliases,
+    declared_config_defaults,
+    load_checkpoint_config,
+)
+from TraceLens.ModelUtils.github import (
+    fetch_github_source,
+    github_config_path,
+    parse_github_url,
+)
+from TraceLens.ModelUtils.source import read_sources, resolve_source_files
+
+_log = logging.getLogger(__name__)
+
+BYTES_PER_BF16 = 2
+
+
+@dataclass
+class ArchitectureSpec:
+    """Normalized architecture description for Model Explorer export."""
+
+    name: str
+    model_type: str
+    architectures: list[str] = field(default_factory=list)
+
+    # Scale
+    total_params_hint: str | None = None
+    active_params_hint: str | None = None
+    hidden_size: int | None = None
+    num_hidden_layers: int | None = None
+    intermediate_size: int | None = None
+    vocab_size: int | None = None
+    max_position_embeddings: int | None = None
+
+    # Attention
+    num_attention_heads: int | None = None
+    num_key_value_heads: int | None = None
+    head_dim: int | None = None
+    attention_type: str = "MHA"
+    attention_notes: list[str] = field(default_factory=list)
+
+    # Positional
+    positional_encoding: str = "RoPE"
+
+    # FFN / MoE
+    decoder_type: str = "Dense"
+    ffn_type: str = "SwiGLU"
+    num_experts: int | None = None
+    num_experts_per_tok: int | None = None
+    num_shared_experts: int | None = None
+    moe_intermediate_size: int | None = None
+    moe_notes: list[str] = field(default_factory=list)
+
+    # Norm / block layout
+    norm_type: str = "RMSNorm"
+    norm_placement: str = "Pre-Norm"
+    norm_notes: list[str] = field(default_factory=list)
+
+    # Layer mix (sliding window, hybrid, dense prefix, etc.)
+    layer_mix: str | None = None
+    layer_variants: list[LayerVariant] = field(default_factory=list)
+    layer_repeat_lines: list[str] = field(default_factory=list)
+    # Canonical pre-substitution repeat lines ("N × Class (v in range(...))"), kept so
+    # _finalize_layer_repeat_lines is idempotent and can be re-run after the live-tree
+    # reconciliation changes counts.
+    layer_repeat_lines_raw: list[str] = field(default_factory=list)
+    layer_notes: list[str] = field(default_factory=list)
+
+    # Embeddings / output
+    tie_word_embeddings: bool | None = None
+
+    # Derived
+    kv_cache_per_token_bf16: str | None = None
+    highlights: list[str] = field(default_factory=list)
+    source_path: str = ""
+    checkpoint_source: str = ""
+    github_source: str = ""
+    raw_config: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    # Live meta-tree structure (repeated ModuleLists), when instantiation succeeds.
+    meta_module_groups: list[MetaModuleGroup] = field(default_factory=list)
+
+    # AST-derived block graph
+    block_components: list[BlockComponent] = field(default_factory=list)
+    stack_pre: list[BlockComponent] = field(default_factory=list)
+    stack_tail: list[BlockComponent] = field(default_factory=list)
+    forward_sequence: list[str] = field(default_factory=list)
+    decoder_class: str | None = None
+    stack_model_class: str | None = None
+    code_sources: list[str] = field(default_factory=list)
+    # Where that source actually sits. `code_sources` is overwritten below with
+    # provenance LABELS (`github://...@<sha>/...`, `hf://<id>`), which read well
+    # in a fact sheet but name no file, so anything wanting to read the model's
+    # own code -- its configuration module, say -- has nothing to open.
+    code_paths: list[str] = field(default_factory=list)
+    analysis_notes: list[str] = field(default_factory=list)
+    custom_blocks: list[str] = field(default_factory=list)
+    export_block_trees: list[tuple[str, BlockNode]] = field(default_factory=list)
+    class_registry: dict = field(default_factory=dict, repr=False)
+    basic_ops: BasicOpFilter | None = None
+
+
+def _first(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _get(config: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in config and config[key] is not None:
+            return config[key]
+    return None
+
+
+def _config_keys_anywhere(config: Any) -> set[str]:
+    """Every key the checkpoint states, at any nesting depth."""
+    found: set[str] = set()
+    if isinstance(config, dict):
+        for key, value in config.items():
+            found.add(str(key))
+            found |= _config_keys_anywhere(value)
+    elif isinstance(config, list):
+        for item in config:
+            found |= _config_keys_anywhere(item)
+    return found
+
+
+def _with_declared_defaults(
+    config: dict[str, Any], source_files: list[Any]
+) -> dict[str, Any]:
+    """Fill in defaults for keys the checkpoint states NOWHERE.
+
+    Only keys absent at every depth. A key the checkpoint gives inside a
+    sub-config is already stated: GLM keeps ``image_size`` 448 in its
+    ``vision_config`` while the vision config CLASS defaults it to 336, and
+    writing that default at the top level shadows the real value -- the nested
+    registration that would have supplied 448 only fills what is still missing.
+    """
+    by_model_type = declared_config_defaults(source_files)
+    if not by_model_type:
+        return config
+    return _section_with_defaults(config, by_model_type)
+
+
+def _section_with_defaults(
+    section: dict[str, Any], by_model_type: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Fill one config section from the class declaring ITS ``model_type``."""
+    declared = by_model_type.get(str(section.get("model_type") or ""), {})
+    # A key this section states at any depth is already answered; writing a
+    # default over it would shadow the real value with the class's placeholder.
+    stated = _config_keys_anywhere(section)
+    merged: dict[str, Any] = {
+        key: value for key, value in declared.items() if key not in stated
+    }
+    merged.update(section)
+    for key, value in list(merged.items()):
+        if isinstance(value, dict) and value.get("model_type"):
+            merged[key] = _section_with_defaults(value, by_model_type)
+    return merged
+
+
+def _declared_get(
+    config: dict[str, Any], canonical: str, declared: dict[str, str]
+) -> Any:
+    """Read *canonical*, falling back to the key the MODEL says holds it.
+
+    A config class states renames in ``attribute_map``, so a checkpoint storing
+    its head count as ``n_head`` is read through the model's own declaration
+    rather than through a list of spellings a checkpoint might use.
+    """
+    value = _get(config, canonical)
+    if value is None and canonical in declared:
+        value = _get(config, declared[canonical])
+    return value
+
+
+def _as_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes"}
+    return bool(value)
+
+
+def _human_bytes(num_bytes: float) -> str:
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    size = float(num_bytes)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}".replace(".0 ", " ")
+        size /= 1024
+    return f"{size:.1f} TiB"
+
+
+def load_config_dict(
+    checkpoint: str | Path,
+    *,
+    config_path: str | None = None,
+    revision: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Load config.json from a HF checkpoint, subpath, or local directory."""
+    return load_checkpoint_config(
+        checkpoint, config_path=config_path, revision=revision
+    )
+
+
+def _resolve_checkpoint(
+    *,
+    checkpoint: str | Path | None,
+    github: str | None,
+    config_path: str | None = None,
+    revision: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    if checkpoint is not None:
+        return load_config_dict(checkpoint, config_path=config_path, revision=revision)
+
+    if github:
+        ref = parse_github_url(github)
+        root = fetch_github_source(ref)
+        discovered = github_config_path(root)
+        if discovered is None:
+            raise FileNotFoundError(
+                "No checkpoint provided and no config.json found in GitHub source. "
+                "Pass a Hugging Face checkpoint via SOURCE or --checkpoint."
+            )
+        config = json.loads(discovered.read_text(encoding="utf-8"))
+        label = f"github-config://{ref.display}"
+        from TraceLens.ModelUtils.config_resolve import normalize_config
+
+        return normalize_config(config, source_label=label), label
+
+    raise ValueError(
+        "Provide a Hugging Face checkpoint (SOURCE or --checkpoint) "
+        "or a GitHub repo that contains config.json."
+    )
+
+
+def _infer_attention(config: dict[str, Any], spec: ArchitectureSpec) -> None:
+    model_type = (spec.model_type or "").lower()
+    kv_lora_rank = _as_int(_get(config, "kv_lora_rank"))
+    q_lora_rank = _as_int(_get(config, "q_lora_rank"))
+    qk_nope_head_dim = _as_int(_get(config, "qk_nope_head_dim"))
+
+    if kv_lora_rank or q_lora_rank or "deepseek" in model_type and qk_nope_head_dim:
+        spec.attention_type = "MLA"
+        spec.attention_notes.append("Multi-head Latent Attention (compressed KV)")
+        if kv_lora_rank:
+            spec.attention_notes.append(f"kv_lora_rank={kv_lora_rank}")
+        return
+
+    num_heads = spec.num_attention_heads
+    num_kv = spec.num_key_value_heads
+
+    if num_heads and num_kv:
+        if num_kv == 1:
+            spec.attention_type = "MQA"
+        elif num_kv < num_heads:
+            spec.attention_type = "GQA"
+            group = max(1, num_heads // num_kv)
+            spec.attention_notes.append(f"GQA group size ≈ {group}")
+        else:
+            spec.attention_type = "MHA"
+
+    if _as_bool(_get(config, "use_sliding_window")):
+        window = _as_int(_get(config, "sliding_window"))
+        max_window_layers = _as_int(_get(config, "max_window_layers"))
+        if max_window_layers and spec.num_hidden_layers:
+            global_layers = spec.num_hidden_layers - max_window_layers
+            spec.layer_mix = (
+                f"{max_window_layers} sliding-window + {global_layers} global"
+            )
+            spec.layer_notes.append(f"Sliding window size={window}")
+        elif window:
+            spec.layer_notes.append(f"Sliding window attention (window={window})")
+
+    if _as_bool(_get(config, "attention_bias")):
+        spec.attention_notes.append("Attention projections use bias")
+
+    # Both spellings are in USE, not guessed: MiniMax-M3 states `use_qk_norm`
+    # and neither config class declares a rename for it, so this is the
+    # model's own key rather than an alias something could resolve.
+    if _get(config, "qk_norm", "use_qk_norm") is True:
+        spec.attention_notes.append("QK-Norm enabled")
+        spec.norm_notes.append("QK-Norm inside attention")
+
+
+def _infer_positional(config: dict[str, Any], spec: ArchitectureSpec) -> None:
+    model_type = (spec.model_type or "").lower()
+    # Three DIFFERENT keys, not three spellings of one: a parameters dict, a
+    # scaling dict and a bare theta. Any of them present means the model has
+    # rope, which is what is being asked here.
+    rope = _get(config, "rope_parameters", "rope_scaling", "rope_theta")
+
+    if _get(config, "position_embedding_type") == "nope" or "nope" in model_type:
+        spec.positional_encoding = "NoPE"
+        return
+
+    alibi = _as_bool(_get(config, "alibi"))
+    if alibi:
+        spec.positional_encoding = "ALiBi"
+        return
+
+    if _get(config, "position_embedding_type") == "absolute":
+        spec.positional_encoding = "Learned absolute"
+        return
+
+    if model_type in {"gpt2", "gpt_neox", "bloom", "opt"} and not rope:
+        spec.positional_encoding = "Learned absolute"
+        return
+
+    if rope or spec.max_position_embeddings:
+        spec.positional_encoding = "RoPE"
+        theta = _get(config, "rope_theta")
+        if theta:
+            spec.attention_notes.append(f"RoPE theta={theta}")
+
+
+def _infer_ffn_and_moe(config: dict[str, Any], spec: ArchitectureSpec) -> None:
+    hidden_act = str(
+        # GPT-2 states `activation_function`, and `GPT2Config` declares no
+        # rename for it -- it is that model's own key, not an alias. Both
+        # spellings are read because both are in use.
+        _get(config, "hidden_act", "activation_function")
+        or "silu"
+    ).lower()
+    if hidden_act in {"silu", "swish"}:
+        spec.ffn_type = "SwiGLU"
+    elif hidden_act == "gelu":
+        spec.ffn_type = "GeGLU" if _get(config, "gated_ffn") else "GELU"
+    else:
+        spec.ffn_type = hidden_act.upper()
+
+    num_experts = _as_int(
+        _get(
+            config,
+            "num_experts",
+            "n_routed_experts",
+            "moe_num_experts",
+            "num_local_experts",
+            "num_moe_experts",
+        )
+    )
+    experts_per_tok = _as_int(
+        _get(
+            config,
+            "num_experts_per_token",
+            "num_experts_per_tok",
+            "moe_k",
+            "num_selected_experts",
+            "top_k",
+            "moe_top_k",
+        )
+    )
+    shared_experts = _as_int(
+        _get(
+            config,
+            "num_shared_experts",
+            "moe_num_shared_experts",
+            "n_shared_experts",
+        )
+    )
+
+    spec.num_experts = num_experts
+    spec.num_experts_per_tok = experts_per_tok
+    spec.num_shared_experts = shared_experts
+    spec.moe_intermediate_size = _as_int(_get(config, "moe_intermediate_size"))
+
+    if num_experts and num_experts > 1:
+        spec.decoder_type = "Sparse MoE"
+        if shared_experts:
+            spec.moe_notes.append(f"{shared_experts} shared expert(s)")
+        if experts_per_tok:
+            active_ratio = experts_per_tok / num_experts * 100
+            spec.moe_notes.append(
+                f"{experts_per_tok}/{num_experts} experts active (~{active_ratio:.1f}%)"
+            )
+    elif _get(config, "layer_types"):
+        spec.decoder_type = "Hybrid"
+    else:
+        spec.decoder_type = "Dense"
+
+    first_k_dense = _as_int(_get(config, "first_k_dense_replace"))
+    moe_layer_start = _as_int(_get(config, "moe_layer_start_index"))
+    moe_layer_interval = _as_int(_get(config, "moe_layer_interval"))
+    mlp_only_layers = _get(config, "mlp_only_layers")
+
+    if first_k_dense:
+        spec.moe_notes.append(f"First {first_k_dense} layers are dense FFN")
+    if moe_layer_start is not None and moe_layer_interval:
+        spec.moe_notes.append(
+            f"MoE from layer {moe_layer_start} every {moe_layer_interval} layer(s)"
+        )
+    if isinstance(mlp_only_layers, list) and mlp_only_layers:
+        spec.moe_notes.append(f"Dense FFN on layer indices: {mlp_only_layers}")
+
+    layer_types = _get(config, "layer_types")
+    if isinstance(layer_types, list) and layer_types:
+        from collections import Counter
+
+        counts = Counter(layer_types)
+        spec.decoder_type = "Hybrid"
+        spec.layer_mix = ", ".join(f"{count} {kind}" for kind, count in counts.items())
+
+
+def _config_has_ffn_layer_variation(config: dict[str, Any]) -> bool:
+    """True when config selects different FFN/MoE modules by layer index."""
+    mlp_layer_types = _get(config, "mlp_layer_types")
+    if (
+        isinstance(mlp_layer_types, list)
+        and len({str(item) for item in mlp_layer_types}) > 1
+    ):
+        return True
+    first_k_dense = _as_int(_get(config, "first_k_dense_replace")) or 0
+    num_experts = _as_int(
+        _get(
+            config,
+            "num_experts",
+            "n_routed_experts",
+            "moe_num_experts",
+            "num_local_experts",
+            "num_moe_experts",
+        )
+    )
+    if first_k_dense and num_experts and num_experts > 1:
+        return True
+    moe_pattern = _get(config, "moe_layer_freq")
+    if (
+        isinstance(moe_pattern, list)
+        and len({bool(_as_int(item)) for item in moe_pattern}) > 1
+    ):
+        return True
+    return False
+
+
+def _resolve_attention_from_config_lists(
+    layer_idx: int,
+    config: dict[str, Any],
+    *,
+    class_registry: dict | None,
+    decoder_class: str | None,
+) -> str | None:
+    """Map config.layer_types entries to the attention class a decoder layer builds."""
+    layer_types = _get(config, "layer_types")
+    if not isinstance(layer_types, list) or layer_idx >= len(layer_types):
+        return None
+    block_type = str(layer_types[layer_idx] or "").strip().lower()
+    if not block_type or not class_registry or not decoder_class:
+        return None
+    from TraceLens.ModelUtils.ast_analyze import ATTENTION_CLASS_RE, ClassStructure
+
+    decoder = class_registry.get(decoder_class)
+    if not isinstance(decoder, ClassStructure):
+        return None
+    options = decoder.init_assignment_options.get("self_attn") or []
+    if not options:
+        return None
+    linear_markers = ("linear", "delta", "kda")
+    sparse_markers = ("sparse", "full", "flash", "mla")
+    wants_linear = any(marker in block_type for marker in linear_markers)
+    wants_sparse = any(marker in block_type for marker in sparse_markers)
+    for class_name in options:
+        lowered = class_name.lower()
+        if wants_linear and "linear" in lowered:
+            return class_name
+        if (
+            wants_sparse
+            and "linear" not in lowered
+            and ATTENTION_CLASS_RE.search(class_name)
+        ):
+            return class_name
+    return options[0]
+
+
+def _resolve_ffn_from_config_lists(
+    layer_idx: int,
+    config: dict[str, Any],
+    *,
+    moe_option: str | None,
+    dense_option: str | None,
+) -> tuple[str | None, str | None]:
+    """Map config.mlp_layer_types entries to the FFN class a decoder layer builds."""
+    mlp_layer_types = _get(config, "mlp_layer_types")
+    if isinstance(mlp_layer_types, list) and layer_idx < len(mlp_layer_types):
+        layer_kind = str(mlp_layer_types[layer_idx] or "").strip().lower()
+        if layer_kind in {"sparse", "moe"}:
+            return "mlp", moe_option
+        if layer_kind in {"dense", "mlp"}:
+            return "mlp", dense_option
+    if _config_moe_layer(layer_idx, config):
+        return "mlp", moe_option
+    return "mlp", dense_option
+
+
+def _config_has_per_layer_typing(config: dict[str, Any]) -> bool:
+    """True when config encodes per-layer module selection beyond a flat layer_types list."""
+    if isinstance(_get(config, "layer_types"), list):
+        return False
+    for container in [
+        config,
+        *([value for value in config.values() if isinstance(value, dict)]),
+    ]:
+        for key, value in container.items():
+            if "layer" in key.lower() and isinstance(value, list) and value:
+                if all(_as_int(item) is not None for item in value):
+                    return True
+    return False
+
+
+_ATTENTION_ATTRS = frozenset({"self_attn", "self_attention", "attn", "attention"})
+
+
+def _resolve_conditional_class(
+    layer_idx: int,
+    rules: list[tuple[str, str]],
+    config: dict[str, Any],
+) -> str | None:
+    from TraceLens.ModelUtils.layer_repeat_simplify import layer_condition_matches
+
+    for class_name, condition in rules:
+        if condition == "else":
+            continue
+        if layer_condition_matches(layer_idx, condition, config):
+            return class_name
+    for class_name, condition in rules:
+        if condition == "else":
+            return class_name
+    return None
+
+
+def _default_attention_class(
+    class_registry: dict | None,
+    decoder_class: str | None,
+) -> str | None:
+    if not class_registry or not decoder_class:
+        return None
+    from TraceLens.ModelUtils.ast_analyze import ClassStructure, _classify_role
+
+    decoder = class_registry.get(decoder_class)
+    if not isinstance(decoder, ClassStructure):
+        return None
+    for attr, class_name in decoder.init_assignments.items():
+        if _classify_role(attr, class_name) == "attention":
+            return class_name
+    return None
+
+
+def _resolve_ffn_for_layer(
+    layer_idx: int,
+    ffn_rules: list[tuple[str, str, str]],
+    config: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    from TraceLens.ModelUtils.layer_repeat_simplify import layer_condition_matches
+
+    for attr, class_name, condition in ffn_rules:
+        if condition != "else" and layer_condition_matches(
+            layer_idx, condition, config
+        ):
+            return attr, class_name
+    for attr, class_name, condition in ffn_rules:
+        if condition == "else":
+            return attr, class_name
+    if _config_moe_layer(layer_idx, config):
+        for attr, class_name, _condition in ffn_rules:
+            from TraceLens.ModelUtils.ast_analyze import _classify_role
+
+            if _classify_role(attr, class_name) == "moe":
+                return attr, class_name
+        return "block_sparse_moe", None
+    for attr, class_name, _condition in ffn_rules:
+        from TraceLens.ModelUtils.ast_analyze import _classify_role
+
+        if _classify_role(attr, class_name) == "ffn":
+            return attr, class_name
+    return "mlp", None
+
+
+def _apply_uniform_ffn_component(
+    spec: ArchitectureSpec,
+    *,
+    ffn_attr: str | None,
+    ffn_class: str | None,
+) -> None:
+    """Name the spine's FFN tile after the branch every layer of this config takes.
+
+    A decoder's ``__init__`` can bind one attribute to either a dense or a sparse
+    class; the AST keeps whichever it saw last, which is not necessarily the one this
+    checkpoint builds.
+    """
+    if not ffn_attr or not ffn_class:
+        return
+    from dataclasses import replace
+
+    from TraceLens.ModelUtils.ast_analyze import _label_for, ffn_role_for_class
+
+    for index, comp in enumerate(spec.block_components):
+        if comp.attr_name != ffn_attr or comp.role not in {"ffn", "moe"}:
+            continue
+        if comp.class_name == ffn_class:
+            return
+        role = ffn_role_for_class(comp.attr_name, ffn_class)
+        spec.block_components[index] = replace(
+            comp,
+            class_name=ffn_class,
+            role=role,
+            label=_label_for(role, ffn_class, comp.attr_name),
+        )
+        return
+
+
+def _infer_layer_variants(
+    config: dict[str, Any],
+    spec: ArchitectureSpec,
+    *,
+    class_registry: dict | None = None,
+    decoder_class: str | None = None,
+) -> None:
+    """Infer per-layer decoder templates when attention or FFN type varies by depth."""
+    num_layers = spec.num_hidden_layers
+    if not num_layers:
+        return
+
+    layer_types = _get(config, "layer_types")
+    has_config_layer_lists = isinstance(layer_types, list) and layer_types
+    has_ffn_layer_variation = _config_has_ffn_layer_variation(config)
+
+    conditionals: list[tuple[str, str, str]] = []
+    if class_registry and decoder_class:
+        from TraceLens.ModelUtils.ast_analyze import (
+            ClassStructure,
+            _extract_decoder_layer_conditionals,
+        )
+
+        decoder = class_registry.get(decoder_class)
+        if isinstance(decoder, ClassStructure):
+            conditionals = _extract_decoder_layer_conditionals(decoder)
+
+    if (
+        has_config_layer_lists
+        and not has_ffn_layer_variation
+        and not conditionals
+        and not _config_has_per_layer_typing(config)
+    ):
+        return
+
+    if (
+        not conditionals
+        and not _config_has_per_layer_typing(config)
+        and not (has_config_layer_lists or has_ffn_layer_variation)
+    ):
+        return
+
+    from collections import Counter
+    from TraceLens.ModelUtils.ast_analyze import (
+        _classify_role,
+        _label_for,
+        ffn_role_for_class,
+    )
+
+    attn_rules = [
+        (cls, cond) for attr, cls, cond in conditionals if attr in _ATTENTION_ATTRS
+    ]
+    ffn_rules = [
+        (attr, cls, cond)
+        for attr, cls, cond in conditionals
+        if _classify_role(attr, cls) in {"ffn", "moe"}
+    ]
+    decoder_options: list[str] = []
+    if class_registry and decoder_class:
+        decoder = class_registry.get(decoder_class)
+        if isinstance(decoder, ClassStructure):
+            for attr in ("mlp", "block_sparse_moe"):
+                decoder_options.extend(decoder.init_assignment_options.get(attr, []))
+    decoder_options = list(dict.fromkeys(decoder_options))
+    moe_option = next(
+        (
+            class_name
+            for class_name in decoder_options
+            if ffn_role_for_class("", class_name) == "moe"
+        ),
+        None,
+    )
+    dense_option = next(
+        (
+            class_name
+            for class_name in decoder_options
+            if ffn_role_for_class("", class_name) == "ffn"
+        ),
+        None,
+    )
+
+    buckets: Counter[tuple[str, str | None, str, str | None, str | None]] = Counter()
+    indices_by_key: dict[
+        tuple[str, str | None, str, str | None, str | None], list[int]
+    ] = {}
+    for layer_idx in range(num_layers):
+        attn_class = (
+            _resolve_conditional_class(layer_idx, attn_rules, config)
+            if attn_rules
+            else None
+        )
+        if attn_class is None and has_config_layer_lists:
+            attn_class = _resolve_attention_from_config_lists(
+                layer_idx,
+                config,
+                class_registry=class_registry,
+                decoder_class=decoder_class,
+            )
+        if attn_class is None:
+            attn_class = _default_attention_class(class_registry, decoder_class)
+
+        ffn_attr, ffn_class = (
+            _resolve_ffn_for_layer(layer_idx, ffn_rules, config)
+            if ffn_rules
+            else (None, None)
+        )
+        if ffn_class is None and ffn_attr is None:
+            ffn_attr, ffn_class = _resolve_ffn_from_config_lists(
+                layer_idx,
+                config,
+                moe_option=moe_option,
+                dense_option=dense_option,
+            )
+        if ffn_class is None and ffn_attr is None:
+            if _config_moe_layer(layer_idx, config):
+                ffn_attr, ffn_class = "mlp", moe_option
+            else:
+                ffn_attr, ffn_class = "mlp", dense_option
+
+        attn_label = _label_for("attention", attn_class or "Attention", "self_attn")
+        ffn_role = ffn_role_for_class(ffn_attr or "mlp", ffn_class or "MLP")
+        ffn_display = _label_for(ffn_role, ffn_class or "", ffn_attr or "")
+
+        key = (attn_label, attn_class, ffn_display, ffn_class, ffn_attr)
+        buckets[key] += 1
+        indices_by_key.setdefault(key, []).append(layer_idx)
+
+    if len(buckets) <= 1:
+        only = next(iter(buckets.items()), None)
+        if only:
+            (attn_label, attn_class, _ffn_display, ffn_class, ffn_attr), _count = only
+            if attn_class:
+                spec.attention_notes.append(f"Attention module: {attn_class}")
+            if len({variant.attention_label for variant in spec.layer_variants}) <= 1:
+                spec.attention_type = attn_label
+            _apply_uniform_ffn_component(spec, ffn_attr=ffn_attr, ffn_class=ffn_class)
+        return
+
+    variants: list[LayerVariant] = []
+    for key, count in sorted(
+        buckets.items(),
+        key=lambda item: (-item[1], item[0][0], item[0][2]),
+    ):
+        attn_label, attn_class, ffn_display, ffn_class, ffn_attr = key
+        variants.append(
+            LayerVariant(
+                label=f"{attn_label} + {ffn_display}",
+                count=count,
+                attention_label=attn_label,
+                attention_class=attn_class,
+                ffn_label=ffn_display,
+                ffn_class=ffn_class,
+                ffn_attr=ffn_attr,
+                layer_indices=list(indices_by_key[key]),
+            )
+        )
+
+    spec.layer_variants = variants
+    attn_labels = sorted({variant.attention_label for variant in variants})
+    if len(attn_labels) > 1:
+        spec.attention_type = "Hybrid"
+        spec.attention_notes.append(" / ".join(attn_labels))
+    elif len(attn_labels) == 1:
+        spec.attention_type = attn_labels[0]
+        if variants[0].attention_class:
+            spec.attention_notes.append(
+                f"Attention module: {variants[0].attention_class}"
+            )
+
+    mix_parts = [f"{variant.count} {variant.label}" for variant in variants]
+    spec.layer_mix = ", ".join(mix_parts)
+    if len({variant.ffn_label for variant in variants}) > 1:
+        spec.decoder_type = "Hybrid"
+        spec.layer_notes.append("Per-layer module types from AST/config")
+
+
+def _select_primary_group(
+    spec: ArchitectureSpec, groups: list[MetaModuleGroup]
+) -> MetaModuleGroup | None:
+    """Pick the decoder ModuleList from the live groups — no role/name heuristic.
+
+    Prefer the group whose elements are the AST-named decoder class, else the
+    conventional ``layers`` attribute path, else the longest repeated ModuleList.
+    """
+    if not groups:
+        return None
+    if spec.decoder_class:
+        for group in groups:
+            if group.element_class == spec.decoder_class:
+                return group
+    for group in groups:
+        if group.path == "layers" or group.path.endswith(".layers"):
+            return group
+    return max(groups, key=lambda group: group.length)
+
+
+def _reconcile_layer_variants(spec: ArchitectureSpec, primary: MetaModuleGroup) -> None:
+    """Drive sub-variant counts from the live per-element structural signatures."""
+    from collections import Counter
+
+    buckets = Counter(primary.signatures)
+    if len(buckets) <= 1:
+        # A single uniform block — the N× banner alone suffices.
+        spec.layer_variants = []
+        return
+
+    # The signatures are ordered by layer index, so grouping their positions gives
+    # the exact 0-based indices each variant occupies (feeds the fact-sheet ranges).
+    indices_by_sig: dict[str, list[int]] = {}
+    for idx, signature in enumerate(primary.signatures):
+        indices_by_sig.setdefault(signature, []).append(idx)
+    # Signatures in descending count order (count then signature) — the same order
+    # the AST variants are matched against below.
+    ordered_sigs = sorted(buckets, key=lambda sig: (-buckets[sig], sig))
+
+    ast_variants = spec.layer_variants
+    if ast_variants and len(ast_variants) == len(buckets):
+        # Keep the AST-derived rich labels/classes (they feed subgraph resolution via
+        # class_registry) but take the authoritative counts + layer indices from the
+        # live buckets, matching the AST's descending-count ordering.
+        ordered = sorted(ast_variants, key=lambda variant: -variant.count)
+        for variant, signature in zip(ordered, ordered_sigs):
+            variant.count = buckets[signature]
+            variant.layer_indices = list(indices_by_sig[signature])
+        spec.layer_variants = ordered
+        return
+
+    # Cardinality disagrees (AST produced none or a different number): synthesize
+    # directly from the live signatures. When the walk supplied full descriptors we can
+    # locate *which* nested submodule paths diverge and render each variant's own subtree;
+    # otherwise (e.g. unit fixtures with shallow signatures only) we fall back to a
+    # discriminating child-class label. Either way the counts stay authoritative.
+    spec.layer_variants = _synthesize_variants_from_signatures(
+        spec, primary, ordered_sigs, buckets, indices_by_sig
+    )
+
+
+# Sentinel: a submodule path present in some buckets but absent in this one.
+_DESC_MISSING = object()
+# Component roles whose divergence is described on the FFN side of a variant's label.
+_FFN_ROLES = frozenset({"ffn", "moe", "router"})
+
+
+def _synthesize_variants_from_signatures(
+    spec: ArchitectureSpec,
+    primary: MetaModuleGroup,
+    ordered_sigs: list[str],
+    buckets: "Counter[str]",
+    indices_by_sig: dict[str, list[int]],
+) -> list[LayerVariant]:
+    """Build one :class:`LayerVariant` per live signature bucket.
+
+    Where the walk supplied full nested descriptors, diff the buckets to find the
+    shallowest submodule paths whose class differs, and give each variant its own
+    per-component subtree (with those nested class swaps / omissions applied) plus a
+    concise label naming the divergence — all read structurally off the meta tree, with
+    no class/config/attr allowlist.
+    """
+    # One representative descriptor (path -> class map) per bucket, when available.
+    sig_to_desc: dict[str, dict[str, str]] = {}
+    if primary.descriptors and len(primary.descriptors) == len(primary.signatures):
+        for signature, descriptor in zip(primary.signatures, primary.descriptors):
+            sig_to_desc.setdefault(signature, dict(descriptor))
+
+    divergent_paths: list[str] = []
+    label_prefix = ""
+    if len(sig_to_desc) == len(buckets):
+        divergent_paths = _shallowest_divergent_paths(sig_to_desc)
+        # Longest common prefix of the divergent class names ACROSS ALL buckets — computed
+        # once so a variant that carries only one of them still strips the shared model
+        # prefix ("DeepseekV4") rather than eating its whole discriminating name.
+        label_prefix = _common_class_prefix(
+            sorted(
+                {
+                    desc[path]
+                    for desc in sig_to_desc.values()
+                    for path in divergent_paths
+                    if desc.get(path)
+                }
+            )
+        )
+
+    variants: list[LayerVariant] = []
+    for signature in ordered_sigs:
+        desc = sig_to_desc.get(signature, {})
+        variant = LayerVariant(
+            label=f"{primary.element_class} {signature}",
+            count=buckets[signature],
+            attention_label=primary.element_class,
+            layer_indices=list(indices_by_sig[signature]),
+        )
+        if divergent_paths:
+            _apply_variant_divergence(
+                spec, variant, divergent_paths, desc, label_prefix
+            )
+        variants.append(variant)
+    return variants
+
+
+def _shallowest_divergent_paths(sig_to_desc: dict[str, dict[str, str]]) -> list[str]:
+    """Submodule paths whose class differs across buckets, minus deeper descendants.
+
+    A path is kept only when no proper ancestor path also diverges, so a per-layer
+    ``self_attn.compressor`` swap is reported once (not once per descendant the swapped
+    compressor's own subtree also differs at).
+    """
+    all_paths: set[str] = set()
+    for desc in sig_to_desc.values():
+        all_paths.update(desc)
+    divergent = {
+        path
+        for path in all_paths
+        if len({desc.get(path, _DESC_MISSING) for desc in sig_to_desc.values()}) > 1
+    }
+    shallow = [
+        path
+        for path in divergent
+        if not any(
+            ".".join(path.split(".")[:cut]) in divergent
+            for cut in range(1, path.count(".") + 1)
+        )
+    ]
+    return sorted(shallow)
+
+
+def _apply_variant_divergence(
+    spec: ArchitectureSpec,
+    variant: LayerVariant,
+    divergent_paths: list[str],
+    desc: dict[str, str],
+    prefix: str,
+) -> None:
+    """Give *variant* per-component subtrees + a concise label from its divergent paths."""
+    from TraceLens.ModelUtils.ast_analyze import _classify_role
+
+    basic_ops = spec.basic_ops or BasicOpFilter.for_detailed()
+    components = {comp.attr_name: comp for comp in spec.block_components}
+
+    # Group divergent paths by their top-level component attr (``self_attn``/``mlp``).
+    by_component: dict[str, dict[str, Any]] = {}
+    for path in divergent_paths:
+        comp_attr, _, rel = path.partition(".")
+        by_component.setdefault(comp_attr, {})[rel] = desc.get(path, SUBMODULE_OMITTED)
+
+    attn_bits: list[str] = []
+    ffn_bits: list[str] = []
+    for comp_attr, rel_overrides in sorted(by_component.items()):
+        comp = components.get(comp_attr)
+        comp_class = desc.get(comp_attr)
+        role = _classify_role(
+            comp_attr, comp_class or (comp.class_name if comp else "")
+        )
+
+        # Describe each divergent leaf: its class short name, or "no <leaf>" when omitted.
+        bits = []
+        for rel, value in sorted(rel_overrides.items()):
+            leaf = rel.split(".")[-1] if rel else comp_attr
+            if value is SUBMODULE_OMITTED:
+                bits.append(f"no {leaf}")
+            else:
+                bits.append(_strip_prefix(value, prefix))
+        (ffn_bits if role in _FFN_ROLES else attn_bits).extend(bits)
+
+        tree = _build_variant_component_tree(
+            spec, comp, comp_attr, comp_class, rel_overrides, basic_ops
+        )
+        if tree is not None:
+            variant.component_trees[comp_attr] = tree
+
+    if attn_bits:
+        variant.attention_label = " + ".join(attn_bits)
+    if ffn_bits:
+        variant.ffn_label = " + ".join(ffn_bits)
+    variant.label = " / ".join(
+        filter(None, [" + ".join(attn_bits), " + ".join(ffn_bits)])
+    )
+    if not variant.label:
+        variant.label = variant.attention_label
+
+
+def _build_variant_component_tree(
+    spec: ArchitectureSpec,
+    comp: BlockComponent | None,
+    comp_attr: str,
+    comp_class: str | None,
+    rel_overrides: dict[str, Any],
+    basic_ops: BasicOpFilter,
+) -> tuple[str, BlockNode] | None:
+    """Build one ``(title, BlockNode)`` for *comp_attr* with this variant's nested swaps.
+
+    ``rel_overrides`` is keyed relative to the component (``"compressor"``), so it is
+    threaded straight into :func:`build_block_node`. A ``rel == ""`` entry means the whole
+    component class itself differs for this variant; that class becomes the tree root.
+    """
+    # A bare "" key overrides the component's own class; the rest are nested submodules.
+    root_class = comp_class
+    nested = dict(rel_overrides)
+    if "" in nested:
+        whole = nested.pop("")
+        if whole is SUBMODULE_OMITTED:
+            return None  # component absent in this variant — nothing to render
+        root_class = whole
+    if root_class is None or root_class not in spec.class_registry:
+        return None
+
+    forward_order = comp.forward_order if comp is not None else None
+    details = list(comp.details) if comp is not None else []
+    title = comp.label if comp is not None else comp_attr
+
+    tree = build_block_node(
+        attr_name=comp_attr,
+        class_name=root_class,
+        registry=spec.class_registry,
+        basic_ops=basic_ops,
+        details=details,
+        forward_order=forward_order,
+        infer_init_steps=True,
+        class_overrides=nested or None,
+    )
+    if is_method_wrapper(tree):
+        return None
+    cls_info = spec.class_registry.get(root_class)
+    tree.input_label = (
+        cls_info.forward_input_name
+        if cls_info and cls_info.forward_input_name
+        else "hidden_states"
+    )
+    return (title, tree)
+
+
+def _common_class_prefix(names: list[str]) -> str:
+    """Longest common prefix of the class names, trimmed at a CamelCase boundary."""
+    if not names:
+        return ""
+    prefix = names[0]
+    for name in names[1:]:
+        while not name.startswith(prefix):
+            prefix = prefix[:-1]
+            if not prefix:
+                return ""
+    # Keep the prefix at an upper-case boundary so we strip "DeepseekV4" but not
+    # the leading capital of the discriminating suffix ("CSACompressor").
+    while prefix and not (prefix[-1].islower() or prefix[-1].isdigit()):
+        prefix = prefix[:-1]
+    return prefix
+
+
+def _strip_prefix(name: str, prefix: str) -> str:
+    """Drop *prefix* from *name* when present, else return *name* unchanged."""
+    return name[len(prefix) :] if prefix and name.startswith(prefix) else name
+
+
+def reconcile_live_module_groups(
+    spec: ArchitectureSpec, groups: list[MetaModuleGroup] | None
+) -> None:
+    """Override the repeated-block grouping from the live meta module tree.
+
+    The N× decoder group's count and banner class, plus the sub-variant counts, come
+    from ``len(nn.ModuleList)`` + element class name + per-element structural signature
+    read off the instantiated tree — no name regex, no config-key role guessing, and
+    it sees through opaque ``_from_config`` sub-stacks the AST cannot follow. When
+    *groups* is *None* (torch unavailable / instantiation failed) the spec is left
+    untouched so the config-derived banner stands (graceful degradation).
+    """
+    if not groups:
+        return
+    spec.meta_module_groups = list(groups)
+
+    primary = _select_primary_group(spec, groups)
+    if primary is None:
+        return
+
+    # Live len() is the authoritative repeated-block count.
+    if spec.num_hidden_layers != primary.length:
+        _log.info(
+            "live ModuleList %r len=%d overrides config num_hidden_layers=%s",
+            primary.path,
+            primary.length,
+            spec.num_hidden_layers,
+        )
+        spec.num_hidden_layers = primary.length
+    # Label the banner from the live element class when AST could not name it (e.g.
+    # GLM-5.3's opaque _from_config decoder).
+    if not spec.decoder_class:
+        spec.decoder_class = primary.element_class
+
+    _reconcile_layer_variants(spec, primary)
+    _finalize_layer_repeat_lines(spec)
+
+
+def reconcile_live_attention_groups(
+    spec: ArchitectureSpec, groups: dict[str, int] | None
+) -> None:
+    """Stamp each attention step's grouped-query repeat factor from the live tree.
+
+    ``groups`` maps an attention module's class name to its live
+    ``num_key_value_groups`` (see
+    :func:`TraceLens.ModelUtils.meta_trace.harvest_meta_attention_groups`). For every
+    class in the registry that carries a synthetic-attention step, record a
+    ``gqa_groups: N`` detail so a later wrapper expansion models ``repeat_kv`` with the
+    real factor instead of guessing from the (latent-attention-unreliable) config.
+
+    Inert for the rendered graph: the detail is not surfaced in the leaf's rendered
+    ``details`` (like ``wrapper_expand:``); it is plumbing a later consumer reads.
+    Leaves the spec untouched when *groups* is *None* (torch unavailable /
+    instantiation failed), mirroring :func:`reconcile_live_module_groups`. Idempotent
+    -- re-running strips any prior stamp first.
+    """
+    if not groups:
+        return
+    from TraceLens.ModelUtils.ast_analyze import SYNTHETIC_ATTENTION
+
+    registry = spec.class_registry or {}
+    for class_name, cls in registry.items():
+        step_details = getattr(cls, "forward_step_details", None)
+        if not step_details:
+            continue
+        details = step_details.get(SYNTHETIC_ATTENTION)
+        if not details:
+            continue
+        stripped = [line for line in details if not line.startswith("gqa_groups:")]
+        factor = groups.get(class_name)
+        if factor is None:
+            _log.info(
+                "no live num_key_value_groups for attention class %s; leaving the "
+                "grouped-query repeat factor unstamped",
+                class_name,
+            )
+        else:
+            stripped.append(f"gqa_groups: {factor}")
+        step_details[SYNTHETIC_ATTENTION] = stripped
+
+
+def _walk_block_nodes(node: BlockNode):
+    """Yield ``node`` and every descendant (pre-order)."""
+    yield node
+    for child in node.children:
+        yield from _walk_block_nodes(child)
+
+
+def apply_live_attention_repeats(spec: ArchitectureSpec) -> None:
+    """Fill each attention core's grouped-query head-repeat ops with the live factor.
+
+    The detailed block tree is built at load time -- before
+    :func:`reconcile_live_attention_groups` stamps the live ``gqa_groups`` factor --
+    so a wrapper-expanded attention core cannot yet size its ``repeat_kv`` expansion
+    and instead records a :class:`~TraceLens.ModelUtils.block_tree.RepeatContext`
+    (callee + repeated key/value port labels + owning attention class). This runs
+    after the stamp: for every such core it resolves the live factor from the owning
+    class's stamped step detail, derives the callee's real shape-op chain
+    (unsqueeze/expand/reshape) with that factor via the SAME source-AST machinery the
+    plan used, and records the ops per repeated port in ``kernel_port_repeats`` so the
+    graph pass interposes them between the key/value producer and the kernel port.
+
+    Inert unless a core carries deferred context AND its class reports a factor >1:
+    ``repeat_kv`` short-circuits at factor 1 (GLM), so those cores keep a bare port
+    and no node is added. When the live factor is >1 but the callee cannot be
+    resolved into a clean shape-op chain the port is left bare and a warning is logged
+    (the introspect-everything fallback -- a genuinely un-introspectable repeat is
+    reported, never silently mis-modelled)."""
+    from TraceLens.ModelUtils.ast_analyze import SYNTHETIC_ATTENTION
+    from TraceLens.ModelUtils.attention_wrapper import (
+        _derive_repeat_ops,
+        _resolve_wrapper_def,
+        attention_wrapper_gqa_groups,
+    )
+
+    registry = spec.class_registry or {}
+    # Live grouped-query factor per attention class, read back from the stamp.
+    factors: dict[str, int] = {}
+    for class_name, cls in registry.items():
+        step_details = getattr(cls, "forward_step_details", None)
+        if not step_details:
+            continue
+        details = step_details.get(SYNTHETIC_ATTENTION)
+        if not details:
+            continue
+        factor = attention_wrapper_gqa_groups(details)
+        if factor and factor > 1:
+            factors[class_name] = factor
+    if not factors:
+        return
+
+    for _title, tree in spec.export_block_trees:
+        for node in _walk_block_nodes(tree):
+            ctx = node.pending_repeat_context
+            if ctx is None:
+                continue
+            factor = factors.get(ctx.owner_class)
+            if not factor or factor <= 1:
+                continue
+            callee = _resolve_wrapper_def(ctx.module, ctx.callee)
+            if callee is None:
+                _log.warning(
+                    "attention repeat callee %r could not be resolved from %r for "
+                    "class %s; keeping a bare key/value port (repeat not materialised)",
+                    ctx.callee,
+                    ctx.module,
+                    ctx.owner_class,
+                )
+                continue
+            ops = _derive_repeat_ops(callee, factor)
+            if not ops:
+                _log.warning(
+                    "attention repeat callee %r body is not a resolvable shape-op "
+                    "chain for class %s; keeping a bare key/value port (repeat not "
+                    "materialised)",
+                    ctx.callee,
+                    ctx.owner_class,
+                )
+                continue
+            node.kernel_port_repeats = {label: list(ops) for label in ctx.port_labels}
+
+
+def _config_moe_layer(layer_idx: int, config: dict[str, Any]) -> bool:
+    num_experts = _as_int(
+        _get(
+            config,
+            "num_experts",
+            "n_routed_experts",
+            "moe_num_experts",
+            "num_local_experts",
+            "num_moe_experts",
+        )
+    )
+    if not num_experts or num_experts <= 1:
+        return False
+    moe_pattern = _get(config, "moe_layer_freq")
+    if isinstance(moe_pattern, list):
+        if 0 <= layer_idx < len(moe_pattern):
+            return bool(_as_int(moe_pattern[layer_idx]) or 0)
+        return False
+    first_k_dense = _as_int(_get(config, "first_k_dense_replace")) or 0
+    moe_freq = _as_int(_get(config, "moe_layer_freq")) or 1
+    return layer_idx >= first_k_dense and layer_idx % moe_freq == 0
+
+
+def _infer_norm(config: dict[str, Any], spec: ArchitectureSpec) -> None:
+    model_type = (spec.model_type or "").lower()
+
+    if _get(config, "rms_norm_eps") is not None:
+        spec.norm_type = "RMSNorm"
+    elif _get(config, "layer_norm_eps") is not None or model_type in {
+        "gpt2",
+        "gpt_neox",
+        "opt",
+        "bloom",
+    }:
+        spec.norm_type = "LayerNorm"
+
+    if any(
+        token in model_type
+        for token in ("gpt2", "gpt_neox", "bloom", "opt", "llama", "mistral", "qwen")
+    ):
+        spec.norm_placement = "Pre-Norm"
+
+    if "olmo" in model_type:
+        spec.norm_placement = "Post-Norm (inside residual)"
+        spec.norm_notes.append("Sandwich / post-norm variant")
+
+    if _get(config, "post_norm") is True:
+        spec.norm_placement = "Post-Norm"
+
+
+def _estimate_kv_cache(spec: ArchitectureSpec, config: dict[str, Any]) -> None:
+    layers = spec.num_hidden_layers
+    if not layers:
+        return
+
+    if spec.attention_type == "MLA" or _as_int(_get(config, "kv_lora_rank")):
+        kv_lora_rank = _as_int(_get(config, "kv_lora_rank")) or 512
+        kv_heads = spec.num_key_value_heads or spec.num_attention_heads or 1
+        bytes_per_layer = kv_heads * kv_lora_rank * BYTES_PER_BF16
+        spec.kv_cache_per_token_bf16 = _human_bytes(bytes_per_layer * layers)
+        return
+
+    head_dim = spec.head_dim
+    if not head_dim and spec.hidden_size and spec.num_attention_heads:
+        head_dim = spec.hidden_size // spec.num_attention_heads
+
+    kv_heads = spec.num_key_value_heads or spec.num_attention_heads
+    if not head_dim or not kv_heads:
+        return
+
+    # K and V tensors per layer.
+    bytes_per_layer = 2 * kv_heads * head_dim * BYTES_PER_BF16
+    spec.kv_cache_per_token_bf16 = _human_bytes(bytes_per_layer * layers)
+
+
+def _estimate_param_hint(config: dict[str, Any], spec: ArchitectureSpec) -> None:
+    """Best-effort parameter estimate from config when total size isn't annotated."""
+    if spec.total_params_hint:
+        return
+
+    hidden = spec.hidden_size
+    layers = spec.num_hidden_layers
+    vocab = spec.vocab_size
+    inter = spec.intermediate_size or spec.moe_intermediate_size
+    if not all([hidden, layers, vocab]):
+        return
+
+    # Very rough: embeddings + transformer blocks + lm head.
+    embed = vocab * hidden
+    attn = layers * hidden * hidden * 4
+    ffn_multiplier = 3 if spec.ffn_type == "SwiGLU" else 2
+    if spec.decoder_type == "Sparse MoE" and spec.num_experts:
+        # Each expert is as wide as one routed FFN, not as wide as the dense one.
+        expert_inter = spec.moe_intermediate_size or inter or hidden * 4
+        ffn = layers * spec.num_experts * hidden * expert_inter * ffn_multiplier
+        active = spec.num_experts_per_tok or 1
+        active_ffn = layers * active * hidden * expert_inter * ffn_multiplier
+        total = embed * 2 + attn + ffn
+        active_total = embed * 2 + attn + active_ffn
+        spec.total_params_hint = _format_params(total)
+        spec.active_params_hint = _format_params(active_total)
+    else:
+        ffn = layers * hidden * (inter or hidden * 4) * ffn_multiplier
+        total = embed * 2 + attn + ffn
+        spec.total_params_hint = _format_params(total)
+
+
+def _format_params(count: float) -> str:
+    if count >= 1e12:
+        return f"{count / 1e12:.2f}T"
+    if count >= 1e9:
+        return f"{count / 1e9:.1f}B"
+    if count >= 1e6:
+        return f"{count / 1e6:.0f}M"
+    return f"{int(count)}"
+
+
+def _build_highlights(spec: ArchitectureSpec) -> None:
+    highlights: list[str] = []
+    if spec.attention_type != "MHA":
+        highlights.append(spec.attention_type)
+    if spec.decoder_type != "Dense":
+        highlights.append(spec.decoder_type)
+    if spec.layer_mix:
+        highlights.append(spec.layer_mix)
+    if spec.positional_encoding != "RoPE":
+        highlights.append(spec.positional_encoding)
+    for block in spec.custom_blocks[:1]:
+        highlights.append(block)
+    for note in spec.attention_notes[:1]:
+        highlights.append(note)
+    spec.highlights = highlights[:4]
+
+
+def _rebuild_stack_components(
+    spec: ArchitectureSpec,
+    analysis: CodeAnalysis,
+) -> None:
+    from TraceLens.ModelUtils.ast_analyze import (
+        ClassStructure,
+        _pick_causal_lm_class,
+        _pick_decoder_class,
+        _pick_stack_model_class,
+        build_stack_components,
+    )
+
+    registry: dict[str, ClassStructure] = analysis.class_registry
+    if not registry:
+        return
+
+    decoder = (
+        registry.get(analysis.decoder_class)
+        if analysis.decoder_class
+        else _pick_decoder_class(registry)
+    )
+    causal_lm = (
+        registry.get(analysis.causal_lm_class)
+        if analysis.causal_lm_class
+        else _pick_causal_lm_class(registry, spec.raw_config)
+    )
+    stack_model = (
+        registry.get(analysis.stack_model_class)
+        if analysis.stack_model_class
+        else _pick_stack_model_class(registry, causal_lm)
+    )
+    if stack_model is None and causal_lm is None:
+        spec.stack_pre = []
+        spec.stack_tail = []
+        return
+    spec.stack_pre, spec.stack_tail = build_stack_components(
+        stack_model=stack_model,
+        causal_lm=causal_lm,
+        decoder=decoder,
+        registry=registry,
+    )
+
+
+def _format_layer_index_ranges(indices: list[int]) -> str:
+    """Collapse ascending 0-based layer indices into compact ranges.
+
+    A consecutive run longer than two indices becomes ``a-b``; runs of one or two
+    indices are listed individually (``0, 1``) so a bare pair is never written as a
+    range. Used to annotate each decoder-layer variant with the iterations it covers.
+    """
+    if not indices:
+        return ""
+    ordered = sorted(set(indices))
+    runs: list[list[int]] = []
+    for idx in ordered:
+        if runs and idx == runs[-1][-1] + 1:
+            runs[-1].append(idx)
+        else:
+            runs.append([idx])
+    parts: list[str] = []
+    for run in runs:
+        if len(run) > 2:
+            parts.append(f"{run[0]}-{run[-1]}")
+        else:
+            parts.extend(str(index) for index in run)
+    return ", ".join(parts)
+
+
+def _finalize_layer_repeat_lines(spec: ArchitectureSpec) -> None:
+    """Fill in resolved layer counts on AST-derived repeat lines.
+
+    Idempotent: always rebuilds from ``layer_repeat_lines_raw`` (the canonical
+    pre-substitution lines) so it can be re-run after the live-tree reconciliation
+    changes ``num_hidden_layers``/``layer_variants`` without duplicating variant
+    lines or leaving a stale count.
+    """
+    raw = spec.layer_repeat_lines_raw or spec.layer_repeat_lines
+    if not raw:
+        return
+    lines = list(raw)
+    if spec.num_hidden_layers is not None and lines:
+        first = lines[0]
+        if first.startswith("N ×"):
+            lines[0] = first.replace("N ×", f"{spec.num_hidden_layers} ×", 1)
+        if " in range(" in lines[0]:
+            prefix, _ = lines[0].split(" in range(", 1)
+            lines[0] = f"{prefix} in range({spec.num_hidden_layers}))"
+    if spec.layer_variants:
+        existing = set(lines)
+        for variant in spec.layer_variants:
+            line = f"{variant.count} × {variant.label}"
+            ranges = _format_layer_index_ranges(variant.layer_indices)
+            if ranges:
+                line += f" (layers {ranges})"
+            if line not in existing:
+                lines.append(line)
+                existing.add(line)
+    if spec.raw_config:
+        from TraceLens.ModelUtils.layer_repeat_simplify import (
+            simplify_layer_repeat_lines,
+        )
+
+        lines = simplify_layer_repeat_lines(lines, spec.raw_config)
+    spec.layer_repeat_lines = lines
+
+
+def _merge_code_analysis(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None:
+    spec.decoder_class = analysis.decoder_class
+    spec.stack_model_class = analysis.stack_model_class
+    spec.block_components = list(analysis.block_components)
+    spec.forward_sequence = list(analysis.forward_sequence)
+    spec.code_sources = list(analysis.source_files)
+    spec.code_paths = [str(source) for source in analysis.source_files]
+    spec.analysis_notes = list(analysis.notes)
+    spec.custom_blocks = list(analysis.custom_blocks)
+    spec.class_registry = dict(analysis.class_registry)
+    spec.layer_repeat_lines = list(analysis.layer_repeat_lines)
+    spec.layer_repeat_lines_raw = list(analysis.layer_repeat_lines)
+    _rebuild_stack_components(spec, analysis)
+    if spec.raw_config and spec.num_hidden_layers:
+        _infer_layer_variants(
+            spec.raw_config,
+            spec,
+            class_registry=spec.class_registry,
+            decoder_class=spec.decoder_class,
+        )
+    _finalize_layer_repeat_lines(spec)
+
+    if analysis.attention_type:
+        mixed_attention = (
+            spec.layer_variants
+            and len({variant.attention_label for variant in spec.layer_variants}) > 1
+        )
+        if not mixed_attention:
+            spec.attention_type = analysis.attention_type
+        if analysis.attention_class:
+            spec.attention_notes.insert(0, f"AST: {analysis.attention_class}")
+
+    if analysis.decoder_type:
+        from TraceLens.ModelUtils.ast_analyze import decoder_type_for_components
+
+        # Read the flavor off the resolved spine, which may name a different FFN class
+        # than the AST alone reported.
+        spec.decoder_type = (
+            decoder_type_for_components(spec.block_components) or analysis.decoder_type
+        )
+
+    if analysis.ffn_type:
+        spec.ffn_type = analysis.ffn_type
+
+    if analysis.norm_type:
+        spec.norm_type = analysis.norm_type
+    if analysis.norm_placement:
+        spec.norm_placement = analysis.norm_placement
+
+    moe_components = [c for c in analysis.block_components if c.role == "moe"]
+    if moe_components and not spec.moe_notes:
+        for comp in moe_components:
+            spec.moe_notes.append(f"AST module: {comp.class_name}")
+            spec.moe_notes.extend(comp.details)
+
+    for comp in analysis.block_components:
+        if comp.role == "other":
+            spec.layer_notes.append(
+                f"Custom block `{comp.attr_name}` ({comp.class_name})"
+            )
+
+
+def _code_rotates_positions(analysis: CodeAnalysis) -> bool:
+    """True when the modeling source shows positions being rotated somewhere."""
+    from TraceLens.ModelUtils.ast_analyze import (
+        POSITIONAL_CLASS_RE,
+        is_positional_synthetic,
+    )
+
+    if analysis.positional_helpers:
+        return True
+    if any(comp.role == "positional" for comp in analysis.stack_pre):
+        return True
+    for name, cls in analysis.class_registry.items():
+        if POSITIONAL_CLASS_RE.search(name):
+            return True
+        if any(is_positional_synthetic(call) for call in cls.forward_calls):
+            return True
+    return False
+
+
+def _refine_positional_from_code(
+    spec: ArchitectureSpec, analysis: CodeAnalysis
+) -> None:
+    """Correct a config-derived rope claim the modeling source contradicts.
+
+    A config carrying `rope_theta` only means rope parameters exist; a checkpoint can
+    still run without positional encoding, as MLA variants asserting NoPE do.
+    """
+    # Only a rope claim can be checked this way: ALiBi biases scores and learned
+    # absolute encodings add an embedding, neither of which rotates anything.
+    if spec.positional_encoding != "RoPE":
+        return
+    if _code_rotates_positions(analysis):
+        return
+    spec.positional_encoding = "NoPE"
+    spec.attention_notes = [
+        note for note in spec.attention_notes if not note.startswith("RoPE theta=")
+    ]
+    spec.layer_notes.append("No positional encoding applied in modeling code")
+
+
+# A multimodal (VLM) checkpoint declares its vision encoder as a nested
+# ``vision_config`` block in config.json — the standard HF multimodal convention.
+# We detect the tower from that structural signal, then resolve its class through
+# transformers' ``model_type -> config class`` mapping. The wrapper binds the tower
+# to one of these attribute names, which the config itself does not record.
+_VISION_TOWER_ATTRS = frozenset({"visual", "vision_tower", "vision_model", "vision"})
+
+
+def _model_type_to_pascal(model_type: str) -> str:
+    """Convert an HF ``model_type`` (snake_case) to its class-name PascalCase stem.
+
+    ``glm5_next_vision -> Glm5NextVision``. Only the first character of each
+    ``_``-separated part is upper-cased, so digits and existing casing inside a
+    part are preserved (``glm5 -> Glm5``), matching HF's own class naming.
+    """
+    return "".join(
+        part[:1].upper() + part[1:] for part in model_type.split("_") if part
+    )
+
+
+def _vision_tower_class_from_config(model_type: str, registry: dict) -> str | None:
+    """Resolve a ``vision_config`` model_type to its tower model-class name.
+
+    The tower class follows the ``<model_type> -> <PascalCase>Model`` convention
+    (``glm5_next_vision -> Glm5NextVisionModel``) and is confirmed against the
+    parsed AST class registry (which is what the detail-tree builder walks).
+
+    transformers' ``CONFIG_MAPPING_NAMES`` gives an authoritative
+    ``model_type -> config class`` mapping for models it ships, but a remote-code
+    checkpoint (GLM-5.3's ``glm5_next_vision``) is absent from it — so that lookup
+    is only a first preference, and the naming convention applied directly to the
+    model_type is the general fallback. Confirming every candidate against the
+    registry keeps the derivation from inventing a class that does not exist.
+    """
+    candidates: list[str] = []
+    try:
+        from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
+
+        config_class = CONFIG_MAPPING_NAMES.get(model_type)
+        if config_class and config_class.endswith("Config"):
+            candidates.append(config_class[: -len("Config")] + "Model")
+    except ImportError:
+        pass
+    pascal = _model_type_to_pascal(model_type)
+    if pascal:
+        candidates.append(pascal + "Model")
+    for candidate in candidates:
+        if candidate in registry:
+            return candidate
+    return None
+
+
+def find_vision_tower(spec: ArchitectureSpec) -> tuple[str, str] | None:
+    """Locate a VLM wrapper's vision tower as ``(attr_name, class_name)``.
+
+    Returns ``None`` for a text-only model. Detection is driven by the presence of
+    a nested ``vision_config`` in the checkpoint config (the HF multimodal
+    convention); the tower class is resolved through transformers' config mapping
+    and confirmed against the AST class registry. The text stack is never mistaken
+    for the tower.
+    """
+    vision_config = (spec.raw_config or {}).get("vision_config")
+    if not isinstance(vision_config, dict):
+        return None
+    model_type = vision_config.get("model_type")
+    if not model_type:
+        return None
+    registry = spec.class_registry or {}
+    tower_class = _vision_tower_class_from_config(model_type, registry)
+    if tower_class is None or tower_class == spec.stack_model_class:
+        return None
+    # The wrapper binds the tower to an attribute (e.g. Glm5NextModel.visual); the
+    # config does not record it, so recover it from the wrapper's assignments.
+    attr_name = next(
+        (
+            attr
+            for cls in registry.values()
+            for attr in (getattr(cls, "init_assignments", {}) or {})
+            if attr in _VISION_TOWER_ATTRS
+        ),
+        None,
+    )
+    return (attr_name or "visual", tower_class)
+
+
+def vision_scoped_classes(spec: ArchitectureSpec) -> set[str]:
+    """Return every module class instantiated under the vision tower.
+
+    A VLM's vision encoder is constructed with the nested ``vision_config`` (where
+    ``hidden_size`` and friends differ from the text stack — e.g. GLM-5.3 vision
+    ``hidden_size=1024`` vs text ``4096``, and ``in_channels``/``patch_size`` exist
+    *only* there). Callers use this set to resolve ``config.<attr>`` against the
+    vision sub-config for exactly these classes, leaving the text path untouched.
+
+    Returns an empty set for text-only models (``find_vision_tower`` is ``None``),
+    so the text stack is provably unaffected. Scoping is by instantiation subtree,
+    not class name, so a norm class (``Glm5NextRMSNorm``) shared by both towers is
+    only scoped for its vision-instantiated occurrences.
+    """
+    found = find_vision_tower(spec)
+    if found is None:
+        return set()
+    _attr, tower_class = found
+    registry = spec.class_registry or {}
+    scoped: set[str] = set()
+    frontier = [tower_class]
+    while frontier:
+        class_name = frontier.pop()
+        if class_name in scoped or class_name not in registry:
+            continue
+        scoped.add(class_name)
+        structure = registry[class_name]
+        # ``init_assignments`` maps ``self.<attr> -> constructed class name`` for
+        # every recognised submodule (including ``nn.ModuleList`` element classes).
+        for child in (getattr(structure, "init_assignments", {}) or {}).values():
+            if child in registry and child not in scoped:
+                frontier.append(child)
+    return scoped
+
+
+def vision_scoped_config(spec: ArchitectureSpec) -> dict[str, Any]:
+    """Return ``{**top_level_config, **vision_config}`` (vision keys win).
+
+    Empty when the checkpoint has no ``vision_config``. The overlay lets a scoped
+    class resolve ``config.hidden_size`` to the vision value while every unscoped
+    class keeps the top-level config.
+    """
+    config = spec.raw_config or {}
+    vision_config = config.get("vision_config")
+    if not isinstance(vision_config, dict):
+        return dict(config)
+    return {
+        **config,
+        **apply_config_attribute_aliases(
+            vision_config, declared_config_aliases(spec.code_paths or [])
+        ),
+    }
+
+
+# HF VLMs mark image positions in ``input_ids`` with a reserved token id. The
+# key name varies by family (Qwen2-VL / GLM: ``image_token_id``; LLaVA and kin:
+# ``image_token_index``), but its presence is the general signal that the model
+# has an image-placeholder mask (``input_ids == <id>``) pairing with the pixel
+# inputs — the control tensor of the ``masked_scatter`` that injects vision
+# embeddings.
+_IMAGE_TOKEN_CONFIG_KEYS = ("image_token_id", "image_token_index", "image_token")
+
+
+def image_placeholder_token_id(config: dict[str, Any] | None) -> int | None:
+    """Return the image-placeholder token id from a model config, or ``None``.
+
+    General across VLM families via the conventional config keys above; used to
+    identify the image-mask input so it can be grouped with the pixel/image-patch
+    input rather than floating next to its distant ``masked_scatter`` consumer.
+    """
+    if not config:
+        return None
+    for key in _IMAGE_TOKEN_CONFIG_KEYS:
+        value = config.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def vision_tower_component(spec: ArchitectureSpec) -> BlockComponent | None:
+    """Return a synthetic ``BlockComponent`` for the vision tower, or ``None``."""
+    found = find_vision_tower(spec)
+    if found is None:
+        return None
+    attr_name, class_name = found
+    return BlockComponent(
+        attr_name=attr_name,
+        class_name=class_name,
+        role="vision",
+        label="Vision Tower",
+        forward_order=0,
+    )
+
+
+_ANNOTATION_DTYPES = {"Long": "int64", "Int": "int32", "Bool": "bool"}
+
+
+def _annotation_dtype(annotation: ast.AST | None) -> str | None:
+    """Dtype named by a ``torch.LongTensor``-style annotation, else ``None``.
+
+    ``torch.Tensor`` says nothing about dtype and answers ``None``; the typed
+    aliases say it exactly. Optional annotations (``X | None``) unwrap first.
+    """
+    while isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        left, right = annotation.left, annotation.right
+        is_none = lambda node: isinstance(node, ast.Constant) and node.value is None
+        annotation = right if is_none(left) else left
+    name = None
+    if isinstance(annotation, ast.Attribute):
+        name = annotation.attr
+    elif isinstance(annotation, ast.Name):
+        name = annotation.id
+    if not name or not name.endswith("Tensor"):
+        return None
+    return _ANNOTATION_DTYPES.get(name[: -len("Tensor")])
+
+
+def vision_tower_passthrough_inputs(spec: ArchitectureSpec) -> dict[str, str | None]:
+    """Vision-tower forward parameters that are MODEL inputs, to their dtype.
+
+    The tower's first forward parameter is the activation -- the patch tensor the
+    patch-embed consumes. A further tensor parameter is handed in from outside the
+    tower, and when the caller passes it STRAIGHT from its own forward signature
+    (``self.visual(pixel_values, grid_thw=image_grid_thw)``) it entered the model
+    there and nothing computed it. Without a boundary of its own such a parameter
+    docks onto the activation, so GLM's ``grid_thw`` reads the image patches and
+    the whole ``cu_seqlens`` chain inherits the patch geometry.
+
+    A caller that DERIVES the argument first (the video path builds
+    ``flattened_video_grid_thw`` with a ``repeat_interleave``/``cat``) is not a
+    pass-through and is skipped -- that tensor has a real producer to draw.
+
+    Maps parameter name -> dtype named by the model-level annotation, or ``None``
+    when the annotation is the untyped ``torch.Tensor``.
+    """
+    component = vision_tower_component(spec)
+    if component is None:
+        return {}
+    tower = spec.class_registry.get(component.class_name)
+    forward = _forward_def(getattr(tower, "node", None))
+    if forward is None:
+        return {}
+    params = [arg.arg for arg in forward.args.args if arg.arg != "self"]
+    # The activation is the first parameter; only the rest can be passed in.
+    candidates = set(params[1:])
+    if not candidates:
+        return {}
+    resolved: dict[str, str | None] = {}
+    for structure in spec.class_registry.values():
+        node = getattr(structure, "node", None)
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for method in node.body:
+            if not isinstance(method, ast.FunctionDef):
+                continue
+            signature = {arg.arg: arg for arg in method.args.args}
+            for call in ast.walk(method):
+                if not isinstance(call, ast.Call):
+                    continue
+                func = call.func
+                if not (
+                    isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "self"
+                    and func.attr == component.attr_name
+                ):
+                    continue
+                bound: list[tuple[str, ast.expr]] = [
+                    (keyword.arg, keyword.value)
+                    for keyword in call.keywords
+                    if keyword.arg in candidates
+                ]
+                bound += [
+                    (params[index], arg)
+                    for index, arg in enumerate(call.args)
+                    if index < len(params) and params[index] in candidates
+                ]
+                for param, value in bound:
+                    # Straight from the caller's signature, or computed on the way?
+                    if not isinstance(value, ast.Name) or value.id not in signature:
+                        continue
+                    resolved.setdefault(
+                        param, _annotation_dtype(signature[value.id].annotation)
+                    )
+    return resolved
+
+
+def _forward_def(node: ast.AST | None) -> ast.FunctionDef | None:
+    """The ``forward`` method of a parsed class, if it has one."""
+    if not isinstance(node, ast.ClassDef):
+        return None
+    return next(
+        (
+            item
+            for item in node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+
+
+def _append_vision_section_tree(
+    spec: ArchitectureSpec, basic_ops: BasicOpFilter
+) -> None:
+    """Append the vision tower's detail tree alongside the text spine, if present."""
+    component = vision_tower_component(spec)
+    if component is None:
+        return
+    if any(attr == component.attr_name for attr, _tree in spec.export_block_trees):
+        return
+    tree = build_block_node(
+        attr_name=component.attr_name,
+        class_name=component.class_name,
+        registry=spec.class_registry,
+        basic_ops=basic_ops,
+        forward_order=component.forward_order,
+        infer_init_steps=True,
+    )
+    if is_method_wrapper(tree):
+        return
+    cls_info = spec.class_registry.get(component.class_name)
+    tree.input_label = (
+        cls_info.forward_input_name
+        if cls_info and cls_info.forward_input_name
+        else "pixel_values"
+    )
+    spec.export_block_trees.append((component.label, tree))
+
+
+def _build_export_block_trees(spec: ArchitectureSpec, basic_ops: BasicOpFilter) -> None:
+    if not spec.class_registry:
+        spec.export_block_trees = []
+        return
+    spec.export_block_trees = build_full_detailed_block_trees(
+        components=spec.block_components,
+        registry=spec.class_registry,
+        basic_ops=basic_ops,
+        positional_encoding=spec.positional_encoding,
+        norm_type=spec.norm_type,
+        decoder_class=spec.decoder_class,
+        stack_pre=spec.stack_pre,
+        stack_tail=spec.stack_tail,
+        partition=False,
+        include_norms=True,
+        infer_init_steps=True,
+    )
+    _append_vision_section_tree(spec, basic_ops)
+
+
+def architecture_section_trees(spec: ArchitectureSpec) -> list[tuple[str, BlockNode]]:
+    """Return block trees for graph export and detailed diagrams."""
+    return spec.export_block_trees
+
+
+def parse_architecture(
+    config: dict[str, Any],
+    source: str,
+    name: str | None = None,
+    *,
+    code_analysis: CodeAnalysis | None = None,
+) -> ArchitectureSpec:
+    """Convert a config dict into an ArchitectureSpec."""
+    # A checkpoint need not store a canonical name under that name -- GPT-2 keeps
+    # its head count in `n_head` -- but its config class says which key holds it.
+    # Reading that declaration beats guessing spellings, which cannot tell a
+    # genuine rename from a name that means something else in this model.
+    declared = declared_config_aliases(
+        (code_analysis.source_files if code_analysis else None) or []
+    )
+    model_type = str(_get(config, "model_type") or "unknown")
+    architectures = _get(config, "architectures") or []
+    if not isinstance(architectures, list):
+        architectures = [str(architectures)]
+
+    display_name = name or (
+        architectures[0] if architectures else model_type.replace("_", " ").title()
+    )
+
+    spec = ArchitectureSpec(
+        name=display_name,
+        model_type=model_type,
+        architectures=[str(a) for a in architectures],
+        hidden_size=_as_int(_declared_get(config, "hidden_size", declared)),
+        num_hidden_layers=_as_int(_declared_get(config, "num_hidden_layers", declared)),
+        intermediate_size=_as_int(_declared_get(config, "intermediate_size", declared)),
+        vocab_size=_as_int(_declared_get(config, "vocab_size", declared)),
+        max_position_embeddings=_as_int(
+            _declared_get(config, "max_position_embeddings", declared)
+        ),
+        num_attention_heads=_as_int(
+            _declared_get(config, "num_attention_heads", declared)
+        ),
+        num_key_value_heads=_as_int(
+            _declared_get(config, "num_key_value_heads", declared)
+        ),
+        head_dim=_as_int(_declared_get(config, "head_dim", declared)),
+        tie_word_embeddings=_as_bool(_get(config, "tie_word_embeddings")),
+        source_path=source,
+        raw_config=config,
+    )
+
+    total_params = _get(config, "total_params")
+    if total_params:
+        spec.total_params_hint = str(total_params)
+
+    _infer_attention(config, spec)
+    _infer_positional(config, spec)
+    _infer_ffn_and_moe(config, spec)
+    _infer_norm(config, spec)
+
+    if code_analysis is not None and code_analysis.has_block_graph():
+        _merge_code_analysis(spec, code_analysis)
+        _refine_positional_from_code(spec, code_analysis)
+
+    _estimate_kv_cache(spec, config)
+    _estimate_param_hint(config, spec)
+    _build_highlights(spec)
+    return spec
+
+
+def load_architecture(
+    source: str | Path | None = None,
+    name: str | None = None,
+    *,
+    checkpoint: str | Path | None = None,
+    github: str | None = None,
+    config_path: str | None = None,
+    code_path: str | Path | None = None,
+    analyze_code: bool = True,
+    detailed: bool = False,
+    basic_ops: BasicOpFilter | None = None,
+    all_tensor_ops: bool = False,
+    allow_github_repos: list[str] | None = None,
+    revision: str | None = None,
+) -> ArchitectureSpec:
+    """Load architecture metadata from an HF checkpoint and/or GitHub modeling code.
+
+    ``revision`` reads a hub checkpoint at one fixed commit. Unset -- what an
+    export does -- the checkpoint resolves to its head, so the model's newest
+    code is what gets drawn.
+    """
+    from TraceLens.ModelUtils.source_policy import SourcePolicy, set_source_policy
+
+    set_source_policy(SourcePolicy.from_env_and_cli(allow_github_repos))
+    resolved_checkpoint = checkpoint or source
+    config, config_label = _resolve_checkpoint(
+        checkpoint=resolved_checkpoint,
+        github=github,
+        config_path=config_path,
+        revision=revision,
+    )
+    code_analysis: CodeAnalysis | None = None
+    code_labels: list[str] = []
+
+    if analyze_code:
+        source_files, code_labels = resolve_source_files(
+            resolved_checkpoint,
+            config,
+            code_path=code_path,
+            github=github,
+            revision=revision,
+        )
+        if source_files:
+            from TraceLens.ModelUtils.kernel_pipeline import register_kernel_search_root
+
+            # The caller's own path first: resolving a checkpoint file follows HF's
+            # symlink into its blob store, where sibling kernel modules do not exist.
+            if code_path is not None:
+                register_kernel_search_root(code_path)
+            for source_file in source_files:
+                register_kernel_search_root(source_file)
+            # A checkpoint records only what differs from the defaults, and the
+            # defaults are stated by the model's own config class. Without them a
+            # switched-OFF branch reads as `None` rather than `False` -- merely
+            # unresolved, so it gets drawn.
+            config = _with_declared_defaults(config, source_files)
+            # Modeling code reads the config OBJECT's attribute names, and the
+            # object answers a name the serialized dict spells differently --
+            # that is what `attribute_map` is for. Give the dict those names so
+            # `config.<attr>` resolves without a list of synonyms it might use.
+            declared = declared_config_aliases(source_files)
+            config = apply_config_attribute_aliases(config, declared)
+            code_analysis = analyze_sources(
+                read_sources(source_files),
+                config=config,
+                all_tensor_ops=all_tensor_ops,
+                # The model's configuration module sits beside its modeling one
+                # rather than being analysed, so its renames are read from there.
+                declared_aliases=declared,
+            )
+
+    spec = parse_architecture(
+        config, config_label, name=name, code_analysis=code_analysis
+    )
+    spec.checkpoint_source = config_label
+    spec.source_path = config_label
+    if config.get("_has_vision_tower"):
+        spec.layer_notes.append("Multimodal wrapper includes a vision tower")
+    if config.get("_wrapper_model_type"):
+        spec.layer_notes.append(
+            f"Loaded text backbone from {config['_wrapper_model_type']} wrapper"
+        )
+    if github:
+        spec.github_source = parse_github_url(github).display
+    else:
+        spec.github_source = next(
+            (label for label in code_labels if label.startswith("github://")),
+            spec.github_source,
+        )
+    spec.code_sources = code_labels or spec.code_sources
+    if detailed:
+        resolved_basic_ops = basic_ops or BasicOpFilter.for_detailed()
+        spec.basic_ops = resolved_basic_ops
+        _build_export_block_trees(spec, resolved_basic_ops)
+    return spec
+
+
+def dump_model_ast(
+    source: str | Path | None = None,
+    *,
+    checkpoint: str | Path | None = None,
+    github: str | None = None,
+    config_path: str | None = None,
+    code_path: str | Path | None = None,
+    allow_github_repos: list[str] | None = None,
+) -> str:
+    """Return a pretty-printed AST dump for the primary modeling file."""
+    from TraceLens.ModelUtils.source_policy import SourcePolicy, set_source_policy
+
+    set_source_policy(SourcePolicy.from_env_and_cli(allow_github_repos))
+    resolved_checkpoint = checkpoint or source
+    config, _ = _resolve_checkpoint(
+        checkpoint=resolved_checkpoint,
+        github=github,
+        config_path=config_path,
+    )
+    source_files, _ = resolve_source_files(
+        resolved_checkpoint,
+        config,
+        code_path=code_path,
+        github=github,
+    )
+    if not source_files:
+        raise FileNotFoundError("No modeling source file found to parse")
+    text = source_files[0].read_text(encoding="utf-8")
+    return dump_ast(text, filename=str(source_files[0]))

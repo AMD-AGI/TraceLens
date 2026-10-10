@@ -102,6 +102,10 @@ cmake-build-*/
 .nuxt/
 .output/
 
+# Generated standalone Model Explorer viewer HTML (repo root only; the
+# viewer template under Visualizer/model_explorer_export/viewer/ is tracked)
+/*.html
+
 # Large binaries / artifacts (archives, ML weights, dumps)
 *.pt
 *.pth

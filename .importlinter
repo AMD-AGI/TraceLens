@@ -9,6 +9,14 @@ ancestors =
     TraceLens
 depth = 10
 ignore_imports =
+    TraceLens.ModelUtils.basic_ops -> TraceLens.ModelUtils.block_tree
+    TraceLens.ModelUtils.blocks -> TraceLens.ModelUtils.ast_analyze
+    TraceLens.ModelUtils.block_tree -> TraceLens.ModelUtils.computation_graph
+    TraceLens.ModelUtils.ast_analyze -> TraceLens.ModelUtils.kernel_pipeline
+    TraceLens.ModelUtils.ast_analyze -> TraceLens.ModelUtils.attention_wrapper
+    TraceLens.ModelUtils.model_graph -> TraceLens.ModelUtils.computation_graph
+    TraceLens.ModelUtils.torch_introspect -> TraceLens.Visualizer.model_explorer_export.adapter
+    TraceLens.ModelUtils.torch_introspect -> TraceLens.Visualizer.model_explorer_export.shapes
     TraceLens.Trace2Tree.trace_capture_merge_experimental -> TraceLens.TraceUtils.utils.annotation_utils
     TraceLens.TraceUtils.split_trace.root_detection -> TraceLens.Trace2Tree.trace_to_tree
     TraceLens.TraceUtils.split_trace.root_detection -> TraceLens.Trace2Tree.util

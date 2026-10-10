@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TraceLens Model Visualizer</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #e1e1e1;
+        font-family: system-ui, sans-serif;
+      }
+
+      body {
+        --tracelens-fact-sheet-width: 420px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) var(--tracelens-fact-sheet-width);
+        grid-template-rows: 1fr;
+      }
+
+      #status {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        text-align: center;
+        color: #1a1a1a;
+        background: #e1e1e1;
+        z-index: 1000;
+      }
+
+      #status[hidden],
+      #tracelens-graph-pane[hidden],
+      #tracelens-fact-sheet[hidden] {
+        display: none !important;
+      }
+
+      #tracelens-graph-pane {
+        grid-column: 1;
+        grid-row: 1;
+        min-width: 0;
+        min-height: 0;
+        overflow: hidden;
+        background: #e1e1e1;
+        position: relative;
+        isolation: isolate;
+      }
+
+      model-explorer-visualizer {
+        display: block;
+        width: 100%;
+        height: 100%;
+        max-width: 100%;
+      }
+
+      #tracelens-fact-sheet {
+        grid-column: 2;
+        grid-row: 1;
+        position: fixed;
+        top: 0;
+        right: 0;
+        box-sizing: border-box;
+        min-width: 240px;
+        width: var(--tracelens-fact-sheet-width);
+        height: 100%;
+        overflow: auto;
+        padding: 14px 16px 20px;
+        background: #ffffff;
+        border-left: 2px solid #b0b0b0;
+        color: #1a1a1a;
+        text-align: left;
+        z-index: 100;
+        box-shadow: -4px 0 12px rgba(0, 0, 0, 0.08);
+      }
+
+      #tracelens-fact-sheet-resizer {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 8px;
+        height: 100%;
+        transform: translateX(-50%);
+        cursor: col-resize;
+        touch-action: none;
+        z-index: 101;
+      }
+
+      #tracelens-fact-sheet-resizer::after {
+        content: "";
+        position: absolute;
+        inset: 0 3px;
+        border-radius: 4px;
+        background: transparent;
+        transition: background 120ms ease;
+      }
+
+      #tracelens-fact-sheet-resizer:hover::after,
+      body.tracelens-fact-sheet-resizing #tracelens-fact-sheet-resizer::after {
+        background: rgba(26, 26, 26, 0.12);
+      }
+
+      body.tracelens-fact-sheet-resizing {
+        cursor: col-resize;
+        user-select: none;
+      }
+
+      #tracelens-fact-sheet h2 {
+        margin: 0 0 10px;
+        font-size: 17.5px;
+        font-weight: 700;
+      }
+
+      #tracelens-fact-sheet pre {
+        margin: 0;
+        font: 15px/1.45 system-ui, sans-serif;
+        white-space: pre-wrap;
+        text-align: left;
+      }
+
+      #tracelens-fact-sheet-body a {
+        color: #0b57d0;
+        text-decoration: underline;
+      }
+    </style>
+    <script src="https://unpkg.com/ai-edge-model-explorer-visualizer@0.1.2"></script>
+  </head>
+  <body>
+    <div id="status">Loading TraceLens graph…</div>
+    <div id="tracelens-graph-pane" hidden></div>
+    <aside id="tracelens-fact-sheet" hidden>
+      <div
+        id="tracelens-fact-sheet-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize fact sheet"
+        tabindex="0"
+      ></div>
+      <h2 id="tracelens-fact-sheet-title">Fact sheet</h2>
+      <pre id="tracelens-fact-sheet-body"></pre>
+    </aside>
+    <script src="./app.js?v=10"></script>
+  </body>
+</html>

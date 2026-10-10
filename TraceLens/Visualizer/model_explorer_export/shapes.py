@@ -1,0 +1,797 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""Attach symbolic tensor shapes from shape inference to Model Explorer nodes."""
+
+from __future__ import annotations
+
+from typing import Any, Callable
+
+from TraceLens.ModelUtils.block_tree import BlockNode
+from TraceLens.ModelUtils.shape_inference import (
+    DimExpr,
+    PORT_SPEC_SEP,
+    ShapeContext,
+    ShapeInferencer,
+    Symbol,
+    TensorSpec,
+    _permute_shape,
+    _reduce_conv_spatial,
+    _resolve_cast_dtype,
+    _resolve_expand_shape,
+    _resolve_view_shape,
+)
+
+SHAPE_SEPARATOR = " x "
+BRACKET_SEPARATOR = ", "
+
+
+def _font_safe(dim: Any, *, star: str = "x") -> str:
+    """Model Explorer renders characters outside its font atlas as ``?``.
+
+    ``star`` controls how a multiplication marker is rendered. The compact
+    ``tensor_shape`` form uses ``"x"`` (Model-Explorer-native); the human display
+    form keeps ``"*"`` so a merged reshape dim reads ``B*S``.
+    """
+    text = str(dim).replace("\u00d7", star).replace("\u2217", star).replace("*", star)
+    return "".join(char if 32 <= ord(char) < 127 else "" for char in text)
+
+
+def format_shape(spec: TensorSpec) -> str:
+    """Bracketed human-readable shape for node attrs, e.g. ``[B, S, 4096]``."""
+    if not spec.shape:
+        return ""
+    inner = BRACKET_SEPARATOR.join(_font_safe(dim, star="*") for dim in spec.shape)
+    return f"[{inner}]"
+
+
+def format_shape_dims(dims: list[str]) -> str:
+    """Bracket a list of already-stringified dims, e.g. ``["B", "S"]`` -> ``[B, S]``."""
+    if not dims:
+        return ""
+    return f"[{BRACKET_SEPARATOR.join(dims)}]"
+
+
+def parse_shape_dims(text: str) -> list[str]:
+    """Inverse of :func:`format_shape` \u2014 recover dims from a display string.
+
+    Accepts the bracket form (``[B, S, 4096]``) and, defensively, the legacy
+    `` x ``-separated form so mixed data never crashes the round trip.
+    """
+    stripped = text.strip()
+    if stripped.startswith("[") and stripped.endswith("]"):
+        stripped = stripped[1:-1]
+        return [part.strip() for part in stripped.split(",") if part.strip()]
+    return [part.strip() for part in stripped.split(SHAPE_SEPARATOR) if part.strip()]
+
+
+def format_shape_with_dtype(spec: TensorSpec) -> str:
+    """Shape string with dtype suffix for display on edges and node attrs."""
+    dims = format_shape(spec)
+    if not dims:
+        return ""
+    if not spec.dtype:
+        return dims
+    return f"{dims} {spec.dtype}"
+
+
+def format_shape_tensor(spec: TensorSpec) -> str:
+    """Bracket ``[B, S, H]`` shape for outputsMetadata tensor_shape / edge labels.
+
+    Model Explorer labels edges from the ``tensor_shape`` attr, so this uses the
+    same bracket form as node attrs (``*`` for merged reshape dims) rather than a
+    compact ``BxSxH`` string.
+    """
+    dims = format_shape_dims([_font_safe(dim, star="*") for dim in spec.shape])
+    if not dims or not spec.dtype:
+        return dims
+    return f"{dims} {spec.dtype}"
+
+
+def format_shape_bracket(spec: TensorSpec) -> str:
+    """Legacy bracket form kept for operator JSON consumers."""
+    inner = ", ".join(str(dim) for dim in spec.shape)
+    return f"[{inner}]"
+
+
+def _apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
+    display_text = format_shape_with_dtype(spec)
+    if not display_text:
+        return
+    tensor_shape = format_shape_tensor(spec)
+    attrs = [
+        item
+        for item in node.get("attrs", [])
+        if item.get("key") not in {"output_shape", "output_dtype"}
+    ]
+    attrs.append({"key": "output_shape", "value": display_text})
+    attrs.append({"key": "output_dtype", "value": spec.dtype})
+    node["attrs"] = attrs
+    existing = node.get("outputsMetadata", [])
+    port_ids = [item.get("id", "0") for item in existing] or ["0"]
+    labels = {
+        item.get("id", "0"): [
+            attr for attr in item.get("attrs", []) if attr.get("key") == "port_label"
+        ]
+        for item in existing
+    }
+    node["outputsMetadata"] = [
+        {
+            "id": port_id,
+            "attrs": [
+                *labels.get(port_id, []),
+                {"key": "shape", "value": display_text},
+                {"key": "tensor_shape", "value": tensor_shape},
+                {"key": "dtype", "value": spec.dtype},
+            ],
+        }
+        for port_id in port_ids
+    ]
+
+
+def apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
+    """Attach one known output shape to an exported node."""
+    _apply_shape_attrs(node, spec)
+
+
+def _output_names_attr(node: dict[str, Any]) -> list[str]:
+    for attr in node.get("attrs", []):
+        if attr.get("key") == "output_names":
+            return [name for name in str(attr.get("value") or "").split(",") if name]
+    return []
+
+
+def _port_specs_for(
+    local_key: str, shape_specs: dict[str, TensorSpec]
+) -> dict[int, TensorSpec]:
+    """Per-ordinal slice specs a tuple-unpacked split published for ``local_key``.
+
+    The inferencer stores one spec per consumed output port under the reserved
+    ``f"{node_id}{PORT_SPEC_SEP}{ordinal}"`` key (see ``infer_model_graph``).
+    """
+    prefix = f"{local_key}{PORT_SPEC_SEP}"
+    result: dict[int, TensorSpec] = {}
+    for key, spec in shape_specs.items():
+        if not key.startswith(prefix):
+            continue
+        try:
+            result[int(key[len(prefix) :])] = spec
+        except ValueError:
+            continue
+    return result
+
+
+def _apply_multi_port_shape_attrs(
+    node: dict[str, Any],
+    whole_spec: TensorSpec | None,
+    port_specs: dict[int, TensorSpec],
+) -> None:
+    """Stamp one output port per split/unbind slice, each with its own shape.
+
+    A tuple-unpacked split has real output ports (``pre_w``/``post_w``/``comb_w``)
+    instead of synthetic per-slice tiles. Consumers were already wired to the
+    right ordinal (``sourceNodeOutputId``); here each port carries its slice shape
+    so the edge feeding ``view`` reads ``[B, S, 16]`` rather than the whole tensor.
+    """
+    output_names = _output_names_attr(node)
+    if whole_spec is not None:
+        display_text = format_shape_with_dtype(whole_spec)
+        attrs = [
+            item
+            for item in node.get("attrs", [])
+            if item.get("key") not in {"output_shape", "output_dtype"}
+        ]
+        if display_text:
+            attrs.append({"key": "output_shape", "value": display_text})
+            attrs.append({"key": "output_dtype", "value": whole_spec.dtype})
+        node["attrs"] = attrs
+    ports: list[dict[str, Any]] = []
+    for ordinal in sorted(port_specs):
+        port_spec = port_specs[ordinal]
+        label = output_names[ordinal] if ordinal < len(output_names) else str(ordinal)
+        ports.append(
+            {
+                "id": str(ordinal),
+                "attrs": [
+                    {"key": "port_label", "value": label},
+                    {"key": "shape", "value": format_shape_with_dtype(port_spec)},
+                    {"key": "tensor_shape", "value": format_shape_tensor(port_spec)},
+                    {"key": "dtype", "value": port_spec.dtype},
+                ],
+            }
+        )
+    if ports:
+        node["outputsMetadata"] = ports
+
+
+def annotate_nodes_with_shapes(
+    nodes: list[dict[str, Any]],
+    shape_specs: dict[str, TensorSpec],
+    *,
+    id_prefix: str,
+) -> None:
+    """Match exported nodes to computation-graph keys under ``id_prefix``."""
+    if not shape_specs:
+        return
+    prefix = f"{id_prefix}/" if id_prefix else ""
+    for node in nodes:
+        node_id = node.get("id", "")
+        if prefix:
+            if not node_id.startswith(prefix):
+                continue
+            local_key = node_id[len(prefix) :]
+        else:
+            local_key = node_id
+        port_specs = _port_specs_for(local_key, shape_specs)
+        if port_specs:
+            _apply_multi_port_shape_attrs(node, shape_specs.get(local_key), port_specs)
+            continue
+        spec = shape_specs.get(local_key)
+        if spec is None:
+            continue
+        _apply_shape_attrs(node, spec)
+        if any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@output"
+            for attr in node.get("attrs", [])
+        ):
+            incoming_by_port = {
+                edge.get("targetNodeInputId"): edge.get("sourceNodeId", "")
+                for edge in node.get("incomingEdges", [])
+            }
+            for metadata in node.get("outputsMetadata", []):
+                port = metadata.get("id")
+                source_id = incoming_by_port.get(port, "")
+                source_key = (
+                    source_id[len(prefix) :]
+                    if prefix and source_id.startswith(prefix)
+                    else source_id
+                )
+                port_spec = shape_specs.get(source_key)
+                if port_spec is None:
+                    continue
+                metadata["attrs"] = [
+                    attr
+                    for attr in metadata.get("attrs", [])
+                    if attr.get("key") not in {"shape", "tensor_shape", "dtype"}
+                ] + [
+                    # Keep the ``shape`` field dtype-qualified, matching
+                    # ``_apply_shape_attrs``/``_apply_multi_port_shape_attrs``.
+                    # ``group_boundary_shapes`` reads this value for an expandable
+                    # module's ``output_shape`` layer attribute, so dropping the
+                    # dtype here left collapsed modules showing shape without type.
+                    {"key": "shape", "value": format_shape_with_dtype(port_spec)},
+                    {
+                        "key": "tensor_shape",
+                        "value": format_shape_tensor(port_spec),
+                    },
+                    {"key": "dtype", "value": port_spec.dtype},
+                ]
+            output_by_port = {
+                str(metadata.get("id")): metadata
+                for metadata in node.get("outputsMetadata", [])
+            }
+            node["inputsMetadata"] = [
+                {
+                    "id": metadata.get("id"),
+                    "attrs": list(
+                        output_by_port.get(str(metadata.get("id")), metadata).get(
+                            "attrs", []
+                        )
+                    ),
+                }
+                for metadata in node.get("inputsMetadata", [])
+            ]
+
+
+def _node_spec(
+    node: dict[str, Any], output_port: str | None = None
+) -> TensorSpec | None:
+    metadata_items = node.get("outputsMetadata", [])
+    if output_port is not None:
+        matching = [
+            metadata
+            for metadata in metadata_items
+            if str(metadata.get("id", "0")) == str(output_port)
+        ]
+        if matching:
+            metadata_items = matching
+    for metadata in metadata_items:
+        attrs = {
+            item.get("key"): item.get("value") for item in metadata.get("attrs", [])
+        }
+        shape_text = attrs.get("shape")
+        if shape_text:
+            dtype = str(attrs.get("dtype") or "")
+            # Strip trailing dtype suffix from display shape text.
+            if dtype and shape_text.endswith(f" {dtype}"):
+                shape_text = shape_text[: -len(dtype) - 1]
+            return TensorSpec(
+                shape=tuple(parse_shape_dims(shape_text)),
+                dtype=dtype,
+            )
+    return None
+
+
+def node_output_spec(
+    node: dict[str, Any], output_port: str | None = None
+) -> TensorSpec | None:
+    """Read one exported output port's symbolic tensor specification."""
+    return _node_spec(node, output_port)
+
+
+def _incoming_sources(node: dict[str, Any]) -> list[tuple[str, str, str]]:
+    return [
+        (
+            str(edge.get("sourceNodeId")),
+            str(edge.get("sourceNodeOutputId", "0")),
+            str(edge.get("targetNodeInputId", "0")),
+        )
+        for edge in node.get("incomingEdges", [])
+        if edge.get("sourceNodeId")
+    ]
+
+
+def _node_synthetic(node: dict[str, Any]) -> str:
+    for attr in node.get("attrs", []):
+        if attr.get("key") == "synthetic":
+            return str(attr.get("value") or "")
+    return ""
+
+
+def _incoming_source_ids(node: dict[str, Any]) -> list[str]:
+    return [
+        source_id for source_id, _source_port, _target_port in _incoming_sources(node)
+    ]
+
+
+def _fallback_node_spec(
+    node: dict[str, Any],
+    sources: list[tuple[str, TensorSpec]],
+    *,
+    working_dtype: str = "float16",
+    dims: dict[str, DimExpr] | None = None,
+    conv_geometry: (
+        dict[str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] | None
+    ) = None,
+) -> TensorSpec:
+    """Infer merge-only synthetic ops that have no block-tree shape record."""
+    specs = [spec for _target_port, spec in sources]
+    label = str(node.get("label") or "")
+    node_id = str(node.get("id") or "")
+    attrs = node.get("attrs", [])
+    details = [
+        str(attr.get("value"))
+        for attr in attrs
+        if attr.get("key") == "detail" or attr.get("key") == "details"
+    ]
+
+    if label.startswith("Conv") and specs:
+        # Vision patch-merger downsample: a Conv{1,2,3}d is not keyed by block-tree
+        # inference, so reduce spatial extents here using geometry captured from the
+        # constructor (kernel/stride/padding), mirroring the smart inference path.
+        attr_name = next(
+            (str(a.get("value")) for a in attrs if a.get("key") == "attr_name"), ""
+        )
+        geometry = (conv_geometry or {}).get(attr_name)
+        if geometry is not None:
+            kernel, stride, padding = geometry
+            shape = list(specs[0].shape)
+            channel_axis = 1 if len(shape) >= 2 else 0
+            _reduce_conv_spatial(shape, channel_axis, kernel, stride, padding)
+            return TensorSpec(tuple(shape), specs[0].dtype)
+
+    if label in {"View", "Reshape"} and specs:
+        # Vision-model-level reshapes (spatial merge, patch pooling) are not keyed
+        # by the block-tree inference, so resolve them here from the recorded
+        # ``shape:`` detail rather than passing the input through unchanged.
+        shape_detail = next(
+            (
+                detail.split(":", 1)[1].strip()
+                for detail in details
+                if detail.startswith("shape:")
+            ),
+            "",
+        )
+        resolved = _resolve_view_shape(shape_detail, specs[0], dims or {})
+        if resolved is not None:
+            return TensorSpec(resolved, specs[0].dtype)
+
+    if label in {"Permute", "Transpose"} and specs:
+        dims_detail = next(
+            (
+                detail.split(":", 1)[1].strip()
+                for detail in details
+                if detail.startswith("dims:")
+            ),
+            None,
+        )
+        permuted = _permute_shape(specs[0].shape, dims_detail)
+        if permuted is not None:
+            return TensorSpec(permuted, specs[0].dtype)
+
+    if label == "Cast" and specs:
+        source = specs[0]
+        dtype_detail = next(
+            (
+                detail.split(":", 1)[1].strip()
+                for detail in details
+                if detail.startswith("dtype:")
+            ),
+            "",
+        )
+        if dtype_detail:
+            return TensorSpec(
+                source.shape,
+                _resolve_cast_dtype(dtype_detail, source.dtype, working_dtype),
+            )
+        return source
+
+    if label == "Unsqueeze":
+        source = specs[0]
+        dim_detail = next(
+            (
+                detail.split(":", 1)[1].strip()
+                for detail in details
+                if detail.startswith("dim:")
+            ),
+            None,
+        )
+        if dim_detail is not None:
+            try:
+                dim = int(dim_detail)
+            except ValueError:
+                dim = 0
+            if dim < 0:
+                dim += len(source.shape) + 1
+            shape = list(source.shape)
+            shape.insert(max(0, min(dim, len(shape))), 1)
+            return TensorSpec(tuple(shape), source.dtype)
+
+    if label == "Squeeze" and specs:
+        source = specs[0]
+        dim_detail = next(
+            (
+                detail.split(":", 1)[1].strip()
+                for detail in details
+                if detail.startswith("dim:")
+            ),
+            None,
+        )
+        shape = list(source.shape)
+        if not shape:
+            return source
+        if dim_detail is None:
+            # Bare squeeze drops every size-1 axis.
+            return TensorSpec(tuple(size for size in shape if size != 1), source.dtype)
+        try:
+            dim = int(dim_detail)
+        except ValueError:
+            return source
+        axis = dim % len(shape)
+        if 0 <= axis < len(shape) and shape[axis] == 1:
+            del shape[axis]
+            return TensorSpec(tuple(shape), source.dtype)
+        return source
+
+    if label == "Expand" and specs:
+        source = specs[0]
+        shape_detail = next(
+            (
+                detail.split(":", 1)[1].strip()
+                for detail in details
+                if detail.startswith("shape:")
+            ),
+            "",
+        )
+        resolved = _resolve_expand_shape(shape_detail, source, dims or {})
+        if resolved is not None:
+            return TensorSpec(resolved, source.dtype)
+        return source
+
+    if label in {"Multiply", "Add", "×", "+"} and len(specs) >= 2:
+        rank = max(len(spec.shape) for spec in specs)
+        padded = [(1,) * (rank - len(spec.shape)) + tuple(spec.shape) for spec in specs]
+        shape: list[Any] = []
+        for dimensions in zip(*padded):
+            non_unit = [dimension for dimension in dimensions if dimension != 1]
+            if non_unit and all(
+                isinstance(dimension, int)
+                or (isinstance(dimension, str) and dimension.isdigit())
+                for dimension in non_unit
+            ):
+                shape.append(max(non_unit, key=lambda dimension: int(dimension)))
+            else:
+                shape.append(non_unit[-1] if non_unit else 1)
+        return TensorSpec(tuple(shape), specs[-1].dtype)
+
+    if label == "MatMul" and len(specs) >= 2:
+        left, right = specs[:2]
+        if left.shape and right.shape:
+            return TensorSpec((*left.shape[:-1], right.shape[-1]), right.dtype)
+
+    if "@residual:" in node_id and label == "Multiply":
+        by_input = {target_port: spec for target_port, spec in sources}
+        post = by_input.get("post")
+        hidden_states = by_input.get("hidden_states")
+        if post is not None and hidden_states is not None and hidden_states.shape:
+            return TensorSpec(
+                (*post.shape, hidden_states.shape[-1]), hidden_states.dtype
+            )
+
+    if "@residual:" in node_id and label == "MatMul":
+        by_input = {target_port: spec for target_port, spec in sources}
+        comb = by_input.get("comb")
+        residual = by_input.get("residual")
+        if comb is not None and residual is not None and comb.shape and residual.shape:
+            return TensorSpec((*comb.shape[:-1], residual.shape[-1]), residual.dtype)
+
+    if node_id.split("/")[-1] == "hc_head" and label == "Mean":
+        source = sources[0][1]
+        if len(source.shape) >= 4:
+            return TensorSpec((*source.shape[:2], source.shape[-1]), source.dtype)
+
+    return max(
+        specs,
+        key=lambda item: (
+            len(item.shape),
+            item.shape[-1] if item.shape and isinstance(item.shape[-1], int) else 0,
+        ),
+    )
+
+
+def fill_missing_node_shapes(
+    nodes: list[dict[str, Any]],
+    *,
+    context: ShapeContext,
+    boundary_spec: Callable[[str, str], TensorSpec | None] | None = None,
+) -> None:
+    """Give every node a shape so the viewer never falls back to rendering ``?``.
+
+    Spine summaries, group input ports and nested-diagram nodes have no entry in the
+    per-section inference results, so they inherit the shape of whatever feeds them and
+    otherwise fall back to the model's activation shape.
+
+    ``boundary_spec(label, namespace)`` optionally supplies the meta-device ground
+    truth for an ``@input`` boundary parameter (e.g. the sparse-attention indexer's
+    ``attention_mask`` is ``[B, S]`` bool, not the generic ``(B, S, hidden)``). It is
+    consulted before the label heuristics so a boundary whose name merely *contains*
+    a heuristic keyword (``attention_mask`` matching the attention-module rule) is
+    sized from what the model actually passed rather than mislabelled.
+    """
+    hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
+    vocab = context.dims.get(Symbol.VOCAB.value, Symbol.VOCAB.value)
+    activation = TensorSpec(
+        (Symbol.BATCH.value, Symbol.SEQ.value, hidden), context.dtype
+    )
+    logits = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value, vocab), context.dtype)
+    tokens = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value), "int64")
+
+    node_by_id = {str(node.get("id", "")): node for node in nodes}
+    known: dict[tuple[str, str], TensorSpec] = {}
+    pending: list[dict[str, Any]] = []
+    for node in nodes:
+        metadata_items = node.get("outputsMetadata", [])
+        found = False
+        for metadata in metadata_items:
+            port = str(metadata.get("id", "0"))
+            spec = _node_spec(node, port)
+            if spec is not None:
+                known[(str(node.get("id", "")), port)] = spec
+                found = True
+        if not found:
+            pending.append(node)
+
+    for node in list(pending):
+        orig_label = str(node.get("label") or "").strip()
+        label = orig_label.lower()
+        node_id = str(node.get("id", ""))
+        namespace = str(node.get("namespace") or "")
+        synthetic = _node_synthetic(node)
+        # A boundary/mirror carrying a real producer (``position_embeddings`` from
+        # a ``rotary_pos_emb``) must inherit that producer's shape, not be caught
+        # by a computational-tile label heuristic. ``position_embeddings`` matches
+        # the ``embedding`` substring below, which would otherwise stamp it with
+        # the language ``(B, S, H)`` activation shape and hide its true axes.
+        connected_boundary = synthetic in {"@input", "@input_mirror"} and bool(
+            _incoming_sources(node)
+        )
+        # Meta-device ground truth for a forward-parameter boundary wins over the
+        # label heuristics below, which key off substrings and would otherwise
+        # mislabel a boundary whose name merely contains a keyword (the
+        # ``attention_mask`` boundary matching the attention-module ``(B, S, H)``
+        # rule). Only applies to real ``@input`` boundaries and only when the meta
+        # trace observed the parameter; everything else keeps the old behaviour.
+        meta_boundary: TensorSpec | None = None
+        if boundary_spec is not None and synthetic in {"@input", "@input_mirror"}:
+            meta_boundary = boundary_spec(orig_label, namespace)
+
+        seeded: TensorSpec | None = None
+        if node_id == "@input" or label in {"tokenized text", "input_ids"}:
+            seeded = tokens
+        elif connected_boundary:
+            # A real incoming dataflow edge always beats a name or meta guess:
+            # leave it pending so the edge-propagation pass below inherits the
+            # producer's concrete shape. This must precede every name-based
+            # heuristic (``logits``/``lm_head``, ``embedding``, ``norm``,
+            # ``attention``) so a boundary tile that merely *shares a name* with a
+            # computational label -- e.g. a router's local ``logits`` variable
+            # whose real producer is (B*S, num_experts), not the model head's
+            # (B, S, vocab) -- is not stamped with that label's canonical shape
+            # over its own producer. Meta ground-truth (below) only seeds *leaf*
+            # boundaries that have no producer to inherit from.
+            seeded = None
+        elif label == "logits" or node_id.split("/")[-1] in {"lm_head", "output"}:
+            seeded = logits
+        elif meta_boundary is not None:
+            seeded = meta_boundary
+        elif "embedding" in label or "embed" in node_id:
+            # Embeddings widen token ids, so they must not inherit the (B, S) input shape.
+            seeded = activation
+        elif "norm" in label:
+            # Spine norms sit on the residual stream whatever the preceding tile computed.
+            seeded = activation
+        elif "attention" in node_id.rsplit("/", 1)[-1].lower():
+            # Attention modules (core_attention, sdpa_attention, etc.) produce
+            # (B, S, H) regardless of internal Q/K/V reshaping.
+            seeded = activation
+        if seeded is not None:
+            known[(node_id, "0")] = seeded
+            _apply_shape_attrs(node, seeded)
+            pending.remove(node)
+
+    while pending:
+        progressed = False
+        for node in list(pending):
+            sources: list[tuple[str, TensorSpec]] = []
+            incoming_sources = _incoming_sources(node)
+            for source_id, source_port, target_port in incoming_sources:
+                spec = known.get((source_id, source_port))
+                if spec is None:
+                    source_node = node_by_id.get(source_id)
+                    if source_node is not None:
+                        spec = _node_spec(source_node, source_port)
+                if spec is not None:
+                    sources.append((target_port, spec))
+            if not sources or len(sources) != len(incoming_sources):
+                continue
+            spec = _fallback_node_spec(
+                node,
+                sources,
+                working_dtype=context.dtype,
+                dims=context.dims,
+                conv_geometry=context.conv_geometry,
+            )
+            node_id = str(node.get("id", ""))
+            known[(node_id, "0")] = spec
+            _apply_shape_attrs(node, spec)
+            pending.remove(node)
+            progressed = True
+        if not progressed:
+            break
+
+    for node in pending:
+        # A node still unresolved here has no spec of its own and nothing usable
+        # feeding it. Stamping the model's activation shape on a boundary or a
+        # summary tile is a reasonable default -- they carry the hidden stream.
+        # Stamping it on a COMPUTATION with no inputs is not: it asserts a shape
+        # the op cannot have (a sourceless ``torch.arange`` reported
+        # ``[B, S, hidden]`` when it produces a 1-D index range). Leave those
+        # alone so the gap is visible and gets fixed at the source instead of
+        # being papered over with a plausible-looking wrong answer.
+        if _node_synthetic(node) or not node.get("incomingEdges"):
+            if not _node_synthetic(node):
+                continue
+        _apply_shape_attrs(node, activation)
+
+
+def _namespace_chain(namespace: str) -> list[str]:
+    """Every group a node sits in, outermost first."""
+    segments = [segment for segment in str(namespace or "").split("/") if segment]
+    return ["/".join(segments[: index + 1]) for index in range(len(segments))]
+
+
+def _record_shape(store: dict[str, list[str]], group: str, shape_text: str) -> None:
+    shapes = store.setdefault(group, [])
+    if shape_text not in shapes:
+        shapes.append(shape_text)
+
+
+def group_boundary_shapes(nodes: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
+    """Shapes crossing each expandable group's boundary, as layer attributes.
+
+    Model Explorer only labels an edge when both endpoints are op nodes, so an edge that
+    ends on a collapsed group renders bare. Recording what enters and leaves the group
+    keeps those shapes readable without expanding it.
+    """
+    namespaces = {
+        str(node.get("id", "")): str(node.get("namespace") or "") for node in nodes
+    }
+    node_by_id = {str(node.get("id", "")): node for node in nodes}
+
+    inputs: dict[str, list[str]] = {}
+    outputs: dict[str, list[str]] = {}
+    for node in nodes:
+        target_chain = _namespace_chain(namespaces.get(str(node.get("id", "")), ""))
+        for source_id, source_port, _target_port in _incoming_sources(node):
+            source_node = node_by_id.get(source_id)
+            spec = (
+                _node_spec(source_node, source_port)
+                if source_node is not None
+                else None
+            )
+            if spec is None or source_id not in namespaces:
+                continue
+            shape_text = format_shape_with_dtype(spec)
+            source_chain = _namespace_chain(namespaces[source_id])
+            for group in target_chain:
+                if group not in source_chain:
+                    _record_shape(inputs, group, shape_text)
+            for group in source_chain:
+                if group not in target_chain:
+                    _record_shape(outputs, group, shape_text)
+
+    attributes: dict[str, dict[str, str]] = {}
+    for key, store in (("input_shape", inputs), ("output_shape", outputs)):
+        for group, group_shapes in store.items():
+            attributes.setdefault(group, {})[key] = ", ".join(group_shapes[:3])
+
+    # Collect every boundary port (label, shape) per (namespace, key). The name is
+    # shown ONLY when a boundary carries more than one output/input — a per-port
+    # split leaves each synthetic node with a single port, so the decision must be
+    # made from the boundary's total arity across all its sibling @input/@output
+    # nodes, not from any one node's port count.
+    boundary_entries: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for node in nodes:
+        namespace = str(node.get("namespace") or "")
+        if not namespace:
+            continue
+        synthetic = next(
+            (
+                attr.get("value")
+                for attr in node.get("attrs", [])
+                if attr.get("key") == "synthetic"
+            ),
+            None,
+        )
+        if synthetic not in {"@input", "@output"}:
+            continue
+        key = "input_shape" if synthetic == "@input" else "output_shape"
+        default_name = "input" if synthetic == "@input" else "output"
+        for metadata in node.get("outputsMetadata", []):
+            metadata_attrs = {
+                attr.get("key"): attr.get("value") for attr in metadata.get("attrs", [])
+            }
+            shape = metadata_attrs.get("shape")
+            if not shape:
+                continue
+            port = str(metadata.get("id", "0"))
+            port_label = metadata_attrs.get("port_label")
+            if port_label:
+                label = str(port_label)
+            elif port in {"0", "result", "output"}:
+                label = str(node.get("label") or default_name)
+            else:
+                label = port
+            boundary_entries.setdefault((namespace, key), []).append(
+                (label, str(shape))
+            )
+    for (namespace, key), entries in boundary_entries.items():
+        if len(entries) > 1:
+            values = [f"{label}: {shape}" for label, shape in entries]
+        else:
+            values = [shape for _label, shape in entries]
+        attributes.setdefault(namespace, {})[key] = ", ".join(dict.fromkeys(values))
+    return attributes
+
+
+def infer_block_tree_shapes(
+    inferencer: ShapeInferencer,
+    block_tree: BlockNode,
+    *,
+    title: str,
+    entry_spec: TensorSpec | None = None,
+) -> dict[str, TensorSpec]:
+    return inferencer.infer_block_tree(block_tree, title=title, entry_spec=entry_spec)

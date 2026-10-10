@@ -1,0 +1,124 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""Build Model Explorer payloads from TraceLens architecture specs."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from TraceLens.ModelUtils.basic_ops import BasicOpFilter
+from TraceLens.ModelUtils.extract import ArchitectureSpec
+from TraceLens.ModelUtils.shape_inference import (
+    ShapeInferencer,
+    build_operator_export,
+    serialize_dim,
+)
+
+from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
+    build_fact_sheet_viewer,
+)
+from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
+
+
+def _export_basic_ops(basic_ops: BasicOpFilter) -> BasicOpFilter:
+    """Keep full kernel inline substeps in Model Explorer (not basic-only tails)."""
+    return BasicOpFilter(basic_ops.patterns, basic_only=False)
+
+
+def build_model_explorer_payload(
+    spec: ArchitectureSpec,
+    *,
+    basic_ops: BasicOpFilter | None = None,
+    collection_label: str | None = None,
+    include_shapes: bool = True,
+    include_operator_export: bool = False,
+    inline_expansion: bool = True,
+    meta_shapes_checkpoint: str | None = None,
+) -> dict[str, Any]:
+    """Build a single merged Model Explorer graph with in-place namespace expansion."""
+    resolved_basic_ops = basic_ops or spec.basic_ops
+    inferencer = (
+        ShapeInferencer(spec) if include_shapes or include_operator_export else None
+    )
+    if inferencer is not None and meta_shapes_checkpoint is not None:
+        inferencer.load_meta_shapes(meta_shapes_checkpoint)
+    if meta_shapes_checkpoint is not None:
+        # Drive the N× repeated-block grouping (count, banner class, sub-variant
+        # counts) from the live meta module tree instead of config ints + role
+        # regexes. This runs before the graph/fact-sheet read the spec. It is
+        # independent of load_meta_shapes (structure needs only instantiation, never
+        # the fragile forward); reconcile is a no-op when instantiation fails.
+        from TraceLens.ModelUtils.extract import (
+            apply_live_attention_repeats,
+            reconcile_live_attention_groups,
+            reconcile_live_module_groups,
+        )
+        from TraceLens.ModelUtils.meta_trace import (
+            harvest_meta_attention_groups,
+            walk_meta_module_tree,
+        )
+
+        reconcile_live_module_groups(
+            spec, walk_meta_module_tree(meta_shapes_checkpoint)
+        )
+        # Record each attention module's live grouped-query repeat factor
+        # (``num_key_value_groups``) so a later wrapper expansion models ``repeat_kv``
+        # with the real factor rather than the config's latent-attention-unreliable
+        # nominal ratio. Inert for the rendered graph.
+        reconcile_live_attention_groups(
+            spec, harvest_meta_attention_groups(meta_shapes_checkpoint)
+        )
+        # The block tree was built at load time, before the factor above was known;
+        # now fill each attention core's ``repeat_kv`` head-repeat ops (unsqueeze/
+        # expand/reshape) from the just-stamped live grouped-query factor so the graph
+        # pass can interpose them on the key/value branches. No-op at factor 1 (GLM).
+        apply_live_attention_repeats(spec)
+    graph = build_merged_model_graph(
+        spec,
+        basic_ops=_export_basic_ops(resolved_basic_ops),
+        shape_inferencer=inferencer,
+        inline_expansion=inline_expansion,
+    )
+
+    viewer_meta: dict[str, Any] = {
+        "factSheet": build_fact_sheet_viewer(spec),
+    }
+    if inferencer is not None:
+        viewer_meta["dimensions"] = {
+            key: serialize_dim(value) for key, value in inferencer.context.dims.items()
+        }
+        viewer_meta["dtype"] = inferencer.context.dtype
+    if include_operator_export and inferencer is not None:
+        viewer_meta["operatorExport"] = inferencer.export_architecture()
+
+    return {
+        "name": spec.name,
+        "model_type": spec.model_type,
+        "source": "tracelens-computation-graph",
+        "tracelensViewer": viewer_meta,
+        "graphCollections": [
+            {
+                "label": collection_label or spec.name,
+                "graphs": [graph],
+            }
+        ],
+    }
+
+
+def build_operator_export_payload(spec: ArchitectureSpec) -> dict[str, Any]:
+    """Build the flat operator/shape JSON used by tooling and tests."""
+    return build_operator_export(spec)
+
+
+def save_model_explorer_payload(payload: dict[str, Any], path: Path | str) -> Path:
+    """Write a Model Explorer payload to JSON."""
+    target = Path(path).expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return target
