@@ -32,7 +32,7 @@ build source (never by pruning a node or suppressing a warning):
 
 These tests rebuild the real model graph and assert the fix holds end to end,
 not just at the unit level covered in
-``tests/Modeling/test_ast_graph_coverage.py::test_subscript_target_assignment_consumes_rhs_and_rebinds_root``.
+``tests/ModelUtils/test_ast_graph_coverage.py::test_subscript_target_assignment_consumes_rhs_and_rebinds_root``.
 """
 
 from __future__ import annotations

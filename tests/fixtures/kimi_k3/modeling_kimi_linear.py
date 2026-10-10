@@ -8,7 +8,7 @@
 # (`modeling_kimi_linear.py`, KimiLinearForCausalLM backbone).
 #
 # Checked in so the source-only AST tests in
-# tests/Modeling/test_kda_kernel.py and
+# tests/ModelUtils/test_kda_kernel.py and
 # tests/Visualizer/test_model_explorer_export.py run without a cached HF
 # snapshot. TraceLens only AST-parses this file (it is never imported or
 # executed), so the third-party runtime imports (einops, transformers,

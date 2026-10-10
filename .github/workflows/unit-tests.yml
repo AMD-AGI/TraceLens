@@ -50,7 +50,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install . pytest pytest-xdist pytest-cov openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
           # CPU torch + transformers are required by the Visualizer / ModelUtils
-          # unit tests under tests/Modeling and tests/Visualizer (FX tracing, shape
+          # unit tests under tests/ModelUtils and tests/Visualizer (FX tracing, shape
           # inference, HF source introspection). Pinned to the versions the tests
           # were validated against.
           pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.14.0'

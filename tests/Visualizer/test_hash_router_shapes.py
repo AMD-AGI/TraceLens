@@ -16,7 +16,7 @@ The table rendered as ``[1]`` in the module's working precision, so the lookup
 reading it lost both its trailing axis and its integer-ness, and every operand
 feeding the final gather was wrong -- while that gather still reached
 ``[B*S, top_k]``, by a fallback that happens to agree. See
-``tests/Modeling/test_buffer_and_index_shapes.py`` for the pieces.
+``tests/ModelUtils/test_buffer_and_index_shapes.py`` for the pieces.
 """
 
 from __future__ import annotations
