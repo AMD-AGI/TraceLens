@@ -1695,7 +1695,22 @@ class ShapeInferencer:
             # reports that one. The owning attr separates them, and repeated
             # decoder layers all agree, so matching many entries is fine as long
             # as they concur on shape and dtype.
-            for attr in _owning_attr_candidates(node, root):
+            candidates = _owning_attr_candidates(node, root)
+            # The owning attr alone is not always enough to separate them.
+            # GPT-2 has a `c_proj` in BOTH its attention and its MLP, and their
+            # weights differ ([768, 768] against [3072, 768]), so `c_proj.weight`
+            # agrees on nothing and falls through to a per-class index where
+            # `Conv1D`'s three different weights collapse to one -- handing both
+            # projections `c_attn`'s [768, 2304]. Their BIASES are both [768],
+            # which is why those resolved and hid the gap. Qualifying with the
+            # module that encloses it is what tells them apart, so after the
+            # plain attr, pair it with each enclosing candidate in turn.
+            qualifiers = list(candidates) + [
+                f"{outer}.{inner}"
+                for position, inner in enumerate(candidates)
+                for outer in candidates[position + 1 :]
+            ]
+            for attr in qualifiers:
                 for name in names:
                     leaf = str(name).split(".")[-1].strip()
                     qualified = f"{attr}.{leaf}"
@@ -3966,6 +3981,13 @@ class ShapeInferencer:
                 ),
                 inputs[-1] if inputs else None,
             )
+            # `addmm(bias, x, weight)` states its operands in order, so the
+            # activation is simply the first -- no search needed, and the search
+            # gets it WRONG for a projection whose input is not hidden-wide:
+            # GPT-2's MLP `c_proj` reads [B*S, 3072], matches nothing, and falls
+            # back to the last operand (the bias), which left the result rank-1.
+            if _detail_value(details, "raw_op") == "addmm" and inputs:
+                activation_input = inputs[0]
             in_shape = (
                 activation_input.shape
                 if activation_input is not None
