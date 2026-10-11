@@ -73,25 +73,31 @@ _MIN_CPU_OP_SHAPES = 10
 
 @dataclass
 class QualityThresholds:
+    # dropped-kernel detection
     drop_num_windows: int = 20
     drop_empty_window_frac: float = 0.5
     drop_fail_frac: float = 0.15
 
+    # runtime variability (spurious events)
     runtime_cv_warn: float = 0.25
     runtime_cv_fail: float = 0.75
     runtime_min_samples: int = 5
     runtime_min_dur_us: float = 2.0
     runtime_max_flagged_frac: float = 0.10
 
+    # GPU busy / idle
     idle_pct_warn: float = 30.0
     idle_pct_fail: float = 60.0
 
+    # shape / metadata coverage
     shape_coverage_warn: float = 0.80
     shape_coverage_fail: float = 0.40
 
+    # CPU:GPU event ratio (PyTorch)
     cpu_gpu_ratio_min: float = 0.2
     cpu_gpu_ratio_max: float = 50.0
 
+    # attention / SDPA detection
     attn_name_patterns: List[str] = field(
         default_factory=lambda: [
             "fmha",
@@ -106,11 +112,19 @@ class QualityThresholds:
         ]
     )
 
+    # high-idle ops
     op_high_idle_pct: float = 40.0
 
 
 @dataclass
 class AttnCountConfig:
+    """Config for the attention-kernel-count check.
+
+    expected = num_gpus * num_steps * num_layers * calls * unique_kernels (per
+    pass). num_gpus and unique_kernels are inferred; num_layers and num_steps
+    must be supplied (else the check is skipped).
+    """
+
     num_layers: Optional[int] = None
     num_steps: Optional[int] = None
     num_gpus: Optional[int] = None
@@ -127,6 +141,7 @@ class AttnCountConfig:
 # Helper functions
 # ---------------------------------------------------------------------------
 def coefficient_of_variation(values: Sequence[float]) -> float:
+    """std / mean (population std). 0.0 if empty or mean is 0."""
     n = len(values)
     if n == 0:
         return 0.0
@@ -137,6 +152,7 @@ def coefficient_of_variation(values: Sequence[float]) -> float:
 
 
 def gcd_of_counts(counts: Iterable[int]) -> int:
+    """GCD of positive counts."""
     positives = [int(c) for c in counts if c and int(c) > 0]
     if not positives:
         return 0
@@ -144,6 +160,7 @@ def gcd_of_counts(counts: Iterable[int]) -> int:
 
 
 def busy_idle_from_events(events: Sequence[dict]) -> Dict[str, float]:
+    """Compute busy/idle/total time (us) from events with ``ts``/``dur``."""
     intervals = [
         (float(e["ts"]), float(e["ts"]) + float(e["dur"]))
         for e in events
@@ -312,6 +329,7 @@ def _check_cpu_gpu_ratio(ctx) -> List[TraceCheck]:
 # Detailed pre-report checks (TRACELENS_DETAILED_HEALTH_CHECKS=1)
 # ---------------------------------------------------------------------------
 def _check_kernels_dropped_windowed(ctx) -> List[TraceCheck]:
+    """Detect intermittent kernel dropping via timeline bucketing."""
     events, thr = ctx["events"], ctx["thr"]
     kernels = [e for e in events if e.get("cat") in GPU_KERNEL_CATEGORIES]
     times = sorted(
@@ -347,6 +365,7 @@ def _check_kernels_dropped_windowed(ctx) -> List[TraceCheck]:
 
 
 def _check_runtime_variability(ctx) -> List[TraceCheck]:
+    """Flag kernel groups whose per-invocation duration varies too much."""
     events, thr = ctx["events"], ctx["thr"]
     groups: Dict[str, List[float]] = defaultdict(list)
     for e in events:
@@ -416,6 +435,7 @@ def _check_gpu_busy_idle(ctx) -> List[TraceCheck]:
 
 
 def _check_kernel_counts(ctx) -> List[TraceCheck]:
+    """Report kernel-count structure and attention kernel presence."""
     events, thr = ctx["events"], ctx["thr"]
     kernels = [e for e in events if e.get("cat") in GPU_KERNEL_CATEGORIES]
     if not kernels:
@@ -441,6 +461,7 @@ def _check_kernel_counts(ctx) -> List[TraceCheck]:
 
 
 def _check_jax_metadata_richness(ctx) -> List[TraceCheck]:
+    """Fraction of GPU events carrying rich HLO metadata."""
     events, thr = ctx["events"], ctx["thr"]
     gpu_events = [e for e in events if e.get("cat") in GPU_KERNEL_CATEGORIES]
     n = len(gpu_events)
@@ -601,6 +622,7 @@ def _check_ops_have_shapes(ctx) -> List[TraceCheck]:
 
 
 def _check_high_idle_ops(ctx) -> List[TraceCheck]:
+    """Flag ops with a large gap between subtree wall time and kernel time."""
     dfs, sheets, thr = ctx["dfs"], ctx["sheets"], ctx["thr"]
     df = dfs.get(sheets["unique_args"])
     cols = set(df.columns) if df is not None else set()
@@ -627,6 +649,7 @@ def _check_high_idle_ops(ctx) -> List[TraceCheck]:
 
 
 def _check_sdpa_count(ctx) -> List[TraceCheck]:
+    """Count SDPA / attention ops across category and dedicated op sheets."""
     dfs, sheets, thr = ctx["dfs"], ctx["sheets"], ctx["thr"]
     cat_df = dfs.get(sheets["op_category"])
     cat_col = sheets["category_col"]
@@ -650,6 +673,7 @@ def _check_sdpa_count(ctx) -> List[TraceCheck]:
 
 
 def _infer_num_gpus(dfs: Dict) -> Optional[int]:
+    """Number of GPU devices, from the perf-report ``gpu_timeline`` sheet."""
     tl = dfs.get("gpu_timeline")
     if tl is None or "gpu_pid" not in getattr(tl, "columns", []):
         return None
@@ -661,6 +685,7 @@ def _infer_num_gpus(dfs: Dict) -> Optional[int]:
 
 
 def _attention_observed(dfs: Dict, sheet_names: Sequence[str]) -> Dict[str, Any]:
+    """Sum observed launches, count unique kernels, and list per-kernel counts."""
     launches = 0
     unique = 0
     found = []
@@ -675,6 +700,7 @@ def _attention_observed(dfs: Dict, sheet_names: Sequence[str]) -> Dict[str, Any]
 
 
 def _check_attention_kernel_count(ctx) -> List[TraceCheck]:
+    """Sanity-check observed attention launches against the model config."""
     dfs, cfg = ctx["dfs"], ctx["attn_cfg"]
     if not cfg.enabled:
         return []
