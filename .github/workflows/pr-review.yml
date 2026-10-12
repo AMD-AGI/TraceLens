@@ -31,8 +31,11 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       PR: ${{ github.event.issue.number }}
-      # Hidden marker on every verdict comment, so the 2-review cap can count them.
-      MARKER: "<!-- tracelens-pr-review -->"
+      # Two markers: NOTICE goes on started/refusal notes and is never counted;
+      # VERDICT goes only on a published verdict (LGTM comment or request-changes
+      # review), so the 2-review cap counts completed reviews and nothing else.
+      NOTICE_MARKER: "<!-- tracelens-pr-notice -->"
+      VERDICT_MARKER: "<!-- tracelens-pr-verdict -->"
       ASSOC: ${{ github.event.comment.author_association }}
     steps:
       - name: Gate the request
@@ -43,7 +46,7 @@ jobs:
           case "$ASSOC" in
             OWNER | MEMBER | COLLABORATOR) ;;
             *) gh pr comment "$PR" --repo "$REPO" --body \
-                 "$MARKER"$'\nPR review refused: /review is limited to users with write access.'
+                 "$NOTICE_MARKER"$'\nPR review refused: /review is limited to users with write access.'
                exit 1 ;;
           esac
 
@@ -53,26 +56,30 @@ jobs:
           head_sha=$(jq -r '.head.sha' <<<"$pr")
 
           if [ "$state" != "open" ]; then
-            gh pr comment "$PR" --repo "$REPO" --body "$MARKER"$'\nPR review refused: the PR is not open.'
+            gh pr comment "$PR" --repo "$REPO" --body "$NOTICE_MARKER"$'\nPR review refused: the PR is not open.'
             exit 1
           fi
           if [ "$is_fork" = "true" ]; then
             gh pr comment "$PR" --repo "$REPO" --body \
-              "$MARKER"$'\nPR review refused: fork PRs are out of scope (the review job has no secret access on forks).'
+              "$NOTICE_MARKER"$'\nPR review refused: fork PRs are out of scope (the review job has no secret access on forks).'
             exit 1
           fi
 
-          # Hard 2-review cap: count prior verdict comments carrying the marker.
-          prior=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
-            --jq '[.[] | select(.body | contains("<!-- tracelens-pr-review -->"))] | length')
+          # Hard 2-review cap: count only published verdicts (VERDICT_MARKER), across
+          # both endpoints -- LGTM lands as an issue comment, request-changes as a review.
+          verdict_comments=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq "[.[] | select(.body | contains(\"$VERDICT_MARKER\"))] | length")
+          verdict_reviews=$(gh api --paginate "repos/$REPO/pulls/$PR/reviews" \
+            --jq "[.[] | select(.body | contains(\"$VERDICT_MARKER\"))] | length")
+          prior=$((verdict_comments + verdict_reviews))
           if [ "$prior" -ge 2 ]; then
             gh pr comment "$PR" --repo "$REPO" --body \
-              "$MARKER"$'\nPR review refused: this PR already has 2 automated reviews (the cap). Push changes and ask a human reviewer.'
+              "$NOTICE_MARKER"$'\nPR review refused: this PR already has 2 automated reviews (the cap). Push changes and ask a human reviewer.'
             exit 1
           fi
 
           gh pr comment "$PR" --repo "$REPO" --body \
-            "$MARKER"$'\nPR review started at '"$head_sha"$'. This posts request-changes or an LGTM comment; it never approves or merges.'
+            "$NOTICE_MARKER"$'\nPR review started at '"$head_sha"$'. This posts request-changes or an LGTM comment; it never approves or merges.'
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
 
   review:
@@ -161,7 +168,8 @@ jobs:
       REPO: ${{ github.repository }}
       PR: ${{ github.event.issue.number }}
       EXPECTED_HEAD: ${{ needs.gate.outputs.head_sha }}
-      MARKER: "<!-- tracelens-pr-review -->"
+      # The published verdict carries the counted marker; the gate's 2-review cap keys on it.
+      MARKER: "<!-- tracelens-pr-verdict -->"
     steps:
       - name: Checkout scripts
         uses: actions/checkout@v4

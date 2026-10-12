@@ -9,7 +9,7 @@ set -euo pipefail
 
 PR="${1:?usage: pr-review-publish.sh <PR> <card.md> <marker>}"
 CARD="${2:?missing card file}"
-MARKER="${3:-<!-- tracelens-pr-review -->}"
+MARKER="${3:-<!-- tracelens-pr-verdict -->}"
 REPO="${REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
 
 [ -s "$CARD" ] || { echo "pr-review-publish: $CARD is empty or missing" >&2; exit 1; }
