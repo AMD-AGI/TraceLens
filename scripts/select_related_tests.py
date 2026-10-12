@@ -9,10 +9,11 @@
 
 A test is related when it imports a changed module, directly or through another
 module, when loading it runs a package ``__init__`` that imports the changed
-module, or when its source names a changed path, including pieces passed to
-``os.path.join``. Changes that can break collection for the rest of the suite
-run every test: package metadata, ``tests/conftest.py``, and modules imported
-while loading ``TraceLens``.
+module, when it launches the module with ``python -m``, or when its source
+names a changed path, including pieces passed to ``os.path.join``. Changes that
+can break collection for the rest of the suite run every test: package
+metadata, ``tests/conftest.py``, and modules imported while loading
+``TraceLens``.
 """
 
 from __future__ import annotations
@@ -115,6 +116,27 @@ class _ImportCollector(ast.NodeVisitor):
         if suffix:
             self.paths.add(suffix)
         self.generic_visit(node)
+
+    def visit_List(self, node):
+        # ``python -m pkg.mod`` names a module without importing it.
+        self._record_module_invocation(node.elts)
+        self.generic_visit(node)
+
+    def visit_Tuple(self, node):
+        self._record_module_invocation(node.elts)
+        self.generic_visit(node)
+
+    def _record_module_invocation(self, elts):
+        for index, elt in enumerate(elts[:-1]):
+            module = elts[index + 1]
+            if (
+                isinstance(elt, ast.Constant)
+                and elt.value == "-m"
+                and isinstance(module, ast.Constant)
+                and isinstance(module.value, str)
+                and _is_dotted_module(module.value)
+            ):
+                self.imports.add(module.value)
 
     def visit_Constant(self, node):
         if isinstance(node.value, str) and "/" in node.value and len(node.value) <= 500:
@@ -551,6 +573,16 @@ def _constant_path_piece(node):
     if isinstance(node, ast.Call):
         return _path_join_suffix(node)
     return None
+
+
+def _is_dotted_module(name):
+    """True for ``pkg.mod`` and false for flags, paths, and ``python -m pip``."""
+    if not name or "/" in name or name.startswith("."):
+        return False
+    parts = name.split(".")
+    if len(parts) < 2:
+        return False
+    return all(part.isidentifier() for part in parts)
 
 
 def _is_path_join(node):

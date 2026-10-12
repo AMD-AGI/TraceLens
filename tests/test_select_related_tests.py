@@ -135,6 +135,31 @@ def test_sibling_import_runs_package_init_dependencies(tmp_path):
     assert other.test_files == ("tests/test_other.py",)
 
 
+def test_python_module_invocation_selects_the_test(tmp_path):
+    _write(tmp_path / "TraceLens" / "__init__.py", '"""package"""\n')
+    _write(tmp_path / "TraceLens" / "sub" / "__init__.py", '"""package"""\n')
+    _write(tmp_path / "TraceLens" / "sub" / "worker.py", "def run():\n    return 1\n")
+    _write(
+        tmp_path / "tests" / "test_cli.py",
+        "import subprocess\n\n"
+        "def test_cli():\n"
+        "    subprocess.run([\n"
+        '        "python3", "-m", "TraceLens.sub.worker",\n'
+        "    ])\n",
+    )
+    _write(
+        tmp_path / "tests" / "test_pip.py",
+        "import subprocess\n\n"
+        "def test_pip():\n"
+        '    subprocess.run(["python3", "-m", "pip", "install", "x"])\n',
+    )
+
+    selection = selector.select_related_tests(tmp_path, ["TraceLens/sub/worker.py"])
+
+    assert selection.mode == "selected"
+    assert selection.test_files == ("tests/test_cli.py",)
+
+
 def test_path_join_tail_selects_the_loader(tmp_path):
     _write(tmp_path / "TraceLens" / "__init__.py", '"""package"""\n')
     _write(
@@ -180,6 +205,23 @@ def test_joined_eval_path_includes_eval_harness():
         ],
     )
     assert "tests/test_analysis_agent_evals.py" in selection.test_files
+
+
+def test_module_flag_selects_collective_analysis():
+    selection = selector.select_related_tests(
+        ROOT,
+        ["TraceLens/Reporting/generate_multi_rank_collective_report_pytorch.py"],
+    )
+    assert selection.mode == "selected"
+    assert "tests/test_collective_analysis.py" in selection.test_files
+
+
+def test_batched_replay_path_selects_event_replay():
+    selection = selector.select_related_tests(
+        ROOT, ["TraceLens/EventReplay/batched_replay.py"]
+    )
+    assert selection.mode == "selected"
+    assert "tests/test_event_replay.py" in selection.test_files
 
 
 def test_kernel_source_cli_change_stays_narrow():
