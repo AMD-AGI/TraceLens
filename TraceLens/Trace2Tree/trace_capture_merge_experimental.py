@@ -29,10 +29,10 @@ from .trace_to_tree import TraceToTree
 def get_subtree_events(tree, event, cat_filter=None, name_filter=None):
     list_events = []
     list_filtered_events = []
-    queue = []
+    queue = deque()
     queue.append(event)
-    while len(queue) > 0:
-        node = queue.pop(0)
+    while queue:
+        node = queue.popleft()
         list_events.append(node)
         if cat_filter is not None:
             if tree.event_to_category(node) in cat_filter:

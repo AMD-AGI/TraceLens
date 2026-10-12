@@ -4,6 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
+# Pull requests run the tests related to the files they change
+# (scripts/select_related_tests.py). Pushes to main run the full suite.
+
 name: Unit Tests
 
 on:
@@ -31,6 +34,50 @@ on:
       - ".github/workflows/unit-tests.yml"
 
 jobs:
+  select-pr-tests:
+    name: Select PR tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      mode: ${{ steps.select.outputs.mode }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          filter: blob:none
+
+      - name: Select related tests
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            python3 scripts/select_related_tests.py --all \
+              --github-output "$GITHUB_OUTPUT" \
+              --write-list selected_tests.txt
+            exit 0
+          fi
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)' \
+            > "$RUNNER_TEMP/changed.txt"
+          python3 scripts/select_related_tests.py \
+            --changed-from "$RUNNER_TEMP/changed.txt" \
+            --github-output "$GITHUB_OUTPUT" \
+            --write-list selected_tests.txt
+
+      - name: Upload selected tests
+        uses: actions/upload-artifact@v6
+        with:
+          name: selected-tests
+          path: selected_tests.txt
+          if-no-files-found: error
+
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -93,24 +140,38 @@ jobs:
           PY
 
   unit-tests:
+    needs: select-pr-tests
     runs-on: ubuntu-latest
     # rocm-origami is required by roofline / Origami perf-model tests.
     container: rocm/dev-ubuntu-24.04:7.2.1
+    defaults:
+      run:
+        # This image runs steps with dash. The test step needs bash for pipefail and mapfile.
+        shell: bash
+    env:
+      TEST_MODE: ${{ needs.select-pr-tests.outputs.mode }}
     strategy:
       fail-fast: false
       matrix:
         # Four shards is the smallest split that can reach the longest test:
         # each runner has 4 cores, and 16 workers cover the suite's total work.
-        # ModelUtils and Visualizer are separate jobs below, so they are not
-        # part of this split and these runners do not install torch.
         shard: [1, 2, 3, 4]
     steps:
       - name: Checkout code
+        if: env.TEST_MODE != 'none'
         uses: actions/checkout@v4
         with:
           filter: blob:none
 
+      - name: Download selected tests
+        if: env.TEST_MODE == 'selected'
+        uses: actions/download-artifact@v8
+        with:
+          name: selected-tests
+          path: selected-tests
+
       - name: Restore test durations
+        if: env.TEST_MODE != 'none'
         uses: actions/cache/restore@v4
         with:
           path: .test_durations
@@ -121,11 +182,13 @@ jobs:
             test-durations-
 
       - name: Set up Python
+        if: env.TEST_MODE != 'none'
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Install dependencies
+        if: env.TEST_MODE != 'none'
         run: |
           apt update && apt install -y python3-venv git
           python -m venv .venv
@@ -134,21 +197,71 @@ jobs:
           pip install '.[jax,kernel_source]' pytest pytest-xdist pytest-split pytest-cov openpyxl orjson rocm-origami
 
       - name: Run unit tests
+        id: tests
         run: |
+          set -euo pipefail
+          if [ "$TEST_MODE" = "none" ]; then
+            echo "No tests relate to the changed files."
+            exit 0
+          fi
           . .venv/bin/activate
-          python -m pytest tests/ -v --tb=short -n auto --dist worksteal \
-            --ignore=tests/ModelUtils --ignore=tests/Visualizer \
+          if [ "$TEST_MODE" = "all" ]; then
+            python -m pytest tests/ -v --tb=short -n auto --dist worksteal \
+              --ignore=tests/ModelUtils --ignore=tests/Visualizer \
+              --splits 4 --group ${{ matrix.shard }} \
+              --splitting-algorithm least_duration \
+              --durations-path .test_durations \
+              --store-durations \
+              -m "not gpu" --durations=20 \
+              --cov=./TraceLens --cov-config=.coveragerc \
+              --cov-report=xml \
+              --junitxml=junit.xml -o junit_family=legacy
+            test -s .coverage
+            echo "has_coverage=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$TEST_MODE" != "selected" ]; then
+            echo "Unknown TEST_MODE: $TEST_MODE" >&2
+            exit 1
+          fi
+          list_file=$(find selected-tests -name selected_tests.txt -print -quit 2>/dev/null || true)
+          if [ -z "$list_file" ]; then
+            echo "selected_tests.txt was not downloaded" >&2
+            find selected-tests -print >&2 || true
+            exit 1
+          fi
+          mapfile -t files < "$list_file"
+          filtered=()
+          for file in "${files[@]}"; do
+            # ModelUtils and Visualizer run in their own sharded jobs, which
+            # install the torch and transformers this one does not.
+            case "$file" in
+              tests/ModelUtils/*|tests/Visualizer/*) continue ;;
+            esac
+            if [ -n "$file" ]; then
+              filtered+=("$file")
+            fi
+          done
+          if [ ${#filtered[@]} -eq 0 ]; then
+            echo "Selector reported tests but the list was empty." >&2
+            exit 1
+          fi
+          set +e
+          python -m pytest "${filtered[@]}" -v --tb=short -n auto --dist worksteal \
             --splits 4 --group ${{ matrix.shard }} \
             --splitting-algorithm least_duration \
             --durations-path .test_durations \
-            --store-durations \
-            -m "not gpu" --durations=20 \
-            --cov=./TraceLens --cov-config=.coveragerc \
-            --cov-report=xml \
-            --junitxml=junit.xml -o junit_family=legacy
-          test -s .coverage
+            -m "not gpu" --durations=20
+          rc=$?
+          set -e
+          if [ "$rc" -eq 5 ]; then
+            echo "No selected tests in shard ${{ matrix.shard }}."
+            exit 0
+          fi
+          exit "$rc"
 
       - name: Upload coverage data
+        if: steps.tests.outputs.has_coverage == 'true'
         uses: actions/upload-artifact@v6
         with:
           name: coverage-data-${{ matrix.shard }}
@@ -157,7 +270,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload junit report
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.select-pr-tests.outputs.mode == 'all' }}
         uses: actions/upload-artifact@v6
         with:
           name: junit-report-${{ matrix.shard }}
@@ -165,6 +278,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload test durations
+        if: needs.select-pr-tests.outputs.mode == 'all'
         uses: actions/upload-artifact@v6
         with:
           name: test-durations-${{ matrix.shard }}
@@ -322,63 +436,55 @@ jobs:
 
   codecov:
     name: Codecov
-    needs: [unit-tests, changes, modelutils-tests, visualizer-tests]
+    needs: [select-pr-tests, unit-tests, changes, modelutils-tests, visualizer-tests]
     if: >-
-      always() &&
+      !cancelled() &&
       needs.unit-tests.result == 'success' &&
       needs.changes.result == 'success' &&
       (needs.modelutils-tests.result == 'success' || needs.modelutils-tests.result == 'skipped') &&
       (needs.visualizer-tests.result == 'success' || needs.visualizer-tests.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
+      - name: Skip coverage gate for a partial PR run
+        if: needs.select-pr-tests.outputs.mode != 'all'
+        run: echo "Related-test run; the coverage gate stays on the full suite."
+
       - name: Checkout code
+        if: success() && needs.select-pr-tests.outputs.mode == 'all'
         uses: actions/checkout@v4
         with:
           filter: blob:none
 
       - name: Set up Python
+        if: success() && needs.select-pr-tests.outputs.mode == 'all'
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Download coverage data
+        if: success() && needs.select-pr-tests.outputs.mode == 'all'
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-data-*
           merge-multiple: false
 
       - name: Download junit reports
+        if: success() && needs.select-pr-tests.outputs.mode == 'all'
         uses: actions/download-artifact@v8
         with:
           pattern: junit-report-*
           merge-multiple: false
 
       - name: Combine coverage
+        if: success() && needs.select-pr-tests.outputs.mode == 'all'
         run: |
           python -m pip install --upgrade pip coverage
           python -m coverage combine coverage-data-*/.coverage
-          python - << 'PY'
-          import subprocess
-          from pathlib import Path
-
-          # A suite that did not run has no measurements. Leave its package out
-          # of the 95% gate so an unrelated change is not failed for 0% on code
-          # this workflow deliberately did not execute. When the suite did run,
-          # its data is in the combine and the package counts.
-          omit = []
-          if not Path("coverage-data-modelutils").is_dir():
-              omit.append("*/ModelUtils/*")
-          if not any(Path(".").glob("coverage-data-visualizer-*")):
-              omit.extend(["*/Visualizer/*", "*/Visualizer/*/*"])
-          omit_arg = ["--omit=" + ",".join(omit)] if omit else []
-          subprocess.run(["python", "-m", "coverage", "xml", *omit_arg], check=True)
-          subprocess.run(
-              ["python", "-m", "coverage", "report", "--fail-under=95", *omit_arg],
-              check=True,
-          )
-          PY
+          python -m coverage xml
+          python -m coverage report --fail-under=95
 
       - name: Upload coverage to Codecov
+        if: success() && needs.select-pr-tests.outputs.mode == 'all'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -387,41 +493,33 @@ jobs:
           fail_ci_if_error: true
           verbose: true
 
-      - name: List junit reports
-        id: junit
-        run: |
-          files=$(find junit-report-* -name junit.xml | sort | paste -sd, -)
-          echo "files=$files" >> "$GITHUB_OUTPUT"
-
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.select-pr-tests.outputs.mode == 'all' }}
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: ${{ steps.junit.outputs.files }}
+          files: junit-report-1/junit.xml,junit-report-2/junit.xml,junit-report-3/junit.xml,junit-report-4/junit.xml
           report_type: test_results
           flags: unit
           fail_ci_if_error: true
           verbose: true
 
       - name: Download test durations
+        if: success() && needs.select-pr-tests.outputs.mode == 'all'
         uses: actions/download-artifact@v8
         with:
           pattern: test-durations-*
           merge-multiple: false
 
       - name: Merge test durations
+        if: success() && needs.select-pr-tests.outputs.mode == 'all'
         run: |
           python - << 'PY'
           import json
           from collections import Counter
           from pathlib import Path
 
-          paths = sorted(
-              path
-              for path in Path(".").glob("test-durations-*/.test_durations")
-              if path.parent.name.removeprefix("test-durations-").isdigit()
-          )
+          paths = sorted(Path(".").glob("test-durations-*/.test_durations"))
           if len(paths) != 4:
               raise SystemExit(f"expected 4 duration files, found {[str(p) for p in paths]}")
           maps = [json.loads(path.read_text()) for path in paths]
@@ -435,47 +533,8 @@ jobs:
           PY
 
       - name: Save test durations
+        if: success() && needs.select-pr-tests.outputs.mode == 'all'
         uses: actions/cache/save@v4
         with:
           path: .test_durations
           key: test-durations-${{ github.run_id }}-${{ github.run_attempt }}
-
-      - name: Merge visualizer test durations
-        id: visualizer-durations
-        run: |
-          python - << 'PY'
-          import json
-          import os
-          from collections import Counter
-          from pathlib import Path
-
-          paths = sorted(Path(".").glob("test-durations-visualizer-*/.test_durations_visualizer"))
-          out = Path(os.environ["GITHUB_OUTPUT"])
-          if not paths:
-              with out.open("a", encoding="utf-8") as handle:
-                  handle.write("save=false\n")
-              print("visualizer suite did not run")
-          else:
-              if len(paths) != 2:
-                  raise SystemExit(
-                      f"expected 2 visualizer duration files, found {[str(p) for p in paths]}"
-                  )
-              maps = [json.loads(path.read_text()) for path in paths]
-              merged = {}
-              for key in set().union(*(item.keys() for item in maps)):
-                  counts = Counter(item[key] for item in maps if key in item)
-                  merged[key] = min(counts, key=lambda value: (counts[value], value))
-              Path(".test_durations_visualizer").write_text(
-                  json.dumps(merged, indent=4, sort_keys=True) + "\n"
-              )
-              with out.open("a", encoding="utf-8") as handle:
-                  handle.write("save=true\n")
-              print(f"merged {len(merged)} visualizer durations from {len(paths)} shards")
-          PY
-
-      - name: Save visualizer test durations
-        if: steps.visualizer-durations.outputs.save == 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: .test_durations_visualizer
-          key: visualizer-test-durations-${{ github.run_id }}-${{ github.run_attempt }}
