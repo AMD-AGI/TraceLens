@@ -687,7 +687,7 @@ def merge_capture_trace_into_graph(
         graph_tree = _load_trace_tree_from_file(
             graph_tree_filepath, add_python_func=True
         )
-    else:
+    elif not graph_tree.cpu_root_nodes:
         graph_tree.build_tree(add_python_func=True)
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
 
