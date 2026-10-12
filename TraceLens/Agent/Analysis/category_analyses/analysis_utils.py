@@ -543,7 +543,7 @@ def build_operation_metrics(
         category_config: Optional extra_fields / operation_classifier
         comparison_scope: ``"standalone"`` or ``"comparative"``
     """
-    peak_mem_bw = get_peak_mem_bw_tbs(metadata, default=1)
+    peak_mem_bw = metadata["peak_mem_bw_tbs"]
     maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
     fusion_op_keys = _load_fusion_op_keys(metadata.get("output_dir", ""))
     e2e_ms_total = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
@@ -1030,16 +1030,6 @@ def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
     return output_path
 
 
-def get_peak_mem_bw_tbs(metadata: dict, default: Optional[float] = None):
-    """Return peak memory bandwidth (TB/s) from metadata.
-
-    Also accepts the legacy ``peak_hbm_bw_tbs`` key found in older metadata files.
-    """
-    if "peak_mem_bw_tbs" in metadata:
-        return metadata["peak_mem_bw_tbs"]
-    return metadata.get("peak_hbm_bw_tbs", default)
-
-
 def get_peak_specs(metadata: dict) -> dict:
     """Extract peak MAF and memory bandwidth from metadata dict.
 
@@ -1052,7 +1042,7 @@ def get_peak_specs(metadata: dict) -> dict:
             if isinstance(metadata.get("max_achievable_tflops"), dict)
             else metadata.get("peak_bf16_maf_tflops")
         ),
-        "peak_mem_bw_tbs": get_peak_mem_bw_tbs(metadata),
+        "peak_mem_bw_tbs": metadata["peak_mem_bw_tbs"],
     }
 
 
