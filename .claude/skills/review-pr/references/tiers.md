@@ -1,12 +1,11 @@
 # Owning layers and backbone risk
 
 Two jobs: it names the canonical owner of each concern (cited by `rules.md` S1/S2/S3/L2), and it
-tiers the backbone for Step 3 of [`../SKILL.md`](../SKILL.md). A concern has one owner; new code
-calls it rather than re-doing its work.
+tiers the backbone for Step 3 of [`../SKILL.md`](../SKILL.md).
 
 ## Owning layers
 
-From issue #1076 § 2, grounded on the current tree. When code moves, update the path here — the
+Grounded on the current tree. When code moves, update the path here — the
 rules cite the concern, not the path.
 
 | Concern | Owning layer |

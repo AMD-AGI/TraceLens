@@ -1,5 +1,5 @@
 # Agent-driven PR self-review. Manual, comment-triggered, privilege-separated.
-# See issue #1076 for the design: gate (write) -> review (read-only, holds the
+# Design: gate (write) -> review (read-only, holds the
 # key) -> publish (write, posts a verdict only). The review job never has a
 # GitHub write path; only publish does, and it never approves or merges.
 name: PR review

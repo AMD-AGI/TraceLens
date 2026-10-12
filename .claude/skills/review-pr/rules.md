@@ -6,12 +6,10 @@ index to pick the rules the diff at hand can break, then read only those.
 **Scope.** Rules apply to the lines a PR adds or changes. Existing debt is flagged only when the PR
 touches it or adds a new copy of it.
 
-**Each check has exactly one owner — deterministic CI or this review, never both.** These are
-CI-owned; the review never flags them:
-
-- `black==26.3.1`, `ruff` (`F401`/`F841`/`RET502`/`RET503`), `import-linter` cycles — `lint.yml`
-- copyright headers (`tests/update_copyright.py`), 95% coverage + Codecov — `unit-tests.yml`
-- CodeQL security scan — `codeql.yml`
+**Each check has exactly one owner — deterministic CI or this review, never both.** The review
+never flags anything already gated by CI (formatting, the lint rule set, import cycles, copyright
+headers, the coverage floor, CodeQL security scan). Those checks are the linters' job — see the CI
+workflow files for the exact list.
 
 **Proposed CI (follow-up).** Until these land as gates, the review flags exactly the named check on
 changed lines; once a check lands, it moves to the CI-owned list above and leaves this review:
@@ -23,7 +21,7 @@ import), and an `import-linter` `layers` contract (lower layers never import hig
 [`references/tiers.md`](references/tiers.md) and is cited by the structure and logic rules, so the
 rules stay stable as code moves.
 
-This file is seeded from issue #1076 § 2. Every rule is `blocking` unless the review determines the
+Every rule is `blocking` unless the review determines the
 shape is correct; non-blocking observations are adjudicated and then not published (they would break
 the two-part card).
 
