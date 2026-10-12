@@ -131,6 +131,7 @@ Example execution_details.json entry:
   "num_gpu_events": 1250,
   "gpu_duration": 2300000,
   "gpu_busy_duration": 1000000,
+  "busy_ratio": 0.4348,
   "phase": {
     "num_prefill": 5,
     "num_prefilldecode": 10,
