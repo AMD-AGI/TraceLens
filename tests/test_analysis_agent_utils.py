@@ -111,11 +111,6 @@ from TraceLens.Agent.Analysis.utils.classify_kernels import (
 )
 
 # Constants
-_FUSION_HEADER = (
-    "| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | "
-    "FLOPS/Byte | Efficiency | Bound |"
-)
-_FUSION_SEP = "|---|---|---|---|---|---|---|---|---|---|"
 _FUSION_ROW = (
     "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
     "50.00% of 5.3 TB/s | memory-bound |"
@@ -1752,10 +1747,10 @@ def test_compute_data_tables_missing_data_table(tmp_path):
 # ----- _validate_fusion_data_tables / _iter_candidate_blocks -----
 
 
-def _fusion_block(header=_FUSION_HEADER, tier="fusion"):
+def _fusion_block(header=_STANDALONE_HEADER, tier="fusion"):
     return (
         f"<!-- reasoning-candidate tier={tier} rank=1 -->\n"
-        f"**Data:**\n\n{header}\n{_FUSION_SEP}\n{_FUSION_ROW}\n"
+        f"**Data:**\n\n{header}\n{_SEP}\n{_FUSION_ROW}\n"
     )
 
 
