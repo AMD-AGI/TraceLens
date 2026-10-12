@@ -24,11 +24,10 @@ except ImportError:
 
 
 class Impact(TypedDict):
-    """Task-level impact estimate; ``mid`` is the point estimate."""
+    """Task-level impact estimate (% E2E). No low/high band: a finding split
+    across tasks has no per-task band, so per-finding bands live in the md only."""
 
     mid: float
-    low: Optional[float]
-    high: Optional[float]
 
 
 class TaskMember(TypedDict):

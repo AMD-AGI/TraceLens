@@ -392,7 +392,7 @@ _FUSION_P2_GOLDEN = {
             "bound": "compute-bound",
         },
     ],
-    "impact": {"mid": 1.25, "low": 1.0, "high": 1.5},
+    "impact": {"mid": 1.25},
     "identification": "The activation runs as a separate elementwise kernel after a GEMM.",
     "reasoning": None,
     "resolution": "Fold the activation into the GEMM epilogue.",
@@ -488,7 +488,7 @@ def _assert_schema_valid(report):
         assert task["operation"] is None or isinstance(task["operation"], str)
         assert isinstance(task["prose_truncated"], bool)
         imp = task["impact"]
-        assert set(imp.keys()) == {"mid", "low", "high"}
+        assert set(imp.keys()) == {"mid"}
         assert isinstance(imp["mid"], (int, float))
         assert isinstance(task["members"], list) and task["members"]
         for m in task["members"]:
@@ -1136,7 +1136,7 @@ def test_fusion_tier_golden(tmp_path):
     p1, p2 = report["fusion_optimizations"]
     assert p2 == _FUSION_P2_GOLDEN
     assert p1["operation"] == "Unfused Attention"
-    assert p1["impact"] == {"mid": 13.5, "low": 11.5, "high": 15.5}
+    assert p1["impact"] == {"mid": 13.5}
     softmax = p1["members"][1]
     assert softmax["flops_per_byte"] is None
     assert softmax["efficiency_percent"] is None
