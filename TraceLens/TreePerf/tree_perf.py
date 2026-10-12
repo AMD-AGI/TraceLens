@@ -212,6 +212,7 @@ class TreePerfAnalyzer:
         data, trace_metadata = DataLoader.load_trace_events(
             profile_filepath,
             capture_trace_filepath=capture_trace_filepath,
+            framework="jax" if jax else "pytorch",
         )
 
         categorizer = (
@@ -2999,7 +3000,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         *args,
         **kwargs,
     ) -> "JaxTreePerfAnalyzer":
-        data_pb, _ = DataLoader.load_trace_events(profile_filepath)
+        data_pb, _ = DataLoader.load_trace_events(profile_filepath, framework="jax")
 
         categorizer = TraceEventUtils.prepare_event_categorizer(data_pb)
         metadata_events, events = TraceEventUtils.split_event_list(data_pb)

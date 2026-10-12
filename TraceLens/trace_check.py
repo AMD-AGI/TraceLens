@@ -592,7 +592,7 @@ def _check_attention_kernel_count(ctx) -> List[TraceCheck]:
 CHECK_REGISTRY = [
     # Pre-report, basic
     (_check_trace_file_size, True, False, None),
-    (_check_kernels_present, True, False, None),
+    (_check_kernels_present, True, False, "pytorch"),
     (_check_call_stack, True, False, None),
     (_check_graph_mode, True, False, None),
     (_check_cpu_op_shapes_basic, True, False, "pytorch"),

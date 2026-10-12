@@ -457,6 +457,7 @@ class DataLoader:
         filepath,
         save_preprocessed=False,
         capture_trace_filepath=None,
+        framework=None,
     ):
         data = DataLoader.load_data(filepath, save_preprocessed=save_preprocessed)
         if isinstance(data, list):
@@ -468,7 +469,10 @@ class DataLoader:
             from . import trace_check
 
             trace_check.run_trace_checks(
-                events, capture_trace_filepath=capture_trace_filepath, filepath=filepath
+                events,
+                capture_trace_filepath=capture_trace_filepath,
+                filepath=filepath,
+                framework=framework,
             ).log_findings()
 
         return events, metadata
