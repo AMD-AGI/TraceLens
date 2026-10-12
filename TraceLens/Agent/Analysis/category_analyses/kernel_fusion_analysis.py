@@ -32,6 +32,7 @@ from analysis_utils import (
     calculate_efficiency,
     format_args,
     format_kernel_names,
+    get_peak_mem_bw_tbs,
     load_perf_rows,
     perf_float,
     perf_report_csv_dir,
@@ -255,7 +256,7 @@ def _efficiency_cells(eff: dict) -> tuple:
     peak, unit = (
         (eff["resolved_peak_maf"], "TFLOPS")
         if bound == "compute"
-        else (eff["resolved_peak_hbm_bw"], "TB/s")
+        else (eff["resolved_peak_mem_bw"], "TB/s")
     )
     return f"{pct:.2f}% of {peak:g} {unit}", bound_cell
 
@@ -649,16 +650,17 @@ def load_arch_config(output_dir: str, platform: str) -> dict:
             if fname.endswith("_metadata.json"):
                 with open(os.path.join(metadata_dir, fname), "r") as f:
                     meta = json.load(f)
-                if "peak_hbm_bw_tbs" in meta and "max_achievable_tflops" in meta:
+                peak_mem_bw_tbs = get_peak_mem_bw_tbs(meta)
+                if peak_mem_bw_tbs is not None and "max_achievable_tflops" in meta:
                     return {
-                        "peak_hbm_bw_tbs": meta["peak_hbm_bw_tbs"],
+                        "peak_mem_bw_tbs": peak_mem_bw_tbs,
                         "max_achievable_tflops": meta["max_achievable_tflops"],
                     }
 
     try:
         arch = load_arch(platform)
         return {
-            "peak_hbm_bw_tbs": arch["mem_bw_gbps"] / 1000,
+            "peak_mem_bw_tbs": arch["mem_bw_gbps"] / 1000,
             "max_achievable_tflops": arch["max_achievable_tflops"],
         }
     except FileNotFoundError:
@@ -775,7 +777,7 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    peak_bw_tbs = arch["peak_hbm_bw_tbs"]
+    peak_bw_tbs = arch["peak_mem_bw_tbs"]
     peak_maf_tflops = arch["max_achievable_tflops"]
 
     perf_rows = load_perf_rows(csv_path)
@@ -823,7 +825,7 @@ def main():
         "estimated_count": len(impact_estimates),
         "total_impact_score": round(total_impact_score, 2),
         "platform": platform,
-        "peak_hbm_bw_tbs": peak_bw_tbs,
+        "peak_mem_bw_tbs": peak_bw_tbs,
         "baseline_ms": baseline_ms,
         "impact_estimates": impact_estimates,
     }
