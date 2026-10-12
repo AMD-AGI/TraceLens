@@ -2515,7 +2515,7 @@ class ShapeInferencer:
             # can only fall back to the undivided tensor. That is how a
             # ``cat((q_pass, q_rot))`` of a [..., 128] and a [..., 64] slice came
             # out [..., 384] -- it was handed the [..., 192] parent twice.
-            self._publish_output_port_specs(node, self._tensor_specs)
+            self._publish_output_port_specs(node, self._tensor_specs, root)
             if node.metadata.get("synthetic") == "@input":
                 self._forward_input_specs.add(id(output))
                 self._forward_input_spec_refs.append(output)
@@ -2618,7 +2618,7 @@ class ShapeInferencer:
         # exporter can label each output port with its slice shape ([B, S, 16] for
         # ``comb_w``) instead of the undivided tensor.
         for node in graph.nodes:
-            self._publish_output_port_specs(node, merged)
+            self._publish_output_port_specs(node, merged, root)
 
         self._tensor_specs = merged
         self._active_seq_axes, self._active_hidden = prev_axes, prev_hidden
@@ -2893,8 +2893,43 @@ class ShapeInferencer:
                 return sliced
         return self._tensor_specs.get(edge.source)
 
+    def _dims_with_owner_scalars(
+        self, node: ModelGraphNode, root: BlockNode | None
+    ) -> dict[str, DimExpr]:
+        """Config dims overlaid with the OWNING module's constructor values.
+
+        A model's config can publish a name its modules then override. GLM
+        declares ``head_dim: 0`` -- its attention genuinely has no RoPE part,
+        and ``qk_head_dim == qk_nope_head_dim`` says so -- while its sparse
+        indexer sets ``self.head_dim = config.index_head_dim``, which is 128.
+        Resolving a size against the global name alone gave the indexer's
+        ``split(packed_states, [self.head_dim, self.head_dim, 1])`` two
+        zero-width slices, so the keys and the gate scores it reads from them
+        both came out ``[B, S, 0]``.
+
+        Each candidate owner is tried in turn and the first that HAS scalars
+        answers. Taking the nearest name and stopping is not enough: an op
+        inside an expanded method sits under the method's own frame, so the
+        nearest name is ``get_pooled_states``, which is not a class and has no
+        scalars -- and a name that identifies nothing must not shadow the class
+        that does.
+        """
+        for candidate in (
+            self._owner_class_name(node, root=root),
+            root.class_name if root is not None else None,
+        ):
+            scalars = (
+                self.module_dims.scalar_by_class.get(candidate) if candidate else None
+            )
+            if scalars:
+                return {**self.context.dims, **scalars}
+        return self.context.dims
+
     def _publish_output_port_specs(
-        self, node: ModelGraphNode, specs: dict[str, TensorSpec]
+        self,
+        node: ModelGraphNode,
+        specs: dict[str, TensorSpec],
+        root: BlockNode | None = None,
     ) -> None:
         """Record one spec per ordinal for a tuple-unpacked split/chunk/unbind.
 
@@ -2921,7 +2956,7 @@ class ShapeInferencer:
                 details,
                 op_label,
                 ordinal,
-                self.context.dims,
+                self._dims_with_owner_scalars(node, root),
                 output_count=len(output_names),
             )
             slices.append(sliced)
@@ -3748,7 +3783,10 @@ class ShapeInferencer:
                         except (ValueError, TypeError):
                             pass
                     else:
-                        sizes = _parse_split_sizes(split_size, self.context.dims)
+                        sizes = _parse_split_sizes(
+                            split_size,
+                            self._dims_with_owner_scalars(node, root),
+                        )
                         if sizes:
                             out_size = sizes[0]
                             return TensorSpec(
@@ -4077,6 +4115,17 @@ class ShapeInferencer:
                     (item for item in inputs if item.dtype not in {"int64", "bool"}),
                     None,
                 )
+            if base is None:
+                # Every operand is an integer, so no dtype tells them apart:
+                # GLM's indexer reads `pool_indices[batch_idx, selected]`, a
+                # table of ids indexed by ids. Which one is the table is not a
+                # question of dtype -- it is the tensor the subscript is applied
+                # TO, and the call passes that first. Without this the op
+                # answered with its own index's shape, so the pooled selection
+                # came out `[1, number_of_pools, 4]` where the model's own
+                # comment says `[B, S, K, P]`, and the concat that follows was
+                # handed a rank-2 operand beside a rank-3 one.
+                base = self._operand_at(inputs, 0)
             int_indices = [
                 item for item in inputs if item is not base and item.dtype == "int64"
             ]
