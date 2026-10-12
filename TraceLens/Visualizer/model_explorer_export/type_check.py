@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from typing import Any
 
@@ -31,6 +32,8 @@ from TraceLens.ModelUtils.shape_inference import (
     _normalize_op_name,
     _operand_ceiling,
     _required_tensor_operand_names,
+    op_cannot_change_element_count,
+    op_cannot_change_shape,
 )
 
 _log = logging.getLogger(__name__)
@@ -559,6 +562,9 @@ def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
     for node in nodes:
         warnings.extend(_check_node(node))
     warnings.extend(_noop_cast_warnings(nodes))
+    warnings.extend(_shape_preserving_op_warnings(nodes))
+    warnings.extend(_reshape_conservation_warnings(nodes))
+    warnings.extend(_in_place_write_warnings(nodes))
     warnings.extend(_output_arity_warnings(nodes))
     warnings.extend(_kernel_operand_arity_warnings(nodes))
     warnings.extend(_unresolved_shape_warnings(nodes))
@@ -580,6 +586,278 @@ def _output_dtype(node: dict[str, Any]) -> str | None:
             dtype = value[idx + 1 :].strip()
             return dtype or None
     return None
+
+
+def _shape_preserving_op_warnings(nodes: list[dict[str, Any]]) -> list[str]:
+    """An op that cannot change a shape must not be recorded having changed one.
+
+    The companion of :func:`_noop_cast_warnings`, which states this invariant in
+    its own first line for casts and then only ever compares dtypes. MiniMax's
+    text ``q_norm`` opened with ``x.float()`` recording
+    ``input_shapes [["B","S","64","128"]]`` beside
+    ``output_shape [B, S, 48, 128]`` -- the contradiction sitting in two
+    adjacent attributes of one node, and every check walked past it, because
+    they ask whether a shape RESOLVED, and 48 is as resolved as 64.
+
+    That came from the same id being inferred once with its class and again by a
+    later root-less pass, which can land on any op; a cast is only where it
+    showed up first. So the invariant is asked of the whole class of ops it
+    applies to, and torch decides the membership
+    (:func:`op_cannot_change_shape`) rather than a list of names -- a dropout, a
+    ``contiguous``, an activation and a cast are all answered for by running the
+    model's own op name against its own callable.
+
+    Two ways in, because the predicate deliberately declines ops taking more
+    than one tensor and ``Tensor.to`` is one of them: an op torch vouches for,
+    or a node the exporter already labelled a cast.
+
+    Read from the node's own annotation rather than by walking edges, for the
+    reason the sibling check documents: a cast whose operand is a hidden
+    constant loses that edge in the render-filtered graph. Only an unambiguous
+    single-operand record is judged, and only when both shapes are recorded.
+    """
+    warnings: list[str] = []
+    for node in nodes:
+        if _is_constant_node(node):
+            continue
+        raw_shapes = _node_attr_value(node, "input_shapes")
+        if not raw_shapes:
+            continue
+        try:
+            input_shapes = json.loads(raw_shapes)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(input_shapes, list) or len(input_shapes) != 1:
+            continue
+        operand = input_shapes[0]
+        if not isinstance(operand, list) or not operand:
+            continue
+        produced = _output_shape_dims(node)
+        if not produced:
+            continue
+        before = [str(dim).strip() for dim in operand]
+        after = [str(dim).strip() for dim in produced]
+        if before == after:
+            continue
+        if not op_cannot_change_shape(_raw_op(node)):
+            continue
+        name = _raw_op(node) or str(node.get("label") or "op")
+        warnings.append(
+            f"{node.get('id')} [{name}]: reads {before} and produces {after}. "
+            f"This op returns its input's shape however it is called, so one of "
+            f"these two was resolved somewhere the other was not -- most often "
+            f"the same node id inferred once WITH its class and again without "
+            f"it, where the body's shapes belong to whichever module was "
+            f"reached last."
+        )
+    return warnings
+
+
+def _dim_factors(tokens: list[str]) -> list[str] | None:
+    """A shape's dim tokens as a flat multiset of factors, or None if unusable.
+
+    ``["B", "S*768"]`` and ``["B", "S", "768"]`` describe the same number of
+    elements, so both reduce to ``["768", "B", "S"]``. A size-1 axis multiplies
+    nothing and drops out, which is what lets ``[8192] -> [1, 1, 8192]`` read as
+    the conserving view it is.
+
+    None for a shape carrying a ``-1``: that is a placeholder standing for
+    whichever width makes the count come out right, so the count it implies
+    cannot disagree with anything.
+    """
+    factors: list[str] = []
+    for token in tokens:
+        for factor in str(token).split("*"):
+            factor = factor.strip()
+            if not factor:
+                return None
+            if factor == "-1" or factor.startswith("-"):
+                return None
+            if factor == "1":
+                continue
+            factors.append(factor)
+    return sorted(factors)
+
+
+def _counts_provably_differ(before: list[str], after: list[str]) -> bool:
+    """Whether two shapes CANNOT hold the same number of elements.
+
+    Factors common to both sides cancel. What is left is only a disagreement if
+    every remaining factor is a literal -- ``[B, S, 768]`` against
+    ``[B, S, 1024]`` cancels to ``768`` against ``1024`` and is one. Two
+    symbolic remainders (``Pv`` against ``Img``) prove nothing: the same count
+    can be written with different symbols, and a check that guessed here would
+    report a model's own notation as a defect.
+    """
+    fed, produced = _dim_factors(before), _dim_factors(after)
+    if fed is None or produced is None:
+        return False
+    remaining_fed, remaining_produced = list(fed), list(produced)
+    for factor in fed:
+        if factor in remaining_produced:
+            remaining_produced.remove(factor)
+            remaining_fed.remove(factor)
+    if not remaining_fed and not remaining_produced:
+        return False
+    fed_count = _concrete_int_dims(remaining_fed)
+    produced_count = _concrete_int_dims(remaining_produced)
+    if fed_count is None or produced_count is None:
+        return False
+    return math.prod(fed_count) != math.prod(produced_count)
+
+
+_MUTATES_DETAIL_PREFIX = "mutates: "
+
+
+def _in_place_write_warnings(nodes: list[dict[str, Any]]) -> list[str]:
+    """An in-place write returns the tensor it writes INTO, unchanged in shape.
+
+    ``final.index_add_(0, token_idx, current)`` hands back ``final``; the index
+    addresses into it and the source supplies values, but neither decides what
+    comes out. The extractor records which name the call mutates, and the
+    receiver is the call's first operand, so the op's own record states both
+    halves of the invariant and this check needs to name no operation.
+
+    Worth asking separately because the shape rule for these ops is POSITIONAL
+    -- it anchors on operand 0 -- and an operand whose shape did not resolve is
+    dropped rather than held open, which silently moves every later operand down
+    a slot. GLM's experts accumulator was handed its index as operand 0 that
+    way and reported ``[nnz, 1] int64`` for a ``[B*S, 4096] bfloat16``
+    accumulator; nothing noticed until a ``view`` two steps later was seen
+    converting a dtype. Comparing the op against its own first operand catches
+    it where it happens.
+    """
+    warnings: list[str] = []
+    for node in nodes:
+        if _is_constant_node(node):
+            continue
+        mutated = next(
+            (
+                line[len(_MUTATES_DETAIL_PREFIX) :].split(";")[0].strip()
+                for line in _details_lines(node)
+                if line.startswith(_MUTATES_DETAIL_PREFIX)
+            ),
+            None,
+        )
+        if not mutated:
+            continue
+        input_shapes = _load_list(node, "input_shapes")
+        produced = _output_shape_dims(node)
+        if not input_shapes or not produced:
+            continue
+        receiver = input_shapes[0]
+        if not isinstance(receiver, list) or not receiver:
+            continue
+        before = [str(dim).strip() for dim in receiver]
+        after = [str(dim).strip() for dim in produced]
+        name = _raw_op(node) or str(node.get("label") or "op")
+        if before != after:
+            warnings.append(
+                f"{node.get('id')} [{name}]: writes into {before} and reports "
+                f"{after}. This op returns the tensor it mutates ({mutated!r}), "
+                f"which is its first operand, so either the receiver is not the "
+                f"operand recorded first -- an earlier operand whose shape did "
+                f"not resolve moves the rest down a slot -- or the two were "
+                f"resolved against different tensors."
+            )
+        input_types = _load_list(node, "input_types")
+        if not input_types or not isinstance(input_types, list):
+            continue
+        in_dtype = input_types[0]
+        if not isinstance(in_dtype, str) or in_dtype in ("Constant", "Tensor"):
+            continue
+        out_dtype = _node_attr_value(node, "output_dtype") or _output_dtype(node)
+        if not out_dtype or in_dtype == out_dtype:
+            continue
+        warnings.append(
+            f"{node.get('id')} [{name}]: writes into a {in_dtype} tensor and "
+            f"reports {out_dtype}. An in-place write keeps the dtype of the "
+            f"tensor it mutates ({mutated!r}); a source of another dtype is "
+            f"converted INTO it, not the other way round."
+        )
+    return warnings
+
+
+def _reshape_conservation_warnings(nodes: list[dict[str, Any]]) -> list[str]:
+    """A reshape rearranges a tensor; it neither makes elements nor retypes them.
+
+    The invariant a ``view`` has in place of the one
+    :func:`_shape_preserving_op_warnings` enforces. A view exists precisely TO
+    move the axes around -- it is checked elsewhere that it must do so or be
+    elided -- but the elements it moves are the ones it was given, so
+    ``[B, S, 768] -> [B, S, 1024]`` is a defect in a way that
+    ``[B, S, 768] -> [B, S*768]`` is not. That is the same root-less-overwrite
+    class the sibling check guards, reaching an op whose shape is SUPPOSED to
+    change and where comparing shapes therefore says nothing.
+
+    Which ops conserve their element count is torch's answer, not a list here
+    (:func:`op_cannot_change_element_count`) -- it keeps ``expand`` out on its
+    own evidence, since broadcasting a size-1 axis really does make more
+    elements.
+
+    The dtype half is asked of the node's own recorded call rather than of the
+    op: ``Tensor.view`` has a second overload that reinterprets a dtype, so a
+    name alone cannot say. A node whose details declare the SHAPE it was called
+    with was not called that way, and a reinterpreting view would in any case
+    have to change the width it reports.
+    """
+    warnings: list[str] = []
+    for node in nodes:
+        if _is_constant_node(node):
+            continue
+        raw_shapes = _node_attr_value(node, "input_shapes")
+        if not raw_shapes:
+            continue
+        try:
+            input_shapes = json.loads(raw_shapes)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(input_shapes, list) or len(input_shapes) != 1:
+            continue
+        operand = input_shapes[0]
+        if not isinstance(operand, list) or not operand:
+            continue
+        produced = _output_shape_dims(node)
+        if not produced:
+            continue
+        declared = _declared_reshape_dims(node)
+        name = _raw_op(node) or str(node.get("label") or "op")
+        before = [str(dim).strip() for dim in operand]
+        after = [str(dim).strip() for dim in produced]
+        if op_cannot_change_element_count(_raw_op(node)) and _counts_provably_differ(
+            before, after
+        ):
+            warnings.append(
+                f"{node.get('id')} [{name}]: reads {before} and produces {after}, "
+                f"which cannot hold the same number of elements. This op "
+                f"rearranges the elements it is given and can neither make nor "
+                f"drop one, so one of these two shapes was resolved against "
+                f"something that is not what the op was handed."
+            )
+        if declared is None:
+            continue
+        raw_types = _node_attr_value(node, "input_types")
+        if not raw_types:
+            continue
+        try:
+            input_types = json.loads(raw_types)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(input_types, list) or len(input_types) != 1:
+            continue
+        in_dtype = input_types[0]
+        if not isinstance(in_dtype, str) or in_dtype in ("Constant", "Tensor"):
+            continue
+        out_dtype = _node_attr_value(node, "output_dtype") or _output_dtype(node)
+        if not out_dtype or in_dtype == out_dtype:
+            continue
+        warnings.append(
+            f"{node.get('id')} [{name}]: reads {in_dtype} and produces {out_dtype} "
+            f"while declaring the shape {declared} it was called with. An op "
+            f"called with a shape rearranges elements and does not convert them, "
+            f"so the two dtypes were resolved from different tensors."
+        )
+    return warnings
 
 
 def _noop_cast_warnings(nodes: list[dict[str, Any]]) -> list[str]:
@@ -607,10 +885,13 @@ def _noop_cast_warnings(nodes: list[dict[str, Any]]) -> list[str]:
     """
     warnings: list[str] = []
     for node in nodes:
-        if (
-            str(node.get("label") or "") != "Cast"
-            and _node_attr_value(node, "op_type") != "Cast"
-        ):
+        # A dtype conversion is identified by the target dtype the extractor
+        # recorded for the call, which only a converting call carries, together
+        # with torch confirming the op keeps its shape. Not by the node being
+        # called "Cast": a label is for reading, not for deciding what an op is.
+        if not any(line.startswith("dtype") for line in _details_lines(node)):
+            continue
+        if not op_cannot_change_shape(_raw_op(node)):
             continue
         if _is_constant_node(node):
             continue
@@ -1095,6 +1376,76 @@ def group_cycle_check_graph_nodes(
     for line in warnings:
         _log.warning("graph group-cycle: %s", line)
     return warnings
+
+
+def projection_weight_bias_widths(nodes: list[dict[str, Any]]) -> list[str]:
+    """A projection's weight and bias must agree on how wide its output is.
+
+    A bias is as long as the output, and the weight has that width on one axis
+    -- WHICH axis is the op's own convention: ``addmm(bias, x, weight)`` stores
+    ``[in, out]`` while ``F.linear`` stores ``[out, in]``. When they disagree,
+    the two constants were resolved from different modules.
+
+    This is the check that catches GPT-2's `c_proj`. Both its projections
+    reported `c_attn`'s ``[768, 2304]`` against their own ``[768]`` bias while
+    every other check passed, because a resolved number looks like any other
+    resolved number -- nothing else here compares two constants that describe
+    the SAME tensor and must therefore agree. Note the bias was RIGHT and the
+    weight wrong, so only comparing them catches it.
+
+    Judged only where the layout is known from the op's ``raw_op`` and both
+    constants are present and concrete. Anywhere else this says nothing: a
+    missing or symbolic constant is another check's business, and guessing would
+    turn a shape gap into a spurious wiring report.
+    """
+    # Which axis of a 2-D weight carries the output width, by the op's own
+    # storage convention. Read from `raw_op`, so no display name is consulted.
+    output_axis = {"addmm": -1, "linear": 0}
+
+    by_id = {str(node.get("id") or ""): node for node in nodes}
+    sized: dict[str, dict[str, tuple[str, list[int]]]] = {}
+    for node in nodes:
+        node_id = str(node.get("id") or "")
+        marker = ":const:"
+        if marker not in node_id:
+            continue
+        label = str(node.get("label") or "")
+        if label not in {"weight", "bias"}:
+            continue
+        shape = _node_attr_value(node, "output_shape")
+        if not shape:
+            continue
+        dims = re.findall(r"-?\d+", str(shape).split("]")[0])
+        if not dims:
+            continue
+        owner = node_id.rsplit(marker, 1)[0]
+        sized.setdefault(owner, {})[label] = (str(shape), [int(d) for d in dims])
+
+    messages: list[str] = []
+    for owner, parts in sorted(sized.items()):
+        weight = parts.get("weight")
+        bias = parts.get("bias")
+        if weight is None or bias is None:
+            continue
+        # A bias names one axis; a weight that is not a matrix is not a
+        # projection's, so there is nothing to compare.
+        if len(bias[1]) != 1 or len(weight[1]) != 2:
+            continue
+        axis = output_axis.get(_raw_op(by_id.get(owner, {})))
+        if axis is None:
+            continue
+        if weight[1][axis] == bias[1][0]:
+            continue
+        messages.append(
+            f"{owner}: weight {weight[0]} and bias {bias[0]} describe different "
+            f"output widths ({weight[1][axis]} against {bias[1][0]}). A "
+            f"projection's bias is as long as its output, so these two "
+            f"constants were resolved from DIFFERENT modules -- check that the "
+            f"name used to look them up is unambiguous. A module class built at "
+            f"several widths collapses in a per-class index, and no shape check "
+            f"can see it because a wrong number is still a number."
+        )
+    return messages
 
 
 def unresolved_config_dims(nodes: list[dict[str, Any]]) -> list[str]:

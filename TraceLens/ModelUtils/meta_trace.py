@@ -490,8 +490,14 @@ def harvest_meta_tensors(checkpoint: str | Path) -> MetaTensorIndex | None:
         }
         by_qualified: dict[str, MetaTensorSpec] = {}
         by_class_attr: dict[tuple[str, str], MetaTensorSpec] = {}
-        for name, tensor in list(model.named_parameters()) + list(
-            model.named_buffers()
+        # ``remove_duplicate=False``: a weight-TIED head shares one tensor with
+        # the embedding, and the default walk reports a shared tensor only once,
+        # under whichever name it reaches first. GPT-2 ties them, so
+        # ``lm_head.weight`` was absent entirely and the head had nothing to say
+        # what width it produces. It is the same tensor either way; what is
+        # wanted is every name it is reachable by.
+        for name, tensor in list(model.named_parameters(remove_duplicate=False)) + list(
+            model.named_buffers(remove_duplicate=False)
         ):
             spec = MetaTensorSpec(
                 shape=tuple(int(dim) for dim in tensor.shape),

@@ -46,7 +46,6 @@ from TraceLens.ModelUtils.shape_inference import (
     _dedupe_preserve,
     _detail_value,
     _dim_term,
-    _heuristic_linear_out_features,
     _int_dim,
     _nested_dim_aliases,
     _parse_module_ctor,
@@ -1704,6 +1703,7 @@ def test_shape_fill_and_boundary_multiple_crossings():
         {
             "id": "embed_tokens",
             "label": "Embedding",
+            "attrs": [{"key": "attr_name", "value": "embed_tokens"}],
             "incomingEdges": [_edge("@input")],
         },
         {
@@ -1719,7 +1719,15 @@ def test_shape_fill_and_boundary_multiple_crossings():
         {"id": "outside", "incomingEdges": [_edge("group/b")]},
         {"id": "output", "label": "anything"},
     ]
-    shapes.fill_missing_node_shapes(nodes, context=context)
+
+    # The embedding widens token ids because its WEIGHT is [vocab, 16] -- not
+    # because the tile is labelled "Embedding".
+    def _module_spec(attr_name, source):
+        if attr_name != "embed_tokens":
+            return None
+        return TensorSpec((*source.shape, 16), "float16")
+
+    shapes.fill_missing_node_shapes(nodes, context=context, module_spec=_module_spec)
     result = shapes.group_boundary_shapes(nodes)
     assert result["outer"]["input_shape"] == "[B, S, 16] float16"
     assert result["outer"]["output_shape"] == "[B, S, 16] float16"
@@ -1732,9 +1740,14 @@ def test_shape_fill_and_boundary_multiple_crossings():
 
 
 def test_connected_boundary_named_logits_inherits_producer_over_head_shape():
-    """A connected ``@input`` tile that merely shares the name ``logits`` with the
-    model head must inherit its producer's real shape, not the ``(B, S, vocab)``
-    head guess. A genuine leaf ``logits`` (no producer) still gets the head shape.
+    """A boundary tile takes its shape from what PRODUCED it.
+
+    There used to be a rule stamping ``(B, S, vocab)`` on anything named
+    ``logits``, and a router's local ``logits`` variable is not the model head --
+    so the producer had to be defended against the name. Now no name is read at
+    all: a tile with a producer inherits it, and a leaf with neither a producer
+    nor a weight of its own is not handed a shape invented from what it is
+    called.
     """
     context = ShapeContext({"H": 16, "V": 128}, "bfloat16")
     nodes = [
@@ -1771,8 +1784,7 @@ def test_connected_boundary_named_logits_inherits_producer_over_head_shape():
     assert boundary_spec is not None
     assert list(boundary_spec.shape) == ["BS", "256"]
     head_spec = shapes._node_spec(by_id["lm_head_logits"])
-    assert head_spec is not None
-    assert list(head_spec.shape) == ["B", "S", "128"]
+    assert head_spec is None or list(head_spec.shape) != ["B", "S", "128"]
 
 
 def test_group_output_boundary_shape_keeps_dtype():
@@ -1899,14 +1911,20 @@ def test_fallback_node_spec_unsqueeze_non_integer_dim_defaults_to_zero():
     node = {
         "id": "u",
         "label": "Unsqueeze",
-        "attrs": [{"key": "detail", "value": "dim: -1"}],
+        "attrs": [
+            {"key": "raw_op", "value": "unsqueeze"},
+            {"key": "detail", "value": "dim: -1"},
+        ],
     }
     # A negative dim resolves against rank; a non-integer would default to 0.
     assert shapes._fallback_node_spec(node, [("0", source)]).shape == ("B", "S", 4, 1)
     bad = {
         "id": "u",
         "label": "Unsqueeze",
-        "attrs": [{"key": "detail", "value": "dim: n"}],
+        "attrs": [
+            {"key": "raw_op", "value": "unsqueeze"},
+            {"key": "detail", "value": "dim: n"},
+        ],
     }
     assert shapes._fallback_node_spec(bad, [("0", source)]).shape == (1, "B", "S", 4)
 
@@ -2047,11 +2065,13 @@ def test_shape_special_nodes_linear_router_and_fallbacks():
         [TensorSpec(("B", "S", 16))],
         root=None,
     ).shape == ("B", "S", 7)
+    # A class merely named like a router states no width: with no weight to
+    # read, the shape passes through rather than being invented from the name.
     assert inferencer._infer_node_output(
         _model_node("RouterBlock", operation=OperationKind.UNKNOWN),
         [TensorSpec(("B", "S", 16))],
         root=None,
-    ).shape == ("B", "S", 8)
+    ).shape == ("B", "S", 16)
     assert inferencer._infer_node_output(
         _model_node("Kernel", operation=OperationKind.GPU_KERNEL), [], root=None
     ).shape == ("B", "S", 16)
@@ -2221,11 +2241,6 @@ def test_shape_misc_helper_error_and_fallback_paths():
     )
     assert aliases["linear_head_dim"] == 4
     assert "x" not in aliases
-    assert _heuristic_linear_out_features("lm_head", ShapeContext({"V": 101})) is None
-    assert _heuristic_linear_out_features("gate_proj", ShapeContext({"I": 32})) == 32
-    assert _heuristic_linear_out_features("router", ShapeContext({"E": 8})) is None
-    assert _heuristic_linear_out_features("custom_proj", ShapeContext({"H": 16})) == 16
-    assert _heuristic_linear_out_features(None, ShapeContext()) is None
 
 
 def test_merge_nested_namespace_segment_variants():
@@ -2503,7 +2518,7 @@ def test_merge_build_graph_expanded_tail_and_shape_boundaries(
     monkeypatch.setattr(
         merge,
         "fill_missing_node_shapes",
-        lambda nodes, context, boundary_spec=None: None,
+        lambda nodes, context, boundary_spec=None, module_spec=None: None,
     )
     monkeypatch.setattr(
         merge,
@@ -2513,6 +2528,7 @@ def test_merge_build_graph_expanded_tail_and_shape_boundaries(
     inferencer = SimpleNamespace(
         context=ShapeContext({"H": 16}),
         boundary_input_spec=lambda *args, **kwargs: None,
+        module_output_spec=lambda *args, **kwargs: None,
     )
     graph = merge.build_merged_model_graph(spec, shape_inferencer=inferencer)
 
@@ -3515,9 +3531,16 @@ def test_compose_viewer_html_flag_controls_constant_visibility():
 # Merge-only shape fallbacks: squeeze / expand / broadcast
 # --------------------------------------------------------------------------- #
 def _shape_node(label: str, details: list[str] | None = None) -> dict:
+    """A node as the extractor builds one: it RECORDS the operation it performs.
+
+    The shape rules key on that record, never on the display label -- a label is
+    for reading and for naming a producer, and two operations can share one.
+    """
     node: dict = {"id": f"@op_{label.lower()}", "label": label}
+    attrs: list[dict] = [{"key": "raw_op", "value": label.lower()}]
     if details:
-        node["attrs"] = [{"key": "details", "value": "; ".join(details)}]
+        attrs.append({"key": "details", "value": "; ".join(details)})
+    node["attrs"] = attrs
     return node
 
 

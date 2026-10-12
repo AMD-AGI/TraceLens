@@ -4,82 +4,93 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""The last-resort Linear width answers only for names that answer.
+"""A projection's width comes from its own weight, never from its name.
 
-A Linear's width comes from the model's own constructor -- ``nn.Linear(in,
-out)``, read off the owning class. That misses only where the owning class
-cannot be resolved, a projection inside an expert list, and then a name is all
-that is left.
+There used to be a table here mapping attribute names to widths -- ``up_proj``
+means the intermediate size, ``down_proj`` means the hidden size, anything with
+``expert`` and ``proj`` in it means the intermediate size. It answered with a
+plausible number for a name it recognised and had no way to be right.
 
-The list of names had grown well past what any model needs, and the surplus was
-not merely unused. Under grouped-query or latent attention a ``q_proj`` is
-``heads * head_dim`` and a ``k_proj`` narrower still -- neither is the hidden
-width the table claimed for them. A guess that never fires is dead weight; a
-guess that is also WRONG is a defect waiting for the first model that reaches it.
+Kimi's latent mixture-of-experts is what it got wrong. ``routed_expert_up_proj``
+and ``routed_expert_down_proj`` project between the hidden size and a smaller
+latent width::
 
-Measured against the pinned models, exactly these answer for something:
-``gate_proj``, ``up_proj``, ``down_proj``, ``gate_up_proj``, and the routed
-expert projections. ``lm_head``, ``embed_out``, ``w1``/``w2``/``w3``,
-``router``, ``gate`` and the four attention projections answered for nothing.
+    self.routed_expert_down_proj = nn.Linear(config.hidden_size, self.moe_hidden_size, ...)
+    self.routed_expert_up_proj = nn.Linear(self.moe_hidden_size, config.hidden_size, ...)
+
+Both names contain ``expert`` and ``proj``, so both were handed the expert
+intermediate width -- 33792 for a pair that are 3584 and 7168 wide. Nothing
+noticed, because a wrong width is still a width, until the ``view`` closing the
+block was asked to hold 33792 elements in a shape with room for 7168.
+
+The module's own weight states the answer: ``nn.Linear`` stores
+``[out_features, in_features]``. It is read qualified by the attribute the
+module is assigned to, and only when every instance of that attribute agrees --
+a bare ``weight`` suffix-matches every parameter in the model.
 """
 
 from __future__ import annotations
 
-from TraceLens.ModelUtils.shape_inference import (
-    ShapeContext,
-    _heuristic_linear_out_features,
+from types import SimpleNamespace
+
+from TraceLens.ModelUtils.shape_inference import ShapeInferencer
+
+
+class _Spec:
+    def __init__(self, shape):
+        self.shape = shape
+        self.dtype = "bfloat16"
+
+
+# The latent pair that the name table got wrong, the expert projection whose
+# width it happened to match, and a norm weight that is not a matrix at all.
+INDEX = SimpleNamespace(
+    by_qualified={
+        "layers.0.block_sparse_moe.routed_expert_down_proj.weight": _Spec((3584, 7168)),
+        "layers.0.block_sparse_moe.routed_expert_up_proj.weight": _Spec((7168, 3584)),
+        "layers.0.block_sparse_moe.experts.0.up_proj.weight": _Spec((33792, 3584)),
+        "layers.0.block_sparse_moe.routed_expert_norm.weight": _Spec((3584,)),
+    },
+    by_class_attr={},
 )
 
-CONTEXT = ShapeContext(
-    dims={"H": 4096, "I": 12288, "V": 50257, "E": 288, "N": 64, "D": 128}
-)
+
+def _out_features(monkeypatch, attr: str | None, owner: str = "block_sparse_moe"):
+    inferencer = ShapeInferencer.__new__(ShapeInferencer)
+    monkeypatch.setattr(
+        ShapeInferencer, "_ensure_meta_tensor_index", lambda self: INDEX
+    )
+    node = SimpleNamespace(
+        id=f"decoder/{owner}/seq:2:{attr}:{attr}:0" if attr else "decoder/@op_add:0",
+        metadata={"attr_name": attr} if attr else {},
+    )
+    return inferencer._projection_weight_out_features(node, root=None)
 
 
-def _width(attr: str):
-    return _heuristic_linear_out_features(attr, CONTEXT)
+class TestTheWidthComesFromTheWeight:
+    def test_the_latent_projection_down(self, monkeypatch) -> None:
+        assert _out_features(monkeypatch, "routed_expert_down_proj") == 3584
+
+    def test_the_latent_projection_up(self, monkeypatch) -> None:
+        assert _out_features(monkeypatch, "routed_expert_up_proj") == 7168
+
+    def test_neither_takes_the_expert_width_their_names_suggest(
+        self, monkeypatch
+    ) -> None:
+        for attr in ("routed_expert_down_proj", "routed_expert_up_proj"):
+            assert _out_features(monkeypatch, attr) != 33792, attr
+
+    def test_an_expert_projection_still_reads_its_own(self, monkeypatch) -> None:
+        assert _out_features(monkeypatch, "up_proj", owner="experts") == 33792
 
 
-class TestTheNamesThatAnswer:
-    def test_the_feed_forward_pair_is_the_intermediate(self) -> None:
-        assert _width("gate_proj") == 12288
-        assert _width("up_proj") == 12288
+class TestWhereItDeclines:
+    def test_a_name_no_parameter_answers_for(self, monkeypatch) -> None:
+        assert _out_features(monkeypatch, "absent_proj") is None
 
-    def test_the_projection_back_is_the_hidden_width(self) -> None:
-        assert _width("down_proj") == 4096
+    def test_a_weight_that_is_not_a_matrix(self, monkeypatch) -> None:
+        """A norm's weight is a vector; it states no output width."""
+        assert _out_features(monkeypatch, "routed_expert_norm") is None
 
-    def test_a_fused_projection_falls_to_the_general_rule(self) -> None:
-        assert _width("gate_up_proj") == 4096
-
-    def test_an_expert_projection_is_the_intermediate(self) -> None:
-        assert _width("routed_expert_up_proj") == 12288
-
-
-class TestTheGuessesThatDidNot:
-    def test_the_attention_projections_are_no_longer_named(self) -> None:
-        """They are not SPELLED OUT any more.
-
-        A name ending in ``_proj`` still falls to the general rule, so the
-        answer for these is unchanged -- and measured against the pinned models
-        none of them ever reaches this function, because an attention
-        projection's owning class resolves and its real constructor is read.
-        What went is the claim that these four names specifically mean the
-        hidden width, which grouped-query and latent attention both contradict.
-        """
-        for attr in ("q_proj", "k_proj", "v_proj", "o_proj"):
-            assert _width(attr) == _width("some_other_proj"), attr
-
-    def test_the_vocabulary_head_is_not_guessed(self) -> None:
-        for attr in ("lm_head", "embed_out"):
-            assert _width(attr) is None, attr
-
-    def test_the_numbered_expert_weights_are_not_guessed(self) -> None:
-        for attr in ("w1", "w2", "w3"):
-            assert _width(attr) is None, attr
-
-    def test_a_router_is_not_guessed(self) -> None:
-        for attr in ("router", "gate", "moe_gate"):
-            assert _width(attr) is None, attr
-
-    def test_nothing_is_claimed_for_no_name(self) -> None:
-        assert _width("") is None
-        assert _heuristic_linear_out_features(None, CONTEXT) is None
+    def test_a_node_with_no_attribute(self, monkeypatch) -> None:
+        assert _out_features(monkeypatch, None) is None

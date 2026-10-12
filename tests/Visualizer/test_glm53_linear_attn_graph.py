@@ -12,7 +12,10 @@ import json
 
 import pytest
 
-from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
+from TraceLens.Visualizer.model_explorer_export.merge import (
+    _loop_trip_count,
+    build_merged_model_graph,
+)
 from TraceLens.Visualizer.model_explorer_export.type_check import type_check_graph_nodes
 from TraceLens.ModelUtils.computation_graph import (
     add_forward_output,
@@ -1327,14 +1330,14 @@ def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
         and node["id"].endswith(":final")
     ]
     # The expert loop carries ``final``. With its ports folded away the body's
-    # own boundaries are what name it -- both simply ``final``, told apart by
-    # which end of the body they sit at. Matched on the carried variable rather
-    # than on one variant, so this does not depend on which MoE variant comes
-    # first.
+    # own boundaries are what name it -- both for ``final``, told apart by which
+    # end of the body they sit at, and both saying the body runs once per
+    # expert. Matched on the carried variable rather than on one variant, so
+    # this does not depend on which MoE variant comes first.
     assert carried, "the expert loop must name the value it carries"
     assert {str(n.get("label")) for n in carried} == {
-        "loop in: final",
-        "loop out: final",
+        "loop in: final iterations: 288",
+        "loop out: final iterations: 288",
     }, [n.get("label") for n in carried]
     assert any("@body_in:" in n["id"] for n in carried), "no entry end"
     assert any("@body_out:" in n["id"] for n in carried), "no exit end"
@@ -1439,8 +1442,12 @@ def test_glm53_loop_carried_pairs_are_well_formed():
         # Both ends name the SAME tensor and say which end they are. Direction
         # alone was a thin thing to hang a recurrence on once the back edge
         # went, especially where several tensors enter and one comes back.
-        assert str(by_id[sides["in"]].get("label")) == f"loop in: {variable}"
-        assert str(by_id[sides["out"]].get("label")) == f"loop out: {variable}"
+        # ... and say how often the body between them runs, where the loop's own
+        # namespace states a trip count.
+        count = _loop_trip_count(str(by_id[sides["in"]].get("namespace") or ""))
+        often = "" if count is None else f" iterations: {count}"
+        assert str(by_id[sides["in"]].get("label")) == f"loop in: {variable}{often}"
+        assert str(by_id[sides["out"]].get("label")) == f"loop out: {variable}{often}"
         # Both ends sit inside the body they bracket, and each is wired.
         assert by_id[sides["in"]].get("incomingEdges"), sides["in"]
         assert by_id[sides["out"]].get("incomingEdges"), sides["out"]

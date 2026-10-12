@@ -12,6 +12,7 @@ import ast
 import functools
 import inspect
 import json
+import math
 import copy
 import logging
 import re
@@ -875,16 +876,6 @@ _POINTWISE_LABELS = frozenset(
 # mask/index/source operands only broadcast or address into it and must never
 # win the ``_broadcast_rank`` vote (a wide bool mask would otherwise turn a
 # float write into a bool tensor of the mask's shape).
-_FIRST_OPERAND_WRITE_LABELS = frozenset(
-    {
-        "masked fill",
-        "masked scatter",
-        "scatter",
-        "scatter add",
-        "index add",
-        "copy",
-    }
-)
 # Display labels (lowercased) for element-wise comparisons. Like a pointwise op
 # they keep the widest operand's shape, but the result dtype is always boolean.
 _COMPARISON_LABELS = frozenset(
@@ -1130,12 +1121,23 @@ def _bind_meta_op_args(
     return tuple(bound), {}
 
 
-def _neutral_scalar_args(torch: Any, name: str) -> list[tuple[str, Any]]:
+_SHAPE_ARG_TYPE = "List[int]"
+
+
+def _neutral_scalar_args(
+    torch: Any, name: str, sizes: tuple[int, ...] = ()
+) -> list[tuple[str, Any]]:
     """Non-tensor parameters of ``aten::<name>``, filled with neutral values.
 
     Read from the op's real schema, so nothing here names an operation. Used
     only to ask whether an op preserves its input's shape, where the value of a
     dropout probability or a training flag cannot change the answer.
+
+    A shape-valued parameter has no neutral constant, only a neutral VALUE: the
+    shape the operand already has, which asks the op to do nothing. That needs
+    the operand's sizes, so without them such an overload is still passed over
+    -- which is what makes ``view`` answer about its dtype overload rather than
+    its size one until a caller supplies sizes to ask the better question with.
     """
     try:
         schemas = torch._C._jit_get_schemas_for_operator(f"aten::{name}")
@@ -1148,6 +1150,9 @@ def _neutral_scalar_args(torch: Any, name: str) -> list[tuple[str, Any]]:
             kind = str(argument.type)
             if kind == "Tensor":
                 continue
+            if kind == _SHAPE_ARG_TYPE and sizes:
+                args.append((argument.name, list(sizes)))
+                continue
             if kind not in neutral:
                 args = []
                 break
@@ -1155,6 +1160,235 @@ def _neutral_scalar_args(torch: Any, name: str) -> list[tuple[str, Any]]:
         if args:
             return args
     return []
+
+
+def _scalar_arg_assignments(
+    torch: Any, name: str, sizes: tuple[int, ...] = ()
+) -> list[list[tuple[str, Any]]]:
+    """Every scalar-argument assignment worth probing an op's shape behaviour with.
+
+    The neutral assignment alone cannot tell an op that CANNOT change a shape
+    from one that merely did not this time: the neutral value asks every op to
+    do nothing, so ``transpose(x, 1, 1)``, ``flatten(x, 1, 1)`` and
+    ``reshape(x, x.shape)`` are all the identity. Moving one parameter at a time
+    off that value makes the difference visible -- ``transpose(x, 0, 1)`` swaps
+    two axes, ``reshape(x, [-1])`` flattens -- while an op whose only parameters
+    are a probability or a training flag has nothing to move and keeps
+    answering.
+
+    A shape-valued parameter is moved through shapes rather than integers: the
+    operand's own shape reversed and flattened (which an op that rearranges
+    accepts and one that resizes rejects), the axis indices and their reverse
+    (which a permutation accepts), and the operand's shape with its first axis
+    widened -- the one assignment under which ``expand`` shows that it really
+    does make more elements than it was given.
+
+    An assignment torch refuses to run is simply never observed, so offering an
+    op a shape it cannot take costs nothing but tells the ops apart.
+    """
+    neutral = _neutral_scalar_args(torch, name, sizes)
+    assignments = [neutral]
+    rank = len(sizes)
+    shape_alternatives = [
+        [-1],
+        list(reversed(sizes)),
+        list(range(rank)),
+        list(reversed(range(rank))),
+        [sizes[0] + 2, *sizes[1:]] if sizes else [],
+    ]
+    for position, (arg_name, value) in enumerate(neutral):
+        if isinstance(value, list):
+            alternatives: list[Any] = [
+                alternative
+                for alternative in shape_alternatives
+                if alternative and alternative != value
+            ]
+        elif isinstance(value, bool) or not isinstance(value, int):
+            continue
+        else:
+            alternatives = [
+                alternative for alternative in (0, -1) if alternative != value
+            ]
+        for alternative in alternatives:
+            varied = list(neutral)
+            varied[position] = (arg_name, alternative)
+            assignments.append(varied)
+    return assignments
+
+
+@functools.lru_cache(maxsize=None)
+def _observed_op_shapes(raw_op: str) -> tuple[tuple[tuple[int, ...], ...], ...]:
+    """Every ``(fed, produced)`` shape pair torch will show for this op name.
+
+    An op is run on meta tensors with a distinct stand-in size per axis -- so a
+    transpose or a flatten cannot come back looking like the shape it started
+    with -- across every argument assignment :func:`_scalar_arg_assignments` can
+    build from the op's own schema, plus the bare call.
+
+    Asked over several ranks, each also probed carrying a size-1 axis, because
+    these are properties of the OP and a shape too small gives an op nothing to
+    do: ``squeeze`` has nothing to drop unless an axis is 1, and ``view``'s dtype
+    overload keeps a one-axis shape, which is enough to mistake a reshape for a
+    no-op.
+
+    Nothing here names an operation: the op's own name is resolved to its own
+    callable and its own schema supplies the parameters. Empty means torch
+    declined to answer -- for an unknown name, an op taking more than one
+    tensor, or one no assignment could run -- and every predicate built on this
+    then says nothing, which is the safe direction.
+    """
+    if not raw_op:
+        return ()
+    ceiling, variadic = _operand_ceiling(raw_op)
+    if variadic:
+        return ()
+    if ceiling is not None and ceiling != 1:
+        # An op taking more than one tensor is still answerable when the extra
+        # tensor cannot widen the result: ``x.to(other)`` and ``x.type_as(other)``
+        # read the other operand for its DTYPE and keep their own shape, while
+        # ``add`` broadcasts and grows. Torch separates them when handed a
+        # second operand bigger than the first.
+        if _op_output_can_exceed_first_operand(raw_op):
+            return ()
+    try:
+        import torch
+    except ImportError:
+        return ()
+    fn = _resolve_meta_op_callable(torch, raw_op)
+    if fn is None:
+        return ()
+    observed: list[tuple[tuple[int, ...], ...]] = []
+    for rank in range(1, 5):
+        distinct = [2 + 2 * index + 1 for index in range(rank)]
+        for sizes in (distinct, [1, *distinct[1:]]):
+            try:
+                meta = torch.zeros(sizes, dtype=torch.float32, device="meta")
+            except Exception:  # noqa: BLE001
+                return ()
+            assignments = _scalar_arg_assignments(torch, raw_op, tuple(sizes))
+            # An op that reads a second tensor only for its dtype (``type_as``)
+            # cannot run with one at all, and broadcasting ops are already out,
+            # so offering a same-shaped companion is safe and lets it answer.
+            operands = [meta] if ceiling in (None, 1) else [meta, meta]
+            for scalar_args in [[], *assignments]:
+                out = _run_meta_op(torch, fn, raw_op, operands, scalar_args)
+                shape = _first_tensor_shape(out) if out is not None else None
+                if shape is not None:
+                    observed.append((tuple(sizes), tuple(shape)))
+    return tuple(observed)
+
+
+@functools.lru_cache(maxsize=None)
+def op_writes_into_its_first_operand(raw_op: str) -> bool:
+    """Whether torch says this op writes into the tensor it is called on.
+
+    ``aten``'s schema marks a written argument -- ``index_add_`` is
+    ``(Tensor(a!) self, int dim, Tensor index, Tensor source)``, and the ``!``
+    is torch saying ``self`` is mutated and returned. So an op in this class
+    returns its receiver, shaped and typed as it already was, and the question
+    is answered by the op's own schema rather than by a list of names.
+
+    Asked of the op AS WRITTEN, never of a name near it. ``x.add_(y)`` is in
+    this class and ``x.add(y)`` is not -- the second broadcasts and its result
+    can be wider than ``x`` -- so trying a trailing underscore on a name that
+    lacks one would put every elementwise op in the class and let the receiver
+    override a wider operand. The display label is normalised to the schema's
+    spelling (``index add`` -> ``index_add``) only so it can be looked UP;
+    nothing is matched against it.
+    """
+    name = str(raw_op or "").strip().lower().replace(" ", "_")
+    if not name:
+        return False
+    if _schema_writes_first_argument(name):
+        return True
+    # The out-of-place spelling of the same write -- ``masked_fill`` beside
+    # ``masked_fill_``, ``copy`` beside ``copy_`` -- returns a COPY of the
+    # receiver with the write applied, which still has the receiver's shape.
+    # Both spellings occur in the pinned models.
+    if not _schema_writes_first_argument(f"{name}_"):
+        return False
+    # ...but having an in-place sibling is not enough on its own: ``add`` has
+    # ``add_`` too, and ``add`` broadcasts, so its result can be WIDER than its
+    # receiver. Ask torch which it is by handing it a second operand bigger
+    # than the first: an op that broadcasts answers with the bigger shape, and
+    # one that writes into its receiver cannot take that operand at all.
+    return not _op_output_can_exceed_first_operand(name)
+
+
+@functools.lru_cache(maxsize=None)
+def _schema_writes_first_argument(name: str) -> bool:
+    """Whether ``aten::<name>``'s schema marks its first tensor argument written."""
+    try:
+        import torch
+    except ImportError:
+        return False
+    try:
+        schemas = torch._C._jit_get_schemas_for_operator(f"aten::{name}")
+    except Exception:  # noqa: BLE001
+        return False
+    for schema in schemas:
+        arguments = list(schema.arguments)
+        if not arguments or str(arguments[0].type) != "Tensor":
+            continue
+        if getattr(arguments[0].alias_info, "is_write", False):
+            return True
+    return False
+
+
+@functools.lru_cache(maxsize=None)
+def _op_output_can_exceed_first_operand(name: str) -> bool:
+    """Whether the op, given a second operand wider than the first, outgrows it."""
+    try:
+        import torch
+    except ImportError:
+        return False
+    fn = _resolve_meta_op_callable(torch, name)
+    if fn is None:
+        return False
+    receiver_sizes = [3, 5, 7, 9]
+    try:
+        receiver = torch.zeros(receiver_sizes, dtype=torch.float32, device="meta")
+        wider = torch.zeros([2, *receiver_sizes], dtype=torch.float32, device="meta")
+    except Exception:  # noqa: BLE001
+        return False
+    out = _run_meta_op(torch, fn, name, [receiver, wider], [])
+    shape = _first_tensor_shape(out) if out is not None else None
+    return shape is not None and tuple(shape) != tuple(receiver_sizes)
+
+
+def op_cannot_change_shape(raw_op: str) -> bool:
+    """Whether torch says this op returns its input's shape HOWEVER it is called.
+
+    A narrower question than "did it preserve the shape here", and the one a
+    check needs: an op in this class recording a different input and output
+    shape is reporting something that cannot have happened, so the disagreement
+    is a defect rather than the op doing its job.
+
+    ANY observed call that moved an axis disqualifies the op; the answer is only
+    yes if torch answered at all (see :func:`_observed_op_shapes`) and no
+    observation moved one.
+    """
+    observed = _observed_op_shapes(raw_op)
+    return bool(observed) and all(fed == produced for fed, produced in observed)
+
+
+def op_cannot_change_element_count(raw_op: str) -> bool:
+    """Whether torch says this op returns as many elements as it was given.
+
+    The invariant a ``view`` or a ``reshape`` has instead of
+    :func:`op_cannot_change_shape`: it is there precisely TO move the axes
+    around, but it cannot conjure or drop an element while doing it, so a
+    recorded ``[B, S, 768] -> [B, S, 1024]`` is a defect in a way that
+    ``[B, S, 768] -> [B, S*768]`` is not.
+
+    Read off the same observations, which keeps ``expand`` out of the class on
+    its own evidence -- broadcasting a size-1 axis genuinely multiplies the
+    element count -- without naming it or any other op here.
+    """
+    observed = _observed_op_shapes(raw_op)
+    return bool(observed) and all(
+        math.prod(fed) == math.prod(produced) for fed, produced in observed
+    )
 
 
 def _run_meta_op(
@@ -1598,6 +1832,7 @@ class ShapeInferencer:
         # instance agrees, so a class built at two widths reports neither.
         self._module_output_specs: dict[str, set[tuple[Any, str | None]]] = {}
         self._module_resolved_ids: set[str] = set()
+        self._rooted_node_ids: set[str] = set()
         self._tensor_names: dict[str, str] = {}
         self._tensor_specs: dict[str, TensorSpec] = {}
         self._tiling_slot_ids: set[str] = set()
@@ -1608,6 +1843,7 @@ class ShapeInferencer:
         # reshaped, and parameter names like `x` repeat across frames.
         self._frame_entry_shapes: dict[str, tuple] = {}
         self._last_input_sources: list[str] = []
+        self._last_input_positions: list[int] = []
         self._owner_classes: dict[int, dict[str, str]] = {}
         # CPython reuses an object's address once it is freed, so a cache keyed
         # by ``id()`` can serve one object's entry to an unrelated later one --
@@ -2208,6 +2444,7 @@ class ShapeInferencer:
         self._boundary_shapes = {}
         self._frame_entry_shapes = {}
         self._last_input_sources: list[str] = []
+        self._last_input_positions: list[int] = []
         # Multi-output nodes whose published slices genuinely divide the parent,
         # and so may be read as a consumer's operand (see
         # ``_publish_output_port_specs``). Reset with the specs they describe.
@@ -2219,6 +2456,7 @@ class ShapeInferencer:
         self._entry_seeded_ids = set()
         self._rooted_output_ids = set()
         self._module_resolved_ids: set[str] = set()
+        self._rooted_node_ids: set[str] = set()
         order = _topological_order(graph)
         node_by_id = {node.id: node for node in graph.nodes}
         # Consumers per source, for redocking the dedicated position_ids producer.
@@ -2254,6 +2492,14 @@ class ShapeInferencer:
             )
             output = self._resolve_extent_dims(node, output, input_specs)
             output = _with_explicit_dtype(node, output)
+            # Resolved WITH its class, so the shapes around it are this
+            # module's. The root-less recursion resolves the same id against
+            # whatever the body's last op happened to be, and it runs later:
+            # MiniMax's text `q_norm` is handed [B, S, 64, 128] here and was
+            # overwritten with [B, S, 48, 128] there, through a `Cast` that
+            # cannot change a shape at all.
+            if root is not None:
+                self._rooted_node_ids.add(node_id)
             if root is not None and node.metadata.get("synthetic") == "@output":
                 self._rooted_output_ids.add(node_id)
                 if node_id == "@output" and getattr(root, "class_name", None):
@@ -2333,6 +2579,7 @@ class ShapeInferencer:
             set(self._entry_seeded_ids)
             | set(self._module_resolved_ids)
             | set(self._rooted_output_ids)
+            | set(self._rooted_node_ids)
         )
         for node in graph.nodes:
             if node.kind == NodeKind.SUBGRAPH:
@@ -2708,6 +2955,13 @@ class ShapeInferencer:
         specs: list[TensorSpec] = []
         labels: list[str] = []
         sources: list[str] = []
+        # Which argument position each surviving spec came from. An operand
+        # whose shape did not resolve is dropped below rather than held open,
+        # so an index into ``specs`` is NOT the call's argument position -- and
+        # a rule that anchors on "operand 0" silently reads whatever moved up
+        # into the gap. GLM's experts accumulator took its index that way.
+        positions: list[int] = []
+        position = 0
         node_by_id = {item.id: item for item in graph.nodes}
         # One consumer can read two different slots of the same producer
         # (``torch.cat((q_pass, q_rot))`` where both come from one ``split``).
@@ -2720,6 +2974,8 @@ class ShapeInferencer:
                 continue
             occurrence = occurrences.get(edge.source, 0)
             occurrences[edge.source] = occurrence + 1
+            argument_position = position
+            position += 1
             source_spec = self._slot_spec(edge, occurrence)
             if source_spec is None:
                 # A port CARRIES a value rather than computing one. If it has no
@@ -2733,6 +2989,7 @@ class ShapeInferencer:
                 continue
             sources.append(edge.source)
             specs.append(source_spec)
+            positions.append(argument_position)
             # Ask the PORT which operand it supplies. It was stamped when the
             # port was bound, so a port renamed for the reader still answers.
             # Only a port that never declared one falls back to its id.
@@ -2751,6 +3008,7 @@ class ShapeInferencer:
         # The producers behind these operands, for a rule that must tell whether
         # a ``X.shape[i]`` target names the tensor being reshaped or another one.
         self._last_input_sources = sources
+        self._last_input_positions = positions
         return specs, labels
 
     def _vision_position_ids_input(
@@ -3227,6 +3485,7 @@ class ShapeInferencer:
                 view_dims,
                 frame_shapes,
                 _shape_snapshot_tokens(details),
+                self._boundary_shapes,
             )
             if resolved is not None:
                 return TensorSpec(shape=resolved, dtype=source.dtype)
@@ -3933,15 +4192,28 @@ class ShapeInferencer:
             or (class_name or "").strip().lower() in _POINTWISE_LABELS
         ):
             if inputs:
-                if operation_label in _FIRST_OPERAND_WRITE_LABELS:
-                    # ``Tensor.masked_fill(mask, value)`` and its sibling in-place
-                    # writes (``masked_scatter``/``scatter``/``scatter_add``/
-                    # ``index_add``/``copy_``) return a tensor shaped and typed like
-                    # operand 0 -- the tensor being written into. The trailing
-                    # mask/index/source operands broadcast or address into it but
-                    # never define the result, so anchor on operand 0 rather than
-                    # letting a wider bool mask win the ``_broadcast_rank`` vote.
-                    return TensorSpec(shape=inputs[0].shape, dtype=inputs[0].dtype)
+                if op_writes_into_its_first_operand(
+                    _detail_value(details, "raw_op") or operation_label
+                ):
+                    # A write INTO a tensor returns that tensor, shaped and
+                    # typed as it already was: ``final.index_add_(0, token_idx,
+                    # current)`` hands back ``final``. The trailing
+                    # mask/index/source operands address into it or supply
+                    # values, but never define the result, so anchor on the
+                    # receiver rather than letting a wider bool mask or a
+                    # longer index win the ``_broadcast_rank`` vote.
+                    #
+                    # Which ops those are is torch's answer -- its schema marks
+                    # the written argument -- not a list of names kept here.
+                    # And the receiver is taken by ARGUMENT POSITION: an
+                    # operand that did not resolve is dropped from ``inputs``,
+                    # so ``inputs[0]`` is whatever moved up into the gap, which
+                    # is how this rule once returned an index's shape for an
+                    # accumulator. With the receiver genuinely unavailable,
+                    # fall through rather than answer with a different operand.
+                    receiver = self._operand_at(inputs, 0)
+                    if receiver is not None:
+                        return TensorSpec(shape=receiver.shape, dtype=receiver.dtype)
                 source = max(inputs, key=_broadcast_rank)
                 if operation_label == "where":
                     # ``torch.where(condition, x, y)`` takes its VALUES from x and
@@ -3993,19 +4265,7 @@ class ShapeInferencer:
                 if activation_input is not None
                 else self._active_hidden_shape()
             )
-            out_features = (
-                linear_spec.out_features
-                if linear_spec is not None
-                else _heuristic_linear_out_features(_node_attr_name(node), self.context)
-            )
-            if (
-                out_features is None
-                and root is not None
-                and re.search(r"(?i)(MoE)?Gate|Router", root.class_name)
-            ):
-                out_features = self.context.dims.get(
-                    Symbol.EXPERTS.value, Symbol.EXPERTS.value
-                )
+            out_features = linear_spec.out_features if linear_spec is not None else None
             if out_features is None and _detail_value(details, "raw_op") == "addmm":
                 # `addmm(bias, x, weight)` is an affine projection that stores
                 # its weight [in, out] -- the TRANSPOSE of `F.linear`'s
@@ -4035,6 +4295,8 @@ class ShapeInferencer:
                     parameter = self._unique_matrix_parameter(node, root)
                 if parameter is not None and len(parameter.shape) >= 2:
                     out_features = parameter.shape[-2]
+            if out_features is None:
+                out_features = self._projection_weight_out_features(node, root=root)
             if out_features is None and inputs:
                 out_features = in_shape[-1]
             if out_features is None:
@@ -4107,10 +4369,25 @@ class ShapeInferencer:
                 return introspected
             return self._activation_spec(dtype)
 
-        if _is_router(block_class, node):
-            experts = self.context.dims.get(Symbol.EXPERTS.value, Symbol.EXPERTS.value)
-            in_shape = inputs[0].shape if inputs else self._active_hidden_shape()
-            return TensorSpec(shape=_replace_last_dim(in_shape, experts), dtype=dtype)
+        # A module that is not a Linear, a Conv or an Embedding, but owns a
+        # matrix weight of its own, still projects along it. A mixture-of-experts
+        # gate is the case this answers: ``self.weight =
+        # nn.Parameter(torch.empty(num_experts, hidden))``, scoring each token
+        # against every expert. It used to be recognised by the word "router"
+        # appearing in its class name, which named the width ``num_experts``
+        # without ever reading it -- the same way a projection's width used to be
+        # guessed from ``up_proj``. The parameter states it, so ask it.
+        #
+        # Asked through the same rule the merged graph's module tiles use, which
+        # requires the operand's last axis to BE the weight's input width.
+        # Owning a matrix is not enough on its own: GLM's hyper-connection holds
+        # a small [4, 4] stream-mixing matrix, and projecting a
+        # ``[B, S, 4, 4096]`` residual onto its rows turned the hidden axis into
+        # a 4.
+        if inputs:
+            projected = self.module_output_spec(_node_attr_name(node), inputs[0])
+            if projected is not None:
+                return projected
 
         if node.operation == OperationKind.TORCH_FUNCTIONAL:
             introspected = self._introspect_forward_shape(node, inputs, root=root)
@@ -4961,6 +5238,157 @@ class ShapeInferencer:
             return self.module_dims.linear_by_attr.get(attr)
         return None
 
+    def module_output_spec(
+        self, attr_name: str | None, source: TensorSpec | None
+    ) -> TensorSpec | None:
+        """What a parameterised module produces, read off its own weight.
+
+        For a merged graph's module tile there is no ModelGraph node to infer,
+        and its shape used to be guessed from its name: a tile whose label
+        contained ``embedding`` was handed ``(B, S, hidden)`` and one called
+        ``lm_head`` was handed ``(B, S, vocab)``. The module's weight says both
+        without being asked what it is called.
+
+        A matrix weight is ``[out, in]``, and which way it is used follows from
+        what the module is handed, not from what it is named: an operand whose
+        last axis IS the weight's input width is being PROJECTED along it, so
+        the result is that axis replaced by ``out``; an operand of integers that
+        does not match is INDEXING the weight's rows, so the result is the
+        operand with the row width appended. That is the difference between a
+        linear and an embedding, stated the way the tensors state it.
+        """
+        if not attr_name or source is None or not source.shape:
+            return None
+        from_constructor = self._module_output_from_constructor(attr_name, source)
+        index = self._ensure_meta_tensor_index()
+        if index is None:
+            return from_constructor
+        qualified = f"{attr_name}.weight"
+        # Only the SHAPE is read. A harvested dtype is whatever the meta
+        # instantiation happened to use, which is not what the model computes in.
+        agreed = {
+            tuple(spec.shape)
+            for full, spec in index.by_qualified.items()
+            if full == qualified or full.endswith("." + qualified)
+        }
+        if len(agreed) != 1:
+            return from_constructor
+        shape = next(iter(agreed))
+        if len(shape) != 2:
+            return from_constructor
+        rows, columns = shape
+        # A resolved dim can be carried as the STRING "4096" or the int 4096 --
+        # both state the same width, and comparing them as written says they
+        # differ, which left every head sized by what flowed into it.
+        last = _as_int(source.shape[-1])
+        if last is not None and last == columns:
+            # A projection computes in the ACTIVATION's dtype; the weight's is
+            # only how the parameter is stored.
+            return TensorSpec(shape=(*source.shape[:-1], rows), dtype=source.dtype)
+        if "int" in str(source.dtype):
+            # Indexing the table returns rows OF the table, so the integer
+            # operand's dtype is certainly not the answer. The model's working
+            # dtype is: what the HARVEST reports is whatever the meta
+            # instantiation happened to use, and reporting that made GPT-2's
+            # embedding float32 inside a float16 model -- which then made the
+            # decoder block look like it returned a different tensor from the
+            # one it was handed, and cost the loop the names on both its ends.
+            return TensorSpec(shape=(*source.shape, columns), dtype=self.context.dtype)
+        return from_constructor
+
+    def _module_output_from_constructor(
+        self, attr_name: str, source: TensorSpec
+    ) -> TensorSpec | None:
+        """The same answer taken from the module's ``__init__`` instead.
+
+        A model whose config this ``transformers`` cannot instantiate harvests
+        no meta tensors at all, so there is no weight to read -- but its source
+        still says ``nn.Embedding(vocab, hidden)`` and ``nn.Linear(in, out)``,
+        and those are the same two numbers.
+        """
+        embedding = self.module_dims.embedding_by_attr.get(attr_name)
+        if embedding is not None and "int" in str(source.dtype):
+            return TensorSpec(
+                shape=(*source.shape, embedding.embedding_dim),
+                dtype=self.context.dtype,
+            )
+        linear = self.module_dims.linear_by_attr.get(attr_name)
+        if linear is not None:
+            last = _as_int(source.shape[-1])
+            declared = _as_int(linear.in_features)
+            if last is not None and declared is not None and last == declared:
+                return TensorSpec(
+                    shape=(*source.shape[:-1], linear.out_features),
+                    dtype=source.dtype,
+                )
+        return None
+
+    def _operand_at(
+        self, inputs: list[TensorSpec], argument_position: int
+    ) -> TensorSpec | None:
+        """The operand the CALL passes at *argument_position*, or None.
+
+        ``inputs`` has had every operand whose shape did not resolve dropped, so
+        ``inputs[0]`` is not the call's first argument -- it is whatever moved
+        up into the gap. ``final.index_add_(0, token_idx, current)`` passes
+        ``final`` first, and that is the tensor the call returns; with ``final``
+        unresolved, ``inputs[0]`` was ``token_idx`` and the accumulator reported
+        the shape of its own index.
+
+        None when the operand is one of the dropped ones, or when the caller
+        replaced ``inputs`` wholesale (a seeded or descriptor override) so the
+        recorded positions no longer describe it. Saying nothing is right there:
+        the operand being asked for is genuinely not available, and answering
+        with a different one is the mistake this exists to prevent.
+        """
+        positions = self._last_input_positions
+        if len(positions) != len(inputs):
+            return None
+        for spec, position in zip(inputs, positions):
+            if position == argument_position:
+                return spec
+        return None
+
+    def _projection_weight_out_features(
+        self, node: ModelGraphNode, *, root: BlockNode | None
+    ) -> DimExpr | None:
+        """``out_features`` read off the projection's OWN weight.
+
+        ``nn.Linear`` stores ``[out_features, in_features]``, so the module's
+        own parameter states the width. This is the answer for a projection
+        whose constructor :meth:`_lookup_linear_spec` could not read -- one
+        inside an expert list, or built in a conditional branch of ``__init__``,
+        as Kimi's latent routed-expert projections are.
+
+        Qualified by the attribute the module is assigned to and accepted only
+        when every instance of that attribute agrees, for the reason
+        :meth:`constant_spec` documents: a bare ``weight`` suffix-matches every
+        parameter in the model, and the per-class index collapses every
+        ``Linear`` in the model onto one entry.
+        """
+        attr = _node_attr_name(node)
+        index = self._ensure_meta_tensor_index()
+        if not attr or index is None:
+            return None
+        qualifiers = [attr] + [
+            f"{owner}.{attr}"
+            for owner in _owning_attr_candidates(node, root)
+            if owner != attr
+        ]
+        for qualifier in qualifiers:
+            qualified = f"{qualifier}.weight"
+            agreed = {
+                tuple(spec.shape)
+                for full, spec in index.by_qualified.items()
+                if full == qualified or full.endswith("." + qualified)
+            }
+            if len(agreed) != 1:
+                continue
+            shape = next(iter(agreed))
+            if len(shape) == 2:
+                return shape[0]
+        return None
+
     def _lookup_conv_spec(
         self, node: ModelGraphNode, *, root: BlockNode | None
     ) -> ModuleConvSpec | None:
@@ -5686,6 +6114,7 @@ def _resolve_view_shape(
     dims: dict[str, DimExpr],
     named_shapes: dict[str, tuple[DimExpr, ...]] | None = None,
     snapshots: frozenset[str] | None = None,
+    outer_shapes: dict[str, tuple[DimExpr, ...]] | None = None,
 ) -> tuple[DimExpr, ...] | None:
     """Try to resolve symbolic view/reshape arguments into a concrete shape.
 
@@ -5747,7 +6176,33 @@ def _resolve_view_shape(
                 leading = tuple(named_prefix[:cut])
                 used_named_prefix = True
         else:
-            leading = source.shape
+            # ``*X.shape`` with no slice: ALL of that tensor's axes. When the
+            # caller knows them and the token is a snapshot, they are the shape
+            # the call restores -- GLM's experts flatten to ``[B*S, H]``,
+            # accumulate across their loop, then ``.view(*orig_shape)`` to put
+            # ``[B, S, H]`` back. Reading the source there returns the flattened
+            # shape, i.e. reports the reshape as doing nothing, which is the one
+            # thing a reshape is never written to do.
+            named = first[1:].split(".shape", 1)[0].strip()
+            whole = (
+                (named_shapes or {}).get(named)
+                if first[1:] in (snapshots or ())
+                else None
+            )
+            if whole and tuple(whole) == tuple(source.shape):
+                # The name was REBOUND between the snapshot and here -- it is
+                # the flatten this call undoes. The frame around the call was
+                # entered with the flattened tensor, so the shape it knows is
+                # the one being undone; the enclosing module's own input is the
+                # one the snapshot took. Decided by the call itself rather than
+                # by preferring one source: a restored shape equal to the shape
+                # being restored would make the view do nothing.
+                whole = (outer_shapes or {}).get(named) or whole
+            if whole:
+                leading = tuple(whole)
+                used_named_prefix = True
+            else:
+                leading = source.shape
         trailing_start = 1
 
     resolved: list[DimExpr] = list(leading)
@@ -7522,11 +7977,45 @@ def _parse_tensor_ctor_shape(
     return tuple(dims) if dims else None
 
 
+# ``computation_graph.SYNTHETIC_LOOP_CARRIED``, spelled here the way the rest of
+# this module spells it, to keep shape inference free of a back-import.
+_LOOP_CARRIED_SYNTHETIC = "@loop_carried"
+
+
+def _is_next_iteration_edge(edge: Any, node_by_id: dict[str, ModelGraphNode]) -> bool:
+    """Whether this edge carries a loop's value from one iteration into the next.
+
+    A loop's two carried-value boundaries are joined by it, and it is the only
+    edge in the graph with a loop-carried tile at BOTH ends: the seed reaches
+    the "in" tile from the value entering the loop, and the body's result
+    reaches the "out" tile, so neither of those has one at both ends.
+
+    It is a real dependency and the graph keeps it. It is not an ORDERING one:
+    what the body reads on its first iteration is the seed, which is already
+    ordered ahead of it. Counting it makes the loop a cycle that a topological
+    sort cannot resolve, leaving every node in it unordered -- and a body op
+    then resolves its shapes before the boundary feeding it has any, which is
+    how GLM's experts accumulator came to report the shape of the index it was
+    handed instead of the tensor it writes into.
+    """
+    source = node_by_id.get(edge.source)
+    target = node_by_id.get(edge.target)
+    return (
+        source is not None
+        and target is not None
+        and source.metadata.get("synthetic") == _LOOP_CARRIED_SYNTHETIC
+        and target.metadata.get("synthetic") == _LOOP_CARRIED_SYNTHETIC
+    )
+
+
 def _topological_order(graph: ModelGraph) -> list[str]:
     incoming = {node.id: 0 for node in graph.nodes}
     outgoing: dict[str, list[str]] = {node.id: [] for node in graph.nodes}
+    node_by_id = {node.id: node for node in graph.nodes}
     for edge in graph.edges:
         if edge.source not in outgoing or edge.target not in incoming:
+            continue
+        if _is_next_iteration_edge(edge, node_by_id):
             continue
         outgoing[edge.source].append(edge.target)
         incoming[edge.target] += 1
@@ -7670,43 +8159,6 @@ def _is_conv(node: ModelGraphNode) -> bool:
         return False
     class_name = node.metadata.get("class_name") or node.label or ""
     return bool(re.search(r"(?i)^Conv(Transpose)?[123]d$", str(class_name)))
-
-
-def _heuristic_linear_out_features(
-    attr: str | None, context: ShapeContext
-) -> DimExpr | None:
-    """Last-resort width for a Linear whose own constructor could not be found.
-
-    :meth:`_lookup_linear_spec` reads the real ``nn.Linear(in, out)`` from the
-    owning class, which is where this should come from. It misses only where the
-    owning class cannot be resolved -- a projection inside an expert list -- and
-    then these names are all that is left.
-
-    Measured against the pinned models, exactly these answer for something:
-    ``gate_proj``, ``up_proj``, ``down_proj``, ``gate_up_proj`` and the routed
-    expert projections. The rest of what this used to list -- ``lm_head``,
-    ``w1``/``w2``/``w3``, ``router``, and ``q_proj``/``k_proj``/``v_proj``/
-    ``o_proj`` -- answered for nothing, and the attention ones were wrong as
-    well as unused: under grouped-query or latent attention a ``q_proj`` is
-    ``heads * head_dim`` and a ``k_proj`` narrower still, neither of them the
-    hidden width this claimed.
-    """
-    if not attr:
-        return None
-    lowered = attr.lower()
-    if lowered in {"gate_proj", "up_proj"}:
-        return context.dims.get(Symbol.INTERMEDIATE.value)
-    if lowered == "down_proj":
-        return context.dims.get(Symbol.HIDDEN.value)
-    if "expert" in lowered and "proj" in lowered:
-        return context.dims.get(Symbol.INTERMEDIATE.value)
-    if lowered.endswith("_proj"):
-        return context.dims.get(Symbol.HIDDEN.value)
-    return None
-
-
-def _is_router(class_name: str, node: ModelGraphNode) -> bool:
-    return "router" in class_name.lower() or "router" in _operator_name(node).lower()
 
 
 def serialize_dim(value: DimExpr) -> int | str:

@@ -1368,7 +1368,7 @@ def test_kernel_frame_labels_split_l2norm_q_and_k_and_sanitize_unicode():
 
 
 def test_fill_missing_node_shapes_seeds_and_propagates():
-    from TraceLens.ModelUtils.shape_inference import ShapeContext
+    from TraceLens.ModelUtils.shape_inference import ShapeContext, TensorSpec
 
     from TraceLens.Visualizer.model_explorer_export.shapes import (
         fill_missing_node_shapes,
@@ -1382,6 +1382,7 @@ def test_fill_missing_node_shapes_seeds_and_propagates():
         {
             "id": "embed_tokens",
             "label": "Token Embedding",
+            "attrs": [{"key": "attr_name", "value": "embed_tokens"}],
             "incomingEdges": [{"sourceNodeId": "@input", "sourceNodeOutputId": "0"}],
         },
         {
@@ -1398,11 +1399,32 @@ def test_fill_missing_node_shapes_seeds_and_propagates():
                 {"sourceNodeId": "decoder/norm", "sourceNodeOutputId": "0"}
             ],
         },
-        {"id": "lm_head", "label": "Logits"},
+        {
+            "id": "lm_head",
+            "label": "Logits",
+            "attrs": [{"key": "attr_name", "value": "lm_head"}],
+            "incomingEdges": [{"sourceNodeId": "mlp", "sourceNodeOutputId": "0"}],
+        },
         {"id": "orphan", "label": "Detached"},
     ]
 
-    fill_missing_node_shapes(nodes, context=context)
+    # Each module is sized by its OWN weight -- an embedding widens token ids to
+    # the table's row width, a head projects the hidden axis onto the vocabulary
+    # -- never by what the tile happens to be called.
+    weights = {"embed_tokens": (32000, 4096), "lm_head": (32000, 4096)}
+
+    def _module_spec(attr_name, source):
+        weight = weights.get(attr_name)
+        if weight is None or not source.shape:
+            return None
+        rows, columns = weight
+        if str(source.shape[-1]) == str(columns):
+            return TensorSpec((*source.shape[:-1], rows), source.dtype)
+        if "int" in str(source.dtype):
+            return TensorSpec((*source.shape, columns), "float16")
+        return None
+
+    fill_missing_node_shapes(nodes, context=context, module_spec=_module_spec)
 
     shapes = {
         node["id"]: next(
@@ -1418,7 +1440,8 @@ def test_fill_missing_node_shapes_seeds_and_propagates():
         "embed_tokens": "[B, S, 4096] float16",
         "decoder/norm": "[B, S, 4096] float16",
         "mlp": "[B, S, 4096] float16",
-        # Seeded from its own label, not from a predecessor.
+        # Its weight is [32000, 4096] and it is handed a 4096-wide activation,
+        # so it projects onto the 32000 rows. Nothing here reads "Logits".
         "lm_head": "[B, S, 32000] float16",
     }
     # A computation with nothing feeding it gets NO shape. It used to be stamped

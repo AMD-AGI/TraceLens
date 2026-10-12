@@ -3865,6 +3865,23 @@ _DIM_DETAIL_METHODS = _REDUCTION_METHODS | {"unsqueeze", "squeeze", "gather"}
 # self.block`` is two hops). Bounded so a self-referential or deeply chained
 # assignment cannot spin; real extent chains in the models are 1-3 hops.
 _EXTENT_RESOLVE_DEPTH = 12
+# The torch operation each Python operator calls. ``a * b`` IS ``torch.mul`` --
+# a fact about the language, not a guess about a name -- and recording it means
+# an operator-built node states what it computes the same way a call-built one
+# does. Without it these nodes reached the export carrying only a display label,
+# so anything needing to know what they were had to read that label.
+_BINOP_RAW_OPS = {
+    ast.Add: "add",
+    ast.Sub: "sub",
+    ast.Mult: "mul",
+    ast.MatMult: "matmul",
+    ast.Div: "div",
+    ast.FloorDiv: "floor_divide",
+    ast.Pow: "pow",
+    ast.BitAnd: "bitwise_and",
+    ast.BitOr: "bitwise_or",
+    ast.BitXor: "bitwise_xor",
+}
 _BINOP_LABELS = {
     ast.Add: "Add",
     ast.Sub: "Subtract",
@@ -5211,6 +5228,20 @@ class _ForwardOperationExtractor:
                 and id(current) in self._materialized_subscripts
             ):
                 return
+            # An arithmetic sub-expression becomes its own op for the same
+            # reason a nested call does, so it owns the params it reads:
+            # ``(position_ids + 1) // self.compress_rate`` is an ``Add`` that
+            # reads ``position_ids`` and a ``Floor divide`` that reads the
+            # ``Add``. Counting the param for the divide too drew a second edge
+            # from the boundary onto it, giving a two-operand operator three
+            # tensor operands.
+            if (
+                not is_root
+                and isinstance(current, ast.BinOp)
+                and _BINOP_LABELS.get(type(current.op)) is not None
+                and not self._is_host_scalar_expr(current)
+            ):
+                return
             if isinstance(current, ast.Name) and current.id in self.param_names:
                 # A rebound re-read (``k`` after ``q, k = q.float(), k.float()``)
                 # already flows into this op through ``predecessors`` -- the
@@ -6257,6 +6288,7 @@ class _ForwardOperationExtractor:
                     *direct_module_predecessors,
                 ],
                 [*left_external, *right_external],
+                raw_op=_BINOP_RAW_OPS.get(type(node.op)),
             )
             return producer, []
         if not isinstance(node, ast.Call):
@@ -7106,7 +7138,7 @@ class _ForwardOperationExtractor:
             token = _single_shape_index_token(value)
             if token is not None:
                 self.shape_unpack_tokens[targets[0].id] = token
-            slice_token = _shape_slice_token(value)
+            slice_token = _shape_slice_token(value) or _whole_shape_token(value)
             if slice_token is not None:
                 self.shape_slice_tokens[targets[0].id] = slice_token
         if isinstance(value, ast.Tuple):
@@ -7172,7 +7204,19 @@ class _ForwardOperationExtractor:
             and isinstance(inner, ast.Name)
             and inner.id in self.shape_slice_tokens
         ):
-            return ["*" + self.shape_slice_tokens[inner.id]]
+            token = self.shape_slice_tokens[inner.id]
+            if token.endswith(_WHOLE_SHAPE_SUFFIX):
+                # A local bound from a tensor's WHOLE shape, spread back over a
+                # reshape: GLM's experts flatten to ``[B*S, H]``, accumulate, and
+                # close with ``.view(*orig_shape)``. Mark it a snapshot so the
+                # resolver reads the tensor it NAMES rather than the one being
+                # reshaped -- and here that is certain rather than merely likely,
+                # because restoring a tensor's entire shape onto itself would do
+                # nothing at all, which is not what the call is for.
+                snapshots = getattr(self, "_pending_shape_snapshots", None)
+                if snapshots is not None and token not in snapshots:
+                    snapshots.append(token)
+            return ["*" + token]
         return [self._render_shape_dim(arg)]
 
     def _render_shape_dim(self, elt: ast.expr) -> str:
@@ -7579,6 +7623,7 @@ class _ForwardOperationExtractor:
                         label,
                         [value for value in (left, right) if value],
                         [*left_external, *right_external],
+                        raw_op=_BINOP_RAW_OPS.get(type(stmt.op)),
                     )
                     if isinstance(stmt.target, ast.Name):
                         self.var_producer[stmt.target.id] = producer
@@ -9871,6 +9916,40 @@ def _single_shape_index_token(value: ast.AST) -> str | None:
     ):
         return f"{ast.unparse(base.value)}.shape[{index.value}]"
     return None
+
+
+# A whole shape read into a local reads as the slice that selects all of it, so
+# one resolver rule covers ``x.shape[:-1]`` and ``x.shape`` alike.
+_WHOLE_SHAPE_SUFFIX = ".shape[:]"
+
+
+def _whole_shape_token(value: ast.AST) -> str | None:
+    """A local bound to a tensor's ENTIRE shape, as a resolver-friendly token.
+
+    ``orig_shape = hidden_states.shape`` followed by ``.view(*orig_shape)`` is
+    how a block that flattens its batch axes puts them back. Unrecognised, the
+    star rendered as the bare name ``orig_shape`` and the view reported whatever
+    it was handed -- which, for GLM's experts, is the flattened ``[B*S, H]`` the
+    call exists to undo.
+
+    Returns ``None`` unless *value* is exactly ``<tensor>.shape`` or its
+    ``<tensor>.size()`` spelling; a slice of one is :func:`_shape_slice_token`'s.
+    """
+    if _is_size_call(value) and isinstance(value, ast.Call):
+        owner = value.func.value if isinstance(value.func, ast.Attribute) else None
+        if owner is None or value.args:
+            return None
+        value = ast.Attribute(value=owner, attr="shape", ctx=ast.Load())
+    if not (
+        isinstance(value, ast.Attribute)
+        and value.attr == "shape"
+        and not _is_self_attr(value, value.attr)
+    ):
+        return None
+    base = _expr_name(value.value)
+    if not base:
+        return None
+    return f"{base}{_WHOLE_SHAPE_SUFFIX}"
 
 
 def _shape_slice_token(value: ast.AST) -> str | None:

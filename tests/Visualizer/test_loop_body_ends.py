@@ -13,9 +13,10 @@ cycle drawn around a body costs every reader who has to work out it is not real
 dataflow.
 
 So the ports fold away everywhere: the seed feeds the body directly, the body
-feeds its consumer directly, and what remains is ``loop in: <var>`` and
-``loop out: <var>`` -- the same tensor named the same way at both ends, one
-named pair PER carried value.
+feeds its consumer directly, and what remains is ``loop in: <var> iterations:
+<count>`` and ``loop out: <var> iterations: <count>`` -- the same tensor named
+the same way at both ends, one named pair PER carried value, each saying how
+often the body between them runs.
 
 Two things this must not do:
 
@@ -58,7 +59,7 @@ def _body_tile(prefix: str, kind: str, loop: str, var: str, namespace: str) -> d
 
 
 def _loop(extra_inputs: int = 0, carried: tuple[str, ...] = ("final",)) -> list[dict]:
-    body = "box/Loop_8_iterations"
+    body = "box/loop_iterations_8"
     nodes: list[dict] = []
     for var in carried:
         nodes += [
@@ -88,6 +89,11 @@ def _labels(nodes: list[dict]) -> set[str]:
     return {str(n["label"]) for n in nodes}
 
 
+def _carried_name(node: dict) -> str:
+    """The tensor out of ``loop <side>: <var> iterations: <count>``."""
+    return str(node["label"]).split(": ", 1)[1].split(" iterations: ", 1)[0]
+
+
 class TestEveryLoopFoldsItsPorts:
     def test_a_body_handed_only_what_it_carries(self) -> None:
         nodes = _loop(extra_inputs=0)
@@ -110,15 +116,15 @@ class TestBothEndsAreNamed:
     def test_the_ends_say_which_end_they_are(self) -> None:
         nodes = _loop()
         _fold_loop_ports(nodes)
-        assert "loop in: final" in _labels(nodes)
-        assert "loop out: final" in _labels(nodes)
+        assert "loop in: final iterations: 8" in _labels(nodes)
+        assert "loop out: final iterations: 8" in _labels(nodes)
 
     def test_both_ends_name_the_same_tensor(self) -> None:
         """The direction differs; the tensor does not."""
         nodes = _loop()
         _fold_loop_ports(nodes)
         named = [n for n in nodes if str(n["label"]).startswith("loop ")]
-        assert {str(n["label"]).split(": ", 1)[1] for n in named} == {"final"}
+        assert {_carried_name(n) for n in named} == {"final"}
 
     def test_each_carried_value_gets_its_own_pair(self) -> None:
         """A loop carrying two values names two pairs, not one combined tile."""
@@ -126,8 +132,8 @@ class TestBothEndsAreNamed:
         _fold_loop_ports(nodes)
         assert _ports(nodes) == []
         for var in ("final", "running"):
-            assert f"loop in: {var}" in _labels(nodes)
-            assert f"loop out: {var}" in _labels(nodes)
+            assert f"loop in: {var} iterations: 8" in _labels(nodes)
+            assert f"loop out: {var} iterations: 8" in _labels(nodes)
 
     def test_the_marker_survives_for_a_later_pass(self) -> None:
         nodes = _loop()
@@ -138,10 +144,50 @@ class TestBothEndsAreNamed:
             assert _node_attr(node, "loop_carried") == "loop_l1:final", node["id"]
 
 
+class TestBothEndsSayHowOften:
+    def test_a_repeat_group_counts_from_its_own_segment(self) -> None:
+        """A ``{N}x_`` group states its trip count where a frame has none."""
+        nodes = _loop()
+        for node in nodes:
+            if "@body_" in str(node["id"]):
+                node["namespace"] = "box/12x_Block"
+        _fold_loop_ports(nodes)
+        assert "loop in: final iterations: 12" in _labels(nodes)
+
+    def test_the_innermost_loop_owns_the_count(self) -> None:
+        """An expert loop runs its own count, not the decoder stack's."""
+        nodes = _loop()
+        for node in nodes:
+            if "@body_" in str(node["id"]):
+                node["namespace"] = "45x_DecoderLayer/MoE/loop_iterations_288"
+        _fold_loop_ports(nodes)
+        assert "loop in: final iterations: 288" in _labels(nodes)
+        assert "loop out: final iterations: 288" in _labels(nodes)
+
+    def test_a_count_that_is_not_a_number_is_still_a_count(self) -> None:
+        """A loop over a tensor's rows is named for the axis it walks."""
+        nodes = _loop()
+        for node in nodes:
+            if "@body_" in str(node["id"]):
+                node["namespace"] = "visual/loop_iterations_Img"
+        _fold_loop_ports(nodes)
+        assert "loop in: final iterations: Img" in _labels(nodes)
+
+    def test_a_frame_with_no_count_says_nothing_it_cannot_know(self) -> None:
+        """Two siblings sharing a label fall back to a frame id, which has none."""
+        nodes = _loop()
+        for node in nodes:
+            if "@body_" in str(node["id"]):
+                node["namespace"] = "box/loop_op_l12_c8_add"
+        _fold_loop_ports(nodes)
+        assert "loop in: final" in _labels(nodes)
+        assert not any(" iterations: " in label for label in _labels(nodes))
+
+
 class TestAnAccumulatorIsNotARecurrence:
     def test_an_exit_without_an_entry_keeps_its_plain_name(self) -> None:
         """``position_ids`` is appended per iteration, then concatenated."""
-        body = "box/Loop_repeated"
+        body = "box/loop_iterations_repeated"
         nodes = [
             _port("box/", "in", "loop_l2", "position_ids", "box"),
             _port("box/", "out", "loop_l2", "position_ids", "box"),
@@ -153,7 +199,7 @@ class TestAnAccumulatorIsNotARecurrence:
         assert not any(str(n["label"]).startswith("loop ") for n in nodes)
 
     def test_it_carries_no_recurrence_marker(self) -> None:
-        body = "box/Loop_repeated"
+        body = "box/loop_iterations_repeated"
         nodes = [
             _port("box/", "in", "loop_l2", "position_ids", "box"),
             _port("box/", "out", "loop_l2", "position_ids", "box"),

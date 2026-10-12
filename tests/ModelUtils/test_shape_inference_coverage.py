@@ -14,6 +14,8 @@ not modify any source file and are independent of the existing
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import ast as _ast
 import json
 import logging
@@ -59,7 +61,6 @@ from TraceLens.ModelUtils.shape_inference import (
     _eval_dim_expr,
     _export_operation_kind,
     _first_tensor_shape,
-    _heuristic_linear_out_features,
     _infer_einsum_shape,
     _is_embedding,
     _looks_valid,
@@ -1065,25 +1066,6 @@ def test_is_embedding_by_role():
     assert _is_embedding("", node) is True
 
 
-def test_heuristic_linear_out_features():
-    ctx = _make_inferencer(
-        hidden_size=4096, intermediate_size=11008, vocab_size=32000
-    ).context
-    ctx.dims[Symbol.INTERMEDIATE.value] = 11008
-    ctx.dims[Symbol.VOCAB.value] = 32000
-    ctx.dims[Symbol.EXPERTS.value] = 64
-    # `lm_head` and `router` answered for no pinned model, so they are no
-    # longer named here; the width comes from the module's own constructor.
-    assert _heuristic_linear_out_features("lm_head", ctx) is None
-    assert _heuristic_linear_out_features("router", ctx) is None
-    assert _heuristic_linear_out_features("gate_proj", ctx) == 11008
-    assert _heuristic_linear_out_features("o_proj", ctx) == 4096
-    assert _heuristic_linear_out_features("expert_proj", ctx) == 11008
-    assert _heuristic_linear_out_features("something_proj", ctx) == 4096
-    assert _heuristic_linear_out_features(None, ctx) is None
-    assert _heuristic_linear_out_features("nomatch", ctx) is None
-
-
 def test_default_hidden_shape():
     ctx = _make_inferencer(hidden_size=256).context
     assert _default_hidden_shape(ctx) == ("B", "S", 256)
@@ -1719,14 +1701,42 @@ def test_resolve_int_tuple_rejects_symbolic_elements():
     assert _resolve_int_tuple(None, config={}, local_vars={}, context=ctx) is None
 
 
-def test_router_module_output():
+def test_router_module_output(monkeypatch):
+    """A router scores each token against every expert, and its own weight --
+    ``[num_experts, hidden]`` -- is what says how many. It used to be read off
+    the word "router" appearing in the class name, which named the width
+    without ever consulting it."""
     inf = _make_inferencer()
     inf.context.dims[Symbol.EXPERTS.value] = 8
+    monkeypatch.setattr(
+        type(inf),
+        "_ensure_meta_tensor_index",
+        lambda self: SimpleNamespace(
+            by_qualified={"gate.weight": TensorSpec((8, 16), "float32")},
+            by_class_attr={},
+        ),
+    )
+    node = _node(
+        "TopKRouter",
+        node_id="moe/seq:0:gate:gate:0",
+        operation=OperationKind.NN_MODULE,
+        class_name="TopKRouter",
+    )
+    node.metadata["attr_name"] = "gate"
+    out = inf._infer_node_output(node, [TensorSpec(("B", "S", 16))], root=None)
+    assert out.shape == ("B", "S", 8)
+
+
+def test_a_router_name_alone_states_no_width(monkeypatch):
+    """With no weight to read, the class name is not evidence about the width."""
+    inf = _make_inferencer()
+    inf.context.dims[Symbol.EXPERTS.value] = 8
+    monkeypatch.setattr(type(inf), "_ensure_meta_tensor_index", lambda self: None)
     node = _node(
         "TopKRouter", operation=OperationKind.NN_MODULE, class_name="TopKRouter"
     )
     out = inf._infer_node_output(node, [TensorSpec(("B", "S", 16))], root=None)
-    assert out.shape == ("B", "S", 8)
+    assert out.shape != ("B", "S", 8)
 
 
 def test_block_with_inputs_passes_through():

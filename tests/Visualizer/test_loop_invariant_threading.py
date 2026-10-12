@@ -22,7 +22,10 @@ from __future__ import annotations
 
 import pytest
 
-from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
+from TraceLens.Visualizer.model_explorer_export.merge import (
+    _loop_trip_count,
+    build_merged_model_graph,
+)
 from TraceLens.Visualizer.model_explorer_export.type_check import (
     integrity_check_graph_nodes,
 )
@@ -1085,8 +1088,14 @@ def test_a_loop_body_names_both_of_its_ends(model_id):
     for key, sides in carried.items():
         variable = key.rsplit(":", 1)[-1]
         if set(sides) == {"in", "out"}:
-            assert str(sides["in"].get("label")) == f"loop in: {variable}"
-            assert str(sides["out"].get("label")) == f"loop out: {variable}"
+            # Each end names the carried tensor and says how often the body
+            # between them runs. A loop whose namespace states no trip count --
+            # the vision block stack is only tagged ``{N}x_`` once the meta pass
+            # has run -- says the tensor and stops there.
+            count = _loop_trip_count(str(sides["in"].get("namespace") or ""))
+            often = "" if count is None else f" iterations: {count}"
+            assert str(sides["in"].get("label")) == f"loop in: {variable}{often}"
+            assert str(sides["out"].get("label")) == f"loop out: {variable}{often}"
             # The marker the ports used to carry lives on the ends now, so a
             # pass can still find the recurrence without reading labels.
             for node in sides.values():

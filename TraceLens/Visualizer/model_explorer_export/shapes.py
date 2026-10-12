@@ -347,6 +347,51 @@ def _incoming_source_ids(node: dict[str, Any]) -> list[str]:
     ]
 
 
+# Operations whose result broadcasts across their operands. Named as
+# OPERATIONS -- what the model called -- which is the one thing a shape may be
+# computed from.
+_BROADCASTING_OPS = frozenset(
+    {
+        "add",
+        "sub",
+        "mul",
+        "div",
+        "floor_divide",
+        "pow",
+        "maximum",
+        "minimum",
+        "bitwise_and",
+        "bitwise_or",
+        "bitwise_xor",
+    }
+)
+
+
+def _operation_of(node: dict[str, Any]) -> str:
+    """The operation a node performs, as the node itself recorded it.
+
+    Read from both channels it can arrive in. The adapter lifts the extractor's
+    ``raw_op:`` detail into an attribute of its own, but a node built on the
+    source path keeps it in ``detail``, and reading only the attribute left
+    GLM's hyper-connection ``unsqueeze`` with no operation at all -- so it
+    returned its input unchanged and the residual it feeds lost the hidden axis.
+    """
+    detail_text = ""
+    for attr in node.get("attrs", []):
+        key = attr.get("key")
+        if key == "raw_op":
+            recorded = str(attr.get("value") or "").strip().lower()
+            if recorded:
+                return recorded
+        elif key in ("detail", "details"):
+            detail_text = f"{detail_text}; {attr.get('value')}"
+    for entry in detail_text.split(";"):
+        name, separator, value = entry.partition(":")
+        if separator and name.strip() == "raw_op":
+            return value.strip().lower()
+    return ""
+
+
 def _fallback_node_spec(
     node: dict[str, Any],
     sources: list[tuple[str, TensorSpec]],
@@ -356,10 +401,15 @@ def _fallback_node_spec(
     conv_geometry: (
         dict[str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] | None
     ) = None,
+    module_spec: Callable[[str, TensorSpec], TensorSpec | None] | None = None,
 ) -> TensorSpec:
     """Infer merge-only synthetic ops that have no block-tree shape record."""
     specs = [spec for _target_port, spec in sources]
-    label = str(node.get("label") or "")
+    # The operation the node records, never its display label. A label is for
+    # reading and for naming a producer; what a node COMPUTES is a separate
+    # fact, and the extractor records it (``raw_op``) for every op -- including
+    # the ones built from Python operators and the ones merge synthesises.
+    operation = _operation_of(node)
     node_id = str(node.get("id") or "")
     attrs = node.get("attrs", [])
     details = [
@@ -368,10 +418,23 @@ def _fallback_node_spec(
         if attr.get("key") == "detail" or attr.get("key") == "details"
     ]
 
-    if label.startswith("Conv") and specs:
+    attr_name_for_module = next(
+        (str(a.get("value")) for a in attrs if a.get("key") == "attr_name"), ""
+    )
+    if module_spec is not None and specs and attr_name_for_module:
+        # A parameterised module tile (an embedding, a head) states its output
+        # through its own weight. Asked before anything else so a module is
+        # never sized by what merely flows into it.
+        from_parameters = module_spec(attr_name_for_module, specs[0])
+        if from_parameters is not None:
+            return from_parameters
+
+    if specs:
         # Vision patch-merger downsample: a Conv{1,2,3}d is not keyed by block-tree
         # inference, so reduce spatial extents here using geometry captured from the
         # constructor (kernel/stride/padding), mirroring the smart inference path.
+        # Having that geometry IS what identifies the op -- it is harvested from
+        # convolution constructors and from nothing else -- so no label is read.
         attr_name = next(
             (str(a.get("value")) for a in attrs if a.get("key") == "attr_name"), ""
         )
@@ -383,7 +446,7 @@ def _fallback_node_spec(
             _reduce_conv_spatial(shape, channel_axis, kernel, stride, padding)
             return TensorSpec(tuple(shape), specs[0].dtype)
 
-    if label in {"View", "Reshape"} and specs:
+    if operation in {"view", "reshape"} and specs:
         # Vision-model-level reshapes (spatial merge, patch pooling) are not keyed
         # by the block-tree inference, so resolve them here from the recorded
         # ``shape:`` detail rather than passing the input through unchanged.
@@ -399,7 +462,7 @@ def _fallback_node_spec(
         if resolved is not None:
             return TensorSpec(resolved, specs[0].dtype)
 
-    if label in {"Permute", "Transpose"} and specs:
+    if operation in {"permute", "transpose"} and specs:
         dims_detail = next(
             (
                 detail.split(":", 1)[1].strip()
@@ -412,7 +475,10 @@ def _fallback_node_spec(
         if permuted is not None:
             return TensorSpec(permuted, specs[0].dtype)
 
-    if label == "Cast" and specs:
+    # A conversion is identified by the target dtype the extractor recorded for
+    # it, which only a dtype-converting call carries -- not by being called
+    # "Cast". It keeps the shape it was given either way.
+    if specs and any(detail.startswith("dtype") for detail in details):
         source = specs[0]
         dtype_detail = next(
             (
@@ -429,7 +495,7 @@ def _fallback_node_spec(
             )
         return source
 
-    if label == "Unsqueeze":
+    if operation == "unsqueeze" and specs:
         source = specs[0]
         dim_detail = next(
             (
@@ -450,7 +516,7 @@ def _fallback_node_spec(
             shape.insert(max(0, min(dim, len(shape))), 1)
             return TensorSpec(tuple(shape), source.dtype)
 
-    if label == "Squeeze" and specs:
+    if operation == "squeeze" and specs:
         source = specs[0]
         dim_detail = next(
             (
@@ -476,7 +542,7 @@ def _fallback_node_spec(
             return TensorSpec(tuple(shape), source.dtype)
         return source
 
-    if label == "Expand" and specs:
+    if operation == "expand" and specs:
         source = specs[0]
         shape_detail = next(
             (
@@ -491,7 +557,7 @@ def _fallback_node_spec(
             return TensorSpec(resolved, source.dtype)
         return source
 
-    if label in {"Multiply", "Add", "×", "+"} and len(specs) >= 2:
+    if operation in _BROADCASTING_OPS and len(specs) >= 2:
         rank = max(len(spec.shape) for spec in specs)
         padded = [(1,) * (rank - len(spec.shape)) + tuple(spec.shape) for spec in specs]
         shape: list[Any] = []
@@ -507,12 +573,12 @@ def _fallback_node_spec(
                 shape.append(non_unit[-1] if non_unit else 1)
         return TensorSpec(tuple(shape), specs[-1].dtype)
 
-    if label == "MatMul" and len(specs) >= 2:
+    if operation in {"matmul", "mm", "bmm"} and len(specs) >= 2:
         left, right = specs[:2]
         if left.shape and right.shape:
             return TensorSpec((*left.shape[:-1], right.shape[-1]), right.dtype)
 
-    if "@residual:" in node_id and label == "Multiply":
+    if "@residual:" in node_id and operation == "mul":
         by_input = {target_port: spec for target_port, spec in sources}
         post = by_input.get("post")
         hidden_states = by_input.get("hidden_states")
@@ -521,17 +587,12 @@ def _fallback_node_spec(
                 (*post.shape, hidden_states.shape[-1]), hidden_states.dtype
             )
 
-    if "@residual:" in node_id and label == "MatMul":
+    if "@residual:" in node_id and operation == "matmul":
         by_input = {target_port: spec for target_port, spec in sources}
         comb = by_input.get("comb")
         residual = by_input.get("residual")
         if comb is not None and residual is not None and comb.shape and residual.shape:
             return TensorSpec((*comb.shape[:-1], residual.shape[-1]), residual.dtype)
-
-    if node_id.split("/")[-1] == "hc_head" and label == "Mean":
-        source = sources[0][1]
-        if len(source.shape) >= 4:
-            return TensorSpec((*source.shape[:2], source.shape[-1]), source.dtype)
 
     return max(
         specs,
@@ -547,6 +608,7 @@ def fill_missing_node_shapes(
     *,
     context: ShapeContext,
     boundary_spec: Callable[[str, str], TensorSpec | None] | None = None,
+    module_spec: Callable[[str, TensorSpec], TensorSpec | None] | None = None,
 ) -> None:
     """Give every node a shape so the viewer never falls back to rendering ``?``.
 
@@ -555,18 +617,15 @@ def fill_missing_node_shapes(
     otherwise fall back to the model's activation shape.
 
     ``boundary_spec(label, namespace)`` optionally supplies the meta-device ground
-    truth for an ``@input`` boundary parameter (e.g. the sparse-attention indexer's
-    ``attention_mask`` is ``[B, S]`` bool, not the generic ``(B, S, hidden)``). It is
-    consulted before the label heuristics so a boundary whose name merely *contains*
-    a heuristic keyword (``attention_mask`` matching the attention-module rule) is
-    sized from what the model actually passed rather than mislabelled.
+    truth for a leaf ``@input`` boundary parameter (e.g. the sparse-attention
+    indexer's ``attention_mask`` is ``[B, S]`` bool, not the generic
+    ``(B, S, hidden)``) -- what the model actually passed, observed rather than
+    inferred from the parameter's name.
     """
     hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-    vocab = context.dims.get(Symbol.VOCAB.value, Symbol.VOCAB.value)
     activation = TensorSpec(
         (Symbol.BATCH.value, Symbol.SEQ.value, hidden), context.dtype
     )
-    logits = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value, vocab), context.dtype)
     tokens = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value), "int64")
 
     node_by_id = {str(node.get("id", "")): node for node in nodes}
@@ -586,57 +645,44 @@ def fill_missing_node_shapes(
 
     for node in list(pending):
         orig_label = str(node.get("label") or "").strip()
-        label = orig_label.lower()
         node_id = str(node.get("id", ""))
         namespace = str(node.get("namespace") or "")
         synthetic = _node_synthetic(node)
-        # A boundary/mirror carrying a real producer (``position_embeddings`` from
-        # a ``rotary_pos_emb``) must inherit that producer's shape, not be caught
-        # by a computational-tile label heuristic. ``position_embeddings`` matches
-        # the ``embedding`` substring below, which would otherwise stamp it with
-        # the language ``(B, S, H)`` activation shape and hide its true axes.
-        connected_boundary = synthetic in {"@input", "@input_mirror"} and bool(
-            _incoming_sources(node)
-        )
-        # Meta-device ground truth for a forward-parameter boundary wins over the
-        # label heuristics below, which key off substrings and would otherwise
-        # mislabel a boundary whose name merely contains a keyword (the
-        # ``attention_mask`` boundary matching the attention-module ``(B, S, H)``
-        # rule). Only applies to real ``@input`` boundaries and only when the meta
-        # trace observed the parameter; everything else keeps the old behaviour.
+        # A boundary carrying a real producer inherits that producer's shape.
+        # Any boundary, not only an entering one: a frame's ``@output`` has a
+        # producer inside the frame and must inherit it too.
+        connected_boundary = synthetic is not None and bool(_incoming_sources(node))
+        # Meta-device ground truth for a forward-parameter boundary. Only for
+        # real ``@input`` boundaries and only when the meta trace observed the
+        # parameter -- it is a measurement of what the model was passed.
         meta_boundary: TensorSpec | None = None
         if boundary_spec is not None and synthetic in {"@input", "@input_mirror"}:
             meta_boundary = boundary_spec(orig_label, namespace)
 
+        # Nothing here reads what a node is CALLED. There used to be a ladder
+        # of label tests -- ``logits``/``lm_head`` meant (B, S, vocab),
+        # ``embedding`` or ``embed`` meant (B, S, hidden), so did ``norm``, so
+        # did ``attention`` -- each stamping a canonical shape on any tile whose
+        # name contained the word. They were wrong wherever a name recurred:
+        # MiniMax's rotary publishes ``q_embed``/``k_embed``, which are
+        # [B, heads, S, head_dim], and were stamped (B, S, hidden) for
+        # containing ``embed``. A shape is what the operation computes from its
+        # operands and its own parameters; a name is not evidence about it.
+        #
+        # What is left is evidence: the model's own entry point, a producer to
+        # inherit from, and what the meta trace observed for a real forward
+        # parameter.
         seeded: TensorSpec | None = None
-        if node_id == "@input" or label in {"tokenized text", "input_ids"}:
+        if node_id == "@input":
             seeded = tokens
         elif connected_boundary:
-            # A real incoming dataflow edge always beats a name or meta guess:
-            # leave it pending so the edge-propagation pass below inherits the
-            # producer's concrete shape. This must precede every name-based
-            # heuristic (``logits``/``lm_head``, ``embedding``, ``norm``,
-            # ``attention``) so a boundary tile that merely *shares a name* with a
-            # computational label -- e.g. a router's local ``logits`` variable
-            # whose real producer is (B*S, num_experts), not the model head's
-            # (B, S, vocab) -- is not stamped with that label's canonical shape
-            # over its own producer. Meta ground-truth (below) only seeds *leaf*
-            # boundaries that have no producer to inherit from.
+            # A real incoming dataflow edge beats everything: leave it pending
+            # so the edge-propagation pass below inherits the producer's
+            # concrete shape. Meta ground-truth only seeds LEAF boundaries,
+            # which have no producer to inherit from.
             seeded = None
-        elif label == "logits" or node_id.split("/")[-1] in {"lm_head", "output"}:
-            seeded = logits
         elif meta_boundary is not None:
             seeded = meta_boundary
-        elif "embedding" in label or "embed" in node_id:
-            # Embeddings widen token ids, so they must not inherit the (B, S) input shape.
-            seeded = activation
-        elif "norm" in label:
-            # Spine norms sit on the residual stream whatever the preceding tile computed.
-            seeded = activation
-        elif "attention" in node_id.rsplit("/", 1)[-1].lower():
-            # Attention modules (core_attention, sdpa_attention, etc.) produce
-            # (B, S, H) regardless of internal Q/K/V reshaping.
-            seeded = activation
         if seeded is not None:
             known[(node_id, "0")] = seeded
             _apply_shape_attrs(node, seeded)
@@ -663,6 +709,7 @@ def fill_missing_node_shapes(
                 working_dtype=context.dtype,
                 dims=context.dims,
                 conv_geometry=context.conv_geometry,
+                module_spec=module_spec,
             )
             node_id = str(node.get("id", ""))
             known[(node_id, "0")] = spec

@@ -494,14 +494,22 @@ def test_i2_sourced_namespaced_input_is_clean():
 # --------------------------------------------------------------------------- #
 
 
-def _cast_node(node_id, out_dtype, input_types, *, label="Cast", op_type="Cast"):
-    """A ``Cast`` op carrying profiler-style ``input_types``/``output_dtype`` attrs.
+def _cast_node(
+    node_id, out_dtype, input_types, *, label="Cast", op_type="Cast", raw_op="float"
+):
+    """A conversion carrying profiler-style ``input_types``/``output_dtype`` attrs.
 
     The no-op-cast check reads the operand dtype from the node's own annotation
     (stable across built and render-filtered graphs), not by walking edges.
+
+    It identifies the conversion by the OPERATION the node records plus the
+    target dtype the extractor stamped for that call -- not by the node being
+    called "Cast". So the node states both, the way a real one does.
     """
     attrs = [
         {"key": "op_type", "value": op_type},
+        {"key": "raw_op", "value": raw_op},
+        {"key": "details", "value": f"dtype: {out_dtype}"},
         {"key": "input_types", "value": json.dumps(input_types)},
         {"key": "output_dtype", "value": out_dtype},
         {"key": "output_shape", "value": f"[B, S, 4] {out_dtype}"},
@@ -553,11 +561,28 @@ def test_noop_cast_not_flagged_when_operand_ambiguous():
     assert not any("c [cast]" in w for w in warnings)
 
 
-def test_noop_cast_flagged_when_label_generic_but_op_type_cast():
-    # Detection keys on op_type=Cast even when the display label is not "Cast".
-    nodes = [_cast_node("c", "float32", ["float32"], label="float")]
+def test_noop_cast_flagged_whatever_the_node_is_called():
+    # Detection keys on the recorded OPERATION, so the display label is free to
+    # be anything at all -- including nothing like "Cast".
+    nodes = [_cast_node("c", "float32", ["float32"], label="float", op_type="Alias")]
     warnings = type_check_graph_nodes(nodes)
     assert any("c [cast]" in w for w in warnings)
+
+
+def test_a_node_called_cast_that_records_no_operation_is_not_judged():
+    """A label is not evidence about what an op does."""
+    nodes = [
+        {
+            "id": "c",
+            "label": "Cast",
+            "attrs": [
+                {"key": "op_type", "value": "Cast"},
+                {"key": "input_types", "value": json.dumps(["float32"])},
+                {"key": "output_dtype", "value": "float32"},
+            ],
+        }
+    ]
+    assert not any("c [cast]" in w for w in type_check_graph_nodes(nodes))
 
 
 def _shape_node(node_id, output_shape, op_type="View", constant=False):

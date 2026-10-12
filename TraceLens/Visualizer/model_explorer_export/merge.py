@@ -2712,6 +2712,42 @@ def _name_repeat_group_inputs_outside_it(nodes: list[dict[str, Any]]) -> None:
     nodes.extend(additions)
 
 
+# A loop frame puts its trip count last, after a fixed prefix, so the count is
+# simply the tail (``computation_graph._add_loop_frames``).
+_LOOP_FRAME_SEGMENT_RE = re.compile(r"^loop_iterations_(.+)$")
+
+
+def _loop_trip_count(namespace: str) -> str | None:
+    """How many times the innermost loop enclosing ``namespace`` runs.
+
+    A loop already says its trip count in its own namespace segment, under one
+    of two spellings: an inline frame reads ``loop_iterations_<count>`` and a
+    repeat group reads ``{N}x_<Class>``. Innermost wins -- an expert loop nested
+    in a decoder stack runs its own count, not the stack's.
+
+    ``None`` when neither spelling applies: two sibling frames sharing a label
+    fall back to the frame id, which carries no count.
+    """
+    for segment in reversed(namespace.split("/")):
+        for pattern in (_LOOP_FRAME_SEGMENT_RE, _REPEAT_SEGMENT_RE):
+            match = pattern.match(segment)
+            if match is not None:
+                return match.group(1)
+    return None
+
+
+def _loop_end_label(side: str, variable: str, namespace: str) -> str:
+    """``loop in: <variable> iterations: <count>`` -- what it carries, how often.
+
+    The name alone pairs the two ends; the count says what the box between them
+    costs, which is the question a reader asks next and otherwise has to answer
+    by reading the group's name.
+    """
+    count = _loop_trip_count(namespace)
+    carried = f"loop {side}: {variable}"
+    return carried if count is None else f"{carried} iterations: {count}"
+
+
 def _name_loop_body_ends(nodes: list[dict[str, Any]]) -> None:
     """Both ends of a loop body say which end they are.
 
@@ -2738,7 +2774,9 @@ def _name_loop_body_ends(nodes: list[dict[str, Any]]) -> None:
         if set(sides) != {"in", "out"}:
             continue
         for side, node in sides.items():
-            node["label"] = f"loop {side}: {variable}"
+            node["label"] = _loop_end_label(
+                side, variable, str(node.get("namespace") or "")
+            )
             # The ports carried the ``@loop_carried`` marker; they are gone, so
             # the body ends carry it. Invisible to the reader, and it keeps the
             # recurrence something a pass can still find without parsing labels.
@@ -2806,8 +2844,8 @@ def _name_iterated_block_ends(nodes: list[dict[str, Any]]) -> None:
         # value the next iteration takes.
         if _node_attr(entry, "output_shape") != _node_attr(exit_tile, "output_shape"):
             continue
-        entry["label"] = f"loop in: {carried}"
-        exit_tile["label"] = f"loop out: {carried}"
+        entry["label"] = _loop_end_label("in", carried, namespace)
+        exit_tile["label"] = _loop_end_label("out", carried, namespace)
         for node in (entry, exit_tile):
             _set_node_attr(node, "loop_carried", f"{container}:{carried}")
 
@@ -3433,6 +3471,49 @@ def _fold_same_source_twins(nodes: list[dict[str, Any]]) -> None:
                 continue
             redirect[str(extra["id"])] = landing
     _apply_tile_redirects(nodes, redirect)
+
+
+def _carry_producer_shape_to_boundary_tiles(nodes: list[dict[str, Any]]) -> None:
+    """Give every boundary tile the shape of what crosses it.
+
+    A boundary tile does not compute: it marks where a tensor enters a module,
+    so what it carries is exactly what its producer made. Several passes create
+    these tiles, and the ones created after shapes were filled in had none at
+    all -- GLM's attention mask read ``[B, S] bool`` at the mirror and then
+    nothing at either of the two module levels it enters, and MiniMax's
+    ``position_ids`` did the same at four.
+
+    Run to a fixed point rather than once, because the tiles chain: the outer
+    level has to be given its shape before the level inside it can take it.
+
+    Only a tile with exactly ONE producer is filled; anything else is not a
+    pass-through and is left to say nothing rather than pick one of several.
+    """
+    by_id = {str(node["id"]): node for node in nodes}
+    while True:
+        progressed = False
+        for tile in nodes:
+            if _node_attr(tile, "synthetic") not in {"@input", "@input_mirror"}:
+                continue
+            if _node_attr(tile, "output_shape") is not None:
+                continue
+            edges = tile.get("incomingEdges") or []
+            if len(edges) != 1:
+                continue
+            source = by_id.get(str(edges[0].get("sourceNodeId")))
+            if source is None:
+                continue
+            shape = _node_attr(source, "output_shape")
+            if not shape:
+                continue
+            attrs = tile.setdefault("attrs", [])
+            attrs.append({"key": "output_shape", "value": shape})
+            dtype = _node_attr(source, "output_dtype")
+            if dtype:
+                attrs.append({"key": "output_dtype", "value": dtype})
+            progressed = True
+        if not progressed:
+            return
 
 
 def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
@@ -6080,6 +6161,10 @@ def _append_variant_layer(
                 {
                     "id": matmul_id,
                     "label": "MatMul",
+                    # Synthesised here, so the operation it performs is recorded
+                    # here too -- a node states what it computes, and nothing
+                    # downstream has to read its display label to find out.
+                    "attrs": [{"key": "raw_op", "value": "matmul"}],
                     "namespace": residual_namespace,
                     "incomingEdges": [
                         _source_edge(comb, "comb"),
@@ -6089,6 +6174,7 @@ def _append_variant_layer(
                 {
                     "id": multiply_id,
                     "label": "Multiply",
+                    "attrs": [{"key": "raw_op", "value": "mul"}],
                     "namespace": residual_namespace,
                     "incomingEdges": [
                         _source_edge(post, "post"),
@@ -6098,6 +6184,7 @@ def _append_variant_layer(
                 {
                     "id": add_id,
                     "label": "Add",
+                    "attrs": [{"key": "raw_op", "value": "add"}],
                     "namespace": residual_namespace,
                     "incomingEdges": [
                         {
@@ -6386,6 +6473,7 @@ def _append_decoder_layers(
                 merged_nodes,
                 context=shape_inferencer.context,
                 boundary_spec=shape_inferencer.boundary_input_spec,
+                module_spec=shape_inferencer.module_output_spec,
             )
         return result
 
@@ -6427,6 +6515,7 @@ def _append_decoder_layers(
             merged_nodes,
             context=shape_inferencer.context,
             boundary_spec=shape_inferencer.boundary_input_spec,
+            module_spec=shape_inferencer.module_output_spec,
         )
     return result
 
@@ -8714,6 +8803,7 @@ def build_merged_model_graph(
             nodes,
             context=shape_inferencer.context,
             boundary_spec=shape_inferencer.boundary_input_spec,
+            module_spec=shape_inferencer.module_output_spec,
         )
         _stamp_boundary_input_shapes(nodes, shape_inferencer)
         _reconcile_edge_endpoint_shapes(nodes)
@@ -8815,6 +8905,10 @@ def build_merged_model_graph(
     # Runs after both boundary passes, so a tile they add or re-point is
     # judged on its final dataflow.
     _draw_entering_tensor_tiles_as_inputs(nodes)
+    # Those passes materialise boundary tiles AFTER shapes were filled in, so
+    # the tiles arrive with none. A boundary does not compute: what crosses it
+    # is what its producer made, and this is where every one of them exists.
+    _carry_producer_shape_to_boundary_tiles(nodes)
     _declare_tuple_boundary_ports(nodes)
     _name_repeat_group_inputs_outside_it(nodes)
     _name_unnamed_group_inputs(nodes)
