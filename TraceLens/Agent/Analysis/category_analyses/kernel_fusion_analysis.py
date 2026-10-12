@@ -32,7 +32,6 @@ from analysis_utils import (
     calculate_efficiency,
     format_args,
     format_kernel_names,
-    get_peak_mem_bw_tbs,
     load_perf_rows,
     perf_float,
     perf_report_csv_dir,
@@ -650,10 +649,9 @@ def load_arch_config(output_dir: str, platform: str) -> dict:
             if fname.endswith("_metadata.json"):
                 with open(os.path.join(metadata_dir, fname), "r") as f:
                     meta = json.load(f)
-                peak_mem_bw_tbs = get_peak_mem_bw_tbs(meta)
-                if peak_mem_bw_tbs is not None and "max_achievable_tflops" in meta:
+                if "peak_mem_bw_tbs" in meta and "max_achievable_tflops" in meta:
                     return {
-                        "peak_mem_bw_tbs": peak_mem_bw_tbs,
+                        "peak_mem_bw_tbs": meta["peak_mem_bw_tbs"],
                         "max_achievable_tflops": meta["max_achievable_tflops"],
                     }
 

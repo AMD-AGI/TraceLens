@@ -37,7 +37,6 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     comparative_efficiency,
     compute_impact_estimates,
     format_args,
-    get_peak_mem_bw_tbs,
     get_peak_specs,
     load_category_data,
     standalone_efficiency,
@@ -2508,58 +2507,6 @@ def test_get_peak_specs_scalar_form():
     assert specs == {"peak_maf_tflops": 700.0, "peak_mem_bw_tbs": 5.3}
 
 
-def test_get_peak_specs_legacy_hbm_key():
-    specs = get_peak_specs({"peak_bf16_maf_tflops": 700.0, "peak_hbm_bw_tbs": 5.3})
-    assert specs == {"peak_maf_tflops": 700.0, "peak_mem_bw_tbs": 5.3}
-
-
-# ----- analysis_utils: get_peak_mem_bw_tbs -----
-
-
-def test_get_peak_mem_bw_tbs_prefers_canonical_key():
-    assert (
-        get_peak_mem_bw_tbs({"peak_mem_bw_tbs": 0.256, "peak_hbm_bw_tbs": 5.3}) == 0.256
-    )
-
-
-def test_get_peak_mem_bw_tbs_accepts_legacy_key():
-    assert get_peak_mem_bw_tbs({"peak_hbm_bw_tbs": 5.3}) == 5.3
-
-
-def test_get_peak_mem_bw_tbs_default_when_missing():
-    assert get_peak_mem_bw_tbs({}) is None
-    assert get_peak_mem_bw_tbs({}, default=1) == 1
-
-
-def test_build_operation_metrics_legacy_metadata_uses_platform_peak():
-    df = pd.DataFrame(
-        {
-            "name": ["aten::add"],
-            "count": [1],
-            "Kernel Time (µs)_sum": [1_000.0],
-            "TB/s_mean": [0.2],
-        }
-    )
-    metadata = {"peak_hbm_bw_tbs": 0.64, "peak_bf16_maf_tflops": 100.0}
-    (op,) = build_operation_metrics(df, metadata, {})
-    assert op["efficiency"]["resolved_peak_mem_bw"] == 0.64
-
-
-def test_kernel_fusion_load_arch_config_reads_legacy_metadata(tmp_path):
-    meta_dir = tmp_path / "metadata"
-    meta_dir.mkdir()
-    (meta_dir / "gemm_metadata.json").write_text(
-        json.dumps(
-            {"peak_hbm_bw_tbs": 0.64, "max_achievable_tflops": {"matrix_bf16": 100.0}}
-        )
-    )
-    arch = kfa.load_arch_config(str(tmp_path), "no_such_platform")
-    assert arch == {
-        "peak_mem_bw_tbs": 0.64,
-        "max_achievable_tflops": {"matrix_bf16": 100.0},
-    }
-
-
 # ----- analysis_utils: _eff_bucket -----
 
 
@@ -2699,7 +2646,8 @@ def test_build_operation_metrics_flags_row_matching_op_key(tmp_path):
         ]
     )
     df["Kernel Time (µs)_sum"] = [300.0, 200.0]
-    ops = build_operation_metrics(df, {"output_dir": str(tmp_path)}, {})
+    metadata = {"output_dir": str(tmp_path), "peak_mem_bw_tbs": 5.3}
+    ops = build_operation_metrics(df, metadata, {})
     # Same name + args on another thread is a different row.
     assert [bool(o.get("fusion_flagged")) for o in ops] == [True, False]
 
