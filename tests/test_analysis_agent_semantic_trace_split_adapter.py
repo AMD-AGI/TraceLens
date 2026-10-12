@@ -8,12 +8,11 @@
 
 Covers the deterministic phase/metadata mapping used to convert TraceUtils
 annotation-split output into the region_metadata shape expected by
-extract_trace_data. The subprocess driver ``split_vllm_trace`` is excluded
-from coverage (it shells out to TraceLens.TraceUtils.split_inference_trace_
-annotation and is exercised only in the end-to-end path).
+extract_trace_data. ``split_vllm_trace`` itself (the in-process call into
+TraceLens.TraceUtils.split_trace.split_and_enumerate) is excluded from
+coverage here and exercised only in the end-to-end path.
 """
 
-import json
 import os
 import sys
 
@@ -154,25 +153,3 @@ def test_iter_type_key_decode():
 
 def test_iter_type_key_empty():
     assert tsa._iter_type_key({"avg_bs": 3}) == "empty_3"
-
-
-# --------------------------------------------------------------------------- #
-# _load_trace (thin wrapper over _helpers.load_json)
-# --------------------------------------------------------------------------- #
-def test_load_trace_reads_plain_json(tmp_path):
-    p = tmp_path / "trace.json"
-    p.write_text(json.dumps({"traceEvents": [{"name": "a"}]}))
-    out = tsa._load_trace(str(p))
-    assert out == {"traceEvents": [{"name": "a"}]}
-
-
-def test_split_vllm_trace_unavailable_backend_degrades_gracefully(monkeypatch, capsys):
-    """When splitting is unavailable, degrade to whole-trace (return None)
-    with a single notice rather than raising."""
-    monkeypatch.setattr(tsa, "_splitter_available", lambda: False)
-    monkeypatch.setattr(tsa, "_splitter_warned", False)
-    assert tsa.split_vllm_trace("/no/such/trace.json.gz") is None
-    assert tsa.split_vllm_trace("/no/such/trace2.json.gz") is None
-    err = capsys.readouterr().err
-    assert "pre-split or small traces" in err
-    assert err.count("pre-split or small traces") == 1

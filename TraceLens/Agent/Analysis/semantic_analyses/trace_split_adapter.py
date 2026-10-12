@@ -5,10 +5,10 @@
 ###############################################################################
 
 """
-Adapter for TraceUtils split_inference_trace_annotation.py.
+Adapter for TraceUtils' canonical trace splitter.
 
-Invokes TraceLens.TraceUtils.split_inference_trace_annotation as a subprocess
-and converts its output to the format expected by extract_trace_data.py:
+Calls TraceLens.TraceUtils.split_trace.split_and_enumerate in-process and
+converts its output to the format expected by extract_trace_data.py:
 [(trace_dict, region_metadata), ...].
 
 Usage:
@@ -19,15 +19,12 @@ Usage:
             key = get_steady_state_key(metadata)
 """
 
-import importlib.util
-import json
 import os
-import subprocess
-import sys
 import tempfile
 from typing import List, Optional, Tuple
 
-from _helpers import load_json
+from TraceLens.TraceUtils.split_trace import split_and_enumerate
+from TraceLens.util import DataLoader
 
 
 def get_steady_state_key(metadata: dict) -> str:
@@ -90,11 +87,6 @@ def _phase_to_region_meta(phase: dict) -> dict:
     }
 
 
-def _load_trace(path: str) -> dict:
-    """Load trace JSON from .json or .json.gz file."""
-    return load_json(path)
-
-
 def _is_single_iteration(phase: dict) -> bool:
     """True if phase represents a single annotation iteration."""
     total = (
@@ -120,82 +112,29 @@ def _iter_type_key(phase: dict) -> str:
     return f"empty_{bs}"
 
 
-_SPLITTER_MODULE = "TraceLens.TraceUtils.split_inference_trace_annotation"
-_splitter_warned = False
-
-
-def _splitter_available() -> bool:
-    """True if the trace-splitting backend is importable."""
-    try:
-        return importlib.util.find_spec(_SPLITTER_MODULE) is not None
-    except (ImportError, ValueError):
-        return False
-
-
-def _warn_splitter_unavailable() -> None:
-    """Emit a single clear notice that vLLM splitting is disabled."""
-    global _splitter_warned
-    if _splitter_warned:
-        return
-    _splitter_warned = True
-    print(
-        "[trace_split_adapter] semantic analysis is currently supported on "
-        "pre-split or small traces only.",
-        file=sys.stderr,
-    )
-
-
 def split_vllm_trace(
     trace_path: str,
 ) -> Optional[List[Tuple[dict, dict]]]:  # pragma: no cover
     """
-    Split a vLLM trace using TraceUtils split_inference_trace_annotation.
+    Split a vLLM/SGLang/ATOM trace using the canonical TraceUtils trace splitter.
 
-    Uses --store-single-iteration to get per-annotation-iteration data,
-    then selects one representative iteration per unique (type, token_count)
-    group.  This matches the reference analysis style of showing per-step
-    averages rather than multi-step totals.
+    Uses split_and_enumerate(..., store_single_iteration=True) to get
+    per-annotation-iteration data, then selects one representative iteration
+    per unique (type, token_count) group. This matches the reference
+    analysis style of showing per-step averages rather than multi-step
+    totals.
 
-    Returns None if no annotation iterations are found, or if trace splitting
-    is unavailable (caller falls back to whole-trace extraction).
+    Returns None if no annotation iterations are found, or if the trace is
+    not splittable (caller falls back to whole-trace extraction).
     """
-    if not _splitter_available():
-        _warn_splitter_unavailable()
-        return None
-
     with tempfile.TemporaryDirectory(prefix="trace_split_") as tmpdir:
-        cmd = [
-            sys.executable,
-            "-m",
-            "TraceLens.TraceUtils.split_inference_trace_annotation",
+        execution_details = split_and_enumerate(
             trace_path,
-            "-o",
             tmpdir,
-            "--find-steady-state",
-            "--store-single-iteration",
-            "--iterations",
-            "all",
-            "--emit-gpu-op-uid",
-        ]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
+            find_steady_state=True,
+            store_single_iteration=True,
+            iterations="all",
         )
-        if result.returncode != 0:
-            print(
-                f"TraceUtils split failed (exit {result.returncode}): {result.stderr}",
-                file=sys.stderr,
-            )
-            return None
-
-        details_path = os.path.join(tmpdir, "execution_details.json")
-        if not os.path.isfile(details_path):
-            return None
-
-        with open(details_path, "r") as f:
-            execution_details = json.load(f)
-
         if not execution_details:
             return None
 
@@ -231,7 +170,7 @@ def split_vllm_trace(
                 region_meta["traceutils_gpu_busy_duration_us"] = entry[
                     "gpu_busy_duration"
                 ]
-            trace_dict = _load_trace(entry["output_path"])
+            trace_dict = DataLoader.load_data(entry["output_path"])
             output.append((trace_dict, region_meta))
 
         return output if output else None

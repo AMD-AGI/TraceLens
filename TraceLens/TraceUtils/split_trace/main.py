@@ -516,6 +516,114 @@ def _write_execution_details(execution_details, output_dir):
     print(f"Wrote execution details CSV to {csv_path}")
 
 
+def run(args: argparse.Namespace) -> list[dict]:
+    """Core split orchestration: detect, gap-fill, extract, classify, write.
+
+    Shared by the CLI's main() and the in-process split_and_enumerate() entry
+    point. Always writes split_manifest.json to args.output_dir (and
+    execution_details.json/.csv when anything was extracted), exactly as the
+    CLI does today. Returns the execution_details list (same shape written to
+    execution_details.json), or [] when nothing was extracted.
+    """
+    loaded = _load_and_detect(args)
+    if loaded is None:
+        return []
+    detection, trace_json, trace_index = loaded
+    events = trace_json.get("traceEvents", [])
+    iteration_roots = detection.roots
+    manifest = detection.to_manifest()
+
+    root_tiles = _gap_fill_tiles(iteration_roots, manifest, args)
+    ctx = ExtractContext(
+        trace=TraceData(
+            events=events,
+            trace_json=trace_json,
+            gpu_corr_map=trace_index.gpu_corr_map,
+            flow_corr_map=trace_index.flow_corr_map,
+            meta_events=trace_index.meta_events,
+        ),
+        output_dir=args.output_dir,
+        base_name=_base_name(args.trace_path),
+        root_tiles=root_tiles,
+    )
+
+    execution_details = []
+    # Only the --store-single-iteration pass can be audited for kernel conservation.
+    per_iteration_details: list | None = None
+    if iteration_roots:
+        start, end = parse_range(args.iterations, len(iteration_roots))
+        extracted, per_iteration_details = _extract_iterations(
+            detection, ctx, args, start, end
+        )
+        execution_details.extend(extracted)
+
+        working_roots = _working_roots(iteration_roots, args, start, end)
+        has_annotations = _has_serving_annotations(working_roots)
+        batch_sizes = _derive_batch_sizes(working_roots, has_annotations, ctx, args)
+
+        if args.divide_phases:
+            execution_details.extend(
+                _divide_phases(working_roots, batch_sizes, has_annotations, ctx, args)
+            )
+        if args.find_steady_state:
+            execution_details.extend(
+                _find_steady_state_windows(
+                    working_roots, batch_sizes, has_annotations, ctx, args
+                )
+            )
+
+    print(f"\nDone! Extracted {len(execution_details)} traces to {args.output_dir}")
+    manifest.update(_conservation(events, per_iteration_details, args))
+    _write_manifest(args.output_dir, manifest)
+    if execution_details:
+        _write_execution_details(execution_details, args.output_dir)
+    return execution_details
+
+
+def split_and_enumerate(
+    trace_path: str,
+    output_dir: str,
+    *,
+    iterations: str = "all",
+    store_single_iteration: bool = False,
+    find_steady_state: bool = False,
+    num_steps: int = 32,
+    CONC: int | None = None,
+    OSL: float | None = None,
+    R: float | None = None,
+    divide_phases: bool = False,
+    no_gap_fill: bool = False,
+    allow_degraded: bool = False,
+    llm_inference: bool = False,
+    max_num_seq: int | None = None,
+) -> list[dict]:
+    """Programmatic (in-process) equivalent of the CLI.
+
+    Splits trace_path and writes outputs into output_dir exactly as
+    python -m TraceLens.TraceUtils.split_trace.main would with the
+    corresponding flags, but runs in-process (no subprocess, no argv) and
+    returns the execution_details list directly. Keyword defaults mirror
+    the CLI argparse defaults exactly.
+    """
+    args = argparse.Namespace(
+        trace_path=trace_path,
+        output_dir=output_dir,
+        iterations=iterations,
+        store_single_iteration=store_single_iteration,
+        find_steady_state=find_steady_state,
+        num_steps=num_steps,
+        CONC=CONC,
+        OSL=OSL,
+        R=R,
+        divide_phases=divide_phases,
+        no_gap_fill=no_gap_fill,
+        allow_degraded=allow_degraded,
+        llm_inference=llm_inference,
+        max_num_seq=max_num_seq,
+    )
+    return run(args)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Split vLLM trace into per-iteration traces"
@@ -629,59 +737,7 @@ def main():
         ),
     )
     args = parser.parse_args()
-
-    loaded = _load_and_detect(args)
-    if loaded is None:
-        return
-    detection, trace_json, trace_index = loaded
-    events = trace_json.get("traceEvents", [])
-    iteration_roots = detection.roots
-    manifest = detection.to_manifest()
-
-    root_tiles = _gap_fill_tiles(iteration_roots, manifest, args)
-    ctx = ExtractContext(
-        trace=TraceData(
-            events=events,
-            trace_json=trace_json,
-            gpu_corr_map=trace_index.gpu_corr_map,
-            flow_corr_map=trace_index.flow_corr_map,
-            meta_events=trace_index.meta_events,
-        ),
-        output_dir=args.output_dir,
-        base_name=_base_name(args.trace_path),
-        root_tiles=root_tiles,
-    )
-
-    execution_details = []
-    # Only the --store-single-iteration pass can be audited for kernel conservation.
-    per_iteration_details: list | None = None
-    if iteration_roots:
-        start, end = parse_range(args.iterations, len(iteration_roots))
-        extracted, per_iteration_details = _extract_iterations(
-            detection, ctx, args, start, end
-        )
-        execution_details.extend(extracted)
-
-        working_roots = _working_roots(iteration_roots, args, start, end)
-        has_annotations = _has_serving_annotations(working_roots)
-        batch_sizes = _derive_batch_sizes(working_roots, has_annotations, ctx, args)
-
-        if args.divide_phases:
-            execution_details.extend(
-                _divide_phases(working_roots, batch_sizes, has_annotations, ctx, args)
-            )
-        if args.find_steady_state:
-            execution_details.extend(
-                _find_steady_state_windows(
-                    working_roots, batch_sizes, has_annotations, ctx, args
-                )
-            )
-
-    print(f"\nDone! Extracted {len(execution_details)} traces to {args.output_dir}")
-    manifest.update(_conservation(events, per_iteration_details, args))
-    _write_manifest(args.output_dir, manifest)
-    if execution_details:
-        _write_execution_details(execution_details, args.output_dir)
+    run(args)
 
 
 if __name__ == "__main__":
