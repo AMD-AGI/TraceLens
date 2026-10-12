@@ -9934,6 +9934,10 @@ def _whole_shape_token(value: ast.AST) -> str | None:
 
     Returns ``None`` unless *value* is exactly ``<tensor>.shape`` or its
     ``<tensor>.size()`` spelling; a slice of one is :func:`_shape_slice_token`'s.
+
+    The tensor has to be something a later ``view(*local)`` could NAME. A call
+    result is not: ``f(x).size()`` would otherwise be recorded as the shape of
+    ``f``, pointing the restored shape at the function instead of at a tensor.
     """
     if _is_size_call(value) and isinstance(value, ast.Call):
         owner = value.func.value if isinstance(value.func, ast.Attribute) else None
@@ -9945,6 +9949,8 @@ def _whole_shape_token(value: ast.AST) -> str | None:
         and value.attr == "shape"
         and not _is_self_attr(value, value.attr)
     ):
+        return None
+    if not isinstance(value.value, (ast.Name, ast.Attribute)):
         return None
     base = _expr_name(value.value)
     if not base:

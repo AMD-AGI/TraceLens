@@ -146,6 +146,8 @@ python -m TraceLens.Visualizer.model_explorer_export.cli --from-payload kimi.jso
 | `--all-tensor-ops`              | Include tensor housekeeping ops in detailed graphs                                                      |
 | `--no-inline-expansion`         | Keep composite modules as opaque tiles instead of expanding into internal steps                         |
 | `--no-shapes`                   | Skip `output_shape` / `output_dtype` annotations                                                        |
+| `--drop-constants` / `--no-drop-constants` | Drop constant / learned-weight / buffer nodes when rendering HTML — on by default. The exported JSON always keeps them |
+| `--auto-venv` / `--no-auto-venv` | Re-run in a per-model virtual environment when this checkpoint's modeling code cannot be imported by the current `transformers` — on by default, detected at run time, cached and reused |
 | `--meta-shapes` / `--no-meta-shapes` | Meta-device shape pass filling shapes static analysis can't infer — on by default (`--no-meta-shapes` = pure static) |
 | `--operators-json PATH`         | Also write flat operator export JSON with inferred shapes                                               |
 | `--torch-module PKG.MOD:FACTORY` | *(debugging)* Introspect a plain `torch.nn.Module` instead of an HF checkpoint (see below)              |
@@ -222,25 +224,42 @@ Composite GPU kernels (e.g. fused attention, MoE dispatch) remain opaque leaf no
 
 ## Project layout
 
+The export lives in `TraceLens/Visualizer`; the model analysis it is built on
+is shared with the rest of TraceLens and lives in `TraceLens/ModelUtils`.
+
 ```
 TraceLens/Visualizer/
 ├── visualize_model_in_explorer.py   # CLI entry point
-├── model_explorer_export/           # Model Explorer payload, viewer, and server
-│   ├── build.py                     # Payload assembly
-│   ├── merge.py                     # Single merged graph export
-│   ├── shapes.py                    # Shape annotation for Model Explorer nodes
-│   └── viewer/                      # Bundled viewer shell (app.js, index.html, worker.js for --serve)
-├── visualizer/
-│   ├── extract.py                   # ArchitectureSpec and config/code merge
-│   ├── ast_analyze.py               # Modeling file AST analysis
-│   ├── block_tree.py                # Recursive block trees and expansion
-│   ├── computation_graph.py         # Graph construction from block trees
-│   ├── model_graph.py               # Serializable model graph IR
-│   ├── shape_inference.py           # Symbolic shape and operator export
-│   ├── source_policy.py             # GitHub whitelist for remote introspection
-│   └── loader.py                    # High-level model spec loading
-├── tests/                           # Pytest suite
-└── requirements.txt
+└── model_explorer_export/           # Model Explorer payload, viewer, and server
+    ├── cli.py                       # Argument parsing and the two-stage pipeline
+    ├── ast_build.py                 # Payload built from the static analysis
+    ├── build.py                     # Payload assembly
+    ├── merge.py                     # Single merged graph export
+    ├── overview.py                  # Top-level spine of the model
+    ├── adapter.py                   # Model graph IR -> Model Explorer nodes
+    ├── shapes.py                    # Shape annotation for Model Explorer nodes
+    ├── type_check.py                # Operand / shape checks over the exported graph
+    ├── fact_sheet.py                # Model fact sheet panel
+    ├── labels.py, styles.py         # Display labels and kernel styling
+    ├── viewer_page.py               # Single-page HTML assembly
+    ├── serve.py                     # Local server for --serve
+    └── viewer/                      # Bundled viewer shell (app.js, index.html, worker.js)
+
+TraceLens/ModelUtils/                # Shared model analysis
+├── loader.py                        # High-level model spec loading
+├── extract.py                       # ArchitectureSpec and config/code merge
+├── ast_analyze.py                   # Modeling file AST analysis
+├── block_tree.py                    # Recursive block trees and expansion
+├── computation_graph.py             # Graph construction from block trees
+├── model_graph.py                   # Serializable model graph IR
+├── shape_inference.py               # Symbolic shape and operator export
+├── meta_trace.py                    # Meta-device pass (--meta-shapes)
+├── model_env.py                     # Per-model environments (--auto-venv)
+├── kernel_pipeline.py               # Custom kernel pipeline parsing
+├── source.py, github.py             # Modeling source resolution
+└── source_policy.py                 # GitHub whitelist for remote introspection
+
+tests/Visualizer/, tests/ModelUtils/ # Pytest suite (repository root)
 ```
 
 
@@ -256,9 +275,9 @@ python3 -m pytest tests/Visualizer/ tests/ModelUtils/
 ## Python API
 
 ```python
-from visualizer.loader import load_model_spec
-from visualizer.shape_inference import build_operator_export
-from model_explorer_export.build import build_model_explorer_payload
+from TraceLens.ModelUtils.loader import load_model_spec
+from TraceLens.ModelUtils.shape_inference import build_operator_export
+from TraceLens.Visualizer.model_explorer_export.ast_build import build_model_explorer_payload
 
 spec = load_model_spec("moonshotai/Kimi-K3", detailed=True)
 

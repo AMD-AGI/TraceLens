@@ -236,11 +236,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Two shards. Each runner has 4 cores, and the suite is a few hundred
-        # tests dominated by session-scoped graph builds. Two machines split
-        # that work; another shard would mostly repeat the torch install and
-        # those builds.
-        shard: [1, 2]
+        # Four shards. Each runner has 4 cores, and the suite is a few hundred
+        # tests dominated by session-scoped graph builds.
+        #
+        # Two shards left the slower one carrying 2705s of tests against the
+        # other's 1766s and gating the whole workflow at 14m44s. The split is
+        # by COUNT rather than time whenever the durations cache misses -- it
+        # had never been populated, so `least_duration` was handed `{}` and
+        # divided 304 tests against 303 with no idea what they cost. Four
+        # shards cut what any one of them can be left holding; once the
+        # durations cache carries forward, the split balances on time as well.
+        shard: [1, 2, 3, 4]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -280,7 +286,7 @@ jobs:
             echo '{}' > .test_durations_visualizer
           fi
           python -m pytest tests/Visualizer -v --tb=short -n auto --dist worksteal \
-            --splits 2 --group ${{ matrix.shard }} \
+            --splits 4 --group ${{ matrix.shard }} \
             --splitting-algorithm least_duration \
             --durations-path .test_durations_visualizer \
             --store-durations \
