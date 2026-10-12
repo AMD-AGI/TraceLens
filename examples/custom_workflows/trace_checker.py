@@ -23,9 +23,9 @@ import enum
 import os
 import statistics
 import warnings
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from .util import GPU_KERNEL_CATEGORIES, GRAPH_LAUNCH_NAMES, merge_intervals
 
