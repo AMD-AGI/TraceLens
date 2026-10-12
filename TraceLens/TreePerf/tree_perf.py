@@ -244,6 +244,7 @@ class TreePerfAnalyzer:
             event_to_category=categorizer,
             enable_pseudo_ops=enable_pseudo_ops,
             tree_postprocess_extension=tree_postprocess_extension,
+            rebuild_tree=capture_trace_filepath is None,
             *args,
             **kwargs,
         )
