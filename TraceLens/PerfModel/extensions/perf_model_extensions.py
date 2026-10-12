@@ -958,7 +958,7 @@ class aiter_rope_cached_positions_2c_fwd_impl(FusedRoPE):
             2 * (numel(input_x) + numel(input_y)) * bpe_in
 
         cos/sin/positions are typically cache-resident and small; omitted from
-        the dominant HBM traffic.
+        the dominant memory traffic.
 
     Expected Input Dims from trace:
         [[B, S, H_q, d], [B, S, H_kv, d], [B, S, H_q, d], [B, S, H_kv, d],

@@ -148,6 +148,19 @@ _MM_KEY = ["aten::mm", "((16, 64), (64, 8))", "('bf16', 'bf16')", "z"] + [""] * 
 _ADD_KEY = ["aten::add", "((16, 8), (16, 8))", "('bf16', 'bf16')", "z"] + [""] * 4
 
 
+def _op_group(perf_key, kernel_names, time_us, count):
+    return {
+        "perf_key": perf_key,
+        "kernel_names": kernel_names,
+        "time_us": time_us,
+        "count": count,
+    }
+
+
+def _name_key(name):
+    return [name, "", ""]
+
+
 # ----- KernelTaxonomy / classify_kernel -----
 
 
@@ -548,10 +561,6 @@ def test_roofline_savings_overlap_blend():
 # ----- _standalone_estimate -----
 
 
-def _name_key(name):
-    return [name, "", ""]
-
-
 def _lookup(**entries):
     """Build perf_rows keyed by ``_name_key``; ``_standalone`` keys each kernel by its name."""
     return {
@@ -654,15 +663,6 @@ def test_standalone_skip_below_modeled_frac():
     }
     lookup = _lookup(ew_modeled=(1.0, None, None))
     assert _standalone(candidate, lookup) is None
-
-
-def _op_group(perf_key, kernel_names, time_us, count):
-    return {
-        "perf_key": perf_key,
-        "kernel_names": kernel_names,
-        "time_us": time_us,
-        "count": count,
-    }
 
 
 def _golden_candidate():
@@ -1131,11 +1131,11 @@ def test_detect_paged_attention():
 # ----- shared metadata fixture for get_peak_specs consumers -----
 
 
-def _metadata(peak_hbm_bw_tbs=5.3, matrix_bf16=1300.0):
+def _metadata(peak_mem_bw_tbs=5.3, matrix_bf16=1300.0):
     """Metadata dict as produced by the orchestrator; get_peak_specs reads it."""
     return {
         "max_achievable_tflops": {"matrix_bf16": matrix_bf16},
-        "peak_hbm_bw_tbs": peak_hbm_bw_tbs,
+        "peak_mem_bw_tbs": peak_mem_bw_tbs,
     }
 
 
@@ -1154,7 +1154,7 @@ def test_conv_extract_with_transpose():
     assert r["transpose_time_ms"] == pytest.approx(0.2)
     # 200 us of 1000 us total = 20%
     assert r["transpose_overhead_percent"] == pytest.approx(20.0)
-    assert r["peak_hbm_bw_tbs"] == 5.3
+    assert r["peak_mem_bw_tbs"] == 5.3
     assert r["peak_maf_tflops"] == 1300.0
 
 
@@ -1269,12 +1269,12 @@ def test_load_gpu_timeline_reads_rows(tmp_path):
 
 
 def test_elementwise_extract():
-    assert elementwise_extract(pd.DataFrame(), _metadata())["peak_hbm_bw_tbs"] == 5.3
+    assert elementwise_extract(pd.DataFrame(), _metadata())["peak_mem_bw_tbs"] == 5.3
 
 
 def test_norm_extract():
     assert (
-        norm_extract(pd.DataFrame(), _metadata(peak_hbm_bw_tbs=8.0))["peak_hbm_bw_tbs"]
+        norm_extract(pd.DataFrame(), _metadata(peak_mem_bw_tbs=8.0))["peak_mem_bw_tbs"]
         == 8.0
     )
 
@@ -1284,7 +1284,7 @@ def test_norm_extract():
 
 def test_moe_extract_delegates_to_peak_specs():
     r = moe_extract(pd.DataFrame(), _metadata())
-    assert r["peak_hbm_bw_tbs"] == 5.3
+    assert r["peak_mem_bw_tbs"] == 5.3
     assert r["peak_maf_tflops"] == 1300.0
 
 
@@ -1336,7 +1336,7 @@ def test_triton_extract_tallies_and_merges_specs():
     assert r["reduction_count"] == 1
     assert r["persistent_count"] == 1
     assert r["other_count"] == 1
-    assert r["peak_hbm_bw_tbs"] == 5.3
+    assert r["peak_mem_bw_tbs"] == 5.3
 
 
 # ----- gemm_analysis -----
@@ -1393,7 +1393,7 @@ def test_reduce_extract_softmax_count():
     df = pd.DataFrame({"name": ["softmax_kernel", "aten::sum", "log_softmax"]})
     r = reduce_extract(df, _metadata())
     assert r["softmax_count"] == 2
-    assert r["peak_hbm_bw_tbs"] == 5.3
+    assert r["peak_mem_bw_tbs"] == 5.3
 
 
 def test_reduce_extract_empty():
@@ -1658,7 +1658,7 @@ def _write_category_inputs(base, category, ops_df):
     ops_df.to_csv(os.path.join(cat_dir, f"{category}_ops.csv"), index=False)
     metadata = {
         "max_achievable_tflops": {"matrix_bf16": 1300.0},
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "gpu_utilization": {"total_time_ms": 100.0},
     }
     with open(os.path.join(meta_dir, f"{category}_metadata.json"), "w") as f:
@@ -1789,7 +1789,7 @@ def _write_fusion_inputs(base, candidates):
         )
     with open(os.path.join(meta_dir, "gemm_metadata.json"), "w") as f:
         json.dump(
-            {"peak_hbm_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_bf16": 1300.0}},
+            {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_bf16": 1300.0}},
             f,
         )
     pd.DataFrame(
@@ -1987,7 +1987,7 @@ class TestArchUtils:
 
 
 class TestCategoryAnalysisHelpers:
-    _META = {"peak_hbm_bw_tbs": 5.3, "peak_maf_tflops": {"matrix_fp16": 654}}
+    _META = {"peak_mem_bw_tbs": 5.3, "peak_maf_tflops": {"matrix_fp16": 654}}
 
     def test_gemm_classifiers(self):
         assert gemm_analysis.detect_quantized_gemm("aten::w8a8_mm")
@@ -2009,19 +2009,19 @@ class TestCategoryAnalysisHelpers:
         out = elementwise_analysis.extract_category_specific(
             pd.DataFrame({"name": ["aten::add"]}), self._META
         )
-        assert out["peak_hbm_bw_tbs"] == 5.3
+        assert out["peak_mem_bw_tbs"] == 5.3
 
     def test_norm_extract(self):
         out = norm_analysis.extract_category_specific(
             pd.DataFrame({"name": ["aten::layer_norm"]}), self._META
         )
-        assert out["peak_hbm_bw_tbs"] == 5.3
+        assert out["peak_mem_bw_tbs"] == 5.3
 
     def test_reduce_extract(self):
         out = reduce_analysis.extract_category_specific(
             pd.DataFrame({"name": ["aten::sum"]}), self._META
         )
-        assert "peak_hbm_bw_tbs" in out
+        assert "peak_mem_bw_tbs" in out
 
     def test_convolution_extract_with_transpose(self):
         ops = pd.DataFrame(
@@ -2084,7 +2084,7 @@ class TestCategoryAnalysisHelpers:
         out = moe_analysis.extract_category_specific(
             pd.DataFrame({"name": ["moe_dispatch"]}), self._META
         )
-        assert "peak_hbm_bw_tbs" in out
+        assert "peak_mem_bw_tbs" in out
         missing = moe_analysis._check_moe_data(str(tmp_path), "moe_fused", "standalone")
         assert missing["status"] == "NO_DATA"
 
@@ -2185,7 +2185,7 @@ def _setup_gemm_output_dir(tmp_path):
     df.to_csv(out / "category_data" / "gemm_ops.csv", index=False)
     meta = {
         "platform": "MI300X",
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708},
         "gpu_utilization": {"total_time_ms": 1000.0},
         "output_dir": str(out),

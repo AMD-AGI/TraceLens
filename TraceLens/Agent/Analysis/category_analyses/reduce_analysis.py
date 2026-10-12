@@ -30,7 +30,7 @@ def extract_category_specific(ops_df, metadata) -> dict:
 
     return {
         "softmax_count": int(softmax_count),
-        "peak_hbm_bw_tbs": metadata.get("peak_hbm_bw_tbs"),
+        "peak_mem_bw_tbs": metadata["peak_mem_bw_tbs"],
     }
 
 

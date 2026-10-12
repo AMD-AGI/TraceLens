@@ -22,7 +22,7 @@ from analysis_utils import run_category_analysis
 
 def extract_category_specific(ops_df, metadata) -> dict:
     """Extract normalization-specific aggregate metrics."""
-    return {"peak_hbm_bw_tbs": metadata.get("peak_hbm_bw_tbs")}
+    return {"peak_mem_bw_tbs": metadata["peak_mem_bw_tbs"]}
 
 
 def main():

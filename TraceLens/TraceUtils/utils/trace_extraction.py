@@ -322,6 +322,7 @@ def extract_and_save_split(
                 "num_gpu_events": num_gpu_events,
                 "gpu_duration": gpu_dur,
                 "gpu_busy_duration": gpu_busy,
+                "busy_ratio": gpu_busy / gpu_dur if gpu_dur else 0,
                 "steps": iter_details,
                 "phase": phase_details,
             }
@@ -376,6 +377,7 @@ def extract_and_save_single_trace(
             "num_gpu_events": num_gpu,
             "gpu_duration": gpu_dur,
             "gpu_busy_duration": gpu_busy,
+            "busy_ratio": gpu_busy / gpu_dur if gpu_dur else 0,
         }
     ]
 
