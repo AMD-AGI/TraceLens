@@ -1,0 +1,1020 @@
+{
+ "fusion_candidates": [
+  {
+   "base_name": "Qwen2MLP",
+   "eligible_kernel_count": 5,
+   "has_fused_kernel": false,
+   "instance_count": 24,
+   "kernel_count": 5,
+   "kernel_type_signature": [
+    "GEMM",
+    "Elementwise",
+    "GEMM",
+    "Mul",
+    "GEMM"
+   ],
+   "module_name": "nn.Module: Qwen2MLP_0",
+   "total_kernel_time_us": 9369.811
+  },
+  {
+   "base_name": "Qwen2RMSNorm",
+   "eligible_kernel_count": 8,
+   "has_fused_kernel": false,
+   "instance_count": 49,
+   "kernel_count": 8,
+   "kernel_type_signature": [
+    "Elementwise",
+    "Elementwise",
+    "Reduce",
+    "Add",
+    "Elementwise",
+    "Mul",
+    "Elementwise",
+    "Mul"
+   ],
+   "module_name": "nn.Module: Qwen2RMSNorm_0",
+   "total_kernel_time_us": 5674.205
+  },
+  {
+   "base_name": "transformers/models/qwen2/modeling_qwen2.py(68): apply_rotary_pos_emb",
+   "eligible_kernel_count": 10,
+   "has_fused_kernel": false,
+   "instance_count": 24,
+   "kernel_count": 10,
+   "kernel_type_signature": [
+    "Mul",
+    "Elementwise",
+    "Elementwise",
+    "Mul",
+    "Add",
+    "Mul",
+    "Elementwise",
+    "Elementwise",
+    "Mul",
+    "Add"
+   ],
+   "module_name": "transformers/models/qwen2/modeling_qwen2.py(68): apply_rotary_pos_emb",
+   "total_kernel_time_us": 4523.117
+  },
+  {
+   "base_name": "transformers/models/qwen2/modeling_qwen2.py(68): apply_rotary_pos_emb",
+   "eligible_kernel_count": 6,
+   "has_fused_kernel": false,
+   "instance_count": 24,
+   "kernel_count": 6,
+   "kernel_type_signature": [
+    "Mul",
+    "Mul",
+    "Add",
+    "Mul",
+    "Mul",
+    "Add"
+   ],
+   "module_name": "transformers/models/qwen2/modeling_qwen2.py(68): apply_rotary_pos_emb",
+   "source": "sibling_sequence",
+   "total_kernel_time_us": 2656.279
+  },
+  {
+   "base_name": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
+   "eligible_kernel_count": 3,
+   "has_fused_kernel": false,
+   "instance_count": 49,
+   "kernel_count": 3,
+   "kernel_type_signature": [
+    "Add",
+    "Mul",
+    "Mul"
+   ],
+   "module_name": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
+   "source": "sibling_sequence",
+   "total_kernel_time_us": 2174.688
+  },
+  {
+   "base_name": "transformers/models/qwen2/modeling_qwen2.py(61): rotate_half",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 48,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "Elementwise",
+    "Elementwise"
+   ],
+   "module_name": "transformers/models/qwen2/modeling_qwen2.py(61): rotate_half",
+   "total_kernel_time_us": 1866.838
+  },
+  {
+   "base_name": "transformers/models/qwen2/modeling_qwen2.py(243): forward",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 24,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "Add",
+    "Add"
+   ],
+   "module_name": "transformers/models/qwen2/modeling_qwen2.py(243): forward",
+   "source": "sibling_sequence",
+   "total_kernel_time_us": 689.413
+  },
+  {
+   "base_name": "Qwen2RotaryEmbedding",
+   "eligible_kernel_count": 9,
+   "has_fused_kernel": false,
+   "instance_count": 1,
+   "kernel_count": 9,
+   "kernel_type_signature": [
+    "Elementwise",
+    "GEMM",
+    "Elementwise",
+    "Elementwise",
+    "Elementwise",
+    "Mul",
+    "Mul",
+    "Elementwise",
+    "Elementwise"
+   ],
+   "module_name": "nn.Module: Qwen2RotaryEmbedding_0",
+   "total_kernel_time_us": 56.199999999999996
+  },
+  {
+   "base_name": "transformers/modeling_attn_mask_utils.py(243): _ignore_causal_mask_sdpa",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 1,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "Elementwise",
+    "Reduce"
+   ],
+   "module_name": "transformers/modeling_attn_mask_utils.py(243): _ignore_causal_mask_sdpa",
+   "total_kernel_time_us": 7.897
+  },
+  {
+   "base_name": "transformers/models/qwen2/modeling_qwen2.py(323): forward",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 1,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "Mul",
+    "Mul"
+   ],
+   "module_name": "transformers/models/qwen2/modeling_qwen2.py(323): forward",
+   "source": "sibling_sequence",
+   "total_kernel_time_us": 7.415
+  }
+ ],
+ "kernel_fusion_metrics": {
+  "baseline_ms": 33.13133349609375,
+  "candidate_count": 7,
+  "category": "kernel_fusion",
+  "estimated_count": 5,
+  "high_confidence_op_keys": [
+   [
+    "aten::copy_",
+    "((16, 559, 1024), (16, 559, 1024), ())",
+    "('float', 'c10::BFloat16', 'Scalar')",
+    "((572416, 1024, 1), (572416, 1024, 1), ())",
+    "('', '', 'False')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::pow",
+    "((16, 559, 1024), ())",
+    "('float', 'Scalar')",
+    "((572416, 1024, 1), ())",
+    "('', '2')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::mean",
+    "((16, 559, 1024), (), (), ())",
+    "('float', 'ScalarList', 'Scalar', '')",
+    "((572416, 1024, 1), (), (), ())",
+    "('', '[-1]', 'True', '')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::add",
+    "((16, 559, 1), (), ())",
+    "('float', 'double', 'Scalar')",
+    "((559, 1, 1), (), ())",
+    "('', '', '1')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::rsqrt",
+    "((16, 559, 1),)",
+    "('float',)",
+    "((559, 1, 1),)",
+    "('',)",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::mul",
+    "((16, 559, 1024), (16, 559, 1))",
+    "('float', 'float')",
+    "((572416, 1024, 1), (559, 1, 1))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::copy_",
+    "((16, 559, 1024), (16, 559, 1024), ())",
+    "('c10::BFloat16', 'float', 'Scalar')",
+    "((572416, 1024, 1), (572416, 1024, 1), ())",
+    "('', '', 'False')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::mul",
+    "((1024,), (16, 559, 1024))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((1,), (572416, 1024, 1))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::mul",
+    "((16, 16, 559, 64), (1, 1, 559, 64))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((572416, 64, 1024, 1), (35776, 35776, 64, 1))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::neg",
+    "((16, 16, 559, 32),)",
+    "('c10::BFloat16',)",
+    "((572416, 64, 1024, 1),)",
+    "('',)",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::cat",
+    "(((16, 16, 559, 32), (16, 16, 559, 32)), ())",
+    "('TensorList', 'Scalar')",
+    "(((286208, 32, 512, 1), (572416, 64, 1024, 1)), ())",
+    "('', '-1')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::mul",
+    "((16, 16, 559, 64), (1, 1, 559, 64))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((572416, 35776, 64, 1), (35776, 35776, 64, 1))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::add",
+    "((16, 16, 559, 64), (16, 16, 559, 64), ())",
+    "('c10::BFloat16', 'c10::BFloat16', 'Scalar')",
+    "((572416, 64, 1024, 1), (572416, 35776, 64, 1), ())",
+    "('', '', '1')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::mul",
+    "((16, 16, 559, 64), (1, 1, 559, 64))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((572416, 64, 1024, 1), (35776, 35776, 64, 1))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::mul",
+    "((16, 16, 559, 64), (1, 1, 559, 64))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((572416, 35776, 64, 1), (35776, 35776, 64, 1))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::add",
+    "((16, 16, 559, 64), (16, 16, 559, 64), ())",
+    "('c10::BFloat16', 'c10::BFloat16', 'Scalar')",
+    "((572416, 64, 1024, 1), (572416, 35776, 64, 1), ())",
+    "('', '', '1')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::mm",
+    "((8944, 1024), (1024, 2816))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((1024, 1), (1, 1024))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::silu",
+    "((16, 559, 2816),)",
+    "('c10::BFloat16',)",
+    "((1574144, 2816, 1),)",
+    "('',)",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::mul",
+    "((16, 559, 2816), (16, 559, 2816))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((1574144, 2816, 1), (1574144, 2816, 1))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::mm",
+    "((8944, 2816), (2816, 1024))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((2816, 1), (1, 2816))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ]
+  ],
+  "impact_estimates": [
+   {
+    "bound_type": "memory",
+    "category": "kernel_fusion",
+    "confidence": "high",
+    "estimation": "full",
+    "fusion_type": "memory_bound",
+    "impact_score": 13.88,
+    "impact_score_high": 15.87,
+    "impact_score_low": 11.9,
+    "instance_count": 49,
+    "kernel_count": 8,
+    "modeled_kernel_count": 8,
+    "op_keys": [
+     [
+      "aten::copy_",
+      "((16, 559, 1024), (16, 559, 1024), ())",
+      "('float', 'c10::BFloat16', 'Scalar')",
+      "((572416, 1024, 1), (572416, 1024, 1), ())",
+      "('', '', 'False')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::pow",
+      "((16, 559, 1024), ())",
+      "('float', 'Scalar')",
+      "((572416, 1024, 1), ())",
+      "('', '2')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::mean",
+      "((16, 559, 1024), (), (), ())",
+      "('float', 'ScalarList', 'Scalar', '')",
+      "((572416, 1024, 1), (), (), ())",
+      "('', '[-1]', 'True', '')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::add",
+      "((16, 559, 1), (), ())",
+      "('float', 'double', 'Scalar')",
+      "((559, 1, 1), (), ())",
+      "('', '', '1')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::rsqrt",
+      "((16, 559, 1),)",
+      "('float',)",
+      "((559, 1, 1),)",
+      "('',)",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::mul",
+      "((16, 559, 1024), (16, 559, 1))",
+      "('float', 'float')",
+      "((572416, 1024, 1), (559, 1, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::copy_",
+      "((16, 559, 1024), (16, 559, 1024), ())",
+      "('c10::BFloat16', 'float', 'Scalar')",
+      "((572416, 1024, 1), (572416, 1024, 1), ())",
+      "('', '', 'False')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::mul",
+      "((1024,), (16, 559, 1024))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((1,), (572416, 1024, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ]
+    ],
+    "operation": "Qwen2RMSNorm",
+    "rows": [
+     {
+      "args": "(16,559,1024) fp32<br>(16,559,1024) bf16",
+      "bound": "memory-bound",
+      "count": 49,
+      "efficiency": "48.23% of 5.3 TB/s",
+      "flops_per_byte": "0.17",
+      "kernel_name": "void at::native::elementwise_kernel<512, 1, at::native::gpu_kernel_impl<at:...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
+      "operation": "aten::copy_",
+      "pct_e2e": "3.19",
+      "time_ms": "1.055"
+     },
+     {
+      "args": "(16,559,1024) fp32",
+      "bound": "memory-bound",
+      "count": 49,
+      "efficiency": "73.38% of 5.3 TB/s",
+      "flops_per_byte": "0.12",
+      "kernel_name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous na...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
+      "operation": "aten::pow",
+      "pct_e2e": "2.80",
+      "time_ms": "0.928"
+     },
+     {
+      "args": "(16,559,1024) fp32<br>() ScalarList",
+      "bound": "memory-bound",
+      "count": 49,
+      "efficiency": "55.13% of 5.3 TB/s",
+      "flops_per_byte": "0.25",
+      "kernel_name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::nati...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
+      "operation": "aten::mean",
+      "pct_e2e": "1.87",
+      "time_ms": "0.619"
+     },
+     {
+      "args": "(16,559,1) fp32<br>() fp64",
+      "bound": "memory-bound",
+      "count": 49,
+      "efficiency": "0.31% of 5.3 TB/s",
+      "flops_per_byte": "0.12",
+      "kernel_name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOn...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
+      "operation": "aten::add",
+      "pct_e2e": "0.67",
+      "time_ms": "0.223"
+     },
+     {
+      "args": "(16,559,1) fp32",
+      "bound": "memory-bound",
+      "count": 49,
+      "efficiency": "0.32% of 5.3 TB/s",
+      "flops_per_byte": "0.12",
+      "kernel_name": "void at::native::vectorized_elementwise_kernel<4, at::native::rsqrt_kernel_...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
+      "operation": "aten::rsqrt",
+      "pct_e2e": "0.65",
+      "time_ms": "0.215"
+     },
+     {
+      "args": "(16,559,1024) fp32<br>(16,559,1) fp32",
+      "bound": "memory-bound",
+      "count": 49,
+      "efficiency": "59.03% of 5.3 TB/s",
+      "flops_per_byte": "0.12",
+      "kernel_name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_k...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
+      "operation": "aten::mul",
+      "pct_e2e": "3.48",
+      "time_ms": "1.154"
+     },
+     {
+      "args": "(16,559,1024) bf16<br>(16,559,1024) fp32",
+      "bound": "memory-bound",
+      "count": 49,
+      "efficiency": "74.89% of 5.3 TB/s",
+      "flops_per_byte": "0.17",
+      "kernel_name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
+      "operation": "aten::copy_",
+      "pct_e2e": "2.06",
+      "time_ms": "0.681"
+     },
+     {
+      "args": "(1024,) bf16<br>(16,559,1024) bf16",
+      "bound": "memory-bound",
+      "count": 49,
+      "efficiency": "42.70% of 5.3 TB/s",
+      "flops_per_byte": "0.25",
+      "kernel_name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_k...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
+      "operation": "aten::mul",
+      "pct_e2e": "2.41",
+      "time_ms": "0.797"
+     }
+    ],
+    "time_ms": 5.674,
+    "type": "kernel_fusion"
+   },
+   {
+    "bound_type": "memory",
+    "category": "kernel_fusion",
+    "confidence": "high",
+    "estimation": "partial",
+    "fusion_type": "memory_bound",
+    "impact_score": 7.78,
+    "impact_score_high": 8.89,
+    "impact_score_low": 6.67,
+    "instance_count": 24,
+    "kernel_count": 10,
+    "modeled_kernel_count": 8,
+    "op_keys": [
+     [
+      "aten::mul",
+      "((16, 16, 559, 64), (1, 1, 559, 64))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((572416, 64, 1024, 1), (35776, 35776, 64, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::neg",
+      "((16, 16, 559, 32),)",
+      "('c10::BFloat16',)",
+      "((572416, 64, 1024, 1),)",
+      "('',)",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::cat",
+      "(((16, 16, 559, 32), (16, 16, 559, 32)), ())",
+      "('TensorList', 'Scalar')",
+      "(((286208, 32, 512, 1), (572416, 64, 1024, 1)), ())",
+      "('', '-1')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::mul",
+      "((16, 16, 559, 64), (1, 1, 559, 64))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((572416, 35776, 64, 1), (35776, 35776, 64, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::add",
+      "((16, 16, 559, 64), (16, 16, 559, 64), ())",
+      "('c10::BFloat16', 'c10::BFloat16', 'Scalar')",
+      "((572416, 64, 1024, 1), (572416, 35776, 64, 1), ())",
+      "('', '', '1')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ]
+    ],
+    "operation": "transformers/models/qwen2/modeling_qwen2.py(68): apply_rotary_pos_emb",
+    "rows": [
+     {
+      "args": "(16,16,559,64) bf16<br>(1,1,559,64) bf16",
+      "bound": "memory-bound",
+      "count": 48,
+      "efficiency": "34.91% of 5.3 TB/s",
+      "flops_per_byte": "0.25",
+      "kernel_name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_k...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(68): apply_rotary_pos_emb",
+      "operation": "aten::mul",
+      "pct_e2e": "2.88",
+      "time_ms": "0.955"
+     },
+     {
+      "args": "(16,16,559,32) bf16",
+      "bound": "memory-bound",
+      "count": 48,
+      "efficiency": "32.24% of 5.3 TB/s",
+      "flops_per_byte": "0.25",
+      "kernel_name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_k...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(61): rotate_half",
+      "operation": "aten::neg",
+      "pct_e2e": "1.56",
+      "time_ms": "0.517"
+     },
+     {
+      "args": "((16, 16, 559, 32),(16, 16, 559, 32)) TensorList",
+      "bound": "\u2014",
+      "count": 48,
+      "efficiency": "\u2014",
+      "flops_per_byte": "\u2014",
+      "kernel_name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(an...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(61): rotate_half",
+      "operation": "aten::cat",
+      "pct_e2e": "4.07",
+      "time_ms": "1.350"
+     },
+     {
+      "args": "(16,16,559,64) bf16<br>(1,1,559,64) bf16",
+      "bound": "memory-bound",
+      "count": 48,
+      "efficiency": "46.34% of 5.3 TB/s",
+      "flops_per_byte": "0.25",
+      "kernel_name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_k...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(68): apply_rotary_pos_emb",
+      "operation": "aten::mul",
+      "pct_e2e": "2.17",
+      "time_ms": "0.718"
+     },
+     {
+      "args": "(16,16,559,64) bf16<br>(16,16,559,64) bf16",
+      "bound": "memory-bound",
+      "count": 48,
+      "efficiency": "50.74% of 5.3 TB/s",
+      "flops_per_byte": "0.17",
+      "kernel_name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_k...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(68): apply_rotary_pos_emb",
+      "operation": "aten::add",
+      "pct_e2e": "2.97",
+      "time_ms": "0.983"
+     }
+    ],
+    "time_ms": 4.523,
+    "type": "kernel_fusion",
+    "warning": "2 of 10 kernels lack perf models; savings estimate uses trace time for unmodeled kernels"
+   },
+   {
+    "bound_type": "memory",
+    "category": "kernel_fusion",
+    "confidence": "high",
+    "estimation": "full",
+    "fusion_type": "memory_bound",
+    "impact_score": 6.51,
+    "impact_score_high": 7.44,
+    "impact_score_low": 5.58,
+    "instance_count": 24,
+    "kernel_count": 6,
+    "modeled_kernel_count": 6,
+    "op_keys": [
+     [
+      "aten::mul",
+      "((16, 16, 559, 64), (1, 1, 559, 64))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((572416, 64, 1024, 1), (35776, 35776, 64, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::mul",
+      "((16, 16, 559, 64), (1, 1, 559, 64))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((572416, 35776, 64, 1), (35776, 35776, 64, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::add",
+      "((16, 16, 559, 64), (16, 16, 559, 64), ())",
+      "('c10::BFloat16', 'c10::BFloat16', 'Scalar')",
+      "((572416, 64, 1024, 1), (572416, 35776, 64, 1), ())",
+      "('', '', '1')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ]
+    ],
+    "operation": "transformers/models/qwen2/modeling_qwen2.py(68): apply_rotary_pos_emb",
+    "rows": [
+     {
+      "args": "(16,16,559,64) bf16<br>(1,1,559,64) bf16",
+      "bound": "memory-bound",
+      "count": 48,
+      "efficiency": "34.91% of 5.3 TB/s",
+      "flops_per_byte": "0.25",
+      "kernel_name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_k...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(68): apply_rotary_pos_emb",
+      "operation": "aten::mul",
+      "pct_e2e": "2.88",
+      "time_ms": "0.955"
+     },
+     {
+      "args": "(16,16,559,64) bf16<br>(1,1,559,64) bf16",
+      "bound": "memory-bound",
+      "count": 48,
+      "efficiency": "46.34% of 5.3 TB/s",
+      "flops_per_byte": "0.25",
+      "kernel_name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_k...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(68): apply_rotary_pos_emb",
+      "operation": "aten::mul",
+      "pct_e2e": "2.17",
+      "time_ms": "0.718"
+     },
+     {
+      "args": "(16,16,559,64) bf16<br>(16,16,559,64) bf16",
+      "bound": "memory-bound",
+      "count": 48,
+      "efficiency": "50.74% of 5.3 TB/s",
+      "flops_per_byte": "0.17",
+      "kernel_name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_k...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(68): apply_rotary_pos_emb",
+      "operation": "aten::add",
+      "pct_e2e": "2.97",
+      "time_ms": "0.983"
+     }
+    ],
+    "time_ms": 2.656,
+    "type": "kernel_fusion"
+   },
+   {
+    "bound_type": "memory",
+    "category": "kernel_fusion",
+    "confidence": "medium",
+    "estimation": "full",
+    "fusion_type": "memory_bound",
+    "impact_score": 5.36,
+    "impact_score_high": 6.12,
+    "impact_score_low": 4.59,
+    "instance_count": 49,
+    "kernel_count": 3,
+    "modeled_kernel_count": 3,
+    "op_keys": [
+     [
+      "aten::add",
+      "((16, 559, 1), (), ())",
+      "('float', 'double', 'Scalar')",
+      "((559, 1, 1), (), ())",
+      "('', '', '1')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::mul",
+      "((16, 559, 1024), (16, 559, 1))",
+      "('float', 'float')",
+      "((572416, 1024, 1), (559, 1, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::mul",
+      "((1024,), (16, 559, 1024))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((1,), (572416, 1024, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ]
+    ],
+    "operation": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
+    "rows": [
+     {
+      "args": "(16,559,1) fp32<br>() fp64",
+      "bound": "memory-bound",
+      "count": 49,
+      "efficiency": "0.31% of 5.3 TB/s",
+      "flops_per_byte": "0.12",
+      "kernel_name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOn...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
+      "operation": "aten::add",
+      "pct_e2e": "0.67",
+      "time_ms": "0.223"
+     },
+     {
+      "args": "(16,559,1024) fp32<br>(16,559,1) fp32",
+      "bound": "memory-bound",
+      "count": 49,
+      "efficiency": "59.03% of 5.3 TB/s",
+      "flops_per_byte": "0.12",
+      "kernel_name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_k...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
+      "operation": "aten::mul",
+      "pct_e2e": "3.48",
+      "time_ms": "1.154"
+     },
+     {
+      "args": "(1024,) bf16<br>(16,559,1024) bf16",
+      "bound": "memory-bound",
+      "count": 49,
+      "efficiency": "42.70% of 5.3 TB/s",
+      "flops_per_byte": "0.25",
+      "kernel_name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_k...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
+      "operation": "aten::mul",
+      "pct_e2e": "2.41",
+      "time_ms": "0.797"
+     }
+    ],
+    "time_ms": 2.175,
+    "type": "kernel_fusion"
+   },
+   {
+    "bound_type": "compute",
+    "category": "kernel_fusion",
+    "confidence": "high",
+    "estimation": "full",
+    "fusion_type": "matrix_compute",
+    "impact_score": 4.37,
+    "impact_score_high": 4.99,
+    "impact_score_low": 3.74,
+    "instance_count": 24,
+    "kernel_count": 5,
+    "modeled_kernel_count": 5,
+    "op_keys": [
+     [
+      "aten::mm",
+      "((8944, 1024), (1024, 2816))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((1024, 1), (1, 1024))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::silu",
+      "((16, 559, 2816),)",
+      "('c10::BFloat16',)",
+      "((1574144, 2816, 1),)",
+      "('',)",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::mul",
+      "((16, 559, 2816), (16, 559, 2816))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((1574144, 2816, 1), (1574144, 2816, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ],
+     [
+      "aten::mm",
+      "((8944, 2816), (2816, 1024))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((2816, 1), (1, 2816))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 23232 (python3)"
+     ]
+    ],
+    "operation": "Qwen2MLP",
+    "rows": [
+     {
+      "args": "(8944,1024) bf16<br>(1024,2816) bf16",
+      "bound": "compute-bound",
+      "count": 48,
+      "efficiency": "65.94% of 708 TFLOPS",
+      "flops_per_byte": "692.77",
+      "kernel_name": "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT128x224x64_MI16x16x1_SN_LDS...",
+      "kernel_path": "torch/nn/modules/linear.py(124): forward",
+      "operation": "aten::mm",
+      "pct_e2e": "16.02",
+      "time_ms": "5.308"
+     },
+     {
+      "args": "(16,559,2816) bf16",
+      "bound": "memory-bound",
+      "count": 24,
+      "efficiency": "58.70% of 5.3 TB/s",
+      "flops_per_byte": "0.25",
+      "kernel_name": "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous na...",
+      "kernel_path": "torch/nn/functional.py(2358): silu",
+      "operation": "aten::silu",
+      "pct_e2e": "2.35",
+      "time_ms": "0.778"
+     },
+     {
+      "args": "(16,559,2816) bf16<br>(16,559,2816) bf16",
+      "bound": "memory-bound",
+      "count": 24,
+      "efficiency": "75.40% of 5.3 TB/s",
+      "flops_per_byte": "0.17",
+      "kernel_name": "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor...",
+      "kernel_path": "transformers/models/qwen2/modeling_qwen2.py(56): forward",
+      "operation": "aten::mul",
+      "pct_e2e": "2.74",
+      "time_ms": "0.909"
+     },
+     {
+      "args": "(8944,2816) bf16<br>(2816,1024) bf16",
+      "bound": "compute-bound",
+      "count": 24,
+      "efficiency": "73.71% of 708 TFLOPS",
+      "flops_per_byte": "692.77",
+      "kernel_name": "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x64_MI16x16x1_SN_LDS...",
+      "kernel_path": "torch/nn/modules/linear.py(124): forward",
+      "operation": "aten::mm",
+      "pct_e2e": "7.17",
+      "time_ms": "2.375"
+     }
+    ],
+    "time_ms": 9.37,
+    "type": "kernel_fusion"
+   }
+  ],
+  "peak_hbm_bw_tbs": 5.3,
+  "platform": "MI300X",
+  "status": "OK",
+  "total_impact_score": 37.9,
+  "total_time_ms": 26.954,
+  "warnings": [
+   "2 of 10 kernels lack perf models; savings estimate uses trace time for unmodeled kernels"
+  ]
+ },
+ "sha256": {
+  "category_data/category_manifest.json": "202e621ad07677d616d5adcbd3690408d1f60a721746037d287e89b9acf9a4e3",
+  "category_data/cpu_idle_metrics.json": "7b9743c6428a527e78434ede2fd5b6c774f3d190618701bf39d242c3ec9f4f31",
+  "category_data/cpu_idle_ops.csv": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+  "category_data/elementwise_metrics.json": "d40cd9ead6d9496610b1625b31940a2a46fe3d370135b7cf6ec62f05e35ad277",
+  "category_data/elementwise_ops.csv": "b1c13ebaf5d712868a0b9f680dcb2d281d6cae30f9d05482dbb8faa1bd498b7f",
+  "category_data/fusion_candidates.json": "d7afef460164800f93d2e30ae005bfec397d96ad5231e41f91077d4378ce16bd",
+  "category_data/gemm_metrics.json": "73b469da7366e796c515fc5dadf69d5d2eeb01fee6e9362746e5116f96390e56",
+  "category_data/gemm_ops.csv": "056839f754ca37969289ef5d0cc3667248b7bf87771dd5498a090e63590606d0",
+  "category_data/kernel_fusion_metrics.json": "25318719a932e43379e32a86e46bcfcdef4a9b8da6a50fbdaa133f30a512b7c7",
+  "category_data/multi_kernel_data.json": "a4ce12c3aa3cdd44c908696aadf05f112ca6995e0bcc18be7301a8621eb2653a",
+  "category_data/multi_kernel_metrics.json": "1a91fb0a3219016972d21139c3759865d8d44c221a4f422b5c80308ce31ebfe3",
+  "category_data/other_metrics.json": "b2b497792f7ee864ac23b653581b47b13c02508f1808b5b70aaf77a5d02e0fe9",
+  "category_data/other_ops.csv": "aa5d3d241646f6af27a9c993cac1f139c2f58129eded2daae38a16e4c129b4d2",
+  "category_data/reduce_metrics.json": "f212cf16cbc6773b9305f25147075142078b7011a6eb168711e5f4c623815546",
+  "category_data/reduce_ops.csv": "efd2ba467fd4eeef45337b6a997cc30a9a60b79d763a97f81aa3033716cd00ec",
+  "category_data/sdpa_fwd_metrics.json": "7a0b0caa564aeef996a89563149ebce0372a02ee70f624a9d65e9c8f653b649f",
+  "category_data/sdpa_fwd_ops.csv": "2db87b465b271ebb446dca69b55acad6fb32dfcf2e791140913283ec734fede3",
+  "metadata/cpu_idle_metadata.json": "dbfe6232d2ba278b19d24b1c1bce3dc9e421ebba2bfa236fad6efbe74ba8b23d",
+  "metadata/elementwise_metadata.json": "69c7382709161c778d62d61ea3f5350ce113c516e8d2731af78ba7ad958263ab",
+  "metadata/gemm_metadata.json": "276830705ade18e3731ac429c29e8f68b24b78f180b2201a35d6028af6e0f5f7",
+  "metadata/model_info.json": "a66c9fe46bc863c6965435b09822d1e28d8a6f321bacb94d39466c4e4dcd95d8",
+  "metadata/multi_kernel_metadata.json": "fb4ea766bab8fe293d9e668156c8cee6e465dfb932d96abe978db0046c4b86b5",
+  "metadata/other_metadata.json": "46179dcab3130d80585e14b42110c5bf4aa530b194c9c309d95d6dd30b4027e5",
+  "metadata/reduce_metadata.json": "c0d5e7c70540faa70e3afb7a4f954900a18fba1760840b7b0e157f3d0867c6c6",
+  "metadata/sdpa_fwd_metadata.json": "9e6194854b7ccf0ec9c262c35a4a6ce4ebbebdb1922700279a1ce151aeb3260c",
+  "priority_data.json": "1fa0010f6892f554c713eca947fb87b8d9c8462d3a521d1acee6c4cc07fec94a"
+ }
+}

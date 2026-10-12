@@ -29,9 +29,11 @@ from pathlib import Path
 from types import ModuleType
 from typing import Dict, List
 from TraceLens.Agent.Analysis.utils.classify_kernels import (
-    MIN_CONFIDENCE,
+    KERNEL_TYPE_RULES,
+    KERNEL_TYPES,
+    PRIMITIVES,
+    TAXONOMY,
     classify_kernel,
-    get_perf_category,
     run_assertions,
 )
 from TraceLens.Agent.Analysis.category_analyses.kernel_fusion_analysis import (
@@ -146,105 +148,249 @@ _MM_KEY = ["aten::mm", "((16, 64), (64, 8))", "('bf16', 'bf16')", "z"] + [""] * 
 _ADD_KEY = ["aten::add", "((16, 8), (16, 8))", "('bf16', 'bf16')", "z"] + [""] * 4
 
 
-# ----- classify_kernel: representative rule hits -----
+# ----- KernelTaxonomy / classify_kernel -----
 
 
 @pytest.mark.parametrize(
-    "name,expected_type,expected_cat",
+    "name,expected_type,expected_cat,expected_covers",
     [
-        ("memcpy_dtoh", "MemCpy", "MemCpy"),
-        ("Cijk_Alik_Bljk", "GEMM", "GEMM"),
-        ("rmsnorm2d", "RMSNorm", "Others"),
-        ("rotary_embed", "Rotary Embedding", "Elementwise"),
-        ("vectorized_elementwise_kernel FillFunctor", "Elementwise", "Elementwise"),
+        ("Memcpy HtoD (Host -> Device)", "MemCpy", "MemCpy", ("pointwise",)),
+        ("nvjet_tst_64x152_64x7_2x1_v_bz_NNT", "GEMM", "GEMM", ("gemm",)),
+        (
+            "_matmul_ogs_NNT_bf16xbf16xmxfp4_16x128x256x1_swiglu",
+            "MoE GateUp+SwiGLU GEMM",
+            "GEMM-MoE",
+            ("moe_gemm", "act", "mul"),
+        ),
+        (
+            "_ZN7ck_tile6kentryILi1ENS_12Rmsnorm2dFwdINS_27Rmsnorm2dFwdPipelineOnePassINS_27Rmsnorm2dFwdPipelineProblemIDF16bDF16bfDF16bDF16bDF16bffNS_19Generic2dBlockShapeINS_8sequenceIJLi1ELi3072EEEENS5_IJLi1ELi128EEEENS5_IJLi1ELi8EEEEEENS_18Rmsnorm2dFwdTraitsILb1ELb0ELb0ELb0ELNS_21Rmsnorm2dFusedAddEnumE0ELNS_23Rmsnorm2dFusedQuantEnumE0ELNS_22Rmsnorm2dSensitiveEnumE0EEEEENS_33Rmsnorm2dFwdPipelineDefaultPolicyEEENS_17Default2DEpilogueINS_24Default2DEpilogueProblemIfDF16bLb0ELb1ELb0EEEvEEEEJNSM_5KargsEEEEvDpT1_",
+            "RMSNorm",
+            "Normalization",
+            ("norm",),
+        ),
+        (
+            "_ZN7ck_tile6kentryILi1ENS_12Rmsnorm2dFwdINS_27Rmsnorm2dFwdPipelineOnePassINS_27Rmsnorm2dFwdPipelineProblemIDF16bDF16bfDF16bDF16bDF16bffNS_19Generic2dBlockShapeINS_8sequenceIJLi1ELi3072EEEENS5_IJLi1ELi128EEEENS5_IJLi1ELi8EEEEEENS_18Rmsnorm2dFwdTraitsILb1ELb0ELb0ELb0ELNS_21Rmsnorm2dFusedAddEnumE1ELNS_23Rmsnorm2dFusedQuantEnumE0ELNS_22Rmsnorm2dSensitiveEnumE0EEEEENS_33Rmsnorm2dFwdPipelineDefaultPolicyEEENS_17Default2DEpilogueINS_24Default2DEpilogueProblemIfDF16bLb0ELb1ELb0EEEvEEEEJNSM_5KargsEEEEvDpT1_",
+            "Add+RMSNorm",
+            "Normalization",
+            ("add", "norm"),
+        ),
+        (
+            "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi64ELi8ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib",
+            "Add+RMSNorm+Quant",
+            "Normalization",
+            ("add", "norm", "quant"),
+        ),
+        (
+            "_fused_rms_mxfp4_quant_kernel",
+            "RMSNorm+Quant",
+            "Normalization",
+            ("norm", "quant"),
+        ),
+        (
+            "void aiter::local_device_load_rmsnorm<std::bfloat16_t, 512, 2>(aiter::RankSignals, std::bfloat16_t*, std::bfloat16_t*, std::bfloat16_t*, std::bfloat16_t*, float, int, int, int, int)",
+            "AllReduce+RMSNorm",
+            "Normalization",
+            ("collective", "norm"),
+        ),
+        (
+            "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<c10::BFloat16, float>(int, float, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, float*, float*, c10::BFloat16*)",
+            "LayerNorm",
+            "Normalization",
+            ("norm",),
+        ),
+        (
+            "void at::native::batch_norm_collect_statistics_kernel<at::native::Var, c10::BFloat16, c10::BFloat16, float, int>(at::GenericPackedTensorAccessor<c10::BFloat16 const, 3ul, at::RestrictPtrTraits, int>, float, float, at::GenericPackedTensorAccessor<float, 1ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<float, 1ul, at::RestrictPtrTraits, int>)",
+            "BatchNorm",
+            "Normalization",
+            ("batchnorm",),
+        ),
+        ("attn_fwd", "Attention (flash)", "SDPA", ("gemm", "softmax", "gemm")),
+        (
+            "aiter::mla_a8w8_qh64_qseqlen1_gqaratio64_v3_ps",
+            "Attention (MLA)",
+            "SDPA",
+            ("gemm", "softmax", "gemm"),
+        ),
+        (
+            "_ZN5aiter49fuse_qk_rope_concat_and_cache_mla_per_head_kernelIDF16bDB8_S1_LN4vllm18Fp8KVCacheDataTypeE1ELS3_1ELi8EEEvPKT_S6_S6_S6_PT0_PT1_PKlSC_S6_S6_iiiiiiiiiiiiiiPKfSE_bb",
+            "RoPE+KV Store",
+            "Elementwise",
+            ("rope", "kv_store"),
+        ),
+        (
+            "void aiter::grouped_topk_opt_sort_kernel<c10::BFloat16, float __vector(4), 8, true, true, false>(c10::BFloat16*, c10::BFloat16 const*, float*, int*, unsigned long, int, int, int, int, float)",
+            "TopK",
+            "Elementwise",
+            ("topk",),
+        ),
+        (
+            "_ZN7sgl_hip10activation18act_and_mul_kernelI14__hip_bfloat16TnPFT_RKS3_EXadL_Z4siluIS2_ES3_S5_EEEEvPS3_PS4_i",
+            "Act+Mul",
+            "Elementwise",
+            ("act", "mul"),
+        ),
+        (
+            "void vllm::rotary_embedding_kernel<c10::BFloat16, true>(long const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16 const*, int, long, long, long, int, int, int)",
+            "Rotary Embedding",
+            "Elementwise",
+            ("rope",),
+        ),
+        (
+            "void aiter::allgather_lastdim<std::bfloat16_t, 2>(aiter::RankData*, aiter::RankSignals, aiter::Signal*, std::bfloat16_t*, int, int, int)",
+            "Collective",
+            "Communication",
+            ("collective",),
+        ),
+        (
+            "void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat16, float, c10::BFloat16, at::native::(anonymous namespace)::SoftMaxForwardEpilogue, long, 6>(c10::BFloat16*, c10::BFloat16 const*, long)",
+            "Softmax",
+            "Elementwise",
+            ("softmax",),
+        ),
+        (
+            "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::ArgMaxOps<float>, unsigned int, long, 4, 4> >(at::native::ReduceOp<float, at::native::ArgMaxOps<float>, unsigned int, long, 4, 4>)",
+            "Reduce",
+            "Elementwise",
+            ("reduce",),
+        ),
+        (
+            "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul>)",
+            "Add",
+            "Elementwise",
+            ("add",),
+        ),
+        (
+            "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 3ul> >(int, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 3ul>)",
+            "Mul",
+            "Elementwise",
+            ("mul",),
+        ),
+        (
+            "batched_transpose_4x64_half",
+            "LayoutTransform",
+            "Elementwise",
+            ("pointwise",),
+        ),
+        (
+            "_ZN2ck16tensor_operation6device12_GLOBAL__N_139kernel_grouped_conv_fwd_xdl_cshuffle_v3INS_28GridwiseGemm_xdl_cshuffle_v3INS_13tensor_layout4gemm8RowMajorENS6_11ColumnMajorES7_ttfttNS0_12element_wise11PassThroughESA_SA_LNS1_18GemmSpecializationE7ELi256ELi64ELi64ELi64ELi8ELi8ELi32ELi32ELi1ELi1ENS_8SequenceIJLi8ELi32ELi1EEEENSC_IJLi1ELi0ELi2EEEESE_Li2ELi8ELi8ELb0ELi0ESD_SE_SE_Li2ELi8ELi8ELb0ELi0ELi1ELi1ENSC_IJLi1ELi32ELi1ELi8EEEELi8ELNS_26BlockGemmPipelineSchedulerE0ELNS_24BlockGemmPipelineVersionE2EttLb0ELb0EEENS_16TensorDescriptorINS_5TupleIJNS_5EmbedINSK_IJiiiiEEESM_Lb0EEENS_11PassThroughIiEENS_3PadIiiiLb0EEESR_SP_SP_NSL_INSK_IJiiEEESS_Lb0EEEST_SP_NS_23Merge_v2_magic_divisionINSK_IJiiiEEEEESW_NS_8RightPadIiiLb0EEESY_NS_7UnMergeISS_Lb0EEESP_EEENSK_IJNSC_IJLi0EEEENSC_IJLi1EEEENSC_IJLi2EEEENSC_IJLi3EEEENSC_IJLi4EEEENSC_IJLi5EEEENSC_IJLi6EEEENSC_IJLi7EEEENSC_IJLi8EEEENSC_IJLi9ELi11ELi13EEEENSC_IJLi10ELi12ELi14EEEENSC_IJLi15EEEENSC_IJLi16EEEENSC_IJLi18EEEENSC_IJLi17EEEEEEENSK_IJNSC_IJLi1ELi2ELi3ELi4EEEES17_S18_S19_S1A_NSC_IJLi9EEEENSC_IJLi10ELi11EEEENSC_IJLi12ELi13EEEENSC_IJLi14EEEES1D_S1E_S1G_S1F_NSC_IJLi19ELi20EEEENSC_IJLi21EEEEEEENSC_IJLi19ELi21ELi20EEEElEENSJ_INSK_IJS10_SY_SY_S10_SP_EEENSK_IJS12_S13_S14_S16_S15_EEENSK_IJNSC_IJLi1ELi2EEEES15_S16_NSC_IJLi5ELi6EEEES19_EEENSC_IJLi5ELi7ELi6EEEElEENSJ_INSK_IJST_SY_SY_NSZ_INSK_IJiNS_17integral_constantIiLi64EEEEEELb0EEES22_EEENSK_IJS12_S13_S14_S15_S16_EEENSK_IJS1U_S15_S16_S1V_NSC_IJLi7ELi8EEEEEEENSC_IJLi5ELi6ELi7ELi8EEEElEENS1_30ComputePtrOffsetOfStridedBatchILi1ELi1ELi0EvEELb1ELNS_25InMemoryDataOperationEnumE0ELi1ELNS_10TailNumberE10EEEvNT_8ArgumentET0_T1_T2_T3_S2I_i",
+            "Convolution",
+            "Convolution",
+            ("gemm",),
+        ),
+        (
+            "igemm_bwd_gtcx3_nhwc_bf16_bx0_ex1_bt128x128x32_wt32x32x8_ws1x1_wr2x2_ta1x8x2x1_1x4x1x64_tb1x8x1x2_1x4x1x64_mh_gkgs",
+            "Convolution",
+            "Convolution",
+            ("gemm",),
+        ),
+        (
+            "void (anonymous namespace)::multimem_all_reduce_kernel<c10::BFloat16, 16>(c10::BFloat16*, unsigned long, unsigned int**, unsigned long, unsigned long)",
+            "Unknown",
+            "Others",
+            (),
+        ),
+        ("triton_poi_fused_0", "Compiled", "Elementwise", ("pointwise", "reduce")),
+        ("__amd_rocclr_copyBuffer", "Elementwise", "Elementwise", ("pointwise",)),
+        (
+            "ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsStorage<4096ul>)",
+            "Unknown",
+            "Others",
+            (),
+        ),
+        (
+            "kernel_paged_attention_2d",
+            "Attention (AMD unified)",
+            "SDPA",
+            ("gemm", "softmax", "gemm"),
+        ),
+        ("_causal_conv1d_update_kernel", "Causal Conv1D", "SDPA", ("pointwise",)),
     ],
 )
-def test_classify_kernel_representative(name, expected_type, expected_cat):
-    ktype, perf_cat, conf = classify_kernel(name)
-    assert ktype == expected_type
-    assert perf_cat == expected_cat
-    assert conf >= MIN_CONFIDENCE
+def test_taxonomy_classify(name, expected_type, expected_cat, expected_covers):
+    kernel = TAXONOMY.classify(name)
+    assert (kernel.type, kernel.perf_category, kernel.covers) == (
+        expected_type,
+        expected_cat,
+        expected_covers,
+    )
 
 
-def test_classify_kernel_priority_tiebreak():
-    """A name matching both a high-prio (Cijk_, 12) and low-prio (gemm, 5) rule
-    resolves to the higher-priority kernel_type and reports that priority."""
-    ktype, _, conf = classify_kernel("Cijk_gemm_kernel")
-    assert ktype == "GEMM"
-    assert conf == 12
+def test_classify_kernel_reports_winning_priority():
+    """A cudnn SDPA kernel also matches the convolution rule (fprop, 6); the
+    flash-attention rule (20) wins and its priority is the reported confidence."""
+    assert classify_kernel(
+        "cudnn_generated_fort_native_sdpa_sm90_flash_fprop_wgmma_f16_knob_7_64x128x128_4x1x1_kernel0_0"
+    ) == ("Attention (flash)", "SDPA", 20)
 
 
-def test_classify_kernel_no_match_is_unknown():
-    assert classify_kernel("zzz_totally_unrecognized") == ("Unknown", "Others", 0)
+def test_taxonomy_types_closed_over_primitives():
+    assert {ktype for _, ktype, _ in KERNEL_TYPE_RULES} <= set(KERNEL_TYPES)
+    for kernel in TAXONOMY.types():
+        assert kernel.perf_category
+        assert set(kernel.covers) <= PRIMITIVES
+        assert TAXONOMY.by_type(kernel.type) == kernel
 
 
-def test_classify_kernel_low_priority_downgraded_to_unknown():
-    """A generic catch-all rule (quant, prio 4 < MIN_CONFIDENCE) is not confident
-    enough, so classify_kernel downgrades to Unknown/Others."""
-    assert MIN_CONFIDENCE == 5
-    ktype, perf_cat, conf = classify_kernel("myquantthing")
-    assert ktype == "Unknown"
-    assert perf_cat == "Others"
-    assert conf == 0
-
-
-# ----- get_perf_category -----
-
-
-def test_get_perf_category_known():
-    assert get_perf_category("Attention") == "SDPA"
-    assert get_perf_category("GEMM") == "GEMM"
-    assert get_perf_category("Unknown") == "Others"
-
-
-def test_get_perf_category_unmapped_defaults_to_others():
-    assert get_perf_category("NotARealType") == "Others"
+# covers and _is_matrix_op must agree on every kernel the baseline fusion findings
+# contain, or deriving the matrix check from covers would move a finding.
+@pytest.mark.parametrize(
+    "name",
+    [
+        "_matmul_ogs_NNT_bf16xbf16xmxfp4_16x128x256x1_swiglu",
+        "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x32_MI16x16x1_SN_LDSB1_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA2_GRVWB2_GSUAMB_GLS0_ISA942_IU1_K1_LBSPPA512_LBSPPB256_LBSPPM0_LPA4_LPB4_LPM0_LRVW4_LWPMn1_MIAV0_MIWT8_4_MO40_NTn1_NTA0_NTB0_NTC0_NTD0_NTM0_NEPBS16_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO0_SVW8_SK0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGROn1_VSn1_VWA8_VWB4_WSGRA0_WSGRB0_WS64_WG32_8_1",
+        "void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat16, float, c10::BFloat16, at::native::(anonymous namespace)::SoftMaxForwardEpilogue, long, 6>(c10::BFloat16*, c10::BFloat16 const*, long)",
+        "Cijk_Ailk_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT64x288x64_MI16x16x1_SN_LDSB1_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_ISA942_IU1_K1_LBSPPA1024_LBSPPB128_LBSPPM0_LPA32_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT2_9_MO40_NTn1_NTA0_NTB4_NTC0_NTD4_NTM0_NEPBS16_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO0_SVW2_SK0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGROn1_VSn1_VWA2_VWB1_WSGRA0_WSGRB0_WS64_WG32_8_1",
+        "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT128x224x64_MI16x16x1_SN_LDSB1_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_ISA942_IU1_K1_LBSPPA512_LBSPPB128_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT4_7_MO40_NTn1_NTA0_NTB0_NTC0_NTD0_NTM0_NEPBS16_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGROn1_VSn1_VWA4_VWB1_WSGRA0_WSGRB0_WS64_WG32_8_1",
+        "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)",
+        "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 3ul> >(int, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 3ul>)",
+        "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x64_MI16x16x1_SN_LDSB1_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_ISA942_IU1_K1_LBSPPA1024_LBSPPB512_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT8_4_MO40_NTn1_NTA0_NTB0_NTC0_NTD0_NTM0_NEPBS16_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO0_SVW8_SK0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGROn1_VSn1_VWA8_VWB4_WSGRA0_WSGRB0_WS64_WG32_8_1",
+        "void at::native::elementwise_kernel<512, 1, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
+        "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespace)::pow_tensor_scalar_kernel_impl<float, float>(at::TensorIteratorBase&, float)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::(anonymous namespace)::pow_tensor_scalar_kernel_impl<float, float>(at::TensorIteratorBase&, float)::{lambda(float)#1}, std::array<char*, 2ul>)",
+        "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::MeanOps<float, float, float, float>, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::MeanOps<float, float, float, float>, unsigned int, float, 4, 4>)",
+        "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnSelf_add<float>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<float>, std::array<char*, 2ul>)",
+        "void at::native::vectorized_elementwise_kernel<4, at::native::rsqrt_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::rsqrt_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>)",
+        "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int, bool)#1})",
+        "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+        "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int, bool)#1})",
+        "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::neg_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#9}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::neg_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#9}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::neg_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#9}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::neg_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#9}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int, bool)#1})",
+        "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 64, 64>(at::native::(anonymous namespace)::OpaqueType<2u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 64, 64>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+        "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<c10::BFloat16> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<c10::BFloat16> const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<c10::BFloat16> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<c10::BFloat16> const&)::{lambda(int, bool)#1})",
+        "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul>)",
+        "void at::native::batch_norm_collect_statistics_kernel<at::native::Var, c10::BFloat16, c10::BFloat16, float, int>(at::GenericPackedTensorAccessor<c10::BFloat16 const, 3ul, at::RestrictPtrTraits, int>, float, float, at::GenericPackedTensorAccessor<float, 1ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<float, 1ul, at::RestrictPtrTraits, int>)",
+        "void at::native::(anonymous namespace)::unrolled_elementwise_kernel_for_multi_outputs<3, at::native::(anonymous namespace)::batch_norm_update_stats_and_invert(at::Tensor const&, at::Tensor const&, at::Tensor const&, at::Tensor const&, double, double, long)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(float, float, c10::BFloat16, c10::BFloat16)#1}, std::array<char*, 7ul>, TrivialOffsetCalculator<4, unsigned int>, TrivialOffsetCalculator<3, unsigned int> >(int, at::native::(anonymous namespace)::batch_norm_update_stats_and_invert(at::Tensor const&, at::Tensor const&, at::Tensor const&, at::Tensor const&, double, double, long)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(float, float, c10::BFloat16, c10::BFloat16)#1}, std::array<char*, 7ul>, TrivialOffsetCalculator<4, unsigned int>, TrivialOffsetCalculator<3, unsigned int>)",
+        "void at::native::batch_norm_transform_input_kernel<c10::BFloat16, c10::BFloat16, float, true, int>(at::GenericPackedTensorAccessor<c10::BFloat16 const, 3ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<c10::BFloat16, 3ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<std::conditional<true, float, c10::BFloat16>::type, 1ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<std::conditional<true, float, c10::BFloat16>::type, 1ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<c10::BFloat16 const, 1ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<c10::BFloat16 const, 1ul, at::RestrictPtrTraits, int>, float)",
+    ],
+)
+def test_taxonomy_matrix_agrees_with_is_matrix_op(name):
+    kernel = TAXONOMY.classify(name)
+    assert kernel.type != "Unknown"
+    covers_matrix = bool({"gemm", "moe_gemm"} & set(kernel.covers))
+    assert covers_matrix is _is_matrix_op({"type": kernel.type})
 
 
 # ----- run_assertions -----
 
 
-def _classified(name, ktype, confidence, index=0):
+def _classified(name, ktype, index=0):
     return {
         "index": index,
         "name": name,
         "kernel_type": ktype,
-        "confidence": confidence,
     }
 
 
 def test_run_assertions_clean():
-    classified = [_classified("Cijk_x", "GEMM", 12, i) for i in range(5)]
+    classified = [_classified("Cijk_x", "GEMM", i) for i in range(5)]
     assert run_assertions(classified) == []
 
 
 def test_run_assertions_flags_unknown():
     classified = [
-        _classified("mystery", "Unknown", 0, 0),
-        _classified("Cijk_x", "GEMM", 12, 1),
+        _classified("mystery", "Unknown", 0),
+        _classified("Cijk_x", "GEMM", 1),
     ]
     errors = run_assertions(classified)
     assert any("Unknown" in e for e in errors)
-
-
-def test_run_assertions_flags_low_confidence_majority():
-    """> 20% of kernels with confidence <= 2 (and not Unknown) triggers a warning."""
-    classified = [
-        _classified("a", "Elementwise", 1, 0),
-        _classified("b", "Elementwise", 2, 1),
-        _classified("c", "GEMM", 12, 2),
-    ]
-    errors = run_assertions(classified)
-    assert any("low classification confidence" in e for e in errors)
-
-
-def test_run_assertions_low_confidence_below_threshold_no_warning():
-    """A single low-confidence kernel (< 20% of total) does not warn."""
-    classified = [_classified("a", "Elementwise", 1, 0)] + [
-        _classified(f"g{i}", "GEMM", 12, i + 1) for i in range(9)
-    ]
-    errors = run_assertions(classified)
-    assert not any("low classification confidence" in e for e in errors)
 
 
 # ----- _classify_confidence -----

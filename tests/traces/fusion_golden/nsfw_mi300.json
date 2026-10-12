@@ -1,0 +1,121 @@
+{
+ "fusion_candidates": [
+  {
+   "base_name": "ViTIntermediate",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 12,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "GEMM",
+    "Elementwise"
+   ],
+   "module_name": "nn.Module: ViTIntermediate_0",
+   "total_kernel_time_us": 316.821
+  },
+  {
+   "base_name": "ViTOutput",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 12,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "GEMM",
+    "Add"
+   ],
+   "module_name": "nn.Module: ViTOutput_0",
+   "total_kernel_time_us": 316.385
+  },
+  {
+   "base_name": "ViTEmbeddings",
+   "eligible_kernel_count": 8,
+   "has_fused_kernel": false,
+   "instance_count": 1,
+   "kernel_count": 8,
+   "kernel_type_signature": [
+    "Unknown",
+    "LayoutTransform",
+    "LayoutTransform",
+    "Convolution",
+    "LayoutTransform",
+    "Add",
+    "Elementwise",
+    "Add"
+   ],
+   "module_name": "nn.Module: ViTEmbeddings_0",
+   "total_kernel_time_us": 71.156
+  },
+  {
+   "base_name": "Conv2d",
+   "eligible_kernel_count": 6,
+   "has_fused_kernel": false,
+   "instance_count": 1,
+   "kernel_count": 6,
+   "kernel_type_signature": [
+    "Unknown",
+    "LayoutTransform",
+    "LayoutTransform",
+    "Convolution",
+    "LayoutTransform",
+    "Add"
+   ],
+   "module_name": "nn.Module: Conv2d_0",
+   "total_kernel_time_us": 53.117000000000004
+  },
+  {
+   "base_name": "ViTPooler",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 1,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "GEMM",
+    "Elementwise"
+   ],
+   "module_name": "nn.Module: ViTPooler_0",
+   "total_kernel_time_us": 11.506
+  }
+ ],
+ "kernel_fusion_metrics": {
+  "baseline_ms": 6.86884912109375,
+  "candidate_count": 2,
+  "category": "kernel_fusion",
+  "estimated_count": 0,
+  "high_confidence_op_keys": [],
+  "impact_estimates": [],
+  "peak_hbm_bw_tbs": 5.3,
+  "platform": "MI300X",
+  "status": "OK",
+  "total_impact_score": 0,
+  "total_time_ms": 0.633
+ },
+ "sha256": {
+  "category_data/category_manifest.json": "774f3c44ef6481b9d3119a7b4081a7c6c32818a148b5a69b9a780a8d568d00dd",
+  "category_data/conv_fwd_metrics.json": "10c1e690e7fe6baebd660b068b10f258fe20c4c6fef838659fa61bf3819b07e2",
+  "category_data/conv_fwd_ops.csv": "830c54a439f545628df032287c3556004f01e3566ded885dafdee4979ab5ac22",
+  "category_data/cpu_idle_metrics.json": "c9047f8292b209c475f6393f6de8ac3e513d1a31d519f577153a6b7c5d4922cf",
+  "category_data/cpu_idle_ops.csv": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+  "category_data/elementwise_metrics.json": "484586b63a77744d8fed06df1b16811fe5060fecb2aa91638ecba8e1f213d7fe",
+  "category_data/elementwise_ops.csv": "a55bc4498482c2ccf6b40d985a5b1194f045a8d6269a5ad8889355ef656f3fd2",
+  "category_data/fusion_candidates.json": "dc0c96fee71a28bc1398861ea0aeba26c5926a44b11b68b0e2bc1ffd462b2e99",
+  "category_data/gemm_metrics.json": "56e394f37a22a0a7a3edf81cec67f3e09887c9fb01006001ccb897792202de66",
+  "category_data/gemm_ops.csv": "12c037dd76e13052e1b855e172c084ea5af8f20cff79ddc83c8bb41a2567c5d9",
+  "category_data/kernel_fusion_metrics.json": "1b3981a941453f02d2580271e0ae90f6ad319a378b943831d3baf511d284d26d",
+  "category_data/multi_kernel_data.json": "ca8935d7d2a76b622d41ce734ee8672c16c3d3553ce6e53260754687d964f1dc",
+  "category_data/norm_fwd_metrics.json": "9af95e6c26f9a8de5a01ae17acc31ff7e2e908b3d7dd1468d538c515fe9b0301",
+  "category_data/norm_fwd_ops.csv": "a6027a879b097d865e02856e2380fb162d4a5eefa0812bd445d4f12443197ed5",
+  "category_data/other_metrics.json": "4d31bdfaea9473497a9db192000ba9bdbd1765d37b41449860d377c76ad46490",
+  "category_data/other_ops.csv": "1fbbceb7c558c855e6677179bcd905ef960bd41ffe9d5448c94970089b4c971f",
+  "category_data/sdpa_fwd_metrics.json": "fb8b260b8c32cf82329ccf0559410bcf311fa89ca3295e99e7fd8d6aaf6e6080",
+  "category_data/sdpa_fwd_ops.csv": "f3b8492e7d0a10044916501434f5aa7e4c9f0e3543eab7f2fb3dda960875d2b4",
+  "metadata/conv_fwd_metadata.json": "702249ea3edcfc66f3f08682431bb2eedb254f66dc43837b77275f74c5a3cb6f",
+  "metadata/cpu_idle_metadata.json": "6a7730ab32b950a957ec2776a6c3d5279f21209923e7e3abd455e27176626b56",
+  "metadata/elementwise_metadata.json": "56d31df27a227500b6f380d608c793883b20285052cb9e78eca09022e91741d1",
+  "metadata/gemm_metadata.json": "bcee5be2b95c44e158a9ae3b295e480fecc89f04dcf69fc38298155e84176350",
+  "metadata/model_info.json": "a66c9fe46bc863c6965435b09822d1e28d8a6f321bacb94d39466c4e4dcd95d8",
+  "metadata/norm_fwd_metadata.json": "bdfc68a70a6063ab41d35c0d754572780352c271295ca1af91a60225b25faeaf",
+  "metadata/other_metadata.json": "3fc776443f7be760078afb8d9aaa6dd624f9bb19428f49904552397de7b0ed31",
+  "metadata/sdpa_fwd_metadata.json": "e33b2726a1d64dfc7ad8c558cca88941ad10f1822eb75f80206b09e1c8b412e8",
+  "priority_data.json": "e24cd68a21ee1520b4085fcec1a12807136f6ed977efa4c3cca958b93ea6b75b"
+ }
+}

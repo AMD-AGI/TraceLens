@@ -1,0 +1,178 @@
+{
+ "fusion_candidates": [
+  {
+   "base_name": "transformers/models/bert/modeling_bert.py(638): feed_forward_chunk",
+   "eligible_kernel_count": 5,
+   "has_fused_kernel": false,
+   "instance_count": 4,
+   "kernel_count": 5,
+   "kernel_type_signature": [
+    "GEMM",
+    "Elementwise",
+    "GEMM",
+    "Add",
+    "LayerNorm"
+   ],
+   "module_name": "transformers/models/bert/modeling_bert.py(638): feed_forward_chunk",
+   "total_kernel_time_us": 105.382
+  },
+  {
+   "base_name": "BertOutput",
+   "eligible_kernel_count": 3,
+   "has_fused_kernel": false,
+   "instance_count": 4,
+   "kernel_count": 3,
+   "kernel_type_signature": [
+    "GEMM",
+    "Add",
+    "LayerNorm"
+   ],
+   "module_name": "nn.Module: BertOutput_0",
+   "total_kernel_time_us": 52.95
+  },
+  {
+   "base_name": "BertIntermediate",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 4,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "GEMM",
+    "Elementwise"
+   ],
+   "module_name": "nn.Module: BertIntermediate_0",
+   "total_kernel_time_us": 52.432
+  },
+  {
+   "base_name": "BertSelfOutput",
+   "eligible_kernel_count": 3,
+   "has_fused_kernel": false,
+   "instance_count": 4,
+   "kernel_count": 3,
+   "kernel_type_signature": [
+    "GEMM",
+    "Add",
+    "LayerNorm"
+   ],
+   "module_name": "nn.Module: BertSelfOutput_0",
+   "total_kernel_time_us": 45.25
+  },
+  {
+   "base_name": "BertLMPredictionHead",
+   "eligible_kernel_count": 4,
+   "has_fused_kernel": false,
+   "instance_count": 1,
+   "kernel_count": 4,
+   "kernel_type_signature": [
+    "GEMM",
+    "Elementwise",
+    "LayerNorm",
+    "GEMM"
+   ],
+   "module_name": "nn.Module: BertLMPredictionHead_0",
+   "total_kernel_time_us": 37.921
+  },
+  {
+   "base_name": "BertEmbeddings",
+   "eligible_kernel_count": 6,
+   "has_fused_kernel": false,
+   "instance_count": 1,
+   "kernel_count": 6,
+   "kernel_type_signature": [
+    "Unknown",
+    "Unknown",
+    "Add",
+    "Unknown",
+    "Add",
+    "LayerNorm"
+   ],
+   "module_name": "nn.Module: BertEmbeddings_0",
+   "total_kernel_time_us": 18.075
+  },
+  {
+   "base_name": "BertPredictionHeadTransform",
+   "eligible_kernel_count": 3,
+   "has_fused_kernel": false,
+   "instance_count": 1,
+   "kernel_count": 3,
+   "kernel_type_signature": [
+    "GEMM",
+    "Elementwise",
+    "LayerNorm"
+   ],
+   "module_name": "nn.Module: BertPredictionHeadTransform_0",
+   "total_kernel_time_us": 12.384
+  },
+  {
+   "base_name": "transformers/modeling_attn_mask_utils.py(429): _prepare_4d_attention_mask_for_sdpa",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 1,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "Elementwise",
+    "Reduce"
+   ],
+   "module_name": "transformers/modeling_attn_mask_utils.py(429): _prepare_4d_attention_mask_for_sdpa",
+   "total_kernel_time_us": 8.376999999999999
+  },
+  {
+   "base_name": "transformers/models/bert/modeling_bert.py(181): forward",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 1,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "Add",
+    "Add"
+   ],
+   "module_name": "transformers/models/bert/modeling_bert.py(181): forward",
+   "source": "sibling_sequence",
+   "total_kernel_time_us": 4.888999999999999
+  }
+ ],
+ "kernel_fusion_metrics": {
+  "baseline_ms": 3.49597607421875,
+  "candidate_count": 1,
+  "category": "kernel_fusion",
+  "estimated_count": 0,
+  "high_confidence_op_keys": [],
+  "impact_estimates": [],
+  "peak_hbm_bw_tbs": 5.3,
+  "platform": "MI300X",
+  "status": "OK",
+  "total_impact_score": 0,
+  "total_time_ms": 0.105
+ },
+ "sha256": {
+  "category_data/category_manifest.json": "919f0375ab64a02c23e2998ab803866b50c64aad14eca2871aacbc2774c5e8cc",
+  "category_data/cpu_idle_metrics.json": "3b423587eb784aa0c0964fa902d6e44b32e05c07ee26e35993d6113479178bd5",
+  "category_data/cpu_idle_ops.csv": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+  "category_data/elementwise_metrics.json": "5d333300b7696a56ac5dce13531b77d60e4f0f7e88e27155c96e1db0f3ea2443",
+  "category_data/elementwise_ops.csv": "816a1380f7cbaee8dbde4d10124b698d5395a2d5a124c59b7471da6e20cc0446",
+  "category_data/fusion_candidates.json": "f9df3c992738b0632ba11baafe58b83a54249d08d54f63b3fbe69f9da27114cd",
+  "category_data/gemm_metrics.json": "c6cd80ac3ea9ca2f6cdc5b3afd381b22a918d533c54438bbc5970dcbc018fb8e",
+  "category_data/gemm_ops.csv": "c271220d71a21f99f6ce79e2d8e97a7df35fd8cf4300ea3ff59283a1beaf39f4",
+  "category_data/kernel_fusion_metrics.json": "d9ef4d5bb79188e68d4b3ce5542b5f57a8abbdcbf6398157d268dc47ac30e2a7",
+  "category_data/multi_kernel_data.json": "1c7da8f8193e3b4548fe8906e5139e0169abc83f6f62492ce2ccbf377a4ae987",
+  "category_data/multi_kernel_metrics.json": "72d4468d192080e15b6998e0465a60fe5117024da63103464cb7a32c3e0202c6",
+  "category_data/norm_fwd_metrics.json": "fe911cf8237f61d7643ac22f8aa2c9552ae5638b75d73726d4a29c7e7ad7bd93",
+  "category_data/norm_fwd_ops.csv": "ce39435a2393b1bcfd151b164aa27a66a4981e849ea84841b1eb4160dd10bee2",
+  "category_data/other_metrics.json": "fddc8af8d9d3dc158b42cd6b0164abfeb935e60ecaf3d544c1c281ad195e5fa3",
+  "category_data/other_ops.csv": "4287982c8c717de5d0281fc77220846172a0e29b33ed4a75c1e0b6671ee2dbbd",
+  "category_data/reduce_metrics.json": "0a33b0960810d74252ce7dcc83da600ab10ea82fadf533936d432f8e7d4738f5",
+  "category_data/reduce_ops.csv": "b4d3f19504164387a3fb05f58dfa35b434d49e91744c6f9e85fbb303fbfafb7c",
+  "category_data/sdpa_fwd_metrics.json": "d1d58652d9f00a7b72d49a553d1c506fa7e3ea888920164bd828124abb39250b",
+  "category_data/sdpa_fwd_ops.csv": "0d5926153b1a9f9a6621e45cb36d2638e72a4ae96acf08578ff6a7876c704dd8",
+  "metadata/cpu_idle_metadata.json": "be3045782e38a34e962378b4927b477adb777318bb5d39288d795ea5318ee8d0",
+  "metadata/elementwise_metadata.json": "a9b9febe4f79deb60b451b0e3c8cc9e2692be8f6bab93ddb1854fd4ea47798f9",
+  "metadata/gemm_metadata.json": "07ce95e9c9181a0c6087a61b0933849adaf0a4a8cccdb67170a2794734975866",
+  "metadata/model_info.json": "a66c9fe46bc863c6965435b09822d1e28d8a6f321bacb94d39466c4e4dcd95d8",
+  "metadata/multi_kernel_metadata.json": "c27d9e998837b205f08b33fe010eb6e064211c690dfbb64c4ed2bdc63cc2fbc4",
+  "metadata/norm_fwd_metadata.json": "932b28ed2052106a930c91f5286d7556bae32174aaaf931c48e1345a4ea23775",
+  "metadata/other_metadata.json": "b24de4a2c3fb62c57d1776a411799de4e5d8b4850f5131696025fa8f45ca69d9",
+  "metadata/reduce_metadata.json": "54cd901e216eb70f4087919e5420c0656c894b252335402d3c96b0c4a073367c",
+  "metadata/sdpa_fwd_metadata.json": "3f1c52ce67270a33f9b69ce1ae614959c8f4190d27becd4eaeee024747b2060c",
+  "priority_data.json": "bfb10d4481445a78c20c31e7b8de45a50fa468172c969d2728f2ee0e8b8548b8"
+ }
+}

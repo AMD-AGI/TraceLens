@@ -1,0 +1,491 @@
+{
+ "fusion_candidates": [
+  {
+   "base_name": "TimesformerSelfAttention",
+   "eligible_kernel_count": 5,
+   "has_fused_kernel": false,
+   "instance_count": 24,
+   "kernel_count": 5,
+   "kernel_type_signature": [
+    "GEMM",
+    "Mul",
+    "Softmax",
+    "Elementwise",
+    "GEMM"
+   ],
+   "module_name": "nn.Module: TimesformerSelfAttention_0",
+   "total_kernel_time_us": 94919.351
+  },
+  {
+   "base_name": "aten::matmul",
+   "eligible_kernel_count": 3,
+   "has_fused_kernel": false,
+   "instance_count": 48,
+   "kernel_count": 3,
+   "kernel_type_signature": [
+    "Elementwise",
+    "Elementwise",
+    "GEMM"
+   ],
+   "module_name": "aten::matmul",
+   "total_kernel_time_us": 45126.358
+  },
+  {
+   "base_name": "TimesformerIntermediate",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 12,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "GEMM",
+    "Elementwise"
+   ],
+   "module_name": "nn.Module: TimesformerIntermediate_0",
+   "total_kernel_time_us": 4266.822
+  },
+  {
+   "base_name": "TimesformerEmbeddings",
+   "eligible_kernel_count": 13,
+   "has_fused_kernel": false,
+   "instance_count": 1,
+   "kernel_count": 13,
+   "kernel_type_signature": [
+    "Unknown",
+    "LayoutTransform",
+    "LayoutTransform",
+    "Convolution",
+    "LayoutTransform",
+    "Add",
+    "Elementwise",
+    "Add",
+    "Elementwise",
+    "Unknown",
+    "Add",
+    "Elementwise",
+    "Elementwise"
+   ],
+   "module_name": "nn.Module: TimesformerEmbeddings_0",
+   "total_kernel_time_us": 710.74
+  },
+  {
+   "base_name": "Conv2d",
+   "eligible_kernel_count": 6,
+   "has_fused_kernel": false,
+   "instance_count": 1,
+   "kernel_count": 6,
+   "kernel_type_signature": [
+    "Unknown",
+    "LayoutTransform",
+    "LayoutTransform",
+    "Convolution",
+    "LayoutTransform",
+    "Add"
+   ],
+   "module_name": "nn.Module: Conv2d_0",
+   "total_kernel_time_us": 386.041
+  },
+  {
+   "base_name": "aten::upsample_nearest1d",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 2,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "Elementwise",
+    "Unknown"
+   ],
+   "module_name": "aten::upsample_nearest1d",
+   "total_kernel_time_us": 21.404
+  }
+ ],
+ "kernel_fusion_metrics": {
+  "baseline_ms": 121.2672041015625,
+  "candidate_count": 3,
+  "category": "kernel_fusion",
+  "estimated_count": 1,
+  "high_confidence_op_keys": [
+   [
+    "aten::bmm",
+    "((37632, 8, 64), (37632, 64, 8))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((512, 64, 1), (512, 8, 1))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 13201 (python3)"
+   ],
+   [
+    "aten::mul",
+    "((3136, 12, 8, 8), ())",
+    "('c10::BFloat16', 'double')",
+    "((768, 64, 8, 1), ())",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 13201 (python3)"
+   ],
+   [
+    "aten::_softmax",
+    "((3136, 12, 8, 8), (), ())",
+    "('c10::BFloat16', 'Scalar', 'Scalar')",
+    "((768, 64, 8, 1), (), ())",
+    "('', '-1', 'False')",
+    "python3",
+    "CPU",
+    "thread 13201 (python3)"
+   ],
+   [
+    "aten::copy_",
+    "((3136, 12, 8, 64), (3136, 12, 8, 64), ())",
+    "('c10::BFloat16', 'c10::BFloat16', 'Scalar')",
+    "((6144, 512, 64, 1), (18432, 64, 2304, 1), ())",
+    "('', '', 'False')",
+    "python3",
+    "CPU",
+    "thread 13201 (python3)"
+   ],
+   [
+    "aten::bmm",
+    "((37632, 8, 8), (37632, 8, 64))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((64, 8, 1), (512, 64, 1))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 13201 (python3)"
+   ],
+   [
+    "aten::bmm",
+    "((96, 3137, 64), (96, 64, 3137))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((200768, 64, 1), (200768, 3137, 1))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 13201 (python3)"
+   ],
+   [
+    "aten::mul",
+    "((8, 12, 3137, 3137), ())",
+    "('c10::BFloat16', 'double')",
+    "((118089228, 9840769, 3137, 1), ())",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 13201 (python3)"
+   ],
+   [
+    "aten::_softmax",
+    "((8, 12, 3137, 3137), (), ())",
+    "('c10::BFloat16', 'Scalar', 'Scalar')",
+    "((118089228, 9840769, 3137, 1), (), ())",
+    "('', '-1', 'False')",
+    "python3",
+    "CPU",
+    "thread 13201 (python3)"
+   ],
+   [
+    "aten::copy_",
+    "((8, 12, 3137, 64), (8, 12, 3137, 64), ())",
+    "('c10::BFloat16', 'c10::BFloat16', 'Scalar')",
+    "((2409216, 200768, 64, 1), (7227648, 64, 2304, 1), ())",
+    "('', '', 'False')",
+    "python3",
+    "CPU",
+    "thread 13201 (python3)"
+   ],
+   [
+    "aten::bmm",
+    "((96, 3137, 3137), (96, 3137, 64))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((9840769, 3137, 1), (200768, 64, 1))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 13201 (python3)"
+   ]
+  ],
+  "impact_estimates": [
+   {
+    "bound_type": "compute",
+    "category": "kernel_fusion",
+    "confidence": "high",
+    "estimation": "partial",
+    "fusion_type": "matrix_compute",
+    "impact_score": 2.52,
+    "impact_score_high": 2.88,
+    "impact_score_low": 2.16,
+    "instance_count": 24,
+    "kernel_count": 5,
+    "modeled_kernel_count": 4,
+    "op_keys": [
+     [
+      "aten::bmm",
+      "((37632, 8, 64), (37632, 64, 8))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((512, 64, 1), (512, 8, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 13201 (python3)"
+     ],
+     [
+      "aten::mul",
+      "((3136, 12, 8, 8), ())",
+      "('c10::BFloat16', 'double')",
+      "((768, 64, 8, 1), ())",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 13201 (python3)"
+     ],
+     [
+      "aten::_softmax",
+      "((3136, 12, 8, 8), (), ())",
+      "('c10::BFloat16', 'Scalar', 'Scalar')",
+      "((768, 64, 8, 1), (), ())",
+      "('', '-1', 'False')",
+      "python3",
+      "CPU",
+      "thread 13201 (python3)"
+     ],
+     [
+      "aten::copy_",
+      "((3136, 12, 8, 64), (3136, 12, 8, 64), ())",
+      "('c10::BFloat16', 'c10::BFloat16', 'Scalar')",
+      "((6144, 512, 64, 1), (18432, 64, 2304, 1), ())",
+      "('', '', 'False')",
+      "python3",
+      "CPU",
+      "thread 13201 (python3)"
+     ],
+     [
+      "aten::bmm",
+      "((37632, 8, 8), (37632, 8, 64))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((64, 8, 1), (512, 64, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 13201 (python3)"
+     ],
+     [
+      "aten::bmm",
+      "((96, 3137, 64), (96, 64, 3137))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((200768, 64, 1), (200768, 3137, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 13201 (python3)"
+     ],
+     [
+      "aten::mul",
+      "((8, 12, 3137, 3137), ())",
+      "('c10::BFloat16', 'double')",
+      "((118089228, 9840769, 3137, 1), ())",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 13201 (python3)"
+     ],
+     [
+      "aten::_softmax",
+      "((8, 12, 3137, 3137), (), ())",
+      "('c10::BFloat16', 'Scalar', 'Scalar')",
+      "((118089228, 9840769, 3137, 1), (), ())",
+      "('', '-1', 'False')",
+      "python3",
+      "CPU",
+      "thread 13201 (python3)"
+     ],
+     [
+      "aten::copy_",
+      "((8, 12, 3137, 64), (8, 12, 3137, 64), ())",
+      "('c10::BFloat16', 'c10::BFloat16', 'Scalar')",
+      "((2409216, 200768, 64, 1), (7227648, 64, 2304, 1), ())",
+      "('', '', 'False')",
+      "python3",
+      "CPU",
+      "thread 13201 (python3)"
+     ],
+     [
+      "aten::bmm",
+      "((96, 3137, 3137), (96, 3137, 64))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((9840769, 3137, 1), (200768, 64, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 13201 (python3)"
+     ]
+    ],
+    "operation": "TimesformerSelfAttention",
+    "rows": [
+     {
+      "args": "(37632,8,64) bf16<br>(37632,64,8) bf16",
+      "bound": "memory-bound",
+      "count": 12,
+      "efficiency": "1.36% of 5.3 TB/s",
+      "flops_per_byte": "3.76",
+      "kernel_name": "Cijk_Ailk_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT16x448x64_MI16x16x1_SN_LDSB...",
+      "kernel_path": "transformers/models/timesformer/modeling_timesformer.py(200): forward",
+      "operation": "aten::bmm",
+      "pct_e2e": "11.31",
+      "time_ms": "13.710"
+     },
+     {
+      "args": "(3136,12,8,8) bf16<br>() fp64",
+      "bound": "memory-bound",
+      "count": 12,
+      "efficiency": "33.48% of 5.3 TB/s",
+      "flops_per_byte": "0.25",
+      "kernel_name": "void at::native::vectorized_elementwise_kernel<8, at::native::AUnaryFunctor...",
+      "kernel_path": "transformers/models/timesformer/modeling_timesformer.py(200): forward",
+      "operation": "aten::mul",
+      "pct_e2e": "0.05",
+      "time_ms": "0.065"
+     },
+     {
+      "args": "(3136,12,8,8) bf16",
+      "bound": "\u2014",
+      "count": 12,
+      "efficiency": "\u2014",
+      "flops_per_byte": "\u2014",
+      "kernel_name": "void (anonymous namespace)::softmax_warp_forward<c10::BFloat16, c10::BFloat...",
+      "kernel_path": "transformers/models/timesformer/modeling_timesformer.py(200): forward",
+      "operation": "aten::_softmax",
+      "pct_e2e": "0.11",
+      "time_ms": "0.134"
+     },
+     {
+      "args": "(3136,12,8,64) bf16<br>(3136,12,8,64) bf16",
+      "bound": "memory-bound",
+      "count": 12,
+      "efficiency": "49.06% of 5.3 TB/s",
+      "flops_per_byte": "0.25",
+      "kernel_name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_k...",
+      "kernel_path": "transformers/models/timesformer/modeling_timesformer.py(200): forward",
+      "operation": "aten::copy_",
+      "pct_e2e": "0.29",
+      "time_ms": "0.350"
+     },
+     {
+      "args": "(37632,8,8) bf16<br>(37632,8,64) bf16",
+      "bound": "memory-bound",
+      "count": 12,
+      "efficiency": "5.54% of 5.3 TB/s",
+      "flops_per_byte": "3.76",
+      "kernel_name": "Cijk_Ailk_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x32_MI16x16x1_SN_LDSB...",
+      "kernel_path": "transformers/models/timesformer/modeling_timesformer.py(200): forward",
+      "operation": "aten::bmm",
+      "pct_e2e": "2.77",
+      "time_ms": "3.356"
+     },
+     {
+      "args": "(96,3137,64) bf16<br>(96,64,3137) bf16",
+      "bound": "memory-bound",
+      "count": 12,
+      "efficiency": "30.61% of 5.3 TB/s",
+      "flops_per_byte": "61.49",
+      "kernel_name": "Cijk_Ailk_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT128x256x32_MI16x16x1_SN_LDS...",
+      "kernel_path": "transformers/models/timesformer/modeling_timesformer.py(200): forward",
+      "operation": "aten::bmm",
+      "pct_e2e": "11.99",
+      "time_ms": "14.546"
+     },
+     {
+      "args": "(8,12,3137,3137) bf16<br>() fp64",
+      "bound": "memory-bound",
+      "count": 12,
+      "efficiency": "78.08% of 5.3 TB/s",
+      "flops_per_byte": "0.25",
+      "kernel_name": "void at::native::vectorized_elementwise_kernel<8, at::native::AUnaryFunctor...",
+      "kernel_path": "transformers/models/timesformer/modeling_timesformer.py(200): forward",
+      "operation": "aten::mul",
+      "pct_e2e": "9.04",
+      "time_ms": "10.959"
+     },
+     {
+      "args": "(8,12,3137,3137) bf16",
+      "bound": "\u2014",
+      "count": 12,
+      "efficiency": "\u2014",
+      "flops_per_byte": "\u2014",
+      "kernel_name": "void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat1...",
+      "kernel_path": "transformers/models/timesformer/modeling_timesformer.py(200): forward",
+      "operation": "aten::_softmax",
+      "pct_e2e": "34.41",
+      "time_ms": "41.723"
+     },
+     {
+      "args": "(8,12,3137,64) bf16<br>(8,12,3137,64) bf16",
+      "bound": "memory-bound",
+      "count": 12,
+      "efficiency": "50.73% of 5.3 TB/s",
+      "flops_per_byte": "0.25",
+      "kernel_name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_k...",
+      "kernel_path": "transformers/models/timesformer/modeling_timesformer.py(200): forward",
+      "operation": "aten::copy_",
+      "pct_e2e": "0.30",
+      "time_ms": "0.360"
+     },
+     {
+      "args": "(96,3137,3137) bf16<br>(96,3137,64) bf16",
+      "bound": "memory-bound",
+      "count": 12,
+      "efficiency": "45.82% of 5.3 TB/s",
+      "flops_per_byte": "61.49",
+      "kernel_name": "Cijk_Ailk_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT64x224x64_MI16x16x1_SN_LDSB...",
+      "kernel_path": "transformers/models/timesformer/modeling_timesformer.py(200): forward",
+      "operation": "aten::bmm",
+      "pct_e2e": "8.01",
+      "time_ms": "9.717"
+     }
+    ],
+    "time_ms": 94.919,
+    "type": "kernel_fusion",
+    "warning": "1 of 5 kernels lack perf models; savings estimate uses trace time for unmodeled kernels"
+   }
+  ],
+  "peak_hbm_bw_tbs": 5.3,
+  "platform": "MI300X",
+  "status": "OK",
+  "total_impact_score": 2.52,
+  "total_time_ms": 144.313,
+  "warnings": [
+   "1 of 5 kernels lack perf models; savings estimate uses trace time for unmodeled kernels"
+  ]
+ },
+ "sha256": {
+  "category_data/category_manifest.json": "449f432024d0a6c01f4fa7dd56ef53bdc030a5b1ffa0cb3aa41a4047c3333bbd",
+  "category_data/conv_fwd_metrics.json": "5fbc03142538ad28a6ce233a7448bd210301b15bf1ed1499aa94471e50571e37",
+  "category_data/conv_fwd_ops.csv": "4564e47d42b13018bf486b25c6381d0a27f73f47025314b6fc9c8ca9b35e68e0",
+  "category_data/cpu_idle_metrics.json": "d00d8b8891a62f05857760472c1e27362b3b1fd728d79384f65baeb59ca4357c",
+  "category_data/cpu_idle_ops.csv": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+  "category_data/elementwise_metrics.json": "3f96c806205cf7f76919432fc4d9baf5fbfc777350025ae62d4d433c84a61e47",
+  "category_data/elementwise_ops.csv": "5d22c2c1c60ddadd4baee0d9f53a8a2b33bb4a8f92cd5c99f093e1b8e1c99c11",
+  "category_data/fusion_candidates.json": "7afdf18755f1acfcea83caeb84a78b5b2126d4ae0e82516b725ea215e9acb3fb",
+  "category_data/gemm_metrics.json": "0cd08e96ab42c6fb48875875dc0a007bd6aac39246c302bd873701f2ad9bba47",
+  "category_data/gemm_ops.csv": "e18a90dd2617bd1c7910d24c9a8de1cfd3163eec34c2c30d18e65c7b98ebbb1d",
+  "category_data/kernel_fusion_metrics.json": "55087e4f90bd3bed073061ee6a8d97df837d8a94b4a2a9abaa825e5e93f8fb2e",
+  "category_data/multi_kernel_data.json": "e8acf1ddb7613e97084315a7a0e1b548da15caa2807038380ff41355ce72e0df",
+  "category_data/multi_kernel_metrics.json": "e3400034d7b76efe44bd204f914e844a70029af9c86d1b87da496ba9ae2e1514",
+  "category_data/norm_fwd_metrics.json": "71f2d93c5e310ea82c2cb1fc61d557919d46a961d25fb2624fa1503a272b3ec6",
+  "category_data/norm_fwd_ops.csv": "d525e3b6d3ac9d565d5177d20cdb07d68d04b82157e323394d2f096aa5f8c984",
+  "category_data/other_metrics.json": "a9b4d45cbd00d26614309a76fd84fd3f50bc8f37ed79326d9d7847ba25a2bc1c",
+  "category_data/other_ops.csv": "6c5057d82ae2c540b67bcf39ebaf79f9a47283af70f62acabb8e5953449c8874",
+  "category_data/reduce_metrics.json": "b54b8146946931502afa018184f4aa3c54e3c40fe603d8127af33d75381b9559",
+  "category_data/reduce_ops.csv": "b610b4a67540672108b190ddedd783750dfe5c9b71f399a9a2b0abcf8b51e387",
+  "metadata/conv_fwd_metadata.json": "dc10a5119b4113752ea2a0a0f2a7afa7f60387fe3a7f2c3203062c3cfc423a9c",
+  "metadata/cpu_idle_metadata.json": "ead900d4aad52aac02945a6f658da2ad96148ff5eb46b26d24cfe7c1b6b7c501",
+  "metadata/elementwise_metadata.json": "0b677ed5e8e7fab9bd40758959f1bb6ae977b9c6c57b652092e09d2ce63bf5ab",
+  "metadata/gemm_metadata.json": "4e6cf4ff4b7d256582aae68de09f5521620c83d192afd7a8fc04a53df45fe682",
+  "metadata/model_info.json": "a66c9fe46bc863c6965435b09822d1e28d8a6f321bacb94d39466c4e4dcd95d8",
+  "metadata/multi_kernel_metadata.json": "99dbff334e0b4ab991d1c17bb626b5ca08b425eac343b79653ab84d20101b2cf",
+  "metadata/norm_fwd_metadata.json": "b6a4dfa87333a2b5ad9699770e6094ce5c5e3721c7577af392473b8f04be0e95",
+  "metadata/other_metadata.json": "8ccd8776fb66eb63bbf28cdf726063d45418ef808b8c3fa3b46705861cf27364",
+  "metadata/reduce_metadata.json": "48aea5b3627126ce2e238938d933eed42f0f226fa5aea5480fcd7a44ccc6485e",
+  "priority_data.json": "60023df980452292619fd259392f8c4a6110c5f2eb543ae91c019ef450079ab5"
+ }
+}

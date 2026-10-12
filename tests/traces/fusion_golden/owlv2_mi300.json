@@ -1,0 +1,525 @@
+{
+ "fusion_candidates": [
+  {
+   "base_name": "Owlv2Attention",
+   "eligible_kernel_count": 3,
+   "has_fused_kernel": false,
+   "instance_count": 180,
+   "kernel_count": 3,
+   "kernel_type_signature": [
+    "GEMM",
+    "Softmax",
+    "GEMM"
+   ],
+   "module_name": "nn.Module: Owlv2Attention_0",
+   "total_kernel_time_us": 250805.191
+  },
+  {
+   "base_name": "Owlv2MLP",
+   "eligible_kernel_count": 5,
+   "has_fused_kernel": false,
+   "instance_count": 180,
+   "kernel_count": 5,
+   "kernel_type_signature": [
+    "GEMM",
+    "Mul",
+    "Elementwise",
+    "Mul",
+    "GEMM"
+   ],
+   "module_name": "nn.Module: Owlv2MLP_0",
+   "total_kernel_time_us": 36605.104
+  },
+  {
+   "base_name": "QuickGELUActivation",
+   "eligible_kernel_count": 3,
+   "has_fused_kernel": false,
+   "instance_count": 180,
+   "kernel_count": 3,
+   "kernel_type_signature": [
+    "Mul",
+    "Elementwise",
+    "Mul"
+   ],
+   "module_name": "nn.Module: QuickGELUActivation_0",
+   "total_kernel_time_us": 11893.41
+  },
+  {
+   "base_name": "Owlv2BoxPredictionHead",
+   "eligible_kernel_count": 6,
+   "has_fused_kernel": false,
+   "instance_count": 10,
+   "kernel_count": 6,
+   "kernel_type_signature": [
+    "GEMM",
+    "Elementwise",
+    "GEMM",
+    "Elementwise",
+    "Elementwise",
+    "GEMM"
+   ],
+   "module_name": "nn.Module: Owlv2BoxPredictionHead_0",
+   "total_kernel_time_us": 1046.027
+  },
+  {
+   "base_name": "Owlv2ClassPredictionHead",
+   "eligible_kernel_count": 20,
+   "has_fused_kernel": false,
+   "instance_count": 5,
+   "kernel_count": 20,
+   "kernel_type_signature": [
+    "GEMM",
+    "Reduce",
+    "Add",
+    "Elementwise",
+    "Reduce",
+    "Add",
+    "Elementwise",
+    "GEMM",
+    "Elementwise",
+    "GEMM",
+    "Elementwise",
+    "GEMM",
+    "Elementwise",
+    "Add",
+    "Add",
+    "Mul",
+    "Elementwise",
+    "Elementwise",
+    "Elementwise",
+    "Elementwise"
+   ],
+   "module_name": "nn.Module: Owlv2ClassPredictionHead_0",
+   "total_kernel_time_us": 821.386
+  },
+  {
+   "base_name": "Owlv2VisionEmbeddings",
+   "eligible_kernel_count": 5,
+   "has_fused_kernel": false,
+   "instance_count": 5,
+   "kernel_count": 5,
+   "kernel_type_signature": [
+    "Unknown",
+    "GEMM",
+    "Elementwise",
+    "Unknown",
+    "Add"
+   ],
+   "module_name": "nn.Module: Owlv2VisionEmbeddings_0",
+   "total_kernel_time_us": 808.59
+  },
+  {
+   "base_name": "transformers/models/owlv2/modeling_owlv2.py(1421): box_predictor",
+   "eligible_kernel_count": 7,
+   "has_fused_kernel": false,
+   "instance_count": 5,
+   "kernel_count": 7,
+   "kernel_type_signature": [
+    "GEMM",
+    "Elementwise",
+    "GEMM",
+    "Elementwise",
+    "GEMM",
+    "Add",
+    "Elementwise"
+   ],
+   "module_name": "transformers/models/owlv2/modeling_owlv2.py(1421): box_predictor",
+   "total_kernel_time_us": 521.401
+  },
+  {
+   "base_name": "Conv2d",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 5,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "Unknown",
+    "GEMM"
+   ],
+   "module_name": "nn.Module: Conv2d_0",
+   "total_kernel_time_us": 517.899
+  },
+  {
+   "base_name": "Linear",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 15,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "Elementwise",
+    "GEMM"
+   ],
+   "module_name": "nn.Module: Linear_219",
+   "total_kernel_time_us": 352.622
+  },
+  {
+   "base_name": "Owlv2TextTransformer",
+   "eligible_kernel_count": 5,
+   "has_fused_kernel": false,
+   "instance_count": 5,
+   "kernel_count": 5,
+   "kernel_type_signature": [
+    "GEMM",
+    "Add",
+    "Add",
+    "Softmax",
+    "GEMM"
+   ],
+   "module_name": "nn.Module: Owlv2TextTransformer_0",
+   "total_kernel_time_us": 153.04500000000002
+  },
+  {
+   "base_name": "transformers/modeling_attn_mask_utils.py(146): _make_causal_mask",
+   "eligible_kernel_count": 6,
+   "has_fused_kernel": false,
+   "instance_count": 5,
+   "kernel_count": 6,
+   "kernel_type_signature": [
+    "Elementwise",
+    "Elementwise",
+    "Add",
+    "Elementwise",
+    "Elementwise",
+    "Elementwise"
+   ],
+   "module_name": "transformers/modeling_attn_mask_utils.py(146): _make_causal_mask",
+   "total_kernel_time_us": 143.138
+  },
+  {
+   "base_name": "transformers/modeling_attn_mask_utils.py(180): _expand_mask",
+   "eligible_kernel_count": 4,
+   "has_fused_kernel": false,
+   "instance_count": 5,
+   "kernel_count": 4,
+   "kernel_type_signature": [
+    "Elementwise",
+    "Add",
+    "Elementwise",
+    "Elementwise"
+   ],
+   "module_name": "transformers/modeling_attn_mask_utils.py(180): _expand_mask",
+   "total_kernel_time_us": 98.245
+  },
+  {
+   "base_name": "Owlv2TextEmbeddings",
+   "eligible_kernel_count": 3,
+   "has_fused_kernel": false,
+   "instance_count": 5,
+   "kernel_count": 3,
+   "kernel_type_signature": [
+    "Unknown",
+    "Unknown",
+    "Add"
+   ],
+   "module_name": "nn.Module: Owlv2TextEmbeddings_0",
+   "total_kernel_time_us": 85.141
+  },
+  {
+   "base_name": "aten::where",
+   "eligible_kernel_count": 2,
+   "has_fused_kernel": false,
+   "instance_count": 5,
+   "kernel_count": 2,
+   "kernel_type_signature": [
+    "Elementwise",
+    "Elementwise"
+   ],
+   "module_name": "aten::where",
+   "total_kernel_time_us": 78.40899999999999
+  }
+ ],
+ "kernel_fusion_metrics": {
+  "baseline_ms": 908.3381547851562,
+  "candidate_count": 2,
+  "category": "kernel_fusion",
+  "estimated_count": 1,
+  "high_confidence_op_keys": [
+   [
+    "aten::bmm",
+    "((16, 5185, 64), (16, 64, 5185))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((331840, 64, 1), (331840, 1, 64))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 14646 (python3)"
+   ],
+   [
+    "aten::_softmax",
+    "((16, 5185, 5185), (), ())",
+    "('c10::BFloat16', 'Scalar', 'Scalar')",
+    "((26884225, 5185, 1), (), ())",
+    "('', '-1', 'False')",
+    "python3",
+    "CPU",
+    "thread 14646 (python3)"
+   ],
+   [
+    "aten::bmm",
+    "((16, 5185, 5185), (16, 5185, 64))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((26884225, 5185, 1), (331840, 64, 1))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 14646 (python3)"
+   ],
+   [
+    "aten::bmm",
+    "((12, 5, 64), (12, 64, 5))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((320, 64, 1), (320, 1, 64))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 14646 (python3)"
+   ],
+   [
+    "aten::add",
+    "((1, 12, 5, 5), (1, 1, 5, 5), ())",
+    "('c10::BFloat16', 'c10::BFloat16', 'Scalar')",
+    "((300, 25, 5, 1), (25, 25, 5, 1), ())",
+    "('', '', '1')",
+    "python3",
+    "CPU",
+    "thread 14646 (python3)"
+   ],
+   [
+    "aten::_softmax",
+    "((12, 5, 5), (), ())",
+    "('c10::BFloat16', 'Scalar', 'Scalar')",
+    "((25, 5, 1), (), ())",
+    "('', '-1', 'False')",
+    "python3",
+    "CPU",
+    "thread 14646 (python3)"
+   ],
+   [
+    "aten::bmm",
+    "((12, 5, 5), (12, 5, 64))",
+    "('c10::BFloat16', 'c10::BFloat16')",
+    "((25, 5, 1), (320, 64, 1))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 14646 (python3)"
+   ]
+  ],
+  "impact_estimates": [
+   {
+    "bound_type": "compute",
+    "category": "kernel_fusion",
+    "confidence": "high",
+    "estimation": "partial",
+    "fusion_type": "matrix_compute",
+    "impact_score": 13.52,
+    "impact_score_high": 15.45,
+    "impact_score_low": 11.58,
+    "instance_count": 180,
+    "kernel_count": 3,
+    "modeled_kernel_count": 2,
+    "op_keys": [
+     [
+      "aten::bmm",
+      "((16, 5185, 64), (16, 64, 5185))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((331840, 64, 1), (331840, 1, 64))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 14646 (python3)"
+     ],
+     [
+      "aten::_softmax",
+      "((16, 5185, 5185), (), ())",
+      "('c10::BFloat16', 'Scalar', 'Scalar')",
+      "((26884225, 5185, 1), (), ())",
+      "('', '-1', 'False')",
+      "python3",
+      "CPU",
+      "thread 14646 (python3)"
+     ],
+     [
+      "aten::bmm",
+      "((16, 5185, 5185), (16, 5185, 64))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((26884225, 5185, 1), (331840, 64, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 14646 (python3)"
+     ],
+     [
+      "aten::bmm",
+      "((12, 5, 64), (12, 64, 5))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((320, 64, 1), (320, 1, 64))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 14646 (python3)"
+     ],
+     [
+      "aten::add",
+      "((1, 12, 5, 5), (1, 1, 5, 5), ())",
+      "('c10::BFloat16', 'c10::BFloat16', 'Scalar')",
+      "((300, 25, 5, 1), (25, 25, 5, 1), ())",
+      "('', '', '1')",
+      "python3",
+      "CPU",
+      "thread 14646 (python3)"
+     ],
+     [
+      "aten::_softmax",
+      "((12, 5, 5), (), ())",
+      "('c10::BFloat16', 'Scalar', 'Scalar')",
+      "((25, 5, 1), (), ())",
+      "('', '-1', 'False')",
+      "python3",
+      "CPU",
+      "thread 14646 (python3)"
+     ],
+     [
+      "aten::bmm",
+      "((12, 5, 5), (12, 5, 64))",
+      "('c10::BFloat16', 'c10::BFloat16')",
+      "((25, 5, 1), (320, 64, 1))",
+      "('', '')",
+      "python3",
+      "CPU",
+      "thread 14646 (python3)"
+     ]
+    ],
+    "operation": "Owlv2Attention",
+    "rows": [
+     {
+      "args": "(16,5185,64) bf16<br>(16,64,5185) bf16",
+      "bound": "memory-bound",
+      "count": 120,
+      "efficiency": "49.39% of 5.3 TB/s",
+      "flops_per_byte": "62.46",
+      "kernel_name": "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x32_MI16x16x1_SN_LDS...",
+      "kernel_path": "transformers/models/owlv2/modeling_owlv2.py(410): forward",
+      "operation": "aten::bmm",
+      "pct_e2e": "4.45",
+      "time_ms": "40.460"
+     },
+     {
+      "args": "(16,5185,5185) bf16",
+      "bound": "\u2014",
+      "count": 120,
+      "efficiency": "\u2014",
+      "flops_per_byte": "\u2014",
+      "kernel_name": "void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat1...",
+      "kernel_path": "torch/nn/functional.py(2103): softmax",
+      "operation": "aten::_softmax",
+      "pct_e2e": "16.92",
+      "time_ms": "153.698"
+     },
+     {
+      "args": "(16,5185,5185) bf16<br>(16,5185,64) bf16",
+      "bound": "memory-bound",
+      "count": 120,
+      "efficiency": "36.51% of 5.3 TB/s",
+      "flops_per_byte": "62.46",
+      "kernel_name": "Cijk_Ailk_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT64x288x64_MI16x16x1_SN_LDSB...",
+      "kernel_path": "transformers/models/owlv2/modeling_owlv2.py(410): forward",
+      "operation": "aten::bmm",
+      "pct_e2e": "6.06",
+      "time_ms": "55.056"
+     },
+     {
+      "args": "(12,5,64) bf16<br>(12,64,5) bf16",
+      "bound": "memory-bound",
+      "count": 60,
+      "efficiency": "0.05% of 5.3 TB/s",
+      "flops_per_byte": "2.41",
+      "kernel_name": "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT16x16x256_MI16x16x1_SN_LDSB...",
+      "kernel_path": "transformers/models/owlv2/modeling_owlv2.py(410): forward",
+      "operation": "aten::bmm",
+      "pct_e2e": "0.04",
+      "time_ms": "0.356"
+     },
+     {
+      "args": "(1,12,5,5) bf16<br>(1,1,5,5) bf16",
+      "bound": "memory-bound",
+      "count": 120,
+      "efficiency": "0.01% of 5.3 TB/s",
+      "flops_per_byte": "0.24",
+      "kernel_name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_k...",
+      "kernel_path": "transformers/models/owlv2/modeling_owlv2.py(410): forward",
+      "operation": "aten::add",
+      "pct_e2e": "0.06",
+      "time_ms": "0.555"
+     },
+     {
+      "args": "(12,5,5) bf16",
+      "bound": "\u2014",
+      "count": 60,
+      "efficiency": "\u2014",
+      "flops_per_byte": "\u2014",
+      "kernel_name": "void (anonymous namespace)::softmax_warp_forward<c10::BFloat16, c10::BFloat...",
+      "kernel_path": "torch/nn/functional.py(2103): softmax",
+      "operation": "aten::_softmax",
+      "pct_e2e": "0.03",
+      "time_ms": "0.295"
+     },
+     {
+      "args": "(12,5,5) bf16<br>(12,5,64) bf16",
+      "bound": "memory-bound",
+      "count": 60,
+      "efficiency": "0.05% of 5.3 TB/s",
+      "flops_per_byte": "2.41",
+      "kernel_name": "Cijk_Ailk_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT16x16x256_MI16x16x1_SN_LDSB...",
+      "kernel_path": "transformers/models/owlv2/modeling_owlv2.py(410): forward",
+      "operation": "aten::bmm",
+      "pct_e2e": "0.04",
+      "time_ms": "0.385"
+     }
+    ],
+    "time_ms": 250.805,
+    "type": "kernel_fusion",
+    "warning": "1 of 3 kernels lack perf models; savings estimate uses trace time for unmodeled kernels"
+   }
+  ],
+  "peak_hbm_bw_tbs": 5.3,
+  "platform": "MI300X",
+  "status": "OK",
+  "total_impact_score": 13.52,
+  "total_time_ms": 287.41,
+  "warnings": [
+   "1 of 3 kernels lack perf models; savings estimate uses trace time for unmodeled kernels"
+  ]
+ },
+ "sha256": {
+  "category_data/category_manifest.json": "34753af20d8359206c79dd0dc25110fd9f277e1ae3b1107f168a365f69d642fa",
+  "category_data/conv_fwd_metrics.json": "cb5678bc6e784438d8e00b15197f1cf2d2c4b7378170632a165e914551b33363",
+  "category_data/conv_fwd_ops.csv": "4f3a36aa0732a69336ce2b397481baef5adf3cca36cafd24b73e97d6d6b6ec86",
+  "category_data/cpu_idle_metrics.json": "6c9eab27903f471c4f32855470348421e874eb9796e66c027de44e7a0f964c8d",
+  "category_data/cpu_idle_ops.csv": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+  "category_data/elementwise_metrics.json": "6049df132bf6146b78668ca9d25eea558300121318cadc694f3242df625d8b87",
+  "category_data/elementwise_ops.csv": "86ac9a70b0458b8142423be381e7ac0bc1e5a3d76dd008b68ce80b33bac0eeba",
+  "category_data/fusion_candidates.json": "727d9112ca3b5bd91feb555de7c1b28f212de068e0fd97cee25114482dd793a9",
+  "category_data/gemm_metrics.json": "a7def32efe6ed69696b6359590358455276d8fec8b06818a2f946473e1d24a4f",
+  "category_data/gemm_ops.csv": "b4b2ceb2e81733e99970fde62cdb2c559b480ba972eca92978e609e722c85a4e",
+  "category_data/kernel_fusion_metrics.json": "42e8f4280fc7f890818f582ce8632db47cef9f299162648d1c580d890c98527a",
+  "category_data/multi_kernel_data.json": "71f28824c8711a9d374b1dac4cf1de89b6e2fc832f06b10588626648ce6e2809",
+  "category_data/multi_kernel_metrics.json": "4cea80079e3d76c65422a1e2d76219c4fc406f4d05f2baedb03d628452d0f002",
+  "category_data/norm_fwd_metrics.json": "bf70eba42a29df31fae221fda1e449ccd411a3be5672d493dadeb372de4800db",
+  "category_data/norm_fwd_ops.csv": "9bff6a0ac678ee89b932e31ebe1265267b1d4460740f3a00b48aa8dd01c22c74",
+  "category_data/other_metrics.json": "f413d0e727acbaed22b907a6c15a165d1f19d911edfb376de7c733845dbeda36",
+  "category_data/other_ops.csv": "0e2e79bd65d2d57b118f51ee0bb666767d294351b197a6391e1663f397bba57c",
+  "category_data/reduce_metrics.json": "a4c9428e5c228d5765a863537587f21d935e989554e47b62850b512bccd32000",
+  "category_data/reduce_ops.csv": "1d477ff32dad5fb788eb94d9041d689a67245032eeb6817f20df434f3e5c4017",
+  "metadata/conv_fwd_metadata.json": "cbd0ec660474ba83c339861bd863b9ee7c7bbf1f4e907fffda327032bf5e03a0",
+  "metadata/cpu_idle_metadata.json": "49156d59c630d75a932dea189b08b776f269e737e1b4920ef609e65853549888",
+  "metadata/elementwise_metadata.json": "4eed919556aa58d4e1aa9bd74898f6bc70d89d1214dbd9d41e1a8576647aaea7",
+  "metadata/gemm_metadata.json": "931bead4f98094b5d41d4e2d9dd8c6f95b8f55f55adc0dc07e4b793efc9277fe",
+  "metadata/model_info.json": "a66c9fe46bc863c6965435b09822d1e28d8a6f321bacb94d39466c4e4dcd95d8",
+  "metadata/multi_kernel_metadata.json": "ab015c70bb13f81f103de63d4887a53b3028d902d92f588f39084ee59a7e9b66",
+  "metadata/norm_fwd_metadata.json": "9e40f67fcb80342ce4abd2a5d50d6064244d94599b67b4cf9b43f9c35c3dee9d",
+  "metadata/other_metadata.json": "784185007bfa818c110dabd616f354b1525061cf65053ba1d8080ad72c95f5a8",
+  "metadata/reduce_metadata.json": "547f337a2add52ea8b34ee938ab9e3700e4a16a8b017c6f2d1661c938a696b5c",
+  "priority_data.json": "71b8df8bae20fef0b31f8803d795a46c282a634570a17d38beb8ecdec08fcee2"
+ }
+}
