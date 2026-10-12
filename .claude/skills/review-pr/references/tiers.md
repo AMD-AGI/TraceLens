@@ -48,7 +48,8 @@ Q1  — If this file raises at import time, does a report CLI (e.g.
 
 Q1b — Is it reached by NAME at runtime — a console_scripts "module:main"
       in setup.py, or a skill name under Agent/**/skills/**? Name-routed
-      wiring fails at invocation, not at startup.       → YES → Tier 1
+      wiring fails at invocation, not at startup, so grep the string,
+      not the symbol.                                   → YES → Tier 1
 
 Q2  — Does it decide, persist, or read a number a report is graded on —
       the event tree, the roofline/origami model, or a persisted
@@ -65,8 +66,3 @@ Q4  — Does it parse a real external artifact (a trace, a compiled
 
 Otherwise → Tier 3.
 ```
-
-Q1b is the one that bites: the `console_scripts` in `setup.py` and the skill names under
-`Agent/**/skills/**` route by string, so a renamed `main`, a moved module or a renamed skill passes
-every import check, passes lint, passes collection, and fails only on invocation. Grep the string,
-not the symbol.
