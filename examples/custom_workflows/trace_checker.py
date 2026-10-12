@@ -187,7 +187,8 @@ def _check_kernels_present(ctx) -> List[TraceCheck]:
         return [
             TraceCheck(
                 Status.ERROR,
-                "No GPU kernel events found in trace.",
+                "No GPU kernel events found in trace. "
+                "Set TRACELENS_SKIP_HEALTH_CHECK=1 to bypass if intentional.",
             )
         ]
     return []
