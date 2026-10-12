@@ -468,7 +468,7 @@ class DataLoader:
             from . import trace_check
 
             trace_check.run_trace_checks(
-                events, metadata, capture_trace_filepath, filepath=filepath
+                events, capture_trace_filepath=capture_trace_filepath, filepath=filepath
             ).log_findings()
 
         return events, metadata

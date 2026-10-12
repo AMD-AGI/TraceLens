@@ -1044,12 +1044,11 @@ def generate_perf_report_pytorch(
         dict_name2df, xlsx_path=output_xlsx_path, csvs_dir=output_csvs_dir
     )
 
-    if os.environ.get("TRACELENS_DETAILED_HEALTH_CHECKS") == "1":
-        from TraceLens import trace_check
+    from TraceLens import trace_check
 
-        trace_check.run_trace_checks(
-            pre_report=False, dfs=dict_name2df, framework="pytorch"
-        ).log_findings()
+    trace_check.run_trace_checks(
+        pre_report=False, tree=perf_analyzer.tree, dfs=dict_name2df, framework="pytorch"
+    ).log_findings()
 
     return dict_name2df
 

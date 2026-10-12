@@ -136,7 +136,7 @@ def perf_analysis(
         )
         op_cat_name = "_".join(op_cat.lower().split())
         dict_name2df[f"op_{op_cat_name}"] = df_op
-    return dict_name2df
+    return dict_name2df, perf_analyzer
 
 
 def generate_perf_report_jax(
@@ -155,7 +155,7 @@ def generate_perf_report_jax(
         gpu_arch=gpu_arch,
     )
     # Analyze trace profile
-    dict_name2df = perf_analysis(
+    dict_name2df, perf_analyzer = perf_analysis(
         profile_path,
         kernel_metadata_keyword_filters=kernel_metadata_keyword_filters,
         arch=gpu_arch_json,
@@ -172,12 +172,11 @@ def generate_perf_report_jax(
         csvs_dir=output_csvs_dir,
     )
 
-    if os.environ.get("TRACELENS_DETAILED_HEALTH_CHECKS") == "1":
-        from TraceLens import trace_check
+    from TraceLens import trace_check
 
-        trace_check.run_trace_checks(
-            pre_report=False, dfs=dict_name2df, framework="jax"
-        ).log_findings()
+    trace_check.run_trace_checks(
+        pre_report=False, tree=perf_analyzer.tree, dfs=dict_name2df, framework="jax"
+    ).log_findings()
 
     return dict_name2df
 

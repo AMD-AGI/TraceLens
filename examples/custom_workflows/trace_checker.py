@@ -20,8 +20,6 @@ with ``TRACELENS_SKIP_HEALTH_CHECK=1``.
 from __future__ import annotations
 
 import enum
-import functools
-import math
 import os
 import statistics
 import warnings
@@ -73,11 +71,6 @@ _MIN_CPU_OP_SHAPES = 10
 
 @dataclass
 class QualityThresholds:
-    # dropped-kernel detection
-    drop_num_windows: int = 20
-    drop_empty_window_frac: float = 0.5
-    drop_fail_frac: float = 0.15
-
     # runtime variability (spurious events)
     runtime_cv_warn: float = 0.25
     runtime_cv_fail: float = 0.75
@@ -96,21 +89,6 @@ class QualityThresholds:
     # CPU:GPU event ratio (PyTorch)
     cpu_gpu_ratio_min: float = 0.2
     cpu_gpu_ratio_max: float = 50.0
-
-    # attention / SDPA detection
-    attn_name_patterns: List[str] = field(
-        default_factory=lambda: [
-            "fmha",
-            "flash_attn",
-            "flash_fwd",
-            "flash_bwd",
-            "fused_attn",
-            "sdpa",
-            "scaled_dot_product",
-            "attention",
-            "_attn",
-        ]
-    )
 
     # high-idle ops
     op_high_idle_pct: float = 40.0
@@ -151,14 +129,6 @@ def coefficient_of_variation(values: Sequence[float]) -> float:
     return statistics.pstdev(values) / abs(mean)
 
 
-def gcd_of_counts(counts: Iterable[int]) -> int:
-    """GCD of positive counts."""
-    positives = [int(c) for c in counts if c and int(c) > 0]
-    if not positives:
-        return 0
-    return functools.reduce(math.gcd, positives)
-
-
 def busy_idle_from_events(events: Sequence[dict]) -> Dict[str, float]:
     """Compute busy/idle/total time (us) from events with ``ts``/``dur``."""
     intervals = [
@@ -179,11 +149,6 @@ def busy_idle_from_events(events: Sequence[dict]) -> Dict[str, float]:
         "total_time": total_time,
         "idle_pct": idle_pct,
     }
-
-
-def matches_any(name: str, patterns: Iterable[str]) -> bool:
-    low = (name or "").lower()
-    return any(p.lower() in low for p in patterns)
 
 
 # ---------------------------------------------------------------------------
@@ -328,42 +293,6 @@ def _check_cpu_gpu_ratio(ctx) -> List[TraceCheck]:
 # ---------------------------------------------------------------------------
 # Detailed pre-report checks (TRACELENS_DETAILED_HEALTH_CHECKS=1)
 # ---------------------------------------------------------------------------
-def _check_kernels_dropped_windowed(ctx) -> List[TraceCheck]:
-    """Detect intermittent kernel dropping via timeline bucketing."""
-    events, thr = ctx["events"], ctx["thr"]
-    kernels = [e for e in events if e.get("cat") in GPU_KERNEL_CATEGORIES]
-    times = sorted(
-        float(k["ts"]) for k in kernels if k.get("ts") is not None and k.get("dur")
-    )
-    if len(times) < thr.drop_num_windows:
-        return []
-    t0, t1 = times[0], times[-1]
-    span = t1 - t0
-    if span <= 0:
-        return []
-    nbins = thr.drop_num_windows
-    width = span / nbins
-    counts = [0] * nbins
-    for t in times:
-        counts[min(int((t - t0) / width), nbins - 1)] += 1
-    nonzero = [c for c in counts if c > 0]
-    median = statistics.median(nonzero) if nonzero else 0
-    floor = thr.drop_empty_window_frac * median
-    starved = [i for i in range(1, nbins - 1) if counts[i] < floor]
-    num_interior = max(1, nbins - 2)
-    starved_frac = len(starved) / num_interior
-    if starved_frac > thr.drop_fail_frac:
-        return [
-            TraceCheck(
-                Status.WARN,
-                f"{len(starved)}/{num_interior} interior timeline windows starved of "
-                f"kernels — kernels likely dropped intermittently.",
-                {"starved_windows": starved, "starved_frac": round(starved_frac, 3)},
-            )
-        ]
-    return []
-
-
 def _check_runtime_variability(ctx) -> List[TraceCheck]:
     """Flag kernel groups whose per-invocation duration varies too much."""
     events, thr = ctx["events"], ctx["thr"]
@@ -434,32 +363,6 @@ def _check_gpu_busy_idle(ctx) -> List[TraceCheck]:
     return []
 
 
-def _check_kernel_counts(ctx) -> List[TraceCheck]:
-    """Report kernel-count structure and attention kernel presence."""
-    events, thr = ctx["events"], ctx["thr"]
-    kernels = [e for e in events if e.get("cat") in GPU_KERNEL_CATEGORIES]
-    if not kernels:
-        return []
-    name_counts = Counter(k.get("name", "") for k in kernels)
-    attn_total = sum(
-        c
-        for name, c in name_counts.items()
-        if matches_any(name, thr.attn_name_patterns)
-    )
-    if attn_total == 0:
-        return [
-            TraceCheck(
-                Status.WARN,
-                f"{len(name_counts)} unique kernels; no attention/FMHA kernel detected.",
-                {
-                    "num_unique_kernels": len(name_counts),
-                    "count_gcd": gcd_of_counts(name_counts.values()),
-                },
-            )
-        ]
-    return []
-
-
 def _check_jax_metadata_richness(ctx) -> List[TraceCheck]:
     """Fraction of GPU events carrying rich HLO metadata."""
     events, thr = ctx["events"], ctx["thr"]
@@ -487,15 +390,16 @@ def _check_jax_metadata_richness(ctx) -> List[TraceCheck]:
     return []
 
 
-# ---------------------------------------------------------------------------
-# Post-tree checks (run after tree building)
-# ---------------------------------------------------------------------------
-def _check_kernels_dropped_correlation(tree) -> List[TraceCheck]:
-    if not hasattr(tree, "runtime_event_uids"):
+def _check_kernels_dropped_correlation(ctx) -> List[TraceCheck]:
+    """Check for dropped kernels via correlation ID after tree building."""
+    tree = ctx.get("tree")
+    if tree is None or not hasattr(tree, "runtime_event_uids"):
         return []
     dropped = 0
     for uid in tree.runtime_event_uids:
         event = tree.events_by_uid[uid]
+        if "launch" not in event.get("name", "").lower():
+            continue
         if not event.get("gpu_events"):
             dropped += 1
     if dropped == 0:
@@ -535,20 +439,6 @@ _ATTN_FWD_SHEETS = ("op_fa_fwd",)
 _ATTN_BWD_SHEETS = ("op_fa_bwd",)
 
 
-def _check_report_generated(ctx) -> List[TraceCheck]:
-    dfs, sheets = ctx["dfs"], ctx["sheets"]
-    expected = {sheets["timeline"], sheets["op_summary"], sheets["unique_args"]}
-    missing = sorted(expected - set(dfs.keys()))
-    if missing:
-        return [
-            TraceCheck(
-                Status.WARN,
-                f"Perf report missing expected sheets: {missing}.",
-            )
-        ]
-    return []
-
-
 def _check_idle_timeline(ctx) -> List[TraceCheck]:
     dfs, sheets, thr = ctx["dfs"], ctx["sheets"], ctx["thr"]
     tl = dfs.get(sheets["timeline"])
@@ -570,26 +460,6 @@ def _check_idle_timeline(ctx) -> List[TraceCheck]:
             TraceCheck(
                 Status.WARN,
                 f"GPU idle {idle_pct:.1f}% (>= {thr.idle_pct_warn}%).",
-            )
-        ]
-    return []
-
-
-def _check_op_count_consistency(ctx) -> List[TraceCheck]:
-    dfs, sheets = ctx["dfs"], ctx["sheets"]
-    summary = dfs.get(sheets["op_summary"])
-    col = sheets["count_col"]
-    if summary is None or col not in getattr(summary, "columns", []):
-        return []
-    counts = [int(c) for c in summary[col].tolist() if c and int(c) > 0]
-    if not counts:
-        return []
-    divisor = gcd_of_counts(counts)
-    if divisor <= 1:
-        return [
-            TraceCheck(
-                Status.WARN,
-                f"{len(counts)} ops have gcd=1 (no common per-step multiple).",
             )
         ]
     return []
@@ -643,30 +513,6 @@ def _check_high_idle_ops(ctx) -> List[TraceCheck]:
             TraceCheck(
                 Status.WARN,
                 f"{offenders} op(s) with >= {thr.op_high_idle_pct}% non-kernel time.",
-            )
-        ]
-    return []
-
-
-def _check_sdpa_count(ctx) -> List[TraceCheck]:
-    """Count SDPA / attention ops across category and dedicated op sheets."""
-    dfs, sheets, thr = ctx["dfs"], ctx["sheets"], ctx["thr"]
-    cat_df = dfs.get(sheets["op_category"])
-    cat_col = sheets["category_col"]
-    total = 0
-    if cat_df is not None and cat_col in getattr(cat_df, "columns", []):
-        count_col = (
-            sheets["count_col"] if sheets["count_col"] in cat_df.columns else None
-        )
-        for _, row in cat_df.iterrows():
-            cat = str(row.get(cat_col, ""))
-            if matches_any(cat, thr.attn_name_patterns):
-                total += int(row[count_col]) if count_col else 1
-    if total == 0:
-        return [
-            TraceCheck(
-                Status.WARN,
-                "No SDPA / attention ops found in perf report.",
             )
         ]
     return []
@@ -753,37 +599,36 @@ CHECK_REGISTRY = [
     # Pre-report, detailed
     (_check_cpu_op_shapes_detailed, True, True, "pytorch"),
     (_check_cpu_gpu_ratio, True, True, "pytorch"),
-    (_check_kernels_dropped_windowed, True, True, None),
     (_check_runtime_variability, True, True, None),
     (_check_gpu_busy_idle, True, True, None),
-    (_check_kernel_counts, True, True, None),
     (_check_jax_metadata_richness, True, True, "jax"),
+    # Post-report, basic
+    (_check_kernels_dropped_correlation, False, False, None),
     # Post-report, detailed
-    (_check_report_generated, False, True, None),
     (_check_idle_timeline, False, True, None),
-    (_check_op_count_consistency, False, True, None),
     (_check_ops_have_shapes, False, True, None),
     (_check_high_idle_ops, False, True, None),
-    (_check_sdpa_count, False, True, None),
     (_check_attention_kernel_count, False, True, "jax"),
 ]
 
 
 def run_trace_checks(
     events: Sequence[Dict[str, Any]] = (),
-    trace_metadata: Optional[Dict[str, Any]] = None,
     capture_trace_filepath: Optional[str] = None,
     filepath: Optional[str] = None,
     framework: Optional[str] = None,
     pre_report: bool = True,
+    tree=None,
     dfs: Optional[Dict] = None,
     attn_cfg: Optional[AttnCountConfig] = None,
 ) -> TraceCheckReport:
     """Run trace checks.
 
     Args:
-        pre_report: If True, run pre-report checks. If False, run post-report checks.
-        dfs: Report DataFrames (required for post-report checks).
+        pre_report: If True, run pre-report checks. If False, run post-report
+            checks (including post-tree checks that need the built tree).
+        tree: A built TraceToTree (for post-report correlation-ID kernel drop check).
+        dfs: Report DataFrames (required for post-report DataFrame checks).
 
     Basic checks always run. Detailed checks run when
     ``TRACELENS_DETAILED_HEALTH_CHECKS=1`` is set. Checks are filtered
@@ -798,6 +643,7 @@ def run_trace_checks(
         "capture_trace_filepath": capture_trace_filepath,
         "filepath": filepath,
         "thr": thr,
+        "tree": tree,
         "dfs": dfs,
         "sheets": sheets,
         "attn_cfg": attn_cfg or AttnCountConfig(),
@@ -813,11 +659,3 @@ def run_trace_checks(
         findings.extend(fn(ctx))
 
     return TraceCheckReport(findings=findings)
-
-
-def run_post_tree_checks(tree) -> TraceCheckReport:
-    """Run checks that require a built trace tree.
-
-    Called after ``tree.build_tree()`` in ``TreePerfAnalyzer``.
-    """
-    return TraceCheckReport(findings=_check_kernels_dropped_correlation(tree))
