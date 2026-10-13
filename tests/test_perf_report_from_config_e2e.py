@@ -35,11 +35,7 @@ TRAINING_FLAGS = {
     "group_by_num_kernels": True,
     "include_call_stack": True,
 }
-INFERENCE_FLAGS = {
-    **TRAINING_FLAGS,
-    "group_by_parent_module": True,
-    "collective_analysis": False,
-}
+INFERENCE_FLAGS = {**TRAINING_FLAGS, "group_by_parent_module": True}
 
 
 def _assert_same_csvs(expected_dir, actual_dir):
@@ -74,6 +70,7 @@ def test_training_yaml_matches_direct_call(tmp_path):
         {
             "analysis_mode": "default",
             "output_dir": str(tmp_path / "yaml"),
+            **TRAINING_FLAGS,
             "jobs": [{"trace_path": TRAINING_TRACE, "platform": "MI300X"}],
         }
     )
@@ -97,6 +94,7 @@ def test_training_compare_to_matches_comparison_json_path(tmp_path):
         {
             "analysis_mode": "default",
             "output_dir": str(tmp_path / "yaml"),
+            **TRAINING_FLAGS,
             "jobs": [
                 {
                     "trace_path": new,
@@ -122,12 +120,14 @@ def test_inference_capture_yaml_matches_direct_call(tmp_path):
         ),
         output_csvs_dir=str(direct),
         gpu_arch_platform="MI300X",
+        collective_analysis=False,
         **INFERENCE_FLAGS,
     )
     run_config(
         {
             "analysis_mode": "inference",
             "output_dir": str(tmp_path / "yaml"),
+            **INFERENCE_FLAGS,
             "jobs": [
                 {
                     "trace_path": INFERENCE_TRACE,

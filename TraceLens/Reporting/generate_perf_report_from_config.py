@@ -18,16 +18,8 @@ selects the report function:
 
 Top-level keys other than ``analysis_mode``, ``output_dir``, and ``jobs`` must
 be parameter names of the selected report function. They apply to every job.
-These recipe flags default on when that function accepts them, unless the YAML
-sets them:
-
-* ``enable_pseudo_ops``
-* ``group_by_num_kernels``
-* ``include_call_stack``
-* ``group_by_parent_module``
-
-Every other flag keeps the value the matching CLI passes when the flag is not
-given. For ``inference`` that turns ``collective_analysis`` off.
+A flag the YAML doesn't set gets the value the matching CLI passes when the
+flag isn't given. For ``inference`` that turns ``collective_analysis`` off.
 
 A job's ``compare_to`` behaves like ``comparison_json_path``: it adds diff
 columns and a ``diff_stats`` sheet to that job's report and writes nothing for
@@ -64,12 +56,6 @@ _JOB_KEYS = frozenset(
 )
 _COMPARE_KEYS = frozenset({"trace_path", "capture_folder"})
 _MODES = ("default", "inference")
-_RECIPE_DEFAULTS = {
-    "enable_pseudo_ops": True,
-    "group_by_num_kernels": True,
-    "include_call_stack": True,
-    "group_by_parent_module": True,
-}
 # Where a CLI passes a different value than its function's default. The
 # inference CLI never enables collective analysis.
 _CLI_DEFAULTS = {
@@ -342,7 +328,7 @@ def _report_kwargs(
         raise ConfigError("; ".join(details) + ".")
 
     kwargs = {key: config[key] for key in config if key in accepted}
-    for key, value in {**cli_defaults, **_RECIPE_DEFAULTS}.items():
+    for key, value in cli_defaults.items():
         if key in accepted and key not in kwargs:
             kwargs[key] = value
     return kwargs
