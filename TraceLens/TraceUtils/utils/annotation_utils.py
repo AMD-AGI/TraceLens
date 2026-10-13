@@ -64,10 +64,26 @@ SGLANG_VERIFY_PATTERN = re.compile(r"step\[(?:TARGET_)?VERIFY\b[^\]]*\]", re.IGN
 SPEC_ROLE_TARGET = "target"
 SPEC_ROLE_DRAFTER = "drafter"
 SPEC_ROLE_DRAFTER_EXTEND = "drafter_extend"
-SGLANG_SPEC_STAGE_ROLES = {
-    "draft": SPEC_ROLE_DRAFTER,
-    "draft_extend": SPEC_ROLE_DRAFTER_EXTEND,
-}
+# SGLang spec-decode drafter annotations.
+# draft          <- drafter decode (graph replay)
+# draft_extend   <- drafter extend (eager, prefill-shaped)
+SGLANG_DRAFT_DECODE_PATTERN = re.compile(r"^draft$")
+SGLANG_DRAFT_EXTEND_PATTERN = re.compile(r"^draft_extend$")
+# ATOM spec-decode annotations.
+# decode[bs=32 tok=128 d=32 spec=3]  <- target verify (decode with speculative steps)
+ATOM_VERIFY_PATTERN = re.compile(r"^decode\[.*\bspec=\d+.*\]")
+# propose_eagle[0/3 tok=4 bs=1]       <- step 0: drafter extend (eager, prefill-shaped)
+# propose_eagle[1/3 tok=1 bs=1/1 graph] <- step 1+: drafter decode (graph replay)
+ATOM_PROPOSE_EXTEND_PATTERN = re.compile(r"^propose_\w+\[0/")
+ATOM_PROPOSE_DECODE_PATTERN = re.compile(r"^propose_\w+\[[1-9]\d*/")
+
+SPEC_VERIFY_PATTERNS = [SGLANG_VERIFY_PATTERN, ATOM_VERIFY_PATTERN]
+SPEC_DRAFT_PATTERNS = [
+    (SGLANG_DRAFT_DECODE_PATTERN, SPEC_ROLE_DRAFTER),
+    (SGLANG_DRAFT_EXTEND_PATTERN, SPEC_ROLE_DRAFTER_EXTEND),
+    (ATOM_PROPOSE_EXTEND_PATTERN, SPEC_ROLE_DRAFTER_EXTEND),
+    (ATOM_PROPOSE_DECODE_PATTERN, SPEC_ROLE_DRAFTER),
+]
 
 # prefill[bs=2 tok=14721 ctx=[7803, 6918]]
 # prefill[bs=6 tok=17408 ctx=[4096, 4096, 4096]...+3]  <- ctx truncated past 5
@@ -419,11 +435,17 @@ def find_known_annotations(annotations: List[dict]) -> List[dict]:
     return []
 
 
+def _match_verify_role(name: str) -> Optional[str]:
+    return SPEC_ROLE_TARGET if any(p.match(name) for p in SPEC_VERIFY_PATTERNS) else None
+
+
+def _match_draft_role(name: str) -> Optional[str]:
+    return next((role for p, role in SPEC_DRAFT_PATTERNS if p.match(name)), None)
+
+
 def spec_decode_role(name: str) -> Optional[str]:
     """Capture role (``SPEC_ROLE_*``) a spec-decode root replays, else ``None``."""
-    if SGLANG_VERIFY_PATTERN.match(name):
-        return SPEC_ROLE_TARGET
-    return SGLANG_SPEC_STAGE_ROLES.get(name)
+    return _match_verify_role(name) or _match_draft_role(name)
 
 
 def find_spec_decode_annotations(annotations: List[dict]) -> List[dict]:
@@ -456,7 +478,7 @@ def spec_decode_batch_sizes(roots: List[dict]) -> List[Optional[int]]:
         return ann.context_requests + ann.generation_requests
 
     verify = sorted(
-        (r for r in roots if SGLANG_VERIFY_PATTERN.match(r.get("name", ""))),
+        (r for r in roots if _match_verify_role(r.get("name", ""))),
         key=lambda r: r["ts"],
     )
     starts = [r["ts"] for r in verify]

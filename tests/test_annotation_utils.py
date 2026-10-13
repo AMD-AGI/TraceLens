@@ -975,6 +975,73 @@ def test_spec_decode_batch_sizes_borrow_from_nearest_verify():
 
 
 # --------------------------------------------------------------------------- #
+# ATOM speculative decoding roots
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "propose_eagle[0/3 tok=4 bs=1]",
+        "propose_eagle[1/3 tok=1 bs=1/1 graph]",
+    ],
+)
+def test_atom_proposer_spans_are_not_iteration_roots(name):
+    assert not IterationAnnotation(name).matched
+    assert find_known_annotations([_event(name)]) == []
+
+
+def test_atom_spec_decode_role():
+    assert spec_decode_role("decode[bs=32 tok=128 d=32 spec=3]") == SPEC_ROLE_TARGET
+    assert (
+        spec_decode_role(
+            "decode[bs=32 tok=128 d=32 spec=3 sqsq=512 sqsk=262144 sk=65536]"
+        )
+        == SPEC_ROLE_TARGET
+    )
+    assert spec_decode_role("decode[bs=64 tok=64 d=64]") is None
+    assert spec_decode_role("prefill[bs=2 tok=14721 ctx=[7803, 6918]]") is None
+    assert spec_decode_role("propose_eagle[0/3 tok=4 bs=1]") == SPEC_ROLE_DRAFTER_EXTEND
+    assert (
+        spec_decode_role("propose_eagle[1/3 tok=1 bs=1/1 graph]") == SPEC_ROLE_DRAFTER
+    )
+    assert (
+        spec_decode_role("propose_eagle[2/3 tok=1 bs=1/1 graph]") == SPEC_ROLE_DRAFTER
+    )
+
+
+def test_atom_find_spec_decode_annotations():
+    events = [
+        _event("prefill[bs=2 tok=14721 ctx=[7803, 6918]]", ts=0),
+        _event("decode[bs=32 tok=128 d=32 spec=3]", ts=100),
+        _event("propose_eagle[0/3 tok=4 bs=1]", ts=80),
+        _event("propose_eagle[1/3 tok=1 bs=1/1 graph]", ts=85),
+        _event("dspark_sched[bs=32]", ts=90),
+    ]
+    known = find_known_annotations(events)
+    assert len(known) == 2
+    spec = find_spec_decode_annotations(events)
+    names = [e["name"] for e in spec]
+    assert "propose_eagle[0/3 tok=4 bs=1]" in names
+    assert "propose_eagle[1/3 tok=1 bs=1/1 graph]" in names
+    assert "decode[bs=32 tok=128 d=32 spec=3]" in names
+    assert "dspark_sched[bs=32]" not in names
+
+
+def test_atom_spec_decode_batch_sizes_borrow_from_nearest_verify():
+    roots = [
+        _span("propose_eagle[0/3 tok=4 bs=1]", ts=0),
+        _span("propose_eagle[1/3 tok=1 bs=1/1 graph]", ts=5),
+        _span("decode[bs=32 tok=128 d=32 spec=3]", ts=20),
+        _span("propose_eagle[0/3 tok=4 bs=1]", ts=1000),
+        _span("decode[bs=64 tok=256 d=64 spec=3]", ts=1020),
+        _span("prefill[bs=2 tok=14721 ctx=[7803, 6918]]", ts=2000),
+    ]
+    sizes = spec_decode_batch_sizes(roots)
+    assert sizes == [32, 32, 32, 64, 64, None]
+
+
+# --------------------------------------------------------------------------- #
 # Phase classification
 # --------------------------------------------------------------------------- #
 
