@@ -845,8 +845,17 @@ class FusionCandidateBuilder:
     def _in_out_sizes(op_category, params: dict) -> tuple | None:
         """(input, output) size of a perf-summary op, in elements or bytes, or None
         when its category and params do not give them."""
-        if op_category == "reduce":
-            return 1, 0
+        if op_category == "reduce" and "num_input_elems" in params:
+            dtype_in, dtype_out = params["dtype_in_out"]
+            bpe_in = name2bpe(dtype_in)
+            # Like Reduce: an output without its own dtype keeps the input's.
+            bpe_out = name2bpe(dtype_out) if dtype_out else bpe_in
+            if None in (bpe_in, bpe_out):
+                return None
+            return (
+                params["num_input_elems"] * bpe_in,
+                params["num_output_elems"] * bpe_out,
+            )
         if op_category == "GEMM":
             M, N, K = params.get("M"), params.get("N"), params.get("K")
             return (M * K + K * N, M * N) if all((M, N, K)) else None

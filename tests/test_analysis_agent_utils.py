@@ -1782,7 +1782,14 @@ def _builder(tree=None, unified_events=None, perf_rows=None):
     [
         # GEMM M=2, K=3, N=4: in = (M*K + K*N) / (M*K + K*N + M*N), out = M*N / total.
         ("GEMM", "{'M': 2, 'N': 4, 'K': 3}", 10.0, (10.0 * 18 / 26, 10.0 * 8 / 26)),
-        ("reduce", "{}", 8.0, (8.0, 0.0)),
+        # Reduce splits by bytes; its output keeps the bf16 input dtype (12 in, 4 out).
+        (
+            "reduce",
+            "{'num_input_elems': 6, 'num_output_elems': 2, "
+            "'dtype_in_out': ('c10::BFloat16', None)}",
+            8.0,
+            (6.0, 2.0),
+        ),
         # Elementwise splits by bytes: two bf16 inputs and a bf16 output, then a
         # double scalar operand (1024 + 8 bytes in, 1024 out).
         (

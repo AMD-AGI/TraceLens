@@ -1789,6 +1789,7 @@ def test_driver_fusion_main_no_candidates(tmp_path, monkeypatch):
     metrics = _read_metrics(base, "kernel_fusion")
     assert metrics["status"] == "NO_DATA"
     assert metrics["candidate_count"] == 0
+    assert metrics["overlap_efficiency"] == OVERLAP_EFFICIENCY
 
 
 def _main_candidate(name, kind, confidence, total_us):

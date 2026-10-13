@@ -111,6 +111,8 @@ def main():
 
     baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
     is_comparative = args.comparison_scope == "comparative"
+    # The standalone report note quotes the overlap even when nothing is found.
+    scope_metrics = {} if is_comparative else {"overlap_efficiency": OVERLAP_EFFICIENCY}
 
     raw_count = len(candidates)
     candidates = FusionPricer.shortlist(candidates, baseline_ms)
@@ -122,6 +124,7 @@ def main():
             "status": "NO_DATA",
             "candidate_count": 0,
             "impact_estimates": [],
+            **scope_metrics,
         }
         output_path = write_metrics_json(metrics, args.output_dir, "kernel_fusion")
         print(f"No fusion candidates found. Metrics written to: {output_path}")
@@ -186,12 +189,11 @@ def main():
         "peak_mem_bw_tbs": peak_bw_tbs,
         "baseline_ms": baseline_ms,
         "impact_estimates": [e.to_dict() for e in impact_estimates],
+        **scope_metrics,
     }
 
     if is_comparative:
         metrics["baseline2_ms"] = trace2_kwargs["baseline2_ms"]
-    else:
-        metrics["overlap_efficiency"] = OVERLAP_EFFICIENCY
 
     if warnings:
         metrics["warnings"] = warnings
