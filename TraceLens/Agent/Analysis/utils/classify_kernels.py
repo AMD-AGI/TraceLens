@@ -69,45 +69,54 @@ UNKNOWN = "Unknown"
 COMPILED = "Compiled"
 
 # Regex rules: (pattern, kernel_type, priority). The highest priority wins; on a
-# tie the earlier rule wins. Compiled sits at 5, after the GEMM and Elementwise
-# catch-alls, so it never takes over a name they type; Convolution sits at 6 so its
-# names win over the GEMM catch-all.
+# tie the earlier rule wins. Priority is one of the bands 1, 5, 10, 15, 20: the band
+# is a rule's specificity, and within a band the more specific (fused) rules are
+# listed first.
 KERNEL_TYPE_RULES = [
-    # ---- Normalization ----
-    (r"(?i)Rmsnorm|rmsnorm2d", "RMSNorm", 20),
-    # Templated ck_tile Rmsnorm2dFwd spells the fused-add and fused-quant enums
-    # even when they are 0 (unfused), so only a non-zero enum means fused.
-    (r"(?i)add_rmsnorm|Rmsnorm2dFusedAddEnumE[1-9]", "Add+RMSNorm", 21),
+    # ---- Band 20: MemCpy and MemSet ----
+    (r"(?i)memcpy", "MemCpy", 20),
+    (r"(?i)combined_routing_memset", "MoE Routing Memset", 20),
+    (r"(?i)memset", "MemSet", 20),
+    # ---- Band 20: fused MoE, norm and KV-store kernels ----
+    (r"(?i)swiglu|swiGlu", "MoE GateUp+SwiGLU GEMM", 20),
     (
-        r"(?i)fused_rms_\w*quant|rmsnorm_quant|Rmsnorm2dFusedQuantEnumE[1-9]",
-        "RMSNorm+Quant",
-        21,
+        r"(?i)fmoe.*g1u1.*silu|fmoe.*silu|mfma_moe\d+_silu_mul",
+        "MoE GEMM+SiLU (aiter)",
+        20,
     ),
     (
         r"(?i)add_rmsnorm_quant|Rmsnorm2dFusedAddEnumE[1-9].*Rmsnorm2dFusedQuantEnumE[1-9]",
         "Add+RMSNorm+Quant",
-        22,
+        20,
     ),
-    (r"(?i)local_device_load_rmsnorm", "AllReduce+RMSNorm", 21),
+    (
+        r"(?i)fuse_qk_rope_concat_and_cache_mla|fused_qk_rope_reshape_and_cache",
+        "RoPE+KV Store",
+        20,
+    ),
+    (r"(?i)kernel_moe_gemm|MoeGemmBlockScale|mfma_moe", "MoE GEMM (CK)", 20),
+    # Templated ck_tile Rmsnorm2dFwd spells the fused-add and fused-quant enums
+    # even when they are 0 (unfused), so only a non-zero enum means fused.
+    (r"(?i)add_rmsnorm|Rmsnorm2dFusedAddEnumE[1-9]", "Add+RMSNorm", 20),
+    (
+        r"(?i)fused_rms_\w*quant|rmsnorm_quant|Rmsnorm2dFusedQuantEnumE[1-9]",
+        "RMSNorm+Quant",
+        20,
+    ),
+    (r"(?i)local_device_load_rmsnorm", "AllReduce+RMSNorm", 20),
+    # ---- Band 20: Normalization ----
+    (r"(?i)Rmsnorm|rmsnorm2d", "RMSNorm", 20),
     (r"(?i)layer_norm|layernorm", "LayerNorm", 20),
     (r"(?i)batch_norm|batchnorm", "BatchNorm", 20),
     (r"(?i)l2norm_fwd|l2norm_kernel", "L2Norm", 20),
+    (
+        r"(?i)fused__to_copy_add_mean_moe_forward_shared.*pow.*rsqrt",
+        "RMSNorm (shared expert + norm)",
+        20,
+    ),
     (r"(?i)rsqrt.*mean.*pow|mean.*mul.*pow.*rsqrt", "RMSNorm (fused triton)", 20),
     (r"(?i)_to_copy_add.*mean.*rsqrt", "RMSNorm (fused triton)", 20),
-    (r"(?i)fused__to_copy_abs.*mean.*pow.*rsqrt", "RMSNorm (fused triton)", 18),
-    (r"(?i)fused__to_copy_add.*mean.*pow.*rsqrt", "RMSNorm (fused triton)", 18),
-    (r"(?i)fused_add_copy__mean.*pow", "RMSNorm (fused triton residual)", 18),
-    (
-        r"(?i)fused__to_copy_add_copy__mean.*pow",
-        "RMSNorm (fused triton residual)",
-        18,
-    ),
-    (
-        r"(?i)fused__to_copy_add_mean.*mul.*pow.*rsqrt",
-        "RMSNorm (fused triton)",
-        18,
-    ),
-    # ---- Attention, KV cache and RoPE ----
+    # ---- Band 20: Attention and KV cache ----
     (r"(?i)attention_[23]d|unified_attention", "Attention (AMD unified)", 20),
     (r"(?i)fmha[Ss]m\d+|fmhaSm100f", "Attention (NVIDIA fmha)", 20),
     (r"(?i)paged_attention|PagedAttention", "Attention (paged)", 20),
@@ -119,13 +128,7 @@ KERNEL_TYPE_RULES = [
     (r"(?i)mla_a8w8", "Attention (MLA)", 20),
     (r"(?i)reduce_segments", "Attention Reduce", 20),
     (r"(?i)reshape_and_cache_flash|reshape_and_cache", "KV Cache Store", 20),
-    (
-        r"(?i)fuse_qk_rope_concat_and_cache_mla|fused_qk_rope_reshape_and_cache",
-        "RoPE+KV Store",
-        22,
-    ),
-    (r"(?i)rotary|rope", "Rotary Embedding", 18),
-    # ---- Linear attention ----
+    # ---- Band 20: Linear attention ----
     (r"(?i)chunk_gated_delta_rule_fwd", "Linear Attention (chunk delta)", 20),
     (r"(?i)chunk_fwd_kernel_o", "Linear Attention (chunk fwd)", 20),
     (r"(?i)chunk_scaled_dot_kkt", "Linear Attention (chunk kkt)", 20),
@@ -135,14 +138,7 @@ KERNEL_TYPE_RULES = [
     (r"(?i)merge_\d+x\d+_to_\d+x\d+_inverse", "Linear Attention (merge inverse)", 20),
     (r"(?i)_causal_conv1d_fwd|_causal_conv1d_update", "Causal Conv1D", 20),
     (r"(?i)fused_gdn_gating", "GDN Gating", 20),
-    # ---- MoE and quantization ----
-    (r"(?i)swiglu|swiGlu", "MoE GateUp+SwiGLU GEMM", 25),
-    (
-        r"(?i)fmoe.*g1u1.*silu|fmoe.*silu|mfma_moe\d+_silu_mul",
-        "MoE GEMM+SiLU (aiter)",
-        25,
-    ),
-    (r"(?i)kernel_moe_gemm|MoeGemmBlockScale|mfma_moe", "MoE GEMM (CK)", 22),
+    # ---- Band 20: MoE ----
     (r"(?i)finalize.*scatter|_finalize_matmul|finalizeKernel", "MoE Finalize", 20),
     (r"(?i)topk_forward", "MoE TopK", 20),
     (r"(?i)topkGatingSoftmax", "MoE TopK Gating", 20),
@@ -153,30 +149,51 @@ KERNEL_TYPE_RULES = [
     (r"(?i)MoeSorting", "MoE Sorting", 20),
     (r"(?i)constant_pad.*moe|moe_forward", "MoE Pad", 20),
     (r"(?i)quantize_with_block_size", "MoE Quantize", 20),
+    # ---- Band 20: Activation, communication and gather ----
+    (r"(?i)act_and_mul_kernel|silu_and_mul|silu_mul|SiluAndMul", "Act+Mul", 20),
+    (r"(?i)cross_device|allgather_lastdim", "Collective", 20),
+    (r"(?i)nccl|rccl|multimem_all_reduce", "Library Collective", 20),
+    (r"(?i)gather_kernel|vectorized_gather", "Elementwise", 20),
+    # ---- Band 15: fused triton Normalization, RoPE, quantization, activation ----
+    (r"(?i)fused__to_copy_abs.*mean.*pow.*rsqrt", "RMSNorm (fused triton)", 15),
+    (r"(?i)fused__to_copy_add.*mean.*pow.*rsqrt", "RMSNorm (fused triton)", 15),
+    (r"(?i)fused_add_copy__mean.*pow", "RMSNorm (fused triton residual)", 15),
+    (
+        r"(?i)fused__to_copy_add_copy__mean.*pow",
+        "RMSNorm (fused triton residual)",
+        15,
+    ),
+    (
+        r"(?i)fused__to_copy_add_mean.*mul.*pow.*rsqrt",
+        "RMSNorm (fused triton)",
+        15,
+    ),
+    (r"(?i)rotary|rope", "Rotary Embedding", 15),
     (
         r"(?i)per_token_group_quant|dynamic_per_group_scaled_quant",
         "Quantize (per-group)",
-        18,
+        15,
     ),
-    # ---- Activation ----
-    (r"(?i)act_and_mul_kernel|silu_and_mul|silu_mul|SiluAndMul", "Act+Mul", 20),
-    (r"(?i)activationDeepSeekKernel", "Activation (DeepSeek fused)", 18),
+    (r"(?i)activationDeepSeekKernel", "Activation (DeepSeek fused)", 15),
+    (r"(?i)fused_mul_sigmoid", "Activation (SiLU)", 15),
+    # ---- Band 15: embedding, sampling, activation, GEMM split-K reduce ----
+    (r"(?i)embedding", "Elementwise", 15),
+    (r"(?i)top_k|top_p|sampling|topk_topp", "Elementwise", 15),
     (r"(?i)\bsilu(_kernel)?\b|swish", "Activation (SiLU)", 15),
     (r"(?i)\bgelu\b", "Activation (GELU)", 15),
-    # ---- Communication ----
-    (r"(?i)cross_device|allgather_lastdim", "Collective", 20),
-    (r"(?i)nccl|rccl|multimem_all_reduce", "Library Collective", 20),
-    # ---- MemCpy and MemSet ----
-    (r"(?i)memcpy", "MemCpy", 30),
-    (r"(?i)memset", "MemSet", 30),
-    # ---- Elementwise, softmax, reduce and layout ----
-    (r"(?i)embedding", "Elementwise", 17),
-    (r"(?i)gather_kernel|vectorized_gather", "Elementwise", 20),
-    (r"(?i)top_k|top_p|sampling|topk_topp", "Elementwise", 15),
-    (r"(?i)__amd_rocclr_copyBuffer", "Elementwise", 12),
-    (r"(?i)memcpy32_post", "Elementwise", 12),
-    (r"(?i)copy_page_indices", "Elementwise", 12),
-    (r"(?i)softmax", "Softmax", 12),
+    (r"(?i)splitKreduce|splitkreduce", "GEMM", 15),
+    # ---- Band 15: copies, softmax and GEMM libraries ----
+    (r"(?i)__amd_rocclr_copyBuffer", "Elementwise", 15),
+    (r"(?i)memcpy32_post", "Elementwise", 15),
+    (r"(?i)copy_page_indices", "Elementwise", 15),
+    (r"(?i)softmax", "Softmax", 15),
+    (r"(?i)_matmul_ogs.*mxfp4", "GEMM", 15),
+    (r"(?i)_gemm_a16_w16", "GEMM", 15),
+    (r"(?i)nvjet_tst", "GEMM", 15),
+    (r"(?i)wvSplitK", "GEMM", 15),
+    (r"(?i)Cijk_", "GEMM", 15),
+    (r"(?i)kernel_gemm_xdl_cshuffle", "GEMM", 15),
+    # ---- Band 10: elementwise and layout, then GEMM libraries ----
     (r"(?i)vectorized_elementwise_kernel.*FillFunctor", "Elementwise", 10),
     (r"(?i)direct_copy_kernel|_to_copy\b", "Elementwise", 10),
     (r"(?i)CatArrayBatchedCopy", "Elementwise", 10),
@@ -185,31 +202,25 @@ KERNEL_TYPE_RULES = [
         LAYOUT_TRANSFORM,
         10,
     ),
-    (r"(?i)CUDAFunctor(OnSelf|OnOther)?_add", "Add", 8),
-    (r"(?i)MulFunctor", "Mul", 8),
-    (r"(?i)\breduce_kernel", "Reduce", 9),
-    (r"(?i)elementwise", "Elementwise", 5),
-    # ---- GEMM, convolution and compiled ----
-    (r"(?i)splitKreduce|splitkreduce", "GEMM", 15),
-    (r"(?i)_matmul_ogs.*mxfp4", "GEMM", 12),
-    (r"(?i)_gemm_a16_w16", "GEMM", 12),
-    (r"(?i)nvjet_tst", "GEMM", 12),
-    (r"(?i)wvSplitK", "GEMM", 12),
-    (r"(?i)Cijk_", "GEMM", 12),
-    (r"(?i)kernel_gemm_xdl_cshuffle", "GEMM", 12),
     (r"(?i)_gemm_a\d+w\d+", "GEMM", 10),
     (r"(?i)bmm_MxE4m3.*MxE2m1", "GEMM", 10),
     (r"(?i)bmm_Bfloat16.*MxE2m1", "GEMM", 10),
     (r"(?i)cublasLt|cublas", "GEMM", 10),
     (r"(?i)rocm_aiter_gemm_a8w8", "GEMM", 10),
-    (r"(?i)triton_poi_fused.*clamp.*div.*rocm_aiter_gemm", "GEMM", 8),
-    (r"(?i)triton_per_fused.*abs.*clamp.*div.*max.*rocm_aiter_gemm", "GEMM", 8),
-    (r"(?i)gemm|matmul|bmm", "GEMM", 5),
+    # ---- Band 10: reduce, add and mul, then fused compiled GEMM ----
+    (r"(?i)\breduce_kernel", "Reduce", 10),
+    (r"(?i)CUDAFunctor(OnSelf|OnOther)?_add", "Add", 10),
+    (r"(?i)MulFunctor", "Mul", 10),
+    (r"(?i)triton_poi_fused.*clamp.*div.*rocm_aiter_gemm", "GEMM", 10),
+    (r"(?i)triton_per_fused.*abs.*clamp.*div.*max.*rocm_aiter_gemm", "GEMM", 10),
+    # ---- Band 5: catch-alls, convolution first so it wins over the GEMM one ----
     (
         r"(?i)fprop|wgrad|grouped_conv|naive_conv|igemm_(fwd|bwd|wrw)_gtc",
         "Convolution",
-        6,
+        5,
     ),
+    (r"(?i)elementwise", "Elementwise", 5),
+    (r"(?i)gemm|matmul|bmm", "GEMM", 5),
     (rf"(?i){COMPILED_PREFIX}fused", COMPILED, 5),
 ]
 
@@ -227,6 +238,7 @@ KERNEL_TYPES = {
     "L2Norm": ("Normalization", ("norm",)),
     "RMSNorm (fused triton)": ("Normalization", ("add", "norm")),
     "RMSNorm (fused triton residual)": ("Normalization", ("add", "norm")),
+    "RMSNorm (shared expert + norm)": ("Normalization", ("add", "norm")),
     "Attention (AMD unified)": ("SDPA", ("gemm", "softmax", "gemm")),
     "Attention (NVIDIA fmha)": ("SDPA", ("gemm", "softmax", "gemm")),
     "Attention (paged)": ("SDPA", ("gemm", "softmax", "gemm")),
@@ -253,6 +265,7 @@ KERNEL_TYPES = {
     "MoE TopK Gating": ("Elementwise-MoE", ("softmax", "topk")),
     "TopK": ("Elementwise", ("topk",)),
     "MoE BitMatrix": ("Elementwise-MoE", ("route",)),
+    "MoE Routing Memset": ("Elementwise-MoE", ("route",)),
     "MoE Routing Compute": ("Elementwise-MoE", ("route",)),
     "MoE Routing (fused)": ("Elementwise-MoE", ("topk", "softmax", "route")),
     "MoE Sorting": ("Elementwise-MoE", ("route",)),

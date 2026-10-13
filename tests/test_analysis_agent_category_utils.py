@@ -189,7 +189,13 @@ def _name_key(name):
     "name,expected_type,expected_cat,expected_covers",
     [
         ("Memcpy HtoD (Host -> Device)", "MemCpy", "MemCpy", ("copy",)),
-        ("_combined_routing_memset", "MemSet", "MemCpy", ("copy",)),
+        ("Memset (Device)", "MemSet", "MemCpy", ("copy",)),
+        (
+            "_combined_routing_memset",
+            "MoE Routing Memset",
+            "Elementwise-MoE",
+            ("route",),
+        ),
         ("nvjet_tst_64x152_64x7_2x1_v_bz_NNT", "GEMM", "GEMM", ("gemm",)),
         (
             "_matmul_ogs_NNT_bf16xbf16xmxfp4_16x128x256x1_swiglu",
@@ -375,6 +381,18 @@ def _name_key(name):
             "Normalization",
             ("add", "norm"),
         ),
+        (
+            "triton_poi_fused__to_copy_add_mean_moe_forward_shared_pow_rsqrt_0",
+            "RMSNorm (shared expert + norm)",
+            "Normalization",
+            ("add", "norm"),
+        ),
+        (
+            "triton_poi_fused_mul_sigmoid_0",
+            "Activation (SiLU)",
+            "Elementwise",
+            ("act",),
+        ),
     ],
 )
 def test_taxonomy_classify(name, expected_type, expected_cat, expected_covers):
@@ -387,7 +405,7 @@ def test_taxonomy_classify(name, expected_type, expected_cat, expected_covers):
 
 
 def test_classify_kernel_reports_winning_priority():
-    """A cudnn SDPA kernel also matches the convolution rule (fprop, 6); the
+    """A cudnn SDPA kernel also matches the convolution rule (fprop, 5); the
     flash-attention rule (20) wins and its priority is the reported confidence."""
     assert classify_kernel(
         "cudnn_generated_fort_native_sdpa_sm90_flash_fprop_wgmma_f16_knob_7_64x128x128_4x1x1_kernel0_0"
