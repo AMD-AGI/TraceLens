@@ -26,6 +26,7 @@ import sys
 from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field, fields, replace
+from math import prod
 
 import pandas as pd
 
@@ -48,20 +49,77 @@ from TraceLens.Agent.Analysis.utils.classify_kernels import (
     KernelClass,
     KernelTaxonomy,
 )
+from TraceLens.PerfModel.perf_model import BinaryElementwise
+from TraceLens.PerfModel.utils import name2bpe
 from TraceLens.TreePerf.tree_perf import event_process_thread_names
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# FusionCandidate fields that hold KernelRecord tuples.
+KERNEL_FIELDS = ("kernels", "kernels_trace1", "kernels_trace2")
+
+# The generic kinds of a group that matches no form.
+GEMM_EPILOGUE = "gemm_epilogue"
+ELEMENTWISE_CHAIN = "elementwise_chain"
+# Kind names that differ from the joined elements; the rest are named by joining.
+KIND_NAMES = {
+    ("gemm", "softmax", "gemm"): "attention",
+    ("collective", "norm"): "allreduce_norm",
+    ("softmax", "topk"): "routing_topk",
+}
+# Kinds whose fused kernel replaces every kernel between its first and last
+# element, matrix kernels included (a flash kernel replaces QK, mask, softmax, PV).
+SPAN_KINDS = frozenset({"attention"})
+# Fused types that are not fusion targets: MoE GEMMs and MoE routing, found by
+# primitive, and compiled kernels, found by type (their pointwise/reduce mix is
+# unknown, so no form can describe them).
+NON_TARGET_COVERS = frozenset({"moe_gemm", "route"})
+MATRIX_COVERS = frozenset({"gemm", "moe_gemm"})
+# Copy-engine kernels and library collectives never sit in a same-stream seam.
+NON_FUSABLE_COVERS = frozenset({"copy", "library_collective"})
+NORM_ONLY_COVERS = frozenset({"norm", "batchnorm"})
+
+MAX_FUSION_KERNEL_COUNT = 15
+# Unrelated kernels allowed between two elements of a form.
+MAX_GAP = 1
+
+MODULE_INDEX_RE = re.compile(r"_(\d+)$")
+# Case-A gates (comparative mode): trace 1 has more kernels than trace 2, by at
+# most CASE_A_MAX_DELTA, and has at most CASE_A_MAX_N1 kernels in all.
+CASE_A_MAX_DELTA = 15
+CASE_A_MAX_N1 = 30
+# Event categories that are never fusion candidate containers.
+SKIP_CATEGORIES = frozenset(
+    {"kernel", "gpu_memcpy", "gpu_memset", "cuda_runtime", "cuda_driver"}
+)
+SIBLING_SOURCE = "sibling_sequence"
+
+# Memory/compute pipeline overlap fraction (0 = no overlap, 1 = perfect overlap).
+OVERLAP_EFFICIENCY = 0.85
+# Drop estimates whose best-case impact_score is below this threshold.
+MIN_IMPACT_SCORE = 2.0
+MIN_SAVINGS_MS = 0.1
+# Fraction of a candidate's kernels that must have perf models: short and long.
+MIN_MODELED_FRAC = 0.5
+MIN_MODELED_FRAC_LONG = 0.75
+LONG_GROUP_KERNELS = 5
+NO_VALUE = "—"  # Table cell for a value the perf report does not provide
 
 # ---------------------------------------------------------------------------
 # Records
 # ---------------------------------------------------------------------------
 
 
-def _to_json(record) -> dict:
-    """A record as a JSON dict: unset (None) fields are omitted, kernel tuples become lists."""
+def _record_dict(record) -> dict:
+    """A record as a JSON-ready dict: unset (None) fields are omitted, kernel tuples
+    become lists."""
     out = {}
     for f in fields(record):
         value = getattr(record, f.name)
         if isinstance(value, tuple):
-            value = [_to_json(k) for k in value]
+            value = [_record_dict(k) for k in value]
         if value is not None:
             out[f.name] = value
     return out
@@ -108,8 +166,6 @@ class FusionCandidate:
     ``_trace2`` fields instead.
     """
 
-    KERNEL_FIELDS = ("kernels", "kernels_trace1", "kernels_trace2")
-
     module_name: str
     base_name: str
     parent_chain: list
@@ -154,14 +210,14 @@ class FusionCandidate:
             else self.total_kernel_time_us
         )
 
-    def to_json(self) -> dict:
-        return _to_json(self)
+    def to_dict(self) -> dict:
+        return _record_dict(self)
 
     @classmethod
-    def from_json(cls, data: dict) -> "FusionCandidate":
+    def from_dict(cls, data: dict) -> "FusionCandidate":
         kernels = {
             name: tuple(KernelRecord(**k) for k in data[name])
-            for name in cls.KERNEL_FIELDS
+            for name in KERNEL_FIELDS
             if name in data
         }
         return cls(**{**data, **kernels})
@@ -193,8 +249,8 @@ class FusionEstimate:
     rows_trace2: list | None = None
     op_keys: list
 
-    def to_json(self) -> dict:
-        return _to_json(self)
+    def to_dict(self) -> dict:
+        return _record_dict(self)
 
 
 # ---------------------------------------------------------------------------
@@ -206,26 +262,6 @@ class FusionForms:
     """Fusion facts derived from the taxonomy: one form per fused type, plus the
     matrix and fusable predicates."""
 
-    # The generic kinds of a group that matches no form.
-    GEMM_EPILOGUE = "gemm_epilogue"
-    ELEMENTWISE_CHAIN = "elementwise_chain"
-    # Kind names that differ from the joined elements; the rest are named by joining.
-    KIND_NAMES = {
-        ("gemm", "softmax", "gemm"): "attention",
-        ("collective", "norm"): "allreduce_norm",
-        ("softmax", "topk"): "routing_topk",
-    }
-    # Kinds whose fused kernel replaces every kernel between its first and last
-    # element, matrix kernels included (a flash kernel replaces QK, mask, softmax, PV).
-    SPAN_KINDS = frozenset({"attention"})
-    # Fused types that are not fusion targets: MoE GEMMs and MoE routing, found by
-    # primitive, and compiled kernels, found by type (their pointwise/reduce mix is
-    # unknown, so no form can describe them).
-    NON_TARGET = frozenset({"moe_gemm", "route"})
-    MATRIX = frozenset({"gemm", "moe_gemm"})
-    # Copy-engine kernels and library collectives never sit in a same-stream seam.
-    NON_FUSABLE = frozenset({"copy", "library_collective"})
-
     def __init__(self, taxonomy: KernelTaxonomy):
         self.taxonomy = taxonomy
         by_covers = {}
@@ -233,17 +269,17 @@ class FusionForms:
             if (
                 self.is_fused(kc)
                 and kc.type != COMPILED
-                and self.NON_TARGET.isdisjoint(kc.covers)
+                and NON_TARGET_COVERS.isdisjoint(kc.covers)
             ):
-                kind = self.KIND_NAMES.get(kc.covers, "_".join(kc.covers))
+                kind = KIND_NAMES.get(kc.covers, "_".join(kc.covers))
                 by_covers.setdefault(
-                    kc.covers, FusedForm(kind, kc.covers, kind in self.SPAN_KINDS)
+                    kc.covers, FusedForm(kind, kc.covers, kind in SPAN_KINDS)
                 )
         self.forms = tuple(
             sorted(by_covers.values(), key=lambda f: len(f.elements), reverse=True)
         )
         self.kinds = frozenset(
-            {f.kind for f in self.forms} | {self.GEMM_EPILOGUE, self.ELEMENTWISE_CHAIN}
+            {f.kind for f in self.forms} | {GEMM_EPILOGUE, ELEMENTWISE_CHAIN}
         )
 
     @staticmethod
@@ -253,7 +289,7 @@ class FusionForms:
     def is_matrix(self, kc: KernelClass | str) -> bool:
         if isinstance(kc, str):
             kc = self.taxonomy.by_type(kc)
-        return not self.MATRIX.isdisjoint(kc.covers)
+        return not MATRIX_COVERS.isdisjoint(kc.covers)
 
     def matrix_mask(
         self, classes: Sequence[KernelClass | str], op_keys: Sequence[list | None]
@@ -272,19 +308,14 @@ class FusionForms:
         ]
 
     def is_fusable(self, kc: KernelClass) -> bool:
-        return self.NON_FUSABLE.isdisjoint(kc.covers)
+        return NON_FUSABLE_COVERS.isdisjoint(kc.covers)
 
     def replaces_span(self, kind: str) -> bool:
-        return kind in self.SPAN_KINDS
+        return kind in SPAN_KINDS
 
 
 class FusionLabeler:
     """Group of kernel names, in stream order, to a fusion kind and confidence."""
-
-    MAX_FUSION_KERNEL_COUNT = 15
-    # Unrelated kernels allowed between two elements of a form.
-    MAX_GAP = 1
-    NORM_ONLY = frozenset({"norm", "batchnorm"})
 
     def __init__(self, taxonomy: KernelTaxonomy, forms: FusionForms):
         self.taxonomy = taxonomy
@@ -308,12 +339,12 @@ class FusionLabeler:
         form, span = self._seam(classes)
         if span:
             classes, op_keys = classes[span[0] : span[1]], op_keys[span[0] : span[1]]
-        if len(classes) > self.MAX_FUSION_KERNEL_COUNT:
+        if len(classes) > MAX_FUSION_KERNEL_COUNT:
             return None
         matrix = self.forms.matrix_mask(classes, op_keys)
         # Also true when every kernel is matrix: nothing is left to fuse.
         if any(matrix) and all(
-            kc.covers and self.NORM_ONLY.issuperset(kc.covers)
+            kc.covers and NORM_ONLY_COVERS.issuperset(kc.covers)
             for kc, is_matrix in zip(classes, matrix)
             if not is_matrix
         ):
@@ -322,12 +353,12 @@ class FusionLabeler:
         if form is not None:
             kind = form.kind
         elif any(matrix):
-            kind = self.forms.GEMM_EPILOGUE
+            kind = GEMM_EPILOGUE
         else:
-            kind = self.forms.ELEMENTWISE_CHAIN
+            kind = ELEMENTWISE_CHAIN
         if any(kc.type == UNKNOWN for kc in classes):
             confidence = "low"
-        elif kind == self.forms.GEMM_EPILOGUE:
+        elif kind == GEMM_EPILOGUE:
             confidence = "medium"
         else:
             confidence = "high"
@@ -353,7 +384,7 @@ class FusionLabeler:
         for element in form.elements[1:]:
             window = range(pos + 1, len(classes))
             if not form.replaces_span:
-                window = window[: 1 + self.MAX_GAP]
+                window = window[: 1 + MAX_GAP]
             for nxt in window:
                 if classes[nxt].covers == (element,):
                     pos = nxt
@@ -418,17 +449,6 @@ class FusionCandidateBuilder:
     """Trace to fusion candidates: walks the event tree, groups kernels by module,
     labels each group and dedups."""
 
-    MODULE_INDEX_RE = re.compile(r"_(\d+)$")
-    # Case-A gates (comparative mode): trace 1 has more kernels than trace 2, by at
-    # most CASE_A_MAX_DELTA, and has at most CASE_A_MAX_N1 kernels in all.
-    CASE_A_MAX_DELTA = 15
-    CASE_A_MAX_N1 = 30
-    # Event categories that are never fusion candidate containers.
-    SKIP_CATEGORIES = frozenset(
-        {"kernel", "gpu_memcpy", "gpu_memset", "cuda_runtime", "cuda_driver"}
-    )
-    SIBLING_SOURCE = "sibling_sequence"
-
     def __init__(self, tree, analyzer, perf_rows: dict, labeler: FusionLabeler):
         self.tree = tree
         self.perf_rows = perf_rows
@@ -454,7 +474,7 @@ class FusionCandidateBuilder:
             names = tuple(k.name for k, _ in g.instances[0])
             if any(self._contains_run(names, hay) for hay in accepted):
                 continue
-            if c := self._candidate(g, self.SIBLING_SOURCE):
+            if c := self._candidate(g, SIBLING_SOURCE):
                 candidates.append(c)
         candidates = self._dedup_by_kernel_set(candidates)
         print(
@@ -466,7 +486,7 @@ class FusionCandidateBuilder:
     def _module_groups(self) -> list[_Group]:
         groups: dict = {}
         for ev in self.tree.events:
-            if self.categorizer(ev) in self.SKIP_CATEGORIES:
+            if self.categorizer(ev) in SKIP_CATEGORIES:
                 continue
             gpu_uids = ev.get("gpu_events", [])
             if len(gpu_uids) < 2:
@@ -600,7 +620,7 @@ class FusionCandidateBuilder:
 
         groups: dict = {}
         for ev in self.tree.events:
-            if self.categorizer(ev) in self.SKIP_CATEGORIES:
+            if self.categorizer(ev) in SKIP_CATEGORIES:
                 continue
             gpu_uids = list(dict.fromkeys(ev.get("gpu_events", [])))
             if len(gpu_uids) < 2:
@@ -712,9 +732,9 @@ class FusionCandidateBuilder:
         n1, n2 = len(t1), len(t2)
         if n1 <= n2:  # focus on trace 1 inefficiencies only
             return False
-        if n1 - n2 > self.CASE_A_MAX_DELTA:  # large deltas are structural divergence
+        if n1 - n2 > CASE_A_MAX_DELTA:  # large deltas are structural divergence
             return False
-        if n1 > self.CASE_A_MAX_N1:  # oversized sub-trees are structural divergence
+        if n1 > CASE_A_MAX_N1:  # oversized sub-trees are structural divergence
             return False
         if n2 < 1:  # no gap analysis against nothing
             return False
@@ -729,10 +749,10 @@ class FusionCandidateBuilder:
 
     # -- shared -------------------------------------------------------------
 
-    @classmethod
-    def _strip_module_index(cls, name: str) -> str:
+    @staticmethod
+    def _strip_module_index(name: str) -> str:
         prefix = name[len("nn.Module: ") :] if name.startswith("nn.Module: ") else name
-        return cls.MODULE_INDEX_RE.sub("", prefix)
+        return MODULE_INDEX_RE.sub("", prefix)
 
     def _parent_chain(self, ev) -> list:
         """Walk ancestors and return a list of cleaned parent names (outermost last)."""
@@ -804,29 +824,44 @@ class FusionCandidateBuilder:
             row.get("op category", ""), "" if pd.isna(pp) else pp, dm
         )
 
-    @staticmethod
-    def _compute_data_in_out(op_category, perf_params_str, data_moved_mb):
-        """Split Data Moved into (data_in_mb, data_out_mb) using op type and shapes."""
-        half = (data_moved_mb / 2, data_moved_mb / 2) if data_moved_mb else (None, None)
+    @classmethod
+    def _compute_data_in_out(cls, op_category, perf_params_str, data_moved_mb):
+        """Split Data Moved into (data_in_mb, data_out_mb) in proportion to the op's
+        input and output sizes; evenly when they are unknown."""
+        if not data_moved_mb:
+            return None, None
         try:
             params = ast.literal_eval(str(perf_params_str)) if perf_params_str else {}
-        except (ValueError, SyntaxError):
-            return half
-        if data_moved_mb is None:
-            return half
+        except (ValueError, SyntaxError, TypeError):
+            params = {}
+        sizes = cls._in_out_sizes(op_category, params)
+        if sizes is None:
+            return data_moved_mb / 2, data_moved_mb / 2
+        size_in, size_out = sizes
+        total = size_in + size_out
+        return data_moved_mb * size_in / total, data_moved_mb * size_out / total
+
+    @staticmethod
+    def _in_out_sizes(op_category, params: dict) -> tuple | None:
+        """(input, output) size of a perf-summary op, in elements or bytes, or None
+        when its category and params do not give them."""
+        if op_category == "reduce":
+            return 1, 0
         if op_category == "GEMM":
             M, N, K = params.get("M"), params.get("N"), params.get("K")
-            if all((M, N, K)):
-                total = M * K + K * N + M * N
-                return (
-                    data_moved_mb * (M * K + K * N) / total,
-                    data_moved_mb * M * N / total,
-                )
-        elif op_category == "reduce":
-            return data_moved_mb, 0.0
-        elif op_category == "elementwise" and "shape_in1" in params:
-            return data_moved_mb * 2 / 3, data_moved_mb / 3
-        return half
+            return (M * K + K * N, M * N) if all((M, N, K)) else None
+        if op_category == "elementwise" and "shape_in1" in params:
+            shape1, shape2 = params["shape_in1"], params["shape_in2"]
+            dtype1, dtype2, dtype_out = params["dtype_in1_in2_out"]
+            bpe1, bpe2 = name2bpe(dtype1), name2bpe(dtype2)
+            bpe_out = BinaryElementwise.output_bpe(
+                shape1, shape2, bpe1, bpe2, dtype_out
+            )
+            if None in (bpe1, bpe2, bpe_out):
+                return None
+            nelems_out = prod(BinaryElementwise.get_broadcast_shape(shape1, shape2))
+            return prod(shape1) * bpe1 + prod(shape2) * bpe2, nelems_out * bpe_out
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -837,17 +872,6 @@ class FusionCandidateBuilder:
 class FusionPricer:
     """Candidate to impact estimate: roofline projection (standalone) or the measured
     gap to trace 2 (comparative), as ``impact_score`` (% of E2E GPU time)."""
-
-    # Memory/compute pipeline overlap fraction (0 = no overlap, 1 = perfect overlap).
-    OVERLAP_EFFICIENCY = 0.85
-    # Drop estimates whose best-case impact_score is below this threshold.
-    MIN_IMPACT_SCORE = 2.0
-    MIN_SAVINGS_MS = 0.1
-    # Fraction of a candidate's kernels that must have perf models: short and long.
-    MIN_MODELED_FRAC = 0.5
-    MIN_MODELED_FRAC_LONG = 0.75
-    LONG_GROUP_KERNELS = 5
-    NO_VALUE = "—"  # Table cell for a value the perf report does not provide
 
     def __init__(
         self,
@@ -874,14 +898,14 @@ class FusionPricer:
         self.baseline2_ms = baseline2_ms
         self.same_platform = same_platform
 
-    @classmethod
+    @staticmethod
     def shortlist(
-        cls, candidates: list[FusionCandidate], baseline_ms: float
+        candidates: list[FusionCandidate], baseline_ms: float
     ) -> list[FusionCandidate]:
         """Drop candidates whose total time cannot reach MIN_IMPACT_SCORE of baseline,
         to avoid pricing them. It is a strict upper bound, as savings never exceed
         the group's time."""
-        min_time_us = baseline_ms * 10 * cls.MIN_IMPACT_SCORE
+        min_time_us = baseline_ms * 10 * MIN_IMPACT_SCORE
         return [c for c in candidates if c.time_us >= min_time_us]
 
     def price_all(
@@ -935,7 +959,7 @@ class FusionPricer:
             return None
 
         savings_high = gap_us / 1000
-        if savings_high < self.MIN_SAVINGS_MS:
+        if savings_high < MIN_SAVINGS_MS:
             return None
 
         savings_low = (TARGET_LOW / TARGET_HIGH) * savings_high
@@ -946,7 +970,7 @@ class FusionPricer:
         impact_score_low = savings_low / self.baseline_ms * 100
         impact_score_mid = savings_mid / self.baseline_ms * 100
 
-        if impact_score_high < self.MIN_IMPACT_SCORE:
+        if impact_score_high < MIN_IMPACT_SCORE:
             return None
 
         has_matrix_ops = any(self.forms.is_matrix(k.type) for k in c.kernels_trace1)
@@ -1009,9 +1033,9 @@ class FusionPricer:
 
         modeled_frac = len(modeled) / len(enriched)
         min_frac = (
-            self.MIN_MODELED_FRAC
-            if len(enriched) < self.LONG_GROUP_KERNELS
-            else self.MIN_MODELED_FRAC_LONG
+            MIN_MODELED_FRAC
+            if len(enriched) < LONG_GROUP_KERNELS
+            else MIN_MODELED_FRAC_LONG
         )
         if modeled_frac < min_frac:
             return None
@@ -1044,14 +1068,14 @@ class FusionPricer:
         time_ms = c.total_kernel_time_us / 1000
         savings_high_ms = gap_high * time_ms
 
-        if savings_high_ms < self.MIN_SAVINGS_MS:
+        if savings_high_ms < MIN_SAVINGS_MS:
             return None
 
         impact_score_high = gap_high * time_ms / self.baseline_ms * 100
         impact_score_low = gap_low * time_ms / self.baseline_ms * 100
         impact_score_mid = gap_mid * time_ms / self.baseline_ms * 100
 
-        if impact_score_high < self.MIN_IMPACT_SCORE:
+        if impact_score_high < MIN_IMPACT_SCORE:
             return None
 
         return FusionEstimate(
@@ -1154,7 +1178,7 @@ class FusionPricer:
 
         fused_optimal = max(memory_time_us, matrix_time_us, vector_time_us)
         fused_sum = memory_time_us + matrix_time_us + vector_time_us
-        fused_time_us = fused_optimal + (1.0 - self.OVERLAP_EFFICIENCY) * (
+        fused_time_us = fused_optimal + (1.0 - OVERLAP_EFFICIENCY) * (
             fused_sum - fused_optimal
         )
 
@@ -1165,10 +1189,10 @@ class FusionPricer:
     def _efficiency_cells(self, eff: dict) -> tuple:
         """(Efficiency, Bound) table cells from a ``calculate_efficiency`` result."""
         bound = eff["bound_type"]
-        bound_cell = f"{bound}-bound" if bound else self.NO_VALUE
+        bound_cell = f"{bound}-bound" if bound else NO_VALUE
         pct = eff["efficiency_percent"]
         if pct is None or bound is None:
-            return self.NO_VALUE, bound_cell
+            return NO_VALUE, bound_cell
         peak, unit = (
             (eff["resolved_peak_maf"], "TFLOPS")
             if bound == "compute"
@@ -1191,7 +1215,6 @@ class FusionPricer:
         ``fill_efficiency=False`` leaves Efficiency and Bound empty (trace 2 on a
         platform whose peaks are unknown).
         """
-        no_value = self.NO_VALUE
         rows = []
         for g in ops:
             key = g["perf_key"]
@@ -1204,14 +1227,14 @@ class FusionPricer:
             efficiency, bound = (
                 self._efficiency_cells(eff)
                 if eff and fill_efficiency
-                else (no_value,) * 2
+                else (NO_VALUE,) * 2
             )
             entry_point = perf.get("entry_point") if perf is not None else None
             time_ms = g["time_us"] / 1000
             rows.append(
                 {
-                    "operation": key[0] if key else no_value,
-                    "args": (key and format_args(key[1], key[2])) or no_value,
+                    "operation": key[0] if key else NO_VALUE,
+                    "args": (key and format_args(key[1], key[2])) or NO_VALUE,
                     "kernel_path": (
                         entry_point if isinstance(entry_point, str) else "Not found"
                     ),
@@ -1220,13 +1243,13 @@ class FusionPricer:
                     "pct_e2e": (
                         f"{time_ms / baseline_ms * 100:.2f}"
                         if baseline_ms > 0
-                        else no_value
+                        else NO_VALUE
                     ),
                     "count": g["count"],
                     "flops_per_byte": (
                         f"{eff['flops_per_byte']:.2f}"
                         if eff and eff["flops_per_byte"]
-                        else no_value
+                        else NO_VALUE
                     ),
                     "efficiency": efficiency,
                     "bound": bound,

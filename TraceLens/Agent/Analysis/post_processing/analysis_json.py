@@ -44,8 +44,7 @@ _LABEL_RE = re.compile(
     r"(?=\n\s*\n|\n\*\*|\Z)",
     re.DOTALL,
 )
-_KIND_RE = re.compile(r"^\*\*Kind:\*\*[ \t]*(\S+)", re.MULTILINE)
-_KIND_DECORATION = "`*.,;:"
+_KIND_RE = re.compile(r"surfaced as\s+`(\w+)`", re.IGNORECASE)
 _FUSION_KINDS = FusionForms(TAXONOMY).kinds
 _EFFICIENCY_RE = re.compile(r"([\d.]+)%\s*of\s*([\d.]+)\s*(\S+)")
 _ANCHOR_LINK_RE = re.compile(r"#detailed-analysis-compute-p(\d+)")
@@ -258,11 +257,6 @@ class AnalysisMdParser:
         elif heading:
             title = _PRIORITY_PREFIX_RE.sub("", heading.lstrip("#").strip())
 
-        kind_m = _KIND_RE.search(block)
-        kind = kind_m.group(1).strip(_KIND_DECORATION).lower() if kind_m else None
-        if kind not in _FUSION_KINDS:
-            kind = None
-
         prose = {"identification": None, "reasoning": None, "resolution": None}
         for label, body in _LABEL_RE.findall(block):
             cleaned = " ".join(body.split())
@@ -272,6 +266,11 @@ class AnalysisMdParser:
                 prose["reasoning"] = cleaned
             else:
                 prose["resolution"] = cleaned
+
+        kind_m = _KIND_RE.search(prose["identification"] or "")
+        kind = kind_m.group(1).lower() if kind_m else None
+        if kind not in _FUSION_KINDS:
+            kind = None
 
         members = self._parse_data_table(start, end)
         for member in members:

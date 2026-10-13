@@ -333,9 +333,7 @@ _FUSION_MD = """# ExampleNet - OTHER_GPU Standalone Analysis
 <!-- reasoning-candidate tier=fusion rank=1 -->
 #### 🔴 P1: Unfused Attention
 
-**Kind:** attention
-
-**Identification:** Attention runs as separate bmm and softmax kernels.
+**Identification:** Attention runs as separate bmm and softmax kernels. Surfaced as `attention` from bmm, softmax, bmm.
 
 **Data:**
 
@@ -1148,17 +1146,17 @@ def test_fusion_tier_golden(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "kind_line,expected",
+    "surfaced,expected",
     [
-        ("**Kind:** attention", "attention"),
-        ("**Kind:** **`Gemm_Epilogue`**.", "gemm_epilogue"),
-        # The value must be on the Kind line.
-        ("**Kind:**\n\nattention", None),
-        ("**Kind:** mystery_kind", None),
+        ("Surfaced as `attention`", "attention"),
+        ("surfaced as `Gemm_Epilogue`", "gemm_epilogue"),
+        # A kind outside the Identification is not read.
+        ("Surfaced as attention.\n\nSurfaced as `attention`", None),
+        ("Surfaced as `mystery_kind`", None),
     ],
 )
-def test_fusion_kind_parsing(kind_line, expected, tmp_path):
-    md = _FUSION_MD.replace("**Kind:** attention", kind_line)
+def test_fusion_kind_parsing(surfaced, expected, tmp_path):
+    md = _FUSION_MD.replace("Surfaced as `attention`", surfaced)
     p1 = _render_text(md, tmp_path)[0]["fusion_optimizations"][0]
     assert p1["kind"] == expected
 

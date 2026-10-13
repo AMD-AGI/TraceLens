@@ -567,7 +567,7 @@ def main():
 
         with open(fusion_candidates_file, "w") as f:
             json.dump(
-                [c.to_json() for c in fusion_candidates], f, indent=2, default=str
+                [c.to_dict() for c in fusion_candidates], f, indent=2, default=str
             )
 
         print(

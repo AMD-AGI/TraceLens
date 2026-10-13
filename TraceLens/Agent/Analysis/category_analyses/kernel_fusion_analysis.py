@@ -27,6 +27,7 @@ from utils.arch_utils import load_arch
 
 from TraceLens.Agent.Analysis.utils.classify_kernels import TAXONOMY
 from TraceLens.Agent.Analysis.utils.kernel_fusion import (
+    OVERLAP_EFFICIENCY,
     FusionCandidate,
     FusionForms,
     FusionPricer,
@@ -42,7 +43,7 @@ def load_fusion_data(output_dir: str):
         raise FileNotFoundError(f"Fusion candidates not found: {fc_path}")
 
     with open(fc_path, "r") as f:
-        candidates = [FusionCandidate.from_json(c) for c in json.load(f)]
+        candidates = [FusionCandidate.from_dict(c) for c in json.load(f)]
 
     manifest = {}
     if os.path.exists(manifest_path):
@@ -184,11 +185,13 @@ def main():
         "platform": platform,
         "peak_mem_bw_tbs": peak_bw_tbs,
         "baseline_ms": baseline_ms,
-        "impact_estimates": [e.to_json() for e in impact_estimates],
+        "impact_estimates": [e.to_dict() for e in impact_estimates],
     }
 
     if is_comparative:
         metrics["baseline2_ms"] = trace2_kwargs["baseline2_ms"]
+    else:
+        metrics["overlap_efficiency"] = OVERLAP_EFFICIENCY
 
     if warnings:
         metrics["warnings"] = warnings

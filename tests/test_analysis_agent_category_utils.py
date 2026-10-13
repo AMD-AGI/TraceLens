@@ -38,6 +38,8 @@ from TraceLens.Agent.Analysis.utils.classify_kernels import (
     run_assertions,
 )
 from TraceLens.Agent.Analysis.utils.kernel_fusion import (
+    MIN_IMPACT_SCORE,
+    OVERLAP_EFFICIENCY,
     FusionCandidate,
     FusionForms,
     FusionLabeler,
@@ -581,9 +583,9 @@ def _golden_candidate(total_us=200):
     ids=["standalone", "comparative"],
 )
 def test_fusion_candidate_json_round_trip(candidate):
-    data = candidate.to_json()
+    data = candidate.to_dict()
     assert not any(v is None for v in data.values())
-    assert FusionCandidate.from_json(data) == candidate
+    assert FusionCandidate.from_dict(data) == candidate
 
 
 # ----- FusionPricer._split_into_subgroups -----
@@ -692,7 +694,7 @@ def test_roofline_savings_overlap_blend():
     # memory_time = 2.0; vector_time = (0.001e9)/(1e12)*1e6 = 1.0; matrix = 0
     # optimal = 2, sum = 3, fused = 2 + (1-0.85)*(3-2) = 2.15; current 20 -> 17.85
     savings = _pricer()._roofline_savings_us(enriched, 100.0)
-    expected = 20.0 - (2.0 + (1.0 - FusionPricer.OVERLAP_EFFICIENCY) * (3.0 - 2.0))
+    expected = 20.0 - (2.0 + (1.0 - OVERLAP_EFFICIENCY) * (3.0 - 2.0))
     assert savings == pytest.approx(expected)
     assert savings == pytest.approx(17.85)
 
@@ -838,7 +840,7 @@ def test_price_comparative_skip_no_gap():
 
 def test_shortlist_drops_below_baseline_floor():
     """baseline_ms>0 sets a min total time of baseline*10*MIN_IMPACT_SCORE us."""
-    floor = 1.0 * 10 * FusionPricer.MIN_IMPACT_SCORE  # 20 us
+    floor = 1.0 * 10 * MIN_IMPACT_SCORE  # 20 us
     candidates = [
         _standalone_candidate([], floor - 1, [], name="tiny"),
         _standalone_candidate([], floor, [], name="edge"),
@@ -1802,7 +1804,7 @@ def _main_candidate(name, kind, confidence, total_us):
     ]
     return _standalone_candidate(
         kernels, total_us, ops, kind, confidence, name
-    ).to_json()
+    ).to_dict()
 
 
 def test_driver_fusion_main_ok_with_estimate(tmp_path, monkeypatch):

@@ -12,7 +12,7 @@ model: claude-opus-4-7-high
 
 # Kernel Fusion Analyzer (Experimental)
 
-Analyze GPU kernel fusion opportunities from pre-extracted module-level candidate data. Name each candidate from its deterministic fusion kind.
+Analyze GPU kernel fusion opportunities from pre-extracted module-level candidate data. Name each candidate from its fusion kind.
 
 ---
 
@@ -72,13 +72,13 @@ Then read `<output_dir>/category_data/kernel_fusion_metrics.json`. The `impact_e
 - `impact_score`, `impact_score_low`, `impact_score_high`: % of E2E recoverable by fusing (mid / low / high)
 - `bound_type`: "compute" or "memory"
 - `fusion_type`: "matrix_compute" or "memory_bound"
-- `fusion_kind`: The deterministic kind of fusion (`attention`, `act_mul`, `add_norm`, `elementwise_chain`, `gemm_epilogue`, ...), decided in code from the kernel sequence. Never contradict it
-- `confidence`: "high", "medium" or "low", decided in code. Use it as given
+- `fusion_kind`: The fusion kind (`attention`, `act_mul`, `add_norm`, `elementwise_chain`, `gemm_epilogue`, ...)
+- `confidence`: "high", "medium" or "low"
 - `time_ms`: Total candidate time across all instances (summed from the real kernels of every instance)
 - `warning`: Present when some kernels lack perf models
 - `rows` (standalone) or `rows_trace1` / `rows_trace2` (comparative): the finished Data-table rows, one per launching op and args, with the keys `operation`, `args`, `kernel_path`, `kernel_name`, `time_ms`, `pct_e2e`, `count`, `flops_per_byte`, `efficiency`, `bound`. Copy them verbatim into the Data table; do not recompute or reformat any cell.
 
-The file also has `baseline_ms` (Trace 1 E2E GPU time in ms) and, in comparative mode, `baseline2_ms` (Trace 2 E2E).
+The file also has `baseline_ms` (Trace 1 E2E GPU time in ms) and, in comparative mode, `baseline2_ms` (Trace 2 E2E); in standalone mode, `overlap_efficiency` (the memory/compute overlap fraction the projections assume).
 
 If `impact_estimates` is empty (or `status` is `NO_DATA`), skip Steps 2-3 entirely. Write **only** the three-line fallback file shown at the end of Step 3 — no P-item cards, no Detailed Analysis blocks, no Impact Summary table. Just the `# heading`, blank line, and the single sentence "No kernel fusion opportunities detected."
 
@@ -108,11 +108,9 @@ Do NOT iterate `fusion_candidates.json` directly. Candidates absent from `impact
 
 ### Step 2: Name Each Candidate
 
-The kind and confidence are decided deterministically; you only name the finding and recommend the change.
+**Specific kinds** (`attention`, `act_mul`, `add_norm`, `add_norm_quant`, `norm_quant`, `rope_kv_store`, `allreduce_norm`, `routing_topk`): the title names that operation.
 
-**Specific kinds** (`attention`, `act_mul`, `add_norm`, `add_norm_quant`, `norm_quant`, `rope_kv_store`, `allreduce_norm`, `routing_topk`): the title names that operation. Phrase it naturally for the module (e.g. "Residual add + RMSNorm in `post_attention_layernorm`") but do not contradict the kind.
-
-**Generic kinds** (`elementwise_chain`, `gemm_epilogue`): name the likely operation when the module and kernel names support it (e.g. "Decomposed RMSNorm in `input_layernorm`", "GEMM + bias + GELU"), otherwise use the generic name. Word a refined name as likely, not certain.
+**Generic kinds** (`elementwise_chain`, `gemm_epilogue`): name the likely operation when the module and kernel names support it (e.g. "Decomposed RMSNorm in `input_layernorm`", "GEMM + bias + GELU", "Convolution + BatchNorm + ReLU"), otherwise use the generic name. Word a refined name as likely, not certain.
 
 Tailor the recommendation to the framework context visible in the parent chain and module names.
 
@@ -143,7 +141,7 @@ Example: if the highest-savings finding has LOW confidence, write `### 🟢 P1:`
 Found N kernel fusion opportunities across M module types.
 
 <!-- [standalone] Use this methodology block: -->
-> **Methodology:** impact_score projections estimate the recoverable fraction of E2E with partial memory/compute pipeline overlap (i.e. fused kernel time is interpolated between perfect overlap and no overlap). Actual recoverable time may vary with workload and hardware.
+> **Methodology:** impact_score projections estimate the recoverable fraction of E2E with <`overlap_efficiency` as a percent> memory/compute pipeline overlap (i.e. fused kernel time is interpolated between perfect overlap and no overlap). Actual recoverable time may vary with workload and hardware.
 
 <!-- [comparative] Use this methodology block instead: -->
 > **Methodology:** Savings are measured as the total GPU time difference between trace1 and trace2, accumulated across all instances. No roofline projection is used.
@@ -174,9 +172,7 @@ Found N kernel fusion opportunities across M module types.
 <!-- reasoning-candidate tier=fusion rank=1 -->
 #### <Pattern Name>
 
-**Kind:** <fusion_kind from kernel_fusion_metrics.json, verbatim>
-
-**Identification:** <3-4 sentences: the module and how many times it runs; its parent module and call site (the nearest module in the call stack and its first frame); each distinct launch path in the Data rows (Trace 1 in comparative) with the ops launched from it, skipping `Not found`; then how this fusion candidate was surfaced (the kernel sequence that matches the kind)>
+**Identification:** <3-4 sentences: the module and how many times it runs; its parent module and call site (the nearest module in the call stack and its first frame); each distinct launch path in the Data rows (Trace 1 in comparative) with the ops launched from it, skipping `Not found`; then "Surfaced as `<fusion_kind>` from <the kernel sequence>.", with `fusion_kind` copied from `kernel_fusion_metrics.json`>
 <!-- [standalone] (source: `fusion_candidates.json` → `module_name`, `parent_chain`, `kernels[]`; `kernel_fusion_metrics.json` → `rows[].kernel_path`) -->
 <!-- [comparative] (source: `fusion_candidates.json` → `module_name`, `parent_chain`, `kernel_count_trace1`, `kernel_count_trace2`, `kernels_trace1[]`, `kernels_trace2[]`; `kernel_fusion_metrics.json` → `rows_trace1[].kernel_path`) -->
 
@@ -263,9 +259,7 @@ If validation fails, fix the findings file and re-run. Max 2 retries.
 
 1. **`kernel_fusion_metrics.json.impact_estimates` is the candidate list.** Every finding maps 1:1 to an entry there. Do not derive findings from candidates absent from that list -- they were dropped by the deterministic threshold gate.
 2. **Include pre-computed impact_score** from `kernel_fusion_metrics.json` -- do NOT re-derive impact_score yourself, use the values from the metrics JSON.
-3. **The kind and confidence are given** -- take them from `kernel_fusion_metrics.json`; use module names and kernel composition only to word the title and the recommendation. Every `impact_estimates` entry gets a finding.
-4. **Explain reasoning** -- especially for generic kinds, state why you believe the kernels are fusable.
-5. Use the **module name** to determine the user-facing operation name. If the module is `aten::conv2d` or `Conv2d`, call it "Convolution" in the finding title, not "GEMM" -- even though convolutions are implemented as GEMMs internally.
+3. **Explain reasoning** -- especially for generic kinds, state why you believe the kernels are fusable.
 
 ---
 

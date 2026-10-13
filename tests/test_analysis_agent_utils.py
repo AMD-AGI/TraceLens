@@ -78,6 +78,7 @@ from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
     _normalize_category,
 )
 from TraceLens.Agent.Analysis.utils.kernel_fusion import (
+    OVERLAP_EFFICIENCY,
     FusionCandidate,
     FusionCandidateBuilder,
     FusionForms,
@@ -1782,11 +1783,33 @@ def _builder(tree=None, unified_events=None, perf_rows=None):
         # GEMM M=2, K=3, N=4: in = (M*K + K*N) / (M*K + K*N + M*N), out = M*N / total.
         ("GEMM", "{'M': 2, 'N': 4, 'K': 3}", 10.0, (10.0 * 18 / 26, 10.0 * 8 / 26)),
         ("reduce", "{}", 8.0, (8.0, 0.0)),
-        ("elementwise", "{'shape_in1': [4, 4]}", 9.0, (6.0, 3.0)),
-        # Half and half: a missing GEMM dim, no shape_in1, unparsable params, an
-        # unknown category.
+        # Elementwise splits by bytes: two bf16 inputs and a bf16 output, then a
+        # double scalar operand (1024 + 8 bytes in, 1024 out).
+        (
+            "elementwise",
+            "{'shape_in1': (4, 4), 'shape_in2': (4, 4), "
+            "'dtype_in1_in2_out': ('c10::BFloat16', 'c10::BFloat16', None)}",
+            9.0,
+            (6.0, 3.0),
+        ),
+        (
+            "elementwise",
+            "{'shape_in1': (512,), 'shape_in2': (), "
+            "'dtype_in1_in2_out': ('c10::BFloat16', 'double', None)}",
+            2056.0,
+            (1032.0, 1024.0),
+        ),
+        # Half and half: a missing GEMM dim, no shape_in1, an unknown dtype,
+        # unparsable params, an unknown category.
         ("GEMM", "{'M': 2, 'N': 4}", 10.0, (5.0, 5.0)),
         ("elementwise", "{'other': 1}", 9.0, (4.5, 4.5)),
+        (
+            "elementwise",
+            "{'shape_in1': (4,), 'shape_in2': (4,), "
+            "'dtype_in1_in2_out': ('mystery', 'float', None)}",
+            9.0,
+            (4.5, 4.5),
+        ),
         ("GEMM", "not-a-dict {{", 10.0, (5.0, 5.0)),
         ("mystery", "{}", 4.0, (2.0, 2.0)),
         ("GEMM", "{'M': 2, 'N': 4, 'K': 3}", None, (None, None)),
@@ -3487,7 +3510,8 @@ def test_standalone_module_candidates(tmp_path):
                 "name": "aten::add",
                 "op category": "elementwise",
                 "Data Moved (MB)": 6.0,
-                "perf_params": "{'shape_in1': [4, 4]}",
+                "perf_params": "{'shape_in1': (4, 4), 'shape_in2': (4, 4), "
+                "'dtype_in1_in2_out': ('c10::BFloat16', 'c10::BFloat16', None)}",
             },
         ]
     ).assign(**_CSV_ARGS, **_UNKNOWN_THREAD).to_csv(csv, index=False)
@@ -3506,7 +3530,7 @@ def test_standalone_module_candidates(tmp_path):
     assert [(k.data_in_mb, k.data_out_mb) for k in mlp.kernels] == pytest.approx(
         [(10 * 18 / 26, 10 * 8 / 26), (4.0, 2.0)]
     )
-    data = mlp.to_json()
+    data = mlp.to_dict()
     assert set(data) == {
         "module_name",
         "base_name",
@@ -4046,7 +4070,7 @@ def test_kernel_fusion_main_writes_metrics(tmp_path, with_manifest):
     cat_dir = os.path.join(out, "category_data")
     os.makedirs(cat_dir, exist_ok=True)
     with open(os.path.join(cat_dir, "fusion_candidates.json"), "w") as f:
-        json.dump([_fusion_candidate().to_json()], f)
+        json.dump([_fusion_candidate().to_dict()], f)
     if with_manifest:
         with open(os.path.join(cat_dir, "category_manifest.json"), "w") as f:
             json.dump(
@@ -4075,6 +4099,7 @@ def test_kernel_fusion_main_writes_metrics(tmp_path, with_manifest):
     )
     assert metrics["status"] == "OK"
     assert metrics["candidate_count"] == 1
+    assert metrics["overlap_efficiency"] == OVERLAP_EFFICIENCY
 
 
 class TestOrchestratorPhase6:
@@ -4252,7 +4277,7 @@ def test_comparative_fusion_producer_to_rows(
     assert len(t2["perf_key"]) == 1 + len(au.PERF_ARG_COLS)
 
     (cat_dir / "fusion_candidates.json").write_text(
-        json.dumps([c.to_json() for c in cands])
+        json.dumps([c.to_dict() for c in cands])
     )
     perf_cols = {
         "op category": "GEMM",
