@@ -566,6 +566,94 @@ class TestPostReportChecks:
         )
         assert not any("non-kernel time" in f.message for f in report.findings)
 
+    def test_high_idle_ops_skips_zero_subtree(self, monkeypatch):
+        import pandas as pd
+
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
+        dfs = self._make_dfs()
+        dfs["ops_unique_args"] = pd.DataFrame(
+            {
+                "name": ["op"],
+                "Input Dims": [[[1]]],
+                "total_subtree_kernel_time_sum": [0.0],
+                "total_direct_kernel_time_sum": [0.0],
+            }
+        )
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs=dfs, framework="pytorch"
+        )
+        assert not any("non-kernel time" in f.message for f in report.findings)
+
+    def test_idle_timeline_missing_sheet(self, monkeypatch):
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
+        dfs = self._make_dfs()
+        del dfs["gpu_timeline"]
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs=dfs, framework="pytorch"
+        )
+        assert not any("GPU idle" in f.message for f in report.findings)
+
+    def test_idle_timeline_no_idle_row(self, monkeypatch):
+        import pandas as pd
+
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
+        dfs = self._make_dfs()
+        dfs["gpu_timeline"] = pd.DataFrame(
+            {"type": ["computation_time"], "percent": [100.0]}
+        )
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs=dfs, framework="pytorch"
+        )
+        assert not any("GPU idle" in f.message for f in report.findings)
+
+    def test_ops_have_shapes_empty_df(self, monkeypatch):
+        import pandas as pd
+
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
+        dfs = self._make_dfs()
+        dfs["ops_unique_args"] = pd.DataFrame({"Input Dims": []})
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs=dfs, framework="pytorch"
+        )
+        assert not any("ops have shapes" in f.message for f in report.findings)
+
+    def test_attention_kernel_count_no_sheets(self, monkeypatch):
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
+        dfs = self._make_dfs()
+        cfg = trace_check.AttnCountConfig(num_layers=4, num_steps=2, num_gpus=1)
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs=dfs, framework="jax", attn_cfg=cfg
+        )
+        assert not any("Attention launches" in f.message for f in report.findings)
+
+    def test_attention_kernel_count_no_gpus(self, monkeypatch):
+        import pandas as pd
+
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
+        dfs = self._make_dfs()
+        dfs["op_fa_fwd"] = pd.DataFrame({"name": ["fmha"], "name_count": [10]})
+        cfg = trace_check.AttnCountConfig(num_layers=4, num_steps=2)
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs=dfs, framework="jax", attn_cfg=cfg
+        )
+        assert not any("Attention launches" in f.message for f in report.findings)
+
+    def test_attention_kernel_count_match(self, monkeypatch):
+        import pandas as pd
+
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
+        dfs = self._make_dfs()
+        dfs["gpu_timeline"] = pd.DataFrame(
+            {"type": ["idle_time"], "percent": [5.0], "gpu_pid": [0]}
+        )
+        # 1 gpu * 2 steps * 4 layers * 1 call * 1 unique = 8 launches
+        dfs["op_fa_fwd"] = pd.DataFrame({"name": ["fmha"], "name_count": [8]})
+        cfg = trace_check.AttnCountConfig(num_layers=4, num_steps=2, num_gpus=1)
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs=dfs, framework="jax", attn_cfg=cfg
+        )
+        assert not any("Attention launches" in f.message for f in report.findings)
+
 
 # ---------------------------------------------------------------------------
 # Edge cases
@@ -605,6 +693,44 @@ class TestEdgeCases:
         idle_findings = [f for f in report.findings if "GPU idle" in f.message]
         assert len(idle_findings) > 0
 
+    def test_gpu_busy_idle_no_gpu_events(self, monkeypatch):
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
+        events = [_cpu_op(i * 100) for i in range(20)]
+        report = trace_check.run_trace_checks(events, framework="pytorch")
+        assert not any("GPU idle" in f.message for f in report.findings)
+
+    def test_gpu_busy_idle_moderate_idle(self, monkeypatch):
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
+        # 50% idle — between warn (30%) and fail (60%)
+        events = [_kernel(0, dur=50), _kernel(100, dur=50)]
+        report = trace_check.run_trace_checks(events, framework="pytorch")
+        assert any("GPU idle" in f.message for f in report.findings)
+
+    def test_cpu_op_shapes_detailed_warn_threshold(self, monkeypatch):
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
+        # 60% coverage — between warn (80%) and fail (40%)
+        shaped = [
+            {
+                "cat": "cpu_op",
+                "name": "op",
+                "ph": "X",
+                "ts": i,
+                "dur": 5,
+                "args": {"Input Dims": [[32]]},
+            }
+            for i in range(6)
+        ]
+        unshaped = [_cpu_op(100 + i) for i in range(4)]
+        events = [_kernel(0)] + shaped + unshaped
+        report = trace_check.run_trace_checks(events, framework="pytorch")
+        assert any("cpu_ops have shapes" in f.message for f in report.findings)
+
+    def test_jax_metadata_no_gpu_events(self, monkeypatch):
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
+        events = [_cpu_op(i) for i in range(10)]
+        report = trace_check.run_trace_checks(events, framework="jax")
+        assert not any("HLO metadata" in f.message for f in report.findings)
+
     def test_jax_metadata_good_coverage(self, monkeypatch):
         monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         events = [
@@ -620,3 +746,25 @@ class TestEdgeCases:
         ]
         report = trace_check.run_trace_checks(events, framework="jax")
         assert not any("HLO metadata" in f.message for f in report.findings)
+
+    def test_kernels_dropped_non_launch_skipped(self):
+        events = [
+            _cpu_op(0, dur=1000),
+            {
+                "cat": "cuda_runtime",
+                "name": "hipDeviceSynchronize",
+                "ph": "X",
+                "ts": 100,
+                "dur": 5,
+                "pid": 0,
+                "tid": 0,
+                "args": {"correlation": 1},
+            },
+            _kernel(110, corr=1),
+        ]
+        report = trace_check.run_trace_checks(
+            pre_report=False, tree=_build_tree(events)
+        )
+        assert not any(
+            "no corresponding GPU kernel" in f.message for f in report.findings
+        )
