@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import copy
 import functools
 import importlib.util
@@ -1206,20 +1207,34 @@ def method_input_param(name: str) -> str | None:
     return None
 
 
-_SYNTHETIC_ATTENTION_NAMES = {
-    "eager_attention_forward",
-    "flash_attention_forward",
-    "sdpa_attention_forward",
-    "attention_interface",
-}
-# Locals a forward assigns an attention implementation to before calling it, so the
-# call site names the variable rather than the kernel that actually runs.
-_ATTENTION_DISPATCH_NAMES = {
-    "attention_interface",
-    "attention_fn",
-    "attn_interface",
-    "all_attention_functions",
-}
+# A kernel the model DISPATCHED to rather than named at the call site. Recorded
+# instead of the local variable's name, which says nothing about what runs and
+# differs from model to model.
+DISPATCHED_KERNEL = "@dispatched"
+
+
+def _is_module_dispatch_call(node: ast.Call) -> bool:
+    """Whether this call hands the module itself to a plain function.
+
+    ``attn_output, attn_weights = attention_interface(self, query_states, ...)``
+    -- the callee is a bare local, bound earlier from a registry lookup, and the
+    FIRST argument is ``self``. That shape is a dispatch: an unbound function
+    invoked with the module as its receiver, which is how a model calls an
+    implementation it selected at runtime rather than one it named.
+
+    Read off the call alone, so nothing has to be called ``attention``. Across
+    the pinned models the only calls of this shape are the attention dispatch
+    and Python's own ``getattr``/``setattr``/``hasattr``, which are excluded
+    because the interpreter provides them rather than the model.
+    """
+    if not isinstance(node.func, ast.Name) or not node.args:
+        return False
+    first = node.args[0]
+    if not (isinstance(first, ast.Name) and first.id == "self"):
+        return False
+    return node.func.id not in dir(builtins)
+
+
 # Boolean helpers a forward branches on to pick a flash-attention code path
 # (``if is_flash_attention_requested(self.config): ...``). We resolve them from
 # the checkpoint's ``_attn_implementation`` so only the selected branch survives,
@@ -1700,7 +1715,7 @@ def _extract_self_calls_ordered(
             return
 
         target = _expr_name(func)
-        if target in _SYNTHETIC_ATTENTION_NAMES or _is_kernel_merge_call(func):
+        if _is_module_dispatch_call(node) or _is_kernel_merge_call(func):
             _append_forward_call(out, SYNTHETIC_ATTENTION)
             return
         # A ``map(lambda x: BODY(x), (a, b))`` idiom clones BODY's own call node
@@ -5289,9 +5304,8 @@ class _ForwardOperationExtractor:
         ):
             return submodule_callsite_attr(func.value.attr, node.lineno)
         target = _expr_name(func)
-        if target and (
-            target in _SYNTHETIC_ATTENTION_NAMES
-            or (isinstance(func, ast.Name) and _is_kernel_merge_call(func))
+        if _is_module_dispatch_call(node) or (
+            target and isinstance(func, ast.Name) and _is_kernel_merge_call(func)
         ):
             return SYNTHETIC_ATTENTION
         # A ``map(lambda x: BODY(x), (a, b))`` idiom clones BODY's own call node
@@ -7364,8 +7378,7 @@ class _ForwardOperationExtractor:
                 node
                 for stmt in body
                 for node in ast.walk(stmt)
-                if isinstance(node, ast.Call)
-                and _expr_name(node.func) in _SYNTHETIC_ATTENTION_NAMES
+                if isinstance(node, ast.Call) and _is_module_dispatch_call(node)
             ),
             None,
         )
@@ -8049,7 +8062,8 @@ def _kernel_merge_source_position(
         (node.lineno, node.col_offset)
         for stmt in live
         for node in ast.walk(stmt)
-        if isinstance(node, ast.Call) and _is_kernel_merge_call(node.func)
+        if isinstance(node, ast.Call)
+        and (_is_kernel_merge_call(node.func) or _is_module_dispatch_call(node))
     ]
     return min(positions) if positions else None
 
@@ -10578,8 +10592,6 @@ def _is_kernel_merge_call(func: ast.AST) -> bool:
         return False
     name = _expr_name(func) or ""
     base = name.split(".")[-1]
-    if base in _SYNTHETIC_ATTENTION_NAMES:
-        return True
     if _KERNEL_MERGE_HELPER_RE.search(base):
         return False
     return bool(_KERNEL_MERGE_NAME_RE.search(base))
@@ -11080,7 +11092,7 @@ def _resolve_dispatched_attention_kernel(
         if not details:
             continue
         kernel = kernel_name_from_step_details(details)
-        if kernel is None or kernel.lower() not in _ATTENTION_DISPATCH_NAMES:
+        if kernel != DISPATCHED_KERNEL:
             continue
         rewritten = [
             f"kernel: {resolved}" if line.startswith("kernel:") else line
@@ -11102,7 +11114,10 @@ def _resolve_dispatched_attention_kernel(
 
 def _kernel_call_detail_lines(call: ast.Call) -> list[str]:
     """Capture kernel name and keyword arguments from a modeling forward call."""
-    kernel_name = _expr_name(call.func) or "kernel"
+    if _is_module_dispatch_call(call):
+        kernel_name = DISPATCHED_KERNEL
+    else:
+        kernel_name = _expr_name(call.func) or "kernel"
     lines = [f"kernel: {kernel_name.split('.')[-1]}"]
     for keyword in call.keywords:
         if keyword.arg in _KERNEL_DETAIL_SKIP_KWARGS or keyword.arg is None:
@@ -11134,7 +11149,9 @@ def _inject_kernel_merge(
         producers = _collect_kernel_producers(call, var_chains)
         if not producers:
             continue
-        is_named_kernel = _is_kernel_merge_call(call.func)
+        is_named_kernel = _is_kernel_merge_call(call.func) or _is_module_dispatch_call(
+            call
+        )
         is_generic_external = (
             not isinstance(call.func, ast.Attribute)
             and len(producers) >= 3
@@ -11277,7 +11294,7 @@ def attention_kernel_label(details: list[str]) -> str:
     kernel = kernel_name_from_step_details(details)
     if not kernel:
         return "Attention"
-    if kernel.lower() in (_ATTENTION_DISPATCH_NAMES | _SYNTHETIC_ATTENTION_NAMES):
+    if kernel == DISPATCHED_KERNEL:
         return "Attention"
     return kernel
 
@@ -11314,7 +11331,7 @@ def attention_kernel_details(
 ) -> list[str]:
     kernel = kernel_name_from_step_details(details)
 
-    if kernel and kernel.lower() in _SYNTHETIC_ATTENTION_NAMES:
+    if kernel == DISPATCHED_KERNEL:
         return []
 
     if kernel:
@@ -11364,8 +11381,7 @@ def _capture_attention_inputs(
     for call in ast.walk(node):
         if not isinstance(call, ast.Call):
             continue
-        target = _expr_name(call.func)
-        if target not in _SYNTHETIC_ATTENTION_NAMES:
+        if not _is_module_dispatch_call(call):
             continue
         start = (
             1
@@ -11488,7 +11504,7 @@ def _capture_call_side_inputs(
         ):
             continue
         callee = call.func.attr
-        if callee.startswith("@") or callee in _SYNTHETIC_ATTENTION_NAMES:
+        if callee.startswith("@"):
             continue
         if not call.args:
             continue

@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 
 from TraceLens.ModelUtils.ast_analyze import (
     _HostSourceResolver,
-    _SYNTHETIC_ATTENTION_NAMES,
+    _is_module_dispatch_call,
     attention_wrapper_expand_location,
     attention_wrapper_gqa_groups,
 )
@@ -452,19 +452,11 @@ def _interface_call_args(cls_node: ast.AST) -> list[str] | None:
     for call in ast.walk(cls_node):
         if not isinstance(call, ast.Call):
             continue
-        func = call.func
-        name = (
-            func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-        )
-        if name not in _SYNTHETIC_ATTENTION_NAMES:
+        if not _is_module_dispatch_call(call):
             continue
-        start = (
-            1
-            if call.args
-            and isinstance(call.args[0], ast.Name)
-            and call.args[0].id == "self"
-            else 0
-        )
+        # The module itself is the first argument of a dispatch; the operands
+        # start after it.
+        start = 1
         args: list[str] = []
         for arg in call.args[start:]:
             if isinstance(arg, ast.Name):

@@ -12,7 +12,11 @@ import json
 import textwrap
 from pathlib import Path
 
-from TraceLens.ModelUtils.ast_analyze import SYNTHETIC_ATTENTION, analyze_source
+from TraceLens.ModelUtils.ast_analyze import (
+    DISPATCHED_KERNEL,
+    SYNTHETIC_ATTENTION,
+    analyze_source,
+)
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.block_tree import BlockNode, build_decoder_block_trees
 from TraceLens.ModelUtils.computation_graph import (
@@ -366,7 +370,7 @@ def test_resolve_dispatched_attention_caps_unpack_names_to_arity():
             forward_calls=[],
             norm_before=[],
         )
-        cls.forward_step_details[SYNTHETIC_ATTENTION] = ["kernel: attention_interface"]
+        cls.forward_step_details[SYNTHETIC_ATTENTION] = [f"kernel: {DISPATCHED_KERNEL}"]
         cls.forward_step_output_names[SYNTHETIC_ATTENTION] = [
             "attn_output",
             "attn_weights",

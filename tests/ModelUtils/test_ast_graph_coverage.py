@@ -109,9 +109,11 @@ def test_public_name_role_and_kernel_helpers_cover_fallbacks():
     assert aa.attention_kernel_label([]) == "Attention"
     # A concrete resolved kernel shows its real name (not the generic "Attention").
     assert aa.attention_kernel_label(["kernel: sdpa"]) == "sdpa"
-    # An unresolved dispatch *variable* falls back to the generic label.
-    assert aa.attention_kernel_label(["kernel: attention_interface"]) == "Attention"
-    assert aa.attention_kernel_details(["kernel: eager_attention_forward"]) == []
+    # A kernel the model DISPATCHED to, which the call site could not name,
+    # falls back to the generic label. Recognised by the marker the call
+    # records -- not by the local variable's name, which differs per model.
+    assert aa.attention_kernel_label([f"kernel: {aa.DISPATCHED_KERNEL}"]) == "Attention"
+    assert aa.attention_kernel_details([f"kernel: {aa.DISPATCHED_KERNEL}"]) == []
     assert aa.attention_kernel_details(["kernel: custom"], {"q": ["q_proj"]}) == [
         "kernel: custom",
         "inputs: q",
