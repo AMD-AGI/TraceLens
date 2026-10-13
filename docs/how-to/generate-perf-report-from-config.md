@@ -76,23 +76,17 @@ architecture, so one config can cover traces from different GPUs.
 
 ## Defaults
 
-Unless the config sets them, these options are on. They match the TraceLens
-Agent's standard report:
+An option the config doesn't set has the same default as in the matching CLI,
+so a config with no options produces the same report as the CLI with no flags.
+For example, `collective_analysis` is on in `default` and off in `inference`.
 
-| Option | Mode | Default here | Default in the CLIs |
-|--------|------|--------------|---------------------|
-| `enable_pseudo_ops` | both | `true` | `false` |
-| `group_by_num_kernels` | both | `true` | `false` |
-| `include_call_stack` | both | `true` | `false` |
-| `group_by_parent_module` | `inference` | `true` | `false` |
+To get the same report as the TraceLens Agent, set these options:
 
-Every other option has the same default as the matching CLI. For example,
-`collective_analysis` is on in `default` and off in `inference`.
-
-```{note}
-`include_call_stack` adds the `call_stack_trimmed` and `call_stack_full`
-columns and makes large traces slower to load. Set
-`include_call_stack: false` if you don't need them.
+```yaml
+enable_pseudo_ops: true
+group_by_num_kernels: true
+include_call_stack: true
+group_by_parent_module: true   # inference only
 ```
 
 ## Outputs
@@ -118,7 +112,7 @@ against the directory you run the command from, as in the CLIs.
 ```yaml
 analysis_mode: default
 output_dir: /data/llama_train/analysis_output
-include_call_stack: false
+include_call_stack: true
 kernel_summary: true
 topk_ops: 50
 jobs:

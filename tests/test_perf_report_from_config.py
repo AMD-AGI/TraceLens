@@ -88,17 +88,25 @@ def test_single_job_name_is_optional_and_used_when_set(tmp_path):
     assert os.path.basename(plan.output_csvs_dir) == "perf_report_llama_csvs"
 
 
-def test_default_recipe_flags_follow_function_signature(tmp_path):
-    kwargs = plan_reports(_config(tmp_path))[0].kwargs
-    assert kwargs["enable_pseudo_ops"] is True
-    assert kwargs["group_by_num_kernels"] is True
-    assert kwargs["include_call_stack"] is True
-    assert "group_by_parent_module" not in kwargs
+def test_default_mode_passes_no_flags_the_yaml_did_not_set(tmp_path):
+    assert plan_reports(_config(tmp_path))[0].kwargs == {}
 
 
-def test_inference_recipe_includes_group_by_parent_module(tmp_path):
+def test_inference_passes_only_the_cli_default_override(tmp_path):
     kwargs = plan_reports(_config(tmp_path, mode="inference"))[0].kwargs
-    assert kwargs["group_by_parent_module"] is True
+    assert kwargs == {"collective_analysis": False}
+
+
+def test_resolved_flags_match_cli_defaults(tmp_path):
+    for mode in ("default", "inference"):
+        resolved = resolve_config(_config(tmp_path, mode=mode))
+        assert resolved["enable_pseudo_ops"] is False
+        assert resolved["group_by_num_kernels"] is False
+        assert resolved["include_call_stack"] is False
+    assert (
+        resolve_config(_config(tmp_path, mode="inference"))["group_by_parent_module"]
+        is False
+    )
 
 
 def test_inference_matches_cli_collective_analysis_off(tmp_path):
@@ -119,7 +127,7 @@ def test_resolved_config_is_written_and_reruns_identically(tmp_path):
     cfg = _config(
         tmp_path,
         mode="inference",
-        include_call_stack=False,
+        include_call_stack=True,
         jobs=[
             {
                 "trace_path": _touch(tmp_path, "rank0.json.gz"),
@@ -132,7 +140,8 @@ def test_resolved_config_is_written_and_reruns_identically(tmp_path):
     path = os.path.join(str(tmp_path), "out", "run_config.resolved.yaml")
     resolved = load_run_config(path)
     assert resolved == resolve_config(cfg)
-    assert resolved["include_call_stack"] is False
+    assert resolved["include_call_stack"] is True
+    assert resolved["enable_pseudo_ops"] is False
     assert resolved["collective_analysis"] is False
     assert resolved["topk_ops"] is None
     assert resolved["jobs"][0]["capture_folder"] == cap
@@ -179,12 +188,11 @@ def test_first_failure_stops_later_jobs(tmp_path):
     assert names == ["perf_report_a.xlsx"]
 
 
-def test_yaml_overrides_recipe_default(tmp_path):
-    kwargs = plan_reports(_config(tmp_path, include_call_stack=False, topk_ops=50))[
+def test_top_level_flags_are_passed(tmp_path):
+    kwargs = plan_reports(_config(tmp_path, include_call_stack=True, topk_ops=50))[
         0
     ].kwargs
-    assert kwargs["include_call_stack"] is False
-    assert kwargs["topk_ops"] == 50
+    assert kwargs == {"include_call_stack": True, "topk_ops": 50}
 
 
 def test_unknown_top_level_key(tmp_path):
