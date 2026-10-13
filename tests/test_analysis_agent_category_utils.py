@@ -38,6 +38,7 @@ from TraceLens.Agent.Analysis.utils.classify_kernels import (
     run_assertions,
 )
 from TraceLens.Agent.Analysis.utils.kernel_fusion import (
+    BYTES_PER_MB,
     MIN_IMPACT_SCORE,
     OVERLAP_EFFICIENCY,
     FusionCandidate,
@@ -626,6 +627,9 @@ def test_split_multiple_gemm_boundaries():
 
 # ----- FusionPricer._roofline_savings_us -----
 
+# Time in us to move 1 MB at the _pricer() peak of 1 TB/s.
+MB_TIME_US = BYTES_PER_MB / 1e6
+
 
 def _pricer(perf_rows=None, baseline_ms=1.0):
     """Peak memory 1 TB/s, vector 1 TFLOPS, matrix 700 TFLOPS."""
@@ -653,9 +657,9 @@ def _ew(name, dur_us, data_in=None, data_out=None, data_moved=None, gflops=None)
 def test_roofline_savings_memory_only():
     """Single memory-bound kernel: fused == memory_time, savings = dur - memory_time."""
     enriched = [_ew("ew", dur_us=10.0, data_in=1.0, data_out=1.0, gflops=None)]
-    # bytes = 2e6; peak = 1e12 B/s; frac=1.0 -> memory_time = 2.0 us; savings = 10 - 2
+    # 2 MB at 1e12 B/s, frac=1.0 -> memory_time = 2 * MB_TIME_US; savings = 10 - that
     savings = _pricer()._roofline_savings_us(enriched, 100.0)
-    assert savings == pytest.approx(8.0)
+    assert savings == pytest.approx(10.0 - 2 * MB_TIME_US)
 
 
 def test_roofline_savings_no_modeled_returns_zero():
@@ -671,7 +675,7 @@ def test_roofline_savings_zero_external_data_returns_zero():
 def test_roofline_savings_clamped_at_zero():
     """When current time is below fused time, savings clamp to 0."""
     enriched = [_ew("ew", dur_us=1.0, data_in=1.0, data_out=1.0)]
-    # memory_time = 2.0 us > current 1.0 us -> max(0, 1 - 2) = 0
+    # memory_time = 2 * MB_TIME_US > current 1.0 us -> savings clamp to 0
     assert _pricer()._roofline_savings_us(enriched, 100.0) == 0.0
 
 
@@ -681,8 +685,9 @@ def test_roofline_savings_unmodeled_subtracted():
         _ew("ew", dur_us=10.0, data_in=1.0, data_out=1.0),
         dict(_ew("unmodeled", dur_us=5.0), has_perf_data=False),
     ]
-    # current = 15, memory_time = 2, unmodeled = 5 -> max(0, 15 - 2 - 5) = 8
-    assert _pricer()._roofline_savings_us(enriched, 100.0) == pytest.approx(8.0)
+    # current = 15, memory_time = 2 * MB_TIME_US, unmodeled = 5
+    savings = _pricer()._roofline_savings_us(enriched, 100.0)
+    assert savings == pytest.approx(15.0 - 2 * MB_TIME_US - 5.0)
 
 
 def test_roofline_savings_overlap_blend():
@@ -691,12 +696,12 @@ def test_roofline_savings_overlap_blend():
         _ew("ew1", dur_us=10.0, data_in=1.0, gflops=0.0005),
         _ew("ew2", dur_us=10.0, data_out=1.0, gflops=0.0005),
     ]
-    # memory_time = 2.0; vector_time = (0.001e9)/(1e12)*1e6 = 1.0; matrix = 0
-    # optimal = 2, sum = 3, fused = 2 + (1-0.85)*(3-2) = 2.15; current 20 -> 17.85
+    # memory_time = 2 * MB_TIME_US; vector_time = (0.001e9)/(1e12)*1e6 = 1.0; matrix = 0
+    # optimal = memory_time, sum = memory_time + 1, current = 20
+    memory_time = 2 * MB_TIME_US
     savings = _pricer()._roofline_savings_us(enriched, 100.0)
-    expected = 20.0 - (2.0 + (1.0 - OVERLAP_EFFICIENCY) * (3.0 - 2.0))
+    expected = 20.0 - (memory_time + (1.0 - OVERLAP_EFFICIENCY) * 1.0)
     assert savings == pytest.approx(expected)
-    assert savings == pytest.approx(17.85)
 
 
 # ----- FusionPricer.price -----

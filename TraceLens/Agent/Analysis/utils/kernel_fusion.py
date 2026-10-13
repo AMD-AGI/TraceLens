@@ -106,6 +106,8 @@ MIN_MODELED_FRAC = 0.5
 MIN_MODELED_FRAC_LONG = 0.75
 LONG_GROUP_KERNELS = 5
 NO_VALUE = "—"  # Table cell for a value the perf report does not provide
+# "Data Moved (MB)" in the perf report is MiB, as in the perf model.
+BYTES_PER_MB = 1024 * 1024
 
 # ---------------------------------------------------------------------------
 # Records
@@ -1160,7 +1162,7 @@ class FusionPricer:
         data_out_mb = last.get("data_out_mb")
         if data_out_mb is None:
             data_out_mb = last["data_moved_mb"] / 2.0
-        total_ext_data_bytes = (data_in_mb + data_out_mb) * 1e6
+        total_ext_data_bytes = (data_in_mb + data_out_mb) * BYTES_PER_MB
 
         vector_gflops = sum(
             e["gflops"] for e in modeled if e["gflops"] and not e["is_matrix"]

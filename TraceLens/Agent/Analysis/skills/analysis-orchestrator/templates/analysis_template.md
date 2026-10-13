@@ -200,7 +200,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 
 ## Kernel Fusion Opportunities (Experimental)
 <!-- === STANDALONE Kernel Fusion === -->
-> **Note:** Kernel fusion analysis is experimental. impact_score projections estimate the recoverable fraction of E2E with <kernel_fusion_metrics.overlap_efficiency as a percent> memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Actual recoverable time depends on implementation feasibility and interaction effects.
+> **Note:** Kernel fusion analysis is experimental. impact_score projections estimate the recoverable fraction of E2E with <kernel_fusion_metrics.overlap_efficiency as a percent> memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates are not reported unless at least 50% of their kernels have perf models (75% for candidates of 5 or more kernels). Actual recoverable time depends on implementation feasibility and interaction effects.
 <!-- === COMPARATIVE Kernel Fusion === -->
 > **Note:** Kernel fusion analysis is experimental.
 
