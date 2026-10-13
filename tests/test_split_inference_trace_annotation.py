@@ -1077,7 +1077,7 @@ def _write_trace(trace, path):
 
 
 def test_main_no_gpu_work_is_skipped(tmp_path, capsys, monkeypatch):
-    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
+    monkeypatch.setenv("TRACELENS_SKIP_QUALITY_CHECK", "1")
     # A trace with no GPU kernels has nothing to split.
     trace = {
         "traceEvents": [

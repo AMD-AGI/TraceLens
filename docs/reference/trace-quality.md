@@ -7,7 +7,7 @@ See LICENSE for license information.
 # TraceLens trace quality checks
 ```{meta}
 :description: Reference for TraceLens trace quality checks that validate traces before and after analysis, including check descriptions, severity levels, detailed checks, and environment variables.
-:keywords: TraceLens, trace check, trace quality, validation, dropped kernels, call stack, graph mode, with_stack, capture trace, TRACELENS_SKIP_HEALTH_CHECK, TRACELENS_DETAILED_HEALTH_CHECKS, ROCm, AMD Instinct
+:keywords: TraceLens, trace check, trace quality, validation, dropped kernels, call stack, graph mode, with_stack, capture trace, TRACELENS_SKIP_QUALITY_CHECK, TRACELENS_DETAILED_QUALITY_CHECKS, ROCm, AMD Instinct
 ```
 
 Collecting a trace can be difficult. Profilers require specific flags and settings to capture the data that
@@ -27,7 +27,7 @@ Checks are organized into three stages:
 - **Pre-report checks** run inside `DataLoader.load_trace_events()`, before
   the call-stack tree is built. Every code path that loads a trace file runs
   basic pre-report checks. Detailed pre-report checks run when
-  `TRACELENS_DETAILED_HEALTH_CHECKS=1` is set.
+  `TRACELENS_DETAILED_QUALITY_CHECKS=1` is set.
 
 - **Post-tree checks** run inside `TreePerfAnalyzer.__init__()` and
   `JaxTreePerfAnalyzer.__init__()` after `build_tree()` completes. These checks
@@ -36,7 +36,7 @@ Checks are organized into three stages:
 
 - **Post-report checks** run after perf report generation completes. These
   validate the generated report DataFrames (idle time, op consistency, shape
-  coverage). Only run when `TRACELENS_DETAILED_HEALTH_CHECKS=1` is set.
+  coverage). Only run when `TRACELENS_DETAILED_QUALITY_CHECKS=1` is set.
 
 ## Complete check reference
 
@@ -69,16 +69,16 @@ Checks are organized into three stages:
 
 | Variable | Effect |
 |----------|--------|
-| `TRACELENS_SKIP_HEALTH_CHECK=1` | Skip all pre-report checks. Post-tree and post-report checks still run. |
-| `TRACELENS_DETAILED_HEALTH_CHECKS=1` | Enable detailed pre-report and post-report checks in addition to the basic checks. |
+| `TRACELENS_SKIP_QUALITY_CHECK=1` | Skip all pre-report checks. Post-tree and post-report checks still run. |
+| `TRACELENS_DETAILED_QUALITY_CHECKS=1` | Enable detailed pre-report and post-report checks in addition to the basic checks. |
 
 ```bash
 # Skip all pre-report checks
-TRACELENS_SKIP_HEALTH_CHECK=1 TraceLens_generate_perf_report_pytorch \
+TRACELENS_SKIP_QUALITY_CHECK=1 TraceLens_generate_perf_report_pytorch \
     --profile_json_path trace.json
 
 # Enable detailed checks
-TRACELENS_DETAILED_HEALTH_CHECKS=1 TraceLens_generate_perf_report_pytorch \
+TRACELENS_DETAILED_QUALITY_CHECKS=1 TraceLens_generate_perf_report_pytorch \
     --profile_json_path trace.json
 ```
 

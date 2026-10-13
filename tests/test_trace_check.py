@@ -253,15 +253,15 @@ class TestGraphMode:
 
 
 class TestBypass:
-    def test_env_var_skips_health_check(self, monkeypatch, tmp_path):
-        """TRACELENS_SKIP_HEALTH_CHECK=1 prevents run_trace_checks from being called."""
+    def test_env_var_skips_quality_check(self, monkeypatch, tmp_path):
+        """TRACELENS_SKIP_QUALITY_CHECK=1 prevents run_trace_checks from being called."""
         import json
 
         from TraceLens.util import DataLoader
 
         trace_file = tmp_path / "trace.json"
         trace_file.write_text(json.dumps({"traceEvents": []}))
-        monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
+        monkeypatch.setenv("TRACELENS_SKIP_QUALITY_CHECK", "1")
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             DataLoader.load_trace_events(str(trace_file))
@@ -275,7 +275,7 @@ class TestBypass:
 
         trace_file = tmp_path / "trace.json"
         trace_file.write_text(json.dumps({"traceEvents": []}))
-        monkeypatch.delenv("TRACELENS_SKIP_HEALTH_CHECK", raising=False)
+        monkeypatch.delenv("TRACELENS_SKIP_QUALITY_CHECK", raising=False)
         with pytest.raises(ValueError, match="No GPU kernel events"):
             DataLoader.load_trace_events(str(trace_file), framework="pytorch")
 
@@ -341,20 +341,20 @@ class TestDetailedPreReport:
         assert not any("GPU idle" in f.message for f in report.findings)
 
     def test_detailed_checks_run_when_enabled(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         events = [_kernel(0, dur=10), _kernel(1000000, dur=10)]
         report = trace_check.run_trace_checks(events, framework="pytorch")
         # With only 2 kernels and a huge gap, gpu_busy_idle should fire
         assert any("GPU idle" in f.message for f in report.findings)
 
     def test_cpu_op_shapes_detailed_low_coverage(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         events = [_kernel(100)] + [_cpu_op(i * 100) for i in range(50)]
         report = trace_check.run_trace_checks(events, framework="pytorch")
         assert any("cpu_ops have shapes" in f.message for f in report.findings)
 
     def test_cpu_op_shapes_detailed_high_coverage(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         events = [_kernel(100)] + [
             {
                 "cat": "cpu_op",
@@ -370,7 +370,7 @@ class TestDetailedPreReport:
         assert not any("cpu_ops have shapes" in f.message for f in report.findings)
 
     def test_cpu_gpu_ratio_normal(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         events = [_kernel(i * 100) for i in range(20)] + [
             _cpu_op(i * 100) for i in range(20)
         ]
@@ -378,13 +378,13 @@ class TestDetailedPreReport:
         assert not any("CPU:GPU" in f.message for f in report.findings)
 
     def test_cpu_gpu_ratio_suspicious(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         events = [_kernel(100)] + [_cpu_op(i) for i in range(1000)]
         report = trace_check.run_trace_checks(events, framework="pytorch")
         assert any("CPU:GPU" in f.message for f in report.findings)
 
     def test_runtime_variability_stable(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         events = [
             {
                 "cat": "kernel",
@@ -400,13 +400,13 @@ class TestDetailedPreReport:
         assert not any("CV>=" in f.message for f in report.findings)
 
     def test_jax_metadata_richness_skipped_for_pytorch(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         events = [_kernel(i * 100) for i in range(20)]
         report = trace_check.run_trace_checks(events, framework="pytorch")
         assert not any("HLO metadata" in f.message for f in report.findings)
 
     def test_jax_metadata_richness_sparse(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         events = [
             {"cat": "kernel", "ph": "X", "ts": i, "dur": 1, "name": "k", "args": {}}
             for i in range(20)
@@ -453,7 +453,7 @@ class TestPostReportChecks:
         assert not any("GPU idle" in f.message for f in report.findings)
 
     def test_idle_timeline_high_idle(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         dfs = self._make_dfs(idle_pct=70.0)
         report = trace_check.run_trace_checks(
             pre_report=False, dfs=dfs, framework="pytorch"
@@ -461,7 +461,7 @@ class TestPostReportChecks:
         assert any("GPU idle" in f.message for f in report.findings)
 
     def test_idle_timeline_low_idle(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         dfs = self._make_dfs(idle_pct=5.0)
         report = trace_check.run_trace_checks(
             pre_report=False, dfs=dfs, framework="pytorch"
@@ -469,7 +469,7 @@ class TestPostReportChecks:
         assert not any("GPU idle" in f.message for f in report.findings)
 
     def test_ops_have_shapes_good_coverage(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         dfs = self._make_dfs(shape_coverage=1.0)
         report = trace_check.run_trace_checks(
             pre_report=False, dfs=dfs, framework="pytorch"
@@ -477,7 +477,7 @@ class TestPostReportChecks:
         assert not any("ops have shapes" in f.message for f in report.findings)
 
     def test_ops_have_shapes_poor_coverage(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         dfs = self._make_dfs(shape_coverage=0.1)
         report = trace_check.run_trace_checks(
             pre_report=False, dfs=dfs, framework="pytorch"
@@ -487,7 +487,7 @@ class TestPostReportChecks:
     def test_high_idle_ops_detected(self, monkeypatch):
         import pandas as pd
 
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         dfs = {
             "gpu_timeline": pd.DataFrame({"type": ["idle_time"], "percent": [5.0]}),
             "ops_summary": pd.DataFrame({"name": ["op"], "Count": [1]}),
@@ -506,7 +506,7 @@ class TestPostReportChecks:
         assert any("non-kernel time" in f.message for f in report.findings)
 
     def test_attention_kernel_count_skipped_for_pytorch(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         dfs = self._make_dfs()
         report = trace_check.run_trace_checks(
             pre_report=False, dfs=dfs, framework="pytorch"
@@ -516,7 +516,7 @@ class TestPostReportChecks:
     def test_attention_kernel_count_mismatch(self, monkeypatch):
         import pandas as pd
 
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         dfs = self._make_dfs()
         dfs["gpu_timeline"] = pd.DataFrame(
             {"type": ["idle_time"], "percent": [5.0], "gpu_pid": [0]}
@@ -531,7 +531,7 @@ class TestPostReportChecks:
     def test_attention_kernel_count_disabled_without_config(self, monkeypatch):
         import pandas as pd
 
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         dfs = self._make_dfs()
         dfs["op_fa_fwd"] = pd.DataFrame({"name": ["fmha_fwd"], "name_count": [10]})
         report = trace_check.run_trace_checks(
@@ -540,7 +540,7 @@ class TestPostReportChecks:
         assert not any("Attention launches" in f.message for f in report.findings)
 
     def test_idle_timeline_warn_threshold(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         dfs = self._make_dfs(idle_pct=35.0)
         report = trace_check.run_trace_checks(
             pre_report=False, dfs=dfs, framework="pytorch"
@@ -550,7 +550,7 @@ class TestPostReportChecks:
     def test_ops_have_shapes_missing_column(self, monkeypatch):
         import pandas as pd
 
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         dfs = self._make_dfs()
         dfs["ops_unique_args"] = pd.DataFrame({"name": ["op"]})
         report = trace_check.run_trace_checks(
@@ -559,7 +559,7 @@ class TestPostReportChecks:
         assert not any("ops have shapes" in f.message for f in report.findings)
 
     def test_high_idle_ops_none_detected(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         dfs = self._make_dfs()
         report = trace_check.run_trace_checks(
             pre_report=False, dfs=dfs, framework="pytorch"
@@ -581,7 +581,7 @@ class TestEdgeCases:
         assert not cfg2.enabled
 
     def test_runtime_variability_high_cv(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         events = []
         for i in range(20):
             dur = 10 if i % 2 == 0 else 1000
@@ -599,14 +599,14 @@ class TestEdgeCases:
         assert any("CV>=" in f.message for f in report.findings)
 
     def test_gpu_busy_idle_warn_threshold(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         events = [_kernel(0, dur=10), _kernel(200, dur=10)]
         report = trace_check.run_trace_checks(events, framework="pytorch")
         idle_findings = [f for f in report.findings if "GPU idle" in f.message]
         assert len(idle_findings) > 0
 
     def test_jax_metadata_good_coverage(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_HEALTH_CHECKS", "1")
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         events = [
             {
                 "cat": "kernel",

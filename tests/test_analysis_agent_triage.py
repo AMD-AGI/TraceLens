@@ -434,7 +434,7 @@ def test_load_trace_json_gzip(tmp_path):
 def test_load_trace_json_lru_cache_returns_same_object(tmp_path, monkeypatch):
     # lru_cache(maxsize=1) keyed on the resolved path collapses a repeat parse of
     # the same file to a single object.
-    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
+    monkeypatch.setenv("TRACELENS_SKIP_QUALITY_CHECK", "1")
     p = write_json(tmp_path / "trace.json", {"traceEvents": []})
     first = _load_trace_json(p)
     second = _load_trace_json(p)
@@ -801,7 +801,7 @@ def test_load_unified_perf_summary_present_and_absent(tmp_path):
 
 
 def test_first_load_capture_event_set_skips_corrupt_and_metadata(tmp_path, monkeypatch):
-    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
+    monkeypatch.setenv("TRACELENS_SKIP_QUALITY_CHECK", "1")
     folder = tmp_path / "capture_traces"
     # Metadata files are skipped by name; a corrupt gz is skipped by the
     # except-continue; the good file wins.
@@ -1048,14 +1048,14 @@ def test_capture_missing_manifest_without_capture_key_returns_none(tmp_path):
 
 
 def test_missing_cpu_op_shapes_zero_cpu_ops(tmp_path, monkeypatch):
-    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
+    monkeypatch.setenv("TRACELENS_SKIP_QUALITY_CHECK", "1")
     run_dir = make_run_dir(tmp_path, capture_events=[{"cat": "kernel"}])
     finding = check_missing_cpu_op_shapes(str(run_dir), None)
     assert finding is None
 
 
 def test_missing_cpu_op_shapes_too_few_with_shapes(tmp_path, monkeypatch):
-    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
+    monkeypatch.setenv("TRACELENS_SKIP_QUALITY_CHECK", "1")
     run_dir = make_run_dir(
         tmp_path, capture_events=[{"cat": "cpu_op"} for _ in range(5)]
     )
@@ -1065,7 +1065,7 @@ def test_missing_cpu_op_shapes_too_few_with_shapes(tmp_path, monkeypatch):
 
 
 def test_missing_cpu_op_shapes_enough_returns_none(tmp_path, monkeypatch):
-    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
+    monkeypatch.setenv("TRACELENS_SKIP_QUALITY_CHECK", "1")
     events = [{"cat": "cpu_op", "args": {"Input Dims": [[1]]}} for _ in range(10)]
     run_dir = make_run_dir(tmp_path, capture_events=events)
     assert check_missing_cpu_op_shapes(str(run_dir), None) is None
@@ -1102,7 +1102,7 @@ def test_inference_annotation_no_main_trace(tmp_path):
 
 
 def test_inference_annotation_present_returns_none(tmp_path, monkeypatch):
-    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
+    monkeypatch.setenv("TRACELENS_SKIP_QUALITY_CHECK", "1")
     events = [{"cat": "user_annotation", "name": "execute_step"}]
     run_dir = make_run_dir(tmp_path, main_trace_events=events)
     assert check_inference_annotation_missing(str(run_dir), None) is None
@@ -1171,7 +1171,7 @@ def test_split_incorrect_is_inert(tmp_path):
 
 
 def test_shape_profiler_missing_fires_from_capture(tmp_path, monkeypatch):
-    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
+    monkeypatch.setenv("TRACELENS_SKIP_QUALITY_CHECK", "1")
     events = [{"cat": "cpu_op", "name": "sglang::forward"}]
     run_dir = make_run_dir(tmp_path, capture_events=events)
     finding = check_shape_profiler_missing(str(run_dir), None)
@@ -1180,7 +1180,7 @@ def test_shape_profiler_missing_fires_from_capture(tmp_path, monkeypatch):
 
 
 def test_shape_profiler_present_returns_none(tmp_path, monkeypatch):
-    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
+    monkeypatch.setenv("TRACELENS_SKIP_QUALITY_CHECK", "1")
     events = [
         {"cat": "cpu_op", "name": "sglang::forward"},
         {"cat": "python_function", "name": "kernel_shape_profiler_run"},
@@ -1190,7 +1190,7 @@ def test_shape_profiler_present_returns_none(tmp_path, monkeypatch):
 
 
 def test_shape_profiler_no_sglang_returns_none(tmp_path, monkeypatch):
-    monkeypatch.setenv("TRACELENS_SKIP_HEALTH_CHECK", "1")
+    monkeypatch.setenv("TRACELENS_SKIP_QUALITY_CHECK", "1")
     events = [{"cat": "cpu_op", "name": "aten::mm"}]
     run_dir = make_run_dir(tmp_path, capture_events=events)
     assert check_shape_profiler_missing(str(run_dir), None) is None

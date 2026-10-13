@@ -13,8 +13,8 @@ post-report checks (report completeness, idle time, op consistency).
 
 Basic checks run automatically via ``DataLoader.load_trace_events()`` and
 ``TreePerfAnalyzer``. Detailed checks run when
-``TRACELENS_DETAILED_HEALTH_CHECKS=1`` is set. All checks can be skipped
-with ``TRACELENS_SKIP_HEALTH_CHECK=1``.
+``TRACELENS_DETAILED_QUALITY_CHECKS=1`` is set. All checks can be skipped
+with ``TRACELENS_SKIP_QUALITY_CHECK=1``.
 """
 
 from __future__ import annotations
@@ -188,7 +188,7 @@ def _check_kernels_present(ctx) -> List[TraceCheck]:
             TraceCheck(
                 Status.ERROR,
                 "No GPU kernel events found in trace. "
-                "Set TRACELENS_SKIP_HEALTH_CHECK=1 to bypass if intentional.",
+                "Set TRACELENS_SKIP_QUALITY_CHECK=1 to bypass if intentional.",
             )
         ]
     return []
@@ -292,7 +292,7 @@ def _check_cpu_gpu_ratio(ctx) -> List[TraceCheck]:
 
 
 # ---------------------------------------------------------------------------
-# Detailed pre-report checks (TRACELENS_DETAILED_HEALTH_CHECKS=1)
+# Detailed pre-report checks (TRACELENS_DETAILED_QUALITY_CHECKS=1)
 # ---------------------------------------------------------------------------
 def _check_runtime_variability(ctx) -> List[TraceCheck]:
     """Flag kernel groups whose per-invocation duration varies too much."""
@@ -588,7 +588,7 @@ def _check_attention_kernel_count(ctx) -> List[TraceCheck]:
 # Each entry: (fn, pre_report, detailed, framework)
 # fn accepts a single ctx dict.
 # pre_report: True = pre-report check, False = post-report check.
-# detailed: True = requires TRACELENS_DETAILED_HEALTH_CHECKS=1.
+# detailed: True = requires TRACELENS_DETAILED_QUALITY_CHECKS=1.
 # framework: None = all, "pytorch" = PyTorch only, "jax" = JAX only.
 CHECK_REGISTRY = [
     # Pre-report, basic
@@ -632,11 +632,11 @@ def run_trace_checks(
         dfs: Report DataFrames (required for post-report DataFrame checks).
 
     Basic checks always run. Detailed checks run when
-    ``TRACELENS_DETAILED_HEALTH_CHECKS=1`` is set. Checks are filtered
+    ``TRACELENS_DETAILED_QUALITY_CHECKS=1`` is set. Checks are filtered
     by ``framework`` (None runs only general checks).
     """
     findings: List[TraceCheck] = []
-    detailed = os.environ.get("TRACELENS_DETAILED_HEALTH_CHECKS") == "1"
+    detailed = os.environ.get("TRACELENS_DETAILED_QUALITY_CHECKS") == "1"
     thr = QualityThresholds()
     sheets = _SHEETS.get(framework or "pytorch", _SHEETS["pytorch"])
     ctx = {

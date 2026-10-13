@@ -465,7 +465,7 @@ class DataLoader:
         metadata = {k: v for k, v in data.items() if k != "traceEvents"}
         events = data.get("traceEvents", [])
 
-        if os.environ.get("TRACELENS_SKIP_HEALTH_CHECK") != "1":
+        if os.environ.get("TRACELENS_SKIP_QUALITY_CHECK") != "1":
             from . import trace_check
 
             trace_check.run_trace_checks(
