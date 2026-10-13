@@ -37,17 +37,22 @@ VLLM_NATIVE_PATTERN = re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d
 
 # step[EXTEND bs=2 toks=14721 c_sq=14721 c_sqsq=108745533 c_sqsk=108745533 c_sk=14721]
 # step[DECODE bs=64 g_sq=128 g_sqsq=256 g_sqsk=262144 g_sk=131072]  <- MTP: g_sq > bs
+# step[DRAFT bs=8 c_sq=56 c_sqsq=392 c_sqsk=5370764 c_sk=767252]  <- DSPARK
+# step[VERIFY bs=8 c_sq=64 c_sqsq=512 c_sqsk=6138080 c_sk=767260]  <- DSPARK
 # step[MIXED bs=2 c=1 g=1 c_sq=5 c_sk=8 c_sqsq=25 c_sqsk=40
 #     g_sq=1 g_sk=12 g_sqsq=1 g_sqsk=12]
 # Case-insensitive: some builds emit lowercase phases (``step[decode bs=1]``).
 SGLANG_DETAILED_PATTERN = re.compile(
-    r"step\[(?:EXTEND|DECODE|MIXED)\b[^\]]*sqsq=\d+[^\]]*\]", re.IGNORECASE
+    r"step\[(?:EXTEND|DECODE|MIXED|DRAFT|VERIFY|TARGET_VERIFY)\b"
+    r"[^\]]*sqsq=\d+[^\]]*\]",
+    re.IGNORECASE,
 )
 # step[EXTEND bs=2 toks=14721]
 # step[DECODE bs=64]
 # step[MIXED bs=2]  <- neither toks nor sq/sk, so bs is the only count
 SGLANG_NATIVE_PATTERN = re.compile(
-    r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]", re.IGNORECASE
+    r"step\[(?:EXTEND|DECODE|MIXED|DRAFT|VERIFY|TARGET_VERIFY)\b.*\]",
+    re.IGNORECASE,
 )
 
 # prefill[bs=2 tok=14721 ctx=[7803, 6918]]
@@ -138,9 +143,13 @@ def _fill_sglang_native(ann, name):
     toks = int(m.group(3) or 0)
     if kind_word == "DECODE":
         ann.generation_requests = ann.generation_sum = ann.g_sq = bs
-    else:  # EXTEND / MIXED treated as prefill; toks = total prompt tokens.
+    else:  # Context-like modes; toks is present only for EXTEND.
         ann.context_requests = bs
-        ann.context_sum = ann.c_sq = toks
+        ann.context_sum = ann.c_sq = toks or bs
+        if kind_word == "DRAFT":
+            ann.meta["capture_role"] = "draft"
+        elif kind_word in ("VERIFY", "TARGET_VERIFY"):
+            ann.meta["capture_role"] = "verify"
     ann.batch_size = ann.c_sq + ann.g_sq or bs
     return True
 
@@ -164,13 +173,21 @@ def _fill_sglang_detailed(ann, name):
     )
     if mode == "DECODE":
         ann.generation_requests, ann.generation_sum = bs, ann.g_sq
-    elif mode == "EXTEND":
+    elif mode in ("EXTEND", "DRAFT", "VERIFY", "TARGET_VERIFY"):
         ann.context_requests, ann.context_sum = bs, ann.c_sq
+        if mode == "DRAFT":
+            ann.meta["capture_role"] = "draft"
+        elif mode in ("VERIFY", "TARGET_VERIFY"):
+            ann.meta["capture_role"] = "verify"
     else:  # MIXED: c=/g= are per-group request counts.
         ann.context_requests = _safe_int(kv.get("c", 0))
         ann.generation_requests = _safe_int(kv.get("g", 0))
         ann.context_sum, ann.generation_sum = ann.c_sq, ann.g_sq
-    ann.batch_size = ann.c_sq + ann.g_sq or toks or bs
+    ann.batch_size = (
+        bs
+        if mode in ("DRAFT", "VERIFY", "TARGET_VERIFY")
+        else ann.c_sq + ann.g_sq or toks or bs
+    )
     ann.has_sqsk = True
     return True
 
@@ -345,7 +362,16 @@ def _fill_capture(ann, name):
     if not m:
         return False
     ann.batch_size = int(m.group(1))
-    ann.mode = m.group(2)
+    mode = m.group(2)
+    role_mode = re.fullmatch(
+        r"(draft|verify|target_verify)_(FULL|PIECEWISE)", mode, re.IGNORECASE
+    )
+    if role_mode:
+        role = role_mode.group(1).lower()
+        ann.role = "verify" if role == "target_verify" else role
+        ann.mode = role_mode.group(2).upper()
+    else:
+        ann.mode = mode
     return True
 
 
@@ -359,6 +385,7 @@ class CaptureAnnotation:
         self.kind = None
         self.batch_size = None
         self.mode = None
+        self.role = None
         for kind, pattern, parser in self.FORMATS:
             if pattern.match(annotation) and parser(self, annotation) is not False:
                 self.kind = kind

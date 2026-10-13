@@ -596,6 +596,43 @@ def test_classify_json_gz_roundtrip(tmp_path):
     assert details[0]["mode"] == "FULL"
 
 
+def test_classify_sglang_draft_and_verify_filenames(tmp_path):
+    events = [
+        {"cat": "cuda_runtime", "name": "hipStreamBeginCapture", "ts": 1},
+        {"cat": "cpu_op", "name": "x", "args": {"Input Dims": [[56, 16]]}},
+    ]
+    for role in ("draft", "verify"):
+        path = tmp_path / f"DecodeCudaGraphRunner_{role}_bs_8_rank0.json.gz"
+        path.write_bytes(gzip.compress(json.dumps({"traceEvents": events}).encode()))
+
+    classify_graph_capture_trace(str(tmp_path))
+
+    details = json.loads((tmp_path / "execution_details.json").read_text())
+    assert {(item["role"], item["batch_size"]) for item in details} == {
+        ("draft", 8),
+        ("verify", 8),
+    }
+    assert {item["mode"] for item in details} == {"FULL"}
+
+
+def test_classify_role_aware_capture_annotation(tmp_path):
+    events = [
+        {
+            "name": "vllm/v1/worker/gpu_model_runner.py(10): _dummy_run",
+            "ts": 1,
+        },
+        {"name": "capture_8_draft_FULL", "cat": "user_annotation", "ts": 2},
+    ]
+    (tmp_path / "graph.json").write_text(json.dumps({"traceEvents": events}))
+
+    classify_graph_capture_trace(str(tmp_path))
+
+    details = json.loads((tmp_path / "execution_details.json").read_text())
+    assert details == [
+        {"file": "graph.json", "batch_size": 8, "mode": "FULL", "role": "draft"}
+    ]
+
+
 def test_classify_no_trace_files_exits(tmp_path):
     with pytest.raises(SystemExit) as exc:
         classify_graph_capture_trace(str(tmp_path))

@@ -125,6 +125,7 @@ from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
     aiter_paged_attention_ragged,
     mha_varlen_fwd,
     mla_decode_fwd,
+    mla_gluon_decode,
     mla_tilelang_sparse_fwd,
     pa_decode_gluon,
     pa_sparse_prefill_opus_fwd,
@@ -182,6 +183,10 @@ class TestPseudoOpsPerfUtils:
         assert mappings["pseudo_op::moe_aiter_fused_1stage"] is moe_aiter_fused_1stage
         assert mappings["aiter::rms_norm"] is aiter_rms_norm
         assert mappings["vllm::gdn_attention_core"] is gdn_attention_core
+        assert (
+            mappings["sglang_profiler::aiter_mla_gluon_mla_gluon_decode"]
+            is mla_gluon_decode
+        )
         assert mappings["aiter::gemm_a8w8_blockscale_ck"] is gemm_a8w8_blockscale
         assert mappings["_C_custom_ar::all_reduce"] is custom_ar_all_reduce
 
@@ -1693,6 +1698,26 @@ class TestAttentionExtensionsCoverage:
             assert model.flops() is None
         else:
             assert model.flops() > 0
+
+    def test_mla_gluon_decode_packed_latent_model(self):
+        event = {
+            "annotation": _GDN_ANNOTATION,
+            "args": {
+                "Input Dims": [[64, 12, 576], [1_000_000, 1, 576], [1024], [9]],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "int",
+                    "int",
+                ],
+            },
+        }
+        model = mla_gluon_decode(event)
+
+        assert model.d_h_qk == 576
+        assert model.d_h_v == 512
+        assert model.flops() > 0
+        assert model.bytes() == (64 * 12 * (576 + 512) * 2 + 131072 * 576)
 
     def test_aiter_paged_attention_ragged(self):
         event = {

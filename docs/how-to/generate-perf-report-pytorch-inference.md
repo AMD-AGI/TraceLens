@@ -308,6 +308,13 @@ during the benchmark. Pass both paths to the report generator using
    the `capture_traces/` folder. On 0.5.12 and earlier the capture traces are
    written unconditionally and this variable does not exist.
 
+Speculative runners that capture separate draft and target-verify graphs can
+name them `*_{draft|verify}_bs_<N>_rank<N>.json.gz`. TraceLens preserves that
+role in `execution_details.json` and matches `step[DRAFT ...]` replay roots to
+draft captures and `step[VERIFY ...]` or `step[TARGET_VERIFY ...]` roots to
+verify captures. This prevents two captures at the same batch size from
+overwriting each other during graph augmentation.
+
 ```{note}
 On SGLang 0.5.13 and 0.5.14 the graph-capture shape profiling is intentionally
 disabled for the EAGLE/MTP speculative graphs (and, on 0.5.14, the target-verify
