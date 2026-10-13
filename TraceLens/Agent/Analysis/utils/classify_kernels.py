@@ -50,8 +50,23 @@ PRIMITIVES = frozenset(
         "add",
         "pointwise",
         "reduce",
+        "copy",
+        "library_collective",
     }
 )
+
+# Inductor kernel names start with this prefix; whether a kernel is compiled is a
+# per-kernel fact, because op words in the name type many of them as op types.
+COMPILED_PREFIX = r"triton_(poi|red|per)_"
+
+# The tile-transform kernels the Case-A comparative gate skips.
+LAYOUT_TRANSFORM = "LayoutTransform"
+
+# The type of a kernel no rule matches.
+UNKNOWN = "Unknown"
+
+# The type of an Inductor-generated kernel (see COMPILED_PREFIX).
+COMPILED = "Compiled"
 
 # Regex rules: (pattern, kernel_type, priority). The highest priority wins; on a
 # tie the earlier rule wins. Compiled sits at 5, after the GEMM and Elementwise
@@ -122,14 +137,17 @@ KERNEL_TYPE_RULES = [
     (r"(?i)fused_gdn_gating", "GDN Gating", 20),
     # ---- MoE and quantization ----
     (r"(?i)swiglu|swiGlu", "MoE GateUp+SwiGLU GEMM", 25),
-    (r"(?i)fmoe.*g1u1.*silu|fmoe.*silu", "MoE GEMM+SiLU (aiter)", 25),
-    (r"(?i)kernel_moe_gemm|MoeGemmBlockScale", "MoE GEMM (CK)", 22),
+    (
+        r"(?i)fmoe.*g1u1.*silu|fmoe.*silu|mfma_moe\d+_silu_mul",
+        "MoE GEMM+SiLU (aiter)",
+        25,
+    ),
+    (r"(?i)kernel_moe_gemm|MoeGemmBlockScale|mfma_moe", "MoE GEMM (CK)", 22),
     (r"(?i)finalize.*scatter|_finalize_matmul|finalizeKernel", "MoE Finalize", 20),
     (r"(?i)topk_forward", "MoE TopK", 20),
     (r"(?i)topkGatingSoftmax", "MoE TopK Gating", 20),
     (r"(?i)grouped_topk", "TopK", 20),
     (r"(?i)bitmatrix|_sum_bitmatrix", "MoE BitMatrix", 20),
-    (r"(?i)combined_routing_memset", "MoE Routing Memset", 20),
     (r"(?i)combined_routing_compute", "MoE Routing Compute", 20),
     (r"(?i)routingIndicesCluster|routingRenormalize", "MoE Routing (fused)", 20),
     (r"(?i)MoeSorting", "MoE Sorting", 20),
@@ -143,12 +161,14 @@ KERNEL_TYPE_RULES = [
     # ---- Activation ----
     (r"(?i)act_and_mul_kernel|silu_and_mul|silu_mul|SiluAndMul", "Act+Mul", 20),
     (r"(?i)activationDeepSeekKernel", "Activation (DeepSeek fused)", 18),
-    (r"(?i)\bsilu\b|swish", "Activation (SiLU)", 15),
+    (r"(?i)\bsilu(_kernel)?\b|swish", "Activation (SiLU)", 15),
     (r"(?i)\bgelu\b", "Activation (GELU)", 15),
     # ---- Communication ----
     (r"(?i)cross_device|allgather_lastdim", "Collective", 20),
-    # ---- MemCpy ----
+    (r"(?i)nccl|rccl|multimem_all_reduce", "Library Collective", 20),
+    # ---- MemCpy and MemSet ----
     (r"(?i)memcpy", "MemCpy", 30),
+    (r"(?i)memset", "MemSet", 30),
     # ---- Elementwise, softmax, reduce and layout ----
     (r"(?i)embedding", "Elementwise", 17),
     (r"(?i)gather_kernel|vectorized_gather", "Elementwise", 20),
@@ -160,10 +180,9 @@ KERNEL_TYPE_RULES = [
     (r"(?i)vectorized_elementwise_kernel.*FillFunctor", "Elementwise", 10),
     (r"(?i)direct_copy_kernel|_to_copy\b", "Elementwise", 10),
     (r"(?i)CatArrayBatchedCopy", "Elementwise", 10),
-    # Same tile-transform names the Case-A comparative gate matches.
     (
         r"(?i)batched_transpose|nchw2nhwc|nhwc2nchw|transpose_nchw|transpose_cnhw",
-        "LayoutTransform",
+        LAYOUT_TRANSFORM,
         10,
     ),
     (r"(?i)CUDAFunctor(OnSelf|OnOther)?_add", "Add", 8),
@@ -191,7 +210,7 @@ KERNEL_TYPE_RULES = [
         "Convolution",
         6,
     ),
-    (r"(?i)triton_(poi|red|per)_fused", "Compiled", 5),
+    (rf"(?i){COMPILED_PREFIX}fused", COMPILED, 5),
 ]
 
 # kernel_type -> (perf_category, covers). `covers` lists the primitives the kernel
@@ -206,7 +225,7 @@ KERNEL_TYPES = {
     "LayerNorm": ("Normalization", ("norm",)),
     "BatchNorm": ("Normalization", ("batchnorm",)),
     "L2Norm": ("Normalization", ("norm",)),
-    "RMSNorm (fused triton)": ("Normalization", ("norm",)),
+    "RMSNorm (fused triton)": ("Normalization", ("add", "norm")),
     "RMSNorm (fused triton residual)": ("Normalization", ("add", "norm")),
     "Attention (AMD unified)": ("SDPA", ("gemm", "softmax", "gemm")),
     "Attention (NVIDIA fmha)": ("SDPA", ("gemm", "softmax", "gemm")),
@@ -234,7 +253,6 @@ KERNEL_TYPES = {
     "MoE TopK Gating": ("Elementwise-MoE", ("softmax", "topk")),
     "TopK": ("Elementwise", ("topk",)),
     "MoE BitMatrix": ("Elementwise-MoE", ("route",)),
-    "MoE Routing Memset": ("Elementwise-MoE", ("route",)),
     "MoE Routing Compute": ("Elementwise-MoE", ("route",)),
     "MoE Routing (fused)": ("Elementwise-MoE", ("topk", "softmax", "route")),
     "MoE Sorting": ("Elementwise-MoE", ("route",)),
@@ -246,18 +264,20 @@ KERNEL_TYPES = {
     "Activation (SiLU)": ("Elementwise", ("act",)),
     "Activation (GELU)": ("Elementwise", ("act",)),
     "Collective": ("Communication", ("collective",)),
-    "MemCpy": ("MemCpy", ("pointwise",)),
+    "Library Collective": ("Communication", ("library_collective",)),
+    "MemCpy": ("MemCpy", ("copy",)),
+    "MemSet": ("MemCpy", ("copy",)),
     "Softmax": ("Elementwise", ("softmax",)),
     "Reduce": ("Elementwise", ("reduce",)),
     "Add": ("Elementwise", ("add",)),
     "Mul": ("Elementwise", ("mul",)),
     "Elementwise": ("Elementwise", ("pointwise",)),
-    "LayoutTransform": ("Elementwise", ("pointwise",)),
+    LAYOUT_TRANSFORM: ("Elementwise", ("pointwise",)),
     "GEMM": ("GEMM", ("gemm",)),
     "Convolution": ("Convolution", ("gemm",)),
     # Compiler-generated kernels fuse an unknown pointwise/reduce mix.
-    "Compiled": ("Elementwise", ("pointwise", "reduce")),
-    "Unknown": ("Others", ()),
+    COMPILED: ("Elementwise", ("pointwise", "reduce")),
+    UNKNOWN: ("Others", ()),
 }
 
 
@@ -273,6 +293,8 @@ class KernelClass:
 class KernelTaxonomy:
     """Kernel-name regex rules plus the facts of every kernel type."""
 
+    _COMPILED = re.compile(COMPILED_PREFIX)
+
     def __init__(self, rules, types):
         self._rules = [(re.compile(pat), ktype, prio) for pat, ktype, prio in rules]
         self._types = {
@@ -282,7 +304,7 @@ class KernelTaxonomy:
 
     def _match(self, name: str) -> tuple[str, int]:
         """Return the (kernel_type, priority) of the winning rule."""
-        best_type, best_prio = "Unknown", 0
+        best_type, best_prio = UNKNOWN, 0
         for regex, ktype, prio in self._rules:
             if prio > best_prio and regex.search(name):
                 best_type, best_prio = ktype, prio
@@ -290,6 +312,9 @@ class KernelTaxonomy:
 
     def classify(self, name: str) -> KernelClass:
         return self._types[self._match(name)[0]]
+
+    def is_compiled(self, name: str) -> bool:
+        return self._COMPILED.match(name) is not None
 
     def by_type(self, ktype: str) -> KernelClass:
         return self._types[ktype]
@@ -332,7 +357,7 @@ def classify_all(extracted_data):
 def run_assertions(classified):
     errors = []
 
-    unknowns = [c for c in classified if c["kernel_type"] == "Unknown"]
+    unknowns = [c for c in classified if c["kernel_type"] == UNKNOWN]
     if unknowns:
         errors.append(
             f"A5.x WARNING: {len(unknowns)} kernels classified as Unknown: "

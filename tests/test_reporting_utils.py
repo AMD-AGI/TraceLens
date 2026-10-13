@@ -20,10 +20,8 @@ from TraceLens.Reporting.reporting_utils import (
     resolve_gpu_arch,
     write_report_outputs,
 )
-from TraceLens.Agent.Analysis.category_analyses import (
-    analysis_utils as au,
-    kernel_fusion_analysis as kfa,
-)
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionCandidateBuilder
 from TraceLens.Reporting import (
     generate_multi_rank_collective_report_pytorch as coll_mod,
     generate_perf_report_pytorch_inference as inf_mod,
@@ -2261,9 +2259,7 @@ class TestPush95Phase2:
                 return analyzer
 
         monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
-        monkeypatch.setattr(
-            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
-        )
+        monkeypatch.setattr(FusionCandidateBuilder, "standalone", lambda self: [])
 
         old_argv = sys.argv
         sys.argv = [
@@ -2324,11 +2320,9 @@ class TestPush95Phase2:
 
         monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
         monkeypatch.setattr(
-            op, "_extract_comparative_fusion_candidates", lambda *a, **k: []
+            FusionCandidateBuilder, "comparative", lambda self, diff_stats: []
         )
-        monkeypatch.setattr(
-            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
-        )
+        monkeypatch.setattr(FusionCandidateBuilder, "standalone", lambda self: [])
 
         old_argv = sys.argv
         sys.argv = [
@@ -2372,9 +2366,6 @@ class TestPush95Phase2:
             json.dumps({"high_confidence_op_keys": [["aten::mm", "x", "y"]]})
         )
         assert au._load_fusion_op_keys(str(tmp_path)) == {("aten::mm", "x", "y")}
-
-        ops = [{"kernel_names": ["a", "b"], "base_name": "Block", "instance_count": 2}]
-        assert len(kfa._filter_and_dedup(ops)) == 1
 
     def test_reporting_pftrace_and_collective(self, tmp_path):
 
@@ -2546,30 +2537,62 @@ class TestPush95Phase3:
             json.dumps(
                 {
                     "platform": "MI300X",
-                    "gpu_utilization": {"total_time_ms": 1000.0},
+                    "gpu_utilization": {"total_time_ms": 10.0},
                 }
             )
         )
+        gemm_key = ["aten::mm", "[[2,3]]", "", "", "", "", "", ""]
+        add_key = ["aten::add", "[[4,4]]", "", "", "", "", "", ""]
         (cat_dir / "fusion_candidates.json").write_text(
             json.dumps(
                 [
                     {
                         "module_name": "nn.Module: Block",
+                        "base_name": "Block",
+                        "parent_chain": [],
+                        "instance_count": 1,
+                        "kernel_count": 2,
                         "kernels": [
                             {
-                                "name": "Cijk_a",
+                                "name": "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x32_MI16x16x1",
                                 "type": "GEMM",
-                                "dur_us": 100,
-                                "data_in_mb": 10.0,
+                                "dur_us": 1000,
+                                "perf_key": gemm_key,
+                                "data_in_mb": 5.0,
+                                "data_out_mb": 5.0,
                             },
                             {
-                                "name": "ew_add",
-                                "type": "Elementwise Add",
-                                "dur_us": 20,
-                                "data_in_mb": 2.0,
+                                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul>)",
+                                "type": "Add",
+                                "dur_us": 1000,
+                                "perf_key": add_key,
+                                "data_in_mb": 1.0,
+                                "data_out_mb": 1.0,
                             },
                         ],
-                        "instance_count": 1,
+                        "ops": [
+                            {
+                                "perf_key": gemm_key,
+                                "kernel_names": [
+                                    "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x32_MI16x16x1"
+                                ],
+                                "time_us": 1000.0,
+                                "count": 1,
+                            },
+                            {
+                                "perf_key": add_key,
+                                "kernel_names": [
+                                    "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul>)"
+                                ],
+                                "time_us": 1000.0,
+                                "count": 1,
+                            },
+                        ],
+                        "total_kernel_time_us": 2000.0,
+                        "kernel_type_signature": ["GEMM", "Add"],
+                        "kernel_type_summary": {"GEMM": 1, "Add": 1},
+                        "fusion_kind": "gemm_epilogue",
+                        "confidence": "medium",
                     }
                 ]
             )
@@ -2586,18 +2609,6 @@ class TestPush95Phase3:
             )
         )
 
-        candidates, manifest, csv_path = kfa.load_fusion_data(str(tmp_path))
-        perf_rows = kfa.load_perf_rows(csv_path)
-        estimates = kfa.compute_fusion_impact_estimates(
-            candidates,
-            perf_rows,
-            peak_bw_tbs=5.3,
-            peak_maf_tflops={"matrix_bf16": 1000.0, "vector_fp32": 100.0},
-            baseline_ms=1000.0,
-            is_comparative=False,
-        )
-        assert isinstance(estimates, list)
-
         mod = importlib.import_module(
             "TraceLens.Agent.Analysis.category_analyses.kernel_fusion_analysis"
         )
@@ -2613,7 +2624,13 @@ class TestPush95Phase3:
             mod.main()
         finally:
             sys.argv = old_argv
-        assert (cat_dir / "kernel_fusion_metrics.json").exists()
+        metrics = json.loads((cat_dir / "kernel_fusion_metrics.json").read_text())
+        (estimate,) = metrics["impact_estimates"]
+        assert (estimate["fusion_kind"], estimate["confidence"]) == (
+            "gemm_epilogue",
+            "medium",
+        )
+        assert metrics["high_confidence_op_keys"] == []
 
     def test_pftrace_cli_mains(self, tmp_path):
 
@@ -2771,25 +2788,28 @@ class TestPush95Phase4:
             sys.argv = old_argv
         fusion_path = os.path.join(out, "category_data", "fusion_candidates.json")
         assert os.path.isfile(fusion_path)
-        assert isinstance(json.loads(open(fusion_path).read()), list)
+        (cand,) = json.loads(open(fusion_path).read())
+        assert (cand["fusion_kind"], cand["confidence"]) == ("gemm_epilogue", "medium")
 
     def test_orchestrator_comparative_fusion_via_main(self, tmp_path, monkeypatch):
 
         out = str(tmp_path)
         _write_minimal_orchestrator_csvs(out, comparative=True)
         t1_csv = os.path.join(out, "perf_report_trace1_csvs")
+        gemm = "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x32_MI16x16x1"
+        add = "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul>)"
         pd.DataFrame(
             {
-                "name": ["Cijk_A", "ew_add"],
-                "source": ["trace1", "trace1"],
-                "lowest_common_ancestor_id": [100, 100],
-                "kernel_time": [5000.0, 3000.0],
-                "gpu_op_uid": [10, 11],
+                "name": [gemm, add, gemm],
+                "source": ["trace1", "trace1", "trace2"],
+                "lowest_common_ancestor_id": [100, 100, 100],
+                "kernel_time": [5000.0, 3000.0, 5000.0],
+                "gpu_op_uid": [10, 11, None],
             }
         ).to_csv(os.path.join(t1_csv, "diff_stats.csv"), index=False)
 
-        k1 = _kernel_event(10, "Cijk_A", dur=500)
-        k2 = _kernel_event(11, "ew_add", dur=300)
+        k1 = _kernel_event(10, gemm, dur=500)
+        k2 = _kernel_event(11, add, dur=300)
         module = {
             "name": "nn.Module: Attn_0",
             "_category": "aten",
@@ -2824,7 +2844,8 @@ class TestPush95Phase4:
         fusion = json.loads(
             open(os.path.join(out, "category_data", "fusion_candidates.json")).read()
         )
-        assert isinstance(fusion, list)
+        (cand,) = fusion
+        assert (cand["fusion_kind"], cand["delta"]) == ("gemm_epilogue", 1)
 
     @pytest.mark.parametrize(
         "rank",

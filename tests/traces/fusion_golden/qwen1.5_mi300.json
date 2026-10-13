@@ -2,13 +2,11 @@
  "fusion_candidates": [
   {
    "base_name": "Qwen2MLP",
-   "eligible_kernel_count": 5,
-   "has_fused_kernel": false,
    "instance_count": 24,
    "kernel_count": 5,
    "kernel_type_signature": [
     "GEMM",
-    "Elementwise",
+    "Activation (SiLU)",
     "GEMM",
     "Mul",
     "GEMM"
@@ -18,8 +16,6 @@
   },
   {
    "base_name": "Qwen2RMSNorm",
-   "eligible_kernel_count": 8,
-   "has_fused_kernel": false,
    "instance_count": 49,
    "kernel_count": 8,
    "kernel_type_signature": [
@@ -37,8 +33,6 @@
   },
   {
    "base_name": "transformers/models/qwen2/modeling_qwen2.py(68): apply_rotary_pos_emb",
-   "eligible_kernel_count": 10,
-   "has_fused_kernel": false,
    "instance_count": 24,
    "kernel_count": 10,
    "kernel_type_signature": [
@@ -58,8 +52,6 @@
   },
   {
    "base_name": "transformers/models/qwen2/modeling_qwen2.py(68): apply_rotary_pos_emb",
-   "eligible_kernel_count": 6,
-   "has_fused_kernel": false,
    "instance_count": 24,
    "kernel_count": 6,
    "kernel_type_signature": [
@@ -76,8 +68,6 @@
   },
   {
    "base_name": "transformers/models/qwen2/modeling_qwen2.py(218): forward",
-   "eligible_kernel_count": 3,
-   "has_fused_kernel": false,
    "instance_count": 49,
    "kernel_count": 3,
    "kernel_type_signature": [
@@ -91,8 +81,6 @@
   },
   {
    "base_name": "transformers/models/qwen2/modeling_qwen2.py(61): rotate_half",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
    "instance_count": 48,
    "kernel_count": 2,
    "kernel_type_signature": [
@@ -104,8 +92,6 @@
   },
   {
    "base_name": "transformers/models/qwen2/modeling_qwen2.py(243): forward",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
    "instance_count": 24,
    "kernel_count": 2,
    "kernel_type_signature": [
@@ -118,8 +104,6 @@
   },
   {
    "base_name": "Qwen2RotaryEmbedding",
-   "eligible_kernel_count": 9,
-   "has_fused_kernel": false,
    "instance_count": 1,
    "kernel_count": 9,
    "kernel_type_signature": [
@@ -138,8 +122,6 @@
   },
   {
    "base_name": "transformers/modeling_attn_mask_utils.py(243): _ignore_causal_mask_sdpa",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
    "instance_count": 1,
    "kernel_count": 2,
    "kernel_type_signature": [
@@ -148,20 +130,6 @@
    ],
    "module_name": "transformers/modeling_attn_mask_utils.py(243): _ignore_causal_mask_sdpa",
    "total_kernel_time_us": 7.897
-  },
-  {
-   "base_name": "transformers/models/qwen2/modeling_qwen2.py(323): forward",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
-   "instance_count": 1,
-   "kernel_count": 2,
-   "kernel_type_signature": [
-    "Mul",
-    "Mul"
-   ],
-   "module_name": "transformers/models/qwen2/modeling_qwen2.py(323): forward",
-   "source": "sibling_sequence",
-   "total_kernel_time_us": 7.415
   }
  ],
  "kernel_fusion_metrics": {
@@ -331,10 +299,30 @@
     "thread 23232 (python3)"
    ],
    [
-    "aten::mm",
-    "((8944, 1024), (1024, 2816))",
+    "aten::add",
+    "((16, 559, 1), (), ())",
+    "('float', 'double', 'Scalar')",
+    "((559, 1, 1), (), ())",
+    "('', '', '1')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::mul",
+    "((16, 559, 1024), (16, 559, 1))",
+    "('float', 'float')",
+    "((572416, 1024, 1), (559, 1, 1))",
+    "('', '')",
+    "python3",
+    "CPU",
+    "thread 23232 (python3)"
+   ],
+   [
+    "aten::mul",
+    "((1024,), (16, 559, 1024))",
     "('c10::BFloat16', 'c10::BFloat16')",
-    "((1024, 1), (1, 1024))",
+    "((1,), (572416, 1024, 1))",
     "('', '')",
     "python3",
     "CPU",
@@ -359,16 +347,6 @@
     "python3",
     "CPU",
     "thread 23232 (python3)"
-   ],
-   [
-    "aten::mm",
-    "((8944, 2816), (2816, 1024))",
-    "('c10::BFloat16', 'c10::BFloat16')",
-    "((2816, 1), (1, 2816))",
-    "('', '')",
-    "python3",
-    "CPU",
-    "thread 23232 (python3)"
    ]
   ],
   "impact_estimates": [
@@ -377,6 +355,7 @@
     "category": "kernel_fusion",
     "confidence": "high",
     "estimation": "full",
+    "fusion_kind": "elementwise_chain",
     "fusion_type": "memory_bound",
     "impact_score": 13.88,
     "impact_score_high": 15.87,
@@ -573,6 +552,7 @@
     "category": "kernel_fusion",
     "confidence": "high",
     "estimation": "partial",
+    "fusion_kind": "elementwise_chain",
     "fusion_type": "memory_bound",
     "impact_score": 7.78,
     "impact_score_high": 8.89,
@@ -704,6 +684,7 @@
     "category": "kernel_fusion",
     "confidence": "high",
     "estimation": "full",
+    "fusion_kind": "elementwise_chain",
     "fusion_type": "memory_bound",
     "impact_score": 6.51,
     "impact_score_high": 7.44,
@@ -788,8 +769,9 @@
    {
     "bound_type": "memory",
     "category": "kernel_fusion",
-    "confidence": "medium",
+    "confidence": "high",
     "estimation": "full",
+    "fusion_kind": "elementwise_chain",
     "fusion_type": "memory_bound",
     "impact_score": 5.36,
     "impact_score_high": 6.12,
@@ -876,6 +858,7 @@
     "category": "kernel_fusion",
     "confidence": "high",
     "estimation": "full",
+    "fusion_kind": "act_mul",
     "fusion_type": "matrix_compute",
     "impact_score": 4.37,
     "impact_score_high": 4.99,
@@ -990,15 +973,15 @@
   ]
  },
  "sha256": {
-  "category_data/category_manifest.json": "202e621ad07677d616d5adcbd3690408d1f60a721746037d287e89b9acf9a4e3",
+  "category_data/category_manifest.json": "5e18b8cb75b4cf731627fa38cfd2763542ea3924cca18c1298433582c52b23a7",
   "category_data/cpu_idle_metrics.json": "7b9743c6428a527e78434ede2fd5b6c774f3d190618701bf39d242c3ec9f4f31",
   "category_data/cpu_idle_ops.csv": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
   "category_data/elementwise_metrics.json": "471f118d4a2125e509d638b1bfc8c8b431b25b72c3aa0a1cd5c30291a35bc3ce",
   "category_data/elementwise_ops.csv": "b1c13ebaf5d712868a0b9f680dcb2d281d6cae30f9d05482dbb8faa1bd498b7f",
-  "category_data/fusion_candidates.json": "d7afef460164800f93d2e30ae005bfec397d96ad5231e41f91077d4378ce16bd",
-  "category_data/gemm_metrics.json": "bf13092af69bb84d5af369a0c10179355ce4a0bfac154a4997543d560e6c29a8",
+  "category_data/fusion_candidates.json": "a5309810208a9b6fa8710d02ec51496e924fe0cfe1e92ea67b26ab7014b0e1a3",
+  "category_data/gemm_metrics.json": "2709b5959cd4a9e4acf6d37484d5a571693a337a05bc82f3a06c97046a708205",
   "category_data/gemm_ops.csv": "056839f754ca37969289ef5d0cc3667248b7bf87771dd5498a090e63590606d0",
-  "category_data/kernel_fusion_metrics.json": "e136d81288d076c9881f6d4fdff57b63b1c6a9ee72954b4f39444d5bac519251",
+  "category_data/kernel_fusion_metrics.json": "3434f73d6f1e6b3f7dad3aeb71b70ea27f6e48acd724b98e154272d8f16d4117",
   "category_data/multi_kernel_data.json": "a4ce12c3aa3cdd44c908696aadf05f112ca6995e0bcc18be7301a8621eb2653a",
   "category_data/multi_kernel_metrics.json": "1a91fb0a3219016972d21139c3759865d8d44c221a4f422b5c80308ce31ebfe3",
   "category_data/other_metrics.json": "708ca8b0ca946ce3f14c84a5ae4860859bd479b3842a56d618af89c70436fca4",
@@ -1015,6 +998,6 @@
   "metadata/other_metadata.json": "1dfc34f5e7b44469b6eae79fd5a588c96712d1c660e6e30cdad5c66934ccf285",
   "metadata/reduce_metadata.json": "bd4b7ac7200c87569f68d2f927ebbd85a431b1548270a9822cec639dcb64053f",
   "metadata/sdpa_fwd_metadata.json": "a44b62ee5115bbdfcf1d1f6ba57bcc25129a528647d561c0179d385aafa1206f",
-  "priority_data.json": "1fa0010f6892f554c713eca947fb87b8d9c8462d3a521d1acee6c4cc07fec94a"
+  "priority_data.json": "629e8312b529b055d5766b0d29f3dbbcd90c08cb2bb1cb87c9956c61b53ec883"
  }
 }

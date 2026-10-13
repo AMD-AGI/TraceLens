@@ -2,8 +2,6 @@
  "fusion_candidates": [
   {
    "base_name": "transformers/models/bert/modeling_bert.py(638): feed_forward_chunk",
-   "eligible_kernel_count": 5,
-   "has_fused_kernel": false,
    "instance_count": 4,
    "kernel_count": 5,
    "kernel_type_signature": [
@@ -18,8 +16,6 @@
   },
   {
    "base_name": "BertOutput",
-   "eligible_kernel_count": 3,
-   "has_fused_kernel": false,
    "instance_count": 4,
    "kernel_count": 3,
    "kernel_type_signature": [
@@ -32,8 +28,6 @@
   },
   {
    "base_name": "BertIntermediate",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
    "instance_count": 4,
    "kernel_count": 2,
    "kernel_type_signature": [
@@ -45,8 +39,6 @@
   },
   {
    "base_name": "BertSelfOutput",
-   "eligible_kernel_count": 3,
-   "has_fused_kernel": false,
    "instance_count": 4,
    "kernel_count": 3,
    "kernel_type_signature": [
@@ -59,8 +51,6 @@
   },
   {
    "base_name": "BertLMPredictionHead",
-   "eligible_kernel_count": 4,
-   "has_fused_kernel": false,
    "instance_count": 1,
    "kernel_count": 4,
    "kernel_type_signature": [
@@ -74,8 +64,6 @@
   },
   {
    "base_name": "BertEmbeddings",
-   "eligible_kernel_count": 6,
-   "has_fused_kernel": false,
    "instance_count": 1,
    "kernel_count": 6,
    "kernel_type_signature": [
@@ -91,8 +79,6 @@
   },
   {
    "base_name": "BertPredictionHeadTransform",
-   "eligible_kernel_count": 3,
-   "has_fused_kernel": false,
    "instance_count": 1,
    "kernel_count": 3,
    "kernel_type_signature": [
@@ -105,8 +91,6 @@
   },
   {
    "base_name": "transformers/modeling_attn_mask_utils.py(429): _prepare_4d_attention_mask_for_sdpa",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
    "instance_count": 1,
    "kernel_count": 2,
    "kernel_type_signature": [
@@ -118,8 +102,6 @@
   },
   {
    "base_name": "transformers/models/bert/modeling_bert.py(181): forward",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
    "instance_count": 1,
    "kernel_count": 2,
    "kernel_type_signature": [
@@ -150,7 +132,7 @@
   "category_data/cpu_idle_ops.csv": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
   "category_data/elementwise_metrics.json": "af7ed2f184e89d41fe159c24cf6f878e4f72d900be720db32fb46992866e2b1d",
   "category_data/elementwise_ops.csv": "816a1380f7cbaee8dbde4d10124b698d5395a2d5a124c59b7471da6e20cc0446",
-  "category_data/fusion_candidates.json": "f9df3c992738b0632ba11baafe58b83a54249d08d54f63b3fbe69f9da27114cd",
+  "category_data/fusion_candidates.json": "bb8639df3ba704594b5294f5fbd54734215ddf56b8b24a80eca8531bf7609d90",
   "category_data/gemm_metrics.json": "802555cdcca0318b33a0c76d75f3164b4e896d198acaebe790934c32a6a30cb0",
   "category_data/gemm_ops.csv": "c271220d71a21f99f6ce79e2d8e97a7df35fd8cf4300ea3ff59283a1beaf39f4",
   "category_data/kernel_fusion_metrics.json": "473aeeefc584150cb9d4bce9e1f22667ba13e647f1df8c18012dfd9666992384",

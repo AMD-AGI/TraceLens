@@ -11,7 +11,7 @@ Covers every module under category_analyses/ plus the shared kernel classifier:
 - utils/classify_kernels: regex-driven kernel classifier.
 - Per-category classifiers and extract_category_specific for convolution,
   cpu_idle, elementwise, gemm, moe, norm, other, reduce, sdpa, triton.
-- kernel_fusion_analysis: pure, deterministic fusion helpers + filter/dedup.
+- kernel_fusion: fused forms, labeler and pricer; kernel_fusion_analysis: its CLI.
 - multi_kernel_analysis: severity classifiers + timeline cross-validation.
 - sdpa_analysis: perf-param and kernel-breakdown parsing plus the flash /
   paged attention detectors.
@@ -24,6 +24,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(ANALYSIS_DIR, "category_analyses"))
+from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 from types import ModuleType
@@ -36,20 +37,12 @@ from TraceLens.Agent.Analysis.utils.classify_kernels import (
     classify_kernel,
     run_assertions,
 )
-from TraceLens.Agent.Analysis.category_analyses.kernel_fusion_analysis import (
-    MAX_FUSION_KERNEL_COUNT,
-    MIN_IMPACT_SCORE,
-    OVERLAP_EFFICIENCY,
-    _classify_confidence,
-    _comparative_estimate,
-    _filter_and_dedup,
-    _is_matrix_op,
-    _is_norm_kernel,
-    _roofline_savings_us,
-    _split_into_subgroups,
-    _standalone_estimate,
-    build_rows,
-    compute_fusion_impact_estimates,
+from TraceLens.Agent.Analysis.utils.kernel_fusion import (
+    FusionCandidate,
+    FusionForms,
+    FusionLabeler,
+    FusionPricer,
+    KernelRecord,
 )
 from TraceLens.Agent.Analysis.category_analyses.multi_kernel_analysis import (
     classify_memcpy_severity,
@@ -147,6 +140,34 @@ from tests.test_trace2tree import _add_gpu_chain, _mk_event
 _MM_KEY = ["aten::mm", "((16, 64), (64, 8))", "('bf16', 'bf16')", "z"] + [""] * 4
 _ADD_KEY = ["aten::add", "((16, 8), (16, 8))", "('bf16', 'bf16')", "z"] + [""] * 4
 
+# Real kernel names, shared by the taxonomy and labeler tests.
+GEMM = "nvjet_tst_64x152_64x7_2x1_v_bz_NNT"
+ADD = "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul>)"
+MUL = "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 3ul> >(int, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 3ul>)"
+SILU = "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)"
+SIGMOID = "void at::native::vectorized_elementwise_kernel<8, at::native::sigmoid_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#4}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::sigmoid_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#4}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)"
+SOFTMAX = "void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat16, float, c10::BFloat16, at::native::(anonymous namespace)::SoftMaxForwardEpilogue, long, 6>(c10::BFloat16*, c10::BFloat16 const*, long)"
+TOPK = "void aiter::grouped_topk_opt_sort_kernel<c10::BFloat16, float __vector(4), 8, true, true, false>(c10::BFloat16*, c10::BFloat16 const*, float*, int*, unsigned long, int, int, int, int, float)"
+LAYERNORM = "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<c10::BFloat16, float>(int, float, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, float*, float*, c10::BFloat16*)"
+BATCHNORM = "void at::native::batch_norm_collect_statistics_kernel<at::native::Var, c10::BFloat16, c10::BFloat16, float, int>(at::GenericPackedTensorAccessor<c10::BFloat16 const, 3ul, at::RestrictPtrTraits, int>, float, float, at::GenericPackedTensorAccessor<float, 1ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<float, 1ul, at::RestrictPtrTraits, int>)"
+QUANT = "void aiter::dynamic_per_group_scaled_quant_kernel<std::bfloat16_t, opus::fp4_t, 32, 32, true, 64, true>(opus::fp4_t*, float*, std::bfloat16_t const*, float const*, long, int, int, long, int const*, int)"
+# ck_tile RMSNorm built with FusedAddEnumE0 / FusedQuantEnumE0: a plain norm.
+RMSNORM = "_ZN7ck_tile6kentryILi1ENS_12Rmsnorm2dFwdINS_27Rmsnorm2dFwdPipelineOnePassINS_27Rmsnorm2dFwdPipelineProblemIDF16bDF16bfDF16bDF16bDF16bffNS_19Generic2dBlockShapeINS_8sequenceIJLi1ELi3072EEEENS5_IJLi1ELi128EEEENS5_IJLi1ELi8EEEEEENS_18Rmsnorm2dFwdTraitsILb1ELb0ELb0ELb0ELNS_21Rmsnorm2dFusedAddEnumE0ELNS_23Rmsnorm2dFusedQuantEnumE0ELNS_22Rmsnorm2dSensitiveEnumE0EEEEENS_33Rmsnorm2dFwdPipelineDefaultPolicyEEENS_17Default2DEpilogueINS_24Default2DEpilogueProblemIfDF16bLb0ELb1ELb0EEEvEEEEJNSM_5KargsEEEEvDpT1_"
+ADD_RMSNORM_QUANT = "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi64ELi8ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib"
+AR_STORE = "void aiter::reduce_scatter_cross_device_store<std::bfloat16_t, 2>(aiter::RankData*, aiter::RankSignals, aiter::Signal*, int, int, int, int)"
+AR_RMSNORM = "void aiter::local_device_load_rmsnorm<std::bfloat16_t, 512, 2>(aiter::RankSignals, std::bfloat16_t*, std::bfloat16_t*, std::bfloat16_t*, std::bfloat16_t*, float, int, int, int, int)"
+# A compiled kernel the taxonomy types as a plain (unfused) elementwise.
+TRITON = "triton_poi_fused_embedding_0"
+MEMCPY = "Memcpy HtoD (Host -> Device)"
+NCCL = "ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsStorage<4096ul>)"
+UNKNOWN_KERNEL = "mystery_kernel"
+CONV = "igemm_bwd_gtcx3_nhwc_bf16_bx0_ex1_bt128x128x32_wt32x32x8_ws1x1_wr2x2_ta1x8x2x1_1x4x1x64_tb1x8x1x2_1x4x1x64_mh_gkgs"
+TRANSPOSE = "batched_transpose_4x64_half"
+MOE_GEMM = (
+    "mfma_moe2_afp4_wfp4_bf16_cshuffle_t32x128x256_vscale_fix3_fp4opt_v1_persist_cu256"
+)
+LABELER = FusionLabeler(TAXONOMY, FusionForms(TAXONOMY))
+
 
 def _op_group(perf_key, kernel_names, time_us, count):
     return {
@@ -167,7 +188,8 @@ def _name_key(name):
 @pytest.mark.parametrize(
     "name,expected_type,expected_cat,expected_covers",
     [
-        ("Memcpy HtoD (Host -> Device)", "MemCpy", "MemCpy", ("pointwise",)),
+        ("Memcpy HtoD (Host -> Device)", "MemCpy", "MemCpy", ("copy",)),
+        ("_combined_routing_memset", "MemSet", "MemCpy", ("copy",)),
         ("nvjet_tst_64x152_64x7_2x1_v_bz_NNT", "GEMM", "GEMM", ("gemm",)),
         (
             "_matmul_ogs_NNT_bf16xbf16xmxfp4_16x128x256x1_swiglu",
@@ -279,7 +301,7 @@ def _name_key(name):
             ("mul",),
         ),
         (
-            "batched_transpose_4x64_half",
+            TRANSPOSE,
             "LayoutTransform",
             "Elementwise",
             ("pointwise",),
@@ -291,24 +313,54 @@ def _name_key(name):
             ("gemm",),
         ),
         (
-            "igemm_bwd_gtcx3_nhwc_bf16_bx0_ex1_bt128x128x32_wt32x32x8_ws1x1_wr2x2_ta1x8x2x1_1x4x1x64_tb1x8x1x2_1x4x1x64_mh_gkgs",
+            CONV,
             "Convolution",
             "Convolution",
             ("gemm",),
         ),
         (
             "void (anonymous namespace)::multimem_all_reduce_kernel<c10::BFloat16, 16>(c10::BFloat16*, unsigned long, unsigned int**, unsigned long, unsigned long)",
-            "Unknown",
-            "Others",
-            (),
+            "Library Collective",
+            "Communication",
+            ("library_collective",),
         ),
         ("triton_poi_fused_0", "Compiled", "Elementwise", ("pointwise", "reduce")),
         ("__amd_rocclr_copyBuffer", "Elementwise", "Elementwise", ("pointwise",)),
         (
             "ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsStorage<4096ul>)",
-            "Unknown",
-            "Others",
-            (),
+            "Library Collective",
+            "Communication",
+            ("library_collective",),
+        ),
+        (
+            "void rcclGenericKernel<2, false>(ncclDevKernelArgsStorage<4096ul>)",
+            "Library Collective",
+            "Communication",
+            ("library_collective",),
+        ),
+        (
+            SILU,
+            "Activation (SiLU)",
+            "Elementwise",
+            ("act",),
+        ),
+        (
+            "_ZN5aiter18act_and_mul_kernelIDF16bDF16bTnPFfRKT_EXadL_ZNS_11silu_kernelIDF16bEEfS3_EELi8ELb0ELi3EEEvPT0_PS2_if",
+            "Act+Mul",
+            "Elementwise",
+            ("act", "mul"),
+        ),
+        (
+            "mfma_moe1_silu_mul_afp4_wfp4_bf16_t32x128x256_pm1_async_v32",
+            "MoE GEMM+SiLU (aiter)",
+            "GEMM-MoE",
+            ("moe_gemm", "act", "mul"),
+        ),
+        (
+            "mfma_moe2_afp4_wfp4_bf16_cshuffle_t32x128x256_vscale_fix3_fp4opt_v1_persist_cu256",
+            "MoE GEMM (CK)",
+            "GEMM-MoE",
+            ("moe_gemm",),
         ),
         (
             "kernel_paged_attention_2d",
@@ -317,6 +369,12 @@ def _name_key(name):
             ("gemm", "softmax", "gemm"),
         ),
         ("_causal_conv1d_update_kernel", "Causal Conv1D", "SDPA", ("pointwise",)),
+        (
+            "triton_per_fused__to_copy_add_mean_mul_pow_rsqrt_0",
+            "RMSNorm (fused triton)",
+            "Normalization",
+            ("add", "norm"),
+        ),
     ],
 )
 def test_taxonomy_classify(name, expected_type, expected_cat, expected_covers):
@@ -344,43 +402,6 @@ def test_taxonomy_types_closed_over_primitives():
         assert TAXONOMY.by_type(kernel.type) == kernel
 
 
-# covers and _is_matrix_op must agree on every kernel the baseline fusion findings
-# contain, or deriving the matrix check from covers would move a finding.
-@pytest.mark.parametrize(
-    "name",
-    [
-        "_matmul_ogs_NNT_bf16xbf16xmxfp4_16x128x256x1_swiglu",
-        "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x32_MI16x16x1_SN_LDSB1_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA2_GRVWB2_GSUAMB_GLS0_ISA942_IU1_K1_LBSPPA512_LBSPPB256_LBSPPM0_LPA4_LPB4_LPM0_LRVW4_LWPMn1_MIAV0_MIWT8_4_MO40_NTn1_NTA0_NTB0_NTC0_NTD0_NTM0_NEPBS16_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO0_SVW8_SK0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGROn1_VSn1_VWA8_VWB4_WSGRA0_WSGRB0_WS64_WG32_8_1",
-        "void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat16, float, c10::BFloat16, at::native::(anonymous namespace)::SoftMaxForwardEpilogue, long, 6>(c10::BFloat16*, c10::BFloat16 const*, long)",
-        "Cijk_Ailk_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT64x288x64_MI16x16x1_SN_LDSB1_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_ISA942_IU1_K1_LBSPPA1024_LBSPPB128_LBSPPM0_LPA32_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT2_9_MO40_NTn1_NTA0_NTB4_NTC0_NTD4_NTM0_NEPBS16_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO0_SVW2_SK0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGROn1_VSn1_VWA2_VWB1_WSGRA0_WSGRB0_WS64_WG32_8_1",
-        "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT128x224x64_MI16x16x1_SN_LDSB1_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_ISA942_IU1_K1_LBSPPA512_LBSPPB128_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT4_7_MO40_NTn1_NTA0_NTB0_NTC0_NTD0_NTM0_NEPBS16_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGROn1_VSn1_VWA4_VWB1_WSGRA0_WSGRB0_WS64_WG32_8_1",
-        "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)",
-        "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 3ul> >(int, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 3ul>)",
-        "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x64_MI16x16x1_SN_LDSB1_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_ISA942_IU1_K1_LBSPPA1024_LBSPPB512_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT8_4_MO40_NTn1_NTA0_NTB0_NTC0_NTD0_NTM0_NEPBS16_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO0_SVW8_SK0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGROn1_VSn1_VWA8_VWB4_WSGRA0_WSGRB0_WS64_WG32_8_1",
-        "void at::native::elementwise_kernel<512, 1, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})",
-        "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespace)::pow_tensor_scalar_kernel_impl<float, float>(at::TensorIteratorBase&, float)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::(anonymous namespace)::pow_tensor_scalar_kernel_impl<float, float>(at::TensorIteratorBase&, float)::{lambda(float)#1}, std::array<char*, 2ul>)",
-        "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::MeanOps<float, float, float, float>, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::MeanOps<float, float, float, float>, unsigned int, float, 4, 4>)",
-        "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnSelf_add<float>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<float>, std::array<char*, 2ul>)",
-        "void at::native::vectorized_elementwise_kernel<4, at::native::rsqrt_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::rsqrt_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>)",
-        "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int, bool)#1})",
-        "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
-        "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int, bool)#1})",
-        "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::neg_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#9}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::neg_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#9}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::neg_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#9}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::neg_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#9}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int, bool)#1})",
-        "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 64, 64>(at::native::(anonymous namespace)::OpaqueType<2u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 64, 64>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
-        "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<c10::BFloat16> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<c10::BFloat16> const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<c10::BFloat16> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<c10::BFloat16> const&)::{lambda(int, bool)#1})",
-        "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul>)",
-        "void at::native::batch_norm_collect_statistics_kernel<at::native::Var, c10::BFloat16, c10::BFloat16, float, int>(at::GenericPackedTensorAccessor<c10::BFloat16 const, 3ul, at::RestrictPtrTraits, int>, float, float, at::GenericPackedTensorAccessor<float, 1ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<float, 1ul, at::RestrictPtrTraits, int>)",
-        "void at::native::(anonymous namespace)::unrolled_elementwise_kernel_for_multi_outputs<3, at::native::(anonymous namespace)::batch_norm_update_stats_and_invert(at::Tensor const&, at::Tensor const&, at::Tensor const&, at::Tensor const&, double, double, long)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(float, float, c10::BFloat16, c10::BFloat16)#1}, std::array<char*, 7ul>, TrivialOffsetCalculator<4, unsigned int>, TrivialOffsetCalculator<3, unsigned int> >(int, at::native::(anonymous namespace)::batch_norm_update_stats_and_invert(at::Tensor const&, at::Tensor const&, at::Tensor const&, at::Tensor const&, double, double, long)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(float, float, c10::BFloat16, c10::BFloat16)#1}, std::array<char*, 7ul>, TrivialOffsetCalculator<4, unsigned int>, TrivialOffsetCalculator<3, unsigned int>)",
-        "void at::native::batch_norm_transform_input_kernel<c10::BFloat16, c10::BFloat16, float, true, int>(at::GenericPackedTensorAccessor<c10::BFloat16 const, 3ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<c10::BFloat16, 3ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<std::conditional<true, float, c10::BFloat16>::type, 1ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<std::conditional<true, float, c10::BFloat16>::type, 1ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<c10::BFloat16 const, 1ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<c10::BFloat16 const, 1ul, at::RestrictPtrTraits, int>, float)",
-    ],
-)
-def test_taxonomy_matrix_agrees_with_is_matrix_op(name):
-    kernel = TAXONOMY.classify(name)
-    assert kernel.type != "Unknown"
-    covers_matrix = bool({"gemm", "moe_gemm"} & set(kernel.covers))
-    assert covers_matrix is _is_matrix_op({"type": kernel.type})
-
-
 # ----- run_assertions -----
 
 
@@ -406,76 +427,167 @@ def test_run_assertions_flags_unknown():
     assert any("Unknown" in e for e in errors)
 
 
-# ----- _classify_confidence -----
+# ----- FusionForms / FusionLabeler -----
 
 
-def test_classify_confidence_high_attention():
-    """Name hint (attention) AND composition (2 GEMM + softmax) -> high."""
-    candidate = {"base_name": "attention", "module_name": ""}
-    enriched = [
-        {"name": "gemm_qk", "type": "GEMM"},
-        {"name": "softmax_kernel", "type": "Elementwise"},
-        {"name": "gemm_pv", "type": "GEMM"},
+def test_fusion_forms_derived_from_fused_types():
+    forms = FusionForms(TAXONOMY).forms
+    assert {f.kind for f in forms} == {
+        "add_norm_quant",
+        "attention",
+        "add_norm",
+        "norm_quant",
+        "allreduce_norm",
+        "rope_kv_store",
+        "routing_topk",
+        "act_mul",
+    }
+    assert [f.kind for f in forms if f.replaces_span] == ["attention"]
+    assert len({f.elements for f in forms}) == len(forms)
+
+
+@pytest.mark.parametrize(
+    "names,expected",
+    [
+        ([GEMM, ADD, SOFTMAX, GEMM], ("attention", "high", (0, 4))),
+        ([MUL, GEMM, ADD, SOFTMAX, GEMM, ADD], ("attention", "high", (1, 5))),
+        ([ADD] * 17 + [GEMM, SOFTMAX, GEMM], ("attention", "high", (17, 20))),
+        # The span starts at the GEMM nearest the softmax, not at one before another GEMM.
+        ([GEMM, GEMM, SOFTMAX, GEMM], ("attention", "high", (1, 4))),
+        ([ADD, LAYERNORM], ("add_norm", "high", None)),
+        ([LAYERNORM, QUANT], ("norm_quant", "high", None)),
+        ([ADD, LAYERNORM, QUANT], ("add_norm_quant", "high", None)),
+        ([AR_STORE, RMSNORM], ("allreduce_norm", "high", None)),
+        ([SOFTMAX, TOPK], ("routing_topk", "high", None)),
+        ([SILU, MUL], ("act_mul", "high", None)),
+        ([SIGMOID, MUL], ("elementwise_chain", "high", None)),
+        ([ADD, BATCHNORM], ("elementwise_chain", "high", None)),
+        ([ADD, MUL, MUL, LAYERNORM], ("elementwise_chain", "high", None)),
+        ([ADD, MUL, GEMM], ("gemm_epilogue", "medium", None)),
+        ([GEMM, ADD], ("gemm_epilogue", "medium", None)),
+        ([ADD, MUL, UNKNOWN_KERNEL], ("elementwise_chain", "low", None)),
+    ],
+)
+def test_label_kind_confidence_span(names, expected):
+    label = LABELER.label(names, [None] * len(names))
+    assert (label.kind, label.confidence, label.span) == expected
+
+
+@pytest.mark.parametrize(
+    "names,op_keys",
+    [
+        pytest.param([ADD, ADD_RMSNORM_QUANT], None, id="fused_kernel"),
+        pytest.param([AR_STORE, AR_RMSNORM], None, id="allreduce_rmsnorm_pair"),
+        pytest.param([ADD, TRITON], None, id="compiled"),
+        pytest.param([ADD, MEMCPY], None, id="copy_engine"),
+        pytest.param([ADD, NCCL], None, id="library_collective"),
+        pytest.param([ADD] * 16, None, id="over_cap"),
+        pytest.param([GEMM, GEMM], None, id="all_matrix"),
+        pytest.param([GEMM, LAYERNORM], None, id="matrix_norm_only"),
+        # An op that launches a convolution owns its layout and bookkeeping kernels.
+        pytest.param(
+            [UNKNOWN_KERNEL, TRANSPOSE, CONV], [_MM_KEY] * 3, id="matrix_op_launch"
+        ),
+    ],
+)
+def test_label_excludes_group(names, op_keys):
+    assert LABELER.label(names, op_keys or [None] * len(names)) is None
+
+
+def test_matrix_mask_groups_kernels_by_op_key():
+    names = (UNKNOWN_KERNEL, CONV, TRANSPOSE, ADD, MOE_GEMM)
+    classes = [TAXONOMY.classify(n) for n in names]
+    forms = FusionForms(TAXONOMY)
+    keys = [_MM_KEY, _MM_KEY, _ADD_KEY, None, None]
+    assert forms.matrix_mask(classes, keys) == [True, True, False, False, True]
+    assert forms.matrix_mask(classes, [None] * 5) == [False, True, False, False, True]
+
+
+# ----- FusionCandidate -----
+
+
+def _standalone_candidate(
+    kernels, total_us, ops, kind="gemm_epilogue", confidence="medium", name="mlp_block"
+):
+    return FusionCandidate(
+        module_name=name,
+        base_name=name,
+        parent_chain=[],
+        instance_count=1,
+        kernel_count=len(kernels),
+        kernels=tuple(kernels),
+        kernel_type_signature=[k.type for k in kernels],
+        kernel_type_summary=dict(Counter(k.type for k in kernels)),
+        fusion_kind=kind,
+        confidence=confidence,
+        total_kernel_time_us=total_us,
+        ops=ops,
+    )
+
+
+def _comparative_candidate(name, type1, time1_us, time2_us):
+    kernels = (KernelRecord("k1", type1, time1_us),)
+    return FusionCandidate(
+        module_name=name,
+        base_name=name,
+        parent_chain=[],
+        instance_count=1,
+        kernel_count_trace1=1,
+        kernel_count_trace2=0,
+        delta=1,
+        kernels_trace1=kernels,
+        kernels_trace2=(),
+        kernel_type_signature=[type1],
+        kernel_type_summary={type1: 1},
+        fusion_kind="elementwise_chain",
+        confidence="high",
+        total_kernel_time_us_trace1=time1_us,
+        total_kernel_time_us_trace2=time2_us,
+        ops_trace1=[],
+        ops_trace2=[],
+    )
+
+
+def _golden_candidate(total_us=200):
+    kernels = [
+        KernelRecord("Cijk_gemm", "GEMM", 100, _name_key("Cijk_gemm")),
+        KernelRecord("ew_add", "Elementwise", 100, _name_key("ew_add")),
     ]
-    assert _classify_confidence(candidate, enriched) == "high"
+    ops = [_op_group(k.perf_key, [k.name], 100.0, 1) for k in kernels]
+    return _standalone_candidate(kernels, total_us, ops)
 
 
-def test_classify_confidence_high_norm():
-    """Name hint (rmsnorm) AND composition (rsqrt) -> high."""
-    candidate = {"base_name": "rmsnorm", "module_name": ""}
-    enriched = [{"name": "rsqrt_kernel", "type": "Elementwise"}]
-    assert _classify_confidence(candidate, enriched) == "high"
+@pytest.mark.parametrize(
+    "candidate",
+    [_golden_candidate(), _comparative_candidate("attn", "GEMM", 10_000, 5_000)],
+    ids=["standalone", "comparative"],
+)
+def test_fusion_candidate_json_round_trip(candidate):
+    data = candidate.to_json()
+    assert not any(v is None for v in data.values())
+    assert FusionCandidate.from_json(data) == candidate
 
 
-def test_classify_confidence_medium_composition_only_norm():
-    """No name hint but rsqrt composition -> medium."""
-    candidate = {"base_name": "unnamed_block", "module_name": ""}
-    enriched = [{"name": "rsqrt_kernel", "type": "Elementwise"}]
-    assert _classify_confidence(candidate, enriched) == "medium"
-
-
-def test_classify_confidence_medium_composition_only_rope():
-    """neg + catarray composition (no name hint) -> rope comp signal -> medium."""
-    candidate = {"base_name": "unnamed_block", "module_name": ""}
-    enriched = [
-        {"name": "neg_kernel", "type": "Elementwise"},
-        {"name": "catarraybatchedcopy", "type": "Elementwise"},
-    ]
-    assert _classify_confidence(candidate, enriched) == "medium"
-
-
-def test_classify_confidence_medium_name_only():
-    """Name hint (rope) but no confirming composition -> medium."""
-    candidate = {"base_name": "rope", "module_name": ""}
-    enriched = [{"name": "some_kernel", "type": "Elementwise"}]
-    assert _classify_confidence(candidate, enriched) == "medium"
-
-
-def test_classify_confidence_low():
-    """Neither name nor composition signal -> low."""
-    candidate = {"base_name": "opaque_block", "module_name": ""}
-    enriched = [{"name": "some_kernel", "type": "Elementwise"}]
-    assert _classify_confidence(candidate, enriched) == "low"
-
-
-# ----- _split_into_subgroups -----
+# ----- FusionPricer._split_into_subgroups -----
 
 
 def test_split_gemm_epilogue():
-    kernels = [{"type": "GEMM"}, {"type": "Elementwise"}]
-    typed = _split_into_subgroups(kernels)
+    kernels = [{"is_matrix": True}, {"is_matrix": False}]
+    typed = FusionPricer._split_into_subgroups(kernels)
     assert len(typed) == 1
     assert typed[0][0] == "gemm_epilogue"
 
 
 def test_split_gemm_only():
-    typed = _split_into_subgroups([{"type": "GEMM"}])
+    typed = FusionPricer._split_into_subgroups([{"is_matrix": True}])
     assert len(typed) == 1
     assert typed[0][0] == "gemm_only"
 
 
 def test_split_elementwise_only():
-    typed = _split_into_subgroups([{"type": "Elementwise"}, {"type": "Elementwise"}])
+    typed = FusionPricer._split_into_subgroups(
+        [{"is_matrix": False}, {"is_matrix": False}]
+    )
     assert len(typed) == 1
     assert typed[0][0] == "elementwise"
 
@@ -483,28 +595,37 @@ def test_split_elementwise_only():
 def test_split_multiple_gemm_boundaries():
     """E, GEMM, E, GEMM splits at each GEMM into three typed sub-groups."""
     kernels = [
-        {"type": "Elementwise"},
-        {"type": "GEMM"},
-        {"type": "Elementwise"},
-        {"type": "GEMM"},
+        {"is_matrix": False},
+        {"is_matrix": True},
+        {"is_matrix": False},
+        {"is_matrix": True},
     ]
-    typed = _split_into_subgroups(kernels)
+    typed = FusionPricer._split_into_subgroups(kernels)
     assert [t for t, _ in typed] == ["elementwise", "gemm_epilogue", "gemm_only"]
 
 
-# ----- _roofline_savings_us -----
+# ----- FusionPricer._roofline_savings_us -----
+
+
+def _pricer(perf_rows=None, baseline_ms=1.0):
+    """Peak memory 1 TB/s, vector 1 TFLOPS, matrix 700 TFLOPS."""
+    return FusionPricer(
+        FusionForms(TAXONOMY),
+        (1.0, {"matrix_bf16": 700.0, "vector_bf16": 1.0}),
+        perf_rows or {},
+        baseline_ms,
+    )
 
 
 def _ew(name, dur_us, data_in=None, data_out=None, data_moved=None, gflops=None):
     return {
         "name": name,
-        "type": "Elementwise",
+        "is_matrix": False,
         "dur_us": dur_us,
         "data_moved_mb": data_moved,
         "data_in_mb": data_in,
         "data_out_mb": data_out,
         "gflops": gflops,
-        "compute_spec": None,
         "has_perf_data": True,
     }
 
@@ -513,25 +634,25 @@ def test_roofline_savings_memory_only():
     """Single memory-bound kernel: fused == memory_time, savings = dur - memory_time."""
     enriched = [_ew("ew", dur_us=10.0, data_in=1.0, data_out=1.0, gflops=None)]
     # bytes = 2e6; peak = 1e12 B/s; frac=1.0 -> memory_time = 2.0 us; savings = 10 - 2
-    savings = _roofline_savings_us(enriched, 1e12, 1.0, 1.0, 100.0)
+    savings = _pricer()._roofline_savings_us(enriched, 100.0)
     assert savings == pytest.approx(8.0)
 
 
 def test_roofline_savings_no_modeled_returns_zero():
     enriched = [dict(_ew("ew", 10.0, 1.0, 1.0), has_perf_data=False)]
-    assert _roofline_savings_us(enriched, 1e12, 1.0, 1.0, 100.0) == 0.0
+    assert _pricer()._roofline_savings_us(enriched, 100.0) == 0.0
 
 
 def test_roofline_savings_zero_external_data_returns_zero():
     enriched = [_ew("ew", 10.0, data_in=0.0, data_out=0.0)]
-    assert _roofline_savings_us(enriched, 1e12, 1.0, 1.0, 100.0) == 0.0
+    assert _pricer()._roofline_savings_us(enriched, 100.0) == 0.0
 
 
 def test_roofline_savings_clamped_at_zero():
     """When current time is below fused time, savings clamp to 0."""
     enriched = [_ew("ew", dur_us=1.0, data_in=1.0, data_out=1.0)]
     # memory_time = 2.0 us > current 1.0 us -> max(0, 1 - 2) = 0
-    assert _roofline_savings_us(enriched, 1e12, 1.0, 1.0, 100.0) == 0.0
+    assert _pricer()._roofline_savings_us(enriched, 100.0) == 0.0
 
 
 def test_roofline_savings_unmodeled_subtracted():
@@ -541,7 +662,7 @@ def test_roofline_savings_unmodeled_subtracted():
         dict(_ew("unmodeled", dur_us=5.0), has_perf_data=False),
     ]
     # current = 15, memory_time = 2, unmodeled = 5 -> max(0, 15 - 2 - 5) = 8
-    assert _roofline_savings_us(enriched, 1e12, 1.0, 1.0, 100.0) == pytest.approx(8.0)
+    assert _pricer()._roofline_savings_us(enriched, 100.0) == pytest.approx(8.0)
 
 
 def test_roofline_savings_overlap_blend():
@@ -552,17 +673,17 @@ def test_roofline_savings_overlap_blend():
     ]
     # memory_time = 2.0; vector_time = (0.001e9)/(1e12)*1e6 = 1.0; matrix = 0
     # optimal = 2, sum = 3, fused = 2 + (1-0.85)*(3-2) = 2.15; current 20 -> 17.85
-    savings = _roofline_savings_us(enriched, 1e12, 1.0, 1.0, 100.0)
-    expected = 20.0 - (2.0 + (1.0 - OVERLAP_EFFICIENCY) * (3.0 - 2.0))
+    savings = _pricer()._roofline_savings_us(enriched, 100.0)
+    expected = 20.0 - (2.0 + (1.0 - FusionPricer.OVERLAP_EFFICIENCY) * (3.0 - 2.0))
     assert savings == pytest.approx(expected)
     assert savings == pytest.approx(17.85)
 
 
-# ----- _standalone_estimate -----
+# ----- FusionPricer.price -----
 
 
 def _lookup(**entries):
-    """Build perf_rows keyed by ``_name_key``; ``_standalone`` keys each kernel by its name."""
+    """Build perf_rows keyed by ``_name_key``; ``price`` keys each kernel by its name."""
     return {
         tuple(_name_key(name)): {
             "Data Moved (MB)": dm,
@@ -573,237 +694,158 @@ def _lookup(**entries):
     }
 
 
-STD_ARGS = dict(peak_bw_bytes_s=1e12, vector_maf=1.0, matrix_maf=700.0)
-
-
-def _standalone(candidate, lookup, min_savings_ms=0.01, baseline_ms=1.0):
-    for k in candidate["kernels"]:
-        k["perf_key"] = _name_key(k["name"])
-    return _standalone_estimate(
-        candidate,
-        lookup,
-        STD_ARGS["peak_bw_bytes_s"],
-        STD_ARGS["vector_maf"],
-        STD_ARGS["matrix_maf"],
-        min_savings_ms,
-        baseline_ms,
-    )
-
-
-def test_standalone_skip_too_few_kernels():
-    candidate = {"base_name": "x", "kernels": [{"name": "k", "dur_us": 10}]}
-    assert _standalone(candidate, {}) is None
-
-
-def test_standalone_skip_has_fused_kernel():
-    candidate = {
-        "base_name": "x",
-        "has_fused_kernel": True,
-        "kernels": [{"name": "a", "dur_us": 10}, {"name": "b", "dur_us": 10}],
-    }
-    assert _standalone(candidate, {}) is None
-
-
-def test_standalone_skip_no_perf_models():
-    candidate = {
-        "base_name": "x",
-        "kernels": [{"name": "a", "dur_us": 10}, {"name": "b", "dur_us": 10}],
-    }
-    assert _standalone(candidate, {}) is None
-
-
-def test_standalone_skip_all_matrix():
-    candidate = {
-        "base_name": "x",
-        "kernels": [
-            {"name": "g1", "type": "GEMM", "dur_us": 10},
-            {"name": "g2", "type": "GEMM", "dur_us": 10},
-        ],
-    }
-    lookup = _lookup(g1=(1.0, None, "matrix_bf16"), g2=(1.0, None, "matrix_bf16"))
-    assert _standalone(candidate, lookup) is None
-
-
-def test_standalone_skip_triton():
-    candidate = {
-        "base_name": "x",
-        "kernels": [
-            {"name": "triton_poi_fused_add", "type": "Elementwise", "dur_us": 10},
-            {"name": "ew", "type": "Elementwise", "dur_us": 10},
-        ],
-    }
-    lookup = _lookup(triton_poi_fused_add=(1.0, None, None), ew=(1.0, None, None))
-    assert _standalone(candidate, lookup) is None
-
-
-def test_standalone_skip_norm_only_epilogue():
-    """GEMM + norm-only epilogue is not a fusion candidate."""
-    candidate = {
-        "base_name": "x",
-        "kernels": [
-            {"name": "Cijk_gemm", "type": "GEMM", "dur_us": 100},
-            {"name": "rmsnorm_kernel", "type": "Elementwise", "dur_us": 100},
-        ],
-    }
-    lookup = _lookup(
-        Cijk_gemm=(1.0, None, "matrix_bf16"), rmsnorm_kernel=(1.0, None, None)
-    )
-    assert _standalone(candidate, lookup) is None
-
-
-def test_standalone_skip_below_modeled_frac():
-    """3 kernels, only 1 modeled -> modeled_frac 0.33 < 0.5 -> skip."""
-    candidate = {
-        "base_name": "x",
-        "kernels": [
-            {"name": "ew_modeled", "type": "Elementwise", "dur_us": 10},
-            {"name": "unmodeled_a", "type": "Elementwise", "dur_us": 10},
-            {"name": "unmodeled_b", "type": "Elementwise", "dur_us": 10},
-        ],
-    }
-    lookup = _lookup(ew_modeled=(1.0, None, None))
-    assert _standalone(candidate, lookup) is None
-
-
-def _golden_candidate():
-    candidate = {
-        "base_name": "mlp_block",
-        "instance_count": 1,
-        "total_kernel_time_us": 200,
-        "kernels": [
-            {"name": "Cijk_gemm", "type": "GEMM", "dur_us": 100},
-            {"name": "ew_add", "type": "Elementwise", "dur_us": 100},
-        ],
-    }
-    candidate["ops"] = []
-    for k in candidate["kernels"]:
-        k["perf_key"] = _name_key(k["name"])
-        candidate["ops"].append(_op_group(k["perf_key"], [k["name"]], 100.0, 1))
-    return candidate
-
-
 def _golden_lookup():
     return _lookup(Cijk_gemm=(1.0, None, "matrix_bf16"), ew_add=(1.0, None, None))
 
 
-def test_standalone_gemm_epilogue_full_estimate():
+def test_price_gemm_epilogue_full_estimate():
     """GEMM+elementwise: savings = elementwise dur; impact bands via TARGET_*."""
-    est = _standalone(_golden_candidate(), _golden_lookup(), baseline_ms=1.0)
+    est = _pricer(_golden_lookup()).price(_golden_candidate())
     assert est is not None
     # gap_high = 100/200 = 0.5; time_ms = 0.2; impact_high = 0.5*0.2/1*100 = 10.0
-    assert est["impact_score_high"] == 10.0
-    assert est["impact_score"] == 8.75
-    assert est["impact_score_low"] == 7.5
-    assert est["bound_type"] == "compute"
-    assert est["estimation"] == "full"
-    assert est["category"] == "kernel_fusion"
-    assert est["type"] == "kernel_fusion"
+    assert est.impact_score_high == 10.0
+    assert est.impact_score == 8.75
+    assert est.impact_score_low == 7.5
+    assert est.bound_type == "compute"
+    assert est.estimation == "full"
+    assert (est.category, est.type) == ("kernel_fusion", "kernel_fusion")
+    assert (est.fusion_kind, est.confidence) == ("gemm_epilogue", "medium")
 
 
-def test_standalone_skip_below_min_impact_score():
-    """Same shape but a large baseline pushes impact_score_high below MIN_IMPACT_SCORE."""
-    assert (
-        _standalone(_golden_candidate(), _golden_lookup(), baseline_ms=1000.0) is None
+def test_price_matrix_op_launch_is_not_epilogue():
+    """A kernel launched by the GEMM's own op is matrix: only ew_add is saved."""
+    kernels = [
+        KernelRecord("Cijk_gemm", "GEMM", 200, _name_key("Cijk_gemm")),
+        KernelRecord("aux", "Unknown", 200, _name_key("Cijk_gemm")),
+        KernelRecord("ew_add", "Elementwise", 200, _name_key("ew_add")),
+    ]
+    est = _pricer(_golden_lookup()).price(_standalone_candidate(kernels, 600, []))
+    assert est.impact_score_high == 20.0
+
+
+@pytest.mark.parametrize(
+    "perf_rows,baseline_ms,candidate",
+    [
+        pytest.param(
+            None,
+            1.0,
+            _standalone_candidate(
+                [
+                    KernelRecord("a", "Elementwise", 10),
+                    KernelRecord("b", "Elementwise", 10),
+                ],
+                20,
+                [],
+            ),
+            id="no_perf_models",
+        ),
+        # Priced if not for the modeled fraction: 1 of 3 modeled, below 0.5.
+        pytest.param(
+            _golden_lookup(),
+            1.0,
+            _standalone_candidate(
+                [
+                    KernelRecord("Cijk_gemm", "GEMM", 200, _name_key("Cijk_gemm")),
+                    KernelRecord("unmodeled_a", "Elementwise", 200),
+                    KernelRecord("unmodeled_b", "Elementwise", 200),
+                ],
+                600,
+                [],
+            ),
+            id="below_modeled_frac",
+        ),
+        # A group of LONG_GROUP_KERNELS needs more: 3 of 5 modeled, below 0.75.
+        pytest.param(
+            _lookup(
+                Cijk_gemm=(1.0, None, "matrix_bf16"),
+                ew_add=(1.0, None, None),
+                ew_mul=(1.0, None, None),
+            ),
+            1.0,
+            _standalone_candidate(
+                [
+                    KernelRecord("Cijk_gemm", "GEMM", 200, _name_key("Cijk_gemm")),
+                    KernelRecord("ew_add", "Elementwise", 200, _name_key("ew_add")),
+                    KernelRecord("ew_mul", "Elementwise", 200, _name_key("ew_mul")),
+                    KernelRecord("unmodeled_a", "Elementwise", 200),
+                    KernelRecord("unmodeled_b", "Elementwise", 200),
+                ],
+                1000,
+                [],
+            ),
+            id="below_long_group_modeled_frac",
+        ),
+        # A large baseline pushes impact_score_high below MIN_IMPACT_SCORE.
+        pytest.param(
+            _golden_lookup(), 1000.0, _golden_candidate(), id="below_min_impact_score"
+        ),
+        # 0.09 ms of projected savings is below MIN_SAVINGS_MS.
+        pytest.param(
+            _golden_lookup(),
+            1.0,
+            _golden_candidate(total_us=180),
+            id="below_min_savings_ms",
+        ),
+    ],
+)
+def test_price_skip(perf_rows, baseline_ms, candidate):
+    assert _pricer(perf_rows, baseline_ms).price(candidate) is None
+
+
+# ----- FusionPricer.price_comparative -----
+
+
+def test_price_comparative_measured_gap():
+    est = _pricer(baseline_ms=100.0).price_comparative(
+        _comparative_candidate("attn", "GEMM", 10_000, 5_000)
     )
-
-
-def test_standalone_skip_below_min_savings_ms():
-    """min_savings_ms above the 0.1 ms projected savings drops the candidate."""
-    assert (
-        _standalone(_golden_candidate(), _golden_lookup(), min_savings_ms=1.0) is None
-    )
-
-
-# ----- _comparative_estimate -----
-
-
-def test_comparative_estimate_measured_gap():
-    candidate = {
-        "base_name": "attn",
-        "instance_count": 1,
-        "kernels_trace1": [{"name": "k1", "type": "GEMM"}],
-        "total_kernel_time_us_trace1": 10_000,
-        "total_kernel_time_us_trace2": 5_000,
-    }
-    est = _comparative_estimate(candidate, min_savings_ms=0.1, baseline_ms=100.0)
     assert est is not None
     # gap = 5000 us -> savings_high = 5.0 ms; impact_high = 5/100*100 = 5.0
-    assert est["impact_score_high"] == 5.0
-    assert est["impact_score"] == 4.38  # (87.5/100)*5 = 4.375 -> 4.38
-    assert est["impact_score_low"] == 3.75
-    assert est["bound_type"] == "compute"
-    assert est["estimation"] == "measured"
-    assert est["type"] == "kernel_fusion"
+    assert est.impact_score_high == 5.0
+    assert est.impact_score == 4.38  # (87.5/100)*5 = 4.375 -> 4.38
+    assert est.impact_score_low == 3.75
+    assert est.bound_type == "compute"
+    assert est.estimation == "measured"
+    assert est.type == "kernel_fusion"
 
 
-def test_comparative_estimate_skip_no_gap():
+def test_price_comparative_skip_no_gap():
     """trace2 not faster than trace1 -> no savings -> skip."""
-    candidate = {
-        "base_name": "attn",
-        "kernels_trace1": [{"name": "k1", "type": "GEMM"}],
-        "total_kernel_time_us_trace1": 5_000,
-        "total_kernel_time_us_trace2": 6_000,
-    }
-    assert _comparative_estimate(candidate, 0.1, 100.0) is None
+    candidate = _comparative_candidate("attn", "GEMM", 5_000, 6_000)
+    assert _pricer(baseline_ms=100.0).price_comparative(candidate) is None
 
 
-def test_comparative_estimate_skip_no_trace1_kernels():
-    candidate = {"base_name": "attn", "kernels_trace1": []}
-    assert _comparative_estimate(candidate, 0.1, 100.0) is None
+# ----- FusionPricer.shortlist / price_all -----
 
 
-# ----- compute_fusion_impact_estimates -----
+def test_shortlist_drops_below_baseline_floor():
+    """baseline_ms>0 sets a min total time of baseline*10*MIN_IMPACT_SCORE us."""
+    floor = 1.0 * 10 * FusionPricer.MIN_IMPACT_SCORE  # 20 us
+    candidates = [
+        _standalone_candidate([], floor - 1, [], name="tiny"),
+        _standalone_candidate([], floor, [], name="edge"),
+        _standalone_candidate([], floor + 100, [], name="keep"),
+        _comparative_candidate("tiny_cmp", "GEMM", floor - 1, 0),
+        _comparative_candidate("keep_cmp", "GEMM", floor + 100, 0),
+    ]
+    out = FusionPricer.shortlist(candidates, baseline_ms=1.0)
+    assert [c.base_name for c in out] == ["edge", "keep", "keep_cmp"]
 
 
-def test_compute_fusion_invalid_baseline_returns_empty(capsys):
-    out = compute_fusion_impact_estimates(
-        [{}], {}, 5.3, {"matrix_bf16": 700}, baseline_ms=0
-    )
+def test_price_all_invalid_baseline_returns_empty(capsys):
+    out = _pricer(baseline_ms=0).price_all([_golden_candidate()])
     assert out == []
     assert "invalid" in capsys.readouterr().err
 
 
-def test_compute_fusion_standalone_dispatch():
-    out = compute_fusion_impact_estimates(
-        [_golden_candidate()],
-        _golden_lookup(),
-        5.3,
-        {"matrix_bf16": 700},
-        baseline_ms=1.0,
-    )
-    assert len(out) == 1
-    assert out[0]["impact_score_high"] == 10.0
-
-
-def test_compute_fusion_comparative_dispatch_and_sort():
-    """Comparative mode dispatches to _comparative_estimate; results sort by impact desc."""
-    small = {
-        "base_name": "small",
-        "kernels_trace1": [{"name": "k", "type": "Elementwise"}],
-        "total_kernel_time_us_trace1": 6_000,
-        "total_kernel_time_us_trace2": 3_000,
-        "ops_trace1": [],
-        "ops_trace2": [],
-    }
-    large = {
-        "base_name": "large",
-        "kernels_trace1": [{"name": "k", "type": "GEMM"}],
-        "total_kernel_time_us_trace1": 20_000,
-        "total_kernel_time_us_trace2": 5_000,
-        "ops_trace1": [],
-        "ops_trace2": [],
-    }
-    out = compute_fusion_impact_estimates(
-        [small, large],
-        {},
-        5.3,
-        {"matrix_bf16": 700},
-        baseline_ms=100.0,
-        is_comparative=True,
-    )
-    assert len(out) == 2
-    assert out[0]["operation"] == "large"
-    assert out[0]["impact_score"] >= out[1]["impact_score"]
+def test_price_all_sorts_by_impact_and_dispatches():
+    """Standalone and comparative candidates each go to their own pricer, best first."""
+    pricer = _pricer(_golden_lookup(), baseline_ms=100.0)
+    small = _comparative_candidate("small", "Elementwise", 6_000, 3_000)
+    large = _comparative_candidate("large", "GEMM", 20_000, 5_000)
+    pairs = pricer.price_all([small, large, _golden_candidate(total_us=20_000)])
+    assert [e.operation for _, e in pairs] == ["large", "mlp_block", "small"]
+    assert [e.estimation for _, e in pairs] == ["measured", "full", "measured"]
 
 
 def test_build_rows():
@@ -816,9 +858,10 @@ def test_build_rows():
         }
     )
     ops = [_op_group(_MM_KEY, ["k1", "k2"], 2500.0, 3), _op_group(None, ["k"], 10.0, 1)]
-    matched, unmatched = build_rows(
-        ops, {tuple(_MM_KEY): perf}, 100.0, 5.3, {"matrix_bf16": 1300.0}
+    pricer = FusionPricer(
+        FusionForms(TAXONOMY), (5.3, {"matrix_bf16": 1300.0}), {}, 100.0
     )
+    matched, unmatched = pricer.build_rows(ops, {tuple(_MM_KEY): perf}, 100.0)
     assert matched["operation"] == "aten::mm"
     assert matched["args"] == "(16,64) bf16<br>(64,8) bf16"
     assert (matched["time_ms"], matched["pct_e2e"], matched["count"]) == (
@@ -1544,104 +1587,6 @@ def test_sdpa_extract_empty():
     assert "workload_profile" not in r
 
 
-# ----- kernel_fusion_analysis._is_norm_kernel / _is_matrix_op -----
-
-
-@pytest.mark.parametrize(
-    "info,expected",
-    [
-        ({"type": "LayerNorm"}, True),
-        ({"type": "Elementwise", "name": "rmsnorm_kernel"}, True),
-        ({"kernel_name": "miopenBatchNorm"}, True),
-        ({"type": "Elementwise", "name": "add_kernel"}, False),
-        ({}, False),
-    ],
-)
-def test_is_norm_kernel(info, expected):
-    assert _is_norm_kernel(info) is expected
-
-
-@pytest.mark.parametrize(
-    "info,expected",
-    [
-        ({"compute_spec": "matrix_bf16"}, True),
-        ({"type": "GEMM"}, True),
-        ({"type": "conv2d"}, True),
-        ({"compute_spec": "vector_fp32"}, False),
-        ({"type": "Elementwise"}, False),
-    ],
-)
-def test_is_matrix_op(info, expected):
-    assert _is_matrix_op(info) is expected
-
-
-# ----- kernel_fusion_analysis._filter_and_dedup -----
-
-
-def _cand(name, insts, kcount, time_us, comparative=False):
-    """Build a fusion candidate for either standalone or comparative keys."""
-    if comparative:
-        return {
-            "module_name": name,
-            "instance_count": insts,
-            "kernel_count_trace1": kcount,
-            "total_kernel_time_us_trace1": time_us,
-        }
-    return {
-        "module_name": name,
-        "instance_count": insts,
-        "kernel_count": kcount,
-        "total_kernel_time_us": time_us,
-    }
-
-
-def test_filter_drops_over_kernel_cap():
-    big = _cand("big", 1, MAX_FUSION_KERNEL_COUNT + 1, 1000.0)
-    ok = _cand("ok", 1, 3, 1000.0)
-    out = _filter_and_dedup([big, ok], baseline_ms=0)
-    assert [c["module_name"] for c in out] == ["ok"]
-
-
-def test_filter_drops_below_baseline_floor():
-    """baseline_ms>0 sets a min total time of baseline*10*MIN_IMPACT_SCORE us."""
-    baseline_ms = 1.0
-    floor = baseline_ms * 10 * MIN_IMPACT_SCORE  # 20 us
-    tiny = _cand("tiny", 1, 2, floor - 1)
-    keep = _cand("keep", 1, 2, floor + 100)
-    out = _filter_and_dedup([tiny, keep], baseline_ms=baseline_ms)
-    assert [c["module_name"] for c in out] == ["keep"]
-
-
-def test_filter_dedup_keeps_shorter_name():
-    a = _cand("a_short", 2, 3, 100.04)
-    b = _cand("a_much_longer_name", 2, 3, 100.04)
-    out = _filter_and_dedup([b, a], baseline_ms=0)
-    assert len(out) == 1
-    assert out[0]["module_name"] == "a_short"
-
-
-def test_filter_dedup_distinct_signatures_kept():
-    a = _cand("a", 1, 3, 100.0)
-    b = _cand("b", 2, 3, 100.0)
-    out = _filter_and_dedup([a, b], baseline_ms=0)
-    assert len(out) == 2
-
-
-def test_filter_comparative_uses_trace1_keys():
-    big = _cand("big", 1, MAX_FUSION_KERNEL_COUNT + 1, 5000.0, comparative=True)
-    ok = _cand("ok", 1, 3, 5000.0, comparative=True)
-    out = _filter_and_dedup([big, ok], baseline_ms=0, is_comparative=True)
-    assert [c["module_name"] for c in out] == ["ok"]
-
-
-def test_filter_comparative_dedup():
-    a = _cand("short", 1, 2, 200.0, comparative=True)
-    b = _cand("longer_name", 1, 2, 200.0, comparative=True)
-    out = _filter_and_dedup([a, b], baseline_ms=0, is_comparative=True)
-    assert len(out) == 1
-    assert out[0]["module_name"] == "short"
-
-
 # ----- driver main() end-to-end smoke tests -----
 #
 # These exercise each module's argparse main() over a minimal fixture tree so the
@@ -1826,28 +1771,25 @@ def test_driver_fusion_main_no_candidates(tmp_path, monkeypatch):
     assert metrics["candidate_count"] == 0
 
 
+def _main_candidate(name, kind, confidence, total_us):
+    """A GEMM + elementwise candidate keyed to the perf rows of _write_fusion_inputs."""
+    half = total_us / 2
+    kernels = [
+        KernelRecord("gemm_a", "GEMM", half, _MM_KEY),
+        KernelRecord("ew_a", "Elementwise", half, _ADD_KEY),
+    ]
+    ops = [
+        _op_group(_MM_KEY, ["gemm_a"], half, 1),
+        _op_group(_ADD_KEY, ["ew_a"], half, 1),
+    ]
+    return _standalone_candidate(
+        kernels, total_us, ops, kind, confidence, name
+    ).to_json()
+
+
 def test_driver_fusion_main_ok_with_estimate(tmp_path, monkeypatch):
     base = str(tmp_path)
-    candidate = {
-        "module_name": "mlp_block",
-        "base_name": "mlp_block",
-        "instance_count": 1,
-        "kernel_count": 2,
-        "total_kernel_time_us": 30000.0,
-        "kernels": [
-            {"name": "gemm_a", "type": "GEMM", "dur_us": 1500, "perf_key": _MM_KEY},
-            {
-                "name": "ew_a",
-                "type": "Elementwise",
-                "dur_us": 1500,
-                "perf_key": _ADD_KEY,
-            },
-        ],
-        "ops": [
-            _op_group(_MM_KEY, ["gemm_a"], 15000.0, 1),
-            _op_group(_ADD_KEY, ["ew_a"], 15000.0, 1),
-        ],
-    }
+    candidate = _main_candidate("mlp_block", "gemm_epilogue", "medium", 30000.0)
     _write_fusion_inputs(base, [candidate])
     monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
     kernel_fusion_analysis.main()
@@ -1855,53 +1797,38 @@ def test_driver_fusion_main_ok_with_estimate(tmp_path, monkeypatch):
     assert metrics["status"] == "OK"
     assert metrics["candidate_count"] == 1
     assert metrics["platform"] == "MI300X"
-    assert "high_confidence_op_keys" in metrics
+    (estimate,) = metrics["impact_estimates"]
+    assert (estimate["fusion_kind"], estimate["confidence"]) == (
+        "gemm_epilogue",
+        "medium",
+    )
+    assert metrics["high_confidence_op_keys"] == []
 
 
-def test_driver_fusion_main_emits_only_high_confidence_op_keys(tmp_path, monkeypatch):
-    def candidate(name, n_gemm, total_us):
-        gemms = [f"gemm_{i}" for i in range(n_gemm)]
-        dur = total_us / (n_gemm + 1)
-        kernels = [(g, "GEMM", _MM_KEY) for g in gemms] + [
-            ("ew", "Elementwise", _ADD_KEY)
-        ]
-        return {
-            "module_name": name,
-            "base_name": name,
-            "instance_count": 1,
-            "kernel_count": n_gemm + 1,
-            "total_kernel_time_us": total_us,
-            "kernels": [
-                {"name": n, "type": t, "dur_us": dur, "perf_key": key}
-                for n, t, key in kernels
-            ],
-            "ops": [
-                _op_group(_MM_KEY, gemms, dur * n_gemm, 1),
-                _op_group(_ADD_KEY, ["ew"], dur, 1),
-            ],
-        }
-
+def test_driver_fusion_main_suppresses_ops_of_high_confidence_findings(
+    tmp_path, monkeypatch
+):
     base = str(tmp_path)
-    # Two GEMMs + an elementwise tail in an "mlp" module is high confidence, one GEMM
-    # is medium, and the small high-confidence candidate fails the impact gate.
+    # Only high-confidence findings that clear the impact gate suppress ops. An
+    # attention kernel replaces its GEMMs; an act_mul fusion leaves the GEMM running.
     _write_fusion_inputs(
         base,
         [
-            candidate("mlp_high", 2, 30000.0),
-            candidate("mlp_medium", 1, 30000.0),
-            candidate("mlp_gated", 2, 3000.0),
+            _main_candidate("attention_high", "attention", "high", 30000.0),
+            _main_candidate("act_mul_high", "act_mul", "high", 20000.0),
+            _main_candidate("mlp_medium", "gemm_epilogue", "medium", 30000.0),
+            _main_candidate("act_mul_gated", "act_mul", "high", 3000.0),
         ],
     )
     monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
     kernel_fusion_analysis.main()
     metrics = _read_metrics(base, "kernel_fusion")
-    by_name = {e["operation"]: e for e in metrics["impact_estimates"]}
-    assert {n: e["confidence"] for n, e in by_name.items()} == {
-        "mlp_high": "high",
-        "mlp_medium": "medium",
+    assert {e["operation"] for e in metrics["impact_estimates"]} == {
+        "attention_high",
+        "act_mul_high",
+        "mlp_medium",
     }
-    assert by_name["mlp_medium"]["op_keys"] == [_MM_KEY, _ADD_KEY]
-    assert metrics["high_confidence_op_keys"] == [_MM_KEY, _ADD_KEY]
+    assert metrics["high_confidence_op_keys"] == [_MM_KEY, _ADD_KEY, _ADD_KEY]
 
 
 # ----- multi_kernel_analysis.main() end-to-end -----

@@ -200,7 +200,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 
 ## Kernel Fusion Opportunities (Experimental)
 <!-- === STANDALONE Kernel Fusion === -->
-> **Note:** Kernel fusion analysis is experimental. impact_score projections estimate the recoverable fraction of E2E with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Actual recoverable time depends on implementation feasibility and interaction effects.
+> **Note:** Kernel fusion analysis is experimental. impact_score projections estimate the recoverable fraction of E2E with partial memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Actual recoverable time depends on implementation feasibility and interaction effects.
 <!-- === COMPARATIVE Kernel Fusion === -->
 > **Note:** Kernel fusion analysis is experimental.
 
@@ -400,7 +400,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### Kernel Fusion Insights
 <!-- === STANDALONE Kernel Fusion === -->
-> **Note:** Kernel fusion analysis is experimental. impact_score projections estimate the recoverable fraction of E2E with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual recoverable time depends on implementation feasibility and interaction effects.
+> **Note:** Kernel fusion analysis is experimental. impact_score projections estimate the recoverable fraction of E2E with partial memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual recoverable time depends on implementation feasibility and interaction effects.
 <!-- === COMPARATIVE Kernel Fusion === -->
 > **Note:** Kernel fusion analysis is experimental.
 

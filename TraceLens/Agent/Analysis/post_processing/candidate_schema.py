@@ -74,12 +74,15 @@ class FusionTask(TypedDict):
 
     The severity color and ``P<N>:`` prefix are stripped from the heading.
 
-    ``reasoning`` is always null (fusion blocks carry no such label) and
-    ``priority`` is the rank within fusion by ``impact.mid``.
+    ``kind`` is the deterministic fusion kind from the finding's ``Kind:`` line
+    (null when the block has none), ``reasoning`` is always null (fusion blocks
+    carry no such label) and ``priority`` is the rank within fusion by
+    ``impact.mid``.
     """
 
     priority: int
     operation: Optional[str]
+    kind: Optional[str]
     identification: Optional[str]
     reasoning: Optional[str]
     resolution: Optional[str]

@@ -336,6 +336,7 @@ For each compute P-item section under `## Detailed Analysis`, and each fusion P-
 | `kind=detail_estimate` marker or sentinel | Either a `<!-- impact-begin kind=detail_estimate ... -->` / `<!-- impact-end -->` pair exists, or the text "not quantifiable from trace data" is present |
 | Required attributes | If marker present, it contains `low`, `mid` and `high` attributes (compute and fusion) |
 | Pairing | Every `impact-begin` has a matching `impact-end` |
+| `**Kind:**` line (fusion only) | The fusion P-item has a `**Kind:**` line equal to the `fusion_kind` of the matching `kernel_fusion_metrics.json` estimate, exactly. The title is judged loosely: it must not contradict the kind |
 
 **Pass:** Marker with correct attributes present, or not-quantifiable sentinel present.
 **Fail:** Neither marker nor sentinel found, or marker has missing attributes. Details list specific issues.

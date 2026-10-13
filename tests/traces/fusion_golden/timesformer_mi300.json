@@ -2,8 +2,6 @@
  "fusion_candidates": [
   {
    "base_name": "TimesformerSelfAttention",
-   "eligible_kernel_count": 5,
-   "has_fused_kernel": false,
    "instance_count": 24,
    "kernel_count": 5,
    "kernel_type_signature": [
@@ -18,8 +16,6 @@
   },
   {
    "base_name": "aten::matmul",
-   "eligible_kernel_count": 3,
-   "has_fused_kernel": false,
    "instance_count": 48,
    "kernel_count": 3,
    "kernel_type_signature": [
@@ -32,8 +28,6 @@
   },
   {
    "base_name": "TimesformerIntermediate",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
    "instance_count": 12,
    "kernel_count": 2,
    "kernel_type_signature": [
@@ -45,8 +39,6 @@
   },
   {
    "base_name": "TimesformerEmbeddings",
-   "eligible_kernel_count": 13,
-   "has_fused_kernel": false,
    "instance_count": 1,
    "kernel_count": 13,
    "kernel_type_signature": [
@@ -68,26 +60,7 @@
    "total_kernel_time_us": 710.74
   },
   {
-   "base_name": "Conv2d",
-   "eligible_kernel_count": 6,
-   "has_fused_kernel": false,
-   "instance_count": 1,
-   "kernel_count": 6,
-   "kernel_type_signature": [
-    "Unknown",
-    "LayoutTransform",
-    "LayoutTransform",
-    "Convolution",
-    "LayoutTransform",
-    "Add"
-   ],
-   "module_name": "nn.Module: Conv2d_0",
-   "total_kernel_time_us": 386.041
-  },
-  {
    "base_name": "aten::upsample_nearest1d",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
    "instance_count": 2,
    "kernel_count": 2,
    "kernel_type_signature": [
@@ -211,6 +184,7 @@
     "category": "kernel_fusion",
     "confidence": "high",
     "estimation": "partial",
+    "fusion_kind": "attention",
     "fusion_type": "matrix_compute",
     "impact_score": 2.52,
     "impact_score_high": 2.88,
@@ -458,17 +432,17 @@
   ]
  },
  "sha256": {
-  "category_data/category_manifest.json": "449f432024d0a6c01f4fa7dd56ef53bdc030a5b1ffa0cb3aa41a4047c3333bbd",
+  "category_data/category_manifest.json": "7a709d1e139ae9f06b4337355fca7f0c7d5673f2acc67ec073bf70be21e00cca",
   "category_data/conv_fwd_metrics.json": "e85075a10a1948f7c5032966ff59bf99e438fb2d6b87d8c7010a2ee6e8510586",
   "category_data/conv_fwd_ops.csv": "4564e47d42b13018bf486b25c6381d0a27f73f47025314b6fc9c8ca9b35e68e0",
   "category_data/cpu_idle_metrics.json": "d00d8b8891a62f05857760472c1e27362b3b1fd728d79384f65baeb59ca4357c",
   "category_data/cpu_idle_ops.csv": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
   "category_data/elementwise_metrics.json": "e7ec099a27b87e6f1ebf482ecf50acb65e954f028a5b0d7ed0821497d6363e84",
   "category_data/elementwise_ops.csv": "5d22c2c1c60ddadd4baee0d9f53a8a2b33bb4a8f92cd5c99f093e1b8e1c99c11",
-  "category_data/fusion_candidates.json": "7afdf18755f1acfcea83caeb84a78b5b2126d4ae0e82516b725ea215e9acb3fb",
+  "category_data/fusion_candidates.json": "a351ba8a3f88c38eb2677e3d35aacc1495f441ae6c7e0e1284820a05597c8715",
   "category_data/gemm_metrics.json": "1bd4fdcd0d00f5db69ffc40e62d0c5e4cc7aa40d13b7152f8d0429671df60396",
   "category_data/gemm_ops.csv": "e18a90dd2617bd1c7910d24c9a8de1cfd3163eec34c2c30d18e65c7b98ebbb1d",
-  "category_data/kernel_fusion_metrics.json": "efac259008e195411032a22f0ab626a6665376b198ecf1b2329184820d77b677",
+  "category_data/kernel_fusion_metrics.json": "91eccd539737aac4ef0987be57af3b028ab70f32c3563fa447ce62fcc45dc382",
   "category_data/multi_kernel_data.json": "e8acf1ddb7613e97084315a7a0e1b548da15caa2807038380ff41355ce72e0df",
   "category_data/multi_kernel_metrics.json": "e3400034d7b76efe44bd204f914e844a70029af9c86d1b87da496ba9ae2e1514",
   "category_data/norm_fwd_metrics.json": "33eb753451a4f6f287befd7dd77b58b8bb305baa03f2146f21e60cf3c02a5402",
@@ -486,6 +460,6 @@
   "metadata/norm_fwd_metadata.json": "a0a82429960701de882af8cd703e36eb37eea11450a0303f86bdb8653efe790c",
   "metadata/other_metadata.json": "bd71dbda7b2ffd517371b431869db2388ec5cdda0280af6e25ceffe2ec4fa291",
   "metadata/reduce_metadata.json": "22724e6659704555bc4ee40ace5bfea85548022ee0b564e34fea040b301876ac",
-  "priority_data.json": "60023df980452292619fd259392f8c4a6110c5f2eb543ae91c019ef450079ab5"
+  "priority_data.json": "eff65c814268d8a49c0c4a82424a1c5f924a7281c69dd773215dc5964e895862"
  }
 }

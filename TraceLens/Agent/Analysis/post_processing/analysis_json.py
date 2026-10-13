@@ -22,6 +22,8 @@ from pathlib import Path
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_MID,
 )
+from TraceLens.Agent.Analysis.utils.classify_kernels import TAXONOMY
+from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionForms
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     MarkerValidator,
     _find_data_table,
@@ -42,6 +44,9 @@ _LABEL_RE = re.compile(
     r"(?=\n\s*\n|\n\*\*|\Z)",
     re.DOTALL,
 )
+_KIND_RE = re.compile(r"^\*\*Kind:\*\*[ \t]*(\S+)", re.MULTILINE)
+_KIND_DECORATION = "`*.,;:"
+_FUSION_KINDS = FusionForms(TAXONOMY).kinds
 _EFFICIENCY_RE = re.compile(r"([\d.]+)%\s*of\s*([\d.]+)\s*(\S+)")
 _ANCHOR_LINK_RE = re.compile(r"#detailed-analysis-compute-p(\d+)")
 _CATEGORY_ATTR_RE = re.compile(r"\bcategory=(\S+)")
@@ -253,6 +258,11 @@ class AnalysisMdParser:
         elif heading:
             title = _PRIORITY_PREFIX_RE.sub("", heading.lstrip("#").strip())
 
+        kind_m = _KIND_RE.search(block)
+        kind = kind_m.group(1).strip(_KIND_DECORATION).lower() if kind_m else None
+        if kind not in _FUSION_KINDS:
+            kind = None
+
         prose = {"identification": None, "reasoning": None, "resolution": None}
         for label, body in _LABEL_RE.findall(block):
             cleaned = " ".join(body.split())
@@ -276,6 +286,7 @@ class AnalysisMdParser:
             "prose": prose,
             "rank": md_rank,
             "title": title,
+            "kind": kind,
             "low": low,
             "mid": mid,
             "high": high,
@@ -636,12 +647,10 @@ class TaskGrouper:
 
         prose = self._accumulate_prose(ordered_fi, bucket["findings"])
 
-        return {
-            "operation": bucket["operation"],
-            "members": members,
-            "impact": {"mid": mid},
-            **prose,
-        }
+        task = {"operation": bucket["operation"]}
+        if self.tier == "fusion":
+            task["kind"] = bucket["findings"][ordered_fi[0]]["kind"]
+        return {**task, "members": members, "impact": {"mid": mid}, **prose}
 
     def _finalize(self, tasks: list) -> list:
         # Python's sort is stable, so fusion ties keep block order.

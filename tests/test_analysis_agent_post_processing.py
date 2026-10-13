@@ -333,6 +333,8 @@ _FUSION_MD = """# ExampleNet - OTHER_GPU Standalone Analysis
 <!-- reasoning-candidate tier=fusion rank=1 -->
 #### 🔴 P1: Unfused Attention
 
+**Kind:** attention
+
 **Identification:** Attention runs as separate bmm and softmax kernels.
 
 **Data:**
@@ -373,6 +375,7 @@ _FUSION_MD = """# ExampleNet - OTHER_GPU Standalone Analysis
 
 _FUSION_P2_GOLDEN = {
     "operation": "Unfused Activation",
+    "kind": None,
     "members": [
         {
             "kernel_launcher_path": "linear.py(30): forward",
@@ -1136,11 +1139,28 @@ def test_fusion_tier_golden(tmp_path):
     p1, p2 = report["fusion_optimizations"]
     assert p2 == _FUSION_P2_GOLDEN
     assert p1["operation"] == "Unfused Attention"
+    assert p1["kind"] == "attention"
     assert p1["impact"] == {"mid": 13.5}
     softmax = p1["members"][1]
     assert softmax["flops_per_byte"] is None
     assert softmax["efficiency_percent"] is None
     assert softmax["bound"] is None
+
+
+@pytest.mark.parametrize(
+    "kind_line,expected",
+    [
+        ("**Kind:** attention", "attention"),
+        ("**Kind:** **`Gemm_Epilogue`**.", "gemm_epilogue"),
+        # The value must be on the Kind line.
+        ("**Kind:**\n\nattention", None),
+        ("**Kind:** mystery_kind", None),
+    ],
+)
+def test_fusion_kind_parsing(kind_line, expected, tmp_path):
+    md = _FUSION_MD.replace("**Kind:** attention", kind_line)
+    p1 = _render_text(md, tmp_path)[0]["fusion_optimizations"][0]
+    assert p1["kind"] == expected
 
 
 def test_fusion_priority_is_impact_order_then_rank(tmp_path):

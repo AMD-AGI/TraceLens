@@ -2,8 +2,6 @@
  "fusion_candidates": [
   {
    "base_name": "ViTIntermediate",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
    "instance_count": 12,
    "kernel_count": 2,
    "kernel_type_signature": [
@@ -15,8 +13,6 @@
   },
   {
    "base_name": "ViTOutput",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
    "instance_count": 12,
    "kernel_count": 2,
    "kernel_type_signature": [
@@ -28,8 +24,6 @@
   },
   {
    "base_name": "ViTEmbeddings",
-   "eligible_kernel_count": 8,
-   "has_fused_kernel": false,
    "instance_count": 1,
    "kernel_count": 8,
    "kernel_type_signature": [
@@ -46,26 +40,7 @@
    "total_kernel_time_us": 71.156
   },
   {
-   "base_name": "Conv2d",
-   "eligible_kernel_count": 6,
-   "has_fused_kernel": false,
-   "instance_count": 1,
-   "kernel_count": 6,
-   "kernel_type_signature": [
-    "Unknown",
-    "LayoutTransform",
-    "LayoutTransform",
-    "Convolution",
-    "LayoutTransform",
-    "Add"
-   ],
-   "module_name": "nn.Module: Conv2d_0",
-   "total_kernel_time_us": 53.117000000000004
-  },
-  {
    "base_name": "ViTPooler",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
    "instance_count": 1,
    "kernel_count": 2,
    "kernel_type_signature": [
@@ -90,14 +65,14 @@
   "total_time_ms": 0.633
  },
  "sha256": {
-  "category_data/category_manifest.json": "774f3c44ef6481b9d3119a7b4081a7c6c32818a148b5a69b9a780a8d568d00dd",
+  "category_data/category_manifest.json": "e8431039d69c7b20363db6fb25247429d039b1364832b71521aad3310275ec8b",
   "category_data/conv_fwd_metrics.json": "1e581adbe7384dcd1e3d8da2ed6a55f16741a7e2788d288661c4f1170b2bb72d",
   "category_data/conv_fwd_ops.csv": "830c54a439f545628df032287c3556004f01e3566ded885dafdee4979ab5ac22",
   "category_data/cpu_idle_metrics.json": "c9047f8292b209c475f6393f6de8ac3e513d1a31d519f577153a6b7c5d4922cf",
   "category_data/cpu_idle_ops.csv": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
   "category_data/elementwise_metrics.json": "1ba8472127c992e75f4f948ed29d72ee8b4b6eeaf9a160f0b319d6426aa5f42f",
   "category_data/elementwise_ops.csv": "a55bc4498482c2ccf6b40d985a5b1194f045a8d6269a5ad8889355ef656f3fd2",
-  "category_data/fusion_candidates.json": "dc0c96fee71a28bc1398861ea0aeba26c5926a44b11b68b0e2bc1ffd462b2e99",
+  "category_data/fusion_candidates.json": "428f5d569c2dcf0af514beb1587fd8f1acfea2efc826c8fd0b13855b7666305c",
   "category_data/gemm_metrics.json": "c5910a9ef475b8fb8b23c4bb5cb835f617a34237f67040cbab3f9d8f1ba06fa7",
   "category_data/gemm_ops.csv": "12c037dd76e13052e1b855e172c084ea5af8f20cff79ddc83c8bb41a2567c5d9",
   "category_data/kernel_fusion_metrics.json": "5e5e3599e3c0fb9c3eaae72bbb3c1f718322a0b634442fa50d339548fffc2e6d",

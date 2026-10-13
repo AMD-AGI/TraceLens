@@ -2,8 +2,6 @@
  "fusion_candidates": [
   {
    "base_name": "Owlv2Attention",
-   "eligible_kernel_count": 3,
-   "has_fused_kernel": false,
    "instance_count": 180,
    "kernel_count": 3,
    "kernel_type_signature": [
@@ -16,8 +14,6 @@
   },
   {
    "base_name": "Owlv2MLP",
-   "eligible_kernel_count": 5,
-   "has_fused_kernel": false,
    "instance_count": 180,
    "kernel_count": 5,
    "kernel_type_signature": [
@@ -32,8 +28,6 @@
   },
   {
    "base_name": "QuickGELUActivation",
-   "eligible_kernel_count": 3,
-   "has_fused_kernel": false,
    "instance_count": 180,
    "kernel_count": 3,
    "kernel_type_signature": [
@@ -46,8 +40,6 @@
   },
   {
    "base_name": "Owlv2BoxPredictionHead",
-   "eligible_kernel_count": 6,
-   "has_fused_kernel": false,
    "instance_count": 10,
    "kernel_count": 6,
    "kernel_type_signature": [
@@ -62,40 +54,7 @@
    "total_kernel_time_us": 1046.027
   },
   {
-   "base_name": "Owlv2ClassPredictionHead",
-   "eligible_kernel_count": 20,
-   "has_fused_kernel": false,
-   "instance_count": 5,
-   "kernel_count": 20,
-   "kernel_type_signature": [
-    "GEMM",
-    "Reduce",
-    "Add",
-    "Elementwise",
-    "Reduce",
-    "Add",
-    "Elementwise",
-    "GEMM",
-    "Elementwise",
-    "GEMM",
-    "Elementwise",
-    "GEMM",
-    "Elementwise",
-    "Add",
-    "Add",
-    "Mul",
-    "Elementwise",
-    "Elementwise",
-    "Elementwise",
-    "Elementwise"
-   ],
-   "module_name": "nn.Module: Owlv2ClassPredictionHead_0",
-   "total_kernel_time_us": 821.386
-  },
-  {
    "base_name": "Owlv2VisionEmbeddings",
-   "eligible_kernel_count": 5,
-   "has_fused_kernel": false,
    "instance_count": 5,
    "kernel_count": 5,
    "kernel_type_signature": [
@@ -110,8 +69,6 @@
   },
   {
    "base_name": "transformers/models/owlv2/modeling_owlv2.py(1421): box_predictor",
-   "eligible_kernel_count": 7,
-   "has_fused_kernel": false,
    "instance_count": 5,
    "kernel_count": 7,
    "kernel_type_signature": [
@@ -127,35 +84,7 @@
    "total_kernel_time_us": 521.401
   },
   {
-   "base_name": "Conv2d",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
-   "instance_count": 5,
-   "kernel_count": 2,
-   "kernel_type_signature": [
-    "Unknown",
-    "GEMM"
-   ],
-   "module_name": "nn.Module: Conv2d_0",
-   "total_kernel_time_us": 517.899
-  },
-  {
-   "base_name": "Linear",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
-   "instance_count": 15,
-   "kernel_count": 2,
-   "kernel_type_signature": [
-    "Elementwise",
-    "GEMM"
-   ],
-   "module_name": "nn.Module: Linear_219",
-   "total_kernel_time_us": 352.622
-  },
-  {
    "base_name": "Owlv2TextTransformer",
-   "eligible_kernel_count": 5,
-   "has_fused_kernel": false,
    "instance_count": 5,
    "kernel_count": 5,
    "kernel_type_signature": [
@@ -170,8 +99,6 @@
   },
   {
    "base_name": "transformers/modeling_attn_mask_utils.py(146): _make_causal_mask",
-   "eligible_kernel_count": 6,
-   "has_fused_kernel": false,
    "instance_count": 5,
    "kernel_count": 6,
    "kernel_type_signature": [
@@ -187,8 +114,6 @@
   },
   {
    "base_name": "transformers/modeling_attn_mask_utils.py(180): _expand_mask",
-   "eligible_kernel_count": 4,
-   "has_fused_kernel": false,
    "instance_count": 5,
    "kernel_count": 4,
    "kernel_type_signature": [
@@ -202,8 +127,6 @@
   },
   {
    "base_name": "Owlv2TextEmbeddings",
-   "eligible_kernel_count": 3,
-   "has_fused_kernel": false,
    "instance_count": 5,
    "kernel_count": 3,
    "kernel_type_signature": [
@@ -216,8 +139,6 @@
   },
   {
    "base_name": "aten::where",
-   "eligible_kernel_count": 2,
-   "has_fused_kernel": false,
    "instance_count": 5,
    "kernel_count": 2,
    "kernel_type_signature": [
@@ -311,6 +232,7 @@
     "category": "kernel_fusion",
     "confidence": "high",
     "estimation": "partial",
+    "fusion_kind": "attention",
     "fusion_type": "matrix_compute",
     "impact_score": 13.52,
     "impact_score_high": 15.45,
@@ -492,17 +414,17 @@
   ]
  },
  "sha256": {
-  "category_data/category_manifest.json": "34753af20d8359206c79dd0dc25110fd9f277e1ae3b1107f168a365f69d642fa",
+  "category_data/category_manifest.json": "b16f2b162099e0f5526e2d46105e8200221f6c5dcc66d4391834ab68aa692da8",
   "category_data/conv_fwd_metrics.json": "40eb4eb6d0b8259780181506ae3741d10856aa20dfefb70567cb5713493f6d58",
   "category_data/conv_fwd_ops.csv": "4f3a36aa0732a69336ce2b397481baef5adf3cca36cafd24b73e97d6d6b6ec86",
   "category_data/cpu_idle_metrics.json": "6c9eab27903f471c4f32855470348421e874eb9796e66c027de44e7a0f964c8d",
   "category_data/cpu_idle_ops.csv": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
   "category_data/elementwise_metrics.json": "17db4aeb56bbce97b6d0ff239e4ea7a30d2156e8426778e00c52333eaf41d8cd",
   "category_data/elementwise_ops.csv": "86ac9a70b0458b8142423be381e7ac0bc1e5a3d76dd008b68ce80b33bac0eeba",
-  "category_data/fusion_candidates.json": "727d9112ca3b5bd91feb555de7c1b28f212de068e0fd97cee25114482dd793a9",
+  "category_data/fusion_candidates.json": "f6801018d619176e31ebb68278cde918869446558faaab6c25cb41191ab3b826",
   "category_data/gemm_metrics.json": "13d6ab783eea766230824205951cf54d42894c625c861f78d21ef4035761ab7f",
   "category_data/gemm_ops.csv": "b4b2ceb2e81733e99970fde62cdb2c559b480ba972eca92978e609e722c85a4e",
-  "category_data/kernel_fusion_metrics.json": "d8c5657de552ba8b643491ba946daa8742b648935fdccf1f0e9b6ada0012bb8e",
+  "category_data/kernel_fusion_metrics.json": "415299798c77535d974fee938b7c5f8157c2bfbf8aafaf8faf9ababcccf6e5ce",
   "category_data/multi_kernel_data.json": "71f28824c8711a9d374b1dac4cf1de89b6e2fc832f06b10588626648ce6e2809",
   "category_data/multi_kernel_metrics.json": "4cea80079e3d76c65422a1e2d76219c4fc406f4d05f2baedb03d628452d0f002",
   "category_data/norm_fwd_metrics.json": "d8de669acd0f0a2942948863b38459d7d29e6683c830758ee045a9f96d842176",
@@ -520,6 +442,6 @@
   "metadata/norm_fwd_metadata.json": "fb1f523acee7ddad7a41ca90c0a9f92e3e38df6338ae0e4e9ec9dd77da29f5b9",
   "metadata/other_metadata.json": "bd1e7bd952725559f208ea4485e6d87863fc8d5b6b771e3c4539ecb1f6cb66a5",
   "metadata/reduce_metadata.json": "bbf54d77bef5b9f31f66bc681f39725422a93cc158440b4481d025ea1c44146a",
-  "priority_data.json": "71b8df8bae20fef0b31f8803d795a46c282a634570a17d38beb8ecdec08fcee2"
+  "priority_data.json": "a42159e742e8d4e8b0e2112169622ef0fe734ea16ef10a4033949b57c05b07c3"
  }
 }
