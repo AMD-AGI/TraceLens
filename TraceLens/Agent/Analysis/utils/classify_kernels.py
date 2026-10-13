@@ -330,7 +330,7 @@ def classify_kernel(name):
     """Classify a single kernel name.
 
     Returns:
-        (kernel_type, perf_category, confidence)
+        (kernel_type, perf_category, priority)
     """
     ktype, priority = TAXONOMY._match(name)
     return ktype, TAXONOMY.by_type(ktype).perf_category, priority
@@ -340,7 +340,7 @@ def classify_all(extracted_data):
     kernels = extracted_data["kernels"]
     classified = []
     for i, k in enumerate(kernels):
-        ktype, perf_cat, confidence = classify_kernel(k["name"])
+        ktype, perf_cat, _ = classify_kernel(k["name"])
         classified.append(
             {
                 "index": i,
@@ -348,7 +348,6 @@ def classify_all(extracted_data):
                 "dur": k["dur"],
                 "kernel_type": ktype,
                 "perf_category": perf_cat,
-                "confidence": confidence,
             }
         )
     return classified
