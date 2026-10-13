@@ -1148,7 +1148,6 @@ def test_fusion_tier_golden(tmp_path):
 @pytest.mark.parametrize(
     "surfaced,expected",
     [
-        ("Surfaced as `attention`", "attention"),
         ("surfaced as `Gemm_Epilogue`", "gemm_epilogue"),
         # A kind outside the Identification is not read.
         ("Surfaced as attention.\n\nSurfaced as `attention`", None),

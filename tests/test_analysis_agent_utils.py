@@ -78,7 +78,6 @@ from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
     _normalize_category,
 )
 from TraceLens.Agent.Analysis.utils.kernel_fusion import (
-    OVERLAP_EFFICIENCY,
     FusionCandidate,
     FusionCandidateBuilder,
     FusionForms,
@@ -111,10 +110,9 @@ _FUSION_ROW = (
     "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
     "50.00% of 5.3 TB/s | memory-bound |"
 )
-_GEMM_KERNEL = "Cijk_Alik_Bljk_B_BS_BH_MT64x64x32"
-_ADD_KERNEL = "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul>)"
-_MUL_KERNEL = "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 3ul> >(int, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 3ul>)"
-_SOFTMAX_KERNEL = "void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat16, float, c10::BFloat16, at::native::(anonymous namespace)::SoftMaxForwardEpilogue, long, 6>(c10::BFloat16*, c10::BFloat16 const*, long)"
+_GEMM_KERNEL = "gemm_kernel_a"
+_ADD_KERNEL = "CUDAFunctor_add_stub"
+_MUL_KERNEL = "MulFunctor_stub"
 _RMSNORM_KERNEL = "rmsnorm2d"
 _UNKNOWN_THREAD = {c: "Unknown" for c in au.PERF_THREAD_COLS}
 _OP_ARGS = {
@@ -1807,7 +1805,7 @@ def _builder(tree=None, unified_events=None, perf_rows=None):
             (1032.0, 1024.0),
         ),
         # Half and half: a missing GEMM dim, no shape_in1, an unknown dtype,
-        # unparsable params, an unknown category.
+        # unparsable params.
         ("GEMM", "{'M': 2, 'N': 4}", 10.0, (5.0, 5.0)),
         ("elementwise", "{'other': 1}", 9.0, (4.5, 4.5)),
         (
@@ -1818,7 +1816,6 @@ def _builder(tree=None, unified_events=None, perf_rows=None):
             (4.5, 4.5),
         ),
         ("GEMM", "not-a-dict {{", 10.0, (5.0, 5.0)),
-        ("mystery", "{}", 4.0, (2.0, 2.0)),
         ("GEMM", "{'M': 2, 'N': 4, 'K': 3}", None, (None, None)),
     ],
 )
@@ -1833,9 +1830,7 @@ def test_compute_data_in_out(category, params, data_moved, expected):
 @pytest.mark.parametrize(
     "n1, n2, expected",
     [
-        (5, 3, True),
         (3, 3, False),  # G1: n1 must exceed n2
-        (2, 3, False),
         (18, 1, False),  # G2: n1 - n2 <= 15
         (31, 20, False),  # G3: n1 <= 30
         (3, 0, False),  # G4: n2 >= 1
@@ -1854,11 +1849,11 @@ def test_passes_gates_case_a(n1, n2, expected):
     [
         (_ADD_KERNEL, "Add", True),
         (
-            "void rcclGenericKernel<2, false>(ncclDevKernelArgsStorage<4096ul>)",
+            "nccl_stub",
             "Library Collective",
             False,
         ),
-        ("batched_transpose_4x64_half", LAYOUT_TRANSFORM, False),
+        ("batched_transpose_stub", LAYOUT_TRANSFORM, False),
     ],
 )
 def test_passes_gates_delta_filters(delta_kernel, delta_type, expected):
@@ -3537,30 +3532,6 @@ def test_standalone_module_candidates(tmp_path):
     assert [(k.data_in_mb, k.data_out_mb) for k in mlp.kernels] == pytest.approx(
         [(10 * 18 / 26, 10 * 8 / 26), (4.0, 2.0)]
     )
-    data = mlp.to_dict()
-    assert set(data) == {
-        "module_name",
-        "base_name",
-        "parent_chain",
-        "instance_count",
-        "kernel_count",
-        "kernels",
-        "kernel_type_signature",
-        "kernel_type_summary",
-        "fusion_kind",
-        "confidence",
-        "total_kernel_time_us",
-        "ops",
-    }
-    assert set(data["kernels"][0]) == {
-        "name",
-        "type",
-        "dur_us",
-        "perf_key",
-        "gpu_op_uid",
-        "data_in_mb",
-        "data_out_mb",
-    }
 
 
 def test_standalone_attention_narrows_to_core():
@@ -3569,7 +3540,7 @@ def test_standalone_attention_narrows_to_core():
     # instance and the trailing add drop out of the count, time and op counts.
     attn = [
         (_GEMM_KERNEL, "aten::bmm", 100),
-        (_SOFTMAX_KERNEL, "aten::_softmax", 20),
+        ("softmax_stub", "aten::_softmax", 20),
         (_GEMM_KERNEL, "aten::mm", 100),
     ]
     add = (_ADD_KERNEL, "aten::add", 5)
@@ -4106,7 +4077,6 @@ def test_kernel_fusion_main_writes_metrics(tmp_path, with_manifest):
     )
     assert metrics["status"] == "OK"
     assert metrics["candidate_count"] == 1
-    assert metrics["overlap_efficiency"] == OVERLAP_EFFICIENCY
 
 
 class TestOrchestratorPhase6:

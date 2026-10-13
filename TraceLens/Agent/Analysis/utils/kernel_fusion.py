@@ -337,6 +337,9 @@ class FusionLabeler:
             return None
         if any(self.taxonomy.is_compiled(n) for n in names):
             return None
+        # One op's own multi-kernel implementation is not a seam between ops.
+        if all(op_keys) and len({tuple(key) for key in op_keys}) == 1:
+            return None
 
         form, span = self._seam(classes)
         if span:

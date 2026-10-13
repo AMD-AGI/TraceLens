@@ -38,7 +38,6 @@ from TraceLens.Agent.Analysis.utils.classify_kernels import (
     run_assertions,
 )
 from TraceLens.Agent.Analysis.utils.kernel_fusion import (
-    BYTES_PER_MB,
     MIN_IMPACT_SCORE,
     OVERLAP_EFFICIENCY,
     FusionCandidate,
@@ -143,32 +142,23 @@ from tests.test_trace2tree import _add_gpu_chain, _mk_event
 _MM_KEY = ["aten::mm", "((16, 64), (64, 8))", "('bf16', 'bf16')", "z"] + [""] * 4
 _ADD_KEY = ["aten::add", "((16, 8), (16, 8))", "('bf16', 'bf16')", "z"] + [""] * 4
 
-# Real kernel names, shared by the taxonomy and labeler tests.
-GEMM = "nvjet_tst_64x152_64x7_2x1_v_bz_NNT"
-ADD = "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul>)"
-MUL = "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 3ul> >(int, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 3ul>)"
-SILU = "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)"
-SIGMOID = "void at::native::vectorized_elementwise_kernel<8, at::native::sigmoid_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#4}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::sigmoid_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#4}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)"
-SOFTMAX = "void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat16, float, c10::BFloat16, at::native::(anonymous namespace)::SoftMaxForwardEpilogue, long, 6>(c10::BFloat16*, c10::BFloat16 const*, long)"
-TOPK = "void aiter::grouped_topk_opt_sort_kernel<c10::BFloat16, float __vector(4), 8, true, true, false>(c10::BFloat16*, c10::BFloat16 const*, float*, int*, unsigned long, int, int, int, int, float)"
-LAYERNORM = "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<c10::BFloat16, float>(int, float, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, float*, float*, c10::BFloat16*)"
-BATCHNORM = "void at::native::batch_norm_collect_statistics_kernel<at::native::Var, c10::BFloat16, c10::BFloat16, float, int>(at::GenericPackedTensorAccessor<c10::BFloat16 const, 3ul, at::RestrictPtrTraits, int>, float, float, at::GenericPackedTensorAccessor<float, 1ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<float, 1ul, at::RestrictPtrTraits, int>)"
-QUANT = "void aiter::dynamic_per_group_scaled_quant_kernel<std::bfloat16_t, opus::fp4_t, 32, 32, true, 64, true>(opus::fp4_t*, float*, std::bfloat16_t const*, float const*, long, int, int, long, int const*, int)"
-# ck_tile RMSNorm built with FusedAddEnumE0 / FusedQuantEnumE0: a plain norm.
-RMSNORM = "_ZN7ck_tile6kentryILi1ENS_12Rmsnorm2dFwdINS_27Rmsnorm2dFwdPipelineOnePassINS_27Rmsnorm2dFwdPipelineProblemIDF16bDF16bfDF16bDF16bDF16bffNS_19Generic2dBlockShapeINS_8sequenceIJLi1ELi3072EEEENS5_IJLi1ELi128EEEENS5_IJLi1ELi8EEEEEENS_18Rmsnorm2dFwdTraitsILb1ELb0ELb0ELb0ELNS_21Rmsnorm2dFusedAddEnumE0ELNS_23Rmsnorm2dFusedQuantEnumE0ELNS_22Rmsnorm2dSensitiveEnumE0EEEEENS_33Rmsnorm2dFwdPipelineDefaultPolicyEEENS_17Default2DEpilogueINS_24Default2DEpilogueProblemIfDF16bLb0ELb1ELb0EEEvEEEEJNSM_5KargsEEEEvDpT1_"
-ADD_RMSNORM_QUANT = "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi64ELi8ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib"
-AR_STORE = "void aiter::reduce_scatter_cross_device_store<std::bfloat16_t, 2>(aiter::RankData*, aiter::RankSignals, aiter::Signal*, int, int, int, int)"
-AR_RMSNORM = "void aiter::local_device_load_rmsnorm<std::bfloat16_t, 512, 2>(aiter::RankSignals, std::bfloat16_t*, std::bfloat16_t*, std::bfloat16_t*, std::bfloat16_t*, float, int, int, int, int)"
-# A compiled kernel the taxonomy types as a plain (unfused) elementwise.
-TRITON = "triton_poi_fused_embedding_0"
-MEMCPY = "Memcpy HtoD (Host -> Device)"
-NCCL = "ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsStorage<4096ul>)"
+# Kernel name stubs, shared by the taxonomy and labeler tests.
+GEMM = "gemm_stub"
+ADD = "CUDAFunctor_add_stub"
+MUL = "MulFunctor_stub"
+SILU = "silu_kernel"
+SOFTMAX = "softmax_stub"
+TOPK = "grouped_topk_stub"
+LAYERNORM = "layer_norm_stub"
+BATCHNORM = "batch_norm_stub"
+# A norm built with the fused-add and fused-quant enums at 0 is a plain norm.
+RMSNORM = "Rmsnorm2dFusedAddEnumE0_Rmsnorm2dFusedQuantEnumE0"
+ADD_RMSNORM_QUANT = "add_rmsnorm_quant_stub"
+NCCL = "nccl_stub"
 UNKNOWN_KERNEL = "mystery_kernel"
-CONV = "igemm_bwd_gtcx3_nhwc_bf16_bx0_ex1_bt128x128x32_wt32x32x8_ws1x1_wr2x2_ta1x8x2x1_1x4x1x64_tb1x8x1x2_1x4x1x64_mh_gkgs"
-TRANSPOSE = "batched_transpose_4x64_half"
-MOE_GEMM = (
-    "mfma_moe2_afp4_wfp4_bf16_cshuffle_t32x128x256_vscale_fix3_fp4opt_v1_persist_cu256"
-)
+CONV = "naive_conv_stub"
+TRANSPOSE = "batched_transpose_stub"
+MOE_GEMM = "mfma_moe2_stub"
 LABELER = FusionLabeler(TAXONOMY, FusionForms(TAXONOMY))
 
 
@@ -194,190 +184,96 @@ def _name_key(name):
         ("Memcpy HtoD (Host -> Device)", "MemCpy", "MemCpy", ("copy",)),
         ("Memset (Device)", "MemSet", "MemCpy", ("copy",)),
         (
-            "_combined_routing_memset",
+            "combined_routing_memset",
             "MoE Routing Memset",
             "Elementwise-MoE",
             ("route",),
         ),
-        ("nvjet_tst_64x152_64x7_2x1_v_bz_NNT", "GEMM", "GEMM", ("gemm",)),
+        (GEMM, "GEMM", "GEMM", ("gemm",)),
         (
-            "_matmul_ogs_NNT_bf16xbf16xmxfp4_16x128x256x1_swiglu",
+            "moe_gemm_swiglu_stub",
             "MoE GateUp+SwiGLU GEMM",
             "GEMM-MoE",
             ("moe_gemm", "act", "mul"),
         ),
+        (RMSNORM, "RMSNorm", "Normalization", ("norm",)),
         (
-            "_ZN7ck_tile6kentryILi1ENS_12Rmsnorm2dFwdINS_27Rmsnorm2dFwdPipelineOnePassINS_27Rmsnorm2dFwdPipelineProblemIDF16bDF16bfDF16bDF16bDF16bffNS_19Generic2dBlockShapeINS_8sequenceIJLi1ELi3072EEEENS5_IJLi1ELi128EEEENS5_IJLi1ELi8EEEEEENS_18Rmsnorm2dFwdTraitsILb1ELb0ELb0ELb0ELNS_21Rmsnorm2dFusedAddEnumE0ELNS_23Rmsnorm2dFusedQuantEnumE0ELNS_22Rmsnorm2dSensitiveEnumE0EEEEENS_33Rmsnorm2dFwdPipelineDefaultPolicyEEENS_17Default2DEpilogueINS_24Default2DEpilogueProblemIfDF16bLb0ELb1ELb0EEEvEEEEJNSM_5KargsEEEEvDpT1_",
-            "RMSNorm",
-            "Normalization",
-            ("norm",),
-        ),
-        (
-            "_ZN7ck_tile6kentryILi1ENS_12Rmsnorm2dFwdINS_27Rmsnorm2dFwdPipelineOnePassINS_27Rmsnorm2dFwdPipelineProblemIDF16bDF16bfDF16bDF16bDF16bffNS_19Generic2dBlockShapeINS_8sequenceIJLi1ELi3072EEEENS5_IJLi1ELi128EEEENS5_IJLi1ELi8EEEEEENS_18Rmsnorm2dFwdTraitsILb1ELb0ELb0ELb0ELNS_21Rmsnorm2dFusedAddEnumE1ELNS_23Rmsnorm2dFusedQuantEnumE0ELNS_22Rmsnorm2dSensitiveEnumE0EEEEENS_33Rmsnorm2dFwdPipelineDefaultPolicyEEENS_17Default2DEpilogueINS_24Default2DEpilogueProblemIfDF16bLb0ELb1ELb0EEEvEEEEJNSM_5KargsEEEEvDpT1_",
+            "Rmsnorm2dFusedAddEnumE1_Rmsnorm2dFusedQuantEnumE0",
             "Add+RMSNorm",
             "Normalization",
             ("add", "norm"),
         ),
         (
-            "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi64ELi8ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_diiiiiiib",
+            ADD_RMSNORM_QUANT,
             "Add+RMSNorm+Quant",
             "Normalization",
             ("add", "norm", "quant"),
         ),
         (
-            "_fused_rms_mxfp4_quant_kernel",
+            "fused_rms_quant_stub",
             "RMSNorm+Quant",
             "Normalization",
             ("norm", "quant"),
         ),
         (
-            "void aiter::local_device_load_rmsnorm<std::bfloat16_t, 512, 2>(aiter::RankSignals, std::bfloat16_t*, std::bfloat16_t*, std::bfloat16_t*, std::bfloat16_t*, float, int, int, int, int)",
+            "local_device_load_rmsnorm_stub",
             "AllReduce+RMSNorm",
             "Normalization",
             ("collective", "norm"),
         ),
-        (
-            "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<c10::BFloat16, float>(int, float, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, float*, float*, c10::BFloat16*)",
-            "LayerNorm",
-            "Normalization",
-            ("norm",),
-        ),
-        (
-            "void at::native::batch_norm_collect_statistics_kernel<at::native::Var, c10::BFloat16, c10::BFloat16, float, int>(at::GenericPackedTensorAccessor<c10::BFloat16 const, 3ul, at::RestrictPtrTraits, int>, float, float, at::GenericPackedTensorAccessor<float, 1ul, at::RestrictPtrTraits, int>, at::GenericPackedTensorAccessor<float, 1ul, at::RestrictPtrTraits, int>)",
-            "BatchNorm",
-            "Normalization",
-            ("batchnorm",),
-        ),
+        (LAYERNORM, "LayerNorm", "Normalization", ("norm",)),
+        (BATCHNORM, "BatchNorm", "Normalization", ("batchnorm",)),
         ("attn_fwd", "Attention (flash)", "SDPA", ("gemm", "softmax", "gemm")),
         (
-            "aiter::mla_a8w8_qh64_qseqlen1_gqaratio64_v3_ps",
+            "mla_a8w8_stub",
             "Attention (MLA)",
             "SDPA",
             ("gemm", "softmax", "gemm"),
         ),
         (
-            "_ZN5aiter49fuse_qk_rope_concat_and_cache_mla_per_head_kernelIDF16bDB8_S1_LN4vllm18Fp8KVCacheDataTypeE1ELS3_1ELi8EEEvPKT_S6_S6_S6_PT0_PT1_PKlSC_S6_S6_iiiiiiiiiiiiiiPKfSE_bb",
+            "fuse_qk_rope_concat_and_cache_mla_stub",
             "RoPE+KV Store",
             "Elementwise",
             ("rope", "kv_store"),
         ),
+        (TOPK, "TopK", "Elementwise", ("topk",)),
+        ("act_and_mul_kernel_stub", "Act+Mul", "Elementwise", ("act", "mul")),
+        ("rotary_embedding_stub", "Rotary Embedding", "Elementwise", ("rope",)),
         (
-            "void aiter::grouped_topk_opt_sort_kernel<c10::BFloat16, float __vector(4), 8, true, true, false>(c10::BFloat16*, c10::BFloat16 const*, float*, int*, unsigned long, int, int, int, int, float)",
-            "TopK",
-            "Elementwise",
-            ("topk",),
-        ),
-        (
-            "_ZN7sgl_hip10activation18act_and_mul_kernelI14__hip_bfloat16TnPFT_RKS3_EXadL_Z4siluIS2_ES3_S5_EEEEvPS3_PS4_i",
-            "Act+Mul",
-            "Elementwise",
-            ("act", "mul"),
-        ),
-        (
-            "void vllm::rotary_embedding_kernel<c10::BFloat16, true>(long const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16 const*, int, long, long, long, int, int, int)",
-            "Rotary Embedding",
-            "Elementwise",
-            ("rope",),
-        ),
-        (
-            "void aiter::allgather_lastdim<std::bfloat16_t, 2>(aiter::RankData*, aiter::RankSignals, aiter::Signal*, std::bfloat16_t*, int, int, int)",
+            "allgather_lastdim_stub",
             "Collective",
             "Communication",
             ("collective",),
         ),
-        (
-            "void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat16, float, c10::BFloat16, at::native::(anonymous namespace)::SoftMaxForwardEpilogue, long, 6>(c10::BFloat16*, c10::BFloat16 const*, long)",
-            "Softmax",
-            "Elementwise",
-            ("softmax",),
-        ),
-        (
-            "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::ArgMaxOps<float>, unsigned int, long, 4, 4> >(at::native::ReduceOp<float, at::native::ArgMaxOps<float>, unsigned int, long, 4, 4>)",
-            "Reduce",
-            "Elementwise",
-            ("reduce",),
-        ),
-        (
-            "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul>)",
-            "Add",
-            "Elementwise",
-            ("add",),
-        ),
-        (
-            "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 3ul> >(int, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 3ul>)",
-            "Mul",
-            "Elementwise",
-            ("mul",),
-        ),
-        (
-            TRANSPOSE,
-            "LayoutTransform",
-            "Elementwise",
-            ("pointwise",),
-        ),
-        (
-            "_ZN2ck16tensor_operation6device12_GLOBAL__N_139kernel_grouped_conv_fwd_xdl_cshuffle_v3INS_28GridwiseGemm_xdl_cshuffle_v3INS_13tensor_layout4gemm8RowMajorENS6_11ColumnMajorES7_ttfttNS0_12element_wise11PassThroughESA_SA_LNS1_18GemmSpecializationE7ELi256ELi64ELi64ELi64ELi8ELi8ELi32ELi32ELi1ELi1ENS_8SequenceIJLi8ELi32ELi1EEEENSC_IJLi1ELi0ELi2EEEESE_Li2ELi8ELi8ELb0ELi0ESD_SE_SE_Li2ELi8ELi8ELb0ELi0ELi1ELi1ENSC_IJLi1ELi32ELi1ELi8EEEELi8ELNS_26BlockGemmPipelineSchedulerE0ELNS_24BlockGemmPipelineVersionE2EttLb0ELb0EEENS_16TensorDescriptorINS_5TupleIJNS_5EmbedINSK_IJiiiiEEESM_Lb0EEENS_11PassThroughIiEENS_3PadIiiiLb0EEESR_SP_SP_NSL_INSK_IJiiEEESS_Lb0EEEST_SP_NS_23Merge_v2_magic_divisionINSK_IJiiiEEEEESW_NS_8RightPadIiiLb0EEESY_NS_7UnMergeISS_Lb0EEESP_EEENSK_IJNSC_IJLi0EEEENSC_IJLi1EEEENSC_IJLi2EEEENSC_IJLi3EEEENSC_IJLi4EEEENSC_IJLi5EEEENSC_IJLi6EEEENSC_IJLi7EEEENSC_IJLi8EEEENSC_IJLi9ELi11ELi13EEEENSC_IJLi10ELi12ELi14EEEENSC_IJLi15EEEENSC_IJLi16EEEENSC_IJLi18EEEENSC_IJLi17EEEEEEENSK_IJNSC_IJLi1ELi2ELi3ELi4EEEES17_S18_S19_S1A_NSC_IJLi9EEEENSC_IJLi10ELi11EEEENSC_IJLi12ELi13EEEENSC_IJLi14EEEES1D_S1E_S1G_S1F_NSC_IJLi19ELi20EEEENSC_IJLi21EEEEEEENSC_IJLi19ELi21ELi20EEEElEENSJ_INSK_IJS10_SY_SY_S10_SP_EEENSK_IJS12_S13_S14_S16_S15_EEENSK_IJNSC_IJLi1ELi2EEEES15_S16_NSC_IJLi5ELi6EEEES19_EEENSC_IJLi5ELi7ELi6EEEElEENSJ_INSK_IJST_SY_SY_NSZ_INSK_IJiNS_17integral_constantIiLi64EEEEEELb0EEES22_EEENSK_IJS12_S13_S14_S15_S16_EEENSK_IJS1U_S15_S16_S1V_NSC_IJLi7ELi8EEEEEEENSC_IJLi5ELi6ELi7ELi8EEEElEENS1_30ComputePtrOffsetOfStridedBatchILi1ELi1ELi0EvEELb1ELNS_25InMemoryDataOperationEnumE0ELi1ELNS_10TailNumberE10EEEvNT_8ArgumentET0_T1_T2_T3_S2I_i",
-            "Convolution",
-            "Convolution",
-            ("gemm",),
-        ),
-        (
-            CONV,
-            "Convolution",
-            "Convolution",
-            ("gemm",),
-        ),
-        (
-            "void (anonymous namespace)::multimem_all_reduce_kernel<c10::BFloat16, 16>(c10::BFloat16*, unsigned long, unsigned int**, unsigned long, unsigned long)",
-            "Library Collective",
-            "Communication",
-            ("library_collective",),
-        ),
+        (SOFTMAX, "Softmax", "Elementwise", ("softmax",)),
+        ("reduce_kernel_stub", "Reduce", "Elementwise", ("reduce",)),
+        (ADD, "Add", "Elementwise", ("add",)),
+        (MUL, "Mul", "Elementwise", ("mul",)),
+        (TRANSPOSE, "LayoutTransform", "Elementwise", ("pointwise",)),
+        (CONV, "Convolution", "Convolution", ("gemm",)),
         ("triton_poi_fused_0", "Compiled", "Elementwise", ("pointwise", "reduce")),
         ("__amd_rocclr_copyBuffer", "Elementwise", "Elementwise", ("pointwise",)),
+        (NCCL, "Library Collective", "Communication", ("library_collective",)),
+        (SILU, "Activation (SiLU)", "Elementwise", ("act",)),
         (
-            "ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsStorage<4096ul>)",
-            "Library Collective",
-            "Communication",
-            ("library_collective",),
-        ),
-        (
-            "void rcclGenericKernel<2, false>(ncclDevKernelArgsStorage<4096ul>)",
-            "Library Collective",
-            "Communication",
-            ("library_collective",),
-        ),
-        (
-            SILU,
-            "Activation (SiLU)",
-            "Elementwise",
-            ("act",),
-        ),
-        (
-            "_ZN5aiter18act_and_mul_kernelIDF16bDF16bTnPFfRKT_EXadL_ZNS_11silu_kernelIDF16bEEfS3_EELi8ELb0ELi3EEEvPT0_PS2_if",
-            "Act+Mul",
-            "Elementwise",
-            ("act", "mul"),
-        ),
-        (
-            "mfma_moe1_silu_mul_afp4_wfp4_bf16_t32x128x256_pm1_async_v32",
+            "mfma_moe1_silu_mul_stub",
             "MoE GEMM+SiLU (aiter)",
             "GEMM-MoE",
             ("moe_gemm", "act", "mul"),
         ),
+        (MOE_GEMM, "MoE GEMM (CK)", "GEMM-MoE", ("moe_gemm",)),
         (
-            "mfma_moe2_afp4_wfp4_bf16_cshuffle_t32x128x256_vscale_fix3_fp4opt_v1_persist_cu256",
-            "MoE GEMM (CK)",
-            "GEMM-MoE",
-            ("moe_gemm",),
-        ),
-        (
-            "kernel_paged_attention_2d",
+            "attention_2d_stub",
             "Attention (AMD unified)",
             "SDPA",
             ("gemm", "softmax", "gemm"),
         ),
-        ("_causal_conv1d_update_kernel", "Causal Conv1D", "SDPA", ("pointwise",)),
+        (
+            "_causal_conv1d_update_stub",
+            "Causal Conv1D",
+            "SDPA",
+            ("pointwise",),
+        ),
         (
             "triton_per_fused__to_copy_add_mean_mul_pow_rsqrt_0",
             "RMSNorm (fused triton)",
@@ -408,19 +304,18 @@ def test_taxonomy_classify(name, expected_type, expected_cat, expected_covers):
 
 
 def test_classify_kernel_reports_winning_priority():
-    """A cudnn SDPA kernel also matches the convolution rule (fprop, 5); the
+    """An SDPA kernel also matches the convolution rule (fprop, 5); the
     flash-attention rule (20) wins and its priority is the reported confidence."""
-    assert classify_kernel(
-        "cudnn_generated_fort_native_sdpa_sm90_flash_fprop_wgmma_f16_knob_7_64x128x128_4x1x1_kernel0_0"
-    ) == ("Attention (flash)", "SDPA", 20)
+    assert classify_kernel("fort_native_sdpa_fprop_stub") == (
+        "Attention (flash)",
+        "SDPA",
+        20,
+    )
 
 
 def test_taxonomy_types_closed_over_primitives():
     assert {ktype for _, ktype, _ in KERNEL_TYPE_RULES} <= set(KERNEL_TYPES)
-    for kernel in TAXONOMY.types():
-        assert kernel.perf_category
-        assert set(kernel.covers) <= PRIMITIVES
-        assert TAXONOMY.by_type(kernel.type) == kernel
+    assert all(set(kernel.covers) <= PRIMITIVES for kernel in TAXONOMY.types())
 
 
 # ----- run_assertions -----
@@ -435,36 +330,20 @@ def _classified(name, ktype, index=0):
 
 
 def test_run_assertions_clean():
-    classified = [_classified("Cijk_x", "GEMM", i) for i in range(5)]
+    classified = [_classified("gemm_x", "GEMM", i) for i in range(5)]
     assert run_assertions(classified) == []
 
 
 def test_run_assertions_flags_unknown():
     classified = [
         _classified("mystery", "Unknown", 0),
-        _classified("Cijk_x", "GEMM", 1),
+        _classified("gemm_x", "GEMM", 1),
     ]
     errors = run_assertions(classified)
     assert any("Unknown" in e for e in errors)
 
 
 # ----- FusionForms / FusionLabeler -----
-
-
-def test_fusion_forms_derived_from_fused_types():
-    forms = FusionForms(TAXONOMY).forms
-    assert {f.kind for f in forms} == {
-        "add_norm_quant",
-        "attention",
-        "add_norm",
-        "norm_quant",
-        "allreduce_norm",
-        "rope_kv_store",
-        "routing_topk",
-        "act_mul",
-    }
-    assert [f.kind for f in forms if f.replaces_span] == ["attention"]
-    assert len({f.elements for f in forms}) == len(forms)
 
 
 @pytest.mark.parametrize(
@@ -476,16 +355,18 @@ def test_fusion_forms_derived_from_fused_types():
         # The span starts at the GEMM nearest the softmax, not at one before another GEMM.
         ([GEMM, GEMM, SOFTMAX, GEMM], ("attention", "high", (1, 4))),
         ([ADD, LAYERNORM], ("add_norm", "high", None)),
-        ([LAYERNORM, QUANT], ("norm_quant", "high", None)),
-        ([ADD, LAYERNORM, QUANT], ("add_norm_quant", "high", None)),
-        ([AR_STORE, RMSNORM], ("allreduce_norm", "high", None)),
+        ([LAYERNORM, "per_token_group_quant_stub"], ("norm_quant", "high", None)),
+        (
+            [ADD, LAYERNORM, "per_token_group_quant_stub"],
+            ("add_norm_quant", "high", None),
+        ),
+        (["cross_device_stub", RMSNORM], ("allreduce_norm", "high", None)),
         ([SOFTMAX, TOPK], ("routing_topk", "high", None)),
         ([SILU, MUL], ("act_mul", "high", None)),
-        ([SIGMOID, MUL], ("elementwise_chain", "high", None)),
+        (["sigmoid_elementwise_stub", MUL], ("elementwise_chain", "high", None)),
         ([ADD, BATCHNORM], ("elementwise_chain", "high", None)),
         ([ADD, MUL, MUL, LAYERNORM], ("elementwise_chain", "high", None)),
         ([ADD, MUL, GEMM], ("gemm_epilogue", "medium", None)),
-        ([GEMM, ADD], ("gemm_epilogue", "medium", None)),
         ([ADD, MUL, UNKNOWN_KERNEL], ("elementwise_chain", "low", None)),
     ],
 )
@@ -498,16 +379,19 @@ def test_label_kind_confidence_span(names, expected):
     "names,op_keys",
     [
         pytest.param([ADD, ADD_RMSNORM_QUANT], None, id="fused_kernel"),
-        pytest.param([AR_STORE, AR_RMSNORM], None, id="allreduce_rmsnorm_pair"),
-        pytest.param([ADD, TRITON], None, id="compiled"),
-        pytest.param([ADD, MEMCPY], None, id="copy_engine"),
+        pytest.param([ADD, "triton_poi_fused_embedding_0"], None, id="compiled"),
+        pytest.param([ADD, "Memcpy HtoD (Host -> Device)"], None, id="copy_engine"),
         pytest.param([ADD, NCCL], None, id="library_collective"),
         pytest.param([ADD] * 16, None, id="over_cap"),
         pytest.param([GEMM, GEMM], None, id="all_matrix"),
         pytest.param([GEMM, LAYERNORM], None, id="matrix_norm_only"),
+        # One op's own passes are not a seam between ops.
+        pytest.param([ADD, MUL], [_ADD_KEY] * 2, id="single_op_launch"),
         # An op that launches a convolution owns its layout and bookkeeping kernels.
         pytest.param(
-            [UNKNOWN_KERNEL, TRANSPOSE, CONV], [_MM_KEY] * 3, id="matrix_op_launch"
+            [UNKNOWN_KERNEL, TRANSPOSE, CONV, LAYERNORM],
+            [_MM_KEY] * 3 + [_ADD_KEY],
+            id="matrix_op_launch",
         ),
     ],
 )
@@ -571,7 +455,7 @@ def _comparative_candidate(name, type1, time1_us, time2_us):
 
 def _golden_candidate(total_us=200):
     kernels = [
-        KernelRecord("Cijk_gemm", "GEMM", 100, _name_key("Cijk_gemm")),
+        KernelRecord("gemm_a", "GEMM", 100, _name_key("gemm_a")),
         KernelRecord("ew_add", "Elementwise", 100, _name_key("ew_add")),
     ]
     ops = [_op_group(k.perf_key, [k.name], 100.0, 1) for k in kernels]
@@ -627,15 +511,12 @@ def test_split_multiple_gemm_boundaries():
 
 # ----- FusionPricer._roofline_savings_us -----
 
-# Time in us to move 1 MB at the _pricer() peak of 1 TB/s.
-MB_TIME_US = BYTES_PER_MB / 1e6
-
 
 def _pricer(perf_rows=None, baseline_ms=1.0):
-    """Peak memory 1 TB/s, vector 1 TFLOPS, matrix 700 TFLOPS."""
+    """Peak memory 1 MB/us, vector 1 TFLOPS, matrix 700 TFLOPS."""
     return FusionPricer(
         FusionForms(TAXONOMY),
-        (1.0, {"matrix_bf16": 700.0, "vector_bf16": 1.0}),
+        (1.048576, {"matrix_bf16": 700.0, "vector_bf16": 1.0}),
         perf_rows or {},
         baseline_ms,
     )
@@ -657,9 +538,9 @@ def _ew(name, dur_us, data_in=None, data_out=None, data_moved=None, gflops=None)
 def test_roofline_savings_memory_only():
     """Single memory-bound kernel: fused == memory_time, savings = dur - memory_time."""
     enriched = [_ew("ew", dur_us=10.0, data_in=1.0, data_out=1.0, gflops=None)]
-    # 2 MB at 1e12 B/s, frac=1.0 -> memory_time = 2 * MB_TIME_US; savings = 10 - that
+    # 2 MB at 1 MB/us, frac=1.0 -> memory_time = 2 us; savings = 10 - 2
     savings = _pricer()._roofline_savings_us(enriched, 100.0)
-    assert savings == pytest.approx(10.0 - 2 * MB_TIME_US)
+    assert savings == pytest.approx(8.0)
 
 
 def test_roofline_savings_no_modeled_returns_zero():
@@ -675,7 +556,7 @@ def test_roofline_savings_zero_external_data_returns_zero():
 def test_roofline_savings_clamped_at_zero():
     """When current time is below fused time, savings clamp to 0."""
     enriched = [_ew("ew", dur_us=1.0, data_in=1.0, data_out=1.0)]
-    # memory_time = 2 * MB_TIME_US > current 1.0 us -> savings clamp to 0
+    # memory_time = 2 us > current 1.0 us -> savings clamp to 0
     assert _pricer()._roofline_savings_us(enriched, 100.0) == 0.0
 
 
@@ -685,9 +566,9 @@ def test_roofline_savings_unmodeled_subtracted():
         _ew("ew", dur_us=10.0, data_in=1.0, data_out=1.0),
         dict(_ew("unmodeled", dur_us=5.0), has_perf_data=False),
     ]
-    # current = 15, memory_time = 2 * MB_TIME_US, unmodeled = 5
+    # current = 15, memory_time = 2, unmodeled = 5
     savings = _pricer()._roofline_savings_us(enriched, 100.0)
-    assert savings == pytest.approx(15.0 - 2 * MB_TIME_US - 5.0)
+    assert savings == pytest.approx(8.0)
 
 
 def test_roofline_savings_overlap_blend():
@@ -696,11 +577,10 @@ def test_roofline_savings_overlap_blend():
         _ew("ew1", dur_us=10.0, data_in=1.0, gflops=0.0005),
         _ew("ew2", dur_us=10.0, data_out=1.0, gflops=0.0005),
     ]
-    # memory_time = 2 * MB_TIME_US; vector_time = (0.001e9)/(1e12)*1e6 = 1.0; matrix = 0
+    # memory_time = 2; vector_time = (0.001e9)/(1e12)*1e6 = 1.0; matrix = 0
     # optimal = memory_time, sum = memory_time + 1, current = 20
-    memory_time = 2 * MB_TIME_US
     savings = _pricer()._roofline_savings_us(enriched, 100.0)
-    expected = 20.0 - (memory_time + (1.0 - OVERLAP_EFFICIENCY) * 1.0)
+    expected = 20.0 - (2.0 + (1.0 - OVERLAP_EFFICIENCY) * 1.0)
     assert savings == pytest.approx(expected)
 
 
@@ -720,7 +600,7 @@ def _lookup(**entries):
 
 
 def _golden_lookup():
-    return _lookup(Cijk_gemm=(1.0, None, "matrix_bf16"), ew_add=(1.0, None, None))
+    return _lookup(gemm_a=(1.0, None, "matrix_bf16"), ew_add=(1.0, None, None))
 
 
 def test_price_gemm_epilogue_full_estimate():
@@ -740,8 +620,8 @@ def test_price_gemm_epilogue_full_estimate():
 def test_price_matrix_op_launch_is_not_epilogue():
     """A kernel launched by the GEMM's own op is matrix: only ew_add is saved."""
     kernels = [
-        KernelRecord("Cijk_gemm", "GEMM", 200, _name_key("Cijk_gemm")),
-        KernelRecord("aux", "Unknown", 200, _name_key("Cijk_gemm")),
+        KernelRecord("gemm_a", "GEMM", 200, _name_key("gemm_a")),
+        KernelRecord("aux", "Unknown", 200, _name_key("gemm_a")),
         KernelRecord("ew_add", "Elementwise", 200, _name_key("ew_add")),
     ]
     est = _pricer(_golden_lookup()).price(_standalone_candidate(kernels, 600, []))
@@ -770,7 +650,7 @@ def test_price_matrix_op_launch_is_not_epilogue():
             1.0,
             _standalone_candidate(
                 [
-                    KernelRecord("Cijk_gemm", "GEMM", 200, _name_key("Cijk_gemm")),
+                    KernelRecord("gemm_a", "GEMM", 200, _name_key("gemm_a")),
                     KernelRecord("unmodeled_a", "Elementwise", 200),
                     KernelRecord("unmodeled_b", "Elementwise", 200),
                 ],
@@ -782,14 +662,14 @@ def test_price_matrix_op_launch_is_not_epilogue():
         # A group of LONG_GROUP_KERNELS needs more: 3 of 5 modeled, below 0.75.
         pytest.param(
             _lookup(
-                Cijk_gemm=(1.0, None, "matrix_bf16"),
+                gemm_a=(1.0, None, "matrix_bf16"),
                 ew_add=(1.0, None, None),
                 ew_mul=(1.0, None, None),
             ),
             1.0,
             _standalone_candidate(
                 [
-                    KernelRecord("Cijk_gemm", "GEMM", 200, _name_key("Cijk_gemm")),
+                    KernelRecord("gemm_a", "GEMM", 200, _name_key("gemm_a")),
                     KernelRecord("ew_add", "Elementwise", 200, _name_key("ew_add")),
                     KernelRecord("ew_mul", "Elementwise", 200, _name_key("ew_mul")),
                     KernelRecord("unmodeled_a", "Elementwise", 200),

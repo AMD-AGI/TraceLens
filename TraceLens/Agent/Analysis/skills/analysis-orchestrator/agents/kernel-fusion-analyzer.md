@@ -120,15 +120,7 @@ Write `<output_dir>/system_findings/kernel_fusion_findings.md` using the command
 
 **Pay particular attention to § Impact markers (REQUIRED) in [`sub_agent_spec.md`](../templates/sub_agent_spec.md).** Every P-item `**Impact**` line and every Detailed Analysis `**Impact estimate:**` two-bullet block must be wrapped in `<!-- impact-begin kind=... -->` ... `<!-- impact-end -->` markers using the `low`/`mid`/`high` impact_score values from `category_data/kernel_fusion_metrics.json::impact_estimates[]`.
 
-Number findings P1, P2, P3... sequentially by impact_score (highest first). The icon is set ONLY by the `confidence` field in `kernel_fusion_metrics.json`:
-
-| Confidence | Icon |
-|------------|------|
-| high       | 🔴   |
-| medium     | 🟡   |
-| low        | 🟢   |
-
-Example: if the highest-savings finding has LOW confidence, write `### 🟢 P1:`. Two HIGH findings in a row are `### 🔴 P1:` and `### 🔴 P2:` (both red).
+Number findings P1, P2, P3... sequentially by impact_score (highest first). Icons are assigned by PRIORITY NUMBER (not severity or confidence): P1=🔴, P2=🟡, P3+=🟢.
 
 **Title format:** `### <icon> P<N>: <Pattern Name>`, where `<Pattern Name>` follows Step 2.
 
@@ -165,7 +157,7 @@ Found N kernel fusion opportunities across M module types.
 **Impact**: impact_score: X.X
 <!-- impact-end -->
 
-**Confidence**: High/Medium/Low (as in `confidence`) -- <brief reason>
+**Confidence**: <High/Medium/Low, from `confidence`> -- <brief reason>
 
 ## Detailed Analysis
 
