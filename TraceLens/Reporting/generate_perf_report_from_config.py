@@ -6,32 +6,38 @@
 
 """Run one TraceLens perf report per job from a YAML config.
 
-    python -m TraceLens.Reporting.generate_perf_report_from_config --config run.yaml
+    TraceLens_generate_perf_report_from_config --config run.yaml
 
 The config is validated in full before any trace is opened. ``analysis_mode``
 selects the report function:
 
-* ``default`` — ``generate_perf_report_pytorch``
-* ``inference_graph_capture``, ``spec_dec``, ``pd_disaggregation`` —
-  ``generate_perf_report_pytorch_inference``
+* ``default`` — ``generate_perf_report_pytorch`` (training and plain PyTorch)
+* ``inference`` — ``generate_perf_report_pytorch_inference``. Set a job's
+  ``capture_folder`` for graph capture traces. Speculative-decoding drafter
+  graphs live in the same capture folder. Prefill and decode are separate jobs.
 
-``spec_dec`` and ``pd_disaggregation`` do not have dedicated report functions
-yet. Both run the inference report. ``spec_decode`` (method, num_spec_tokens)
-is checked and kept on the plan, and is not forwarded as a kwarg.
-``pd_disaggregation`` names each workbook ``perf_report_<role>_rank<r>``.
-
-Top-level keys other than ``analysis_mode``, ``output_dir``, ``jobs``, and
-``spec_decode`` must be parameter names of the selected report function.
-They apply to every job. These recipe flags default on when that function
-accepts them, unless the YAML sets them:
+Top-level keys other than ``analysis_mode``, ``output_dir``, and ``jobs`` must
+be parameter names of the selected report function. They apply to every job.
+These recipe flags default on when that function accepts them, unless the YAML
+sets them:
 
 * ``enable_pseudo_ops``
 * ``group_by_num_kernels``
 * ``include_call_stack``
 * ``group_by_parent_module``
 
-Comparison stays outside this wrapper: pass one trace per job, then run the
-compare step separately.
+Every other flag keeps the value the matching CLI passes when the flag is not
+given. For ``inference`` that turns ``collective_analysis`` off.
+
+A job's ``compare_to`` behaves like ``comparison_json_path``: it adds diff
+columns and a ``diff_stats`` sheet to that job's report and writes nothing for
+the compared trace.
+
+One job writes ``perf_report.xlsx`` and ``perf_report_csvs/``. With more than
+one job, every job needs a ``name`` and writes ``perf_report_<name>.xlsx`` and
+``perf_report_<name>_csvs/``. Before the first job runs, the config is written
+back as ``run_config.resolved.yaml`` with every flag explicit and absolute
+paths. Jobs run in order, and the first failure stops the run.
 """
 
 import argparse
@@ -44,26 +50,34 @@ import yaml
 
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
 
-_CONFIG_KEYS = frozenset({"analysis_mode", "output_dir", "jobs", "spec_decode"})
-_JOB_KEYS = frozenset({"trace_path", "platform", "capture_folder", "role", "rank"})
-_MODES = (
-    "default",
-    "inference_graph_capture",
-    "spec_dec",
-    "pd_disaggregation",
+_CONFIG_KEYS = frozenset({"analysis_mode", "output_dir", "jobs"})
+_JOB_KEYS = frozenset(
+    {
+        "name",
+        "trace_path",
+        "platform",
+        "gpu_arch_json_path",
+        "capture_folder",
+        "compare_to",
+        "precomputed_diff_stats",
+    }
 )
-_INFERENCE_MODES = frozenset(
-    {"inference_graph_capture", "spec_dec", "pd_disaggregation"}
-)
-_SPEC_METHODS = frozenset({"eagle", "eagle3", "mtp"})
+_COMPARE_KEYS = frozenset({"trace_path", "capture_folder"})
+_MODES = ("default", "inference")
 _RECIPE_DEFAULTS = {
     "enable_pseudo_ops": True,
     "group_by_num_kernels": True,
     "include_call_stack": True,
     "group_by_parent_module": True,
 }
-# Derived by the wrapper, or owned by the separate compare step.
-_REJECTED_KWARGS = frozenset(
+# Where a CLI passes a different value than its function's default. The
+# inference CLI never enables collective analysis.
+_CLI_DEFAULTS = {
+    "default": {},
+    "inference": {"collective_analysis": False},
+}
+RESOLVED_CONFIG_NAME = "run_config.resolved.yaml"
+_WRAPPER_KWARGS = frozenset(
     {
         "profile_json_path",
         "output_xlsx_path",
@@ -77,7 +91,9 @@ _REJECTED_KWARGS = frozenset(
         "precomputed_diff_stats",
     }
 )
-_ROLE_OK = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+_NAME_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
+)
 
 
 class ConfigError(ValueError):
@@ -86,18 +102,20 @@ class ConfigError(ValueError):
 
 @dataclass
 class PlannedJob:
-    """One validated report call. ``kwargs`` does not include path or arch fields."""
+    """One validated report call. ``kwargs`` holds the shared report flags."""
 
     analysis_mode: str
+    name: Optional[str]
     trace_path: str
-    platform: str
+    platform: Optional[str]
+    gpu_arch_json_path: Optional[str]
     capture_folder: Optional[str]
-    role: Optional[str]
-    rank: Optional[int]
+    compare_trace_path: Optional[str]
+    compare_capture_folder: Optional[str]
+    precomputed_diff_stats: Optional[str]
     output_xlsx_path: str
     output_csvs_dir: str
     kwargs: Dict[str, Any] = field(default_factory=dict)
-    spec_decode: Optional[Dict[str, Any]] = None
 
 
 def load_run_config(path: str) -> dict:
@@ -130,54 +148,33 @@ def plan_reports(config: Mapping[str, Any]) -> List[PlannedJob]:
     output_dir = config.get("output_dir")
     if not isinstance(output_dir, str) or not output_dir.strip():
         raise ConfigError("output_dir is required and must be a non-empty string.")
+    output_dir = os.path.abspath(output_dir)
 
     jobs = config.get("jobs")
     if not isinstance(jobs, list) or not jobs:
         raise ConfigError("jobs is required and must be a non-empty list.")
 
-    spec_decode = _validate_spec_decode(config.get("spec_decode"), mode)
-    report_fn = _report_targets()[mode]
-    accepted = _accepted_params(report_fn)
-    kwargs = _report_kwargs(config, accepted)
+    accepted = _accepted_params(_report_targets()[mode])
+    kwargs = _report_kwargs(config, accepted, _CLI_DEFAULTS[mode])
 
-    parsed_jobs: List[dict] = []
-    seen_pd = set()
-    stems: List[str] = []
-    for index, job in enumerate(jobs):
-        parsed = _validate_job(job, index, mode)
-        if mode == "pd_disaggregation":
-            key = (parsed["role"], parsed["rank"])
-            if key in seen_pd:
-                raise ConfigError(
-                    f"duplicate PD job role={parsed['role']!r} rank={parsed['rank']}."
-                )
-            seen_pd.add(key)
-        else:
-            stems.append(_unique_stem(_trace_stem(parsed["trace_path"]), stems))
-        parsed_jobs.append(parsed)
-
-    output_dir = os.path.abspath(output_dir)
+    multi = len(jobs) > 1
+    names = set()
     planned: List[PlannedJob] = []
-    for index, parsed in enumerate(parsed_jobs):
-        xlsx_path, csvs_dir = _output_paths(
-            output_dir,
-            mode,
-            parsed,
-            stems[index] if stems else None,
-            len(parsed_jobs),
-        )
+    for index, job in enumerate(jobs):
+        parsed = _validate_job(job, index, mode, require_name=multi)
+        name = parsed["name"]
+        if name is not None:
+            if name in names:
+                raise ConfigError(f"duplicate job name {name!r}.")
+            names.add(name)
+        stem = "perf_report" if name is None else f"perf_report_{name}"
         planned.append(
             PlannedJob(
                 analysis_mode=mode,
-                trace_path=parsed["trace_path"],
-                platform=parsed["platform"],
-                capture_folder=parsed["capture_folder"],
-                role=parsed["role"],
-                rank=parsed["rank"],
-                output_xlsx_path=xlsx_path,
-                output_csvs_dir=csvs_dir,
+                output_xlsx_path=os.path.join(output_dir, stem + ".xlsx"),
+                output_csvs_dir=os.path.join(output_dir, stem + "_csvs"),
                 kwargs=dict(kwargs),
-                spec_decode=dict(spec_decode) if spec_decode else None,
+                **parsed,
             )
         )
     return planned
@@ -198,24 +195,86 @@ def run_config(
     plans = plan_reports(config)
     selected = dict(_report_targets() if runners is None else runners)
     merge = _merge_capture if merge_capture is None else merge_capture
+    output_dir = os.path.dirname(plans[0].output_xlsx_path)
+    os.makedirs(output_dir, exist_ok=True)
+    with open(
+        os.path.join(output_dir, RESOLVED_CONFIG_NAME), "w", encoding="utf-8"
+    ) as handle:
+        yaml.safe_dump(_resolved_from_plans(plans), handle, sort_keys=False)
     results = []
-    for plan in plans:
+    for index, plan in enumerate(plans, start=1):
+        print(
+            f"[{index}/{len(plans)}] {plan.name or 'report'}: "
+            f"{plan.trace_path} -> {plan.output_xlsx_path}"
+        )
         if plan.analysis_mode not in selected:
             raise ConfigError(
                 f"no report function registered for analysis_mode {plan.analysis_mode!r}."
             )
-        fn = selected[plan.analysis_mode]
         call = dict(plan.kwargs)
         call["profile_json_path"] = plan.trace_path
         call["output_xlsx_path"] = plan.output_xlsx_path
         call["output_csvs_dir"] = plan.output_csvs_dir
-        call["gpu_arch_platform"] = plan.platform
+        if plan.platform is not None:
+            call["gpu_arch_platform"] = plan.platform
+        else:
+            call["gpu_arch_json_path"] = plan.gpu_arch_json_path
         if plan.capture_folder is not None:
             call["augmented_tree"] = merge(plan.capture_folder, plan.trace_path)
-        os.makedirs(plan.output_csvs_dir, exist_ok=True)
-        os.makedirs(os.path.dirname(plan.output_xlsx_path), exist_ok=True)
-        results.append(fn(**call))
+        if plan.compare_trace_path is not None:
+            call["comparison_json_path"] = plan.compare_trace_path
+        if plan.compare_capture_folder is not None:
+            call["comparison_augmented_tree"] = merge(
+                plan.compare_capture_folder, plan.compare_trace_path
+            )
+        if plan.precomputed_diff_stats is not None:
+            call["precomputed_diff_stats"] = plan.precomputed_diff_stats
+        results.append(selected[plan.analysis_mode](**call))
     return results
+
+
+def resolve_config(config: Mapping[str, Any]) -> dict:
+    """Return ``config`` as a runnable YAML dict with every report flag explicit.
+
+    Paths are absolute. This is what ``run_config`` writes to
+    ``<output_dir>/run_config.resolved.yaml`` before the first job runs.
+    """
+    return _resolved_from_plans(plan_reports(config))
+
+
+def _resolved_from_plans(plans: List[PlannedJob]) -> dict:
+    mode = plans[0].analysis_mode
+    params = inspect.signature(_report_targets()[mode]).parameters
+    flags = {
+        name: plans[0].kwargs.get(name, params[name].default)
+        for name in _accepted_params(_report_targets()[mode])
+        if name not in _WRAPPER_KWARGS
+    }
+    jobs = []
+    for plan in plans:
+        job = {}
+        if plan.name is not None:
+            job["name"] = plan.name
+        job["trace_path"] = plan.trace_path
+        if plan.platform is not None:
+            job["platform"] = plan.platform
+        else:
+            job["gpu_arch_json_path"] = plan.gpu_arch_json_path
+        if plan.capture_folder is not None:
+            job["capture_folder"] = plan.capture_folder
+        if plan.compare_trace_path is not None:
+            job["compare_to"] = {"trace_path": plan.compare_trace_path}
+            if plan.compare_capture_folder is not None:
+                job["compare_to"]["capture_folder"] = plan.compare_capture_folder
+        if plan.precomputed_diff_stats is not None:
+            job["precomputed_diff_stats"] = plan.precomputed_diff_stats
+        jobs.append(job)
+    return {
+        "analysis_mode": mode,
+        "output_dir": os.path.dirname(plans[0].output_xlsx_path),
+        **flags,
+        "jobs": jobs,
+    }
 
 
 def run_config_file(path: str, **kwargs) -> List[Any]:
@@ -247,12 +306,7 @@ def _report_targets() -> Dict[str, Callable]:
         generate_perf_report_pytorch as inference_report,
     )
 
-    return {
-        "default": training_report,
-        "inference_graph_capture": inference_report,
-        "spec_dec": inference_report,
-        "pd_disaggregation": inference_report,
-    }
+    return {"default": training_report, "inference": inference_report}
 
 
 def _accepted_params(fn: Callable) -> set:
@@ -268,58 +322,33 @@ def _accepted_params(fn: Callable) -> set:
     }
 
 
-def _report_kwargs(config: Mapping[str, Any], accepted: set) -> Dict[str, Any]:
-    unknown = sorted(set(config) - _CONFIG_KEYS - accepted)
-    rejected = sorted(set(config) & _REJECTED_KWARGS)
-    if unknown or rejected:
+def _report_kwargs(
+    config: Mapping[str, Any], accepted: set, cli_defaults: Mapping[str, Any]
+) -> Dict[str, Any]:
+    wrapper = sorted(set(config) & _WRAPPER_KWARGS)
+    unknown = sorted(set(config) - _CONFIG_KEYS - _WRAPPER_KWARGS - accepted)
+    if wrapper or unknown:
         details = []
+        if wrapper:
+            details.append(
+                "keys that belong on a job or are set by the wrapper: "
+                + ", ".join(wrapper)
+            )
         if unknown:
             details.append(
                 "unknown keys (not config fields or report parameters): "
                 + ", ".join(unknown)
             )
-        if rejected:
-            details.append(
-                "keys set by the wrapper or the separate compare step: "
-                + ", ".join(rejected)
-            )
         raise ConfigError("; ".join(details) + ".")
 
     kwargs = {key: config[key] for key in config if key in accepted}
-    for key, value in _RECIPE_DEFAULTS.items():
+    for key, value in {**cli_defaults, **_RECIPE_DEFAULTS}.items():
         if key in accepted and key not in kwargs:
             kwargs[key] = value
     return kwargs
 
 
-def _validate_spec_decode(spec: Any, mode: str) -> Optional[dict]:
-    if mode != "spec_dec":
-        if spec is not None:
-            raise ConfigError(
-                "spec_decode is only valid when analysis_mode is spec_dec."
-            )
-        return None
-    if not isinstance(spec, dict):
-        raise ConfigError(
-            "spec_dec requires spec_decode with method and num_spec_tokens."
-        )
-    extra = sorted(set(spec) - {"method", "num_spec_tokens"})
-    if extra:
-        raise ConfigError("unknown spec_decode keys: " + ", ".join(extra) + ".")
-    method = spec.get("method")
-    if method not in _SPEC_METHODS:
-        raise ConfigError(
-            "spec_decode.method must be one of: "
-            + ", ".join(sorted(_SPEC_METHODS))
-            + "."
-        )
-    tokens = spec.get("num_spec_tokens")
-    if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 1:
-        raise ConfigError("spec_decode.num_spec_tokens must be an integer >= 1.")
-    return {"method": method, "num_spec_tokens": tokens}
-
-
-def _validate_job(job: Any, index: int, mode: str) -> dict:
+def _validate_job(job: Any, index: int, mode: str, *, require_name: bool) -> dict:
     where = f"jobs[{index}]"
     if not isinstance(job, dict):
         raise ConfigError(f"{where} must be a mapping.")
@@ -330,103 +359,103 @@ def _validate_job(job: Any, index: int, mode: str) -> dict:
             "Report flags belong at the top level."
         )
 
-    trace_path = job.get("trace_path")
-    if not isinstance(trace_path, str) or not trace_path.strip():
-        raise ConfigError(f"{where}.trace_path is required and must be a string.")
-    if not os.path.isfile(trace_path):
-        raise ConfigError(f"{where}.trace_path not found: {trace_path}")
+    name = job.get("name")
+    if name is None:
+        if require_name:
+            raise ConfigError(
+                f"{where}.name is required when there is more than one job."
+            )
+    elif (
+        not isinstance(name, str)
+        or not name
+        or any(ch not in _NAME_CHARS for ch in name)
+    ):
+        raise ConfigError(
+            f"{where}.name must contain only letters, digits, '_', '-' or '.'."
+        )
+
+    trace_path = _existing_file(job.get("trace_path"), f"{where}.trace_path")
 
     platform = job.get("platform")
-    if not isinstance(platform, str) or not platform.strip():
-        raise ConfigError(f"{where}.platform is required and must be a string.")
-    known = list_platforms()
-    if platform not in known:
+    arch_path = job.get("gpu_arch_json_path")
+    if (platform is None) == (arch_path is None):
         raise ConfigError(
-            f"{where}.platform {platform!r} is not a known arch "
-            f"({', '.join(known)})."
+            f"{where} needs exactly one of platform or gpu_arch_json_path."
         )
-
-    capture = job.get("capture_folder", None)
-    if capture is None:
-        capture_folder = None
-    elif not isinstance(capture, str) or not capture.strip():
-        raise ConfigError(f"{where}.capture_folder must be a non-empty string.")
-    elif not os.path.isdir(capture):
-        raise ConfigError(f"{where}.capture_folder not found: {capture}")
+    if platform is not None:
+        known = list_platforms()
+        if platform not in known:
+            raise ConfigError(
+                f"{where}.platform {platform!r} is not a known arch "
+                f"({', '.join(known)}). Use gpu_arch_json_path or TL_EXTENSION."
+            )
     else:
-        capture_folder = capture
+        arch_path = _existing_file(arch_path, f"{where}.gpu_arch_json_path")
 
-    if mode == "default" and capture_folder is not None:
-        raise ConfigError(f"{where}.capture_folder is only valid for inference modes.")
-
-    role = job.get("role", None)
-    rank = job.get("rank", None)
-    if mode == "pd_disaggregation":
-        if (
-            not isinstance(role, str)
-            or not role
-            or any(ch not in _ROLE_OK for ch in role)
-        ):
-            raise ConfigError(
-                f"{where}.role is required for pd_disaggregation "
-                "and must contain only letters, digits, '_' or '-'."
-            )
-        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
-            raise ConfigError(
-                f"{where}.rank is required for pd_disaggregation "
-                "and must be an integer >= 0."
-            )
-    elif role is not None or rank is not None:
+    capture_folder = _optional_dir(job.get("capture_folder"), f"{where}.capture_folder")
+    if capture_folder is not None and mode != "inference":
         raise ConfigError(
-            f"{where}.role and rank are only valid for analysis_mode pd_disaggregation."
+            f"{where}.capture_folder is only valid for analysis_mode inference."
         )
+
+    compare_trace = None
+    compare_capture = None
+    compare = job.get("compare_to")
+    if compare is not None:
+        if not isinstance(compare, dict):
+            raise ConfigError(f"{where}.compare_to must be a mapping.")
+        extra = sorted(set(compare) - _COMPARE_KEYS)
+        if extra:
+            raise ConfigError(
+                f"{where}.compare_to has unknown keys: " + ", ".join(extra) + "."
+            )
+        compare_trace = _existing_file(
+            compare.get("trace_path"), f"{where}.compare_to.trace_path"
+        )
+        compare_capture = _optional_dir(
+            compare.get("capture_folder"), f"{where}.compare_to.capture_folder"
+        )
+        if compare_capture is not None and mode != "inference":
+            raise ConfigError(
+                f"{where}.compare_to.capture_folder is only valid for analysis_mode inference."
+            )
+
+    diff_stats = job.get("precomputed_diff_stats")
+    if diff_stats is not None:
+        if compare is not None:
+            raise ConfigError(
+                f"{where} cannot set both compare_to and precomputed_diff_stats."
+            )
+        diff_stats = _existing_file(diff_stats, f"{where}.precomputed_diff_stats")
 
     return {
-        "trace_path": os.path.abspath(trace_path),
+        "name": name,
+        "trace_path": trace_path,
         "platform": platform,
-        "capture_folder": (
-            os.path.abspath(capture_folder) if capture_folder is not None else None
-        ),
-        "role": role if mode == "pd_disaggregation" else None,
-        "rank": rank if mode == "pd_disaggregation" else None,
+        "gpu_arch_json_path": arch_path,
+        "capture_folder": capture_folder,
+        "compare_trace_path": compare_trace,
+        "compare_capture_folder": compare_capture,
+        "precomputed_diff_stats": diff_stats,
     }
 
 
-def _output_paths(output_dir, mode, parsed, stem, n_jobs):
-    if mode == "pd_disaggregation":
-        name = f"perf_report_{parsed['role']}_rank{parsed['rank']}"
-        return (
-            os.path.join(output_dir, name + ".xlsx"),
-            os.path.join(output_dir, name + "_csvs"),
-        )
-    if n_jobs == 1:
-        return (
-            os.path.join(output_dir, "perf_report.xlsx"),
-            os.path.join(output_dir, "csvs"),
-        )
-    job_dir = os.path.join(output_dir, stem)
-    return (
-        os.path.join(job_dir, "perf_report.xlsx"),
-        os.path.join(job_dir, "csvs"),
-    )
+def _existing_file(value: Any, where: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{where} is required and must be a string.")
+    if not os.path.isfile(value):
+        raise ConfigError(f"{where} not found: {value}")
+    return os.path.abspath(value)
 
 
-def _trace_stem(path: str) -> str:
-    name = os.path.basename(path)
-    if name.endswith(".json.gz"):
-        name = name[: -len(".json.gz")]
-    elif name.endswith(".json"):
-        name = name[: -len(".json")]
-    return name or "trace"
-
-
-def _unique_stem(base: str, used: List[str]) -> str:
-    if base not in used:
-        return base
-    index = 2
-    while f"{base}_{index}" in used:
-        index += 1
-    return f"{base}_{index}"
+def _optional_dir(value: Any, where: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{where} must be a non-empty string.")
+    if not os.path.isdir(value):
+        raise ConfigError(f"{where} not found: {value}")
+    return os.path.abspath(value)
 
 
 def _merge_capture(capture_folder: str, trace_path: str):

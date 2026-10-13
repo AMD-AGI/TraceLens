@@ -74,40 +74,21 @@ Generate one report per job from a YAML file. The same entry point is
 |----------|---------|-------------|
 | `--config` | required | Path to the run YAML. |
 
-The file is checked in full before any trace is opened.
+| Key | Required | Description |
+|-----|----------|-------------|
+| `analysis_mode` | yes | `default` (calls the `TraceLens_generate_perf_report_pytorch` report) or `inference` (calls the `TraceLens_generate_perf_report_pytorch_inference` report). |
+| `output_dir` | yes | Directory for the reports and `run_config.resolved.yaml`. |
+| `jobs[].name` | more than one job | Output names become `perf_report_<name>.xlsx` and `perf_report_<name>_csvs/`. |
+| `jobs[].trace_path` | yes | Trace to analyze. |
+| `jobs[].platform`, `jobs[].gpu_arch_json_path` | exactly one | Architecture name, or path to an architecture JSON file. |
+| `jobs[].capture_folder` | no | Graph-capture folder. `inference` only. |
+| `jobs[].compare_to` | no | `trace_path` and, in `inference`, `capture_folder` of a trace to compare against. |
+| `jobs[].precomputed_diff_stats` | no | `diff_stats.csv` to use instead of TraceDiff. |
+| any report parameter | no | Top-level, by Python name. Applies to every job. |
 
-| Key | Required | Meaning |
-|-----|----------|---------|
-| `analysis_mode` | yes | `default`, `inference_graph_capture`, `spec_dec`, or `pd_disaggregation`. |
-| `output_dir` | yes | Directory for the workbook and CSV files. |
-| `jobs[].trace_path` | yes | Trace passed as `profile_json_path`. |
-| `jobs[].platform` | yes | Bundled or `TL_EXTENSION` arch name, resolved with `load_arch`. |
-| `jobs[].capture_folder` | no | Graph-capture folder. Inference modes only. |
-| `jobs[].role`, `jobs[].rank` | PD only | Workbook is named `perf_report_<role>_rank<r>`. |
-| `spec_decode` | `spec_dec` only | `method` (`eagle`, `eagle3`, or `mtp`) and `num_spec_tokens`. |
-| any report parameter | no | Top-level key with the same name as the selected function's parameter. Applies to every job. |
-
-`default` calls the training report. The other three modes call the inference
-report. `spec_dec` and `pd_disaggregation` don't have their own report
-functions yet: `spec_decode` is validated and isn't forwarded, and PD only
-changes the output name.
-
-Unless the YAML turns them off, these flags default on when the selected
-function accepts them: `enable_pseudo_ops`, `group_by_num_kernels`,
-`include_call_stack`, and `group_by_parent_module`.
-
-Compare two traces by running this wrapper once per trace, then the compare
-step. `comparison_json_path` isn't accepted here.
-
-```yaml
-analysis_mode: default
-output_dir: /data/llama_train/analysis_output
-include_call_stack: false
-kernel_summary: true
-jobs:
-  - trace_path: /data/llama_train/trace.json.gz
-    platform: MI300X
-```
+**Output:** one report per job. See
+[Generate performance reports from a YAML config](../how-to/generate-perf-report-from-config.md)
+for defaults and examples.
 
 ### TraceLens_generate_perf_report_jax
 
