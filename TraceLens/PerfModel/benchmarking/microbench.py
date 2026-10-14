@@ -8,7 +8,7 @@
 """GPU Microbenchmarking Suite.
 
 Measures matrix TFLOPS (PyTorch GEMM), vector TFLOPS (Triton FMA chain), and
-HBM bandwidth. Writes JSON in the ``results/MI300X.json`` shape. Methodology:
+memory bandwidth. Writes JSON in the ``results/MI300X.json`` shape. Methodology:
 do_bench, L2 clear, warmup=30 rep=200, normal-distributed inputs, median ms.
 
 Examples:
@@ -33,7 +33,7 @@ Examples:
     # Override idle check (run even if the GPU shows activity)
     python -m TraceLens.PerfModel.benchmarking.microbench --device 0 --allow-busy
 
-    # Large GEMM + multi-GB HBM sweep
+    # Large GEMM + multi-GB memory bandwidth sweep
     python -m TraceLens.PerfModel.benchmarking.microbench --device 0 \\
         --shape-sweep --sweep-output sweeps/mi355x.json
 """
@@ -41,6 +41,7 @@ Examples:
 import argparse
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -48,6 +49,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from triton.testing import do_bench
 
+from ..utils import gemm_tflops
 from .microbench_utils import check_gpu_idle
 
 logger = logging.getLogger(__name__)
@@ -153,7 +155,7 @@ GEMM_SHAPES_SWEEP_TILE304: List[Tuple[int, int, int]] = [
     (8192, 4864, 6878),
 ]
 
-# Extended HBM sweep: multi-GB transfers to approach device HBM ceiling.
+# Extended memory bandwidth sweep: multi-GB transfers to approach the device ceiling.
 BW_SIZES_SWEEP_LARGE: List[int] = [
     4 * 1024 * 1024 * 1024,
     8 * 1024 * 1024 * 1024,
@@ -168,6 +170,12 @@ def _bpe(dtype: torch.dtype) -> int:
 
 def _arch_product_name(gpu_name: str, mem_gb: float) -> str:
     """Short name to match arch JSONs like `MI300X.json` (e.g. 'MI300X')."""
+    # Client parts report e.g. "AMD Radeon 8060S Graphics": the model sits
+    # between the brand and the trailing "Graphics", which names no model.
+    match = re.search(r"\bRadeon\s+(.+?)\s+Graphics\b", gpu_name, re.IGNORECASE)
+    if match:
+        return "_".join(["Radeon", *match.group(1).split()])
+
     # ROCm containers often report a generic device string; use memory tier as hint.
     mem = int(round(mem_gb))
     if mem >= 280:
@@ -218,7 +226,7 @@ def bench_gemm(M: int, N: int, K: int, dtype: torch.dtype, device: int = 0) -> f
     B = torch.randn(K, N, dtype=dtype, device=dev)
 
     ms = do_bench(lambda: torch.matmul(A, B), warmup=WARMUP, rep=REP)
-    tflops = _gemm_flops(M, N, K) / (ms * 1e-3) / 1e12
+    tflops = gemm_tflops(M, N, K, ms)
     return tflops
 
 
@@ -293,7 +301,7 @@ def bench_gemm_fp8(M: int, N: int, K: int, device: int = 0) -> float:
         print(f"    FP8 scaled_mm failed ({e})")
         return 0.0
 
-    return _gemm_flops(M, N, K) / (ms * 1e-3) / 1e12
+    return gemm_tflops(M, N, K, ms)
 
 
 def bench_gemm_int8(M: int, N: int, K: int, device: int = 0) -> float:
@@ -315,7 +323,7 @@ def bench_gemm_int8(M: int, N: int, K: int, device: int = 0) -> float:
         print(f"    INT8 _int_mm failed: {e}")
         return 0.0
 
-    return _gemm_flops(M, N, K) / (ms * 1e-3) / 1e12
+    return gemm_tflops(M, N, K, ms)
 
 
 def _bench_mx_matrix_peak(
@@ -703,19 +711,19 @@ else:
         return results
 
 
-# ── HBM Bandwidth benchmark ──────────────────────────────────────────
+# ── Memory Bandwidth benchmark ───────────────────────────────────────
 
 
-def bench_hbm_bandwidth(
+def bench_mem_bandwidth(
     device: int = 0,
     sizes: Optional[List[int]] = None,
 ) -> Dict[str, float]:
-    """Measure HBM read and write bandwidth via tensor copy."""
+    """Measure memory read and write bandwidth via tensor copy."""
     dev = f"cuda:{device}"
     nbytes_list = sizes if sizes is not None else BW_SIZES
     results: Dict[str, float] = {}
 
-    print("\n  [HBM Read Bandwidth (copy src → dst)]")
+    print("\n  [Memory Read Bandwidth (copy src → dst)]")
     best_read = 0.0
     for nbytes in nbytes_list:
         n_elem = nbytes // 4  # float32
@@ -731,7 +739,7 @@ def bench_hbm_bandwidth(
     results["read_bw_gbps"] = round(best_read, 1)
     print(f"    Best: {best_read:.1f} GB/s")
 
-    print("\n  [HBM Write Bandwidth (fill)]")
+    print("\n  [Memory Write Bandwidth (fill)]")
     best_write = 0.0
     for nbytes in nbytes_list:
         n_elem = nbytes // 4
@@ -872,11 +880,11 @@ def _sweep_shapes_on_list(
     return all_rows, _best_per_metric(all_rows)
 
 
-def bench_hbm_bandwidth_sweep(
+def bench_mem_bandwidth_sweep(
     device: int = 0,
     sizes: Optional[List[int]] = None,
 ) -> Tuple[List[Dict[str, object]], Dict[str, float]]:
-    """Per-size HBM read/write; returns rows and bests."""
+    """Per-size memory read/write; returns rows and bests."""
     nbytes_list = sizes if sizes is not None else BW_SIZES_SWEEP_LARGE
     dev = f"cuda:{device}"
     rows: List[Dict[str, object]] = []
@@ -885,7 +893,7 @@ def bench_hbm_bandwidth_sweep(
     best_read_n = 0
     best_write_n = 0
 
-    print(f"\n── HBM sweep: large transfers ({len(nbytes_list)} sizes) ──")
+    print(f"\n── Memory bandwidth sweep: large transfers ({len(nbytes_list)} sizes) ──")
     for nbytes in nbytes_list:
         n_elem = nbytes // 4
         read_gbps = 0.0
@@ -963,11 +971,11 @@ def run_shape_sweep(
     *,
     include_large: bool = True,
     include_tile304: bool = True,
-    include_hbm: bool = True,
+    include_mem: bool = True,
     include_production: bool = True,
 ) -> Dict[str, object]:
     """
-    Sweep candidate GEMM shapes and optional HBM sizes; compare to production ``GEMM_SHAPES``.
+    Sweep candidate GEMM shapes and optional memory bandwidth sizes; compare to production ``GEMM_SHAPES``.
     """
     _FP8_DTYPE_CACHE[0] = None
 
@@ -992,10 +1000,10 @@ def run_shape_sweep(
             GEMM_SHAPES_SWEEP_TILE304, device, "tile-304 sweet shapes"
         )
 
-    hbm_rows: List[Dict[str, object]] = []
-    hbm_bests: Dict[str, float] = {}
-    if include_hbm:
-        hbm_rows, hbm_bests = bench_hbm_bandwidth_sweep(device, BW_SIZES_SWEEP_LARGE)
+    mem_rows: List[Dict[str, object]] = []
+    mem_bests: Dict[str, float] = {}
+    if include_mem:
+        mem_rows, mem_bests = bench_mem_bandwidth_sweep(device, BW_SIZES_SWEEP_LARGE)
 
     candidate_best = _pick_best_with_source(
         ("large", large_best),
@@ -1033,7 +1041,7 @@ def run_shape_sweep(
         )
 
     payload: Dict[str, object] = {
-        "sweep_type": "gemm_and_hbm",
+        "sweep_type": "gemm_and_mem",
         "warmup": WARMUP,
         "rep": REP,
         "production_gemm_shapes": [list(s) for s in GEMM_SHAPES],
@@ -1048,8 +1056,8 @@ def run_shape_sweep(
         "tile304_gemm_best": tile304_best,
         "candidate_gemm_best": candidate_best,
         "comparison": comparison,
-        "hbm_rows": hbm_rows,
-        "hbm_best": hbm_bests,
+        "mem_rows": mem_rows,
+        "mem_best": mem_bests,
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1111,7 +1119,7 @@ def main():
         help="If >0, do one streaming load every N iterations to estimate bandwidth at peak compute",
     )
     parser.add_argument(
-        "--skip-bandwidth", action="store_true", help="Skip HBM bandwidth benchmarks"
+        "--skip-bandwidth", action="store_true", help="Skip memory bandwidth benchmarks"
     )
     parser.add_argument(
         "--warmup",
@@ -1128,7 +1136,7 @@ def main():
     parser.add_argument(
         "--shape-sweep",
         action="store_true",
-        help="Sweep large GEMM shapes + multi-GB HBM sizes (see GEMM_SHAPES_SWEEP_LARGE)",
+        help="Sweep large GEMM shapes + multi-GB memory bandwidth sizes (see GEMM_SHAPES_SWEEP_LARGE)",
     )
     parser.add_argument(
         "--sweep-output",
@@ -1139,7 +1147,7 @@ def main():
     parser.add_argument(
         "--shape-sweep-tile304-only",
         action="store_true",
-        help="With --shape-sweep: only production + tile-304 shapes (skip large/HBM)",
+        help="With --shape-sweep: only production + tile-304 shapes (skip large/memory)",
     )
     parser.add_argument(
         "--allow-busy",
@@ -1206,7 +1214,7 @@ def main():
             sweep_out,
             include_large=not args.shape_sweep_tile304_only,
             include_tile304=True,
-            include_hbm=not args.shape_sweep_tile304_only,
+            include_mem=not args.shape_sweep_tile304_only,
             include_production=True,
         )
         return
@@ -1225,10 +1233,10 @@ def main():
     else:
         vector_results = {}
 
-    # HBM Bandwidth
+    # Memory Bandwidth
     if not args.skip_bandwidth:
-        print("\n── HBM Bandwidth ──")
-        bw_results = bench_hbm_bandwidth(device)
+        print("\n── Memory Bandwidth ──")
+        bw_results = bench_mem_bandwidth(device)
     else:
         bw_results = {}
 

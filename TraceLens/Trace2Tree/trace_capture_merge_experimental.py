@@ -29,10 +29,10 @@ from .trace_to_tree import TraceToTree
 def get_subtree_events(tree, event, cat_filter=None, name_filter=None):
     list_events = []
     list_filtered_events = []
-    queue = []
+    queue = deque()
     queue.append(event)
-    while len(queue) > 0:
-        node = queue.pop(0)
+    while queue:
+        node = queue.popleft()
         list_events.append(node)
         if cat_filter is not None:
             if tree.event_to_category(node) in cat_filter:
@@ -539,9 +539,9 @@ def find_execution_roots(graph_tree):
 
     Primary (detailed) patterns are tried first, and native (backup) patterns are used only when no primary root is found.
     """
-    from ..TraceUtils.annotation_utils import find_iteration_roots_by_priority
+    from ..TraceUtils.utils.annotation_utils import find_known_annotations
 
-    return find_iteration_roots_by_priority(graph_tree.events)
+    return find_known_annotations(graph_tree.events)
 
 
 def find_graph_roots_under_execution(execution_root, graphlaunch_events):
@@ -651,7 +651,7 @@ def find_execution_details(execution_root) -> Optional[str]:
     Returns ``None`` when no integer batch size can be determined.
     """
     name = execution_root["name"]
-    from ..TraceUtils.annotation_utils import IterationAnnotation
+    from ..TraceUtils.utils.annotation_utils import IterationAnnotation
 
     ann = IterationAnnotation(name)
     if ann.matched and ann.batch_size is not None:
@@ -663,33 +663,41 @@ def find_execution_details(execution_root) -> Optional[str]:
 
 
 def merge_capture_trace_into_graph(
-    capture_folder: str,
-    metadata_json_path: str,
-    graph_tree_filepath: str,
+    capture_folder: str = None,
+    metadata_json_path: str = None,
+    graph_tree_filepath: str = None,
+    graph_tree: "TraceToTree" = None,
 ) -> "TraceToTree":
-    """
-    Merge capture trace information into a graph replay trace.
-
-    Extracts matching subtrees from capture and graph trees, validates alignment,
-    remaps UIDs/timestamps, and integrates capture events into the graph tree.
-    The result is a single augmented TraceToTree that combines both traces,
-    suitable for standard performance analysis APIs.
+    """Merge capture trace information into a graph replay trace.
 
     Args:
-        capture_tree: TraceToTree from actual/capture execution
-        graph_tree: TraceToTree from graph/replay execution
-        add_python_func: If True, include python function events in tree structure (default: False)
+        capture_folder: Directory containing capture trace files.
+        metadata_json_path: Path to ``execution_details.json`` metadata
+            index.
+        graph_tree_filepath: Path to the graph-replay timing trace.
+        graph_tree: Optional pre-built :class:`TraceToTree`.  When provided
+            the expensive file load is skipped and this tree is used
+            directly (after ensuring it is built with ``add_python_func``).
 
     Returns:
-        Augmented graph_tree with capture information merged in
+        Augmented graph_tree with capture information merged in, or ``None``
+        if the merge failed.
     """
-    graph_tree = _load_trace_tree_from_file(graph_tree_filepath, add_python_func=True)
+    if graph_tree is None:
+        graph_tree = _load_trace_tree_from_file(
+            graph_tree_filepath, add_python_func=True
+        )
+    else:
+        graph_tree.build_tree(add_python_func=True)
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
-    ##Use cuda graph APIs to find the root node for capture subtrees
+
     execution_graph_root_map = build_execution_graph_root_map(graph_tree)
+
     capture_map, capture_batch_sizes = load_capture_folder(
         capture_folder, metadata_json_path
     )
+
+    # ── Per-execution-root merge loop ──
     merge_failed = False
     for execution_root, graph_roots in execution_graph_root_map:
         print("Processing execution root: {}".format(execution_root["name"]))
@@ -700,6 +708,8 @@ def merge_capture_trace_into_graph(
                 )
             )
             continue
+
+        # ── Resolve capture tree + roots for this execution root ──
         batch_size = find_execution_details(execution_root)
         if batch_size is None:
             print(
@@ -718,26 +728,54 @@ def merge_capture_trace_into_graph(
                 )
             )
             continue
-        num_graph_roots = len(graph_roots)
-        if num_graph_roots != 1:
-            mode = "PIECEWISE"
+        # Look up the capture trace by batch_size.  The mode (FULL vs
+        # PIECEWISE) is already determined in execution_details.json from
+        # the capture trace's StreamBeginCapture count.  Try both modes
+        # and use whichever is available; when both exist, prefer the one
+        # matching the graph launch count.
+        full_key = "{}_FULL".format(closest_batch_size)
+        piece_key = "{}_PIECEWISE".format(closest_batch_size)
+        if full_key in capture_map and piece_key in capture_map:
+            str_key = piece_key if len(graph_roots) != 1 else full_key
+        elif full_key in capture_map:
+            str_key = full_key
+        elif piece_key in capture_map:
+            str_key = piece_key
         else:
-            mode = "FULL"
-        str_key = "{}_{}".format(closest_batch_size, mode)
+            print(
+                "Warning: no capture trace for batch size {}".format(closest_batch_size)
+            )
+            continue
         filepath = capture_map[str_key]
         key = (str_key, os.path.abspath(filepath))
         capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
             key, filepath
         )
 
+        # Build (capture_root, graph_root) pairs. When there is a single
+        # capture root , map it to every graph root.
+        # Otherwise pair 1:1 positionally.
+        if len(capture_roots) == 1:
+            pairs = [(capture_roots[0], g) for g in graph_roots]
+            data = [capture_root_data[0]] * len(graph_roots)
+        else:
+            if len(capture_roots) == len(graph_roots):
+                pairs = list(zip(capture_roots, graph_roots))
+                data = capture_root_data
+            else:
+                print(
+                    "Warning: number of capture roots ({}) does not match number of graph roots ({}), merging may be incorrect".format(
+                        len(capture_roots), len(graph_roots)
+                    )
+                )
+                continue
+
         print(
             "Found {} capture roots and {} graph roots".format(
                 len(capture_roots), len(graph_roots)
             )
         )
-        for (c_root, g_root), (cached_events, filtered_uids) in zip(
-            zip(capture_roots, graph_roots), capture_root_data
-        ):
+        for (c_root, g_root), (cached_events, filtered_uids) in zip(pairs, data):
             # Shallow-copy each event dict: every mutation downstream replaces
             # top-level keys (UID, ts, dur, parent, children) or adds new ones
             # (gpu_events). No nested structure is ever mutated in-place, so a

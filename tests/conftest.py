@@ -27,6 +27,29 @@ def pytest_configure(config):
         "markers",
         "gpu: test requires a CUDA/HIP GPU (skipped in CPU-only CI)",
     )
+    config.addinivalue_line(
+        "markers",
+        "no_cover: exclude this test from coverage measurement",
+    )
+
+
+def pytest_collection_modifyitems(items):
+    """GPU tests must not affect Codecov unit coverage (see codecov.yml gpu flag)."""
+    for item in items:
+        if item.get_closest_marker("gpu"):
+            item.add_marker(pytest.mark.no_cover)
+
+
+@pytest.fixture(autouse=True)
+def _clear_gemm_simulator_cache():
+    """Prevent GEMM simulator cache pollution across tests."""
+    yield
+    try:
+        from TraceLens.PerfModel import perf_model
+
+        perf_model.GEMM.cache_gemm_results.clear()
+    except Exception:
+        pass
 
 
 def pytest_addoption(parser):

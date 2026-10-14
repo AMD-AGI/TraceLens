@@ -32,6 +32,8 @@ import os
 import re
 from math import prod
 
+from .utils import torch_dtype_map
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -417,9 +419,13 @@ class TritonCompiledPerfModel:
         return "vector" if self._meta is not None else None
 
     def get_compute_precision(self):
+        # The two metadata paths disagree on vocabulary: kernel-signature
+        # parsing yields Triton pointer names ("bf16") while Input type
+        # parsing yields c10 names with the namespace stripped ("bfloat16").
+        # Normalise so the compute spec matches the arch spec keys either way.
         if self._meta is None:
             return None
-        return self._meta.get("dtype")
+        return torch_dtype_map(self._meta.get("dtype"))
 
     def flops_bwd(self) -> float:
         raise NotImplementedError
