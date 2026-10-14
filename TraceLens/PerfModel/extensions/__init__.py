@@ -61,6 +61,11 @@ from .custom_collectives_perf_model_extensions import (
     sgl_kernel_qr_all_reduce,
     sgl_kernel_reg_all_gather_into_tensor,
 )
+from .gsplat_perf_model_extensions import (
+    gsplat_spherical_harmonics,
+    gsplat_projection_ewa_packed,
+    gsplat_rasterize_to_pixels,
+)
 from .pseudo_ops_perf_utils import (
     get_pseudo_op_mappings,
     get_pseudo_op_category_only_mappings,
@@ -113,6 +118,10 @@ __all__ = [
     "sgl_kernel_qr_all_reduce",
     "sgl_kernel_reg_all_gather_into_tensor",
     "custom_ar_qr_all_reduce",
+    # gsplat 3DGS classes
+    "gsplat_spherical_harmonics",
+    "gsplat_projection_ewa_packed",
+    "gsplat_rasterize_to_pixels",
     # Utility functions
     "get_pseudo_op_mappings",
     "get_pseudo_op_category_only_mappings",

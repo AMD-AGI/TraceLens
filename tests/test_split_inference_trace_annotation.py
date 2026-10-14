@@ -19,9 +19,9 @@ No trace files are written; everything operates on in-memory dicts.
 
 import gzip, json, os, zipfile, sys, pytest
 from typing import Dict, List
-from TraceLens.TraceUtils.trace_split import main as split
+from TraceLens.TraceUtils.split_trace import main as split
 from TraceLens.TraceUtils.utils.annotation_utils import IterationAnnotation
-from TraceLens.TraceUtils.trace_split.steady_state_window import (
+from TraceLens.TraceUtils.split_trace.steady_state_window import (
     _identify_regions_inference,
     _compute_reference_pd_ratio,
 )
@@ -45,13 +45,13 @@ from TraceLens.Trace2Tree.util import (
     _entry_roots,
     _reattach_worker_threads,
 )
-from TraceLens.TraceUtils.trace_split.period_detection import (
+from TraceLens.TraceUtils.split_trace.period_detection import (
     _find_repeating_period,
 )
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.util import GPU_KERNEL_CATEGORIES, normalize_name_for_comparison
 from TraceLens.TraceUtils.utils.detect_utils import DetectStatus
-from TraceLens.TraceUtils.trace_split.root_detection import (
+from TraceLens.TraceUtils.split_trace.root_detection import (
     RootSet,
     _child_groups,
     _periodic_candidate,

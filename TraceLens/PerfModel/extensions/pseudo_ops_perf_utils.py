@@ -15,6 +15,7 @@ from . import (
     perf_model_extensions,
     rmsnorm_perf_model_extensions,
     custom_collectives_perf_model_extensions,
+    gsplat_perf_model_extensions,
 )
 
 
@@ -54,6 +55,8 @@ def get_pseudo_op_mappings():
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
+        # Prefer the annotation-aware inference extension when annotations are
+        # present; it falls back to the core SDPA model for plain training rows.
         "aiter::fmha_v3_varlen_fwd": attention_perf_model_extensions.aiter_fmha_v3_varlen_fwd,
         "aiter::mha_batch_prefill": attention_perf_model_extensions.aiter_mha_batch_prefill,
         "sglang_profiler::attention_paged_attention_ragged": attention_perf_model_extensions.aiter_paged_attention_ragged,
@@ -149,6 +152,10 @@ def get_pseudo_op_mappings():
         "aiter::rmsnorm_quant": rmsnorm_perf_model_extensions.aiter_rmsnorm_quant,
         ## AITER GroupNorm (same math as aten::group_norm, different event layout)
         "aiter::_groupnorm_run": _core_perf_model.GroupNorm,
+        ## gsplat 3DGS autograd ops (carry tensor shapes in the trace);
+        # projection/intersect kernels are matched by substring in torch_op_mapping.
+        "_SphericalHarmonics": gsplat_perf_model_extensions.gsplat_spherical_harmonics,
+        "_RasterizeToPixels": gsplat_perf_model_extensions.gsplat_rasterize_to_pixels,
     }
 
     return pseudo_op_mappings

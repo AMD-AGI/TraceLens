@@ -4,12 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for the agent_evals/Analysis eval harness.
+"""Unit tests for the analysis-orchestrator eval harness.
 
 The eval harness grades agent-generated reports; these tests grade the graders.
 All target functions are pure (dict/df/csv in, score/tuple out) and exercised
-with small synthetic fixtures. The modules under ``agent_evals/Analysis`` are
-not importable via the ``TraceLens`` package path, so each is loaded by file
+with small synthetic fixtures. The modules under
+``TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals`` are not importable via the ``TraceLens`` package path, so each is loaded by file
 path with importlib. ``eval_utils`` is placed on ``sys.path`` first so
 run_post_processing's ``from aggregate_repeatability import ...`` resolves.
 """
@@ -25,7 +25,15 @@ import yaml
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-_ANALYSIS_DIR = os.path.join(REPO_ROOT, "agent_evals", "Analysis")
+_ANALYSIS_DIR = os.path.join(
+    REPO_ROOT,
+    "TraceLens",
+    "Agent",
+    "Analysis",
+    "skills",
+    "analysis-orchestrator",
+    "evals",
+)
 _EVAL_UTILS_DIR = os.path.join(_ANALYSIS_DIR, "eval_utils")
 _RULES_PATH = os.path.join(_EVAL_UTILS_DIR, "report_section_rules.yaml")
 
@@ -34,7 +42,7 @@ if _EVAL_UTILS_DIR not in sys.path:
 
 
 def _load_module(name, rel_path):
-    """Load a module from a file path under agent_evals/Analysis."""
+    """Load a module from a file path under the analysis-orchestrator evals dir."""
     path = os.path.join(_ANALYSIS_DIR, rel_path)
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
@@ -1086,6 +1094,88 @@ def test_check_marker_reasoning_candidates_no_subsections(tmp_path):
     rows = workflow._check_marker_reasoning_candidates(out)
     assert rows[0]["result"] == "PASS"
     assert "No Detailed Analysis" in rows[0]["details"]
+
+
+def _op_row_report(impacts):
+    return (
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### Kernel P1: First\n"
+        "**Data:**\n"
+        "| Operation | Time (ms) |\n"
+        "|-----------|-----------|\n"
+        "| op_a | 1.0 |\n"
+        "| op_b | 2.0 |\n"
+        f"<!-- impact-begin kind=op_row rank=1 impacts={impacts} -->\n"
+        "<!-- impact-end -->\n"
+    )
+
+
+def test_check_marker_op_rows_complete(tmp_path):
+    out = _write_report(tmp_path, _op_row_report("3.2,1.1"))
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "PASS"
+
+
+def test_check_marker_op_rows_count_mismatch(tmp_path):
+    out = _write_report(tmp_path, _op_row_report("3.2"))
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "FAIL"
+    assert "1 impacts" in rows[0]["details"] and "2 rows" in rows[0]["details"]
+
+
+def test_check_marker_op_rows_missing_attr(tmp_path):
+    text = (
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### Kernel P1: First\n"
+        "**Data:**\n"
+        "| Operation | Time (ms) |\n"
+        "|-----------|-----------|\n"
+        "| op_a | 1.0 |\n"
+        "<!-- impact-begin kind=op_row rank=1 -->\n"
+        "<!-- impact-end -->\n"
+    )
+    out = _write_report(tmp_path, text)
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "FAIL"
+    assert "impacts" in rows[0]["details"]
+
+
+def test_check_marker_op_rows_unpaired(tmp_path):
+    text = (
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### Kernel P1: First\n"
+        "**Data:**\n"
+        "| Operation | Time (ms) |\n"
+        "|-----------|-----------|\n"
+        "| op_a | 1.0 |\n"
+        "<!-- impact-begin kind=op_row rank=1 impacts=3.2 -->\n"
+    )
+    out = _write_report(tmp_path, text)
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "FAIL"
+    assert "Unpaired" in rows[0]["details"]
+
+
+def test_check_marker_op_rows_none_present(tmp_path):
+    out = _write_report(tmp_path, "## Executive Summary\nx\n")
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "PASS"
+
+
+def test_check_marker_op_rows_no_analysis_md(tmp_path):
+    rows = workflow._check_marker_op_rows(str(tmp_path))
+    assert rows[0]["result"] == "FAIL"
+    assert "not found" in rows[0]["details"]
+
+
+def test_marker_not_found_shape():
+    rows = workflow._marker_not_found("marker_eval_x", "Some markers")
+    assert len(rows) == 1
+    assert rows[0]["index"] == "marker_eval_x"
+    assert rows[0]["issue_summary"] == "Some markers"
+    assert rows[0]["result"] == "FAIL"
+    assert rows[0]["details"] == "analysis.md not found"
+    assert rows[0]["category"] == "Marker Identification"
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@ from TraceLens.TraceUtils.utils.annotation_utils import (
     name_skeleton,
     parse_annotation,
 )
-from TraceLens.TraceUtils.trace_split import (
+from TraceLens.TraceUtils.split_trace import (
     DetectStatus,
     PhaseConfidence,
     RootSet,
@@ -25,15 +25,16 @@ from TraceLens.TraceUtils.trace_split import (
     extract_iteration,
     find_iteration_roots,
 )
-from TraceLens.TraceUtils.trace_split import root_detection as rd
+from TraceLens.TraceUtils.split_trace import root_detection as rd
 from TraceLens.TraceUtils.utils.detect_utils import (
     COVERAGE_FLOOR,
     COVERAGE_GATE,
     GpuAttribution,
     IntervalIndex,
+    grade_coverage,
     group_by_thread,
 )
-from TraceLens.TraceUtils.trace_split.period_detection import (
+from TraceLens.TraceUtils.split_trace.period_detection import (
     _find_repeating_period,
 )
 
@@ -378,20 +379,23 @@ class TestGpuAttribution:
 # Coverage grading
 # --------------------------------------------------------------------------- #
 class TestGrade:
-    """_grade maps GPU coverage to a three-way status at the gate and floor."""
+    """grade_coverage maps GPU coverage to a three-way status at the gate and floor."""
 
     def test_at_or_above_gate_is_splittable(self):
-        assert rd._grade(1.0) is DetectStatus.SPLITTABLE
-        assert rd._grade(COVERAGE_GATE) is DetectStatus.SPLITTABLE
+        assert grade_coverage(1.0) is DetectStatus.SPLITTABLE
+        assert grade_coverage(COVERAGE_GATE) is DetectStatus.SPLITTABLE
 
     def test_between_floor_and_gate_is_degraded(self):
-        assert rd._grade(COVERAGE_GATE - 1e-6) is DetectStatus.DEGRADED
-        assert rd._grade((COVERAGE_FLOOR + COVERAGE_GATE) / 2) is DetectStatus.DEGRADED
-        assert rd._grade(COVERAGE_FLOOR) is DetectStatus.DEGRADED
+        assert grade_coverage(COVERAGE_GATE - 1e-6) is DetectStatus.DEGRADED
+        assert (
+            grade_coverage((COVERAGE_FLOOR + COVERAGE_GATE) / 2)
+            is DetectStatus.DEGRADED
+        )
+        assert grade_coverage(COVERAGE_FLOOR) is DetectStatus.DEGRADED
 
     def test_below_floor_is_not_splittable(self):
-        assert rd._grade(COVERAGE_FLOOR - 1e-6) is DetectStatus.NOT_SPLITTABLE
-        assert rd._grade(0.0) is DetectStatus.NOT_SPLITTABLE
+        assert grade_coverage(COVERAGE_FLOOR - 1e-6) is DetectStatus.NOT_SPLITTABLE
+        assert grade_coverage(0.0) is DetectStatus.NOT_SPLITTABLE
 
 
 # --------------------------------------------------------------------------- #

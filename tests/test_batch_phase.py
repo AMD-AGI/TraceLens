@@ -4,13 +4,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for TraceLens.TraceUtils.trace_split.batch_phase.
+"""Unit tests for TraceLens.TraceUtils.split_trace.batch_phase.
 
 Covers the shape-based batch-size inference and the decode/prefill phase
 classification used for LLM-inference traces without parseable annotations.
 """
 
-from TraceLens.TraceUtils.trace_split.batch_phase import (
+from TraceLens.TraceUtils.split_trace.batch_phase import (
     _GAP_SPLIT_MIN_RATIO,
     classify_phases_from_batch_sizes,
     infer_batch_sizes_from_shapes,

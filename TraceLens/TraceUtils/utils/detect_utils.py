@@ -22,7 +22,7 @@ from enum import Enum, IntEnum
 from statistics import median
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from ...util import GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION
+from ...util import GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION, TraceEventUtils
 
 # Coverage to accept roots outright, and the floor below which a trace is
 # unsplittable rather than degraded.
@@ -35,6 +35,12 @@ MIN_SPAN_SHARE = 0.5
 
 # Fewer roots than this usually means only a warmup loop matched.
 MIN_ROOTS = 4
+
+# Names given to the synthetic warmup/wrapup roots that bookend enhancement
+# (root_detection._try_bookend_enhancement) adds around a branch/sibling
+# candidate. Not real iterations, so callers that reason about the iteration
+# body exclude them.
+BOOKEND_NAMES = {"warmup", "wrapup"}
 
 
 # --- result contract --------------------------------------------------------
@@ -52,6 +58,15 @@ class PhaseConfidence(str, Enum):
     HIGH = "high"  # parsed from a recognized annotation
     LOW = "low"  # inherited onto a synthetic root
     UNKNOWN = "unknown"  # derived from kernel or python-frame periodicity
+
+
+def grade_coverage(coverage: float) -> DetectStatus:
+    """SPLITTABLE at or above the gate, DEGRADED above the floor, else NOT_SPLITTABLE."""
+    if coverage >= COVERAGE_GATE:
+        return DetectStatus.SPLITTABLE
+    if coverage >= COVERAGE_FLOOR:
+        return DetectStatus.DEGRADED
+    return DetectStatus.NOT_SPLITTABLE
 
 
 @dataclass
@@ -331,6 +346,11 @@ class EventIndex:
 
         self.kernels.sort(key=lambda x: x["ts"])
         self.annotations.sort(key=lambda e: e["ts"])
+        self.collective_kernels: set = {
+            k.get("name", "")
+            for k in self.kernels
+            if TraceEventUtils.is_communication_string(k.get("name", ""))
+        }
 
 
 # --- GPU attribution and coverage -------------------------------------------

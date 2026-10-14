@@ -1885,6 +1885,35 @@ def test_jax_gemm_performance_from_pb():
     assert isinstance(df, pd.DataFrame)
 
 
+def test_gemm_performance_from_pb_accepts_derived_xla_module_row():
+    events = [
+        {
+            "ph": "M",
+            "pid": 1,
+            "name": "process_name",
+            "args": {"name": "gpu"},
+        },
+        {
+            "ph": "M",
+            "pid": 1,
+            "tid": 4,
+            "name": "thread_name",
+            "args": {"name": "XLA Modules - from #19"},
+        },
+        {"ph": "X", "pid": 1, "tid": 4, "name": "jit_train_step(args)"},
+    ]
+    with patch(
+        "TraceLens.TreePerf.jax_analyses.DataLoader.load_data",
+        return_value={"traceEvents": events},
+    ), patch(
+        "TraceLens.TreePerf.jax_analyses.JaxProfileProcessor.process_protobuf_file",
+        return_value={},
+    ) as process_pb:
+        df = JaxAnalyses.gemm_performance_from_pb("trace.xplane.pb", module_name=None)
+    process_pb.assert_called_once_with("trace.xplane.pb", "jit_train_step")
+    assert df.empty
+
+
 class TestTreePerfFromFileCapture:
     @pytest.mark.skipif(
         not os.path.isdir(

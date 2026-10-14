@@ -10,10 +10,11 @@ import logging
 import os
 import re
 import glob
+import struct
 import sys
 import tempfile
 import zipfile
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 
 try:
     from enum import StrEnum
@@ -28,8 +29,8 @@ from typing import List, Dict, Callable, Iterable, Tuple, Optional
 logger = logging.getLogger(__name__)
 
 
-# Benign native XLA logs (id > INT_MAX, from packed HLO instruction ids in xprof
-# 2.20.1). Emitted to fd 2 before absl init, so only filterable at the fd level.
+# Benign native XLA logs (id > INT_MAX, from packed HLO instruction ids).
+# Emitted to fd 2 before absl init, so only filterable at the fd level.
 _NATIVE_LOG_NOISE = re.compile(
     r"Instruction with id > INT_MAX"
     r"|not intended behavior and might indicate a bug in the HLO proto serialization"
@@ -129,27 +130,259 @@ def get_filename(filepath: str) -> str:
 
 
 def _load_xplane_converter():
-    """Load the optional JAX converter, preserving the legacy profile backend."""
+    """Load the optional JAX xprof converter."""
     try:
         from xprof.convert import raw_to_tool_data as convert
+    except ImportError as exc:
+        raise ImportError(
+            "JAX XPlane parsing requires the optional JAX dependencies. "
+            "Install TraceLens with the [jax] extra, for example "
+            "`pip install 'TraceLens[jax] @ "
+            "git+https://github.com/AMD-AGI/TraceLens.git'`, "
+            "using a Python version supported by xprof."
+        ) from exc
+    return convert, "xprof"
 
-        return convert, "xprof"
-    except ImportError:
-        try:
-            from tensorboard_plugin_profile.convert import raw_to_tool_data as convert
-        except ImportError as exc:
-            raise ImportError(
-                "JAX XPlane parsing requires the optional JAX dependencies. "
-                "Install TraceLens with the [jax] extra, for example "
-                "`pip install 'TraceLens[jax] @ "
-                "git+https://github.com/AMD-AGI/TraceLens.git'`, "
-                "using a Python version supported by xprof."
-            ) from exc
+
+def _converter_text(data):
+    """Return xprof tool output as text.
+
+    The non-streaming trace viewer returns a ``str``. Graph viewer returns
+    ``bytes``.
+    """
+    if isinstance(data, bytes):
+        return data.decode("utf-8")
+    return data
+
+
+# xprof merges one profile as host 1 and adds host_id * 1000 to every device
+# id. TraceLens treats pids <= 100 as GPU streams, so undo that single-host
+# offset when the trace only contains the remapped ids.
+_STREAMING_DEVICE_ID_STRIDE = 1000
+
+
+def _restore_streaming_device_ids(trace: dict) -> dict:
+    events = trace.get("traceEvents")
+    if not isinstance(events, list):
+        return trace
+    pids = [event.get("pid") for event in events if isinstance(event.get("pid"), int)]
+    if not pids or min(pids) < _STREAMING_DEVICE_ID_STRIDE:
+        return trace
+    for event in events:
+        pid = event.get("pid")
+        if isinstance(pid, int):
+            event["pid"] = pid - _STREAMING_DEVICE_ID_STRIDE
+    return trace
+
+
+def _read_pb_varint(buf: bytes, index: int) -> tuple:
+    value = 0
+    shift = 0
+    while True:
+        byte = buf[index]
+        index += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, index
+        shift += 7
+
+
+def _iter_pb_fields(buf: bytes):
+    index = 0
+    size = len(buf)
+    while index < size:
+        tag, index = _read_pb_varint(buf, index)
+        field, wire = tag >> 3, tag & 7
+        if wire == 0:
+            value, index = _read_pb_varint(buf, index)
+            yield field, wire, value
+        elif wire == 1:
+            value = struct.unpack_from("<Q", buf, index)[0]
+            index += 8
+            yield field, wire, value
+        elif wire == 2:
+            length, index = _read_pb_varint(buf, index)
+            yield field, wire, buf[index : index + length]
+            index += length
+        elif wire == 5:
+            value = struct.unpack_from("<I", buf, index)[0]
+            index += 4
+            yield field, wire, value
+        else:
+            raise ValueError(f"unsupported protobuf wire type {wire}")
+
+
+def _signed_pb_int(value: int) -> int:
+    if value >= 2**63:
+        return value - 2**64
+    return value
+
+
+def _pb_map_entry(buf: bytes):
+    key = None
+    value = None
+    for field, wire, raw in _iter_pb_fields(buf):
+        if field == 1 and wire == 0:
+            key = raw
+        elif field == 2 and wire == 2:
+            value = raw
+    return key, value
+
+
+def _pb_metadata_name(buf: bytes, *, prefer_display: bool = False) -> str:
+    name = ""
+    display = ""
+    for field, wire, raw in _iter_pb_fields(buf):
+        if wire != 2:
+            continue
+        if field == 2:
+            name = raw.decode("utf-8", "replace")
+        elif prefer_display and field == 4:
+            display = raw.decode("utf-8", "replace")
+    return display or name
+
+
+def _stat_arg_text(value) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return format(value, ".6f").rstrip("0").rstrip(".")
+    return str(value)
+
+
+def _parse_xstat(buf: bytes, stat_names: dict):
+    metadata_id = None
+    value = None
+    for field, wire, raw in _iter_pb_fields(buf):
+        if field == 1 and wire == 0:
+            metadata_id = raw
+        elif field == 2 and wire == 1:
+            value = struct.unpack("<d", struct.pack("<Q", raw))[0]
+        elif field == 3 and wire == 0:
+            value = raw
+        elif field == 4 and wire == 0:
+            value = _signed_pb_int(raw)
+        elif field == 5 and wire == 2:
+            value = raw.decode("utf-8", "replace")
+        elif field == 6 and wire == 2:
+            value = raw
+        elif field == 7 and wire == 0:
+            value = stat_names.get(raw, str(raw))
+    if metadata_id is None or value is None:
+        return None
+    return stat_names.get(metadata_id, str(metadata_id)), _stat_arg_text(value)
+
+
+def _xplane_event_args(filename_path: str) -> dict:
+    """Index raw XPlane stats by the trace-viewer (name, ts, dur) key.
+
+    Streaming ``trace_viewer@`` writes those stats to a side table and emits
+    only a ``uid`` in the overview JSON. The raw xplane still has them, with
+    no 5,000,000-event cutoff.
+    """
+    with open(filename_path, "rb") as handle:
+        payload = handle.read()
+    indexed = defaultdict(deque)
+    for field, wire, plane in _iter_pb_fields(payload):
+        if field != 1 or wire != 2:
+            continue
+        stat_names = {}
+        event_names = {}
+        lines = []
+        for plane_field, plane_wire, raw in _iter_pb_fields(plane):
+            if plane_field == 4 and plane_wire == 2:
+                key, meta = _pb_map_entry(raw)
+                if key is not None and meta is not None:
+                    event_names[key] = _pb_metadata_name(meta, prefer_display=True)
+            elif plane_field == 5 and plane_wire == 2:
+                key, meta = _pb_map_entry(raw)
+                if key is not None and meta is not None:
+                    stat_names[key] = _pb_metadata_name(meta)
+            elif plane_field == 3 and plane_wire == 2:
+                lines.append(raw)
+        for line in lines:
+            timestamp_ns = 0
+            for line_field, line_wire, raw in _iter_pb_fields(line):
+                if line_field == 3 and line_wire == 0:
+                    timestamp_ns = _signed_pb_int(raw)
+                elif line_field == 4 and line_wire == 2:
+                    metadata_id = None
+                    offset_ps = 0
+                    duration_ps = 0
+                    args = {}
+                    for event_field, event_wire, event_raw in _iter_pb_fields(raw):
+                        if event_field == 1 and event_wire == 0:
+                            metadata_id = event_raw
+                        elif event_field == 2 and event_wire == 0:
+                            offset_ps = _signed_pb_int(event_raw)
+                        elif event_field == 3 and event_wire == 0:
+                            duration_ps = _signed_pb_int(event_raw)
+                        elif event_field == 4 and event_wire == 2:
+                            parsed = _parse_xstat(event_raw, stat_names)
+                            if parsed is not None:
+                                args[parsed[0]] = parsed[1]
+                    name = event_names.get(metadata_id, "")
+                    if not name:
+                        continue
+                    start_us = (timestamp_ns * 1000 + offset_ps) / 1e6
+                    duration_us = duration_ps / 1e6
+                    key = (name, round(start_us, 3), round(duration_us, 3))
+                    indexed[key].append(args)
+    return indexed
+
+
+def _attach_xplane_event_args(trace: dict, filename_path: str) -> None:
+    events = trace.get("traceEvents")
+    if not isinstance(events, list):
+        return
+    try:
+        indexed = _xplane_event_args(filename_path)
+    except (OSError, ValueError, IndexError, struct.error):
         logger.warning(
-            "xprof not available, falling back to tensorboard-plugin-profile "
-            "for trace conversion. Install TraceLens[jax] for JAX 0.8+ support."
+            "Could not read event args from xplane %s", filename_path, exc_info=True
         )
-        return convert, "tensorboard-plugin-profile"
+        return
+    if not indexed:
+        return
+    for event in events:
+        name = event.get("name")
+        if not name or "ts" not in event:
+            continue
+        key = (name, round(float(event["ts"]), 3), round(float(event.get("dur", 0)), 3))
+        matches = indexed.get(key)
+        if not matches:
+            continue
+        args = event.get("args")
+        if not isinstance(args, dict):
+            args = {}
+            event["args"] = args
+        for stat_name, stat_value in matches.popleft().items():
+            args.setdefault(stat_name, stat_value)
+
+
+def _normalize_xprof_trace(trace: dict) -> dict:
+    """Make non-streaming xprof JSON match the event shape TraceLens expects.
+
+    ``TraceEventsJsonStream`` appends a sentinel ``{}`` so it can always emit
+    a trailing comma. Zero-duration events are written as instant events
+    (``ph`` ``i``) with no ``dur``; the streaming viewer that older xprof
+    builds used emits those as complete events with a 1 ps duration.
+    """
+    events = trace.get("traceEvents")
+    if not isinstance(events, list):
+        return trace
+    normalized = []
+    for event in events:
+        if not event:
+            continue
+        if event.get("ph") == "i":
+            event["ph"] = "X"
+            event.setdefault("dur", 1e-6)
+        normalized.append(event)
+    trace["traceEvents"] = normalized
+    return trace
 
 
 # generic data loader class for json, json.gz, or tensorboard pb files
@@ -161,8 +394,13 @@ class DataLoader:
             convert, converter_lib = _load_xplane_converter()
 
             with suppress_native_hlo_logs():
+                # Non-streaming trace_viewer stops at 5,000,000 events.
+                # Streaming trace_viewer@ does not, which is how main loads
+                # a full profile. Resolution 0 asks for every event.
                 data, _ = convert.xspace_to_tool_data(
-                    [filename_path], "trace_viewer@^", {}
+                    [filename_path],
+                    "trace_viewer@",
+                    {"trace_viewer_options": {"resolution": "0"}},
                 )
             if data is None:
                 raise RuntimeError(
@@ -170,36 +408,49 @@ class DataLoader:
                     f"{filename_path}. Ensure the file exists and the output directory "
                     "is writable (cache files may need to be written)."
                 )
-            data = data.decode("utf-8")  # we get bytes back from the call above
+            data = _converter_text(data)
         elif filename_path.endswith("json.gz"):
             import gzip
 
-            with gzip.open(filename_path, "r") as fin:
+            with gzip.open(filename_path, "rb") as fin:
                 data = fin.read()  # Keep as bytes for orjson
         elif filename_path.endswith("json"):
             with open(filename_path, "rb") as fin:  # Read as bytes for orjson
                 data = fin.read()
         else:
             raise ValueError("Unknown file type", filename_path)
-        if save_preprocessed:
-            data_str = data if isinstance(data, str) else data.decode("utf-8")
-            with open(filename_path.replace("pb", "processed.json"), "w") as writefile:
-                writefile.write(data_str)
 
         # Use orjson for faster parsing (23% faster than stdlib json)
-        # Falls back to json if orjson not available
+        # Falls back to json if orjson not available. rocprofv3 HIP API string
+        # args can embed invalid UTF-8; retry those traces with replacement.
         try:
             import orjson
 
-            return orjson.loads(data)
+            try:
+                parsed = orjson.loads(data)
+            except orjson.JSONDecodeError:
+                if not isinstance(data, bytes):
+                    raise
+                data = data.decode("utf-8", errors="replace").encode("utf-8")
+                parsed = orjson.loads(data)
         except ImportError:
             logger.warning(
                 "orjson not available, falling back to standard json. "
                 "Install orjson for faster JSON parsing: pip install orjson"
             )
             if isinstance(data, bytes):
-                data = data.decode("utf-8")
-            return json.loads(data)
+                data = data.decode("utf-8", errors="replace")
+            parsed = json.loads(data)
+        if filename_path.endswith("pb"):
+            parsed = _normalize_xprof_trace(parsed)
+            # Streaming overview JSON offsets device ids and omits event args.
+            _restore_streaming_device_ids(parsed)
+            _attach_xplane_event_args(parsed, filename_path)
+        if save_preprocessed:
+            out_path = filename_path.replace("pb", "processed.json")
+            with open(out_path, "w") as writefile:
+                json.dump(parsed, writefile)
+        return parsed
 
 
 class JaxProfileProcessor:
@@ -281,8 +532,8 @@ class JaxProfileProcessor:
         }
         params = {"graph_viewer_options": graph_viewer_options}
         with suppress_native_hlo_logs():
-            data, _ = convert.xspace_to_tool_data([dir_name], "graph_viewer^", params)
-        data = data.decode("utf-8").split("\n")
+            data, _ = convert.xspace_to_tool_data([dir_name], "graph_viewer", params)
+        data = _converter_text(data).split("\n")
         for line in data:
             JaxProfileProcessor.process_line(hlo_ops, line)
         JaxProfileProcessor._resolve_operand_references(hlo_ops)
@@ -814,14 +1065,26 @@ class TraceEventUtils:
         ):
             pid = event[TraceEventUtils.TraceKeys.PID]
             tid = event[TraceEventUtils.TraceKeys.TID]
-            ThreadName = metadata[pid][tid][TraceEventUtils.MetadataFields.ThreadName]
-            if ThreadName == TraceEventUtils.JaxSpecialThreads.FrameworkCallStack:
+            # xprof emits thread_sort_index for unnamed host threads and no
+            # thread_name. Those events are not GPU streams.
+            thread_name = (
+                metadata.get(pid, {})
+                .get(tid, {})
+                .get(TraceEventUtils.MetadataFields.ThreadName)
+            )
+            if not thread_name:
+                return "Unknown"
+            if TraceEventUtils.matches_jax_derived_thread(
+                thread_name, TraceEventUtils.JaxSpecialThreads.FrameworkCallStack
+            ):
                 return "cpu_op"
-            elif TraceEventUtils.JaxSpecialThreads.pyXla in ThreadName:
+            elif TraceEventUtils.JaxSpecialThreads.pyXla in thread_name:
                 return "cpu_op"
-            elif ThreadName == TraceEventUtils.JaxSpecialThreads.XlaOps:
+            elif TraceEventUtils.matches_jax_derived_thread(
+                thread_name, TraceEventUtils.JaxSpecialThreads.XlaOps
+            ):
                 return "python function"
-            elif ThreadName.startswith("Stream"):
+            elif thread_name.startswith("Stream"):
                 name = event[TraceEventUtils.TraceKeys.Name]
                 if any(name.lower().startswith(x) for x in ["copy", "memcpy"]):
                     return "memcpy"
@@ -854,6 +1117,17 @@ class TraceEventUtils:
                 x.get(TraceEventUtils.TraceKeys.Duration),
             )
         )
+
+    @staticmethod
+    def matches_jax_derived_thread(thread_name: Optional[str], canonical: str) -> bool:
+        """Match a legacy xprof row name or a derived ``"<name> - from #<id>"`` row.
+
+        xprof 2.23 names derived timeline rows such as ``XLA Modules - from #19``
+        instead of the exact ``XLA Modules`` name older converters emitted.
+        """
+        if not thread_name:
+            return False
+        return thread_name == canonical or thread_name.startswith(canonical + " ")
 
     @staticmethod
     def find_thread_by_item_in_metadata(

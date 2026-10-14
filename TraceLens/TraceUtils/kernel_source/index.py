@@ -238,8 +238,8 @@ def _is_triton_kernel_def(node: ast.AST) -> bool:
 def _scan_triton_file(path: Path) -> list[tuple[str, int]]:
     """Return ``(def_name, def_line)`` for each ``@triton.jit`` kernel in ``path``.
 
-    pre-filter first: a file that never mentions ``triton`` can't define a
-    Triton kernel, so we skip parsing it (mirrors the native scanner's
+    pre-filter first: a file that mentions neither ``triton`` nor ``gluon`` can't
+    define a jit kernel, so we skip parsing it (mirrors the native scanner's
     ``"__global__" not in text`` guard). Only the survivors are AST-parsed.
     """
     try:
@@ -247,7 +247,7 @@ def _scan_triton_file(path: Path) -> list[tuple[str, int]]:
     except OSError as exc:
         log.debug("triton index: cannot read %s: %s", path, exc)
         return []
-    if "triton" not in text:
+    if "triton" not in text and "gluon" not in text:
         return []
     try:
         tree = ast.parse(text)

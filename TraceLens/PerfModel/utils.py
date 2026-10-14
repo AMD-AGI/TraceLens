@@ -149,28 +149,49 @@ def simulation_dtype_map(dtype):
     return dict_dtype2simulation.get(dtype.lower(), None)
 
 
+# Keys are stored without a namespace, because torch_dtype_map strips one off
+# its input before looking it up. That way "c10::Half" and the already-stripped
+# "half" take the same path, and a new c10 spelling of a type already listed
+# here needs no entry of its own.
+_DTYPE2SIMULATION = {
+    "float": "fp32",
+    "double": "fp64",
+    "float16": "fp16",
+    "float32": "fp32",
+    "float64": "fp64",
+    "half": "fp16",
+    "bfloat16": "bf16",
+    "float8_e4m3fn": "fp8",
+    "float8_e4m3fnuz": "fp8",
+    "float4_e2m1fn_x2": "fp4",
+    "mxfp4": "fp4",
+    "unsigned char": "fp8",
+}
+
+# Canonical values map to themselves, so normalising an already-normalised
+# value is a no-op. Derived rather than written out, so adding a type above is
+# enough.
+_DTYPE2SIMULATION.update({value: value for value in set(_DTYPE2SIMULATION.values())})
+
+
 def torch_dtype_map(dtype):
     """
     This function maps a PyTorch data type to a simulation data type.
+
+    Accepts the c10 spelling ("c10::BFloat16"), the same name with the
+    namespace already stripped ("bfloat16"), and the canonical simulation name
+    ("bf16").
+
     Args:
         dtype (str): The name of the PyTorch data type.
     Returns:
-        str: The name of the simulation data type.
+        str: The name of the simulation data type, or None if the type has no
+            simulation equivalent — integer, boolean and complex types among
+            them, which have no place in a floating-point roofline.
     """
-    dict_dtype2simulation = {
-        "float": "fp32",
-        "double": "fp64",
-        "c10::half": "fp16",
-        "c10::bfloat16": "bf16",
-        "c10::float8_e4m3fnuz": "fp8",
-        "unsigned char": "fp8",
-        "fp8": "fp8",
-        "fp4": "fp4",
-        "mxfp4": "fp4",
-        "c10::float4_e2m1fn_x2": "fp4",
-        "c10::float8_e4m3fn": "fp8",
-    }
-    return dict_dtype2simulation.get(dtype.lower(), None)
+    if dtype is None:
+        return None
+    return _DTYPE2SIMULATION.get(str(dtype).lower().split("::")[-1], None)
 
 
 def parse_bool(input):
