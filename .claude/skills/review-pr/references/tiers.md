@@ -1,3 +1,8 @@
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
 # Owning layers and backbone risk
 
 Two jobs: it names the canonical owner of each concern (cited by `rules.md` S1/S2/S3/L2), and it

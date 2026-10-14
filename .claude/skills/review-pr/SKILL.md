@@ -3,6 +3,12 @@ name: review-pr
 description: "Review a TraceLens pull request. Invoke with a PR number whenever asked to review, re-review, or sanity-check a PR in this repository. Collects the PR into a scratch directory, selects from rules.md only the rules this diff can trigger, forces a semantic and core-file risk assessment before any finding is written, refutes every finding twice, and publishes an English conclusion to the PR. The output has two parts only: what the PR does, and blocking issues."
 ---
 
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # TraceLens PR review
 
 Written for an agent to execute top to bottom. Every step writes an artifact into `$WORK`; a step

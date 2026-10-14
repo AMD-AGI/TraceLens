@@ -1,3 +1,8 @@
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
 # TraceLens review rules
 
 The canonical rule set for the `review-pr` skill. Do not read top to bottom during a review: use the
