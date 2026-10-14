@@ -40,10 +40,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
    exists (number sequentially from P1, including CPU/Idle first if invoked).
 6. Each section is independently composable -- can be shared standalone.
 7. All three tiers (Compute, Kernel Fusion, System) use separate sequential P1/P2/P3 numbering (no gaps).
-8. Priority icons are assigned by PRIORITY NUMBER, not severity:
-   - Compute Kernel: 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ...
-   - Kernel Fusion: icon by confidence (🔴 high → 🟡 medium → 🟢 low), not priority number
-   - System-Level: 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (only when actionable issues exist)
+8. Priority icons are assigned by PRIORITY NUMBER, not severity, in every section (Compute Kernel, Kernel Fusion, System-Level): 🔴 P1 → 🟡 P2 → 🟢 P3 → 🟢 P4 ... (System-Level only when actionable issues exist)
 9. Field labels — each section uses EXACTLY these labels:
 
    OPTIMIZATION CARDS (§Compute Kernel Optimizations, §Kernel Fusion, §System-Level):
@@ -200,14 +197,14 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 
 ## Kernel Fusion Opportunities (Experimental)
 <!-- === STANDALONE Kernel Fusion === -->
-> **Note:** Kernel fusion analysis is experimental. impact_score projections estimate the recoverable fraction of E2E with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates where fewer than 75% of kernels have perf models are not reported. Actual recoverable time depends on implementation feasibility and interaction effects.
+> **Note:** Kernel fusion analysis is experimental. impact_score projections estimate the recoverable fraction of E2E with <kernel_fusion_metrics.overlap_efficiency as a percent> memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Candidates are not reported unless at least 50% of their kernels have perf models (75% for candidates of 5 or more kernels). Actual recoverable time depends on implementation feasibility and interaction effects.
 <!-- === COMPARATIVE Kernel Fusion === -->
 > **Note:** Kernel fusion analysis is experimental.
 
 <!-- Populate from system_findings/kernel_fusion_findings.md if kernel_fusion category exists in manifest. -->
 <!-- Each finding uses Insight / Action / Impact / Confidence format, with Impact from kernel_fusion_metrics.json. -->
 <!-- P1/P2/P3+ ordered by impact_score, highest first. -->
-<!-- Icon mapping by CONFIDENCE (not priority number): 🔴 high → 🟡 medium → 🟢 low. -->
+<!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- If no findings or kernel_fusion category not in manifest, replace the cards below with: "No kernel fusion opportunities detected." -->
 
 ### 🔴 P1: <Candidate Name>
@@ -400,7 +397,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 ### Kernel Fusion Insights
 <!-- === STANDALONE Kernel Fusion === -->
-> **Note:** Kernel fusion analysis is experimental. impact_score projections estimate the recoverable fraction of E2E with 85% memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual recoverable time depends on implementation feasibility and interaction effects.
+> **Note:** Kernel fusion analysis is experimental. impact_score projections estimate the recoverable fraction of E2E with <kernel_fusion_metrics.overlap_efficiency as a percent> memory/compute pipeline overlap. Kernels without perf models use their measured trace time as-is. Actual recoverable time depends on implementation feasibility and interaction effects.
 <!-- === COMPARATIVE Kernel Fusion === -->
 > **Note:** Kernel fusion analysis is experimental.
 
@@ -410,7 +407,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 <a id="detailed-analysis-fusion-P1"></a>
 <!-- reasoning-candidate tier=fusion rank=1 -->
-#### 🔴/🟡/🟢 P1: <Candidate Name>
+#### 🔴 P1: <Candidate Name>
 
 **Identification:**
 

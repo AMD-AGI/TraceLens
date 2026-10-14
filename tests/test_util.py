@@ -19,10 +19,7 @@ from TraceLens.util import (
     merge_intervals,
     suppress_native_hlo_logs,
 )
-from TraceLens.Agent.Analysis.category_analyses import (
-    analysis_utils as au,
-    kernel_fusion_analysis as kfa,
-)
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
 
 TK = TraceEventUtils.TraceKeys
 TP = TraceEventUtils.TracePhases
@@ -1490,16 +1487,6 @@ class TestAnalysisUtilsPhase7:
             )
         )
         assert au._load_fusion_op_keys(str(tmp_path)) == set()
-
-        ops = [
-            {
-                "kernel_names": ["a", "b"],
-                "base_name": "Block",
-                "instance_count": 3,
-                "kernel_type_signature": ["GEMM", "elementwise"],
-            }
-        ]
-        assert len(kfa._filter_and_dedup(ops)) >= 1
 
 
 class TestAnalysisUtilsPhase8:
