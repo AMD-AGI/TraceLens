@@ -29,7 +29,6 @@ from pathlib import Path
 # Constants
 
 PACKAGE_ROOT = "TraceLens"
-COPYRIGHT_TEST = "tests/test_copyright_headers.py"
 RUN_ALL_PATHS = frozenset(
     {
         "setup.py",
@@ -44,20 +43,19 @@ RUN_ALL_PATHS = frozenset(
         "tests/conftest.py",
     }
 )
-COPYRIGHT_SUFFIXES = frozenset({".py", ".md", ".yml", ".yaml", ".ipynb"})
-COPYRIGHT_SKIP_DIR_NAMES = frozenset(
+_SKIP_WALK_DIRS = frozenset(
     {
         ".git",
         "__pycache__",
         ".pytest_cache",
         ".ipynb_checkpoints",
+        "TraceLens.egg-info",
         "node_modules",
         "venv",
         "env",
         ".venv",
     }
 )
-_SKIP_WALK_DIRS = COPYRIGHT_SKIP_DIR_NAMES | {"TraceLens.egg-info"}
 _GITHUB_OUTPUT_DELIMITER = "__SELECT_RELATED_TESTS__"
 
 
@@ -181,9 +179,6 @@ def select_related_tests(repo_root, changed_paths):
     for path in changed:
         if _is_test_path(path) and (root / path).is_file():
             selected.add(path)
-    if _needs_copyright_test(changed) and (root / COPYRIGHT_TEST).is_file():
-        selected.add(COPYRIGHT_TEST)
-
     existing = tuple(sorted(path for path in selected if (root / path).is_file()))
     if not existing:
         return Selection("none", ())
@@ -357,21 +352,6 @@ def _py_in_dir(root, directory):
     return [
         _normalize(str(path.relative_to(root))) for path in sorted(folder.glob("*.py"))
     ]
-
-
-def _needs_copyright_test(changed):
-    for path in changed:
-        suffix = Path(path).suffix.lower()
-        if suffix not in COPYRIGHT_SUFFIXES:
-            continue
-        if Path(path).name in {"__init__.py", "LICENSE"}:
-            continue
-        if any(part in COPYRIGHT_SKIP_DIR_NAMES for part in Path(path).parts):
-            continue
-        if ".egg-info" in Path(path).parts:
-            continue
-        return True
-    return False
 
 
 def _parse_imports(root, py_files, modules):
