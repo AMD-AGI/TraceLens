@@ -24,9 +24,8 @@ sys.path.insert(0, _ANALYSIS_DIR)
 
 from analysis_utils import load_perf_rows, perf_report_csv_dir, write_metrics_json
 from utils.arch_utils import load_arch
-
-from TraceLens.Agent.Analysis.utils.classify_kernels import TAXONOMY
-from TraceLens.Agent.Analysis.utils.kernel_fusion import (
+from utils.classify_kernels import TAXONOMY
+from utils.kernel_fusion import (
     OVERLAP_EFFICIENCY,
     FusionCandidate,
     FusionForms,

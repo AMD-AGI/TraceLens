@@ -421,7 +421,23 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 **Impact estimate:**
 
-<!-- Repeat per candidate with anchor detailed-analysis-fusion-PN. -->
+<a id="detailed-analysis-fusion-P2"></a>
+<!-- reasoning-candidate tier=fusion rank=2 -->
+#### 🟡 P2: <Candidate Name>
+**Identification:**
+**Data:**
+**Resolution:**
+**Impact estimate:**
+
+<a id="detailed-analysis-fusion-P3"></a>
+<!-- reasoning-candidate tier=fusion rank=3 -->
+#### 🟢 P3: <Candidate Name>
+**Identification:**
+**Data:**
+**Resolution:**
+**Impact estimate:**
+
+<!-- Repeat for P4 onward with anchor detailed-analysis-fusion-PN. -->
 
 ### System-Level Insights
 
