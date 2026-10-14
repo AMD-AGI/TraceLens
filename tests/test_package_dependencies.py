@@ -39,3 +39,12 @@ def test_jax_dependencies_are_optional(tmp_path):
     assert {"xprof", "protobuf"}.isdisjoint(dependencies(""))
     assert {"xprof", "protobuf"} <= dependencies("jax")
     assert "pandas" in dependencies("")
+
+    jax = {
+        requirement.name.lower(): requirement
+        for requirement in requirements
+        if requirement.marker is not None
+        and requirement.marker.evaluate({"extra": "jax"})
+    }
+    assert str(jax["xprof"].specifier) == "==2.23.2"
+    assert str(jax["protobuf"].specifier) == ">=6.33.5"

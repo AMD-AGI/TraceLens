@@ -65,7 +65,7 @@ The orchestrator runs against a PyTorch profiler trace. Collection is workload-s
 
 ### 3. Establish a hardware performance baseline
 
-Roofline analysis compares each measured kernel against your GPU's max-achievable TFLOPS and HBM bandwidth, so the analysis needs a `<platform>.json` arch file for your hardware. Bundled arch files live in [`utils/arch/`](utils/arch/); if your platform is not already there (or you want stack-specific measured values instead of published specs), generate benchmark-derived peak TFLOPS and HBM with the GPU microbenchmarking suite. It measures matrix/vector TFLOPS and HBM bandwidth and writes the arch JSON in the exact shape the roofline expects. See the [Benchmarking README](../../PerfModel/benchmarking/README.md).
+Roofline analysis compares each measured kernel against your GPU's max-achievable TFLOPS and memory bandwidth, so the analysis needs a `<platform>.json` arch file for your hardware. Bundled arch files live in [`utils/arch/`](utils/arch/); if your platform is not already there (or you want stack-specific measured values instead of published specs), generate benchmark-derived peak TFLOPS and memory bandwidth with the GPU microbenchmarking suite. It measures matrix/vector TFLOPS and memory bandwidth and writes the arch JSON in the exact shape the roofline expects. See the [Benchmarking README](../../PerfModel/benchmarking/README.md).
 
 ---
 
@@ -117,7 +117,7 @@ Any agentic CLI runner that supports skill-file discovery and headless (print/no
     "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode <default|inference>, [execution mode <eager|graph replay + capture>, capture folder <path_to_capture_folder>,] node <node>, container <container>, output to <output_dir>"
 ```
 
-Set `analysis mode inference` for vLLM/SGLang/ATOM traces (and include the `execution mode` / `capture folder` fields when using graph replay + capture); use `analysis mode default` for training and non-vLLM/SGLang eager inference. Passing all parameters inline avoids interactive prompts, which is useful for batch runs and CI pipelines (see `agent_evals/Analysis/eval_scripts/generate_ref.sh` for an example).
+Set `analysis mode inference` for vLLM/SGLang/ATOM traces (and include the `execution mode` / `capture folder` fields when using graph replay + capture); use `analysis mode default` for training and non-vLLM/SGLang eager inference. Passing all parameters inline avoids interactive prompts, which is useful for batch runs and CI pipelines (see `skills/analysis-orchestrator/evals/eval_scripts/generate_ref.sh` for an example).
 
 ---
 

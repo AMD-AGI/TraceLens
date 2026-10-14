@@ -2362,7 +2362,7 @@ class TestPush95Phase2:
             }
         )
         eff = au.calculate_efficiency(
-            row, peak_maf_or_maf_dict={"vector_fp32": 100.0}, peak_hbm_bw=5300
+            row, peak_maf_or_maf_dict={"vector_fp32": 100.0}, peak_mem_bw=5300
         )
         assert eff["bound_type"] == "memory"
 
@@ -2576,7 +2576,7 @@ class TestPush95Phase3:
         (cat_dir / "arch_config.json").write_text(
             json.dumps(
                 {
-                    "peak_hbm_bw_tbs": 5.3,
+                    "peak_mem_bw_tbs": 5.3,
                     "max_achievable_tflops": {
                         "matrix_bf16": 1000.0,
                         "vector_fp32": 100.0,

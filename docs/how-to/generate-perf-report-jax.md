@@ -29,15 +29,12 @@ Confirm you have the following before continuing.
   ```
 
   For a source checkout, use `pip install -e '.[jax]'`. The pinned
-  `xprof==2.20.1` provides wheels for CPython 3.9–3.12 on Linux x86-64 and
-  macOS ARM64; use a compatible interpreter for JAX parsing. Other TraceLens
-  input formats do not require this converter.
-
-```{note}
-The legacy fallback has been validated with `tensorboard` 2.19.0,
-`tensorboard-plugin-profile` 2.19.0, and `protobuf` 5.29.2. Other versions might
-not work.
-```
+  `xprof==2.23.2` requires Python 3.10 or later and provides wheels for
+  Linux x86-64, Linux aarch64, macOS ARM64, and Windows x86-64; use a
+  compatible interpreter for JAX parsing. Other TraceLens input formats do
+  not require this converter. TraceLens loads the profile with xprof's
+  streaming trace viewer so the 5,000,000-event non-streaming cutoff does
+  not apply.
 
 ## Standard report
 

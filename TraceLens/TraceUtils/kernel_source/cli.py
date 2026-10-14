@@ -23,10 +23,8 @@ import argparse
 import json
 import sys
 
+from . import resolve_kernel_source
 from .datatypes import ResolveResult
-from .patchability import classify_patchability
-from .resolver import resolve_source_path
-from .triton_pin import resolve_triton_source
 
 
 def _result_to_dict(result: ResolveResult) -> dict:
@@ -75,37 +73,16 @@ def main(argv: list[str] | None = None) -> int:
     """Resolve one kernel per the CLI args and print the JSON result."""
     args = _build_parser().parse_args(argv)
 
-    if args.triton_kernel_file:
-        result = resolve_triton_source(args.triton_kernel_file, symbol=args.kernel)
-        print(json.dumps(_result_to_dict(result), indent=2))
-        return 0
-
-    if not args.kernel:
+    if not args.kernel and not args.triton_kernel_file:
         print("error: --kernel (or --triton-kernel-file) is required", file=sys.stderr)
         return 2
 
-    gate = classify_patchability(args.kernel, op_name=args.op_name)
-    if gate.patchable is False:
-        result = ResolveResult(
-            location=None,
-            patchable=False,
-            kind=gate.kind,
-            reason=gate.reason,
-            method="gate_non_patchable",
-        )
-        print(json.dumps(_result_to_dict(result), indent=2))
-        return 0
-
-    location = resolve_source_path(args.kernel, args.search_path or None)
-    if location is not None:
-        result = ResolveResult(location=location, patchable=True, method="symbol_index")
-    else:
-        result = ResolveResult(
-            location=None,
-            patchable=False,
-            method="unresolved",
-            reason="no live match",
-        )
+    result = resolve_kernel_source(
+        args.kernel,
+        kernel_file=args.triton_kernel_file,
+        op_name=args.op_name,
+        search_paths=args.search_path or None,
+    )
     print(json.dumps(_result_to_dict(result), indent=2))
     return 0
 
