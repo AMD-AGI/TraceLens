@@ -711,26 +711,6 @@ def collect_parallel_gate_wrappers(
     return wrappers
 
 
-@dataclass(frozen=True)
-class RepeatContext:
-    """Deferred grouped-query head-repeat derivation context for an attention core.
-
-    The block tree is built at load time -- before the live grouped-query factor is
-    stamped onto the attention step (``reconcile_live_attention_groups`` runs later,
-    in the export build). The ``repeat_kv`` shape ops therefore cannot be derived
-    yet, so this records everything a post-reconcile pass
-    (:func:`TraceLens.ModelUtils.extract.apply_live_attention_repeats`) needs to
-    resolve the callee and fill :attr:`BlockNode.kernel_port_repeats` with the real
-    factor: the host module + symbol of the repeat callee, the kernel-input port
-    labels that repeat (key/value roles), and the owning attention class whose live
-    ``gqa_groups`` supplies the factor. Purely structural -- no op/param/class gate."""
-
-    module: str
-    callee: str
-    port_labels: tuple[str, ...]
-    owner_class: str
-
-
 @dataclass
 class BlockNode:
     """One node in a recursive block diagram."""
@@ -751,20 +731,6 @@ class BlockNode:
     input_label: str | None = None
     input_source: str | None = None
     kernel_tensor_ports: dict[str, str] = field(default_factory=dict)
-    # For a wrapper-expanded attention core: kernel-input port label -> the ordered
-    # head-repeat shape ops (``repeat_kv`` -> unsqueeze/expand/reshape) to interpose
-    # between that port's producer and the port. Each op is a ``(label, details)``
-    # pair the graph pass materialises as a
-    # visible node so the grouped-query head expansion is not hidden. Empty for
-    # every non-repeating kernel and every non-repeated port.
-    kernel_port_repeats: dict[str, list[tuple[str, tuple[str, ...]]]] = field(
-        default_factory=dict
-    )
-    # Deferred derivation context when the live grouped-query factor is not yet
-    # known at block-tree build time (see :class:`RepeatContext`). A post-reconcile
-    # pass reads this to populate ``kernel_port_repeats``; ``None`` for every core
-    # that never repeats heads.
-    pending_repeat_context: "RepeatContext | None" = None
     tensor_input_labels: list[str] = field(default_factory=list)
     tensor_step_targets: dict[str, str] = field(default_factory=dict)
     kernel_predecessors: list[str] = field(default_factory=list)

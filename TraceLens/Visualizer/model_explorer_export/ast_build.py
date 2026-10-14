@@ -54,29 +54,12 @@ def build_model_explorer_payload(
         # regexes. This runs before the graph/fact-sheet read the spec. It is
         # independent of load_meta_shapes (structure needs only instantiation, never
         # the fragile forward); reconcile is a no-op when instantiation fails.
-        from TraceLens.ModelUtils.extract import (
-            reconcile_live_attention_groups,
-            reconcile_live_module_groups,
-        )
-        from TraceLens.ModelUtils.meta_trace import (
-            harvest_meta_attention_groups,
-            walk_meta_module_tree,
-        )
+        from TraceLens.ModelUtils.extract import reconcile_live_module_groups
+        from TraceLens.ModelUtils.meta_trace import walk_meta_module_tree
 
         reconcile_live_module_groups(
             spec, walk_meta_module_tree(meta_shapes_checkpoint)
         )
-        # Record each attention module's live grouped-query repeat factor
-        # (``num_key_value_groups``) so a later wrapper expansion models ``repeat_kv``
-        # with the real factor rather than the config's latent-attention-unreliable
-        # nominal ratio. Inert for the rendered graph.
-        reconcile_live_attention_groups(
-            spec, harvest_meta_attention_groups(meta_shapes_checkpoint)
-        )
-        # The block tree was built at load time, before the factor above was known;
-        # now fill each attention core's ``repeat_kv`` head-repeat ops (unsqueeze/
-        # expand/reshape) from the just-stamped live grouped-query factor so the graph
-        # pass can interpose them on the key/value branches. No-op at factor 1 (GLM).
     graph = build_merged_model_graph(
         spec,
         basic_ops=_export_basic_ops(resolved_basic_ops),
