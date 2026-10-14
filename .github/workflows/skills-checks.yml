@@ -4,9 +4,11 @@
 # See LICENSE for license information.
 ###############################################################################
 
-# Reuse the amd/skills lychee gate on federated TraceLens skills so link rot is
-# caught in this repo before the catalog nightly run.
-# See: https://github.com/amd/skills/blob/main/docs/federating-your-repo.md#catch-failures-before-nightly
+# Catch link rot in the federated TraceLens skill before the catalog's nightly
+# run does. `mode: references` skips the graded runs, so this costs one ubuntu
+# runner and no model calls.
+#
+# See: https://github.com/amd/skills/blob/main/CONTRIBUTING.md
 
 name: skills-checks
 
@@ -19,9 +21,14 @@ on:
 
 jobs:
   analysis-orchestrator-external-references:
-    uses: amd/skills/.github/workflows/external-reference-check.yml@main
+    uses: amd/skillscope/.github/workflows/skill-evals.yml@v0.1.3
     with:
-      markdown_glob: "./TraceLens/Agent/Analysis/skills/analysis-orchestrator/**/*.md"
+      # `skill_globs` names the directories that ARE skills. `skills` is a
+      # different input -- a list of names to run behavioral cases for -- and
+      # leaving `skill_globs` at its `./*` default would point the check at
+      # every directory in the repository root.
+      skill_globs: TraceLens/Agent/Analysis/skills/analysis-orchestrator
+      mode: references
+      external_references: true
     permissions:
       contents: read
-      issues: write
