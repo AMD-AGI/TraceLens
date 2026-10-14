@@ -163,7 +163,7 @@ involved.
 | `--output_csvs_dir` | None | Directory for CSV output. |
 | `--traceconv` | auto | Path to `traceconv`. |
 
-### TraceLens_split_inference_trace
+### TraceLens_split_trace
 
 Split an inference trace into per-iteration or per-phase sub-traces.
 

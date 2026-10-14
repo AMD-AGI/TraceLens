@@ -38,6 +38,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     comparative_efficiency,
     compute_impact_estimates,
     format_args,
+    get_peak_mem_bw_tbs,
     get_peak_specs,
     load_category_data,
     parse_first_shape,
@@ -55,6 +56,7 @@ from TraceLens.Agent.Analysis.utils.report_utils import (
 )
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     MarkerValidator,
+    _ROLLUP_IMPACT_TOL,
     _category_findings_empty,
     _check_coverage,
     _check_priority_consistency,
@@ -140,7 +142,7 @@ def output_dir_with_category_data(tmp_path):
     # gemm_metadata.json
     meta = {
         "platform": "MI300X",
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708, "matrix_fp16": 654},
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
@@ -259,7 +261,7 @@ def output_dir_other_and_customcollective_nccl(tmp_path):
 
     meta = {
         "platform": "MI300X",
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708},
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
@@ -398,7 +400,7 @@ def test_comparative_impact_from_operations_trace2_faster():
             "delta_us (trace2 - trace1)": [-5_000.0, 1_000.0, -200.0],
         }
     )
-    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    metadata = {"peak_mem_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
     config: dict = {}
     operations = build_operation_metrics(
         df, metadata, config, comparison_scope="comparative"
@@ -438,7 +440,7 @@ def test_comparative_roofline_cap_clamps_savings():
             "Pct Roofline_mean": [60.0],  # roofline floor
         }
     )
-    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    metadata = {"peak_mem_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
     operations = build_operation_metrics(
         df, metadata, {}, comparison_scope="comparative"
     )
@@ -470,7 +472,7 @@ def test_comparative_roofline_cap_no_clamp_when_trace2_above_roofline():
             "Pct Roofline_mean": [60.0],
         }
     )
-    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    metadata = {"peak_mem_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
     operations = build_operation_metrics(
         df, metadata, {}, comparison_scope="comparative"
     )
@@ -494,7 +496,7 @@ def test_comparative_roofline_cap_no_roofline_column():
             # no Pct Roofline_mean column
         }
     )
-    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    metadata = {"peak_mem_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
     operations = build_operation_metrics(
         df, metadata, {}, comparison_scope="comparative"
     )
@@ -573,7 +575,7 @@ def test_load_category_data(output_dir_with_category_data):
     assert "name" in df.columns
     assert "Kernel Time (µs)_sum" in df.columns
     assert meta["platform"] == "MI300X"
-    assert meta["peak_hbm_bw_tbs"] == 5.3
+    assert meta["peak_mem_bw_tbs"] == 5.3
 
 
 def test_load_category_data_missing_csv_raises(tmp_path):
@@ -611,6 +613,62 @@ def test_build_operation_metrics(output_dir_with_category_data):
         assert "time_ms" in o
         assert "efficiency" in o
         assert "efficiency_percent" in o["efficiency"] or "efficiency" in o
+        # Per-row impact stamped at source; these rows lack a roofline bound so
+        # efficiency_percent is None and the ladder falls to the heuristic branch.
+        assert "impact_score" in o
+        assert o["impact_estimate_method"] == "heuristic"
+        assert o["impact_score"] > 0
+
+
+def test_build_operation_metrics_stamps_none_for_zero_time():
+    """A time_ms<=0 row stamps None (helper runs after the fusion-map block)."""
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm"],
+            "count": [1],
+            "Kernel Time (µs)_sum": [0.0],
+            "TFLOPS/s_mean": [400.0],
+            "TB/s_mean": [0.5],
+            "FLOPS/Byte": [2000.0],
+            "Compute Spec": ["matrix_bf16"],
+        }
+    )
+    meta = {
+        "peak_mem_bw_tbs": 5.3,
+        "max_achievable_tflops": {"matrix_bf16": 708},
+        "gpu_utilization": {"total_time_ms": 1000.0},
+    }
+    ops = build_operation_metrics(df, meta, {})
+    assert ops[0]["impact_score"] is None
+    assert ops[0]["impact_estimate_method"] is None
+
+
+def test_build_operation_metrics_per_row_impact_sums_to_card():
+    """Σ per-row impact_score of a card's members == card impact_score (INV7')."""
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm", "aten::mm"],
+            "count": [1, 1],
+            "Kernel Time (µs)_sum": [100_000.0, 50_000.0],
+            "TFLOPS/s_mean": [354.0, 300.0],
+            "TB/s_mean": [0.5, 0.4],
+            "FLOPS/Byte": [2000.0, 1800.0],
+            "Compute Spec": ["matrix_bf16", "matrix_bf16"],
+            "Roofline Bound": ["COMPUTE_BOUND", "COMPUTE_BOUND"],
+        }
+    )
+    meta = {
+        "peak_mem_bw_tbs": 5.3,
+        "max_achievable_tflops": {"matrix_bf16": 708},
+        "gpu_utilization": {"total_time_ms": 1000.0},
+    }
+    ops = build_operation_metrics(df, meta, {})
+    estimates = compute_impact_estimates(ops, "gemm", baseline_ms=1000.0)
+    findings = build_category_findings(estimates, "standalone")
+    assert len(findings) == 1
+    card = findings[0]
+    row_sum = sum(o["impact_score"] for o in ops)
+    assert abs(row_sum - card["impact_score"]) <= _ROLLUP_IMPACT_TOL
 
 
 def test_build_operation_metrics_comparative_uses_delta():
@@ -629,7 +687,7 @@ def test_build_operation_metrics_comparative_uses_delta():
         }
     )
     meta = {
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708},
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
@@ -651,7 +709,7 @@ def test_build_operation_metrics_comparative_no_comparative_cols_yields_none():
         }
     )
     meta = {
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708},
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
@@ -1004,6 +1062,60 @@ def test_marker_scan_all_null_is_allowed():
     assert seen == {"p_item"}
 
 
+def test_marker_scan_valid_op_row():
+    text = (
+        "<!-- impact-begin kind=op_row rank=1 impacts=3.2,1.1,— -->\n"
+        "<!-- impact-end -->\n"
+    )
+    errors, seen = MarkerValidator.scan(text, "f.md")
+    assert errors == []
+    assert seen == {"op_row"}
+
+
+def test_marker_scan_op_row_missing_required_attr():
+    text = "<!-- impact-begin kind=op_row rank=1 -->\n<!-- impact-end -->\n"
+    errors, _ = MarkerValidator.scan(text, "f.md")
+    assert any("kind=op_row missing required attr impacts" in e for e in errors)
+
+
+def _op_row_candidate(impacts):
+    return (
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### P1: Do the thing\n"
+        "**Data:**\n"
+        "| Operation | Time (ms) |\n"
+        "|-----------|-----------|\n"
+        "| op_a | 1.0 |\n"
+        "| op_b | 2.0 |\n"
+        f"<!-- impact-begin kind=op_row rank=1 impacts={impacts} -->\n"
+        "<!-- impact-end -->\n"
+    )
+
+
+def test_check_findings_file_op_row_count_matches(tmp_path):
+    p = tmp_path / "gemm_findings.md"
+    _write(str(p), _op_row_candidate("3.2,1.1"))
+    errors = MarkerValidator._check_op_row_csv_count(
+        _op_row_candidate("3.2,1.1"), "f.md"
+    )
+    assert errors == []
+
+
+def test_check_findings_file_op_row_count_mismatch(tmp_path):
+    errors = MarkerValidator._check_op_row_csv_count(_op_row_candidate("3.2"), "f.md")
+    assert any("kind=op_row has 1 impacts" in e and "2 rows" in e for e in errors)
+
+
+def test_check_findings_file_op_row_unpaired():
+    text = (
+        "<!-- impact-begin kind=op_row rank=1 impacts=3.2,1.1 -->\n"
+        "<!-- impact-begin kind=op_row rank=2 impacts=1.0 -->\n"
+        "<!-- impact-end -->\n"
+    )
+    errors, _ = MarkerValidator.scan(text, "f.md")
+    assert any("marker pairing mismatch" in e for e in errors)
+
+
 # ----- MarkerValidator.check_findings_file -----
 
 
@@ -1085,11 +1197,83 @@ def test_check_report_requires_top_ops(tmp_path):
 
 
 def test_check_report_with_top_ops_ok(tmp_path):
-    text = "<!-- impact-begin kind=top_ops -->\n| a |\n<!-- impact-end -->\n"
+    text = (
+        "<!-- report-begin kind=report_mode mode=agentic -->\n"
+        "<!-- report-end -->\n"
+        "<!-- impact-begin kind=top_ops -->\n| a |\n<!-- impact-end -->\n"
+    )
     p = tmp_path / "analysis.md"
     _write(str(p), text)
     errors = MarkerValidator.check_report(str(p))
     assert errors == []
+
+
+# ----- MarkerValidator.scan_report + report_mode / warning gate -----
+
+
+def test_scan_report_valid_report_mode():
+    text = (
+        "<!-- report-begin kind=report_mode mode=agentic -->\n" "<!-- report-end -->\n"
+    )
+    errors, counts = MarkerValidator.scan_report(text, "analysis.md")
+    assert errors == []
+    assert counts["report_mode"] == 1
+
+
+def test_scan_report_report_mode_missing_mode():
+    text = "<!-- report-begin kind=report_mode -->\n<!-- report-end -->\n"
+    errors, _ = MarkerValidator.scan_report(text, "analysis.md")
+    assert any(
+        "report kind=report_mode missing required attr mode" in e for e in errors
+    )
+
+
+def test_scan_report_valid_warning():
+    text = (
+        "<!-- report-begin kind=warning -->\n"
+        "> **⚠ Data Quality.** high variance detected.\n"
+        "<!-- report-end -->\n"
+    )
+    errors, counts = MarkerValidator.scan_report(text, "analysis.md")
+    assert errors == []
+    assert counts["warning"] == 1
+
+
+def test_scan_report_unknown_kind_rejected():
+    text = "<!-- report-begin kind=bogus -->\n<!-- report-end -->\n"
+    errors, _ = MarkerValidator.scan_report(text, "analysis.md")
+    assert any("unknown report kind=bogus" in e for e in errors)
+
+
+def test_scan_report_unpaired_rejected():
+    text = (
+        "<!-- report-begin kind=report_mode mode=agentic -->\n"
+        "<!-- report-begin kind=warning -->\n"
+        "<!-- report-end -->\n"
+    )
+    errors, _ = MarkerValidator.scan_report(text, "analysis.md")
+    assert any("report-marker pairing mismatch" in e for e in errors)
+
+
+def test_check_report_requires_report_mode(tmp_path):
+    text = "<!-- impact-begin kind=top_ops -->\n| a |\n<!-- impact-end -->\n"
+    p = tmp_path / "analysis.md"
+    _write(str(p), text)
+    errors = MarkerValidator.check_report(str(p))
+    assert any("exactly one kind=report_mode" in e for e in errors)
+
+
+def test_check_report_rejects_legacy_warnings_section(tmp_path):
+    text = (
+        "<!-- report-begin kind=report_mode mode=agentic -->\n"
+        "<!-- report-end -->\n"
+        "<!-- impact-begin kind=top_ops -->\n| a |\n<!-- impact-end -->\n"
+        "## Warnings\n\nsome legacy prose\n"
+    )
+    p = tmp_path / "analysis.md"
+    _write(str(p), text)
+    errors = MarkerValidator.check_report(str(p))
+    assert any("legacy mid-document ## Warnings" in e for e in errors)
 
 
 # ----- validate_report + _validate_report_priority_consistency (R1-R4) -----
@@ -1097,6 +1281,8 @@ def test_check_report_with_top_ops_ok(tmp_path):
 
 def _passing_report():
     return """# Analysis Report
+<!-- report-begin kind=report_mode mode=agentic -->
+<!-- report-end -->
 
 ## Executive Summary
 
@@ -1174,6 +1360,41 @@ def _priority_data_two():
 
 def test_validate_report_passes(tmp_path):
     _write(str(tmp_path / "analysis.md"), _passing_report())
+    (tmp_path / "priority_data.json").write_text(json.dumps(_priority_data_two()))
+    passed, missing = validate_report(str(tmp_path))
+    assert passed, missing
+    assert missing == []
+
+
+# Two top kind=warning markers, one per producer (subagent failure and
+# high_variance data-quality). No trace in the corpus produces a warning, so this fixture is the
+# end-to-end check that a warning-bearing report clears the gate.
+_TOP_WARNING_MARKERS = """<!-- report-begin kind=warning -->
+> **⚠ Analysis incomplete.** Excluded from recommendations (script failures):
+> - conv_analyzer (Compute Kernel) — subprocess exited non-zero
+<!-- report-end -->
+
+<!-- report-begin kind=warning -->
+> **⚠ Data Quality.** Unreliable kernel-time (CoV > 1.0, extreme variance across instances):
+> - fused_moe (moe_unfused) — CoV 1.4
+<!-- report-end -->
+"""
+
+
+def _report_with_warnings():
+    # Insert the two warning markers after the report_mode marker block, before
+    # the Executive Summary, exactly where the template emits them.
+    return _passing_report().replace(
+        "<!-- report-end -->\n\n## Executive Summary",
+        "<!-- report-end -->\n\n" + _TOP_WARNING_MARKERS + "\n## Executive Summary",
+    )
+
+
+def test_validate_report_passes_with_top_warning_markers(tmp_path):
+    content = _report_with_warnings()
+    assert content.count("<!-- report-begin kind=warning -->") == 2
+    assert "## Warnings" not in content
+    _write(str(tmp_path / "analysis.md"), content)
     (tmp_path / "priority_data.json").write_text(json.dumps(_priority_data_two()))
     passed, missing = validate_report(str(tmp_path))
     assert passed, missing
@@ -2266,14 +2487,66 @@ def test_resolve_peak_maf_unknown_spec_falls_back():
 
 def test_get_peak_specs_dict_form():
     specs = get_peak_specs(
-        {"max_achievable_tflops": {"matrix_bf16": 708}, "peak_hbm_bw_tbs": 5.3}
+        {"max_achievable_tflops": {"matrix_bf16": 708}, "peak_mem_bw_tbs": 5.3}
     )
-    assert specs == {"peak_maf_tflops": 708, "peak_hbm_bw_tbs": 5.3}
+    assert specs == {"peak_maf_tflops": 708, "peak_mem_bw_tbs": 5.3}
 
 
 def test_get_peak_specs_scalar_form():
+    specs = get_peak_specs({"peak_bf16_maf_tflops": 700.0, "peak_mem_bw_tbs": 5.3})
+    assert specs == {"peak_maf_tflops": 700.0, "peak_mem_bw_tbs": 5.3}
+
+
+def test_get_peak_specs_legacy_hbm_key():
     specs = get_peak_specs({"peak_bf16_maf_tflops": 700.0, "peak_hbm_bw_tbs": 5.3})
-    assert specs == {"peak_maf_tflops": 700.0, "peak_hbm_bw_tbs": 5.3}
+    assert specs == {"peak_maf_tflops": 700.0, "peak_mem_bw_tbs": 5.3}
+
+
+# ----- analysis_utils: get_peak_mem_bw_tbs -----
+
+
+def test_get_peak_mem_bw_tbs_prefers_canonical_key():
+    assert (
+        get_peak_mem_bw_tbs({"peak_mem_bw_tbs": 0.256, "peak_hbm_bw_tbs": 5.3}) == 0.256
+    )
+
+
+def test_get_peak_mem_bw_tbs_accepts_legacy_key():
+    assert get_peak_mem_bw_tbs({"peak_hbm_bw_tbs": 5.3}) == 5.3
+
+
+def test_get_peak_mem_bw_tbs_default_when_missing():
+    assert get_peak_mem_bw_tbs({}) is None
+    assert get_peak_mem_bw_tbs({}, default=1) == 1
+
+
+def test_build_operation_metrics_legacy_metadata_uses_platform_peak():
+    df = pd.DataFrame(
+        {
+            "name": ["aten::add"],
+            "count": [1],
+            "Kernel Time (µs)_sum": [1_000.0],
+            "TB/s_mean": [0.2],
+        }
+    )
+    metadata = {"peak_hbm_bw_tbs": 0.64, "peak_bf16_maf_tflops": 100.0}
+    (op,) = build_operation_metrics(df, metadata, {})
+    assert op["efficiency"]["resolved_peak_mem_bw"] == 0.64
+
+
+def test_kernel_fusion_load_arch_config_reads_legacy_metadata(tmp_path):
+    meta_dir = tmp_path / "metadata"
+    meta_dir.mkdir()
+    (meta_dir / "gemm_metadata.json").write_text(
+        json.dumps(
+            {"peak_hbm_bw_tbs": 0.64, "max_achievable_tflops": {"matrix_bf16": 100.0}}
+        )
+    )
+    arch = kfa.load_arch_config(str(tmp_path), "no_such_platform")
+    assert arch == {
+        "peak_mem_bw_tbs": 0.64,
+        "max_achievable_tflops": {"matrix_bf16": 100.0},
+    }
 
 
 # ----- analysis_utils: _eff_bucket -----
@@ -2440,7 +2713,7 @@ def _many_ops_df(n):
 
 def test_build_operation_metrics_call_chain_present_under_cap():
     meta = {
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708},
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
@@ -2452,7 +2725,7 @@ def test_build_operation_metrics_call_chain_present_under_cap():
 
 def test_build_operation_metrics_call_chain_dropped_over_cap():
     meta = {
-        "peak_hbm_bw_tbs": 5.3,
+        "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708},
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
@@ -2957,6 +3230,8 @@ def _full_report(extra_kf_impact=""):
     if extra_kf_impact:
         kf += extra_kf_impact + "\n"
     return f"""# Analysis Report
+<!-- report-begin kind=report_mode mode=agentic -->
+<!-- report-end -->
 
 ## Executive Summary
 
@@ -4093,7 +4368,7 @@ class TestKernelFusionMain:
         meta_dir = os.path.join(out, "metadata")
         os.makedirs(meta_dir)
         json.dump(
-            {"peak_hbm_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_fp32": 100}},
+            {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_fp32": 100}},
             open(os.path.join(meta_dir, "gemm_metadata.json"), "w"),
         )
 
@@ -4484,7 +4759,7 @@ def test_analysis_utils_efficiency_and_fusion(tmp_path):
         }
     )
     result = au.calculate_efficiency(
-        row, peak_maf_or_maf_dict={"matrix_bf16": 1000}, peak_hbm_bw=5300
+        row, peak_maf_or_maf_dict={"matrix_bf16": 1000}, peak_mem_bw=5300
     )
     assert result["bound_type"] == "compute"
 

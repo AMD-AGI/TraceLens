@@ -39,11 +39,37 @@ TraceLens is a Python library for **automated performance analysis of training a
 
 ### 1. Install
 
+To work on TraceLens, clone the repository:
+
+```bash
+git clone --filter=blob:none https://github.com/AMD-AGI/TraceLens
+```
+
+If you are not developing TraceLens, install it with pip:
+
 ```bash
 pip install git+https://github.com/AMD-AGI/TraceLens.git
 ```
 
-For JAX XPlane (`.pb`) traces, install the [JAX extra](docs/how-to/generate-perf-report-jax.md#before-you-begin).
+Optional extras use the same URL. Name one or more inside the brackets:
+
+```bash
+pip install 'TraceLens[jax] @ git+https://github.com/AMD-AGI/TraceLens.git'
+```
+
+To install every extra at once:
+
+```bash
+pip install 'TraceLens[all] @ git+https://github.com/AMD-AGI/TraceLens.git'
+```
+
+| Extra | What it adds |
+| ----- | ------------ |
+| `jax` | [JAX XPlane (`.pb`) traces](docs/how-to/generate-perf-report-jax.md#before-you-begin) (`xprof`, `protobuf`) |
+| `kernel_source` | [Kernel source mapping](docs/how-to/map-kernel-source.md) (`itanium-demangler`) |
+| `comparative` | LLM clients for comparative analysis (`slodels` with OpenAI, Anthropic, and Google) |
+| `dev` | Test and format tools (`pytest`, `setuptools`, `black`) |
+| `all` | Every extra in this table |
 
 ### 2. Collect Traces
 

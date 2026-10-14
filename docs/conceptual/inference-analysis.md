@@ -278,8 +278,26 @@ splitter to override the empirically estimated ratio with the analytically
 derived one; see
 [Split inference traces](../how-to/generate-perf-report-pytorch-inference.md#split-inference-traces-optional).
 
+## How trace splitting uses these definitions
+
+Before a steady-state window can be extracted, the splitter first finds the
+*iteration boundaries* -- the repeating unit of work -- with a cascade of
+detectors that adapts to how much information the trace carries: recognized
+serving annotations when present, then the repeating structure of the call tree,
+then periodicity across top-level frames. Each candidate is graded by the share of
+GPU time its per-iteration windows explain. The steady-state region defined above
+is then located over those iterations, and each step is classified as
+prefill-decode-mix or decode-only -- from the parsed annotation when one is
+present, or from the batch size inferred from tensor shapes for annotation-less
+LLM traces.
+
+For the full mechanism -- the detection cascade, gap-free extraction, the three
+steady-state tiers, phase division, and every CLI flag -- see
+[Split traces into iterations, steady state, and phases](../how-to/split-traces.md).
+
 ## Related topics
 
+- [Split traces into iterations, steady state, and phases](../how-to/split-traces.md)
 - [Generate a PyTorch inference performance report](../how-to/generate-perf-report-pytorch-inference.md)
 - [Compare two traces in TraceLens](../how-to/compare-traces.md)
 - [GEMM analysis in TraceLens](./gemm-analysis.md)
