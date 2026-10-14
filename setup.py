@@ -6,9 +6,11 @@
 
 import subprocess
 from datetime import datetime
+from pathlib import Path
 from setuptools import setup, find_packages
 
 _BASE_VERSION = "0.1.0"
+_ROOT = Path(__file__).resolve().parent
 
 
 def _wheel_version():
@@ -28,6 +30,16 @@ def _wheel_version():
         return _BASE_VERSION
 
 
+def _read_requirements(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
 with open("README.md", encoding="utf-8") as _readme:
     _LONG_DESCRIPTION = _readme.read()
 
@@ -41,6 +53,9 @@ def _extras_require():
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
         ],
+        "Visualizer": _read_requirements(
+            _ROOT / "TraceLens" / "Visualizer" / "requirements.txt"
+        ),
         "kernel_source": [
             "itanium-demangler>=1.0",
         ],
@@ -57,7 +72,7 @@ def _extras_require():
 setup(
     name="TraceLens",
     version=_wheel_version(),
-    packages=find_packages(where="."),  # Will pick up 'TraceLens' automatically
+    packages=find_packages(where="."),
     package_dir={"": "."},
     include_package_data=True,
     package_data={
@@ -65,6 +80,10 @@ setup(
             "**/*.md",
             "Agent/**/skills/**/*",
             "Agent/Analysis/utils/arch/*.json",
+        ],
+        "TraceLens.Visualizer.model_explorer_export": [
+            "viewer/*.html",
+            "viewer/*.js",
         ],
     },
     exclude_package_data={
@@ -109,6 +128,8 @@ setup(
             "TraceLens_generate_perf_report_pftrace_hip_activity = TraceLens.Reporting.generate_perf_report_pftrace_hip_activity:main",
             "TraceLens_generate_perf_report_pftrace_memory_copy = TraceLens.Reporting.generate_perf_report_pftrace_memory_copy:main",
             "TraceLens_generate_perf_report_genesis = TraceLens.Reporting.generate_perf_report_genesis:main",
+            "TraceLens_visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main",
+            "visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main",
             "TraceLens_split_trace = TraceLens.TraceUtils.split_trace.main:main",
             "TraceLens_resolve_kernel_source = TraceLens.TraceUtils.kernel_source.cli:main",
             "TraceLens_trace_index = TraceLens.TraceIndex.cli:main",

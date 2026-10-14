@@ -1,0 +1,1107 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""Tests for symbolic shape inference and operator export."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from TraceLens.ModelUtils.ast_analyze import SYNTHETIC_ATTENTION, analyze_source
+from TraceLens.ModelUtils.basic_ops import BasicOpFilter
+from TraceLens.ModelUtils.block_tree import BlockNode, build_block_node
+from TraceLens.ModelUtils.extract import ArchitectureSpec, load_architecture
+from TraceLens.ModelUtils.model_graph import build_model_graph
+from TraceLens.ModelUtils.shape_inference import (
+    ModuleDimRegistry,
+    ShapeContext,
+    ShapeInferencer,
+    TensorSpec,
+    build_operator_export,
+)
+from TraceLens.ModelUtils.meta_trace import symbolise_meta_shape
+
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+
+
+def _mla_fixture_root() -> BlockNode:
+    def leaf(name: str) -> BlockNode:
+        return BlockNode(
+            attr_name=name,
+            class_name="Linear",
+            role="other",
+            label="Linear",
+            is_basic=True,
+        )
+
+    return BlockNode(
+        attr_name="attn",
+        class_name="Attn",
+        role="attention",
+        label="Attn",
+        parallel_gates=["g_proj"],
+        children=[
+            leaf("q_a_proj"),
+            leaf("q_a_layernorm"),
+            leaf("q_b_proj"),
+            leaf("kv_a_proj_with_mqa"),
+            leaf("kv_a_layernorm"),
+            leaf("kv_b_proj"),
+            BlockNode(
+                attr_name=SYNTHETIC_ATTENTION,
+                class_name="AttentionOp",
+                role="attention",
+                label="Attention",
+                is_basic=True,
+                details=["kernel: flash_attn"],
+            ),
+            leaf("g_proj"),
+            leaf("o_proj"),
+        ],
+    )
+
+
+def test_module_dim_registry_parses_linear_from_ast():
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        detailed=True,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    context = ShapeContext.from_spec(spec)
+    registry = ModuleDimRegistry.from_registry(
+        spec.class_registry,
+        config=spec.raw_config,
+        context=context,
+    )
+    q_spec = registry.linear.get(("CustomLatentAttention", "q_proj"))
+    assert q_spec is not None
+    assert q_spec.in_features == 4096
+    assert q_spec.out_features == 4096
+    kv_spec = registry.linear.get(("CustomLatentAttention", "kv_proj"))
+    assert kv_spec is not None
+    assert kv_spec.out_features == 512
+    router_spec = registry.linear.get(("CustomSharedExpertMoE", "router"))
+    assert router_spec is not None
+    assert router_spec.out_features == 64
+
+
+def test_shape_inferencer_mla_fixture_linear_shapes():
+    root = _mla_fixture_root()
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        detailed=True,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    inferencer = ShapeInferencer(spec)
+    graph = build_model_graph(root, title="MLA")
+    operators = inferencer.export_operators(graph, root=root)
+
+    by_name = {op.name: op for op in operators}
+    assert by_name["q_a_proj"].output.shape == ("B", "S", 4096)
+    assert by_name["o_proj"].output.shape == ("B", "S", 4096)
+    assert by_name["Attention"].computation == "AttentionOp"
+    assert by_name["Attention"].output.shape == ("B", "S", 4096)
+    assert by_name["×"].computation == "elementwise_mul"
+    assert "input" in by_name["q_a_proj"].inputs
+    assert by_name["input"].operation == "input"
+    assert by_name["input"].name == "input"
+    assert by_name["input"].inputs == []
+
+
+def test_model_output_operator():
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        detailed=True,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    inferencer = ShapeInferencer(spec)
+    output = inferencer.model_output_operator()
+    assert output is not None
+    assert output.name == "output"
+    assert output.operation == "output"
+    assert output.computation == "output"
+    assert output.output.shape == ("B", "S", 32000)
+
+
+def test_build_operator_export_custom_model():
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        name="Custom MLA MoE",
+        detailed=True,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    payload = build_operator_export(spec)
+    assert payload["name"] == "Custom MLA MoE"
+    assert payload["dtype"] == "float16"
+    assert payload["dimensions"]["H"] == 4096
+    assert payload["sections"]
+    assert payload.get("checkpoint_source")
+    assert payload.get("code_sources")
+
+    all_ops = []
+    for section in payload["sections"]:
+        all_ops.extend(section["operators"])
+    section_titles = [section["title"] for section in payload["sections"]]
+    assert "Token Embedding" in section_titles
+    assert "Linear" in section_titles
+    assert "CustomRotaryEmbedding" in section_titles
+    assert section_titles.count("RMSNorm") == 1
+    assert any(op["name"] == "q_proj" for op in all_ops)
+    assert any(op["name"] == "input" and op["operation"] == "input" for op in all_ops)
+    assert any(op["name"] == "router" for op in all_ops)
+    output_ops = [op for op in all_ops if op["name"] == "output"]
+    assert len(output_ops) == 1
+    assert output_ops[0]["inputs"] == ["lm_head"]
+    json.dumps(payload)
+
+
+def test_subgraph_warrants_export_filters_opaque_single_ops():
+    from TraceLens.ModelUtils.block_tree import (
+        BlockNode,
+        forward_operation_count,
+        subgraph_expands_on_export,
+        subgraph_warrants_export,
+    )
+
+    embed = BlockNode(
+        attr_name="embed_tokens",
+        class_name="Embedding",
+        role="embedding",
+        label="Embedding",
+        is_basic=True,
+    )
+    rope = BlockNode(
+        attr_name="rotary_emb",
+        class_name="RotaryEmbedding",
+        role="positional",
+        label="RoPE",
+        details=["positional encoding (RoPE)"],
+    )
+    attn = BlockNode(
+        attr_name="attn",
+        class_name="Attn",
+        role="attention",
+        label="Attn",
+        children=[
+            BlockNode(
+                attr_name="q_proj",
+                class_name="Linear",
+                role="other",
+                label="Linear",
+                is_basic=True,
+            ),
+            BlockNode(
+                attr_name="k_proj",
+                class_name="Linear",
+                role="other",
+                label="Linear",
+                is_basic=True,
+            ),
+        ],
+    )
+    inline_mlp = BlockNode(
+        attr_name="mlp",
+        class_name="MLP",
+        role="ffn",
+        label="MLP",
+        children=[
+            BlockNode(
+                attr_name="down_proj",
+                class_name="Linear",
+                role="other",
+                label="Linear",
+                is_basic=True,
+            ),
+        ],
+    )
+
+    assert forward_operation_count(embed) == 1
+    assert forward_operation_count(rope) == 1
+    assert forward_operation_count(attn) == 2
+    assert forward_operation_count(inline_mlp) == 1
+    assert not subgraph_expands_on_export(rope)
+    assert subgraph_expands_on_export(inline_mlp)
+    assert not subgraph_warrants_export(embed)
+    assert not subgraph_warrants_export(rope)
+    assert subgraph_warrants_export(attn)
+    assert subgraph_warrants_export(inline_mlp)
+
+
+def test_build_operator_export_deduplicates_same_shape_subgraphs():
+    from TraceLens.ModelUtils.shape_inference import (
+        ShapeInferencer,
+        subgraph_boundary_signature,
+    )
+
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        name="Custom MLA MoE",
+        detailed=True,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    payload = build_operator_export(spec)
+    section_titles = [section["title"] for section in payload["sections"]]
+    assert section_titles.count("RMSNorm") == 1
+    assert "CustomRotaryEmbedding" in section_titles
+    assert "Token Embedding" in section_titles
+    assert "Linear" in section_titles
+    assert "CustomLatent Attn" in section_titles
+    assert "CustomSharedExpertMoE" in section_titles
+
+    inferencer = ShapeInferencer(spec)
+    rmsnorm_signatures: list[tuple[Any, ...]] = []
+    for title, tree in spec.export_block_trees:
+        if title != "RMSNorm":
+            continue
+        operators = inferencer.export_operators(
+            build_model_graph(
+                tree, title=title, basic_ops=BasicOpFilter.for_detailed()
+            ),
+            root=tree,
+        )
+        signature = subgraph_boundary_signature(operators, class_name=tree.class_name)
+        assert signature is not None
+        rmsnorm_signatures.append(signature)
+    assert len(rmsnorm_signatures) >= 2
+    assert len(set(rmsnorm_signatures)) == 1
+
+
+def test_infer_forward_steps_from_init():
+    from TraceLens.ModelUtils.ast_analyze import (
+        effective_forward_calls,
+        infer_forward_steps_from_init,
+    )
+
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        detailed=True,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    attn = spec.class_registry["CustomLatentAttention"]
+    assert infer_forward_steps_from_init(attn) == ["q_proj", "kv_proj"]
+    assert effective_forward_calls(attn) == ["q_proj", "kv_proj"]
+    decoder = spec.class_registry["CustomDecoderLayer"]
+    assert effective_forward_calls(decoder) == [
+        "input_layernorm",
+        "self_attn",
+        "post_attention_layernorm",
+        "block_sparse_moe",
+    ]
+
+
+def test_export_block_trees_expand_init_only_modules():
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        detailed=True,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    export_titles = [title for title, _ in spec.export_block_trees]
+    assert "Token Embedding" in export_titles
+    assert "Linear" in export_titles
+    assert "CustomLatent Attn" in export_titles
+    assert "CustomSharedExpertMoE" in export_titles
+
+    attn_tree = next(
+        tree for title, tree in spec.export_block_trees if "CustomLatent" in title
+    )
+    assert [child.attr_name for child in attn_tree.children] == ["q_proj", "kv_proj"]
+
+
+def test_shape_context_flattens_nested_sub_config_dims():
+    spec = ArchitectureSpec(
+        name="GLM-like",
+        model_type="glm",
+        hidden_size=4096,
+        raw_config={
+            "hidden_size": 4096,
+            "linear_attn_config": {"head_dim": 128, "num_heads": 64},
+        },
+    )
+    context = ShapeContext.from_spec(spec)
+    assert context.dims["linear_head_dim"] == 128
+    assert context.dims["linear_attn_head_dim"] == 128
+    assert context.dims["linear_num_heads"] == 64
+    assert context.dims["head_dim"] == 128
+
+
+def test_module_registry_resolves_parameter_shapes_through_locals():
+    source = """
+import torch
+import torch.nn as nn
+
+
+class HyperConnection(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        mix = (2 + config.hc_mult) * config.hc_mult
+        self.fn = nn.Parameter(torch.empty(mix, config.hc_mult * config.hidden_size))
+        self.head_proj = nn.Linear(
+            config.hidden_size,
+            config.linear_head_dim * config.linear_num_heads,
+        )
+"""
+    config = {
+        "hidden_size": 4096,
+        "hc_mult": 4,
+        "linear_attn_config": {"head_dim": 128, "num_heads": 64},
+    }
+    analysis = analyze_source(source, config=config)
+    spec = ArchitectureSpec(
+        name="hc",
+        model_type="glm",
+        hidden_size=4096,
+        raw_config=config,
+        class_registry=analysis.class_registry,
+    )
+    context = ShapeContext.from_spec(spec)
+    registry = ModuleDimRegistry.from_registry(
+        analysis.class_registry,
+        config=config,
+        context=context,
+    )
+    assert registry.parameter_by_attr["fn"].shape == (24, 16384)
+    assert registry.linear_by_attr["head_proj"].out_features == 8192
+
+
+def test_functional_linear_uses_owning_module_parameter_shape():
+    source = """
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class Norm(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(config.hidden_size))
+
+    def forward(self, hidden_states):
+        return hidden_states * self.weight
+
+
+class Router(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(config.n_routed_experts, config.hidden_size))
+
+    def forward(self, hidden_states):
+        router_logits = F.linear(hidden_states, self.weight)
+        scores = router_logits.sigmoid()
+        return scores
+
+
+class Block(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.norm = Norm(config)
+        self.gate = Router(config)
+
+    def forward(self, hidden_states):
+        hidden_states = self.norm(hidden_states)
+        scores = self.gate(hidden_states)
+        return scores
+"""
+    config = {"hidden_size": 4096, "n_routed_experts": 288}
+    analysis = analyze_source(source, config=config)
+    basic = BasicOpFilter.for_detailed()
+    block = build_block_node(
+        attr_name="block",
+        class_name="Block",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    spec = ArchitectureSpec(
+        name="router owner",
+        model_type="test",
+        hidden_size=4096,
+        num_experts=288,
+        raw_config=config,
+        class_registry=analysis.class_registry,
+        basic_ops=basic,
+        export_block_trees=[("Block", block)],
+    )
+    inferencer = ShapeInferencer(spec)
+    operators = inferencer.export_operators(
+        build_model_graph(block, title="Block", basic_ops=basic),
+        root=block,
+    )
+    linear = next(op for op in operators if op.computation == "Linear")
+    # `weight` is declared by both classes; the router's shape must win here.
+    assert linear.output.shape == ("B", "S", 288)
+
+
+HYPERCONNECTION_SOURCE = """
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class Norm(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(config.hidden_size))
+
+    def forward(self, hidden_states):
+        return hidden_states * self.weight
+
+
+class HyperConnection(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.input_norm = Norm(config)
+        self.fn = nn.Parameter(torch.empty(24, config.hidden_size))
+
+    def forward(self, hidden_streams):
+        flat = self.input_norm(hidden_streams)
+        mix = F.linear(flat, self.fn)
+        pre = mix.sigmoid()
+        collapsed = (pre * hidden_streams).sum(dim=2)
+        return collapsed
+"""
+
+
+def _hyperconnection_spec() -> tuple[ArchitectureSpec, BlockNode, BasicOpFilter]:
+    config = {"hidden_size": 4096}
+    analysis = analyze_source(HYPERCONNECTION_SOURCE, config=config)
+    basic = BasicOpFilter.for_detailed()
+    block = build_block_node(
+        attr_name="hc",
+        class_name="HyperConnection",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    spec = ArchitectureSpec(
+        name="hyperconnection",
+        model_type="test",
+        hidden_size=4096,
+        raw_config=config,
+        class_registry=analysis.class_registry,
+        basic_ops=basic,
+        export_block_trees=[("HyperConnection", block)],
+    )
+    return spec, block, basic
+
+
+def test_stream_collapse_takes_width_from_the_forward_input():
+    spec, block, basic = _hyperconnection_spec()
+    graph = build_model_graph(block, title="HyperConnection", basic_ops=basic)
+    specs = ShapeInferencer(spec).infer_model_graph(graph, root=block)
+    by_label = {}
+    for node in graph.nodes:
+        by_label.setdefault(node.label, []).append(specs[node.id])
+
+    # The mixing weights are one value per stream ...
+    assert by_label["Linear"][0].shape == ("B", "S", 24)
+    # ... while collapsing the streams reads `hidden_streams` and stays activation wide.
+    assert by_label["Multiply"][0].shape == ("B", "S", 4096)
+    assert by_label["Sum"][0].shape == ("B", "S", 4096)
+
+
+def test_forward_parameter_reads_link_back_to_the_block_input():
+    from TraceLens.ModelUtils.ast_analyze import FORWARD_METHOD_INPUT
+    from TraceLens.ModelUtils.computation_graph import build_computation_graph
+
+    spec, block, basic = _hyperconnection_spec()
+    collapse = next(
+        step
+        for step in block.children
+        if step.label == "Multiply"
+        and FORWARD_METHOD_INPUT in step.operation_predecessors
+    )
+    graph = build_computation_graph(block, basic_ops=basic)
+    input_index = next(
+        index for index, node in enumerate(graph.nodes) if node.synthetic == "@input"
+    )
+    collapse_index = next(
+        index
+        for index, node in enumerate(graph.nodes)
+        if node.block is not None and node.block.attr_name == collapse.attr_name
+    )
+    assert (input_index, collapse_index) in graph.links
+
+
+def test_kimi_router_export_uses_real_ops_and_topk_shapes():
+    config = {
+        "hidden_size": 7168,
+        "num_experts": 896,
+        "num_experts_per_token": 16,
+        "num_expert_group": 1,
+        "topk_group": 1,
+        "moe_router_activation_func": "sigmoid",
+        "moe_renormalize": True,
+        "routed_scaling_factor": 1.0,
+    }
+    analysis = analyze_source(
+        (FIXTURES / "kimi_moe_gate.py").read_text(),
+        config=config,
+    )
+    basic = BasicOpFilter.for_detailed()
+    gate = build_block_node(
+        attr_name="gate",
+        class_name="KimiMoEGate",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    spec = ArchitectureSpec(
+        name="Kimi gate",
+        model_type="kimi",
+        hidden_size=7168,
+        num_experts=896,
+        num_experts_per_tok=16,
+        raw_config=config,
+        class_registry=analysis.class_registry,
+        basic_ops=basic,
+        export_block_trees=[("KimiMoEGate", gate)],
+    )
+    exported = build_operator_export(spec)
+    operators = exported["sections"][0]["operators"]
+    by_computation = {item["computation"]: item for item in operators}
+    assert by_computation["Linear"]["output"]["shape"] == ["B", "S", 896]
+    assert by_computation["TopK"]["output"] == {
+        "shape": ["B", "S", 16],
+        "dtype": "int64",
+    }
+    assert by_computation["Gather"]["output"]["shape"] == ["B", "S", 16]
+    assert by_computation["Sum"]["output"]["shape"] == ["B", "S", 1]
+    assert all(
+        item["operation"] == "torch_functional"
+        for item in operators
+        if item["name"].startswith("@op_")
+    )
+
+
+# ---------------------------------------------------------------------------
+# Direct shape inference tests for newly added operation handlers
+# ---------------------------------------------------------------------------
+
+from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+from TraceLens.ModelUtils.shape_inference import TensorSpec
+
+
+def _make_inferencer(**dims: int) -> ShapeInferencer:
+    """Create a minimal ShapeInferencer with custom dims."""
+    spec = ArchitectureSpec(
+        name="Test",
+        model_type="test",
+        hidden_size=dims.get("hidden_size", 4096),
+        raw_config={"hidden_size": dims.get("hidden_size", 4096)},
+    )
+    ctx = ShapeContext.from_spec(spec)
+    for key, val in dims.items():
+        ctx.dims[key] = val
+    return ShapeInferencer(spec, context=ctx)
+
+
+def _node(
+    label: str,
+    *,
+    details: list[str] | None = None,
+    external_inputs: list[str] | None = None,
+    operation: OperationKind = OperationKind.TORCH_FUNCTIONAL,
+) -> ModelGraphNode:
+    meta: dict = {"class_name": label}
+    if details:
+        meta["details"] = details
+    if external_inputs:
+        meta["external_inputs"] = external_inputs
+    return ModelGraphNode(
+        id="n1", kind=NodeKind.LEAF, label=label, operation=operation, metadata=meta
+    )
+
+
+def test_split_shape_inference_with_split_size():
+    inf = _make_inferencer(qkv_dim=2730)
+    inp = TensorSpec(shape=("B", "S", 8192), dtype="float16")
+    node = _node(
+        "Split",
+        details=["split_size: [self.qkv_dim] * 3", "dim: -1"],
+        external_inputs=["qkv_dim"],
+    )
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", "S", 2730)
+
+
+def test_split_shape_inference_fallback_to_external_inputs():
+    inf = _make_inferencer(qkv_dim=2730)
+    inp = TensorSpec(shape=("B", "S", 8192), dtype="float16")
+    node = _node("Split", details=["dim: -1"], external_inputs=["qkv_dim"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", "S", 2730)
+
+
+def test_chunk_shape_inference():
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 4096), dtype="float16")
+    node = _node("Chunk", details=["split_size: 2", "dim: -1"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    # chunk(chunks=2, dim=-1) divides last dim: 4096 / 2 = 2048
+    assert result.shape == ("B", "S", 2048)
+
+
+def test_concat_shape_inference():
+    inf = _make_inferencer()
+    a = TensorSpec(shape=("B", "S", 1024), dtype="float16")
+    b = TensorSpec(shape=("B", "S", 2048), dtype="float16")
+    node = _node("Concat", details=["dim: -1"])
+    result = inf._infer_node_output(node, [a, b], root=None)
+    assert result.shape == ("B", "S", 3072)
+
+
+def test_gather_torch_gather_output_equals_index_shape():
+    # ``torch.gather(input, dim, index)`` records a ``dim`` detail and a single
+    # int64 index operand; its output is shaped exactly like the index. This is
+    # the pre-existing behaviour and must stay byte-identical.
+    inf = _make_inferencer()
+    base = TensorSpec(shape=("B", "S", 4096), dtype="float16")
+    index = TensorSpec(shape=("B", "S", 8), dtype="int64")
+    node = _node("Gather", details=["dim: -1"])
+    result = inf._infer_node_output(node, [base, index], root=None)
+    assert result.shape == ("B", "S", 8)
+    assert result.dtype == "float16"
+
+
+def test_gather_integer_advanced_index_broadcasts_indices_and_keeps_tail():
+    # ``base[i, j]`` (a Subscript / ``__getitem__``, no ``dim`` detail) with two
+    # integer index operands indexes the two leading axes: the broadcast of the
+    # index shapes replaces them and the trailing base axes are kept. Without this
+    # rule the op collapsed to a single index operand's shape (rank-1), breaking
+    # every downstream rank check (the GLM indexer ``pool_indices[batch_idx,
+    # selected]`` bug).
+    inf = _make_inferencer()
+    base = TensorSpec(shape=(10, 20, 8), dtype="bfloat16")
+    i = TensorSpec(shape=(4,), dtype="int64")
+    j = TensorSpec(shape=(4,), dtype="int64")
+    node = _node("Gather")  # no ``dim`` detail -> advanced index, not torch.gather
+    result = inf._infer_node_output(node, [base, i, j], root=None)
+    assert result.shape == (4, 8)
+    assert result.dtype == "bfloat16"
+
+
+def test_gather_integer_advanced_index_broadcasts_unequal_index_ranks():
+    # Broadcasting the index operands is right-aligned NumPy-style: a ``[4, 1]``
+    # and a ``[1, 5]`` index yield a ``[4, 5]`` selection over the two leading
+    # axes, with the base's trailing axis preserved.
+    inf = _make_inferencer()
+    base = TensorSpec(shape=("B", "S", 128), dtype="float16")
+    i = TensorSpec(shape=(4, 1), dtype="int64")
+    j = TensorSpec(shape=(1, 5), dtype="int64")
+    node = _node("Gather")
+    result = inf._infer_node_output(node, [base, i, j], root=None)
+    assert result.shape == (4, 5, 128)
+
+
+def test_gather_single_int_index_without_dim_stays_on_legacy_path():
+    # A single int64 index operand and no ``dim`` detail does NOT trigger the
+    # advanced-index broadcast (it needs two or more index operands); the legacy
+    # ``index.shape`` result is preserved, keeping the change conservatively
+    # scoped to the multi-index pattern.
+    inf = _make_inferencer()
+    base = TensorSpec(shape=("B", "S", 4096), dtype="float16")
+    index = TensorSpec(shape=("B", 4), dtype="int64")
+    node = _node("Gather")
+    result = inf._infer_node_output(node, [base, index], root=None)
+    assert result.shape == ("B", 4)
+
+
+def test_index_select_leading_axis_advanced_index_keeps_tail():
+    # ``index_first_axis(x, indices): return x[indices]`` -- a bare advanced index
+    # whose index operand is a tensor parameter -- is captured as a dedicated
+    # ``Index select`` op (never the overloaded ``gather`` label). Its int64 index
+    # replaces the leading axis of the base and the trailing base axes are kept:
+    # ``[nnz] ++ base.shape[1:]`` -> ``[nnz, H]``.
+    inf = _make_inferencer()
+    base = TensorSpec(shape=("B*S", 7168), dtype="bfloat16")
+    indices = TensorSpec(shape=("nnz",), dtype="int64")
+    node = _node("Index select")
+    result = inf._infer_node_output(node, [base, indices], root=None)
+    assert result.shape == ("nnz", 7168)
+    assert result.dtype == "bfloat16"
+
+
+def test_index_select_falls_back_to_base_when_index_not_int_typed():
+    # Interim state (before the index producer is introspected to int64): the index
+    # operand carries no integer shape, so the rule passes the base shape through
+    # rather than inventing one -- and never raises or warns.
+    inf = _make_inferencer()
+    base = TensorSpec(shape=("B", "S", 7168), dtype="bfloat16")
+    opaque_index = TensorSpec(shape=("B", "S", 7168), dtype="bfloat16")
+    node = _node("Index select")
+    result = inf._infer_node_output(node, [base, opaque_index], root=None)
+    assert result.shape == ("B", "S", 7168)
+    assert result.dtype == "bfloat16"
+
+
+def test_transpose_shape_inference():
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 32, 128), dtype="float16")
+    node = _node("Transpose", details=["dim0: 1", "dim1: 2"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", 32, "S", 128)
+
+
+def test_shape_slice_narrows_axis_by_own_shape_arithmetic():
+    # ``rotate_half``'s ``x[..., : x.shape[-1] // 2]`` narrows the last axis to
+    # half its concrete width: the ``shape_slice`` detail carries the per-axis
+    # ``lower|upper`` expressions over the operand's own ``shape`` symbol, and the
+    # inferencer sizes the axis (64 -> 32) instead of passing the shape through.
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 16, 64), dtype="float16")
+    lower = _node("Slice", details=["shape_slice: -1=|shape[-1] // 2"])
+    result = inf._infer_node_output(lower, [inp], root=None)
+    assert result.shape == ("B", "S", 16, 32)
+    # The complementary upper half ``x[..., x.shape[-1] // 2 :]`` also narrows to 32.
+    upper = _node("Slice", details=["shape_slice: -1=shape[-1] // 2|"])
+    result = inf._infer_node_output(upper, [inp], root=None)
+    assert result.shape == ("B", "S", 16, 32)
+
+
+def test_view_resolves_inferred_size_one_axis_to_int():
+    # ``view(B, S, -1, 128)`` on a ``[B, S, 128]`` source infers the ``-1`` axis
+    # to a concrete size of 1. It must be an ``int`` 1, not the string "1" — a
+    # stringified 1 reads as a symbolic axis and defeats a following squeeze.
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 128), dtype="float16")
+    node = _node("View", details=["shape: x.shape[0], x.shape[1], -1, 128"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", "S", 1, 128)
+    assert result.shape[2] == 1 and isinstance(result.shape[2], int)
+
+
+def test_squeeze_drops_inferred_size_one_view_axis():
+    # The regression the phantom-rank bug produced: ``.view(...).squeeze(2)``
+    # where the viewed axis is an inferred size-1 must collapse to rank-3.
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 128), dtype="float16")
+    view = _node("View", details=["shape: x.shape[0], x.shape[1], -1, 128"])
+    viewed = inf._infer_node_output(view, [inp], root=None)
+    squeeze = _node("Squeeze", details=["dim: 2"])
+    result = inf._infer_node_output(squeeze, [viewed], root=None)
+    assert result.shape == ("B", "S", 128)
+
+
+def test_flatten_collapses_trailing_span():
+    # ``flatten(-2)`` merges the last two axes; previously flatten shared the
+    # view/reshape path, found no shape detail, and passed through unchanged.
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 4, 128), dtype="float16")
+    node = _node("Flatten", details=["start_dim: -2"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", "S", 512)
+
+
+def test_flatten_collapses_explicit_span_symbolic():
+    # A span containing a symbolic axis yields a readable ``*``-joined product.
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 4, 8), dtype="float16")
+    node = _node("Flatten", details=["start_dim: 1", "end_dim: 2"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", "S*4", 8)
+
+
+def test_matmul_shape_inference():
+    inf = _make_inferencer()
+    a = TensorSpec(shape=("B", "S", 4096), dtype="float16")
+    b = TensorSpec(shape=(4096, 1024), dtype="float16")
+    node = _node("MatMul")
+    result = inf._infer_node_output(node, [a, b], root=None)
+    assert result.shape == ("B", "S", 1024)
+
+
+def test_einsum_shape_inference():
+    inf = _make_inferencer()
+    a = TensorSpec(shape=("B", "S", 32, 128), dtype="float16")
+    b = TensorSpec(shape=("B", 32, 128, "S"), dtype="float16")
+    node = _node("Einsum", details=["equation: bshd,bhds->bshs"])
+    result = inf._infer_node_output(node, [a, b], root=None)
+    assert result.shape == ("B", "S", 32, "S")
+
+
+def test_resolve_cast_dtype_honours_concrete_tokens():
+    from TraceLens.ModelUtils.shape_inference import _resolve_cast_dtype
+
+    # Concrete dtype tokens win, and longest-first matching keeps bfloat16 from
+    # being misread as the float16 substring it contains.
+    assert _resolve_cast_dtype("float32", "float16", "float16") == "float32"
+    assert _resolve_cast_dtype("torch.float32", "float16", "float16") == "float32"
+    assert _resolve_cast_dtype("torch.bfloat16", "float16", "float16") == "bfloat16"
+    assert _resolve_cast_dtype("torch.int32", "float16", "float16") == "int32"
+    assert _resolve_cast_dtype("half", "float32", "float16") == "float16"
+    assert _resolve_cast_dtype("double", "float16", "float16") == "float64"
+
+
+def test_resolve_cast_dtype_variable_ref_restores_working_dtype():
+    from TraceLens.ModelUtils.shape_inference import _resolve_cast_dtype
+
+    # `comb.to(dtype)` where `dtype = hidden_states.dtype`: a float32 tensor cast
+    # back to the module's working precision. The variable ref must resolve to the
+    # working dtype, not silently keep the float32 source.
+    assert _resolve_cast_dtype("dtype", "float32", "float16") == "float16"
+    assert _resolve_cast_dtype("x.dtype", "float32", "bfloat16") == "bfloat16"
+    assert _resolve_cast_dtype("input_dtype", "float32", "float16") == "float16"
+    # An empty expression carries no information: keep the source dtype.
+    assert _resolve_cast_dtype("", "float32", "float16") == "float32"
+
+
+def test_cast_to_variable_dtype_downcasts_from_float32():
+    # A `.to(dtype)` cast fed a float32 tensor resolves to the working dtype so the
+    # HyperConnection's float32 → float16 downcast renders as a real op.
+    inf = _make_inferencer()
+    assert inf.context.dtype == "float16"
+    inp = TensorSpec(shape=("B", "S", 4), dtype="float32")
+    node = _node("Cast", details=["dtype: dtype"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", "S", 4)
+    assert result.dtype == "float16"
+
+
+def test_parse_module_ctor_parses_conv_channels():
+    import ast as _ast
+
+    from TraceLens.ModelUtils.shape_inference import ModuleConvSpec, _parse_module_ctor
+
+    call = _ast.parse("nn.Conv2d(64, 128, kernel_size=3)").body[0].value
+    ctx = ShapeContext.from_spec(
+        ArchitectureSpec(name="T", model_type="t", raw_config={})
+    )
+    spec = _parse_module_ctor(call, config={}, local_vars={}, context=ctx)
+    assert isinstance(spec, ModuleConvSpec)
+    assert spec.in_channels == 64
+    assert spec.out_channels == 128
+
+
+def test_conv_shape_inference_replaces_matched_channel_axis():
+    from TraceLens.ModelUtils.shape_inference import ModuleConvSpec
+
+    inf = _make_inferencer()
+    inf.module_dims.conv_by_attr["patch_conv"] = ModuleConvSpec(
+        in_channels=3, out_channels=1280
+    )
+    inp = TensorSpec(shape=("B", 3, 224, 224), dtype="float16")
+    node = _node("Conv2d")
+    node.metadata["attr_name"] = "patch_conv"
+    result = inf._infer_node_output(node, [inp], root=None)
+    # channel axis (carrying in_channels=3) becomes out_channels; spatial passes through
+    assert result.shape == ("B", 1280, 224, 224)
+
+
+def test_conv_shape_inference_defaults_to_channel_axis_one():
+    # No parsed spec: _is_conv fires and the conventional channel axis (1) is replaced.
+    inf = _make_inferencer(hidden_size=768)
+    inp = TensorSpec(shape=("B", 16, "S"), dtype="float16")
+    node = _node("Conv1d")
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", 768, "S")
+
+
+def test_synthetic_kernel_port_passthrough_no_warning(caplog):
+    """Synthetic kernel port nodes should pass through silently (no warning)."""
+    import logging
+
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 4096), dtype="float16")
+    node = ModelGraphNode(
+        id="@kernel_in:1:query",
+        kind=NodeKind.LEAF,
+        label="query",
+        operation=OperationKind.SYNTHETIC,
+        metadata={"synthetic": "@kernel_port_in"},
+    )
+    with caplog.at_level(
+        logging.WARNING, logger="TraceLens.ModelUtils.shape_inference"
+    ):
+        result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", "S", 4096)
+    assert "No shape inference" not in caplog.text
+
+
+def test_introspect_forward_shape_simulates_ops():
+    """_introspect_forward_shape walks forward_operations to infer shape."""
+    from TraceLens.ModelUtils.ast_analyze import ClassStructure, ForwardOperation
+    import ast
+
+    # Build a minimal ClassStructure with two ops: view then linear.
+    dummy_class = ast.parse("class Dummy:\n  pass\n").body[0]
+    structure = ClassStructure(
+        name="Dummy",
+        node=dummy_class,
+        init_assignments={},
+        init_details={},
+        forward_calls=[],
+        norm_before=[],
+        forward_input_name="x",
+        forward_operations={
+            "@op_view": ForwardOperation(
+                attr_name="@op_view",
+                label="View",
+                class_name="View",
+                predecessors=("x",),
+                details=("shape: -1, self.hidden_size",),
+            ),
+        },
+        primary_return_slot="@op_view",
+    )
+
+    spec = ArchitectureSpec(
+        name="Test",
+        model_type="test",
+        hidden_size=4096,
+        raw_config={"hidden_size": 4096},
+        class_registry={"Dummy": structure},
+    )
+    inf = ShapeInferencer(spec)
+    node = ModelGraphNode(
+        id="test",
+        kind=NodeKind.LEAF,
+        label="Dummy",
+        operation=OperationKind.NN_MODULE,
+        metadata={"class_name": "Dummy"},
+    )
+    inp = TensorSpec(shape=("B", "S", 4096), dtype="float16")
+    result = inf._introspect_forward_shape(node, [inp], root=None)
+    assert result is not None
+    # The view should pass through since shape resolves to same dims
+    assert len(result.shape) >= 2
+
+
+# ── Meta-device shape utilities ──────────────────────────────────────────────
+
+
+def test_symbolise_meta_shape_replaces_batch_and_seq():
+    shape = (1, 128, 4096)
+    sym = symbolise_meta_shape(shape, batch_size=1, seq_len=128)
+    assert sym == ("B", "S", 4096)
+
+
+def test_symbolise_meta_shape_no_match():
+    shape = (4096, 1024)
+    sym = symbolise_meta_shape(shape, batch_size=1, seq_len=128)
+    # 1024 is neither batch nor seq; 4096 is neither
+    assert sym == (4096, 1024)
+
+
+def test_meta_shape_lookup_uses_attr_name():
+    """_lookup_meta_shape should find shapes by node attr_name."""
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+
+    spec = ArchitectureSpec(
+        name="Test",
+        model_type="test",
+        hidden_size=4096,
+        raw_config={"hidden_size": 4096},
+    )
+    inf = ShapeInferencer(spec)
+    inf._meta_shapes["model.layers.0.self_attn.q_proj"] = TensorSpec(
+        shape=("B", "S", 512), dtype="float16"
+    )
+    node = ModelGraphNode(
+        id="test:q",
+        kind=NodeKind.LEAF,
+        label="Linear",
+        operation=OperationKind.NN_MODULE,
+        metadata={"attr_name": "model.layers.0.self_attn.q_proj"},
+    )
+    result = inf._lookup_meta_shape(node)
+    assert result is not None
+    assert result.shape == ("B", "S", 512)
+
+
+def test_topk_honours_its_own_literal_k():
+    """``.topk(2, dim=-1)`` narrows to 2, not the model-wide experts-per-token.
+
+    A MoE gate scores expert GROUPS with a small literal k on the way to picking
+    experts-per-token, so the experts-per-token default is the wrong answer there.
+    """
+    inf = _make_inferencer(experts_per_tok=8)
+    inp = TensorSpec(shape=("B*S", 1, 288), dtype="float32")
+    node = _node("TopK", details=["k: 2", "dim: -1"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B*S", 1, 2)
+    assert result.dtype == "int64"
+
+
+def test_topk_without_literal_k_is_unchanged():
+    """A config-derived k (``self.top_k``) is not guessed at.
+
+    Such a node must resolve exactly as it did before k was captured at all, so
+    the existing experts-per-token behaviour is preserved for every gate that
+    spells its k as a config attribute.
+    """
+    inf = _make_inferencer(experts_per_tok=8)
+    inp = TensorSpec(shape=("B*S", 288), dtype="float32")
+    symbolic = inf._infer_node_output(
+        _node("TopK", details=["k: self.top_k", "dim: -1"]), [inp], root=None
+    )
+    bare = inf._infer_node_output(_node("TopK", details=["dim: -1"]), [inp], root=None)
+    assert symbolic.shape == bare.shape
+    assert symbolic.shape[-1] != 288  # still narrowed, just not by a literal
+
+
+def test_strided_slice_thins_the_axis():
+    """``x[..., 0::2]`` takes every other element, halving the axis.
+
+    Interleaved RoPE slices a tensor this way; without the stride the axis passed
+    through at full width and the following stack/flatten reported twice the real
+    interleave width.
+    """
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", 1, "S", 4096), dtype="bfloat16")
+    even = inf._infer_node_output(
+        _node("Slice", details=["step_dim: -1=0:2"]), [inp], root=None
+    )
+    odd = inf._infer_node_output(
+        _node("Slice", details=["step_dim: -1=1:2"]), [inp], root=None
+    )
+    assert even.shape == ("B", 1, "S", 2048)
+    assert odd.shape == ("B", 1, "S", 2048)
+    assert even.dtype == "bfloat16"
+
+
+def test_strided_slice_leaves_a_symbolic_axis_alone():
+    """A stride is only applied to a width that can actually be divided."""
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", "head_dim"), dtype="float32")
+    result = inf._infer_node_output(
+        _node("Slice", details=["step_dim: -1=0:2"]), [inp], root=None
+    )
+    assert result.shape == ("B", "S", "head_dim")
+
+
+def test_add_promotes_a_trailing_placeholder_axis():
+    """``tail_start[..., None] + tail_offsets`` keeps the offsets' width.
+
+    Picking the highest-rank operand alone returns [B, 1, 1], which reports a
+    single-element tail and shrinks the concat that consumes it.
+    """
+    inf = _make_inferencer()
+    base = TensorSpec(shape=("B", 1, 1), dtype="int64")
+    offsets = TensorSpec(shape=("max_tail_width",), dtype="int64")
+    result = inf._infer_node_output(_node("Add"), [base, offsets], root=None)
+    assert result.shape == ("B", 1, "max_tail_width")
+    assert result.dtype == "int64"
+
+
+def test_add_leaves_an_unambiguous_shape_alone():
+    """Only a trailing literal 1 with exactly one sibling width is promoted."""
+    inf = _make_inferencer()
+    # No placeholder: the widest operand already carries a real width.
+    wide = TensorSpec(shape=("B", "S", 4096), dtype="float32")
+    other = TensorSpec(shape=(4096,), dtype="float32")
+    assert inf._infer_node_output(_node("Add"), [wide, other], root=None).shape == (
+        "B",
+        "S",
+        4096,
+    )
+    # Two different sibling widths identify nothing, so nothing is promoted.
+    base = TensorSpec(shape=("B", 1, 1), dtype="int64")
+    a = TensorSpec(shape=(3,), dtype="int64")
+    b = TensorSpec(shape=(5,), dtype="int64")
+    assert inf._infer_node_output(_node("Add"), [base, a, b], root=None).shape == (
+        "B",
+        1,
+        1,
+    )
