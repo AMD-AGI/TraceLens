@@ -437,6 +437,38 @@ def test_meta_shape_takes_priority():
     assert out.shape == ("B", "S", 512)
 
 
+def test_scaled_dot_product_attention_carries_the_value_width():
+    """The attention primitive is compiled, so its shape is stated, not probed.
+
+    It returns the QUERY's shape carrying the VALUE's last axis: a model whose
+    value is narrower than its query (DeepSeek-style MLA) gets the value's
+    width out, not the query's.
+    """
+    inf = _make_inferencer()
+    node = _node("scaled_dot_product_attention")
+    out = inf._infer_node_output(
+        node,
+        [
+            TensorSpec(("B", 32, "S", 128), "bfloat16"),
+            TensorSpec(("B", 32, "S", 128), "bfloat16"),
+            TensorSpec(("B", 32, "S", 64), "bfloat16"),
+        ],
+        root=None,
+    )
+    assert out.shape == ("B", 32, "S", 64)
+    assert out.dtype == "bfloat16"
+
+
+def test_scaled_dot_product_attention_without_a_value_keeps_the_query():
+    """Handed too few operands to read the value, it reports the query it has."""
+    inf = _make_inferencer()
+    node = _node("scaled_dot_product_attention")
+    out = inf._infer_node_output(
+        node, [TensorSpec(("B", 8, "S", 64), "float16")], root=None
+    )
+    assert out.shape == ("B", 8, "S", 64)
+
+
 def test_synthetic_output_passthrough_with_inputs():
     inf = _make_inferencer()
     node = _node("out", meta={"synthetic": "@output"})

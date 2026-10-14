@@ -11505,55 +11505,6 @@ def _ordered_forward_params(func: ast.FunctionDef) -> list[str]:
     ]
 
 
-def _max_real_return_arity(func: ast.FunctionDef) -> int | None:
-    """Count the real (non-``None``) tensor slots the function returns.
-
-    Reads every ``return`` statement's value: a tuple contributes one per element
-    that is not the literal ``None`` (a ``None`` slot is a placeholder the caller
-    unpacks but never uses as a tensor), a bare expression contributes one. The
-    max across returns is the number of tensor outputs the function can hand back.
-    Returns ``None`` when the function has no value-bearing ``return``.
-    """
-    best: int | None = None
-    for node in ast.walk(func):
-        if not isinstance(node, ast.Return) or node.value is None:
-            continue
-        value = node.value
-        if isinstance(value, ast.Tuple):
-            count = sum(
-                0 if (isinstance(elt, ast.Constant) and elt.value is None) else 1
-                for elt in value.elts
-            )
-        else:
-            count = 1
-        best = count if best is None else max(best, count)
-    return best
-
-
-def _attention_kernel_return_arity(
-    kernel: str,
-    config: dict[str, Any] | None,
-    resolver: "_HostSourceResolver",
-) -> int | None:
-    """Real tensor-return count of the resolved attention wrapper, from source AST.
-
-    The dispatched interface (``attention_interface(...)``) resolves to a wrapper
-    whose return arity is kernel-specific: SDPA's ``sdpa_attention_forward`` returns
-    ``(attn_output, None)`` — one real tensor — while the model's own
-    ``eager_attention_forward`` returns ``(attn_output, attn_weights)`` — two. We
-    read that wrapper's ``return`` from source (never executing it) so the graph
-    advertises exactly the tensor outputs the kernel actually produces, dropping a
-    slot the wrapper fills with ``None``. General: the count comes from whatever
-    wrapper the registry/config selects, with no per-kernel table.
-
-    Returns ``None`` when no wrapper source can be located (arity left unknown).
-    """
-    resolved = _resolve_dispatched_implementation_source(kernel, config, resolver)
-    if resolved is None:
-        return None
-    return _max_real_return_arity(resolved[2])
-
-
 def _config_selected_entry_name(
     binding: ast.expr | None, config: dict | None
 ) -> str | None:
@@ -11710,13 +11661,11 @@ def kernel_name_from_step_details(details: list[str]) -> str | None:
     return None
 
 
-# Keep-atomic, return-arity, the display label and now node COLORING are all
-# derived structurally: the keep-atomic gate resolves the kernel through
-# ``ALL_ATTENTION_FUNCTIONS`` and introspects the wrapper AST
-# (``_resolve_dispatched_attention_kernel``), arity comes from the wrapper's own
-# return statement (``_max_real_return_arity``), the label is the resolved callee
-# qualname (``kernel_step_label``), and the color follows the provider module
-# resolved below. No attention marker list survives.
+# Keep-atomic, the display label and now node COLORING are all derived
+# structurally: a dispatch resolves to the implementation the model's own source
+# and config select, the label is the kernel that implementation ends in
+# (``kernel_step_label`` over ``_denoted_kernel``), and the color follows the
+# provider module resolved below. No attention marker list survives.
 #
 # Coloring was the last holdout, on the grounds that ``flex_attention`` reaches
 # its torch op through a ``torch.compile`` singleton behind a conditional import.

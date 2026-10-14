@@ -228,19 +228,6 @@ def test_library_attention_is_a_kernel_but_torch_attention_is_not():
     ), "attention nobody could resolve to a torch call stays a kernel"
 
 
-def test_max_real_return_arity_drops_none_slots():
-    import ast
-
-    from TraceLens.ModelUtils.ast_analyze import _max_real_return_arity
-
-    one = ast.parse("def f(x):\n    return x, None").body[0]
-    two = ast.parse("def f(x, y):\n    return x, y").body[0]
-    bare = ast.parse("def f(x):\n    return x").body[0]
-    assert _max_real_return_arity(one) == 1
-    assert _max_real_return_arity(two) == 2
-    assert _max_real_return_arity(bare) == 1
-
-
 def test_build_model_graph_matches_computation_graph_topology():
     root = _mla_fixture_root()
     basic = BasicOpFilter.for_detailed()

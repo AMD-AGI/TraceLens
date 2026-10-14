@@ -112,3 +112,15 @@ class Model:
 
     def test_no_sources_at_all(self) -> None:
         assert declared_config_overrides([]) == {}
+
+    def test_a_directory_that_cannot_be_listed(self, tmp_path, monkeypatch) -> None:
+        """An unreadable source directory declines, rather than taking the
+        export down over a config value it merely could not read."""
+        body = "class Model:\n    def __init__(self, config):\n        config.x = 1\n"
+        sources = _sources(tmp_path, body)
+
+        def _refuse(self, _pattern):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(Path, "glob", _refuse)
+        assert declared_config_overrides(sources) == {}
