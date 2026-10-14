@@ -17,7 +17,9 @@ reproducers with kernel or framework developers.
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/install.md)).
+Confirm you have the following before continuing.
+
+- [TraceLens installed](../install/install.md).
 - A PyTorch profiler trace containing the operation you want to isolate.
 
 ## How it works
@@ -45,6 +47,8 @@ unique (operation, arguments) group, and a representative UID for the group
 appears in the `ex_UID` column.
 
 ## Step 2: Replay a single event (SDK)
+
+Use the `EventReplayer` class to replay the event identified by its UID on the device of your choice.
 
 ```python
 from TraceLens import TreePerfAnalyzer, EventReplayer

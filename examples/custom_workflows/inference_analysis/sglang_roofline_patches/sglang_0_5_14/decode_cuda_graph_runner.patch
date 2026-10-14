@@ -41,12 +41,12 @@ index 19eded792d..062c5565c2 100644
      def _init_profile_context_and_memory_record(self):
 +        rank = get_tensor_model_parallel_rank()
 +
-+        # Per-bs capture traces are opt-in via SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE.
-+        # When it is unset the profiler still runs (for the summary tables and the
++        # Per-bs capture traces are opt-in via SGLANG_GRAPH_BATCH_CAPTURE or the legacy SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE.
++        # When both are unset the profiler still runs (for the summary tables and the
 +        # memory snapshot in _post_process_after_profile), but no per-bs chrome
 +        # trace is written to disk and on_trace_ready stays None.
 +        on_trace_ready = None
-+        if envs.SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE.get():
++        if envs.SGLANG_GRAPH_BATCH_CAPTURE.get() or envs.SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE.get():
 +            trace_dir = os.path.join(
 +                os.environ.get("SGLANG_TORCH_PROFILER_DIR", "traces"), "capture_traces"
 +            )

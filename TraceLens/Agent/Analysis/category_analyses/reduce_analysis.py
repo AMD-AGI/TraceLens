@@ -16,7 +16,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis_utils import run_category_analysis
+from analysis_utils import get_peak_mem_bw_tbs, run_category_analysis
 
 
 def detect_softmax(op_name: str) -> bool:
@@ -30,7 +30,7 @@ def extract_category_specific(ops_df, metadata) -> dict:
 
     return {
         "softmax_count": int(softmax_count),
-        "peak_hbm_bw_tbs": metadata.get("peak_hbm_bw_tbs"),
+        "peak_mem_bw_tbs": get_peak_mem_bw_tbs(metadata),
     }
 
 

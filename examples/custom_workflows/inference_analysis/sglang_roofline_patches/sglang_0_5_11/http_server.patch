@@ -7,7 +7,7 @@ index 88705cc35..44d937228 100644
          profile_prefix=obj.profile_prefix,
          profile_stages=obj.profile_stages,
 +        shape_discovery=obj.shape_discovery,
-+        roofline_annotations=obj.roofline_annotations,
++        detailed_annotations=obj.detailed_annotations,
      )
      return Response(
          content="Start profiling.\n",

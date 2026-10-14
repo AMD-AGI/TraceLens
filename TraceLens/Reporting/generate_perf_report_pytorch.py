@@ -19,8 +19,8 @@ from TraceLens import NcclAnalyser, TraceDiff, TreePerfAnalyzer
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
-    request_install,
     resolve_gpu_arch,
+    write_report_outputs,
 )
 
 _WRAPPER_FILE_PATTERNS = frozenset(
@@ -240,12 +240,11 @@ def get_dfs_short_kernels(
             sort=False,
         ).agg(agg_dict)
 
-    # Handle empty dataframe case
-    if df_grouped.empty:
-        return df_hist, df_grouped
-
     # Flatten multi-level column names
     df_grouped.columns = ["_".join(col).strip() for col in df_grouped.columns]
+
+    if df_grouped.empty:
+        return df_hist, df_grouped
 
     # Rename columns for clarity
     df_grouped.rename(
@@ -422,6 +421,10 @@ def generate_perf_report_pytorch(
     topk_ops: Optional[int] = None,
     topk_roofline_ops: Optional[int] = None,
     comparison_json_path: Optional[str] = None,
+    # precomputed diff_stats.csv (e.g. from the semantic comparison path); when
+    # set, the internal TraceDiff is skipped and this CSV is used as-is to
+    # enrich the report. Mutually exclusive with comparison_json_path.
+    precomputed_diff_stats: Optional[str] = None,
     extension_file: Optional[str] = None,
     # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
     python_path: Optional[str] = None,
@@ -553,6 +556,9 @@ def generate_perf_report_pytorch(
                 for event in perf_analyzer.tree.events
                 if event["name"] in op_names
             ]
+            if not op_events:
+                # No events for this category in the trace
+                continue
 
             if sheet_category in [
                 "GEMM",
@@ -638,19 +644,27 @@ def generate_perf_report_pytorch(
                     for event in op_events
                     if event["name"] != "vllm::unified_attention_with_output"
                 ]
-                df_ops_bwd_raw = perf_analyzer.build_df_perf_metrics(
-                    op_events, bwd=True, include_kernel_details=True, include_args=True
-                )
-                df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_bwd_raw,
-                    agg_metrics,
-                    group_by_num_kernels=group_by_num_kernels,
-                )
-                df_ops_bwd = add_truncated_kernel_details(
-                    df_ops_bwd,
-                    source_col="kernel_details__summarize_kernel_stats",
-                    new_col_name="trunc_kernel_details",
-                )
+                has_bwd_events = any(event.get("bwd_events") for event in op_events)
+                if has_bwd_events:
+                    df_ops_bwd_raw = perf_analyzer.build_df_perf_metrics(
+                        op_events,
+                        bwd=True,
+                        include_kernel_details=True,
+                        include_args=True,
+                    )
+                    df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
+                        df_ops_bwd_raw,
+                        agg_metrics,
+                        group_by_num_kernels=group_by_num_kernels,
+                    )
+                    df_ops_bwd = add_truncated_kernel_details(
+                        df_ops_bwd,
+                        source_col="kernel_details__summarize_kernel_stats",
+                        new_col_name="trunc_kernel_details",
+                    )
+                else:
+                    df_ops_bwd_raw = pd.DataFrame()
+                    df_ops_bwd = pd.DataFrame()
                 if filtered_df_bwd_ops is not None:
                     df_ops_bwd = pd.concat([df_ops_bwd, filtered_df_bwd_ops])
                 # Filter out forward operations that were incorrectly included in backward
@@ -706,24 +720,27 @@ def generate_perf_report_pytorch(
                             ~df_ops_fwd_overlapping_kernels["name"].isin(bwd_op_names)
                         ]
 
-                    df_ops_bwd_overlapping_kernels = (
-                        perf_analyzer.summarize_df_perf_metrics(
-                            df_ops_bwd_raw,
-                            agg_metrics,
-                            group_by_num_kernels=group_by_num_kernels,
-                            include_overlapping_kernels=True,
+                    if has_bwd_events:
+                        df_ops_bwd_overlapping_kernels = (
+                            perf_analyzer.summarize_df_perf_metrics(
+                                df_ops_bwd_raw,
+                                agg_metrics,
+                                group_by_num_kernels=group_by_num_kernels,
+                                include_overlapping_kernels=True,
+                            )
                         )
-                    )
-                    df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
-                        df_ops_bwd_overlapping_kernels,
-                        source_col="kernel_details__summarize_kernel_stats",
-                        new_col_name="trunc_kernel_details",
-                    )
-                    df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
-                        df_ops_bwd_overlapping_kernels,
-                        source_col="overlapping_kernels_details__summarize_kernel_stats",
-                        new_col_name="trunc_overlapping_kernels_details",
-                    )
+                        df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
+                            df_ops_bwd_overlapping_kernels,
+                            source_col="kernel_details__summarize_kernel_stats",
+                            new_col_name="trunc_kernel_details",
+                        )
+                        df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
+                            df_ops_bwd_overlapping_kernels,
+                            source_col="overlapping_kernels_details__summarize_kernel_stats",
+                            new_col_name="trunc_overlapping_kernels_details",
+                        )
+                    else:
+                        df_ops_bwd_overlapping_kernels = pd.DataFrame()
                     if filtered_df_bwd_ops_overlapping_kernels is not None:
                         df_ops_bwd_overlapping_kernels = pd.concat(
                             [
@@ -785,7 +802,10 @@ def generate_perf_report_pytorch(
         # Add unified perf metrics table (ops with perf models + leaf ops with GPU kernels)
         df_unified_perf = perf_analyzer.build_df_unified_perf_table()
 
-        # Run TraceDiff when a comparison trace is provided. diff_stats_df is generated
+        # Obtain the comparison diff_stats. Normally generated by running
+        # TraceDiff against a comparison trace; alternatively a precomputed
+        # diff_stats.csv (e.g. from the semantic comparison path) can be
+        # supplied, in which case the internal TraceDiff is skipped.
         _tracediff_diff_stats: Optional[pd.DataFrame] = None
         if comparison_json_path and not df_unified_perf.empty:
             perf_analyzer2 = TreePerfAnalyzer.from_file(
@@ -801,6 +821,8 @@ def generate_perf_report_pytorch(
             td = TraceDiff(perf_analyzer.tree, perf_analyzer2.tree)
             td.generate_tracediff_report()
             _tracediff_diff_stats = td.diff_stats_df
+        elif precomputed_diff_stats and not df_unified_perf.empty:
+            _tracediff_diff_stats = pd.read_csv(precomputed_diff_stats)
 
         if not df_unified_perf.empty:
             df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
@@ -1015,25 +1037,12 @@ def generate_perf_report_pytorch(
                 print(f"Added {len(additional_dfs)} additional sheets from extension")
 
     # Write CSVs and/or Excel (independent options)
-    if output_csvs_dir:
-        os.makedirs(output_csvs_dir, exist_ok=True)
-        for sheet_name, df in dict_name2df.items():
-            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
-            print(f"DataFrame '{sheet_name}' written to {csv_path}")
-
-    if output_xlsx_path is not None or output_csvs_dir is None:
-        if output_xlsx_path is None:
-            base_path = profile_json_path.rsplit(".json", 1)[0]
-            output_xlsx_path = base_path + "_perf_report.xlsx"
-        if importlib.util.find_spec("openpyxl") is None:
-            print("Error importing openpyxl")
-            request_install("openpyxl")
-
-        with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
-            for sheet_name, df in dict_name2df.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-            print(f"DataFrames successfully written to {output_xlsx_path}")
+    if output_xlsx_path is None and output_csvs_dir is None:
+        base_path = profile_json_path.rsplit(".json", 1)[0]
+        output_xlsx_path = base_path + "_perf_report.xlsx"
+    write_report_outputs(
+        dict_name2df, xlsx_path=output_xlsx_path, csvs_dir=output_csvs_dir
+    )
 
     return dict_name2df
 
@@ -1143,6 +1152,19 @@ def main():
     )
 
     parser.add_argument(
+        "--precomputed_diff_stats",
+        type=str,
+        default=None,
+        help=(
+            "Path to a precomputed TraceDiff-schema diff_stats.csv (e.g. from "
+            "the semantic comparison path). When set, the internal TraceDiff "
+            "is skipped and this CSV is used to enrich unified_perf_summary "
+            "and emit the diff_stats sheet. Mutually exclusive with "
+            "--comparison_json_path."
+        ),
+    )
+
+    parser.add_argument(
         "--extension_file",
         type=str,
         default=None,
@@ -1206,6 +1228,11 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.comparison_json_path and args.precomputed_diff_stats:
+        parser.error(
+            "--comparison_json_path and --precomputed_diff_stats cannot be "
+            "used together; provide only one comparison diff_stats source."
+        )
     generate_perf_report_pytorch(
         profile_json_path=args.profile_json_path,
         output_xlsx_path=args.output_xlsx_path,
@@ -1224,6 +1251,7 @@ def main():
         topk_ops=args.topk_ops,
         topk_roofline_ops=args.topk_roofline_ops,
         comparison_json_path=args.comparison_json_path,
+        precomputed_diff_stats=args.precomputed_diff_stats,
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,

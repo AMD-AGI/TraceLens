@@ -58,6 +58,43 @@ def add_simulation_time_columns(
     )
 
 
+def build_perf_metrics_dict(gflops, bytes_moved, busy_kernel_time):
+    """
+    Build the standard GFLOPS/TFLOPS/TB-per-s metrics dict shared by the
+    PyTorch and JAX perf-metric code paths.
+    """
+    tflops_per_s = (
+        (gflops / 1e3) / (busy_kernel_time / 1e6)
+        if busy_kernel_time > 0
+        else float("nan")
+    )
+    dict_metrics = {
+        "GFLOPS": gflops,
+        "Kernel Time (µs)": busy_kernel_time,
+        "TFLOPS/s": tflops_per_s,
+    }
+    if bytes_moved is not None:
+        dict_metrics["Data Moved (MB)"] = bytes_moved / (1024 * 1024)
+        dict_metrics["FLOPS/Byte"] = (
+            (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float("nan")
+        )
+        dict_metrics["TB/s"] = (
+            (bytes_moved / 1e12) / (busy_kernel_time / 1e6)
+            if busy_kernel_time > 0
+            else float("nan")
+        )
+    else:
+        dict_metrics["Data Moved (MB)"] = float("nan")
+        dict_metrics["FLOPS/Byte"] = float("nan")
+        dict_metrics["TB/s"] = float("nan")
+    return dict_metrics
+
+
+def gemm_tflops(M, N, K, time_ms):
+    """Achieved TFLOPS for a dense GEMM of shape (M, N, K) given elapsed time in ms."""
+    return (2 * M * N * K) / (time_ms * 1e-3) / 1e12
+
+
 def name2bpe(name):
     """
     This function maps a data type name to the number of bytes per element.
@@ -112,28 +149,49 @@ def simulation_dtype_map(dtype):
     return dict_dtype2simulation.get(dtype.lower(), None)
 
 
+# Keys are stored without a namespace, because torch_dtype_map strips one off
+# its input before looking it up. That way "c10::Half" and the already-stripped
+# "half" take the same path, and a new c10 spelling of a type already listed
+# here needs no entry of its own.
+_DTYPE2SIMULATION = {
+    "float": "fp32",
+    "double": "fp64",
+    "float16": "fp16",
+    "float32": "fp32",
+    "float64": "fp64",
+    "half": "fp16",
+    "bfloat16": "bf16",
+    "float8_e4m3fn": "fp8",
+    "float8_e4m3fnuz": "fp8",
+    "float4_e2m1fn_x2": "fp4",
+    "mxfp4": "fp4",
+    "unsigned char": "fp8",
+}
+
+# Canonical values map to themselves, so normalising an already-normalised
+# value is a no-op. Derived rather than written out, so adding a type above is
+# enough.
+_DTYPE2SIMULATION.update({value: value for value in set(_DTYPE2SIMULATION.values())})
+
+
 def torch_dtype_map(dtype):
     """
     This function maps a PyTorch data type to a simulation data type.
+
+    Accepts the c10 spelling ("c10::BFloat16"), the same name with the
+    namespace already stripped ("bfloat16"), and the canonical simulation name
+    ("bf16").
+
     Args:
         dtype (str): The name of the PyTorch data type.
     Returns:
-        str: The name of the simulation data type.
+        str: The name of the simulation data type, or None if the type has no
+            simulation equivalent — integer, boolean and complex types among
+            them, which have no place in a floating-point roofline.
     """
-    dict_dtype2simulation = {
-        "float": "fp32",
-        "double": "fp64",
-        "c10::half": "fp16",
-        "c10::bfloat16": "bf16",
-        "c10::float8_e4m3fnuz": "fp8",
-        "unsigned char": "fp8",
-        "fp8": "fp8",
-        "fp4": "fp4",
-        "mxfp4": "fp4",
-        "c10::float4_e2m1fn_x2": "fp4",
-        "c10::float8_e4m3fn": "fp8",
-    }
-    return dict_dtype2simulation.get(dtype.lower(), None)
+    if dtype is None:
+        return None
+    return _DTYPE2SIMULATION.get(str(dtype).lower().split("::")[-1], None)
 
 
 def parse_bool(input):

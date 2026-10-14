@@ -6,7 +6,7 @@ index c9939a1fc9..3a6accc0d9 100644
          merge_profiles: bool = False,
          profile_prefix: Optional[str] = None,
          profile_stages: Optional[List[str]] = None,
-+        roofline_annotations: bool = False,
++        detailed_annotations: bool = False,
 +        shape_discovery: bool = False,
      ):
          self.auto_create_handle_loop()
@@ -15,7 +15,7 @@ index c9939a1fc9..3a6accc0d9 100644
              merge_profiles=merge_profiles,
              profile_prefix=profile_prefix,
              profile_stages=profile_stages,
-+            roofline_annotations=roofline_annotations,
++            detailed_annotations=detailed_annotations,
 +            shape_discovery=shape_discovery,
          )
          return await self._execute_profile(req)

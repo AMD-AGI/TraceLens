@@ -6,11 +6,8 @@
 
 """Unit tests for TraceLens.Reporting.compare_traces_jax_llama."""
 
-import gzip
-import json
-
-import pytest
-
+import gzip, importlib, json, sys, pytest
+from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
 from TraceLens.Reporting.compare_traces_jax_llama import (
     Event,
     Stats,
@@ -25,6 +22,7 @@ from TraceLens.Reporting.compare_traces_jax_llama import (
     get_path,
     infer_params,
     is_loop_multiply_fusion,
+    load_trace,
     mk_stats,
     parse_range,
     percentile,
@@ -33,6 +31,7 @@ from TraceLens.Reporting.compare_traces_jax_llama import (
     token_start_times,
     top_stats_by_key,
 )
+from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
 
 
 def test_parse_range_valid():
@@ -164,7 +163,7 @@ def _make_synthetic_trace_events(pid=1, tid=10, hint="te_layernorm_forward"):
     return events
 
 
-def _write_gz_trace(tmp_path, hint="te_layernorm_forward"):
+def _write_synthetic_gz_trace(tmp_path, hint="te_layernorm_forward"):
     path = tmp_path / "trace.json.gz"
     payload = {"traceEvents": _make_synthetic_trace_events(hint=hint)}
     with gzip.open(path, "wt", encoding="utf-8") as f:
@@ -173,7 +172,7 @@ def _write_gz_trace(tmp_path, hint="te_layernorm_forward"):
 
 
 def test_pid_map_and_extract_gpu_events(tmp_path):
-    path = _write_gz_trace(tmp_path)
+    path = _write_synthetic_gz_trace(tmp_path)
     with gzip.open(path, "rt", encoding="utf-8") as f:
         trace = json.load(f)
     mp = pid_map(trace)
@@ -184,7 +183,7 @@ def test_pid_map_and_extract_gpu_events(tmp_path):
 
 
 def test_token_start_times_and_compute_stage_table(tmp_path):
-    path = _write_gz_trace(tmp_path)
+    path = _write_synthetic_gz_trace(tmp_path)
     with gzip.open(path, "rt", encoding="utf-8") as f:
         trace = json.load(f)
     gpu_events = extract_gpu_events(trace, gpu_index=0)
@@ -280,10 +279,10 @@ def test_emit_report_from_summaries():
 
 
 def test_summarize_one_integration(tmp_path):
-    rocm_path = _write_gz_trace(tmp_path, hint="te_layernorm_forward")
+    rocm_path = _write_synthetic_gz_trace(tmp_path, hint="te_layernorm_forward")
     cuda_dir = tmp_path / "cuda"
     cuda_dir.mkdir()
-    cuda_path = _write_gz_trace(cuda_dir, hint="te_norm_forward_ffi")
+    cuda_path = _write_synthetic_gz_trace(cuda_dir, hint="te_norm_forward_ffi")
 
     rocm = summarize_one(
         "ROCm",
@@ -315,3 +314,153 @@ def test_get_path():
     ev = Event(1, 1, 0, 1, "k", {"name": "/some/path"})
     assert get_path(ev) == "/some/path"
     assert get_path(Event(1, 1, 0, 1, "k", {})) == ""
+
+
+class TestCompareTracesJaxLlama:
+    def test_helper_functions(self, tmp_path):
+        trace_path = _write_gz_trace(tmp_path, _jax_llama_trace_events())
+        trace = load_trace(trace_path)
+        gpu_events = extract_gpu_events(trace, gpu_index=0)
+        assert gpu_events
+        assert percentile([1, 2, 3, 4], 50) == 2.5
+        assert mk_stats([10, 20]).total_us == 30
+        d_model, head_dim, gsu = infer_params(gpu_events)
+        assert d_model == 4096
+
+        stream = [e for e in gpu_events if e.tid == gpu_events[0].tid]
+        starts = token_start_times(stream, "te_layernorm_forward")
+        assert len(starts) >= 1
+
+        stage_avg, stage_share, per_layer, per_token, notes = compute_stage_table(
+            stream, starts, (0, 0), (0, 1)
+        )
+        assert per_layer > 0
+        assert "attn_core" in stage_avg
+
+        ev = Event(
+            1, 10, 0, 10, "loop_multiply_fusion", {"hlo_op": "loop_multiply_fusion"}
+        )
+        assert is_loop_multiply_fusion(ev)
+        assert classify_stage_base(ev) == "other"
+        assert top_stats_by_key(stream, lambda e: e.name, 3)
+
+    def test_summarize_one_and_emit_report(self, tmp_path):
+        trace_path = _write_gz_trace(tmp_path, _jax_llama_trace_events())
+        summary = summarize_one(
+            "ROCm", trace_path, 0, (0, 0), (0, 1), "te_layernorm_forward"
+        )
+        assert isinstance(summary, Summary)
+        report = emit_report(summary, summary)
+        assert "Trace Comparison" in report
+        assert summary.notes is not None
+
+    def test_main_mocked(self, tmp_path, monkeypatch):
+        rocm = _write_gz_trace(tmp_path, _jax_llama_trace_events(), "rocm.json.gz")
+        cuda = _write_gz_trace(
+            tmp_path, _jax_llama_trace_events("te_norm_forward_ffi"), "cuda.json.gz"
+        )
+        out_md = tmp_path / "report.md"
+        mod = importlib.import_module("TraceLens.Reporting.compare_traces_jax_llama")
+        summary = summarize_one("ROCm", rocm, 0, (0, 0), (0, 1), "te_layernorm_forward")
+        monkeypatch.setattr(mod, "summarize_one", lambda *a, **k: summary)
+        old_argv = sys.argv
+        sys.argv = [
+            "compare_traces_jax_llama",
+            "--rocm",
+            rocm,
+            "--cuda",
+            cuda,
+            "--tokens",
+            "0:0",
+            "--layers",
+            "0:1",
+            "--out",
+            str(out_md),
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert out_md.exists()
+
+
+class TestCompareTracesEdgeCases:
+    def test_extract_gpu_events_partial_pid_match(self, tmp_path):
+        events = [
+            {
+                "ph": "M",
+                "name": "process_name",
+                "pid": 1,
+                "args": {"name": "prefix/device:GPU:0/suffix"},
+            },
+            {
+                "ph": "X",
+                "pid": 1,
+                "tid": 10,
+                "ts": 100,
+                "dur": 50,
+                "name": "k",
+                "args": {},
+            },
+        ]
+        path = tmp_path / "t.json.gz"
+        with gzip.open(path, "wt", encoding="utf-8") as f:
+            json.dump({"traceEvents": events}, f)
+        trace = load_trace(str(path))
+        evs = extract_gpu_events(trace, gpu_index=0)
+        assert len(evs) == 1
+
+    def test_compute_stage_table_incomplete_blocks_note(self):
+        stream = [
+            Event(1, 10, 1000, 50, "k", {"name": "/Transformer/block_0/norm_attn/x"}),
+            Event(1, 10, 2000, 50, "k", {"name": "/Transformer/block_0/norm_attn/y"}),
+        ]
+        starts = [1000.0, 2000.0]
+        with pytest.raises(RuntimeError, match="No complete token"):
+            compute_stage_table(stream, starts, (0, 0), (0, 2))
+
+
+class TestJaxLlamaPhase7:
+    def test_jax_llama_helpers_full(self, tmp_path):
+        path = _write_gz_trace(tmp_path, _jax_llama_trace_events())
+        trace = jax_cmp.load_trace(path)
+        evs = jax_cmp.extract_gpu_events(trace, gpu_index=0)
+        assert len(evs) > 0
+        assert jax_cmp.percentile([1, 2, 3, 4], 50) == 2.5
+        assert jax_cmp.mk_stats([10, 20]).total_us == 30
+        d_model, head_dim, gsu = jax_cmp.infer_params(evs)
+        assert d_model == 4096
+        stream = [e for e in evs if e.tid == evs[0].tid]
+        starts = jax_cmp.token_start_times(stream, "te_layernorm_forward")
+        stage_avg, stage_share, per_layer, per_token, notes = (
+            jax_cmp.compute_stage_table(stream, starts, (0, 0), (0, 1))
+        )
+        assert per_layer > 0
+        assert jax_cmp.is_loop_multiply_fusion(
+            jax_cmp.Event(
+                1, 10, 0, 10, "loop_multiply_fusion", {"hlo_op": "loop_multiply_fusion"}
+            )
+        )
+
+
+def test_compare_traces_jax_llama_helpers(tmp_path):
+
+    path = tmp_path / "t1.json.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        json.dump({"traceEvents": _make_synthetic_trace_events()}, f)
+    load_trace(str(path))
+    evs = [
+        type(
+            "E",
+            (),
+            {
+                "name": "ln_fwd_tuned_kernel<Kernel_traits<float, 4096u,",
+                "dur": 5.0,
+                "args": {},
+            },
+        )(),
+        type("E", (), {"name": "flash_fprop_hd128", "dur": 5.0, "args": {}})(),
+    ]
+    d_model, head_dim, gsu = infer_params(evs)
+    assert d_model == 4096
+    assert head_dim == 128

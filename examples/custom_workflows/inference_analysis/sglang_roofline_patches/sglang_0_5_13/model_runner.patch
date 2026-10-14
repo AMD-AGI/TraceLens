@@ -17,7 +17,7 @@ index 3b30eb0e1f..d49935b89f 100644
 +        # Toggled by the scheduler's profiler manager while a roofline-annotated
 +        # profile is active; folds the per-phase sq/sqsq/sqsk/sk aggregates
 +        # (context ``c_`` / generation ``g_``) into the step span.
-+        self.roofline_annotations = False
++        self.detailed_annotations = False
          self.init_new_workspace = False
          self._eager_decode_registry = _EagerBufferRegistry()
          self._eager_prefill_registry = _EagerBufferRegistry()
@@ -27,7 +27,7 @@ index 3b30eb0e1f..d49935b89f 100644
          step_span_ctx = (
 -            torch.profiler.record_function(_build_step_span_name(forward_batch))
 +            torch.profiler.record_function(
-+                build_step_span_name(forward_batch, self.roofline_annotations)
++                build_step_span_name(forward_batch, self.detailed_annotations)
 +            )
              if torch.autograd._profiler_enabled()
              else contextlib.nullcontext()

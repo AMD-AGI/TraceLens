@@ -1,0 +1,16 @@
+diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
+index 1866495..5588801 100644
+--- a/python/sglang/srt/server_args.py
++++ b/python/sglang/srt/server_args.py
+@@ -1864,6 +1864,11 @@ class ServerArgs:
+     enable_profile_cuda_graph: A[
+         bool, "Enable profiling of cuda graph capture.", NS("exec.graph")
+     ] = False
++    enable_shape_discovery_for_cuda_graph_profile: A[
++        bool,
++        "Enable shape discovery during cuda graph capture profiling.",
++        NS("exec.graph"),
++    ] = False
+     enable_cudagraph_gc: A[
+         bool,
+         "Enable garbage collection during CUDA graph capture. If disabled (default), GC is frozen during capture to speed up the process.",

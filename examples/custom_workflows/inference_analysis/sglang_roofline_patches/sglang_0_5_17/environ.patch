@@ -1,0 +1,14 @@
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 81cbfc18dd..6fcd0acfd9 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -323,6 +323,9 @@ class Envs:
+     )
+     SGLANG_RECORD_STEP_TIME = EnvBool(False)
+     SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE = EnvBool(False)
++    # Opt-in: persist one Chrome trace per batch size during CUDA graph capture
++    # (only takes effect together with --enable-profile-cuda-graph).
++    SGLANG_GRAPH_BATCH_CAPTURE = EnvBool(False)
+     SGLANG_FORCE_SHUTDOWN = EnvBool(False)
+     SGLANG_DEBUG_MEMORY_POOL = EnvBool(False)
+     SGLANG_DSPARK_DEBUG_CONFIDENCE_PREFIX_SCHEDULER = EnvBool(False)

@@ -21,18 +21,18 @@ import re
 import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
+from TraceLens.util import most_common_first_dim
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.generate_perf_report_pytorch import _find_entry_point
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
-    request_install,
     resolve_gpu_arch,
+    write_report_outputs,
 )
 from TraceLens.util import TraceEventUtils
-from TraceLens.TraceUtils.annotation_utils import (
+from TraceLens.TraceUtils.utils.annotation_utils import (
     CAPTURE_PATTERN,
     CaptureAnnotation,
-    find_events_by_patterns,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
@@ -181,6 +181,18 @@ def perf_report_sanity_check(
     }
 
 
+def find_capture_annotation_events(events):
+    return sorted(
+        [
+            e
+            for e in events
+            if e.get("cat") == "user_annotation"
+            and CAPTURE_PATTERN.match(e.get("name", ""))
+        ],
+        key=lambda x: x.get("ts", 0),
+    )
+
+
 def classify_graph_capture_trace(input_folder: str):
     """
     Return {file, batch_size, mode} for a single graph-capture trace file.
@@ -226,22 +238,6 @@ def classify_graph_capture_trace(input_folder: str):
             and e.get("cat") == "cuda_runtime"
         )
 
-    def infer_batch_size_from_cpu_ops(events):
-        first_dims = []
-        for e in events:
-            if e.get("cat") != "cpu_op":
-                continue
-            input_dims = e.get("args", {}).get("Input Dims")
-            if not input_dims:
-                continue
-            for dim_list in input_dims:
-                if isinstance(dim_list, list) and dim_list:
-                    if isinstance(dim_list[0], int):
-                        first_dims.append(dim_list[0])
-        if not first_dims:
-            return None
-        return collections.Counter(first_dims).most_common(1)[0][0]
-
     def infer_mode_from_captures(num_captures: int):
         return "FULL" if num_captures <= 1 else "PIECEWISE"
 
@@ -266,7 +262,7 @@ def classify_graph_capture_trace(input_folder: str):
         trace_json = load_trace(filepath)
         events = trace_json.get("traceEvents", [])
         dummy_roots = find_dummy_run_roots(events)
-        annotation_roots = find_events_by_patterns(events, [CAPTURE_PATTERN])
+        annotation_roots = find_capture_annotation_events(events)
         basename = os.path.basename(filepath)
 
         if annotation_roots and len(annotation_roots) == len(dummy_roots):
@@ -280,7 +276,7 @@ def classify_graph_capture_trace(input_folder: str):
 
         num_captures = count_stream_begin_captures(events)
         mode = infer_mode_from_captures(num_captures)
-        batch_size = infer_batch_size_from_cpu_ops(events)
+        batch_size = most_common_first_dim(events)
         print(
             f"batch_size: {batch_size}, mode: {mode} inferred, num_captures: {num_captures}"
         )
@@ -352,12 +348,11 @@ def get_dfs_short_kernels(
             sort=False,
         ).agg(agg_dict)
 
-    # Handle empty dataframe case
-    if df_grouped.empty:
-        return df_hist, df_grouped
-
     # Flatten multi-level column names
     df_grouped.columns = ["_".join(col).strip() for col in df_grouped.columns]
+
+    if df_grouped.empty:
+        return df_hist, df_grouped
 
     # Rename columns for clarity
     df_grouped.rename(
@@ -533,6 +528,10 @@ def generate_perf_report_pytorch(
     topk_ops: Optional[int] = None,
     topk_roofline_ops: Optional[int] = None,
     comparison_json_path: Optional[str] = None,
+    # precomputed diff_stats.csv (e.g. from the semantic comparison path); when
+    # set, the internal TraceDiff is skipped and this CSV is used as-is to
+    # enrich the report. Mutually exclusive with comparison_json_path.
+    precomputed_diff_stats: Optional[str] = None,
     comparison_augmented_tree: Optional[TraceToTree] = None,
     extension_file: Optional[str] = None,
     # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
@@ -769,6 +768,7 @@ def generate_perf_report_pytorch(
                 # For now, flash_attention_varlen_backward and aten::convolution_backward are processed with bwd=True,
                 # so we need a workaround to extract them from the fwd df and append them to the bwd df.
                 filtered_df_bwd_ops = None
+                df_ops_bwd_raw = None
                 if not df_ops_fwd.empty:
                     # Filter out backward operations that were incorrectly included in forward
                     bwd_op_names = [
@@ -920,7 +920,10 @@ def generate_perf_report_pytorch(
             include_nccl=collective_analysis
         )
 
-        # Run TraceDiff when a comparison trace is provided. diff_stats_df is generated
+        # Obtain the comparison diff_stats. Normally generated by running
+        # TraceDiff against a comparison trace; alternatively a precomputed
+        # diff_stats.csv (e.g. from the semantic comparison path) can be
+        # supplied, in which case the internal TraceDiff is skipped.
         _tracediff_diff_stats: Optional[pd.DataFrame] = None
         if comparison_json_path and not df_unified_perf.empty:
             if comparison_augmented_tree is not None:
@@ -947,6 +950,8 @@ def generate_perf_report_pytorch(
             td = TraceDiff(perf_analyzer.tree, perf_analyzer2.tree)
             td.generate_tracediff_report()
             _tracediff_diff_stats = td.diff_stats_df
+        elif precomputed_diff_stats and not df_unified_perf.empty:
+            _tracediff_diff_stats = pd.read_csv(precomputed_diff_stats)
 
         if not df_unified_perf.empty:
             df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
@@ -1168,25 +1173,12 @@ def generate_perf_report_pytorch(
                 print(f"Added {len(additional_dfs)} additional sheets from extension")
 
     # Write CSVs and/or Excel (independent options)
-    if output_csvs_dir:
-        os.makedirs(output_csvs_dir, exist_ok=True)
-        for sheet_name, df in dict_name2df.items():
-            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
-            print(f"DataFrame '{sheet_name}' written to {csv_path}")
-
-    if output_xlsx_path is not None or output_csvs_dir is None:
-        if output_xlsx_path is None:
-            base_path = profile_json_path.rsplit(".json", 1)[0]
-            output_xlsx_path = base_path + "_perf_report.xlsx"
-        if importlib.util.find_spec("openpyxl") is None:
-            print("Error importing openpyxl")
-            request_install("openpyxl")
-
-        with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
-            for sheet_name, df in dict_name2df.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-            print(f"DataFrames successfully written to {output_xlsx_path}")
+    if output_xlsx_path is None and output_csvs_dir is None:
+        base_path = profile_json_path.rsplit(".json", 1)[0]
+        output_xlsx_path = base_path + "_perf_report.xlsx"
+    write_report_outputs(
+        dict_name2df, xlsx_path=output_xlsx_path, csvs_dir=output_csvs_dir
+    )
 
     return dict_name2df
 
@@ -1304,6 +1296,19 @@ def main():
     )
 
     parser.add_argument(
+        "--precomputed_diff_stats",
+        type=str,
+        default=None,
+        help=(
+            "Path to precomputed TraceDiff output (diff_stats.csv). When set, "
+            "the internal TraceDiff is skipped and this CSV is used to enrich "
+            "unified_perf_summary and emit the diff_stats sheet. Mutually "
+            "exclusive with --comparison_json_path, but may be combined with "
+            "--capture_folder."
+        ),
+    )
+
+    parser.add_argument(
         "--extension_file",
         type=str,
         default=None,
@@ -1358,24 +1363,36 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.comparison_json_path and args.precomputed_diff_stats:
+        parser.error(
+            "--comparison_json_path and --precomputed_diff_stats cannot be "
+            "used together; provide only one comparison diff_stats source."
+        )
+    # NOTE: --capture_folder + --precomputed_diff_stats IS allowed: the
+    # precomputed (e.g. semantic) diff_stats does not run the internal
+    # TraceDiff, so graph capture traces can be compared via this path.
     if args.comparison_capture_folder and not args.comparison_json_path:
         parser.error("--comparison_capture_folder requires --comparison_json_path.")
     if args.capture_folder:
-        classify_graph_capture_trace(args.capture_folder)
         metadata_json_path = os.path.join(args.capture_folder, "execution_details.json")
+        classify_graph_capture_trace(args.capture_folder)
         graph_tree = merge_capture_trace_into_graph(
-            args.capture_folder, metadata_json_path, args.profile_json_path
+            args.capture_folder,
+            metadata_json_path,
+            args.profile_json_path,
         )
     else:
         graph_tree = None
     comparison_graph_tree = None
     if args.comparison_capture_folder:
-        classify_graph_capture_trace(args.comparison_capture_folder)
         comp_metadata = os.path.join(
             args.comparison_capture_folder, "execution_details.json"
         )
+        classify_graph_capture_trace(args.comparison_capture_folder)
         comparison_graph_tree = merge_capture_trace_into_graph(
-            args.comparison_capture_folder, comp_metadata, args.comparison_json_path
+            args.comparison_capture_folder,
+            comp_metadata,
+            args.comparison_json_path,
         )
     generate_perf_report_pytorch(
         profile_json_path=args.profile_json_path,
@@ -1395,6 +1412,7 @@ def main():
         topk_ops=args.topk_ops,
         topk_roofline_ops=args.topk_roofline_ops,
         comparison_json_path=args.comparison_json_path,
+        precomputed_diff_stats=args.precomputed_diff_stats,
         comparison_augmented_tree=comparison_graph_tree,
         extension_file=args.extension_file,
         python_path=args.python_path,

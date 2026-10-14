@@ -16,7 +16,9 @@ supports both `rocprofv3` JSON results and Perfetto-style `.pftrace` files.
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/install.md)).
+Confirm you have the following before continuing.
+
+- [TraceLens installed](../install/install.md).
 - A `rocprofv3` trace: either a `*_results.json` file or a `.pftrace` file.
 
 ## rocprofv3 JSON
@@ -48,7 +50,7 @@ Options:
 - `--short_kernel_study` adds short-kernel analysis (tune with
   `--short_kernel_threshold_us` and `--short_kernel_histogram_bins`).
 - Kernel-summary sheets are on by default; disable with `--disable_kernel_summary`.
-- `--output_xlsx_path` / `--output_csvs_dir` control output.
+- `--output_xlsx_path` or `--output_csvs_dir` controls output.
 
 Kernels are categorized from name patterns (GEMM, elementwise, reduction,
 convolution, normalization, attention, memory, and other).

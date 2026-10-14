@@ -11,7 +11,8 @@ import re
 from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
-from openpyxl.utils import get_column_letter
+
+from TraceLens.Reporting.reporting_utils import write_report_outputs
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration
@@ -66,6 +67,12 @@ SHEETS_COMPARE_CONFIG = {
         "keys": ["name"],
         "diff_cols": ["total_direct_kernel_time_ms", "Count"],
         "cols_to_delete": ["total_direct_kernel_time_sum"],
+        "sort_col": "total_direct_kernel_time_ms",
+    },
+    "ops_summary_by_category": {
+        "keys": ["op category"],
+        "diff_cols": ["total_direct_kernel_time_ms", "Count"],
+        "cols_to_delete": [],
         "sort_col": "total_direct_kernel_time_ms",
     },
     "kernel_summary": {
@@ -430,6 +437,16 @@ def generate_compare_perf_reports_pytorch(
         ops = process_summary_sheet(reports, sheet_to_load, tags, config)
         results[sheet_to_load] = ops
 
+    # Perform ops_summary_by_category if specified
+    if "ops_summary_by_category" in sheets or "all" in sheets:
+        sheet_to_load = "ops_summary_by_category"
+        config = SHEETS_COMPARE_CONFIG[sheet_to_load]
+        if sheet_to_load in report_sheet_names:
+            ops = process_summary_sheet(reports, sheet_to_load, tags, config)
+            results[sheet_to_load] = ops
+        elif "ops_summary_by_category" in sheets:
+            raise ValueError(f"ops_summary_by_category sheet not found in {reports[0]}")
+
     # Perform kernel_summary if specified
     if "kernel_summary" in sheets or "all" in sheets:
         if "kernel_summary" not in report_sheet_names:
@@ -588,31 +605,12 @@ def generate_compare_perf_reports_pytorch(
                 cols_to_hide_xl[sheet_name] = cols_to_hide
 
     # ── Write workbook ────────────────────────────────────────────────────────
-    if output_csvs_dir:
-        os.makedirs(output_csvs_dir, exist_ok=True)
-        for sheet_name, df in results.items():
-            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
-            print(
-                f"Wrote '{sheet_name}.csv' with {len(df)} rows × {len(df.columns)} columns"
-            )
-
-    if output is not None:
-        with pd.ExcelWriter(output, engine="openpyxl") as xls:
-            for sheet_name, df in results.items():
-                if df.empty:
-                    print(f"Sheet '{sheet_name}' is empty (no matching rows)")
-                df.to_excel(
-                    xls, sheet_name=sheet_name[:31], index=False
-                )  # Excel 31-char limit
-                for col in cols_to_hide_xl.get(sheet_name, []):
-                    col_idx = df.columns.get_loc(col) + 1
-                    col_letter = get_column_letter(col_idx)
-                    worksheet = xls.sheets[sheet_name[:31]]
-                    worksheet.column_dimensions[col_letter].hidden = True
-                print(
-                    f"Wrote sheet '{sheet_name}' with {len(df)} rows × {len(df.columns)} columns"
-                )
+    write_report_outputs(
+        results,
+        xlsx_path=output,
+        csvs_dir=output_csvs_dir,
+        hide_columns=cols_to_hide_xl,
+    )
 
     return results
 
@@ -644,6 +642,7 @@ def main() -> None:
         choices=(
             "gpu_timeline",
             "ops_summary",
+            "ops_summary_by_category",
             "kernel_summary",
             "ops_all",
             "roofline",

@@ -4,7 +4,7 @@ Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
-# Tensor shape metadata in PyTorch profiler traces
+# Tensor shape metadata in PyTorch profiler traces in TraceLens
 ```{meta}
 :description: A conceptual explanation of when tensor shapes appear in PyTorch profiler traces, why some operations lack them, and how to register operations so shapes are recorded.
 :keywords: tensor shapes, PyTorch profiler, cpu_op, dispatcher, torch.library, custom op, Triton, FlashInfer, vLLM, SGLang, Input Dims, backward events, TraceLens
@@ -14,7 +14,7 @@ Tensor shapes are one of the most useful pieces of metadata in a PyTorch profile
 
 ## When are shapes available?
 
-The simple rule is that shapes are available when an operation goes through PyTorch's dispatcher as a `cpu_op`.
+Shapes are available when an operation goes through PyTorch's dispatcher as a `cpu_op`.
 
 In profiler traces, look for events with:
 
@@ -22,6 +22,8 @@ In profiler traces, look for events with:
 - `"args": { "Input Dims": [...], "Input type": [...] }`
 
 ### Operations that have shapes
+
+The following operation types record tensor shapes in the trace.
 
 | Operation type | Example | Why it works |
 |---|---|---|
@@ -33,6 +35,8 @@ In profiler traces, look for events with:
 
 ### Operations that don't have shapes
 
+The following operation types bypass the dispatcher and do not record shapes.
+
 | Operation type | Example | Why it fails |
 |---|---|---|
 | Plain Python functions | `def my_kernel(x, y): ...` | Bypasses the dispatcher |
@@ -41,6 +45,8 @@ In profiler traces, look for events with:
 | Backward engine events | `autograd::engine::evaluate_function:*Backward` | Empty inputs passed to the profiler |
 
 ### Quick reference: event categories
+
+The following summary shows which event categories carry shape information.
 
 ```
 cpu_op          → Usually has shapes (exception: backward events)
@@ -53,7 +59,7 @@ cuda_runtime    → No shapes (API-level event)
 
 If an operation lacks shapes, the fix is to register it with the dispatcher through `torch.library`. There are two approaches.
 
-### Option 1: register as a custom op
+### Option 1: Register as a custom op
 
 Wrap the operation with `torch.library.custom_op`:
 
@@ -74,7 +80,7 @@ The `mutates_args` argument tells PyTorch which input arguments the function mod
 - `mutates_args=("output",)` — the `output` argument is modified in-place.
 - Required for correctness with `torch.compile` and autograd.
 
-### Option 2: lighter-weight registration (vLLM approach)
+### Option 2: Lighter-weight registration (vLLM approach)
 
 Use the lower-level `Library` API directly. For reference, see [`vllm/utils/torch_utils.py:742` — `direct_register_custom_op`](https://github.com/vllm-project/vllm/blob/0b225fb7b22f8ae1f5fc8ee618640ae0983c76de/vllm/utils/torch_utils.py#L742-L780).
 
@@ -95,6 +101,8 @@ register_op("triton_matmul", triton_matmul_impl)
 
 ### Choosing between the two options
 
+The following table compares the two registration approaches to help you select the right one for your use case.
+
 | Aspect | Option 1: `custom_op` | Option 2: `Library.define()` |
 |---|---|---|
 | Simplicity | Decorator, minimal code | More boilerplate |
@@ -103,6 +111,8 @@ register_op("triton_matmul", triton_matmul_impl)
 | Use when | Prototyping, one-off ops | Performance-critical paths |
 
 ## Framework-specific status
+
+The following table shows the current shape-recording status for each supported framework.
 
 | Framework | Current state | How to get shapes |
 |---|---|---|
@@ -115,6 +125,8 @@ register_op("triton_matmul", triton_matmul_impl)
 
 ## Key takeaways
 
+The following points summarize when shapes are available and how to recover them when they are missing.
+
 - Shapes are tied to dispatcher registration. If it's a `cpu_op`, it has shapes.
 - The fix is straightforward: register operations through `torch.library`.
 - Start simple with `@torch.library.custom_op`.
@@ -122,6 +134,8 @@ register_op("triton_matmul", triton_matmul_impl)
 - FlashInfer disabled shape recording on purpose — a performance versus observability trade-off that can be re-enabled.
 
 ## Appendix
+
+This section provides supplementary detail on how backward events relate to their forward counterparts via sequence number linking.
 
 ### Backward events and sequence number linking
 

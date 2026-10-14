@@ -12,10 +12,9 @@ from TraceLens.TraceDiff.util import (
     _is_gpu_path,
     _is_kernel,
     _list_to_tuple,
-    _normalize_name_for_comparison,
     _sort_by_ts,
 )
-from TraceLens.util import TraceEventUtils
+from TraceLens.util import TraceEventUtils, normalize_name_for_comparison
 
 _TK = TraceEventUtils.TraceKeys
 
@@ -96,26 +95,26 @@ class TestIsKernel:
 
 class TestNormalizeNameForComparison:
     def test_none_name(self):
-        assert _normalize_name_for_comparison(None) is None
+        assert normalize_name_for_comparison(None) is None
 
     def test_hex_addresses_replaced(self):
         name = "launch 0xabc123 at 0xdead"
-        assert _normalize_name_for_comparison(name) == "launch 0xXXXX at 0xXXXX"
+        assert normalize_name_for_comparison(name) == "launch 0xXXXX at 0xXXXX"
 
     def test_python_line_numbers_stripped(self):
         name = "/src/train.py(128): forward"
-        assert _normalize_name_for_comparison(name) == "/src/train.py: forward"
+        assert normalize_name_for_comparison(name) == "/src/train.py: forward"
 
     def test_kernel_launch_equivalents(self):
         assert (
-            _normalize_name_for_comparison("hipModuleLaunchKernel")
+            normalize_name_for_comparison("hipModuleLaunchKernel")
             == "__kernel_launch__"
         )
-        assert _normalize_name_for_comparison("cuLaunchKernel") == "__kernel_launch__"
+        assert normalize_name_for_comparison("cuLaunchKernel") == "__kernel_launch__"
 
     def test_strip_details_removes_suffix(self):
         name = "/home/user/proj/layer.py(99): matmul : detail"
         assert (
-            _normalize_name_for_comparison(name, strip_details=True)
+            normalize_name_for_comparison(name, strip_details=True)
             == "/home/user/proj/layer.py: matmul "
         )
