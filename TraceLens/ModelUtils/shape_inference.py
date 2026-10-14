@@ -3894,6 +3894,21 @@ class ShapeInferencer:
                     return TensorSpec(shape=permuted, dtype=source.dtype)
             return source
 
+        if operation_label == "scaled_dot_product_attention":
+            # The attention primitive returns its QUERY's shape carrying the
+            # VALUE's width: [B, heads, q_len, head_dim] against a value whose
+            # last axis is the one that comes out. Stated here because the
+            # primitive is compiled -- there is no Python body to introspect --
+            # and without it the op fell through to the per-module FX probe,
+            # which is both slower and noisier than reading the two operands.
+            if len(inputs) >= 3 and inputs[0].shape and inputs[2].shape:
+                query, value = inputs[0], inputs[2]
+                return TensorSpec(
+                    shape=(*query.shape[:-1], value.shape[-1]), dtype=query.dtype
+                )
+            if inputs and inputs[0].shape:
+                return inputs[0]
+
         if operation_label in {"matmul", "batchmatmul", "mm", "bmm"}:
             if len(inputs) >= 2:
                 a, b = inputs[0], inputs[1]

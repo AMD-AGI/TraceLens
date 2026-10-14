@@ -113,12 +113,25 @@ class TestBoundaryOperandIsWired:
 
     def test_the_mask_port_is_sourced_from_the_mask_boundary(self, kimi_nodes) -> None:
         by_id = {node["id"]: node for node in kimi_nodes}
+        # A mask the module is HANDED has no producer inside the block, so it
+        # arrives on the module's own boundary rather than on a port built from
+        # a producing chain. Either way the question is the same: does the
+        # operand named ``attention_mask`` carry the mask?
         masks = [
             port
             for _kernel, port in _ports_of_attention_kernels(kimi_nodes)
             if (port.get("label") or "").strip().lower() == "attention_mask"
         ]
-        assert masks, "no attention_mask operand port found"
+        masks += [
+            by_id[str(edge["sourceNodeId"])]
+            for node in kimi_nodes
+            if "@attention" in str(node.get("id", ""))
+            for edge in node.get("incomingEdges", []) or []
+            if str(edge.get("sourceNodeId")) in by_id
+            and (by_id[str(edge["sourceNodeId"])].get("label") or "").strip().lower()
+            == "attention_mask"
+        ]
+        assert masks, "no attention_mask operand found"
         for port in masks:
             sources = [
                 by_id.get(str(edge.get("sourceNodeId")))

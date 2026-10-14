@@ -1619,6 +1619,9 @@ def _wire_all_predecessor_edges(
                 # arg name to the specific return-slot producer so the edge
                 # starts from the correct pipeline node.
                 ordinal_slot_resolved = False
+                # The callee's own name for the slot the redirect landed on, so
+                # the edge can ask that producer which of ITS ports the slot is.
+                resolved_slot_name: str | None = None
                 if arg_name and source_index is not None:
                     pred_node = steps_by_attr.get(pred)
                     if pred_node is not None and pred_node.forward_return_slots:
@@ -1667,6 +1670,9 @@ def _wire_all_predecessor_edges(
                             if resolved is not None:
                                 source_index = resolved
                                 ordinal_slot_resolved = True
+                                slot_order = pred_node.forward_return_order or []
+                                if 0 <= ordinal < len(slot_order):
+                                    resolved_slot_name = slot_order[ordinal]
                 # A tuple-unpacked side arg (``position_embeddings`` ->
                 # ``cos, sin`` inside an inline-expanded rope frame) feeds one op
                 # per slot. Fan the producer out to each slot's consumer with its
@@ -1721,14 +1727,18 @@ def _wire_all_predecessor_edges(
                             )
                             if resolved != source_index:
                                 slot_source = resolved
-                                slot_port = "0"
+                                slot_port = _producer_slot_port(
+                                    graph, resolved, slot_order[ordinal]
+                                )
                             elif distinct_slot_producers:
                                 # Last slot's producer coincides with the frame
                                 # tail (``attr_last_index[pred]``); it is still a
-                                # distinct single-output op, so read port "0"
-                                # instead of the ordinal (which would dangle — the
-                                # op has no port matching the tuple index).
-                                slot_port = "0"
+                                # distinct op, so read its own port rather than
+                                # the tuple index (which would dangle — the op has
+                                # no port matching the caller's ordinal).
+                                slot_port = _producer_slot_port(
+                                    graph, slot_source, slot_order[ordinal]
+                                )
                         slot_link = (slot_source, consumer_index)
                         if slot_link not in graph.links:
                             graph.links.append(slot_link)
@@ -1842,15 +1852,24 @@ def _wire_all_predecessor_edges(
                 # the producer fans out into one port per consumed slot instead
                 # of docking every consumer onto slot 0. Skip the port tag when
                 # the source was already redirected onto the ordinal's own
-                # per-slot producer above: that producer has a single output,
-                # so tagging it with the tuple ordinal would dangle instead of
-                # naming a real port.
+                # per-slot producer above: the CALLER's tuple ordinal names a
+                # port on the call, not on that producer, so tagging it there
+                # would dangle. Ask the producer instead -- usually it has one
+                # output and answers "0", but it can itself be a multi-output op
+                # (``k_nope, value_states = kv.split(...)`` makes the split the
+                # producer of the slot ``value_states``, its SECOND slice).
                 if (
                     arg_name is not None
                     and arg_name in ordinal_map
                     and not ordinal_slot_resolved
                 ):
                     graph.link_output_ports[link] = str(ordinal_map[arg_name])
+                elif ordinal_slot_resolved and resolved_slot_name:
+                    slot_port = _producer_slot_port(
+                        graph, source_index, resolved_slot_name, default=""
+                    )
+                    if slot_port:
+                        graph.link_output_ports[link] = slot_port
                 if multi and link not in graph.link_port_labels and arg_name:
                     graph.link_port_labels[link] = arg_name
 
@@ -1881,9 +1900,26 @@ def _wire_all_predecessor_edges(
             # wired positionally to a neighbouring op instead.
             linked_sources = {source for source, _target in graph.links}
 
+            # The call site's own argument map is predecessor tracking too, and
+            # a port it resolves is already wired. Adding the provenance chain's
+            # endpoint on top draws the tensor's ANCESTORS as further operands:
+            # Kimi's attention came out reading six (its ``q_b_proj`` and
+            # ``kv_b_proj`` projections and ``hidden_states``, beside the three
+            # real ones) for a call that passes four.
+            tracked_ports = {
+                name.lower()
+                for name, producer in (
+                    (root.forward_step_predecessor_args or {}).get(SYNTHETIC_ATTENTION)
+                    or {}
+                ).items()
+                if producer
+            }
+
             ports_by_source: dict[int, list[str]] = {}
             for port, chain in root.attention_inputs.items():
-                if kernel_declared and port.lower() in kernel_declared:
+                if (kernel_declared and port.lower() in kernel_declared) or (
+                    port.lower() in tracked_ports
+                ):
                     resolved = next(
                         (
                             attr_last_index[attr]
@@ -2045,6 +2081,31 @@ def _link_output_port_recorded(existing: str | list[str] | None, port: str) -> b
     return existing == port
 
 
+def _producer_slot_port(
+    graph: ComputationGraph, node_index: int, slot: str, default: str = "0"
+) -> str:
+    """The output port a return slot reads on the op that produces it.
+
+    A slot with its own distinct producer is usually single-output, so it reads
+    port ``"0"``. But that producer can itself be a MULTI-output op: in
+    ``k_nope, value_states = kv.split(...)`` followed by ``return key_states,
+    value_states``, the split is recorded as ``value_states``'s producer while
+    being its SECOND slice. Reading port ``"0"`` there published ``k_nope`` under
+    the name ``value_states`` and left the real slice with no consumer at all.
+
+    An op names its own unpack targets in source order, index-aligned to its
+    ports, so the slot's name picks the port out of them. Anything that does not
+    name several outputs keeps the default.
+    """
+    if not (0 <= node_index < len(graph.nodes)):
+        return default
+    block = graph.nodes[node_index].block
+    names = list((block.output_names if block is not None else None) or ())
+    if len(names) > 1 and slot in names:
+        return str(names.index(slot))
+    return default
+
+
 def _merge_link_output_port(
     existing: str | list[str] | None, port: str
 ) -> str | list[str]:
@@ -2174,6 +2235,12 @@ def _operation_source_indices(
     ports = step.operation_predecessor_ports
     for predecessor in step.operation_predecessors:
         if is_method_input(predecessor):
+            # A token that NAMES its parameter is not the primary -- the primary
+            # arrives on the shared, unnamed token -- so docking it on the chain
+            # input as well says the op reads a tensor it does not. Its own
+            # parameter reaches it through the boundary wired for that name.
+            if method_input_param(predecessor):
+                continue
             if chain_input_index is not None:
                 sources.append(chain_input_index)
             continue

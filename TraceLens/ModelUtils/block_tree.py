@@ -16,6 +16,7 @@ from typing import Any, Literal
 from TraceLens.ModelUtils.ast_analyze import (
     named_method_operations,
     is_method_input,
+    method_input_param,
     GATE_ACTIVATION_DETAIL_PREFIX,
     LAYOUT_ONLY_LABELS,
     SYNTHETIC_ATTENTION,
@@ -26,7 +27,7 @@ from TraceLens.ModelUtils.ast_analyze import (
     LoopCarriedSpec,
     SideInputSpec,
     attention_kernel_details,
-    attention_kernel_label,
+    kernel_step_label,
     base_submodule_attr,
     map_clone_base_attr,
     displays_as_linear,
@@ -41,8 +42,9 @@ from TraceLens.ModelUtils.ast_analyze import (
     operation_display_label,
     positional_display_label,
     _synthetic_call_function_name,
-    is_attention_wrapper_expandable,
+    DISPATCHED_KERNEL,
     is_kernel_pipeline_step,
+    kernel_name_from_step_details,
     kernel_kwarg_ports,
     kernel_name_from_step_details,
     tensor_input_label_order,
@@ -752,7 +754,7 @@ class BlockNode:
     # For a wrapper-expanded attention core: kernel-input port label -> the ordered
     # head-repeat shape ops (``repeat_kv`` -> unsqueeze/expand/reshape) to interpose
     # between that port's producer and the port. Each op is a ``(label, details)``
-    # pair (:data:`attention_wrapper.RepeatOp`) the graph pass materialises as a
+    # pair the graph pass materialises as a
     # visible node so the grouped-query head expansion is not hidden. Empty for
     # every non-repeating kernel and every non-repeated port.
     kernel_port_repeats: dict[str, list[tuple[str, tuple[str, ...]]]] = field(
@@ -1267,6 +1269,13 @@ def _expanded_free_function_node(
         # keeps only the first consumer of each boundary slot -- so the raw producer
         # is not re-wired as a spurious extra tensor operand onto every rebound
         # re-read (an ``unsqueeze``/``multiply`` that already reads the rebinding).
+        # Keyed by the PARAMETER as well as the producer slot: one tensor can
+        # feed two different parameters of the same call -- DeepSeek hands its
+        # one compressed-KV tensor to both ``key`` and ``value`` -- and those
+        # are two operands the callee reads separately, so each needs its own
+        # port. Keyed on the slot alone, ``key`` claimed it and ``value`` was
+        # left with none. The guard this key exists for (a rebound re-read of
+        # one parameter) is unaffected: that repeats the parameter too.
         claimed_producer_slots: set[tuple[str, int | None]] = set()
         # The callee's own primary (first) parameter (``q``) never appears in any
         # op's ``param_inputs`` -- it is excluded from the callee's own tracked
@@ -1276,6 +1285,16 @@ def _expanded_free_function_node(
         # ``param_inputs`` loop below, so it needs its own boundary label named
         # after this same primary parameter here.
         primary_param = cls.multi_op_method_inputs.get(call_attr)
+        # How many of the call's parameters each argument tensor is bound to.
+        # Keyed by producer AND ordinal: two parameters reading DIFFERENT slots
+        # of one multi-output producer (``cos``/``sin`` out of one rotary call)
+        # are told apart by the slot, and each docks normally. Only parameters
+        # reading the very same slot are indistinguishable at the boundary.
+        shared_arg_producers: dict[tuple[str, int | None], int] = {}
+        for _param, _producer in (producer_arg_params or {}).items():
+            if _producer:
+                _slot = (_producer, ordinal_arg_params.get(_param))
+                shared_arg_producers[_slot] = shared_arg_producers.get(_slot, 0) + 1
         children: list[BlockNode] = []
         for operation_index, operation in enumerate(method_ops):
             translated: list[str] = []
@@ -1283,7 +1302,28 @@ def _expanded_free_function_node(
             boundary_ordinal: int | None = None
             extra_predecessors: list[str] = []
             extra_predecessor_ports: list[tuple[str, int]] = []
-            for param in operation.param_inputs:
+            # A parameter can reach an op as a per-parameter boundary token
+            # among its predecessors (``@method_input:value``) rather than being
+            # listed among its reads. That only needs acting on when the tensor
+            # it names is bound to MORE THAN ONE of the call's parameters --
+            # DeepSeek hands one ``kv`` to both ``key`` and ``value``. Then the
+            # boundary cannot tell them apart, only the first gets a tile, and
+            # the rest must be wired to the producer or they fall back to the
+            # frame's primary (a different tensor). A parameter with a producer
+            # of its own already docks correctly and is left alone.
+            read_params = list(operation.param_inputs)
+            read_params += [
+                param
+                for predecessor in operation.predecessors
+                if is_method_input(predecessor)
+                and (param := method_input_param(predecessor))
+                and param not in operation.param_inputs
+                and shared_arg_producers.get(
+                    (producer_arg_params.get(param), ordinal_arg_params.get(param)), 0
+                )
+                > 1
+            ]
+            for param in read_params:
                 mapping = boundary_arg_params.get(param)
                 if mapping is None:
                     producer_attr = producer_arg_params.get(param)
@@ -1302,9 +1342,24 @@ def _expanded_free_function_node(
                         # default label instead of the callee's own parameter name.
                         slot = (producer_attr, ordinal)
                         first_consumer = slot not in claimed_producer_slots
-                        if not first_consumer and operation.predecessors:
+                        carried_internally = any(
+                            not is_method_input(predecessor)
+                            for predecessor in operation.predecessors
+                        )
+                        if not first_consumer and carried_internally:
                             # A rebound re-read of this slot; the value already
                             # flows in through this op's internal predecessor.
+                            continue
+                        if not first_consumer:
+                            # The slot is already claimed by ANOTHER parameter
+                            # fed by the same tensor -- DeepSeek hands one ``kv``
+                            # to both ``key`` and ``value`` -- so this parameter
+                            # gets no boundary of its own. It still has to read
+                            # that tensor: wire it to the producer directly
+                            # rather than letting it fall back to the frame's
+                            # primary, which is a different tensor entirely.
+                            if producer_attr not in extra_predecessors:
+                                extra_predecessors.append(producer_attr)
                             continue
                         # An op with NO internal predecessor has
                         # nothing carrying the value to it: it reads the
@@ -1349,12 +1404,28 @@ def _expanded_free_function_node(
                 if boundary_name is None:
                     boundary_name = origin
                     boundary_ordinal = ordinal
-            if (
-                boundary_name is None
-                and primary_param is not None
-                and any(is_method_input(p) for p in operation.predecessors)
-            ):
-                boundary_name = primary_param
+            if boundary_name is None:
+                # A per-parameter boundary token NAMES the parameter it carries
+                # (``@method_input:key``). Taking the frame's primary parameter
+                # regardless gave every such op the same port, so an expanded
+                # implementation's first op appeared to read query, key and
+                # value at once while the operands that really fed the others
+                # went unconsumed. Fall back to the primary only for the shared,
+                # unnamed token.
+                named = next(
+                    (
+                        method_input_param(p)
+                        for p in operation.predecessors
+                        if is_method_input(p) and method_input_param(p)
+                    ),
+                    None,
+                )
+                if named is not None:
+                    boundary_name = named
+                elif primary_param is not None and any(
+                    is_method_input(p) for p in operation.predecessors
+                ):
+                    boundary_name = primary_param
             operation_predecessors = list(operation.predecessors)
             for producer_attr in extra_predecessors:
                 if producer_attr not in operation_predecessors:
@@ -1584,222 +1655,6 @@ def _output_gate_details(
         lines.append("output gate for normalized branch")
 
     return lines
-
-
-def _attention_wrapper_block_nodes(
-    *,
-    forward_order: int | None,
-    details: list[str],
-    cls_node,
-    attention_inputs: dict[str, list[str]] | None = None,
-) -> BlockNode | None:
-    """Expand a dispatched attention wrapper into a visible op pipeline.
-
-    The wrapper (SDPA's ``sdpa_attention_forward``) is not a kernel: it calls the
-    compiled ``scaled_dot_product_attention`` primitive, then transposes and makes
-    the result contiguous. This renders that as a ``<kernel> -> transpose ->
-    contiguous`` pipeline whose only atomic leaf is the compiled primitive, so the
-    post-kernel layout ops the opaque leaf used to hide become visible.
-
-    The tail method chain (with each method's literal int args, e.g. a
-    ``transpose(1, 2)``'s two dims) is read from source AST by
-    :func:`introspect_attention_wrapper` -- no op/param/class allow-list. Returns
-    ``None`` when the wrapper cannot be resolved, so the caller keeps the atomic
-    leaf it built before. When the live grouped-query factor is >1 the wrapper's
-    ``repeat_kv`` is materialised too: its introspected unsqueeze/expand/reshape ops
-    are recorded per repeated key/value port (``kernel_port_repeats``) so the graph
-    pass interposes them between that port's producer and the kernel.
-    """
-    from TraceLens.ModelUtils.attention_wrapper import introspect_attention_wrapper
-
-    plan = introspect_attention_wrapper(details, cls_node)
-    if plan is None:
-        return None
-    inputs = dict(attention_inputs or {})
-
-    # A BOUNDARY input -- a kernel tensor with an empty provenance chain, fed
-    # straight from an enclosing scope -- is only representable here if the
-    # wrapper's own signature BINDS it: the expansion renders the wrapper's
-    # parameters, so a tensor the wrapper never names has no port to arrive on and
-    # its producing chain would be pruned as unreachable (GLM's vision
-    # ``cu_seqlens``, whose varlen metadata the sdpa wrapper does not take, taking
-    # the whole seqlens frame with it). Those keep the atomic-leaf path, which
-    # declares such inputs as ``param_inputs`` instead. A boundary input the
-    # wrapper DOES bind (``attention_mask``) is an ordinary operand and expands.
-    bound_callers = {caller for _param, caller in plan.port_map}
-    if any(not chain and port not in bound_callers for port, chain in inputs.items()):
-        return None
-
-    # The atomic compiled primitive is the pipeline entry: it keeps the
-    # ``SYNTHETIC_ATTENTION`` attr so the caller's provenance edges (query / key /
-    # value / mask) dock onto it through the existing attention-provenance pass and
-    # its ``@kernel_in`` ports are named exactly as before. Because sdpa genuinely
-    # receives every one of those tensors, a single dock target for all of them is
-    # faithful. The grouped-query ``repeat_kv`` (which grows ONLY the key/value head
-    # axis, while query and mask bypass it) is materialised as its own per-port
-    # interception at the kernel-port pass -- recorded here on the core leaf via
-    # ``kernel_port_repeats`` (see below) rather than as a leading pipeline node,
-    # exactly because only the key/value branch routes through it. The core leaf's
-    # own output shape is inferred by the ``sdpa`` rule
-    # (``query.shape[:-1] + (value.shape[-1],)``), shape-correct for GQA and MLA.
-    core_attr = SYNTHETIC_ATTENTION
-    # Declare the core's tensor-input ports exactly as the atomic-leaf path does
-    # (``attention_kernel_details`` stamps ``inputs: q,kv,attention_mask`` from the
-    # step's ``attention_inputs`` keys). Without this declaration the attention-
-    # provenance pass (``_wire_*`` section 2) treats the core as having no declared
-    # ports and routes *every* input through provenance chains -- which, for a
-    # compressed-KV kernel (DeepSeek MLA) whose ``kv`` and ``attention_mask`` trace
-    # to the same producer, merges them into one ``kv/attention_mask`` port and
-    # fabricates ``Merge`` ports from the split's output ordinals. Declaring the
-    # ports makes that pass skip them so they dock by normal predecessor tracking,
-    # yielding the same clean ``q``/``kv``/``attention_mask`` ports as the leaf.
-    core_details = attention_kernel_details(details, inputs)
-    if not core_details:
-        core_details = [f"kernel: {plan.kernel}", "outputs: 1"]
-
-    # A grouped-query / compressed-KV wrapper feeds two distinct kernel parameters
-    # (``key`` and ``value``) from ONE caller tensor (``kv``): the port_map then
-    # carries two entries sharing a caller var. sdpa genuinely reads key and value
-    # as separate operands, so the shared caller var must fan into two distinct
-    # role-labeled ports rather than one merged ``kv`` port. Derive that split
-    # purely from the port_map's structure -- a caller var mapped by >1 wrapper
-    # param -- and stamp it so the kernel-port pass (``_add_kernel_port_nodes``)
-    # emits one port per role from the single producer. No param-name/class allow
-    # list: any wrapper whose interface passes one tensor to several params splits.
-    caller_to_params: dict[str, list[str]] = {}
-    for param, caller_var in plan.port_map:
-        caller_to_params.setdefault(caller_var, []).append(param)
-    for caller_var, params in caller_to_params.items():
-        if len(params) > 1:
-            core_details.append(f"port_split: {caller_var}={','.join(params)}")
-
-    # Stamp the atomic primitive as a dedicated ``kernel_primitive`` detail
-    # (promoted to its own attr by the adapter). The type-check resolves the
-    # primitive's real REQUIRED tensor-operand contract (sdpa: query/key/value) from
-    # its aten schema to verify the kernel carries a distinct input port per required
-    # operand -- catching a combined ``kv`` port that hides two required operands
-    # behind one edge. It is deliberately NOT stamped as ``raw_op``: the primitive's
-    # operand *ceiling* is not the wrapper node's ceiling (the wrapper legitimately
-    # receives forwarded non-operand kwargs -- MiniMax's ``block_indices`` -- that
-    # the primitive never reads), so overloading ``raw_op`` would make the generic
-    # over-arity check miscount those forwarded inputs. The required-operand COVERAGE
-    # check keys on this dedicated attr instead.
-    if plan.kernel_primitive:
-        core_details.append(f"kernel_primitive: {plan.kernel_primitive}")
-    # Which PARAMETER of the wrapper each caller-side port supplies, from the
-    # binding ``port_map`` already resolved (``q`` -> ``query``). Stamped so the
-    # role travels with the port as an identity: recovering it downstream by
-    # string-matching the port's DISPLAY label breaks the moment that label is
-    # qualified for a reader, which is exactly how renaming a port once made
-    # ``sdpa`` appear to read one tensor where it reads three.
-    if plan.port_map:
-        core_details.append(
-            "operand_role: "
-            + ", ".join(f"{caller}={param}" for param, caller in plan.port_map)
-        )
-    core_leaf = _leaf_node(
-        attr_name=core_attr,
-        class_name="AttentionOp",
-        forward_order=0,
-        label=plan.kernel,
-        details=core_details,
-        basic=False,
-    )
-
-    # A grouped-query wrapper re-materialises key/value heads before the kernel
-    # (``key = repeat_kv(key, n)``). When the live factor is >1 the wrapper's repeat
-    # callee introspects into visible shape ops (unsqueeze/expand/reshape) that must
-    # sit between the key/value producer and the kernel port -- the head expansion
-    # the opaque wrapper used to hide. Map each REPEATED wrapper param to the port
-    # label it drives so the kernel-port pass can interpose those ops on that branch
-    # only (query / mask are untouched). The port label is the param's ROLE after a
-    # shared-caller split (``key``/``value`` <- one ``kv``) or the caller var itself
-    # when the interface already passes distinct key/value tensors. Derived purely
-    # from the plan (repeat params + port_map + the callee body), no param-name gate.
-    #
-    # The live grouped-query factor that sizes the expand/reshape is stamped onto the
-    # attention step only later (``reconcile_live_attention_groups`` runs in the
-    # export build, AFTER this block tree is constructed), so ``plan.repeat_ops`` is
-    # still empty here for the real pipeline. Record the derivation context (callee +
-    # repeated port labels + owning class, all factor-independent) and let the
-    # post-reconcile pass ``apply_live_attention_repeats`` resolve the callee and fill
-    # ``kernel_port_repeats`` with the real factor. Keyed lower-case to match how the
-    # kernel-port pass looks the label up (``label.strip().lower()``).
-    if plan.repeat_params:
-        port_labels: list[str] = []
-        for param, caller_var in plan.port_map:
-            if param not in plan.repeat_params:
-                continue
-            shared = len(caller_to_params.get(caller_var, [])) > 1
-            port_label = param if shared else caller_var
-            key = port_label.strip().lower()
-            if key not in port_labels:
-                port_labels.append(key)
-        owner_class = getattr(cls_node, "name", None)
-        if port_labels and plan.repeat_module and plan.repeat_callee and owner_class:
-            core_leaf.pending_repeat_context = RepeatContext(
-                module=plan.repeat_module,
-                callee=plan.repeat_callee,
-                port_labels=tuple(port_labels),
-                owner_class=owner_class,
-            )
-        # If the live factor was already known when the plan was built (a direct
-        # build that stamped ``gqa_groups`` up front), fill the map immediately so
-        # the deferred pass is a no-op.
-        if plan.repeat_ops and port_labels:
-            core_leaf.kernel_port_repeats = {
-                key: list(plan.repeat_ops) for key in port_labels
-            }
-
-    children: list[BlockNode] = [core_leaf]
-
-    # Post-kernel tail (``attn_output.transpose(1, 2).contiguous()``), each method a
-    # visible op reading the previous one. A ``transpose``'s two literal dims are
-    # stamped as ``dim0``/``dim1`` details so its shape rule permutes the right axes
-    # (the compiled kernel returns ``[B, H, S, D]``; the wrapper transposes heads
-    # and sequence back to ``[B, S, H, D]`` before returning). The last tail op is
-    # the pipeline's real output, which downstream steps reading the attention
-    # result resolve to via the ``_reroute_wrapper_kernel_output_edges`` pass.
-    prev_attr = core_attr
-    for order, (method, int_args) in enumerate(plan.tail_ops, start=1):
-        attr = f"@attn_tail:{method}"
-        # Each tail is an ordinary layout op, represented exactly as the same
-        # method called anywhere else in the model (``basic`` leaf, canonical
-        # ``Transpose``/``Contiguous`` label, ``raw_op`` detail carrying the torch
-        # name for the type-check's operand-arity resolution). Keeping it a plain
-        # op -- not a bespoke node kind -- means every existing shape rule
-        # (``transpose`` reads ``dim0``/``dim1``; ``contiguous`` is a no-op),
-        # detail-graph filter, and renderer treats it with no special-casing. The
-        # explicit ``operation_predecessors`` chain (core -> transpose ->
-        # contiguous) gives each its single real dataflow edge.
-        display = operation_display_label(method)
-        tail_details = [f"raw_op: {method}"]
-        if method == "transpose" and len(int_args) >= 2:
-            tail_details += [f"dim0: {int_args[0]}", f"dim1: {int_args[1]}"]
-        children.append(
-            _leaf_node(
-                attr_name=attr,
-                class_name=display,
-                forward_order=order,
-                label=display,
-                details=tail_details,
-                basic=True,
-                operation_predecessors=[prev_attr],
-            )
-        )
-        prev_attr = attr
-
-    return BlockNode(
-        attr_name="@attn_pipeline",
-        class_name="KernelPipeline",
-        role="attention",
-        label=f"{plan.kernel} attention",
-        forward_order=forward_order,
-        details=[f"attention wrapper · {plan.kernel}"],
-        is_basic=False,
-        children=children,
-        attention_inputs=inputs,
-    )
 
 
 def _kernel_pipeline_block_nodes(
@@ -2593,7 +2448,7 @@ def build_block_node(
             attr_name=attr_name,
             class_name="AttentionOp",
             forward_order=forward_order,
-            label=attention_kernel_label(step_details),
+            label=kernel_step_label(step_details) or "Kernel",
             details=attention_kernel_details(step_details),
             basic=False,
         )
@@ -2723,23 +2578,30 @@ def build_block_node(
                 and not cls.attention_inputs
             ):
                 continue
-            if is_attention_wrapper_expandable(child_details) and cls.attention_inputs:
-                # A dispatched attention interface (``sdpa_attention_forward``) is a
-                # Python wrapper, not a kernel: expand it into its visible ops
-                # (``sdpa -> transpose -> contiguous``) with the compiled primitive
-                # as the only atomic leaf. Falls through to the atomic-leaf path
-                # when the wrapper source cannot be resolved. A boundary attention
-                # input docks on the core leaf's own ``param_inputs``, declared in
-                # that builder exactly as the atomic-leaf path declares them.
-                wrapper_node = _attention_wrapper_block_nodes(
-                    forward_order=child_order,
-                    details=child_details,
-                    cls_node=cls.node,
-                    attention_inputs=cls.attention_inputs,
+            if (
+                call_attr in cls.multi_op_methods
+                and kernel_name_from_step_details(child_details) == DISPATCHED_KERNEL
+            ):
+                # The implementation the model dispatched to is a Python
+                # function like any other: expand its body and let the ops it
+                # performs show. Its parameters bind to the caller's arguments
+                # through the same generic wiring every expanded helper uses, so
+                # nothing here is specific to what it computes. The compiled
+                # primitive inside it has no Python body and so stays the one
+                # atomic leaf, by the rule that applies to every such call.
+                expanded = _expanded_free_function_node(
+                    call_attr,
+                    cls,
+                    child_order=child_order,
+                    child_details=child_details,
+                    label=kernel_step_label(child_details) or "Kernel",
+                    fallback_class_name="KernelOp",
+                    fallback_param_inputs=list(
+                        cls.forward_step_boundary_params.get(call_attr, ())
+                    ),
                 )
-                if wrapper_node is not None:
-                    child_nodes.append(wrapper_node)
-                    continue
+                child_nodes.append(expanded)
+                continue
             if is_kernel_pipeline_step(child_details, cls.attention_inputs):
                 pipeline_node, output_node = _kernel_pipeline_block_nodes(
                     forward_order=child_order,
@@ -2768,7 +2630,7 @@ def build_block_node(
                         attr_name=call_attr,
                         class_name="AttentionOp",
                         forward_order=child_order,
-                        label=attention_kernel_label(child_details),
+                        label=kernel_step_label(child_details) or "Kernel",
                         details=attention_kernel_details(
                             child_details, cls.attention_inputs
                         ),

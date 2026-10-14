@@ -135,6 +135,28 @@ def test_deepseek_v4_flash_type_check_clean():
     assert warnings == [], warnings
 
 
+def _attention_parameter_shapes(nodes) -> dict[str, list[str]]:
+    """Shape axes of each operand arriving at the expanded attention, by name.
+
+    The dispatch expands into the implementation the model runs, so each
+    parameter it binds gets a boundary of its own inside that frame.
+    """
+    shapes: dict[str, list[str]] = {}
+    for node in nodes:
+        node_id = str(node.get("id", ""))
+        if ":@attention:" not in node_id or "/@input:" not in node_id:
+            continue
+        attrs = {a.get("key"): a.get("value") for a in node.get("attrs", []) or []}
+        if attrs.get("synthetic") != "@input":
+            continue
+        raw = str(attrs.get("output_shape") or "")
+        inner = raw.split("]", 1)[0].lstrip("[")
+        axes = [d.strip() for d in inner.split(",") if d.strip()]
+        if axes:
+            shapes.setdefault(str(node.get("label")), axes)
+    return shapes
+
+
 def test_deepseek_v4_attention_kernel_q_key_value_are_rank4():
     """The attention kernel's ``q`` / ``key`` / ``value`` inputs are all 4-D
     ``[B, H, S, D]``.
@@ -156,7 +178,6 @@ def test_deepseek_v4_attention_kernel_q_key_value_are_rank4():
     pytest.importorskip("huggingface_hub")
     graph = _build_graph()
     nodes = graph["nodes"]
-    by_id = {node["id"]: node for node in nodes}
 
     def _rank(node) -> int | None:
         for out in node.get("outputsMetadata", []) or []:
@@ -170,29 +191,15 @@ def test_deepseek_v4_attention_kernel_q_key_value_are_rank4():
                     )
         return None
 
-    # The attention kernel is the node fed by the named kernel-input ports.
-    port_rank: dict[str, int | None] = {}
-    for node in nodes:
-        for edge in node.get("incomingEdges", []) or []:
-            src = edge.get("sourceNodeId", "")
-            if "@kernel_in" not in src:
-                continue
-            port = src.rsplit(":", 1)[-1]
-            if port in {"q", "key", "value"} and port not in port_rank:
-                port_rank[port] = _rank(by_id.get(src, {}))
-
-    assert {"q", "key", "value"} <= set(
-        port_rank
-    ), f"kernel q/key/value ports not found: {port_rank}"
-    assert (
-        port_rank["q"] == 4
-    ), f"query kernel input must be 4-D, got rank {port_rank['q']}"
-    assert (
-        port_rank["key"] == 4
-    ), f"key kernel input must be 4-D, got rank {port_rank['key']}"
-    assert (
-        port_rank["value"] == 4
-    ), f"value kernel input must be 4-D, got rank {port_rank['value']}"
+    # The attention the model dispatches to is its own implementation, expanded
+    # into the ops it performs, so its operands arrive on that frame's own
+    # parameter boundaries -- one per parameter the call binds.
+    ports = _attention_parameter_shapes(nodes)
+    assert {"query", "key"} <= set(ports), f"attention operands not found: {ports}"
+    for name in ("query", "key"):
+        assert (
+            len(ports[name]) == 4
+        ), f"{name} must be 4-D [B, H, S, D], got {ports[name]}"
 
 
 def test_deepseek_v4_attention_kernel_ports_carry_correct_distinct_shapes():
@@ -224,114 +231,73 @@ def test_deepseek_v4_attention_kernel_ports_carry_correct_distinct_shapes():
     pytest.importorskip("huggingface_hub")
     graph = _build_graph()
     nodes = graph["nodes"]
-    by_id = {node["id"]: node for node in nodes}
 
-    def _axes(node) -> list[str] | None:
-        for out in node.get("outputsMetadata", []) or []:
-            for attr in out.get("attrs", []) or []:
-                if attr.get("key") == "tensor_shape":
-                    inner = str(attr.get("value", "")).split("]", 1)[0].lstrip("[")
-                    return [d.strip() for d in inner.split(",") if d.strip()] or None
-        return None
+    ports = _attention_parameter_shapes(nodes)
+    assert {"query", "key", "attention_mask"} <= set(
+        ports
+    ), f"attention operands not all found: {ports}"
+    query = ports["query"]
+    key = ports["key"]
+    mask = ports["attention_mask"]
 
-    port_axes: dict[str, list[str] | None] = {}
-    for node in nodes:
-        for edge in node.get("incomingEdges", []) or []:
-            src = edge.get("sourceNodeId", "")
-            if "@kernel_in" not in src:
-                continue
-            port = src.rsplit(":", 1)[-1]
-            if (
-                port in {"q", "key", "value", "attention_mask"}
-                and port not in port_axes
-            ):
-                port_axes[port] = _axes(by_id.get(src, {}))
-
-    assert {"q", "key", "value", "attention_mask"} <= set(
-        port_axes
-    ), f"kernel q/key/value/attention_mask ports not all found: {port_axes}"
-    q = port_axes["q"]
-    key = port_axes["key"]
-    value = port_axes["value"]
-    mask = port_axes["attention_mask"]
-    assert q and key and value and mask, port_axes
-
-    # q is a real multi-head query, not the head-broadcast square mask.
-    assert len(q) == 4 and q[1] != "1", f"query head axis must be multi-head: {q}"
-    assert q[-1] != q[-2], f"query must not be square (mask-shaped): {q}"
+    # query is a real multi-head query, not the head-broadcast square mask.
+    assert (
+        len(query) == 4 and query[1] != "1"
+    ), f"query head axis must be multi-head: {query}"
+    assert query[-1] != query[-2], f"query must not be square (mask-shaped): {query}"
 
     # attention_mask is head-broadcast and spatially square.
     assert len(mask) == 4 and mask[1] == "1", f"mask must be head-broadcast: {mask}"
     assert mask[-1] == mask[-2], f"attention mask must be square: {mask}"
 
-    # Task J: ``key`` and ``value`` are distinct sdpa operand ports fanned out
-    # from the one compressed-KV producer, so they carry the *same* shape.
-    assert tuple(key) == tuple(
-        value
-    ), f"key/value ports share the one kv producer's shape: {port_axes}"
-
-    # q, the shared key/value shape, and the mask are mutually distinct (no port
-    # collapsed onto another -- the fragmentation/merge bug).
+    # No operand collapsed onto another -- the fragmentation/merge bug.
     assert (
-        len({tuple(q), tuple(key), tuple(mask)}) == 3
-    ), f"q/key(=value)/mask ports must carry distinct shapes: {port_axes}"
+        len({tuple(query), tuple(key), tuple(mask)}) == 3
+    ), f"query/key/mask must carry distinct shapes: {ports}"
 
 
-def test_deepseek_v4_attention_kernel_splits_kv_into_key_and_value_ports():
-    """Task J Part 1: the dispatched sdpa wrapper's single ``kv`` producer fans
-    out into the primitive's two distinct ``key`` and ``value`` operand ports.
+def test_deepseek_v4_one_kv_tensor_feeds_both_attention_roles():
+    """DeepSeek hands ONE compressed-KV tensor to both ``key`` and ``value``.
 
-    DeepSeek is the model where the attention wrapper passes one compressed-KV
-    tensor to *both* the ``key`` and ``value`` parameters of
-    ``scaled_dot_product_attention``. The export must expose them as two separate
-    kernel-input ports (labelled by the primitive's parameter role, ``key`` /
-    ``value``, not by the caller variable ``kv``) fed by that one producer -- and
-    must NOT retain a single combined ``kv`` port. The sdpa core also carries a
-    ``kernel_primitive`` attr naming the primitive so the operand-arity coverage
-    check can resolve its required tensor operands. Keyed structurally on the
-    kernel's own port labels, never on a class/line/op name.
+    ``attention_interface(self, q, kv, kv, attention_mask, ...)`` -- the source
+    says ``# sliding where K==V`` -- so the two roles are the same tensor, and
+    the expanded implementation runs its head-repeat on it once per role.
+
+    That is a shape the boundary cannot express: a tensor crossing into a block
+    is drawn once, so only the FIRST parameter it is bound to gets a tile and
+    the second has none. The second repeat then fell back to the frame's primary
+    and reported the QUERY as its operand -- wrong tensor, wrong shape. Both
+    repeats must read the one kv tile, and neither may read anything else.
     """
     pytest.importorskip("huggingface_hub")
     graph = _build_graph()
     nodes = graph["nodes"]
+    by_id = {node["id"]: node for node in nodes}
 
-    def _attr(node, key):
-        for attr in node.get("attrs", []) or []:
-            if attr.get("key") == key:
-                return attr.get("value")
-        return None
+    repeats = [
+        node
+        for node in nodes
+        if ":@attention:" in str(node["id"])
+        and "repeat" in str(node["id"])
+        and str(node.get("label")) == "Unsqueeze"
+    ]
+    assert len(repeats) >= 2, f"expected a head-repeat per role, got {len(repeats)}"
 
-    # Locate the sdpa core(s): nodes carrying a ``kernel_primitive`` attr.
-    cores = [n for n in nodes if _attr(n, "kernel_primitive")]
-    assert cores, "expected at least one sdpa core carrying a kernel_primitive attr"
-
-    for core in cores:
-        prim = _attr(core, "kernel_primitive")
-        assert "scaled_dot_product_attention" in str(
-            prim
-        ), f"unexpected kernel_primitive on sdpa core: {prim!r}"
-        port_sources: dict[str, str] = {}
-        for edge in core.get("incomingEdges", []) or []:
-            src = edge.get("sourceNodeId", "")
-            if "@kernel_in" not in src:
-                continue
-            port_sources[src.rsplit(":", 1)[-1]] = src
-
-        # Distinct key + value ports present; the combined ``kv`` port is gone.
+    sources = set()
+    for repeat in repeats:
+        reads = {
+            str(by_id.get(edge["sourceNodeId"], {}).get("label"))
+            for edge in repeat.get("incomingEdges", []) or []
+        }
+        assert reads, f"head-repeat reads nothing: {repeat['id']}"
         assert (
-            "key" in port_sources and "value" in port_sources
-        ), f"sdpa core must expose distinct key/value ports: {sorted(port_sources)}"
-        assert (
-            "kv" not in port_sources
-        ), f"combined ``kv`` port must be split away: {sorted(port_sources)}"
-        # Both roles are fed by the one shared kv producer (same source node,
-        # differing only by the trailing port-role segment).
-        key_root = port_sources["key"].rsplit(":", 1)[0]
-        value_root = port_sources["value"].rsplit(":", 1)[0]
-        assert key_root == value_root, (
-            f"key/value ports must fan out from one producer: "
-            f"{port_sources['key']} vs {port_sources['value']}"
-        )
+            "query" not in reads
+        ), f"a head-repeat of the KV tensor must not read the query: {reads}"
+        sources |= reads
+
+    assert (
+        len(sources) == 1
+    ), f"both roles are the one kv tensor, so both repeats read one tile: {sources}"
 
 
 def test_deepseek_v4_indexer_chunk_kv_and_gate_are_consumed():

@@ -1956,44 +1956,31 @@ def test_glm53_vision_attention_resolves_single_kernel_branch():
     attn_nodes = [n for n in nodes if "VisionAttention" in n.get("namespace", "")]
     assert attn_nodes
 
-    # Exactly one attention kernel node, labelled with the resolved kernel (the
-    # config defaults ``_attn_implementation`` to sdpa), tagged with the impl.
-    kernels = [n for n in attn_nodes if n.get("label") == "sdpa"]
-    assert len(kernels) == 1, [n["id"] for n in kernels]
-    kernel = kernels[0]
-    assert any(
-        attr.get("key") == "attn_implementation" and attr.get("value") == "sdpa"
-        for attr in kernel.get("attrs", [])
-    )
+    # Exactly one attention is drawn, and it is the implementation the model
+    # runs: this checkpoint sets no attention implementation, so the lookup
+    # yields the ``eager_attention_forward`` written beside it, expanded into
+    # its own ops. Its softmax is the single witness of that one attention.
+    softmaxes = [
+        n
+        for n in attn_nodes
+        if n.get("label") == "Softmax" and ":@attention:" in n["id"]
+    ]
+    assert len(softmaxes) == 1, [n["id"] for n in softmaxes]
 
     # No duplicated kernel-output node survives from the untaken flash branch.
     assert not [n for n in attn_nodes if "@kernel_out" in n["id"]]
 
-    # No per-chunk reassembly Concat survives: ``torch.cat`` over the windowed
-    # comprehension collapses to one representative kernel output, so the cat has a
-    # single input and restores the same ``[Pv, 1024]`` it received -- a provable
-    # no-op that ``_elide_noop_single_input_concat`` folds onto the kernel (the
-    # block-diagonal windowing is already carried by the kernel's ``cu_seqlens``).
-    # The rope helper's own ``rotate_half`` Concats live in the expanded
-    # ``apply_rotary_pos_emb_vision`` frame (a separate computation) and are
-    # excluded here.
-    concats = [
-        n
-        for n in attn_nodes
-        if n.get("label") == "Concat" and "apply_rotary_pos_emb_vision" not in n["id"]
-    ]
-    assert concats == [], [n["id"] for n in concats]
+    # The per-image windowing the taken branch performs IS drawn: the model
+    # splits q/k/v per image and concatenates the results back.
+    assert len([n for n in attn_nodes if n.get("label") == "Split"]) >= 3
 
-    # The output reshape reads the attention PIPELINE's output. The kernel is a
-    # wrapper (``sdpa_attention_forward``) expanded into its real ops, so what
-    # follows the kernel is its own tail (``transpose``/``contiguous``) and then
-    # the pipeline boundary -- not the kernel node itself. The elided cat was a
-    # pass-through between them either way.
+    # The output reshape reads the attention's result, with a path back through
+    # the ops inside it.
     reshape = _export_node(nodes, "visual/seq:3:blocks:attn:@op_l1665_c22_reshape")
     reshape_sources = [e["sourceNodeId"] for e in reshape.get("incomingEdges", [])]
     assert len(reshape_sources) == 1, reshape_sources
-    assert reshape_sources[0].endswith("sdpa_attention/@output"), reshape_sources
-    assert _has_export_path(nodes, kernel["id"], reshape["id"])
+    assert ":@attention:" in reshape_sources[0], reshape_sources
+    assert _has_export_path(nodes, softmaxes[0]["id"], reshape["id"])
 
 
 def test_glm53_vision_attention_flags_impl_dead_interface_input():
@@ -2016,27 +2003,28 @@ def test_glm53_vision_attention_flags_impl_dead_interface_input():
 
     _assert_export_is_acyclic(nodes)
 
-    kernel = _export_node(nodes, "visual/seq:3:blocks:attn:@attn_pipeline:@attention:")
-    details = next(
-        attr["value"]
-        for attr in kernel.get("attrs", [])
-        if attr.get("key") == "details"
-    )
+    # The attention takes q/k/v and NOTHING else. Neither packed-attention
+    # argument is one of its operands: ``max_seqlen`` is read only by the flash
+    # branch the model does not take, and ``cu_seqlens`` is read by the taken
+    # branch to SIZE the per-image chunking (``torch.split(t, lengths.tolist(),
+    # ...)``), which is a host value, not an operand.
+    operands = {
+        n.get("label")
+        for n in nodes
+        if "visual/seq:3:blocks:attn:@attention:" in n["id"] and "/@input:" in n["id"]
+    }
+    assert operands, "the vision attention must declare its operands"
+    assert "cu_seqlens" not in operands, sorted(operands)
+    assert "max_seqlen" not in operands, sorted(operands)
 
-    # Under sdpa the kernel takes q/k/v and NOTHING else. Neither packed-attention
-    # argument reaches it: ``max_seqlen`` is read only by the flash branch, and
-    # ``cu_seqlens`` is read by the sdpa branch to SIZE the per-image chunking
-    # (``torch.split(t, lengths.tolist(), ...)``), which is a host value, not an
-    # operand. Only the flash call passed it to the kernel.
-    assert "inputs:" in details
-    inputs_segment = [
-        seg for seg in details.split(";") if seg.strip().startswith("inputs:")
-    ][0]
-    assert "cu_seqlens" not in inputs_segment, inputs_segment
-    assert "max_seqlen" not in inputs_segment, inputs_segment
-
-    # max_seqlen is surfaced as an interface input dead in this implementation.
-    assert "unused_interface_inputs: max_seqlen" in details
+    # ``max_seqlen`` is dead in this implementation, so nothing anywhere under
+    # the vision attention draws it as a live tensor.
+    assert not [
+        n
+        for n in nodes
+        if "VisionAttention" in n.get("namespace", "")
+        and str(n.get("label")) == "max_seqlen"
+    ], "max_seqlen is read only by the branch this checkpoint does not take"
 
 
 def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
@@ -2111,69 +2099,48 @@ def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
 
 
 def test_glm53_vision_attention_kernel_reads_all_qkv_no_orphans():
-    """The vision attention kernel reads query/key/value_states plus cu_seqlens.
+    """The vision attention takes query/key/value, each from its own producer.
 
-    ``Glm5NextVisionAttention.forward`` computes ``query_states``, ``key_states``
-    and ``value_states`` (each ending in an ``unsqueeze``) and hands all three to
-    the attention interface alongside ``cu_seqlens``. The taken sdpa branch spells
-    that call inside an ``else``-branch comprehension the provenance walk never
-    descends into, and ``value_states`` never passes through a submodule call, so
-    the kernel previously wired only ``query_states``/``cu_seqlens`` — dropping
-    ``key_states``/``value_states`` and leaving their ``unsqueeze`` ops as orphan
-    leaves.
+    ``Glm5NextVisionAttention.forward`` computes ``query_states``,
+    ``key_states`` and ``value_states`` and hands all three to the attention
+    interface. The taken branch spells that call inside an ``else``-branch
+    comprehension the provenance walk never descends into, and ``value_states``
+    never passes through a submodule call, so the attention once wired only
+    ``query_states`` -- dropping the other two and leaving their ops orphaned.
 
-    General: when the taken branch hides the attention call, the kernel's q/k/v
-    predecessors are reconstructed from the first visible attention-interface call
-    by resolving each positional ``Name`` arg through the topology producer map
-    (``var_producer``) — which tracks inline ops and non-module tensors alike — so
-    every declared kernel input is labeled and wired, with no orphaned tensor ops.
+    ``cu_seqlens`` is NOT one of the operands: the branch reads it to SIZE the
+    per-image chunking (``torch.split(t, lengths.tolist(), ...)``), a host
+    value, so it crosses the module boundary and reaches the split it sizes
+    without ever being an attention operand.
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
+    node_by_id = {n["id"]: n for n in nodes}
 
     _assert_export_is_acyclic(nodes)
 
-    kernel = _export_node(nodes, "visual/seq:3:blocks:attn:@attn_pipeline:@attention:")
-    kernel_sources = {e["sourceNodeId"] for e in kernel.get("incomingEdges", [])}
-
-    # Every declared kernel input is a distinct, correctly-labeled port node with
-    # its OWN producer. Under sdpa each of q/k/v reaches the kernel through its
-    # own per-image ``torch.split`` (the branch chunks by ``cu_seqlens`` lengths
-    # and runs the kernel once per image); cu_seqlens itself is NOT an operand
-    # here -- only the untaken flash branch passed it to the kernel.
-    unsqueezes = {
-        "query_states": "visual/seq:3:blocks:attn:@op_l1616_c23_unsqueeze",
-        "key_states": "visual/seq:3:blocks:attn:@op_l1617_c21_unsqueeze",
-        "value_states": "visual/seq:3:blocks:attn:@op_l1618_c23_unsqueeze",
+    prefix = "visual/seq:3:blocks:attn:@attention:"
+    ports = {
+        label: node_by_id[f"{prefix}@/@input:{label}"]
+        for label in ("query", "key", "value")
     }
-    ports = {}
-    for label in unsqueezes:
-        port = next(
-            n
-            for n in nodes
-            if n["id"].startswith("visual/@kernel_in:")
-            and n["id"].endswith(f":{label}")
-        )
-        assert port["id"] in kernel_sources, label
-        ports[label] = port
-    # Three distinct ports, three distinct producers -- not one shared.
+
+    # Each operand reads one source, named for the tensor it carries, and the
+    # three are distinct -- not one shared.
     producers = {
         label: [e["sourceNodeId"] for e in port["incomingEdges"]]
         for label, port in ports.items()
     }
     for label, sources in producers.items():
         assert len(sources) == 1, (label, sources)
-        # The port reads the boundary that carries its own tensor across the
-        # attention's namespace edge, named for that tensor.
         assert sources[0].endswith(f"{label}^{label}"), (label, sources)
     assert len({sources[0] for sources in producers.values()}) == 3, producers
-    # ...and behind each of those is its own split, not one shared.
+
+    # ...and behind each of those is its own per-image split.
     splits = {
-        label: [
-            e["sourceNodeId"] for e in _export_node(nodes, sources[0])["incomingEdges"]
-        ]
+        label: [e["sourceNodeId"] for e in node_by_id[sources[0]]["incomingEdges"]]
         for label, sources in producers.items()
     }
     for label, sources in splits.items():
@@ -2182,19 +2149,16 @@ def test_glm53_vision_attention_kernel_reads_all_qkv_no_orphans():
             sources,
         )
     assert len({sources[0] for sources in splits.values()}) == 3, splits
-    assert not [
-        n
-        for n in nodes
-        if n["id"].startswith("visual/@kernel_in:") and n["id"].endswith(":cu_seqlens")
-    ]
 
-    # The q/k/v unsqueeze ops are no longer orphan leaves: each still reaches the
-    # kernel, now by way of the split that chunks it.
-    fed = {e["sourceNodeId"] for n in nodes for e in n.get("incomingEdges", [])}
-    for label, unsqueeze_id in unsqueezes.items():
-        node_id = _export_node(nodes, unsqueeze_id)["id"]
-        assert node_id in fed, label
-        assert _has_export_path(nodes, node_id, kernel["id"]), label
+    # No operand is left orphaned: every op feeding them is consumed.
+    assert "cu_seqlens" not in {p.get("label") for p in ports.values()}
+    attn_boundary = node_by_id["visual/seq:3:blocks:attn/@input:cu_seqlens"]
+    assert [e["sourceNodeId"] for e in attn_boundary["incomingEdges"]] == [
+        "visual/@input:cu_seqlens"
+    ]
+    # ...and cu_seqlens reaches the split it sizes, so its producer is no orphan.
+    split = next(n for n in nodes if "blocks:attn:@op_l1646_c16_split:" in n["id"])
+    assert _has_export_path(nodes, attn_boundary["id"], split["id"])
 
 
 def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
@@ -2684,17 +2648,23 @@ def test_glm53_no_single_input_concat_survives_anywhere():
     ]
     assert single_input_concats == [], single_input_concats
 
-    # The known vision fallback reassembly cat is gone; its consumer (the output
-    # reshape) reads the attention pipeline's output. The kernel is a wrapper
-    # expanded into its real ops, so the pipeline -- not the kernel node -- is
-    # what the reshape sees, with a path back to the kernel.
+    # The known vision fallback reassembly cat is gone, and its consumer (the
+    # output reshape) reads the attention's result. The dispatched attention is
+    # the implementation the model runs, expanded into its own ops, so what the
+    # reshape sees is that expansion's output boundary -- with a path back
+    # through the ops inside it.
     assert not any("@op_l1663_c26_concat" in n["id"] for n in nodes)
     reshape = _export_node(nodes, "visual/seq:3:blocks:attn:@op_l1665_c22_reshape")
-    kernel = _export_node(nodes, "visual/seq:3:blocks:attn:@attn_pipeline:@attention:")
     reshape_sources = [e["sourceNodeId"] for e in reshape.get("incomingEdges", [])]
     assert len(reshape_sources) == 1, reshape_sources
-    assert reshape_sources[0].endswith("sdpa_attention/@output"), reshape_sources
-    assert _has_export_path(nodes, kernel["id"], reshape["id"])
+    assert ":@attention:" in reshape_sources[0], reshape_sources
+    matmul = next(
+        n
+        for n in nodes
+        if "visual/seq:3:blocks:attn:@attention:" in n["id"]
+        and n.get("label") == "MatMul"
+    )
+    assert _has_export_path(nodes, matmul["id"], reshape["id"])
 
 
 def test_glm53_multi_input_concat_sums_operand_widths_not_identity():
@@ -3857,29 +3827,34 @@ def test_glm53_build_attention_mask_frame_is_not_opaque():
     assert not_equal["id"] in {e["sourceNodeId"] for e in unsqueeze["incomingEdges"]}
     assert scatter_add["id"] in {e["sourceNodeId"] for e in not_equal["incomingEdges"]}
 
-    # The attention kernel of the sparse block must read all four declared ports;
-    # query_states and attention_mask are the ones that used to be dropped.
-    kernel = next(
-        n
+    # The sparse block's attention must take all four operands the call passes;
+    # query_states and attention_mask are the ones that used to be dropped. The
+    # dispatched attention is expanded into the implementation it runs, so each
+    # operand arrives on that expansion's own parameter boundary.
+    operands = {
+        n.get("label")
         for n in nodes
-        if n.get("label") == "sdpa"
-        and "11x_Glm5NextTextAttention" in n["id"]
-        and n["id"].endswith(":@attention:0")
-    )
-    node_by_id = {n["id"]: n for n in nodes}
-    port_labels = {
-        node_by_id[e["sourceNodeId"]].get("label") for e in kernel["incomingEdges"]
+        if "11x_Glm5NextTextAttention" in n["id"]
+        and ":@attention:" in n["id"]
+        and "/@input:" in n["id"]
     }
     assert {
-        "query_states",
+        "query",
         "key_states",
         "value_states",
         "attention_mask",
-    } <= port_labels, sorted(port_labels)
+    } <= operands, sorted(operands)
 
-    # The mask the frame produces must actually reach the kernel's mask port
-    # (proving the chain is consumed, hence not pruned).
-    assert _has_export_path(nodes, unsqueeze["id"], kernel["id"])
+    # The mask the frame produces must actually reach the attention (proving the
+    # chain is consumed, hence not pruned).
+    mask_port = next(
+        n
+        for n in nodes
+        if "11x_Glm5NextTextAttention" in n["id"]
+        and ":@attention:" in n["id"]
+        and n["id"].endswith("/@input:attention_mask")
+    )
+    assert _has_export_path(nodes, unsqueeze["id"], mask_port["id"])
 
 
 def test_glm53_graph_integrity_checks_emit_no_warnings():
@@ -3917,40 +3892,40 @@ def test_glm53_graph_integrity_checks_emit_no_warnings():
 
 
 def test_glm53_attention_nodes_show_real_resolved_kernel():
-    """Every attention leaf shows its real resolved kernel, never the generic word.
+    """Every attention shows what it really runs, never the generic word.
 
-    ``Glm5NextTextAttention`` and ``Glm5NextVisionAttention`` both dispatch to
-    ``sdpa`` (the checkpoint leaves ``_attn_implementation`` unset), and
-    ``Glm5NextTextLinearAttention`` runs ``recurrent_kimi_delta_attention``. The
-    label must be the resolved kernel string, falling back to "Attention" only when
-    no kernel is statically knowable -- so no attention kernel node reads the bare
-    word "Attention".
+    ``Glm5NextTextLinearAttention`` calls ``recurrent_kimi_delta_attention``
+    outright, so it is a kernel leaf under that name.
+    ``Glm5NextTextAttention`` and ``Glm5NextVisionAttention`` DISPATCH, and this
+    checkpoint sets no implementation -- so what they run is the
+    ``eager_attention_forward`` the model writes down beside the lookup, and it
+    is expanded into the ops it performs rather than named as a kernel nobody
+    saw the model call.
+
+    The sparse-block attention's key/value operands reach it through
+    ``expand_kv``'s own ``@output`` crossing -- a module exit, which the
+    hierarchy-aware same-name collapse KEEPS (owner: never fold across a module
+    edge) -- and that boundary resolves through to a real op inside expand_kv,
+    never a dangling passthrough.
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
+    node_by_id = {n["id"]: n for n in nodes}
 
     attn_kernels = [n for n in nodes if n["id"].endswith(":@attention:0")]
     assert attn_kernels, "expected attention kernel leaves"
     labels = {n.get("label") for n in attn_kernels}
-    # The real resolved kernels are present; the generic fallback is not.
-    assert "sdpa" in labels, sorted(labels)
     assert "recurrent_kimi_delta_attention" in labels, sorted(labels)
+    # Nothing is left reading the bare word.
     assert "Attention" not in labels, sorted(labels)
 
-    # The sparse-block attention kernel's expanded key/value ports read the
-    # ``expand_kv`` submodule's own ``@output`` boundary. That crossing is a module
-    # exit (expand_kv -> the parent self_attn), so the hierarchy-aware same-name
-    # collapse KEEPS the boundary tile (owner: never fold across a module edge).
-    # Walking the kept boundary resolves to a real op inside expand_kv, never a
-    # dangling passthrough.
-    node_by_id = {n["id"]: n for n in nodes}
-    sparse_kernel = next(
-        n
-        for n in attn_kernels
-        if n.get("label") == "sdpa" and "11x_Glm5NextTextAttention" in n["id"]
-    )
+    # The dispatching attentions expanded: their implementation's own ops are
+    # drawn inside them, so there is a matmul under the attention namespace.
+    assert any(
+        ":@attention:" in n["id"] and n.get("label") == "MatMul" for n in nodes
+    ), "the dispatched attention must be expanded into the ops it performs"
 
     def _resolves_to_real_op(start_id: str) -> bool:
         # Walk single-source boundary tiles (@output/@output_mirror/@slice_out)
@@ -3968,16 +3943,23 @@ def test_glm53_attention_nodes_show_real_resolved_kernel():
             cur = edges[0]["sourceNodeId"]
         return False
 
-    for edge in sparse_kernel["incomingEdges"]:
-        source = node_by_id[edge["sourceNodeId"]]
-        port = source.get("label")
-        if port in ("key_states", "value_states"):
-            upstream = node_by_id[source["incomingEdges"][0]["sourceNodeId"]]
-            # The kept boundary is the expand_kv module's own @output crossing...
-            assert _attr_value(upstream, "synthetic") in ("@output", "@output_mirror")
-            assert "expand_kv" in upstream["id"], (port, upstream["id"])
-            # ...and it resolves through to a real op inside expand_kv.
-            assert _resolves_to_real_op(upstream["id"]), (port, upstream["id"])
+    operands = [
+        n
+        for n in nodes
+        if "11x_Glm5NextTextAttention" in n["id"]
+        and ":@attention:" in n["id"]
+        and n.get("label") in ("key_states", "value_states")
+        and _attr_value(n, "synthetic") == "@input"
+    ]
+    assert operands, "the expanded attention must take key/value operands"
+    for operand in operands:
+        upstream = node_by_id[operand["incomingEdges"][0]["sourceNodeId"]]
+        assert _attr_value(upstream, "synthetic") in ("@output", "@output_mirror")
+        assert "expand_kv" in upstream["id"], (operand["label"], upstream["id"])
+        assert _resolves_to_real_op(upstream["id"]), (
+            operand["label"],
+            upstream["id"],
+        )
 
 
 def test_glm53_attn_hc_constant_closure_is_well_formed():

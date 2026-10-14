@@ -32,6 +32,7 @@ from TraceLens.ModelUtils.config_resolve import (
     apply_config_attribute_aliases,
     declared_config_aliases,
     declared_config_defaults,
+    declared_config_overrides,
     load_checkpoint_config,
 )
 from TraceLens.ModelUtils.github import (
@@ -173,6 +174,32 @@ def _with_declared_defaults(
     if not by_model_type:
         return config
     return _section_with_defaults(config, by_model_type)
+
+
+def _with_constructor_overrides(
+    config: dict[str, Any], source_files: list[Any]
+) -> dict[str, Any]:
+    """Apply values the model's own code writes back onto its config.
+
+    Applied at EVERY depth, because the tower that reads the attribute may hold
+    a sub-config and the constructor overwrote whatever that section stored.
+    That is the difference from :func:`_with_declared_defaults`, which fills
+    only what no section states: this replaces what a section does.
+    """
+    overrides = declared_config_overrides(source_files)
+    if not overrides:
+        return config
+    return _section_with_overrides(config, overrides)
+
+
+def _section_with_overrides(
+    section: dict[str, Any], overrides: dict[str, Any]
+) -> dict[str, Any]:
+    merged = {**section, **overrides}
+    for key, value in list(merged.items()):
+        if isinstance(value, dict) and value.get("model_type"):
+            merged[key] = _section_with_overrides(value, overrides)
+    return merged
 
 
 def _section_with_defaults(
@@ -1194,80 +1221,6 @@ def _walk_block_nodes(node: BlockNode):
         yield from _walk_block_nodes(child)
 
 
-def apply_live_attention_repeats(spec: ArchitectureSpec) -> None:
-    """Fill each attention core's grouped-query head-repeat ops with the live factor.
-
-    The detailed block tree is built at load time -- before
-    :func:`reconcile_live_attention_groups` stamps the live ``gqa_groups`` factor --
-    so a wrapper-expanded attention core cannot yet size its ``repeat_kv`` expansion
-    and instead records a :class:`~TraceLens.ModelUtils.block_tree.RepeatContext`
-    (callee + repeated key/value port labels + owning attention class). This runs
-    after the stamp: for every such core it resolves the live factor from the owning
-    class's stamped step detail, derives the callee's real shape-op chain
-    (unsqueeze/expand/reshape) with that factor via the SAME source-AST machinery the
-    plan used, and records the ops per repeated port in ``kernel_port_repeats`` so the
-    graph pass interposes them between the key/value producer and the kernel port.
-
-    Inert unless a core carries deferred context AND its class reports a factor >1:
-    ``repeat_kv`` short-circuits at factor 1 (GLM), so those cores keep a bare port
-    and no node is added. When the live factor is >1 but the callee cannot be
-    resolved into a clean shape-op chain the port is left bare and a warning is logged
-    (the introspect-everything fallback -- a genuinely un-introspectable repeat is
-    reported, never silently mis-modelled)."""
-    from TraceLens.ModelUtils.ast_analyze import SYNTHETIC_ATTENTION
-    from TraceLens.ModelUtils.attention_wrapper import (
-        _derive_repeat_ops,
-        _resolve_wrapper_def,
-        attention_wrapper_gqa_groups,
-    )
-
-    registry = spec.class_registry or {}
-    # Live grouped-query factor per attention class, read back from the stamp.
-    factors: dict[str, int] = {}
-    for class_name, cls in registry.items():
-        step_details = getattr(cls, "forward_step_details", None)
-        if not step_details:
-            continue
-        details = step_details.get(SYNTHETIC_ATTENTION)
-        if not details:
-            continue
-        factor = attention_wrapper_gqa_groups(details)
-        if factor and factor > 1:
-            factors[class_name] = factor
-    if not factors:
-        return
-
-    for _title, tree in spec.export_block_trees:
-        for node in _walk_block_nodes(tree):
-            ctx = node.pending_repeat_context
-            if ctx is None:
-                continue
-            factor = factors.get(ctx.owner_class)
-            if not factor or factor <= 1:
-                continue
-            callee = _resolve_wrapper_def(ctx.module, ctx.callee)
-            if callee is None:
-                _log.warning(
-                    "attention repeat callee %r could not be resolved from %r for "
-                    "class %s; keeping a bare key/value port (repeat not materialised)",
-                    ctx.callee,
-                    ctx.module,
-                    ctx.owner_class,
-                )
-                continue
-            ops = _derive_repeat_ops(callee, factor)
-            if not ops:
-                _log.warning(
-                    "attention repeat callee %r body is not a resolvable shape-op "
-                    "chain for class %s; keeping a bare key/value port (repeat not "
-                    "materialised)",
-                    ctx.callee,
-                    ctx.owner_class,
-                )
-                continue
-            node.kernel_port_repeats = {label: list(ops) for label in ctx.port_labels}
-
-
 def _config_moe_layer(layer_idx: int, config: dict[str, Any]) -> bool:
     num_experts = _as_int(
         _get(
@@ -2077,6 +2030,12 @@ def load_architecture(
             # `config.<attr>` resolves without a list of synonyms it might use.
             declared = declared_config_aliases(source_files)
             config = apply_config_attribute_aliases(config, declared)
+            # Last word goes to the model: a value its own code writes back onto
+            # the config overrules whatever the checkpoint asked for, at every
+            # depth (unlike a default, an override is meant to shadow). Without
+            # it, branches keyed on that attribute resolve against a value the
+            # model discarded in its constructor.
+            config = _with_constructor_overrides(config, source_files)
             code_analysis = analyze_sources(
                 read_sources(source_files),
                 config=config,

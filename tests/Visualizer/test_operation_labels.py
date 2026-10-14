@@ -295,14 +295,23 @@ def test_glm_attention_expand_kv_assembles_key_states_from_split_and_expand():
         for node in graph["nodes"]
         if synthetic(node) == "@output_mirror" and consumes(node, out_boundary["id"])
     )
+    # The attention the model dispatches to is its own implementation, expanded
+    # into the ops it performs, so what the mirror reaches is that frame's own
+    # parameter boundary -- the port named for the parameter ``key_states`` is
+    # bound to -- not a port on a kernel nobody saw it call.
     key_port = next(
         node
         for node in graph["nodes"]
-        if synthetic(node) == "@kernel_port_in" and consumes(node, out_mirror["id"])
+        if synthetic(node) == "@input"
+        and ":@attention:" in node["id"]
+        and consumes(node, out_mirror["id"])
     )
     assert key_port["label"] == "key_states"
+    # And the expansion's own ops read it: the tensor crosses into the frame.
     assert any(
-        ":@attention:" in node["id"] and consumes(node, key_port["id"])
+        ":@attention:" in node["id"]
+        and synthetic(node) is None
+        and consumes(node, key_port["id"])
         for node in graph["nodes"]
     )
 

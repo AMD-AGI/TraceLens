@@ -12,6 +12,7 @@ import ast
 import builtins
 import copy
 import functools
+import importlib
 import importlib.util
 import logging
 import re
@@ -630,6 +631,338 @@ def _analyzed_base_module(config: dict[str, Any] | None) -> str | None:
     return f"transformers.models.{model_type}.modeling_{model_type}"
 
 
+def _table_entry_origin(tree: ast.AST, table: str, key: str) -> tuple[str, str] | None:
+    """``(module, name)`` of the entry a runtime table maps *key* to.
+
+    A dispatch table is filled at IMPORT time -- its entries register themselves
+    from several modules -- so no file states the mapping and no amount of
+    reading source will find it. The table object is the only place it exists.
+    Import the module the analysed file imports the table from, ask it which
+    entry the key selects, and read that entry's own module and name off it. The
+    entry is never called; from here on it is read as source like anything else.
+    """
+    source_module = next(
+        (
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module
+            and any(alias.name == table for alias in node.names)
+        ),
+        None,
+    )
+    if not source_module:
+        return None
+    try:
+        entry = getattr(importlib.import_module(source_module), table)[key]
+        return entry.__module__, entry.__name__
+    except Exception:  # noqa: BLE001 - unreadable table leaves the key as it is
+        return None
+
+
+def _name_dispatched_kernels(
+    classes: dict[str, Any], tree: ast.AST, registry: "_ParsedModuleRegistry"
+) -> None:
+    """Rename each dispatch to the kernel it ends in, not the entry it selects.
+
+    The config names a TABLE KEY (``flash_attention_2``) and the table hands back
+    a library wrapper -- neither of which is the kernel the GPU runs. Following
+    the wrapper to where the source runs out gives that
+    (``flash_attn_varlen_func``), so the node says what actually executes.
+
+    Leaves the selection as it stands whenever the chain cannot be followed to a
+    single answer, which is the honest result for a dispatch whose arm depends on
+    something only the data decides.
+    """
+    for structure in classes.values():
+        for details in (getattr(structure, "forward_step_details", {}) or {}).values():
+            table = _detail_suffix(details, KERNEL_TABLE_DETAIL)
+            key = _detail_suffix(details, KERNEL_SELECTED_DETAIL)
+            if not table or not key:
+                continue
+            origin = _table_entry_origin(tree, table, key)
+            if origin is None:
+                continue
+            supplied = (_detail_suffix(details, KERNEL_ARGS_DETAIL) or "").split(",")
+            kernel = _denoted_kernel(
+                origin[1], None, origin[0], registry, {s for s in supplied if s}
+            )
+            if not kernel or kernel == key:
+                continue
+            for index, detail in enumerate(details):
+                if str(detail).startswith(KERNEL_SELECTED_DETAIL):
+                    details[index] = f"{KERNEL_SELECTED_DETAIL}{kernel}"
+
+
+def _detail_suffix(details: list[str], prefix: str) -> str | None:
+    """The value of the first detail carrying *prefix*."""
+    return next(
+        (
+            str(detail)[len(prefix) :].strip()
+            for detail in details or ()
+            if str(detail).startswith(prefix)
+        ),
+        None,
+    )
+
+
+def _call_argument_names(call: ast.Call) -> list[str]:
+    """Names the call site passes, positionally and by keyword.
+
+    Used to decide an arm guarded on whether an argument was supplied at all.
+    """
+    names = [arg.id for arg in call.args if isinstance(arg, ast.Name)]
+    names += [kw.arg for kw in call.keywords if kw.arg and _is_tensor_like_arg(kw)]
+    return names
+
+
+def _is_tensor_like_arg(keyword: ast.keyword) -> bool:
+    """A keyword that hands over a VALUE, not a literal switch."""
+    return not isinstance(keyword.value, ast.Constant)
+
+
+def _target_slot_path(target: ast.AST, name: str, prefix: tuple = ()) -> list | None:
+    """Index path to *name* inside an assignment target, through nested tuples."""
+    if isinstance(target, ast.Name):
+        return list(prefix) if target.id == name else None
+    if isinstance(target, (ast.Tuple, ast.List)):
+        for index, element in enumerate(target.elts):
+            found = _target_slot_path(element, name, (*prefix, index))
+            if found is not None:
+                return found
+    return None
+
+
+def _returned_at_path(func: ast.FunctionDef, path: list) -> str | None:
+    """The name a function returns at a nested tuple *path*."""
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Return) or node.value is None:
+            continue
+        value: ast.AST | None = node.value
+        for index in path:
+            if isinstance(value, ast.Tuple) and index < len(value.elts):
+                value = value.elts[index]
+            else:
+                value = None
+                break
+        # ``return attn_output, None`` hands back one real value and a slot the
+        # wrapper fills with nothing; the whole return IS that first element.
+        if not path and isinstance(value, ast.Tuple) and value.elts:
+            value = value.elts[0]
+        if isinstance(value, ast.Name):
+            return value.id
+    return None
+
+
+def _guarded_assignments(
+    func: ast.FunctionDef, name: str
+) -> list[tuple[list[ast.expr], ast.Call]]:
+    """Calls assigned to *name*, each with the conditions guarding it."""
+    found: list[tuple[list[ast.expr], ast.Call]] = []
+
+    def walk(body: list[ast.stmt], conditions: list[ast.expr]) -> None:
+        for statement in body:
+            if isinstance(statement, ast.If):
+                walk(statement.body, [*conditions, statement.test])
+                # An ``else`` is reached when the test does NOT hold; recorded as
+                # the negated test so it can be judged the same way.
+                walk(
+                    statement.orelse,
+                    [*conditions, ast.UnaryOp(op=ast.Not(), operand=statement.test)],
+                )
+                continue
+            for child in ast.iter_child_nodes(statement):
+                if isinstance(child, ast.stmt):
+                    walk([child], conditions)
+            if isinstance(statement, ast.Assign) and isinstance(
+                statement.value, ast.Call
+            ):
+                if any(
+                    _target_slot_path(target, name) is not None
+                    for target in statement.targets
+                ):
+                    found.append((conditions, statement.value))
+
+    walk(func.body, [])
+    return found
+
+
+def _condition_holds(test: ast.expr, supplied: set[str]) -> bool | None:
+    """Whether a guard holds, judged only by what the caller supplied.
+
+    ``x is not None`` is answered by whether the call site passed ``x``; ``not
+    (...)`` inverts its operand. Anything else is unknown -- returned as ``None``
+    so the caller declines rather than picking an arm it cannot justify.
+    """
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = _condition_holds(test.operand, supplied)
+        return None if inner is None else not inner
+    if isinstance(test, ast.Compare) and len(test.ops) == 1:
+        left, operator, right = test.left, test.ops[0], test.comparators[0]
+        is_none = isinstance(right, ast.Constant) and right.value is None
+        if is_none and isinstance(left, ast.Name):
+            if isinstance(operator, ast.IsNot):
+                return left.id in supplied
+            if isinstance(operator, ast.Is):
+                return left.id not in supplied
+    return None
+
+
+def _denoted_kernel(
+    name: str,
+    scope: ast.FunctionDef | None,
+    module: str,
+    registry: "_ParsedModuleRegistry",
+    supplied: set[str],
+    depth: int = 0,
+) -> str | None:
+    """What a called *name* finally denotes, following wrappers and return slots.
+
+    A library hands its kernel over through several layers of indirection, none
+    of which is the kernel: ``flash_attention_forward`` calls
+    ``_flash_attention_forward``, which calls a local bound out of a tuple
+    returned by ``lazy_import_flash_attention``, which returns module globals
+    assigned from ``_lazy_imports``, which returns the names it imported from
+    the kernel package. Stopping at any of those names the library boundary
+    rather than the kernel.
+
+    So follow it: a readable function is a wrapper, and what it returns is what
+    it really is; a local or global bound out of another call is that call's
+    return slot. The walk ends at a name no readable source defines -- which is
+    exactly a compiled kernel, since those have no Python body to read. We never
+    go INTO it; there is nothing there to draw.
+
+    Generic: nothing here knows what the kernel computes, which library it comes
+    from, or what any of the functions are called.
+    """
+    if depth > _KERNEL_ALIAS_DEPTH:
+        return None
+    loaded = registry.load(module)
+    if loaded is None:
+        # No readable source for the module that would define it: the name is
+        # as far as reading goes, which is where a compiled kernel lives.
+        return name
+    functions, bindings = loaded
+
+    if name not in functions and name in bindings:
+        # Imported from elsewhere -- a wrapper chain crosses module boundaries
+        # (``flash_attention_forward`` is one file, the helper it calls another),
+        # so continue in the module that actually defines it.
+        destination, _, symbol = bindings[name].partition("#")
+        if destination and destination != module:
+            return _denoted_kernel(
+                symbol or name, None, destination, registry, supplied, depth + 1
+            )
+
+    definition = functions.get(name)
+    if definition is not None:
+        # A readable function: it is a wrapper, so follow what it hands back.
+        returned = _returned_at_path(definition, [])
+        if returned is None:
+            return None
+        inner_supplied = _passed_through(definition, supplied)
+        for conditions, call in _guarded_assignments(definition, returned):
+            if not isinstance(call.func, ast.Name):
+                continue
+            verdicts = [_condition_holds(c, inner_supplied) for c in conditions]
+            if any(v is False for v in verdicts) or any(v is None for v in verdicts):
+                continue
+            root = _chain_root_call(definition, call)
+            return _denoted_kernel(
+                root.func.id if isinstance(root.func, ast.Name) else call.func.id,
+                definition,
+                module,
+                registry,
+                inner_supplied,
+                depth + 1,
+            )
+        return None
+
+    if scope is not None:
+        # A local (or module global) bound out of another call: resolve the slot
+        # it was unpacked from, then keep going from that call's own return.
+        for container in (scope, *functions.values()):
+            for node in ast.walk(container):
+                if not isinstance(node, ast.Assign) or not isinstance(
+                    node.value, ast.Call
+                ):
+                    continue
+                if not isinstance(node.value.func, ast.Name):
+                    continue
+                path = next(
+                    (
+                        found
+                        for target in node.targets
+                        if (found := _target_slot_path(target, name)) is not None
+                    ),
+                    None,
+                )
+                if path is None:
+                    continue
+                callee = functions.get(node.value.func.id)
+                if callee is None:
+                    continue
+                nxt = _returned_at_path(callee, path)
+                if nxt:
+                    return _denoted_kernel(
+                        nxt, callee, module, registry, supplied, depth + 1
+                    )
+    # Nothing readable defines it, so this is where the source runs out: the
+    # name itself is the kernel.
+    return name
+
+
+def _chain_root_call(func: ast.FunctionDef, call: ast.Call) -> ast.Call:
+    """Walk back to the call that STARTED the chain this one finishes.
+
+    An arm often ends in layout work rather than the computation: the varlen
+    branch of a flash wrapper runs the kernel on unpadded tokens and then pads
+    the result back, so the call producing the returned value is the padding,
+    not the kernel. Following its first operand back through local assignments
+    reaches the call the chain actually begins with.
+
+    Stops at whatever is not a locally-assigned result -- a parameter, a method
+    call, a literal -- which is where the chain starts.
+    """
+    seen: set[int] = set()
+    current = call
+    while id(current) not in seen:
+        seen.add(id(current))
+        if not current.args or not isinstance(current.args[0], ast.Name):
+            return current
+        producer = next(
+            (
+                node.value
+                for node in ast.walk(func)
+                if isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and any(
+                    isinstance(t, ast.Name) and t.id == current.args[0].id
+                    for t in node.targets
+                )
+            ),
+            None,
+        )
+        if producer is None:
+            return current
+        current = producer
+    return current
+
+
+def _passed_through(func: ast.FunctionDef, supplied: set[str]) -> set[str]:
+    """Supplied-ness carried into a callee, matched by parameter name.
+
+    A wrapper forwards its own parameters under the same names
+    (``_flash_attention_forward(query, key, value, attention_mask, ...)``), so a
+    name the caller supplied is still supplied one level in.
+    """
+    parameters = {
+        arg.arg for arg in func.args.posonlyargs + func.args.args + func.args.kwonlyargs
+    }
+    return supplied & parameters if supplied else set()
+
+
 def _annotate_host_free_functions(
     classes: dict[str, "ClassStructure"],
     tree: ast.AST,
@@ -1165,6 +1498,12 @@ _ACTIVATION_LEAF_CLASS_NAMES = frozenset(_ACTIVATION_DISPLAY_NAMES.values())
 # from the tag instead of matching detail text against a hardcoded activation set.
 GATE_ACTIVATION_DETAIL_PREFIX = "gate activation: "
 
+# Forward parameters an operation reads only for their EXTENT -- ``torch.full(
+# (batch_size,), ...)`` where ``batch_size = token_visible.shape[0]``. They are
+# recorded as parameter reads so the sizing dependency is visible, and marked
+# here so they can be told apart from an operand read of the same tensor.
+EXTENT_PARAMS_DETAIL = "extent_params: "
+
 
 def _display_activation_name(raw: str) -> str:
     """Canonical display name for an activation registry key (``silu`` -> ``SiLU``).
@@ -1211,6 +1550,23 @@ def method_input_param(name: str) -> str | None:
 # instead of the local variable's name, which says nothing about what runs and
 # differs from model to model.
 DISPATCHED_KERNEL = "@dispatched"
+# What the model's config selected out of the table a dispatch reads. Recorded
+# BESIDE the structural ``kernel: @dispatched`` marker rather than replacing it:
+# the marker says the callee was chosen at run time (so there is an
+# implementation to expand), the selection says which one it chose.
+KERNEL_SELECTED_DETAIL = "kernel_selected: "
+# The table a dispatch read its selection out of, so the entry it names can be
+# looked up and followed to the kernel it ultimately calls.
+KERNEL_TABLE_DETAIL = "kernel_table: "
+# The arguments the dispatch call actually supplies, by the callee's parameter
+# names. Following a wrapper to its kernel has to pick between arms guarded on
+# whether an argument was given (``if attention_mask is not None``), and the
+# call site is what answers that.
+KERNEL_ARGS_DETAIL = "kernel_args: "
+# How many layers of wrapper indirection to follow when resolving a called name
+# to the kernel it denotes. Four hops covers the libraries seen; the bound keeps
+# a cyclic or self-referential binding from looping.
+_KERNEL_ALIAS_DEPTH = 8
 
 
 def _is_module_dispatch_call(node: ast.Call) -> bool:
@@ -1474,7 +1830,99 @@ def _module_forward_functions(
         tree, _analyzed_base_module(config), registry
     ).items():
         functions.setdefault(name, func)
+    # A dispatch call names no callee -- the model picked one at runtime -- but
+    # the fallback it passes IS written down, and is defined right here. Register
+    # that under the key the dispatch records, so it expands through exactly the
+    # path any other helper in this file does. Only what the source shows.
+    dispatched = _dispatched_implementation_def(tree, functions, config, registry)
+    if dispatched is not None:
+        functions.setdefault(SYNTHETIC_ATTENTION, dispatched)
     return functions
+
+
+def _dispatched_implementation_def(
+    tree: ast.AST,
+    functions: dict[str, ast.FunctionDef],
+    config: dict[str, Any] | None = None,
+    registry: "_ParsedModuleRegistry | None" = None,
+) -> ast.FunctionDef | None:
+    """The implementation a dispatch call could run, read from the SOURCE.
+
+    ``attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+    self.config._attn_implementation, eager_attention_forward)`` selects its
+    callee at runtime, so the key names nothing this file can see. The fallback
+    argument does: it is a plain function defined in this very module, written
+    down by the model.
+
+    A model whose config NAMES the key is a different case: it has told us which
+    entry it takes, so what it runs is that entry, not the fallback written
+    beside it (Kimi-K3 overwrites the implementation it is handed, making its
+    fallback a path the model never takes). That selection is recorded as
+    ``kernel_selected:`` and names the step; it is deliberately NOT expanded
+    here, because the entry it names is a backend kernel binding whose body
+    bottoms out in a compiled kernel rather than in ops worth drawing.
+
+    Keyed on nothing: an argument that IS a function defined here, passed to a
+    call whose result is later called. One such argument, or none.
+    """
+    bound: dict[str, ast.FunctionDef] = {}
+    for node in ast.walk(tree):
+        # ``x = f(...)`` and the annotated ``x: Callable = f(...)`` the models
+        # actually write are different nodes; both bind a name to a result.
+        if isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target.id]
+        else:
+            continue
+        if len(targets) != 1:
+            continue
+        if not isinstance(node.value, ast.Call):
+            continue
+        named = [
+            functions[arg.id]
+            for arg in node.value.args
+            if isinstance(arg, ast.Name) and arg.id in functions
+        ]
+        if len(named) == 1:
+            bound.setdefault(targets[0], named[0])
+    if len(bound) != 1:
+        return None
+    return _with_receiver_named_self(next(iter(bound.values())))
+
+
+def _with_receiver_named_self(func: ast.FunctionDef) -> ast.FunctionDef:
+    """The function with its receiver parameter renamed to ``self``.
+
+    A dispatch hands the module itself in as the first argument, so inside the
+    body that parameter IS the module -- DeepSeek's eager attention reads
+    ``module.sinks``, meaning the attention module's own parameter. Spelled
+    under its own name nothing resolves it: the reshape that follows found no
+    shape for it and sized its ``-1`` from whatever flowed past, turning a
+    per-head bias into ``[1, B*S*1024, 1, 1]``.
+
+    Renaming it says what the call already established, and every mechanism that
+    resolves ``self.<attr>`` then works unchanged -- including leaving it out of
+    the data ports, which a receiver was never one of.
+    """
+    import copy
+
+    params = func.args.posonlyargs + func.args.args
+    if not params or params[0].arg == "self":
+        return func
+    receiver = params[0].arg
+    renamed = copy.deepcopy(func)
+
+    class _Rename(ast.NodeTransformer):
+        def visit_Name(self, node: ast.Name) -> ast.Name:
+            if node.id == receiver:
+                node.id = "self"
+            return node
+
+    renamed = _Rename().visit(renamed)
+    (renamed.args.posonlyargs + renamed.args.args)[0].arg = "self"
+    ast.fix_missing_locations(renamed)
+    return renamed
 
 
 _EINOPS_CALLS = frozenset({"rearrange", "repeat"})
@@ -2421,6 +2869,12 @@ def _synthetic_call_function_name(call_attr: str) -> str | None:
         return _POSITIONAL_SOURCE_POS_RE.sub("", call_attr) or None
     if is_function_synthetic(call_attr):
         return _FUNCTION_SOURCE_POS_RE.sub("", call_attr) or None
+    if call_attr == SYNTHETIC_ATTENTION:
+        # A dispatched call names no function at its call site -- the callee was
+        # a value, not a name -- so it is registered under this very key by
+        # ``_module_forward_functions``. Returning the key reads that entry and
+        # the body expands like any other helper's.
+        return SYNTHETIC_ATTENTION
     return None
 
 
@@ -4545,10 +4999,20 @@ def _collect_name_value_ast(func: ast.FunctionDef) -> dict[str, ast.expr]:
     """
     name_value_ast: dict[str, ast.expr] = {}
     for sub in ast.walk(func):
+        # ``x = expr`` and the annotated ``x: T = expr`` are different nodes for
+        # the same binding, and models write both -- an attention dispatch is
+        # usually spelled ``attention_interface: Callable = ...``. Reading only
+        # the first left those locals with no recorded value at all.
         if isinstance(sub, ast.Assign):
-            for target in sub.targets:
-                if isinstance(target, ast.Name):
-                    name_value_ast[target.id] = sub.value
+            targets = [t for t in sub.targets if isinstance(t, ast.Name)]
+            value = sub.value
+        elif isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name):
+            targets = [sub.target] if sub.value is not None else []
+            value = sub.value
+        else:
+            continue
+        for target in targets:
+            name_value_ast[target.id] = value
     return name_value_ast
 
 
@@ -5229,6 +5693,17 @@ class _ForwardOperationExtractor:
             # skips below.
             if not is_root and self._is_host_scalar_expr(current):
                 return
+            # ``attn_weights.type(value.dtype)`` reads value's DTYPE, not its
+            # data. Counted as a tensor read it both wires value onto the cast
+            # and -- because the first consumer of a parameter claims it -- robs
+            # the ``matmul(attn_weights, value)`` below of the operand it really
+            # takes. Mirrors the shape-read skip directly above.
+            if (
+                not is_root
+                and isinstance(current, ast.Attribute)
+                and current.attr in {"dtype", "device"}
+            ):
+                return
             if (
                 not is_root
                 and isinstance(current, ast.Call)
@@ -5329,7 +5804,13 @@ class _ForwardOperationExtractor:
         func = node.func
         if not isinstance(func, ast.Name):
             return None
-        definition = self.module_functions.get(func.id)
+        # A dispatch names a local, not its callee, so there is no name to look
+        # up -- but the implementation the source handed it is registered under
+        # the key the call records. Binding through that is what gives the
+        # expanded body its real parameter ports (``query``/``key``/``value``)
+        # instead of positional stand-ins that all dock on its first op.
+        key = SYNTHETIC_ATTENTION if _is_module_dispatch_call(node) else func.id
+        definition = self.module_functions.get(key)
         if definition is None:
             return None
         return [arg.arg for arg in definition.args.posonlyargs + definition.args.args]
@@ -5467,8 +5948,18 @@ class _ForwardOperationExtractor:
 
         def record(base: str) -> None:
             producer = self.var_producer.get(base)
-            if producer and producer not in producers:
-                producers.append(producer)
+            if producer:
+                if producer not in producers:
+                    producers.append(producer)
+                return
+            # ``k_len = idx_q.shape[-1]`` sizes the range off a forward
+            # PARAMETER, which has no internal producer to draw an edge from. It
+            # docks through the parameter channel instead -- the same route the
+            # bare-name branch below takes, which this path used to skip, so the
+            # dependency survived only while something else in the call (a
+            # ``device=idx_q.device`` read) happened to name the tensor too.
+            if base in self.param_names and base not in params:
+                params.append(base)
 
         def walk(node: ast.AST, depth: int) -> None:
             if depth > _EXTENT_RESOLVE_DEPTH:
@@ -6360,6 +6851,15 @@ class _ForwardOperationExtractor:
                 if isinstance(node.func, ast.Attribute)
                 else None
             )
+            # A call into one of torch's own functional namespaces computes a
+            # tensor whether or not this file has a display name for it. Left
+            # unlabelled it was dropped outright, which is how
+            # ``scaled_dot_product_attention`` -- the compiled primitive that IS
+            # the attention -- came to be missing from an expanded dispatch
+            # while the layout ops around it were drawn. Fall back to the name
+            # the model itself wrote, so the set of ops that can be shown is not
+            # limited to the ones already listed here.
+            or (operation_display_label(functional_name) if functional_name else None)
         )
         housekeeping = not submodule_call and (
             call_name in _HOUSEKEEPING_METHODS or call_name == "zeros_like"
@@ -6456,7 +6956,20 @@ class _ForwardOperationExtractor:
                 positional_producers.append(producers)
                 arg_producers.extend(producers)
                 external.extend(arg_external)
-                if submodule_call and idx >= start and len(producers) == 1:
+                # Binding an argument to the parameter it feeds is not special
+                # to a submodule call: a dispatch needs it too, or its expanded
+                # body's ports fall back to positional stand-ins that all dock on
+                # its first op. Not extended to EVERY call with a known
+                # signature, though: an argument that is one slot of a tuple
+                # unpack already reaches its consumer through that slot, and
+                # claiming it again here leaves the slot's own producer with
+                # nothing reading it -- GLM's ``expand_kv`` split lost its
+                # ``value_states`` that way.
+                if (
+                    (submodule_call or _is_module_dispatch_call(node))
+                    and idx >= start
+                    and len(producers) == 1
+                ):
                     positional_index = idx - start
                     name = None
                     if callee_param_names is not None and positional_index < len(
@@ -6875,6 +7388,13 @@ class _ForwardOperationExtractor:
             )
             if extent_params:
                 extra_param_refs = tuple(extent_params)
+                # Marked, not merely added: these name the parameter whose SIZE
+                # this op reads, never its data. Left indistinguishable from a
+                # data read, the op competes to be that parameter's single
+                # boundary consumer -- and an earlier sizing op wins, starving
+                # the op that really takes the tensor. See
+                # ``_release_extent_only_params``.
+                details.append(f"{EXTENT_PARAMS_DETAIL}{','.join(extent_params)}")
             if extent_producers:
                 emit_predecessors.extend(extent_producers)
                 # These edges carry an EXTENT, not an operand: ``arange``'s
@@ -8742,6 +9262,53 @@ def _publish_submodule_return_producers(
         )
 
 
+def _release_extent_only_params(operations: list[ForwardOperation]) -> None:
+    """Stop a sizing read from claiming a parameter another op takes as data.
+
+    A parameter reaches its consumer through ONE boundary: the op that names it
+    as its boundary input. So when two ops in a body read the same parameter,
+    the first to name it wins -- and GLM's ``append_visible_tail`` sizes a
+    ``torch.full((batch_size,), ...)`` off ``token_visible`` two lines before
+    ``token_visible.long().sum(-1)`` actually reads it. The sum was left with no
+    operand at all and chained onto its neighbour instead, closing a cycle
+    between the ops either side of it.
+
+    An extent read is a real dependency and keeps its mark either way; it just
+    yields the boundary when some other op takes the same tensor as an operand.
+    A parameter that is ONLY ever sized -- the generator case this recovery
+    exists for -- has no such op, so it keeps the parameter and stays docked.
+    """
+    read_as_data: set[str] = set()
+    for operation in operations:
+        sized = _extent_param_names(operation.details)
+        read_as_data.update(set(operation.param_inputs) - sized)
+    for index, operation in enumerate(operations):
+        sized = _extent_param_names(operation.details)
+        if not sized:
+            continue
+        kept = tuple(
+            param
+            for param in operation.param_inputs
+            if param not in sized or param not in read_as_data
+        )
+        if kept != operation.param_inputs:
+            operations[index] = replace(operation, param_inputs=kept)
+
+
+def _extent_param_names(details: tuple[str, ...] | list[str]) -> set[str]:
+    """Parameters an operation's details mark as read for their extent only."""
+    names: set[str] = set()
+    for detail in details:
+        text = str(detail)
+        if text.startswith(EXTENT_PARAMS_DETAIL):
+            names.update(
+                part.strip()
+                for part in text[len(EXTENT_PARAMS_DETAIL) :].split(",")
+                if part.strip()
+            )
+    return names
+
+
 def _forward_operations_from_forward(
     func: ast.FunctionDef,
     *,
@@ -8872,6 +9439,7 @@ def _forward_operations_from_forward(
                 primary_return_slot = submodule_call_slot
     if primary_return_slot is None and return_order:
         primary_return_slot = return_order[-1]
+    _release_extent_only_params(extractor.operations)
     return ForwardAnalysis(
         operations=extractor.operations,
         var_producer=dict(extractor.var_producer),
@@ -10962,62 +11530,6 @@ def _max_real_return_arity(func: ast.FunctionDef) -> int | None:
     return best
 
 
-def _attention_wrapper_candidates(
-    kernel: str, config: dict[str, Any] | None
-) -> list[tuple[str, str]]:
-    """(module, function) sites the resolved kernel's wrapper could be defined in.
-
-    ``ALL_ATTENTION_FUNCTIONS`` is the runtime registry transformers dispatches a
-    named implementation (``"sdpa"``, ``"flash_attention_2"``, …) through, so its
-    entry's ``__module__``/``__name__`` point at the exact wrapper the model runs —
-    introspected, never hardcoded. ``"eager"`` is special-cased by transformers and
-    is not in the registry; it runs the analysed modeling file's own
-    ``eager_attention_forward``, so fall back to the base module by the same
-    ``<kernel>_attention_forward`` naming the library uses.
-    """
-    candidates: list[tuple[str, str]] = []
-    try:
-        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-
-        fn = ALL_ATTENTION_FUNCTIONS[kernel]
-    except Exception:
-        fn = None
-    if fn is not None:
-        module = getattr(fn, "__module__", None)
-        name = getattr(fn, "__name__", None)
-        if module and name:
-            candidates.append((module, name))
-    base = _analyzed_base_module(config)
-    if base:
-        for name in (kernel, f"{kernel}_attention_forward"):
-            candidates.append((base, name))
-    return candidates
-
-
-def _resolve_attention_wrapper_source(
-    kernel: str,
-    config: dict[str, Any] | None,
-    resolver: "_HostSourceResolver",
-) -> tuple[str, str, ast.FunctionDef] | None:
-    """Locate the resolved kernel's wrapper as ``(module, name, func)`` from source.
-
-    Walks the registry/config-derived candidate sites (never a per-kernel table)
-    and returns the first whose module loads and defines the named wrapper, so a
-    single resolution feeds both the return-arity read and the ``wrapper_expand:``
-    location the graph stamps for subtree expansion. ``None`` when no wrapper source
-    can be located.
-    """
-    for module, name in _attention_wrapper_candidates(kernel, config):
-        loaded = resolver._load(module)
-        if loaded is None:
-            continue
-        func = loaded[0].get(name)
-        if func is None:
-            continue
-        return module, name, func
-    return None
-
-
 def _attention_kernel_return_arity(
     kernel: str,
     config: dict[str, Any] | None,
@@ -11036,89 +11548,99 @@ def _attention_kernel_return_arity(
 
     Returns ``None`` when no wrapper source can be located (arity left unknown).
     """
-    resolved = _resolve_attention_wrapper_source(kernel, config, resolver)
+    resolved = _resolve_dispatched_implementation_source(kernel, config, resolver)
     if resolved is None:
         return None
     return _max_real_return_arity(resolved[2])
 
 
-def _resolve_dispatched_attention_kernel(
-    classes: dict[str, ClassStructure],
-    config: dict[str, Any] | None,
-) -> None:
-    """Name the kernel a dispatched attention call runs, from the checkpoint config.
+def _config_selected_entry_name(
+    binding: ast.expr | None, config: dict | None
+) -> str | None:
+    """The implementation a dispatch local is bound to, by whatever names it.
 
-    A forward that calls ``ALL_ATTENTION_FUNCTIONS[config._attn_implementation]``
-    through a local variable leaves the AST with nothing but the variable's name.
-    The checkpoint says which implementation that variable resolves to.
+    A dispatch call names only a local, so the call site names no callee -- that
+    is why it is recorded as :data:`DISPATCHED_KERNEL`. The local's BINDING does
+    name one, in one of the three ways models write it:
 
-    When the checkpoint leaves ``_attn_implementation`` unset we resolve it to
-    ``"sdpa"`` — the transformers default when nothing is configured — so a
-    dispatched-attention step still names the kernel that actually runs instead
-    of leaving the call site's opaque dispatch variable.
+    * ``x = TABLE[self.config._attn_implementation]`` -- the key is a config
+      value, so once the config is resolved (including whatever the model's own
+      constructor writes back onto it) the table is being asked for an entry the
+      source names. Generic over the table: nothing here knows or cares which
+      table it is, only that a name is subscripted by something config answers.
+    * ``x = TABLE.get_interface(key, eager_attention_forward)`` -- the fallback
+      argument is a function the model wrote down.
+    * ``x: Callable = eager_attention_forward`` -- bound to it outright.
 
-    Having named the kernel we introspect *its* wrapper's return arity (SDPA →
-    one tensor, eager → two) and (a) record it as an ``outputs: N`` detail so the
-    type-check can verify the rendered node never advertises more output ports
-    than the kernel really returns, and (b) trim the recorded unpack names to that
-    arity so an ``attn_output, attn_weights = attention_interface(...)`` whose
-    second slot the wrapper fills with ``None`` does not fan out a phantom second
-    output. General: arity comes from the resolved wrapper's own source.
+    ``None`` when none of them names anything, rather than a guess: naming the
+    wrong implementation would draw a kernel the model does not run.
     """
-    resolved = resolved_attn_implementation(config)
-    resolver = _HostSourceResolver()
-    wrapper = _resolve_attention_wrapper_source(resolved, config, resolver)
-    arity = _max_real_return_arity(wrapper[2]) if wrapper is not None else None
-    # ``wrapper_expand: module#symbol`` records where the resolved kernel's wrapper
-    # is defined so the block tree can expand its real body (``repeat_kv`` →
-    # ``scaled_dot_product_attention`` → ``transpose`` → ``contiguous``) instead of
-    # rendering a single opaque leaf, keeping the primitive itself atomic. The
-    # location comes from the same registry/config resolution as the arity — never a
-    # per-kernel table — and is inert for a kernel with no expandable wrapper source.
-    wrapper_expand = f"{wrapper[0]}#{wrapper[1]}" if wrapper is not None else None
-    # Which MODULE provides the implementation this kernel actually runs, read by
-    # following the wrapper's own body through the import graph (sdpa ->
-    # ``torch.nn.functional``; flash -> ``transformers`` -> ``flash_attn``; flex ->
-    # a local shim -> ``torch.nn.attention.flex_attention``). That is the
-    # structural form of "is this torch's own attention or an outside library's",
-    # a question about where the code lives rather than what it is called.
-    provider: str | None = None
-    if wrapper is not None:
-        from TraceLens.ModelUtils.attention_wrapper import _providing_module
-
-        provider = _providing_module(wrapper[0], wrapper[2])
-    for cls in classes.values():
-        details = cls.forward_step_details.get(SYNTHETIC_ATTENTION)
-        if not details:
-            continue
-        kernel = kernel_name_from_step_details(details)
-        if kernel != DISPATCHED_KERNEL:
-            continue
-        rewritten = [
-            f"kernel: {resolved}" if line.startswith("kernel:") else line
-            for line in details
-            if not line.startswith(("outputs:", "wrapper_expand:", "kernel_provider:"))
-        ]
-        if arity is not None:
-            rewritten.append(f"outputs: {arity}")
-        if wrapper_expand is not None:
-            rewritten.append(f"wrapper_expand: {wrapper_expand}")
-        if provider:
-            rewritten.append(f"kernel_provider: {provider}")
-        cls.forward_step_details[SYNTHETIC_ATTENTION] = rewritten
-        if arity is not None:
-            names = cls.forward_step_output_names.get(SYNTHETIC_ATTENTION)
-            if names is not None and len(names) > arity:
-                cls.forward_step_output_names[SYNTHETIC_ATTENTION] = names[:arity]
+    selected = _config_selected_table_entry(binding, config)
+    if selected:
+        return selected[1]
+    if isinstance(binding, ast.Name):
+        return binding.id
+    if isinstance(binding, ast.Call):
+        named = [arg.id for arg in binding.args if isinstance(arg, ast.Name)]
+        if len(named) == 1:
+            return named[0]
+    return None
 
 
-def _kernel_call_detail_lines(call: ast.Call) -> list[str]:
+def _config_selected_table_entry(
+    binding: ast.expr | None, config: dict | None
+) -> tuple[str, str] | None:
+    """``(table, key)`` for a lookup whose key the config answers."""
+    if not isinstance(binding, ast.Subscript):
+        return None
+    table = (_expr_name(binding.value) or "").rsplit(".", 1)[-1]
+    if not table:
+        return None
+    key = binding.slice
+    if isinstance(key, ast.Constant):
+        value = key.value
+    elif isinstance(key, ast.Attribute):
+        value = (config or {}).get(key.attr)
+    elif isinstance(key, ast.Name):
+        value = (config or {}).get(key.id)
+    else:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return table, value.strip()
+
+
+def _kernel_call_detail_lines(
+    call: ast.Call,
+    config: dict | None = None,
+    name_value_ast: dict[str, ast.expr] | None = None,
+) -> list[str]:
     """Capture kernel name and keyword arguments from a modeling forward call."""
+    selected: str | None = None
+    table: tuple[str, str] | None = None
     if _is_module_dispatch_call(call):
+        # ``kernel:`` stays the STRUCTURAL marker -- this call chose its callee
+        # at run time -- because that is what decides whether there is an
+        # implementation to expand. What the config selected is a separate fact,
+        # recorded alongside it, so naming the selection cannot silently turn
+        # the dispatch into an ordinary directly-called kernel.
+        local = call.func.id if isinstance(call.func, ast.Name) else None
+        binding = (name_value_ast or {}).get(local)
+        selected = _config_selected_entry_name(binding, config)
+        table = _config_selected_table_entry(binding, config)
         kernel_name = DISPATCHED_KERNEL
     else:
         kernel_name = _expr_name(call.func) or "kernel"
     lines = [f"kernel: {kernel_name.split('.')[-1]}"]
+    if selected:
+        lines.append(f"{KERNEL_SELECTED_DETAIL}{selected}")
+    if table is not None:
+        # The table is recorded so a later pass can look the entry up and follow
+        # it to the kernel it ends in; the key alone names a library binding.
+        lines.append(f"{KERNEL_TABLE_DETAIL}{table[0]}")
+        supplied = _call_argument_names(call)
+        if supplied:
+            lines.append(f"{KERNEL_ARGS_DETAIL}{','.join(supplied)}")
     for keyword in call.keywords:
         if keyword.arg in _KERNEL_DETAIL_SKIP_KWARGS or keyword.arg is None:
             continue
@@ -11140,6 +11662,8 @@ def _inject_kernel_merge(
     stmt_calls: list[str],
     attention_inputs: dict[str, list[str]],
     forward_step_details: dict[str, list[str]],
+    config: dict | None = None,
+    name_value_ast: dict[str, ast.expr] | None = None,
 ) -> None:
     if len(attention_inputs) >= 2:
         return
@@ -11164,7 +11688,9 @@ def _inject_kernel_merge(
         if SYNTHETIC_ATTENTION not in stmt_calls:
             stmt_calls.append(SYNTHETIC_ATTENTION)
         attention_inputs.update(producers)
-        forward_step_details[SYNTHETIC_ATTENTION] = _kernel_call_detail_lines(call)
+        forward_step_details[SYNTHETIC_ATTENTION] = _kernel_call_detail_lines(
+            call, config, name_value_ast
+        )
         return
 
 
@@ -11189,7 +11715,7 @@ def kernel_name_from_step_details(details: list[str]) -> str | None:
 # ``ALL_ATTENTION_FUNCTIONS`` and introspects the wrapper AST
 # (``_resolve_dispatched_attention_kernel``), arity comes from the wrapper's own
 # return statement (``_max_real_return_arity``), the label is the resolved callee
-# qualname (``attention_kernel_label``), and the color follows the provider module
+# qualname (``kernel_step_label``), and the color follows the provider module
 # resolved below. No attention marker list survives.
 #
 # Coloring was the last holdout, on the grounds that ``flex_attention`` reaches
@@ -11242,60 +11768,32 @@ def is_kernel_pipeline_step(
     return len(inputs) >= 2 or kwarg_tensors >= 2
 
 
-def is_attention_wrapper_expandable(details: list[str] | None) -> bool:
-    """True when a dispatched attention step records an expandable wrapper location.
+def kernel_step_label(details: list[str]) -> str | None:
+    """The name of the kernel a step runs -- its own, whatever it computes.
 
-    ``_resolve_dispatched_attention_kernel`` stamps ``wrapper_expand: module#symbol``
-    onto a step whose resolved kernel is a real Python wrapper (SDPA's
-    ``sdpa_attention_forward``) whose body can be introspected into its live ops
-    (``repeat_kv`` -> ``scaled_dot_product_attention`` -> ``transpose`` ->
-    ``contiguous``). A kernel with no such source (a fused library kernel, an
-    unresolved dispatch variable, or a non-attention output constructor) never
-    carries the marker, so the block tree keeps rendering it as an atomic leaf.
+    One rule for every kernel call, with nothing in it about what the kernel is
+    for. A call that names its callee outright is that name (``chunk_kda``). A
+    DISPATCH names only a local, so it carries the structural ``@dispatched``
+    marker -- and the entry the model's config selected out of the table is
+    recorded beside it, which is the name it really runs under.
+
+    ``None`` when the step runs no kernel this can name, leaving the caller to
+    its own generic default rather than inventing one here. Naming a kernel the
+    model does not run is worse than not naming it.
     """
-    if not details:
-        return False
-    return any(line.startswith("wrapper_expand:") for line in details)
-
-
-def attention_wrapper_expand_location(details: list[str]) -> tuple[str, str] | None:
-    """Split a ``wrapper_expand: module#symbol`` detail into ``(module, symbol)``."""
-    for line in details:
-        if line.startswith("wrapper_expand:"):
-            value = line.split(":", 1)[1].strip()
-            module, _, symbol = value.partition("#")
-            if module and symbol:
-                return module, symbol
-    return None
-
-
-def attention_wrapper_gqa_groups(details: list[str]) -> int | None:
-    """Read the ``gqa_groups: N`` repeat factor stamped onto a wrapper step."""
-    for line in details:
-        if line.startswith("gqa_groups:"):
-            try:
-                return int(line.split(":", 1)[1].strip())
-            except ValueError:
-                return None
-    return None
-
-
-def attention_kernel_label(details: list[str]) -> str:
-    """Label an attention leaf with its real resolved kernel (``sdpa``,
-    ``recurrent_kimi_delta_attention``, …), not the generic word "Attention".
-
-    ``_resolve_dispatched_attention_kernel`` rewrites the dispatch call
-    (``kernel: attention_interface``) into the concrete kernel it selected
-    (``kernel: sdpa``), so by the time we label we usually have the real name --
-    show it raw. Fall back to "Attention" only when no kernel resolves, or when
-    the recorded "kernel" is still an unresolved dispatch *variable* / synthetic
-    wrapper name rather than a kernel that actually runs.
-    """
+    selected = next(
+        (
+            str(detail)[len(KERNEL_SELECTED_DETAIL) :].strip()
+            for detail in details or ()
+            if str(detail).startswith(KERNEL_SELECTED_DETAIL)
+        ),
+        None,
+    )
+    if selected:
+        return selected
     kernel = kernel_name_from_step_details(details)
-    if not kernel:
-        return "Attention"
-    if kernel == DISPATCHED_KERNEL:
-        return "Attention"
+    if not kernel or kernel == DISPATCHED_KERNEL:
+        return None
     return kernel
 
 
@@ -11329,10 +11827,13 @@ def attention_kernel_details(
     details: list[str],
     attention_inputs: dict[str, list[str]] | None = None,
 ) -> list[str]:
-    kernel = kernel_name_from_step_details(details)
-
-    if kernel == DISPATCHED_KERNEL:
-        return []
+    # The kernel a step runs, by its own name -- including the entry a dispatch
+    # selected. Returning nothing at all for a dispatch (as this did while a
+    # dispatch could name nothing) dropped the operand DECLARATION with it, and
+    # the operands are not in doubt: they are the arguments the call passes. The
+    # mask then had no declared port, so it fell back to the frame's primary and
+    # the node reported ``hidden_states`` where the mask belongs.
+    kernel = kernel_step_label(details)
 
     if kernel:
         lines = [f"kernel: {kernel}"]
@@ -11355,8 +11856,13 @@ def attention_kernel_details(
     # The kernel could not be named, but this step IS an attention kernel -- that
     # much the extraction established. Say so, so the graph does not have to fall
     # back to recognising the class name, and so an unresolved attention is not
-    # quietly assumed to be a torch call.
-    return ["kernel: attention"]
+    # quietly assumed to be a torch call. Its operands are still not in doubt --
+    # they are the arguments the call passes -- so they are declared here too,
+    # or the ports they name fall back to the frame's primary.
+    lines = ["kernel: attention"]
+    if attention_inputs:
+        lines.append(f"inputs: {','.join(attention_inputs.keys())}")
+    return lines
 
 
 def _capture_attention_inputs(
@@ -12034,6 +12540,8 @@ def _walk_forward_stmt(
             stmt_calls,
             attention_inputs,
             forward_step_details,
+            config,
+            name_value_ast,
         )
         _capture_attention_inputs(
             ast.Assign(targets=node.targets, value=expanded_value),
@@ -12062,6 +12570,8 @@ def _walk_forward_stmt(
             stmt_calls,
             attention_inputs,
             forward_step_details,
+            config,
+            name_value_ast,
         )
         _capture_attention_inputs(
             node, var_chains, attention_inputs, forward_input_names, name_value_ast
@@ -12086,6 +12596,8 @@ def _walk_forward_stmt(
             stmt_calls,
             attention_inputs,
             forward_step_details,
+            config,
+            name_value_ast,
         )
         _capture_attention_inputs(
             node, var_chains, attention_inputs, forward_input_names, name_value_ast
@@ -12106,6 +12618,8 @@ def _walk_forward_stmt(
             stmt_calls,
             attention_inputs,
             forward_step_details,
+            config,
+            name_value_ast,
         )
         _capture_call_side_inputs(
             node, var_chains, forward_input_names, side_inputs, calls
@@ -12129,6 +12643,8 @@ def _walk_forward_stmt(
             stmt_calls,
             attention_inputs,
             forward_step_details,
+            config,
+            name_value_ast,
         )
         _capture_attention_inputs(
             node, var_chains, attention_inputs, forward_input_names, name_value_ast
@@ -12744,7 +13260,7 @@ def _build_components(decoder: ClassStructure) -> list[BlockComponent]:
                     attr_name=attr,
                     class_name="AttentionOp",
                     role="attention",
-                    label=attention_kernel_label(step_details),
+                    label=kernel_step_label(step_details) or "Kernel",
                     forward_order=index,
                     details=attention_kernel_details(
                         step_details, decoder.attention_inputs
@@ -13120,8 +13636,8 @@ def analyze_source(
     visitor.visit(tree)
     finalize_class_registry(visitor.classes)
     _annotate_host_free_functions(visitor.classes, tree, config, parsed_registry)
+    _name_dispatched_kernels(visitor.classes, tree, parsed_registry)
     _enrich_kernel_import_details(visitor.classes, external_imports)
-    _resolve_dispatched_attention_kernel(visitor.classes, config)
     _forward_kwargs_boundary_params(visitor.classes)
     _flag_unused_interface_inputs(visitor.classes, config)
     _expand_unresolved_activation_classes(

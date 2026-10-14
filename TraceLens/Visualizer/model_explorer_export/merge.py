@@ -8970,6 +8970,11 @@ def build_merged_model_graph(
         },
         **group_node_attributes,
     }
+    # Once more now the graph is final: later passes materialise boundary tiles
+    # of their own, and a boundary with a producer should never reach the reader
+    # without the shape of what crosses it. Idempotent -- a tile that already has
+    # one is left alone.
+    _carry_producer_shape_to_boundary_tiles(nodes)
     if shape_inferencer is not None:
         for namespace, boundary in group_boundary_shapes(nodes).items():
             graph_attributes.setdefault(namespace, {}).update(boundary)

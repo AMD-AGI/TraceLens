@@ -105,15 +105,36 @@ def test_public_name_role_and_kernel_helpers_cover_fallbacks():
     assert aa.attention_kernel_provider_module(["import: fla.ops.kda#chunk_kda"]) == (
         "fla.ops.kda"
     )
-    assert aa.attention_kernel_label(["kernel: custom_delta"]) == "custom_delta"
-    assert aa.attention_kernel_label([]) == "Attention"
-    # A concrete resolved kernel shows its real name (not the generic "Attention").
-    assert aa.attention_kernel_label(["kernel: sdpa"]) == "sdpa"
-    # A kernel the model DISPATCHED to, which the call site could not name,
-    # falls back to the generic label. Recognised by the marker the call
-    # records -- not by the local variable's name, which differs per model.
-    assert aa.attention_kernel_label([f"kernel: {aa.DISPATCHED_KERNEL}"]) == "Attention"
-    assert aa.attention_kernel_details([f"kernel: {aa.DISPATCHED_KERNEL}"]) == []
+    # One rule for every kernel call: it is named after the kernel it runs.
+    assert aa.kernel_step_label(["kernel: custom_delta"]) == "custom_delta"
+    assert aa.kernel_step_label(["kernel: sdpa"]) == "sdpa"
+    # A step that runs no kernel this can name says so, leaving the caller its
+    # own default rather than inventing a name here.
+    assert aa.kernel_step_label([]) is None
+    # A DISPATCH names only a local, so the marker alone resolves to nothing.
+    # Recognised by the marker the call records -- not by the local variable's
+    # name, which differs per model.
+    assert aa.kernel_step_label([f"kernel: {aa.DISPATCHED_KERNEL}"]) is None
+    # ... but the entry the model's config selected out of the table is the
+    # name it really runs under, and wins over the marker.
+    assert (
+        aa.kernel_step_label(
+            [
+                f"kernel: {aa.DISPATCHED_KERNEL}",
+                f"{aa.KERNEL_SELECTED_DETAIL}flash_attention_2",
+            ]
+        )
+        == "flash_attention_2"
+    )
+    # A dispatch whose selection nothing resolved cannot be NAMED, but it is
+    # still an attention kernel and its operands are still the ones the call
+    # passes -- both are said, so the ports do not fall back to the primary.
+    assert aa.attention_kernel_details([f"kernel: {aa.DISPATCHED_KERNEL}"]) == [
+        "kernel: attention"
+    ]
+    assert aa.attention_kernel_details(
+        [f"kernel: {aa.DISPATCHED_KERNEL}"], {"q": ["q_proj"], "mask": []}
+    ) == ["kernel: attention", "inputs: q,mask"]
     assert aa.attention_kernel_details(["kernel: custom"], {"q": ["q_proj"]}) == [
         "kernel: custom",
         "inputs: q",

@@ -247,6 +247,81 @@ def declared_config_defaults(
     return seen
 
 
+def declared_config_overrides(paths: Iterable[str | Path]) -> dict[str, Any]:
+    """Values the model's own code writes BACK onto the config it is given.
+
+    A checkpoint records what the model was ASKED for; the model's ``__init__``
+    can overrule it, and then the value in ``config.json`` is not the value the
+    forwards read. Kimi-K3 overwrites whatever attention implementation it is
+    handed -- logging that it is ignoring the request -- and leaves nothing in
+    the checkpoint to say so, so every branch keyed on that attribute resolved
+    against a value the model had already discarded.
+
+    This is the counterpart of :func:`declared_config_defaults`: that one fills
+    a key the checkpoint states NOWHERE, this one replaces a key the model
+    states for itself. So unlike a default, an override is MEANT to shadow --
+    including a value a sub-config stores, which is exactly what the model
+    overwrote.
+
+    Taken only when every assignment to the attribute agrees on one literal. A
+    model that sets an attribute conditionally has not forced it, and picking an
+    arm would resolve branches against a value the model may never hold. An
+    attribute written once in each arm of an if/else with the SAME literal is
+    forced, which is how this is usually spelled.
+    """
+    assigned: dict[str, set[Any]] = {}
+    for directory in {Path(path).parent for path in paths}:
+        try:
+            candidates = sorted(directory.glob("*.py"))
+        except OSError:
+            continue
+        for candidate in candidates:
+            try:
+                tree = ast.parse(candidate.read_text(encoding="utf-8"))
+            except (OSError, SyntaxError, ValueError):
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Assign):
+                    continue
+                try:
+                    value = ast.literal_eval(node.value)
+                except (ValueError, TypeError, SyntaxError):
+                    continue
+                if not isinstance(value, (bool, int, float, str)):
+                    continue
+                for target in node.targets:
+                    attribute = _config_attribute_target(target)
+                    if attribute is not None:
+                        assigned.setdefault(attribute, set()).add(value)
+    return {
+        attribute: next(iter(values))
+        for attribute, values in assigned.items()
+        if len(values) == 1
+    }
+
+
+def _config_attribute_target(target: ast.AST) -> str | None:
+    """The config attribute an assignment target writes, if it writes one.
+
+    Recognised structurally: an attribute of the name the model holds its config
+    under -- the ``config`` the constructor is handed, or ``self.config`` once it
+    has been kept. Anything else assigns to some other object.
+    """
+    if not isinstance(target, ast.Attribute):
+        return None
+    owner = target.value
+    if isinstance(owner, ast.Name) and owner.id == "config":
+        return target.attr
+    if (
+        isinstance(owner, ast.Attribute)
+        and owner.attr == "config"
+        and isinstance(owner.value, ast.Name)
+        and owner.value.id == "self"
+    ):
+        return target.attr
+    return None
+
+
 def apply_config_attribute_aliases(
     overlay: dict[str, Any], declared: dict[str, str] | None = None
 ) -> dict[str, Any]:
