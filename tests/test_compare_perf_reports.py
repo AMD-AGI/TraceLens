@@ -14,6 +14,7 @@ and validates the generated comparison against a reference directory of CSVs.
 import os
 import shutil
 
+import pandas as pd
 import pytest
 
 from TraceLens.Reporting.generate_perf_report_pytorch import (
@@ -21,6 +22,8 @@ from TraceLens.Reporting.generate_perf_report_pytorch import (
 )
 from TraceLens.Reporting.compare_perf_reports_pytorch import (
     generate_compare_perf_reports_pytorch,
+    process_summary_sheet,
+    SHEETS_COMPARE_CONFIG,
 )
 
 from conftest import (
@@ -309,3 +312,119 @@ def test_compare_report_matches_reference(generated_reports, update_references):
 
     errors = _validate_report_against_reference(compare_dir, E2E_REF_COMPARE_CSVS)
     assert not errors, "Compare report differences:\n" + "\n".join(errors)
+
+
+# ─── Unit tests for ops_summary cross-product fix (#1014) ────────────────────
+
+
+def _make_ops_summary_csv(path, rows, has_parent_module=True):
+    """Write a minimal ops_summary.csv for testing."""
+    os.makedirs(path, exist_ok=True)
+    cols = ["name"]
+    if has_parent_module:
+        cols.append("parent_module")
+    cols += [
+        "total_direct_kernel_time_sum",
+        "total_direct_kernel_time_ms",
+        "Count",
+        "Percentage (%)",
+        "Cumulative Percentage (%)",
+    ]
+    df = pd.DataFrame(rows, columns=cols)
+    df.to_csv(os.path.join(path, "ops_summary.csv"), index=False)
+
+
+def test_ops_summary_no_cross_product_with_parent_module(tmp_path):
+    """When parent_module is present, merge uses it as a key (no cross-product)."""
+    r1 = str(tmp_path / "report1")
+    r2 = str(tmp_path / "report2")
+    _make_ops_summary_csv(
+        r1,
+        [
+            ["aten::add", "ModuleA", 100, 0.1, 5, 50.0, 50.0],
+            ["aten::add", "ModuleB", 100, 0.1, 5, 50.0, 100.0],
+        ],
+    )
+    _make_ops_summary_csv(
+        r2,
+        [
+            ["aten::add", "ModuleA", 200, 0.2, 10, 50.0, 50.0],
+            ["aten::add", "ModuleB", 200, 0.2, 10, 50.0, 100.0],
+        ],
+    )
+    config = SHEETS_COMPARE_CONFIG["ops_summary"]
+    result = process_summary_sheet([r1, r2], "ops_summary", ["base", "test"], config)
+    assert len(result) == 2, (
+        f"Expected 2 rows (one per parent_module), got {len(result)} — "
+        f"cross-product detected"
+    )
+    assert "parent_module" in result.columns
+
+
+def test_ops_summary_merge_without_parent_module(tmp_path):
+    """Without parent_module, merge keys are just ['name'] (existing behavior)."""
+    r1 = str(tmp_path / "report1")
+    r2 = str(tmp_path / "report2")
+    _make_ops_summary_csv(
+        r1,
+        [
+            ["aten::add", 100, 0.1, 5, 50.0, 50.0],
+            ["aten::mul", 100, 0.1, 5, 50.0, 100.0],
+        ],
+        has_parent_module=False,
+    )
+    _make_ops_summary_csv(
+        r2,
+        [
+            ["aten::add", 200, 0.2, 10, 50.0, 50.0],
+            ["aten::mul", 200, 0.2, 10, 50.0, 100.0],
+        ],
+        has_parent_module=False,
+    )
+    config = SHEETS_COMPARE_CONFIG["ops_summary"]
+    result = process_summary_sheet([r1, r2], "ops_summary", ["base", "test"], config)
+    assert len(result) == 2
+    assert "parent_module" not in result.columns
+
+
+def test_ops_summary_mismatched_parent_module_raises(tmp_path):
+    """Mixing a grouped report with a non-grouped one raises ValueError."""
+    r1 = str(tmp_path / "report1")
+    r2 = str(tmp_path / "report2")
+    _make_ops_summary_csv(
+        r1,
+        [["aten::add", "ModuleA", 100, 0.1, 5, 50.0, 50.0]],
+        has_parent_module=True,
+    )
+    _make_ops_summary_csv(
+        r2,
+        [["aten::add", 200, 0.2, 10, 50.0, 50.0]],
+        has_parent_module=False,
+    )
+    config = SHEETS_COMPARE_CONFIG["ops_summary"]
+    with pytest.raises(ValueError, match="parent_module"):
+        process_summary_sheet([r1, r2], "ops_summary", ["base", "test"], config)
+
+
+def test_duplicate_merge_keys_raises(tmp_path):
+    """A grouping column not in the merge keys is caught by the duplicate guard."""
+    r1 = str(tmp_path / "report1")
+    r2 = str(tmp_path / "report2")
+    os.makedirs(r1, exist_ok=True)
+    os.makedirs(r2, exist_ok=True)
+    for path in [r1, r2]:
+        df = pd.DataFrame(
+            {
+                "name": ["aten::add", "aten::add"],
+                "unknown_grouping_col": ["GroupA", "GroupB"],
+                "total_direct_kernel_time_sum": [100, 100],
+                "total_direct_kernel_time_ms": [0.1, 0.1],
+                "Count": [5, 5],
+                "Percentage (%)": [50.0, 50.0],
+                "Cumulative Percentage (%)": [50.0, 100.0],
+            }
+        )
+        df.to_csv(os.path.join(path, "ops_summary.csv"), index=False)
+    config = SHEETS_COMPARE_CONFIG["ops_summary"]
+    with pytest.raises(ValueError, match="not unique"):
+        process_summary_sheet([r1, r2], "ops_summary", ["base", "test"], config)
