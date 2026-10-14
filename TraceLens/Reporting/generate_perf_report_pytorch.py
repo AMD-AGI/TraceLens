@@ -15,7 +15,7 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
-from TraceLens import NcclAnalyser, TraceDiff, TreePerfAnalyzer
+from TraceLens import NcclAnalyser, TraceDiff, TreePerfAnalyzer, trace_check
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
@@ -1043,8 +1043,6 @@ def generate_perf_report_pytorch(
     write_report_outputs(
         dict_name2df, xlsx_path=output_xlsx_path, csvs_dir=output_csvs_dir
     )
-
-    from TraceLens import trace_check
 
     trace_check.run_trace_checks(
         pre_report=False, tree=perf_analyzer.tree, dfs=dict_name2df, framework="pytorch"

@@ -17,6 +17,7 @@ logging.basicConfig(
     format="[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s",
 )
 
+from TraceLens import trace_check
 from TraceLens.TreePerf import JaxTreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
@@ -171,8 +172,6 @@ def generate_perf_report_jax(
         xlsx_path=output_xlsx_path,
         csvs_dir=output_csvs_dir,
     )
-
-    from TraceLens import trace_check
 
     trace_check.run_trace_checks(
         pre_report=False, tree=perf_analyzer.tree, dfs=dict_name2df, framework="jax"

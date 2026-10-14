@@ -70,6 +70,11 @@ def suppress_native_hlo_logs():
         tmp.close()
 
 
+def parse_bool_string(value) -> bool:
+    """Parse a string value as a boolean."""
+    return str(value if value is not None else "").lower() in ("1", "true")
+
+
 def merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
     """Merge a list of ``(start, end)`` intervals into a union of non-overlapping ones.
 
@@ -465,7 +470,7 @@ class DataLoader:
         metadata = {k: v for k, v in data.items() if k != "traceEvents"}
         events = data.get("traceEvents", [])
 
-        if os.environ.get("TRACELENS_SKIP_QUALITY_CHECK") != "1":
+        if not parse_bool_string(os.environ.get("TRACELENS_SKIP_QUALITY_CHECK")):
             from . import trace_check
 
             trace_check.run_trace_checks(

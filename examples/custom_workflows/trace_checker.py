@@ -27,7 +27,12 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
-from .util import GPU_KERNEL_CATEGORIES, GRAPH_LAUNCH_NAMES, merge_intervals
+from .util import (
+    GPU_KERNEL_CATEGORIES,
+    GRAPH_LAUNCH_NAMES,
+    merge_intervals,
+    parse_bool_string,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -636,7 +641,7 @@ def run_trace_checks(
     by ``framework`` (None runs only general checks).
     """
     findings: List[TraceCheck] = []
-    detailed = os.environ.get("TRACELENS_DETAILED_QUALITY_CHECKS") == "1"
+    detailed = parse_bool_string(os.environ.get("TRACELENS_DETAILED_QUALITY_CHECKS"))
     thr = QualityThresholds()
     sheets = _SHEETS.get(framework or "pytorch", _SHEETS["pytorch"])
     ctx = {
