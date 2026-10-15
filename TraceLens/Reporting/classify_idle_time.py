@@ -7,12 +7,13 @@
 """
 Standalone CLI for GPU idle time classification of PyTorch profiler traces.
 
-Classifies each GPU idle interval (noise/macro, drain_type, cpu_during_gap),
-writes an Excel report, and emits an augmented trace with annotation tracks
-for Perfetto.
+Splits each GPU idle gap into measured parts, labels it by the largest part,
+writes an Excel report (idle_overview, idle_groups, idle_intervals), and emits
+an augmented trace with annotation tracks for Perfetto.
 
 Usage:
-    python -m TraceLens.Reporting.classify_idle_time <trace.json[.gz]> [--micro-thresh 5.0] [-o output.json.gz]
+    python -m TraceLens.Reporting.classify_idle_time <trace.json[.gz]> [--micro-thresh 5.0]
+        [--launch-latency 15.0] [--include-call-stack] [-o output.json.gz]
 
 To add the same sheets to the main perf report, use
 ``TraceLens_generate_perf_report_pytorch --enable_idle_analysis`` instead.
@@ -21,22 +22,23 @@ To add the same sheets to the main perf report, use
 import argparse
 import gzip
 import json
-from collections import Counter
 from pathlib import Path
 
+import pandas as pd
+
 from TraceLens import DataLoader, TreePerfAnalyzer
-from TraceLens.IdleTimeAnalyser.classify import (
-    assign_idle_ids,
-    classify_idle_intervals,
-    find_gpu_pid,
-    make_annotation_events,
-)
+from TraceLens.IdleTimeAnalyser import IdleThresholds, IdleTimeAnalyser
+from TraceLens.IdleTimeAnalyser.classify import find_gpu_pid
 from TraceLens.IdleTimeAnalyser.report import build_idle_dataframes, write_idle_excel
 
 
-def generate_excel_report(classified, output_path):
-    """Write idle_overview, idle_summary, and idle_intervals sheets to Excel."""
-    write_idle_excel(build_idle_dataframes(classified), output_path)
+def generate_excel_report(
+    classified, output_path, gpu_busy_time_us=None, thresholds=None
+):
+    """Write idle_overview, idle_groups, and idle_intervals sheets to Excel."""
+    write_idle_excel(
+        build_idle_dataframes(classified, gpu_busy_time_us, thresholds), output_path
+    )
 
 
 def _default_output_path(trace_path):
@@ -49,57 +51,29 @@ def _default_output_path(trace_path):
     return str(p.parent / f"{stem}_idle_classified.json.gz")
 
 
-def _print_summary(classified, micro_thresh):
-    noise_count = sum(1 for r in classified if r["label_noise"])
-    macro = [r for r in classified if not r["label_noise"]]
-    macro_total_us = sum(r["duration"] for r in macro)
-
-    print(f"\n{'=' * 60}")
-    print("Idle Interval Summary")
-    print(f"{'=' * 60}")
-    print(f"Total intervals:    {len(classified)}")
-    print(f"  Noise (<{micro_thresh}µs):  {noise_count}")
-    print(
-        f"  Macro (≥{micro_thresh}µs):  {len(macro)}  ({macro_total_us / 1e3:.2f} ms total)"
-    )
-
-    if not macro:
-        return
-
-    sync_drain = [r for r in macro if r["drain_type"] == "sync_drain"]
-    starved = [r for r in macro if r["drain_type"] == "starved"]
-    print("\nDrain Type:")
-    print(
-        f"  sync_drain:       {len(sync_drain)}  ({sum(r['duration'] for r in sync_drain) / 1e3:.2f} ms)"
-    )
-    print(
-        f"  starved:          {len(starved)}  ({sum(r['duration'] for r in starved) / 1e3:.2f} ms)"
-    )
-    for st, cnt in Counter(r["sync_type"] for r in sync_drain).most_common():
-        st_time = sum(r["duration"] for r in sync_drain if r["sync_type"] == st)
-        print(f"    {st}: {cnt} intervals, {st_time / 1e3:.2f} ms")
-
-    print("\nCPU During Gap:")
-    for cpu_gap in [
-        "LAUNCH_ANOMALY",
-        "LAUNCH_OVERHEAD_ONLY",
-        "RUNTIME_DOMINATED",
-        "CPU_DOMINATED",
-        "CPU_UNTRACED",
-    ]:
-        items = [r for r in macro if r["cpu_during_gap"] == cpu_gap]
-        if not items:
+def _print_summary(df_overview):
+    print(f"\n{'=' * 72}")
+    print("GPU Idle Overview")
+    print(f"{'=' * 72}")
+    indent = {"total": "", "label": "  ", "sub_label": "    ", "drain": "  "}
+    prev_section = "total"
+    for r in df_overview.to_dict("records"):
+        section = r["section"]
+        if section == "threshold":
             continue
-        total_t = sum(r["duration"] for r in items)
-        print(f"  {cpu_gap}: {len(items)} intervals, {total_t / 1e3:.2f} ms")
-        if cpu_gap == "RUNTIME_DOMINATED":
-            for detail, cnt in Counter(
-                r["cpu_during_gap_detail"] for r in items
-            ).most_common():
-                dt = sum(
-                    r["duration"] for r in items if r["cpu_during_gap_detail"] == detail
-                )
-                print(f"    {detail}: {cnt} intervals, {dt / 1e3:.2f} ms")
+        if r["row"] == "gpu_utilization_pct":
+            print(f"GPU utilization: {r['pct_of_trace']:.1f}%")
+            continue
+        if (section == "label" and prev_section == "total") or (
+            section == "drain" and prev_section != "drain"
+        ):
+            print()
+        prev_section = section
+        gaps = "" if pd.isna(r["gaps"]) else f"{int(r['gaps'])} gaps"
+        print(
+            f"{indent[section]}{r['row']:<40} {gaps:>12} "
+            f"{r['total_ms']:>10.2f} ms {r['pct_of_idle']:>6.1f}%"
+        )
 
 
 def main(argv=None):
@@ -110,8 +84,23 @@ def main(argv=None):
     parser.add_argument(
         "--micro-thresh",
         type=float,
-        default=5.0,
-        help="Micro idle threshold in µs (default: 5.0)",
+        default=IdleThresholds.noise_us,
+        help="Gaps shorter than this (us) count as noise (default: 5.0)",
+    )
+    parser.add_argument(
+        "--launch-latency",
+        type=float,
+        default=IdleThresholds.launch_latency_us,
+        help="Normal launch return -> GPU op start in us (default: 15.0)",
+    )
+    parser.add_argument(
+        "--include-call-stack",
+        "--include_call_stack",
+        dest="include_call_stack",
+        action="store_true",
+        help="Add sync_entry_point, sync_call_stack_full and covering_call_stack_full "
+        "to idle_intervals (builds the tree with Python functions, like the perf "
+        "report flag)",
     )
     parser.add_argument(
         "-o",
@@ -125,25 +114,32 @@ def main(argv=None):
     output_path = args.output or _default_output_path(trace_path)
 
     print(f"Loading trace: {trace_path}")
-    tree = TreePerfAnalyzer.from_file(trace_path).tree
+    tree = TreePerfAnalyzer.from_file(
+        trace_path, add_python_func=args.include_call_stack
+    ).tree
 
     print("Classifying idle intervals...")
-    classified = classify_idle_intervals(tree, micro_thresh_us=args.micro_thresh)
-    _print_summary(classified, args.micro_thresh)
-
-    assign_idle_ids(classified)
+    thresholds = IdleThresholds(
+        noise_us=args.micro_thresh, launch_latency_us=args.launch_latency
+    )
+    analyser = IdleTimeAnalyser(
+        tree, thresholds, include_call_stack=args.include_call_stack
+    )
+    dfs = analyser.get_dataframes()
+    _print_summary(dfs["idle_overview"])
 
     excel_path = output_path.replace(".json.gz", ".xlsx").replace(".json", ".xlsx")
     if excel_path == output_path:
         excel_path = output_path + ".xlsx"
-    generate_excel_report(classified, excel_path)
+    write_idle_excel(dfs, excel_path)
+    print(f"\nWrote Excel report: {excel_path}")
 
-    print("\nLoading raw trace for augmentation...")
+    print("Loading raw trace for augmentation...")
     raw_data = DataLoader.load_data(trace_path)
     gpu_pid = find_gpu_pid(raw_data["traceEvents"])
     print(f"GPU pid: {gpu_pid}")
 
-    annotation_events = make_annotation_events(classified, gpu_pid)
+    annotation_events = analyser.get_augmented_events(gpu_pid)
     raw_data["traceEvents"].extend(annotation_events)
 
     print(f"Added {len(annotation_events)} annotation events to trace.")

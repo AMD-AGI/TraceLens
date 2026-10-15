@@ -110,7 +110,7 @@ The generated workbook contains the following sheets:
 | Roofline sheets | One per operation category (`GEMM`, `CONV_fwd`, `SDPA_fwd`, and so on) with the intensity/roofline metrics described below. |
 | `kernel_summary` | Per-kernel summary — added with `--enable_kernel_summary`. |
 | `short_kernels_summary`, `short_kernel_histogram` | Short-kernel table and duration histogram — added with `--short_kernel_study`. |
-| `idle_overview`, `idle_summary`, `idle_intervals` | GPU idle gaps classified by root cause — added with `--enable_idle_analysis`. See [Analyze GPU idle time](./analyze-idle-time.md). |
+| `idle_overview`, `idle_groups`, `idle_intervals` | GPU idle gaps broken down by cause — added with `--enable_idle_analysis`. See [Analyze GPU idle time](./analyze-idle-time.md). |
 
 For the GPU timeline, a low computation percentage with significant idle time
 indicates poor compute and communication overlap; use `--micro_idle_thresh_us` to
@@ -238,8 +238,9 @@ The following table describes all optional arguments.
 | `--include_overlap_info` | `False` | Add kernel-overlap sheets. |
 | `--include_unlinked_kernels` | `False` | Include kernels not linked to a host call stack in the GPU timeline. |
 | `--micro_idle_thresh_us X` | `None` | Split idle gaps shorter than this into a separate micro-idle category. Also the noise threshold for `--enable_idle_analysis` (`5` µs when unset). |
-| `--enable_idle_analysis` | `False` | Add the `idle_overview`, `idle_summary`, and `idle_intervals` sheets (see [Analyze GPU idle time](./analyze-idle-time.md)). |
+| `--enable_idle_analysis` | `False` | Add the `idle_overview`, `idle_groups`, and `idle_intervals` sheets (see [Analyze GPU idle time](./analyze-idle-time.md)). With `--include_call_stack`, `idle_intervals` also shows the code that issued each sync call, and `idle_overview` splits the sync rows by that code. |
 | `--enable_augmented_trace` | `False` | Write `<trace>_idle_augmented.json.gz` with idle annotation tracks for Perfetto. Requires `--enable_idle_analysis`. |
+| `--idle_launch_latency_us X` | `None` | Launch latency threshold for `--enable_idle_analysis` (`15` µs when unset). An op launched more than this before a gap counts as queued. |
 | `--disable_coll_analysis` | (on) | Disable the `coll_analysis` sheet (collective analysis is on by default). |
 | `--topk_ops N` | `None` | Cap rows in the unique-args (`ops_unique_args`) table. |
 | `--topk_short_kernels N` | `None` | Cap rows in the short-kernel table. |
