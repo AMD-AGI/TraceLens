@@ -338,12 +338,15 @@ def test_symbolic_reshape_target_never_warns_on_unchanged_shape():
 
 def test_reshape_with_negative_one_placeholder_never_warns():
     # A ``-1`` axis is an unfolded placeholder, not a concrete dim; even with an
-    # otherwise-concrete input the target is non-concrete and must NOT fire.
+    # otherwise-concrete input the target is non-concrete and the element-count
+    # comparison must NOT fire. The RANK is still a fact -- ``reshape(-1, 1,
+    # 288)`` yields three axes whatever ``-1`` becomes -- so the output carries
+    # the three it declared; what is unknown is their sizes, not how many.
     node = _reshape_node(
         "n:neg_one_reshape",
         "-1, 1, 288",
         ["8", "1"],
-        "[8, 1] float32",
+        "[8, 1, 288] float32",
     )
     assert type_check_graph_nodes([node]) == []
 

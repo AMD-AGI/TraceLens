@@ -148,6 +148,10 @@ def _declared_reshape_dims(node: dict[str, Any]) -> list[str] | None:
     for line in _details_lines(node):
         if line.startswith(_RESHAPE_SHAPE_DETAIL_PREFIX):
             body = line[len(_RESHAPE_SHAPE_DETAIL_PREFIX) :].strip()
+            # Details are rendered ``a; b; c`` onto ONE line, so the target
+            # shape ends at the next detail -- without this the tokens of a
+            # following ``shape_snapshots:`` were read as further target axes.
+            body = body.split(";", 1)[0].strip()
             return [tok.strip() for tok in body.split(",")]
     return None
 
@@ -568,8 +572,127 @@ def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
     warnings.extend(_output_arity_warnings(nodes))
     warnings.extend(_kernel_operand_arity_warnings(nodes))
     warnings.extend(_unresolved_shape_warnings(nodes))
+    warnings.extend(_declared_axis_warnings(nodes))
+    warnings.extend(_declared_rank_warnings(nodes))
     for line in warnings:
         _log.warning("graph type-check: %s", line)
+    return warnings
+
+
+def _declared_axis_warnings(nodes: list[dict[str, Any]]) -> list[str]:
+    """An op that declares WHICH axis it changes must have that axis.
+
+    ``select_dim``/``resize_dim`` name an axis by index, and the extractor reads
+    that index off the model's own subscript. So the index is a fact about the
+    tensor the model slices -- and if the operand the graph hands the op has
+    fewer axes than that, the two disagree and one of them is wrong. Either the
+    operand was mis-wired, or whatever produced it reported the wrong rank.
+
+    This is the check that was missing when Kimi's post-attention
+    ``attn_output[:, :, :, : self.v_head_dim]`` -- ``resize_dim: 3`` -- was
+    handed a RANK-3 operand, because the kernel above it had reported the
+    enclosing module's output instead of its own. Nothing objected: the shape
+    rules wrote the declared width at whatever axis they could reach, producing
+    ``[128, S, 7168]``, and every existing check asked only whether the dims
+    RESOLVED. They did. They were just not this tensor's.
+
+    Reads the declaration the extractor already stamps -- no op name list.
+    """
+    warnings: list[str] = []
+    for node in nodes:
+        shapes = _load_list(node, "input_shapes")
+        if not isinstance(shapes, list) or not shapes:
+            continue
+        operand = next((s for s in shapes if isinstance(s, list) and s), None)
+        if operand is None:
+            continue
+        rank = len(operand)
+        for line in _detail_tokens(node):
+            text = str(line).strip()
+            for prefix in ("select_dim:", "resize_dim:"):
+                if not text.startswith(prefix):
+                    continue
+                body = text[len(prefix) :].strip().split("=", 1)[0].strip()
+                try:
+                    axis = int(body)
+                except ValueError:
+                    continue
+                if axis < 0:
+                    axis += rank
+                if 0 <= axis < rank:
+                    continue
+                warnings.append(
+                    f"{node.get('id')} [{_op_type(node)}]: declares "
+                    f"{prefix.rstrip(':')} {body} but its operand has rank "
+                    f"{rank} ({operand}); the axis it narrows does not exist, "
+                    "so the operand it was given is not the tensor the model "
+                    "slices -- fix the producer's shape, not this op."
+                )
+    return warnings
+
+
+def _spans_several_axes(token: str) -> bool:
+    """Whether one reshape argument can stand for more than one axis.
+
+    ``*x.shape[:2]`` unpacks two; ``x.shape[0]`` is a single extent. Only the
+    former makes the argument count differ from the rank.
+    """
+    text = token.strip()
+    if text.startswith("*"):
+        return True
+    start = text.find("[")
+    return start != -1 and ":" in text[start:]
+
+
+def _declared_rank_warnings(nodes: list[dict[str, Any]]) -> list[str]:
+    """A reshape that declares N target axes must produce N axes.
+
+    The ``shape:`` detail is the model's own argument list, so its LENGTH is a
+    fact even when the individual dims are not: ``chunk_kv.view(batch,
+    n_windows, ratio, -1)`` names four axes whatever ``n_windows`` turns out to
+    be. Rank is therefore checkable where the dims are not, and checking it is
+    what separates "this axis is still symbolic" from "this is not the same
+    tensor".
+
+    DeepSeek's compressor view declared four and produced ``[B*S, 1024]`` --
+    two. Every dim in that result is fully resolved, so the unresolved-shape
+    check was satisfied; the conservation check folds dims and declined on the
+    symbols; and the rank simply went unexamined. The rank-4 slices downstream
+    then addressed an axis the operand did not have.
+
+    Only the length is asserted, never the dims -- a symbolic axis is normal and
+    is not this check's business.
+    """
+    warnings: list[str] = []
+    for node in nodes:
+        if _is_constant_node(node):
+            continue
+        if _op_type(node).strip().lower() not in {"view", "reshape"}:
+            # ``expand`` shares the ``shape:`` detail but not the rule: a ``-1``
+            # there KEEPS an existing axis rather than standing for one, and its
+            # own resolver deliberately passes the source through when the args
+            # cannot be aligned axis-for-axis. Rank is the reshape's contract.
+            continue
+        declared = _declared_reshape_dims(node)
+        if not declared or len(declared) < 2:
+            # A single token is ``x.reshape(x.shape)`` / ``view(shape_tuple)``:
+            # one ARGUMENT standing for a whole shape, which says nothing about
+            # how many axes come out.
+            continue
+        if any(not tok or _spans_several_axes(tok) for tok in declared):
+            # A token that can stand for SEVERAL axes (``*x.shape[:2]``) makes
+            # the argument count smaller than the rank. A scalar shape READ
+            # (``x.shape[0]``) is one axis like any other and is fine.
+            continue
+        produced = _output_shape_dims(node)
+        if produced is None or len(produced) == len(declared):
+            continue
+        warnings.append(
+            f"{node.get('id')} [{_op_type(node)}]: declares {len(declared)} "
+            f"target axes ({', '.join(declared)}) but its output has "
+            f"{len(produced)} ({produced}); a reshape produces exactly the axes "
+            "it is given, so this is not the tensor the model reshaped."
+        )
     return warnings
 
 

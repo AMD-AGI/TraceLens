@@ -14,8 +14,11 @@ MiniMax builds its sparse attention mask with
 and ``build_block_mask`` is inferred as its own section, with no caller context.
 Its ``@input`` therefore fell back to the activation default, so the body read
 ``block_indices`` as the decoder activation ``[B, S, 6144] bfloat16`` where the
-tensor is ``[B, index_n_heads, 4] int64`` -- and the comparison, masked fill and
-floor-divide that size the mask all inherited it.
+tensor is the indexer's ``topk_indices``, ``[B, index_n_heads, S, 4] int64`` --
+and the comparison, masked fill and floor-divide that size the mask all
+inherited it. ``build_block_mask`` opens by unpacking exactly those four axes
+(``batch, n_idx_heads, q_len, _ = block_indices.shape``), which is the model's
+own statement of the rank.
 
 The tensor it is handed is the output of the step that produced it, named by the
 expansion's first recorded predecessor, and sibling sections are annotated in
@@ -62,7 +65,7 @@ class TestTheExpansionReadsWhatItWasHanded:
         tiles = _labelled(mask_builder, "block_indices")
         assert tiles, "no block_indices boundary"
         for tile in tiles:
-            assert _attr(tile, "output_shape") == "[B, index_n_heads, 4] int64", (
+            assert _attr(tile, "output_shape") == "[B, index_n_heads, S, 4] int64", (
                 tile["id"],
                 _attr(tile, "output_shape"),
             )

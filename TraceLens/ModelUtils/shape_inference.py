@@ -2146,9 +2146,35 @@ class ShapeInferencer:
 
     @staticmethod
     def _frame_prefix(node_id: str) -> str:
-        """The frame a node belongs to: its id without the op segment."""
-        head, sep, _ = str(node_id).rpartition(":@op_")
-        return head if sep else ""
+        """The frame a node belongs to: its id without the op segment.
+
+        A frame's own TERMINAL node carries the frame's name rather than an
+        ``@op_`` segment (``...:@fn_l350_repeat_kv:2`` is what ``repeat_kv``
+        returns), so splitting on the op segment leaves it with no frame at all
+        -- and it could not read the entry shape its own inner ops recorded.
+        Recognised structurally by the frame marker, so an ordinary module step
+        (``seq:3:q_proj:q_proj:0``) is unaffected.
+
+        A step that is a bare operation names ITSELF on both sides
+        (``seq:25:@op_l580_c17_view:@op_l580_c17_view:0``), so cutting at the op
+        segment leaves the op's own id standing where a frame's name would be.
+        An op is not a frame, and treating one as a frame published that op's
+        own input under the enclosing class's forward-parameter name -- which is
+        how MiniMax's indexer came to believe ``hidden_states`` was the attention
+        scores it was reshaping.
+        """
+        text = str(node_id)
+        head, sep, _ = text.rpartition(":@op_")
+        if sep:
+            return "" if head.rpartition(":")[2].startswith("@op_") else head
+        stem, colon, tail = text.rpartition(":")
+        if (
+            colon
+            and tail.isdigit()
+            and stem.rpartition(":")[2].startswith(("@fn_", "@positional_"))
+        ):
+            return stem + ":"
+        return ""
 
     def _record_frame_entry(self, node: Any, inputs: list[TensorSpec]) -> None:
         """Remember what a frame was handed, the first time it reads anything.
@@ -2844,6 +2870,17 @@ class ShapeInferencer:
                         changed = True
             if changed:
                 return TensorSpec(shape=tuple(axes), dtype=widest.dtype)
+        # An elementwise op BROADCASTS: the result has the rank of its widest
+        # operand, whichever position that operand is in. Keeping ``inputs[0]``
+        # regardless made a gated norm's ``self.weight * hidden_states`` report
+        # the WEIGHT -- [4096] against [B, S, 64, 128] -- and everything after
+        # it inherited rank 1, including the reshape that then declared three
+        # axes against a rank-1 operand.
+        #
+        # Only a strictly wider operand wins. At equal rank the first operand
+        # still answers, which is the chain order the rest of this relies on.
+        if _broadcast_rank(widest)[0] > _broadcast_rank(inputs[0])[0]:
+            return widest
         return inputs[0]
 
     def _spec_through_port(
@@ -3514,17 +3551,25 @@ class ShapeInferencer:
             entry = self._frame_entry_shape(node, owner)
             if entry is not None:
                 frame_shapes[entry[0]] = entry[1]
+            snapshots = _shape_snapshot_tokens(details)
             resolved = _resolve_view_shape(
                 shape_detail,
                 source,
                 view_dims,
                 frame_shapes,
-                _shape_snapshot_tokens(details),
+                snapshots,
                 self._boundary_shapes,
             )
             if resolved is not None:
                 return TensorSpec(shape=resolved, dtype=source.dtype)
-            if "-1" in shape_detail:
+            # ``x.view(-1, D)`` is the flatten this answers: TWO axes, the
+            # leading ones merged. A ``-1`` among MORE axes is one unknown among
+            # several, and answering that with a rank-2 flatten threw away the
+            # axes the call states -- DeepSeek's ``view(batch, n_windows, ratio,
+            # -1)`` came out [B*S, 1024], and the rank-4 slices below it then
+            # had no axis 3. Wider targets fall through to the branch that keeps
+            # the stated rank.
+            if "-1" in shape_detail and len(shape_detail.split(",")) == 2:
                 flattened = self._active_flattened_seq()
                 return TensorSpec(
                     shape=(flattened, source.shape[-1]), dtype=source.dtype
@@ -3540,7 +3585,30 @@ class ShapeInferencer:
             tokens = [token.strip() for token in shape_detail.split(",")]
             if tokens and all(tokens) and not any("*" in token for token in tokens):
                 dims: list[Any] = []
-                for token in tokens:
+                negative_at: int | None = None
+                for position, token in enumerate(tokens):
+                    if token == "-1":
+                        # The axis left for whatever remains. A target with MORE
+                        # axes than the source splits one of them, so a trailing
+                        # ``-1`` is the feature width passing through untouched
+                        # (``view(batch, n_windows, ratio, -1)`` chops the
+                        # sequence and keeps the channels). A target with FEWER
+                        # axes merges instead, and then the residual is a product
+                        # this branch cannot form -- left to the caller.
+                        if (
+                            position == len(tokens) - 1
+                            and source.shape
+                            and len(tokens) > len(source.shape)
+                        ):
+                            dims.append(source.shape[-1])
+                            continue
+                        # Otherwise it is the residual: whatever the other axes
+                        # leave over, which is what ``-1`` means. Settled once
+                        # they are all known (``reshape(-1, n_groups,
+                        # hidden_dim)`` merges the leading axes into it).
+                        negative_at = position
+                        dims.append(token)
+                        continue
                     number = _as_int(token)
                     if number is not None:
                         dims.append(number)
@@ -3552,14 +3620,62 @@ class ShapeInferencer:
                     if resolved_dim is not None:
                         dims.append(resolved_dim)
                         continue
+                    # ``hidden_states.shape[0]`` names an axis of a tensor the
+                    # caller NAMED, and when that tensor's shape is known the
+                    # axis is too. Read only from the named shapes -- never from
+                    # the tensor being reshaped, whose axes mean something else
+                    # once it has been expanded (measured: reading the source
+                    # there gave ``repeat_kv`` the expanded axis and sized two
+                    # dims wrong).
+                    axis_of = _snapshot_axis(token, snapshots, frame_shapes)
+                    if axis_of is not None:
+                        dims.append(axis_of)
+                        continue
                     # A plain name stands for an extent this scope cannot put a
                     # number to but can still carry (``number_of_pools``). Anything
-                    # that is still an EXPRESSION (``hidden_states.shape[0]``) is
-                    # not a dimension name, and printing it as one states a shape
-                    # nobody can read -- keep the old reading there.
-                    if not _PLAIN_DIM_NAME.fullmatch(token):
+                    # that is still an EXPRESSION is not a dimension name, and
+                    # printing it as one states a shape nobody can read.
+                    # ``self.n_groups`` is this module's own attribute. The
+                    # module does not state a number for it, but it is still one
+                    # axis with a readable name -- carrying it keeps the rank the
+                    # call states, where bailing dropped two axes.
+                    bare = token.removeprefix("self.")
+                    if not _PLAIN_DIM_NAME.fullmatch(bare):
+                        # An axis this scope cannot put a number to is still an
+                        # axis, and the arithmetic the model wrote IS what it
+                        # measures (``h // merge_size``). Carrying it keeps the
+                        # rank the call states; dropping the whole reading kept
+                        # the operand's rank instead, which is what made the ops
+                        # below address axes that did not exist.
+                        #
+                        # Not a shape READ, though: an unresolved ``x.shape[0]``
+                        # printed as a dim is the shape of something else quoted
+                        # as this one's -- the very thing every reader of a shape
+                        # is entitled to assume it is not.
+                        if ".shape[" in bare:
+                            return source
+                        bare = " ".join(token.split())
+                    dims.append(bare)
+                if negative_at is not None:
+                    residual = _merge_flatten_dim(
+                        source.shape,
+                        [dim for i, dim in enumerate(dims) if i != negative_at],
+                    )
+                    if residual is None and negative_at == 0:
+                        # Cancellation needs the trailing axes to be known, and
+                        # they are not when the model names them by a local
+                        # (``reshape(-1, self.n_groups, hidden_dim)``). But a
+                        # LEADING ``-1`` merges exactly the axes the trailing
+                        # ones do not cover, so the residual is the product of
+                        # the source axes above them.
+                        kept = len(tokens) - 1
+                        if source.shape and kept < len(source.shape):
+                            residual = _product_dim(
+                                source.shape[: len(source.shape) - kept]
+                            )
+                    if residual is None:
                         return source
-                    dims.append(token)
+                    dims[negative_at] = residual
                 return TensorSpec(shape=tuple(dims), dtype=source.dtype)
             return source
 
@@ -4431,6 +4547,21 @@ class ShapeInferencer:
             introspected = self._introspect_forward_shape(node, inputs, root=root)
             if introspected is not None:
                 return introspected
+            # A compiled kernel has no body to read, so its own shape cannot be
+            # derived -- but it is still a function of the tensors it was handed,
+            # and the generic activation shape is a function of the MODEL. Giving
+            # it the latter said a kernel fed [B, 96, S, 192] returns
+            # [B, S, hidden]: the width of the projection that happens to follow
+            # it. The op reading that result then applied its own declared axis
+            # to a rank it does not have.
+            #
+            # Passing the primary operand through says far less, and nothing
+            # untrue: whatever the kernel does to its operands, it starts from
+            # them. The ops after it narrow from there, as the model's own code
+            # does. Only a kernel handed no tensor at all has nothing to say.
+            for operand in inputs:
+                if operand.shape:
+                    return operand
             return self._activation_spec(dtype)
 
         # A module that is not a Linear, a Conv or an Embedding, but owns a
@@ -6172,6 +6303,34 @@ def _shape_snapshot_tokens(details: Sequence[str]) -> frozenset[str]:
     return frozenset(item.strip() for item in token.split(",") if item.strip())
 
 
+def _snapshot_axis(
+    token: str,
+    snapshots: frozenset[str] | None,
+    named_shapes: dict[str, tuple[DimExpr, ...]] | None,
+) -> DimExpr | None:
+    """The extent a ``<tensor>.shape[i]`` reshape argument names, if it is known.
+
+    Only for a SNAPSHOT token -- a shape local the model bound earlier
+    (``batch, q_len, _ = hidden_states.shape``), which records what that tensor
+    measured where it was bound. An inline read written in the reshape itself
+    names whatever the local holds now, which this scope cannot see.
+
+    ``None`` when nothing in scope knows that tensor's shape, or does not have
+    the axis: an unresolved shape read printed as a dimension would state one
+    tensor's extent as another's, and no reader of a shape expects that.
+    """
+    match = re.fullmatch(r"(?P<name>[\w.]+)\.shape\[(?P<axis>-?\d+)\]", token.strip())
+    if match is None or token.strip() not in (snapshots or ()):
+        return None
+    shape = (named_shapes or {}).get(match.group("name"))
+    if not shape:
+        return None
+    axis = int(match.group("axis"))
+    if not -len(shape) <= axis < len(shape):
+        return None
+    return shape[axis]
+
+
 def _resolve_view_shape(
     detail: str,
     source: TensorSpec,
@@ -6317,6 +6476,16 @@ def _resolve_view_shape(
             )
             if named is not None and -len(named) <= axis < len(named):
                 resolved.append(named[axis])
+                # Read off a tensor the caller NAMED, at an axis a snapshot
+                # recorded -- the same standing as a named starred prefix, and
+                # the same reason: these axes are known independently of the
+                # tensor being reshaped, so one unknown left over is determined
+                # by element conservation. ``repeat_kv`` is this exact shape --
+                # ``reshape(batch, num_key_value_heads * n_rep, slen, head_dim)``
+                # names three snapshot axes and one product no config states --
+                # and without it the reshape resolved to nothing and passed its
+                # rank-5 input straight through.
+                used_named_prefix = True
                 continue
             if -len(source.shape) <= axis < len(source.shape):
                 resolved.append(source.shape[axis])
@@ -7469,6 +7638,31 @@ def _resolve_int_tuple(
     return tuple(resolved) if resolved else None
 
 
+def _optional_argument_guard(node: ast.IfExp) -> str | None:
+    """The argument name in ``X if X is not None else <default>``, else ``None``.
+
+    Both orders count (``X if X is None else`` puts the default first), but the
+    guarded name has to be the value of the branch it guards -- otherwise the
+    conditional is about something else and its test is not this one to decide.
+    """
+    test = node.test
+    if not (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], (ast.Is, ast.IsNot))
+        and isinstance(test.left, ast.Name)
+        and len(test.comparators) == 1
+        and isinstance(test.comparators[0], ast.Constant)
+        and test.comparators[0].value is None
+    ):
+        return None
+    name = test.left.id
+    given = node.body if isinstance(test.ops[0], ast.IsNot) else node.orelse
+    if isinstance(given, ast.Name) and given.id == name:
+        return name
+    return None
+
+
 def _resolve_dim_expr(
     node: ast.AST,
     *,
@@ -7500,7 +7694,38 @@ def _resolve_dim_expr(
                 nested = config.get(container.attr)
                 if isinstance(nested, dict):
                     return _int_dim(nested.get(key.value))
+                # ``config.compress_rates["heavily_compressed_attention"]``
+                # where the checkpoint states ``compress_rates: null``. The KEY
+                # is not a config dim -- reading it as one recorded the module's
+                # ``compress_rate`` as the string
+                # ``"heavily_compressed_attention"``, which then stood in for a
+                # number everywhere that scalar was used.
+                return None
             return _config_dim(key.value, config=config, context=context)
+    if isinstance(node, ast.IfExp):
+        # ``inter = intermediate_size if intermediate_size is not None else
+        # config.dense_intermediate_size`` -- an optional constructor argument
+        # falling back to config. Which branch holds is decided by whether the
+        # call site pinned that argument, which is exactly what ``local_vars``
+        # records: bound means the caller passed it, absent means it was left at
+        # its ``None`` default.
+        #
+        # Only this idiom, where the guarded name IS the branch value. A general
+        # conditional is a question about the model's configuration that this
+        # scope cannot answer, and answering it anyway would state one width
+        # where the model builds another.
+        guarded = _optional_argument_guard(node)
+        if guarded is None:
+            return None
+        given, default = (
+            (node.body, node.orelse)
+            if isinstance(node.test.ops[0], ast.IsNot)
+            else (node.orelse, node.body)
+        )
+        branch = given if guarded in local_vars else default
+        return _resolve_dim_expr(
+            branch, config=config, local_vars=local_vars, context=context
+        )
     if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
         # ``getattr(config, 'head_dim', None) or hidden // heads`` — take the
         # first operand that resolves to a truthy int, matching ``or`` semantics.
@@ -8200,6 +8425,28 @@ def _is_embedding(class_name: str, node: ModelGraphNode) -> bool:
     # Some models wrap the embedding in a factory function (e.g. ``init_method``).
     # Fall back to the ``role`` metadata assigned by the block tree.
     return node.metadata.get("role") == "embedding"
+
+
+def _product_dim(dims: tuple[Any, ...]) -> Any | None:
+    """The single extent a run of axes merges into, as a readable product.
+
+    Numbers multiply out; symbols are joined the way the rest of the shapes
+    spell a merged axis (``B*S``). ``None`` for an empty run.
+    """
+    if not dims:
+        return None
+    number = 1
+    symbols: list[str] = []
+    for dim in dims:
+        if isinstance(dim, int):
+            number *= dim
+        else:
+            symbols.append(str(dim))
+    if not symbols:
+        return number
+    if number != 1:
+        symbols.append(str(number))
+    return "*".join(symbols)
 
 
 def _is_norm(class_name: str, node: ModelGraphNode) -> bool:
