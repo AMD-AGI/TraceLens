@@ -1497,8 +1497,12 @@ def test_glm53_spine_norms_do_not_share_a_namespace():
     post_ns = section_namespace("post_attention_layernorm")
     assert input_ns != post_ns
 
-    # A shared namespace made a norm both feed and be fed by the same group, which
-    # is what read as a loop.
+    # A shared namespace made the two norms feed each other, which is what read
+    # as a loop. Their ENCLOSING group relates to each of them both ways by
+    # construction -- it holds the sibling boxes on either side of them
+    # (``attn_hc`` feeds ``input_layernorm``; the norm feeds ``self_attn``
+    # through the operand mirror that sits at the call site), so that pair is
+    # not the symptom. The two norms reaching each other is.
     reaches: dict[str, set[str]] = {}
     for node in graph["nodes"]:
         target = namespace_of.get(node["id"], "")
@@ -1506,27 +1510,33 @@ def test_glm53_spine_norms_do_not_share_a_namespace():
             source = namespace_of.get(edge["sourceNodeId"], "")
             if source != target:
                 reaches.setdefault(source, set()).add(target)
-    for norm_ns in (input_ns, post_ns):
-        both_ways = {
-            other
-            for other in reaches.get(norm_ns, set())
-            if norm_ns in reaches.get(other, set())
-        }
-        assert not both_ways, (norm_ns, both_ways)
+    assert post_ns not in reaches.get(input_ns, set()) or input_ns not in reaches.get(
+        post_ns, set()
+    ), (input_ns, post_ns)
 
     # The real order is attn_hc -> input_layernorm -> self_attn. Crossing into
     # ``self_attn`` is a module entry, so self_attn keeps its own ``@input``
     # boundary (defect B: same-name tiles are only collapsed within one hierarchy
-    # level, never across a module edge). The ``@input`` reads
-    # ``input_layernorm/@output`` and self_attn's first op reads the ``@input``.
+    # level, never across a module edge). ``self_attn`` reads two parameters --
+    # the hidden state and the mask -- so each operand is mirrored at the call
+    # site and the ``@input`` reaches ``input_layernorm/@output`` through its
+    # own mirror rather than by a direct edge.
     norm_output = f"{prefix}/input_layernorm/@output"
     self_attn_input = f"{prefix}/self_attn/@input"
     assert self_attn_input in namespace_of
-    input_node = next(n for n in graph["nodes"] if n["id"] == self_attn_input)
-    assert any(
-        edge["sourceNodeId"] == norm_output
-        for edge in input_node.get("incomingEdges", [])
-    ), (self_attn_input, norm_output)
+    by_node_id = {node["id"]: node for node in graph["nodes"]}
+
+    def _reaches(node_id: str, depth: int = 3) -> bool:
+        if node_id == norm_output:
+            return True
+        if depth == 0:
+            return False
+        return any(
+            _reaches(str(edge["sourceNodeId"]), depth - 1)
+            for edge in by_node_id.get(node_id, {}).get("incomingEdges", [])
+        )
+
+    assert _reaches(self_attn_input), (self_attn_input, norm_output)
     self_attn_ns = f"{prefix}/self_attn"
     readers = [
         node["id"]
@@ -1885,11 +1895,23 @@ def test_glm53_norm_boundary_connects_to_attention_input_across_module_edge():
     # Entering ``self_attn`` is a module edge, so self_attn keeps its own ``@input``
     # tile, fed by ``input_layernorm/@output``; self_attn's first op reads it.
     self_attn_input_id = f"{prefix}/self_attn/@input"
-    self_attn_input = node_by_id[self_attn_input_id]
-    assert any(
-        edge["sourceNodeId"] == norm_output["id"]
-        for edge in self_attn_input.get("incomingEdges", [])
-    ), self_attn_input_id
+    assert self_attn_input_id in node_by_id
+
+    # ``self_attn`` reads two parameters now (the hidden state and the mask), so
+    # each operand is mirrored at the call site and the norm reaches the input
+    # through its own mirror rather than by a direct edge.
+    def _reaches_norm(node_id: str, depth: int = 3) -> bool:
+        if node_id == norm_output["id"]:
+            return True
+        if depth == 0:
+            return False
+        node = node_by_id.get(node_id)
+        return any(
+            _reaches_norm(str(edge["sourceNodeId"]), depth - 1)
+            for edge in (node or {}).get("incomingEdges", [])
+        )
+
+    assert _reaches_norm(self_attn_input_id), self_attn_input_id
     self_attn_ns = f"{prefix}/self_attn"
     readers = [
         node
@@ -3586,13 +3608,21 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     # The mask builder renders as its real ops and publishes through its own
     # output tile, so resolving that tile reaches the op that produces the
     # builder's result -- not a tile named after the callee.
-    assert len(spine_invariant_inputs) == 1
-    assert next(iter(spine_invariant_inputs)).endswith("/@input:attention_mask")
-    (mask_sources,) = spine_invariant_inputs.values()
-    assert len(mask_sources) == 1
-    mask_source = by_id[next(iter(mask_sources))]
-    assert str(mask_source.get("label")) == "Ones", spine_invariant_inputs
-    assert _shape_attr(mask_source) == "[B, S] bool", mask_source
+    #
+    # Every variant that READS the mask gets one: the full-attention variant
+    # through its indexer, and both linear-attention variants through
+    # ``apply_mask_to_padding_states(hidden_states, attention_mask)``. The
+    # linear ones used to be missing, which is how that frame came to read the
+    # hidden state where the model reads the mask.
+    assert len(spine_invariant_inputs) == 3, spine_invariant_inputs
+    assert all(
+        nid.endswith("/@input:attention_mask") for nid in spine_invariant_inputs
+    ), spine_invariant_inputs
+    for mask_sources in spine_invariant_inputs.values():
+        assert len(mask_sources) == 1, spine_invariant_inputs
+        mask_source = by_id[next(iter(mask_sources))]
+        assert str(mask_source.get("label")) == "Ones", spine_invariant_inputs
+        assert _shape_attr(mask_source) == "[B, S] bool", mask_source
     assert not any("hidden_states" in nid for nid in spine_invariant_inputs)
 
     # The vision block carries one value but is HANDED several -- cos, sin and

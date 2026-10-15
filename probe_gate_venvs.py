@@ -57,6 +57,17 @@ MODELS = [
 # and could not be sized) give way to the one `torch.ones` the model runs.
 # Every check is now zero on all four.
 EXPECTED_NODES = {
+    # 2026-10-15c -- an op that READS a forward parameter declares it. Only a
+    # kernel's `inputs:` detail counted as a declaration, so a plain op naming
+    # a parameter (`attention_mask[:, :, None]` records it in `param_inputs`)
+    # fell back to the frame's primary input: GLM's
+    # `apply_mask_to_padding_states` had ONE tile, named `attention_mask` and
+    # carrying the hidden state, so the unsqueeze that should read a `[B, S]`
+    # mask read `[B, S, 4096]` and the whole frame came out rank 4.
+    # GLM 1311 -> 1319, +4 per linear-attention variant (2 of them): the frame's
+    # one mis-named tile becomes two (`hidden_states` + `attention_mask`), and
+    # the mask gains a tile on each box it crosses to get there. No other model
+    # has a frame reading a second parameter this way, so none moves.
     # 2026-10-15b -- mutually-exclusive layer variants converge in a phi. A
     # repeat stack whose layers are not all alike is drawn as one group per
     # variant, and each group's output was wired straight to whatever follows
@@ -183,7 +194,7 @@ EXPECTED_NODES = {
     # off `grid_thw.tolist()` and takes no tensor operand at all, so docking it
     # on the chain running past it made the frame assert it reads the vision
     # activation -- a tensor that call is never passed. Same count, right tensor.
-    "zai-org/GLM-5.3-Flash": 1311,
+    "zai-org/GLM-5.3-Flash": 1319,
     # GPT-2, the one non-MoE decoder here. 121 -> 67 while it was being made
     # clean: -47 for a cross-attention tower its config never builds, -10 for a
     # shape that rendered as tensor ops, +9 for projections that drew nothing at

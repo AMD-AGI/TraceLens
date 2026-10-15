@@ -748,6 +748,15 @@ def _declared_operand_names(block: "BlockNode | None") -> set[str]:
     lives on the atomic core leaf inside it, not on the step node the call site
     names. Asking only the step node would answer "declares nothing" for exactly
     the kernels that declare the most.
+
+    An op declares a parameter just as plainly by READING it as an argument:
+    ``attention_mask[:, :, None]`` records ``attention_mask`` in ``param_inputs``.
+    Counting only the kernel ``inputs:`` detail answered "declares nothing" for
+    such an op, so its named boundary token fell back to the frame's primary
+    input -- GLM's ``apply_mask_to_padding_states`` ended up with ONE tile,
+    named ``attention_mask`` and carrying the hidden state, so the unsqueeze
+    that should read a ``[B, S]`` mask read ``[B, S, 4096]`` and everything
+    below it came out rank 4.
     """
     names: set[str] = set()
     stack = [block]
@@ -756,6 +765,7 @@ def _declared_operand_names(block: "BlockNode | None") -> set[str]:
         if node is None:
             continue
         names.update(name.strip().lower() for name in _declared_input_names(node))
+        names.update(name.strip().lower() for name in (node.param_inputs or ()))
         stack.extend(node.children or ())
     return names
 
