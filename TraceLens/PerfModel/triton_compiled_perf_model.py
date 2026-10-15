@@ -370,7 +370,7 @@ class TritonCompiledPerfModel:
     TraceLens silently skips the kernel (same behaviour as unmodelled ATen ops).
     """
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.name = event["name"]
         self._meta = _meta_from_trace_args(event)  # V2: trace args
         if self._meta is None:

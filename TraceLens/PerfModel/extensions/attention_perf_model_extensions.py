@@ -53,10 +53,9 @@ class InferenceAttention:
         "g_sqsk",
     )
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
         self.B = self.param_details["B"]
         self.N_Q = self.param_details["N_Q"]
@@ -550,10 +549,6 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
     category = "SDPA_fwd"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
-        self.enable_origami = enable_origami
-        super().__init__(event, arch, python_path)
-
     @staticmethod
     def _core_param_details(event):
         params = perf_model.aiter__fmha_v3_varlen_fwd.get_param_details(event).copy()
@@ -564,8 +559,6 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
         return perf_model.aiter__fmha_v3_varlen_fwd(
             self.event,
             self.arch,
-            self.python_path,
-            enable_origami=self.enable_origami,
         )
 
     @staticmethod
@@ -598,11 +591,6 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
         if self.param_details.get("_fallback_core"):
             return self._core_model().get_compute_precision()
         return super().get_compute_precision()
-
-    def get_simulation_time(self):
-        if self.param_details.get("_fallback_core"):
-            return self._core_model().get_simulation_time()
-        return None
 
 
 class aiter_paged_attention_ragged(InferenceAttention):
@@ -823,8 +811,8 @@ class gdn_attention_core(InferenceAttention):
         total:           7 * d_v * d_k
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         self.H_V = self.param_details["H_V"]
         self.d_k = self.param_details["d_h_qk"]
         self.d_v = self.param_details["d_h_v"]

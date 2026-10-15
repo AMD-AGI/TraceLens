@@ -176,12 +176,6 @@ def format_diff_details(diff_details):
 # Test case discovery
 # ---------------------------------------------------------------------------
 
-COLS_IGNORE = [
-    "Non-Data-Mov TFLOPS/s_mean",
-    "Non-Data-Mov Kernel Time (µs)_sum",
-    "Non-Data-Mov Kernel Time (µs)_mean",
-]
-
 
 def find_inference_test_cases():
     """
@@ -306,11 +300,7 @@ def test_inference_perf_report(
             f"generate_perf_report_pytorch"
         )
         df_test = result[sheet_name]
-        cols = [
-            col
-            for col in df_ref.columns
-            if col not in COLS_IGNORE and col in df_test.columns
-        ]
+        cols = [col for col in df_ref.columns if col in df_test.columns]
         diff_cols = compare_cols(df_test, df_ref, cols, tol=tol)
         assert not diff_cols, (
             f"'{sheet_name}' has differences in {profile_path}:"

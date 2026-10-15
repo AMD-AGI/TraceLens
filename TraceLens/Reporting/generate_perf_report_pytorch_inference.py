@@ -396,6 +396,23 @@ def apply_extension(perf_analyzer, extension_path):
     extension = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(extension)
 
+    if hasattr(extension, "external_op_model"):
+        print(f"Applying external op model from {extension_path}")
+        perf_analyzer.set_external_op_model(extension.external_op_model)
+
+    for attr, register in (
+        ("op_models", "register_op_model"),
+        ("kernel_filters", "register_kernel_filter"),
+    ):
+        if not hasattr(extension, attr):
+            continue
+        print(f"Applying {attr} from {extension_path}")
+        entries = getattr(extension, attr)
+        if not isinstance(entries, dict):
+            raise TypeError(f"Expected {attr} to be a dict, got {type(entries)}")
+        for label, fn in entries.items():
+            getattr(perf_analyzer, register)(label, fn)
+
     if hasattr(extension, "tree_postprocess_extension"):
         print(f"Applying tree postprocess extension from {extension_path}")
         tree_postprocess_extension = getattr(extension, "tree_postprocess_extension")
@@ -534,12 +551,11 @@ def generate_perf_report_pytorch(
     precomputed_diff_stats: Optional[str] = None,
     comparison_augmented_tree: Optional[TraceToTree] = None,
     extension_file: Optional[str] = None,
-    # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
-    python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
     gpu_arch_platform: Optional[str] = None,
     gpu_arch: Optional[dict] = None,
-    enable_origami: bool = False,
+    enable_origami_gemm: bool = False,
+    enable_origami_sdpa_tile: bool = False,
     group_by_parent_module: bool = False,
     group_by_num_kernels: bool = False,
     include_call_stack: bool = False,
@@ -563,20 +579,22 @@ def generate_perf_report_pytorch(
         perf_analyzer = TreePerfAnalyzer(
             tree=augmented_tree,
             arch=gpu_arch_json,
-            python_path=python_path,
             include_unlinked_kernels=include_unlinked_kernels,
             add_python_func=add_python_func,
             enable_pseudo_ops=enable_pseudo_ops,
             rebuild_tree=False,
+            enable_origami_gemm=enable_origami_gemm,
+            enable_origami_sdpa_tile=enable_origami_sdpa_tile,
         )
     else:
         perf_analyzer = TreePerfAnalyzer.from_file(
             profile_filepath=profile_json_path,
             arch=gpu_arch_json,
-            python_path=python_path,
             include_unlinked_kernels=include_unlinked_kernels,
             add_python_func=add_python_func,
             enable_pseudo_ops=enable_pseudo_ops,
+            enable_origami_gemm=enable_origami_gemm,
+            enable_origami_sdpa_tile=enable_origami_sdpa_tile,
         )
 
         graph_launch_events = [
@@ -929,7 +947,6 @@ def generate_perf_report_pytorch(
                 perf_analyzer2 = TreePerfAnalyzer(
                     tree=comparison_augmented_tree,
                     arch=gpu_arch_json,
-                    python_path=python_path,
                     include_unlinked_kernels=include_unlinked_kernels,
                     add_python_func=add_python_func,
                     enable_pseudo_ops=enable_pseudo_ops,
@@ -938,7 +955,6 @@ def generate_perf_report_pytorch(
             else:
                 perf_analyzer2 = TreePerfAnalyzer.from_file(
                     profile_filepath=comparison_json_path,
-                    python_path=perf_analyzer.python_path,
                     include_unlinked_kernels=perf_analyzer.include_unlinked_kernels,
                     enable_pseudo_ops=enable_pseudo_ops,
                     add_python_func=perf_analyzer.add_python_func,
@@ -1311,21 +1327,23 @@ def main():
         "--extension_file",
         type=str,
         default=None,
-        help="Path to the extension file containing custom extensions for TraceTree and PerfModel.",
+        help="Python file with custom hooks: tree post-processing, perf models, "
+        "op categories, op models (op_models, external_op_model), and kernel filters.",
     )
 
-    parser.add_argument(
-        "--python_path",
-        type=str,
-        default=None,
-        help="Path to the python executable for gemm simulator",
-    )
     add_gpu_arch_cli_args(parser)
     parser.add_argument(
-        "--enable-origami",
+        "--enable-origami-gemm",
         action="store_true",
         default=False,
-        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+        help="Add Origami GEMM times (Origami columns) when a GPU arch is given.",
+    )
+    parser.add_argument(
+        "--enable-origami-sdpa-tile",
+        action="store_true",
+        default=False,
+        help="Add attention times from TraceLens's SDPA tile model, with Origami "
+        "timing each tile GEMM (SDPA Tile Origami columns), when a GPU arch is given.",
     )
 
     parser.add_argument(
@@ -1414,10 +1432,10 @@ def main():
         precomputed_diff_stats=args.precomputed_diff_stats,
         comparison_augmented_tree=comparison_graph_tree,
         extension_file=args.extension_file,
-        python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
         gpu_arch_platform=args.gpu_arch_platform,
-        enable_origami=args.enable_origami,
+        enable_origami_gemm=args.enable_origami_gemm,
+        enable_origami_sdpa_tile=args.enable_origami_sdpa_tile,
         group_by_parent_module=args.group_by_parent_module,
         group_by_num_kernels=args.group_by_num_kernels,
         include_call_stack=args.include_call_stack,

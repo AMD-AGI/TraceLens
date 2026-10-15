@@ -130,6 +130,8 @@ This adds:
   `vector_fp32`).
 - `Roofline Time (µs):` theoretical minimum time from the GPU's peak
   capabilities.
+- `Roofline TFLOPS/s:` throughput from dividing modeled FLOPs by that time.
+- `Roofline TB/s:` bandwidth from dividing modeled bytes by that time.
 - `Roofline Bound:` `COMPUTE_BOUND` or `MEMORY_BOUND`.
 - `Pct Roofline:` how close the measured kernel time runs to the roofline.
 
@@ -147,8 +149,11 @@ This adds:
   Equivalently, operations whose arithmetic intensity (FLOPs/byte) sits below the
   roofline knee point (peak FLOPS / peak bandwidth) are memory-bound; those above
   it are compute-bound.
-- Add `--enable-origami` to use Origami-simulated GEMM/SDPA times when a GPU arch
-  spec is provided.
+- Add `--enable-origami-gemm` for Origami GEMM times when a GPU arch spec is
+  provided.
+- Add `--enable-origami-sdpa-tile` for attention times from TraceLens's SDPA
+  tile model, with Origami timing each tile GEMM (see below).
+- To add your own model, see [Add an op model](#add-an-op-model).
 
 The arch JSON specifies Max Achievable FLOPS (MAF) per compute type and
 precision; see the
@@ -205,12 +210,127 @@ can define any of:
 | `tree_postprocess_extension` | `Callable` | Called with `perf_analyzer.tree`; update the tree post-construction. |
 | `perf_model_extension` | `dict` | Map op name → custom perf-model class; overrides or extends built-in models. |
 | `op_category_extension` | `dict` | Map category-only op names to final categories, so an op appears in unified reports without a perf model. |
+| `op_models` | `dict` | Map a label → op model `fn(category, params, arch)`; see [Add an op model](#add-an-op-model). |
+| `external_op_model` | `Callable` | Same signature; registered under the label `External`. |
+| `kernel_filters` | `dict` | Map a label → `fn(kernel_event)` returning whether to count the kernel. Each label fills `<label> Kernel Time (µs)` and `<label> TFLOPS/s` with the busy time of the op's kept kernels. |
 
 ```bash
 TraceLens_generate_perf_report_pytorch \
     --profile_json_path path/to/trace.json \
     --extension_file my_extension.py
 ```
+
+### Add an op model
+
+A *perf model* says what work an op does: its parameters, FLOPs, and bytes.
+An *op model* takes that description and returns anything you want reported
+per op: usually a predicted time, but also values such as the kernel
+configuration a library would pick, an occupancy estimate, or a flag.
+TraceLens reports each op model under a label, next to the measured metrics
+and the roofline.
+
+The contract:
+
+```python
+def my_model(category, params, arch):
+    ...
+    return None            # this op isn't handled
+    return 12.5            # predicted time in µs
+    return {"time_us": 12.5, "Tile": "256x128x64"}  # time plus extra columns
+```
+
+- `category` is the perf-model category (`"GEMM"`, `"SDPA_fwd"`, ...). For a
+  backward op it is the backward category (`"SDPA_bwd"`, `"CONV_bwd"`, ...)
+  with the forward op's params; ops without one, such as GEMM backward, are
+  skipped.
+- `params` is a copy of the perf model's parameters, the same values as the
+  report's `param:` columns; look at those columns to see what a category
+  provides. Any key can be missing: `transpose`, for example, is only set
+  when the GEMM's kernel name parses. `dtype_A_B` holds the trace's dtype
+  strings, such as `"c10::BFloat16"`;
+  `TraceLens.PerfModel.utils.torch_dtype_map` turns them into `"bf16"`.
+- `arch` is the report's GPU arch dict, or `None` without one. A model is
+  free to ignore it and target another GPU.
+- A dict's `time_us` is optional. Every other key becomes a `<label> <key>`
+  column. Only scalars (numbers, strings, bools) are written.
+- The model is called once per op launch, so the same shape can arrive many
+  times. Cache results in the model if a call is slow.
+- If the model raises, TraceLens leaves its columns empty for that op, keeps
+  the op's other metrics, and prints one warning per model, category, and
+  error type. Return `None` to skip ops on purpose.
+
+Register models in the extension file:
+
+```python
+from functools import lru_cache
+
+@lru_cache(maxsize=None)
+def _gemm_time(M, N, K, B, transpose):
+    return my_library.gemm(M, N, K, B, transpose)
+
+def gemm_model(category, params, arch):
+    if category != "GEMM":
+        return None
+    result = _gemm_time(
+        params["M"], params["N"], params["K"], params.get("B", 1),
+        str(params.get("transpose")),
+    )
+    return {"time_us": result.time_us, "Tile": result.tile}
+
+op_models = {"MyModel": gemm_model}
+```
+
+This adds `MyModel Time (µs)`, `MyModel TFLOPS/s`, `MyModel TB/s`,
+`MyModel Tile`, and `Pct MyModel` (the time as a percentage of the measured
+kernel time); the summary sheets pick up every label (see the
+[column reference](../reference/perf-report-columns.md#op-model-columns)).
+Keep the import and call of a proprietary library in the extension file. A
+placeholder is in `examples/external_op_model_stub.py`.
+
+From Python, register a model with
+`TreePerfAnalyzer.register_op_model(label, fn)`, then
+`compute_perf_metrics(event)` runs every registered model on one op, which is
+handy when iterating on a model:
+
+```python
+from TraceLens import TreePerfAnalyzer
+
+analyzer = TreePerfAnalyzer.from_file("trace.json", arch=arch)
+analyzer.register_op_model("MyModel", gemm_model)
+gemm = next(e for e in analyzer.tree.events if e["name"] == "aten::mm")
+metrics = analyzer.compute_perf_metrics(gemm)  # param: ..., MyModel Time (µs), ...
+```
+
+Behind this, TraceLens builds the op's perf model from the event, describes
+its work with `TraceLens.PerfModel.op_models.op_work(perf_model)`, and calls
+each op model on that work. Roofline and the Origami models use the same
+interface, in `TraceLens/PerfModel/op_models.py`.
+
+Origami models GEMMs only. For attention, `--enable-origami-sdpa-tile` adds
+TraceLens's SDPA tile model: it times one Q·Kᵀ tile and one P·V tile on one
+CU with Origami, scales them by the number of waves, and adds softmax and
+memory terms. Its columns are labeled `SDPA Tile Origami`. It needs
+`num_cus`, `gemm_units_per_cu`, and `mem_bw_gbps` in the arch, and
+`l1_bw_gbps` for backward. The tile model, in
+`TraceLens/PerfModel/sdpa_tile.py`, times its tiles with whatever GEMM model
+it's given as `gemm_time`; the op model passes Origami's. To use another GEMM
+model, write an op model that calls
+`sdpa_tile_time_us(work.perf_model, arch, your_gemm_time, bwd=work.bwd)`.
+
+### Add a kernel filter
+
+A kernel filter reports the op's throughput over a subset of its kernels, for
+example without copy and transpose kernels. `examples/kernel_filter_example.py`
+defines one:
+
+```python
+def non_data_mov_filter(kernel):
+    return not any(p in kernel["name"] for p in ("direct_copy_kernel", "transpose_"))
+
+kernel_filters = {"Non-Data-Mov": non_data_mov_filter}
+```
+
+From Python, use `TreePerfAnalyzer.register_kernel_filter(label, fn)`.
 
 See the example extension file for MegatronLM in the
 [`examples/`](https://github.com/AMD-AGI/TraceLens/tree/main/examples) directory.
@@ -225,9 +345,10 @@ The following table describes all optional arguments.
 | `--output_csvs_dir DIR` | `None` | Write each sheet as a CSV in this directory. |
 | `--gpu_arch_platform NAME` | `None` | Bundled GPU arch for roofline classification (`MI300X`, `MI325X`). |
 | `--gpu_arch_json_path PATH` | `None` | Custom GPU arch JSON (mutually exclusive with `--gpu_arch_platform`). |
-| `--enable-origami` | `False` | Use Origami-simulated GEMM/SDPA times when an arch is provided. |
+| `--enable-origami-gemm` | `False` | Add `Origami` GEMM times when an arch is provided. |
+| `--enable-origami-sdpa-tile` | `False` | Add `SDPA Tile Origami` attention times from TraceLens's tile model, with Origami timing each tile GEMM. |
 | `--detect_recompute` | `False` | Add an `is_recompute` column for activation checkpointing (see above). |
-| `--extension_file PATH` | `None` | Custom tree / perf-model / op-category hooks (see above). |
+| `--extension_file PATH` | `None` | Custom tree, perf-model, op-category, op-model, and kernel-filter hooks (see above). |
 | `--enable_kernel_summary` | `False` | Add the `kernel_summary` sheet. |
 | `--short_kernel_study` | `False` | Add the short-kernel study sheets. |
 | `--short_kernel_threshold_us X` | `10` | Threshold (µs) to classify a kernel as "short". |
