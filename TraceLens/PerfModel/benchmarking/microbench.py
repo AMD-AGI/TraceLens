@@ -50,7 +50,11 @@ import torch
 from triton.testing import do_bench
 
 from ..utils import gemm_tflops
-from .microbench_utils import check_gpu_idle
+from .microbench_utils import (
+    check_gpu_idle,
+    gfx_target,
+    mx_peak_without_native_support,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -421,6 +425,17 @@ def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
     results["matrix_fp6"] = _bench_mx_matrix_peak(
         mxfp6_label, bench_mxfp6_gemm, device, GEMM_SHAPES
     )
+    gfx = gfx_target(
+        getattr(torch.cuda.get_device_properties(device), "gcnArchName", "")
+    )
+    mx_peak = mx_peak_without_native_support(gfx, results)
+    if mx_peak is not None:
+        print(
+            f"\n  {gfx} has no native MXFP4/MXFP6 matrix instructions; these "
+            f"formats run on the 16-bit matrix cores, so matrix_fp4 and "
+            f"matrix_fp6 use the 16-bit matrix peak ({mx_peak:.1f} TFLOPS)."
+        )
+        results["matrix_fp4"] = results["matrix_fp6"] = round(mx_peak, 1)
 
     # INT8: torch._int_mm + aiter CK gemm_a8w8; take max.
     print("\n  [matrix_int8]  (torch._int_mm; TFLOPS = 2·M·N·K / time, AMD & CUDA)")
