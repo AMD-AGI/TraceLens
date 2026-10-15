@@ -644,11 +644,6 @@ def fused_kernel(x, scale):
         "fused_kernel",
     )
     assert kernel._function_has_triton_jit_decorator(triton)
-    assert kernel._extract_triton_computation_labels(triton) == [
-        "Sigmoid",
-        "× scale",
-        "CumSum",
-    ]
     assert (
         kernel._extract_recurrence_from_kernel_source(
             "b_v = tl.load(p_v) - b_v\nb_h1 *= tl.exp2(g)\nx = tl.dot(k, b_h1)"
@@ -746,8 +741,6 @@ def test_model_graph_serialization_saving_and_validation(tmp_path: Path):
 
     issues = model_graph.collect_non_reduced_operations(graph)
     assert any(issue.node_id == "bad" for issue in issues)
-    with pytest.raises(AssertionError, match="could not classify"):
-        model_graph.assert_operations_reduced(graph)
 
 
 def test_model_graph_helpers_and_classification():
@@ -1089,7 +1082,6 @@ def test_kernel_flags_docstrings_merge_and_recurrence(monkeypatch):
         KernelPipelineStep("a", "a", "KernelOp", "a", [], condition="mode"),
         {"mode": "fast"},
     )
-    assert kernel._details_for_call("src", "call") == []
     assert kernel._merge_computation_text("", "right") == "right"
     assert kernel._merge_computation_text("left", "left") == "left"
     assert kernel._merge_computation_text("left", "right") == "left\nright"
@@ -1546,15 +1538,6 @@ def test_model_graph_node_kinds_classify_and_reduced_issues():
     assert "label" not in payload["edges"][0]
     assert "sublabel" not in payload["inline_frames"][0]
 
-    ok = ModelGraph(
-        "ok",
-        nodes=[
-            ModelGraphNode("in", NodeKind.LEAF, "Input", OperationKind.SYNTHETIC),
-            ModelGraphNode("op", NodeKind.LEAF, "Linear", OperationKind.NN_MODULE),
-            ModelGraphNode("block", NodeKind.BLOCK, "MLP", OperationKind.COMPOSITE),
-        ],
-    )
-    model_graph.assert_operations_reduced(ok)
     issues = model_graph.collect_non_reduced_operations(
         ModelGraph(
             "root",

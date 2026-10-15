@@ -612,15 +612,3 @@ def collect_non_reduced_operations(
         issues.extend(collect_non_reduced_operations(subgraph))
 
     return issues
-
-
-def assert_operations_reduced(graph: ModelGraph) -> None:
-    """Raise AssertionError when any operational leaf is not a reduced op kind."""
-    issues = collect_non_reduced_operations(graph)
-    if not issues:
-        return
-    lines = [
-        f"{issue.graph_title}:{issue.node_id} ({issue.label!r}) -> {issue.operation.value}: {issue.reason}"
-        for issue in issues
-    ]
-    raise AssertionError("Non-reduced operations found:\n" + "\n".join(lines))

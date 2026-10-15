@@ -685,30 +685,6 @@ def test_adapter_graph_conversion_covers_metadata_namespaces_and_bad_edges():
     assert "groupNodeAttributes" not in unlabeled
 
 
-def test_attach_subgraph_links_deduplicates_and_avoids_self_links():
-    graphs = [
-        {
-            "id": "root",
-            "nodes": [
-                {
-                    "id": "child",
-                    "attrs": [
-                        {"key": "attr_name", "value": "child"},
-                        {"key": "attr_name", "value": 7},
-                        {"key": "other", "value": "ignored"},
-                    ],
-                },
-                {"id": "root", "attrs": [{"key": "attr_name", "value": "root"}]},
-            ],
-        }
-    ]
-    adapter.attach_subgraph_links(
-        graphs, attr_name_to_graph_id={"child": "nested", "root": "root"}
-    )
-    assert graphs[0]["nodes"][0]["subgraphIds"] == ["nested"]
-    assert "subgraphIds" not in graphs[0]["nodes"][1]
-
-
 @pytest.mark.parametrize(
     ("label", "expected"),
     [

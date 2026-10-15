@@ -520,14 +520,6 @@ def harvest_meta_tensors(checkpoint: str | Path) -> MetaTensorIndex | None:
     return MetaTensorIndex(by_qualified=by_qualified, by_class_attr=by_class_attr)
 
 
-def _meta_int_attr(mod: Any, name: str) -> int | None:
-    """Return ``mod.name`` when it is a plain ``int`` (not ``bool``), else *None*."""
-    value = getattr(mod, name, None)
-    if isinstance(value, bool):
-        return None
-    return value if isinstance(value, int) else None
-
-
 def trace_meta_shapes(
     checkpoint: str | Path,
     config: dict[str, Any] | None = None,

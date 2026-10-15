@@ -26,7 +26,6 @@ from TraceLens.ModelUtils.extract import load_architecture
 from TraceLens.ModelUtils.model_graph import (
     NodeKind,
     OperationKind,
-    assert_operations_reduced,
     build_architecture_model_graphs,
     build_model_graph,
     classify_operation,
@@ -294,12 +293,6 @@ def test_model_graph_json_roundtrip():
         assert node["kind"] in {kind.value for kind in NodeKind}
     for edge in payload["edges"]:
         assert {"source", "target", "style"} <= set(edge)
-
-
-def test_assert_operations_reduced_for_mla_fixture():
-    root = _mla_fixture_root()
-    model_graph = build_model_graph(root, title="MLA")
-    assert_operations_reduced(model_graph)
 
 
 def test_collect_non_reduced_operations_flags_unexpanded_module():

@@ -15,7 +15,6 @@ from pathlib import Path
 import TraceLens.ModelUtils.ast_analyze as aa
 from TraceLens.ModelUtils.ast_analyze import (
     ClassStructure,
-    _assign_target,
     _build_components,
     _classify_role,
     _config_value,
@@ -23,7 +22,6 @@ from TraceLens.ModelUtils.ast_analyze import (
     _extract_decoder_layer_conditionals,
     _find_positional_module,
     _functional_call_name,
-    _if_has_competing_assigns,
     _infer_attention_type_from_class,
     _infer_norm_from_ast,
     _label_for,
@@ -55,24 +53,6 @@ def _cls(name: str, *, assignments=None, calls=None, norm_before=None, node_src=
 # --------------------------------------------------------------------------- #
 # _assign_target / _if_has_competing_assigns (no in-tree callers)
 # --------------------------------------------------------------------------- #
-
-
-def test_assign_target_variants():
-    assert _assign_target(ast.parse("x = 1").body[0]) == "x"
-    # tuple target -> not a single Name
-    assert _assign_target(ast.parse("x, y = 1, 2").body[0]) is None
-    # attribute target -> not a Name
-    assert _assign_target(ast.parse("self.x = 1").body[0]) is None
-    # not an assignment
-    assert _assign_target(ast.parse("return 1").body[0]) is None
-
-
-def test_if_has_competing_assigns():
-    competing = ast.parse("if flag:\n    y = a()\nelse:\n    y = b()\n").body[0]
-    assert _if_has_competing_assigns(competing) is True
-
-    distinct = ast.parse("if flag:\n    y = a()\nelse:\n    z = b()\n").body[0]
-    assert _if_has_competing_assigns(distinct) is False
 
 
 # --------------------------------------------------------------------------- #

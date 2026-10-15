@@ -32,30 +32,19 @@ from TraceLens.ModelUtils.block_tree import (
     SideCombineSegment,
     SideFeedSegment,
     TensorPortsSegment,
-    block_purpose,
     build_block_node,
     collect_computation_segments,
-    collect_graph_segments,
     collect_method_wrappers,
     collect_parallel_gate_wrappers,
-    components_from_registry,
     gated_norm_activation,
     inline_block_frame_label,
     inline_composite_steps,
-    is_basic_op_tile,
     is_inline_expandable_module,
     is_method_wrapper,
-    is_simple_modeled_tile,
     is_single_function_tree,
     is_straight_line_module,
     partition_detail_trees,
-    side_producer_has_activation,
-    spine_expanded_frame_label,
     straight_line_steps,
-    tile_display_labels,
-    wrapper_bullet,
-    wrapper_panel_line,
-    wrapper_skips_comment,
 )
 
 
@@ -98,43 +87,9 @@ def structure(
         norm_before=list(norm_before or []),
     )
 
-
-# --------------------------------------------------------------------------- #
-# wrapper labels / bullets
-# --------------------------------------------------------------------------- #
-def test_wrapper_bullet_label_differs_from_attr():
-    # label differs from attr so wrapper_bullet returns "label (attr)".
-    n = node("q_proj", "Linear", label="Query")
-    assert bt.wrapper_bullet(n) == "Query (q_proj)"
-
-
-def test_wrapper_bullet_label_matches_attr_returns_label():
-    n = node("query_proj", "Thing", label="query proj", basic=False)
-    assert bt.wrapper_bullet(n) == "query proj"
-
-
-# --------------------------------------------------------------------------- #
-# block_purpose specialized branches
-# --------------------------------------------------------------------------- #
-def test_block_purpose_output_gate_details_only_linear_returns_none():
-    gate = node("g", "OutputGate", role="gate", basic=False, details=["Linear"])
     # OutputGate branch: only "Linear" detail is skipped -> returns None.
-    assert bt.block_purpose(gate) is None
 
-
-def test_block_purpose_role_gate_no_details_fallback():
-    gate = node("g", "SomeGate", role="gate", basic=False)
     # not OutputGate, role gate, no details -> reaches role=="gate" fallback line.
-    assert bt.block_purpose(gate) == "Output gate — scales normalized output"
-
-
-def test_block_purpose_attention_merge_none():
-    plain = node("m2", "AttentionMerge", basic=False, details=["method `x()`"])
-    assert bt.block_purpose(plain) is None
-
-
-def test_block_purpose_kernel_op_and_kernel_output_none():
-    assert bt.block_purpose(node("k", "KernelOutput", basic=False)) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -174,12 +129,6 @@ def test_expand_block_tree_straight_line_single_step_input_source(monkeypatch):
     assert out.input_source == "Residual"
 
 
-def test_subgraph_warrants_diagram_alias(monkeypatch):
-    n = node("x", "X", basic=False, children=[node("a"), node("b")])
-    monkeypatch.setattr(bt, "forward_operation_count", lambda *a, **k: 2)
-    assert bt.subgraph_warrants_diagram(n)
-
-
 # --------------------------------------------------------------------------- #
 # pipeline wrapper / bypass / straight-line
 # --------------------------------------------------------------------------- #
@@ -188,18 +137,9 @@ def test_is_pipeline_wrapper_by_role():
     assert bt._is_pipeline_wrapper(embed)
 
 
-def test_bypass_spans_skips_missing_target():
-    # child whose attr_name is empty -> not in step_index -> target None -> continue.
-    a = BlockNode(attr_name="", class_name="X", role="other", label="X")
-    b = node("b", operation_predecessors=["a"])
-    parent = node("p", "P", basic=False, children=[a, b])
-    assert bt._bypass_spans(parent) == []
-
-
 def test_straight_line_steps_non_straight_returns_self():
     kernel = node("k", "KernelPipeline", basic=False, children=[node("x")])
     assert bt.straight_line_steps(kernel) == [kernel]
-    assert bt.linear_pipeline_steps(kernel) == [kernel]
 
 
 def test_straight_line_module_false_when_no_segments():
@@ -397,13 +337,6 @@ def test_kernel_pipeline_block_nodes_multi_input_step(monkeypatch):
     assert output is not None and output.class_name == "KernelOutput"
 
 
-# --------------------------------------------------------------------------- #
-# gated-norm / short-conv helpers
-# --------------------------------------------------------------------------- #
-def test_side_producer_has_activation_false_for_non_gate():
-    assert not bt.side_producer_has_activation(node("x", "Linear"))
-
-
 def test_gated_norm_activation_reads_resolved_tag():
     # Resolved generically at extraction and carried on the node as a tag; the
     # class name is never consulted.
@@ -525,22 +458,6 @@ def test_collect_segments_pipeline_child_provenance():
 # --------------------------------------------------------------------------- #
 # is_simple_modeled_tile / tile helpers
 # --------------------------------------------------------------------------- #
-def test_is_simple_modeled_tile_false_for_kernel_pipeline_tree():
-    kp = node("@attn_pipeline", "KernelPipeline", basic=False, children=[node("s")])
-    assert not bt.is_simple_modeled_tile(kp)
-
-
-def test_tile_sublabel_and_purpose_none():
-    assert bt.tile_sublabel(node("x")) is None
-    assert bt.tile_purpose_annotation(node("x")) is None
-
-
-def test_tile_display_labels_kernel_output_and_none_block():
-    ko = node("o", "KernelOutput", label="out", basic=False)
-    assert bt.tile_display_labels(ko) == ("out", None)
-    assert bt.tile_display_labels(None) == ("", None)
-
-
 # --------------------------------------------------------------------------- #
 # build_block_node kernel-pipeline / method / init branches
 # --------------------------------------------------------------------------- #
@@ -806,16 +723,6 @@ def test_build_full_detailed_partition_true():
     assert isinstance(trees, list)
 
 
-def test_collect_graph_segments_trailing_norm():
-    norm = node("norm", "RMSNorm", role="norm")
-    segments = bt.collect_graph_segments([norm], [], use_residual=True)
-    assert segments == [("seq", norm)]
-
-
-def test_components_from_registry_missing_and_present():
-    assert bt.components_from_registry("missing", {}) == []
-
-
 # --------------------------------------------------------------------------- #
 # Ported proven coverage for block_tree helpers (from block-extract suite).
 # --------------------------------------------------------------------------- #
@@ -827,15 +734,6 @@ def test_wrapper_labels_comments_and_purpose():
         details=["method `_update_state()`"],
     )
     assert is_method_wrapper(method)
-    assert wrapper_bullet(method) == "update state (_update_state)"
-    assert wrapper_panel_line(method) == "update state (_update_state)"
-
-    ffn = node("mlp", "MLP", role="ffn", label="MLP", basic=False)
-    assert block_purpose(ffn) == "Position-wise feed-forward transform"
-    assert wrapper_panel_line(ffn) == "mlp — Position-wise feed-forward transform"
-    assert wrapper_skips_comment(node("self_attn", "Attention", role="attention"))
-    assert wrapper_skips_comment(node("residual_add", "Add"))
-    assert not wrapper_skips_comment(ffn)
 
 
 def test_gated_norm_and_tile_helpers():
@@ -855,10 +753,6 @@ def test_gated_norm_and_tile_helpers():
         gated_norm_activation(node("norm", "SomeNormGated", role="norm", basic=False))
         is None
     )
-    assert is_simple_modeled_tile(gated)
-    assert is_basic_op_tile(gated)
-    assert tile_display_labels(gated, spec_label="Norm")[0] == "Norm"
-    assert tile_display_labels(None, spec_label="Unknown") == ("Unknown", None)
 
 
 def test_collect_straight_line_steps_and_partitioning():
@@ -978,15 +872,6 @@ def test_method_and_parallel_gate_collection():
     assert collect_method_wrappers(root) == [method]
     assert collect_parallel_gate_wrappers(root) == [gate]
 
-    wrapped_gate = node(
-        "gate",
-        "OutputGate",
-        role="gate",
-        basic=False,
-        children=[node("@gate_activation", "ActivationOp", basic=False)],
-    )
-    assert side_producer_has_activation(wrapped_gate)
-
 
 def test_build_block_node_handles_registry_leaf_recursion_and_methods():
     basic_filter = BasicOpFilter.for_detailed()
@@ -1020,89 +905,6 @@ def test_build_block_node_handles_registry_leaf_recursion_and_methods():
         ).is_basic
         is False
     )
-    assert components_from_registry("missing", registry) == []
-
-
-def test_graph_segments_and_spine_labels():
-    norm = node("norm", "RMSNorm", role="norm")
-    attn = node("attn", "Attention", role="attention", basic=False)
-    mlp = node("mlp", "MLP", role="ffn", basic=False)
-
-    segments = collect_graph_segments([norm, attn, mlp], ["attn"], use_residual=True)
-    assert segments == [("sublayer", norm, attn), ("seq", mlp)]
-    assert collect_graph_segments([norm], [], use_residual=False) == [("seq", norm)]
-
-    positional = BlockComponent("rotary", "RotaryEmbedding", "positional", "RoPE")
-    assert (
-        spine_expanded_frame_label(positional, positional_encoding="RoPE")
-        == "Positional (RoPE) (rotary)"
-    )
-
-
-@pytest.mark.parametrize(
-    ("candidate", "expected"),
-    [
-        (
-            node(
-                "@attention",
-                "AttentionOp",
-                basic=False,
-                details=["delta rule recurrence"],
-            ),
-            "delta rule recurrence",
-        ),
-        (node("gate", "OutputGate", role="gate", basic=False), None),
-        (
-            node(
-                "gate",
-                "OutputGate",
-                role="gate",
-                basic=False,
-                details=["Linear", "Sigmoid"],
-            ),
-            "Sigmoid",
-        ),
-        (
-            node(
-                "pipeline",
-                "KernelPipeline",
-                basic=False,
-                details=["kernel pipeline · scan"],
-            ),
-            "kernel pipeline · scan",
-        ),
-        (
-            node(
-                "conv",
-                "ShortConvolution",
-                label="Short Conv",
-                basic=False,
-                details=["depthwise conv"],
-            ),
-            "depthwise conv",
-        ),
-        (
-            node("merge", "AttentionMerge", basic=False, details=["ports:q,k,v"]),
-            "ports:q,k,v",
-        ),
-        (node("op", "KernelOp", basic=False), None),
-        (node("lm_head", "Linear", role="head"), "Project to vocabulary logits"),
-        (
-            node("router", "Router", role="router", basic=False),
-            "Score and route tokens to experts",
-        ),
-        (
-            node("split_gate_up", "Split", basic=False, label="Split"),
-            "Split fused gate/up projection",
-        ),
-        (
-            node("mul", "Multiply", basic=False, label="×"),
-            "Multiply gate and up activations",
-        ),
-    ],
-)
-def test_block_purpose_specialized_branches(candidate, expected):
-    assert block_purpose(candidate) == expected
 
 
 def test_block_purpose_skips_functional_details_and_formats_fused_ops():
@@ -1111,9 +913,6 @@ def test_block_purpose_skips_functional_details_and_formats_fused_ops():
     fused = node("act_fn", "SiluAndMul", basic=False, details=["F.silu(...)"])
     activation = node("activation", "ActivationOp", label="GELU", basic=False)
 
-    assert block_purpose(fused) is None
-    assert block_purpose(activation) == "Apply GELU to gate half"
-    assert bt.wrapper_module_comment(node("embed_tokens", "Embedding")) is None
     assert bt.inline_wrapper_step_label(fused, activation, 0) == "GELU"
     assert bt.inline_wrapper_step_label(fused, activation, 1) is None
 
@@ -1154,8 +953,6 @@ def test_bypass_span_detection_and_pipeline_exclusions():
         "crossing", "Crossing", basic=False, children=[one, two, three, four]
     )
 
-    assert bt._bypass_spans(crossing) == [(0, 2), (1, 3)]
-    assert bt._has_overlapping_bypass_spans(crossing)
     assert is_straight_line_module(crossing)
     assert not is_straight_line_module(
         node("embed", "EmbeddingWrapper", role="embedding", basic=False, children=[one])
@@ -1227,25 +1024,6 @@ def test_output_gate_wrapping_and_short_convolution_helpers():
     )
     assert wrapped[0].class_name == "OutputGate"
     assert [child.label for child in wrapped[0].children] == ["Linear", "Sigmoid"]
-
-
-def test_tile_display_label_branches(monkeypatch):
-    basic = node("proj", label="Projection")
-    kernel = node("scan", "KernelOp", label="chunk_scan", basic=False)
-    activation = node("act", "ActivationOp", label="SiLU", basic=False)
-
-    monkeypatch.setattr(
-        "TraceLens.ModelUtils.kernel_pipeline.kernel_op_display_label",
-        lambda label: f"display:{label}",
-    )
-    assert tile_display_labels(basic, in_inline_frame=True) == ("Projection", None)
-    assert tile_display_labels(basic, port_label="q", port_style="inline") == (
-        "Projection",
-        None,
-    )
-    assert tile_display_labels(kernel) == ("display:chunk_scan", None)
-    assert tile_display_labels(activation) == ("SiLU", None)
-    assert not is_basic_op_tile(None)
 
 
 def test_collect_nested_diagrams_assigns_source_and_deduplicates(monkeypatch):
@@ -1333,8 +1111,6 @@ def test_stack_tree_builders_cover_registry_and_leaf_paths():
     external = BlockComponent("external", "External", "other", "External", 2)
     norm = BlockComponent("norm", "RMSNorm", "norm", "Norm", 0)
 
-    assert bt.build_stack_component_tree(known, registry, basic_filter).children
-    assert not bt.build_stack_component_tree(external, registry, basic_filter).is_basic
     pipeline = bt.build_pipeline_block_trees(
         stack_pre=[external, norm],
         registry=registry,
@@ -1348,24 +1124,6 @@ def test_stack_tree_builders_cover_registry_and_leaf_paths():
     )
     assert [tree.attr_name for _, tree in pipeline] == ["norm", "external"]
     assert head[0][1].attr_name == "known"
-    assert (
-        bt.spine_expanded_frame_label(known, positional_encoding="RoPE")
-        == "Known (known)"
-    )
-
-
-def test_additional_block_purpose_fallbacks():
-    assert block_purpose(node("@attention", "AttentionOp", basic=False)) is None
-    assert (
-        block_purpose(node("embedding", "Embedding", role="embedding"))
-        == "Gather rows by token id"
-    )
-    assert (
-        block_purpose(
-            node("gate_activation", "ActivationOp", label="SiLU", basic=False)
-        )
-        is None
-    )
 
 
 def test_substitution_rejections_and_existing_source(monkeypatch):
@@ -1456,26 +1214,6 @@ def test_detail_tree_builder_skips_method_wrappers_and_non_pipeline_items():
         [method_component, late], registry, basic_filter
     )
     assert [tree.attr_name for _, tree in trees] == ["helper"]
-
-
-# --------------------------------------------------------------------------- #
-# Second batch: remaining targeted branches.
-# --------------------------------------------------------------------------- #
-def test_block_purpose_gated_norm_is_structural():
-    from TraceLens.ModelUtils.ast_analyze import GATE_ACTIVATION_DETAIL_PREFIX
-
-    # Recognised by the resolved gate-activation tag, not the class name.
-    n = node(
-        "norm",
-        "AnyNorm",
-        role="norm",
-        basic=False,
-        details=[f"{GATE_ACTIVATION_DETAIL_PREFIX}Sigmoid"],
-    )
-    assert bt.block_purpose(n) == "Normalize, then multiply by gate"
-    # A gated-norm class name alone (no resolved activation) is not enough.
-    plain = node("norm", "FusedRMSNormGated", role="norm", basic=False)
-    assert bt.block_purpose(plain) != "Normalize, then multiply by gate"
 
 
 def test_forward_operation_count_and_subgraph_warrants():
@@ -1617,27 +1355,6 @@ def test_collect_segments_post_merge_side_skip():
     segments = bt.collect_computation_segments(n)
     # producer feeds consumer -> skip_sequential; consumer becomes SideFeed
     assert any(isinstance(s, SideFeedSegment) for s in segments)
-
-
-def test_is_simple_modeled_tile_false_for_method_and_composite():
-    method = node("m", "m", details=["method `m()`"])
-    assert not bt.is_simple_modeled_tile(method)
-    composite = node("c", "C", basic=False, children=[node("a"), node("b")])
-    assert not bt.is_simple_modeled_tile(composite)
-
-
-def test_tile_display_labels_basic_plain():
-    assert bt.tile_display_labels(node("proj", label="Projection")) == (
-        "Projection",
-        None,
-    )
-
-
-def test_tile_display_labels_activation_and_spec_label():
-    act = node("a", "ActivationOp", label="GELU", basic=False)
-    assert bt.tile_display_labels(act) == ("GELU", None)
-    modeled = node("op", "KernelOutput", label="out", basic=False)
-    assert bt.tile_display_labels(modeled, spec_label="Spec")[0] == "out"
 
 
 def test_collect_nested_diagrams_recurses_into_inner(monkeypatch):
@@ -1883,19 +1600,6 @@ def test_build_decoder_block_trees_method_wrapper_skip(monkeypatch):
     monkeypatch.setattr(bt, "is_method_wrapper", lambda n: True)
     trees = bt.build_decoder_block_trees([known], registry, _basic())
     assert trees == []
-
-
-def test_collect_graph_segments_pending_norm_then_plain():
-    norm = node("norm", "RMSNorm", role="norm")
-    mlp = node("mlp", "MLP", role="ffn", basic=False)
-    segments = bt.collect_graph_segments([norm, mlp], [], use_residual=True)
-    assert segments == [("seq", norm), ("seq", mlp)]
-
-
-def test_components_from_registry_present():
-    cls = structure("Reg", assignments={"proj": "Linear"}, calls=["proj"])
-    comps = bt.components_from_registry("Reg", {"Reg": cls})
-    assert isinstance(comps, list)
 
 
 # --------------------------------------------------------------------------- #

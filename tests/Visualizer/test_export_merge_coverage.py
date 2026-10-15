@@ -515,7 +515,7 @@ def test_overview_defaults_order_labels_and_namespaces():
     )
 
 
-def test_overview_forward_labels_and_build_graph():
+def test_overview_forward_labels():
     components = [
         _component("input_layernorm", "norm", class_name="RMSNorm", order=0),
         _component("self_attn", "attention", label="Attention", order=1),
@@ -536,14 +536,6 @@ def test_overview_forward_labels_and_build_graph():
         overview.format_forward_sequence(spec, arrow=" -> ")
         == "RMSNorm -> Attention -> unknown step"
     )
-    graph = overview.build_overview_graph(
-        spec, attr_name_to_graph_id={"self_attn": "attention-detail"}
-    )
-    by_id = {node["id"]: node for node in graph["nodes"]}
-    assert by_id["decoder/self_attn"]["subgraphIds"] == ["attention-detail"]
-    assert by_id["head"]["label"] == "Linear"
-    assert by_id["embed"]["incomingEdges"][0]["sourceNodeId"] == "@input"
-    assert graph["groupNodeAttributes"][""]["forward"].endswith("unknown step")
 
 
 def test_overview_shared_classes_and_style_fallbacks():
@@ -552,12 +544,6 @@ def test_overview_shared_classes_and_style_fallbacks():
     spec = _spec(block_components=[same_a, same_b])
     assert overview._shared_decoder_class_attr_names(spec, "Shared") == ["a", "b"]
     assert overview._section_namespace_segment(spec, same_a) == "a"
-    assert overview._subgraph_ids("a", {"a": "graph"}) == ["graph"]
-    assert overview._subgraph_ids("x", {}) is None
-    assert overview._style_for_component(same_a)["backgroundColor"] == "#5dade2"
-    assert (
-        overview._style_for_component(_component("x"))["backgroundColor"] == "#bdc3c7"
-    )
     assert (
         overview._spine_moe_class(
             _spec(block_components=[_component("moe", "moe", class_name="MoE")])
@@ -725,7 +711,6 @@ def test_shape_format_annotation_and_empty_shape_paths():
     assert shapes.format_shape(spec) == "[B, 2*H, N*D, ]"
     # tensor_shape (edge labels) now uses the same bracket form as node attrs.
     assert shapes.format_shape_tensor(spec) == "[B, 2*H, N*D, ] bfloat16"
-    assert shapes.format_shape_bracket(spec) == "[B, 2×H, N∗D, λ]"
 
     node = {
         "id": "p/key",
@@ -3660,71 +3645,3 @@ def _slice_graph(
             }
         )
     return nodes
-
-
-def test_view_split_folds_onto_its_layout_only_producer():
-    nodes = _slice_graph()
-    merge._elide_view_split_onto_producer(nodes)
-    ids = [n["id"] for n in nodes]
-    assert "unbind" not in ids  # the redundant hop is gone
-    producer = next(n for n in nodes if n["id"] == "permute")
-    # every slice stays visible, re-homed as named ports on the producer
-    assert [p.get("name") for p in producer["outputsMetadata"]] == [
-        "query_states",
-        "key_states",
-    ]
-    assert merge._node_attr(producer, "output_names") == '["q", "k", "v"]'
-    # the downstream consumer now reads from the producer directly
-    consumer = next(n for n in nodes if n["id"] == "q_norm")
-    assert consumer["incomingEdges"][0]["sourceNodeId"] == "permute"
-
-
-def test_view_split_keeps_its_tile_when_the_producer_computes_values():
-    """A fused-weight split's producer genuinely transforms values."""
-    nodes = _slice_graph(producer_label="Linear")
-    merge._elide_view_split_onto_producer(nodes)
-    assert "unbind" in [n["id"] for n in nodes]
-
-
-def test_view_split_keeps_its_tile_when_the_producer_fans_out():
-    """Re-labelling a shared port as slices would corrupt the other consumer."""
-    nodes = _slice_graph(extra_consumer=True)
-    merge._elide_view_split_onto_producer(nodes)
-    assert "unbind" in [n["id"] for n in nodes]
-
-
-def test_view_split_keeps_its_tile_when_the_producer_is_multi_port():
-    nodes = _slice_graph(producer_ports=2)
-    merge._elide_view_split_onto_producer(nodes)
-    assert "unbind" in [n["id"] for n in nodes]
-
-
-def test_view_split_keeps_its_tile_when_the_producer_is_synthetic():
-    nodes = _slice_graph(producer_synthetic=True)
-    merge._elide_view_split_onto_producer(nodes)
-    assert "unbind" in [n["id"] for n in nodes]
-
-
-def test_view_split_keeps_its_tile_without_exactly_one_producer():
-    nodes = _slice_graph(n_incoming=2)
-    merge._elide_view_split_onto_producer(nodes)
-    assert "unbind" in [n["id"] for n in nodes]
-
-
-def test_view_split_ignores_ops_that_are_not_slices():
-    nodes = _slice_graph(split_label="Multiply")
-    merge._elide_view_split_onto_producer(nodes)
-    assert "unbind" in [n["id"] for n in nodes]
-
-
-def test_view_split_without_output_names_still_folds():
-    nodes = _slice_graph(output_names=None)
-    merge._elide_view_split_onto_producer(nodes)
-    assert "unbind" not in [n["id"] for n in nodes]
-
-
-def test_view_split_on_a_missing_producer_is_a_no_op():
-    nodes = _slice_graph()
-    nodes[1]["incomingEdges"] = [{"sourceNodeId": "absent", "sourceNodeOutputId": "0"}]
-    merge._elide_view_split_onto_producer(nodes)
-    assert "unbind" in [n["id"] for n in nodes]

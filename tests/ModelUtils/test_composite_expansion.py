@@ -8,11 +8,7 @@
 
 from __future__ import annotations
 
-from TraceLens.ModelUtils.block_tree import (
-    BlockNode,
-    inline_composite_steps,
-    is_simple_modeled_tile,
-)
+from TraceLens.ModelUtils.block_tree import BlockNode, inline_composite_steps
 
 
 def test_inline_composite_steps_expands_kernel_pipeline_children():
@@ -90,26 +86,6 @@ def test_inline_composite_steps_expands_output_gate_with_activation():
 
     assert wrapper is gate
     assert [step.label for step in steps] == ["Linear", "Sigmoid"]
-
-
-def test_output_gate_is_not_simple_modeled_tile():
-    gate = BlockNode(
-        attr_name="g_proj",
-        class_name="OutputGate",
-        role="gate",
-        label="Output gate",
-        children=[
-            BlockNode(
-                attr_name="linear",
-                class_name="Linear",
-                role="other",
-                label="Linear",
-                is_basic=True,
-            ),
-        ],
-    )
-
-    assert not is_simple_modeled_tile(gate)
 
 
 def test_single_operation_head_is_replaced_inline_without_wrapper():

@@ -598,44 +598,6 @@ def test_rename_generic_output_ports_missing_output_returns_empty():
 # ---------------------------------------------------------------------------
 
 
-def test_remove_transparent_root_output_selects_primary_port():
-    nodes = [
-        {
-            "id": "p/@output",
-            "incomingEdges": [
-                {
-                    "sourceNodeId": "a",
-                    "sourceNodeOutputId": "0",
-                    "targetNodeInputId": "result",
-                },
-                {
-                    "sourceNodeId": "b",
-                    "sourceNodeOutputId": "1",
-                    "targetNodeInputId": "other",
-                },
-            ],
-        }
-    ]
-    ref = merge._remove_transparent_root_output(
-        nodes, id_prefix="p", primary_port="other"
-    )
-    assert ref == ("b", "1")
-    assert not nodes
-
-
-def test_remove_transparent_root_output_none_and_empty():
-    assert (
-        merge._remove_transparent_root_output([], id_prefix="p", primary_port=None)
-        is None
-    )
-    nodes = [{"id": "p/@output", "incomingEdges": []}]
-    assert (
-        merge._remove_transparent_root_output(nodes, id_prefix="p", primary_port=None)
-        is None
-    )
-    assert not nodes
-
-
 # ---------------------------------------------------------------------------
 # _wrap_actual_group_boundary (1379, 1392)
 # ---------------------------------------------------------------------------

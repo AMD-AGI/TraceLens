@@ -30,7 +30,6 @@ from TraceLens.ModelUtils.block_tree import (
     inline_composite_steps,
     inline_wrapper_step_label,
     is_kernel_pipeline_tree,
-    is_straight_line_module,
     is_transparent_inline_expansion,
     is_transparent_loop_wrapper,
     is_method_wrapper,
@@ -2001,24 +2000,6 @@ def _wire_multi_input_op_forward_links(
             graph.links.append((source_index, target_index))
 
 
-def _inline_frame_exit_index(
-    graph: ComputationGraph, member_indices: set[int]
-) -> int | None:
-    exit_candidates = [
-        source
-        for source, target in graph.links
-        if source in member_indices and target not in member_indices
-    ]
-    if exit_candidates:
-        return exit_candidates[-1]
-
-    sources_inside = {
-        source for source, _target in graph.links if source in member_indices
-    }
-    dangling = [index for index in member_indices if index not in sources_inside]
-    return dangling[-1] if dangling else None
-
-
 def _link_output_port_recorded(existing: str | list[str] | None, port: str) -> bool:
     """True when ``port`` is already the (or one of the) recorded output port(s)
     of a graph link.
@@ -2334,11 +2315,6 @@ def _is_pure_generator_source(step: BlockNode) -> bool:
         return False
     ceiling, variadic = _operand_ceiling(_raw_op_from_details(step.details))
     return ceiling == 0 and not variadic
-
-
-def _is_local_operation_port(spec: GraphNodeSpec) -> bool:
-    """True for an external scalar/config operand docked beside one operation."""
-    return spec.synthetic == SYNTHETIC_TENSOR and ":external:" in spec.key
 
 
 def _condition_detail(block: BlockNode | None) -> str | None:
@@ -3243,31 +3219,6 @@ def add_forward_output(
         else next(iter(ports))
     )
     return output_index
-
-
-def add_root_pipeline_frame(
-    graph: ComputationGraph,
-    block: BlockNode,
-    *,
-    label: str | None = None,
-) -> None:
-    """Group all non-input steps of a root block tree in one inline frame."""
-    if not is_straight_line_module(block):
-        return
-    indices = [
-        index
-        for index, spec in enumerate(graph.nodes)
-        if spec.synthetic not in {SYNTHETIC_INPUT, SYNTHETIC_OUTPUT, SYNTHETIC_HIDDEN}
-    ]
-    if len(indices) < 2:
-        return
-    graph.inline_frames.append(
-        InlineFrameSpec(
-            frame_id=block.attr_name,
-            label=label or inline_block_frame_label(block),
-            node_indices=indices,
-        )
-    )
 
 
 def _link_forward_input(

@@ -48,13 +48,11 @@ from TraceLens.ModelUtils.ast_analyze import (
     kernel_kwarg_ports,
     kernel_name_from_step_details,
     tensor_input_label_order,
-    _build_components,
     _classify_role,
     _label_for,
 )
 from TraceLens.ModelUtils.basic_ops import (
     BasicOpFilter,
-    introspect_is_modeling_operation,
     resolve_is_basic,
 )
 from TraceLens.ModelUtils.blocks import (
@@ -93,125 +91,11 @@ def wrapper_bullet_lines(node: BlockNode) -> tuple[str, str]:
     return label, attr
 
 
-def wrapper_bullet(node: BlockNode) -> str:
-    """Human-readable bullet text for a method wrapper."""
-    label, attr = wrapper_bullet_lines(node)
-    if is_method_wrapper(node):
-        return f"{label} ({attr})"
-    if label.replace(" ", "_").strip("_") == attr.strip("_"):
-        return label
-    return f"{label} ({attr})"
-
-
 _SKIP_WRAPPER_COMMENT_ATTRS = frozenset({"tokenization", "embed_tokens"})
 
 _FUNCTIONAL_CALL_DETAIL_RE = re.compile(
     r"(?i)^(?:F\.|torch\.nn\.functional\.)[\w.]+\(\.\.\.\)$"
 )
-
-
-def wrapper_skips_comment(node: BlockNode) -> bool:
-    """True when the wrapped-module panel should omit the descriptive comment line."""
-    attr = node.attr_name.lower()
-    if attr in _SKIP_WRAPPER_COMMENT_ATTRS:
-        return True
-    if node.role == "attention" or attr in {
-        "self_attn",
-        "self_attention",
-        "attn",
-        "attention",
-    }:
-        return True
-    if "residual" in attr:
-        return True
-    return any("residual" in detail.lower() for detail in node.details)
-
-
-def block_purpose(node: BlockNode) -> str | None:
-    """Generic one-line description of what a block computes."""
-    if node.class_name == "AttentionOp" or node.attr_name == SYNTHETIC_ATTENTION:
-        if any("delta rule" in detail.lower() for detail in node.details):
-            return node.details[0] if node.details else None
-        return None
-
-    if node.class_name == "OutputGate" or (node.role == "gate" and node.details):
-        for detail in node.details:
-            cleaned = detail.strip()
-            if cleaned and cleaned != "Linear":
-                return cleaned
-        return None
-
-    if node.class_name == "KernelPipeline":
-        return node.details[0] if node.details else None
-
-    for detail in node.details:
-        cleaned = detail.strip()
-        if (
-            cleaned
-            and not cleaned.startswith("method `")
-            and not cleaned.startswith("kernel:")
-            # ``raw_op: <name>`` is machine metadata for the type-check (lifted to
-            # its own node attr at export), never a human-facing description.
-            and not cleaned.startswith("raw_op:")
-            # ``gate activation: <name>`` is structured metadata resolved at
-            # init time and consumed by ``gated_norm_activation`` to key the
-            # structural gated-norm purpose below; not a human-facing purpose.
-            and not cleaned.startswith(GATE_ACTIVATION_DETAIL_PREFIX)
-        ):
-            if _FUNCTIONAL_CALL_DETAIL_RE.match(cleaned):
-                continue
-            return cleaned
-
-    class_name = node.class_name or ""
-    role = node.role
-    attr = node.attr_name.lower()
-
-    if class_name == "OutputGate" or role == "gate":
-        return "Output gate — scales normalized output"
-    if class_name == "AttentionMerge":
-        for detail in node.details:
-            if detail.startswith("ports:"):
-                return detail.replace("ports:", "ports ·").strip()
-        return None
-    if class_name == "KernelPipeline" and node.details:
-        return node.details[0]
-    if class_name in {"KernelOp", "KernelOutput"}:
-        return None
-    if role == "norm" and gated_norm_activation(node):
-        return "Normalize, then multiply by gate"
-    if class_name == "Split":
-        return "Split fused gate/up projection"
-    if class_name == "ActivationOp":
-        if node.attr_name.endswith("_activation"):
-            return None
-        return f"Apply {node.label} to gate half"
-    if class_name == "Multiply" or node.label in {"×", "Elementwise ×"}:
-        return "Multiply gate and up activations"
-    if role == "head" or attr == "lm_head":
-        return "Project to vocabulary logits"
-    if role == "router" or attr in {"gate", "router"}:
-        return "Score and route tokens to experts"
-    if role == "ffn":
-        return "Position-wise feed-forward transform"
-    if role == "embedding":
-        return "Gather rows by token id"
-    return None
-
-
-def wrapper_module_comment(node: BlockNode) -> str | None:
-    """Short description of what a wrapped module does, when applicable."""
-    if wrapper_skips_comment(node):
-        return None
-    return block_purpose(node)
-
-
-def wrapper_panel_line(node: BlockNode) -> str:
-    """Single panel row: bullet label plus optional inline description."""
-    line = wrapper_bullet(node)
-    comment = wrapper_module_comment(node)
-    if comment:
-        return f"{line} — {comment}"
-    return line
 
 
 def inline_wrapper_step_label(
@@ -377,20 +261,6 @@ def prepare_diagram_section_trees(
     ]
 
 
-def subgraph_warrants_diagram(
-    node: BlockNode,
-    *,
-    basic_ops: BasicOpFilter | None = None,
-    min_operations: int = MIN_SUBGRAPH_OPERATIONS,
-) -> bool:
-    """Alias for :func:`subgraph_warrants_export`."""
-    return subgraph_warrants_export(
-        node,
-        basic_ops=basic_ops,
-        min_operations=min_operations,
-    )
-
-
 _PIPELINE_WRAPPER_ATTRS = frozenset({"tokenization", "tokenizer"})
 
 
@@ -404,41 +274,6 @@ def _is_pipeline_wrapper(node: BlockNode) -> bool:
 def is_kernel_pipeline_tree(node: BlockNode) -> bool:
     """True for derived kernel pipelines rendered as nested trees."""
     return node.class_name == "KernelPipeline" and bool(node.children)
-
-
-def _bypass_spans(node: BlockNode) -> list[tuple[int, int]]:
-    """Step ranges that a tensor skips over on its way to a later step."""
-    step_index = {
-        child.attr_name: index
-        for index, child in enumerate(node.children)
-        if child.attr_name
-    }
-    spans: list[tuple[int, int]] = []
-    for child in node.children:
-        target = step_index.get(child.attr_name)
-        if target is None:
-            continue
-        for name in child.operation_predecessors:
-            source = step_index.get(name)
-            if source is not None and target - source > 1:
-                spans.append((source, target))
-    return spans
-
-
-def _has_overlapping_bypass_spans(node: BlockNode) -> bool:
-    """True when bypassed step ranges nest or cross each other.
-
-    Inline expansion draws a bypass by offsetting the steps it skips into a single
-    side column. Consecutive bypasses reuse that column in turn, but nested or
-    crossing ones would need columns of their own, so the block only reads clearly
-    as a diagram of its own.
-    """
-    spans = _bypass_spans(node)
-    return any(
-        first is not second and first[0] < second[1] and second[0] < first[1]
-        for index, first in enumerate(spans)
-        for second in spans[index + 1 :]
-    )
 
 
 def is_straight_line_module(node: BlockNode) -> bool:
@@ -553,11 +388,6 @@ def straight_line_steps(node: BlockNode) -> list[BlockNode]:
             return [node]
         steps.append(segment.step)
     return steps
-
-
-def linear_pipeline_steps(node: BlockNode) -> list[BlockNode]:
-    """Alias for :func:`straight_line_steps`."""
-    return straight_line_steps(node)
 
 
 def _kernel_inline_frame_label(block: BlockNode) -> str | None:
@@ -1907,15 +1737,6 @@ def _wrap_parallel_gate_children(
     return wrapped
 
 
-def side_producer_has_activation(producer: BlockNode) -> bool:
-    """True when an output-gate side producer already ends with an activation step."""
-    if producer.class_name == "OutputGate":
-        return any(
-            child.attr_name == SYNTHETIC_GATE_ACTIVATION for child in producer.children
-        )
-    return False
-
-
 def gated_norm_activation(node: BlockNode) -> str | None:
     """Return the gate activation applied inside a gated norm module, if resolved.
 
@@ -2188,82 +2009,6 @@ def _is_composite_block(node: BlockNode | None) -> bool:
         and bool(node.children)
         and not is_method_wrapper(node)
     )
-
-
-def is_basic_op_tile(block: BlockNode | None) -> bool:
-    """True when a detail tile uses the gray basic-op styling."""
-    if block is None:
-        return False
-    return block.is_basic or is_simple_modeled_tile(block)
-
-
-def is_simple_modeled_tile(node: BlockNode) -> bool:
-    """Modeled op rendered as a gray tile with operation text (not a role-colored leaf)."""
-    if node.is_basic or is_method_wrapper(node):
-        return False
-    if _is_output_gate_node(node) or is_kernel_pipeline_tree(node):
-        return False
-    if _is_composite_block(node):
-        return False
-    return introspect_is_modeling_operation(
-        node.class_name, node.attr_name, node.details
-    )
-
-
-def tile_sublabel(
-    block: BlockNode | None, *, in_inline_frame: bool = False
-) -> str | None:
-    """Secondary label for a detail tile; in-box sublabels are disabled."""
-    del block, in_inline_frame
-    return None
-
-
-def tile_purpose_annotation(block: BlockNode | None) -> str | None:
-    """Short purpose line rendered below a tile (outside the box).
-
-    Disabled: tile labels already name the operation; extra prose was redundant
-    or incorrect (e.g. RoPE freq/apply descriptions, router step duplicates).
-    """
-    return None
-
-
-def tile_display_labels(
-    block: BlockNode | None,
-    *,
-    spec_label: str | None = None,
-    in_inline_frame: bool = False,
-    port_label: str | None = None,
-    port_style: PortStyle | None = None,
-) -> tuple[str, str | None]:
-    """Primary and secondary labels for a diagram tile from block-tree metadata."""
-    if block is not None and in_inline_frame:
-        return block.label, tile_sublabel(block, in_inline_frame=True)
-
-    if port_label and port_style == "inline":
-        if block is not None and block.is_basic:
-            return block.label, None
-
-    if block is not None and block.is_basic:
-        return block.label, None
-
-    if block is not None and block.class_name == "KernelOp":
-        from TraceLens.ModelUtils.kernel_pipeline import kernel_op_display_label
-
-        return kernel_op_display_label(block.label), None
-
-    if block is not None and block.class_name in {
-        "ActivationOp",
-        "AttentionOp",
-        "KernelPipeline",
-        "KernelOutput",
-    }:
-        return block.label, None
-
-    if block is None:
-        return spec_label or "", None
-
-    sublabel = tile_sublabel(block, in_inline_frame=False)
-    return spec_label or block.label, sublabel
 
 
 def collect_nested_diagrams(
@@ -3163,47 +2908,6 @@ def _input_sources_for_components(
     return upstream_input_sources(components)
 
 
-def build_stack_component_tree(
-    component: BlockComponent,
-    registry: dict[str, ClassStructure],
-    basic_ops: BasicOpFilter,
-) -> BlockNode:
-    """Build a block tree for one main-diagram stack component."""
-    if component.class_name in registry:
-        return build_block_node(
-            attr_name=component.attr_name,
-            class_name=component.class_name,
-            registry=registry,
-            basic_ops=basic_ops,
-            details=list(component.details),
-            forward_order=component.forward_order,
-        )
-    return BlockNode(
-        attr_name=component.attr_name,
-        class_name=component.class_name,
-        role=component.role,
-        label=component.label,
-        forward_order=component.forward_order,
-        details=list(component.details),
-        is_basic=resolve_is_basic(
-            component.class_name,
-            component.attr_name,
-            basic_ops,
-            details=list(component.details),
-            in_registry=False,
-        ),
-    )
-
-
-def spine_expanded_frame_label(
-    component: BlockComponent, *, positional_encoding: str
-) -> str:
-    """Dotted-frame title for a straight-line module expanded on the main spine."""
-    if component.role == "positional":
-        return f"Positional ({positional_encoding}) ({component.attr_name})"
-    return f"{component.label} ({component.attr_name})"
-
-
 def _build_component_block_trees(
     components: list[BlockComponent],
     registry: dict[str, ClassStructure],
@@ -3407,45 +3111,3 @@ def build_full_detailed_block_trees(
     if partition:
         return partition_detail_trees(trees)
     return trees
-
-
-def collect_graph_segments(
-    nodes: list[BlockNode],
-    norm_before: list[str],
-    *,
-    use_residual: bool,
-) -> list[tuple[str, ...]]:
-    """Split ordered nodes into sequential steps and norm→module (+residual) sublayers."""
-    segments: list[tuple[str, ...]] = []
-    pending_norm: BlockNode | None = None
-    norm_pairs = set(norm_before)
-
-    for node in nodes:
-        if node.role == "norm":
-            pending_norm = node
-            continue
-
-        if use_residual and pending_norm is not None and node.attr_name in norm_pairs:
-            segments.append(("sublayer", pending_norm, node))
-            pending_norm = None
-            continue
-
-        if pending_norm is not None:
-            segments.append(("seq", pending_norm))
-            pending_norm = None
-        segments.append(("seq", node))
-
-    if pending_norm is not None:
-        segments.append(("seq", pending_norm))
-    return segments
-
-
-def components_from_registry(
-    class_name: str,
-    registry: dict[str, ClassStructure],
-) -> list[BlockComponent]:
-    """Rebuild BlockComponent list for a class in the registry."""
-    cls = registry.get(class_name)
-    if cls is None:
-        return []
-    return _build_components(cls)

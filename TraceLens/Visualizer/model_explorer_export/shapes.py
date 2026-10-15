@@ -91,12 +91,6 @@ def format_shape_tensor(spec: TensorSpec) -> str:
     return f"{dims} {spec.dtype}"
 
 
-def format_shape_bracket(spec: TensorSpec) -> str:
-    """Legacy bracket form kept for operator JSON consumers."""
-    inner = ", ".join(str(dim) for dim in spec.shape)
-    return f"[{inner}]"
-
-
 def _apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
     display_text = format_shape_with_dtype(spec)
     if not display_text:

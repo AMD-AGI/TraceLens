@@ -298,28 +298,3 @@ def computation_graph_to_explorer_graph(
             }
         }
     return graph
-
-
-def attach_subgraph_links(
-    graphs: list[dict[str, Any]],
-    *,
-    attr_name_to_graph_id: dict[str, str],
-) -> None:
-    """Attach ``subgraphIds`` to nodes that reference nested computation graphs."""
-    for graph in graphs:
-        graph_id = graph["id"]
-        for node in graph.get("nodes", []):
-            candidate_ids: list[str] = []
-            node_id = node.get("id")
-            if isinstance(node_id, str) and node_id in attr_name_to_graph_id:
-                candidate_ids.append(attr_name_to_graph_id[node_id])
-            for attr in node.get("attrs", []):
-                if attr.get("key") != "attr_name":
-                    continue
-                attr_name = attr.get("value")
-                if isinstance(attr_name, str) and attr_name in attr_name_to_graph_id:
-                    candidate_ids.append(attr_name_to_graph_id[attr_name])
-
-            linked = sorted({sub_id for sub_id in candidate_ids if sub_id != graph_id})
-            if linked:
-                node["subgraphIds"] = linked

@@ -653,12 +653,6 @@ def _step_matches_flags(step: KernelPipelineStep, flags: dict[str, str | bool]) 
     return True
 
 
-def _details_for_call(source: str, call_name: str) -> list[str]:
-    """Extract display detail strings from kernel source when present."""
-    del source, call_name
-    return []
-
-
 def _statement_computation(stmt: ast.stmt) -> str:
     """Return the source-level computation performed by one forward statement."""
     try:
@@ -1329,10 +1323,6 @@ def _extract_triton_computation_ops(func: ast.FunctionDef) -> list[ComputationOp
 
     walk(func.body)
     return [op for op in ops if op.label not in {"+"}]
-
-
-def _extract_triton_computation_labels(func: ast.FunctionDef) -> list[str]:
-    return [op.label for op in _extract_triton_computation_ops(func)]
 
 
 def _launched_triton_kernel_name(func: ast.FunctionDef) -> str | None:

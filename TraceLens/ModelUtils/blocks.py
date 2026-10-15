@@ -66,30 +66,6 @@ def ordered_components(components: list[BlockComponent]) -> list[BlockComponent]
     )
 
 
-def collect_norm_module_pairs(
-    components: list[BlockComponent],
-) -> list[tuple[BlockComponent, BlockComponent]]:
-    """Pair each norm with every compute module it feeds before the next norm."""
-    pairs: list[tuple[BlockComponent, BlockComponent]] = []
-    pending_norm: BlockComponent | None = None
-    paired_order: int | None = None
-    for comp in ordered_components(components):
-        if comp.role == "norm":
-            pending_norm = comp
-            paired_order = None
-            continue
-        if pending_norm is None:
-            continue
-        if paired_order is None:
-            paired_order = comp.forward_order
-        elif comp.forward_order != paired_order:
-            pending_norm = None
-            paired_order = None
-            continue
-        pairs.append((pending_norm, comp))
-    return pairs
-
-
 def input_source_label(component: BlockComponent) -> str:
     """Return the AST-derived diagram label for an upstream module."""
     return component.label
@@ -142,11 +118,6 @@ def upstream_input_sources(components: list[BlockComponent]) -> dict[str, str]:
         )
         sources[comp.attr_name] = input_source_label(upstream)
     return sources
-
-
-def norm_input_sources(components: list[BlockComponent]) -> dict[str, str]:
-    """Backwards-compatible alias for upstream_input_sources."""
-    return upstream_input_sources(components)
 
 
 @dataclass

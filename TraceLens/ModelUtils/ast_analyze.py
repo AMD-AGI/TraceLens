@@ -2044,32 +2044,6 @@ def _is_size_call(node: ast.AST) -> bool:
     )
 
 
-def _assign_target(stmt: ast.AST) -> str | None:
-    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-        target = stmt.targets[0]
-        if isinstance(target, ast.Name):
-            return target.id
-    return None
-
-
-def _if_has_competing_assigns(if_node: ast.If) -> bool:
-    if_targets = {
-        _assign_target(stmt)
-        for branch_stmt in if_node.body
-        for stmt in ast.walk(branch_stmt)
-        if isinstance(stmt, ast.Assign)
-    }
-    if_targets.discard(None)
-    for branch_stmt in if_node.orelse:
-        for stmt in ast.walk(branch_stmt):
-            if not isinstance(stmt, ast.Assign):
-                continue
-            target = _assign_target(stmt)
-            if target is not None and target in if_targets:
-                return True
-    return False
-
-
 def _alternate_forward_dispatches(func: ast.FunctionDef) -> set[str]:
     """Private helpers invoked only via early-return branches (alternate forward paths)."""
     dispatches: set[str] = set()

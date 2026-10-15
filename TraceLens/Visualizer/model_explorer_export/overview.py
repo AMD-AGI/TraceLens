@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-import re
-from typing import Any
 
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.block_tree import (
@@ -25,12 +23,6 @@ from TraceLens.ModelUtils.block_tree import (
 )
 from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant
 from TraceLens.ModelUtils.extract import ArchitectureSpec, architecture_section_trees
-
-from TraceLens.Visualizer.model_explorer_export.styles import (
-    ROLE_COLORS,
-    ensure_readable_text,
-    spine_tile_style,
-)
 
 
 def _stack_pre_components(spec: ArchitectureSpec) -> list[BlockComponent]:
@@ -314,141 +306,9 @@ def _flat_spine_namespace(
     return namespace_prefix
 
 
-def _style_for_component(component: BlockComponent) -> dict[str, str] | None:
-    if component.role in {"attention", "moe", "ffn"} and component.role in ROLE_COLORS:
-        return ensure_readable_text(dict(ROLE_COLORS[component.role]))
-    return ensure_readable_text(spine_tile_style())
-
-
 def _edge(source_id: str, target_id: str) -> dict[str, str]:
     return {
         "sourceNodeId": source_id,
         "sourceNodeOutputId": "0",
         "targetNodeInputId": "0",
-    }
-
-
-def _subgraph_ids(
-    attr_name: str, attr_name_to_graph_id: dict[str, str]
-) -> list[str] | None:
-    graph_id = attr_name_to_graph_id.get(attr_name)
-    return [graph_id] if graph_id else None
-
-
-def build_overview_graph(
-    spec: ArchitectureSpec,
-    *,
-    attr_name_to_graph_id: dict[str, str],
-    graph_id: str = "model",
-) -> dict[str, Any]:
-    """Build the main model spine graph for the overview layer."""
-    nodes: list[dict[str, Any]] = []
-    incoming: dict[str, list[dict[str, str]]] = {}
-    previous_id = "@input"
-
-    def append_node(
-        node_id: str,
-        label: str,
-        *,
-        namespace: str = "",
-        component: BlockComponent | None = None,
-    ) -> None:
-        nonlocal previous_id
-        node: dict[str, Any] = {
-            "id": node_id,
-            "label": label,
-            "namespace": namespace,
-        }
-        attrs: list[dict[str, str]] = []
-        if component is not None:
-            attrs.extend(
-                [
-                    {"key": "attr_name", "value": component.attr_name},
-                    {"key": "class_name", "value": component.class_name},
-                    {"key": "role", "value": component.role},
-                ]
-            )
-        if attrs:
-            node["attrs"] = attrs
-        if component is not None:
-            style = _style_for_component(component)
-            if style:
-                node["style"] = style
-            linked = _subgraph_ids(component.attr_name, attr_name_to_graph_id)
-            if linked:
-                node["subgraphIds"] = linked
-        incoming.setdefault(node_id, []).append(_edge(previous_id, node_id))
-        nodes.append(node)
-        previous_id = node_id
-
-    nodes.append(
-        {
-            "id": "@input",
-            "label": "Tokenized text",
-            "namespace": "",
-            "attrs": [{"key": "synthetic", "value": "@input"}],
-            "style": ensure_readable_text(
-                {"backgroundColor": "#d9e8f5", "textColor": "#1a1a1a"}
-            ),
-        }
-    )
-
-    for component in _stack_pre_components(spec):
-        append_node(
-            component.attr_name,
-            _display_label(component, spec),
-            component=component,
-        )
-
-    decoder_namespace = _decoder_namespace(spec)
-    for component in _ordered_decoder_components(spec):
-        append_node(
-            f"decoder/{component.attr_name}",
-            _display_label(component, spec),
-            namespace=decoder_namespace,
-            component=component,
-        )
-
-    for component in _stack_tail_components(spec):
-        append_node(
-            component.attr_name,
-            _display_label(component, spec),
-            component=component,
-        )
-
-    for node in nodes:
-        node_id = node["id"]
-        if node_id in incoming:
-            node["incomingEdges"] = incoming[node_id]
-
-    model_attrs: dict[str, str] = {
-        "title": spec.name,
-        "model_type": spec.model_type,
-        "decoder": spec.decoder_type,
-        "layers": str(spec.num_hidden_layers or "?"),
-    }
-    if spec.forward_sequence:
-        model_attrs["forward"] = format_forward_sequence(spec)
-    if spec.decoder_class:
-        model_attrs["decoder_class"] = spec.decoder_class
-
-    return {
-        "id": graph_id,
-        "nodes": nodes,
-        "groupNodeAttributes": {
-            "": model_attrs,
-            decoder_namespace: {
-                "repeat": _decoder_namespace(spec),
-                "forward": format_forward_sequence(spec),
-            },
-        },
-        "groupNodeConfigs": [
-            {
-                "namespaceRegex": re.escape(decoder_namespace),
-                "backgroundColor": "#fff5f4",
-                "borderColor": "#c0392b",
-                "textColor": "#1a1a1a",
-                "layoutDirection": "TOP_BOTTOM",
-            }
-        ],
     }

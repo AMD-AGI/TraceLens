@@ -25,7 +25,6 @@ from TraceLens.ModelUtils.computation_graph import (
 from TraceLens.ModelUtils.extract import load_architecture
 
 from TraceLens.Visualizer.model_explorer_export.adapter import (
-    attach_subgraph_links,
     computation_graph_to_explorer_graph,
 )
 from TraceLens.Visualizer.model_explorer_export.ast_build import (
@@ -191,28 +190,6 @@ def test_inline_frames_become_namespaces():
     if computation.inline_frames:
         namespaced = [node for node in graph["nodes"] if node["namespace"]]
         assert namespaced
-
-
-def test_attach_subgraph_links():
-    main = {
-        "id": "decoder",
-        "nodes": [
-            {
-                "id": "self_attn",
-                "label": "Attention",
-                "namespace": "",
-                "attrs": [{"key": "attr_name", "value": "self_attn"}],
-            }
-        ],
-    }
-    nested = {
-        "id": "self_attn",
-        "nodes": [{"id": "q_proj", "label": "Linear", "namespace": ""}],
-    }
-    attach_subgraph_links(
-        [main, nested], attr_name_to_graph_id={"self_attn": "self_attn"}
-    )
-    assert main["nodes"][0]["subgraphIds"] == ["self_attn"]
 
 
 def test_merged_sections_include_input_ports():

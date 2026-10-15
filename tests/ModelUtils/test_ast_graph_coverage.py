@@ -790,8 +790,6 @@ def test_graph_node_helpers_outputs_frames_and_pruning():
     assert graph.links == [(0, 1), (1, 2), (2, 3)]
     assert cg.add_forward_output(graph, label="Result") == 3
     assert graph.links[-1] == (2, 3)
-    cg.add_root_pipeline_frame(graph, root)
-    assert graph.inline_frames[-1].node_indices == [1, 2]
 
     excluded = cg.ComputationGraph(
         nodes=[cg.GraphNodeSpec(key="only", block=a)],

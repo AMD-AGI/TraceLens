@@ -129,14 +129,6 @@ def test_reads_only_a_side_parameter():
     assert not cg._reads_only_a_side_parameter(with_pred)
 
 
-def test_is_local_operation_port():
-    ext = _spec(synthetic=cg.SYNTHETIC_TENSOR, key="foo:external:scale")
-    assert cg._is_local_operation_port(ext)
-    assert not cg._is_local_operation_port(
-        _spec(synthetic=cg.SYNTHETIC_TENSOR, key="x")
-    )
-
-
 def test_condition_detail():
     assert cg._condition_detail(None) is None
     assert cg._condition_detail(_node("x", details=["note"])) is None
@@ -746,17 +738,6 @@ def test_strip_dangling_leaves():
     assert cg._strip_dangling_leaves(graph2) is graph2
 
 
-def test_inline_frame_exit_index():
-    graph = cg.ComputationGraph(
-        nodes=[_spec(), _spec(), _spec()],
-        links=[(0, 1), (1, 2)],
-    )
-    # member {0,1} → exit is source 1 (points outside).
-    assert cg._inline_frame_exit_index(graph, {0, 1}) == 1
-    # member {0,1,2} with no outgoing edge outside → dangling last.
-    assert cg._inline_frame_exit_index(graph, {0, 1, 2}) == 2
-
-
 # --------------------------------------------------------------------------- #
 # Loop frames / carried nodes
 # --------------------------------------------------------------------------- #
@@ -905,29 +886,6 @@ def test_add_forward_output_multi_exit_and_primary_index():
     )
     cg.add_forward_output(graph)
     assert set(graph.output_ports) == {"result_1", "result_2"}
-
-
-def test_add_root_pipeline_frame(monkeypatch):
-    a = _node("a", is_basic=True)
-    b = _node("b", is_basic=True)
-    root = _node("root", class_name="Pipeline", children=[a, b], input_label="tokens")
-    graph = cg.build_computation_graph(root)
-    cg.add_root_pipeline_frame(graph, root)
-    assert graph.inline_frames[-1].node_indices
-
-    # Not a straight-line module → no frame added.
-    monkeypatch.setattr(cg, "is_straight_line_module", lambda block: False)
-    g2 = cg.ComputationGraph(nodes=[_spec(), _spec()])
-    cg.add_root_pipeline_frame(g2, root)
-    assert not g2.inline_frames
-
-    # Straight-line but fewer than 2 non-io nodes → no frame.
-    monkeypatch.setattr(cg, "is_straight_line_module", lambda block: True)
-    g3 = cg.ComputationGraph(
-        nodes=[_spec(synthetic=cg.SYNTHETIC_INPUT), _spec(block=_node("only"))]
-    )
-    cg.add_root_pipeline_frame(g3, root)
-    assert not g3.inline_frames
 
 
 # --------------------------------------------------------------------------- #

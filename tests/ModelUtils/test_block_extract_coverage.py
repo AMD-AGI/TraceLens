@@ -35,35 +35,23 @@ from TraceLens.ModelUtils.block_tree import (
     SideCombineSegment,
     SideFeedSegment,
     TensorPortsSegment,
-    block_purpose,
     build_block_node,
     collect_computation_segments,
-    collect_graph_segments,
     collect_method_wrappers,
     collect_parallel_gate_wrappers,
-    components_from_registry,
     gated_norm_activation,
     inline_block_frame_label,
     inline_composite_steps,
-    is_basic_op_tile,
     is_inline_expandable_module,
     is_method_wrapper,
-    is_simple_modeled_tile,
     is_single_function_tree,
     is_straight_line_module,
     partition_detail_trees,
-    side_producer_has_activation,
-    spine_expanded_frame_label,
     straight_line_steps,
-    tile_display_labels,
-    wrapper_bullet,
-    wrapper_panel_line,
-    wrapper_skips_comment,
 )
 from TraceLens.ModelUtils.blocks import (
     BlockComponent,
     CodeAnalysis,
-    collect_norm_module_pairs,
     input_sources_from_forward_sequence,
     ordered_components,
     upstream_input_sources,
@@ -225,12 +213,6 @@ def test_component_order_norm_pairs_and_sources():
         "parallel",
         "late",
         "unknown",
-    ]
-    assert [
-        (a.attr_name, b.attr_name) for a, b in collect_norm_module_pairs(comps)
-    ] == [
-        ("norm", "attn"),
-        ("norm", "parallel"),
     ]
     assert upstream_input_sources(comps) == {
         "attn": "Norm",
@@ -598,15 +580,6 @@ def test_wrapper_labels_comments_and_purpose():
         details=["method `_update_state()`"],
     )
     assert is_method_wrapper(method)
-    assert wrapper_bullet(method) == "update state (_update_state)"
-    assert wrapper_panel_line(method) == "update state (_update_state)"
-
-    ffn = node("mlp", "MLP", role="ffn", label="MLP", basic=False)
-    assert block_purpose(ffn) == "Position-wise feed-forward transform"
-    assert wrapper_panel_line(ffn) == "mlp — Position-wise feed-forward transform"
-    assert wrapper_skips_comment(node("self_attn", "Attention", role="attention"))
-    assert wrapper_skips_comment(node("residual_add", "Add"))
-    assert not wrapper_skips_comment(ffn)
 
 
 def test_gated_norm_and_tile_helpers():
@@ -626,10 +599,6 @@ def test_gated_norm_and_tile_helpers():
         gated_norm_activation(node("norm", "SomeNormGated", role="norm", basic=False))
         is None
     )
-    assert is_simple_modeled_tile(gated)
-    assert is_basic_op_tile(gated)
-    assert tile_display_labels(gated, spec_label="Norm")[0] == "Norm"
-    assert tile_display_labels(None, spec_label="Unknown") == ("Unknown", None)
 
 
 def test_collect_straight_line_steps_and_partitioning():
@@ -802,15 +771,6 @@ def test_method_and_parallel_gate_collection():
     assert collect_method_wrappers(root) == [method]
     assert collect_parallel_gate_wrappers(root) == [gate]
 
-    wrapped_gate = node(
-        "gate",
-        "OutputGate",
-        role="gate",
-        basic=False,
-        children=[node("@gate_activation", "ActivationOp", basic=False)],
-    )
-    assert side_producer_has_activation(wrapped_gate)
-
 
 def test_build_block_node_handles_registry_leaf_recursion_and_methods():
     basic_filter = BasicOpFilter.for_detailed()
@@ -848,109 +808,6 @@ def test_build_block_node_handles_registry_leaf_recursion_and_methods():
         ).is_basic
         is False
     )
-    assert components_from_registry("missing", registry) == []
-
-
-def test_graph_segments_and_spine_labels():
-    norm = node("norm", "RMSNorm", role="norm")
-    attn = node("attn", "Attention", role="attention", basic=False)
-    mlp = node("mlp", "MLP", role="ffn", basic=False)
-
-    segments = collect_graph_segments([norm, attn, mlp], ["attn"], use_residual=True)
-    assert segments == [("sublayer", norm, attn), ("seq", mlp)]
-    assert collect_graph_segments([norm], [], use_residual=False) == [("seq", norm)]
-
-    positional = BlockComponent(
-        "rotary",
-        "RotaryEmbedding",
-        "positional",
-        "RoPE",
-    )
-    assert (
-        spine_expanded_frame_label(positional, positional_encoding="RoPE")
-        == "Positional (RoPE) (rotary)"
-    )
-
-
-@pytest.mark.parametrize(
-    ("candidate", "expected"),
-    [
-        (
-            node(
-                "@attention",
-                "AttentionOp",
-                basic=False,
-                details=["delta rule recurrence"],
-            ),
-            "delta rule recurrence",
-        ),
-        (node("gate", "OutputGate", role="gate", basic=False), None),
-        (
-            node(
-                "gate",
-                "OutputGate",
-                role="gate",
-                basic=False,
-                details=["Linear", "Sigmoid"],
-            ),
-            "Sigmoid",
-        ),
-        (
-            node(
-                "pipeline",
-                "KernelPipeline",
-                basic=False,
-                details=["kernel pipeline · scan"],
-            ),
-            "kernel pipeline · scan",
-        ),
-        (
-            node(
-                "conv",
-                "ShortConvolution",
-                label="Short Conv",
-                basic=False,
-                details=["depthwise conv"],
-            ),
-            "depthwise conv",
-        ),
-        (
-            node(
-                "merge",
-                "AttentionMerge",
-                basic=False,
-                details=["ports:q,k,v"],
-            ),
-            "ports:q,k,v",
-        ),
-        (node("op", "KernelOp", basic=False), None),
-        (node("lm_head", "Linear", role="head"), "Project to vocabulary logits"),
-        (
-            node("router", "Router", role="router", basic=False),
-            "Score and route tokens to experts",
-        ),
-        (
-            node(
-                "gate_up_split",
-                "Split",
-                basic=False,
-                label="Split",
-            ),
-            "Split fused gate/up projection",
-        ),
-        (
-            node(
-                "mul",
-                "Multiply",
-                basic=False,
-                label="×",
-            ),
-            "Multiply gate and up activations",
-        ),
-    ],
-)
-def test_block_purpose_specialized_branches(candidate, expected):
-    assert block_purpose(candidate) == expected
 
 
 def test_block_purpose_skips_functional_details_and_formats_fused_ops():
@@ -969,9 +826,6 @@ def test_block_purpose_skips_functional_details_and_formats_fused_ops():
         basic=False,
     )
 
-    assert block_purpose(fused) is None
-    assert block_purpose(activation) == "Apply GELU to gate half"
-    assert bt.wrapper_module_comment(node("embed_tokens", "Embedding")) is None
     assert bt.inline_wrapper_step_label(fused, activation, 0) == "GELU"
     assert bt.inline_wrapper_step_label(fused, activation, 1) is None
 
@@ -1027,8 +881,6 @@ def test_bypass_span_detection_and_pipeline_exclusions():
         children=[one, two, three, four],
     )
 
-    assert bt._bypass_spans(crossing) == [(0, 2), (1, 3)]
-    assert bt._has_overlapping_bypass_spans(crossing)
     assert is_straight_line_module(crossing)
     assert not is_straight_line_module(
         node(
@@ -1131,25 +983,6 @@ def test_output_gate_wrapping():
     assert [child.label for child in wrapped[0].children] == ["Linear", "Sigmoid"]
 
 
-def test_tile_display_label_branches(monkeypatch):
-    basic = node("proj", label="Projection")
-    kernel = node("scan", "KernelOp", label="chunk_scan", basic=False)
-    activation = node("act", "ActivationOp", label="SiLU", basic=False)
-
-    monkeypatch.setattr(
-        "TraceLens.ModelUtils.kernel_pipeline.kernel_op_display_label",
-        lambda label: f"display:{label}",
-    )
-    assert tile_display_labels(basic, in_inline_frame=True) == ("Projection", None)
-    assert tile_display_labels(basic, port_label="q", port_style="inline") == (
-        "Projection",
-        None,
-    )
-    assert tile_display_labels(kernel) == ("display:chunk_scan", None)
-    assert tile_display_labels(activation) == ("SiLU", None)
-    assert not is_basic_op_tile(None)
-
-
 def test_collect_nested_diagrams_assigns_source_and_deduplicates(monkeypatch):
     nested = node(
         "nested",
@@ -1241,8 +1074,6 @@ def test_stack_tree_builders_cover_registry_and_leaf_paths():
     external = BlockComponent("external", "External", "other", "External", 2)
     norm = BlockComponent("norm", "RMSNorm", "norm", "Norm", 0)
 
-    assert bt.build_stack_component_tree(known, registry, basic_filter).children
-    assert not bt.build_stack_component_tree(external, registry, basic_filter).is_basic
     pipeline = bt.build_pipeline_block_trees(
         stack_pre=[external, norm],
         registry=registry,
@@ -1256,10 +1087,6 @@ def test_stack_tree_builders_cover_registry_and_leaf_paths():
     )
     assert [tree.attr_name for _, tree in pipeline] == ["norm", "external"]
     assert head[0][1].attr_name == "known"
-    assert (
-        bt.spine_expanded_frame_label(known, positional_encoding="RoPE")
-        == "Known (known)"
-    )
 
 
 def test_resolve_checkpoint_from_github_config(monkeypatch, tmp_path):
@@ -1457,25 +1284,6 @@ def test_layer_repeat_long_predicates_parsing_and_literals():
 )
 def test_safe_condition_decider_operations(expression, layer, expected):
     assert repeat._decide_condition(expression, layer) is expected
-
-
-def test_additional_block_purpose_fallbacks():
-    assert block_purpose(node("@attention", "AttentionOp", basic=False)) is None
-    assert (
-        block_purpose(node("embedding", "Embedding", role="embedding"))
-        == "Gather rows by token id"
-    )
-    assert (
-        block_purpose(
-            node(
-                "gate_activation",
-                "ActivationOp",
-                label="SiLU",
-                basic=False,
-            )
-        )
-        is None
-    )
 
 
 def test_substitution_rejections_and_existing_source(monkeypatch):
