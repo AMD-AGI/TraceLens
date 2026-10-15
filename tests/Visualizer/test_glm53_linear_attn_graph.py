@@ -21,6 +21,7 @@ from TraceLens.ModelUtils.computation_graph import (
     add_forward_output,
     build_computation_graph,
 )
+from TraceLens.ModelUtils.ast_analyze import PHI_LABEL
 from TraceLens.ModelUtils.loader import load_model_spec
 from TraceLens.ModelUtils.shape_inference import ShapeInferencer
 
@@ -732,7 +733,7 @@ def test_glm53_linear_attention_branch_merge_and_slice_in_merged_graph():
     ]
     (t_src,) = _activation_incoming(transpose, node_by_id)
     merge = node_by_id[t_src["sourceNodeId"]]
-    assert merge.get("label") == "Merge", merge["id"]
+    assert merge.get("label") == PHI_LABEL, merge["id"]
     assert merge["id"].endswith(":@op_l661_c8_merge:0"), merge["id"]
     assert len(_activation_incoming(transpose, node_by_id)) == 1
 
@@ -3543,8 +3544,11 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     for node_id in variant_inputs:
         assert _sources(node_id) == {"@model_forward/@op_l1477_c24_contiguous"}
 
-    # The hyper-head reads the three variant ``@output``s directly (no loop-out
-    # intermediary), and the final norm still follows the head, unchanged.
+    # The three variants are mutually exclusive -- exactly one is what any given
+    # layer IS -- so they converge in a phi and the hyper-head reads ONE tensor.
+    # Wiring all three into it drew three tensors arriving at once, and made the
+    # head, a ``mean``, look like it took three operands. Still no loop-out
+    # intermediary on the arms, and the final norm still follows the head.
     variant_outputs = {
         node["id"]
         for node in nodes
@@ -3553,7 +3557,11 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
         and node["id"].count("/") == 2
     }
     assert len(variant_outputs) == 3
-    assert _sources("hc_head") == variant_outputs
+    phi = _sources("hc_head")
+    assert len(phi) == 1, phi
+    phi_id = next(iter(phi))
+    assert by_id[phi_id].get("label") == PHI_LABEL, phi_id
+    assert _sources(phi_id) == variant_outputs
     assert _sources("norm/@input") == {"hc_head"}
 
     # The hidden_states spine keeps its direct wiring: it is never surfaced as an

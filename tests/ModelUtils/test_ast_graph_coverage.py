@@ -228,7 +228,7 @@ def forward(self, x, flag):
     )
     by_label = lambda label: [op for op in analysis.operations if op.label == label]
 
-    merges = by_label("Merge")
+    merges = by_label(aa.PHI_LABEL)
     assert len(merges) == 1, [op.label for op in analysis.operations]
     merge = merges[0]
     # The Merge carries the branch condition and joins the two branch producers.

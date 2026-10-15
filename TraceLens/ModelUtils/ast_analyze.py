@@ -1532,6 +1532,15 @@ FORWARD_METHOD_INPUT = "@method_input"
 FORWARD_METHOD_INPUT_PREFIX = FORWARD_METHOD_INPUT + ":"
 
 
+#: What a phi is DISPLAYED as. Its identity stays ``PHI_CLASS``: a label is for
+#: a reader, and every rule that has to recognise this node keys on the class.
+PHI_LABEL = "Mutually exclusive branch"
+#: The phi's stable identity. Free of any torch op -- no aten schema anywhere
+#: contains "merge" (``torch.select`` does exist, which is why that name was
+#: rejected), so nothing can mistake this node for an operator.
+PHI_CLASS = "Merge"
+
+
 def is_method_input(name: str) -> bool:
     """True for the frame boundary token, shared or per-parameter."""
     return name == FORWARD_METHOD_INPUT or str(name).startswith(
@@ -5575,7 +5584,7 @@ class _ForwardOperationExtractor:
         reachable while giving downstream consumers a single tensor to read. The
         node is built directly (not via ``_emit``) and carries no ``raw_op``,
         so the arity type-check skips it (a phi legitimately takes N tensor
-        operands). It is labelled ``Merge``, NOT ``Select``: ``torch.select`` is
+        operands). It is labelled ``Mutually exclusive branch``, NOT ``Select``: ``torch.select`` is
         equivalent to slicing and removes a dimension, so borrowing that name for
         a node whose output has the same shape as each arm reads as an op that
         failed to do what it says. ``Merge`` is what a dataflow graph calls this
@@ -5594,8 +5603,8 @@ class _ForwardOperationExtractor:
         self.operations.append(
             ForwardOperation(
                 attr_name=attr_name,
-                label="Merge",
-                class_name="Merge",
+                label=PHI_LABEL,
+                class_name=PHI_CLASS,
                 predecessors=producers,
                 # NOT a ``condition:`` detail: that key is how
                 # ``block_tree._dead_forward_steps`` finds ops a variant's absent

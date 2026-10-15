@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import textwrap
 
+from TraceLens.ModelUtils.ast_analyze import PHI_LABEL
 from TraceLens.ModelUtils.ast_analyze import analyze_source
 
 _HEADER = """class M(nn.Module):
@@ -63,7 +64,7 @@ class TestCacheUpdateIsAPassthrough:
                 )
             return key_states + value_states
             """)
-        merges = [attr for attr, label in ops.items() if label == "Merge"]
+        merges = [attr for attr, label in ops.items() if label == PHI_LABEL]
         assert merges == [], (merges, ops)
 
     def test_a_call_that_renames_what_it_is_given_still_merges(self) -> None:
@@ -79,7 +80,7 @@ class TestCacheUpdateIsAPassthrough:
                 key_states = other_key
             return key_states + value_states
             """)
-        assert "Merge" in ops.values(), ops
+        assert PHI_LABEL in ops.values(), ops
 
     def test_a_method_on_self_is_not_treated_as_opaque(self) -> None:
         """``self.<attr>`` is resolvable, so it must keep its normal wiring."""

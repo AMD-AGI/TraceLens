@@ -15,6 +15,8 @@ from typing import Any
 
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.ast_analyze import (
+    PHI_CLASS,
+    PHI_LABEL,
     _pick_stack_model_class,
     base_submodule_attr,
     expand_class_forward_dataflow,
@@ -2130,6 +2132,121 @@ def _collapse_mirror_boundary_passthroughs(nodes: list[dict[str, Any]]) -> None:
 
     if removed:
         nodes[:] = [node for node in nodes if str(node["id"]) not in removed]
+
+
+def _converge_layer_variants_through_a_phi(nodes: list[dict[str, Any]]) -> None:
+    """Mutually-exclusive layer variants converge in a Merge, not side by side.
+
+    A repeat stack whose layers are not all alike is drawn as one group per
+    variant -- GLM's decoder splits into ``31x_``/``11x_``/``3x_``, DeepSeek's
+    into four. Exactly one of them is what any given layer IS, so they are
+    alternatives; but each group's output was wired straight to whatever follows
+    the stack, so the reader saw three tensors arriving at once. GLM's
+    ``hc_head``, a ``mean``, appeared to take three operands, and the operand
+    contract of every such consumer was unreadable in the same way.
+
+    The graph already has a name for arms that converge: the ``Merge`` phi
+    ``ast_analyze`` emits for the two arms of an unresolved ``if`` -- forward
+    whichever is live, same shape as each arm. Deliberately ``Merge`` and not
+    ``Select``: ``torch.select`` slices and drops an axis, which is not what
+    this does. The same node is owed here, for the same reason, one rank up.
+
+    The phi sits in the scope that CONTAINS the variant groups, since that is
+    where the choice between them is made, and the consumer then reads one
+    tensor.
+    """
+    by_id = {str(node["id"]): node for node in nodes}
+
+    def variant_of(node: dict[str, Any] | None) -> tuple[str, str] | None:
+        """``(scope holding the variants, which variant)`` for a node inside one."""
+        if node is None:
+            return None
+        parts = [p for p in str(node.get("namespace") or "").split("/") if p]
+        # The INNERMOST repeat segment. A variant stack nests inside its own
+        # ``45x_`` wrapper, and that outer one is the stack itself -- reading it
+        # as the variant makes all three arms look like the same one.
+        for depth in range(len(parts) - 1, -1, -1):
+            if _REPEAT_SEGMENT_RE.match(parts[depth]):
+                return "/".join(parts[:depth]), parts[depth]
+        return None
+
+    additions: list[dict[str, Any]] = []
+    for node in nodes:
+        edges = node.get("incomingEdges", []) or []
+        if len(edges) < 2:
+            continue
+        # Per scope, at most one edge per variant: two edges out of the SAME
+        # group are two tensors and nothing is being chosen between them.
+        arms: dict[str, dict[str, dict[str, Any]]] = {}
+        for edge in edges:
+            found = variant_of(by_id.get(str(edge.get("sourceNodeId"))))
+            if found is None:
+                continue
+            parent, variant = found
+            by_variant = arms.setdefault(parent, {})
+            if variant in by_variant:
+                by_variant[variant] = None  # type: ignore[assignment]
+            else:
+                by_variant[variant] = edge
+        for parent, by_variant in arms.items():
+            group = [edge for edge in by_variant.values() if edge is not None]
+            if len(group) < 2 or len(group) != len(by_variant):
+                continue
+            # The choice is resolved where the stack's result is READ, so the
+            # phi sits at the level both the variants and their consumer share.
+            # Inside the stack it would be a node whose value leaves the box
+            # without passing through the box's own output tile.
+            scope = _common_namespace(parent, str(node.get("namespace") or ""))
+            phi_id = (
+                f"{scope}/@variant_merge:{node['id']}"
+                if scope
+                else (f"@variant_merge:{node['id']}")
+            )
+            if phi_id in by_id:
+                continue
+            first = by_id[str(group[0].get("sourceNodeId"))]
+            phi = {
+                "id": phi_id,
+                "label": PHI_LABEL,
+                "namespace": scope,
+                "attrs": [
+                    {"key": "class_name", "value": PHI_CLASS},
+                    {"key": "role", "value": "other"},
+                    {"key": "operation", "value": "torch_functional"},
+                    {
+                        "key": "details",
+                        "value": f"merge: one layer variant of {len(group)}",
+                    },
+                    {
+                        "key": "output_shape",
+                        "value": _node_attr(first, "output_shape") or "",
+                    },
+                    {
+                        "key": "output_dtype",
+                        "value": _node_attr(first, "output_dtype") or "",
+                    },
+                ],
+                # Every operation tile is coloured for what it does, and the
+                # colour is per LABEL -- a phi added here must look like the
+                # phis the extractor emits, not like an unstyled box.
+                "style": ensure_readable_text(operation_tile_style(PHI_LABEL)),
+                "incomingEdges": [dict(edge) for edge in group],
+            }
+            for position, edge in enumerate(phi["incomingEdges"]):
+                edge["targetNodeInputId"] = str(position)
+            additions.append(phi)
+            by_id[phi_id] = phi
+            kept = [edge for edge in edges if edge not in group]
+            kept.append(
+                {
+                    "sourceNodeId": phi_id,
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": str(group[0].get("targetNodeInputId") or "0"),
+                }
+            )
+            node["incomingEdges"] = kept
+            edges = kept
+    nodes.extend(additions)
 
 
 def _port_unnamed_kernel_operands(nodes: list[dict[str, Any]]) -> None:
@@ -4367,8 +4484,15 @@ def _elide_noop_merges_and_casts(nodes: list[dict[str, Any]]) -> None:
     node_by_id = {str(node.get("id")): node for node in nodes}
     redirect: dict[str, tuple[str, str]] = {}
     for node in nodes:
+        # A phi answers to either its identity or its display name: not every
+        # one carries a ``class_name``, and the label a reader sees is
+        # ``PHI_LABEL``. Missing one of the two left an elided no-op phi
+        # standing.
         label = str(node.get("label") or "")
-        if label not in {"Merge", "Cast"}:
+        identity = str(_node_attr(node, "class_name") or "")
+        if PHI_LABEL in (label, identity) or PHI_CLASS in (label, identity):
+            label = PHI_CLASS
+        if label not in {PHI_CLASS, "Cast"}:
             continue
         if _node_attr(node, "synthetic"):
             # A boundary tile takes its name from the tensor it carries, so one
@@ -9009,6 +9133,7 @@ def build_merged_model_graph(
     # the ports, so they must exist before the ports can be folded away.
     _fold_loop_ports(nodes)
     _name_iterated_block_ends(nodes)
+    _converge_layer_variants_through_a_phi(nodes)
 
     # After every boundary pass has placed its tiles: a mirror is only
     # redundant once its neighbours are final.
@@ -9018,6 +9143,12 @@ def build_merged_model_graph(
     _share_one_tile_per_kernel_operand(nodes)
     _name_kernel_ports_after_their_source(nodes)
     _port_unnamed_kernel_operands(nodes)
+    # Both the phi above and the kernel ports change which node an operand
+    # arrives FROM (and the phi changes how many there are), so the
+    # profiler-style operand annotation is re-read here. Leaving it as first
+    # stamped left GLM's ``hc_head`` recorded as taking three tensors while its
+    # edges, correctly, showed one.
+    _annotate_op_input_signatures(nodes)
     _qualify_colliding_mirrors(nodes)
 
     # Structural-integrity check on the FINAL built graph (after loop-carried

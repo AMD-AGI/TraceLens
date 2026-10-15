@@ -32,6 +32,8 @@ from TraceLens.ModelUtils.extract import (
     vision_tower_passthrough_inputs,
 )
 from TraceLens.ModelUtils.ast_analyze import (
+    PHI_CLASS,
+    PHI_LABEL,
     analyze_source,
     is_forward_operation,
     operation_display_label,
@@ -3817,15 +3819,21 @@ class ShapeInferencer:
             # summing them cancel back to the source width.
             bound = _slice_bound_name(_detail_value(details, "slice"))
             if bound is not None and source.shape:
-                name, takes_head = bound
-                width = source.shape[-1]
-                narrowed = name if takes_head else f"{width}-({name})"
-                return TensorSpec(
-                    shape=source.shape[:-1] + (narrowed,), dtype=source.dtype
-                )
+                name, takes_head, axis = bound
+                rank = len(source.shape)
+                if -rank <= axis < rank:
+                    at = axis % rank
+                    width = source.shape[at]
+                    narrowed = name if takes_head else f"{width}-({name})"
+                    shape = list(source.shape)
+                    shape[at] = narrowed
+                    return TensorSpec(shape=tuple(shape), dtype=source.dtype)
             return source
 
-        if operation_label == "merge":
+        if (
+            operation_label in {PHI_CLASS.lower(), PHI_LABEL.lower()}
+            or (class_name or "").strip().lower() == PHI_CLASS.lower()
+        ):
             # An explicit branch-merge (phi): exactly one of its mutually-exclusive
             # inputs flows through per invocation, and both carry the same shape,
             # so the output is just that shape -- a pure passthrough of any operand.
@@ -7819,25 +7827,49 @@ def _broadcast_rank(spec: TensorSpec) -> tuple[int, float]:
     return len(spec.shape), width
 
 
-def _slice_bound_name(raw: str | None) -> tuple[str, bool] | None:
-    """``(name, takes_head)`` for a trailing-axis slice bounded by a bare name.
+def _slice_bound_name(raw: str | None) -> tuple[str, bool, int] | None:
+    """``(name, takes_head, axis)`` for a slice bounded by a bare name.
 
-    ``(..., :rotary_dim)`` takes the head of the axis and ``(..., rotary_dim:)``
+    ``(..., :rotary_dim)`` takes the head of an axis and ``(..., rotary_dim:)``
     the tail. Returns *None* for anything else -- a numeric bound is folded by
     the branches above, and a bound we cannot even name is not narrowed at all.
+
+    The AXIS is the subscript position the bound sits at, which is not always
+    the last one: ``kv[:, :usable]`` narrows the SEQUENCE of a ``[B, S, 1024]``
+    tensor. Reading only the final element and writing it to the trailing axis
+    reported ``[B, S, usable]`` -- the right extent on the wrong axis, which
+    then disagreed with the other arm of every phi below it. An ``...`` stands
+    for the axes not named, so a bound after one is counted from the end.
     """
     if not raw:
         return None
-    element = raw.strip().removeprefix("(").removesuffix(")").split(",")[-1].strip()
-    if element.count(":") != 1:
-        return None
-    head, _, tail = element.partition(":")
-    head, tail = head.strip(), tail.strip()
-    if head and not tail and head.isidentifier():
-        return head, False
-    if tail and not head and tail.isidentifier():
-        return tail, True
-    return None
+    body = raw.strip().removeprefix("(").removesuffix(")")
+    elements = [item.strip() for item in body.split(",")]
+    try:
+        ellipsis_at = elements.index("...")
+    except ValueError:
+        ellipsis_at = None
+    found: tuple[str, bool, int] | None = None
+    for position, element in enumerate(elements):
+        if element.count(":") != 1:
+            continue
+        head, _, tail = element.partition(":")
+        head, tail = head.strip(), tail.strip()
+        if head and not tail and head.isidentifier():
+            name, takes_head = head, False
+        elif tail and not head and tail.isidentifier():
+            name, takes_head = tail, True
+        else:
+            continue
+        if ellipsis_at is not None and position > ellipsis_at:
+            axis = position - len(elements)
+        else:
+            axis = position
+        if found is not None:
+            # Two named bounds name two axes; this rule narrows one.
+            return None
+        found = (name, takes_head, axis)
+    return found
 
 
 def _detail_value(details: Sequence[str], key: str) -> str | None:
