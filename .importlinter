@@ -12,3 +12,4 @@ ignore_imports =
     TraceLens.Trace2Tree.trace_capture_merge_experimental -> TraceLens.TraceUtils.utils.annotation_utils
     TraceLens.TraceUtils.split_trace.root_detection -> TraceLens.Trace2Tree.trace_to_tree
     TraceLens.TraceUtils.split_trace.root_detection -> TraceLens.Trace2Tree.util
+    TraceLens.IdleTimeAnalyser.classify -> TraceLens.Reporting.generate_perf_report_pytorch
