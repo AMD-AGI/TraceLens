@@ -3029,6 +3029,27 @@ def _propagate_constant_closure(graph: ComputationGraph, seed: set[int]) -> None
     so it is tagged too. Edges are left intact — the render filter drops the
     whole constant closure together, and shape inference can still read a
     tagged node's operand shapes from the surviving graph.
+
+    KNOWN LIMITATION, deliberately not checked. "Constant" here means every
+    operand is constant, which assumes a seed buffer is never REWRITTEN during
+    inference. A rotary ``inv_freq`` is the case to watch: every HF rotary
+    assigns it only in ``__init__``, but ``forward`` carries
+    ``@dynamic_rope_update``, whose wrapper calls ``register_buffer("inv_freq",
+    ...)`` -- recomputed from ``torch.max(position_ids)``, so genuinely
+    data-dependent -- when ``"dynamic" in rope_type`` or ``rope_type ==
+    "longrope"``. None of the pinned models selects either (MiniMax/Kimi
+    ``default``, GLM ``axial``, DeepSeek ``main=default``/``compress=yarn``,
+    GPT-2 no rope), so folding their frequency chains is correct, and verified
+    so by AST: every ``inv_freq`` assignment in each model's own source is in
+    an ``__init__``.
+
+    It is not checked because a check that fired would have to decide
+    REACHABILITY -- the rewrite is guarded on the configured rope type -- and
+    the extractor reads no decorators at all (the repo's only ``decorator_list``
+    reader is ``kernel_pipeline._function_has_triton_jit_decorator``). A check
+    without that evaluation reports every rope model, and one with it is the
+    part no pinned model can validate. The trigger to watch for is a checkpoint
+    with ``rope_scaling: {"rope_type": "dynamic"}`` or ``"longrope"``.
     """
     preds: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
     for source, target in graph.links:

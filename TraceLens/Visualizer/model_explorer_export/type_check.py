@@ -28,6 +28,7 @@ import math
 import re
 from typing import Any
 
+from TraceLens.ModelUtils.ast_analyze import PHI_CLASS, PHI_LABEL
 from TraceLens.ModelUtils.shape_inference import (
     _normalize_op_name,
     _operand_ceiling,
@@ -642,6 +643,54 @@ def _kernel_interface_tile_warnings(nodes: list[dict[str, Any]]) -> list[str]:
     return warnings
 
 
+def _phi_forwards_an_arm_warnings(nodes: list[dict[str, Any]]) -> list[str]:
+    """A phi hands back one of its arms, so its shape has to be one of theirs.
+
+    Exactly one arm of a mutually-exclusive branch runs per invocation and the
+    phi forwards it untouched -- it computes nothing. So whatever shape it
+    reports must be a shape some arm actually has; any other shape is one
+    nobody produces, and every op below it inherits that.
+
+    Only that. The arms do NOT all have to agree: a model may rebind the name
+    to a differently-shaped tensor in one branch, and Kimi does -- its linear
+    attention replaces ``hidden_states`` with the unpadded ``[1, nnz, 7168]``
+    when a mask is present and keeps ``[B, S, 7168]`` when it is not. Both are
+    real. Asserting agreement would report that correct graph, so this asserts
+    the part that holds whatever the model does.
+
+    Constant arms are skipped: a learned operand is not a branch.
+    """
+    by_id = {str(n.get("id")): n for n in nodes}
+    warnings: list[str] = []
+    for node in nodes:
+        is_phi = _node_attr_value(node, "class_name") == PHI_CLASS or (
+            node.get("label") == PHI_LABEL
+        )
+        if not is_phi or _node_attr_value(node, "synthetic"):
+            continue
+        out = _output_shape_dims(node)
+        if out is None:
+            continue
+        arms = []
+        for edge in node.get("incomingEdges", []) or []:
+            source = by_id.get(str(edge.get("sourceNodeId")))
+            if source is None or _node_attr_value(source, "constant") == "true":
+                continue
+            shape = _output_shape_dims(source)
+            if shape is not None:
+                arms.append((source.get("label"), shape))
+        if not arms or out in [shape for _label, shape in arms]:
+            continue
+        warnings.append(
+            f"{node.get('id')} [{_op_type(node)}]: forwards one of its arms "
+            f"untouched, so its shape must be one of theirs -- it reports "
+            f"{out} where the arms are "
+            f"{[(str(label), shape) for label, shape in arms]}. A phi computes "
+            f"nothing; a shape no arm has is one nothing produces."
+        )
+    return warnings
+
+
 def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
     """Type-check every checkable operation node; return + log warning lines.
 
@@ -657,6 +706,7 @@ def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
     warnings.extend(_output_arity_warnings(nodes))
     warnings.extend(_kernel_operand_arity_warnings(nodes))
     warnings.extend(_kernel_interface_tile_warnings(nodes))
+    warnings.extend(_phi_forwards_an_arm_warnings(nodes))
     warnings.extend(_unresolved_shape_warnings(nodes))
     warnings.extend(_declared_axis_warnings(nodes))
     warnings.extend(_declared_rank_warnings(nodes))
