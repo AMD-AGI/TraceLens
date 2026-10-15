@@ -290,7 +290,7 @@ EVAL_REGISTRY = [
         "Unified perf. report exists",
         _check_unified_perf_report,
         "pipeline",
-        "Re-run TraceLens_generate_perf_report_pytorch (Step 1)",
+        "Re-run TraceLens_generate_perf_report_from_config (Step 1)",
         True,
     ),
     (

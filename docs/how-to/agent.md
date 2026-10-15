@@ -102,6 +102,34 @@ or `inference` for vLLM, SGLang, or ATOM), the execution mode and capture-folder
 inference, environment details (node, container, or virtual environment), and an
 optional output directory.
 
+### Run the agent from a YAML config
+
+If you already have a run config, point the agent at it instead of answering the
+prompts:
+
+```text
+Follow the analysis orchestrator installed with TraceLens and run the full
+agentic analysis workflow from config <run.yaml>, <scope>
+```
+
+Replace `<scope>` with `standalone`, `comparative`, or `semantic`. The scope is
+optional: the agent derives it when the shape is unambiguous (one job is `standalone`,
+two jobs with `compare_to` on job 1 is `comparative`). The config must already have the
+shape the scope needs. The agent only adds wiring and its own report flags, and prints
+every change it makes. In two-trace runs both reports use the first trace's platform,
+and the second trace's platform is kept as a label. The agent still asks for environment
+details.
+
+| Scope | Config shape |
+|---|---|
+| `standalone` | One job. |
+| `comparative` | Two jobs. `capture_folder` on both or on neither. The agent compares them with TraceDiff. |
+| `semantic` | Two jobs, `analysis_mode: inference`, no `capture_folder`. Both traces are graph-replay-only. |
+
+Every job needs `platform`, and the trace, capture folder, and output paths must be absolute. For the full schema and
+examples, see
+[Generate performance reports from a YAML config](./generate-perf-report-from-config.md).
+
 ## Read the results
 
 Only `analysis.md` is intended for end-user review. Everything else under
@@ -158,10 +186,8 @@ matter.
 
 The high-level steps are:
 
-1. Query user inputs (comparison scope, trace paths, platforms, analysis mode,
-   environment setup).
-2. Generate the performance report (branching on analysis mode and comparison
-   scope).
+1. Query user inputs, or read a run YAML (environment setup is always asked).
+2. Generate the performance reports with one call on the completed run config.
 3. Prepare category data (GPU utilization, top operations, tree data, multi-kernel
    data, category filtering) and extract fusion candidates.
 4. Run system-level analysis (CPU/idle, multi-kernel, and kernel fusion) in
