@@ -232,7 +232,17 @@ def _check_node(node: dict[str, Any]) -> list[str]:
     # Resolve the op's operand contract dynamically from its real function
     # parameters (``inspect`` first, then the aten schema) keyed on the raw op
     # name recovered from the model's own forward source -- never a static list.
-    ceiling, variadic = _operand_ceiling(_raw_op(node))
+    #
+    # Keyed on ``raw_op`` and never on the display label, which is not evidence
+    # about the contract: ``Gather`` is what an advanced index
+    # (``keys[batch_idx, pool_idx]``, three tensors and legal) is DISPLAYED as
+    # as well as what ``torch.gather`` (two) is, and ``Mean`` labels the phi
+    # that joins three mutually-exclusive layer variants. Measured: judging by
+    # the label reported eight such ops on GLM alone, every one of them
+    # correctly wired. An op whose label was synthesised rather than read off a
+    # call carries ``raw_op`` only where the construction IS that op.
+    contract_name = _raw_op(node)
+    ceiling, variadic = _operand_ceiling(contract_name)
 
     if variadic:
         # An unbounded tensor-list op (``cat``/``stack``): any number of tensor
@@ -290,7 +300,7 @@ def _check_node(node: dict[str, Any]) -> list[str]:
     # never a list of op names.
     index_parameters = [
         name
-        for name in _required_tensor_operand_names(_raw_op(node))
+        for name in _required_tensor_operand_names(contract_name)
         if name in {"index", "indices"}
     ]
     if index_parameters and tensor_count >= 2:
@@ -557,6 +567,81 @@ def _kernel_operand_arity_warnings(nodes: list[dict[str, Any]]) -> list[str]:
     return warnings
 
 
+_KERNEL_IN_TILE = "@kernel_port_in"
+_KERNEL_OUT_TILES = frozenset({"@kernel_port_out", "@output", "@output_mirror"})
+
+
+def _kernel_interface_tile_warnings(nodes: list[dict[str, Any]]) -> list[str]:
+    """A fused kernel reading several tensors must name each one it reads.
+
+    One unnamed edge into a box is readable; several are not. A kernel is drawn
+    as a single opaque tile precisely because its insides are not shown, so its
+    INTERFACE is the only thing a reader has: which tensor arrives where, and
+    what comes back. Each operand therefore gets its own ``@kernel_port_in``
+    tile carrying the kernel's own name for it, and each value the kernel
+    publishes to more than one reader leaves by an output tile.
+
+    Measured when this was written: Kimi's ``chunk_kda_fwd_intra`` was wired
+    five tensors and declared four ports, so ``v`` arrived as a bare edge from a
+    tile shared with the rest of the pipeline; ``flash_attn_varlen_func``
+    declared ``attention_mask`` among its inputs and then read it off a plain
+    boundary; and the three ``ShortConvolution`` kernels took ``cu_seqlens``
+    straight from another box's output mirror. Four named arrows and one
+    anonymous one is a picture that cannot be read -- and in each case the
+    unported operand was also the one whose provenance nothing had checked.
+
+    Keyed on the node's own ``operation: gpu_kernel`` tag, never on a kernel
+    name. Constants are exempt: a learned weight is wired where it is used and
+    is never part of a declared interface.
+    """
+    by_id = {str(n.get("id")): n for n in nodes}
+    consumers: dict[str, list[dict[str, Any]]] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []) or []:
+            consumers.setdefault(str(edge.get("sourceNodeId")), []).append(node)
+    warnings: list[str] = []
+    for node in nodes:
+        if _node_attr_value(node, "operation") != "gpu_kernel":
+            continue
+        operands = [
+            source
+            for source in (
+                by_id.get(str(edge.get("sourceNodeId")))
+                for edge in node.get("incomingEdges", []) or []
+            )
+            if source is not None and _node_attr_value(source, "constant") != "true"
+        ]
+        unported = [
+            source
+            for source in operands
+            if _node_attr_value(source, "synthetic") != _KERNEL_IN_TILE
+        ]
+        if len(operands) > 1 and unported:
+            warnings.append(
+                f"{node.get('id')} [{_op_type(node)}]: reads {len(operands)} "
+                f"tensors but only {len(operands) - len(unported)} arrive on an "
+                f"input tile of its own; "
+                f"{[_port_label(source) for source in unported]} reach it as bare "
+                f"edges. A kernel is drawn as one opaque tile, so an operand with "
+                f"no port of its own cannot be told from the others -- give it a "
+                f"kernel input port naming it."
+            )
+        readers = consumers.get(str(node.get("id")), [])
+        untiled = [
+            reader
+            for reader in readers
+            if _node_attr_value(reader, "synthetic") not in _KERNEL_OUT_TILES
+        ]
+        if len(readers) > 1 and untiled:
+            warnings.append(
+                f"{node.get('id')} [{_op_type(node)}]: publishes to "
+                f"{len(readers)} readers but only {len(readers) - len(untiled)} "
+                f"leave by an output tile of its own; a kernel handing back "
+                f"several values must say which is which."
+            )
+    return warnings
+
+
 def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
     """Type-check every checkable operation node; return + log warning lines.
 
@@ -571,6 +656,7 @@ def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
     warnings.extend(_in_place_write_warnings(nodes))
     warnings.extend(_output_arity_warnings(nodes))
     warnings.extend(_kernel_operand_arity_warnings(nodes))
+    warnings.extend(_kernel_interface_tile_warnings(nodes))
     warnings.extend(_unresolved_shape_warnings(nodes))
     warnings.extend(_declared_axis_warnings(nodes))
     warnings.extend(_declared_rank_warnings(nodes))

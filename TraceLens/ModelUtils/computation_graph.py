@@ -244,6 +244,95 @@ def _normalize_param_name(name: str) -> str:
     return name.replace("indices", "index").replace("_", "").rstrip("s")
 
 
+def _boundary_parameters(block: "BlockNode", *, named_only: bool = False) -> list[str]:
+    """Forward parameters an op declares it reads straight from the boundary.
+
+    An op records this two ways and the second was not being read. ``param_
+    inputs`` names a parameter an op reads as a named argument; a frame's
+    boundary read is recorded instead as a ``@method_input`` predecessor -- per
+    parameter (``@method_input:key``) or, where the frame has one primary input,
+    the bare token with :attr:`boundary_input_name` saying which parameter it is.
+
+    Without the second route an expanded implementation has no entry point for
+    ANY of its parameters, so every one of them falls back to the section's
+    first op: ``eager_attention_forward``'s ``query``, ``key`` and ``value``
+    all landed on the first ``repeat_kv``'s ``unsqueeze`` -- a unary op shown
+    reading three tensors, one of which (MiniMax) was the indexer's int64 block
+    indices. The tree knew the right op for each; nothing asked it.
+
+    Only a genuine boundary read counts. :func:`_boundary_input_name` also
+    answers for a ``mutates:`` target, which is a local variable rather than a
+    parameter, and keying an entry on that would let an unrelated argument of
+    the same name steal the edge.
+
+    ``named_only`` drops the bare-token route, for a caller indexing a whole
+    SUBTREE rather than one frame. The bare token's parameter comes from the
+    owning class's primary input name, which every module calls much the same
+    thing: letting a nested norm's ``Cast`` claim ``hidden_states`` there gave
+    DeepSeek's ``kv_norm`` the decoder activation ``[B, S, 4096]`` beside the
+    ``[batch, n_windows, 512]`` it actually normalises. A named token says which
+    parameter OF THIS FRAME it is and cannot be confused with an outer one.
+    """
+    tokens = [p for p in block.operation_predecessors if is_method_input(p)]
+    if not tokens:
+        return []
+    named = [param for param in (method_input_param(p) for p in tokens) if param]
+    if named:
+        return named
+    if named_only:
+        return []
+    return [block.boundary_input_name] if block.boundary_input_name else []
+
+
+def _drop_sibling_argument_edges(
+    graph: ComputationGraph,
+    target_index: int,
+    arg_name: str,
+    arg_map: dict[str, str],
+    attr_last_index: dict[str, int] | None,
+    source_index: int,
+) -> None:
+    """An op that names ONE argument must not also be read as taking another.
+
+    The bare ``@method_input`` token says only "reads this call's boundary", and
+    which tensor that is was guessed from chain position -- the last op emitted
+    before the call. That is right only while the arguments are produced in the
+    order they are read. MiniMax's ``apply_rotary_pos_emb`` returns ``q_embed,
+    k_embed`` and ``k_embed`` is emitted last, so the guess handed the QK matmul
+    ``key`` on top of the ``query`` it declares.
+
+    The step records which parameter it reads, and the call records a producer
+    for each argument, so a producer belonging to a DIFFERENT argument of this
+    same call is provably not this op's operand. Only when the op declares a
+    single boundary read: an op that genuinely takes two of the call's arguments
+    names two, and neither is then the odd one out.
+    """
+    if attr_last_index is None or not (0 <= target_index < len(graph.nodes)):
+        return
+    block = graph.nodes[target_index].block
+    if block is None or not block.boundary_input_name:
+        return
+    if _normalize_param_name(block.boundary_input_name) != _normalize_param_name(
+        arg_name
+    ):
+        return
+    if sum(1 for p in block.operation_predecessors if is_method_input(p)) != 1:
+        return
+    siblings = {
+        attr_last_index.get(producer)
+        for name, producer in arg_map.items()
+        if _normalize_param_name(name) != _normalize_param_name(arg_name)
+    }
+    siblings -= {None, source_index}
+    if not siblings:
+        return
+    graph.links = [
+        (src, dst)
+        for src, dst in graph.links
+        if not (dst == target_index and src in siblings)
+    ]
+
+
 def _build_module_param_entries(
     graph: ComputationGraph,
 ) -> dict[str, dict[str, int]]:
@@ -255,11 +344,27 @@ def _build_module_param_entries(
     result: dict[str, dict[str, int]] = {}
     for frame in graph.inline_frames:
         entries: dict[str, int] = {}
-        for index in frame.node_indices:
-            block = graph.nodes[index].block
-            if block is None:
-                continue
+        blocks = [
+            (index, graph.nodes[index].block)
+            for index in frame.node_indices
+            if graph.nodes[index].block is not None
+        ]
+        # A frame whose ops NAME the parameters they read is one the extractor
+        # resolved per parameter, and the bare ``@method_input`` left over is
+        # then that frame's primary input -- ``eager_attention_forward``'s
+        # ``key`` and ``value`` are named, so the matmul's bare token is
+        # ``query``. Where no op names anything, the bare token says only "reads
+        # the primary input", and an op spliced in from a NESTED callee answers
+        # it with its own class's input name: an ``RMSNorm``'s ``Cast``, inlined
+        # into DeepSeek's compressor, claimed ``hidden_states`` and took the
+        # decoder activation that belongs to the compressor itself.
+        has_named = any(
+            _boundary_parameters(block, named_only=True) for _index, block in blocks
+        )
+        for index, block in blocks:
             for param in block.param_inputs:
+                entries.setdefault(param, index)
+            for param in _boundary_parameters(block, named_only=not has_named):
                 entries.setdefault(param, index)
         if entries:
             result[frame.frame_id] = entries
@@ -378,6 +483,8 @@ def _module_param_entries_for_step(
         if index is None:
             continue
         for param in step.param_inputs:
+            entries.setdefault(param, index)
+        for param in _boundary_parameters(step, named_only=True):
             entries.setdefault(param, index)
     return entries
 
@@ -803,6 +910,14 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
         unlabeled_sources: list[int] = []
         for source, target in graph.links:
             if target != kernel_index:
+                continue
+            # An edge already arriving on a port is done -- its operand is
+            # named. Skipping it is what lets this run a second time, after the
+            # later wiring passes have added their edges: ``cu_seqlens`` reaching
+            # ``ShortConvolution`` and the mask reaching Kimi's attention are
+            # both wired after ports were first assigned, and they were the
+            # operands left with no port of their own.
+            if graph.nodes[source].synthetic == SYNTHETIC_KERNEL_PORT_IN:
                 continue
             label = graph.link_port_labels.get((source, target))
             if label:
@@ -1490,7 +1605,19 @@ def _wire_all_predecessor_edges(
                 # module with a complete arg_map (vision attention) or an empty
                 # one (linear attention) is unaffected.
                 covered = set(arg_map.values())
-                pairs.extend((pred, None) for pred in preds if pred not in covered)
+                # ...but only while the callee still has a parameter left for
+                # one to be. When every parameter with an entry point is already
+                # named by an argument, a further predecessor is an argument the
+                # callee does not read: MiniMax passes ``block_indices=`` to an
+                # implementation whose signature collects it in ``**kwargs`` and
+                # never touches it, and dumping it on the default target drew the
+                # indexer's int64 block indices as an operand of ``repeat_kv``.
+                named_params = {_normalize_param_name(name) for name in arg_map}
+                unclaimed = {
+                    _normalize_param_name(name) for name in param_entries
+                } - named_params
+                if unclaimed or not param_entries:
+                    pairs.extend((pred, None) for pred in preds if pred not in covered)
             else:
                 pairs = [(pred, None) for pred in preds]
 
@@ -1791,6 +1918,15 @@ def _wire_all_predecessor_edges(
                 link = (source_index, target_index)
                 if link not in graph.links:
                     graph.links.append(link)
+                if arg_name:
+                    _drop_sibling_argument_edges(
+                        graph,
+                        target_index,
+                        arg_name,
+                        arg_map,
+                        attr_last_index,
+                        source_index,
+                    )
                 # Every op that reads this parameter only as a SIZE reads it
                 # directly; the entry point above is just the first of them.
                 for extra in host_size_readers.get(step_attr, {}).get(
@@ -1934,6 +2070,14 @@ def _wire_all_predecessor_edges(
 
     # --- 7. Frame entries whose argument was emitted after the frame ---
     _resolve_deferred_method_inputs(graph)
+
+    # --- 8. Ports for kernel operands wired after pass 2b ---
+    # A kernel is one opaque tile, so every tensor it reads has to arrive on a
+    # port naming it. Pass 2b runs before the forward-link and deferred-entry
+    # passes, so an operand those wire had no port and reached the kernel as a
+    # bare edge. Re-running here ports exactly those: edges already on a port
+    # are skipped, so nothing is double-wrapped.
+    _add_kernel_port_nodes(graph)
 
 
 def _wire_multi_input_op_forward_links(
@@ -2243,6 +2387,27 @@ def _reads_only_module_constants(step: BlockNode) -> bool:
         return True
     ceiling, variadic = _operand_ceiling(_raw_op_from_details(step.details))
     return ceiling is not None and not variadic and ceiling <= 1
+
+
+def _reads_only_named_boundary_parameters(step: BlockNode) -> bool:
+    """True when every operand an op names is a parameter read at the boundary.
+
+    ``@method_input:value`` says which parameter the op reads, so
+    :func:`_operation_source_indices` deliberately contributes no chain edge for
+    it -- the boundary pass wires that parameter to this op by name. But that
+    leaves ``explicit_sources`` empty, and the sequential fallback then chained
+    the op to whatever preceded it in source order anyway: ``repeat_kv(value)``
+    was drawn reading the softmax output as well as ``value``, and the first
+    ``repeat_kv`` read the section's ``query`` on top of its ``key``.
+
+    An op that names only boundary parameters has no chain operand by
+    construction, which is exactly the judgement
+    :func:`_operation_source_indices` already makes about each token.
+    """
+    tokens = step.operation_predecessors
+    return bool(tokens) and all(
+        is_method_input(token) and method_input_param(token) for token in tokens
+    )
 
 
 def _reads_only_a_side_parameter(step: BlockNode) -> bool:
@@ -3530,6 +3695,7 @@ def _add_linear_pipeline_chain(
         if (
             not explicit_sources
             and not _reads_only_a_side_parameter(sub_step)
+            and not _reads_only_named_boundary_parameters(sub_step)
             and not _is_pure_generator_source(sub_step)
             and sub_step.attr_name != SYNTHETIC_ATTENTION
         ):

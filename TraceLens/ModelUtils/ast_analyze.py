@@ -6639,6 +6639,16 @@ class _ForwardOperationExtractor:
                                 predecessors,
                                 external,
                                 details=[f"dim: {unsqueeze_dim}"],
+                                # The label here is not a guess about what the
+                                # subscript resembles: a ``None`` inserts exactly
+                                # one size-1 axis and does nothing else, and this
+                                # loop emits one op per inserted axis. So the op
+                                # IS ``unsqueeze`` and may say so, which lets the
+                                # operand-arity check see a contract it otherwise
+                                # had none for -- ``repeat_kv``'s
+                                # ``hidden_states[:, :, None, :, :]`` is written
+                                # this way, and it was being handed three tensors.
+                                raw_op="unsqueeze",
                             )
                             predecessors = [producer] if producer else []
                             external = []

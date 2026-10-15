@@ -18,9 +18,18 @@ first, so the unsqueeze reported ``[B, S, hidden]`` and every op built from it
 (the second insert, the expand, the cast, the ``@`` and the ``cat`` after it)
 inherited that rank.
 
-The buffer edge goes first now. The chain edge stays, so the op still has a
-non-constant source once the render filter drops the constants -- removing it
-outright left the node orphaned (I2) in the filtered graph.
+The buffer edge goes first now, and the chain edge is gone: ``x`` is not an
+operand of this unsqueeze, which is what the operand-arity check was saying all
+along ("takes at most 1 tensor operand, but 2 are wired"). An op is wired the
+operands it declares, and this one declares the buffer.
+
+With the fabricated edge gone the whole ``inv_freq`` layout chain is a pure
+function of a registered buffer, so the constant tag propagates along it and the
+render filter drops it the way it drops every weight -- the chain stays in the
+JSON, and the ``@`` that reads it keeps its other operand. That is the same
+bargain every ``nn.Linear`` already makes; it was only drawn before because the
+fabricated edge made it look like it read an activation. Nothing is orphaned:
+I2/I3 are clean on the render-filtered graph.
 """
 
 from __future__ import annotations
@@ -85,15 +94,31 @@ class TestTheBufferIsReadFirst:
         # state is rank 3, and inheriting it made this rank 4.
         assert shape.count(",") == 1, shape
 
-    def test_it_keeps_a_source_the_render_filter_will_not_drop(
-        self, nodes: list[dict]
-    ) -> None:
-        """Dropping the constants must not orphan it (integrity check I2)."""
+    def test_the_buffer_is_its_only_operand(self, nodes: list[dict]) -> None:
+        """``x`` supplies a device, not a tensor, so it is not wired here."""
         by_id = {str(n["id"]): n for n in nodes}
         node = _rotary_first_unsqueeze(nodes)
-        surviving = [
-            edge
+        sources = [
+            by_id.get(str(edge["sourceNodeId"]))
             for edge in node.get("incomingEdges", []) or []
-            if _attr(by_id.get(str(edge["sourceNodeId"]), {}), "constant") != "true"
         ]
-        assert surviving, node["id"]
+        assert len(sources) == 1, [s and s.get("id") for s in sources]
+        assert _attr(sources[0], "constant") == "true"
+
+    def test_dropping_the_constants_orphans_nothing(self, nodes: list[dict]) -> None:
+        """The chain goes with the buffer rather than being left sourceless."""
+        from TraceLens.Visualizer.model_explorer_export.type_check import (
+            integrity_check_graph_nodes,
+        )
+        from TraceLens.Visualizer.model_explorer_export.viewer_page import (
+            _graph_without_constants,
+        )
+
+        filtered = _graph_without_constants({"nodes": nodes})["nodes"]
+        assert integrity_check_graph_nodes(filtered, label="render-filtered") == []
+        assert not [
+            node
+            for node in filtered
+            if "rotary_emb" in str(node.get("id", ""))
+            and _attr(node, "constant") == "true"
+        ]

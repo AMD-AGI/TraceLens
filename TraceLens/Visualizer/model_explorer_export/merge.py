@@ -2132,6 +2132,186 @@ def _collapse_mirror_boundary_passthroughs(nodes: list[dict[str, Any]]) -> None:
         nodes[:] = [node for node in nodes if str(node["id"]) not in removed]
 
 
+def _port_unnamed_kernel_operands(nodes: list[dict[str, Any]]) -> None:
+    """Give every tensor a fused kernel reads a port of its own.
+
+    A kernel is drawn as one opaque tile, so the only thing a reader has is its
+    interface: which tensor arrives where. ``computation_graph`` assigns those
+    ports, but it does so before the boundary and mirror passes run here, so an
+    operand WIRED LATER reached the kernel as a bare edge among named ones --
+    four labelled arrows and one anonymous. Measured on Kimi: ``cu_seqlens``
+    into each of the three ``ShortConvolution`` kernels, ``attention_mask`` into
+    ``flash_attn_varlen_func`` (which declares it among its ``inputs:``), and
+    ``v`` into ``chunk_kda_fwd_intra``, which read it off the tile shared with
+    the rest of the pipeline.
+
+    The port takes the kernel's own remaining declared name for the operand when
+    it has one, else the producer's name -- the same precedence
+    ``_add_kernel_port_nodes`` uses. Constants are exempt: a learned weight is
+    wired where it is used and is never part of a declared interface.
+    """
+    by_id = {str(node["id"]): node for node in nodes}
+    additions: list[dict[str, Any]] = []
+    # One tensor read by several kernels is one tile, the way
+    # ``_share_one_tile_per_kernel_operand`` already draws it: Kimi's three
+    # ``ShortConvolution`` kernels read the same ``cu_seqlens``, and a port each
+    # would put three tiles of that name in one box.
+    shared: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for node in nodes:
+        if _node_attr(node, "operation") != "gpu_kernel":
+            continue
+        edges = node.get("incomingEdges", []) or []
+        claimed: set[str] = set()
+        unported: list[dict[str, Any]] = []
+        operand_count = 0
+        for edge in edges:
+            source = by_id.get(str(edge.get("sourceNodeId")))
+            if source is None or _node_attr(source, "constant") == "true":
+                continue
+            operand_count += 1
+            if _node_attr(source, "synthetic") == "@kernel_port_in":
+                claimed.add(str(source.get("label") or "").strip().lower())
+            else:
+                unported.append(edge)
+        if operand_count < 2 or not unported:
+            continue
+        spare = [
+            name
+            for name in _declared_kernel_input_names(node)
+            if name.strip().lower() not in claimed
+        ]
+        for position, edge in enumerate(unported):
+            source = by_id[str(edge.get("sourceNodeId"))]
+            label = (
+                spare[position]
+                if position < len(spare)
+                else str(source.get("label") or f"input_{position}")
+            )
+            namespace = str(node.get("namespace") or "")
+            source_id = str(edge.get("sourceNodeId"))
+            existing = shared.get((namespace, label, source_id))
+            if existing is not None:
+                edge["sourceNodeId"] = str(existing["id"])
+                edge["sourceNodeOutputId"] = "0"
+                continue
+            port_id = f"{node['id']}:@kernel_in:{label.replace('/', '_')}"
+            if port_id in by_id:
+                continue
+            port = {
+                "id": port_id,
+                "label": label,
+                "namespace": node.get("namespace"),
+                "attrs": [
+                    {"key": "synthetic", "value": "@kernel_port_in"},
+                    {"key": "operation", "value": "synthetic"},
+                    {
+                        "key": "output_shape",
+                        "value": _node_attr(source, "output_shape") or "",
+                    },
+                    {
+                        "key": "output_dtype",
+                        "value": _node_attr(source, "output_dtype") or "",
+                    },
+                ],
+                "style": ensure_readable_text(input_port_style()),
+                "incomingEdges": [dict(edge)],
+            }
+            additions.append(port)
+            by_id[port_id] = port
+            shared[(namespace, label, source_id)] = port
+            edge["sourceNodeId"] = port_id
+            edge["sourceNodeOutputId"] = "0"
+    nodes.extend(additions)
+    _fold_feeders_into_new_kernel_ports(nodes, {str(p["id"]) for p in additions})
+
+
+def _fold_feeders_into_new_kernel_ports(
+    nodes: list[dict[str, Any]], port_ids: set[str]
+) -> None:
+    """Drop the tile a new kernel port duplicates, and read its source instead.
+
+    A port interposed above a tile that already names the same tensor, in the
+    same box, leaves the box holding that name twice -- and the honest
+    qualifier for the second is the first's own name, which is how
+    ``cu_seqlens`` came out as ``cu_seqlens.cu_seqlens``. The two describe one
+    untransformed passthrough, exactly the shape
+    :func:`_collapse_kernel_input_passthroughs` already folds one level up, so
+    fold it the same way: the port keeps the name and reads what the tile read.
+
+    Only when the tile has no other reader. A tile several consumers share is
+    the box's own interface and stays.
+    """
+    if not port_ids:
+        return
+    by_id = {str(node["id"]): node for node in nodes}
+    consumers: dict[str, list[str]] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []) or []:
+            consumers.setdefault(str(edge.get("sourceNodeId")), []).append(
+                str(node["id"])
+            )
+    removed: set[str] = set()
+    for port_id in port_ids:
+        port = by_id.get(port_id)
+        if port is None:
+            continue
+        incoming = port.get("incomingEdges", []) or []
+        if len(incoming) != 1:
+            continue
+        feeder = by_id.get(str(incoming[0].get("sourceNodeId")))
+        if feeder is None or str(feeder["id"]) in removed:
+            continue
+        if _node_attr(feeder, "synthetic") not in _NEW_PORT_FOLDABLE_FEEDERS:
+            continue
+        if feeder.get("namespace") != port.get("namespace"):
+            continue
+        if str(feeder.get("label") or "") != str(port.get("label") or ""):
+            continue
+        if consumers.get(str(feeder["id"])) != [port_id]:
+            continue
+        upstream = feeder.get("incomingEdges", []) or []
+        if len(upstream) != 1:
+            continue
+        # The port takes over the tile's edge whole: the ordinal it docks and
+        # the port label the viewer reads both belong to the tensor, not to the
+        # tile that happened to carry them.
+        incoming[0].clear()
+        incoming[0].update(upstream[0])
+        removed.add(str(feeder["id"]))
+    if removed:
+        nodes[:] = [node for node in nodes if str(node["id"]) not in removed]
+
+
+# Tiles a freshly-interposed kernel port can absorb: a boundary or named-tensor
+# tile that says the same thing the port now says. A ``@kernel_port_in`` is
+# never folded -- it is already a kernel's declared interface.
+_NEW_PORT_FOLDABLE_FEEDERS = frozenset(
+    {"@input", "@input_mirror", "@output_mirror", "@tensor"}
+)
+
+
+def _declared_kernel_input_names(node: dict[str, Any]) -> list[str]:
+    """Operand names a kernel tile declares, in the order it declares them.
+
+    Both forms the extractor writes: an ``inputs: a,b,c`` list, and the
+    ``operand: <producer>=<param>`` pairs a decomposed pipeline stage carries.
+    """
+    names: list[str] = []
+    for part in str(_node_attr(node, "details") or "").split(";"):
+        key, sep, value = part.partition(":")
+        if not sep:
+            continue
+        key = key.strip()
+        if key == "inputs":
+            names.extend(item.strip() for item in value.split(",") if item.strip())
+        elif key == "operand":
+            for item in value.split(","):
+                _, has_eq, param = item.partition("=")
+                if has_eq and param.strip():
+                    names.append(param.strip())
+    return names
+
+
 def _collapse_kernel_input_passthroughs(nodes: list[dict[str, Any]]) -> None:
     """Drop a module ``@input`` tile that only feeds a same-scope kernel port.
 
@@ -4427,6 +4607,19 @@ def _op_scalar_details(node: dict[str, Any]) -> list[str]:
 _GEMM_DISPLAY_LABELS = frozenset({"MatMul", "BatchMatMul"})
 
 
+def _last_dim(rendered_shape: str | None) -> str | None:
+    """The trailing extent of a rendered ``[a, b, c] dtype`` shape, or ``None``."""
+    text = str(rendered_shape or "")
+    start, bracket, rest = text.partition("[")
+    if not bracket:
+        return None
+    body, close, _ = rest.partition("]")
+    if not close:
+        return None
+    dims = [dim.strip() for dim in body.split(",") if dim.strip()]
+    return dims[-1] if dims else None
+
+
 def _relabel_constant_operand_matmul_as_linear(nodes: list[dict[str, Any]]) -> None:
     """Relabel a ``MatMul`` / ``BatchMatMul`` node ``Linear`` when it contracts a
     real activation against a *learned constant* operand.
@@ -4454,11 +4647,22 @@ def _relabel_constant_operand_matmul_as_linear(nodes: list[dict[str, Any]]) -> N
             continue
         saw_constant = False
         saw_activation = False
+        # A projection takes its output width FROM the weight: that is what makes
+        # the contraction affine. MiniMax's RoPE multiplies a constant-tagged
+        # ``inv_freq[None, :, None]`` by ``position_ids[:, None, :]`` -- an outer
+        # product whose output width comes from the positions, not the buffer --
+        # and reading a registered buffer as a learned weight drew the frequency
+        # computation as an ``nn.Linear`` with its real operand hidden.
+        output_width = _last_dim(_node_attr(node, "output_shape"))
         for edge in node.get("incomingEdges", []) or []:
             source = node_by_id.get(str(edge.get("sourceNodeId") or ""))
             if source is None:
                 continue
             if _node_attr(source, "constant") == "true":
+                if output_width is not None and _last_dim(
+                    _node_attr(source, "output_shape")
+                ) not in (None, output_width):
+                    continue
                 saw_constant = True
             else:
                 saw_activation = True
@@ -8813,6 +9017,7 @@ def build_merged_model_graph(
     _name_kernel_leaves_for_their_kernel(nodes)
     _share_one_tile_per_kernel_operand(nodes)
     _name_kernel_ports_after_their_source(nodes)
+    _port_unnamed_kernel_operands(nodes)
     _qualify_colliding_mirrors(nodes)
 
     # Structural-integrity check on the FINAL built graph (after loop-carried

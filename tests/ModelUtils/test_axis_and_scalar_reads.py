@@ -87,8 +87,17 @@ class TestEveryInsertedAxisIsDrawn:
     def test_the_graph_draws_both_inserts(self) -> None:
         ops = _ops("return x[:, None, None] + y")
         assert [label for label, _ in ops] == ["Unsqueeze", "Unsqueeze", "Add"], ops
-        assert ops[0][1] == ("dim: 1",)
-        assert ops[1][1] == ("dim: 2",)
+        assert "dim: 1" in ops[0][1]
+        assert "dim: 2" in ops[1][1]
+
+    def test_each_insert_says_which_op_it_is(self) -> None:
+        """A ``None`` inserts exactly one axis and does nothing else, so the op
+        IS ``unsqueeze`` and says so -- which is what lets the operand-arity
+        check resolve a contract for it. ``repeat_kv``'s
+        ``hidden_states[:, :, None, :, :]`` is written this way, and it was
+        being handed three tensors with nothing able to object."""
+        ops = _ops("return x[:, None, None] + y")
+        assert all("raw_op: unsqueeze" in details for _label, details in ops[:2])
 
 
 class TestScalarAnnotatedParameters:
