@@ -25,8 +25,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 ## Workflow Steps
 
 ```
-0. Query User Inputs (NL answers or a run YAML, Environment Setup) → cache/run_config.yaml
-1. Generate Performance Report (one background wrapper call on cache/run_config.yaml, polled to completion; semantic runs Step 1.5 first)
+0. Query User Inputs (interactive answers or a run YAML, Environment Setup) → cache/run_config.yaml
+1. Generate Performance Report (one wrapper call on cache/run_config.yaml; semantic pre-processing first)
 2. Trace-Quality Gate (deterministic fallback branch for graph-under-recorded traces)
 3-6. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
 7. System-Level Analysis (PARALLEL, CPU/Idle + Kernel Fusion + Multi-Kernel) → system_findings/
@@ -39,7 +39,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
     optionally invoke agent_extension.py (when present), then embed the PNG into the report.
 ```
 
-**Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Step 1.5 semantic diff, Steps 7, 8, 10). All other steps (including Step 8.5) must be performed directly by the orchestrator using the command prefix.
+**Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Step 1 pre-processing semantic diff, Steps 7, 8, 10). All other steps (including Step 8.5) must be performed directly by the orchestrator using the command prefix.
 
 ---
 
@@ -48,9 +48,9 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 The prompt selects the input mode:
 
 - **YAML mode**: the prompt says "from config `<config_path>`", optionally with a scope (`standalone`, `comparative` or `semantic`). Resolve `<config_path>` to an absolute path. Read `output_dir` from the file and ask only the environment questions (item 5), unless the prompt answers them. Skip the other items.
-- **NL mode**: anything else.
+- **Interactive mode**: the prompt names no config.
 
-**In NL mode, when this skill is invoked, immediately ask the user for:**
+**In Interactive mode, when this skill is invoked, immediately ask the user for:**
 
 ### Required Information:
 
@@ -178,10 +178,10 @@ Run one `config_utils` command. It completes the config, writes `<output_dir>/ca
 ```bash
 <prefix> python3 -m TraceLens.Agent.Analysis.utils.config_utils check \
   --config <config_path> \
-  [--scope <scope>]   # as stated in the prompt
+  [--scope <scope>]
 ```
 
-**NL mode** (`<scope>` is the comparison scope, or `semantic` for the `comparative` graph replay only case):
+**Interactive mode** (`<scope>` is the comparison scope, or `semantic` for the `comparative` graph replay only case):
 
 ```bash
 <prefix> python3 -m TraceLens.Agent.Analysis.utils.config_utils build \
@@ -195,7 +195,7 @@ Run one `config_utils` command. It completes the config, writes `<output_dir>/ca
 
 Pass the second `--job` for `comparative` and `semantic`, a `capture_folder` only for graph replay + capture, and `--set` only when an extension file was provided.
 
-If it exits non-zero, the errors are on stderr. In YAML mode, show them and stop. In NL mode, re-ask the field an error names once and rebuild.
+If it exits non-zero, the errors are on stderr. In YAML mode, show them and stop. In Interactive mode, re-ask the field an error names once and rebuild.
 
 Otherwise, show the change lines to the user and assign each `key=value` line to the variable `<key>`. Assign the variables once, from this run. Never run `check` on `<output_dir>/cache/run_config.yaml`: it is the wrapper's input only, and it no longer holds the original `platform2`.
 
@@ -203,31 +203,9 @@ Otherwise, show the change lines to the user and assign each `key=value` line to
 
 ## Step 1: Generate Performance Report
 
-One wrapper call runs every report the config describes, in order. For `<comparison_method>` = semantic, do Step 1.5 first.
+### Pre-processing
 
-The call can outlast the runner's command timeout, so start it in the background. The status file reads `RUNNING` until the wrapper exits, then `DONE` or `FAILED`:
-
-```bash
-<prefix> echo RUNNING > <output_dir>/cache/step1.status; ( TraceLens_generate_perf_report_from_config --config <output_dir>/cache/run_config.yaml > <output_dir>/cache/step1.log 2>&1 && echo DONE > <output_dir>/cache/step1.status || echo FAILED > <output_dir>/cache/step1.status ) > /dev/null 2>&1 < /dev/null &
-```
-
-This returns at once. Then poll. Each poll waits up to 100 seconds and prints the status:
-
-```bash
-<prefix> for i in 1 2 3 4 5 6 7 8 9 10; do grep -qx RUNNING <output_dir>/cache/step1.status || break; sleep 10; done; cat <output_dir>/cache/step1.status
-```
-
-- `RUNNING`: poll again. After 300 polls (about 8 hours), treat it as `FAILED` and leave the wrapper running.
-- `FAILED`: show `<prefix> tail -n 40 <output_dir>/cache/step1.log`, emit `[DIAG:pipeline:STEP1_FAIL]`, and stop.
-- `DONE`: proceed to Step 2.
-
-Judge completion only from `step1.status`. `run_config.resolved.yaml` is written before the first report and the CSV folders fill as each report runs, so both exist mid-run.
-
----
-
-## Step 1.5: Semantic Comparative Ordering (`<comparison_method>` = semantic)
-
-Run before Step 1:
+Only when `<comparison_method>` = semantic; otherwise skip to Generate Report.
 
 1. **Semantic diff (subagent)** — launch a Task subagent that reads and follows the FULL instructions in `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/semantic-comparison-agent.md`. Prompt context:
 
@@ -257,6 +235,18 @@ Run the full semantic comparison through "Generate TraceDiff Output" so that
    ```
 
    It rewrites `<output_dir>/cache/run_config.yaml` and prints one `added` line; show it. If it fails, stop and report.
+
+### Generate Report
+
+One wrapper call runs every report the config describes, in order:
+
+```bash
+<prefix> TraceLens_generate_perf_report_from_config --config <output_dir>/cache/run_config.yaml
+```
+
+This call can run for several minutes, longer for comparative graph-capture runs. Run it with the longest command timeout your runner allows.
+
+If it exits non-zero or times out, show the tail of its output, emit `[DIAG:pipeline:STEP1_FAIL]`, and stop.
 
 ---
 
@@ -305,11 +295,8 @@ Execute the TraceLens Agentic Mode orchestrator preparation script:
   --platform <platform> \
   --output-dir <output_dir> \
   --comparison-scope <comparison_scope> \
-  [--disable_pseudo_ops] \
   [--platform2 <platform2>]   # comparative only
 ```
-
-Pass `--disable_pseudo_ops` only when `<pseudo_ops>` = disabled.
 
 This script performs:
 - **Step 3:** Assess GPU utilization (computation, idle, communication times)

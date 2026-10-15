@@ -27,8 +27,8 @@ Follow **[reference.md](reference.md)** for every step (user prompts, `<prefix>`
 ## Workflow index
 
 ```
-0. Query User Inputs (NL answers or a run YAML, Environment Setup) → cache/run_config.yaml
-1. Generate Performance Report (one background wrapper call on cache/run_config.yaml, polled to completion; semantic runs Step 1.5 first)
+0. Query User Inputs (interactive answers or a run YAML, Environment Setup) → cache/run_config.yaml
+1. Generate Performance Report (one wrapper call on cache/run_config.yaml; semantic pre-processing first)
 2. Trace-Quality Gate → Deterministic fallback analysis
 3-6. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
 7. System-Level Analysis (PARALLEL) → system_findings/

@@ -50,21 +50,26 @@ jobs:
         """
 analysis_mode: inference
 output_dir: ROOT/out
-include_call_stack: false
+enable_pseudo_ops: false
 jobs:
   - {trace_path: ROOT/t1.json.gz, platform: MI300X, capture_folder: ROOT/c1}
 """,
         """
 analysis_mode: inference
 output_dir: ROOT/out
-include_call_stack: false
 enable_pseudo_ops: true
 group_by_num_kernels: true
+include_call_stack: true
 group_by_parent_module: true
 jobs:
   - {trace_path: ROOT/t1.json.gz, platform: MI300X, capture_folder: ROOT/c1}
 """,
-        None,
+        [
+            "set     enable_pseudo_ops: true   (was false)",
+            "added   group_by_num_kernels: true",
+            "added   include_call_stack: true",
+            "added   group_by_parent_module: true",
+        ],
     ),
     "comparative": (
         None,
@@ -176,7 +181,9 @@ def test_check_config_completes_each_scope(root, case):
     result = check_config(config, scope)
     assert result.run_config == _load(expected, root)
     if changes is not None:
-        assert result.changes == [line.replace("ROOT", root) for line in changes]
+        assert [f"{verb:<8}{text}" for verb, text in result.changes] == [
+            line.replace("ROOT", root) for line in changes
+        ]
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -354,7 +361,6 @@ def test_add_diff_stats(root, tmp_path, monkeypatch, capsys):
                 "trace_path=ROOT/t1.json.gz",
                 "platform=MI300X",
                 "output_dir=ROOT/out",
-                "pseudo_ops=enabled",
                 "wrote   ROOT/out/cache/run_config.yaml",
             ],
             id="standalone",
@@ -366,7 +372,6 @@ def test_add_diff_stats(root, tmp_path, monkeypatch, capsys):
                 "trace_path=ROOT/t1.json.gz",
                 "platform=MI300X",
                 "output_dir=ROOT/out",
-                "pseudo_ops=enabled",
                 "comparison_method=tracediff",
                 "trace2_path=ROOT/t2.json.gz",
                 "platform2=MI325X",
@@ -381,7 +386,6 @@ def test_add_diff_stats(root, tmp_path, monkeypatch, capsys):
                 "trace_path=ROOT/t1.json.gz",
                 "platform=MI300X",
                 "output_dir=ROOT/out",
-                "pseudo_ops=enabled",
                 "comparison_method=semantic",
                 "trace2_path=ROOT/t2.json.gz",
                 "platform2=MI325X",

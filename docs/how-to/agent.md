@@ -188,15 +188,17 @@ The high-level steps are:
 
 1. Query user inputs, or read a run YAML (environment setup is always asked).
 2. Generate the performance reports with one call on the completed run config.
-3. Prepare category data (GPU utilization, top operations, tree data, multi-kernel
+3. Check trace quality, with a fallback for graph-under-recorded traces.
+4. Prepare category data (GPU utilization, top operations, tree data, multi-kernel
    data, category filtering) and extract fusion candidates.
-4. Run system-level analysis (CPU/idle, multi-kernel, and kernel fusion) in
+5. Run system-level analysis (CPU/idle, multi-kernel, and kernel fusion) in
    parallel.
-5. Run the compute-kernel sub-agents in parallel.
-6. Aggregate the per-category findings into a globally ranked list.
-7. Validate sub-agent outputs for time sanity, efficiency anomalies, and coverage.
-8. Prepare report data and identify the model.
-9. Generate the final `analysis.md` report.
+6. Run the compute-kernel sub-agents in parallel.
+7. Aggregate the per-category findings into a globally ranked list.
+8. Validate sub-agent outputs for time sanity, efficiency anomalies, and coverage.
+9. Prepare report data and identify the model.
+10. Render the performance plot when no `agent_extension.py` is present.
+11. Generate the final `analysis.md` report.
 
 ### Sub-agents
 
