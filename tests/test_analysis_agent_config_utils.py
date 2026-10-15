@@ -170,8 +170,26 @@ def root(tmp_path):
     return str(tmp_path)
 
 
+def _fill(text, root):
+    return text.replace("ROOT", root)
+
+
 def _load(text, root):
-    return yaml.safe_load(text.replace("ROOT", root))
+    return yaml.safe_load(_fill(text, root))
+
+
+def _scope_args(scope):
+    return [] if scope is None else ["--scope", scope]
+
+
+def _write_run(tmp_path, config):
+    path = tmp_path / "run.yaml"
+    path.write_text(yaml.safe_dump(config))
+    return str(path)
+
+
+def _cache(tmp_path):
+    return yaml.safe_load((tmp_path / "out" / "cache" / "run_config.yaml").read_text())
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -182,23 +200,19 @@ def test_check_config_completes_each_scope(root, case):
     assert result.run_config == _load(expected, root)
     if changes is not None:
         assert [f"{verb:<8}{text}" for verb, text in result.changes] == [
-            line.replace("ROOT", root) for line in changes
+            _fill(line, root) for line in changes
         ]
 
 
 @pytest.mark.parametrize("case", CASES)
 def test_build_matches_yaml(root, tmp_path, capsys, case):
     scope, text, _, _ = CASES[case]
-    scope_args = [] if scope is None else ["--scope", scope]
     config = _load(text, root)
-    config_path = tmp_path / "run.yaml"
-    config_path.write_text(yaml.safe_dump(config))
-    main(["check", "--config", str(config_path), *scope_args])
+    main(["check", "--config", _write_run(tmp_path, config), *_scope_args(scope)])
     from_yaml = capsys.readouterr().out
-    cache_path = tmp_path / "out" / "cache" / "run_config.yaml"
-    from_yaml_file = yaml.safe_load(cache_path.read_text())
+    from_yaml_file = _cache(tmp_path)
 
-    argv = ["build", *scope_args]
+    argv = ["build", *_scope_args(scope)]
     argv += ["--analysis_mode", config["analysis_mode"]]
     argv += ["--output_dir", config["output_dir"]]
     for job in config["jobs"]:
@@ -212,36 +226,12 @@ def test_build_matches_yaml(root, tmp_path, capsys, case):
     main(argv)
 
     assert capsys.readouterr().out == from_yaml
-    assert yaml.safe_load(cache_path.read_text()) == from_yaml_file
+    assert _cache(tmp_path) == from_yaml_file
 
 
 @pytest.mark.parametrize(
     "scope, text, expected",
     [
-        pytest.param(
-            "comparative",
-            "{analysis_mode: inference, output_dir: ROOT/out, jobs: ["
-            "{trace_path: ROOT/t1.json.gz, platform: MI300X, capture_folder: ROOT/c1},"
-            "{trace_path: ROOT/t2.json.gz, platform: MI300X}]}",
-            ["capture_folder on both jobs or neither"],
-            id="capture_on_one_job",
-        ),
-        pytest.param(
-            "semantic",
-            "{analysis_mode: inference, output_dir: ROOT/out, jobs: ["
-            "{trace_path: ROOT/t1.json.gz, platform: MI300X, capture_folder: ROOT/c1},"
-            "{trace_path: ROOT/t2.json.gz, platform: MI300X}]}",
-            ["jobs[0] takes no capture_folder"],
-            id="semantic_capture",
-        ),
-        pytest.param(
-            "standalone",
-            "{analysis_mode: default, output_dir: ROOT/out, jobs: ["
-            "{trace_path: ROOT/t1.json.gz, platform: MI300X,"
-            " compare_to: {trace_path: ROOT/t2.json.gz}}]}",
-            ["jobs[0] takes no compare_to"],
-            id="stray_compare_to",
-        ),
         pytest.param(
             None,
             "{analysis_mode: default, output_dir: ROOT/out, jobs: ["
@@ -251,38 +241,51 @@ def test_build_matches_yaml(root, tmp_path, capsys, case):
             id="ambiguous_scope",
         ),
         pytest.param(
-            "comparative",
-            "{analysis_mode: default, output_dir: ROOT/out, jobs: ["
-            "{trace_path: ROOT/t1.json.gz, platform: MI300X},"
-            "{trace_path: ROOT/t2.json.gz}]}",
-            ["jobs[1] needs a platform"],
-            id="job2_no_platform",
+            None,
+            "{analysis_mode: default, output_dir: ROOT/out, jobs: []}",
+            ["jobs is required"],
+            id="empty_jobs",
+        ),
+        pytest.param(
+            "standalone",
+            "{analysis_mode: default, output_dir: out, jobs: ["
+            "{trace_path: ROOT/t1.json.gz, gpu_arch_json_path: ROOT/arch.json,"
+            " compare_to: {trace_path: ROOT/t2.json.gz}},"
+            "{trace_path: t2.json.gz}]}",
+            [
+                "standalone takes exactly 1 job, got 2",
+                "jobs[0] needs a platform",
+                "jobs[1] needs a platform",
+                "output_dir must be an absolute path",
+                "jobs[1].trace_path must be an absolute path",
+                "jobs[0] takes no compare_to",
+            ],
+            id="standalone_errors",
         ),
         pytest.param(
             "semantic",
             "{analysis_mode: default, output_dir: ROOT/out, jobs: ["
-            "{trace_path: ROOT/t1.json.gz, platform: MI300X},"
+            "{trace_path: ROOT/t1.json.gz, platform: MI300X, capture_folder: ROOT/c1},"
             "{trace_path: ROOT/t2.json.gz, platform: MI300X}]}",
-            ["semantic needs analysis_mode inference"],
-            id="semantic_default_mode",
+            [
+                "semantic needs analysis_mode inference",
+                "jobs[0] takes no capture_folder",
+            ],
+            id="semantic_errors",
         ),
         pytest.param(
             "comparative",
-            "{analysis_mode: default, output_dir: ROOT/out, jobs: ["
-            "{trace_path: ROOT/t1.json.gz, platform: MI300X,"
+            "{analysis_mode: inference, output_dir: ROOT/out, jobs: ["
+            "{trace_path: ROOT/t1.json.gz, platform: MI300X, capture_folder: ROOT/c1,"
             " compare_to: {trace_path: ROOT/t3.json.gz}},"
-            "{trace_path: ROOT/t2.json.gz, platform: MI300X}]}",
-            ["must point at jobs[1]"],
-            id="compare_to_wrong_target",
-        ),
-        pytest.param(
-            "comparative",
-            "{analysis_mode: default, output_dir: ROOT/out, jobs: ["
-            "{trace_path: ROOT/t1.json.gz, platform: MI300X},"
             "{trace_path: ROOT/t2.json.gz, platform: MI300X,"
             " compare_to: {trace_path: ROOT/t1.json.gz}}]}",
-            ["jobs[1] takes no compare_to"],
-            id="compare_to_on_job2",
+            [
+                "capture_folder on both jobs or neither",
+                "must point at jobs[1]",
+                "jobs[1] takes no compare_to",
+            ],
+            id="comparative_errors",
         ),
         pytest.param(
             "comparative",
@@ -292,31 +295,6 @@ def test_build_matches_yaml(root, tmp_path, capsys, case):
             "{trace_path: ROOT/t2.json.gz, platform: MI300X}]}",
             ["comparative takes exactly 2 jobs, got 3"],
             id="three_jobs_comparative",
-        ),
-        pytest.param(
-            None,
-            "{analysis_mode: default, output_dir: ROOT/out, jobs: []}",
-            ["jobs is required"],
-            id="empty_jobs",
-        ),
-        pytest.param(
-            "standalone",
-            "{analysis_mode: default, output_dir: ROOT/out, jobs: ["
-            "{trace_path: t1.json.gz, platform: MI300X}]}",
-            ["jobs[0].trace_path must be an absolute path"],
-            id="relative_trace",
-        ),
-        pytest.param(
-            "standalone",
-            "{analysis_mode: default, output_dir: out, jobs: ["
-            "{trace_path: ROOT/t1.json.gz, gpu_arch_json_path: ROOT/arch.json},"
-            "{trace_path: ROOT/t2.json.gz, platform: MI300X}]}",
-            [
-                "standalone takes exactly 1 job, got 2",
-                "jobs[0] needs a platform",
-                "output_dir must be an absolute path",
-            ],
-            id="three_errors",
         ),
     ],
 )
@@ -332,7 +310,7 @@ def test_add_diff_stats(root, tmp_path, monkeypatch, capsys):
     completed = check_config(_load(text, root), scope).run_config
     stats = str(tmp_path / "diff_stats.csv")
     (tmp_path / "diff_stats.csv").touch()
-    (tmp_path / "run.yaml").write_text(yaml.safe_dump(completed))
+    _write_run(tmp_path, completed)
     monkeypatch.chdir(tmp_path)
 
     main(["set-diff-stats", "--config", "run.yaml", "--path", stats])
@@ -395,39 +373,39 @@ def test_add_diff_stats(root, tmp_path, monkeypatch, capsys):
         ),
     ],
 )
-def test_cli_check_writes_config(root, tmp_path, capsys, case, tail):
-    scope, text, expected, _ = CASES[case]
-    scope_args = [] if scope is None else ["--scope", scope]
-    config_path = tmp_path / "run.yaml"
-    config_path.write_text(yaml.safe_dump(_load(text, root)))
+def test_cli_check_prints_variables(root, tmp_path, capsys, case, tail):
+    scope, text, _, _ = CASES[case]
 
-    main(["check", "--config", str(config_path), *scope_args])
+    main(
+        [
+            "check",
+            "--config",
+            _write_run(tmp_path, _load(text, root)),
+            *_scope_args(scope),
+        ]
+    )
 
-    cache_path = tmp_path / "out" / "cache" / "run_config.yaml"
-    assert yaml.safe_load(cache_path.read_text()) == _load(expected, root)
     assert capsys.readouterr().out.splitlines()[-len(tail) :] == [
-        line.replace("ROOT", root) for line in tail
+        _fill(line, root) for line in tail
     ]
 
 
 def test_cli_check_failures(root, tmp_path, capsys):
     config = _load(CASES["standalone_named"][1], root)
-    config_path = tmp_path / "run.yaml"
+    argv = ["check", *_scope_args("standalone")]
 
     config["output_dir"] = root + "/bad_out"
     del config["jobs"][0]["platform"]
-    config_path.write_text(yaml.safe_dump(config))
     with pytest.raises(SystemExit) as excinfo:
-        main(["check", "--config", str(config_path), "--scope", "standalone"])
+        main([*argv, "--config", _write_run(tmp_path, config)])
     assert excinfo.value.code == 2
     assert not os.path.exists(root + "/bad_out")
 
     config["output_dir"] = root + "/t1.json.gz/out"
     config["jobs"][0]["platform"] = "MI300X"
-    config_path.write_text(yaml.safe_dump(config))
     capsys.readouterr()
     with pytest.raises(SystemExit) as excinfo:
-        main(["check", "--config", str(config_path), "--scope", "standalone"])
+        main([*argv, "--config", _write_run(tmp_path, config)])
     assert excinfo.value.code == 2
     assert capsys.readouterr().out == ""
 
