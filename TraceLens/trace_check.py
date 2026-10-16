@@ -91,7 +91,7 @@ class TraceCheckReport:
         if not output_dir:
             return
         os.makedirs(output_dir, exist_ok=True)
-        path = os.path.join(output_dir, "trace_check.json")
+        path = os.path.join(output_dir, "trace_checks.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.to_json_dict(), f, indent=2)
             f.write("\n")
