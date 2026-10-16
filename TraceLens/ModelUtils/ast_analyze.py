@@ -8088,8 +8088,40 @@ class _ForwardOperationExtractor:
                 }
             )
 
-    def _inject_iterator_predecessor(self, before: int, iterable_producer: str) -> None:
-        """Add the loop iterator as a predecessor of operations that use the loop var."""
+    def _inject_iterator_predecessor(
+        self, before: int, iterable_producer: str, row_producer: str | None = None
+    ) -> None:
+        """Add the loop iterator as a predecessor of the first body operation
+        that does not already read the per-iteration ROW.
+
+        An op that names the loop variable reads the row select, and the row
+        select reads the iterable -- so it already depends on the iterable,
+        transitively and correctly. Prepending the iterable onto it as well
+        makes the WHOLE tensor one of its operands, and since it goes first it
+        becomes that op's base.
+
+        That is what happened to every MoE expert loop. GLM writes::
+
+            for expert_idx in hit:
+                top_k_pos, token_idx = torch.where(mask[expert_idx])
+
+        and ``mask[expert_idx]`` came out reading ``hit`` -- the ``[nnz, 1]``
+        nonzero the loop walks -- as the tensor being indexed, with ``mask``
+        demoted to an index. So the shape rule answered with the whole routing
+        table ``[288, 8, B*S]`` where this expert's own tokens belong, and every
+        shape in the expert MLP below inherited it.
+
+        So the blanket dependency is for a body that reads the row NOWHERE --
+        exactly what the caller says it is for. Where some op does read it, the
+        body is already tied to the loop through that op and the row select
+        beneath it, and adding the iterable anywhere else only hands some
+        unrelated op a tensor it does not take.
+        """
+        if row_producer is not None and any(
+            row_producer in self.operations[index].predecessors
+            for index in range(before, len(self.operations))
+        ):
+            return
         for index in range(before, len(self.operations)):
             op = self.operations[index]
             if iterable_producer not in op.predecessors:
@@ -8766,7 +8798,9 @@ class _ForwardOperationExtractor:
                     # the loop TARGET resolves to, not this blanket dependency.
                     # Injecting the row here instead cost the GLM expert gather
                     # its weights-table operand.
-                    self._inject_iterator_predecessor(before, iterable_producer)
+                    self._inject_iterator_predecessor(
+                        before, iterable_producer, row_producer
+                    )
                 operation_ids = tuple(
                     operation.attr_name for operation in self.operations[before:]
                 )

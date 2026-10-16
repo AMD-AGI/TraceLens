@@ -4302,12 +4302,35 @@ class ShapeInferencer:
             # rule finds no base at all and the lookup collapses to the index's
             # own shape. The op names its buffer, so ask it.
             table_shapes: set[tuple[DimExpr, ...]] = set()
+            table_specs: list[TensorSpec] = []
             for name in node.metadata.get("external_inputs", []) or ():
                 buffer_spec = self._lookup_parameter_spec(
                     node, root=root, names=[str(name)]
                 )
                 if buffer_spec is not None and buffer_spec.shape:
                     table_shapes.add(tuple(buffer_spec.shape))
+                    table_specs.append(buffer_spec)
+            # A weight table is NAMED but never WIRED: a learned parameter is
+            # not drawn as a compute operand, so ``self.gate_up_proj[
+            # expert_idx]`` arrives with its index as the only edge. With no
+            # base among the inputs the rule fell through to the fallback that
+            # replaces the last dim with ``EXPERTS_PER_TOK``, and a per-expert
+            # weight slice reported ``[8]`` -- which the ``F.linear`` reading it
+            # then took as its own output. The table the op names IS the base;
+            # ask the parameter rather than the edges.
+            if (
+                table_specs
+                and len(table_shapes) == 1
+                and inputs
+                and all(item.dtype == "int64" for item in inputs)
+                and not any(tuple(item.shape) in table_shapes for item in inputs)
+            ):
+                table = table_specs[0]
+                selected = _broadcast_shapes([item.shape for item in inputs])
+                return TensorSpec(
+                    shape=tuple(selected) + tuple(table.shape[len(inputs) :]),
+                    dtype=table.dtype or dtype,
+                )
             base = next(
                 (item for item in inputs if tuple(item.shape) in table_shapes), None
             )
@@ -4465,6 +4488,19 @@ class ShapeInferencer:
                     if receiver is not None:
                         return TensorSpec(shape=receiver.shape, dtype=receiver.dtype)
                 source = max(inputs, key=_broadcast_rank)
+                if operation_label == "where" and len(inputs) == 1:
+                    # ``torch.where(condition)`` is NOT the three-argument
+                    # select: with one argument it is ``nonzero(as_tuple=True)``
+                    # and hands back one 1-D index tensor per axis, each as long
+                    # as the number of true entries -- the same ``nnz``
+                    # ``nonzero`` publishes. Reporting the condition's own shape
+                    # instead is what gave every MoE expert loop its wrong
+                    # tokens: GLM's ``top_k_pos, token_idx = torch.where(
+                    # mask[expert_idx])`` handed ``token_idx`` the whole
+                    # ``[1, 8, B*S]`` routing slice, so ``hidden_states[
+                    # token_idx]`` selected that many rows rather than this
+                    # expert's, and the entire expert MLP inherited it.
+                    return TensorSpec(shape=("nnz",), dtype="int64")
                 if operation_label == "where":
                     # ``torch.where(condition, x, y)`` takes its VALUES from x and
                     # y; the condition only selects between them. Letting the
@@ -4510,6 +4546,21 @@ class ShapeInferencer:
             # back to the last operand (the bias), which left the result rank-1.
             if _detail_value(details, "raw_op") == "addmm" and inputs:
                 activation_input = inputs[0]
+            # ``F.linear(x, w)`` states its operands in order too, and the same
+            # search gets it wrong for the same reason whenever the WEIGHT is a
+            # wired operand -- which it is when the weight is indexed out of a
+            # stacked table, since the indexing is an op and not a prunable
+            # learned leaf. GLM's expert MLP does
+            # ``F.linear(current, self.down_proj[expert_idx])`` where ``current``
+            # is ``[nnz, 2048]`` and the weight slice is ``[1, 4096, 4096]``:
+            # the activation does not end in the hidden dim and the weight does,
+            # so the weight was read as the input and the projection reported
+            # the weight's own shape. Taken by ARGUMENT POSITION, so an operand
+            # that did not resolve cannot promote another into its place.
+            if _detail_value(details, "raw_op") == "linear":
+                stated = self._operand_at(inputs, 0)
+                if stated is not None and stated.shape:
+                    activation_input = stated
             in_shape = (
                 activation_input.shape
                 if activation_input is not None
@@ -4545,6 +4596,27 @@ class ShapeInferencer:
                     parameter = self._unique_matrix_parameter(node, root)
                 if parameter is not None and len(parameter.shape) >= 2:
                     out_features = parameter.shape[-2]
+                if out_features is None and activation_input is not None:
+                    # The weight was indexed out of a stacked table, so it is a
+                    # wired OPERAND rather than a named parameter of this op --
+                    # ``self.down_proj[expert_idx]`` records the table on the
+                    # indexing, not on the ``F.linear`` reading it. Ask the
+                    # operand: ``F.linear`` stores its weight ``[out, in]``, so
+                    # the row axis is the width. Without this the width fell
+                    # through to "the input's own last dim", which reports the
+                    # projection as not projecting -- GLM's expert down
+                    # projection answered ``[nnz, 2048]`` where it maps 2048 up
+                    # to 4096.
+                    weight_operand = next(
+                        (
+                            item
+                            for item in inputs
+                            if item is not activation_input and len(item.shape) >= 2
+                        ),
+                        None,
+                    )
+                    if weight_operand is not None:
+                        out_features = weight_operand.shape[-2]
             if out_features is None:
                 out_features = self._projection_weight_out_features(node, root=root)
             if out_features is None and inputs:
@@ -5683,20 +5755,6 @@ class ShapeInferencer:
         masks = [
             spec for spec in index_specs if spec is not None and spec.dtype == "bool"
         ]
-
-        # Integer indices on the LEADING axes are left exactly as they were.
-        # Two reasons, both measured. The multi-index case already has a rule
-        # below and this would only restate it; and the single-index case is a
-        # deliberate, documented punt sitting on top of a defect further up --
-        # GLM's expert loop indexes ``[B*S, 4096]`` with a ``[288, 8, B*S]``
-        # index, which is the whole routing table rather than this expert's
-        # tokens. Answering that one faithfully (``[288, 8, B*S, 4096]``, which
-        # is what torch would really produce) propagates the upstream wrong
-        # shape through an entire MLP -- 113 shapes moved across three models,
-        # a ``SiLU`` going ``[3]`` -> ``[256, 6, B*S, 2048]``. The index has to
-        # be right before placing it correctly is an improvement.
-        if not masks and first == 0:
-            return None
 
         if masks:
             if len(index_specs) != 1:

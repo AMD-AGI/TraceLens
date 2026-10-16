@@ -161,16 +161,27 @@ class TestAnIntegerIndexOffTheLeadingAxis:
         assert result.shape == ("B", 4, 128)
 
 
-class TestWhenItDeclinesAndLeavesTheOldAnswerAlone:
-    def test_a_leading_integer_index(self) -> None:
-        """Deliberate: the legacy answer stands until the MoE index is fixed."""
+class TestALeadingIntegerIndex:
+    def test_it_is_placed_like_any_other(self) -> None:
+        """Selecting rows keeps the columns -- the precondition now holds.
+
+        This case was DECLINED when the rule first landed, because the only
+        leading-axis index in any model was the MoE expert loop's, and that
+        index was itself wrong: it carried the whole routing table, so placing
+        it faithfully pushed a wrong shape through an entire MLP. The loop now
+        hands over its own expert's tokens, so the index is right and the
+        correct answer is an improvement rather than a louder bug.
+        """
         inf = _make_inferencer()
-        base = TensorSpec(shape=("B*S", 4096), dtype="bfloat16")
-        index = TensorSpec(shape=(288, 8, "B*S"), dtype="int64")
+        base = TensorSpec(shape=("nnz", 4096), dtype="bfloat16")
+        index = TensorSpec(shape=("nnz",), dtype="int64")
         result = _infer(
             inf, _node("Indexing", details=["index_axes: 0"]), [base, index], [0, 1]
         )
-        assert result.shape == (288, 8, "B*S")  # the index's own shape, as before
+        assert result.shape == ("nnz", 4096)
+
+
+class TestWhenItDeclinesAndLeavesTheOldAnswerAlone:
 
     def test_more_operands_wired_than_axes_recorded(self) -> None:
         """Three tensors wired against one axis: the structure is not known."""

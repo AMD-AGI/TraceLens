@@ -57,6 +57,34 @@ MODELS = [
 # and could not be sized) give way to the one `torch.ones` the model runs.
 # Every check is now zero on all four.
 EXPECTED_NODES = {
+    # 2026-10-16d -- the MoE expert loop computes on its own expert's tokens.
+    # Four defects in one chain, each uncovered by fixing the one above it:
+    #   * the loop ITERABLE was injected as a predecessor of the first body op,
+    #     which is `mask[expert_idx]` -- so `hit` (the `[nnz, 1]` nonzero the
+    #     loop walks) became that op's BASE and the routing table was read as an
+    #     index. The blanket dependency is for a body that names the loop
+    #     variable NOWHERE; where some op reads the row select, the body is
+    #     already tied to the loop through it.
+    #   * `torch.where(condition)` with ONE argument is `nonzero(as_tuple=True)`
+    #     -- 1-D index tensors of length nnz, not the condition's shape. So
+    #     `token_idx` carried the whole `[1, 8, B*S]` routing slice.
+    #   * a weight table is NAMED but never WIRED (a learned parameter is not
+    #     drawn as an operand), so `self.down_proj[expert_idx]` had only its
+    #     index and fell to the fallback that stamps `num_experts_per_tok`,
+    #     reporting `[8]` for a weight slice.
+    #   * `F.linear(x, w)` states its operands in order, but the activation was
+    #     found by searching for "the operand ending in the hidden dim" -- which
+    #     the WEIGHT does and the activation need not, so the projection
+    #     reported the weight's own shape.
+    # GLM's expert MLP now reads [nnz, 4096] -> [nnz, 2048] -> [nnz, 4096] and
+    # scatters back into [B*S, 4096]; it used to read [3], [4], [8] and
+    # [288, 8, B*S]. 192 shapes corrected in GLM, 286 in DeepSeek, 21 in
+    # MiniMax; Kimi and GPT-2 have no such loop and do not move at all.
+    # The last of the four also fixes HyperConnection in GLM and DeepSeek, where
+    # `F.linear` reported `[24, 24]` (its weight) instead of `[B, S, 24]`.
+    # GLM 1319 -> 1317 and MiniMax 722 -> 721: the `current.to(final.dtype)`
+    # cast in each expert loop, now a genuine no-op because the expert output
+    # and the accumulator finally agree in dtype.
     # 2026-10-16c -- a variadic op counts the operands it DECLARES, and a phi
     # forwards the arm that is not empty.
     # `torch.cat([attention_mask, block_bias.to(...)], dim=-1)` has one
@@ -279,7 +307,7 @@ EXPECTED_NODES = {
     # off `grid_thw.tolist()` and takes no tensor operand at all, so docking it
     # on the chain running past it made the frame assert it reads the vision
     # activation -- a tensor that call is never passed. Same count, right tensor.
-    "zai-org/GLM-5.3-Flash": 1319,
+    "zai-org/GLM-5.3-Flash": 1317,
     # GPT-2, the one non-MoE decoder here. 121 -> 67 while it was being made
     # clean: -47 for a cross-attention tower its config never builds, -10 for a
     # shape that rendered as tensor ops, +9 for projections that drew nothing at
@@ -339,7 +367,7 @@ EXPECTED_NODES = {
     # Loop ports folded away everywhere: the back edge was the only cycle the
     # graph allowed, and the body's own ends now name the direction instead
     # (``loop in: <var>`` / ``loop out: <var>``). -2 per loop that had ports.
-    "MiniMaxAI/MiniMax-M3": 722,
+    "MiniMaxAI/MiniMax-M3": 721,
     # 2287 -> 2291: +1 ``@input_mirror`` per decoder-layer variant (4 of them).
     # ``apply_rotary_pos_emb(x, cos, sin)`` reads BOTH slots of the caller's
     # ``position_embeddings``; slot 0 (``cos``) previously reached no op at all,
