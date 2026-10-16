@@ -548,9 +548,12 @@ def test_causal_conv1d_no_inputs():
 def test_gather_no_inputs_uses_default():
     inf = _make_inferencer(hidden_size=16)
     inf.context.dims[Symbol.EXPERTS_PER_TOK.value] = 4
-    out = inf._infer_node_output(_node("Gather"), [], root=None)
-    # replace_last_dim of default hidden shape with top-k.
-    assert out.shape == ("B", "S", 4)
+    # Both names reach the one branch: a subscript is emitted as ``Indexing``,
+    # while ``torch.gather`` keeps ``Gather``.
+    for label in ("Indexing", "Gather"):
+        out = inf._infer_node_output(_node(label), [], root=None)
+        # replace_last_dim of default hidden shape with top-k.
+        assert out.shape == ("B", "S", 4), label
 
 
 def test_reduction_argmax_drops_the_axis_it_reduces_and_is_int64():

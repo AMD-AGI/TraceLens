@@ -3122,7 +3122,7 @@ def test_glm53_router_outputs_no_redundant_mirror_passthrough():
     # index shifts whenever the loop body gains or loses a step.
     gather_prefix = (
         "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/"
-        "sidefeed:1:experts:@op_l134_c70_gather:"
+        "sidefeed:1:experts:@op_l134_c70_indexing:"
     )
     gather_ids = [nid for nid in node_by_id if nid.startswith(gather_prefix)]
     assert len(gather_ids) == 1, gather_ids

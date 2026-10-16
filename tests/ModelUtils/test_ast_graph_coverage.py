@@ -333,8 +333,9 @@ def forward(self, x):
     by_label = lambda label: [op for op in analysis.operations if op.label == label]
 
     topk = by_label("TopK")[0]
-    # ``x[selected]`` becomes a Gather that consumes the TopK index tensor.
-    gathers = by_label("Gather")
+    # ``x[selected]`` becomes an Indexing op consuming the TopK index tensor --
+    # a subscript, not ``torch.gather``, which keeps the ``Gather`` name.
+    gathers = by_label("Indexing")
     assert gathers and any(topk.attr_name in g.predecessors for g in gathers)
     gather = next(g for g in gathers if topk.attr_name in g.predecessors)
 
@@ -345,7 +346,7 @@ def forward(self, x):
     assert matmul.attr_name in bitwise[0].predecessors
     assert gather.attr_name in bitwise[0].predecessors
 
-    # ``buf[..., :1].copy_(picked)`` emits a Copy consuming the copied Gather.
+    # ``buf[..., :1].copy_(picked)`` emits a Copy consuming the copied Indexing.
     copies = by_label("Copy")
     assert copies and gather.attr_name in copies[0].predecessors
 
@@ -374,7 +375,7 @@ def forward(self, x):
     )
     by_label = lambda label: [op for op in analysis.operations if op.label == label]
 
-    gather = by_label("Gather")[0]
+    gather = by_label("Indexing")[0]  # ``x[selected]``
     # The slice-assignment emits a Copy op (same label as the explicit
     # ``.copy_()`` in-place-mutator path) consuming the assigned RHS operand.
     copies = by_label("Copy")

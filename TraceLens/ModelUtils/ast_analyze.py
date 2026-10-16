@@ -6607,9 +6607,17 @@ class _ForwardOperationExtractor:
                 return None, []
             base, base_external = self.expression(node.value)
             # Advanced indexing (``x[idx]`` where ``idx`` is a tensor, e.g.
-            # ``pool_indices[batch_idx, selected]`` or a boolean mask) is a gather:
-            # the index tensor is a genuine data consumer, not slicing. Plain
+            # ``pool_indices[batch_idx, selected]`` or a boolean mask): the index
+            # tensor is a genuine data consumer, not slicing. Plain
             # slices/ints/``None``/``...`` carry no producer and stay pass-through.
+            #
+            # Labelled ``Indexing``, NOT ``Gather``. ``torch.gather`` is a specific
+            # op -- one index tensor, an explicit ``dim``, output shaped exactly
+            # like the index -- and a subscript is none of those things. They were
+            # one label until the two were counted: 65 subscripts across the five
+            # pinned models claimed to be a ``torch.gather`` beside 12 that are one.
+            # A real ``torch.gather``/``x.gather(dim, idx)`` keeps the ``Gather``
+            # name through the tensor-method table and carries ``raw_op: gather``.
             index_producers: list[str] = []
             index_external: list[str] = []
             for operand in _subscript_index_operands(node.slice):
@@ -6620,7 +6628,7 @@ class _ForwardOperationExtractor:
             if index_producers:
                 producer = self._emit(
                     node,
-                    "Gather",
+                    "Indexing",
                     [value for value in (base, *index_producers) if value],
                     [*base_external, *index_external],
                 )

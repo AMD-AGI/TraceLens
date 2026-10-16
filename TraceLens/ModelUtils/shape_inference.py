@@ -4231,7 +4231,15 @@ class ShapeInferencer:
                 inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
             )
 
-        if operation_label == "gather":
+        if operation_label in {"gather", "indexing"}:
+            # Both names, one branch -- deliberately, and only for now. The label
+            # IS this rule's key, so renaming the subscript emit site to
+            # ``Indexing`` without naming it here would drop all 65 of those nodes
+            # onto the generic fallback: a rename that silently moved shapes, which
+            # is how two earlier attempts to split this label died. The split of
+            # the RULE is separate work; until then the two names share the body
+            # below unchanged, and ``has_dim`` remains what actually tells a real
+            # ``torch.gather`` from a subscript.
             has_dim = _detail_value(details, "dim") is not None
             # A buffer this op reads is the TABLE being indexed, whatever its
             # dtype. Separating base from index by "the non-integer one" works

@@ -234,14 +234,21 @@ def _check_node(node: dict[str, Any]) -> list[str]:
     # parameters (``inspect`` first, then the aten schema) keyed on the raw op
     # name recovered from the model's own forward source -- never a static list.
     #
-    # Keyed on ``raw_op`` and never on the display label, which is not evidence
-    # about the contract: ``Gather`` is what an advanced index
-    # (``keys[batch_idx, pool_idx]``, three tensors and legal) is DISPLAYED as
-    # as well as what ``torch.gather`` (two) is, and ``Mean`` labels the phi
-    # that joins three mutually-exclusive layer variants. Measured: judging by
-    # the label reported eight such ops on GLM alone, every one of them
-    # correctly wired. An op whose label was synthesised rather than read off a
-    # call carries ``raw_op`` only where the construction IS that op.
+    # Keyed on ``raw_op`` and never on the display label. The two answer
+    # different questions: the label says what an op IS for a reader, ``raw_op``
+    # names the call whose signature is its contract. ``Mean`` labels the phi
+    # that joins mutually-exclusive layer variants -- a node with no call behind
+    # it at all -- and a phi's arity is a property of the branch, not of
+    # ``torch.mean``. Measured: judging arity by the label reported eight such
+    # ops on GLM alone, every one of them correctly wired. An op whose label was
+    # synthesised rather than read off a call carries ``raw_op`` only where the
+    # construction IS that op, which is exactly when the contract applies.
+    #
+    # ``Gather`` used to be the other half of this example, when it labelled a
+    # three-tensor advanced index (``keys[batch_idx, pool_idx]``) as well as the
+    # two-tensor ``torch.gather``. A subscript is now ``Indexing``, so that
+    # particular lie is gone -- but the rule stands on its own reasoning, not on
+    # the labels happening to be honest today.
     contract_name = _raw_op(node)
     ceiling, variadic = _operand_ceiling(contract_name)
 

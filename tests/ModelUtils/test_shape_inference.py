@@ -672,14 +672,20 @@ def test_gather_integer_advanced_index_broadcasts_indices_and_keeps_tail():
     # rule the op collapsed to a single index operand's shape (rank-1), breaking
     # every downstream rank check (the GLM indexer ``pool_indices[batch_idx,
     # selected]`` bug).
+    #
+    # Pinned under BOTH names. A subscript is emitted as ``Indexing``; the rule is
+    # still reached by ``Gather`` because the label is this rule's key and the two
+    # share one branch. Asserting both means a future edit cannot unhook one of
+    # them without a test saying so.
     inf = _make_inferencer()
     base = TensorSpec(shape=(10, 20, 8), dtype="bfloat16")
     i = TensorSpec(shape=(4,), dtype="int64")
     j = TensorSpec(shape=(4,), dtype="int64")
-    node = _node("Gather")  # no ``dim`` detail -> advanced index, not torch.gather
-    result = inf._infer_node_output(node, [base, i, j], root=None)
-    assert result.shape == (4, 8)
-    assert result.dtype == "bfloat16"
+    for label in ("Indexing", "Gather"):
+        node = _node(label)  # no ``dim`` detail -> advanced index, not torch.gather
+        result = inf._infer_node_output(node, [base, i, j], root=None)
+        assert result.shape == (4, 8), label
+        assert result.dtype == "bfloat16", label
 
 
 def test_gather_integer_advanced_index_broadcasts_unequal_index_ranks():
@@ -690,9 +696,10 @@ def test_gather_integer_advanced_index_broadcasts_unequal_index_ranks():
     base = TensorSpec(shape=("B", "S", 128), dtype="float16")
     i = TensorSpec(shape=(4, 1), dtype="int64")
     j = TensorSpec(shape=(1, 5), dtype="int64")
-    node = _node("Gather")
-    result = inf._infer_node_output(node, [base, i, j], root=None)
-    assert result.shape == (4, 5, 128)
+    for label in ("Indexing", "Gather"):
+        node = _node(label)
+        result = inf._infer_node_output(node, [base, i, j], root=None)
+        assert result.shape == (4, 5, 128), label
 
 
 def test_gather_single_int_index_without_dim_stays_on_legacy_path():
@@ -703,9 +710,10 @@ def test_gather_single_int_index_without_dim_stays_on_legacy_path():
     inf = _make_inferencer()
     base = TensorSpec(shape=("B", "S", 4096), dtype="float16")
     index = TensorSpec(shape=("B", 4), dtype="int64")
-    node = _node("Gather")
-    result = inf._infer_node_output(node, [base, index], root=None)
-    assert result.shape == ("B", 4)
+    for label in ("Indexing", "Gather"):
+        node = _node(label)
+        result = inf._infer_node_output(node, [base, index], root=None)
+        assert result.shape == ("B", 4), label
 
 
 def test_index_select_leading_axis_advanced_index_keeps_tail():
