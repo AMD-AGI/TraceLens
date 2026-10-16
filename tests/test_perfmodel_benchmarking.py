@@ -189,9 +189,26 @@ class TestMicrobenchHelpers:
             vector_results={"vector_fp16": 45.6},
         )
         assert payload["name"] == "MI300X"
-        assert payload["max_achievable_tflops"]["matrix_fp16"] == 123
-        assert payload["max_achievable_tflops"]["vector_fp16"] == 46
+        assert payload["max_achievable_tflops"]["matrix_fp16"] == 123.4
+        assert payload["max_achievable_tflops"]["vector_fp16"] == 45.6
         assert set(mb.ARCH_TLOPS_KEYS) <= set(payload["max_achievable_tflops"])
+
+    def test_build_measured_arch_json_keeps_sub_one_tflops(self):
+        mb = _import_microbench()
+        payload = mb._build_measured_arch_json(
+            gpu_name="R9600D",
+            mem_gb=47.6,
+            read_bw_gbps=640.4,
+            matrix_results={"matrix_fp64": 0.4, "matrix_bf16": 69.1},
+            vector_results={"vector_fp64": 0.4},
+        )
+        maf = payload["max_achievable_tflops"]
+        assert maf["matrix_fp64"] == 0.4
+        assert maf["vector_fp64"] == 0.4
+        assert maf["matrix_bf16"] == 69.1
+        assert payload["mem_bw_gbps"] == 640.4
+        assert payload["memory_gb"] == 47.6
+        assert maf["vector_fp16"] == 0.0
 
     def test_gemm_shapes_non_empty(self):
         mb = _import_microbench()

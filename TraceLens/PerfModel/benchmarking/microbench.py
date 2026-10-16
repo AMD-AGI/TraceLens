@@ -204,13 +204,13 @@ def _build_measured_arch_json(
     maf: Dict[str, float] = {}
     for key in ARCH_TLOPS_KEYS:
         if key.startswith("matrix_"):
-            maf[key] = int(round(float(matrix_results.get(key, 0.0))))
+            maf[key] = round(float(matrix_results.get(key, 0.0)), 1)
         else:
-            maf[key] = int(round(float(vector_results.get(key, 0.0))))
+            maf[key] = round(float(vector_results.get(key, 0.0)), 1)
     return {
         "name": _arch_product_name(gpu_name, mem_gb),
-        "mem_bw_gbps": int(round(float(read_bw_gbps))),
-        "memory_gb": int(round(mem_gb)),
+        "mem_bw_gbps": round(float(read_bw_gbps), 1),
+        "memory_gb": round(float(mem_gb), 1),
         "max_achievable_tflops": maf,
         "source": "These are benchmark derived peak flops and bw",
     }
