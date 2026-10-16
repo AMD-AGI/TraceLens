@@ -37,6 +37,13 @@ class LayerVariant:
     # ``Any`` avoids a blocks->block_tree import cycle. When empty (the common case) the
     # variant renders via the normal top-level class resolution.
     component_trees: dict[str, Any] = field(default_factory=dict)
+    # Decoder-layer component attrs the LIVE module for this variant does not have, so
+    # the renderer skips them outright. A forward that picks between two components
+    # (``block_sparse_moe`` when it exists, else ``mlp``) parses as both arms, but each
+    # live layer was built with exactly one; drawing the other is drawing a module that
+    # is not there. Distinct from ``component_trees`` — an absent component has no tree
+    # to render, and "no tree" otherwise means "no override, draw the default".
+    omitted_components: frozenset[str] = frozenset()
 
 
 @dataclass

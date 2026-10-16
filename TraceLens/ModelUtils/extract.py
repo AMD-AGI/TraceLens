@@ -896,6 +896,12 @@ def _reconcile_layer_variants(spec: ArchitectureSpec, primary: MetaModuleGroup) 
     # the AST variants are matched against below.
     ordered_sigs = sorted(buckets, key=lambda sig: (-buckets[sig], sig))
 
+    # One representative descriptor (path -> class map) per bucket, when available.
+    sig_to_desc: dict[str, dict[str, str]] = {}
+    if primary.descriptors and len(primary.descriptors) == len(primary.signatures):
+        for signature, descriptor in zip(primary.signatures, primary.descriptors):
+            sig_to_desc.setdefault(signature, dict(descriptor))
+
     ast_variants = spec.layer_variants
     if ast_variants and len(ast_variants) == len(buckets):
         # Keep the AST-derived rich labels/classes (they feed subgraph resolution via
@@ -905,6 +911,10 @@ def _reconcile_layer_variants(spec: ArchitectureSpec, primary: MetaModuleGroup) 
         for variant, signature in zip(ordered, ordered_sigs):
             variant.count = buckets[signature]
             variant.layer_indices = list(indices_by_sig[signature])
+            # The AST describes every layer this class COULD build; this bucket is
+            # what one of them actually is. Agreeing on the count does not make the
+            # parse right about which submodules each variant owns.
+            _apply_live_module_truth(spec, variant, sig_to_desc.get(signature, {}))
         spec.layer_variants = ordered
         return
 
@@ -1006,6 +1016,149 @@ def _shallowest_divergent_paths(sig_to_desc: dict[str, dict[str, str]]) -> list[
     return sorted(shallow)
 
 
+def _live_path_set(desc: dict[str, str]) -> frozenset[str]:
+    """Every live submodule path, plus an index-free spelling of each.
+
+    ``named_modules()`` addresses a ``ModuleList`` element by position
+    (``experts.0.w1``) while the parsed tree names the attr alone (``experts.w1``).
+    Collapsing the numeric segments lets the two be compared without the caller
+    knowing which attrs happen to be lists — otherwise every expert's projections
+    read as "not in the live model" and the whole expert MLP is pruned away.
+    """
+    collapsed = {
+        ".".join(part for part in path.split(".") if not part.isdigit())
+        for path in desc
+    }
+    return frozenset(desc) | frozenset(collapsed) - {""}
+
+
+def _absent_submodule_paths(
+    spec: ArchitectureSpec,
+    comp_attr: str,
+    comp_class: str,
+    live_paths: frozenset[str],
+    basic_ops: BasicOpFilter,
+) -> dict[str, Any]:
+    """Rel paths under *comp_attr* this element's own tree does not have.
+
+    A child counts as absent only if it is BOTH drawn and assigned by the owner's
+    ``__init__``, and both halves were measured to be load-bearing:
+
+    * drawn, but not constructor-assigned — ``moe_infer`` is a METHOD the forward
+      calls. ``named_modules()`` lists modules, so it never lists a method, and its
+      absence is no evidence at all. Pruning on the drawn tree alone deleted it and
+      the 22 nodes behind it from the two variants that do run it.
+    * constructor-assigned, but not drawn — ``self.use_full_rank_gate =
+      config...get(...)`` is a scalar the forward branches on, recorded like any
+      other ``__init__`` assignment. It is not a module, is not in the live tree,
+      and must not be read as missing.
+
+    Descent stops at an absent submodule — its subtree goes with it, and its
+    descendants are not separately absent, they are simply not there.
+    """
+    from TraceLens.ModelUtils.block_tree import build_block_node
+
+    if comp_class not in spec.class_registry:
+        return {}
+    tree = build_block_node(
+        attr_name=comp_attr,
+        class_name=comp_class,
+        registry=spec.class_registry,
+        basic_ops=basic_ops,
+        infer_init_steps=True,
+    )
+    absent: dict[str, Any] = {}
+
+    def visit(node: Any, rel: str) -> None:
+        owner = spec.class_registry.get(getattr(node, "class_name", "") or "")
+        # A repeated call keys ``init_assignments`` as ``attr@l<lineno>``; the base
+        # attr is what names the submodule.
+        declared = {
+            key.split("@")[0] for key in (owner.init_assignments if owner else {})
+        }
+        for child in getattr(node, "children", None) or []:
+            attr = getattr(child, "attr_name", "")
+            # ``@``-prefixed children are the forward's own operations, not submodules;
+            # the live module tree has nothing to say about them.
+            if not attr or attr.startswith("@"):
+                continue
+            child_rel = f"{rel}.{attr}" if rel else attr
+            if f"{comp_attr}.{child_rel}" in live_paths:
+                visit(child, child_rel)
+            elif attr.split("@")[0] in declared:
+                absent[child_rel] = SUBMODULE_OMITTED
+
+    visit(tree, "")
+    return absent
+
+
+def _live_module_overrides(
+    spec: ArchitectureSpec,
+    desc: dict[str, str],
+    basic_ops: BasicOpFilter,
+) -> tuple[frozenset[str], dict[str, dict[str, Any]]]:
+    """``(components this element lacks, per-component absent submodule overrides)``.
+
+    The live module is the authority on what exists. A forward that chooses between
+    two submodules parses as both arms, and an ``__init__`` guarded by a config flag
+    constructs one of them — but the element in front of us was built exactly one way,
+    so the arm it cannot take is not drawn.
+    """
+    if not desc:
+        return frozenset(), {}
+    live_paths = _live_path_set(desc)
+    omitted_components: set[str] = set()
+    overrides: dict[str, dict[str, Any]] = {}
+    for comp in spec.block_components:
+        if comp.attr_name not in desc:
+            omitted_components.add(comp.attr_name)
+            continue
+        absent = _absent_submodule_paths(
+            spec,
+            comp.attr_name,
+            desc.get(comp.attr_name) or comp.class_name,
+            live_paths,
+            basic_ops,
+        )
+        if absent:
+            overrides[comp.attr_name] = absent
+    return frozenset(omitted_components), overrides
+
+
+def _apply_live_module_truth(
+    spec: ArchitectureSpec,
+    variant: LayerVariant,
+    desc: dict[str, str],
+    *,
+    live_absent: dict[str, dict[str, Any]] | None = None,
+    omitted_components: frozenset[str] | None = None,
+) -> None:
+    """Drop from *variant* every submodule the live element does not have.
+
+    Callers that already resolved the element's absences pass them in; otherwise they
+    are read here. A component the divergence pass has already rendered keeps that
+    tree — it was built with these same absences folded in.
+    """
+    basic_ops = spec.basic_ops or BasicOpFilter.for_detailed()
+    if live_absent is None or omitted_components is None:
+        omitted_components, live_absent = _live_module_overrides(spec, desc, basic_ops)
+    variant.omitted_components = omitted_components
+    components = {comp.attr_name: comp for comp in spec.block_components}
+    for comp_attr, rel_overrides in sorted(live_absent.items()):
+        if comp_attr in variant.component_trees or comp_attr in omitted_components:
+            continue
+        tree = _build_variant_component_tree(
+            spec,
+            components.get(comp_attr),
+            comp_attr,
+            desc.get(comp_attr),
+            rel_overrides,
+            basic_ops,
+        )
+        if tree is not None:
+            variant.component_trees[comp_attr] = tree
+
+
 def _apply_variant_divergence(
     spec: ArchitectureSpec,
     variant: LayerVariant,
@@ -1018,6 +1171,7 @@ def _apply_variant_divergence(
 
     basic_ops = spec.basic_ops or BasicOpFilter.for_detailed()
     components = {comp.attr_name: comp for comp in spec.block_components}
+    omitted_components, live_absent = _live_module_overrides(spec, desc, basic_ops)
 
     # Group divergent paths by their top-level component attr (``self_attn``/``mlp``).
     by_component: dict[str, dict[str, Any]] = {}
@@ -1035,6 +1189,8 @@ def _apply_variant_divergence(
         )
 
         # Describe each divergent leaf: its class short name, or "no <leaf>" when omitted.
+        # Only what DIVERGES names the variant — a submodule no variant has says
+        # nothing about which variant this is.
         bits = []
         for rel, value in sorted(rel_overrides.items()):
             leaf = rel.split(".")[-1] if rel else comp_attr
@@ -1044,11 +1200,27 @@ def _apply_variant_divergence(
                 bits.append(_strip_prefix(value, prefix))
         (ffn_bits if role in _FFN_ROLES else attn_bits).extend(bits)
 
+        # A submodule this element simply does not have is omitted alongside the
+        # divergent ones, so a single tree carries both facts.
         tree = _build_variant_component_tree(
-            spec, comp, comp_attr, comp_class, rel_overrides, basic_ops
+            spec,
+            comp,
+            comp_attr,
+            comp_class,
+            {**live_absent.get(comp_attr, {}), **rel_overrides},
+            basic_ops,
         )
         if tree is not None:
             variant.component_trees[comp_attr] = tree
+
+    # Components the divergence did not touch still answer to the live module.
+    _apply_live_module_truth(
+        spec,
+        variant,
+        desc,
+        live_absent=live_absent,
+        omitted_components=omitted_components,
+    )
 
     if attn_bits:
         variant.attention_label = " + ".join(attn_bits)

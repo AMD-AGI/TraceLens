@@ -6511,6 +6511,13 @@ def _append_variant_layer(
         return add_id
 
     for component in _ordered_decoder_components(spec):
+        # A component the live module for this variant does not have is not drawn at
+        # all. The forward picks between them (``block_sparse_moe`` when it was built,
+        # else ``mlp``) so the parse reports both, but each layer was built exactly one
+        # way. Skipping keeps the chain intact: the next component reads whatever this
+        # one would have read.
+        if variant is not None and component.attr_name in variant.omitted_components:
+            continue
         if component.attr_name in {"attn_hc", "ffn_hc"}:
             residual_source = chain_exits[0] if chain_exits else None
         section_prefix = _merge_node_id(id_prefix, component.attr_name)
@@ -6615,6 +6622,12 @@ def _append_source_decoder_layer(
             ]
             if not sources:
                 continue
+            if (operation.class_name or "") == PHI_CLASS and len(sources) == 1:
+                # The other arm called a submodule this variant was not built with,
+                # so there is nothing left to choose between. A phi with one arm
+                # forwards it unchanged; it is not a phi and is not drawn.
+                refs[step] = sources[0]
+                continue
             node_id = _merge_node_id(id_prefix, step)
             merged_nodes.append(
                 {
@@ -6639,6 +6652,13 @@ def _append_source_decoder_layer(
 
         component = components.get(step)
         if component is None:
+            continue
+        # A component the live module for this variant does not have is not drawn.
+        # The forward picks between them (``block_sparse_moe`` when it was built,
+        # else ``mlp``) so the parse reports both calls, but each layer was built
+        # exactly one way. Publishing no ref for the step leaves the phi below it
+        # a single arm, which folds away.
+        if variant is not None and component.attr_name in variant.omitted_components:
             continue
         predecessors = decoder.forward_step_predecessors.get(step, ())
         inputs = [

@@ -57,6 +57,38 @@ MODELS = [
 # and could not be sized) give way to the one `torch.ones` the model runs.
 # Every check is now zero on all four.
 EXPECTED_NODES = {
+    # 2026-10-16 -- the live module tree says which submodules a variant HAS.
+    # An absent component and a component with no override were the same state
+    # (no entry in `component_trees`), and the renderer's fallback for "no
+    # override" is to draw the DEFAULT component list -- which contains both
+    # arms. So every Kimi variant group drew an `mlp` AND a `block_sparse_moe`,
+    # including the one whose own label says "no mlp".
+    # Kimi 648 -> 517, every one of the 131 accounted:
+    #     66  1x group: block_sparse_moe (that layer has `mlp`, and was never
+    #         built with a MoE block at all)
+    #     25  24x group: mlp     (those layers have block_sparse_moe)
+    #     25  68x group: mlp     (same)
+    #      6  SituAndMul frame boundary tiles, 2 per deleted MLP subtree
+    #      3  68x self_attn: g_a_proj, g_b_proj, @op_l651_c8_merge
+    #      3  1x  self_attn: the same three
+    #      3  @op_l965_c8_merge, one per variant group
+    # The gate pair goes for the same reason: this checkpoint sets
+    # `use_full_rank_gate: true`, so `g_proj` is constructed and `g_a_proj` /
+    # `g_b_proj` never are. A phi left with one arm folds onto it rather than
+    # being drawn as a choice between one thing.
+    # The other four models do not move. DeepSeek takes the synthesize path (its
+    # AST variant count disagrees with the live buckets) so it never reached the
+    # early return that caused this, and its four variant trees are intact.
+    # NOTE, because it cost a wrong first attempt: a child is only evidence of
+    # absence if it is BOTH drawn AND in the owner's `init_assignments`.
+    # `moe_infer` is a METHOD the forward calls -- `named_modules()` would never
+    # list it -- and pruning on live-tree absence alone deleted 22 LIVE nodes
+    # from the two variants that really do have a MoE block.
+    # NOTE also: the frame census did NOT catch this and correctly reports 0
+    # missing, because it tracks `@fn_`/`@positional_` FREE-FUNCTION frames and
+    # these were module components. A 66-node module subtree can vanish without
+    # it noticing; EXPECTED_NODES is the only guard that covers that case, and
+    # it is what fired here.
     # 2026-10-15d -- a method called on a LOCAL object is read like any other.
     # DeepSeek's compressor and indexer run `cache_layer.store_compression_
     # weights(...)` / `update_overlap_state(...)` on their KV cache, both
@@ -137,7 +169,6 @@ EXPECTED_NODES = {
     #     named operand ports the leaf now declares.
     #   * GLM +28 / MiniMax +16 / DeepSeek +89 are the same expansion, times
     #     the number of attention modules and layer variants each model has.
-
     # Then -36 / -1: a loop body split across two frames (a submodule among its
     # ops carried no ``loop:`` detail) is one frame again, dropping the boundary
     # plumbing that ran between the halves.
@@ -243,7 +274,7 @@ EXPECTED_NODES = {
     #   -1 the phi built over ``past_key_values.update(key_states, value_states)``
     #      -- a method on a forward parameter that produces no op, so there were
     #      never two arms to choose between.
-    "moonshotai/Kimi-K3": 648,
+    "moonshotai/Kimi-K3": 517,
     # MiniMax used to move by one between runs of the SAME code. That is fixed
     # (18148ab2): all four models are byte-identical across PYTHONHASHSEED 0, 7,
     # 42 and 123, so a single expected count is meaningful again.
