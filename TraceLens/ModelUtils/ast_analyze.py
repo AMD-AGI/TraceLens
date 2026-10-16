@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import builtins
 import copy
 import functools
@@ -264,6 +265,67 @@ def function_display_label(attr_name_or_func: str) -> str:
 # wiring; strip it back to the base attr wherever the key indexes ``init_assignments``
 # / ``multi_op_methods`` (the child-class join point).
 _SUBMODULE_CALLSITE_RE = re.compile(r"@l(\d+)$")
+
+
+def _uniquely_defined_methods(tree: ast.AST) -> dict[str, str]:
+    """``{method name: the one class that defines it}`` for this module.
+
+    A forward can call a method on a LOCAL object -- DeepSeek's compressor runs
+    ``cache_layer.store_compression_weights(...)`` on its KV cache, a class in
+    the model's own source. The receiver is not ``self``, so no submodule path
+    sees it and the call vanishes: its results then have no producer, and
+    whatever reads them falls back on the op that happened to precede it.
+    """
+    owners: dict[str, set[str]] = {}
+    for cls in [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]:
+        for item in cls.body:
+            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if item.name == "forward" or item.name.startswith("__"):
+                continue
+            owners.setdefault(item.name, set()).add(cls.name)
+    return {name: next(iter(who)) for name, who in owners.items() if len(who) == 1}
+
+
+def _local_method_call_sites(
+    func: ast.FunctionDef, owners: dict[str, str]
+) -> dict[tuple[str, int], str]:
+    """``{(receiver, lineno): owning class}`` for local-object calls to expand.
+
+    Keyed per CALL SITE because one method name can be both kinds of call.
+    Excludes the ECHO -- ``key_states, value_states = past_key_values.update(
+    key_states, value_states, ...)`` hands back the names it was given, which
+    changes nothing drawable and is already modelled as a passthrough.
+    """
+    sites: dict[tuple[str, int], str] = {}
+    for stmt in ast.walk(func):
+        if not isinstance(stmt, (ast.Assign, ast.Expr)):
+            continue
+        call = stmt.value
+        if not (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id != "self"
+        ):
+            continue
+        owner = owners.get(call.func.attr)
+        if owner is None:
+            continue
+        targets: set[str] = set()
+        for target in getattr(stmt, "targets", []):
+            for item in (
+                target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
+            ):
+                if isinstance(item, ast.Name):
+                    targets.add(item.id)
+        arguments = {arg.id for arg in call.args if isinstance(arg, ast.Name)} | {
+            kw.value.id for kw in call.keywords if isinstance(kw.value, ast.Name)
+        }
+        if targets and targets <= arguments:
+            continue
+        sites[(call.func.value.id, call.lineno)] = owner
+    return sites
 
 
 def submodule_callsite_attr(attr: str, lineno: int) -> str:
@@ -2090,6 +2152,7 @@ def _extract_self_calls_ordered(
     skip_free_fn: bool = False,
     repeated_attrs: frozenset[str] = frozenset(),
     module_attrs: frozenset[str] = frozenset(),
+    local_object_methods: dict[tuple[str, int], str] | None = None,
 ) -> None:
     """Collect self.module(...) calls in approximate evaluation order (inner-first).
 
@@ -2108,11 +2171,21 @@ def _extract_self_calls_ordered(
     if isinstance(node, ast.Call):
         for arg in node.args:
             _extract_self_calls_ordered(
-                arg, out, skip_free_fn, repeated_attrs, module_attrs
+                arg,
+                out,
+                skip_free_fn,
+                repeated_attrs,
+                module_attrs,
+                local_object_methods,
             )
         for keyword in node.keywords:
             _extract_self_calls_ordered(
-                keyword.value, out, skip_free_fn, repeated_attrs, module_attrs
+                keyword.value,
+                out,
+                skip_free_fn,
+                repeated_attrs,
+                module_attrs,
+                local_object_methods,
             )
 
         func = node.func
@@ -2143,6 +2216,16 @@ def _extract_self_calls_ordered(
         functional_op = _functional_call_name(func)
         if functional_op:
             _append_forward_call(out, functional_synthetic_attr(functional_op))
+            return
+        if (
+            local_object_methods
+            and isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and (func.value.id, node.lineno) in local_object_methods
+        ):
+            _append_forward_call(
+                out, submodule_callsite_attr(func.value.id, node.lineno)
+            )
             return
 
         target = _expr_name(func)
@@ -2181,48 +2264,93 @@ def _extract_self_calls_ordered(
         # either. Free-function calls (``func`` is an ``ast.Name``) don't reach here.
         if isinstance(func, ast.Attribute):
             _extract_self_calls_ordered(
-                func.value, out, skip_free_fn, repeated_attrs, module_attrs
+                func.value,
+                out,
+                skip_free_fn,
+                repeated_attrs,
+                module_attrs,
+                local_object_methods,
             )
         return
 
     if isinstance(node, ast.BinOp):
         _extract_self_calls_ordered(
-            node.left, out, skip_free_fn, repeated_attrs, module_attrs
+            node.left,
+            out,
+            skip_free_fn,
+            repeated_attrs,
+            module_attrs,
+            local_object_methods,
         )
         _extract_self_calls_ordered(
-            node.right, out, skip_free_fn, repeated_attrs, module_attrs
+            node.right,
+            out,
+            skip_free_fn,
+            repeated_attrs,
+            module_attrs,
+            local_object_methods,
         )
         return
 
     if isinstance(node, (ast.List, ast.Tuple)):
         for elt in node.elts:
             _extract_self_calls_ordered(
-                elt, out, skip_free_fn, repeated_attrs, module_attrs
+                elt,
+                out,
+                skip_free_fn,
+                repeated_attrs,
+                module_attrs,
+                local_object_methods,
             )
         return
 
     if isinstance(node, ast.IfExp):
         _extract_self_calls_ordered(
-            node.body, out, skip_free_fn, repeated_attrs, module_attrs
+            node.body,
+            out,
+            skip_free_fn,
+            repeated_attrs,
+            module_attrs,
+            local_object_methods,
         )
         _extract_self_calls_ordered(
-            node.orelse, out, skip_free_fn, repeated_attrs, module_attrs
+            node.orelse,
+            out,
+            skip_free_fn,
+            repeated_attrs,
+            module_attrs,
+            local_object_methods,
         )
         return
 
     if isinstance(node, ast.Subscript):
         _extract_self_calls_ordered(
-            node.value, out, skip_free_fn, repeated_attrs, module_attrs
+            node.value,
+            out,
+            skip_free_fn,
+            repeated_attrs,
+            module_attrs,
+            local_object_methods,
         )
         return
 
     if isinstance(node, ast.Compare):
         _extract_self_calls_ordered(
-            node.left, out, skip_free_fn, repeated_attrs, module_attrs
+            node.left,
+            out,
+            skip_free_fn,
+            repeated_attrs,
+            module_attrs,
+            local_object_methods,
         )
         for comparator in node.comparators:
             _extract_self_calls_ordered(
-                comparator, out, skip_free_fn, repeated_attrs, module_attrs
+                comparator,
+                out,
+                skip_free_fn,
+                repeated_attrs,
+                module_attrs,
+                local_object_methods,
             )
         return
 
@@ -2316,7 +2444,9 @@ def _path_max_self_call_sites(stmts: list[ast.stmt]) -> dict[str, set[int]]:
 
 
 def _submodule_method_step_details(
-    body: list[ast.stmt], module_attrs: frozenset[str]
+    body: list[ast.stmt],
+    module_attrs: frozenset[str],
+    local_object_methods: dict[tuple[str, int], str] | None = None,
 ) -> dict[str, list[str]]:
     """Record WHICH method a ``self.<sub>.<method>(...)`` step invokes.
 
@@ -2340,7 +2470,53 @@ def _submodule_method_step_details(
             ):
                 key = submodule_callsite_attr(receiver.attr, node.lineno)
                 details.setdefault(key, []).append(f"method: {node.func.attr}")
+                continue
+            owner = (
+                (local_object_methods or {}).get((receiver.id, node.lineno))
+                if isinstance(receiver, ast.Name)
+                else None
+            )
+            if owner is not None:
+                key = submodule_callsite_attr(receiver.id, node.lineno)
+                details.setdefault(key, []).extend(
+                    [f"method: {node.func.attr}", f"method_class: {owner}"]
+                )
     return details
+
+
+def named_method_return_slots(
+    cls: "ClassStructure", method_name: str
+) -> tuple[dict[str, str], list[str]]:
+    """``(slot -> producing op, slot order)`` for a NAMED method of *cls*.
+
+    A method's returns are published the same way a forward's are, and the
+    caller unpacks them the same way -- but only a forward's were ever
+    recorded, so a method call's results had no producer. ``prior_kv,
+    prior_gate = cache_layer.update_overlap_state(...)`` then left the ops that
+    read the cache dead and the ``.to()`` below reading whatever preceded it.
+
+    ``({}, [])`` when the method is absent or returns nothing traceable.
+    """
+    node = getattr(cls, "node", None)
+    if node is None:
+        return {}, []
+    func = next(
+        (
+            item
+            for item in node.body
+            if isinstance(item, ast.FunctionDef) and item.name == method_name
+        ),
+        None,
+    )
+    if func is None:
+        return {}, []
+    try:
+        analysis = _forward_operations_from_forward(
+            func, self_values={}, all_tensor_ops=True
+        )
+    except Exception:  # noqa: BLE001 - a helper we cannot trace stays a leaf
+        return {}, []
+    return dict(analysis.return_slots), list(analysis.return_order)
 
 
 def named_method_operations(
@@ -5207,6 +5383,7 @@ class _ForwardOperationExtractor:
         module_functions: dict[str, ast.FunctionDef] | None = None,
         repeated_submodule_attrs: frozenset[str] | None = None,
         submodule_attrs: frozenset[str] | None = None,
+        local_object_methods: dict[tuple[str, int], str] | None = None,
         class_methods: dict[str, ast.FunctionDef] | None = None,
         is_free_function_body: bool = False,
         param_values: dict[str, Any] | None = None,
@@ -5246,6 +5423,7 @@ class _ForwardOperationExtractor:
         # (``self.indexer.build_block_mask(...)``) is recognised as that child's
         # call rather than an untracked tensor-method chain link.
         self.submodule_attrs = frozenset(submodule_attrs or ())
+        self.local_object_methods = dict(local_object_methods or {})
         # Module-level free functions (``apply_rotary_pos_emb_vision``, ...) keyed
         # by name, so a traced synthetic call can map its positional args to the
         # callee's parameter names and route each to the producer feeding it.
@@ -5761,6 +5939,17 @@ class _ForwardOperationExtractor:
             and func.value.attr in self.submodule_attrs
         ):
             return submodule_callsite_attr(func.value.attr, node.lineno)
+        # ``<local>.<method>(...)`` resolved to a class in this file. It produces
+        # a value exactly as a child module's call does, and the branch env has
+        # to record that: the phi over a variable assigned in both arms
+        # otherwise takes whatever produced the name LAST, so DeepSeek's cache
+        # arm read the projection it only passes to the cache.
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and (func.value.id, node.lineno) in self.local_object_methods
+        ):
+            return submodule_callsite_attr(func.value.id, node.lineno)
         target = _expr_name(func)
         if _is_module_dispatch_call(node) or (
             target and isinstance(func, ast.Name) and _is_kernel_merge_call(func)
@@ -7454,7 +7643,50 @@ class _ForwardOperationExtractor:
                 )
         return names
 
+    @staticmethod
+    def _stored_self_attr(stmt: ast.Assign | ast.AnnAssign) -> str | None:
+        """The ``self.<attr>`` a statement STORES into, through any subscript.
+
+        ``self.overlap_kv[name] = chunk_kv[...].clone()`` publishes a value into
+        persistent state. Nothing in THIS forward reads it -- the next call
+        does -- so the op behind it has no consumer and reads as dead, which is
+        the one thing it is not. Recorded here so the render can give it a sink
+        of its own.
+        """
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        for target in targets:
+            node = target
+            while isinstance(node, ast.Subscript):
+                node = node.value
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "self"
+            ):
+                return node.attr
+        return None
+
+    def _record_state_store(
+        self, stmt: ast.Assign | ast.AnnAssign, producer: str | None
+    ) -> None:
+        """Mark the op behind a store to persistent state with what it writes."""
+        if producer is None:
+            return
+        attr = self._stored_self_attr(stmt)
+        if attr is None:
+            return
+        for index, operation in enumerate(self.operations):
+            if operation.attr_name != producer:
+                continue
+            if any(str(d).startswith("stores:") for d in operation.details):
+                return
+            self.operations[index] = dataclasses.replace(
+                operation, details=(*operation.details, f"stores: {attr}")
+            )
+            return
+
     def _bind(self, stmt: ast.Assign | ast.AnnAssign, producer: str | None) -> None:
+        self._record_state_store(stmt, producer)
         if producer is None:
             return
         for name in self._target_names(stmt):
@@ -9313,6 +9545,7 @@ def _forward_operations_from_forward(
     is_free_function_body: bool = False,
     param_values: dict[str, Any] | None = None,
     unbuilt_attrs: frozenset[str] = frozenset(),
+    local_object_methods: dict[str, str] | None = None,
 ) -> ForwardAnalysis:
     # The primary parameter is the main path, so only the extra ones can identify
     # which step consumes a side feed.
@@ -9330,6 +9563,7 @@ def _forward_operations_from_forward(
         class_methods=class_methods,
         is_free_function_body=is_free_function_body,
         param_values=param_values,
+        local_object_methods=_local_method_call_sites(func, local_object_methods or {}),
     )
     # An operation reading the primary parameter partway through the forward reads the
     # value arriving at the chain, not the previous step. Naming it lets those reads
@@ -9538,10 +9772,12 @@ class _ModelAstVisitor(ast.NodeVisitor):
         vision_scoped_classes: set[str] | None = None,
         vision_config: dict[str, Any] | None = None,
         module_functions: dict[str, ast.FunctionDef] | None = None,
+        local_object_methods: dict[str, str] | None = None,
         declared_aliases: dict[str, str] | None = None,
         ctor_defaults: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.classes: dict[str, ClassStructure] = {}
+        self.local_object_methods = dict(local_object_methods or {})
         self.config = dict(config or {})
         # What the model's own config classes say they rename, so a sub-config
         # dict can answer the canonical names its config OBJECT would.
@@ -9711,6 +9947,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     self.ctor_defaults.get(node.name),
                 ),
                 config=self._config_for_class(node.name),
+                local_object_methods=self.local_object_methods,
             )
             alternate = _alternate_forward_dispatches(forward_func)
             if alternate:
@@ -9752,6 +9989,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     config=self._config_for_class(node.name),
                     module_functions=self.module_functions,
                     class_methods=class_methods,
+                    local_object_methods=self.local_object_methods,
                 )
                 if analysis.operations:
                     forward_step_predecessors = dict(analysis.step_predecessors)
@@ -9894,6 +10132,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     config=self._config_for_class(node.name),
                     module_functions=self.module_functions,
                     class_methods=class_methods,
+                    local_object_methods=self.local_object_methods,
                 )
                 if analysis.operations:
                     forward_step_predecessors = dict(analysis.step_predecessors)
@@ -9950,6 +10189,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     config=self._config_for_class(node.name),
                     module_functions=self.module_functions,
                     class_methods=class_methods,
+                    local_object_methods=self.local_object_methods,
                 )
                 if _forward_mixes_modules_and_inline_ops(
                     forward_calls,
@@ -12381,6 +12621,7 @@ def _parse_forward(
     func: ast.FunctionDef,
     self_values: dict | None = None,
     config: dict | None = None,
+    local_object_methods: dict[str, str] | None = None,
 ) -> tuple[
     list[str],
     list[str],
@@ -12396,6 +12637,7 @@ def _parse_forward(
     side_inputs: dict[str, list[SideInputSpec]] = {}
     forward_step_details: dict[str, list[str]] = {}
     forward_input_names = _forward_input_names(func)
+    local_object_methods = _local_method_call_sites(func, local_object_methods or {})
     self_values = self_values or {}
     config = config or {}
     name_value_ast = _collect_name_value_ast(func)
@@ -12418,11 +12660,12 @@ def _parse_forward(
             repeated_attrs=repeated_attrs,
             module_attrs=module_attrs,
             config=config,
+            local_object_methods=local_object_methods,
         )
     forward_step_details.update(_positional_step_details(func))
     forward_step_details.update(_einops_step_details(func))
     for _key, _detail in _submodule_method_step_details(
-        func.body, module_attrs
+        func.body, module_attrs, local_object_methods
     ).items():
         forward_step_details.setdefault(_key, []).extend(_detail)
     return (
@@ -12450,6 +12693,7 @@ def _walk_forward_stmt(
     repeated_attrs: frozenset[str] = frozenset(),
     module_attrs: frozenset[str] = frozenset(),
     config: dict | None = None,
+    local_object_methods: dict[tuple[str, int], str] | None = None,
 ) -> str | None:
     if isinstance(node, ast.Assign):
         stmt_calls: list[str] = []
@@ -12475,6 +12719,7 @@ def _walk_forward_stmt(
             in_conditional,
             repeated_attrs,
             module_attrs,
+            local_object_methods,
         )
         _inject_kernel_merge(
             expanded_value,
@@ -12504,7 +12749,12 @@ def _walk_forward_stmt(
     if isinstance(node, ast.AnnAssign) and node.value is not None:
         stmt_calls = []
         _extract_self_calls_ordered(
-            node.value, stmt_calls, in_conditional, repeated_attrs, module_attrs
+            node.value,
+            stmt_calls,
+            in_conditional,
+            repeated_attrs,
+            module_attrs,
+            local_object_methods,
         )
         _inject_kernel_merge(
             node.value,
@@ -12530,7 +12780,12 @@ def _walk_forward_stmt(
     if isinstance(node, ast.Expr):
         stmt_calls = []
         _extract_self_calls_ordered(
-            node.value, stmt_calls, in_conditional, repeated_attrs, module_attrs
+            node.value,
+            stmt_calls,
+            in_conditional,
+            repeated_attrs,
+            module_attrs,
+            local_object_methods,
         )
         _inject_kernel_merge(
             node.value,
@@ -12552,7 +12807,12 @@ def _walk_forward_stmt(
     if isinstance(node, ast.AugAssign):
         stmt_calls = []
         _extract_self_calls_ordered(
-            node.value, stmt_calls, in_conditional, repeated_attrs, module_attrs
+            node.value,
+            stmt_calls,
+            in_conditional,
+            repeated_attrs,
+            module_attrs,
+            local_object_methods,
         )
         _inject_kernel_merge(
             node.value,
@@ -12577,7 +12837,12 @@ def _walk_forward_stmt(
     if isinstance(node, ast.Return) and node.value is not None:
         stmt_calls = []
         _extract_self_calls_ordered(
-            node.value, stmt_calls, in_conditional, repeated_attrs, module_attrs
+            node.value,
+            stmt_calls,
+            in_conditional,
+            repeated_attrs,
+            module_attrs,
+            local_object_methods,
         )
         _inject_kernel_merge(
             node.value,
@@ -12665,6 +12930,7 @@ def _walk_forward_stmt(
                 repeated_attrs=repeated_attrs,
                 module_attrs=module_attrs,
                 config=config,
+                local_object_methods=local_object_methods,
             )
         return pending_norm
 
@@ -12687,6 +12953,7 @@ def _walk_forward_stmt(
                 repeated_attrs=repeated_attrs,
                 module_attrs=module_attrs,
                 config=config,
+                local_object_methods=local_object_methods,
             )
         # Tensor operations are annotated by _ForwardOperationExtractor, but
         # expanded helper calls (for example `_apply_gate()`) are not operations
@@ -12722,6 +12989,7 @@ def _walk_forward_stmt(
                 repeated_attrs=repeated_attrs,
                 module_attrs=module_attrs,
                 config=config,
+                local_object_methods=local_object_methods,
             )
         return pending_norm
 
@@ -13498,6 +13766,7 @@ def build_class_registry(
         all_tensor_ops=all_tensor_ops,
         activation_param_bindings=activation_param_bindings,
         module_functions=_module_forward_functions(tree, config),
+        local_object_methods=_uniquely_defined_methods(tree),
     )
     visitor.visit(tree)
     return visitor.classes
@@ -13572,6 +13841,7 @@ def analyze_source(
             (config or {}).get("vision_config") if isinstance(config, dict) else None
         ),
         module_functions=_module_forward_functions(tree, config, parsed_registry),
+        local_object_methods=_uniquely_defined_methods(tree),
         declared_aliases=declared_aliases,
         ctor_defaults=_settled_ctor_defaults(tree, config),
     )

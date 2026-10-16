@@ -57,6 +57,21 @@ MODELS = [
 # and could not be sized) give way to the one `torch.ones` the model runs.
 # Every check is now zero on all four.
 EXPECTED_NODES = {
+    # 2026-10-15d -- a method called on a LOCAL object is read like any other.
+    # DeepSeek's compressor and indexer run `cache_layer.store_compression_
+    # weights(...)` / `update_overlap_state(...)` on their KV cache, both
+    # defined in the model's own source. The receiver is not `self`, so no
+    # submodule path saw them: the calls vanished, their results had no
+    # producer, and whatever read them fell back on the op that happened to
+    # precede it -- a `copy_` drawn reading the gate chunk the model only
+    # PASSES to the cache, and every phi over a cached value taking the
+    # projection as its arm.
+    # DeepSeek 2393 -> 2558, every one of the 165 accounted: 44 ops the methods
+    # really run, 90 boundary tiles for what crosses in/out, 23 constants they
+    # read, and 8 `@state_out` sinks for the values written back into
+    # `overlap_kv`/`overlap_gate` (nothing in THIS forward reads those; the
+    # next call does). No other model calls a method on a local object whose
+    # class this file defines, so none moves.
     # 2026-10-15c -- an op that READS a forward parameter declares it. Only a
     # kernel's `inputs:` detail counted as a declaration, so a plain op naming
     # a parameter (`attention_mask[:, :, None]` records it in `param_inputs`)
@@ -267,7 +282,7 @@ EXPECTED_NODES = {
     # Loop ports folded away everywhere: the back edge was the only cycle the
     # graph allowed, and the body's own ends now name the direction instead
     # (``loop in: <var>`` / ``loop out: <var>``). -2 per loop that had ports.
-    "deepseek-ai/DeepSeek-V4-Flash": 2393,
+    "deepseek-ai/DeepSeek-V4-Flash": 2558,
 }
 
 # Warnings the per-model run prints that the check summary does not cover. Both

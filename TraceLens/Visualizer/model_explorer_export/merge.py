@@ -2249,6 +2249,119 @@ def _converge_layer_variants_through_a_phi(nodes: list[dict[str, Any]]) -> None:
     nodes.extend(additions)
 
 
+def _publish_state_stores_through_output_tiles(nodes: list[dict[str, Any]]) -> None:
+    """A value written into persistent state leaves through a tile of its own.
+
+    ``self.overlap_kv[name] = chunk_kv[..., :head_dim].clone()`` publishes into
+    the module's own state: nothing in THIS forward reads it, the NEXT call
+    does. With no consumer the clone reads as a dead node, which is the one
+    thing it is not -- it is the whole point of the statement.
+
+    The graph already says "a value leaves here" with an output tile, so the
+    store gets one, named for the state it writes. The reader sees where the
+    value goes instead of a box wired to nothing, and the dead-node check sees
+    a legitimate sink rather than a dropped edge.
+    """
+    consumed = {
+        str(edge.get("sourceNodeId"))
+        for node in nodes
+        for edge in node.get("incomingEdges", []) or []
+    }
+    additions: list[dict[str, Any]] = []
+    for node in nodes:
+        if str(node["id"]) in consumed or _node_attr(node, "synthetic"):
+            continue
+        stored = next(
+            (
+                part.split(":", 1)[1].strip()
+                for part in str(_node_attr(node, "details") or "").split(";")
+                if part.strip().startswith("stores:")
+            ),
+            None,
+        )
+        if not stored:
+            continue
+        additions.append(
+            {
+                "id": f"{node['id']}:@state_out:{stored}",
+                "label": stored,
+                "namespace": node.get("namespace"),
+                "attrs": [
+                    {"key": "synthetic", "value": "@output"},
+                    {"key": "operation", "value": "synthetic"},
+                    {
+                        "key": "output_shape",
+                        "value": _node_attr(node, "output_shape") or "",
+                    },
+                    {
+                        "key": "output_dtype",
+                        "value": _node_attr(node, "output_dtype") or "",
+                    },
+                ],
+                "style": ensure_readable_text(output_port_style()),
+                "incomingEdges": [
+                    {
+                        "sourceNodeId": str(node["id"]),
+                        "sourceNodeOutputId": "0",
+                        "targetNodeInputId": "0",
+                    }
+                ],
+            }
+        )
+    nodes.extend(additions)
+    _drop_undrawn_state_reads(nodes)
+
+
+def _drop_undrawn_state_reads(nodes: list[dict[str, Any]]) -> None:
+    """Inside an expanded method, a value neither returned nor stored is not drawn.
+
+    ``buffered_kv, buffered_gate = self.buffer_kv[name], self.buffer_gate[name]``
+    reads persistent state for a branch guarded by ``if buffered_kv is not None
+    and buffered_kv.shape[1]`` -- empty on the call this export draws, so the
+    concat that consumes it is correctly not drawn either. The read is then
+    left pointing at nothing.
+
+    It is dead only in the sense that the branch reading it is: inside a method
+    expansion, a value that neither leaves through a return slot nor goes into
+    state has no other way to be used. Dropping it keeps the picture to what
+    this call runs, the same way a branch the model cannot take is not drawn.
+    """
+    removed = True
+    while removed:
+        consumed = {
+            str(edge.get("sourceNodeId"))
+            for node in nodes
+            for edge in node.get("incomingEdges", []) or []
+        }
+        live = {str(node["id"]) for node in nodes}
+        drop = {
+            str(node["id"])
+            for node in nodes
+            if str(node["id"]) not in consumed
+            and not _node_attr(node, "synthetic")
+            and "method_params:" in str(_node_attr(node, "details") or "")
+            and "stores:" not in str(_node_attr(node, "details") or "")
+        }
+        # A constant tile belongs to the op that reads it; when that op is not
+        # drawn, neither is the weight it was reading.
+        drop |= {
+            str(node["id"])
+            for node in nodes
+            if str(node["id"]) not in consumed
+            and ":const:" in str(node["id"])
+            and str(node["id"]).rsplit(":const:", 1)[0] not in live
+        }
+        removed = bool(drop)
+        if removed:
+            nodes[:] = [n for n in nodes if str(n["id"]) not in drop]
+            for node in nodes:
+                edges = node.get("incomingEdges")
+                if edges:
+                    node["incomingEdges"] = [
+                        e for e in edges if str(e.get("sourceNodeId")) not in drop
+                    ]
+
+
 def _port_unnamed_kernel_operands(nodes: list[dict[str, Any]]) -> None:
     """Give every tensor a fused kernel reads a port of its own.
 
@@ -9143,6 +9256,7 @@ def build_merged_model_graph(
     _share_one_tile_per_kernel_operand(nodes)
     _name_kernel_ports_after_their_source(nodes)
     _port_unnamed_kernel_operands(nodes)
+    _publish_state_stores_through_output_tiles(nodes)
     # Both the phi above and the kernel ports change which node an operand
     # arrives FROM (and the phi changes how many there are), so the
     # profiler-style operand annotation is re-read here. Leaving it as first

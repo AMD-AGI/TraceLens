@@ -15,6 +15,7 @@ from typing import Any, Literal
 
 from TraceLens.ModelUtils.ast_analyze import (
     named_method_operations,
+    named_method_return_slots,
     is_method_input,
     method_input_param,
     GATE_ACTIVATION_DETAIL_PREFIX,
@@ -2433,6 +2434,18 @@ def build_block_node(
             if override is not _NO_SUBMODULE_OVERRIDE
             else cls.init_assignments.get(base_attr)
         )
+        # A method called on a LOCAL object names no submodule, so
+        # ``init_assignments`` cannot say what class it runs on; the extractor
+        # resolved it and recorded it.
+        if child_class is None:
+            child_class = next(
+                (
+                    detail.split(":", 1)[1].strip()
+                    for detail in child_details
+                    if detail.startswith("method_class:")
+                ),
+                None,
+            )
         # ``self.<sub>.<method>(...)`` runs a NAMED method of the child, not its
         # forward. Expanding the forward here would emit a second frame identical
         # to the child's own call -- the two then collapse, and the step's output
@@ -2457,6 +2470,15 @@ def build_block_node(
                 if method_child is not None
                 else []
             )
+            # What the method RETURNS, published the way a forward's returns
+            # are. Without it the caller's unpack has nothing to bind to, so
+            # every op behind a returned value is left dead and whatever reads
+            # that value falls back on the op that happens to precede it.
+            method_slots, method_slot_order = (
+                named_method_return_slots(method_child, invoked_method)
+                if method_child is not None
+                else ({}, [])
+            )
             # The ``method:`` detail is kept either way: it marks this node as a
             # composite (a named method of a child module) rather than a
             # primitive, so the opaque-leaf check can tell when an unexpanded one
@@ -2479,6 +2501,8 @@ def build_block_node(
                         # boundary fell back to the generic name and labelled the
                         # tile with a tensor it does not carry.
                         input_label=_named_method_primary(method_ops),
+                        forward_return_slots=dict(method_slots),
+                        forward_return_order=list(method_slot_order),
                         # Its other tensor parameters get boundaries of their own
                         # from ``_add_forward_param_inputs``; without this every
                         # argument the call passes collapses onto the primary's
