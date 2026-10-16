@@ -156,6 +156,16 @@ def _perf_model_init_kwargs(
     return kwargs
 
 
+def event_process_thread_names(tree, event):
+    """The unified perf table's ``process_name`` / ``process_label`` / ``thread_name`` of ``event``."""
+    meta = tree.metadata.get(event.get("pid"), {})
+    return {
+        "process_name": meta.get(0, {}).get("process_name", "Unknown"),
+        "process_label": meta.get(0, {}).get("process_labels", "Unknown"),
+        "thread_name": meta.get(event.get("tid"), {}).get("thread_name", "Unknown"),
+    }
+
+
 class TreePerfAnalyzer:
     @staticmethod
     def from_file(
@@ -2025,15 +2035,7 @@ class TreePerfAnalyzer:
                 "UID": event.get("UID"),
                 "pid": event.get("pid"),
                 "tid": event.get("tid"),
-                "process_name": self.tree.metadata.get(event.get("pid"), {})
-                .get(0, {})
-                .get("process_name", "Unknown"),
-                "process_label": self.tree.metadata.get(event.get("pid"), {})
-                .get(0, {})
-                .get("process_labels", "Unknown"),
-                "thread_name": self.tree.metadata.get(event.get("pid"), {})
-                .get(event.get("tid"), {})
-                .get("thread_name", "Unknown"),
+                **event_process_thread_names(self.tree, event),
                 "External id": args.get("External id"),
                 "duration_us": event.get("dur"),
                 "has_perf_model": has_own_perf_model or is_sole_bwd,

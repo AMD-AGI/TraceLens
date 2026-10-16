@@ -20,10 +20,8 @@ from TraceLens.Reporting.reporting_utils import (
     resolve_gpu_arch,
     write_report_outputs,
 )
-from TraceLens.Agent.Analysis.category_analyses import (
-    analysis_utils as au,
-    kernel_fusion_analysis as kfa,
-)
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionCandidateBuilder
 from TraceLens.Reporting import (
     generate_multi_rank_collective_report_pytorch as coll_mod,
     generate_perf_report_pytorch_inference as inf_mod,
@@ -2261,9 +2259,7 @@ class TestPush95Phase2:
                 return analyzer
 
         monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
-        monkeypatch.setattr(
-            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
-        )
+        monkeypatch.setattr(FusionCandidateBuilder, "standalone", lambda self: [])
 
         old_argv = sys.argv
         sys.argv = [
@@ -2324,11 +2320,9 @@ class TestPush95Phase2:
 
         monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
         monkeypatch.setattr(
-            op, "_extract_comparative_fusion_candidates", lambda *a, **k: []
+            FusionCandidateBuilder, "comparative", lambda self, diff_stats: []
         )
-        monkeypatch.setattr(
-            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
-        )
+        monkeypatch.setattr(FusionCandidateBuilder, "standalone", lambda self: [])
 
         old_argv = sys.argv
         sys.argv = [
@@ -2369,12 +2363,9 @@ class TestPush95Phase2:
         fusion_dir = tmp_path / "category_data"
         fusion_dir.mkdir()
         (fusion_dir / "kernel_fusion_metrics.json").write_text(
-            json.dumps({"high_confidence_kernel_map": {"gemm_a": "fused_a"}})
+            json.dumps({"high_confidence_op_keys": [["aten::mm", "x", "y"]]})
         )
-        assert au._load_fusion_map(str(tmp_path))["gemm_a"] == "fused_a"
-
-        ops = [{"kernel_names": ["a", "b"], "base_name": "Block", "instance_count": 2}]
-        assert len(kfa._filter_and_dedup(ops)) == 1
+        assert au._load_fusion_op_keys(str(tmp_path)) == {("aten::mm", "x", "y")}
 
     def test_reporting_pftrace_and_collective(self, tmp_path):
 
@@ -2528,6 +2519,7 @@ class TestPush95Phase3:
         csv_dir.mkdir()
         pd.DataFrame(
             {
+                "name": ["aten::mm", "aten::add"],
                 "kernel_details_summary": [
                     "[{'name': 'Cijk_a'}]",
                     "[{'name': 'ew_add'}]",
@@ -2554,21 +2546,19 @@ class TestPush95Phase3:
                 [
                     {
                         "module_name": "nn.Module: Block",
-                        "kernels": [
-                            {
-                                "name": "Cijk_a",
-                                "type": "GEMM",
-                                "dur_us": 100,
-                                "data_in_mb": 10.0,
-                            },
-                            {
-                                "name": "ew_add",
-                                "type": "Elementwise Add",
-                                "dur_us": 20,
-                                "data_in_mb": 2.0,
-                            },
-                        ],
+                        "base_name": "Block",
+                        "parent_chain": [],
                         "instance_count": 1,
+                        "kernel_count": 2,
+                        "kernels": [
+                            {"name": "gemm_a", "type": "GEMM", "dur_us": 100},
+                            {"name": "ew_add", "type": "Add", "dur_us": 20},
+                        ],
+                        "total_kernel_time_us": 120.0,
+                        "kernel_type_signature": ["GEMM", "Add"],
+                        "kernel_type_summary": {"GEMM": 1, "Add": 1},
+                        "fusion_kind": "gemm_epilogue",
+                        "confidence": "medium",
                     }
                 ]
             )
@@ -2584,18 +2574,6 @@ class TestPush95Phase3:
                 }
             )
         )
-
-        candidates, manifest, csv_path = kfa.load_fusion_data(str(tmp_path))
-        lookup = kfa.build_kernel_perf_lookup(csv_path)
-        estimates = kfa.compute_fusion_impact_estimates(
-            candidates,
-            lookup,
-            peak_bw_tbs=5.3,
-            peak_maf_tflops={"matrix_bf16": 1000.0, "vector_fp32": 100.0},
-            baseline_ms=1000.0,
-            is_comparative=False,
-        )
-        assert isinstance(estimates, list)
 
         mod = importlib.import_module(
             "TraceLens.Agent.Analysis.category_analyses.kernel_fusion_analysis"
@@ -2779,11 +2757,11 @@ class TestPush95Phase4:
         t1_csv = os.path.join(out, "perf_report_trace1_csvs")
         pd.DataFrame(
             {
-                "name": ["Cijk_A", "ew_add"],
-                "source": ["trace1", "trace1"],
-                "lowest_common_ancestor_id": [100, 100],
-                "kernel_time": [5000.0, 3000.0],
-                "gpu_op_uid": [10, 11],
+                "name": ["gemm_a", "ew_add", "gemm_a"],
+                "source": ["trace1", "trace1", "trace2"],
+                "lowest_common_ancestor_id": [100, 100, 100],
+                "kernel_time": [5000.0, 3000.0, 5000.0],
+                "gpu_op_uid": [10, 11, None],
             }
         ).to_csv(os.path.join(t1_csv, "diff_stats.csv"), index=False)
 
