@@ -57,6 +57,28 @@ MODELS = [
 # and could not be sized) give way to the one `torch.ones` the model runs.
 # Every check is now zero on all four.
 EXPECTED_NODES = {
+    # 2026-10-16b -- a parameter the model annotates as a plain Python value is
+    # not the method's primary TENSOR parameter, and a string-keyed dict lookup
+    # is not a tensor index.
+    # DeepSeek's KV cache names the entry it addresses first
+    # (`store_compression_weights(self, name: str, kv, gate)`), so `name` was
+    # taken as the primary, `kv`/`gate` were demoted, and `self.entry_count[
+    # name]` / `self.buffer_kv[name]` -- host bookkeeping over a dict -- were
+    # emitted as tensor index ops. With no integer index they fell to a MoE
+    # fallback that stamps `num_experts_per_tok` on them, which is where the
+    # cache's `[B, usable, 6]` came from. It is now the one `kv[:, :usable]`
+    # the method really returns, `[B, usable, 1024]`.
+    # DeepSeek 2558 -> 2418. 165 nodes removed, 25 added; 25 of the removals are
+    # the SAME nodes re-identified when the frame changed shape (13 Slice,
+    # 8 Clone, 4 overlap_kv @output), so the real removal is 140:
+    #     18  `Indexing` ops fabricated for string-keyed dict lookups
+    #     15  constants only those ops read (entry_count/compress_rate/buffer_gate)
+    #     50  boundary + mirror tiles for `name` and for the mis-assigned
+    #         `hidden_states`/`hidden_states_2` primaries
+    #     36  `result_1`/`result_2` return-slot tiles and their mirrors
+    #     21  `overlap_kv`/`overlap_gate` state ops/outputs and 5 Multiply
+    # No other model calls a method whose first parameter is annotated as a
+    # plain value, so none moves.
     # 2026-10-16 -- the live module tree says which submodules a variant HAS.
     # An absent component and a component with no override were the same state
     # (no entry in `component_trees`), and the renderer's fallback for "no
@@ -313,7 +335,7 @@ EXPECTED_NODES = {
     # Loop ports folded away everywhere: the back edge was the only cycle the
     # graph allowed, and the body's own ends now name the direction instead
     # (``loop in: <var>`` / ``loop out: <var>``). -2 per loop that had ports.
-    "deepseek-ai/DeepSeek-V4-Flash": 2558,
+    "deepseek-ai/DeepSeek-V4-Flash": 2418,
 }
 
 # Warnings the per-model run prints that the check summary does not cover. Both

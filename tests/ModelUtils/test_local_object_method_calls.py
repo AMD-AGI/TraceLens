@@ -41,6 +41,8 @@ import ast
 import textwrap
 
 from TraceLens.ModelUtils.ast_analyze import (
+    LocalMethod,
+    _forward_operations_from_forward,
     _local_method_call_sites,
     _uniquely_defined_methods,
     analyze_sources,
@@ -90,7 +92,17 @@ def _forward():
 
 class TestWhichMethodsResolve:
     def test_a_name_only_one_class_defines(self) -> None:
-        assert _uniquely_defined_methods(_tree())["store_weights"] == "Cache"
+        assert _uniquely_defined_methods(_tree())["store_weights"].owner == "Cache"
+
+    def test_it_carries_the_methods_own_parameter_names(self) -> None:
+        """The call binds its arguments to THESE names, not the caller's locals.
+
+        Without them the producers are recorded positionally but mapped to no
+        parameter, so the expansion's ``@method_input`` resolves by chain
+        position -- the op emitted last before the call.
+        """
+        resolved = _uniquely_defined_methods(_tree())["store_weights"]
+        assert resolved.params == ("name", "kv", "gate")
 
     def test_a_name_two_classes_define_resolves_to_neither(self) -> None:
         assert "only_here" not in _uniquely_defined_methods(_tree())
@@ -103,13 +115,13 @@ class TestWhichMethodsResolve:
 class TestWhichCallSitesAreTaken:
     def test_a_call_returning_new_names(self) -> None:
         sites = _local_method_call_sites(_forward(), _uniquely_defined_methods(_tree()))
-        assert [owner for owner in sites.values()] == ["Cache"]
+        assert [resolved.owner for resolved in sites.values()] == ["Cache"]
         assert [receiver for receiver, _line in sites] == ["cache_layer"]
 
     def test_the_echo_is_left_alone(self) -> None:
         """``kv, gate = past_key_values.update(kv, ...)`` changes nothing drawn."""
         owners = dict(_uniquely_defined_methods(_tree()))
-        owners["update"] = "Cache"
+        owners["update"] = LocalMethod("Cache", ("kv", "gate"))
         sites = _local_method_call_sites(_forward(), owners)
         assert all(receiver != "past_key_values" for receiver, _line in sites)
 
@@ -162,3 +174,37 @@ def test_a_store_into_persistent_state_is_recorded() -> None:
         if str(detail).startswith("stores:")
     ]
     assert stored == ["stores: buffer"], [op.details for op in ops]
+
+
+class TestWhatTheCallHandsIn:
+    def test_each_argument_binds_to_the_methods_own_parameter(self) -> None:
+        """The producers alone are positional; the NAMES are what the frame docks on.
+
+        Recorded positionally and mapped to nothing, the expansion's
+        ``@method_input`` resolves by chain position -- the op emitted last
+        before the call -- so DeepSeek's cache frame read the hidden state
+        instead of the ``kv`` the call passes it.
+        """
+        caller = _forward()
+        owners = _uniquely_defined_methods(_tree())
+        analysis = _forward_operations_from_forward(
+            caller, self_values={}, all_tensor_ops=True, local_object_methods=owners
+        )
+        step = next(k for k in analysis.step_predecessor_args if "cache_layer" in k)
+        bound = analysis.step_predecessor_args[step]
+        # The fixture calls ``self.kv_proj`` twice, so each call site carries its
+        # own suffix -- and the two arguments bind to DIFFERENT ones, which is
+        # the whole point: positionally they would collapse onto one producer.
+        assert sorted(bound) == ["gate", "kv"]
+        assert bound["kv"] != bound["gate"]
+        assert all(value.startswith("kv_proj") for value in bound.values())
+
+    def test_a_string_literal_argument_contributes_no_producer(self) -> None:
+        """``"c"`` names the cache entry; it is not a tensor the frame reads."""
+        caller = _forward()
+        owners = _uniquely_defined_methods(_tree())
+        analysis = _forward_operations_from_forward(
+            caller, self_values={}, all_tensor_ops=True, local_object_methods=owners
+        )
+        step = next(k for k in analysis.step_predecessor_args if "cache_layer" in k)
+        assert "name" not in analysis.step_predecessor_args[step]

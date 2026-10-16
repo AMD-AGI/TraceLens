@@ -21,7 +21,7 @@ import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from collections.abc import Iterable
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 _log = logging.getLogger(__name__)
 
@@ -267,7 +267,30 @@ def function_display_label(attr_name_or_func: str) -> str:
 _SUBMODULE_CALLSITE_RE = re.compile(r"@l(\d+)$")
 
 
-def _uniquely_defined_methods(tree: ast.AST) -> dict[str, str]:
+class LocalMethod(NamedTuple):
+    """The class a local-object method belongs to, and what it takes.
+
+    The owner alone is not enough. A call binds its arguments to the CALLEE's
+    parameter names, and for a method on another class there is no other way to
+    reach them -- ``_class_method_param_names`` resolves same-class siblings
+    only. Without the names, ``cache_layer.store_compression_weights(
+    "compressor", kv, gate)`` records its producers positionally but maps none
+    of them to a parameter, so the expansion's ``@method_input`` has nothing to
+    resolve against and falls back to chain position: the op emitted last before
+    the call, which is the 4096-wide hidden state rather than the 1024-wide
+    ``kv`` the call actually passes.
+
+    Carried in the same map rather than a parallel one on purpose. That map is
+    already threaded through ~20 call sites, and a second one would have to be
+    threaded alongside it -- the trap that cost four attempts the last time this
+    area was touched.
+    """
+
+    owner: str
+    params: tuple[str, ...]
+
+
+def _uniquely_defined_methods(tree: ast.AST) -> dict[str, LocalMethod]:
     """``{method name: the one class that defines it}`` for this module.
 
     A forward can call a method on a LOCAL object -- DeepSeek's compressor runs
@@ -277,6 +300,7 @@ def _uniquely_defined_methods(tree: ast.AST) -> dict[str, str]:
     whatever reads them falls back on the op that happened to precede it.
     """
     owners: dict[str, set[str]] = {}
+    defined: dict[str, LocalMethod] = {}
     for cls in [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]:
         for item in cls.body:
             if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -284,20 +308,25 @@ def _uniquely_defined_methods(tree: ast.AST) -> dict[str, str]:
             if item.name == "forward" or item.name.startswith("__"):
                 continue
             owners.setdefault(item.name, set()).add(cls.name)
-    return {name: next(iter(who)) for name, who in owners.items() if len(who) == 1}
+            arguments = item.args
+            names = [arg.arg for arg in arguments.posonlyargs + arguments.args]
+            if names and names[0] == "self":
+                names = names[1:]
+            defined[item.name] = LocalMethod(cls.name, tuple(names))
+    return {name: defined[name] for name, who in owners.items() if len(who) == 1}
 
 
 def _local_method_call_sites(
-    func: ast.FunctionDef, owners: dict[str, str]
-) -> dict[tuple[str, int], str]:
-    """``{(receiver, lineno): owning class}`` for local-object calls to expand.
+    func: ast.FunctionDef, owners: dict[str, LocalMethod]
+) -> dict[tuple[str, int], LocalMethod]:
+    """``{(receiver, lineno): the method it calls}`` for local-object calls.
 
     Keyed per CALL SITE because one method name can be both kinds of call.
     Excludes the ECHO -- ``key_states, value_states = past_key_values.update(
     key_states, value_states, ...)`` hands back the names it was given, which
     changes nothing drawable and is already modelled as a passthrough.
     """
-    sites: dict[tuple[str, int], str] = {}
+    sites: dict[tuple[str, int], LocalMethod] = {}
     for stmt in ast.walk(func):
         if not isinstance(stmt, (ast.Assign, ast.Expr)):
             continue
@@ -2152,7 +2181,7 @@ def _extract_self_calls_ordered(
     skip_free_fn: bool = False,
     repeated_attrs: frozenset[str] = frozenset(),
     module_attrs: frozenset[str] = frozenset(),
-    local_object_methods: dict[tuple[str, int], str] | None = None,
+    local_object_methods: dict[tuple[str, int], LocalMethod] | None = None,
 ) -> None:
     """Collect self.module(...) calls in approximate evaluation order (inner-first).
 
@@ -2446,7 +2475,7 @@ def _path_max_self_call_sites(stmts: list[ast.stmt]) -> dict[str, set[int]]:
 def _submodule_method_step_details(
     body: list[ast.stmt],
     module_attrs: frozenset[str],
-    local_object_methods: dict[tuple[str, int], str] | None = None,
+    local_object_methods: dict[tuple[str, int], LocalMethod] | None = None,
 ) -> dict[str, list[str]]:
     """Record WHICH method a ``self.<sub>.<method>(...)`` step invokes.
 
@@ -2479,7 +2508,7 @@ def _submodule_method_step_details(
             if owner is not None:
                 key = submodule_callsite_attr(receiver.id, node.lineno)
                 details.setdefault(key, []).extend(
-                    [f"method: {node.func.attr}", f"method_class: {owner}"]
+                    [f"method: {node.func.attr}", f"method_class: {owner.owner}"]
                 )
     return details
 
@@ -5383,7 +5412,7 @@ class _ForwardOperationExtractor:
         module_functions: dict[str, ast.FunctionDef] | None = None,
         repeated_submodule_attrs: frozenset[str] | None = None,
         submodule_attrs: frozenset[str] | None = None,
-        local_object_methods: dict[tuple[str, int], str] | None = None,
+        local_object_methods: dict[tuple[str, int], LocalMethod] | None = None,
         class_methods: dict[str, ast.FunctionDef] | None = None,
         is_free_function_body: bool = False,
         param_values: dict[str, Any] | None = None,
@@ -7110,10 +7139,28 @@ class _ForwardOperationExtractor:
             # params on ITS OWN parameter names (``token_visible``, ``key_valid``,
             # ...). Resolve those names once so a caller/callee mismatch doesn't
             # strand an argument onto the callee's default target.
+            # ``<local>.<method>(...)`` on a class this file defines binds its
+            # arguments to that METHOD's parameters, and nothing else can reach
+            # them: ``_class_method_param_names`` resolves same-class siblings
+            # only. Without them the call records its producers positionally but
+            # maps none to a parameter, so the expansion's ``@method_input`` has
+            # nothing to resolve against and falls back to chain position --
+            # DeepSeek's cache frame read the 4096-wide hidden state instead of
+            # the 1024-wide ``kv`` the call passes it.
+            local_method = (
+                self.local_object_methods.get((node.func.value.id, node.lineno))
+                if isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                else None
+            )
             callee_param_names = (
-                self._class_method_param_names(method_name)
-                if submodule_call and method_name is not None
-                else self._free_function_param_names(node)
+                list(local_method.params)
+                if local_method is not None
+                else (
+                    self._class_method_param_names(method_name)
+                    if submodule_call and method_name is not None
+                    else self._free_function_param_names(node)
+                )
             )
             for idx, arg in enumerate(node.args):
                 # A host-scalar positional (``key_states.shape[2]``) is an int size
@@ -7168,7 +7215,11 @@ class _ForwardOperationExtractor:
                 # nothing reading it -- GLM's ``expand_kv`` split lost its
                 # ``value_states`` that way.
                 if (
-                    (submodule_call or _is_module_dispatch_call(node))
+                    (
+                        submodule_call
+                        or _is_module_dispatch_call(node)
+                        or local_method is not None
+                    )
                     and idx >= start
                     and len(producers) == 1
                 ):
@@ -9565,7 +9616,7 @@ def _forward_operations_from_forward(
     is_free_function_body: bool = False,
     param_values: dict[str, Any] | None = None,
     unbuilt_attrs: frozenset[str] = frozenset(),
-    local_object_methods: dict[str, str] | None = None,
+    local_object_methods: dict[str, LocalMethod] | None = None,
 ) -> ForwardAnalysis:
     # The primary parameter is the main path, so only the extra ones can identify
     # which step consumes a side feed.
@@ -9792,7 +9843,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         vision_scoped_classes: set[str] | None = None,
         vision_config: dict[str, Any] | None = None,
         module_functions: dict[str, ast.FunctionDef] | None = None,
-        local_object_methods: dict[str, str] | None = None,
+        local_object_methods: dict[str, LocalMethod] | None = None,
         declared_aliases: dict[str, str] | None = None,
         ctor_defaults: dict[str, dict[str, Any]] | None = None,
     ) -> None:
@@ -12351,11 +12402,18 @@ def _capture_augassign_module_input(
             existing.append(spec)
 
 
-# Annotations that say a parameter carries a Python number, not a tensor. The
-# model states this itself (``q_length: int``), and a bare ``int`` / ``float`` /
-# ``bool`` is unambiguous in a way ``torch.BoolTensor`` or an unannotated
-# parameter is not -- so only these count.
-_HOST_SCALAR_ANNOTATIONS = frozenset({"int", "float", "bool"})
+# Annotations that say a parameter carries a plain Python value, not a tensor.
+# The model states this itself (``q_length: int``, ``name: str``), and a bare
+# ``int`` / ``float`` / ``bool`` / ``str`` is unambiguous in a way
+# ``torch.BoolTensor`` or an unannotated parameter is not -- so only these count.
+#
+# ``str`` earns its place the same way the numbers do. DeepSeek's KV cache names
+# the entry it is addressing first (``store_compression_weights(self, name: str,
+# kv, gate)``), and taking that as the method's primary TENSOR parameter demoted
+# the real tensors, left ``kv[:, :usable]`` with no base to dock on, and turned
+# the string-keyed lookups ``self.entry_count[name]`` / ``self.buffer_kv[name]``
+# -- host bookkeeping over a dict -- into tensor index ops.
+_HOST_SCALAR_ANNOTATIONS = frozenset({"int", "float", "bool", "str"})
 
 
 def _host_scalar_param_names(func: ast.AST) -> set[str]:
@@ -12426,9 +12484,20 @@ def _keyword_source_names(value: ast.expr, pre_loop: list[ast.stmt]) -> list[str
 
 
 def _primary_forward_input_name(func: ast.FunctionDef) -> str | None:
-    """Return the first forward parameter name (typically the hidden-state tensor)."""
+    """The first parameter carrying a TENSOR (typically the hidden state).
+
+    The primary parameter is what an expansion docks its input boundary on, so a
+    parameter the model itself annotates as a plain Python value cannot be it --
+    there is no tensor there to dock. Skipping those is what stops DeepSeek's
+    ``store_compression_weights(self, name: str, kv, gate)`` from leading with
+    ``name`` and leaving ``kv[:, :usable]`` without a base.
+
+    An UNANNOTATED parameter still leads: absence of an annotation says nothing,
+    and most forwards annotate nothing at all.
+    """
+    host_values = _host_scalar_param_names(func)
     for arg in func.args.posonlyargs + func.args.args:
-        if arg.arg != "self":
+        if arg.arg != "self" and arg.arg not in host_values:
             return arg.arg
     return None
 
@@ -12666,7 +12735,7 @@ def _parse_forward(
     func: ast.FunctionDef,
     self_values: dict | None = None,
     config: dict | None = None,
-    local_object_methods: dict[str, str] | None = None,
+    local_object_methods: dict[str, LocalMethod] | None = None,
 ) -> tuple[
     list[str],
     list[str],
@@ -12738,7 +12807,7 @@ def _walk_forward_stmt(
     repeated_attrs: frozenset[str] = frozenset(),
     module_attrs: frozenset[str] = frozenset(),
     config: dict | None = None,
-    local_object_methods: dict[tuple[str, int], str] | None = None,
+    local_object_methods: dict[tuple[str, int], LocalMethod] | None = None,
 ) -> str | None:
     if isinstance(node, ast.Assign):
         stmt_calls: list[str] = []
