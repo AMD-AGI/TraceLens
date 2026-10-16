@@ -2066,6 +2066,54 @@ def _condition_requires_presence(expr: str, attr: str) -> bool:
     return not expr.strip().startswith("not ")
 
 
+def _statically_decided_phi_arms(
+    cls: ClassStructure, present_attrs: frozenset[str]
+) -> dict[str, tuple[str, ...]]:
+    """``{phi step: the arms that survive}`` where ``__init__`` already decided it.
+
+    A phi over ``if self.compressor is not None:`` is not a choice in a variant
+    that always BUILDS one -- the absence arm never runs, so a phi carrying both
+    publishes a shape that is wrong whenever the arm it did not take would have
+    run. DeepSeek's reported ``[B, 1, S, 512]`` against the compressor path's
+    ``[B, 1, S + n_windows, 512]``.
+
+    The absence arm cannot be pruned the way the presence arm already is (by
+    dropping the omitted submodule's ops), because it is the PRE-BRANCH value --
+    ``kv`` before the ``cat``, which the ``cat`` itself also reads. Killing its
+    producer would take the live arm with it. Drop the phi's EDGE to it instead
+    and leave one arm, which folds onto its producer.
+
+    The surviving arm is the one whose own producer carries the same
+    ``condition:`` the phi merges on -- connection, not position.
+    """
+    ops = cls.forward_operations
+    live: dict[str, tuple[str, ...]] = {}
+    for key, op in ops.items():
+        merge = next(
+            (
+                detail[len("merge:") :].strip()
+                for detail in op.details
+                if detail.startswith("merge:")
+            ),
+            None,
+        )
+        if merge is None or not any(
+            _condition_requires_presence(merge, attr) for attr in present_attrs
+        ):
+            continue
+        guarded = tuple(
+            pred
+            for pred in op.predecessors
+            if any(
+                str(detail).strip() == f"condition: {merge}"
+                for detail in getattr(ops.get(pred), "details", ()) or ()
+            )
+        )
+        if guarded and len(guarded) < len(op.predecessors):
+            live[key] = guarded
+    return live
+
+
 def _dead_forward_steps(
     cls: ClassStructure, omitted_attrs: frozenset[str]
 ) -> frozenset[str]:
@@ -2258,6 +2306,16 @@ def build_block_node(
     dead_steps = (
         _dead_forward_steps(cls, omitted_attrs) if omitted_attrs else frozenset()
     )
+    # The other half of the same ``__init__`` outcome: a submodule this variant
+    # really does BUILD rules out the branch guarded by its absence.
+    present_attrs = frozenset(
+        attr
+        for attr, val in (class_overrides or {}).items()
+        if val is not SUBMODULE_OMITTED and "." not in attr
+    )
+    phi_live_arms = (
+        _statically_decided_phi_arms(cls, present_attrs) if present_attrs else {}
+    )
 
     for index, call_attr in enumerate(forward_steps):
         if call_attr in dead_steps:
@@ -2366,7 +2424,9 @@ def build_block_node(
                         operation.label, class_name=operation.class_name
                     ),
                     basic=True,
-                    operation_predecessors=list(operation.predecessors),
+                    operation_predecessors=list(
+                        phi_live_arms.get(call_attr, operation.predecessors)
+                    ),
                     output_names=list(operation.output_names),
                     operation_predecessor_ports=_predecessor_ports_dict(
                         operation.predecessor_ports

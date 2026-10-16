@@ -57,6 +57,21 @@ MODELS = [
 # and could not be sized) give way to the one `torch.ones` the model runs.
 # Every check is now zero on all four.
 EXPECTED_NODES = {
+    # 2026-10-16e -- a branch `__init__` already decided is not a choice.
+    # DeepSeek appends compressed entries only where the layer HAS a compressor,
+    # and the variant split already knows which layers those are -- yet the phi
+    # over `kv` carried both arms in every variant, publishing `[B, 1, S, 512]`
+    # against the compressor path's `[B, 1, S + n_windows, 512]`. A phi whose
+    # arms disagree reports a shape that is wrong whenever the other arm runs,
+    # and that arm never runs at all here.
+    # The absence arm could not be removed the way the presence arm already is
+    # (dropping an omitted submodule's ops): it is the PRE-BRANCH value of `kv`,
+    # which the live arm's `cat` also reads, so killing its producer would take
+    # the live arm too. The phi's EDGE to it goes instead, leaving one arm to
+    # fold onto its producer.
+    # DeepSeek 2421 -> 2418: exactly the three `@op_l819_c8_merge` phis, one per
+    # variant that really builds a compressor. The `2x_no_compressor` group's
+    # was already handled by the omitted-submodule path.
     # 2026-10-16d -- the MoE expert loop computes on its own expert's tokens.
     # Four defects in one chain, each uncovered by fixing the one above it:
     #   * the loop ITERABLE was injected as a predecessor of the first body op,
@@ -380,7 +395,7 @@ EXPECTED_NODES = {
     # Loop ports folded away everywhere: the back edge was the only cycle the
     # graph allowed, and the body's own ends now name the direction instead
     # (``loop in: <var>`` / ``loop out: <var>``). -2 per loop that had ports.
-    "deepseek-ai/DeepSeek-V4-Flash": 2421,
+    "deepseek-ai/DeepSeek-V4-Flash": 2418,
 }
 
 # Warnings the per-model run prints that the check summary does not cover. Both
