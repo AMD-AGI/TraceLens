@@ -281,7 +281,6 @@ def test_build_matches_yaml(root, tmp_path, capsys, case):
             "{trace_path: ROOT/t2.json.gz, platform: MI300X,"
             " compare_to: {trace_path: ROOT/t1.json.gz}}]}",
             [
-                "capture_folder on both jobs or neither",
                 "must point at jobs[1]",
                 "jobs[1] takes no compare_to",
             ],

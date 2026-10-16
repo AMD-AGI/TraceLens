@@ -100,6 +100,13 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
             )
         for key in _PATH_KEYS:
             paths[f"jobs[{index}].{key}"] = job.get(key)
+        compare = job.get("compare_to")
+        if isinstance(compare, dict):
+            for key in _PATH_KEYS:
+                paths[f"jobs[{index}].compare_to.{key}"] = compare.get(key)
+        paths[f"jobs[{index}].precomputed_diff_stats"] = job.get(
+            "precomputed_diff_stats"
+        )
     errors += [
         f"{where} must be an absolute path: {value}"
         for where, value in paths.items()
@@ -282,10 +289,6 @@ def _shape_errors(
         if len(jobs) != 2:
             return [f"comparative takes exactly 2 jobs, got {len(jobs)}."]
         checked = [(1, jobs[1])]
-        if (jobs[0].get("capture_folder") is None) != (
-            jobs[1].get("capture_folder") is None
-        ):
-            errors.append("comparative needs capture_folder on both jobs or neither.")
         target = {
             key: jobs[1][key] for key in _PATH_KEYS if jobs[1].get(key) is not None
         }

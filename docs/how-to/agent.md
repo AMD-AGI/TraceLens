@@ -123,7 +123,7 @@ details.
 | Scope | Config shape |
 |---|---|
 | `standalone` | One job. |
-| `comparative` | Two jobs. `capture_folder` on both or on neither. The agent compares them with TraceDiff. |
+| `comparative` | Two jobs. `capture_folder` is optional per job. The agent compares them with TraceDiff. |
 | `semantic` | Two jobs, `analysis_mode: inference`, no `capture_folder`. Both traces are graph-replay-only. |
 
 Every job needs `platform`, and the trace, capture folder, and output paths must be absolute. For the full schema and
