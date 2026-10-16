@@ -711,6 +711,18 @@ class pseudo_mla_prefill_fwd(InferenceAttention):
 
 
 class mla_tilelang_sparse_fwd(InferenceAttention):
+    """
+    Performance model for TileLang SparseMLA
+    (``sglang::tilelang_sparse_fwd`` / DSA sparse decode).
+
+    Sparse decode attends only to indexer-selected KV slots. The indices
+    tensor's last dim is the topk window (SGLang:
+    ``topk = indices.shape[-1]``). That width is surfaced as
+    ``param_details["sliding_window"]`` so the base roofline caps generation
+    KV via :meth:`InferenceAttention._cap_gen_kv` (same path as
+    :class:`pa_decode_gluon` / V4 paged decode). Missing or non-positive
+    indices dims fail closed via :meth:`InferenceAttention.no_perf_param_details`.
+    """
 
     @staticmethod
     def get_param_details(event):
@@ -722,6 +734,14 @@ class mla_tilelang_sparse_fwd(InferenceAttention):
             params["d_h_v"] = 512
         else:
             params["d_h_v"] = int(concrete[4])
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        if len(dims) <= 2 or len(dims[2]) < 1:
+            return InferenceAttention.no_perf_param_details()
+        topk = int(dims[2][-1])
+        if topk <= 0:
+            return InferenceAttention.no_perf_param_details()
+        params["sliding_window"] = topk
         return params
 
 
