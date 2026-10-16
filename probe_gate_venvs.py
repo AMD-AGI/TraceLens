@@ -56,6 +56,34 @@ MODELS = [
 # Then GLM 1282 -> 1279: the mask builder's two ops (which had no mask to read
 # and could not be sized) give way to the one `torch.ones` the model runs.
 # Every check is now zero on all four.
+# Phis whose arms carry DIFFERENT shapes. Exactly one arm runs per invocation
+# and a phi forwards it untouched, so a disagreement means the phi publishes a
+# shape that is wrong whenever the other arm runs, and everything below it
+# inherits that. Each is either a shape to correct or two genuinely different
+# computations whose subgraph must be split.
+#
+# BASELINED, NOT ZERO-CHECKED, and the direction that matters is BOTH. These
+# are real and outstanding, so zero is not the pass condition -- explaining the
+# change is. A rule that "resolved" all of them by dropping phi arms took the
+# count to 0 while deleting live computation: 8 DeepSeek `else` branches
+# (`new_zeros` for the empty chunk, `F.pad` for the no-block-bias case), plus 2
+# GLM false positives from comparing dtype as part of the shape. Nothing was
+# orphaned, so dead-node and every other check stayed silent. This is the only
+# thing that would have caught it.
+#
+#   Kimi 4: `l567` / `l660`, the padded vs unpadded regimes of linear attention.
+#   DeepSeek 8: three complementary empty-vs-full compressor pairs, and `l832`,
+#     whose `F.pad` cannot resolve `kv.shape[2] - attention_mask.shape[-1]`
+#     because no rule can read the shape of a forward LOCAL.
+EXPECTED_PHI_ARM_SHAPES = {
+    "zai-org/GLM-5.3-Flash": 0,
+    "moonshotai/Kimi-K3": 4,
+    "MiniMaxAI/MiniMax-M3": 0,
+    "deepseek-ai/DeepSeek-V4-Flash": 8,
+    "openai-community/gpt2": 0,
+}
+
+
 EXPECTED_NODES = {
     # 2026-10-16e -- a branch `__init__` already decided is not a choice.
     # DeepSeek appends compressed entries only where the layer HAS a compressor,
@@ -475,6 +503,21 @@ def main(argv: list[str]) -> int:
                 if marker in line and line.rsplit(":", 1)[-1].strip() not in {"0", ""}:
                     status = 1
                     print(f"  !! {line.strip()}", flush=True)
+
+        phi_expected = EXPECTED_PHI_ARM_SHAPES.get(model)
+        if phi_expected is not None:
+            found = re.search(r"phi arm shapes\s*:\s*(\d+)", result.stdout)
+            if found is None:
+                status = 1
+                print("  !! no phi-arm-shape census reported", flush=True)
+            elif int(found.group(1)) != phi_expected:
+                status = 1
+                print(
+                    f"  !! phi arm shapes {found.group(1)} != expected "
+                    f"{phi_expected} -- a DROP counts too: the last rule that "
+                    f"took these to zero did it by deleting live computation",
+                    flush=True,
+                )
 
         expected = EXPECTED_NODES.get(model)
         if expected is not None:
