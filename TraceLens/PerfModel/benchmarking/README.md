@@ -91,6 +91,9 @@ The output filename is used as the arch `name` heuristically (memory tier → `M
 }
 ```
 
+All numeric values are floats rounded to one decimal place (for example `0.4`
+TFLOPS for a slow fp64 unit), not integers.
+
 Drop this file into an arch directory (the bundled [`Agent/Analysis/utils/arch/`](../../Agent/Analysis/utils/arch/)) as `<platform>.json`, then pass `--gpu_arch_json_path <platform>.json` to the perf-report CLIs. See [`examples/gpu_arch_example.md`](../../../examples/gpu_arch_example.md) for the field reference.
 
 ## Validating against hardware counters (AMD)
