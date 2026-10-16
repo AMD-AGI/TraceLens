@@ -20,6 +20,7 @@ with ``TRACELENS_SKIP_QUALITY_CHECK=1``.
 from __future__ import annotations
 
 import enum
+import json
 import os
 import statistics
 import warnings
@@ -47,12 +48,14 @@ class Status(enum.Enum):
 class TraceCheck:
     status: Status
     message: str
+    check_name: str = ""
     metrics: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class TraceCheckReport:
     findings: List[TraceCheck] = field(default_factory=list)
+    ran_checks: List[str] = field(default_factory=list)
 
     def log_findings(self) -> None:
         for f in self.findings:
@@ -64,6 +67,34 @@ class TraceCheckReport:
                     UserWarning,
                     stacklevel=2,
                 )
+
+    def merge(self, other: "TraceCheckReport") -> None:
+        self.findings.extend(other.findings)
+        self.ran_checks.extend(other.ran_checks)
+
+    def to_json_dict(self) -> Dict[str, Dict[str, str]]:
+        failed = {}
+        for f in self.findings:
+            failed[f.check_name] = {
+                "status": f.status.value.upper(),
+                "message": f.message,
+            }
+        result = {}
+        for name in self.ran_checks:
+            if name in failed:
+                result[name] = failed[name]
+            else:
+                result[name] = {"status": "PASS", "message": ""}
+        return result
+
+    def write_json(self, output_dir: str) -> None:
+        if not output_dir:
+            return
+        os.makedirs(output_dir, exist_ok=True)
+        path = os.path.join(output_dir, "trace_check.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_json_dict(), f, indent=2)
+            f.write("\n")
 
 
 # ---------------------------------------------------------------------------
@@ -445,32 +476,6 @@ _ATTN_FWD_SHEETS = ("op_fa_fwd",)
 _ATTN_BWD_SHEETS = ("op_fa_bwd",)
 
 
-def _check_idle_timeline(ctx) -> List[TraceCheck]:
-    dfs, sheets, thr = ctx["dfs"], ctx["sheets"], ctx["thr"]
-    tl = dfs.get(sheets["timeline"])
-    if tl is None or "type" not in getattr(tl, "columns", []):
-        return []
-    idle_rows = tl[tl["type"] == "idle_time"]
-    if idle_rows.empty:
-        return []
-    idle_pct = float(idle_rows["percent"].mean())
-    if idle_pct >= thr.idle_pct_fail:
-        return [
-            TraceCheck(
-                Status.WARN,
-                f"GPU idle {idle_pct:.1f}% (>= {thr.idle_pct_fail}%).",
-            )
-        ]
-    if idle_pct >= thr.idle_pct_warn:
-        return [
-            TraceCheck(
-                Status.WARN,
-                f"GPU idle {idle_pct:.1f}% (>= {thr.idle_pct_warn}%).",
-            )
-        ]
-    return []
-
-
 def _check_ops_have_shapes(ctx) -> List[TraceCheck]:
     dfs, sheets, thr = ctx["dfs"], ctx["sheets"], ctx["thr"]
     df = dfs.get(sheets["unique_args"])
@@ -594,6 +599,8 @@ def _check_attention_kernel_count(ctx) -> List[TraceCheck]:
 # fn accepts a single ctx dict.
 # pre_report: True = pre-report check, False = post-report check.
 # detailed: True = requires TRACELENS_DETAILED_QUALITY_CHECKS=1.
+_accumulated_reports: List[TraceCheckReport] = []
+
 # framework: None = all, "pytorch" = PyTorch only, "jax" = JAX only.
 CHECK_REGISTRY = [
     # Pre-report, basic
@@ -611,7 +618,6 @@ CHECK_REGISTRY = [
     # Post-report, basic
     (_check_kernels_dropped_correlation, False, False, None),
     # Post-report, detailed
-    (_check_idle_timeline, False, True, None),
     (_check_ops_have_shapes, False, True, None),
     (_check_high_idle_ops, False, True, None),
     (_check_attention_kernel_count, False, True, "jax"),
@@ -641,6 +647,7 @@ def run_trace_checks(
     by ``framework`` (None runs only general checks).
     """
     findings: List[TraceCheck] = []
+    ran_checks: List[str] = []
     detailed = parse_bool_string(os.environ.get("TRACELENS_DETAILED_QUALITY_CHECKS"))
     thr = QualityThresholds()
     sheets = _SHEETS.get(framework or "pytorch", _SHEETS["pytorch"])
@@ -662,6 +669,24 @@ def run_trace_checks(
             continue
         if check_fw is not None and check_fw != framework:
             continue
-        findings.extend(fn(ctx))
+        name = fn.__name__
+        ran_checks.append(name)
+        check_findings = fn(ctx)
+        for f in check_findings:
+            f.check_name = name
+        findings.extend(check_findings)
 
-    return TraceCheckReport(findings=findings)
+    report = TraceCheckReport(findings=findings, ran_checks=ran_checks)
+    _accumulated_reports.append(report)
+    return report
+
+
+def write_accumulated_json(output_dir: str) -> None:
+    """Write all accumulated check results to trace_check.json and clear."""
+    if not output_dir or not _accumulated_reports:
+        return
+    merged = TraceCheckReport()
+    for r in _accumulated_reports:
+        merged.merge(r)
+    merged.write_json(output_dir)
+    _accumulated_reports.clear()

@@ -452,22 +452,6 @@ class TestPostReportChecks:
         # Only kernels_dropped_correlation runs (basic), not detailed checks
         assert not any("GPU idle" in f.message for f in report.findings)
 
-    def test_idle_timeline_high_idle(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
-        dfs = self._make_dfs(idle_pct=70.0)
-        report = trace_check.run_trace_checks(
-            pre_report=False, dfs=dfs, framework="pytorch"
-        )
-        assert any("GPU idle" in f.message for f in report.findings)
-
-    def test_idle_timeline_low_idle(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
-        dfs = self._make_dfs(idle_pct=5.0)
-        report = trace_check.run_trace_checks(
-            pre_report=False, dfs=dfs, framework="pytorch"
-        )
-        assert not any("GPU idle" in f.message for f in report.findings)
-
     def test_ops_have_shapes_good_coverage(self, monkeypatch):
         monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         dfs = self._make_dfs(shape_coverage=1.0)
@@ -539,14 +523,6 @@ class TestPostReportChecks:
         )
         assert not any("Attention launches" in f.message for f in report.findings)
 
-    def test_idle_timeline_warn_threshold(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
-        dfs = self._make_dfs(idle_pct=35.0)
-        report = trace_check.run_trace_checks(
-            pre_report=False, dfs=dfs, framework="pytorch"
-        )
-        assert any("GPU idle" in f.message for f in report.findings)
-
     def test_ops_have_shapes_missing_column(self, monkeypatch):
         import pandas as pd
 
@@ -583,28 +559,6 @@ class TestPostReportChecks:
             pre_report=False, dfs=dfs, framework="pytorch"
         )
         assert not any("non-kernel time" in f.message for f in report.findings)
-
-    def test_idle_timeline_missing_sheet(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
-        dfs = self._make_dfs()
-        del dfs["gpu_timeline"]
-        report = trace_check.run_trace_checks(
-            pre_report=False, dfs=dfs, framework="pytorch"
-        )
-        assert not any("GPU idle" in f.message for f in report.findings)
-
-    def test_idle_timeline_no_idle_row(self, monkeypatch):
-        import pandas as pd
-
-        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
-        dfs = self._make_dfs()
-        dfs["gpu_timeline"] = pd.DataFrame(
-            {"type": ["computation_time"], "percent": [100.0]}
-        )
-        report = trace_check.run_trace_checks(
-            pre_report=False, dfs=dfs, framework="pytorch"
-        )
-        assert not any("GPU idle" in f.message for f in report.findings)
 
     def test_ops_have_shapes_empty_df(self, monkeypatch):
         import pandas as pd

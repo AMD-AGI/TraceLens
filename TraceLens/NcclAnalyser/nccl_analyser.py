@@ -102,6 +102,7 @@ class NcclAnalyser:
         use_multiprocessing=False,
         max_workers=None,
         custom_collective_patterns=None,
+        preloaded_events=None,
     ):
         """
         Parameters
@@ -181,11 +182,22 @@ class NcclAnalyser:
         # Internal storage
         self.rank2trace_data = {}  # Stores per-rank data
         self._simplified_mode = False
-        self.load_trace_data()
+        if preloaded_events is not None:
+            self._load_from_preloaded(preloaded_events)
+        else:
+            self.load_trace_data()
 
     def _nccl_filter_event_fn(self, event):
         """Filters collective kernel events using instance patterns."""
         return _collective_filter(event, self._filter_patterns)
+
+    def _load_from_preloaded(self, preloaded_events):
+        """Load NCCL events from already-parsed trace events per rank."""
+        for rank, events in preloaded_events.items():
+            nccl_events = [e for e in events if self._nccl_filter_event_fn(e)]
+            self.rank2trace_data[rank] = {
+                idx: evt for idx, evt in enumerate(nccl_events)
+            }
 
     def load_trace_data(self):
         """Loads NCCL JSON trace data and extracts relevant events."""

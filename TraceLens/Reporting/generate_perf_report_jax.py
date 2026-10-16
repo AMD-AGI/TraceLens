@@ -167,15 +167,15 @@ def generate_perf_report_jax(
     if not output_csvs_dir and output_xlsx_path is None:
         base_path = profile_path.rsplit(".xplane.pb", 1)[0]
         output_xlsx_path = base_path + "_perf_report.xlsx"
+    trace_check.run_trace_checks(
+        pre_report=False, tree=perf_analyzer.tree, dfs=dict_name2df, framework="jax"
+    ).log_findings()
+
     write_report_outputs(
         dict_name2df,
         xlsx_path=output_xlsx_path,
         csvs_dir=output_csvs_dir,
     )
-
-    trace_check.run_trace_checks(
-        pre_report=False, tree=perf_analyzer.tree, dfs=dict_name2df, framework="jax"
-    ).log_findings()
 
     return dict_name2df
 

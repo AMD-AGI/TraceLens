@@ -1013,7 +1013,11 @@ def generate_perf_report_pytorch(
 
     # Skip collective analysis for GPU-only traces (no CPU ops means no collectives)
     if collective_analysis and not perf_analyzer.gpu_only:
-        nccl_analyser = NcclAnalyser([profile_json_path], None)
+        nccl_analyser = NcclAnalyser(
+            [profile_json_path],
+            None,
+            preloaded_events={0: perf_analyzer.tree.events},
+        )
         df_nccl_summary = nccl_analyser.build_df_summary_long()
         if not df_nccl_summary.empty:
             dict_name2df["coll_analysis"] = df_nccl_summary
@@ -1040,13 +1044,13 @@ def generate_perf_report_pytorch(
     if output_xlsx_path is None and output_csvs_dir is None:
         base_path = profile_json_path.rsplit(".json", 1)[0]
         output_xlsx_path = base_path + "_perf_report.xlsx"
-    write_report_outputs(
-        dict_name2df, xlsx_path=output_xlsx_path, csvs_dir=output_csvs_dir
-    )
-
     trace_check.run_trace_checks(
         pre_report=False, tree=perf_analyzer.tree, dfs=dict_name2df, framework="pytorch"
     ).log_findings()
+
+    write_report_outputs(
+        dict_name2df, xlsx_path=output_xlsx_path, csvs_dir=output_csvs_dir
+    )
 
     return dict_name2df
 
