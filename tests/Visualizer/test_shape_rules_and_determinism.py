@@ -92,6 +92,9 @@ class TestGroupEntryBucketOrder:
 
 
 class TestSliceBoundedByALocalName:
+    """The fourth element says the bound counted from the END (``[..., -n:]``),
+    which takes the opposite side and needs a KNOWN end to become a width."""
+
     """Partial RoPE splits on a local, then concatenates the halves back."""
 
     @staticmethod
@@ -101,10 +104,10 @@ class TestSliceBoundedByALocalName:
         return _slice_bound_name(raw)
 
     def test_head_slice_takes_the_named_width(self) -> None:
-        assert self._bound("(..., :rotary_dim)") == ("rotary_dim", True, -1)
+        assert self._bound("(..., :rotary_dim)") == ("rotary_dim", True, -1, False)
 
     def test_tail_slice_takes_the_remainder(self) -> None:
-        assert self._bound("(..., rotary_dim:)") == ("rotary_dim", False, -1)
+        assert self._bound("(..., rotary_dim:)") == ("rotary_dim", False, -1, False)
 
     def test_the_bound_names_the_axis_it_sits_at(self) -> None:
         """``kv[:, :usable]`` narrows the SEQUENCE of a ``[B, S, 1024]``.
@@ -113,8 +116,8 @@ class TestSliceBoundedByALocalName:
         axis reported ``[B, S, usable]`` -- the right extent on the wrong axis,
         which then disagreed with the other arm of every phi below it.
         """
-        assert self._bound("(:, :usable)") == ("usable", True, 1)
-        assert self._bound("(:, :, :head)") == ("head", True, 2)
+        assert self._bound("(:, :usable)") == ("usable", True, 1, False)
+        assert self._bound("(:, :, :head)") == ("head", True, 2, False)
 
     def test_two_named_bounds_name_two_axes(self) -> None:
         """This rule narrows one axis; two is not its question."""

@@ -3221,6 +3221,22 @@ class ShapeInferencer:
 
         if synthetic == "@tensor":
             label = (node.metadata.get("port_label") or node.label or "").lower()
+            # A tile with an OPERAND is carrying an activation; this rule's other
+            # branches all answer the other question -- what a tile that NAMES a
+            # parameter holds. Falling through them returned ``()`` even when a
+            # correct shape had just been handed in, and an empty shape is not a
+            # smaller answer, it is the absence of one. Kimi's linear-attention
+            # pipeline entry tiles (q/k/v/g/beta) each received
+            # ``[1, nnz, 96, 128]`` and published nothing, so the fused kernel
+            # below them was handed five shapeless operands and fell back to the
+            # activation default -- which is how the unpadded shape died one step
+            # ABOVE the ports, and why ``o_proj``'s ``squeeze(0)`` then looked
+            # like a no-op. Measured across the five pinned models: Kimi has the
+            # only ``@tensor`` tiles, all five carry an operand, and the
+            # parameter branches below are dead everywhere -- so no tile that
+            # resolves to a parameter is reached through this path.
+            if inputs and inputs[0].shape:
+                return inputs[0]
             experts = self.context.dims.get(Symbol.EXPERTS.value, Symbol.EXPERTS.value)
             hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
             parameter = self._lookup_parameter_spec(node, root=root, names=[label])
@@ -3819,11 +3835,23 @@ class ShapeInferencer:
             # summing them cancel back to the source width.
             bound = _slice_bound_name(_detail_value(details, "slice"))
             if bound is not None and source.shape:
-                name, takes_head, axis = bound
+                name, takes_head, axis, from_end = bound
                 rank = len(source.shape)
                 if -rank <= axis < rank:
                     at = axis % rank
                     width = source.shape[at]
+                    # A bound counted from the END can only become a width when
+                    # the end is KNOWN. Against an already-symbolic axis both
+                    # ``n`` and ``width-(n)`` are unresolvable either way, so the
+                    # narrowing adds nothing and merely RENAMES the axis -- and a
+                    # rename is not free. GLM cuts its conv tail with
+                    # ``mixed_qkv[:, :, -seq_len:]`` where ``batch_size, seq_len
+                    # = hidden_states.shape[:2]``, i.e. ``seq_len`` IS ``S``;
+                    # writing ``seq_len`` over ``S`` left the ``view(batch_size,
+                    # seq_len, -1, head_dim)`` below unable to cancel its ``-1``,
+                    # and three q/k/v views silently stopped reshaping.
+                    if from_end and not isinstance(width, int):
+                        return source
                     narrowed = name if takes_head else f"{width}-({name})"
                     shape = list(source.shape)
                     shape[at] = narrowed
@@ -6577,6 +6605,29 @@ def _resolve_view_shape(
             continue
         except ValueError:
             pass
+        # A starred term is not only ever the FIRST one. Kimi's own
+        # ``pad_input`` ends ``out.view(batch_size, seq_len,
+        # *hidden_states.shape[1:])`` -- two leading axes it names, then "and
+        # whatever feature axes came in". Recognising the star only at position
+        # 0 left this unresolvable, so the view returned its source and rendered
+        # as doing nothing, which this file's own comment calls the one thing a
+        # reshape is never written to do.
+        star = re.match(
+            r"^\*(?P<name>[\w.]+)\.shape(?:\[(?P<lo>-?\d*):(?P<hi>-?\d*)\])?$", part
+        )
+        if star is not None:
+            named = (
+                (named_shapes or {}).get(star.group("name"))
+                if part[1:] in (snapshots or ())
+                else None
+            )
+            axes = named if named is not None else source.shape
+            low = int(star.group("lo")) if star.group("lo") else None
+            high = int(star.group("hi")) if star.group("hi") else None
+            resolved.extend(axes[low:high])
+            if named is not None:
+                used_named_prefix = True
+            continue
         # Try resolving via config dims (with suffix heuristics)
         val = _resolve_dim_name(part, dims)
         if val is not None:
@@ -6635,6 +6686,23 @@ def _resolve_view_shape(
         if used_named_prefix and neg_index is None:
             neg_index = len(resolved)
             resolved.append("-1")
+            continue
+        # A bare NAME the config does not state is still a dim, when the SOURCE
+        # already names it. Kimi's ``pad_input`` ends ``out.view(batch_size,
+        # seq_len, *hidden_states.shape[1:])`` on a tensor whose leading axis is
+        # literally ``batch_size * seq_len``: the view splits one axis into the
+        # two factors the axis is already written in terms of, so the elements
+        # agree by construction and transcribing them is reporting the reshape,
+        # not guessing at it. Refusing left the view reported as doing nothing.
+        #
+        # Only when the source names it. A name appearing NOWHERE in the source
+        # is the case where the axis would have to be inferred from leading dims
+        # that may themselves be a fallback -- the guess that collapsed GLM's
+        # ``[B, S, 4096]`` into ``[B*S*4096]`` -- and that stays refused.
+        if re.fullmatch(r"[A-Za-z_]\w*", part) and any(
+            part in re.findall(r"[A-Za-z_]\w*", str(dim)) for dim in source.shape
+        ):
+            resolved.append(part)
             continue
         # Cannot resolve — give up
         return None
@@ -7951,12 +8019,23 @@ def _broadcast_rank(spec: TensorSpec) -> tuple[int, float]:
     return len(spec.shape), width
 
 
-def _slice_bound_name(raw: str | None) -> tuple[str, bool, int] | None:
-    """``(name, takes_head, axis)`` for a slice bounded by a bare name.
+def _slice_bound_name(raw: str | None) -> tuple[str, bool, int, bool] | None:
+    """``(name, takes_head, axis, from_end)`` for a slice bounded by a bare name.
 
     ``(..., :rotary_dim)`` takes the head of an axis and ``(..., rotary_dim:)``
     the tail. Returns *None* for anything else -- a numeric bound is folded by
     the branches above, and a bound we cannot even name is not narrowed at all.
+
+    A NEGATED bound counts from the other end, so it takes the other side:
+    ``(..., :-rope_dim)`` is everything BUT the last ``rope_dim`` and
+    ``(..., -rope_dim:)`` is exactly those. That is the positive case with the
+    side flipped, so stripping the sign and inverting ``takes_head`` reuses the
+    arithmetic the caller already does rather than adding a parallel one.
+    Without this, DeepSeek's partial RoPE -- which splits with
+    ``x[..., :-rope_dim]`` and ``x[..., -rope_dim:]`` -- had BOTH halves report
+    the full 512, and the concat that rejoins them answered 1024. That width
+    then flowed out of the compressor and disagreed with the empty-case arm of
+    the phi below it, which had the right 512 from its own ``new_zeros``.
 
     The AXIS is the subscript position the bound sits at, which is not always
     the last one: ``kv[:, :usable]`` narrows the SEQUENCE of a ``[B, S, 1024]``
@@ -7973,17 +8052,23 @@ def _slice_bound_name(raw: str | None) -> tuple[str, bool, int] | None:
         ellipsis_at = elements.index("...")
     except ValueError:
         ellipsis_at = None
-    found: tuple[str, bool, int] | None = None
+    found: tuple[str, bool, int, bool] | None = None
     for position, element in enumerate(elements):
         if element.count(":") != 1:
             continue
         head, _, tail = element.partition(":")
         head, tail = head.strip(), tail.strip()
-        if head and not tail and head.isidentifier():
+        if head and not tail:
             name, takes_head = head, False
-        elif tail and not head and tail.isidentifier():
+        elif tail and not head:
             name, takes_head = tail, True
         else:
+            continue
+        from_end = name.startswith("-")
+        if from_end:
+            # Counting from the far end takes the opposite side.
+            name, takes_head = name[1:].strip(), not takes_head
+        if not name.isidentifier():
             continue
         if ellipsis_at is not None and position > ellipsis_at:
             axis = position - len(elements)
@@ -7992,7 +8077,7 @@ def _slice_bound_name(raw: str | None) -> tuple[str, bool, int] | None:
         if found is not None:
             # Two named bounds name two axes; this rule narrows one.
             return None
-        found = (name, takes_head, axis)
+        found = (name, takes_head, axis, from_end)
     return found
 
 
