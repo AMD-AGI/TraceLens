@@ -119,6 +119,8 @@ Any agentic CLI runner that supports skill-file discovery and headless (print/no
 
 Set `analysis mode inference` for vLLM/SGLang/ATOM traces (and include the `execution mode` / `capture folder` fields when using graph replay + capture); use `analysis mode default` for training and non-vLLM/SGLang eager inference. Passing all parameters inline avoids interactive prompts, which is useful for batch runs and CI pipelines (see `skills/analysis-orchestrator/evals/eval_scripts/generate_ref.sh` for an example).
 
+The agent can also run from a run YAML instead of prompts; see [Run the agent from a YAML config](../../../docs/how-to/agent.md#run-the-agent-from-a-yaml-config).
+
 ---
 
 ## Integrating with Model Optimization Flows
@@ -218,37 +220,38 @@ Every report embeds HTML comment markers that a downstream system can leverage w
 
 The analysis is split into three independent tiers that can be composed separately:
 
-- **System-Level Optimizations** (Step 6): Issues that affect the GPU pipeline as a whole -- idle time, memcpy overhead, NCCL blocking, compute/comm overlap. These are not about individual kernel efficiency.
-- **Kernel Fusion Opportunities** (Steps 4b + 6, Experimental): Identifies multi-kernel modules that could be fused and estimates savings.
-- **Compute Kernel Optimizations** (Step 7): Per-category kernel analysis (GEMM, SDPA, elementwise, etc.) focused on individual operation efficiency.
+- **System-Level Optimizations** (Step 7): Issues that affect the GPU pipeline as a whole -- idle time, memcpy overhead, NCCL blocking, compute/comm overlap. These are not about individual kernel efficiency.
+- **Kernel Fusion Opportunities** (Steps 3-6 + 7, Experimental): Identifies multi-kernel modules that could be fused and estimates savings.
+- **Compute Kernel Optimizations** (Step 8): Per-category kernel analysis (GEMM, SDPA, elementwise, etc.) focused on individual operation efficiency.
 
 Each tier writes to a separate findings directory and produces an independently composable report section.
 
 ```mermaid
 flowchart TD
-    Prep["Steps 0-5: Trace Processing, TraceLens Pre-Processing, Additional Pre-Computation"]
-    Prep --> Step6["Step 6: System-Level Analysis"]
-    Prep --> Step7["Step 7: Compute Kernel Analysis"]
+    Prep["Steps 0-6: Trace Processing, TraceLens Pre-Processing, Additional Pre-Computation"]
+    Prep --> Step7["Step 7: System-Level Analysis"]
+    Prep --> Step8["Step 8: Compute Kernel Analysis"]
 
-    Step6 --> CpuIdle["cpu-idle-analyzer"]
-    Step6 --> MultiKernel["multi-kernel-analyzer"]
-    Step6 --> KernelFusion["kernel-fusion-analyzer"]
+    Step7 --> CpuIdle["cpu-idle-analyzer"]
+    Step7 --> MultiKernel["multi-kernel-analyzer"]
+    Step7 --> KernelFusion["kernel-fusion-analyzer"]
     CpuIdle --> SysFindings["system_findings/"]
     MultiKernel --> SysFindings
     KernelFusion --> SysFindings
 
-    Step7 --> Gemm["gemm-analyzer"]
-    Step7 --> Sdpa["sdpa-analyzer"]
-    Step7 --> Others["other analyzers..."]
+    Step8 --> Gemm["gemm-analyzer"]
+    Step8 --> Sdpa["sdpa-analyzer"]
+    Step8 --> Others["other analyzers..."]
     Gemm --> CatFindings["category_findings/"]
     Sdpa --> CatFindings
     Others --> CatFindings
 
-    SysFindings --> Agg["Step 7.5: Aggregate"]
+    SysFindings --> Agg["Step 8.5: Aggregate"]
     CatFindings --> Agg
-    Agg --> Step8["Step 8: Validate"]
-    Step8 --> Step9["Step 9: Report Prep + Model ID"]
-    Step9 --> Step10["Step 10: Final Report"]
+    Agg --> Step9["Step 9: Validate"]
+    Step9 --> Step10["Step 10: Report Prep + Model ID"]
+    Step10 --> Step11["Step 11: Render PNG"]
+    Step11 --> Step12["Step 12: Final Report"]
 ```
 
 ### Orchestrator
@@ -259,20 +262,22 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 ### Workflow Steps
 
 ```
-0.   Query User Inputs (Comparison scope, Trace path(s), Platform(s), Analysis Mode, Environment Setup)
-1.   Generate Performance Report (branches on analysis mode and comparison scope)
-2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json + kernel_fusion_metrics.json
-6.   System-Level Analysis (CPU/Idle + Multi-Kernel + Kernel Fusion, PARALLEL) → system_findings/
-7.   Compute Kernel Subagents (PARALLEL) → category_findings/
-7.5. Aggregate per-category Compute Kernel findings → priority_data.json (globally ranked)
-8.   Validate Subagent Outputs (time sanity, efficiency anomalies, coverage)
-9.   Prepare Report Data + Model Identification (subagent) → metadata/model_info.json
-10.  Generate Final Report (analysis.md): compose System-Level + Kernel Fusion + Compute Kernel sections
+0.   Query User Inputs (interactive answers or a run YAML, Environment Setup) → cache/run_config.yaml
+1.   Generate Performance Report (one wrapper call on cache/run_config.yaml; semantic pre-processing first)
+2.   Trace-Quality Gate (deterministic fallback branch for graph-under-recorded traces)
+3-6. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json + kernel_fusion_metrics.json
+7.   System-Level Analysis (CPU/Idle + Multi-Kernel + Kernel Fusion, PARALLEL) → system_findings/
+8.   Compute Kernel Subagents (PARALLEL) → category_findings/
+8.5. Aggregate per-category Compute Kernel findings → priority_data.json (globally ranked)
+9.   Validate Subagent Outputs (time sanity, efficiency anomalies, coverage)
+10.  Prepare Report Data + Model Identification (subagent) → metadata/model_info.json
+11.  Render performance PNG if agent_extension.py is absent
+12.  Generate Final Report (analysis.md): compose System-Level + Kernel Fusion + Compute Kernel sections
 ```
 
 ### Sub-Agents
 
-**System-Level (Step 6):**
+**System-Level (Step 7):**
 
 | Agent | Purpose |
 |-------|---------|
@@ -280,7 +285,7 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 | `multi-kernel-analyzer` | Analyzes memcpy D2H/H2D patterns, NCCL blocking, compute/comm overlap |
 | `kernel-fusion-analyzer` | Identifies multi-kernel fusion opportunities and estimates savings via roofline model |
 
-**Compute Kernel (Step 7):**
+**Compute Kernel (Step 8):**
 
 | Agent | Purpose |
 |-------|---------|
@@ -300,7 +305,7 @@ The orchestrator and all 13 sub-agents run on a capable frontier reasoning model
 
 ### Supported Analysis Modes
 
-The orchestrator supports two analysis modes, selected during Step 0:
+The orchestrator supports two analysis modes, selected during Step 0. Step 1 runs these scripts through `TraceLens_generate_perf_report_from_config`:
 
 | Mode | Script | Use Case |
 |------|--------|----------|
@@ -334,6 +339,8 @@ analysis_output/
 ├── analysis.md                     # Stakeholder report (only user-facing output)
 ├── perf_report.xlsx                # Excel export of TraceLens perf report (Internal)
 ├── perf_report_csvs/               # CSV exports: gpu_timeline, ops_summary, ... (Internal)
+├── run_config.resolved.yaml        # Run config with every report option spelled out (Internal)
+├── cache/                          # cmd_prefix.txt + run_config.yaml, the completed run config (Internal)
 ├── category_data/                  # Per-category CSVs, metrics JSONs, tree data, fusion inputs (Internal)
 │   ├── category_manifest.json          # Category metadata, GPU utilization, tier info
 │   ├── multi_kernel_data.json          # Pre-computed memcpy/comm./overlap data
@@ -362,6 +369,8 @@ analysis_output/
 ├── perf_report_trace1_csvs/        # Trace 1 CSV exports: gpu_timeline, ops_summary, ... (Internal)
 ├── perf_report_trace2.xlsx         # Excel export of TraceLens perf report for trace 2 (Internal)
 ├── perf_report_trace2_csvs/        # Trace 2 CSV exports: gpu_timeline, ops_summary, ... (Internal)
+├── run_config.resolved.yaml        # Run config with every report option spelled out (Internal)
+├── cache/                          # cmd_prefix.txt + run_config.yaml, the completed run config (Internal)
 ├── category_data/                  # Per-category CSVs, metrics JSONs, tree data, fusion inputs (Internal)
 │   ├── category_manifest.json          # Category metadata, GPU utilization, tier info
 │   ├── multi_kernel_data.json          # Pre-computed memcpy/comm./overlap data

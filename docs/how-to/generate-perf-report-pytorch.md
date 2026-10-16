@@ -14,6 +14,9 @@ See LICENSE for license information.
 Turn a `torch.profiler` Chrome trace into a multi-sheet Excel (or CSV)
 performance report, then read the sheets to find what dominates GPU time.
 
+To run this report from a YAML file instead of command-line flags, see
+[Generate performance reports from a YAML config](./generate-perf-report-from-config.md).
+
 ## Before you begin
 
 Before generating a report, confirm you have the following:

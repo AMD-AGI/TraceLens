@@ -102,6 +102,34 @@ or `inference` for vLLM, SGLang, or ATOM), the execution mode and capture-folder
 inference, environment details (node, container, or virtual environment), and an
 optional output directory.
 
+### Run the agent from a YAML config
+
+If you already have a run config, point the agent at it instead of answering the
+prompts:
+
+```text
+Follow the analysis orchestrator installed with TraceLens and run the full
+agentic analysis workflow from config <run.yaml>, <scope>
+```
+
+Replace `<scope>` with `standalone`, `comparative`, or `semantic`. The scope is
+optional: the agent derives it when the shape is unambiguous (one job is `standalone`,
+two jobs with `compare_to` on job 1 is `comparative`). The config must already have the
+shape the scope needs. The agent only adds wiring and its own report flags, and prints
+every change it makes. In two-trace runs both reports use the first trace's platform,
+and the second trace's platform is kept as a label. The agent still asks for environment
+details.
+
+| Scope | Config shape |
+|---|---|
+| `standalone` | One job. |
+| `comparative` | Two jobs. `capture_folder` is optional per job. The agent compares them with TraceDiff. |
+| `semantic` | Two jobs, `analysis_mode: inference`, no `capture_folder`. Both traces are graph-replay-only. |
+
+Every job needs `platform`, and the trace, capture folder, and output paths must be absolute. For the full schema and
+examples, see
+[Generate performance reports from a YAML config](./generate-perf-report-from-config.md).
+
 ## Read the results
 
 Only `analysis.md` is intended for end-user review. Everything else under
@@ -158,19 +186,19 @@ matter.
 
 The high-level steps are:
 
-1. Query user inputs (comparison scope, trace paths, platforms, analysis mode,
-   environment setup).
-2. Generate the performance report (branching on analysis mode and comparison
-   scope).
-3. Prepare category data (GPU utilization, top operations, tree data, multi-kernel
+1. Query user inputs, or read a run YAML (environment setup is always asked).
+2. Generate the performance reports with one call on the completed run config.
+3. Check trace quality, with a fallback for graph-under-recorded traces.
+4. Prepare category data (GPU utilization, top operations, tree data, multi-kernel
    data, category filtering) and extract fusion candidates.
-4. Run system-level analysis (CPU/idle, multi-kernel, and kernel fusion) in
+5. Run system-level analysis (CPU/idle, multi-kernel, and kernel fusion) in
    parallel.
-5. Run the compute-kernel sub-agents in parallel.
-6. Aggregate the per-category findings into a globally ranked list.
-7. Validate sub-agent outputs for time sanity, efficiency anomalies, and coverage.
-8. Prepare report data and identify the model.
-9. Generate the final `analysis.md` report.
+6. Run the compute-kernel sub-agents in parallel.
+7. Aggregate the per-category findings into a globally ranked list.
+8. Validate sub-agent outputs for time sanity, efficiency anomalies, and coverage.
+9. Prepare report data and identify the model.
+10. Render the performance plot when no `agent_extension.py` is present.
+11. Generate the final `analysis.md` report.
 
 ### Sub-agents
 
