@@ -50,7 +50,8 @@ class TestConcatDefaultAxis:
     def test_no_dim_joins_along_axis_zero(self) -> None:
         operand = TensorSpec(("B", "S", 8), "float32")
         out = _infer("concat", [], [operand, operand])
-        assert out.shape == ("B + B", "S", 8), out.shape
+        # Like terms collect, so two B-deep operands join to 2*B rather than "B + B".
+        assert out.shape == ("2*B", "S", 8), out.shape
 
     def test_an_explicit_axis_still_wins(self) -> None:
         operand = TensorSpec(("B", "S", 8), "float32")

@@ -1490,7 +1490,9 @@ def test_concat_with_inputs_and_symbolic_fallback():
     out2 = inf._infer_node_output(
         _node("concat", details=["dim: -1"]), [c, d], root=None
     )
-    assert out2.shape == ("B", "S", "H + H")
+    # Like terms are collected, so two H-wide operands concatenate to 2*H rather
+    # than the unreduced "H + H" -- the same pass that cancels S + n_windows - S.
+    assert out2.shape == ("B", "S", "2*H")
 
 
 def test_transpose_and_permute():

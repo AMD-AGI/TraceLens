@@ -3475,9 +3475,10 @@ class ShapeInferencer:
             amounts: list[int] = []
             for token in raw.split(","):
                 token = token.strip()
-                if not token.lstrip("-").isdigit():
-                    return source
-                amounts.append(int(token))
+                if token.lstrip("-").isdigit():
+                    amounts.append(int(token))
+                    continue
+                return source
             pairs = len(amounts) // 2
             if len(amounts) % 2 or pairs > len(source.shape):
                 return source
@@ -6948,7 +6949,116 @@ def _sum_dim_sizes(sizes: list[DimExpr]) -> DimExpr:
         return total if total else 0
     if len(parts) == 1 and str(parts[0]).isdigit():
         return int(parts[0])
-    return " + ".join(parts) if parts else 0
+    joined = " + ".join(parts) if parts else 0
+    # Collect like terms across the WHOLE sum, not just the one pattern
+    # ``_cancel_subtracted_terms`` matches. A part can itself be a sum, so the
+    # cancelling pair need not be two separate parts.
+    collected = _collect_dim_terms(joined) if isinstance(joined, str) else None
+    if collected is None:
+        return joined
+    if collected.isdigit():
+        return int(collected)
+    return collected
+
+
+def _strip_redundant_parens(term: str) -> str:
+    """``"(rope_dim)"`` -> ``"rope_dim"``, leaving ``"(a + b)*c"`` alone."""
+    text = term.strip()
+    while len(text) > 1 and text[0] == "(" and text[-1] == ")":
+        depth = 0
+        for index, char in enumerate(text):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0 and index != len(text) - 1:
+                    return text
+        text = text[1:-1].strip()
+    return text
+
+
+def _split_signed_terms(expr: str) -> list[tuple[int, str]] | None:
+    """``"S + n_windows - S"`` -> ``[(1, "S"), (1, "n_windows"), (-1, "S")]``.
+
+    Splits on TOP-LEVEL ``+``/``-`` only, and only where one really is an
+    operator: the character before it has to end a term. So ``x[-1]`` keeps its
+    index, ``f(a - b)`` stays whole, and a leading unary sign is not read as a
+    separator. ``None`` when the result would contain an empty term, i.e. when
+    the string is not a plain sum.
+    """
+    text = str(expr).strip()
+    if not text:
+        return None
+    terms: list[tuple[int, str]] = []
+    depth = 0
+    current = ""
+    sign = 1
+    for index, char in enumerate(text):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        if depth == 0 and char in "+-":
+            before = text[:index].rstrip()
+            if before and (before[-1].isalnum() or before[-1] in "_)]}"):
+                terms.append((sign, current.strip()))
+                sign = 1 if char == "+" else -1
+                current = ""
+                continue
+        current += char
+    terms.append((sign, current.strip()))
+    return None if any(not term for _sign, term in terms) else terms
+
+
+def _collect_dim_terms(expr: DimExpr) -> str | None:
+    """Collect like terms in a symbolic size: ``S + n_windows - S`` is ``n_windows``.
+
+    A size reaches here as a string built by summing operands, and nothing
+    cancelled anything that was not a literal ``A-(B)`` against its own ``B``.
+    So a mask padded to ``kv.shape[2]`` reads ``S + S + n_windows - S`` and a
+    reader cannot see that it is ``S + n_windows``, nor can any check that
+    compares two shapes for equality.
+
+    ``None`` when the expression is a single term or is not a plain sum -- there
+    is nothing to collect, and guessing at arbitrary arithmetic is not this.
+    """
+    terms = _split_signed_terms(str(expr))
+    if terms is None or len(terms) < 2:
+        return None
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    constant = 0
+    for sign, raw in terms:
+        term = _strip_redundant_parens(raw)
+        if term.lstrip("-").isdigit():
+            constant += sign * int(term)
+            continue
+        if term not in counts:
+            order.append(term)
+        counts[term] = counts.get(term, 0) + sign
+    positive: list[str] = []
+    negative: list[str] = []
+    for term in order:
+        count = counts[term]
+        if count == 0:
+            continue
+        if abs(count) == 1:
+            rendered = term
+        elif term.isidentifier():
+            rendered = f"{abs(count)}*{term}"
+        else:
+            rendered = f"{abs(count)}*({term})"
+        (positive if count > 0 else negative).append(rendered)
+    if constant > 0:
+        positive.append(str(constant))
+    elif constant < 0:
+        negative.append(str(-constant))
+    if not positive and not negative:
+        return "0"
+    out = " + ".join(positive)
+    for term in negative:
+        out = f"{out} - {term}" if out else f"-{term}"
+    return out
 
 
 def _cancel_subtracted_terms(parts: list[str]) -> list[str]:
