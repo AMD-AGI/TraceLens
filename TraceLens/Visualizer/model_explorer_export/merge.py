@@ -3113,13 +3113,52 @@ def _loop_trip_count(namespace: str) -> str | None:
     return None
 
 
+def _variant_share_of_stack(namespace: str) -> tuple[str, str] | None:
+    """``(this variant's count, the whole stack's count)``, or ``None``.
+
+    A heterogeneous stack renders one group per variant, and each group's own
+    ends were named for ITS count -- so Kimi's decoder read as three separate
+    loops running 68, 24 and 1 times. It is one loop of 93 whose body differs by
+    slot, and 68 + 24 + 1 = 93 is exactly what says so. Returns both numbers
+    only when the namespace really is a variant nested in a larger repeat group;
+    a uniform stack has one count and nothing to qualify.
+    """
+    segments = [s for s in namespace.split("/") if _REPEAT_SEGMENT_RE.match(s)]
+    if len(segments) < 2:
+        return None
+    outer = _REPEAT_SEGMENT_RE.match(segments[0])
+    inner = _REPEAT_SEGMENT_RE.match(segments[-1])
+    if outer is None or inner is None or outer.group(1) == inner.group(1):
+        return None
+    # The variant must be the INNERMOST loop here, not merely an ancestor of
+    # it. HyperConnection's ``comb`` loop and the expert ``final`` loop live
+    # inside a variant and run their own counts (19 and 256); reading the
+    # variant's share onto them said ``comb · 20 of 43``, which is neither
+    # loop's trip count.
+    if _loop_trip_count(namespace) != inner.group(1):
+        return None
+    return inner.group(1), outer.group(1)
+
+
 def _loop_end_label(side: str, variable: str, namespace: str) -> str:
     """``loop in: <variable> iterations: <count>`` -- what it carries, how often.
 
     The name alone pairs the two ends; the count says what the box between them
     costs, which is the question a reader asks next and otherwise has to answer
     by reading the group's name.
+
+    For one arm of a heterogeneous stack the count is a SHARE. Naming each
+    variant for its own count made Kimi's decoder read as three loops running
+    68, 24 and 1 times, when it is one loop of 93 whose body differs by slot --
+    every one of those layers runs, which is what their summing to the stack's
+    own count says. The arms all read the same tensor in and all converge in the
+    one ``Mutually exclusive branch`` below, so the picture was already a single
+    stack; only these labels claimed otherwise.
     """
+    share = _variant_share_of_stack(namespace)
+    if share is not None:
+        taken, total = share
+        return f"loop {side}: {variable} · {taken} of {total} iterations"
     count = _loop_trip_count(namespace)
     carried = f"loop {side}: {variable}"
     return carried if count is None else f"{carried} iterations: {count}"
