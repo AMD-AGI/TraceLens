@@ -8,12 +8,32 @@ See LICENSE for license information.
 # TraceLens release notes
 ```{meta}
 :description: Release notes for TraceLens. Learn what features and SDK modules are available in each version, and see links to the compatibility matrix.
-:keywords: TraceLens, TraceLens 1.0.0, release notes, GPU trace analysis, performance models, TraceLens Agent, PyTorch, JAX, rocprofv3
+:keywords: TraceLens, TraceLens 1.1.0, TraceLens 1.0.0, release notes, GPU trace analysis, performance models, TraceLens Agent, PyTorch, JAX, rocprofv3
 ```
 
 This topic summarizes the features available in each TraceLens release. For the
 hardware and software versions validated for a release, see the
 [Compatibility matrix](../reference/compatibility.md).
+
+## TraceLens 1.1.0
+
+The release extends inference profiling support to SGLang 0.5.18 and vLLM 0.26.0
+through 0.28.0. The TraceLens library, command-line tools, and compatibility
+matrix are unchanged from 1.0.0.
+
+### Frameworks and profiling
+
+This release extends framework and profiling support:
+
+- **SGLang 0.5.18:** Profiling images for SGLang 0.5.18 on MI300X and MI355X.
+  Because SGLang 0.5.18 carries detailed annotation and graph-capture support
+  upstream, its patch set adds only the kernel-shape profiler. On ROCm 7.2.4
+  images, the build also replaces the HIP and roctracer libraries bundled with
+  PyTorch so kernels launched inside HIP graph replays appear in the trace.
+- **vLLM 0.26.0 through 0.28.0:** Profiling images for vLLM 0.26.0, 0.27.0, and
+  0.28.0 that add graph-capture tracing for the V2 model runner (decoder and
+  speculator, plus the encoder from 0.28.0) and the V1 encoder. Traces are
+  written per subsystem.
 
 ## TraceLens 1.0.0
 
