@@ -23,6 +23,10 @@ from ...Trace2Tree.util import (
     _reattach_worker_threads,
 )
 from ..utils.annotation_utils import (
+    ANNOTATION_CAT,
+    ITERATION_BACKUP_PATTERNS,
+    ITERATION_PATTERNS,
+    IterationAnnotation,
     find_known_annotations,
     name_skeleton,
 )
@@ -433,6 +437,41 @@ def _annotation_root_set(
     )
 
 
+_KNOWN_PATTERNS = ITERATION_PATTERNS + ITERATION_BACKUP_PATTERNS
+
+
+def _enrich_unmatched_roots(roots: list[dict], annotations: Sequence[dict]) -> None:
+    """Inherit a contained known annotation's name when a root has no metadata.
+
+    When the preferred-tier selects a root whose name does not parse as a
+    known ``IterationAnnotation`` (e.g. ``scheduler.run_batch``), look for
+    a single known annotation whose duration is fully contained within
+    that root.  If exactly one is found, graft its name onto the root so
+    that ``IterationAnnotation`` parses it with full metadata (batch size,
+    sq/sk aggregates, phase).
+    """
+    annot_by_ts = sorted(
+        (a for a in annotations if a.get("cat") == ANNOTATION_CAT and a.get("ph") == "X"),
+        key=lambda a: a.get("ts", 0),
+    )
+    for root in roots:
+        if IterationAnnotation(root.get("name", "")).matched:
+            continue
+        r_ts = root["ts"]
+        r_end = r_ts + root.get("dur", 0)
+        contained_known = []
+        for a in annot_by_ts:
+            a_ts = a.get("ts", 0)
+            if a_ts > r_end:
+                break
+            a_end = a_ts + a.get("dur", 0)
+            if a_ts >= r_ts and a_end <= r_end:
+                if any(p.match(a.get("name", "")) for p in _KNOWN_PATTERNS):
+                    contained_known.append(a)
+        if len(contained_known) == 1:
+            root["name"] = contained_known[0]["name"]
+
+
 def _detect_from_known_annotations(
     annotations: Sequence[dict],
     attribution: GpuAttribution,
@@ -440,6 +479,7 @@ def _detect_from_known_annotations(
     known = find_known_annotations(annotations)
     if not known:
         return None
+    _enrich_unmatched_roots(known, annotations)
     return _annotation_root_set(
         known,
         attribution,

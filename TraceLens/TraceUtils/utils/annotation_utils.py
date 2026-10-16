@@ -103,8 +103,15 @@ CAPTURE_PATTERN = re.compile(r"capture_(\d+)_(.*)")
 # execute_diffusion_1_1024x1024   (diffusion replay: batch_size, resolution)
 DIFFUSION_NATIVE_PATTERN = re.compile(r"execute_diffusion_(\d+)_(\d+x\d+)")
 
-# Root-discovery priority: PRIMARY (detailed) patterns are tried first and
-# BACKUP (native) patterns are used only when no primary root is found.
+# SGLang scheduler.run_batch encompasses the target model forward pass and is
+# a better iteration boundary than the short step[VERIFY/EXTEND] marker.
+SGLANG_ENGINE_STEP_PATTERN = re.compile(r"^scheduler\.run_batch$")
+
+# Root-discovery priority: PREFERRED > PRIMARY > BACKUP.  Each tier is tried in
+# order; the first tier that produces any matches wins.
+ITERATION_PREFERRED_PATTERNS = [
+    SGLANG_ENGINE_STEP_PATTERN,
+]
 ITERATION_PATTERNS = [
     VLLM_DETAILED_PATTERN,
     ATOM_DETAILED_PATTERN,
@@ -419,10 +426,14 @@ class CaptureAnnotation:
 def find_known_annotations(annotations: List[dict]) -> List[dict]:
     """Annotations matching a recognized iteration pattern, sorted by timestamp.
 
-    Tries the detailed tier first, then the native/backup tier, returning the
-    first tier that produces any matches.
+    Tries preferred > detailed > native/backup tiers, returning the first tier
+    that produces any matches.
     """
-    for patterns in (ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS):
+    for patterns in (
+        ITERATION_PREFERRED_PATTERNS,
+        ITERATION_PATTERNS,
+        ITERATION_BACKUP_PATTERNS,
+    ):
         matches = [
             e
             for e in annotations

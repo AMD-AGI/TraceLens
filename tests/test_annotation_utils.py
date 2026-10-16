@@ -880,6 +880,17 @@ def _event(name, ts=0, cat="user_annotation"):
     return {"name": name, "ts": ts, "cat": cat}
 
 
+def test_find_known_annotations_prefers_preferred_tier():
+    events = [
+        _event("scheduler.run_batch", ts=5),
+        _event(DETAILED_DECODE, ts=10),
+        _event(NATIVE_DECODE, ts=20),
+        _event("step[DECODE bs=64]", ts=30),
+    ]
+    roots = find_known_annotations(events)
+    assert [e["name"] for e in roots] == ["scheduler.run_batch"]
+
+
 def test_find_known_annotations_prefers_the_detailed_tier():
     events = [
         _event(DETAILED_DECODE, ts=10),
