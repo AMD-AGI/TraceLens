@@ -204,8 +204,6 @@ class GPUEventAnalyser:
                     raise ValueError(
                         f"Event {event} does not have 'ts' or 't_end' fields"
                     )
-        if len(dict_gpu_event_lists["all_gpu"]) == 0:
-            raise ValueError("No GPU events found in the trace")
 
     @staticmethod
     def compute_metrics_dict(dict: dict, micro_idle_thresh_us=None):
