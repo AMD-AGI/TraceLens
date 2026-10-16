@@ -72,14 +72,24 @@ MODELS = [
 # thing that would have caught it.
 #
 #   Kimi 4: `l567` / `l660`, the padded vs unpadded regimes of linear attention.
-#   DeepSeek 8: three complementary empty-vs-full compressor pairs, and `l832`,
-#     whose `F.pad` cannot resolve `kv.shape[2] - attention_mask.shape[-1]`
-#     because no rule can read the shape of a forward LOCAL.
+#   DeepSeek 4: `l832` x3, whose `F.pad` cannot resolve
+#     `kv.shape[2] - attention_mask.shape[-1]` because no rule can read the
+#     shape of a forward LOCAL; and `l403`, where the axis-1 difference is
+#     degenerate but axis 0 reads `1` against `batch`.
+#
+# An EMPTY axis is not a disagreement, which is why DeepSeek reads 4 and not 8.
+# The compressor emits `chunk_kv.new_zeros((batch, 0, self.head_dim))` only on
+# the branch where `chunk_kv.shape[1] > 0` is FALSE, and `n_windows` is
+# `chunk_kv.shape[1] // ratio` -- so in that branch `n_windows` IS 0.
+# `[batch, 0, D]` and `[batch, n_windows, D]` are one shape at the value that
+# branch takes, so the phi publishing the symbolic one is correct for both arms
+# and there is nothing to correct and nothing to split. Two pairs settle that
+# way; `l403` does not, because its axis 0 differs as well.
 EXPECTED_PHI_ARM_SHAPES = {
     "zai-org/GLM-5.3-Flash": 0,
     "moonshotai/Kimi-K3": 4,
     "MiniMaxAI/MiniMax-M3": 0,
-    "deepseek-ai/DeepSeek-V4-Flash": 8,
+    "deepseek-ai/DeepSeek-V4-Flash": 4,
     "openai-community/gpt2": 0,
 }
 
