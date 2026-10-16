@@ -462,6 +462,7 @@ class FusionCandidateBuilder:
         self.categorizer = analyzer.event_to_category
         self.perf_ops = analyzer.collect_unified_perf_events()
         self.resolver = OpResolver(tree, self.perf_ops)
+        self._launches: dict[int, tuple[KernelRecord, int] | None] = {}
 
     # -- standalone ---------------------------------------------------------
 
@@ -534,7 +535,15 @@ class FusionCandidateBuilder:
         return list(groups.values())
 
     def _launch(self, uid) -> tuple[KernelRecord, int] | None:
-        """Kernel ``uid`` as (record, launching-op UID); None if it is not a kernel."""
+        """Kernel ``uid`` as (record, launching-op UID); None if it is not a kernel.
+
+        Memoized: the module walk meets each kernel once per ancestor.
+        """
+        if uid not in self._launches:
+            self._launches[uid] = self._resolve_launch(uid)
+        return self._launches[uid]
+
+    def _resolve_launch(self, uid) -> tuple[KernelRecord, int] | None:
         try:
             k = self.tree.get_UID2event(uid)
             if self.categorizer(k) != "kernel":
