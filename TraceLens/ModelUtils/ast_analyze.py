@@ -6620,10 +6620,12 @@ class _ForwardOperationExtractor:
             # name through the tensor-method table and carries ``raw_op: gather``.
             index_producers: list[str] = []
             index_external: list[str] = []
-            for operand in _subscript_index_operands(node.slice):
+            index_axes: list[int] = []
+            for axis, operand in _subscript_index_axes(node.slice):
                 producer, operand_external = self.expression(operand)
                 if producer:
                     index_producers.append(producer)
+                    index_axes.append(axis)
                 index_external.extend(operand_external)
             if index_producers:
                 producer = self._emit(
@@ -6631,6 +6633,16 @@ class _ForwardOperationExtractor:
                     "Indexing",
                     [value for value in (base, *index_producers) if value],
                     [*base_external, *index_external],
+                    # One axis per index operand, in operand order, so the shape
+                    # rule can place the selection. Emitted only when the base
+                    # itself resolved: without it the operands do not line up
+                    # (operand 0 would be an index, not the tensor indexed), and
+                    # a rule that trusted the axes would read them off by one.
+                    details=(
+                        [f"index_axes: {','.join(str(a) for a in index_axes)}"]
+                        if base
+                        else None
+                    ),
                 )
                 return producer, []
             # Advanced indexing whose index operand is a tensor-valued *parameter*
@@ -10477,6 +10489,36 @@ def _parse_init(
     )
 
 
+def _subscript_index_axes(index: ast.AST) -> list[tuple[int, ast.AST]]:
+    """``(axis, operand)`` for each subscript element that could be a tensor index.
+
+    WHICH axis an index sits on is the difference between ``x[idx]`` and
+    ``x[:, idx]``, and nothing downstream can recover it from the operands alone:
+    both arrive as a base plus one index tensor. Recording it here is what lets
+    the shape rule place the selection instead of assuming the leading axis.
+
+    The axis is signed the way :meth:`_subscript_shape_relative_dims` signs it --
+    counted from the front, or from the BACK once an ``Ellipsis`` has been passed,
+    since everything after ``...`` is positioned relative to the end.
+    """
+    elts = list(index.elts) if isinstance(index, ast.Tuple) else [index]
+    ellipsis_at = next(
+        (
+            pos
+            for pos, elt in enumerate(elts)
+            if isinstance(elt, ast.Constant) and elt.value is Ellipsis
+        ),
+        None,
+    )
+    out: list[tuple[int, ast.AST]] = []
+    for pos, elt in enumerate(elts):
+        if isinstance(elt, (ast.Slice, ast.Constant, ast.Starred)):
+            continue
+        axis = pos if ellipsis_at is None or pos < ellipsis_at else -(len(elts) - pos)
+        out.append((axis, elt))
+    return out
+
+
 def _subscript_index_operands(index: ast.AST) -> list[ast.AST]:
     """Slice operands that could be *tensor* indices (advanced indexing).
 
@@ -10484,17 +10526,12 @@ def _subscript_index_operands(index: ast.AST) -> list[ast.AST]:
     be a tensor: ``Slice`` (``a:b``), ``Constant`` (ints, ``None``, ``...``), and
     ``Starred``. A ``Tuple`` slice (``x[i, j]``) is unpacked to its axes. The caller
     resolves each survivor through ``expression`` — only those bound to a traced
-    tensor become gather inputs; scalar names (``layer_idx``) resolve to nothing.
+    tensor become index inputs; scalar names (``layer_idx``) resolve to nothing.
+
+    One filter, shared with :func:`_subscript_index_axes`, so the operands and
+    their axes can never disagree about which elements are indices.
     """
-    if isinstance(index, ast.Tuple):
-        operands = list(index.elts)
-    else:
-        operands = [index]
-    return [
-        operand
-        for operand in operands
-        if not isinstance(operand, (ast.Slice, ast.Constant, ast.Starred))
-    ]
+    return [operand for _axis, operand in _subscript_index_axes(index)]
 
 
 def _is_int_index(node: ast.AST) -> bool:

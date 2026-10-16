@@ -4231,15 +4231,28 @@ class ShapeInferencer:
                 inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
             )
 
+        if operation_label == "indexing":
+            # A subscript whose recorded structure and wired operands line up
+            # exactly: the indices are placed on the axes they were WRITTEN on,
+            # which is the difference between ``x[idx]`` and ``x[:, idx]``.
+            # ``None`` whenever anything does not line up -- the shared branch
+            # below then answers exactly as it did before, so a structure this
+            # rule cannot read is left alone rather than guessed at.
+            placed = self._placed_advanced_index(inputs, details)
+            if placed is not None:
+                return placed
+
         if operation_label in {"gather", "indexing"}:
-            # Both names, one branch -- deliberately, and only for now. The label
-            # IS this rule's key, so renaming the subscript emit site to
-            # ``Indexing`` without naming it here would drop all 65 of those nodes
-            # onto the generic fallback: a rename that silently moved shapes, which
-            # is how two earlier attempts to split this label died. The split of
-            # the RULE is separate work; until then the two names share the body
-            # below unchanged, and ``has_dim`` remains what actually tells a real
-            # ``torch.gather`` from a subscript.
+            # Both names, one branch. A real ``torch.gather`` belongs here; a
+            # subscript reaches it only when ``_placed_advanced_index`` above
+            # declined, and then it gets exactly the answer it got before this
+            # rule existed. The label IS this rule's key, so the subscript name
+            # must appear here or all 65 of those nodes fall onto the generic
+            # fallback -- a rename that silently moves shapes, which is how two
+            # earlier attempts to split this label died. ``has_dim`` is what
+            # actually tells a ``torch.gather`` from a subscript, and it agrees
+            # with ``raw_op: gather`` on all 77 nodes across the five models
+            # (measured, not assumed).
             has_dim = _detail_value(details, "dim") is not None
             # A buffer this op reads is the TABLE being indexed, whatever its
             # dtype. Separating base from index by "the non-integer one" works
@@ -5559,6 +5572,109 @@ class ShapeInferencer:
             if position == argument_position:
                 return spec
         return None
+
+    def _placed_advanced_index(
+        self, inputs: list[TensorSpec], details: list[str]
+    ) -> TensorSpec | None:
+        """``base[..., idx, ...]`` with each index on the axis it was WRITTEN on.
+
+        NumPy/torch semantics for consecutive advanced indices: the indexed axes
+        are replaced by the broadcast of the index operands, and the axes on
+        either side are kept. ``x[idx]`` on ``[N, D]`` is ``[n, D]``; the same
+        index written ``x[:, idx]`` on ``[N, D]`` is ``[N, n]``. Nothing
+        downstream can tell those apart from the operands, which is why the
+        emit site records ``index_axes``.
+
+        A boolean mask is not an index of one axis: it consumes as many axes as
+        it has, and yields a single data-dependent length (``nnz``, the same
+        symbol ``nonzero`` publishes) in their place.
+
+        Returns None -- leaving the caller to answer exactly as it did before --
+        whenever the recorded structure and the wired operands do not line up:
+        no ``index_axes`` detail, a base or an index that did not resolve, an
+        axis outside the base's rank, or advanced indices separated by a slice
+        (``x[idx, :, jdx]``), which torch answers by moving the selection to the
+        FRONT. That last case is real and is deliberately not modelled here: an
+        answer invented for it would be wrong in a way nothing downstream could
+        detect.
+        """
+        axes_detail = _detail_value(details, "index_axes")
+        if not axes_detail:
+            return None
+        try:
+            axes = [
+                int(token) for token in str(axes_detail).split(",") if token.strip()
+            ]
+        except ValueError:
+            return None
+        if not axes:
+            return None
+
+        # EVERY wired operand has to be accounted for by the recorded structure,
+        # not just the ones this rule expects to find. A node wired with three
+        # tensors while one axis was recorded is a node whose operands and whose
+        # source disagree -- reading the first two and ignoring the third is
+        # exactly how a rule comes to "know" a structure it does not have. GLM's
+        # expert chain is wired that way, and answering for it cascaded a
+        # ``Linear`` from ``[8]`` to ``[288, 8, B*S, 1, 4096]``.
+        if len(inputs) != 1 + len(axes):
+            return None
+
+        # By ARGUMENT POSITION, never by list index: ``inputs`` has had every
+        # operand whose shape did not resolve dropped, so a base that failed to
+        # resolve would silently promote the first index into its place.
+        base = self._operand_at(inputs, 0)
+        index_specs = [
+            self._operand_at(inputs, 1 + offset) for offset in range(len(axes))
+        ]
+        if base is None or not base.shape or any(spec is None for spec in index_specs):
+            return None
+
+        rank = len(base.shape)
+        placed = [axis + rank if axis < 0 else axis for axis in axes]
+        if any(axis < 0 or axis >= rank for axis in placed):
+            return None
+        first = placed[0]
+        if placed != list(range(first, first + len(placed))):
+            return None
+
+        dims = list(base.shape)
+        masks = [
+            spec for spec in index_specs if spec is not None and spec.dtype == "bool"
+        ]
+
+        # Integer indices on the LEADING axes are left exactly as they were.
+        # Two reasons, both measured. The multi-index case already has a rule
+        # below and this would only restate it; and the single-index case is a
+        # deliberate, documented punt sitting on top of a defect further up --
+        # GLM's expert loop indexes ``[B*S, 4096]`` with a ``[288, 8, B*S]``
+        # index, which is the whole routing table rather than this expert's
+        # tokens. Answering that one faithfully (``[288, 8, B*S, 4096]``, which
+        # is what torch would really produce) propagates the upstream wrong
+        # shape through an entire MLP -- 113 shapes moved across three models,
+        # a ``SiLU`` going ``[3]`` -> ``[256, 6, B*S, 2048]``. The index has to
+        # be right before placing it correctly is an improvement.
+        if not masks and first == 0:
+            return None
+
+        if masks:
+            if len(index_specs) != 1:
+                return None
+            consumed = max(1, len(masks[0].shape))
+            if first + consumed > rank:
+                return None
+            return TensorSpec(
+                shape=tuple(dims[:first]) + ("nnz",) + tuple(dims[first + consumed :]),
+                dtype=base.dtype,
+            )
+
+        selected = _broadcast_shapes([spec.shape for spec in index_specs if spec])
+        return TensorSpec(
+            shape=tuple(dims[:first])
+            + tuple(selected)
+            + tuple(dims[first + len(index_specs) :]),
+            dtype=base.dtype,
+        )
 
     def _projection_weight_out_features(
         self, node: ModelGraphNode, *, root: BlockNode | None
