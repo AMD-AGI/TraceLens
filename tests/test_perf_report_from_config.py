@@ -475,6 +475,66 @@ def test_load_run_config_roundtrip(tmp_path):
     assert plan_reports(load_run_config(path))[0].kwargs["kernel_summary"] is True
 
 
+def _phase_jobs(tmp_path, phases):
+    return [
+        {
+            "name": f"job{i}",
+            "phase": phase,
+            "trace_path": _touch(tmp_path, f"t{i}.json"),
+            "platform": "MI300X",
+        }
+        for i, phase in enumerate(phases)
+    ]
+
+
+def test_aggregation_requires_phase_on_every_job(tmp_path):
+    jobs = _phase_jobs(tmp_path, ["prefill", "decode"])
+    del jobs[1]["phase"]
+    cfg = _config(tmp_path, jobs=jobs, aggregation={"policy": "combine"})
+    with pytest.raises(ConfigError, match=r"jobs\[1\]\.phase is required"):
+        plan_reports(cfg)
+
+
+@pytest.mark.parametrize(
+    "aggregation",
+    [{"policy": "average"}, {}, "combine", {"policy": "combine", "weights": 1}],
+)
+def test_bad_aggregation(tmp_path, aggregation):
+    jobs = _phase_jobs(tmp_path, ["decode"])
+    with pytest.raises(ConfigError, match="aggregation"):
+        plan_reports(_config(tmp_path, jobs=jobs, aggregation=aggregation))
+
+
+def test_resolved_config_records_phase_and_aggregation(tmp_path):
+    jobs = _phase_jobs(tmp_path, ["prefill", "decode"])
+    resolved = resolve_config(
+        _config(tmp_path, jobs=jobs, aggregation={"policy": "combine_only_same_phase"})
+    )
+    assert resolved["aggregation"] == {"policy": "combine_only_same_phase"}
+    assert [job["phase"] for job in resolved["jobs"]] == ["prefill", "decode"]
+
+
+def test_aggregation_writes_combined_csvs(tmp_path):
+    def runner(**kwargs):
+        os.makedirs(kwargs["output_csvs_dir"])
+        with open(
+            os.path.join(kwargs["output_csvs_dir"], "gpu_timeline.csv"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            handle.write("type,time ms,percent\nbusy_time,2.0,50.0\n")
+            handle.write("total_time,4.0,100.0\n")
+
+    jobs = _phase_jobs(tmp_path, ["prefill", "decode"])
+    cfg = _config(tmp_path, jobs=jobs, aggregation={"policy": "combine"})
+    run_config(cfg, runners={"default": runner})
+    path = os.path.join(
+        str(tmp_path), "out", "perf_report_aggregated_csvs", "gpu_timeline.csv"
+    )
+    with open(path, encoding="utf-8") as handle:
+        assert "busy_time,4.0,50.0" in handle.read()
+
+
 def test_main_exits_on_config_error(tmp_path):
     path = os.path.join(str(tmp_path), "bad.yaml")
     with open(path, "w", encoding="utf-8") as handle:
