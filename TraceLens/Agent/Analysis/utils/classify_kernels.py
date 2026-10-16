@@ -314,14 +314,17 @@ class KernelTaxonomy:
             ktype: KernelClass(ktype, perf_cat, covers)
             for ktype, (perf_cat, covers) in types.items()
         }
+        self._matches: dict[str, tuple[str, int]] = {}
 
     def _match(self, name: str) -> tuple[str, int]:
-        """Return the (kernel_type, priority) of the winning rule."""
-        best_type, best_prio = UNKNOWN, 0
-        for regex, ktype, prio in self._rules:
-            if prio > best_prio and regex.search(name):
-                best_type, best_prio = ktype, prio
-        return best_type, best_prio
+        """Return the (kernel_type, priority) of the winning rule, memoized per name."""
+        if (hit := self._matches.get(name)) is None:
+            best_type, best_prio = UNKNOWN, 0
+            for regex, ktype, prio in self._rules:
+                if prio > best_prio and regex.search(name):
+                    best_type, best_prio = ktype, prio
+            hit = self._matches[name] = (best_type, best_prio)
+        return hit
 
     def classify(self, name: str) -> KernelClass:
         return self._types[self._match(name)[0]]
