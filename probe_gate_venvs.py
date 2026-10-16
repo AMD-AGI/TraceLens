@@ -57,6 +57,23 @@ MODELS = [
 # and could not be sized) give way to the one `torch.ones` the model runs.
 # Every check is now zero on all four.
 EXPECTED_NODES = {
+    # 2026-10-16c -- a variadic op counts the operands it DECLARES, and a phi
+    # forwards the arm that is not empty.
+    # `torch.cat([attention_mask, block_bias.to(...)], dim=-1)` has one
+    # predecessor and one forward PARAMETER. `_needs_another_tensor_operand`
+    # tests an operand ceiling and `cat` is variadic, so the parameter never got
+    # its edge; a one-edge `Concat` is a forbidden single-input concat, so the
+    # elision pass deleted the whole op and the phi below read raw `block_bias`.
+    # DeepSeek +3: the restored Concat, its Cast, and the boundary tile.
+    # Then: the compressor's phi published its EMPTY arm
+    # (`new_zeros((batch, 0, head_dim))`), so `compressed_kv` contributed
+    # nothing, `kv.shape[2]` stayed `S`, and attention scored `[B, 64, S, S]` --
+    # the graph showed the sparse-attention compressor contributing NOTHING,
+    # which is the model's entire mechanism. A zero-extent axis is the
+    # degenerate instance of the other arm (`n_windows == 0` IS that case), so
+    # the phi now forwards the non-empty one: `[B, 64, S, S + n_windows]`.
+    # 76 shapes corrected, all in DeepSeek. The other four models do not move at
+    # all -- 0 nodes and 0 shapes -- so both changes are DeepSeek-only in effect.
     # 2026-10-16b -- a parameter the model annotates as a plain Python value is
     # not the method's primary TENSOR parameter, and a string-keyed dict lookup
     # is not a tensor index.
@@ -335,7 +352,7 @@ EXPECTED_NODES = {
     # Loop ports folded away everywhere: the back edge was the only cycle the
     # graph allowed, and the body's own ends now name the direction instead
     # (``loop in: <var>`` / ``loop out: <var>``). -2 per loop that had ports.
-    "deepseek-ai/DeepSeek-V4-Flash": 2418,
+    "deepseek-ai/DeepSeek-V4-Flash": 2421,
 }
 
 # Warnings the per-model run prints that the check summary does not cover. Both

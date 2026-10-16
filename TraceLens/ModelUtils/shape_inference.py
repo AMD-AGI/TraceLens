@@ -3863,15 +3863,28 @@ class ShapeInferencer:
             or (class_name or "").strip().lower() == PHI_CLASS.lower()
         ):
             # An explicit branch-merge (phi): exactly one of its mutually-exclusive
-            # inputs flows through per invocation, and both carry the same shape,
-            # so the output is just that shape -- a pure passthrough of any operand.
-            # This is NOT ``torch.select``, which indexes one position along a
-            # dimension and so REMOVES that dimension from the output shape.
-            return (
-                inputs[0]
-                if inputs
-                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            # inputs flows through per invocation, so the output is one arm's
+            # shape -- a pure passthrough. This is NOT ``torch.select``, which
+            # indexes one position along a dimension and so REMOVES it.
+            #
+            # Where the arms differ only in that one is EMPTY, forward the
+            # non-empty one. A zero-extent axis is the degenerate instance of
+            # the other arm, not a different answer: DeepSeek's compressor emits
+            # ``chunk_kv.new_zeros((batch, 0, self.head_dim))`` when no window is
+            # full yet and ``[batch, n_windows, head_dim]`` when one is, and
+            # ``n_windows == 0`` IS that first case. Publishing the ``0``
+            # propagated emptiness through everything downstream -- the KV concat
+            # that appends it reported no growth, so ``kv.shape[2]`` stayed ``S``
+            # and the mask ``F.pad`` that widens to it became a no-op, which then
+            # disagreed with the arm that pads correctly. Reporting the general
+            # case shows the graph the model runs; reporting the empty one shows
+            # nothing and makes every shape below it wrong.
+            if inputs:
+                return next(
+                    (item for item in inputs if 0 not in tuple(item.shape)),
+                    inputs[0],
+                )
+            return external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
 
         if operation_label == "tile":
             source = (

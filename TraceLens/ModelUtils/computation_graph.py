@@ -2630,7 +2630,23 @@ def _needs_another_tensor_operand(block: BlockNode) -> bool:
     read and the op silently computed against the wrong tensor.
     """
     ceiling, variadic = _operand_ceiling(_raw_op_from_details(block.details))
-    if variadic or ceiling is None:
+    if variadic:
+        # A ``cat``/``stack`` has no ceiling to fall short of, so "it already
+        # reads something" says nothing about whether every operand it names is
+        # wired. Count what it DECLARES instead: a parameter it reads is an
+        # operand as surely as a predecessor is.
+        #
+        # DeepSeek extends its attention mask with ``torch.cat([attention_mask,
+        # block_bias.to(...)], dim=-1)``. The cast of ``block_bias`` is its one
+        # predecessor and ``attention_mask`` is a forward parameter, so it was
+        # skipped here and left with a single incoming edge -- and a one-edge
+        # ``Concat`` is a forbidden single-input concat, so the elision pass
+        # folded the whole op away. The phi below it then had no cat to read and
+        # took raw ``block_bias``, whose shape disagreed with the other arm: a
+        # real operation deleted, and what it left behind looking like a shape
+        # defect rather than a missing edge.
+        return bool(block.param_inputs)
+    if ceiling is None:
         return False
     return len(block.operation_predecessors) < ceiling
 
