@@ -65,6 +65,31 @@ Shares most options with `TraceLens_generate_perf_report_pytorch` (output
 paths, short-kernel study, roofline/Origami, comparison, call stack). Run with
 `--help` for the full list.
 
+### TraceLens_generate_perf_report_from_config
+
+Generate one report per job from a YAML file. The same entry point is
+`python -m TraceLens.Reporting.generate_perf_report_from_config`.
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--config` | required | Path to the run YAML. |
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `analysis_mode` | yes | `default` (calls the `TraceLens_generate_perf_report_pytorch` report) or `inference` (calls the `TraceLens_generate_perf_report_pytorch_inference` report). |
+| `output_dir` | yes | Directory for the reports and `run_config.resolved.yaml`. |
+| `jobs[].name` | more than one job | Output names become `perf_report_<name>.xlsx` and `perf_report_<name>_csvs/`. |
+| `jobs[].trace_path` | yes | Trace to analyze. |
+| `jobs[].platform`, `jobs[].gpu_arch_json_path` | exactly one | Architecture name, or path to an architecture JSON file. |
+| `jobs[].capture_folder` | no | Graph-capture folder. `inference` only. |
+| `jobs[].compare_to` | no | `trace_path` and, in `inference`, `capture_folder` of a trace to compare against. |
+| `jobs[].precomputed_diff_stats` | no | `diff_stats.csv` to use instead of TraceDiff. |
+| any report parameter | no | Top-level, by Python name. Applies to every job. |
+
+**Output:** one report per job. See
+[Generate performance reports from a YAML config](../how-to/generate-perf-report-from-config.md)
+for defaults and examples.
+
 ### TraceLens_generate_perf_report_jax
 
 Generate a report from a JAX XPlane protobuf trace (also accepts a PyTorch
