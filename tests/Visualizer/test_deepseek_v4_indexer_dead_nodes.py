@@ -220,9 +220,13 @@ def test_deepseek_v4_attention_kernel_ports_carry_correct_distinct_shapes():
     literal head-count / head-dim numbers:
 
     * ``q`` is a genuine multi-head query -- its head axis (axis 1) is > 1 and
-      its last two axes are *not* equal (not the square attention mask).
-    * ``attention_mask`` is head-broadcast (axis 1 == 1) and spatially square
-      (its last two axes are equal).
+      its last two axes are *not* equal.
+    * ``attention_mask`` is head-broadcast (axis 1 == 1) and spans the two
+      sequences it scores: one ROW per query and one COLUMN per key. It is
+      square only when nothing extends the keys; DeepSeek's compressor
+      concatenates ``n_windows`` entries onto the KV axis and the mask is
+      padded to match, so asserting squareness asserted a mask that did not
+      cover the compressed keys.
     * the three port shapes are mutually distinct.
 
     A rotation that swaps ``q`` and ``attention_mask`` makes ``q`` square with a
@@ -246,9 +250,10 @@ def test_deepseek_v4_attention_kernel_ports_carry_correct_distinct_shapes():
     ), f"query head axis must be multi-head: {query}"
     assert query[-1] != query[-2], f"query must not be square (mask-shaped): {query}"
 
-    # attention_mask is head-broadcast and spatially square.
+    # attention_mask is head-broadcast, one row per query and one column per key.
     assert len(mask) == 4 and mask[1] == "1", f"mask must be head-broadcast: {mask}"
-    assert mask[-1] == mask[-2], f"attention mask must be square: {mask}"
+    assert mask[-2] == query[-2], f"mask needs one row per query: {mask} vs {query}"
+    assert mask[-1] == key[-2], f"mask needs one column per key: {mask} vs {key}"
 
     # No operand collapsed onto another -- the fragmentation/merge bug.
     assert (

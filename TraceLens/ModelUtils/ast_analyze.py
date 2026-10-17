@@ -3848,6 +3848,7 @@ class ForwardAnalysis:
 
     operations: list[ForwardOperation]
     var_producer: dict[str, str]
+    var_bindings: dict[str, list[tuple[int, str]]]
     step_predecessors: dict[str, tuple[str, ...]]
     step_predecessor_args: dict[str, dict[str, str]]
     step_predecessor_ordinals: dict[str, dict[str, int]]
@@ -3912,6 +3913,10 @@ class ClassStructure:
         default_factory=dict
     )
     forward_step_output_names: dict[str, list[str]] = field(default_factory=dict)
+    # Local tensor name -> every ``(line, producer attr)`` the forward binds it
+    # at, so an expression naming a local resolves to the tensor that name held
+    # AT THAT LINE. A forward reassigns the same name to different tensors.
+    forward_var_bindings: dict[str, list[tuple[int, str]]] = field(default_factory=dict)
     forward_step_boundary_params: dict[str, tuple[str, ...]] = field(
         default_factory=dict
     )
@@ -5459,6 +5464,13 @@ class _ForwardOperationExtractor:
         self.module_functions = dict(module_functions or {})
         self.operations: list[ForwardOperation] = []
         self.var_producer: dict[str, str] = {}
+        # Every binding of every local, with the line it was made on, where
+        # ``var_producer`` keeps only the last. A forward reassigns a name
+        # (``kv`` is the projection, then the cache update, then the concat with
+        # the compressed entries), so an expression reading ``kv.shape[2]``
+        # means whichever binding was in effect AT ITS OWN LINE -- the last one
+        # is a different tensor.
+        self.var_bindings: dict[str, list[tuple[int, str]]] = {}
         self.var_module_origin: dict[str, str] = {}
         # ``pre_w, post_w, comb_w = ...split(...)`` binds each unpacked local to
         # the single split producer plus the output ordinal it selects. Consumers
@@ -7535,9 +7547,26 @@ class _ForwardOperationExtractor:
                 # which is a shape, not a missing one. Say so explicitly --
                 # "no sizes recorded" and "zero sizes" mean different things.
                 details.append("sizes: ()")
+            # A size written as a shape local (`batch, _, _ =
+            # hidden_states.shape`, then `new_zeros((batch, 0, D))`) names an
+            # axis of a tensor, exactly as a reshape arg does. Left as the bare
+            # local it resolves to nothing and prints as its own identifier, so
+            # ONE axis appears as `batch` here and `B` everywhere else, which
+            # reads as two different extents. Record what each such local
+            # measured, ALONGSIDE the size rather than in place of it: when the
+            # named tensor is out of scope the local is still the better answer
+            # -- `compressed_len` says more than an unresolved
+            # `compressed_kv.shape[2]`.
+            locals_read: list[str] = []
             for index, size in enumerate(sizes):
                 details.append(f"size{index}: {ast.unparse(size)}")
+                if isinstance(size, ast.Name) and size.id in self.shape_unpack_tokens:
+                    entry = f"{size.id}={self.shape_unpack_tokens[size.id]}"
+                    if entry not in locals_read:
+                        locals_read.append(entry)
                 extent_bounds.append(size)
+            if locals_read:
+                details.append("shape_locals: " + ", ".join(locals_read))
             for keyword in node.keywords:
                 if keyword.arg == "dtype":
                     details.append(f"dtype: {ast.unparse(keyword.value)}")
@@ -7763,6 +7792,7 @@ class _ForwardOperationExtractor:
         for name in self._target_names(stmt):
             previous_producer = self.var_producer.get(name)
             self.var_producer[name] = producer
+            self.var_bindings.setdefault(name, []).append((stmt.lineno, producer))
             # A reassignment drops any stale tuple-unpack ordinal: ``up`` bound to
             # chunk slice 1 by ``gate, up = x.chunk(2)`` becomes a fresh single-
             # output value after ``up = up.clamp(...)``. Without clearing, a later
@@ -9775,6 +9805,9 @@ def _forward_operations_from_forward(
     return ForwardAnalysis(
         operations=extractor.operations,
         var_producer=dict(extractor.var_producer),
+        var_bindings={
+            name: list(bindings) for name, bindings in extractor.var_bindings.items()
+        },
         step_predecessors=dict(extractor.step_predecessors),
         step_predecessor_args=dict(extractor.step_predecessor_args),
         step_predecessor_ordinals=dict(extractor.step_predecessor_ordinals),
@@ -9854,6 +9887,9 @@ def expand_class_forward_dataflow(
     cls.forward_step_predecessor_args = dict(analysis.step_predecessor_args)
     cls.forward_step_predecessor_ordinals = dict(analysis.step_predecessor_ordinals)
     cls.forward_step_output_names = dict(analysis.step_output_names)
+    cls.forward_var_bindings = {
+        name: list(bindings) for name, bindings in analysis.var_bindings.items()
+    }
     cls.forward_step_boundary_params = dict(analysis.step_boundary_params)
     cls.forward_step_boundary_arg_params = dict(analysis.step_boundary_arg_params)
     cls.forward_operations = _refine_forward_operation_predecessors(
@@ -9980,6 +10016,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         forward_step_predecessor_args: dict[str, dict[str, str]] = {}
         forward_step_predecessor_ordinals: dict[str, dict[str, int]] = {}
         forward_step_output_names: dict[str, list[str]] = {}
+        forward_var_bindings: dict[str, list[tuple[int, str]]] = {}
         forward_step_boundary_params: dict[str, tuple[str, ...]] = {}
         forward_step_boundary_arg_params: dict[
             str, dict[str, tuple[str, int | None]]
@@ -10103,6 +10140,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         analysis.step_predecessor_ordinals
                     )
                     forward_step_output_names = dict(analysis.step_output_names)
+                    forward_var_bindings = dict(analysis.var_bindings)
                     forward_step_boundary_params = dict(analysis.step_boundary_params)
                     forward_step_boundary_arg_params = dict(
                         analysis.step_boundary_arg_params
@@ -10246,6 +10284,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         analysis.step_predecessor_ordinals
                     )
                     forward_step_output_names = dict(analysis.step_output_names)
+                    forward_var_bindings = dict(analysis.var_bindings)
                     forward_step_boundary_params = dict(analysis.step_boundary_params)
                     forward_step_boundary_arg_params = dict(
                         analysis.step_boundary_arg_params
@@ -10307,6 +10346,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         probed.step_predecessor_ordinals
                     )
                     forward_step_output_names = dict(probed.step_output_names)
+                    forward_var_bindings = dict(probed.var_bindings)
                     forward_step_boundary_params = dict(probed.step_boundary_params)
                     forward_step_boundary_arg_params = dict(
                         probed.step_boundary_arg_params
@@ -10370,6 +10410,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             forward_step_predecessor_args=forward_step_predecessor_args,
             forward_step_predecessor_ordinals=forward_step_predecessor_ordinals,
             forward_step_output_names=forward_step_output_names,
+            forward_var_bindings=forward_var_bindings,
             forward_step_boundary_params=forward_step_boundary_params,
             forward_step_boundary_arg_params=forward_step_boundary_arg_params,
             single_op_methods=single_op_methods,

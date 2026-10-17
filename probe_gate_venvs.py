@@ -72,10 +72,16 @@ MODELS = [
 # thing that would have caught it.
 #
 #   Kimi 4: `l567` / `l660`, the padded vs unpadded regimes of linear attention.
-#   DeepSeek 4: `l832` x3, whose `F.pad` cannot resolve
-#     `kv.shape[2] - attention_mask.shape[-1]` because no rule can read the
-#     shape of a forward LOCAL; and `l403`, where the axis-1 difference is
-#     degenerate but axis 0 reads `1` against `batch`.
+#   DeepSeek 2: `l832` in the two CSA variants. Its mask `F.pad` now resolves
+#     `kv.shape[2] - attention_mask.shape[-1]` and reads `[B, 1, S, S +
+#     n_windows]`, which is what the HCA variant's other arm reads too -- that
+#     one is CLOSED. The CSA arm still reads `S + compressed_len`, the same
+#     quantity under the name of a local this cannot resolve yet: CSA takes its
+#     width from `block_bias[..., :compressed_len]`, a SLICE bound, where
+#     `compressed_len = compressed_kv.shape[2]` is a local read off a local.
+#     (`l403` is CLOSED too: its axis 0 read `1` against `batch` because a
+#     frame's parameter was taken from whichever op it inferred first, and its
+#     `batch` was the same axis as `B` under the local's own name.)
 #
 # An EMPTY axis is not a disagreement, which is why DeepSeek reads 4 and not 8.
 # The compressor emits `chunk_kv.new_zeros((batch, 0, self.head_dim))` only on
@@ -89,7 +95,7 @@ EXPECTED_PHI_ARM_SHAPES = {
     "zai-org/GLM-5.3-Flash": 0,
     "moonshotai/Kimi-K3": 4,
     "MiniMaxAI/MiniMax-M3": 0,
-    "deepseek-ai/DeepSeek-V4-Flash": 4,
+    "deepseek-ai/DeepSeek-V4-Flash": 2,
     "openai-community/gpt2": 0,
 }
 

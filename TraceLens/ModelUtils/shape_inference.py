@@ -2293,6 +2293,140 @@ class ShapeInferencer:
                 return owner
         return root.class_name
 
+    def _shape_read_order(
+        self, graph: ModelGraph, root: BlockNode | None
+    ) -> list[tuple[str, str]]:
+        """Ordering constraints an op's own details declare by reading a shape.
+
+        ``F.pad(attention_mask, (0, kv.shape[2] - attention_mask.shape[-1]))``
+        depends on ``kv``: not on its data, which is why no edge carries it, but
+        on its EXTENT, which cannot be read before it exists. The two sit in
+        unconnected branches, so the sort was free to infer the pad first --
+        and then the width was unknowable and the pad reported as doing
+        nothing. Declaring the constraint here keeps it out of the emitted
+        graph, where it is not an operand.
+        """
+        producers: dict[tuple[str, str], str] = {}
+        for node in graph.nodes:
+            attr = _node_attr_name(node)
+            if attr:
+                producers.setdefault((self._frame_prefix(node.id), attr), node.id)
+        constraints: list[tuple[str, str]] = []
+        for node in graph.nodes:
+            details = node.metadata.get("details") or ()
+            names = {
+                match.group("name")
+                for detail in details
+                for match in _SHAPE_READ_RE.finditer(str(detail))
+            }
+            if not names:
+                continue
+            line = self._node_source_line(node.id)
+            if line is None:
+                continue
+            frame = self._frame_prefix(node.id)
+            structure = (getattr(self.spec, "class_registry", None) or {}).get(
+                self._frame_class_name(frame, root) or ""
+            )
+            bindings = getattr(structure, "forward_var_bindings", None) or {}
+            for name in sorted(names):
+                latest: tuple[int, str] | None = None
+                for at, producer in bindings.get(name, ()):
+                    if at < line and (latest is None or at > latest[0]):
+                        latest = (at, producer)
+                if latest is None:
+                    continue
+                source = producers.get((frame, latest[1]))
+                if source:
+                    constraints.append((source, node.id))
+        return constraints
+
+    @staticmethod
+    def _node_source_line(node_id: str) -> int | None:
+        """The forward line a node's op was extracted from, if its attr says."""
+        match = _NODE_SOURCE_LINE_RE.search(str(node_id))
+        return int(match.group("line")) if match else None
+
+    def _frame_local_shapes(
+        self, node: Any, root: BlockNode | None, source: TensorSpec | None
+    ) -> dict[str, tuple]:
+        """``{local tensor name -> shape}`` as that name reads AT this node's line.
+
+        A forward rebinds a name: DeepSeek's attention makes ``kv`` the
+        projection, then the cache update, then the concat with the compressed
+        entries. An expression reading ``kv.shape[2]`` means the binding in
+        effect at its own line, so the last one recorded is the wrong tensor
+        whenever the read comes earlier.
+
+        A binding made ON this node's own line is this op's RESULT -- in
+        ``attention_mask = F.pad(attention_mask, ...)`` the name on both sides
+        is not the same tensor -- so that name resolves to what the op was
+        handed, and bindings from later lines are not in scope at all.
+        """
+        node_id = str(getattr(node, "id", ""))
+        line = self._node_source_line(node_id)
+        if line is None:
+            return {}
+        frame = self._frame_prefix(node_id)
+        structure = (getattr(self.spec, "class_registry", None) or {}).get(
+            self._frame_class_name(frame, root) or ""
+        )
+        bindings = getattr(structure, "forward_var_bindings", None) or {}
+        own_attr = _node_attr_name(node)
+        resolved: dict[str, tuple] = {}
+        for name, bound in bindings.items():
+            if source is not None and source.shape:
+                if any(at == line and producer == own_attr for at, producer in bound):
+                    resolved[name] = tuple(source.shape)
+                    continue
+            latest: tuple[int, str] | None = None
+            for at, producer in bound:
+                if at < line and (latest is None or at > latest[0]):
+                    latest = (at, producer)
+            if latest is None:
+                continue
+            shape = self._frame_step_shapes.get((frame, latest[1]))
+            if shape:
+                resolved[name] = shape
+        return resolved
+
+    def _shape_read_expression(
+        self,
+        token: str,
+        node: Any,
+        root: BlockNode | None,
+        source: TensorSpec | None,
+    ) -> DimExpr | None:
+        """A host-scalar expression written out of ``<tensor>.shape[i]`` reads.
+
+        DeepSeek extends its mask by ``kv.shape[2] -
+        attention_mask.shape[-1]``. Both names are in scope here -- one a
+        forward local, one the tensor being padded -- so the width is knowable,
+        and refusing it left a pad reported as doing nothing. ``None`` unless
+        EVERY read resolves: a partly-substituted expression would state an
+        extent nothing can compare.
+        """
+        reads = list(_SHAPE_READ_RE.finditer(str(token)))
+        if not reads:
+            return None
+        scope = self._frame_local_shapes(node, root, source)
+        rendered: list[str] = []
+        end = 0
+        for match in reads:
+            shape = scope.get(match.group("name"))
+            if not shape:
+                return None
+            axis = int(match.group("axis"))
+            if not -len(shape) <= axis < len(shape):
+                return None
+            rendered.append(str(token)[end : match.start()])
+            rendered.append(str(shape[axis]))
+            end = match.end()
+        rendered.append(str(token)[end:])
+        text = "".join(rendered).strip()
+        as_int = _int_dim(text)
+        return as_int if as_int is not None else text
+
     def _frame_parameter_shapes(
         self, node: Any, root: BlockNode | None
     ) -> dict[str, tuple]:
@@ -2668,8 +2802,12 @@ class ShapeInferencer:
         self._rooted_output_ids = set()
         self._module_resolved_ids: set[str] = set()
         self._rooted_node_ids: set[str] = set()
-        order = _topological_order(graph)
         node_by_id = {node.id: node for node in graph.nodes}
+        order = _topological_order(graph, self._shape_read_order(graph, root))
+        if len(order) != len(node_by_id):
+            # An extra constraint closed a cycle, so the sort could not place
+            # every node. Program order is a nicety; a complete order is not.
+            order = _topological_order(graph)
         # Consumers per source, for redocking the dedicated position_ids producer.
         consumers_of: dict[str, list[str]] = {}
         for edge in graph.edges:
@@ -3576,6 +3714,14 @@ class ShapeInferencer:
             size_dims = self.context.dims
             if owner_scalars:
                 size_dims = {**self.context.dims, **owner_scalars}
+            size_shapes = dict(self._boundary_shapes)
+            size_shapes.update(self._frame_parameter_shapes(node, root))
+            # A constructor sized by a local read off another local
+            # (``compressed_len = compressed_kv.shape[2]``) needs the frame's
+            # own locals, not just its parameters and boundaries.
+            size_shapes.update(
+                self._frame_local_shapes(node, root, inputs[0] if inputs else None)
+            )
             whole = _detail_value(details, "size0")
             if (
                 whole is not None
@@ -3594,7 +3740,7 @@ class ShapeInferencer:
             # dtype and device, and the sizes may name its leading axes
             # (``kv_nope.new_empty(*kv_nope.shape[:-1], head_dim)``).
             template = inputs[0] if inputs else None
-            shape = _constructed_shape(details, size_dims, template)
+            shape = _constructed_shape(details, size_dims, template, size_shapes)
             if shape is None:
                 return inputs[0] if inputs else self._activation_spec(dtype)
             return TensorSpec(
@@ -3656,19 +3802,25 @@ class ShapeInferencer:
             raw = _detail_value(details, "pad")
             if not raw or not source.shape:
                 return source
-            amounts: list[int] = []
+            amounts: list[DimExpr] = []
             for token in raw.split(","):
                 token = token.strip()
                 if token.lstrip("-").isdigit():
                     amounts.append(int(token))
                     continue
-                return source
+                # Not a literal, but not unknowable either: a width written out
+                # of shape reads over tensors in scope is a real extent, and
+                # refusing it reported the pad as doing nothing.
+                measured = self._shape_read_expression(token, node, root, source)
+                if measured is None:
+                    return source
+                amounts.append(measured)
             pairs = len(amounts) // 2
             if len(amounts) % 2 or pairs > len(source.shape):
                 return source
             padded = list(source.shape)
             for index in range(pairs):
-                added = amounts[2 * index] + amounts[2 * index + 1]
+                added = _sum_dim_sizes([amounts[2 * index], amounts[2 * index + 1]])
                 if not added:
                     continue
                 axis = len(padded) - 1 - index
@@ -6526,6 +6678,7 @@ def _constructed_shape(
     details: Sequence[str],
     dims: dict[str, DimExpr],
     template: TensorSpec | None = None,
+    named_shapes: dict[str, tuple[DimExpr, ...]] | None = None,
 ) -> tuple[DimExpr, ...] | None:
     """Axes of a tensor built from host-scalar sizes (``ones``/``zeros``/...).
 
@@ -6537,7 +6690,15 @@ def _constructed_shape(
 
     *template* is the receiver of a ``new_*`` constructor, which such a call can
     name its leading axes from (``*x.shape[:-1]``).
+
+    A size the model wrote as a shape local (``batch`` from ``batch, _, _ =
+    hidden_states.shape``) is resolved against *named_shapes* like a reshape
+    arg, so the axis is reported under the one name the rest of the graph calls
+    it by rather than under the local's identifier. When that tensor is not in
+    scope the local itself is kept: it names the extent, where the shape read
+    it stands for would resolve to nothing.
     """
+    shape_locals = _shape_local_reads(details)
     if (
         _detail_value(details, "size0") is None
         and _detail_value(details, "sizes") == "()"
@@ -6554,6 +6715,13 @@ def _constructed_shape(
         if token is None:
             break
         token = token.strip()
+        read = shape_locals.get(token)
+        if read is not None:
+            measured = _snapshot_axis(read, frozenset({read}), named_shapes)
+            if measured is not None:
+                axes.append(measured)
+                index += 1
+                continue
         starred = _starred_shape_axes(token, template)
         if starred is not None:
             axes.extend(starred)
@@ -6709,6 +6877,30 @@ def _arange_axis(details: Sequence[str], dims: dict[str, DimExpr]) -> DimExpr:
     if start == 0 and step == 1:
         return stop
     return stop
+
+
+#: ``@op_l835_c33_pad`` -> the forward line the op was extracted from.
+_NODE_SOURCE_LINE_RE = re.compile(r"@(?:op|fn|positional)_l(?P<line>\d+)[_:]")
+#: One ``<tensor>.shape[i]`` read inside a host-scalar expression.
+_SHAPE_READ_RE = re.compile(r"(?P<name>[A-Za-z_]\w*)\.shape\[(?P<axis>-?\d+)\]")
+
+
+def _shape_local_reads(details: Sequence[str]) -> dict[str, str]:
+    """``{local -> the shape read it was bound from}`` for a constructor's sizes.
+
+    The extractor marks these (``shape_locals:``) because a size written as a
+    shape local names an axis of the tensor it was read from, and that tensor
+    may be in scope here even though the local is not.
+    """
+    token = _detail_value(details, "shape_locals")
+    if not token:
+        return {}
+    reads: dict[str, str] = {}
+    for item in token.split(","):
+        name, _, source = item.strip().partition("=")
+        if name and source:
+            reads[name.strip()] = source.strip()
+    return reads
 
 
 def _shape_snapshot_tokens(details: Sequence[str]) -> frozenset[str]:
@@ -7227,7 +7419,12 @@ def _collect_dim_terms(expr: DimExpr) -> str | None:
         counts[term] = counts.get(term, 0) + sign
     positive: list[str] = []
     negative: list[str] = []
-    for term in order:
+    # One sum, one spelling. The same axis reached two ways is summed in two
+    # orders -- a mask padded to `kv.shape[2]` reads `S + n_windows` where the
+    # concat that builds the same width reads `n_windows + S` -- and a reader
+    # comparing the arms of a phi for equality sees two shapes where there is
+    # one. Order is not information in a sum, so fix it.
+    for term in sorted(order):
         count = counts[term]
         if count == 0:
             continue
@@ -8908,7 +9105,9 @@ def _is_next_iteration_edge(edge: Any, node_by_id: dict[str, ModelGraphNode]) ->
     )
 
 
-def _topological_order(graph: ModelGraph) -> list[str]:
+def _topological_order(
+    graph: ModelGraph, extra_edges: Sequence[tuple[str, str]] = ()
+) -> list[str]:
     incoming = {node.id: 0 for node in graph.nodes}
     outgoing: dict[str, list[str]] = {node.id: [] for node in graph.nodes}
     node_by_id = {node.id: node for node in graph.nodes}
@@ -8919,6 +9118,14 @@ def _topological_order(graph: ModelGraph) -> list[str]:
             continue
         outgoing[edge.source].append(edge.target)
         incoming[edge.target] += 1
+    for source, target in extra_edges:
+        # An ordering constraint that carries no tensor: the target reads the
+        # SIZE of what the source made. Default-empty, so the emitted node order
+        # is untouched -- only shape inference asks for these.
+        if source not in outgoing or target not in incoming or source == target:
+            continue
+        outgoing[source].append(target)
+        incoming[target] += 1
     queue = [node_id for node_id, degree in incoming.items() if degree == 0]
     order: list[str] = []
     while queue:
