@@ -35,7 +35,10 @@ from TraceLens.ModelUtils.ast_analyze import (
     PHI_CLASS,
     PHI_LABEL,
     analyze_source,
+    base_submodule_attr,
     is_forward_operation,
+    is_method_input,
+    method_input_param,
     operation_display_label,
 )
 from TraceLens.ModelUtils.kernel_pipeline import (
@@ -1844,6 +1847,13 @@ class ShapeInferencer:
         # parameter, which is a different tensor from the one being
         # reshaped, and parameter names like `x` repeat across frames.
         self._frame_entry_shapes: dict[str, tuple] = {}
+        # Forward parameters resolved from a frame's call site, by ``(frame, tree)``.
+        self._frame_parameters: dict[tuple[str, int], dict[str, tuple]] = {}
+        # What each step of each frame produced, keyed by ``(frame prefix, attr)``.
+        # A frame's forward PARAMETER is whatever its caller passed for it, and
+        # the caller names that argument by the attr that produced it -- so the
+        # producer has to be findable by attr within the caller's own frame.
+        self._frame_step_shapes: dict[tuple[str, str], tuple] = {}
         self._last_input_sources: list[str] = []
         self._last_input_positions: list[int] = []
         self._owner_classes: dict[int, dict[str, str]] = {}
@@ -2190,6 +2200,177 @@ class ShapeInferencer:
         if prefix:
             self._frame_entry_shapes.setdefault(prefix, tuple(inputs[0].shape))
 
+    def _record_frame_step(
+        self, node: Any, output: TensorSpec, root: BlockNode | None
+    ) -> None:
+        """Remember what each step of each frame produced, by ``(frame, attr)``.
+
+        A caller names the argument it passes by the attr that produced it
+        (``compressor`` is handed ``q_a_norm``'s output), so the producer has to
+        be findable by attr inside the CALLER's frame -- which is what lets a
+        callee's forward parameter be resolved to the tensor really bound to it.
+        """
+        if not output.shape:
+            return
+        attr = _node_attr_name(node)
+        if not attr:
+            return
+        frame = self._frame_prefix(str(getattr(node, "id", "")))
+        self._frame_step_shapes[(frame, attr)] = tuple(output.shape)
+        # A submodule expanded into a frame leaves no node of its own for its
+        # caller to read, so publish the frame to its parent under the attr the
+        # parent calls it by. Which op that is comes from the class's DECLARED
+        # return slot, never from inference order -- ops are inferred
+        # topologically, and the norm whose last-inferred op was its `[B, S, 1]`
+        # variance published that as the norm's output.
+        parent = self._parent_frame(frame, root)
+        if parent is None:
+            return
+        attrs = self._tree_classes(root)
+        if self._frame_attr(frame) not in attrs:
+            return
+        structure = (getattr(self.spec, "class_registry", None) or {}).get(
+            attrs[self._frame_attr(frame)]
+        )
+        slots = getattr(structure, "forward_return_slots", None) or {}
+        # Only a single-valued frame. Reading a tuple-returning frame by its
+        # bare attr cannot say WHICH slot is meant, and a shape that states one
+        # returned tensor's extents for another is worse than no answer.
+        if len(slots) != 1 or attr != next(iter(slots.values())):
+            return
+        self._frame_step_shapes[(parent, self._frame_attr(frame))] = tuple(output.shape)
+
+    @staticmethod
+    def _frame_attr(frame: str) -> str:
+        """The attr a frame is reached by: the last segment of its prefix."""
+        return frame.rpartition(":")[2]
+
+    def _parent_frame(self, frame: str, root: BlockNode | None) -> str | None:
+        """The frame prefix enclosing ``frame``, or ``None`` for the root frame.
+
+        Drops the frame's own attr and then every segment that is not itself a
+        frame. Between two frames sit step markers (``seq:12``) that name a
+        POSITION in the parent's body rather than a module, and leaving them on
+        builds a key no producer was ever recorded under. Structural: a segment
+        counts as a frame when it is a declared submodule attr of this tree or a
+        function frame (``@fn_``/``@positional_``), never by matching a list of
+        marker words.
+        """
+        if not frame:
+            return None
+        classes = self._tree_classes(root)
+        parent = frame.rpartition(":")[0]
+        while parent:
+            tail = parent.rpartition(":")[2]
+            if tail.startswith("@") or tail in classes:
+                break
+            parent = parent.rpartition(":")[0]
+        return parent
+
+    def _tree_classes(self, root: BlockNode | None) -> dict[str, str]:
+        """``{submodule attr -> class}`` for everything under ``root``."""
+        if root is None:
+            return {}
+        classes = self._owner_classes.get(id(root))
+        if classes is None:
+            classes = _descendant_classes(root)
+            self._owner_classes[id(root)] = classes
+            self._owner_class_refs.append(root)
+        return classes
+
+    def _frame_class_name(self, frame: str, root: BlockNode | None) -> str | None:
+        """Class whose ``forward`` a frame's body is: its attr's declared class."""
+        if root is None:
+            return None
+        if not frame:
+            return root.class_name
+        classes = self._tree_classes(root)
+        for segment in reversed(re.split(r"[:/]", frame)):
+            if segment.startswith("@"):
+                continue
+            owner = classes.get(segment)
+            if owner:
+                return owner
+        return root.class_name
+
+    def _frame_parameter_shapes(
+        self, node: Any, root: BlockNode | None
+    ) -> dict[str, tuple]:
+        """``{forward parameter -> shape}`` for the frame this node sits in.
+
+        Read off the CALL SITE. The calling class records which argument it
+        passes for each of the callee's parameters
+        (``compressor -> {'hidden_states': '@method_input', ...}``), so the
+        callee's ``hidden_states.shape[0]`` can be answered with the shape of the
+        tensor actually bound to ``hidden_states`` -- not with whatever tensor
+        the frame happened to touch first. Those are different tensors, and
+        ``[1, n_windows, 512]`` is what reading the wrong one printed.
+        """
+        frame = self._frame_prefix(str(getattr(node, "id", "")))
+        if not frame or root is None:
+            return {}
+        cached = self._frame_parameters.get((frame, id(root)))
+        if cached is not None:
+            return cached
+        resolved = self._resolve_frame_parameters(frame, root, seen=set())
+        self._frame_parameters[(frame, id(root))] = resolved
+        self._owner_class_refs.append(root)
+        return resolved
+
+    def _resolve_frame_parameters(
+        self, frame: str, root: BlockNode | None, *, seen: set[str]
+    ) -> dict[str, tuple]:
+        if frame in seen:
+            return {}
+        seen.add(frame)
+        parent = self._parent_frame(frame, root)
+        if parent is None:
+            return {}
+        parent_class = self._frame_class_name(parent, root)
+        structure = (getattr(self.spec, "class_registry", None) or {}).get(
+            parent_class or ""
+        )
+        arguments = (
+            getattr(structure, "forward_step_predecessor_args", None) or {}
+        ).get(base_submodule_attr(self._frame_attr(frame)))
+        if not arguments:
+            return {}
+        resolved: dict[str, tuple] = {}
+        for parameter, producer in arguments.items():
+            shape = self._producer_shape(parent, producer, root, seen=seen)
+            if shape:
+                resolved[parameter] = shape
+        return resolved
+
+    def _producer_shape(
+        self, frame: str, producer: str, root: BlockNode | None, *, seen: set[str]
+    ) -> tuple | None:
+        """Shape of what ``producer`` made, as named inside ``frame``."""
+        if is_method_input(producer):
+            # The caller is passing on what IT was handed, so the answer is a
+            # parameter of the enclosing frame -- the one the token names, or
+            # that frame's primary input when the token is the bare boundary.
+            structure = (getattr(self.spec, "class_registry", None) or {}).get(
+                self._frame_class_name(frame, root) or ""
+            )
+            parameter = method_input_param(producer) or getattr(
+                structure, "forward_input_name", None
+            )
+            if self._parent_frame(frame, root) is None:
+                # The outermost frame of this tree has no call site here, so
+                # what it was handed is what the tree itself was: the spec the
+                # caller passed, else the tree's own ``@input`` boundary.
+                entry = self._caller_entry_spec or self._tensor_specs.get("@input")
+                if entry is None or not entry.shape:
+                    return None
+                return tuple(entry.shape)
+            outer = self._resolve_frame_parameters(frame, root, seen=seen)
+            return outer.get(str(parameter)) if parameter else None
+        direct = self._frame_step_shapes.get((frame, base_submodule_attr(producer)))
+        if direct:
+            return direct
+        return self._frame_step_shapes.get((frame, producer))
+
     def _frame_entry_shape(
         self, node: Any, owner: str | None
     ) -> tuple[str, tuple] | None:
@@ -2471,6 +2652,8 @@ class ShapeInferencer:
         # whatever is being reshaped.
         self._boundary_shapes = {}
         self._frame_entry_shapes = {}
+        self._frame_step_shapes = {}
+        self._frame_parameters = {}
         self._last_input_sources: list[str] = []
         self._last_input_positions: list[int] = []
         # Multi-output nodes whose published slices genuinely divide the parent,
@@ -2537,6 +2720,7 @@ class ShapeInferencer:
             self._tensor_specs[node_id] = output
             if node.metadata.get("synthetic") == "@input" and node.label:
                 self._boundary_shapes.setdefault(str(node.label), output.shape)
+            self._record_frame_step(node, output, root)
             # Publish this node's per-ordinal slices NOW, not in a pass after the
             # whole graph is inferred: a consumer reading one slot of a split is
             # itself a later node in this same loop, and until the slice exists it
@@ -3570,6 +3754,11 @@ class ShapeInferencer:
             entry = self._frame_entry_shape(node, owner)
             if entry is not None:
                 frame_shapes[entry[0]] = entry[1]
+            # Last, because this is the only one of the three that KNOWS: the
+            # call site says which tensor was bound to each of this frame's
+            # parameters, where the two below infer it from a name that repeats
+            # across frames or from whichever op the frame touched first.
+            frame_shapes.update(self._frame_parameter_shapes(node, root))
             snapshots = _shape_snapshot_tokens(details)
             resolved = _resolve_view_shape(
                 shape_detail,
