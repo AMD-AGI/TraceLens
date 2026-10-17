@@ -4194,6 +4194,20 @@ class ShapeInferencer:
                     # and three q/k/v views silently stopped reshaping.
                     if from_end and not isinstance(width, int):
                         return source
+                    # A bound that is a shape local names an axis of the tensor
+                    # it was read from. Reported under the local's own name, the
+                    # SAME axis reads `compressed_len` here and `n_windows`
+                    # where it was measured, so the two cannot be compared.
+                    measured = _shape_local_reads(details).get(name)
+                    if measured is not None:
+                        scope = dict(self._boundary_shapes)
+                        scope.update(self._frame_parameter_shapes(node, root))
+                        scope.update(self._frame_local_shapes(node, root, source))
+                        resolved_bound = _snapshot_axis(
+                            measured, frozenset({measured}), scope
+                        )
+                        if resolved_bound is not None:
+                            name = str(resolved_bound)
                     narrowed = name if takes_head else f"{width}-({name})"
                     shape = list(source.shape)
                     shape[at] = narrowed

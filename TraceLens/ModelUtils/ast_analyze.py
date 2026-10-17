@@ -6873,12 +6873,32 @@ class _ForwardOperationExtractor:
                     and self._subscript_narrows_range(node.slice)
                 ):
                     self._materialized_subscripts.add(id(node))
+                    slice_details = [f"slice: {ast.unparse(node.slice)}"]
+                    # A bound written as a shape local names an axis of the
+                    # tensor it was read from, exactly as a constructor size
+                    # does. Without this, DeepSeek's CSA block bias is cut to
+                    # `[..., :compressed_len]` and reports `compressed_len`
+                    # where the same axis reached the other way reports
+                    # `n_windows` -- one quantity, two names.
+                    bound_locals = [
+                        f"{name}={self.shape_unpack_tokens[name]}"
+                        for name in sorted(
+                            {
+                                inner.id
+                                for inner in ast.walk(node.slice)
+                                if isinstance(inner, ast.Name)
+                                and inner.id in self.shape_unpack_tokens
+                            }
+                        )
+                    ]
+                    if bound_locals:
+                        slice_details.append("shape_locals: " + ", ".join(bound_locals))
                     producer = self._emit(
                         node,
                         "Slice",
                         base_predecessors,
                         base_external,
-                        details=[f"slice: {ast.unparse(node.slice)}"],
+                        details=slice_details,
                     )
                     return producer, []
                 # ``x[..., None]`` / ``x[:, None]`` inserts a size-1 axis: an
