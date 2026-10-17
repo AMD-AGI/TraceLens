@@ -14,7 +14,7 @@ because the only host crossing (``.item()``) collapses to a Python scalar that i
 never traced as a visible op. The device gather/nonzero work is shown as the
 device ops it is.
 
-Kimi's graph comes from the ``kimi_nodes`` fixture, which builds it under the
+Kimi's graph comes from the ``kimi_packed_nodes`` fixture, which builds it under the
 ``transformers`` Kimi's own code needs. Built in this interpreter instead, a
 DIFFERENT ``get_unpad_data`` is parsed and the model cannot reach the meta
 device -- so these assertions would describe a file the model never runs.
@@ -30,13 +30,13 @@ def _is_cpu(node) -> bool:
     )
 
 
-def test_kimi_get_unpad_data_is_no_longer_an_opaque_leaf(kimi_nodes):
-    opaque = [n for n in kimi_nodes if n.get("label") == "Get unpad data"]
+def test_kimi_get_unpad_data_is_no_longer_an_opaque_leaf(kimi_packed_nodes):
+    opaque = [n for n in kimi_packed_nodes if n.get("label") == "Get unpad data"]
     assert not opaque, [n["id"] for n in opaque]
 
 
-def test_kimi_get_unpad_data_ops_are_device_not_cpu(kimi_nodes):
-    unpad = [n for n in kimi_nodes if "get_unpad_data" in n.get("id", "")]
+def test_kimi_get_unpad_data_ops_are_device_not_cpu(kimi_packed_nodes):
+    unpad = [n for n in kimi_packed_nodes if "get_unpad_data" in n.get("id", "")]
     labels = {n.get("label") for n in unpad}
     # The device work is visible...
     assert "Nonzero" in labels
@@ -52,18 +52,18 @@ def test_kimi_get_unpad_data_ops_are_device_not_cpu(kimi_nodes):
     # ``indices``; with the slots resolved per return, that no longer happens.
 
 
-def test_kimi_unpad_publishes_its_real_return_names(kimi_nodes):
+def test_kimi_unpad_publishes_its_real_return_names(kimi_packed_nodes):
     """The helper returns ``indices`` and ``cu_seqlens``, and says so.
 
     Only reachable in Kimi's own environment: the helper this interpreter would
     otherwise parse has no ``_prepare_cu_seqlens_from_mask`` arm at all.
     """
-    unpad = [n for n in kimi_nodes if "get_unpad_data" in n.get("id", "")]
+    unpad = [n for n in kimi_packed_nodes if "get_unpad_data" in n.get("id", "")]
     labels = {n.get("label") for n in unpad}
     assert {"indices", "cu_seqlens"} <= labels, sorted(labels)
 
 
-def test_kimi_cu_seqlens_is_one_longer_than_the_batch(kimi_nodes):
+def test_kimi_cu_seqlens_is_one_longer_than_the_batch(kimi_packed_nodes):
     """``F.pad(cumsum(lens), (1, 0))`` prepends a zero, so the extent is B + 1.
 
     int32, not int64: ``_get_unpad_data`` writes
@@ -73,7 +73,7 @@ def test_kimi_cu_seqlens_is_one_longer_than_the_batch(kimi_nodes):
     """
     tiles = [
         n
-        for n in kimi_nodes
+        for n in kimi_packed_nodes
         if n.get("label") == "cu_seqlens" and "get_unpad_data" in n.get("id", "")
     ]
     assert tiles
@@ -86,11 +86,11 @@ def test_kimi_cu_seqlens_is_one_longer_than_the_batch(kimi_nodes):
     assert shapes == {"[B + 1] int32"}, shapes
 
 
-def test_kimi_index_select_shape_leads_with_nnz(kimi_nodes):
+def test_kimi_index_select_shape_leads_with_nnz(kimi_packed_nodes):
     """With ``get_unpad_data`` expanded, ``indices`` carries an int64 ``[nnz]``
     shape, so the ``Index select`` output leads with the symbolic ``nnz`` gathered
     row count instead of the base-passthrough batch dim."""
-    selects = [n for n in kimi_nodes if n.get("label") == "Index select"]
+    selects = [n for n in kimi_packed_nodes if n.get("label") == "Index select"]
     assert selects
     node = selects[0]
     meta = node.get("outputsMetadata") or []
@@ -113,3 +113,37 @@ def test_no_device_cpu_nodes_remain_after_per_op_hostness(model_graph_nodes):
         nodes = model_graph_nodes(model_id)
         cpu = [n.get("label") for n in nodes if _is_cpu(n)]
         assert cpu == [], (model_id, cpu)
+
+
+def test_a_rectangular_run_does_not_unpad_at_all(kimi_nodes):
+    """The complement: with padding kept, none of this apparatus exists.
+
+    ``if attention_mask is not None`` asks whether this batch was padded, and
+    nothing in the config answers it. Drawing both arms made the whole
+    attention body carry ``[1, nnz, H]`` -- the packed answer -- while its
+    other arm carries ``[B, S, H]``, so every shape below was true of one run
+    only. The default run keeps the rectangular batch, and then there is no
+    padding to strip: no ``get_unpad_data``, no ``index_first_axis``, no
+    ``pad_input`` putting it back, and no phi left over to disagree about it.
+    """
+    for fragment in ("get_unpad_data", "index_first_axis", "pad_input"):
+        assert not [n for n in kimi_nodes if fragment in n.get("id", "")], fragment
+    assert not [n for n in kimi_nodes if n.get("label") == "Index select"]
+    assert not [n for n in kimi_nodes if n.get("label") == "Nonzero"]
+    body = [
+        n
+        for n in kimi_nodes
+        if "/self_attn/" in n.get("id", "") and n.get("label") == "Linear"
+    ]
+    assert body, "the attention body should still be drawn"
+    for node in body:
+        shape = next(
+            (
+                a.get("value")
+                for a in node.get("attrs", [])
+                if a.get("key") == "output_shape"
+            ),
+            "",
+        )
+        # Rectangular: the batch axis is the batch, not a packed single row.
+        assert shape.startswith("[B, S,"), (node["id"], shape)

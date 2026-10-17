@@ -24,7 +24,12 @@ from datetime import datetime
 from pathlib import Path
 
 from TraceLens.ModelUtils.basic_ops import DEFAULT_BASIC_OP_PATTERNS
-from TraceLens.ModelUtils.extract import ArchitectureSpec, dump_model_ast
+from TraceLens.ModelUtils.ast_analyze import RuntimeRegime
+from TraceLens.ModelUtils.extract import (
+    ArchitectureSpec,
+    dump_model_ast,
+    parse_config_overrides,
+)
 from TraceLens.ModelUtils.loader import (
     build_detailed_basic_ops,
     load_model_spec,
@@ -136,6 +141,75 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: on). The need is detected at run time -- a checkpoint that "
             "imports fine here is untouched -- and the environment is cached and "
             "reused. Use --no-auto-venv to always stay in the current interpreter."
+        ),
+    )
+
+    regime_group = parser.add_argument_group(
+        "runtime regime",
+        "Which RUN the drawing depicts. A forward branches on things no config "
+        "decides and only a run does, and both arms are real: drawing both "
+        "leaves every shape below the branch true of only one of them. Each "
+        "option picks exactly one arm, so the arm not taken is never drawn.",
+    )
+    regime_group.add_argument(
+        "--sequence-layout",
+        choices=list(RuntimeRegime.SEQUENCE_LAYOUTS),
+        default=RuntimeRegime.SEQUENCE_LAYOUTS[0],
+        help=(
+            "rectangular keeps [B, S, ...]; packed removes the padding first "
+            "and carries every real token as one row, [1, nnz, ...] "
+            "(default: rectangular)."
+        ),
+    )
+    regime_group.add_argument(
+        "--phase",
+        choices=list(RuntimeRegime.PHASES),
+        default=RuntimeRegime.PHASES[0],
+        help=(
+            "prefill scores a whole prompt; decode advances one token, which "
+            "is what makes the query length 1 and can select different kernels "
+            "entirely (default: prefill)."
+        ),
+    )
+    regime_group.add_argument(
+        "--cache",
+        choices=list(RuntimeRegime.CACHES),
+        default=RuntimeRegime.CACHES[0],
+        help=(
+            "cold is the first forward, with nothing stored yet; warm "
+            "continues from a cache that already holds keys and values "
+            "(default: cold). decode always reads a cache."
+        ),
+    )
+    regime_group.add_argument(
+        "--attention",
+        default=None,
+        help=(
+            "Attention implementation to draw (eager, sdpa, "
+            "flash_attention_2, ...). eager draws the real matmul/softmax "
+            "chain where sdpa draws one fused kernel. Unset takes the "
+            "checkpoint's own setting, which is sdpa unless it says otherwise."
+        ),
+    )
+    regime_group.add_argument(
+        "--mode",
+        choices=list(RuntimeRegime.MODES),
+        default=RuntimeRegime.MODES[0],
+        help="Whether `self.training` reads true (default: inference).",
+    )
+    regime_group.add_argument(
+        "--config-override",
+        action="append",
+        metavar="KEY=VALUE",
+        default=[],
+        help=(
+            "Override one config key, repeatable. Applied left to right over "
+            "everything else -- the checkpoint, the config class defaults and "
+            "the model's own constructor writes -- so this is the last word. "
+            "A dotted key reaches a nested config "
+            "(vision_config.hidden_size=1024); the value is read as JSON when "
+            "it parses as one (8, true, null, [1, 2]) and as text otherwise. "
+            "Stating one key twice warns and keeps the last."
         ),
     )
 
@@ -385,6 +459,14 @@ def _load_ast_spec(
         basic_ops=basic_ops,
         require_code=True,
         allow_github_repos=args.allow_repo,
+        regime=RuntimeRegime(
+            sequence_layout=args.sequence_layout,
+            phase=args.phase,
+            cache=args.cache,
+            attention=args.attention,
+            mode=args.mode,
+        ),
+        config_overrides=parse_config_overrides(args.config_override),
     )
 
 

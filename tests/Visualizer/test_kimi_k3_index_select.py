@@ -12,7 +12,7 @@ whose index operand is the free function's own tensor *parameter* -- captured as
 zero ops. It is now captured as a dedicated ``Index select`` op and inlined at the
 call site, keeping the exact base/index wiring the opaque leaf already had.
 
-Kimi's graph comes from the ``kimi_nodes`` fixture, which builds it under the
+Kimi's graph comes from the ``kimi_packed_nodes`` fixture, which builds it under the
 ``transformers`` Kimi's own code needs; this interpreter would parse a different
 ``index_first_axis`` and reach no meta shapes.
 """
@@ -20,14 +20,16 @@ Kimi's graph comes from the ``kimi_nodes`` fixture, which builds it under the
 from __future__ import annotations
 
 
-def test_kimi_index_first_axis_is_no_longer_an_opaque_leaf(kimi_nodes):
-    nodes = kimi_nodes
+def test_kimi_index_first_axis_is_no_longer_an_opaque_leaf(kimi_packed_nodes):
+    nodes = kimi_packed_nodes
     opaque = [n for n in nodes if n.get("label") == "Index first axis"]
     assert not opaque, [n["id"] for n in opaque]
 
 
-def test_kimi_index_select_reads_base_and_indices_and_feeds_unsqueeze(kimi_nodes):
-    nodes = kimi_nodes
+def test_kimi_index_select_reads_base_and_indices_and_feeds_unsqueeze(
+    kimi_packed_nodes,
+):
+    nodes = kimi_packed_nodes
     by_id = {n["id"]: n for n in nodes}
     selects = [n for n in nodes if n.get("label") == "Index select"]
     assert selects, "expected at least one Index select node"

@@ -10,7 +10,10 @@ Run as a script, so a test can build a model inside the environment that model's
 own code needs rather than in whatever interpreter pytest happens to be. See
 ``tests/Visualizer/conftest.py``.
 
-    python tests/Visualizer/build_graph_in_env.py <model-id> <out.json> [revision]
+    python tests/Visualizer/build_graph_in_env.py <model-id> <out.json> [revision] [regime-json]
+
+``regime-json`` states which RUN to draw (see ``RuntimeRegime``); omitted, the
+defaults apply, exactly as an export with no flags would.
 """
 
 from __future__ import annotations
@@ -24,14 +27,17 @@ def main(argv: list[str]) -> int:
     # The caller passes the revision these assertions were written against; a
     # bare invocation reads the checkpoint's head, like an export does.
     revision = argv[3] if len(argv) > 3 else None
+    regime_json = argv[4] if len(argv) > 4 else None
 
+    from TraceLens.ModelUtils.ast_analyze import RuntimeRegime
     from TraceLens.ModelUtils.loader import load_model_spec
     from TraceLens.ModelUtils.shape_inference import ShapeInferencer
     from TraceLens.Visualizer.model_explorer_export.merge import (
         build_merged_model_graph,
     )
 
-    spec = load_model_spec(model_id, detailed=True, revision=revision)
+    regime = RuntimeRegime(**json.loads(regime_json)) if regime_json else None
+    spec = load_model_spec(model_id, detailed=True, revision=revision, regime=regime)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     with open(out_path, "w") as handle:
         json.dump(graph["nodes"], handle, default=str)

@@ -13,12 +13,18 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from TraceLens.ModelUtils.meta_trace import MetaModuleGroup
 
-from TraceLens.ModelUtils.ast_analyze import analyze_sources, dump_ast
+from TraceLens.ModelUtils.ast_analyze import (
+    RUNTIME_REGIME_KEY,
+    RuntimeRegime,
+    analyze_sources,
+    dump_ast,
+)
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.block_tree import (
     SUBMODULE_OMITTED,
@@ -130,6 +136,68 @@ class ArchitectureSpec:
     export_block_trees: list[tuple[str, BlockNode]] = field(default_factory=list)
     class_registry: dict = field(default_factory=dict, repr=False)
     basic_ops: BasicOpFilter | None = None
+    # Which run this spec was built for, and the config keys the caller
+    # overrode. Both are recorded so a reader of the graph can see WHICH run it
+    # depicts -- a decided branch leaves no trace in the drawing otherwise.
+    runtime_regime: RuntimeRegime = field(default_factory=RuntimeRegime)
+    config_overrides: dict[str, Any] = field(default_factory=dict)
+
+
+def parse_config_overrides(items: Sequence[str] | None) -> dict[str, Any]:
+    """``["a=1", "b.c=x"]`` -> ``{"a": 1, "b.c": "x"}``, left to right.
+
+    Applied in the order given, so a key stated twice takes its LAST value --
+    and says so, because repeating one is far more likely to be a mistake than
+    an intent.
+
+    Values are read as JSON first (``true``/``null``/``8``/``[1, 2]`` mean what
+    they do in the config file this is overriding) and kept as text when that
+    fails, so ``--config-override torch_dtype=bfloat16`` needs no quoting.
+    """
+    overrides: dict[str, Any] = {}
+    for item in items or ():
+        key, separator, raw = str(item).partition("=")
+        key = key.strip()
+        if not separator or not key:
+            raise ValueError(f"--config-override expects key=value, got {item!r}")
+        try:
+            value: Any = json.loads(raw)
+        except (TypeError, ValueError):
+            value = raw
+        if key in overrides and overrides[key] != value:
+            _log.warning(
+                "config key %r overridden more than once (%r then %r); "
+                "the last one is used",
+                key,
+                overrides[key],
+                value,
+            )
+        overrides[key] = value
+    return overrides
+
+
+def _with_config_overrides(
+    config: dict[str, Any] | None, overrides: dict[str, Any]
+) -> dict[str, Any] | None:
+    """*config* with the caller's keys written over it, nested path included.
+
+    ``vision_config.hidden_size=1024`` reaches the nested block, because a
+    config is a tree and the key that names a leaf of it should work.
+    """
+    if not overrides or config is None:
+        return config
+    merged = dict(config)
+    for key, value in overrides.items():
+        head, dot, tail = key.partition(".")
+        if not dot:
+            merged[key] = value
+            continue
+        nested = merged.get(head)
+        if isinstance(nested, dict):
+            merged[head] = _with_config_overrides(nested, {tail: value})
+        else:
+            merged[key] = value
+    return merged
 
 
 def _first(*values: Any) -> Any:
@@ -2111,6 +2179,8 @@ def load_architecture(
     all_tensor_ops: bool = False,
     allow_github_repos: list[str] | None = None,
     revision: str | None = None,
+    regime: RuntimeRegime | None = None,
+    config_overrides: dict[str, Any] | None = None,
 ) -> ArchitectureSpec:
     """Load architecture metadata from an HF checkpoint and/or GitHub modeling code.
 
@@ -2128,6 +2198,11 @@ def load_architecture(
         config_path=config_path,
         revision=revision,
     )
+    resolved_regime = regime or RuntimeRegime()
+    overrides = dict(config_overrides or {})
+    # Early, so the defaults, aliases and class resolution below all read the
+    # values the caller asked for rather than the ones they replace.
+    config = _with_config_overrides(config, overrides)
     code_analysis: CodeAnalysis | None = None
     code_labels: list[str] = []
 
@@ -2165,9 +2240,13 @@ def load_architecture(
             # it, branches keyed on that attribute resolve against a value the
             # model discarded in its constructor.
             config = _with_constructor_overrides(config, source_files)
+            # Again, and last: a value the MODEL writes onto its own config
+            # overrules the checkpoint, but not the person asking for this
+            # drawing.
+            config = _with_config_overrides(config, overrides)
             code_analysis = analyze_sources(
                 read_sources(source_files),
-                config=config,
+                config={**config, RUNTIME_REGIME_KEY: resolved_regime},
                 all_tensor_ops=all_tensor_ops,
                 # The model's configuration module sits beside its modeling one
                 # rather than being analysed, so its renames are read from there.
@@ -2177,6 +2256,8 @@ def load_architecture(
     spec = parse_architecture(
         config, config_label, name=name, code_analysis=code_analysis
     )
+    spec.runtime_regime = resolved_regime
+    spec.config_overrides = overrides
     spec.checkpoint_source = config_label
     spec.source_path = config_label
     if config.get("_has_vision_tower"):

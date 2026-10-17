@@ -1611,6 +1611,275 @@ def _display_activation_name(raw: str) -> str:
     return raw.strip().replace("_", " ").title().replace(" ", "")
 
 
+@dataclass(frozen=True)
+class RuntimeRegime:
+    """Which run a drawn graph depicts.
+
+    A forward is not one program. It branches on things no config decides and
+    only a RUN does: whether this batch was padded, whether a cache already
+    holds keys, whether one token is being decoded or a whole prompt scored.
+    Both arms of such a branch are real, and they do not agree -- Kimi's
+    unpadded arm carries ``[1, nnz, H]`` where its rectangular arm carries
+    ``[B, S, H]``, and its decode arm runs different KERNELS, not merely
+    different extents.
+
+    Drawing both left every shape below the branch true of only one of them.
+    Stating the run instead makes the graph answer a question that has an
+    answer. Every field resolves to exactly one arm: there is no "either",
+    because an undecided branch is what this exists to remove.
+    """
+
+    #: ``rectangular`` keeps ``[B, S, ...]``; ``packed`` removes the padding and
+    #: carries all real tokens as one row, ``[1, nnz, ...]``.
+    sequence_layout: str = "rectangular"
+    #: ``prefill`` scores a whole prompt; ``decode`` advances one token, which
+    #: is what makes a query length of 1 and selects the recurrent kernels.
+    phase: str = "prefill"
+    #: ``cold`` is the first forward, with nothing stored; ``warm`` continues
+    #: from a cache that already holds keys and values.
+    cache: str = "cold"
+    #: The attention implementation to draw. ``None`` takes the model's own
+    #: word (its config), which already falls back to ``sdpa`` when the config
+    #: is silent -- so leaving this unset IS the sdpa default, without
+    #: overruling a checkpoint that asks for something else.
+    attention: str | None = None
+    #: ``inference`` or ``training`` -- what ``self.training`` reads.
+    mode: str = "inference"
+
+    SEQUENCE_LAYOUTS = ("rectangular", "packed")
+    PHASES = ("prefill", "decode")
+    CACHES = ("cold", "warm")
+    MODES = ("inference", "training")
+
+    @property
+    def is_packed(self) -> bool:
+        return self.sequence_layout == "packed"
+
+    @property
+    def is_decode(self) -> bool:
+        return self.phase == "decode"
+
+    @property
+    def has_cache(self) -> bool:
+        """Whether a cache OBJECT is passed at all.
+
+        A decode step has to read one, and a warm cache is one. A cold prefill
+        is the call that creates it, so the forward runs as though none exists.
+        """
+        return self.cache == "warm" or self.is_decode
+
+    @property
+    def cache_has_content(self) -> bool:
+        """Whether the cache already HOLDS something to read back.
+
+        A warm one does by definition, and so does a decode step: advancing one
+        token is only meaningful after something was scored into it.
+        """
+        return self.cache == "warm" or self.is_decode
+
+    @property
+    def is_training(self) -> bool:
+        return self.mode == "training"
+
+
+#: Reserved config key carrying the :class:`RuntimeRegime`. The config dict is
+#: the one object already handed to every extractor and every nested analysis,
+#: so a choice placed on it reaches all of them without a parameter threaded
+#: through each signature -- the route ``_attn_implementation`` already takes.
+RUNTIME_REGIME_KEY = "_runtime_regime"
+
+
+@dataclass(frozen=True)
+class _RegimeFacts:
+    """What ONE forward says about the runtime choices its branches test.
+
+    Read from the function itself -- its parameter annotations and its own
+    assignments -- so no list of blessed parameter names decides anything. A
+    model that calls its cache ``cache_params`` and one that calls it
+    ``past_key_values`` are read the same way, because both DECLARE it.
+    """
+
+    #: Names holding the cache OBJECT: parameters the model annotates as a
+    #: cache, plus locals taken out of one by attribute or index
+    #: (``cache_layer = past_key_values.layers[layer_idx]``).
+    cache_names: frozenset[str] = frozenset()
+    #: Locals bound from the SEQUENCE axis of a tensor's shape, which is what a
+    #: ``== 1`` test is really asking about.
+    sequence_names: frozenset[str] = frozenset()
+    #: Locals bound ONCE to a boolean expression. ``use_precomputed_states =
+    #: cache_params is not None and cache_params.has_previous_state(...)`` is
+    #: the cache question under another name, and ``if use_precomputed_states``
+    #: is how it gets asked -- a bare name nothing could answer.
+    bool_locals: dict[str, ast.expr] = field(default_factory=dict)
+    #: Unparsed tests whose branch packs the sequence. Recorded per function, so
+    #: every ``if`` on that same test -- including the one that pads the result
+    #: back out again -- resolves the same way, because one run answers it once.
+    layout_tests: frozenset[str] = frozenset()
+
+
+def _merges_leading_axes(pattern: str) -> bool:
+    """True for an einops pattern that packs the leading axes into one.
+
+    ``"b s ... -> (b s) ..."`` is the padding being removed: a batch of padded
+    rows becomes one row of real tokens. That is the structural signature of a
+    packed layout, and it is the model's own declaration of it.
+    """
+    left, separator, right = str(pattern).partition("->")
+    if not separator:
+        return False
+    left_axes = left.replace("(", " ").replace(")", " ").split()
+    group = re.match(r"\s*\(([^)]*)\)", right)
+    if group is None:
+        return False
+    packed = group.group(1).split()
+    return len(packed) >= 2 and packed == left_axes[: len(packed)]
+
+
+def _call_source_line(call: str) -> int | None:
+    """The forward line a call key names, when its key carries one."""
+    match = re.search(r"(?:^@(?:op|fn|positional)_l|@l)(\d+)", str(call))
+    return int(match.group(1)) if match else None
+
+
+def _without_skipped_calls(
+    calls: list[str], analysis: ForwardAnalysis, live: set[str]
+) -> list[str]:
+    """*calls* minus everything that only a branch arm NOT TAKEN would run.
+
+    The call list is read off the function's AST, which knows nothing of which
+    arms ran, so a decided branch would still contribute its helpers. They have
+    no consumers -- the statements that read them were never walked -- so they
+    render as frames whose ops feed nothing, which is exactly what the
+    dead-node check reports.
+
+    A call is dropped when its key names a line inside a skipped arm, or when
+    it is a submodule called ONLY there: an attr the live walk also recorded is
+    called in both arms and stays.
+    """
+    if not analysis.skipped_spans and not analysis.skipped_attrs:
+        return calls
+    spans = analysis.skipped_spans
+    kept: list[str] = []
+    for call in calls:
+        line = _call_source_line(call)
+        if line is not None and any(start <= line <= end for start, end in spans):
+            continue
+        if (
+            line is None
+            and base_submodule_attr(call) in analysis.skipped_attrs
+            and base_submodule_attr(call) not in live
+        ):
+            continue
+        kept.append(call)
+    return kept
+
+
+def _packs_sequence(body: Sequence[ast.stmt]) -> bool:
+    """Whether a branch body packs the sequence, by its own einops pattern."""
+    for statement in body:
+        for inner in ast.walk(statement):
+            if not isinstance(inner, ast.Call):
+                continue
+            for argument in inner.args:
+                if (
+                    isinstance(argument, ast.Constant)
+                    and isinstance(argument.value, str)
+                    and _merges_leading_axes(argument.value)
+                ):
+                    return True
+    return False
+
+
+def _names_a_cache(value: ast.expr, cache_names: set[str]) -> bool:
+    """Whether *value* names a cache, or a part of one reached by attribute/index.
+
+    Only what the value IS. The RESULT of calling a cache is not a cache and
+    not its contents either: ``create_causal_mask`` reads an int ``layer_idx``
+    off one, and treating that as cached data decided ``if layer_idx is None``
+    by whether a cache was warm -- a question it is not asking.
+    """
+    root = value
+    while isinstance(root, (ast.Attribute, ast.Subscript)):
+        root = root.value
+    return isinstance(root, ast.Name) and root.id in cache_names
+
+
+def _regime_facts(func: ast.FunctionDef) -> _RegimeFacts:
+    """Read one forward for the runtime questions its branches ask."""
+    cache_names: set[str] = set()
+    sequence_names: set[str] = set()
+    bool_locals: dict[str, ast.expr] = {}
+    rebound: set[str] = set()
+    layout_tests: set[str] = set()
+
+    for argument in (*func.args.args, *func.args.kwonlyargs):
+        annotation = argument.annotation
+        if annotation is None:
+            continue
+        # The model's own declared type. A cache is the thing it says is one.
+        if "cache" in ast.unparse(annotation).lower():
+            cache_names.add(argument.arg)
+
+    for statement in ast.walk(func):
+        if isinstance(statement, ast.If) and _packs_sequence(statement.body):
+            layout_tests.add(ast.unparse(statement.test).strip())
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = statement.value
+        if value is None:
+            continue
+        targets = (
+            statement.targets
+            if isinstance(statement, ast.Assign)
+            else [statement.target]
+        )
+        names = [
+            element.id
+            for target in targets
+            for element in (
+                target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
+            )
+            if isinstance(element, ast.Name)
+        ]
+        if not names:
+            continue
+        # ``batch, q_len, _ = hidden_states.shape`` names the sequence axis.
+        if _shape_read_base(value) is not None and len(names) >= 2:
+            sequence_names.add(names[1])
+        if len(names) == 1 and isinstance(
+            value, (ast.BoolOp, ast.Compare, ast.UnaryOp)
+        ):
+            # Only while it stays bound once: a name assigned twice means two
+            # different values, and this has no idea which one a test reads.
+            if names[0] in bool_locals:
+                rebound.add(names[0])
+            bool_locals[names[0]] = value
+        # What the value IS, not what it mentions. Handing a cache to a call
+        # (`self.compressor(hidden_states, ..., past_key_values, layer_idx)`)
+        # says nothing about the call's RESULT -- reading that as cache-derived
+        # decided `if block_bias is not None` and left the compressor's own
+        # output with nothing to consume it.
+        source = value
+        if isinstance(source, ast.IfExp):
+            # `cache_layer = past_key_values.layers[i] if past_key_values is
+            # not None else None` -- the arm that is not None is the one that
+            # says where this came from.
+            source = source.body
+        if _names_a_cache(source, cache_names):
+            cache_names.update(names)
+
+    return _RegimeFacts(
+        cache_names=frozenset(cache_names),
+        sequence_names=frozenset(sequence_names),
+        bool_locals={
+            name: expression
+            for name, expression in bool_locals.items()
+            if name not in rebound
+        },
+        layout_tests=frozenset(layout_tests),
+    )
+
+
 FORWARD_OPERATION_PREFIX = "@op_"
 # Stands for the value a helper method receives, so operations reading its parameter
 # resolve to whatever feeds the chain the method is inlined into.
@@ -3849,6 +4118,12 @@ class ForwardAnalysis:
     operations: list[ForwardOperation]
     var_producer: dict[str, str]
     var_bindings: dict[str, list[tuple[int, str]]]
+    #: Source spans of branch arms the run does not take, and the submodule
+    #: attrs called only there.
+    skipped_spans: tuple[tuple[int, int], ...]
+    skipped_attrs: frozenset[str]
+    #: Branch tests neither the config nor the stated run answers.
+    undecided_tests: tuple[str, ...]
     step_predecessors: dict[str, tuple[str, ...]]
     step_predecessor_args: dict[str, dict[str, str]]
     step_predecessor_ordinals: dict[str, dict[str, int]]
@@ -3917,6 +4192,9 @@ class ClassStructure:
     # at, so an expression naming a local resolves to the tensor that name held
     # AT THAT LINE. A forward reassigns the same name to different tensors.
     forward_var_bindings: dict[str, list[tuple[int, str]]] = field(default_factory=dict)
+    #: Branch tests in this forward that nothing decides -- reported, not
+    #: failed: some are genuine model options rather than runtime regimes.
+    forward_undecided_tests: list[str] = field(default_factory=list)
     forward_step_boundary_params: dict[str, tuple[str, ...]] = field(
         default_factory=dict
     )
@@ -4913,6 +5191,17 @@ def _config_value(
                 if all(value is not _UNKNOWN for value in values)
                 else _UNKNOWN
             )
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        # A literal collection is a value like any other, and a membership test
+        # cannot be answered without it: MiniMax asks
+        # `self.config._attn_implementation in ('eager', 'sdpa')`, which decides
+        # whether the real matmul/softmax chain is drawn or one fused kernel.
+        items = [
+            _config_value(item, config, self_values, param_values) for item in node.elts
+        ]
+        if any(item is _UNKNOWN for item in items):
+            return _UNKNOWN
+        return tuple(items)
     if isinstance(node, ast.Compare):
         left = _config_value(node.left, config, self_values, param_values)
         comparators = [
@@ -4940,6 +5229,14 @@ def _config_value(
                 return False
             if isinstance(op, ast.IsNot) and not (a is not b):
                 return False
+            if isinstance(op, (ast.In, ast.NotIn)):
+                if not isinstance(b, (tuple, list, set, frozenset, str)):
+                    return _UNKNOWN
+                inside = a in b
+                if isinstance(op, ast.NotIn):
+                    inside = not inside
+                if not inside:
+                    return False
         return True
     return _UNKNOWN
 
@@ -5425,6 +5722,32 @@ class _ForwardOperationExtractor:
         self.self_values = self_values
         self.all_tensor_ops = all_tensor_ops
         self.config = dict(config or {})
+        # Which RUN this graph depicts. Carried on the config because that is
+        # the one thing already handed to every extractor, every resolver and
+        # every nested analysis -- the same route `_attn_implementation` takes.
+        # A branch only a run decides is decided HERE, at the branch, so the arm
+        # not taken is never walked and nothing downstream has to know it
+        # existed.
+        regime = self.config.get(RUNTIME_REGIME_KEY)
+        self.regime = regime if isinstance(regime, RuntimeRegime) else RuntimeRegime()
+        # Set for the duration of one forward, so a test can be read against the
+        # whole function it sits in (which parameter is the cache, which local
+        # holds a packed sequence) rather than against the statement alone.
+        self._function_root: ast.FunctionDef | None = None
+        self._regime_facts: _RegimeFacts | None = None
+        # Source spans of the arms NOT taken, because a decided branch does not
+        # run. The call list is assembled from the function's AST rather than
+        # from this walk, so without recording them a helper called only in the
+        # dead arm still gets a frame -- and its ops have no consumer, because
+        # the thing that read them was never walked.
+        self.skipped_spans: list[tuple[int, int]] = []
+        self.skipped_attrs: set[str] = set()
+        # Tests nothing answers: not the config, not the stated run. Both arms
+        # get drawn, so every shape below one is true of only one of them. The
+        # phi census can only see these where BOTH arms produce a value; where
+        # one arm merely rebinds there is no phi and no warning at all, which
+        # is why they are counted here, at the branch, instead.
+        self.undecided_tests: list[str] = []
         # True only when the body being extracted is a module-level free
         # function's own definition (``apply_rotary_pos_emb``), never a
         # class's own top-level ``forward`` or a sibling class method. A
@@ -8382,6 +8705,132 @@ class _ForwardOperationExtractor:
         """
         return _resolve_flash_predicate(test, self.config)
 
+    def _record_skipped(self, body: Sequence[ast.stmt]) -> None:
+        """Remember an arm that is not taken, so nothing it calls is drawn."""
+        for statement in body or ():
+            self.skipped_spans.append(
+                (statement.lineno, statement.end_lineno or statement.lineno)
+            )
+            for inner in ast.walk(statement):
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Attribute)
+                    and isinstance(inner.func.value, ast.Name)
+                    and inner.func.value.id == "self"
+                ):
+                    self.skipped_attrs.add(inner.func.attr)
+
+    def _regime_outcome(self, test: ast.expr) -> bool | None:
+        """How the RUN being depicted answers *test*, or ``None`` if it does not.
+
+        Answering here, at the branch, is what makes the choice reach
+        everything: the arm not taken is never walked, so no op, no shape and
+        no phi downstream ever carries a value from a run this graph is not of.
+        """
+        facts = self._regime_facts
+        if facts is None:
+            return None
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            inner = self._regime_outcome(test.operand)
+            return None if inner is None else not inner
+        if isinstance(test, ast.BoolOp):
+            # Short-circuit, like the language does: one False part settles an
+            # ``and`` and one True part settles an ``or``, whatever the rest
+            # says. GPT-2 guards its cache update with ``(past_key_values is
+            # not None and not is_cross_attention) or (past_key_values is not
+            # None and is_cross_attention and not is_updated)`` -- with no
+            # cache both groups are False and so is the whole test, but
+            # demanding that every part be known left it undecided and drew a
+            # phi over a branch that cannot run.
+            parts = [self._regime_outcome(value) for value in test.values]
+            settles = isinstance(test.op, ast.Or)
+            if any(part is settles for part in parts):
+                return settles
+            if any(part is None for part in parts):
+                return None
+            return not settles
+        if isinstance(test, ast.Name) and test.id in facts.bool_locals:
+            # The test is a name; what it was bound to is the real question.
+            return self._regime_outcome(facts.bool_locals[test.id])
+        if ast.unparse(test).strip() in facts.layout_tests:
+            return self.regime.is_packed
+        if (
+            isinstance(test, ast.Attribute)
+            and test.attr == "training"
+            and isinstance(test.value, ast.Name)
+            and test.value.id == "self"
+        ):
+            # ``nn.Module.training`` -- the framework's own flag, not a name
+            # this model chose.
+            return self.regime.is_training
+        if isinstance(test, ast.Call) and _names_a_cache(
+            test.func, set(facts.cache_names)
+        ):
+            # ``cache_params.has_previous_state(...)`` ASKED AS A TEST: whether
+            # the cache holds anything. Only in this position -- reading the
+            # same call's RESULT as if it were cached data is what made
+            # ``layer_idx``, an int that `create_causal_mask` takes off a
+            # cache, decide a branch by whether the cache was warm.
+            return self.regime.cache_has_content
+        presence = self._presence_outcome(test, facts)
+        if presence is not None:
+            return presence
+        return self._single_token_outcome(test, facts)
+
+    def _presence_outcome(self, test: ast.expr, facts: _RegimeFacts) -> bool | None:
+        """``<cache> is None`` / ``is not None``, answered by the cache choice."""
+        if (
+            not isinstance(test, ast.Compare)
+            or len(test.ops) != 1
+            or len(test.comparators) != 1
+        ):
+            return None
+        if not isinstance(test.ops[0], (ast.Is, ast.IsNot)):
+            return None
+        other = test.comparators[0]
+        if not (isinstance(other, ast.Constant) and other.value is None):
+            return None
+        root = test.left
+        while isinstance(root, (ast.Attribute, ast.Subscript)):
+            root = root.value
+        if not isinstance(root, ast.Name):
+            return None
+        if root.id not in facts.cache_names:
+            return None
+        present = self.regime.has_cache
+        return present if isinstance(test.ops[0], ast.IsNot) else not present
+
+    def _single_token_outcome(self, test: ast.expr, facts: _RegimeFacts) -> bool | None:
+        """``q_len == 1`` and friends -- the question decode answers yes."""
+        if (
+            not isinstance(test, ast.Compare)
+            or len(test.ops) != 1
+            or len(test.comparators) != 1
+        ):
+            return None
+        other = test.comparators[0]
+        if not (isinstance(other, ast.Constant) and other.value == 1):
+            return None
+        left = test.left
+        names_sequence = (
+            isinstance(left, ast.Name) and left.id in facts.sequence_names
+        ) or (
+            isinstance(left, ast.Subscript)
+            and _shape_read_base(left.value) is None
+            and ast.unparse(left).endswith(".shape[1]")
+        )
+        if not names_sequence:
+            return None
+        decode = self.regime.is_decode
+        operator = test.ops[0]
+        if isinstance(operator, ast.Eq):
+            return decode
+        if isinstance(operator, ast.NotEq):
+            return not decode
+        if isinstance(operator, ast.Gt):
+            return not decode
+        return None
+
     def statements(
         self, statements: list[ast.stmt], *, condition: str | None = None
     ) -> None:
@@ -8623,6 +9072,14 @@ class _ForwardOperationExtractor:
                         stmt.test, self.config, self.self_values, self.param_values
                     )
                 if not isinstance(outcome, bool):
+                    # No CONFIG decides it, but the RUN may: whether this batch
+                    # was padded, whether a cache holds anything, whether one
+                    # token is being decoded. Those have answers once the run is
+                    # stated, and stating them is what keeps a drawn shape true.
+                    decided = self._regime_outcome(stmt.test)
+                    if decided is not None:
+                        outcome = decided
+                if not isinstance(outcome, bool):
                     # No config decides this test -- GPT-2 guards its
                     # cross-attention with `encoder_hidden_states is not None`.
                     # But an arm that calls a submodule NO instance has cannot
@@ -8634,15 +9091,19 @@ class _ForwardOperationExtractor:
                     elif stmt.orelse and self._calls_unbuilt_submodule(stmt.orelse):
                         outcome = True
                 if outcome is True:
+                    self._record_skipped(stmt.orelse)
                     self.statements(stmt.body, condition=condition)
                     if self._statements_terminate(stmt.body):
                         break
                 elif outcome is False:
+                    self._record_skipped(stmt.body)
                     self.statements(stmt.orelse, condition=condition)
                     if self._statements_terminate(stmt.orelse):
                         break
                 else:
                     test = ast.unparse(stmt.test)
+                    if test not in self.undecided_tests:
+                        self.undecided_tests.append(test)
                     before_env = dict(self.var_producer)
                     before_host = dict(self.host_scalar_values)
                     before = len(self.operations)
@@ -9746,6 +10207,10 @@ def _forward_operations_from_forward(
             else f"{FORWARD_METHOD_INPUT_PREFIX}{name}"
         )
         extractor.var_producer.setdefault(name, token)
+    # Read the function once for the runtime questions its branches ask, so a
+    # test can be answered against the whole forward it sits in.
+    extractor._function_root = func
+    extractor._regime_facts = _regime_facts(func)
     extractor.statements(func.body)
     extractor._apply_branch_alternatives()
     extractor._reconstruct_attention_step(func.body)
@@ -9828,6 +10293,9 @@ def _forward_operations_from_forward(
         var_bindings={
             name: list(bindings) for name, bindings in extractor.var_bindings.items()
         },
+        skipped_spans=tuple(extractor.skipped_spans),
+        skipped_attrs=frozenset(extractor.skipped_attrs),
+        undecided_tests=tuple(extractor.undecided_tests),
         step_predecessors=dict(extractor.step_predecessors),
         step_predecessor_args=dict(extractor.step_predecessor_args),
         step_predecessor_ordinals=dict(extractor.step_predecessor_ordinals),
@@ -9888,8 +10356,10 @@ def expand_class_forward_dataflow(
         cls.init_assignments,
         parsed_operations=analysis.operations,
     )
-    merged_calls = _forward_calls_in_source_order(
-        forward, module_calls, analysis.operations
+    merged_calls = _without_skipped_calls(
+        _forward_calls_in_source_order(forward, module_calls, analysis.operations),
+        analysis,
+        set(analysis.step_predecessors),
     )
     (
         cls.forward_calls,
@@ -9910,6 +10380,7 @@ def expand_class_forward_dataflow(
     cls.forward_var_bindings = {
         name: list(bindings) for name, bindings in analysis.var_bindings.items()
     }
+    cls.forward_undecided_tests = list(analysis.undecided_tests)
     cls.forward_step_boundary_params = dict(analysis.step_boundary_params)
     cls.forward_step_boundary_arg_params = dict(analysis.step_boundary_arg_params)
     cls.forward_operations = _refine_forward_operation_predecessors(
@@ -10037,6 +10508,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         forward_step_predecessor_ordinals: dict[str, dict[str, int]] = {}
         forward_step_output_names: dict[str, list[str]] = {}
         forward_var_bindings: dict[str, list[tuple[int, str]]] = {}
+        forward_undecided_tests: list[str] = []
         forward_step_boundary_params: dict[str, tuple[str, ...]] = {}
         forward_step_boundary_arg_params: dict[
             str, dict[str, tuple[str, int | None]]
@@ -10161,6 +10633,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     )
                     forward_step_output_names = dict(analysis.step_output_names)
                     forward_var_bindings = dict(analysis.var_bindings)
+                    forward_undecided_tests = list(analysis.undecided_tests)
                     forward_step_boundary_params = dict(analysis.step_boundary_params)
                     forward_step_boundary_arg_params = dict(
                         analysis.step_boundary_arg_params
@@ -10305,6 +10778,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     )
                     forward_step_output_names = dict(analysis.step_output_names)
                     forward_var_bindings = dict(analysis.var_bindings)
+                    forward_undecided_tests = list(analysis.undecided_tests)
                     forward_step_boundary_params = dict(analysis.step_boundary_params)
                     forward_step_boundary_arg_params = dict(
                         analysis.step_boundary_arg_params
@@ -10315,11 +10789,15 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         init_assignments,
                         parsed_operations=analysis.operations,
                     )
-                    merged_calls = _forward_calls_in_source_order(
-                        resolved_forward_func,
-                        module_calls,
-                        analysis.operations,
-                        self._config_for_class(node.name),
+                    merged_calls = _without_skipped_calls(
+                        _forward_calls_in_source_order(
+                            resolved_forward_func,
+                            module_calls,
+                            analysis.operations,
+                            self._config_for_class(node.name),
+                        ),
+                        analysis,
+                        set(analysis.step_predecessors),
                     )
                     (
                         forward_calls,
@@ -10367,6 +10845,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     )
                     forward_step_output_names = dict(probed.step_output_names)
                     forward_var_bindings = dict(probed.var_bindings)
+                    forward_undecided_tests = list(probed.undecided_tests)
                     forward_step_boundary_params = dict(probed.step_boundary_params)
                     forward_step_boundary_arg_params = dict(
                         probed.step_boundary_arg_params
@@ -10377,11 +10856,15 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         init_assignments,
                         parsed_operations=probed.operations,
                     )
-                    merged_calls = _forward_calls_in_source_order(
-                        resolved_forward_func,
-                        module_calls,
-                        probed.operations,
-                        self._config_for_class(node.name),
+                    merged_calls = _without_skipped_calls(
+                        _forward_calls_in_source_order(
+                            resolved_forward_func,
+                            module_calls,
+                            probed.operations,
+                            self._config_for_class(node.name),
+                        ),
+                        probed,
+                        set(probed.step_predecessors),
                     )
                     (
                         forward_calls,
@@ -10431,6 +10914,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             forward_step_predecessor_ordinals=forward_step_predecessor_ordinals,
             forward_step_output_names=forward_step_output_names,
             forward_var_bindings=forward_var_bindings,
+            forward_undecided_tests=forward_undecided_tests,
             forward_step_boundary_params=forward_step_boundary_params,
             forward_step_boundary_arg_params=forward_step_boundary_arg_params,
             single_op_methods=single_op_methods,
@@ -14018,6 +14502,14 @@ def _with_resolved_attn_implementation(
     """
     if config is None:
         return None
+    regime = config.get(RUNTIME_REGIME_KEY)
+    asked = getattr(regime, "attention", None)
+    if isinstance(asked, str) and asked.strip():
+        # The caller named the run's implementation, which outranks the
+        # checkpoint: eager draws the matmul/softmax chain where sdpa draws one
+        # fused kernel, and which of those a reader wants is not the
+        # checkpoint's to decide.
+        return {**config, "_attn_implementation": asked.strip()}
     existing = config.get("_attn_implementation")
     if isinstance(existing, str) and existing.strip():
         return config

@@ -624,12 +624,29 @@ def test_glm53_forget_gate_expands_internal_computation():
     assert "Linear" in forget_labels
 
 
-def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges(phase):
+    """The conv path the stated run takes reaches the split, and nothing else does.
+
+    ``Glm5NextTextLinearAttention`` runs exactly ONE of two conv alternatives:
+    ``causal_conv1d_update`` when decoding a single token, ``causal_conv1d``
+    plus the narrowing ``mixed_qkv[:, :, -seq_len:]`` when prefilling. Which one
+    is not a config setting -- it is a property of the call -- so the graph used
+    to draw both and join them at a phi, leaving the shapes below true of only
+    one run.
+
+    The run is stated now, so each build draws one alternative and the other is
+    not there at all. Both are pinned here, because "drew the right one" is only
+    half the claim: the other must be absent.
+    """
     pytest.importorskip("huggingface_hub")
+    from TraceLens.ModelUtils.ast_analyze import RuntimeRegime
     from TraceLens.ModelUtils.block_tree import build_block_node
     from TraceLens.ModelUtils.computation_graph import build_computation_graph
 
-    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    spec = load_model_spec(
+        "zai-org/GLM-5.3-Flash", detailed=True, regime=RuntimeRegime(phase=phase)
+    )
     tree = build_block_node(
         attr_name="self_attn",
         class_name="Glm5NextTextLinearAttention",
@@ -642,10 +659,6 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
     sources = {source for source, _target in graph.links}
 
     concat_key = _graph_key(graph, ":@op_l645_c20_concat:@op_l645_c20_concat:0")
-    conv_update_key = _graph_key_for_op(graph, ":@op_l662_c24_causal_conv1d_update:")
-    conv_key = _graph_key_for_op(graph, ":@op_l677_c24_causal_conv1d:")
-    slice_key = _graph_key_for_op(graph, ":@op_l686_c24_slice:")
-    merge_key = _graph_key_for_op(graph, ":@op_l661_c8_merge:")
     transpose_key = _graph_key_for_op(graph, ":@op_l689_c12_transpose:")
     split_key = _graph_key_for_op(graph, ":@op_l688_c28_split:")
     forget_entry_key = _graph_key(graph, ":forget_gate:f_a_proj:0")
@@ -656,30 +669,39 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
     )
 
     assert key_to_index[concat_key] in sources
-    # The decode/update and prefill convolution alternatives both consume mixed_qkv;
-    # they are joined by an explicit Merge (the mutually-exclusive branch join),
-    # and the prefill branch's narrowing slice (``mixed_qkv[:, :, -seq_len:]``) is a
-    # visible Slice between the conv and the Merge. The Merge then feeds
-    # transpose -> split into query/key/value -- both convs reach the split only
-    # through the single Merge join.
-    assert _has_computation_path(
-        graph, key_to_index[concat_key], key_to_index[conv_update_key]
+
+    def _present(fragment: str) -> bool:
+        return any(
+            fragment in node.key and ":const:" not in node.key for node in graph.nodes
+        )
+
+    taken, not_taken = (
+        (":@op_l677_c24_causal_conv1d:", ":@op_l662_c24_causal_conv1d_update:")
+        if phase == "prefill"
+        else (":@op_l662_c24_causal_conv1d_update:", ":@op_l677_c24_causal_conv1d:")
     )
+    assert not _present(not_taken), f"{phase} must not draw {not_taken}"
+    # Nothing joins two alternatives any more, so there is no phi to join them.
+    assert not _present(":@op_l661_c8_merge:")
+
+    conv_key = _graph_key_for_op(graph, taken)
     assert _has_computation_path(
         graph, key_to_index[concat_key], key_to_index[conv_key]
     )
-    # Prefill: conv -> Slice -> Merge; decode: conv_update -> Merge.
-    assert _has_computation_path(graph, key_to_index[conv_key], key_to_index[slice_key])
-    assert _has_computation_path(
-        graph, key_to_index[slice_key], key_to_index[merge_key]
-    )
-    assert _has_computation_path(
-        graph, key_to_index[conv_update_key], key_to_index[merge_key]
-    )
-    # Both branches converge on the single Merge, which alone reaches the split.
-    assert _has_computation_path(
-        graph, key_to_index[merge_key], key_to_index[transpose_key]
-    )
+    if phase == "prefill":
+        # ``mixed_qkv[:, :, -seq_len:]`` -- the narrowing only prefill performs.
+        slice_key = _graph_key_for_op(graph, ":@op_l686_c24_slice:")
+        assert _has_computation_path(
+            graph, key_to_index[conv_key], key_to_index[slice_key]
+        )
+        assert _has_computation_path(
+            graph, key_to_index[slice_key], key_to_index[transpose_key]
+        )
+    else:
+        assert not _present(":@op_l686_c24_slice:")
+        assert _has_computation_path(
+            graph, key_to_index[conv_key], key_to_index[transpose_key]
+        )
     assert _has_computation_path(
         graph, key_to_index[transpose_key], key_to_index[split_key]
     )
@@ -690,22 +712,27 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
     assert key_to_index[branch_add_key] in sources
 
 
-def test_glm53_linear_attention_branch_merge_and_slice_in_merged_graph():
-    """In the merged graph the two conv branches join at an explicit Merge.
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_glm53_linear_attention_branch_merge_and_slice_in_merged_graph(phase):
+    """In the merged graph the transpose reads the ONE conv the run performs.
 
     ``Glm5NextTextLinearAttention.forward`` runs exactly one of two mutually
-    exclusive conv branches per invocation (``causal_conv1d_update`` on decode,
-    ``causal_conv1d_fn`` + ``mixed_qkv[:, :, -seq_len:]`` on prefill), then
-    ``query, key, value = split(mixed_qkv.transpose(1, 2), ...)``. Rather than union
-    both branch producers onto the transpose (which would give it two tensor
-    operands), the extraction emits an explicit **Merge** phi joining the two
-    branches; the transpose reads that single node. The dropped prefill narrowing
-    ``[:, :, -seq_len:]`` is materialised as a visible **Slice**. The module keeps
-    its own ``@input`` boundary (the hierarchy-aware collapse no longer folds it
-    into the upstream norm's ``@output``). The whole graph stays acyclic, dead-node
-    free, and clean under the operand type-check and the I4 boundary check.
+    exclusive conv alternatives per invocation (``causal_conv1d_update`` when
+    decoding one token, ``causal_conv1d_fn`` + the narrowing
+    ``mixed_qkv[:, :, -seq_len:]`` when prefilling), then
+    ``query, key, value = split(mixed_qkv.transpose(1, 2), ...)``.
+
+    Nothing in the config picks between them -- only the call does -- so both
+    used to be drawn and joined by a phi, and the transpose read that. Every
+    shape below it was then true of only one of the two runs. The run is stated
+    now, so there is one conv, no phi, and the transpose reads the conv path
+    directly. The module keeps its own ``@input`` boundary (the hierarchy-aware
+    collapse no longer folds it into the upstream norm's ``@output``), and the
+    graph stays acyclic, dead-node free, and clean under the operand type-check
+    and the I4 boundary check -- in BOTH runs.
     """
     pytest.importorskip("huggingface_hub")
+    from TraceLens.ModelUtils.ast_analyze import RuntimeRegime
     from TraceLens.Visualizer.model_explorer_export.type_check import (
         integrity_check_graph_nodes,
     )
@@ -713,7 +740,9 @@ def test_glm53_linear_attention_branch_merge_and_slice_in_merged_graph():
         _graph_without_constants,
     )
 
-    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    spec = load_model_spec(
+        "zai-org/GLM-5.3-Flash", detailed=True, regime=RuntimeRegime(phase=phase)
+    )
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {n["id"]: n for n in nodes}
@@ -727,29 +756,43 @@ def test_glm53_linear_attention_branch_merge_and_slice_in_merged_graph():
     assert self_attn_input is not None
     assert self_attn_input.get("label") == "hidden_states"
 
-    # A2: the l689 transpose reads exactly one tensor operand -- the Merge phi.
-    transpose = node_by_id[
-        f"{prefix}/seq:12:@op_l689_c12_transpose:@op_l689_c12_transpose:0"
-    ]
+    # A2: the l689 transpose reads exactly one tensor operand, and it is the
+    # conv path this run performs -- not a phi over two of them.
+    transpose = next(
+        n
+        for n in nodes
+        if n["id"].startswith(prefix)
+        and n["id"].endswith("@op_l689_c12_transpose:@op_l689_c12_transpose:0")
+    )
     (t_src,) = _activation_incoming(transpose, node_by_id)
-    merge = node_by_id[t_src["sourceNodeId"]]
-    assert merge.get("label") == PHI_LABEL, merge["id"]
-    assert merge["id"].endswith(":@op_l661_c8_merge:0"), merge["id"]
-    assert len(_activation_incoming(transpose, node_by_id)) == 1
+    feeding = node_by_id[t_src["sourceNodeId"]]
+    assert feeding.get("label") != PHI_LABEL, feeding["id"]
+    assert not any(":@op_l661_c8_merge:" in n["id"] for n in nodes)
 
-    # Both conv branches are reachable and feed only through the Merge.
-    merge_sources = {e["sourceNodeId"] for e in merge["incomingEdges"]}
-    conv_update = f"{prefix}/seq:7:@op_l662_c24_causal_conv1d_update:@op_l662_c24_causal_conv1d_update:0"
-    slice_id = f"{prefix}/seq:10:@op_l686_c24_slice:@op_l686_c24_slice:0"
-    assert conv_update in merge_sources, merge_sources
-    # C: the prefill narrowing slice is a visible Slice feeding the Merge.
-    assert slice_id in merge_sources, merge_sources
-    slice_node = node_by_id[slice_id]
-    assert slice_node.get("label") == "Slice"
-    (slice_src,) = _activation_incoming(slice_node, node_by_id)
-    assert slice_src["sourceNodeId"].endswith(
-        ":@op_l677_c24_causal_conv1d:@op_l677_c24_causal_conv1d:0"
-    ), slice_src
+    def _within(fragment: str) -> list[dict]:
+        return [
+            n
+            for n in nodes
+            if n["id"].startswith(prefix)
+            and fragment in n["id"]
+            and ":const:" not in n["id"]
+        ]
+
+    if phase == "prefill":
+        # C: the narrowing ``mixed_qkv[:, :, -seq_len:]`` is a visible Slice,
+        # and it is what the transpose reads.
+        assert feeding.get("label") == "Slice", feeding["id"]
+        assert ":@op_l686_c24_slice:" in feeding["id"], feeding["id"]
+        (slice_src,) = _activation_incoming(feeding, node_by_id)
+        assert slice_src["sourceNodeId"].endswith(
+            ":@op_l677_c24_causal_conv1d:@op_l677_c24_causal_conv1d:0"
+        ), slice_src
+        assert not _within(":@op_l662_c24_causal_conv1d_update:")
+    else:
+        assert ":@op_l662_c24_causal_conv1d_update:" in feeding["id"], feeding["id"]
+        # Decode writes one token into the cache; there is nothing to narrow.
+        assert not _within(":@op_l686_c24_slice:")
+        assert not _within(":@op_l677_c24_causal_conv1d:")
 
     # A1: the operand type-check and I4 boundary check are clean on the built graph
     # and on the render-filtered graph -- apart from ONE documented, pre-existing
@@ -3300,10 +3343,14 @@ def test_glm53_view_split_stays_visible_with_named_slice_tiles():
     # --- The text self_attn query/key/value split stays visible with 3 tiles.
     # (Decoder layers collapse into MoE/MLP representatives; either exercises the
     # same split — pick the first one, excluding its own slice tiles.)
+    # Found by its op identity, not by its slot: which step index it lands on
+    # depends on how many ops precede it, and that depends on which run the
+    # graph is of (a decode build draws the conv-update path instead).
     qkv_split = next(
         n
         for n in nodes
-        if n["id"].endswith("self_attn/seq:13:@op_l688_c28_split:@op_l688_c28_split:0")
+        if "/self_attn/" in n["id"]
+        and n["id"].endswith("@op_l688_c28_split:@op_l688_c28_split:0")
     )
     qkv_tiles = _slice_tiles(qkv_split)
     assert {port: tile.get("label") for port, tile in qkv_tiles.items()} == {
@@ -3318,7 +3365,7 @@ def test_glm53_view_split_stays_visible_with_named_slice_tiles():
     (split_src,) = _activation_incoming(qkv_split, node_by_id)
     transpose = node_by_id[split_src["sourceNodeId"]]
     assert transpose["id"].endswith(
-        "self_attn/seq:12:@op_l689_c12_transpose:@op_l689_c12_transpose:0"
+        "@op_l689_c12_transpose:@op_l689_c12_transpose:0"
     ), transpose["id"]
 
     # --- The F.linear-fed pre_w/post_w/comb_w split also stays, with its tiles,

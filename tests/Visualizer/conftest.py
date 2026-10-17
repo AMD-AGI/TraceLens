@@ -26,6 +26,7 @@ instead would be asserting on the wrong model.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 import sys
@@ -37,19 +38,19 @@ import pytest
 _BUILDER = Path(__file__).with_name("build_graph_in_env.py")
 
 
-def _build_here(model_id: str, revision: str | None = None) -> list[dict]:
+def _build_here(model_id: str, revision: str | None = None, regime=None) -> list[dict]:
     from TraceLens.ModelUtils.loader import load_model_spec
     from TraceLens.ModelUtils.shape_inference import ShapeInferencer
     from TraceLens.Visualizer.model_explorer_export.merge import (
         build_merged_model_graph,
     )
 
-    spec = load_model_spec(model_id, detailed=True, revision=revision)
+    spec = load_model_spec(model_id, detailed=True, revision=revision, regime=regime)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     return graph["nodes"]
 
 
-def _build_in_env(model_id: str, reason: str, pin) -> list[dict]:
+def _build_in_env(model_id: str, reason: str, pin, regime=None) -> list[dict]:
     from TraceLens.ModelUtils import model_env
 
     # The pin names the versions these assertions were written against, rather
@@ -69,7 +70,14 @@ def _build_in_env(model_id: str, reason: str, pin) -> list[dict]:
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "nodes.json"
         result = subprocess.run(
-            [sys.executable, str(_BUILDER), model_id, str(out), pin.revision],
+            [
+                sys.executable,
+                str(_BUILDER),
+                model_id,
+                str(out),
+                pin.revision,
+                *([json.dumps(dataclasses.asdict(regime))] if regime else []),
+            ],
             env=model_env._child_env(target),
             capture_output=True,
             text=True,
@@ -108,9 +116,9 @@ def model_graph_nodes():
     from TraceLens.ModelUtils import model_env
     from model_pins import pin_for
 
-    cache: dict[str, list[dict]] = {}
+    cache: dict[tuple, list[dict]] = {}
 
-    def nodes(model_id: str) -> list[dict]:
+    def nodes(model_id: str, regime=None) -> list[dict]:
         # Every graph test funnels through here, so this is where an unpinned
         # model is caught. Asserting on a floating checkpoint means asserting on
         # whatever its repo holds today: when DeepSeek-V4-Flash published two
@@ -123,22 +131,23 @@ def model_graph_nodes():
             "of one model's source; add its commit SHA and library versions to "
             "tests/model_pins.py so this suite reads the same code every run."
         )
-        if model_id not in cache:
+        key = (model_id, regime)
+        if key not in cache:
             # Already inside a provisioned environment (the exporter's own
             # re-exec flag): this interpreter IS the right one.
             import os
 
             if os.environ.get(model_env.REEXEC_ENV_FLAG):
-                cache[model_id] = _build_here(model_id, pin.revision)
+                cache[key] = _build_here(model_id, pin.revision, regime)
             elif pin.own_environment:
                 reason = model_env.detect_env_mismatch(model_id)
-                cache[model_id] = _build_in_env(
-                    model_id, reason or "pinned to its own environment", pin
+                cache[key] = _build_in_env(
+                    model_id, reason or "pinned to its own environment", pin, regime
                 )
             else:
                 _require_pinned_transformers(model_id, pin)
-                cache[model_id] = _build_here(model_id, pin.revision)
-        return cache[model_id]
+                cache[key] = _build_here(model_id, pin.revision, regime)
+        return cache[key]
 
     return nodes
 
@@ -147,3 +156,18 @@ def model_graph_nodes():
 def kimi_nodes(model_graph_nodes):
     """Kimi-K3's merged graph, built under the transformers its code needs."""
     return model_graph_nodes("moonshotai/Kimi-K3")
+
+
+@pytest.fixture(scope="session")
+def kimi_packed_nodes(model_graph_nodes):
+    """Kimi-K3 drawn for a PACKED run -- the one that removes the padding.
+
+    ``if attention_mask is not None`` is not a config setting; it asks whether
+    this batch was padded. The unpadding helpers only exist in the run that
+    answers yes, so the assertions about them belong to that run.
+    """
+    from TraceLens.ModelUtils.ast_analyze import RuntimeRegime
+
+    return model_graph_nodes(
+        "moonshotai/Kimi-K3", RuntimeRegime(sequence_layout="packed")
+    )

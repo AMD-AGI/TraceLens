@@ -71,7 +71,11 @@ MODELS = [
 # orphaned, so dead-node and every other check stayed silent. This is the only
 # thing that would have caught it.
 #
-#   Kimi 4: `l567` / `l660`, the padded vs unpadded regimes of linear attention.
+# ZERO, as of 2026-10-17, and that is now the pass condition -- but the rule
+# above still holds: a DROP has to be explained too. Kimi's last 4 were
+# `l567`/`l660`, the unpadded regime against the padded one, and they went
+# away because the run is now STATED rather than guessed: `--sequence-layout`
+# decides the branch, so only one regime is drawn and the phi has one arm.
 #   DeepSeek 0: all of them closed, each by reading a name in the scope that
 #     names it. `l403` read `1` for `batch` because a frame's parameter was
 #     taken from whichever op it inferred first; `l832` could not read `kv`, a
@@ -91,7 +95,7 @@ MODELS = [
 # way; `l403` does not, because its axis 0 differs as well.
 EXPECTED_PHI_ARM_SHAPES = {
     "zai-org/GLM-5.3-Flash": 0,
-    "moonshotai/Kimi-K3": 4,
+    "moonshotai/Kimi-K3": 0,
     "MiniMaxAI/MiniMax-M3": 0,
     "deepseek-ai/DeepSeek-V4-Flash": 0,
     "openai-community/gpt2": 0,
@@ -99,6 +103,32 @@ EXPECTED_PHI_ARM_SHAPES = {
 
 
 EXPECTED_NODES = {
+    # 2026-10-17 -- the drawing states WHICH RUN it is of.
+    # A forward branches on things no config decides and only a run does:
+    # whether this batch was padded, whether a cache holds anything, whether
+    # one token is being decoded. Both arms are real and they do not agree,
+    # so drawing both left every shape below the branch true of only one of
+    # them. The run is now stated (--sequence-layout/--phase/--cache/
+    # --attention/--mode, defaulting to a rectangular cold prefill at
+    # inference) and decided AT the branch, so the arm not taken is never
+    # walked. Every count below is the arms that a cold rectangular prefill
+    # does not run:
+    #   GLM 1317 -> 1309: the single-token decode path, guarded by
+    #     `use_precomputed_states and seq_len == 1` -- `causal_conv1d_update`
+    #     and the two phis over it. Prefill makes `seq_len == 1` false, which
+    #     settles the `and` whatever the cache says.
+    #   Kimi 517 -> 463: the unpadding apparatus. `get_unpad_data`,
+    #     `index_first_axis`, `pad_input` and their `Nonzero`/`Flatten`/
+    #     `Cumulative sum`/`indices`/`cu_seqlens`, plus the 4 phis that made
+    #     the body carry `[1, nnz, H]` where its other arm carries
+    #     `[B, S, H]` -- the last phi-arm disagreements in the suite.
+    #   DeepSeek 2418 -> 2351: the cache paths. `store_compression_weights`,
+    #     `update_overlap_state` (the window-0 fill the source itself calls
+    #     a later-call behaviour) and the KV cache update, with 26 phis over
+    #     them. A cold forward is handed no cache.
+    #   MiniMax 721 and GPT-2 67 are UNCHANGED: both were already drawn as a
+    #     cold rectangular prefill, which is the check that this decides
+    #     branches rather than merely deleting them.
     # 2026-10-16e -- a branch `__init__` already decided is not a choice.
     # DeepSeek appends compressed entries only where the layer HAS a compressor,
     # and the variant split already knows which layers those are -- yet the phi
@@ -364,7 +394,7 @@ EXPECTED_NODES = {
     # off `grid_thw.tolist()` and takes no tensor operand at all, so docking it
     # on the chain running past it made the frame assert it reads the vision
     # activation -- a tensor that call is never passed. Same count, right tensor.
-    "zai-org/GLM-5.3-Flash": 1317,
+    "zai-org/GLM-5.3-Flash": 1309,
     # GPT-2, the one non-MoE decoder here. 121 -> 67 while it was being made
     # clean: -47 for a cross-attention tower its config never builds, -10 for a
     # shape that rendered as tensor ops, +9 for projections that drew nothing at
@@ -398,7 +428,7 @@ EXPECTED_NODES = {
     #   -1 the phi built over ``past_key_values.update(key_states, value_states)``
     #      -- a method on a forward parameter that produces no op, so there were
     #      never two arms to choose between.
-    "moonshotai/Kimi-K3": 517,
+    "moonshotai/Kimi-K3": 463,
     # MiniMax used to move by one between runs of the SAME code. That is fixed
     # (18148ab2): all four models are byte-identical across PYTHONHASHSEED 0, 7,
     # 42 and 123, so a single expected count is meaningful again.
@@ -437,7 +467,7 @@ EXPECTED_NODES = {
     # Loop ports folded away everywhere: the back edge was the only cycle the
     # graph allowed, and the body's own ends now name the direction instead
     # (``loop in: <var>`` / ``loop out: <var>``). -2 per loop that had ports.
-    "deepseek-ai/DeepSeek-V4-Flash": 2418,
+    "deepseek-ai/DeepSeek-V4-Flash": 2351,
 }
 
 # Warnings the per-model run prints that the check summary does not cover. Both

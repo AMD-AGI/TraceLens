@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
+from TraceLens.ModelUtils.ast_analyze import RuntimeRegime
 from TraceLens.ModelUtils.basic_ops import COMMON_LEAF_PATTERNS, BasicOpFilter
 from TraceLens.ModelUtils.extract import ArchitectureSpec, load_architecture
 
@@ -49,6 +51,8 @@ def load_model_spec(
     require_code: bool = False,
     allow_github_repos: list[str] | None = None,
     revision: str | None = None,
+    regime: RuntimeRegime | None = None,
+    config_overrides: dict[str, Any] | None = None,
 ) -> ArchitectureSpec:
     """Load architecture metadata for Model Explorer export.
 
@@ -79,6 +83,8 @@ def load_model_spec(
         all_tensor_ops=detailed,
         allow_github_repos=allow_github_repos,
         revision=revision,
+        regime=regime,
+        config_overrides=config_overrides,
     )
 
     if require_code and analyze_code and not spec.class_registry:
