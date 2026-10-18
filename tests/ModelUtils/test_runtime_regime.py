@@ -341,3 +341,63 @@ def forward(self, x):
             self_values={},
         )
         assert spans == ()
+
+
+class TestWhatTheConstructorReadsOutOfTheConfig:
+    """``__init__`` settles a branch by reading the config, in the model's idiom.
+
+    Kimi writes ``self.use_full_rank_gate =
+    config.linear_attn_config.get("use_full_rank_gate", False)`` and branches on
+    it twice. Neither the nested read nor the ``.get`` default resolved, so a
+    branch the config alone decides was drawn both ways.
+
+    The constant key is the whole point: DeepSeek settles ``self.is_hash =
+    config.mlp_layer_types[layer_idx] == "hash_moe"`` per LAYER, and answering
+    that per class would state one layer's architecture for every one of them.
+    """
+
+    CONFIG = {
+        "linear_attn_config": {"head_dim": 128, "use_full_rank_gate": True},
+        "mlp_layer_types": ["dense", "hash_moe"],
+        "layers": [4, 8],
+    }
+
+    @staticmethod
+    def _value(expression: str, config: dict):
+        from TraceLens.ModelUtils.ast_analyze import _UNKNOWN, _config_value
+
+        out = _config_value(ast.parse(expression, mode="eval").body, config, {})
+        return "UNKNOWN" if out is _UNKNOWN else out
+
+    def test_a_nested_key(self) -> None:
+        assert self._value('config.linear_attn_config["head_dim"]', self.CONFIG) == 128
+
+    def test_a_get_with_the_models_own_default(self) -> None:
+        out = self._value(
+            'config.linear_attn_config.get("use_full_rank_gate", False)', self.CONFIG
+        )
+        assert out is True
+
+    def test_the_default_answers_when_the_checkpoint_is_silent(self) -> None:
+        out = self._value('config.linear_attn_config.get("absent", 7)', self.CONFIG)
+        assert out == 7
+
+    def test_a_list_read_by_a_constant_index(self) -> None:
+        assert self._value("config.layers[1]", self.CONFIG) == 8
+
+    def test_a_per_instance_read_stays_unknown(self) -> None:
+        # The index is a variable, so this says nothing about any one layer.
+        assert (
+            self._value("config.mlp_layer_types[layer_idx]", self.CONFIG) == "UNKNOWN"
+        )
+
+    def test_a_bare_get_of_a_missing_key_really_is_none(self) -> None:
+        # What the model would see at run time, and a branch can test it.
+        out = self._value('config.linear_attn_config.get("absent")', self.CONFIG)
+        assert out is None
+
+    def test_a_default_this_cannot_read_leaves_the_call_unknown(self) -> None:
+        out = self._value(
+            'config.linear_attn_config.get("absent", some_local)', self.CONFIG
+        )
+        assert out == "UNKNOWN"

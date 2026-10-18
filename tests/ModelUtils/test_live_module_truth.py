@@ -15,6 +15,12 @@ its 93 layers owns ``self_attn.g_proj`` and none owns ``g_a_proj``/``g_b_proj`` 
 yet both were drawn, and the phi over them reported an arm of a rank the model never
 produces. The same question one level up decides ``mlp`` vs ``block_sparse_moe``.
 
+Since 2026-10-18 the constructor settles THAT flag by itself: the config read
+``config.linear_attn_config.get("use_full_rank_gate", False)`` resolves, so the arm
+it does not build is ``unbuilt_attrs`` and never a candidate. The live tree still
+decides whenever nothing settles the flag, which is what most of these tests pin --
+the parse only ever says what COULD exist.
+
 Two things are deliberately NOT treated as missing modules, both measured rather
 than guessed -- the first draft of this rule got both wrong:
 
@@ -85,14 +91,47 @@ _SOURCE = textwrap.dedent("""
 """)
 
 
+#: The same model with a flag NO config settles, so the parse genuinely cannot
+#: tell which arm was built and the live module tree is the only evidence.
+_SOURCE_UNDECIDED = _SOURCE.replace(
+    'self.use_full_rank_gate = config.get("use_full_rank_gate", False)',
+    "self.use_full_rank_gate = bool(kwargs)",
+)
+
+
 @pytest.fixture(scope="module")
 def registry():
+    # No config, so the model's own `.get(..., False)` default answers: the
+    # constructor builds the low-rank pair and `g_proj` is never built at all.
     return analyze_sources({"m.py": _SOURCE}).class_registry
+
+
+@pytest.fixture(scope="module")
+def registry_full_rank():
+    """The config turns the flag ON, so the other arm is the one not built."""
+    return analyze_sources(
+        {"m.py": _SOURCE}, config={"use_full_rank_gate": True}
+    ).class_registry
+
+
+@pytest.fixture(scope="module")
+def registry_undecided():
+    return analyze_sources({"m.py": _SOURCE_UNDECIDED}).class_registry
 
 
 @pytest.fixture(scope="module")
 def spec(registry):
     return types.SimpleNamespace(class_registry=registry, block_components=[])
+
+
+@pytest.fixture(scope="module")
+def spec_full_rank(registry_full_rank):
+    return types.SimpleNamespace(class_registry=registry_full_rank, block_components=[])
+
+
+@pytest.fixture(scope="module")
+def spec_undecided(registry_undecided):
+    return types.SimpleNamespace(class_registry=registry_undecided, block_components=[])
 
 
 @pytest.fixture(scope="module")
@@ -107,34 +146,71 @@ def _absent(spec, basic_ops, comp_attr, comp_class, live):
 
 
 class TestAnArmTheCheckpointDoesNotHave:
-    def test_the_unbuilt_gate_pair_is_omitted(self, spec, basic_ops) -> None:
-        live = {"self_attn": "Attn", "self_attn.q_proj": "L", "self_attn.g_proj": "L"}
-        absent = _absent(spec, basic_ops, "self_attn", "Attn", live)
+    """Two mechanisms, and which one answers depends on what the config says.
+
+    When the CONSTRUCTOR settles the flag, the arm it does not build is not a
+    candidate at all -- it lands in ``unbuilt_attrs``, because no instance of
+    the class has it. The live tree is consulted only for what is left over.
+    When nothing settles the flag, both arms are candidates and the live tree
+    alone decides, which is the case this file is named for.
+    """
+
+    LIVE_FULL = {
+        "self_attn": "Attn",
+        "self_attn.q_proj": "L",
+        "self_attn.g_proj": "L",
+    }
+    LIVE_LOW = {
+        "self_attn": "Attn",
+        "self_attn.q_proj": "L",
+        "self_attn.g_a_proj": "L",
+        "self_attn.g_b_proj": "L",
+    }
+
+    def test_the_constructor_rules_out_the_arm_it_never_builds(self, registry) -> None:
+        # `.get("use_full_rank_gate", False)` -- the model's own default, with
+        # no config to override it. `g_proj` is not merely absent here, it is
+        # never constructed.
+        attn = registry["Attn"]
+        assert sorted(attn.unbuilt_attrs) == ["g_proj"]
+        assert "g_a_proj" in attn.init_assignments
+
+    def test_and_the_other_way_round_when_the_config_turns_it_on(
+        self, registry_full_rank
+    ) -> None:
+        attn = registry_full_rank["Attn"]
+        assert sorted(attn.unbuilt_attrs) == ["g_a_proj", "g_b_proj"]
+        assert "g_proj" in attn.init_assignments
+
+    def test_nothing_is_left_for_the_live_tree_to_omit(
+        self, spec_full_rank, basic_ops
+    ) -> None:
+        # The config and the checkpoint agree, which is the ordinary case.
+        absent = _absent(spec_full_rank, basic_ops, "self_attn", "Attn", self.LIVE_FULL)
+        assert absent == {}
+
+    def test_an_undecided_flag_leaves_the_live_tree_to_decide(
+        self, spec_undecided, basic_ops
+    ) -> None:
+        """Nothing settles the flag, so BOTH arms are candidates."""
+        absent = _absent(spec_undecided, basic_ops, "self_attn", "Attn", self.LIVE_FULL)
         assert absent == {
             "g_a_proj": SUBMODULE_OMITTED,
             "g_b_proj": SUBMODULE_OMITTED,
         }
 
-    def test_the_other_build_omits_the_other_arm(self, spec, basic_ops) -> None:
-        """Flip which arm the checkpoint was built with; the answer flips too."""
-        live = {
-            "self_attn": "Attn",
-            "self_attn.q_proj": "L",
-            "self_attn.g_a_proj": "L",
-            "self_attn.g_b_proj": "L",
-        }
-        absent = _absent(spec, basic_ops, "self_attn", "Attn", live)
+    def test_and_flipping_the_checkpoint_flips_the_answer(
+        self, spec_undecided, basic_ops
+    ) -> None:
+        absent = _absent(spec_undecided, basic_ops, "self_attn", "Attn", self.LIVE_LOW)
         assert absent == {"g_proj": SUBMODULE_OMITTED}
 
-    def test_a_module_that_is_there_is_left_alone(self, spec, basic_ops) -> None:
-        live = {
-            "self_attn": "Attn",
-            "self_attn.q_proj": "L",
-            "self_attn.g_proj": "L",
-            "self_attn.g_a_proj": "L",
-            "self_attn.g_b_proj": "L",
-        }
-        assert _absent(spec, basic_ops, "self_attn", "Attn", live) == {}
+    def test_a_module_that_is_there_is_left_alone(
+        self, spec_undecided, basic_ops
+    ) -> None:
+        live = dict(self.LIVE_FULL)
+        live.update({"self_attn.g_a_proj": "L", "self_attn.g_b_proj": "L"})
+        assert _absent(spec_undecided, basic_ops, "self_attn", "Attn", live) == {}
 
 
 class TestWhatIsNotAMissingModule:

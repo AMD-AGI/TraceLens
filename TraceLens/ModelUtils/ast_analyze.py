@@ -5180,6 +5180,25 @@ def _config_value(
         if isinstance(base, dict):
             return base.get(node.attr, _UNKNOWN)
         return _UNKNOWN
+    if isinstance(node, ast.Subscript):
+        # A nested config block read by key:
+        # ``config.linear_attn_config["head_dim"]``. Only a CONSTANT key, so a
+        # per-instance read stays unresolved -- DeepSeek settles
+        # ``self.is_hash = config.mlp_layer_types[layer_idx] == "hash_moe"``
+        # differently for each layer, and answering that per CLASS would state
+        # one layer's architecture for all of them.
+        base = _config_value(node.value, config, self_values, param_values)
+        index = _config_value(node.slice, config, self_values, param_values)
+        if base is _UNKNOWN or index is _UNKNOWN:
+            return _UNKNOWN
+        if isinstance(base, dict) and isinstance(index, str):
+            return base.get(index, _UNKNOWN)
+        if isinstance(base, (list, tuple)) and isinstance(index, int):
+            try:
+                return base[index]
+            except IndexError:
+                return _UNKNOWN
+        return _UNKNOWN
     if isinstance(node, ast.Call):
         name = _expr_name(node.func)
         if name == "getattr" and len(node.args) >= 2:
@@ -5192,6 +5211,29 @@ def _config_value(
             )
             if isinstance(base, dict) and isinstance(key, str):
                 return base.get(key, default)
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and node.args
+        ):
+            # ``config.linear_attn_config.get("use_full_rank_gate", False)`` --
+            # a config read with the model's own default written beside it, and
+            # that default is the answer when the checkpoint is silent. Kimi
+            # settles `self.use_full_rank_gate` this way, and leaving it
+            # unresolved left a branch undecided that the config alone decides.
+            base = _config_value(node.func.value, config, self_values, param_values)
+            key = _config_value(node.args[0], config, self_values, param_values)
+            if isinstance(base, dict) and isinstance(key, str):
+                fallback = (
+                    _config_value(node.args[1], config, self_values, param_values)
+                    if len(node.args) >= 2
+                    else None
+                )
+                # A default this cannot read leaves the whole call unknown; a
+                # bare ``.get(key)`` really does answer None, which is a value
+                # a branch can test.
+                if fallback is not _UNKNOWN:
+                    return base.get(key, fallback)
         return _UNKNOWN
     if isinstance(node, ast.BinOp):
         left = _config_value(node.left, config, self_values, param_values)
