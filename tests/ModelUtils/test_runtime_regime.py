@@ -225,3 +225,119 @@ class TestTheOverridesAreTheLastWord:
     def test_nothing_to_override_leaves_the_config_alone(self) -> None:
         config = {"a": 1}
         assert _with_config_overrides(config, {}) is config
+
+
+KIMI_MODE = """
+def forward(self, hidden_states, cache_params: KimiLinearCache | None = None):
+    batch_size, q_len, _ = hidden_states.shape
+    use_cache = cache_params is not None
+    mode = 'fused_recurrent' if use_cache and q_len == 1 else self.mode
+    if mode == 'chunk':
+        o = chunk_kda(q, k, v)
+    else:
+        o = fused_recurrent_kda(q, k, v)
+    return o
+"""
+
+
+class TestAConstructorConstantIsReadToo:
+    """Kimi picks its KERNEL through three hops, all of them knowable.
+
+        self.mode = "chunk"                     # __init__, a constant
+        use_cache = cache_params is not None    # the cache question
+        mode = 'fused_recurrent' if use_cache and q_len == 1 else self.mode
+        if mode == 'chunk': chunk_kda(...) else: fused_recurrent_kda(...)
+
+    Reading only the comparison left the choice of kernel undecided, so a
+    decode graph drew the chunk kernels it does not run.
+    """
+
+    @staticmethod
+    def _decide(phase: str):
+        func = _func(KIMI_MODE)
+        extractor = _ForwardOperationExtractor(
+            self_values={"mode": "chunk"},
+            all_tensor_ops=False,
+            config={RUNTIME_REGIME_KEY: RuntimeRegime(phase=phase)},
+        )
+        extractor._function_root = func
+        extractor._regime_facts = _regime_facts(func)
+        return extractor._regime_outcome(_test_of(func, 0))
+
+    def test_prefill_runs_the_chunk_kernel(self) -> None:
+        assert self._decide("prefill") is True
+
+    def test_decode_runs_the_recurrent_one(self) -> None:
+        # decode: a cache is read and q_len is 1, so the conditional settles on
+        # 'fused_recurrent' and `mode == 'chunk'` is false.
+        assert self._decide("decode") is False
+
+
+class TestTheArmsTheRunDoesNotTake:
+    """The kernel-naming pass must not read an arm that cannot run.
+
+    A forward is read more than once -- the extractor walks it for operations
+    and takes the arm the run takes, while a separate parse reads the same
+    function for its calls, its attention inputs and the KERNEL it runs. Only
+    the first consulted the run, so that parse reported the FIRST kernel-shaped
+    call in source order: Kimi was labelled ``chunk_kda`` even when decoding,
+    and GLM drew its prefill convolution beside the kernel a DECODE step runs.
+
+    Spans, not a pruned tree: every other pass keeps reading the function as
+    the model wrote it. Pruning the tree instead changed what the dataflow
+    passes saw, orphaned a node, and the orphan was then wired onto the
+    attention as a bogus ``query/key/value`` operand carrying the pre-split
+    tensor.
+    """
+
+    @staticmethod
+    def _spans(phase: str):
+        from TraceLens.ModelUtils.ast_analyze import _regime_skipped_spans
+
+        return _regime_skipped_spans(
+            _func(KIMI_MODE),
+            config={RUNTIME_REGIME_KEY: RuntimeRegime(phase=phase)},
+            self_values={"mode": "chunk"},
+        )
+
+    @staticmethod
+    def _lines(source: str, spans) -> set[str]:
+        from TraceLens.ModelUtils.ast_analyze import _within_skipped
+
+        return {
+            ast.unparse(node).split("(")[0]
+            for node in ast.walk(_func(source))
+            if isinstance(node, ast.Call) and _within_skipped(node, spans)
+        }
+
+    def test_prefill_skips_the_recurrent_call(self) -> None:
+        assert "fused_recurrent_kda" in self._lines(KIMI_MODE, self._spans("prefill"))
+
+    def test_prefill_keeps_the_chunk_call(self) -> None:
+        assert "chunk_kda" not in self._lines(KIMI_MODE, self._spans("prefill"))
+
+    def test_decode_skips_the_chunk_call(self) -> None:
+        assert "chunk_kda" in self._lines(KIMI_MODE, self._spans("decode"))
+
+    def test_decode_keeps_the_recurrent_call(self) -> None:
+        assert "fused_recurrent_kda" not in self._lines(
+            KIMI_MODE, self._spans("decode")
+        )
+
+    def test_an_undecided_branch_skips_nothing(self) -> None:
+        from TraceLens.ModelUtils.ast_analyze import _regime_skipped_spans
+
+        source = """
+def forward(self, x):
+    if self.whatever_nothing_settles:
+        y = f(x)
+    else:
+        y = g(x)
+    return y
+"""
+        spans = _regime_skipped_spans(
+            _func(source),
+            config={RUNTIME_REGIME_KEY: RuntimeRegime()},
+            self_values={},
+        )
+        assert spans == ()

@@ -3979,8 +3979,15 @@ def test_glm53_graph_integrity_checks_emit_no_warnings():
 def test_glm53_attention_nodes_show_real_resolved_kernel():
     """Every attention shows what it really runs, never the generic word.
 
-    ``Glm5NextTextLinearAttention`` calls ``recurrent_kimi_delta_attention``
-    outright, so it is a kernel leaf under that name.
+    ``Glm5NextTextLinearAttention`` calls TWO kernels, in the two arms of
+    ``if use_precomputed_states and seq_len == 1``:
+    ``recurrent_kimi_delta_attention`` when decoding a single token and
+    ``chunk_kimi_delta_attention`` otherwise. The default graph is of a
+    prefill, so it is a kernel leaf under the chunk name -- it used to be
+    labelled with the recurrent one, which is the kernel a decode step runs,
+    drawn beside the convolution a PREFILL performs. The pass that names the
+    kernel re-read the source and took the first kernel-shaped call it saw,
+    without regard for which arm the run takes.
     ``Glm5NextTextAttention`` and ``Glm5NextVisionAttention`` DISPATCH, and this
     checkpoint sets no implementation -- so what they run is the
     ``eager_attention_forward`` the model writes down beside the lookup, and it
@@ -4002,7 +4009,10 @@ def test_glm53_attention_nodes_show_real_resolved_kernel():
     attn_kernels = [n for n in nodes if n["id"].endswith(":@attention:0")]
     assert attn_kernels, "expected attention kernel leaves"
     labels = {n.get("label") for n in attn_kernels}
-    assert "recurrent_kimi_delta_attention" in labels, sorted(labels)
+    assert "chunk_kimi_delta_attention" in labels, sorted(labels)
+    # And NOT the one the other arm runs: a graph of a prefill that names the
+    # decode kernel is describing two different runs at once.
+    assert "recurrent_kimi_delta_attention" not in labels, sorted(labels)
     # Nothing is left reading the bare word.
     assert "Attention" not in labels, sorted(labels)
 
@@ -4185,3 +4195,30 @@ def test_glm53_heterogeneous_decoder_group_has_no_loop_carried_tiles():
     assert stale == [], stale
 
     _assert_export_is_acyclic(nodes)
+
+
+def test_glm53_decode_shows_the_kernel_a_decode_step_runs():
+    """The companion: state a decode run and the other kernel is drawn.
+
+    ``recurrent_kimi_delta_attention`` is reached only through
+    ``use_precomputed_states and seq_len == 1`` -- a cache with something in it
+    and a single token. Neither is a config setting, so the graph has to be
+    told which run it is of before it can name this kernel honestly.
+    """
+    pytest.importorskip("huggingface_hub")
+    from TraceLens.ModelUtils.ast_analyze import RuntimeRegime
+
+    spec = load_model_spec(
+        "zai-org/GLM-5.3-Flash", detailed=True, regime=RuntimeRegime(phase="decode")
+    )
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    labels = {n.get("label") for n in nodes if n["id"].endswith(":@attention:0")}
+    assert "recurrent_kimi_delta_attention" in labels, sorted(labels)
+    assert "chunk_kimi_delta_attention" not in labels, sorted(labels)
+
+    # The convolution agrees with it: a decode step updates the conv state for
+    # one token rather than convolving a whole prompt.
+    conv = {n.get("label") for n in nodes if "conv1d" in n["id"].lower()}
+    assert "Causal Conv1D update" in conv, sorted(conv)
+    assert "Causal Conv1D" not in conv, sorted(conv)
