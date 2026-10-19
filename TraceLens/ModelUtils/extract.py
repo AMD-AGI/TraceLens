@@ -227,6 +227,69 @@ def _config_keys_anywhere(config: Any) -> set[str]:
     return found
 
 
+def _with_derived_config_values(
+    config: dict[str, Any], checkpoint: str | Path | None
+) -> dict[str, Any]:
+    """Fill gaps with values the model's own config CLASS derives.
+
+    A config class does work in ``__post_init__`` that a checkpoint never
+    writes down. DeepSeek ships neither ``layer_types`` nor
+    ``mlp_layer_types``; its class expands them into one entry PER LAYER
+    (``['sliding_attention', 'sliding_attention',
+    'compressed_sparse_attention', ...]``, ``3x 'hash_moe'`` then ``'moe'``).
+    Those lists are the only statement of what each individual layer IS, so
+    without them nothing read from source can tell layer 2 from layer 3 --
+    which is why a per-layer read like ``config.layer_types[layer_idx]``
+    stayed unresolved and the per-instance split had to come from
+    instantiating the whole model on a meta device.
+
+    Instantiating a CONFIG is far cheaper and far more likely to succeed than
+    instantiating a model, so this narrows that dependency rather than adding
+    one. Only keys the dict is MISSING or holds ``None`` for are filled: a
+    value the checkpoint states, or the caller overrode, is never touched.
+    """
+    if checkpoint is None:
+        return config
+    try:
+        from transformers import AutoConfig
+
+        live = AutoConfig.from_pretrained(str(checkpoint), trust_remote_code=True)
+    except Exception as error:  # noqa: BLE001 - any failure leaves the config as-is
+        _log.debug("no live config for %s: %s", checkpoint, error)
+        return config
+
+    def _fill(target: dict[str, Any], source: Any) -> dict[str, Any]:
+        """Take the PER-LAYER lists, and nothing else.
+
+        A list with one entry per layer is the only thing that says what an
+        individual layer is, which is what per-instance resolution needs. The
+        first draft merged everything the live config carried, and that is how
+        `id2label` -- keyed by int on an object, by string in JSON -- reached a
+        parser that assumed string keys.
+        """
+        values = getattr(source, "__dict__", None)
+        if not isinstance(values, dict):
+            return target
+        depth = _as_int(values.get("num_hidden_layers"))
+        merged = dict(target)
+        for key, value in values.items():
+            if str(key).startswith("_") or merged.get(key) is not None:
+                continue
+            if isinstance(value, (list, tuple)) and depth and len(value) == depth:
+                merged[str(key)] = list(value)
+        return merged
+
+    merged = _fill(config, live)
+    text = getattr(live, "text_config", None)
+    if text is not None and text is not live:
+        inner = merged.get("text_config")
+        if isinstance(inner, dict):
+            merged["text_config"] = _fill(inner, text)
+        else:
+            merged = _fill(merged, text)
+    return merged
+
+
 def _with_declared_defaults(
     config: dict[str, Any], source_files: list[Any]
 ) -> dict[str, Any]:
@@ -642,7 +705,9 @@ def _config_has_per_layer_typing(config: dict[str, Any]) -> bool:
         *([value for value in config.values() if isinstance(value, dict)]),
     ]:
         for key, value in container.items():
-            if "layer" in key.lower() and isinstance(value, list) and value:
+            # Not every config key is a string: `id2label` is keyed by int on a
+            # live config object, and assuming otherwise crashed the whole parse.
+            if "layer" in str(key).lower() and isinstance(value, list) and value:
                 if all(_as_int(item) is not None for item in value):
                     return True
     return False
@@ -2199,6 +2264,8 @@ def load_architecture(
         revision=revision,
     )
     resolved_regime = regime or RuntimeRegime()
+    # What the model's own config class derives, before anything reads it.
+    config = _with_derived_config_values(config, resolved_checkpoint)
     overrides = dict(config_overrides or {})
     # Early, so the defaults, aliases and class resolution below all read the
     # values the caller asked for rather than the ones they replace.
