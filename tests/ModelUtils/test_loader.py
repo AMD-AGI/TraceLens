@@ -14,6 +14,7 @@ import pytest
 
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.loader import load_model_spec, resolve_checkpoint_arg
+from tests.model_pins import pin_for
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
@@ -48,11 +49,15 @@ def test_load_model_spec_requires_modeling_source(tmp_path: Path):
 
 def test_load_model_spec_hf_kimi():
     pytest.importorskip("huggingface_hub")
+    # Read the revision this assertion was written against. The hub head moves.
+    pin = pin_for("moonshotai/Kimi-K3")
+    assert pin is not None
     spec = load_model_spec(
         "moonshotai/Kimi-K3",
         detailed=True,
         basic_ops=BasicOpFilter.for_detailed(),
         require_code=True,
+        revision=pin.revision,
     )
     assert spec.checkpoint_source
     assert any(src.startswith("hf://") for src in spec.code_sources)
