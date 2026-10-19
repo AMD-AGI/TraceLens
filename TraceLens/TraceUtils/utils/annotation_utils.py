@@ -69,6 +69,13 @@ SPEC_ROLE_DRAFTER_EXTEND = "drafter_extend"
 # draft_extend   <- drafter extend (eager, prefill-shaped)
 SGLANG_DRAFT_DECODE_PATTERN = re.compile(r"^draft$")
 SGLANG_DRAFT_EXTEND_PATTERN = re.compile(r"^draft_extend$")
+# vLLM wraps sample_tokens with the execute annotation shape. The HIP graph
+# replays under it are the drafter; the lookup key is generation request count,
+# not the token batch in sq.
+# sample_128_context_0(sq0sk0sqsq0sqsk0)_generation_32(sq128sk42473sqsq512sqsk169892)
+VLLM_SAMPLE_PATTERN = re.compile(
+    r"sample_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
+)
 # ATOM spec-decode annotations.
 # decode[bs=32 tok=128 d=32 spec=3]  <- target verify (decode with speculative steps)
 ATOM_VERIFY_PATTERN = re.compile(r"^decode\[.*\bspec=\d+.*\]")
@@ -81,6 +88,7 @@ SPEC_VERIFY_PATTERNS = [SGLANG_VERIFY_PATTERN, ATOM_VERIFY_PATTERN]
 SPEC_DRAFT_PATTERNS = [
     (SGLANG_DRAFT_DECODE_PATTERN, SPEC_ROLE_DRAFTER),
     (SGLANG_DRAFT_EXTEND_PATTERN, SPEC_ROLE_DRAFTER_EXTEND),
+    (VLLM_SAMPLE_PATTERN, SPEC_ROLE_DRAFTER),
     (ATOM_PROPOSE_EXTEND_PATTERN, SPEC_ROLE_DRAFTER_EXTEND),
     (ATOM_PROPOSE_DECODE_PATTERN, SPEC_ROLE_DRAFTER),
 ]
@@ -447,7 +455,9 @@ def find_known_annotations(annotations: List[dict]) -> List[dict]:
 
 
 def _match_verify_role(name: str) -> Optional[str]:
-    return SPEC_ROLE_TARGET if any(p.match(name) for p in SPEC_VERIFY_PATTERNS) else None
+    return (
+        SPEC_ROLE_TARGET if any(p.match(name) for p in SPEC_VERIFY_PATTERNS) else None
+    )
 
 
 def _match_draft_role(name: str) -> Optional[str]:
@@ -477,11 +487,12 @@ def find_spec_decode_annotations(annotations: List[dict]) -> List[dict]:
 def spec_decode_batch_sizes(roots: List[dict]) -> List[Optional[int]]:
     """Request batch size per root, aligned with *roots*.
 
-    Requests, not tokens: SGLang captures are keyed by request bs, while a
-    detailed verify label's ``batch_size`` counts draft tokens.
+    Requests, not tokens: SGLang and ATOM captures are keyed by request bs,
+    while a detailed verify label's ``batch_size`` counts draft tokens.
     Drafter stage spans carry no batch size; they take it from the VERIFY root
-    closest in time, which belongs to the same iteration. ``None`` for roots
-    that are not spec-decode roots or have no VERIFY to borrow from.
+    closest in time, which belongs to the same iteration. A vLLM ``sample_``
+    span carries its own generation request count. ``None`` for roots that are
+    not spec-decode roots or have no VERIFY to borrow from.
     """
 
     def requests(root):
@@ -499,7 +510,12 @@ def spec_decode_batch_sizes(roots: List[dict]) -> List[Optional[int]]:
 
     sizes = []
     for root in roots:
-        role = spec_decode_role(root.get("name", ""))
+        name = root.get("name", "")
+        if VLLM_SAMPLE_PATTERN.match(name):
+            ann = IterationAnnotation("execute_" + name[len("sample_") :])
+            sizes.append(ann.generation_requests or ann.num_requests)
+            continue
+        role = spec_decode_role(name)
         if role == SPEC_ROLE_TARGET:
             sizes.append(requests(root))
             continue

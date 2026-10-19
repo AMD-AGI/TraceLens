@@ -44,14 +44,21 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
 
 # Constants
 # Capture role from the file name: SGLang runner classes (EAGLEDraftExtend*,
-# EAGLEDraft*, DraftDecode*) and the vLLM speculator (graph_capture_rank_0_speculator.*).
+# EAGLEDraft*, DraftDecode*), the vLLM speculator
+# (graph_capture_rank_0_speculator.*), and ATOM's drafter step
+# (draft_step_forward_bs_*).
 CAPTURE_ROLE_PATTERNS = [
     (re.compile(r"DraftExtend"), SPEC_ROLE_DRAFTER_EXTEND),
-    (re.compile(r"Draft|_speculator"), SPEC_ROLE_DRAFTER),
+    (re.compile(r"Draft|_speculator|draft_step_forward"), SPEC_ROLE_DRAFTER),
 ]
 # DecodeCudaGraphRunner_bs_32_rank0.json.gz: SGLang names captures by request
 # batch size, while the most common first dim counts tokens (bs x draft tokens).
 SGLANG_RUNNER_BS_PATTERN = re.compile(r"^\w*CudaGraphRunner_bs_(\d+)_")
+# bs_32_q_4_rank0.json.gz / bs_32_rank0.json.gz: ATOM names the target graph
+# by request batch size. The leading tensor dim counts tokens (bs x query).
+# draft_step_forward_bs_32_rank0.json.gz is the drafter decode graph.
+ATOM_TARGET_BS_PATTERN = re.compile(r"^bs_(\d+)(?:_q_\d+)?_rank_?\d+")
+ATOM_DRAFT_BS_PATTERN = re.compile(r"^draft_step_forward_bs_(\d+)_rank_?\d+")
 
 
 def perf_report_sanity_check(
@@ -305,8 +312,17 @@ def classify_graph_capture_trace(input_folder: str):
         num_captures = count_stream_begin_captures(events)
         mode = infer_mode_from_captures(num_captures)
         tokens = most_common_first_dim(events)
+        atom_draft = ATOM_DRAFT_BS_PATTERN.match(basename)
+        atom_target = ATOM_TARGET_BS_PATTERN.match(basename)
         runner_bs = SGLANG_RUNNER_BS_PATTERN.match(basename)
-        batch_size = int(runner_bs.group(1)) if runner_bs else tokens
+        if atom_draft:
+            batch_size = int(atom_draft.group(1))
+        elif atom_target:
+            batch_size = int(atom_target.group(1))
+        elif runner_bs:
+            batch_size = int(runner_bs.group(1))
+        else:
+            batch_size = tokens
         print(
             f"batch_size: {batch_size}, mode: {mode}, capture_type: {role} inferred, num_captures: {num_captures}"
         )

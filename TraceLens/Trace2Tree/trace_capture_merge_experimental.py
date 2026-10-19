@@ -653,6 +653,25 @@ def load_capture_folder(
     return result, batch_sizes
 
 
+def _same_graph_replay(graph_tree, graph_roots) -> bool:
+    """True when every graph launch replays one kernel sequence.
+
+    Speculative decoding replays one FULL drafter graph several times in a
+    step. A piecewise capture is the case where those sequences differ.
+    """
+    if len(graph_roots) <= 1:
+        return True
+    signatures = []
+    for root in graph_roots:
+        _, filtered = get_subtree_events(
+            graph_tree,
+            root,
+            cat_filter=["kernel", "gpu_memset", "gpu_memcpy"],
+        )
+        signatures.append(tuple(event["name"] for event in filtered))
+    return len(set(signatures)) == 1
+
+
 def find_closest_batch_size(
     batch_size: int, capture_batch_sizes: List[int]
 ) -> Optional[int]:
@@ -759,12 +778,15 @@ def merge_capture_trace_into_graph(
         # Look up the capture trace by batch_size.  The mode (FULL vs
         # PIECEWISE) is already determined in execution_details.json from
         # the capture trace's StreamBeginCapture count.  Try both modes
-        # and use whichever is available; when both exist, prefer the one
-        # matching the graph launch count.
+        # and use whichever is available; when both exist, repeated replays
+        # of one kernel sequence use FULL, and differing sequences use
+        # PIECEWISE.
         full_key = "{}_{}_FULL".format(role, closest_batch_size)
         piece_key = "{}_{}_PIECEWISE".format(role, closest_batch_size)
         if full_key in capture_map and piece_key in capture_map:
-            str_key = piece_key if len(graph_roots) != 1 else full_key
+            str_key = (
+                full_key if _same_graph_replay(graph_tree, graph_roots) else piece_key
+            )
         elif full_key in capture_map:
             str_key = full_key
         elif piece_key in capture_map:

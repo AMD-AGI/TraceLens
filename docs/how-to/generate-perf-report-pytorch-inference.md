@@ -324,7 +324,7 @@ annotations and graph-capture tracing:
 | `ATOM_ENABLE_DETAILED_ANNOTATION` | env var    | When`1`, execution-step annotations carry roofline metrics (`sqsq`, `sqsk`, `sk`) alongside the batch and token counts. The aggregates are computed only while the profiler is running, so unprofiled steps pay nothing. |
 | `ATOM_PROFILER_MORE`              | env var    | When`1`, records shapes and CPU call stacks, which the report needs for shape-level analysis.                                                                                                                                  |
 | `--torch-profiler-dir DIR`        | server arg | Destination for the profiler traces. ATOM writes one subdirectory per rank (`rank_N/`).                                                                                                                                        |
-| `--mark-trace`                    | server arg | Enables the graph-capture profiler, writing one trace per captured batch size to`capture_traces/bs_{bs}_rank{N}.json.gz`. Recent nightlies add a query-length field and use `bs_{bs}_q_{q}_rank{N}.json.gz` instead.         |
+| `--mark-trace`                    | server arg | Enables the graph-capture profiler. Target files are `bs_{bs}_rank{N}.json.gz` or `bs_{bs}_q_{q}_rank{N}.json.gz`. Drafter files are `draft_step_forward_bs_{bs}_rank{N}.json.gz`. TraceLens keys both by the request batch size in the file name.         |
 
 ```bash
 export ATOM_PROFILER_MORE=1
@@ -473,8 +473,15 @@ root. SGLang captures are keyed by request batch size, taken from the
 (`step[TARGET_VERIFY bs=N c_sq=... c_sqsq=...]`) is also an iteration root, so the
 trace splitter splits on it; it counts as a decode step. `step[DRAFT ...]` spans and stages without a
 graph launch aren't merged. vLLM speculator captures
-(`graph_capture_rank_0_speculator.*`) are classified as `drafter`, which keeps them
-from replacing target captures; the speculator's replay graphs aren't merged yet.
+(`graph_capture_rank_0_speculator.*`) are classified as `drafter`. The drafter
+replays sit under `sample_` spans that mirror the `execute_` annotation; those
+spans merge with the drafter capture keyed by generation request count. Several
+launches of one kernel sequence share the FULL capture. ATOM target files
+`bs_{bs}_q_{q}_rank{N}` and drafter files `draft_step_forward_bs_{bs}_rank{N}` are
+keyed by that request batch size. `decode[bs=N tok=... spec=...]` merges with the
+target capture, `propose_*[0/...]` with drafter extend, and later `propose_*`
+steps with the drafter capture. The propose spans borrow `N` from the adjacent
+decode annotation.
 
 ## Inference-oriented options
 

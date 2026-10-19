@@ -970,6 +970,39 @@ def test_find_spec_decode_annotations_coexists_with_detailed_tier():
     assert [e["name"] for e in roots] == ["draft", "step[VERIFY bs=32]", "draft_extend"]
 
 
+VLLM_SAMPLE = (
+    "sample_128_context_0(sq0sk0sqsq0sqsk0)"
+    "_generation_32(sq128sk42473sqsq512sqsk169892)"
+)
+VLLM_SAMPLE_PARTIAL = (
+    "sample_124_context_0(sq0sk0sqsq0sqsk0)"
+    "_generation_31(sq124sk41406sqsq496sqsk165624)"
+)
+
+
+def test_vllm_sample_is_drafter_not_an_iteration_root():
+    assert spec_decode_role(VLLM_SAMPLE) == SPEC_ROLE_DRAFTER
+    assert not IterationAnnotation(VLLM_SAMPLE).matched
+    assert find_known_annotations([_event(VLLM_SAMPLE)]) == []
+    assert [e["name"] for e in find_spec_decode_annotations([_event(VLLM_SAMPLE)])] == [
+        VLLM_SAMPLE
+    ]
+
+
+def test_vllm_sample_batch_is_generation_requests():
+    execute = (
+        "execute_128_context_0(sq0sk0sqsq0sqsk0)"
+        "_generation_32(sq128sk42473sqsq512sqsk169892)"
+    )
+    assert spec_decode_batch_sizes(
+        [
+            _span(VLLM_SAMPLE, ts=0),
+            _span(execute, ts=10),
+            _span(VLLM_SAMPLE_PARTIAL, ts=20),
+        ]
+    ) == [32, None, 31]
+
+
 def test_spec_decode_batch_sizes_borrow_from_nearest_verify():
     roots = [
         _span("draft", ts=0),

@@ -27,6 +27,7 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _capture_kernel_name,
     _capture_tree_cache,
     _get_cached_capture_tree,
+    _same_graph_replay,
     align_streams,
     build_execution_graph_root_map,
     capture_has_kernel_names,
@@ -526,7 +527,32 @@ def test_merge_capture_trace_integration(dirpath, trace_gz, capture_folder):
     assert len(merged.events) > 0
 
 
+class _ChildTree:
+    def event_to_category(self, event):
+        return event.get("cat")
+
+    def get_children_events(self, event):
+        return event.get("children_events", [])
+
+
+def _launch(kernel_name):
+    return {
+        "name": "hipGraphLaunch",
+        "cat": "cuda_runtime",
+        "ts": 0,
+        "children_events": [
+            {"name": kernel_name, "cat": "kernel", "ts": 1, "children_events": []}
+        ],
+    }
+
+
 class TestCaptureMergeHelpers:
+    def test_same_graph_replay_keeps_repeated_full_launches_together(self):
+        tree = _ChildTree()
+        assert _same_graph_replay(tree, [_launch("draft")])
+        assert _same_graph_replay(tree, [_launch("draft"), _launch("draft")])
+        assert not _same_graph_replay(tree, [_launch("draft"), _launch("extend")])
+
     def test_align_capture_to_graph_memcpy(self):
         capture = [{"name": "cudaMemcpy", "args": {}}]
         graph = [{"name": "MemcpyHtoD", "args": {}}]
@@ -660,6 +686,35 @@ class TestInferenceZipPhase8:
                 7,
             ),
             "graph_capture_rank_0.json.gz": ("target", 16),
+        }
+
+    def test_classify_atom_spec_decode_captures(self, tmp_path):
+        """ATOM filenames give request bs, not the token dim inside the file."""
+        capture_dir = tmp_path / "cap"
+        capture_dir.mkdir()
+        files = {
+            "bs_32_q_4_rank0.json.gz": 128,
+            "bs_7_rank0.json.gz": 28,
+            "draft_step_forward_bs_32_rank0.json.gz": 32,
+        }
+        for name, tokens in files.items():
+            events = [
+                _mk_event("cuda_runtime", "hipStreamBeginCapture", 0, 10, 1, 1, {}),
+                _mk_event(
+                    "cpu_op", "aten::mm", 20, 5, 1, 1, {"Input Dims": [[tokens, 8]]}
+                ),
+            ]
+            with gzip.open(capture_dir / name, "wt", encoding="utf-8") as f:
+                json.dump({"traceEvents": events}, f)
+        classify_graph_capture_trace(str(capture_dir))
+        details = json.loads((capture_dir / "execution_details.json").read_text())
+        got = {
+            d["file"]: (d["capture_type"], d["batch_size"], d["mode"]) for d in details
+        }
+        assert got == {
+            "bs_32_q_4_rank0.json.gz": ("target", 32, "FULL"),
+            "bs_7_rank0.json.gz": ("target", 7, "FULL"),
+            "draft_step_forward_bs_32_rank0.json.gz": ("drafter", 32, "FULL"),
         }
 
 
