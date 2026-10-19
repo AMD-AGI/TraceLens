@@ -117,6 +117,7 @@ def get_pseudo_op_mappings():
         "aiter::rmsnorm2d_fwd_with_add_ck": rmsnorm_perf_model_extensions.aiter_rmsnorm2d_fwd_with_add_ck,
         "aiter::add_rmsnorm": rmsnorm_perf_model_extensions.aiter_rmsnorm2d_fwd_with_add_ck,
         "aiter::rmsnorm2d_fwd_with_dynamicquant_ck": rmsnorm_perf_model_extensions.aiter_rmsnorm2d_fwd_with_dynamicquant_ck,
+        "aiter::_fused_qk_rmsnorm_kernel": rmsnorm_perf_model_extensions.aiter_fused_qk_rmsnorm,
         "vllm::rocm_aiter_rmsnorm_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_fp8_group_quant,
         "vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant,
         "vllm::rocm_aiter_triton_add_rmsnorm_pad": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,

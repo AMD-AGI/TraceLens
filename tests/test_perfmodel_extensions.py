@@ -85,6 +85,7 @@ from TraceLens.PerfModel.extensions.pseudo_ops_perf_utils import (
 from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
     RMSNorm,
     aiter_add_rmsnorm,
+    aiter_fused_qk_rmsnorm,
     aiter_rmsnorm,
     aiter_rmsnorm2d_fwd_with_dynamicquant_ck,
     aiter_rmsnorm_quant,
@@ -1600,6 +1601,47 @@ class TestRmsNormExtensionsCoverage:
         }
         model = aiter_rmsnorm(event)
         assert model.flops() > 0
+
+    def test_aiter_fused_qk_rmsnorm(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    (12, 2048),
+                    (2048,),
+                    (),
+                    (12, 512),
+                    (512,),
+                    (),
+                    (12, 2048),
+                    (12, 512),
+                ],
+                "Input type": ["c10::BFloat16"] * 8,
+                "Input Strides": [
+                    (2624, 1),
+                    (1,),
+                    (),
+                    (2624, 1),
+                    (1,),
+                    (),
+                    (2048, 1),
+                    (512, 1),
+                ],
+            }
+        }
+        model = aiter_fused_qk_rmsnorm(event)
+        assert model.num_channels == 2048
+        assert model.k_num_channels == 512
+        q_only = aiter_rmsnorm(
+            {
+                "args": {
+                    "Input Dims": [(12, 2048), (12, 2048), (2048,), ()],
+                    "Input type": ["c10::BFloat16"] * 3 + ["Scalar"],
+                    "Input Strides": [(2048, 1), (2048, 1), (1,), ()],
+                }
+            }
+        )
+        assert model.flops() > q_only.flops()
+        assert model.bytes() > q_only.bytes()
 
     def test_aiter_rmsnorm2d_dynamicquant(self):
         event = {
