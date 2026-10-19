@@ -1788,8 +1788,6 @@ class TestAttentionExtensionsCoverage:
         assert model.flops() > 0
 
     def test_mla_tilelang_sparse_fwd_topk_sliding_window(self):
-        # glm53 decode shapes: dense annotation blows the roofline without
-        # capping g_sk/g_sqsk to indices topk (Input Dims[2][-1]).
         event = {
             "annotation": (
                 "execute_11_context_0(sq0sk0sqsq0sqsk0)"
@@ -1809,7 +1807,7 @@ class TestAttentionExtensionsCoverage:
         bytes_mib = model.bytes() / (1024**2)
         assert bytes_mib < 1815
         assert 20 <= bytes_mib <= 30
-        duration_s = 21.81e-6  # report mean, seconds
+        duration_s = 21.81e-6
         tb_per_s = model.bytes() / duration_s / 1e12
         assert tb_per_s < 7.4
         assert 0.5 <= tb_per_s <= 2.0

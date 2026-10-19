@@ -711,7 +711,9 @@ class pseudo_mla_prefill_fwd(InferenceAttention):
 
 
 class mla_tilelang_sparse_fwd(InferenceAttention):
-    """Perf model for TileLang SparseMLA (``sglang::tilelang_sparse_fwd``).
+    """
+    Performance model for ``sglang::tilelang_sparse_fwd`` (TileLang SparseMLA;
+    inference: sglang).
 
     Indices topk from ``Input Dims[2][-1]`` → ``sliding_window`` /
     :meth:`InferenceAttention._cap_gen_kv`.
