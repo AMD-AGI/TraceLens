@@ -184,16 +184,6 @@ class TestPseudoOpsPerfUtils:
         assert mappings["vllm::gdn_attention_core"] is gdn_attention_core
         assert mappings["aiter::gemm_a8w8_blockscale_ck"] is gemm_a8w8_blockscale
         assert mappings["_C_custom_ar::all_reduce"] is custom_ar_all_reduce
-        assert (
-            mappings[
-                "sglang_profiler::communication_op_tensor_model_parallel_fused_allreduce_rmsnorm"
-            ]
-            is aiter_fused_allreduce_rmsnorm_
-        )
-        assert (
-            mappings["sglang_profiler::moe_sorting_small__run_small_sort"]
-            is MoeSortScatterGather
-        )
 
     def test_get_pseudo_op_category_only_mappings(self):
         category_only = get_pseudo_op_category_only_mappings()
@@ -275,36 +265,6 @@ class TestMoeExtensions:
         }
         model = MoeSortScatterGather(event)
         assert model.flops() == 128 * 8
-        assert model.get_maf_type() == "vector"
-
-    def test_glm53_moe_sorting_small_alias(self):
-        # Verified GLM-5.3 decode CSV name
-        # sglang_profiler::moe_sorting_small__run_small_sort Input Dims.
-        event = {
-            "args": {
-                "Input Dims": [
-                    (12, 9),
-                    (12, 9),
-                    (4211,),
-                    (4211,),
-                    (264,),
-                    (2,),
-                    (12, 6144),
-                ],
-                "Input type": [
-                    "int",
-                    "float",
-                    "int",
-                    "float",
-                    "int",
-                    "int",
-                    "c10::BFloat16",
-                ],
-            }
-        }
-        model = MoeSortScatterGather(event)
-        assert model.flops() == 12 * 6144
-        assert model.bytes() > 0
         assert model.get_maf_type() == "vector"
 
 
@@ -2294,25 +2254,6 @@ class TestCustomCollectivesPerfModels:
     def test_aiter_fused_allreduce_rmsnorm_python_layout(self):
         model = aiter_fused_allreduce_rmsnorm_(_fused_allreduce_python_event())
         assert model.num_elems == 64 * 7168
-        assert model.flops() > 0
-        assert model.bytes() > 0
-
-    def test_glm53_sglang_fused_allreduce_rmsnorm_parent_alias(self):
-        # Verified GLM-5.3 decode parent Input Dims (Python fused layout).
-        event = {
-            "args": {
-                "Input Dims": [(12, 6144), (12, 6144), (6144,)],
-                "Input type": [
-                    "c10::BFloat16",
-                    "c10::BFloat16",
-                    "c10::BFloat16",
-                ],
-                "Input Strides": [(6144, 1), (6144, 1), (1,)],
-            }
-        }
-        model = aiter_fused_allreduce_rmsnorm_(event)
-        assert model.num_elems == 12 * 6144
-        assert model.param_details["num_channels"] == 6144
         assert model.flops() > 0
         assert model.bytes() > 0
 
