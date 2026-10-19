@@ -14,12 +14,17 @@ import pytest
 
 from TraceLens.ModelUtils.torch_introspect import (
     FxNodeInfo,
+    InputSpec,
     _dotted_prefixes,
     computation_graph_from_fx_inventory,
     explorer_graph_from_fx_inventory,
     payload_from_fx_inventory,
+    symbolic_example_sizes,
 )
-from TraceLens.Visualizer.model_explorer_export.cli import parse_input_shape
+from TraceLens.Visualizer.model_explorer_export.cli import (
+    parse_input_shape,
+    parse_input_spec,
+)
 
 
 def _sample_inventory():
@@ -134,3 +139,38 @@ def test_parse_input_shape_valid_and_invalid():
         parse_input_shape("")
     with pytest.raises(ValueError):
         parse_input_shape("2,abc")
+
+
+def test_parse_input_spec_mixes_symbolic_and_static_dims():
+    assert parse_input_spec("ids=B,S:int64") == InputSpec("ids", ("B", "S"), "int64")
+    assert parse_input_spec(" x = B , 3 , 224 ") == InputSpec("x", ("B", 3, 224))
+    for bad in ("B,S", "=B,S", "ids=", "ids=B,,S", "ids=B,-1", "1x=B"):
+        with pytest.raises(ValueError):
+            parse_input_spec(bad)
+
+
+def test_symbolic_example_sizes_are_distinct_and_never_0_or_1():
+    specs = [InputSpec("ids", ("B", "S")), InputSpec("links", ("B", "S", 48, "K"))]
+    sizes = symbolic_example_sizes(specs)
+    assert list(sizes) == ["B", "S", "K"]
+    assert len(set(sizes.values())) == 3
+    assert min(sizes.values()) > 1
+
+
+def test_nodes_no_input_reaches_are_constant():
+    inventory = [
+        FxNodeInfo(name="ids", op="placeholder", label="ids"),
+        FxNodeInfo(name="freqs", op="call_function", label="arange"),
+        FxNodeInfo(name="inv", op="call_function", label="pow", inputs=["freqs"]),
+        FxNodeInfo(
+            name="positions", op="call_function", label="arange", reads_sizes=True
+        ),
+        FxNodeInfo(
+            name="angles", op="call_function", label="mul", inputs=["positions", "inv"]
+        ),
+        FxNodeInfo(name="emb", op="call_function", label="embedding", inputs=["ids"]),
+        FxNodeInfo(name="out", op="output", label="Output", inputs=["emb"]),
+    ]
+    graph = computation_graph_from_fx_inventory(inventory)
+    constant = {node.key for node in graph.nodes if node.constant}
+    assert constant == {"freqs", "inv"}

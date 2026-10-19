@@ -158,6 +158,7 @@ python -m TraceLens.Visualizer.model_explorer_export.cli --from-payload kimi.jso
 | `--operators-json PATH`         | Also write flat operator export JSON with inferred shapes                                               |
 | `--torch-module PKG.MOD:FACTORY` | *(debugging)* Introspect a plain `torch.nn.Module` instead of an HF checkpoint (see below)              |
 | `--input-shape N,...`           | *(debugging)* Primary input tensor shape for `--torch-module` (e.g. `2,128`)                            |
+| `--input-spec NAME=DIM,...[:DTYPE]` | *(debugging)* A named forward input for `--torch-module`, traced with `torch.export` (repeatable); a DIM may be a symbolic name such as `B` or `S` |
 
 
 Shape inference is **on by default**, and every exported node carries output metadata so the viewer shows tensor shapes on edges instead of `?`. Nodes without an inferred shape of their own (overview spine tiles, group input ports) inherit the shape of whatever feeds them. Model Explorer cannot label an edge that ends on a collapsed group, so expandable blocks also carry `input_shape` and `output_shape` layer attributes describing what crosses their boundary. Dimensions use the symbols `B` (batch), `S` (sequence), `H` (hidden), `V` (vocab), `N`/`K` (attention and KV heads), `D` (head dim), `I` (intermediate), `E` (experts) and `TopK`.
@@ -191,6 +192,37 @@ factory) plus the primary `--input-shape`:
 python -m TraceLens.Visualizer.model_explorer_export.cli \
   --torch-module my_pkg.models:MyBlock --input-shape 2,128 -o myblock.html
 ```
+
+`torch.fx` cannot trace a module whose Python code branches on tensor
+sizes, and `--input-shape` describes one floating-point input. For a module
+with several inputs, integer inputs, or shape-dependent control flow, give
+one `--input-spec` per forward argument instead; the module is then traced
+with `torch.export` and the inputs are passed by keyword:
+
+```bash
+python -m TraceLens.Visualizer.model_explorer_export.cli \
+  --torch-module my_pkg.models:build_lm \
+  --input-spec input_ids=B,S:int64 --input-spec links=B,S,48:int64 \
+  -o my_lm.html
+```
+
+Each DIM is an int or a symbolic name, and a name shared across inputs is the
+same dimension. Symbolic dims stay symbolic in every shape (`[B, S, 512]`,
+`[B*S, 64]`) rather than echoing the example sizes. Inputs are zero-filled, a
+valid index for embedding and gather inputs; DTYPE defaults to the module's
+floating dtype. When the module bounds a dimension itself (say, a
+position table caps `S`), the bound is applied and logged. The graph shows
+ATen-level ops, and the module hierarchy becomes nested groups.
+
+`torch.export` reads every symbolic size off a model input, whichever tensor
+the code read it from, so an op with no tensor operand (`arange(N)`) is docked
+on the tensor the source actually reads: the model's own lines are followed
+from the op back through its size names (`B, N = W.shape`, a helper's
+parameter, `max(N, 4096)`) to a tensor variable, and from there to the node
+that variable held at that point in the trace. An op whose source cannot be
+followed is drawn with no input and logged. Ops that no model input reaches
+(a weight read, a literal frequency table) are tagged constant and hidden by
+`--drop-constants`, like weights in the checkpoint pipeline.
 
 This path is intentionally kept for debugging and is separate from the HF
 checkpoint pipeline; it is not part of the default export flow.

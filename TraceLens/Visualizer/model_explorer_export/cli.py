@@ -36,6 +36,7 @@ from TraceLens.ModelUtils.loader import (
     resolve_checkpoint_arg,
 )
 from TraceLens.ModelUtils.shape_inference import save_operator_export
+from TraceLens.ModelUtils.torch_introspect import InputSpec
 
 from TraceLens.Visualizer.model_explorer_export.ast_build import (
     build_model_explorer_payload as build_ast_model_explorer_payload,
@@ -313,14 +314,27 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Introspect a plain torch.nn.Module instead of an HF checkpoint. "
             "Give an importable 'package.module:callable' that returns an "
-            "nn.Module (a class or zero-arg factory). Requires torch; the "
-            "module is symbolically traced with torch.fx. Requires --input-shape."
+            "nn.Module (a class or zero-arg factory). Requires torch and "
+            "exactly one of --input-shape (torch.fx) or --input-spec (torch.export)."
         ),
     )
     torch_group.add_argument(
         "--input-shape",
         metavar="N,...",
         help="Comma-separated primary input tensor shape for --torch-module (e.g. 2,128)",
+    )
+    torch_group.add_argument(
+        "--input-spec",
+        action="append",
+        default=[],
+        metavar="NAME=DIM,...[:DTYPE]",
+        help=(
+            "A named forward input for --torch-module, traced with torch.export "
+            "(repeatable). Each DIM is an int or a symbolic name kept symbolic "
+            "in every shape; a name shared across inputs is one dimension. "
+            "DTYPE defaults to the module's float dtype "
+            "(e.g. --input-spec input_ids=B,S:int64)."
+        ),
     )
     return parser
 
@@ -502,6 +516,29 @@ def parse_input_shape(text: str) -> tuple[int, ...]:
         ) from exc
 
 
+def parse_input_spec(text: str) -> InputSpec:
+    """Parse a ``"W=B,S:int64"`` style ``--input-spec`` into an :class:`InputSpec`."""
+    name, sep, rest = str(text).partition("=")
+    dims_text, _, dtype = rest.partition(":")
+    parts = [part.strip() for part in dims_text.split(",")]
+    if not sep or not name.strip().isidentifier() or not all(parts):
+        raise ValueError(
+            f"--input-spec must be NAME=DIM,...[:DTYPE], e.g. input_ids=B,S:int64; "
+            f"got {text!r}"
+        )
+    dims: list[int | str] = []
+    for part in parts:
+        if part.isdigit():
+            dims.append(int(part))
+        elif part.isidentifier():
+            dims.append(part)
+        else:
+            raise ValueError(
+                f"--input-spec dim {part!r} is neither an int nor a name: {text!r}"
+            )
+    return InputSpec(name.strip(), tuple(dims), dtype.strip() or None)
+
+
 def _load_torch_module(target: str):  # pragma: no cover
     """Import ``package.module:callable`` and instantiate an ``nn.Module``."""
     import importlib
@@ -518,11 +555,19 @@ def _load_torch_module(target: str):  # pragma: no cover
 
 
 def _build_torch_module_payload(args: argparse.Namespace) -> dict:  # pragma: no cover
-    from TraceLens.ModelUtils.torch_introspect import build_torch_module_payload
+    from TraceLens.ModelUtils.torch_introspect import (
+        build_exported_module_payload,
+        build_torch_module_payload,
+    )
 
     module = _load_torch_module(args.torch_module)
-    input_shape = parse_input_shape(args.input_shape)
     name = args.title or type(module).__name__
+    if args.input_spec:
+        input_specs = [parse_input_spec(text) for text in args.input_spec]
+        return build_exported_module_payload(
+            module, input_specs, include_shapes=args.shapes, name=name
+        )
+    input_shape = parse_input_shape(args.input_shape)
     return build_torch_module_payload(
         module, input_shape, include_shapes=args.shapes, name=name
     )
@@ -588,8 +633,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_from_payload(args, parser)
 
     if args.torch_module is not None:
-        if args.input_shape is None:
-            parser.error("--torch-module requires --input-shape")
+        if (args.input_shape is None) == (not args.input_spec):
+            parser.error(
+                "--torch-module requires exactly one of --input-shape or --input-spec"
+            )
         return _run_torch_module(args, parser)
 
     checkpoint = resolve_checkpoint_arg(checkpoint=args.checkpoint, source=args.source)
