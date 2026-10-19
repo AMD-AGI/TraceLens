@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 import json
 import logging
 from dataclasses import dataclass, field
@@ -227,6 +228,25 @@ def _config_keys_anywhere(config: Any) -> set[str]:
     return found
 
 
+@functools.lru_cache(maxsize=32)
+def _live_config(checkpoint: str) -> Any:
+    """The model's own config object, loaded ONCE per checkpoint.
+
+    Cached because this reaches the hub: one spec load became one more API
+    call, and a test session that loads the same handful of checkpoints over
+    and over spent its unauthenticated rate limit on asking the same question
+    repeatedly -- until the hub answered 429 and an unrelated config-discovery
+    test failed. A config does not change between loads in one process.
+    """
+    try:
+        from transformers import AutoConfig
+
+        return AutoConfig.from_pretrained(checkpoint, trust_remote_code=True)
+    except Exception as error:  # noqa: BLE001 - any failure leaves the config as-is
+        _log.debug("no live config for %s: %s", checkpoint, error)
+        return None
+
+
 def _with_derived_config_values(
     config: dict[str, Any], checkpoint: str | Path | None
 ) -> dict[str, Any]:
@@ -250,12 +270,8 @@ def _with_derived_config_values(
     """
     if checkpoint is None:
         return config
-    try:
-        from transformers import AutoConfig
-
-        live = AutoConfig.from_pretrained(str(checkpoint), trust_remote_code=True)
-    except Exception as error:  # noqa: BLE001 - any failure leaves the config as-is
-        _log.debug("no live config for %s: %s", checkpoint, error)
+    live = _live_config(str(checkpoint))
+    if live is None:
         return config
 
     def _fill(target: dict[str, Any], source: Any) -> dict[str, Any]:
