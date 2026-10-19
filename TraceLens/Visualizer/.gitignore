@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.png
+*.svg
+*.pdf
+.pytest_cache/
+.cache/
+
+# Generated standalone Model Explorer viewer HTML output (this directory
+# only; templates under model_explorer_export/viewer/ remain tracked).
+/*.html
