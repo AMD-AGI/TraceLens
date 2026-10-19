@@ -869,18 +869,18 @@ def test_fill_repeated_loop_counts_from_repeat_namespace():
         _lc(
             "visual/@loop_carried_in:l1:hidden_states",
             "visual/24x_Glm5NextVisionBlock",
-            "hidden_states · repeated",
+            "hidden_states - repeated",
         ),
         # Nearest (deepest) repeat segment wins when nested.
-        _lc("d/@loop_carried_in:l2:h", "45x_Decoder/2x_Inner", "h · repeated"),
+        _lc("d/@loop_carried_in:l2:h", "45x_Decoder/2x_Inner", "h - repeated"),
         # Already-counted inner loop is left untouched.
         _lc(
             "d/@loop_carried_in:l3:comb",
             "45x_Decoder/Loop_19_iterations",
-            "comb · 19 iterations",
+            "comb - 19 iterations",
         ),
         # A loop-carried boundary with no enclosing repeat group stays "repeated".
-        _lc("x/@loop_carried_in:l4:y", "x", "y · repeated"),
+        _lc("x/@loop_carried_in:l4:y", "x", "y - repeated"),
     ]
 
     merge._fill_repeated_loop_counts(nodes)
@@ -888,10 +888,10 @@ def test_fill_repeated_loop_counts_from_repeat_namespace():
     def _sub(node):
         return next(a["value"] for a in node["attrs"] if a["key"] == "sublabel")
 
-    assert _sub(nodes[0]) == "hidden_states · 24 iterations"
-    assert _sub(nodes[1]) == "h · 2 iterations"  # deepest 2x_ wins, not 45x_
-    assert _sub(nodes[2]) == "comb · 19 iterations"  # unchanged
-    assert _sub(nodes[3]) == "y · repeated"  # no repeat namespace → unchanged
+    assert _sub(nodes[0]) == "hidden_states - 24 iterations"
+    assert _sub(nodes[1]) == "h - 2 iterations"  # deepest 2x_ wins, not 45x_
+    assert _sub(nodes[2]) == "comb - 19 iterations"  # unchanged
+    assert _sub(nodes[3]) == "y - repeated"  # no repeat namespace → unchanged
 
 
 def _synthetic_input(node_id, namespace, source, *, label="hidden_states"):

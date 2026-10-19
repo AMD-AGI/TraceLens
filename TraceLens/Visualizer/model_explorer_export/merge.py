@@ -3133,7 +3133,7 @@ def _variant_share_of_stack(namespace: str) -> tuple[str, str] | None:
     # The variant must be the INNERMOST loop here, not merely an ancestor of
     # it. HyperConnection's ``comb`` loop and the expert ``final`` loop live
     # inside a variant and run their own counts (19 and 256); reading the
-    # variant's share onto them said ``comb · 20 of 43``, which is neither
+    # variant's share onto them said ``comb - 20 of 43``, which is neither
     # loop's trip count.
     if _loop_trip_count(namespace) != inner.group(1):
         return None
@@ -3158,7 +3158,7 @@ def _loop_end_label(side: str, variable: str, namespace: str) -> str:
     share = _variant_share_of_stack(namespace)
     if share is not None:
         taken, total = share
-        return f"loop {side}: {variable} · {taken} of {total} iterations"
+        return f"loop {side}: {variable} - {taken} of {total} iterations"
     count = _loop_trip_count(namespace)
     carried = f"loop {side}: {variable}"
     return carried if count is None else f"{carried} iterations: {count}"
@@ -7333,11 +7333,11 @@ def _fill_repeated_loop_counts(nodes: list[dict[str, Any]]) -> None:
     """Show the trip count on loop-carried boundaries of ModuleList loops.
 
     A ``for blk in self.blocks:`` loop has no static ``range(...)`` bound, so the
-    AST analyzer leaves its ``@loop_carried`` boundary labeled ``<var> · repeated``.
+    AST analyzer leaves its ``@loop_carried`` boundary labeled ``<var> - repeated``.
     But the block body lives in an ``{N}x_Cls`` namespace whose count is authoritative
     (placed from the live meta tree — the decoder banner and ``_tag_secondary_module_groups``).
     Fill the count from the nearest enclosing ``{N}x_`` namespace segment so the
-    boundary reads ``<var> · {N} iterations`` like the config-bounded inner loops.
+    boundary reads ``<var> - {N} iterations`` like the config-bounded inner loops.
     Cosmetic (sublabel only); no nodes or edges change, so acyclicity is untouched.
     """
     for node in nodes:
@@ -7347,7 +7347,7 @@ def _fill_repeated_loop_counts(nodes: list[dict[str, Any]]) -> None:
             (a for a in node.get("attrs", []) if a.get("key") == "sublabel"), None
         )
         if sublabel_attr is None or not sublabel_attr.get("value", "").endswith(
-            "· repeated"
+            "- repeated"
         ):
             continue
         # Nearest (deepest) enclosing repeat group owns this loop's trip count.
@@ -7361,8 +7361,8 @@ def _fill_repeated_loop_counts(nodes: list[dict[str, Any]]) -> None:
         )
         if count is None:
             continue
-        variable = sublabel_attr["value"].rsplit(" · ", 1)[0]
-        sublabel_attr["value"] = f"{variable} · {count} iterations"
+        variable = sublabel_attr["value"].rsplit(" - ", 1)[0]
+        sublabel_attr["value"] = f"{variable} - {count} iterations"
         # Mirror the count into the "Loop in" label when the boundary was built
         # with a symbolic count (CG loops whose trip count is only known from the
         # enclosing ``{N}x_`` namespace, e.g. the vision block loop).
@@ -7552,7 +7552,7 @@ def _wrap_container_loop_carried(nodes: list[dict[str, Any]], container: str) ->
             "label": label,
             "namespace": boundary_namespace,
             "attrs": [
-                {"key": "sublabel", "value": f"{variable} · repeated"},
+                {"key": "sublabel", "value": f"{variable} - repeated"},
                 {"key": "synthetic", "value": "@loop_carried"},
                 {"key": "operation", "value": "synthetic"},
             ],
@@ -9243,7 +9243,7 @@ def build_merged_model_graph(
     # tower gets from the ComputationGraph. No-op on groups already wrapped (vision);
     # synthesizes the boundary for the structural decoder spine. Runs after the
     # ``{N}x_`` namespaces are final so the no-op guard and container detection see
-    # them, and before the count fill below stamps ``· N iterations``.
+    # them, and before the count fill below stamps ``- N iterations``.
     _synthesize_repeat_loop_boundaries(nodes)
 
     # Reconnect the repeat group's loop-invariant ``@input:<param>`` tiles
@@ -9283,8 +9283,8 @@ def build_merged_model_graph(
     # internal-only rotary) leaves its stack-entry prep ops orphaned; drop them.
     _prune_dead_stack_entry_sources(nodes)
 
-    # Fill trip counts on ModuleList loop-carried boundaries (``<var> · repeated``
-    # -> ``<var> · N iterations``) from the ``{N}x_`` namespaces just finalized.
+    # Fill trip counts on ModuleList loop-carried boundaries (``<var> - repeated``
+    # -> ``<var> - N iterations``) from the ``{N}x_`` namespaces just finalized.
     _fill_repeated_loop_counts(nodes)
 
     # Hoist the model-input boundaries to the front in forward-signature order
