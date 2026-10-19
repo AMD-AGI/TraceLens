@@ -3089,6 +3089,112 @@ def _name_repeat_group_inputs_outside_it(nodes: list[dict[str, Any]]) -> None:
     nodes.extend(additions)
 
 
+def _name_kernel_pipeline_inputs_outside_it(nodes: list[dict[str, Any]]) -> None:
+    """A kernel pipeline names each tensor entering it just OUTSIDE the box too.
+
+    Read at the ``KimiDeltaAttention`` level, ``chunk_kda_pipeline`` was a box
+    entered by five bare arrows -- a Linear and four Rearranges -- with nothing
+    saying which carried ``q`` and which carried ``beta``. The names were there,
+    one level down, on the tiles inside the box; the reader who has not opened
+    it sees none of them. Every kernel INSIDE that same pipeline already reads
+    the other way round (``l2norm_fwd_q.q`` sits beside the kernel it feeds),
+    and :func:`_name_repeat_group_inputs_outside_it` gives a repeat group the
+    same thing, so this is the one crossing in the drawing still unlabelled.
+
+    A pipeline is identified by what it declares -- the ``@tensor`` operand
+    tiles ``_add_tensor_ports_segment`` places inside it -- and each entering
+    tensor is named by the tile it LANDS on, so an operand wired through a
+    kernel port instead of a tensor tile (Kimi's ``v``, interposed late) is
+    named the same way as the rest. A crossing already named at the parent
+    level is left alone, and a constant is never part of a declared interface.
+    """
+    by_id = {str(node["id"]): node for node in nodes}
+
+    def ns_of(node: dict[str, Any]) -> str:
+        return str(node.get("namespace") or "")
+
+    def inside(namespace: str, group: str) -> bool:
+        return namespace == group or namespace.startswith(group + "/")
+
+    groups = sorted(
+        {ns_of(node) for node in nodes if _node_attr(node, "synthetic") == "@tensor"}
+    )
+    additions: list[dict[str, Any]] = []
+    for group in groups:
+        if not group:
+            continue
+        parent = group.rsplit("/", 1)[0] if "/" in group else ""
+        # One producer port feeding several consumers inside the box is ONE
+        # tensor and gets one tile.
+        entering: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        landed: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for node in nodes:
+            if not inside(ns_of(node), group):
+                continue
+            for edge in node.get("incomingEdges", []) or []:
+                source = by_id.get(str(edge.get("sourceNodeId")))
+                if source is None or inside(ns_of(source), group):
+                    continue
+                if str(_node_attr(source, "constant")) == "true":
+                    continue
+                if ns_of(source) == parent and _node_attr(source, "synthetic"):
+                    continue  # already named at this level
+                key = (
+                    str(edge["sourceNodeId"]),
+                    str(edge.get("sourceNodeOutputId", "0")),
+                )
+                entering.setdefault(key, []).append(edge)
+                landed.setdefault(key, []).append(node)
+        chosen: dict[tuple[str, str], str] = {}
+        for key, consumers in landed.items():
+            name = next(
+                (
+                    str(consumer.get("label") or "")
+                    for consumer in consumers
+                    if _node_attr(consumer, "synthetic")
+                    and str(consumer.get("label") or "")
+                ),
+                "",
+            )
+            chosen[key] = name or str(by_id[key[0]].get("label") or "input")
+        # One tile means ONE tensor: where the box calls two of them by the same
+        # name, each keeps its producer's own rather than merging.
+        shared = {
+            name
+            for name in set(chosen.values())
+            if len([k for k, v in chosen.items() if v == name]) > 1
+        }
+        for key, name in list(chosen.items()):
+            if name in shared:
+                chosen[key] = str(by_id[key[0]].get("label") or name)
+        segment = _sanitize_namespace_segment(group.rsplit("/", 1)[-1])
+        for (source_id, source_port), edges in entering.items():
+            name = chosen[(source_id, source_port)]
+            tile_id = f"@input_mirror:{name}^{segment}"
+            if parent:
+                tile_id = f"{parent}/{tile_id}"
+            tile = by_id.get(tile_id)
+            if tile is None:
+                source = by_id[source_id]
+                tile = {
+                    "id": tile_id,
+                    "label": name,
+                    "namespace": parent,
+                    "attrs": [{"key": "synthetic", "value": "@input_mirror"}],
+                    "style": ensure_readable_text(input_port_style()),
+                    "incomingEdges": [_source_edge(source_id, source_port)],
+                }
+                carried = node_output_spec(source, source_port)
+                if carried is not None:
+                    apply_shape_attrs(tile, carried)
+                additions.append(tile)
+                by_id[tile_id] = tile
+            for edge in edges:
+                edge["sourceNodeId"] = tile_id
+                edge["sourceNodeOutputId"] = "0"
+    nodes.extend(additions)
+
+
 # A loop frame puts its trip count last, after a fixed prefix, so the count is
 # simply the tail (``computation_graph._add_loop_frames``).
 _LOOP_FRAME_SEGMENT_RE = re.compile(r"^loop_iterations_(.+)$")
@@ -3930,6 +4036,50 @@ def _carry_producer_shape_to_boundary_tiles(nodes: list[dict[str, Any]]) -> None
             progressed = True
         if not progressed:
             return
+
+
+def _publish_declared_shapes_as_output_ports(nodes: list[dict[str, Any]]) -> None:
+    """A node that states a shape has to publish it, or the reader sees ``?``.
+
+    Model Explorer takes the shape it draws on a tile, and the label it puts on
+    every edge leaving it, from ``outputsMetadata``; the node-level
+    ``output_shape`` attr is text in the side panel and nothing more.
+    ``apply_shape_attrs`` writes both at once, so anything shaped BY INFERENCE
+    is already right. What is not is every tile made after inference ran, which
+    takes its shape from the producer it passes through and writes the attr
+    alone: Kimi's ``v`` into ``chunk_kda_fwd_intra`` (a kernel port interposed
+    late, which then absorbed the named tile that did publish one), the
+    boundary tiles :func:`_carry_producer_shape_to_boundary_tiles` fills, and
+    the layer-variant phi. Each of them drew ``?`` while naming its own shape
+    one panel away.
+
+    One port, because a node with several has already published them -- that is
+    where several come from. Its id is the one its readers dock on, so a tile
+    read at a named slot keeps that name. ``shape`` and ``tensor_shape`` carry
+    the same text, as they do on every port the shape pass writes.
+    """
+    docked: dict[str, set[str]] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []) or []:
+            docked.setdefault(str(edge.get("sourceNodeId")), set()).add(
+                str(edge.get("sourceNodeOutputId") or "0")
+            )
+    for node in nodes:
+        if node.get("outputsMetadata"):
+            continue
+        shape = _node_attr(node, "output_shape")
+        if not shape:
+            continue
+        attrs = [
+            {"key": "shape", "value": shape},
+            {"key": "tensor_shape", "value": shape},
+        ]
+        dtype = _node_attr(node, "output_dtype")
+        if dtype:
+            attrs.append({"key": "dtype", "value": dtype})
+        ports = docked.get(str(node.get("id"))) or {"0"}
+        port_id = next(iter(ports)) if len(ports) == 1 else "0"
+        node["outputsMetadata"] = [{"id": port_id, "attrs": attrs}]
 
 
 def _insert_missing_boundary_levels(nodes: list[dict[str, Any]]) -> None:
@@ -9315,6 +9465,9 @@ def build_merged_model_graph(
     _share_one_tile_per_kernel_operand(nodes)
     _name_kernel_ports_after_their_source(nodes)
     _port_unnamed_kernel_operands(nodes)
+    # After the ports above, which is where an operand wired late gets the name
+    # this pass then mirrors outside the box.
+    _name_kernel_pipeline_inputs_outside_it(nodes)
     _publish_state_stores_through_output_tiles(nodes)
     # Both the phi above and the kernel ports change which node an operand
     # arrives FROM (and the phi changes how many there are), so the
@@ -9350,6 +9503,9 @@ def build_merged_model_graph(
     # without the shape of what crosses it. Idempotent -- a tile that already has
     # one is left alone.
     _carry_producer_shape_to_boundary_tiles(nodes)
+    # Right behind it: that pass is the last thing to state a shape, and this
+    # is what makes a stated shape one the reader can actually see.
+    _publish_declared_shapes_as_output_ports(nodes)
     if shape_inferencer is not None:
         for namespace, boundary in group_boundary_shapes(nodes).items():
             graph_attributes.setdefault(namespace, {}).update(boundary)

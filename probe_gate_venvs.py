@@ -428,7 +428,12 @@ EXPECTED_NODES = {
     #   -1 the phi built over ``past_key_values.update(key_states, value_states)``
     #      -- a method on a forward parameter that produces no op, so there were
     #      never two arms to choose between.
-    "moonshotai/Kimi-K3": 463,
+    #   +10 the ``chunk_kda_pipeline`` box's own inputs, named OUTSIDE it the
+    #      way a repeat group's and every kernel's already are: 5 operands
+    #      (q/k/v/g/beta) x the 2 ``KimiDeltaAttention`` variants. Read at the
+    #      attention level the box was entered by five bare arrows -- a Linear
+    #      and four Rearranges -- with the names a level down, inside it.
+    "moonshotai/Kimi-K3": 473,
     # MiniMax used to move by one between runs of the SAME code. That is fixed
     # (18148ab2): all four models are byte-identical across PYTHONHASHSEED 0, 7,
     # 42 and 123, so a single expected count is meaningful again.
