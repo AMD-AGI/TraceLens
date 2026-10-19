@@ -1438,6 +1438,101 @@ def _strip_prefix(name: str, prefix: str) -> str:
     return name[len(prefix) :] if prefix and name.startswith(prefix) else name
 
 
+def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
+    """Group the decoder layers by the submodules each one really constructs.
+
+    The parse's own per-instance answer, for when no live module tree is
+    available. A decoder class is ONE class, but its layers are not one thing:
+    DeepSeek builds a different compressor for layer 2 than for layer 3 and
+    none at all for layer 0, and a different router for the first three layers
+    than for the rest. Which it builds is decided by
+    ``config.layer_types[layer_idx]`` / ``config.mlp_layer_types[layer_idx]``,
+    so asking each class what IT constructs for one ``layer_idx`` gives the
+    split without instantiating anything.
+
+    Only attrs with more than one construction option are asked about -- those
+    are the only ones that can differ -- and a layer whose answers are all
+    unknown contributes nothing, so an unresolvable model degrades to the
+    single uniform banner exactly as before.
+    """
+    from TraceLens.ModelUtils.ast_analyze import (
+        INSTANCE_SUBMODULE_ABSENT,
+        instance_submodule_class,
+    )
+
+    registry = spec.class_registry or {}
+    decoder = registry.get(spec.decoder_class or "")
+    depth = spec.num_hidden_layers or 0
+    config = spec.raw_config or {}
+    if decoder is None or not depth or not config:
+        return []
+
+    varying: list[tuple[str, str, Any]] = []
+    for comp_attr, comp_class in (decoder.init_assignments or {}).items():
+        comp = registry.get(comp_class)
+        if comp is None:
+            continue
+        for nested, options in (comp.init_assignment_options or {}).items():
+            if len(options) > 1:
+                varying.append((comp_attr, nested, comp))
+    if not varying:
+        return []
+
+    signatures: list[tuple[tuple[str, str, str], ...]] = []
+    for layer_idx in range(depth):
+        chosen: list[tuple[str, str, str]] = []
+        for comp_attr, nested, comp in varying:
+            picked = instance_submodule_class(
+                comp, nested, config, {"layer_idx": layer_idx}
+            )
+            if picked is None:
+                return []  # one unknown and the whole split is a guess
+            chosen.append((comp_attr, nested, picked))
+        signatures.append(tuple(chosen))
+
+    if len(set(signatures)) <= 1:
+        return []  # every layer builds the same thing -- no variants to show
+
+    indices: dict[tuple, list[int]] = {}
+    for layer_idx, signature in enumerate(signatures):
+        indices.setdefault(signature, []).append(layer_idx)
+
+    basic_ops = spec.basic_ops or BasicOpFilter.for_detailed()
+    components = {comp.attr_name: comp for comp in spec.block_components}
+    variants: list[LayerVariant] = []
+    for signature, layers in sorted(
+        indices.items(), key=lambda item: (-len(item[1]), item[1][0])
+    ):
+        overrides: dict[str, dict[str, Any]] = {}
+        labels: list[str] = []
+        for comp_attr, nested, picked in signature:
+            absent = picked == INSTANCE_SUBMODULE_ABSENT
+            overrides.setdefault(comp_attr, {})[nested] = (
+                SUBMODULE_OMITTED if absent else picked
+            )
+            labels.append(f"no {nested}" if absent else picked)
+        variant = LayerVariant(
+            label=" + ".join(labels),
+            count=len(layers),
+            attention_label=labels[0] if labels else "Attention",
+            ffn_label=labels[-1] if len(labels) > 1 else "FFN",
+            layer_indices=list(layers),
+        )
+        for comp_attr, rel_overrides in sorted(overrides.items()):
+            built = _build_variant_component_tree(
+                spec,
+                components.get(comp_attr),
+                comp_attr,
+                (decoder.init_assignments or {}).get(comp_attr),
+                rel_overrides,
+                basic_ops,
+            )
+            if built is not None:
+                variant.component_trees[comp_attr] = built
+        variants.append(variant)
+    return variants
+
+
 def reconcile_live_module_groups(
     spec: ArchitectureSpec, groups: list[MetaModuleGroup] | None
 ) -> None:
@@ -1451,6 +1546,11 @@ def reconcile_live_module_groups(
     untouched so the config-derived banner stands (graceful degradation).
     """
     if not groups:
+        # No live tree: fall back on what the parse can work out per instance.
+        static = _static_layer_variants(spec)
+        if static:
+            spec.layer_variants = static
+            _finalize_layer_repeat_lines(spec)
         return
     spec.meta_module_groups = list(groups)
 

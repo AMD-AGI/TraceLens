@@ -1313,6 +1313,149 @@ def _module_dict_registry_class_refs(tree: ast.AST) -> dict[str, list[str]]:
     return registries
 
 
+#: Returned for a submodule an instance does NOT construct (the ``else None``
+#: arm of a conditional assignment). Named apart from the block-tree sentinel
+#: so this module stays free of that import.
+INSTANCE_SUBMODULE_ABSENT = "@absent"
+
+
+def instance_submodule_class(
+    cls: "ClassStructure",
+    attr: str,
+    config: dict[str, Any],
+    param_values: dict[str, Any] | None = None,
+) -> str | None:
+    """Which class ONE instance constructs for ``self.<attr>``.
+
+    ``INSTANCE_SUBMODULE_ABSENT`` when that instance builds nothing there, and
+    ``None`` when this cannot tell -- which is the answer whenever the choice
+    turns on something no config settles.
+
+    *param_values* carries the constructor's own arguments, and that is what
+    makes it per INSTANCE: with ``layer_idx`` supplied, DeepSeek's
+
+        self.layer_type = config.layer_types[layer_idx]
+        self.compressor = (
+            COMPRESSOR_CLASSES[self.layer_type](config)
+            if self.layer_type != "sliding_attention" else None
+        )
+
+    answers CSACompressor for layer 2, HCACompressor for layer 3 and "builds
+    nothing" for layer 0 -- three different answers from one class, which is
+    the whole point of asking per instance rather than per class.
+    """
+    node = getattr(cls, "node", None)
+    init = next(
+        (
+            item
+            for item in getattr(node, "body", []) or []
+            if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+        ),
+        None,
+    )
+    if init is None:
+        return None
+    self_values = _self_config_values(init, config, param_values)
+    assigned = next(
+        (
+            stmt.value
+            for stmt in ast.walk(init)
+            if isinstance(stmt, ast.Assign)
+            for target in stmt.targets
+            if isinstance(target, ast.Attribute)
+            and target.attr == attr
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+        ),
+        None,
+    )
+    if assigned is None:
+        return None
+    return _instance_constructed_class(
+        assigned, cls, attr, config, self_values, param_values
+    )
+
+
+def _instance_constructed_class(
+    node: ast.expr,
+    cls: "ClassStructure",
+    attr: str,
+    config: dict[str, Any],
+    self_values: dict[str, Any],
+    param_values: dict[str, Any] | None,
+    depth: int = 0,
+) -> str | None:
+    """The class an assignment RHS constructs, for one instance."""
+    if depth > 4:
+        return None
+    if isinstance(node, ast.Constant) and node.value is None:
+        return INSTANCE_SUBMODULE_ABSENT
+    if isinstance(node, ast.IfExp):
+        taken = _config_value(node.test, config, self_values, param_values)
+        if not isinstance(taken, bool):
+            return None
+        return _instance_constructed_class(
+            node.body if taken else node.orelse,
+            cls,
+            attr,
+            config,
+            self_values,
+            param_values,
+            depth + 1,
+        )
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    if isinstance(func, ast.Subscript):
+        # ``COMPRESSOR_CLASSES[self.layer_type](config)`` -- the key decides.
+        key = _config_value(func.slice, config, self_values, param_values)
+        if not isinstance(key, str):
+            return None
+        return (cls.init_assignment_choices.get(attr) or {}).get(key)
+    name = _expr_name(func)
+    return name.split(".")[-1] if name else None
+
+
+def _module_dict_registry_entries(tree: ast.AST) -> dict[str, dict[str, str]]:
+    """Module-level ``{key: SomeClass}`` dicts, by name -> ``{key: class name}``.
+
+    The unkeyed twin above answers "which classes COULD this build"; this one
+    keeps the keys, which is what says which class ONE instance builds.
+    DeepSeek selects its compressor with
+    ``COMPRESSOR_CLASSES[self.layer_type](config)``, and ``self.layer_type`` is
+    ``config.layer_types[layer_idx]`` -- a different answer for every layer.
+    """
+    entries: dict[str, dict[str, str]] = {}
+    if not isinstance(tree, ast.Module):
+        return entries
+    for stmt in tree.body:
+        if not (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and isinstance(stmt.value, ast.Dict)
+        ):
+            continue
+        mapping: dict[str, str] = {}
+        usable = True
+        for key, value in zip(stmt.value.keys, stmt.value.values):
+            if isinstance(value, ast.Constant) and value.value is None:
+                continue
+            if not isinstance(key, ast.Constant) or not isinstance(
+                value, (ast.Name, ast.Attribute)
+            ):
+                usable = False
+                break
+            name = _expr_name(value)
+            if name is None:
+                usable = False
+                break
+            mapping[str(key.value)] = name.split(".")[-1]
+        if usable and mapping:
+            entries[stmt.targets[0].id] = mapping
+    return entries
+
+
 def _class_from_module_chain(
     module: str,
     symbol: str,
@@ -1501,6 +1644,7 @@ def _resolve_module_dict_registry_classes(
     or key allow-list.
     """
     registries = _module_dict_registry_class_refs(tree)
+    keyed_registries = _module_dict_registry_entries(tree)
     for cls in classes.values():
         for attr, registry_name in list(cls.unresolved_module_dict_class_refs.items()):
             candidates = [
@@ -1516,6 +1660,13 @@ def _resolve_module_dict_registry_classes(
                 )
                 continue
             cls.init_assignments[attr] = candidates[0]
+            # Keep the KEYS too: which of these one instance builds is decided
+            # by the key it looks up, and that varies per layer.
+            keyed = keyed_registries.get(registry_name) or {}
+            if keyed:
+                cls.init_assignment_choices[attr] = {
+                    key: name for key, name in keyed.items() if name in classes
+                }
             existing = cls.init_assignment_options.setdefault(attr, [])
             for name in candidates:
                 if name not in existing:
@@ -4219,6 +4370,9 @@ class ClassStructure:
     forward_step_details: dict[str, list[str]] = field(default_factory=dict)
     side_inputs: dict[str, list[SideInputSpec]] = field(default_factory=dict)
     init_assignment_options: dict[str, list[str]] = field(default_factory=dict)
+    #: attr -> ``{registry key: class}`` when a module-level dict of classes
+    #: picks the submodule. The key is what differs per instance.
+    init_assignment_choices: dict[str, dict[str, str]] = field(default_factory=dict)
     # Submodules assigned ONLY inside an `__init__` branch the config rules
     # out, so no instance has them. A forward that calls one cannot run --
     # the model raises -- which is what makes the call safe to drop.
