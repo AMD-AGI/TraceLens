@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from TraceLens.ModelUtils import source
 from TraceLens.ModelUtils.source import (
     _checkpoint_modeling_files,
     _declared_architectures,
@@ -133,3 +134,66 @@ class TestCheckpointModelingFiles:
     ) -> None:
         files = [_write(tmp_path, "model.py", "class Whatever:\n    pass\n")]
         assert _checkpoint_modeling_files(files, {}) == files
+
+
+class TestAConfigOnlySnapshotStillFetchesModeling:
+    def test_auto_map_modeling_is_downloaded_before_transformers(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """AutoConfig leaves only configuration_*.py in the snapshot.
+
+        That file makes the snapshot look occupied, so the modeling download
+        has to run anyway. Otherwise the transformers copy is what gets
+        analysed, and its class names are not the checkpoint's.
+        """
+        snapshot = tmp_path / "snapshot"
+        _write(snapshot, "configuration_kimi_k3.py", "class KimiK3Config:\n    pass\n")
+        modeling = tmp_path / "modeling_kimi_linear.py"
+        modeling.write_text("class KimiDecoderLayer:\n    pass\n", encoding="utf-8")
+        seen: list[tuple[str, list[str], str | None]] = []
+
+        def download(model_id, names, revision=None):
+            seen.append((model_id, list(names), revision))
+            if "modeling_kimi_linear.py" in names:
+                return [modeling]
+            return []
+
+        monkeypatch.setattr(
+            source,
+            "_hub_snapshot_root",
+            lambda model_id, revision=None: snapshot,
+        )
+        monkeypatch.setattr(source, "_download_repo_files", download)
+        monkeypatch.setattr(
+            source,
+            "_list_repo_python_files",
+            lambda model_id, revision=None: [
+                "configuration_kimi_k3.py",
+                "modeling_kimi_linear.py",
+            ],
+        )
+        monkeypatch.setattr(
+            source,
+            "_transformers_github_modeling_file",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("transformers fallback")
+            ),
+        )
+
+        files, labels = source.resolve_source_files(
+            "moonshotai/Kimi-K3",
+            {
+                "model_type": "kimi_k3",
+                "auto_map": {
+                    "AutoModel": "modeling_kimi_linear.KimiLinearModel",
+                },
+            },
+            revision="f831ab66814297da540d832a5235f8e904f29d06",
+        )
+        assert modeling in files
+        assert "hf://moonshotai/Kimi-K3" in labels
+        assert seen
+        assert all(
+            revision == "f831ab66814297da540d832a5235f8e904f29d06"
+            for _, _, revision in seen
+        )

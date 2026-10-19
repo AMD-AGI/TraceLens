@@ -508,7 +508,16 @@ def resolve_source_files(
 
     auto_map_files = _collect_auto_map_files(config)
 
-    if model_id and not files:
+    # AutoConfig caches configuration_*.py and stops. That partial snapshot is
+    # not a modeling implementation, but it does make ``files`` non-empty.
+    # Download this revision's own files before the transformers fallback, so
+    # a checkpoint that ships modeling_*.py (Kimi-K3 via auto_map) is the
+    # source that gets analysed.
+    if (
+        model_id
+        and not _has_modeling_implementation(files)
+        and (not files or auto_map_files)
+    ):
         hf_files = _download_repo_files(model_id, auto_map_files, revision)
         files.extend(hf_files)
         repo_python = _list_repo_python_files(model_id, revision)
