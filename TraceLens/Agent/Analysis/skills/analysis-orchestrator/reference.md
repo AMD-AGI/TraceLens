@@ -295,8 +295,11 @@ Execute the TraceLens Agentic Mode orchestrator preparation script:
   --platform <platform> \
   --output-dir <output_dir> \
   --comparison-scope <comparison_scope> \
-  [--platform2 <platform2>]   # comparative only
+  [--platform2 <platform2>] \
+  [--capture-folder <capture_folder>]
 ```
+
+Pass `--platform2` only for comparative, and `--capture-folder` only when `config_utils` printed `capture_folder`. With `--capture-folder` this call merges the capture traces again and can run for several minutes. Run it with the longest command timeout your runner allows.
 
 This script performs:
 - **Step 3:** Assess GPU utilization (computation, idle, communication times)

@@ -173,6 +173,8 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
         "platform": plans[0].platform,
         "output_dir": os.path.dirname(plans[0].output_xlsx_path),
     }
+    if plans[0].capture_folder is not None:
+        variables["capture_folder"] = plans[0].capture_folder
     if scope != "standalone":
         variables.update(
             comparison_method="semantic" if scope == "semantic" else "tracediff",

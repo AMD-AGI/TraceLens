@@ -343,6 +343,18 @@ def test_add_diff_stats(root, tmp_path, monkeypatch, capsys):
             id="standalone",
         ),
         pytest.param(
+            "standalone_inference_capture",
+            [
+                "comparison_scope=standalone",
+                "trace_path=ROOT/t1.json.gz",
+                "platform=MI300X",
+                "output_dir=ROOT/out",
+                "capture_folder=ROOT/c1",
+                "wrote   ROOT/out/cache/run_config.yaml",
+            ],
+            id="standalone_capture",
+        ),
+        pytest.param(
             "comparative",
             [
                 "comparison_scope=comparative",

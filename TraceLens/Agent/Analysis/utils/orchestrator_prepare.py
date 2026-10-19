@@ -26,6 +26,9 @@ from TraceLens.Agent.Analysis.utils.kernel_fusion import (
     FusionForms,
     FusionLabeler,
 )
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+)
 from TraceLens.TreePerf import TreePerfAnalyzer
 from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
 
@@ -171,6 +174,14 @@ def main():
         ),
     )
     parser.add_argument(
+        "--capture-folder",
+        default=None,
+        help=(
+            "Graph capture folder of trace 1. Merged into trace 1's tree, as the "
+            "perf report does."
+        ),
+    )
+    parser.add_argument(
         "--disable_pseudo_ops",
         action="store_false",
         dest="enable_pseudo_ops",
@@ -205,6 +216,8 @@ def main():
     print("=" * 80)
     print(f"Platform: {platform}")
     print(f"Trace: {trace_path}")
+    if args.capture_folder is not None:
+        print(f"Capture folder: {args.capture_folder}")
     print(f"Output: {output_dir}")
     print(f"Comparison scope: {comparison_scope}")
     print(f"Trace 1 perf CSVs: {trace1_csv_dir}")
@@ -307,11 +320,32 @@ def main():
     try:
         print(f"  Loading trace: {trace_path}")
         print(f"  Pseudo ops: {'enabled' if enable_pseudo_ops else 'disabled'}")
-        analyzer = TreePerfAnalyzer.from_file(
-            trace_path,
-            add_python_func=True,
-            enable_pseudo_ops=enable_pseudo_ops,
-        )
+        # Build the tree the perf report built: merge the capture folder (Step 1
+        # wrote its execution_details.json), and fall back to the raw trace when
+        # the merge fails.
+        merged_tree = None
+        if args.capture_folder is not None:
+            merged_tree = merge_capture_trace_into_graph(
+                args.capture_folder,
+                os.path.join(args.capture_folder, "execution_details.json"),
+                trace_path,
+            )
+            if merged_tree is None:
+                print("  Capture merge failed; using the raw trace")
+        if merged_tree is not None:
+            # The merge builds the tree, so it is not rebuilt.
+            analyzer = TreePerfAnalyzer(
+                tree=merged_tree,
+                add_python_func=True,
+                enable_pseudo_ops=enable_pseudo_ops,
+                rebuild_tree=False,
+            )
+        else:
+            analyzer = TreePerfAnalyzer.from_file(
+                trace_path,
+                add_python_func=True,
+                enable_pseudo_ops=enable_pseudo_ops,
+            )
         tree = analyzer.tree
         print(f"  ✓ Trace loaded successfully")
         print(f"  ✓ Tree has {len(tree.events)} events")
