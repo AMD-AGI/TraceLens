@@ -37,6 +37,7 @@ _SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 # Optional icon / prefix before P<N> (e.g. kernel fusion `### 🔴 P1:`).
 _P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->")
+_FUSION_EMPTY_SENTENCE = "No kernel fusion opportunities detected."
 _DA_HEADING_RE = re.compile(r"^####\s+.*?P(\d+)\s*:", re.MULTILINE)
 _NOT_QUANTIFIABLE_SENTINEL = re.compile(
     r"not quantifiable from trace data", re.IGNORECASE
@@ -131,10 +132,20 @@ def _category_findings_empty(filepath):
     return isinstance(cf, list) and len(cf) == 0
 
 
+def _fusion_estimates_empty(filepath):
+    """True when the fusion metrics JSON has no impact_estimates (kernel-fusion-analyzer § empty)."""
+    try:
+        with open(_metrics_json_for_findings(filepath)) as f:
+            return not json.load(f).get("impact_estimates")
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
 def validate_findings_file(filepath, tier, comparison_scope=None):
     """Validate a single findings file against the sub-agent spec contract.
 
     Checks:
+    - Fusion tier with no ``impact_estimates``: only the spec's no-opportunities sentence
     - Required ## headers present and in correct order
     - P-item labels match tier (all tiers: Insight/Action/Impact)
     - At least one reasoning-candidate block in Detailed Analysis
@@ -159,6 +170,14 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
 
     with open(filepath, "r") as f:
         content = f.read()
+
+    # With no impact_estimates the spec's file is a heading and this one sentence.
+    if tier == "fusion" and _fusion_estimates_empty(filepath):
+        if _FUSION_EMPTY_SENTENCE in content:
+            return True, []
+        return False, [
+            f"Fusion findings with no impact_estimates must state: {_FUSION_EMPTY_SENTENCE}"
+        ]
 
     errors = []
 

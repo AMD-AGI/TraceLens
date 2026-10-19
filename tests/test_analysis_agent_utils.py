@@ -2717,6 +2717,28 @@ def test_validate_findings_file_relaxed_empty_category(tmp_path):
     assert passed, errors
 
 
+@pytest.mark.parametrize(
+    "impact_estimates, expected",
+    [([], True), ([{"operation": "Block"}], False)],
+    ids=["no_estimates", "has_estimates"],
+)
+def test_validate_findings_file_fusion_empty(tmp_path, impact_estimates, expected):
+    findings_dir = tmp_path / "system_findings"
+    findings_dir.mkdir()
+    fp = findings_dir / "kernel_fusion_findings.md"
+    _write(
+        str(fp),
+        "# Kernel Fusion Analysis Summary (Experimental)\n\n"
+        "No kernel fusion opportunities detected.\n",
+    )
+    (tmp_path / "category_data").mkdir()
+    (tmp_path / "category_data" / "kernel_fusion_metrics.json").write_text(
+        json.dumps({"impact_estimates": impact_estimates})
+    )
+    passed, errors = validate_findings_file(str(fp), "fusion", "standalone")
+    assert passed is expected, errors
+
+
 def test_validate_findings_file_tier_mismatch(tmp_path):
     content = _valid_compute_findings().replace("tier=compute", "tier=system")
     fp = tmp_path / "gemm_findings.md"
