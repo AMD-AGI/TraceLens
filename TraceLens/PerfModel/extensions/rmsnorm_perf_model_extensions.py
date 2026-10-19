@@ -105,6 +105,62 @@ class aiter_rmsnorm(RMSNorm):
         }
 
 
+class aiter_fused_qk_rmsnorm(RMSNorm):
+    """
+    Performance model for ``aiter::_fused_qk_rmsnorm_kernel`` (fused Q+K RMSNorm;
+    inference: aiter / sglang).
+
+    Two independent affine RMSNorms from the trace layout
+    ``[q, q_w, q_eps, k, k_w, k_eps, q_out, k_out]``:
+    Q channels from ``Input Dims[0]/[1]``, K/KV from ``Input Dims[3]/[4]``.
+
+    flops/bytes = RMSNorm(Q) + RMSNorm(K); plain ``aiter_rmsnorm`` is wrong here
+    (single ``[out, in, w, …]`` layout).
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
+        dims = event["args"]["Input Dims"]
+        self.k_shape = tuple(dims[3])
+        self.k_num_channels = int(dims[4][0])
+        self.k_num_elems = 1
+        for d in self.k_shape:
+            self.k_num_elems *= int(d)
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][0])  # q: [M, N_q]
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        num_channels = event["args"]["Input Dims"][1][0]  # q_weight.shape[0]
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+        }
+
+    def flops(self):
+        flops_q = super().flops()
+        rows_k = self.k_num_elems / self.k_num_channels
+        flops_k = rows_k * (2 * self.k_num_channels + 2)
+        flops_k += self.k_num_elems * (2 if self.is_affine else 1)
+        return flops_q + flops_k
+
+    def bytes(self):
+        bytes_q = super().bytes()
+        bytes_k = (
+            self.k_num_elems * self.bpe_in
+            + self.k_num_elems * self.bpe_out
+            + (self.k_num_channels * self.bpe_in if self.is_affine else 0)
+        )
+        return bytes_q + bytes_k
+
+
 class aiter_rmsnorm2d_fwd_with_dynamicquant_ck(RMSNorm):
     """
     Performance model for aiter::rmsnorm2d_fwd_with_dynamicquant_ck.
