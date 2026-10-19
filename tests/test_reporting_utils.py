@@ -60,7 +60,6 @@ from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     generate_perf_report_pytorch as gen_inf,
     generate_perf_report_pytorch as generate_inference_report,
     get_dfs_short_kernels as get_dfs_short_kernels_inference,
-    perf_report_sanity_check,
 )
 from TraceLens.Reporting.compare_perf_reports_pytorch import (
     generate_compare_perf_reports_pytorch,
@@ -476,61 +475,6 @@ class _MockShortKernelAnalyzer:
 
     def get_df_kernels(self):
         return self._kernels
-
-
-# ---------------------------------------------------------------------------
-# perf_report_sanity_check (inference)
-# ---------------------------------------------------------------------------
-
-
-def test_sanity_check_include_nccl_busy_time():
-    events = [{"name": "ncclAllReduce", "cat": "kernel"}]
-    tl = pd.DataFrame({"type": ["busy_time"], "time ms": [0.05]})
-    kl = pd.DataFrame({"total_direct_kernel_time_sum": [60.0]})
-    up = pd.DataFrame({"Kernel Time (µs)_sum": [60.0]})
-    result = perf_report_sanity_check(events, tl, kl, up, include_nccl=True)
-    assert result["kl_time_pass"]
-    assert result["total_gpu_events"] == 1
-
-
-def test_sanity_check_time_mismatch():
-    events = [{"name": "k", "cat": "kernel"}]
-    tl = pd.DataFrame({"type": ["computation_time"], "time ms": [10.0]})
-    kl = pd.DataFrame({"total_direct_kernel_time_sum": [1.0]})
-    up = pd.DataFrame({"Kernel Time (µs)_sum": [1.0]})
-    result = perf_report_sanity_check(events, tl, kl, up)
-    assert not result["kl_time_pass"]
-    assert not result["up_time_pass"]
-
-
-def test_sanity_check_kernel_details_column():
-    events = [{"name": "k_a", "cat": "kernel"}]
-    tl = pd.DataFrame({"type": ["computation_time"], "time ms": [0.1]})
-    kl = pd.DataFrame(
-        {
-            "total_direct_kernel_time": [100.0],
-            "kernel_details": [[{"name": "k_a", "count": 1}]],
-        }
-    )
-    up = pd.DataFrame(
-        {
-            "Kernel Time (µs)": [100.0],
-            "kernel_details": [[{"name": "k_a", "count": 1}]],
-        }
-    )
-    result = perf_report_sanity_check(events, tl, kl, up)
-    assert result["kl_count_pass"]
-    assert result["up_count_pass"]
-
-
-def test_sanity_check_missing_kernel_details_column(capsys):
-    events = [{"name": "k", "cat": "kernel"}]
-    tl = pd.DataFrame({"type": ["computation_time"], "time ms": [0.1]})
-    kl = pd.DataFrame({"total_direct_kernel_time_sum": [100.0]})
-    up = pd.DataFrame({"Kernel Time (µs)_sum": [100.0]})
-    result = perf_report_sanity_check(events, tl, kl, up)
-    assert not result["kl_count_pass"]
-    assert "WARNING" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -1463,14 +1407,6 @@ class TestReportingPhase6:
             include_unlinked_kernels=True,
             micro_idle_thresh_us=0,
         )
-        analyzer = TreePerfAnalyzer.from_file(trace)
-        sanity = perf_report_sanity_check(
-            analyzer.tree.events,
-            pd.read_csv(str(tmp_path / "out" / "gpu_timeline.csv")),
-            analyzer.get_df_kernel_launchers(),
-            analyzer.build_df_unified_perf_table(),
-        )
-        assert isinstance(sanity, dict)
 
     @pytest.mark.skipif(
         not os.path.isdir(os.path.join(INFERENCE_ROOT, "vllm_decode_full")),
@@ -3116,21 +3052,6 @@ class TestReportingFinalCoverage:
             group_by_parent_module=False,
         )
         assert "gpu_timeline" in result
-
-    def test_sanity_check_kernel_details_summary_column(self):
-        events = [{"name": "k_a", "cat": "kernel"}]
-        tl = pd.DataFrame({"type": ["computation_time"], "time ms": [0.1]})
-        kl = pd.DataFrame(
-            {
-                "total_direct_kernel_time": [100.0],
-                "kernel_details_summary": [[{"name": "k_a", "count": 1}]],
-            }
-        )
-        up = pd.DataFrame(
-            {"Kernel Time (µs)": [100.0], "kernel_details_summary": [[{"name": "k_a"}]]}
-        )
-        result = perf_report_sanity_check(events, tl, kl, up)
-        assert result["kl_count_pass"]
 
     def test_pytorch_report_with_comparison(self, tmp_path):
         trace1 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "t1.json")

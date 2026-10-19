@@ -722,3 +722,197 @@ class TestEdgeCases:
         assert not any(
             "no corresponding GPU kernel" in f.message for f in report.findings
         )
+
+
+class TestKernelTimeCoverage:
+    """Tests for _check_kernel_time_coverage."""
+
+    def _make_timeline(self, comp_time_ms=100.0):
+        import pandas as pd
+
+        return pd.DataFrame(
+            {
+                "type": ["computation_time", "idle_time", "busy_time"],
+                "time ms": [comp_time_ms, 10.0, comp_time_ms + 5.0],
+                "percent": [80.0, 10.0, 85.0],
+            }
+        )
+
+    def test_kernel_time_exceeds_computation_no_warning(self):
+        import pandas as pd
+
+        dfs = {
+            "gpu_timeline": self._make_timeline(comp_time_ms=100.0),
+            "ops_summary": pd.DataFrame(
+                {
+                    "total_direct_kernel_time_sum": [200_000.0],
+                }
+            ),
+        }
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs=dfs, framework="pytorch"
+        )
+        assert not any("kernel time" in f.message for f in report.findings)
+
+    def test_kernel_time_below_computation_warns(self):
+        import pandas as pd
+
+        dfs = {
+            "gpu_timeline": self._make_timeline(comp_time_ms=100.0),
+            "ops_summary": pd.DataFrame(
+                {
+                    "total_direct_kernel_time_sum": [50_000.0],
+                }
+            ),
+        }
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs=dfs, framework="pytorch"
+        )
+        assert any("kernel_launchers kernel time" in f.message for f in report.findings)
+
+    def test_unified_perf_below_computation_warns(self):
+        import pandas as pd
+
+        dfs = {
+            "gpu_timeline": self._make_timeline(comp_time_ms=100.0),
+            "unified_perf_summary": pd.DataFrame(
+                {
+                    "Kernel Time (µs)_sum": [50_000.0],
+                }
+            ),
+        }
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs=dfs, framework="pytorch"
+        )
+        assert any("unified_perf kernel time" in f.message for f in report.findings)
+
+    def test_no_timeline_no_finding(self):
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs={}, framework="pytorch"
+        )
+        assert not any("kernel time" in f.message for f in report.findings)
+
+    def test_no_computation_time_rows_no_finding(self):
+        import pandas as pd
+
+        dfs = {
+            "gpu_timeline": pd.DataFrame(
+                {
+                    "type": ["idle_time"],
+                    "time ms": [10.0],
+                    "percent": [100.0],
+                }
+            ),
+        }
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs=dfs, framework="pytorch"
+        )
+        assert not any("kernel time" in f.message for f in report.findings)
+
+
+class TestKernelCountAlignment:
+    """Tests for _check_kernel_count_alignment."""
+
+    def _make_tree_with_kernels(self, kernel_names):
+        events = [_cpu_op(0, dur=10000)]
+        for i, name in enumerate(kernel_names):
+            events.append(
+                {
+                    "cat": "kernel",
+                    "name": name,
+                    "ph": "X",
+                    "ts": 100 + i * 20,
+                    "dur": 10,
+                    "pid": 0,
+                    "tid": 1,
+                }
+            )
+        return _build_tree(events)
+
+    def test_counts_match_no_warning(self):
+        import pandas as pd
+
+        tree = self._make_tree_with_kernels(["gemm", "gemm", "relu"])
+        dfs = {
+            "ops_summary": pd.DataFrame(
+                {
+                    "kernel_details": [
+                        [
+                            {"name": "gemm", "count": 2},
+                            {"name": "relu", "count": 1},
+                        ]
+                    ],
+                }
+            ),
+        }
+        report = trace_check.run_trace_checks(
+            pre_report=False, tree=tree, dfs=dfs, framework="pytorch"
+        )
+        assert not any("kernel count" in f.message for f in report.findings)
+
+    def test_counts_mismatch_warns(self):
+        import pandas as pd
+
+        tree = self._make_tree_with_kernels(["gemm", "gemm", "relu"])
+        dfs = {
+            "ops_summary": pd.DataFrame(
+                {
+                    "kernel_details": [
+                        [
+                            {"name": "gemm", "count": 1},
+                        ]
+                    ],
+                }
+            ),
+        }
+        report = trace_check.run_trace_checks(
+            pre_report=False, tree=tree, dfs=dfs, framework="pytorch"
+        )
+        assert any("kernel count" in f.message for f in report.findings)
+
+    def test_nccl_kernels_excluded_from_tree_count(self):
+        import pandas as pd
+
+        tree = self._make_tree_with_kernels(
+            ["gemm", "gemm", "ncclAllReduceRingLLKernel_sum_bf16"]
+        )
+        dfs = {
+            "ops_summary": pd.DataFrame(
+                {
+                    "kernel_details": [
+                        [
+                            {"name": "gemm", "count": 2},
+                        ]
+                    ],
+                }
+            ),
+        }
+        report = trace_check.run_trace_checks(
+            pre_report=False, tree=tree, dfs=dfs, framework="pytorch"
+        )
+        assert not any("kernel count" in f.message for f in report.findings)
+
+    def test_no_tree_no_finding(self):
+        import pandas as pd
+
+        dfs = {
+            "ops_summary": pd.DataFrame(
+                {"kernel_details": [[{"name": "gemm", "count": 1}]]}
+            ),
+        }
+        report = trace_check.run_trace_checks(
+            pre_report=False, tree=None, dfs=dfs, framework="pytorch"
+        )
+        assert not any("kernel count" in f.message for f in report.findings)
+
+    def test_no_kernel_details_column_no_finding(self):
+        import pandas as pd
+
+        tree = self._make_tree_with_kernels(["gemm"])
+        dfs = {
+            "ops_summary": pd.DataFrame({"name": ["op1"]}),
+        }
+        report = trace_check.run_trace_checks(
+            pre_report=False, tree=tree, dfs=dfs, framework="pytorch"
+        )
+        assert not any("kernel count" in f.message for f in report.findings)

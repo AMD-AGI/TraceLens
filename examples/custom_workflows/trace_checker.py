@@ -24,13 +24,14 @@ import json
 import os
 import statistics
 import warnings
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 from .util import (
     GPU_KERNEL_CATEGORIES,
     GRAPH_LAUNCH_NAMES,
+    TraceEventUtils,
     merge_intervals,
     parse_bool_string,
 )
@@ -529,6 +530,106 @@ def _check_high_idle_ops(ctx) -> List[TraceCheck]:
     return []
 
 
+def _check_kernel_time_coverage(ctx) -> List[TraceCheck]:
+    """Check that kernel time in reports accounts for GPU computation time."""
+    dfs, sheets = ctx.get("dfs"), ctx.get("sheets")
+    if not dfs or not sheets:
+        return []
+    tl = dfs.get(sheets.get("timeline", ""))
+    if tl is None or "time ms" not in getattr(tl, "columns", []):
+        return []
+    comp_rows = tl[tl["type"] == "computation_time"]
+    if comp_rows.empty:
+        return []
+    computation_time_us = float(comp_rows["time ms"].values[0]) * 1e3
+
+    def _sum_time(df, *cols):
+        for col in cols:
+            if col in getattr(df, "columns", []):
+                return df[col].sum()
+        return None
+
+    findings = []
+    kl = dfs.get(sheets.get("op_summary", ""))
+    if kl is not None:
+        kl_us = _sum_time(
+            kl, "total_direct_kernel_time_sum", "total_direct_kernel_time"
+        )
+        if kl_us is not None and kl_us < computation_time_us:
+            findings.append(
+                TraceCheck(
+                    Status.WARN,
+                    f"kernel_launchers kernel time ({kl_us:.0f} µs) is less than "
+                    f"computation time ({computation_time_us:.0f} µs).",
+                )
+            )
+
+    up = dfs.get("unified_perf_summary")
+    if up is not None:
+        up_us = _sum_time(up, "Kernel Time (µs)_sum", "Kernel Time (µs)")
+        if up_us is not None and up_us < computation_time_us:
+            findings.append(
+                TraceCheck(
+                    Status.WARN,
+                    f"unified_perf kernel time ({up_us:.0f} µs) is less than "
+                    f"computation time ({computation_time_us:.0f} µs).",
+                )
+            )
+
+    return findings
+
+
+def _check_kernel_count_alignment(ctx) -> List[TraceCheck]:
+    """Check that kernel counts in report match ground truth from tree events."""
+    tree, dfs, sheets = ctx.get("tree"), ctx.get("dfs"), ctx.get("sheets")
+    if not tree or not dfs or not sheets:
+        return []
+    events = tree.events
+
+    tree_counts = Counter(
+        e["name"]
+        for e in events
+        if e.get("cat") in GPU_KERNEL_CATEGORIES
+        and not TraceEventUtils.is_communication_string(e.get("name", ""))
+    )
+    if not tree_counts:
+        return []
+    tree_total = sum(tree_counts.values())
+
+    def _extract_counts(df):
+        for col in ["kernel_details_summary", "kernel_details"]:
+            if col not in getattr(df, "columns", []):
+                continue
+            counts = Counter()
+            for kd in df[col]:
+                if isinstance(kd, list):
+                    for d in kd:
+                        counts[d["name"]] += d.get("count", 1)
+            return counts
+        return None
+
+    findings = []
+    for label, df in [
+        ("kernel_launchers", dfs.get(sheets.get("op_summary", ""))),
+        ("unified_perf", dfs.get("unified_perf_summary")),
+    ]:
+        if df is None:
+            continue
+        df_counts = _extract_counts(df)
+        if df_counts is None:
+            continue
+        df_total = sum(df_counts.values())
+        if df_total != tree_total:
+            findings.append(
+                TraceCheck(
+                    Status.WARN,
+                    f"{label} kernel count ({df_total}) does not match "
+                    f"tree kernel count ({tree_total}).",
+                )
+            )
+    return findings
+
+
 def _infer_num_gpus(dfs: Dict) -> Optional[int]:
     """Number of GPU devices, from the perf-report ``gpu_timeline`` sheet."""
     tl = dfs.get("gpu_timeline")
@@ -617,6 +718,8 @@ CHECK_REGISTRY = [
     (_check_jax_metadata_richness, True, True, "jax"),
     # Post-report, basic
     (_check_kernels_dropped_correlation, False, False, None),
+    (_check_kernel_time_coverage, False, False, None),
+    (_check_kernel_count_alignment, False, False, None),
     # Post-report, detailed
     (_check_ops_have_shapes, False, True, None),
     (_check_high_idle_ops, False, True, None),
