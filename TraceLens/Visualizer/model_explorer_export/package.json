@@ -1,0 +1,11 @@
+{
+  "name": "tracelens-model-explorer-export",
+  "private": true,
+  "description": "Model Explorer viewer assets for TraceLens computation graph export",
+  "dependencies": {
+    "ai-edge-model-explorer-visualizer": "0.1.2"
+  },
+  "scripts": {
+    "setup": "npm install && cp node_modules/ai-edge-model-explorer-visualizer/dist/worker.js viewer/worker.js"
+  }
+}

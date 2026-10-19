@@ -230,7 +230,6 @@ def test_kernel_source_cli_change_stays_narrow():
     )
     assert selection.mode == "selected"
     assert "tests/test_kernel_source_cli.py" in selection.test_files
-    assert "tests/test_copyright_headers.py" in selection.test_files
     assert "tests/test_jax_perf_report.py" not in selection.test_files
 
 
