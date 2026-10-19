@@ -136,8 +136,14 @@ python -m TraceLens.Visualizer.model_explorer_export.cli --from-payload kimi.jso
 | `--allow-repo OWNER/REPO`       | Whitelist an extra GitHub repo for remote source introspection (repeatable)                             |
 | `--title`                       | Architecture display name override                                                                      |
 | `--serve`                       | Start a local HTTP server with the viewer (optional; HTML export works without it)                      |
-| `--open`                        | Open the viewer URL in a browser (with `--serve`)                                                       |
+| `--open`                        | Open the viewer URL in a browser (implies `--serve`)                                                    |
 | `--port`                        | Port for `--serve` (default: `8765`)                                                                    |
+| `--sequence-layout {rectangular,packed}` | Sequence layout to draw. `rectangular` keeps `[B, S, ...]` (default). `packed` removes the padding and carries every real token as one row, `[1, nnz, ...]` |
+| `--phase {prefill,decode}`      | `prefill` scores a whole prompt (default). `decode` advances one token, so the query length is 1 and a different kernel may be drawn. Decode always reads a cache |
+| `--cache {cold,warm}`           | `cold` is the first forward, with nothing stored yet (default). `warm` continues from a cache that already holds keys and values |
+| `--attention NAME`              | Attention implementation to draw (`eager`, `sdpa`, `flash_attention_2`, ...). `eager` draws the matmul/softmax chain; `sdpa` draws one fused kernel. Unset, the checkpoint's own setting is used |
+| `--mode {inference,training}`   | What `self.training` reads (default: `inference`)                                                       |
+| `--config-override KEY=VALUE`   | Override one config key, repeatable. Applied last, over the checkpoint, the config-class defaults, and the model's own constructor writes. A dotted key reaches a nested config (`vision_config.hidden_size=1024`). The value is JSON when it parses as JSON (`8`, `true`, `null`, `[1, 2]`) and text otherwise. Stating one key twice keeps the last value |
 | `--config-path`                 | Explicit `config.json` path inside a checkpoint                                                         |
 | `--code-path`                   | Explicit path to `modeling_*.py` when auto-discovery fails                                              |
 | `--dump-ast`                    | Write parsed modeling-file AST dump to a path                                                           |
@@ -155,6 +161,19 @@ python -m TraceLens.Visualizer.model_explorer_export.cli --from-payload kimi.jso
 
 
 Shape inference is **on by default**, and every exported node carries output metadata so the viewer shows tensor shapes on edges instead of `?`. Nodes without an inferred shape of their own (overview spine tiles, group input ports) inherit the shape of whatever feeds them. Model Explorer cannot label an edge that ends on a collapsed group, so expandable blocks also carry `input_shape` and `output_shape` layer attributes describing what crosses their boundary. Dimensions use the symbols `B` (batch), `S` (sequence), `H` (hidden), `V` (vocab), `N`/`K` (attention and KV heads), `D` (head dim), `I` (intermediate), `E` (experts) and `TopK`.
+
+### Runtime regime
+
+A forward branches on facts no config decides: whether this batch was padded, whether a cache already holds keys and values, and whether this step scores a prompt or advances one token. Both arms are real, and they disagree on shapes and on which kernels run. `--sequence-layout`, `--phase`, `--cache`, `--attention`, and `--mode` each pick one arm, so the arm not taken is left out of the drawing. The defaults are a cold rectangular prefill in inference mode, with attention taken from the checkpoint.
+
+`--config-override` is the last word on a config value. Repeat it to set several keys.
+
+```bash
+python -m TraceLens.Visualizer.model_explorer_export.cli moonshotai/Kimi-K3 \
+  --sequence-layout packed --phase decode --attention eager \
+  --config-override num_hidden_layers=2 \
+  -o kimi-decode.html
+```
 
 ### Debugging: standalone `nn.Module` introspection (`--torch-module`)
 
