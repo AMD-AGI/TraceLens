@@ -182,11 +182,11 @@ The main pipeline visualizes a Hugging Face checkpoint from its `modeling_*.py`
 source. As a **debugging aid**, `--torch-module` instead introspects an
 arbitrary in-memory `torch.nn.Module` — useful for inspecting a module in
 isolation, or cross-checking the static-analysis graph against a real trace.
-It requires `torch`: the module is instantiated, symbolically traced with
-`torch.fx`, and its shapes propagated with `ShapeProp`
-(`TraceLens.ModelUtils.torch_introspect`). Give an importable
-`package.module:callable` returning an `nn.Module` (a class or zero-arg
-factory) plus the primary `--input-shape`:
+It requires `torch` (`TraceLens.ModelUtils.torch_introspect`). Give an
+importable `package.module:callable` returning an `nn.Module` (a class or
+zero-arg factory) plus its inputs: either the primary `--input-shape`, which
+symbolically traces the module with `torch.fx` and propagates shapes with
+`ShapeProp`, or one `--input-spec` per forward argument (below):
 
 ```bash
 python -m TraceLens.Visualizer.model_explorer_export.cli \
