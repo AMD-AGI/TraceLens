@@ -50,7 +50,6 @@ def get_pseudo_op_mappings():
         "pseudo_op::moe_flydsl_stage2": moe_perf_model_extensions.moe_flydsl_stage2,
         "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel": moe_perf_model_extensions.moe_triton_invoke_grouped_gemm,
         "aiter::biased_grouped_topk_hip": moe_perf_model_extensions.BiasedGroupedTopk,
-        # only launches fused_append_shared_experts on the aiter path
         "sglang_profiler::topk__post_process_topk_ids": moe_perf_model_extensions.sglang_fused_append_shared_experts,
         "aiter::moe_sorting_fwd": moe_perf_model_extensions.MoeSortScatterGather,
         "aiter::mxfp4_moe_sort_hip": moe_perf_model_extensions.MoeSortScatterGather,
