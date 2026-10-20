@@ -258,6 +258,27 @@ def test_cli_requires_a_source():
     assert exc.value.code == 2
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--torch-module", "pkg.mod:build"],
+        [
+            "--torch-module",
+            "pkg.mod:build",
+            "--input-shape",
+            "2,128",
+            "--input-spec",
+            "x=2,128",
+        ],
+    ],
+)
+def test_cli_torch_module_requires_exactly_one_input(argv, capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    assert exc.value.code == 2
+    assert "exactly one of --input-shape or --input-spec" in capsys.readouterr().err
+
+
 def test_cli_dump_ast_operator_fallback_and_explicit_output(
     monkeypatch, tmp_path, capsys
 ):
