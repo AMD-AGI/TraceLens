@@ -90,6 +90,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      - `standalone`: abort.
      - `comparative`: set `<comparison_method>` = `semantic`.
 
+   - **Cross-framework check** (applies regardless of `<analysis_mode>`/`<inference_exec_mode>`): if `<comparison_scope>` = `comparative`, determine whether trace1 and trace2 come from different frameworks (e.g. vLLM, SGLang, ATOM, torchtitan, Megatron, or any other framework — infer from trace file names/contents, or ask the user directly if ambiguous). If the frameworks differ, set `<comparison_method>` = `semantic`.
+
    - For `comparative`, `<comparison_method>` = `tracediff` unless already set to `semantic`.
 
 5. **Environment Setup**
@@ -263,7 +265,7 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 
 ---
 
-## Step 1.5: Semantic Comparative Ordering (`<inference_exec_mode>` = `graph_replay_only`, `<comparison_scope>` = `comparative`)
+## Step 1.5: Semantic Comparative Ordering (`<comparison_method>` = `semantic`, `<comparison_scope>` = `comparative`)
 
 Run Step 1 in this order:
 
@@ -312,7 +314,7 @@ print(f'GRAPH_REPLAY_FRACTION={coverage.graph_replay_fraction}')
 
 **`STATUS=OK`:** Proceed
 **`STATUS=GRAPH_UNDER_RECORDED`:**
-If <inference_exec_mode> = graph_replay_only and <comparison_scope> = comparative, i.e. <comparison_method> = semantic, skip the rest of this step and proceed with Steps 3-6.
+If <comparison_method> = semantic and <comparison_scope> = comparative, skip the rest of this step and proceed with Steps 3-6.
 
 Otherwise,
 

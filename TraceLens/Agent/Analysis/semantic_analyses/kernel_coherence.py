@@ -34,7 +34,8 @@ Two subcommands:
                    ``context_catalog`` with stable ids.
 
   apply            Apply the LLM decisions (``context_renames`` +
-                   ``fallback_remap_a`` / ``fallback_remap_b``) to recompute each
+                   ``fallback_remap_a`` / ``fallback_remap_b`` + optional
+                   ``fallback_remap_regex_a`` / ``_b``) to recompute each
                    kernel's ``semantic_block`` in place, emit an audit CSV, and
                    warn about any residual one-sided condensed symbols.
 
@@ -56,6 +57,7 @@ Usage:
 import argparse
 import csv
 import json
+import re
 import sys
 from collections import OrderedDict, defaultdict
 
@@ -242,8 +244,13 @@ def cmd_prepare_context(args):  # pragma: no cover
     )
     out["llm_output_schema"] = {
         "context_renames": "{context_id -> final_block}",
-        "fallback_remap_a": "{first_pass_block -> final_block} for trace A",
-        "fallback_remap_b": "{first_pass_block -> final_block} for trace B",
+        "fallback_remap_a": "{first_pass_block -> final_block} for trace A (exact match)",
+        "fallback_remap_b": "{first_pass_block -> final_block} for trace B (exact match)",
+        "fallback_remap_regex_a": "optional {python_regex -> final_block} for trace A, "
+        "checked in order after fallback_remap_a, first re.search match against the "
+        "first_pass_block wins -- use for a whole kernel-name family (e.g. every "
+        "Cijk_* Tensile GEMM solution variant) instead of enumerating every exact name",
+        "fallback_remap_regex_b": "optional {python_regex -> final_block} for trace B, same semantics",
         "notes": "optional string",
     }
     out["context_catalog"] = catalog
@@ -281,10 +288,41 @@ def _context_lookup(catalog):
     return out
 
 
+def _compile_fallback_regex(mapping, label):
+    """Compile an ordered {pattern: final_block} mapping into (regex, final) pairs.
+
+    Patterns are matched with ``re.search`` against the first-pass semantic_block
+    (the same value ``fallback_remap`` matches exactly), in declaration order --
+    first match wins. Raises ValueError naming the offending pattern/side on bad
+    regex syntax rather than silently dropping it.
+    """
+    compiled = []
+    for pattern, final in (mapping or {}).items():
+        try:
+            compiled.append((re.compile(pattern), str(final)))
+        except re.error as e:
+            raise ValueError(f"Invalid regex in {label}: {pattern!r} ({e})") from e
+    return compiled
+
+
 def _final_blocks(
-    workload, kernels, shared, problematic, radius, lookup, context_renames, fallback
+    workload,
+    kernels,
+    shared,
+    problematic,
+    radius,
+    lookup,
+    context_renames,
+    fallback,
+    fallback_regex,
 ):
-    """Compute the final semantic_block for each kernel; return (finals, audit)."""
+    """Compute the final semantic_block for each kernel; return (finals, audit).
+
+    Resolution order per problematic kernel: context_renames (by context id) ->
+    fallback (exact first_pass_block match) -> fallback_regex (first pattern, in
+    declaration order, whose re.search matches first_pass_block) -> else keep
+    the first-pass block.
+    """
     seq = [k.get("semantic_block", "") for k in kernels]
     cond = collapse_consecutive(seq)
     run_per_kernel = run_index_per_kernel(seq)
@@ -296,6 +334,7 @@ def _final_blocks(
         j = run_per_kernel[i]
         sym = cond[j]
         cid = ""
+        match_source = "shared"
         if sym not in problematic:
             final = fp
         else:
@@ -305,10 +344,18 @@ def _final_blocks(
             cid = lookup.get((workload, sym, tuple(left), tuple(right)), "")
             if cid and cid in context_renames:
                 final = context_renames[cid]
+                match_source = "context_rename"
             elif sym in fallback:
                 final = fallback[sym]
+                match_source = "fallback_exact"
             else:
                 final = fp
+                match_source = "unmatched"
+                for pattern, repl in fallback_regex:
+                    if pattern.search(sym):
+                        final = repl
+                        match_source = f"fallback_regex:{pattern.pattern}"
+                        break
         finals.append(final)
         audit.append(
             {
@@ -317,6 +364,7 @@ def _final_blocks(
                 "first_pass_block": fp,
                 "final_block": final,
                 "context_id": cid,
+                "match_source": match_source,
             }
         )
     return finals, audit
@@ -332,6 +380,7 @@ def _write_audit(path, rows):  # pragma: no cover
                 "first_pass_block",
                 "final_block",
                 "context_id",
+                "match_source",
             ],
         )
         w.writeheader()
@@ -367,6 +416,12 @@ def cmd_apply(args):  # pragma: no cover
     }
     fb_a = {str(k): str(v) for k, v in (dec.get("fallback_remap_a") or {}).items()}
     fb_b = {str(k): str(v) for k, v in (dec.get("fallback_remap_b") or {}).items()}
+    fb_regex_a = _compile_fallback_regex(
+        dec.get("fallback_remap_regex_a"), f"{name_a} fallback_remap_regex_a"
+    )
+    fb_regex_b = _compile_fallback_regex(
+        dec.get("fallback_remap_regex_b"), f"{name_b} fallback_remap_regex_b"
+    )
 
     labels_a = _load(labels_a_path)
     labels_b = _load(labels_b_path)
@@ -381,10 +436,10 @@ def cmd_apply(args):  # pragma: no cover
     lookup = _context_lookup(ctx.get("context_catalog", []))
 
     finals_a, audit_a = _final_blocks(
-        name_a, ka, shared, prob_a, radius, lookup, context_renames, fb_a
+        name_a, ka, shared, prob_a, radius, lookup, context_renames, fb_a, fb_regex_a
     )
     finals_b, audit_b = _final_blocks(
-        name_b, kb, shared, prob_b, radius, lookup, context_renames, fb_b
+        name_b, kb, shared, prob_b, radius, lookup, context_renames, fb_b, fb_regex_b
     )
 
     changed_a = 0

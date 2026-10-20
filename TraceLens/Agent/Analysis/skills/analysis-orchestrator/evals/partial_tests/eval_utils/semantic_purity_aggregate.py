@@ -43,6 +43,12 @@ import re
 import statistics
 import sys
 
+# csv_io lives two dirs up in eval_utils/ (not a package).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ANALYSIS_EVAL_UTILS = os.path.abspath(os.path.join(_HERE, "..", "..", "eval_utils"))
+sys.path.insert(0, _ANALYSIS_EVAL_UTILS)
+from csv_io import write_csv  # noqa: E402
+
 CSV_COLUMNS = [
     "index",
     "category",
@@ -224,10 +230,7 @@ def main():
             continue
         result = aggregate_one(args.results_root, test_id)
         out_path = os.path.join(case_dir, "semantic_purity_aggregate_verdict.csv")
-        with open(out_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-            writer.writeheader()
-            writer.writerow(result)
+        write_csv(out_path, [result], CSV_COLUMNS)
         print(f"[{test_id}] {result['result']}: {result['details']}")
         print(f"  -> {out_path}")
         if result["result"] != "PASS":

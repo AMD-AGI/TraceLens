@@ -20,6 +20,8 @@ import os
 import re
 import sys
 
+from csv_io import write_csv
+
 CSV_COLUMNS = [
     "index",
     "category",
@@ -1438,10 +1440,7 @@ def run(
                     "recommended_fix": "Fix pre-check gate failure before running evals",
                 }
             )
-        with open(results_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-            writer.writeheader()
-            writer.writerows(rows)
+        write_csv(results_path, rows, CSV_COLUMNS)
         return rows
 
     for i, (summary, func, rc, fix, mode_aware) in enumerate(EVAL_REGISTRY, start=1):
@@ -1463,10 +1462,7 @@ def run(
     for check_fn in _MULTI_EVAL_CHECKS:
         rows.extend(check_fn(output_dir, comparison_scope))
 
-    with open(results_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-        writer.writeheader()
-        writer.writerows(rows)
+    write_csv(results_path, rows, CSV_COLUMNS)
     return rows
 
 
