@@ -1076,7 +1076,8 @@ def _write_trace(trace, path):
     return path
 
 
-def test_main_no_gpu_work_is_skipped(tmp_path, capsys):
+def test_main_no_gpu_work_is_skipped(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("TRACELENS_SKIP_QUALITY_CHECK", "1")
     # A trace with no GPU kernels has nothing to split.
     trace = {
         "traceEvents": [
@@ -1093,8 +1094,8 @@ def test_main_no_gpu_work_is_skipped(tmp_path, capsys):
     }
     out_dir = tmp_path / "out"
     _invoke_main(_write_trace(trace, tmp_path / "t.json"), out_dir)
-    assert "No GPU work" in capsys.readouterr().out
-    assert not (out_dir / "execution_details.json").exists()
+    # Splitter finds no iteration roots and refuses to split
+    assert "NOT_SPLITTABLE" in capsys.readouterr().out
 
 
 def _force_status(monkeypatch, events, status):

@@ -194,6 +194,15 @@ def write_report_outputs(
                     worksheet.column_dimensions[col_letter].hidden = True
         logger.info("Wrote %s", xlsx_path)
 
+    output_dir = csvs_dir or (os.path.dirname(xlsx_path) if xlsx_path else None)
+    if output_dir:
+        try:
+            from TraceLens import trace_check
+
+            trace_check.write_accumulated_json(output_dir)
+        except ImportError:
+            pass
+
 
 def request_install(package_name):
     """

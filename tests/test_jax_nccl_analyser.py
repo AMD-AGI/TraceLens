@@ -265,7 +265,7 @@ def test_jax_load_trace_data_extracts_nccl_events(
 ):
     pb_path = tmp_path / "node0.xplane.pb"
     pb_path.write_text("pb", encoding="utf-8")
-    mock_loader.load_data.return_value = {"traceEvents": [{"name": "evt"}]}
+    mock_loader.load_trace_events.return_value = ([{"name": "evt"}], {})
     mock_categorizer.return_value = lambda e: e.get("cat", "")
     mock_split.return_value = ([], [{"name": "ncclAllReduce"}])
     mock_tree = MagicMock()

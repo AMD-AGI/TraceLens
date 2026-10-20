@@ -47,7 +47,8 @@ def test_trace_to_tree_preserves_trace_metadata():
     assert "trace_metadata" not in tree.events[0]
 
 
-def test_tree_perf_analyzer_from_file_exposes_trace_metadata(tmp_path):
+def test_tree_perf_analyzer_from_file_exposes_trace_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRACELENS_SKIP_QUALITY_CHECK", "1")
     trace = {
         "schemaVersion": 1,
         "traceName": "from_file_trace.json",

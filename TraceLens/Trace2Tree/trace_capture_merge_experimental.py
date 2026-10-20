@@ -432,9 +432,7 @@ def _load_trace_tree_from_file(
     """Load a trace file into a built TraceToTree without TreePerfAnalyzer."""
     from ..util import DataLoader
 
-    data = DataLoader.load_data(profile_filepath)
-    trace_metadata = {key: value for key, value in data.items() if key != "traceEvents"}
-    events = data["traceEvents"]
+    events, trace_metadata = DataLoader.load_trace_events(profile_filepath)
     tree = TraceToTree(
         events,
         event_to_category=TraceToTree.default_categorizer,
