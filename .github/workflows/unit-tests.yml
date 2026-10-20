@@ -184,6 +184,10 @@ jobs:
           restore-keys: |
             test-durations-
 
+      - name: Drop incompatible toolcache Python
+        if: env.TEST_MODE != 'none'
+        run: sh scripts/reset_incompatible_toolcache_python.sh
+
       - name: Set up Python
         if: env.TEST_MODE != 'none'
         uses: actions/setup-python@v5
@@ -286,6 +290,9 @@ jobs:
         with:
           filter: blob:none
 
+      - name: Drop incompatible toolcache Python
+        run: sh scripts/reset_incompatible_toolcache_python.sh
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -362,6 +369,9 @@ jobs:
           key: visualizer-test-durations-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             visualizer-test-durations-
+
+      - name: Drop incompatible toolcache Python
+        run: sh scripts/reset_incompatible_toolcache_python.sh
 
       - name: Set up Python
         uses: actions/setup-python@v5
