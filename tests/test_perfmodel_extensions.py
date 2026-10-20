@@ -1631,6 +1631,8 @@ class TestRmsNormExtensionsCoverage:
         model = aiter_fused_qk_rmsnorm(event)
         assert model.num_channels == 2048
         assert model.k_num_channels == 512
+        assert model.k_shape == (12, 512)
+        assert model.k_num_elems == 12 * 512
         q_only = aiter_rmsnorm(
             {
                 "args": {
@@ -1640,8 +1642,23 @@ class TestRmsNormExtensionsCoverage:
                 }
             }
         )
-        assert model.flops() > q_only.flops()
-        assert model.bytes() > q_only.bytes()
+        k_only = aiter_rmsnorm(
+            {
+                "args": {
+                    "Input Dims": [(12, 512), (12, 512), (512,), ()],
+                    "Input type": ["c10::BFloat16"] * 3 + ["Scalar"],
+                    "Input Strides": [(512, 1), (512, 1), (1,), ()],
+                }
+            }
+        )
+        assert model.flops() == q_only.flops() + k_only.flops()
+        assert model.bytes() == q_only.bytes() + k_only.bytes()
+        assert model.flops() == 122928
+        assert model.bytes() == 128000
+        assert (
+            get_pseudo_op_mappings()["aiter::_fused_qk_rmsnorm_kernel"]
+            is aiter_fused_qk_rmsnorm
+        )
 
     def test_aiter_rmsnorm2d_dynamicquant(self):
         event = {
