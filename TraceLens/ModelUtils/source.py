@@ -128,6 +128,27 @@ def _list_repo_python_files(model_id: str, revision: str | None = None) -> list[
         return []
 
 
+_WEIGHT_SUFFIXES = (
+    ".safetensors",
+    ".bin",
+    ".pt",
+    ".pth",
+    ".gguf",
+    ".onnx",
+    ".msgpack",
+    ".h5",
+    ".ckpt",
+    ".tflite",
+    ".pb",
+)
+
+
+def is_weight_file(name: str) -> bool:
+    """True for checkpoint weight blobs. Config and Python source are not weights."""
+    base = name.split("?", 1)[0].lower().rstrip("/")
+    return base.endswith(_WEIGHT_SUFFIXES)
+
+
 def _download_repo_files(
     model_id: str, filenames: list[str], revision: str | None = None
 ) -> list[Path]:
@@ -141,6 +162,8 @@ def _download_repo_files(
 
     paths: list[Path] = []
     for name in filenames:
+        if is_weight_file(name):
+            continue
         try:
             downloaded = hf_hub_download(model_id, name, revision=revision)
             paths.append(Path(downloaded))
@@ -501,10 +524,17 @@ def resolve_source_files(
             files.append(path)
             labels.append(label)
         else:
-            tf_path = _transformers_modeling_path(model_type)
-            if tf_path is not None:
+            # The flattened ``model_type`` is often the text backbone
+            # (``muse_spark_text``), whose classes live in the wrapper package
+            # (``modeling_muse_spark.py``). Try every type the config names,
+            # wrapper first, and stop at the first installed module.
+            for candidate in _config_model_types(config):
+                tf_path = _transformers_modeling_path(candidate)
+                if tf_path is None:
+                    continue
                 files.append(tf_path)
                 labels.append(str(tf_path))
+                break
 
     auto_map_files = _collect_auto_map_files(config)
 

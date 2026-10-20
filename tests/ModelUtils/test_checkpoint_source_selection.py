@@ -23,6 +23,8 @@ published more files than it used to.
 
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 
 from TraceLens.ModelUtils import source
@@ -197,3 +199,73 @@ class TestAConfigOnlySnapshotStillFetchesModeling:
             revision == "f831ab66814297da540d832a5235f8e904f29d06"
             for _, _, revision in seen
         )
+
+
+def test_weight_files_are_not_downloaded(monkeypatch):
+    """A hub fetch of modeling code must not pull checkpoint weights."""
+    downloaded: list[str] = []
+
+    def download(model_id, name, revision=None):
+        downloaded.append(name)
+        return f"/tmp/{name}"
+
+    hub = types.ModuleType("huggingface_hub")
+    hub.hf_hub_download = download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+
+    paths = source._download_repo_files(
+        "org/model",
+        [
+            "modeling_muse.py",
+            "model.safetensors",
+            "pytorch_model.bin",
+            "model.gguf",
+        ],
+    )
+    assert downloaded == ["modeling_muse.py"]
+    assert paths == [Path("/tmp/modeling_muse.py")]
+    assert source.is_weight_file("weights.pt")
+    assert not source.is_weight_file("config.json")
+
+
+def test_installed_modeling_file_uses_the_wrapper_type(tmp_path, monkeypatch):
+    """A flattened text ``model_type`` still resolves the wrapper's modeling file.
+
+    Muse Spark's config says ``muse_spark_text`` after normalization, but the
+    classes live in ``modeling_muse_spark.py``. ``vision_config`` is not a
+    module name and is not searched.
+    """
+    modeling = tmp_path / "modeling_muse_spark.py"
+    modeling.write_text(
+        "class MuseSparkForConditionalGeneration:\n    pass\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        source, "_transformers_versioned_modeling_file", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(source, "_hub_snapshot_root", lambda *_a, **_k: None)
+    monkeypatch.setattr(source, "_list_repo_python_files", lambda *_a, **_k: [])
+
+    def _no_download(*_args, **_kwargs):
+        raise AssertionError("the installed wrapper module is not a hub download")
+
+    monkeypatch.setattr(source, "_download_repo_files", _no_download)
+    seen: list[str] = []
+
+    def path_for(model_type):
+        seen.append(model_type)
+        return modeling if model_type == "muse_spark" else None
+
+    monkeypatch.setattr(source, "_transformers_modeling_path", path_for)
+    files, _labels = source.resolve_source_files(
+        "unsloth/Muse-Spark-Open-816B-A42B",
+        {
+            "model_type": "muse_spark_text",
+            "_wrapper_model_type": "muse_spark",
+            "text_config": {"model_type": "muse_spark_text"},
+            "vision_config": {"model_type": "muse_spark_vision"},
+            "architectures": ["MuseSparkForConditionalGeneration"],
+        },
+    )
+    assert files == [modeling]
+    assert seen == ["muse_spark"]
+    assert "muse_spark_vision" not in seen

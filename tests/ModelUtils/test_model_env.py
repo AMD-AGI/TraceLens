@@ -162,8 +162,158 @@ def test_child_process_never_reprovisions(monkeypatch):
 
 def test_no_reexec_when_checkpoint_runs_here(monkeypatch):
     monkeypatch.delenv(model_env.REEXEC_ENV_FLAG, raising=False)
+    monkeypatch.setattr(model_env, "required_transformers_version", lambda *_a: None)
     monkeypatch.setattr(model_env, "detect_env_mismatch", lambda *_a, **_k: None)
     assert model_env.reexec_in_model_env("some/checkpoint", []) is None
+
+
+def _pin_installed(monkeypatch, installed):
+    monkeypatch.setattr(model_env, "_installed_transformers_version", lambda: installed)
+
+
+def test_newer_requested_release_switches_without_an_import_failure(monkeypatch):
+    monkeypatch.delenv(model_env.REEXEC_ENV_FLAG, raising=False)
+    _pin_installed(monkeypatch, "5.16.1")
+    monkeypatch.setattr(
+        model_env, "required_transformers_version", lambda *_a: "5.18.0.dev0"
+    )
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("a newer pin switches before the import probe")
+
+    monkeypatch.setattr(model_env, "detect_env_mismatch", _unexpected)
+    monkeypatch.setattr(
+        model_env,
+        "_published_transformers_versions",
+        lambda: ["5.16.1", "5.18.0.dev0", "5.20.2"],
+    )
+    seen: dict[str, str] = {}
+
+    def _ensure(_checkpoint, version, **kwargs):
+        seen["version"] = version
+        seen["requirement"] = kwargs.get("requirement")
+        return Path("/env")
+
+    monkeypatch.setattr(model_env, "ensure_model_dependencies", _ensure)
+    monkeypatch.setattr(
+        model_env.subprocess,
+        "run",
+        lambda *_a, **_k: type("R", (), {"returncode": 0})(),
+    )
+    assert model_env.reexec_in_model_env("some/checkpoint", []) == 0
+    assert seen == {
+        "version": "5.18.0.dev0",
+        "requirement": "transformers==5.18.0.dev0",
+    }
+
+
+def test_unpublished_newer_pin_installs_the_newest_later_release(monkeypatch):
+    monkeypatch.delenv(model_env.REEXEC_ENV_FLAG, raising=False)
+    _pin_installed(monkeypatch, "5.16.1")
+    monkeypatch.setattr(
+        model_env, "required_transformers_version", lambda *_a: "5.18.0.dev0"
+    )
+    monkeypatch.setattr(
+        model_env,
+        "_published_transformers_versions",
+        lambda: ["5.16.1", "5.18.0", "5.20.2"],
+    )
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("a newer pin switches before the import probe")
+
+    seen: dict[str, str] = {}
+
+    def _ensure(_checkpoint, version, **kwargs):
+        seen["version"] = version
+        seen["requirement"] = kwargs.get("requirement")
+        return Path("/env")
+
+    monkeypatch.setattr(model_env, "detect_env_mismatch", _unexpected)
+    monkeypatch.setattr(model_env, "ensure_model_dependencies", _ensure)
+    monkeypatch.setattr(
+        model_env.subprocess,
+        "run",
+        lambda *_a, **_k: type("R", (), {"returncode": 0})(),
+    )
+    assert model_env.reexec_in_model_env("unsloth/Muse-Spark", []) == 0
+    assert seen == {"version": "5.20.2", "requirement": "transformers==5.20.2"}
+
+
+def test_unpublished_pin_ahead_of_every_release_uses_head(monkeypatch):
+    commit = "abc123def456abc123def456abc123def456abcd"
+    monkeypatch.setattr(
+        model_env, "_published_transformers_versions", lambda: ["5.16.1", "5.20.2"]
+    )
+    monkeypatch.setattr(model_env, "_transformers_head_commit", lambda: commit)
+    assert model_env._transformers_install_spec("5.21.0.dev0") == (
+        commit,
+        f"git+{model_env._TRANSFORMERS_GIT}@{commit}",
+    )
+
+
+def test_unreadable_pypi_index_keeps_the_requested_pin(monkeypatch):
+    monkeypatch.setattr(model_env, "_published_transformers_versions", lambda: None)
+
+    def _unexpected():
+        raise AssertionError("HEAD is only for a readable index with no newer release")
+
+    monkeypatch.setattr(model_env, "_transformers_head_commit", _unexpected)
+    assert model_env._transformers_install_spec("5.18.0.dev0") == (
+        "5.18.0.dev0",
+        "transformers==5.18.0.dev0",
+    )
+
+
+def test_older_requested_release_stays_when_import_succeeds(monkeypatch):
+    monkeypatch.delenv(model_env.REEXEC_ENV_FLAG, raising=False)
+    _pin_installed(monkeypatch, "5.20.0")
+    monkeypatch.setattr(
+        model_env, "required_transformers_version", lambda *_a: "4.56.2"
+    )
+    monkeypatch.setattr(model_env, "detect_env_mismatch", lambda *_a, **_k: None)
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("an older pin must not replace a working install")
+
+    monkeypatch.setattr(model_env, "ensure_model_dependencies", _unexpected)
+    assert model_env.reexec_in_model_env("some/checkpoint", []) is None
+
+
+def test_older_requested_release_switches_when_import_fails(monkeypatch):
+    monkeypatch.delenv(model_env.REEXEC_ENV_FLAG, raising=False)
+    _pin_installed(monkeypatch, "5.20.0")
+    monkeypatch.setattr(
+        model_env, "required_transformers_version", lambda *_a: "4.56.2"
+    )
+    monkeypatch.setattr(model_env, "detect_env_mismatch", lambda *_a, **_k: "broken")
+
+    def _no_substitute(*_args, **_kwargs):
+        raise AssertionError("an older pin is installed as named")
+
+    seen: dict[str, str] = {}
+
+    def _ensure(_checkpoint, version, **kwargs):
+        seen["version"] = version
+        seen["requirement"] = kwargs.get("requirement")
+        return Path("/env")
+
+    monkeypatch.setattr(model_env, "_transformers_install_spec", _no_substitute)
+    monkeypatch.setattr(model_env, "ensure_model_dependencies", _ensure)
+    monkeypatch.setattr(
+        model_env.subprocess,
+        "run",
+        lambda *_a, **_k: type("R", (), {"returncode": 3})(),
+    )
+    assert model_env.reexec_in_model_env("some/checkpoint", []) == 3
+    assert seen == {"version": "4.56.2", "requirement": "transformers==4.56.2"}
+
+
+def test_version_relation_orders_dev_before_the_final_release():
+    assert model_env._version_relation("5.18.0.dev0", "5.16.1") == "newer"
+    assert model_env._version_relation("5.18.0.dev0", "5.18.0") == "older"
+    assert model_env._version_relation("5.16.1", "5.16.1") == "same"
+    assert model_env._version_relation("5.18.0", None) == "newer"
 
 
 def test_no_reexec_when_config_names_no_version(monkeypatch):
@@ -296,6 +446,25 @@ def test_dependencies_installs_pinned_transformers_once(monkeypatch, tmp_path):
         "some/checkpoint", "4.56.2", root=tmp_path
     )
     assert second == first and installed == ["transformers==4.56.2"]
+
+
+def test_dependencies_installs_a_git_requirement_under_its_commit(
+    monkeypatch, tmp_path
+):
+    """A HEAD pin is cached by commit and installed as a git URL, not ==sha."""
+    installed: list[str] = []
+    _stub_install(monkeypatch, installed)
+    commit = "a" * 40
+    requirement = f"git+{model_env._TRANSFORMERS_GIT}@{commit}"
+    target = model_env.ensure_model_dependencies(
+        "some/checkpoint",
+        commit,
+        root=tmp_path,
+        requirement=requirement,
+        probe=False,
+    )
+    assert target is not None and installed == [requirement]
+    assert (target / ".tracelens-transformers").read_text(encoding="utf-8") == commit
 
 
 def test_dependencies_gives_up_when_transformers_cannot_be_installed(
