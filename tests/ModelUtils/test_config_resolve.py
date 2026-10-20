@@ -6,9 +6,15 @@
 
 """Tests for modular Hugging Face config discovery."""
 
+import sys
+import types
+
+import pytest
+
 from TraceLens.ModelUtils.config_resolve import (
     discover_remote_config,
     normalize_config,
+    _download_config,
     _score_config_content,
 )
 
@@ -47,3 +53,14 @@ def test_discover_minimax_h3_config():
     assert "text_encoder/config.json" in label
     assert config["num_hidden_layers"] == 64
     assert config["num_key_value_heads"] == 8
+
+
+def test_download_config_refuses_weight_files(monkeypatch):
+    def _no_download(*_args, **_kwargs):
+        raise AssertionError("weight files are not downloaded")
+
+    hub = types.ModuleType("huggingface_hub")
+    hub.hf_hub_download = _no_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    with pytest.raises(ValueError, match="weight file"):
+        _download_config("org/model", "model.safetensors")

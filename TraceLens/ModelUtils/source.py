@@ -128,6 +128,27 @@ def _list_repo_python_files(model_id: str, revision: str | None = None) -> list[
         return []
 
 
+_WEIGHT_SUFFIXES = (
+    ".safetensors",
+    ".bin",
+    ".pt",
+    ".pth",
+    ".gguf",
+    ".onnx",
+    ".msgpack",
+    ".h5",
+    ".ckpt",
+    ".tflite",
+    ".pb",
+)
+
+
+def is_weight_file(name: str) -> bool:
+    """True for checkpoint weight blobs. Config and Python source are not weights."""
+    base = name.split("?", 1)[0].lower().rstrip("/")
+    return base.endswith(_WEIGHT_SUFFIXES)
+
+
 def _download_repo_files(
     model_id: str, filenames: list[str], revision: str | None = None
 ) -> list[Path]:
@@ -141,6 +162,8 @@ def _download_repo_files(
 
     paths: list[Path] = []
     for name in filenames:
+        if is_weight_file(name):
+            continue
         try:
             downloaded = hf_hub_download(model_id, name, revision=revision)
             paths.append(Path(downloaded))
@@ -501,6 +524,10 @@ def resolve_source_files(
             files.append(path)
             labels.append(label)
         else:
+            # Only the flattened model type. An installed wrapper module
+            # (``modeling_glm5_next.py``) can be a different revision than
+            # ``TRANSFORMERS_GITHUB_SOURCE``, which is what the graph tests
+            # pin their op ids to. The wrapper is tried after that pin.
             tf_path = _transformers_modeling_path(model_type)
             if tf_path is not None:
                 files.append(tf_path)
@@ -543,6 +570,20 @@ def resolve_source_files(
             path, label = upstream
             files.append(path)
             labels.append(label)
+        else:
+            # The flattened type is often the text backbone
+            # (``muse_spark_text``), whose classes live in the wrapper
+            # package (``modeling_muse_spark.py``). Use that installed
+            # module when the pinned GitHub ref does not have it.
+            for candidate in _config_model_types(config):
+                if candidate == model_type:
+                    continue
+                tf_path = _transformers_modeling_path(candidate)
+                if tf_path is None:
+                    continue
+                files.append(tf_path)
+                labels.append(str(tf_path))
+                break
 
     # Analysis reads the files in order, so modeling code has to precede the
     # config and processing helpers a checkpoint may also ship.

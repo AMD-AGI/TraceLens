@@ -7,26 +7,29 @@
 """Per-checkpoint Python environments for models that need a different
 ``transformers`` than the interpreter currently running.
 
-A checkpoint whose architecture ships inside ``transformers`` runs fine here. A
-checkpoint that ships its OWN modeling code (``auto_map`` / ``trust_remote_code``)
-was written against one specific ``transformers`` release, and that code breaks
-on a newer one as soon as it imports a symbol the newer release no longer
-exports. The break is an ``ImportError`` raised while importing the model's own
-module -- which makes it something we can DETECT AT RUN TIME rather than track in
-a per-model table.
+A checkpoint names the ``transformers`` that wrote its ``config.json``. When
+that release is newer than the one installed here, the export re-runs against
+the named release even if this interpreter can already import the model. An
+older release is used only when importing the checkpoint's own modeling code
+fails here: a newer installed ``transformers`` that still imports the model is
+left in place.
 
 Nothing here keys off a model name or a version table. The flow is:
 
-1. :func:`detect_env_mismatch` probes THIS interpreter by resolving the
-   checkpoint's declared class exactly the way meta instantiation does, and
-   reports a reason only when that import genuinely fails.
-2. :func:`required_transformers_version` then reads the pin hint out of the
-   checkpoint's own ``config.json``. That field records the version that WROTE
-   the config, so it is not authoritative on its own -- it is consulted only for
-   a checkpoint already proven unable to run here.
-3. :func:`ensure_model_venv` creates (or reuses) a venv for that pin and
-   installs what the model needs, discovering extra third-party requirements
-   from the import errors the model itself raises.
+1. :func:`required_transformers_version` reads the pin from the checkpoint's
+   own ``config.json``.
+2. A pin newer than the installed release is reason enough to switch. When
+   that pin is not on PyPI, :func:`_transformers_install_spec` selects the
+   newest published release still newer than the pin, or the current
+   transformers ``main`` commit when no published release is newer.
+3. Otherwise :func:`detect_env_mismatch` probes THIS interpreter, and an older
+   pin is used only when that import genuinely fails.
+4. :func:`ensure_model_dependencies` creates (or reuses) a directory for that
+   pin and installs what the model needs, discovering extra third-party
+   requirements from the import errors the model itself raises.
+
+Provisioning and the probe load config and modeling code only. Weight files
+are never downloaded.
 """
 
 from __future__ import annotations
@@ -121,13 +124,153 @@ def detect_env_mismatch(checkpoint: str | Path) -> str | None:
     return None
 
 
-def required_transformers_version(checkpoint: str | Path) -> str | None:
-    """Pin hint from the checkpoint's own ``config.json``.
+def _version_relation(requested: str, installed: str | None) -> str | None:
+    """``newer``, ``older``, ``same``, or ``None`` when the two cannot be ordered.
 
-    ``transformers_version`` records the release that WROTE the config, not a
-    requirement -- natively supported checkpoints routinely name an older release
-    and run fine. Only call this for a checkpoint :func:`detect_env_mismatch` has
-    already shown cannot run in the current interpreter.
+    A missing installed release counts as older than any requested pin. Dev
+    markers sort before the matching final release, so ``5.18.0.dev0`` is newer
+    than ``5.16.1`` and older than ``5.18.0``.
+    """
+    if not installed:
+        return "newer"
+    try:
+        from packaging.version import Version
+    except ImportError:
+        return None
+    try:
+        requested_version = Version(requested)
+        installed_version = Version(installed)
+    except Exception:  # noqa: BLE001 - an unreadable version is not an order
+        return None
+    if requested_version > installed_version:
+        return "newer"
+    if requested_version < installed_version:
+        return "older"
+    return "same"
+
+
+_TRANSFORMERS_GIT = "https://github.com/huggingface/transformers.git"
+_PYPI_TRANSFORMERS_JSON = "https://pypi.org/pypi/transformers/json"
+
+
+def _published_transformers_versions() -> list[str] | None:
+    """Version strings PyPI publishes for transformers, or ``None`` if unread."""
+    try:
+        import json as _json
+        from urllib.request import urlopen
+
+        with urlopen(_PYPI_TRANSFORMERS_JSON, timeout=30) as response:
+            payload = _json.load(response)
+    except Exception:  # noqa: BLE001 - an unread index is not an empty one
+        return None
+    releases = payload.get("releases") if isinstance(payload, dict) else None
+    if not isinstance(releases, dict):
+        return None
+    return [name for name in releases if isinstance(name, str)]
+
+
+def _published_match(requested: str, published: list[str]) -> str | None:
+    """The published spelling of ``requested``, when PyPI has that release."""
+    if requested in published:
+        return requested
+    try:
+        from packaging.version import Version
+    except ImportError:
+        return None
+    try:
+        wanted = Version(requested)
+    except Exception:  # noqa: BLE001
+        return None
+    for name in published:
+        try:
+            if Version(name) == wanted:
+                return name
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _newest_published_after(requested: str, published: list[str]) -> str | None:
+    """Greatest published release strictly newer than ``requested``."""
+    try:
+        from packaging.version import Version
+    except ImportError:
+        return None
+    try:
+        requested_version = Version(requested)
+    except Exception:  # noqa: BLE001
+        return None
+    newer: list[tuple[object, str]] = []
+    for name in published:
+        try:
+            parsed = Version(name)
+        except Exception:  # noqa: BLE001
+            continue
+        if parsed > requested_version:
+            newer.append((parsed, name))
+    if not newer:
+        return None
+    return max(newer, key=lambda item: item[0])[1]
+
+
+def _transformers_head_commit() -> str | None:
+    """Current ``HEAD`` commit of huggingface/transformers, when git can see it."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", _TRANSFORMERS_GIT, "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    line = (result.stdout or "").strip().split()
+    if not line or not re.fullmatch(r"[0-9a-f]{40}", line[0]):
+        return None
+    return line[0]
+
+
+def _transformers_install_spec(requested: str) -> tuple[str, str]:
+    """Cache key and pip requirement for a pin newer than the installed release.
+
+    A release PyPI publishes is installed as named. An unpublished pin uses the
+    greatest published release strictly newer than it. When every published
+    release is older, the requirement is the current ``main`` commit of
+    huggingface/transformers. An unreadable PyPI index leaves the exact pin in
+    place.
+    """
+    published = _published_transformers_versions()
+    if published is None:
+        return requested, f"transformers=={requested}"
+    match = _published_match(requested, published)
+    if match is not None:
+        return match, f"transformers=={match}"
+    newer = _newest_published_after(requested, published)
+    if newer is not None:
+        return newer, f"transformers=={newer}"
+    commit = _transformers_head_commit()
+    if commit is None:
+        return requested, f"transformers=={requested}"
+    return commit, f"git+{_TRANSFORMERS_GIT}@{commit}"
+
+
+def _installed_transformers_version() -> str | None:
+    try:
+        import transformers
+    except ImportError:
+        return None
+    version = getattr(transformers, "__version__", None)
+    return version if isinstance(version, str) and version else None
+
+
+def required_transformers_version(checkpoint: str | Path) -> str | None:
+    """Pin from the checkpoint's own ``config.json``.
+
+    ``transformers_version`` records the release that wrote the config. A pin
+    newer than the installed release selects that release on its own. An older
+    pin is used only when :func:`detect_env_mismatch` has shown this interpreter
+    cannot import the checkpoint.
     """
     config: dict | None = None
     try:
@@ -252,6 +395,7 @@ def ensure_model_dependencies(
     root: Path | None = None,
     probe: bool = True,
     extra_packages: list[str] | None = None,
+    requirement: str | None = None,
 ) -> Path | None:
     """Directory holding the code ``checkpoint`` needs, for ``PYTHONPATH``.
 
@@ -275,13 +419,12 @@ def ensure_model_dependencies(
     """
     target = env_path_for(checkpoint, version, root)
     stamp = target / ".tracelens-transformers"
+    requirement = requirement or f"transformers=={version}"
     if not stamp.is_file() or stamp.read_text(encoding="utf-8").strip() != version:
         target.mkdir(parents=True, exist_ok=True)
-        ok, output = _pip_install(target, [f"transformers=={version}"], deps=True)
+        ok, output = _pip_install(target, [requirement], deps=True)
         if not ok:
-            _log.warning(
-                "Installing transformers==%s failed: %s", version, output[-800:]
-            )
+            _log.warning("Installing %s failed: %s", requirement, output[-800:])
             return None
         stamp.write_text(version, encoding="utf-8")
 
@@ -363,41 +506,59 @@ def reexec_in_model_env(
     root: Path | None = None,
     module: str = "TraceLens.Visualizer.model_explorer_export.cli",
 ) -> int | None:
-    """Re-run this command in an environment that can import ``checkpoint``.
+    """Re-run this command against the transformers release ``checkpoint`` names.
+
+    A pin newer than the installed release always switches. An unpublished
+    newer pin installs the newest PyPI release after it, or the transformers
+    git ``HEAD`` when no published release is newer. An older pin switches
+    only when this interpreter cannot import the checkpoint. The same pin
+    still provisions when that import fails, so a missing third-party
+    dependency can be installed without changing ``transformers``.
 
     Returns the child's exit status, or ``None`` when nothing was re-executed --
-    because this process already IS the child, because the checkpoint runs fine
-    here (the common case), or because the environment could not be provisioned.
-    A ``None`` return means the caller should simply carry on in-process, which
-    degrades to the same static-analysis-only result as before.
+    because this process already IS the child, because the installed release
+    should stay, or because the environment could not be provisioned. A
+    ``None`` return means the caller should carry on in-process.
     """
     if os.environ.get(REEXEC_ENV_FLAG):
         return None
-    reason = detect_env_mismatch(checkpoint)
-    if reason is None:
-        return None
     version = required_transformers_version(checkpoint)
-    if version is None:
-        _log.warning(
-            "%s needs different model code (%s) but its config names no "
-            "transformers version to pin; continuing in the current environment",
-            checkpoint,
-            reason,
+    installed = _installed_transformers_version()
+    relation = _version_relation(version, installed) if version else None
+    if relation == "newer":
+        install_version, requirement = _transformers_install_spec(version)
+        reason = (
+            f"config requests transformers=={version}, "
+            f"newer than installed {installed or 'none'}"
         )
-        return None
+    else:
+        reason = detect_env_mismatch(checkpoint)
+        if reason is None:
+            return None
+        if version is None:
+            _log.warning(
+                "%s needs different model code (%s) but its config names no "
+                "transformers version to pin; continuing in the current environment",
+                checkpoint,
+                reason,
+            )
+            return None
+        install_version = version
+        requirement = f"transformers=={version}"
+        if relation == "older":
+            reason = (
+                f"{reason}; config requests older transformers=={version} "
+                f"than installed {installed}"
+            )
 
-    _log.warning(
-        "%s cannot be imported here (%s); using pinned transformers==%s",
-        checkpoint,
-        reason,
-        version,
+    _log.warning("%s will run with %s (%s)", checkpoint, requirement, reason)
+    target = ensure_model_dependencies(
+        checkpoint, install_version, root=root, requirement=requirement
     )
-    target = ensure_model_dependencies(checkpoint, version, root=root)
     if target is None:
         _log.warning(
-            "Could not provision a transformers==%s environment for %s; "
-            "continuing in the current environment",
-            version,
+            "Could not provision %s for %s; continuing in the current environment",
+            requirement,
             checkpoint,
         )
         return None

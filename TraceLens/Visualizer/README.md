@@ -153,7 +153,7 @@ python -m TraceLens.Visualizer.model_explorer_export.cli --from-payload kimi.jso
 | `--no-inline-expansion`         | Keep composite modules as opaque tiles instead of expanding into internal steps                         |
 | `--no-shapes`                   | Skip `output_shape` / `output_dtype` annotations                                                        |
 | `--drop-constants` / `--no-drop-constants` | Drop constant / learned-weight / buffer nodes when rendering HTML — on by default. The exported JSON always keeps them |
-| `--auto-venv` / `--no-auto-venv` | Re-run in a per-model virtual environment when this checkpoint's modeling code cannot be imported by the current `transformers` — on by default, detected at run time, cached and reused |
+| `--auto-venv` / `--no-auto-venv` | Re-run against the `transformers` release named in the checkpoint when that release is newer than the one installed, and also when it is older and the model cannot be imported here. An unpublished newer pin uses the newest PyPI release after it, or transformers git HEAD when none is newer — on by default, cached and reused |
 | `--meta-shapes` / `--no-meta-shapes` | Meta-device shape pass filling shapes static analysis can't infer — on by default (`--no-meta-shapes` = pure static) |
 | `--operators-json PATH`         | Also write flat operator export JSON with inferred shapes                                               |
 | `--torch-module PKG.MOD:FACTORY` | *(debugging)* Introspect a plain `torch.nn.Module` instead of an HF checkpoint (see below)              |

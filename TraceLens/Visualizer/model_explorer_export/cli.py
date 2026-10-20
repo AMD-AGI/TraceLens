@@ -137,11 +137,13 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Re-run in a per-model virtual environment when this checkpoint's "
-            "modeling code cannot be imported by the current transformers "
-            "(default: on). The need is detected at run time -- a checkpoint that "
-            "imports fine here is untouched -- and the environment is cached and "
-            "reused. Use --no-auto-venv to always stay in the current interpreter."
+            "Re-run against the transformers release named in the checkpoint "
+            "when that release is newer than the one installed here, and also "
+            "when it is older and this interpreter cannot import the model "
+            "(default: on). An unpublished newer pin uses the newest PyPI "
+            "release after it, or the transformers git HEAD when none is "
+            "newer. The environment is cached and reused. "
+            "Use --no-auto-venv to always stay in the current interpreter."
         ),
     )
 
@@ -647,8 +649,9 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.auto_venv and checkpoint is not None:
-        # Only re-executes for a checkpoint whose own modeling code fails to
-        # import here; returns None (and we carry on in-process) otherwise.
+        # Re-executes when the checkpoint names a newer transformers release,
+        # or an older one that this interpreter cannot import. Returns None
+        # (and we carry on in-process) when the installed release should stay.
         from TraceLens.ModelUtils.model_env import reexec_in_model_env
 
         status = reexec_in_model_env(
