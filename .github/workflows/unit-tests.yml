@@ -68,6 +68,8 @@ jobs:
             > "$RUNNER_TEMP/changed.txt"
           python3 scripts/select_related_tests.py \
             --changed-from "$RUNNER_TEMP/changed.txt" \
+            --exclude-test-prefix tests/ModelUtils/ \
+            --exclude-test-prefix tests/Visualizer/ \
             --github-output "$GITHUB_OUTPUT" \
             --write-list selected_tests.txt
 
@@ -141,6 +143,7 @@ jobs:
 
   unit-tests:
     needs: select-pr-tests
+    if: needs.select-pr-tests.outputs.mode != 'none'
     runs-on: ubuntu-latest
     # rocm-origami is required by roofline / Origami perf-model tests.
     container: rocm/dev-ubuntu-24.04:7.2.1
@@ -231,23 +234,8 @@ jobs:
             exit 1
           fi
           mapfile -t files < "$list_file"
-          filtered=()
-          for file in "${files[@]}"; do
-            # ModelUtils and Visualizer run in their own sharded jobs, which
-            # install the torch and transformers this one does not.
-            case "$file" in
-              tests/ModelUtils/*|tests/Visualizer/*) continue ;;
-            esac
-            if [ -n "$file" ]; then
-              filtered+=("$file")
-            fi
-          done
-          if [ ${#filtered[@]} -eq 0 ]; then
-            echo "Selector reported tests but the list was empty." >&2
-            exit 1
-          fi
           set +e
-          python -m pytest "${filtered[@]}" -v --tb=short -n auto --dist worksteal \
+          python -m pytest "${files[@]}" -v --tb=short -n auto --dist worksteal \
             --splits 4 --group ${{ matrix.shard }} \
             --splitting-algorithm least_duration \
             --durations-path .test_durations \
@@ -439,7 +427,7 @@ jobs:
     needs: [select-pr-tests, unit-tests, changes, modelutils-tests, visualizer-tests]
     if: >-
       !cancelled() &&
-      needs.unit-tests.result == 'success' &&
+      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
       needs.changes.result == 'success' &&
       (needs.modelutils-tests.result == 'success' || needs.modelutils-tests.result == 'skipped') &&
       (needs.visualizer-tests.result == 'success' || needs.visualizer-tests.result == 'skipped')
