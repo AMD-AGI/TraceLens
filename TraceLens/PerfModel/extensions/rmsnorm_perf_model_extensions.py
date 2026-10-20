@@ -107,15 +107,26 @@ class aiter_rmsnorm(RMSNorm):
 
 class aiter_fused_qk_rmsnorm(RMSNorm):
     """
-    Performance model for ``aiter::_fused_qk_rmsnorm_kernel`` (fused Q+K RMSNorm;
-    inference: aiter / sglang).
+    Performance model for aiter::_fused_qk_rmsnorm_kernel.
 
-    Two independent affine RMSNorms from the trace layout
-    ``[q, q_w, q_eps, k, k_w, k_eps, q_out, k_out]``:
-    Q channels from ``Input Dims[0]/[1]``, K/KV from ``Input Dims[3]/[4]``.
+    Fused Q+K affine RMSNorm (aiter / sglang). flops/bytes = RMSNorm(Q) + RMSNorm(K).
 
-    flops/bytes = RMSNorm(Q) + RMSNorm(K); plain ``aiter_rmsnorm`` is wrong here
-    (single ``[out, in, w, …]`` layout).
+    Signature: _fused_qk_rmsnorm_kernel(q, q_w, q_eps, k, k_w, k_eps, q_out, k_out)
+        q / q_out     — shape [M, N_q], dtype BFloat16
+        q_w           — shape [N_q],    dtype BFloat16 (affine scale)
+        q_eps         — float scalar
+        k / k_out     — shape [M, N_k], dtype BFloat16
+        k_w           — shape [N_k],    dtype BFloat16 (affine scale)
+        k_eps         — float scalar
+
+    Expected Input Dims from trace:
+        [q_shape, q_w_shape, q_eps, k_shape, k_w_shape, k_eps, q_out_shape, k_out_shape]
+        e.g. [(12, 2048), (2048,), (), (12, 512), (512,), (), (12, 2048), (12, 512)]
+
+    Expected Input type from trace:
+        [dtype_q, dtype_q_w, dtype_q_eps, dtype_k, dtype_k_w, dtype_k_eps, dtype_q_out, dtype_k_out]
+
+    get_param_details uses Q at [0]/[1]; K shape/channels from [3]/[4] in __init__.
     """
 
     def __init__(self, event, arch=None, python_path=None):
