@@ -38,12 +38,8 @@ def test_glm53_flash_resolves_transformers_modeling_source():
     files, labels = resolve_source_files("zai-org/GLM-5.3-Flash", config)
     assert files
     assert any("modeling_glm5_next.py" in str(path) for path in files)
-    # The wrapper module lives in installed transformers when that release
-    # matches the checkpoint. Otherwise it is read from the pinned GitHub ref.
     assert any(
-        label.startswith("github://huggingface/transformers")
-        or "/transformers/models/" in label.replace("\\", "/")
-        for label in labels
+        label.startswith("github://huggingface/transformers") for label in labels
     )
 
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)

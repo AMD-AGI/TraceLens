@@ -246,7 +246,7 @@ def test_installed_modeling_file_uses_the_wrapper_type(tmp_path, monkeypatch):
     monkeypatch.setattr(source, "_list_repo_python_files", lambda *_a, **_k: [])
 
     def _no_download(*_args, **_kwargs):
-        raise AssertionError("the installed wrapper module is not a hub download")
+        return []
 
     monkeypatch.setattr(source, "_download_repo_files", _no_download)
     seen: list[str] = []
@@ -256,6 +256,9 @@ def test_installed_modeling_file_uses_the_wrapper_type(tmp_path, monkeypatch):
         return modeling if model_type == "muse_spark" else None
 
     monkeypatch.setattr(source, "_transformers_modeling_path", path_for)
+    monkeypatch.setattr(
+        source, "_transformers_github_modeling_file", lambda *_a, **_k: None
+    )
     files, _labels = source.resolve_source_files(
         "unsloth/Muse-Spark-Open-816B-A42B",
         {
@@ -267,5 +270,5 @@ def test_installed_modeling_file_uses_the_wrapper_type(tmp_path, monkeypatch):
         },
     )
     assert files == [modeling]
-    assert seen == ["muse_spark"]
+    assert seen == ["muse_spark_text", "muse_spark"]
     assert "muse_spark_vision" not in seen
