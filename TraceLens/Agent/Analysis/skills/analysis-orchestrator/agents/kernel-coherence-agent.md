@@ -152,6 +152,16 @@ prints the residual one-sided condensed symbols. If meaningful (non-singleton)
 symbols remain one-sided, revise the decisions and re-run; residual pre/post
 singletons may be accepted.
 
+## Verify
+
+The orchestrator validates `kernel_coherence_decisions.json`
+(`validate_kernel_coherence_decisions`) before applying and returns any errors
+for you to fix and re-emit: `context_renames` keys must be `context_catalog`
+ids, `fallback_remap_a` / `_b` keys must be one-sided symbols from the context,
+and every `fallback_remap_regex_a` / `_b` key must compile as a regex. **Prefer
+a `fallback_remap_regex` family rule over many long exact `fallback_remap`
+keys** (see above) -- one regex is shorter and catches every tile-shape variant.
+
 ## Return Value
 
 Return: `status`, `pairs_created` (new shared names used on both sides),
