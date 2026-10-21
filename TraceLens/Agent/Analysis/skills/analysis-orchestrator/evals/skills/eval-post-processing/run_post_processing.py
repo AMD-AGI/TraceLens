@@ -33,6 +33,7 @@ _EVAL_UTILS_DIR = os.path.join(_SCRIPT_DIR, "..", "..", "eval_utils")
 if _EVAL_UTILS_DIR not in sys.path:
     sys.path.insert(0, _EVAL_UTILS_DIR)
 from aggregate_repeatability import find_runs, parse_ndjson_stream
+from csv_io import write_csv
 
 REPO_ROOT = "/workspace/TraceLens"
 ANALYSIS_DIR = os.path.join(
@@ -134,13 +135,6 @@ def reaggregate_from_sources(results_root):
                             }
                         )
     return rows
-
-
-def write_csv(path, rows, cols):
-    with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=cols)
-        w.writeheader()
-        w.writerows(rows)
 
 
 def classify_stability(pass_count, total):
