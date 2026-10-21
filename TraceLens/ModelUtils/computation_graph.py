@@ -185,6 +185,44 @@ def _add_method_wrapper_node(
     return _add_node(graph, key=key, block=step, label=label, sublabel=None)
 
 
+def _producer_node_index(
+    graph: ComputationGraph,
+    attr_last_index: dict[str, int],
+    pred: str,
+    ordinal: int,
+    producer_attr: str | None,
+) -> int | None:
+    """Index of one return slot's producer, even after its attr was popped.
+
+    The slot key and the raw attr are both written into ``attr_last_index``
+    while the frame is built, and a later scope restore can drop or reuse the
+    raw attr. The node is still in the graph. When the recorded index is
+    missing or names a different op, and exactly one node carries this attr,
+    that node is the slot.
+    """
+    resolved = attr_last_index.get(_multi_return_slot_key(pred, ordinal))
+    if resolved is None and producer_attr:
+        resolved = attr_last_index.get(producer_attr)
+    if not producer_attr:
+        return resolved
+    block = (
+        graph.nodes[resolved].block
+        if resolved is not None and 0 <= resolved < len(graph.nodes)
+        else None
+    )
+    if block is not None and block.attr_name == producer_attr:
+        return resolved
+    found: int | None = None
+    for index, spec in enumerate(graph.nodes):
+        node = spec.block
+        if node is None or node.attr_name != producer_attr:
+            continue
+        if found is not None:
+            return resolved
+        found = index
+    return found if found is not None else resolved
+
+
 def _multi_return_slot_key(attr_name: str, ordinal: int) -> str:
     """Key under which a multi-return wrapper's per-ordinal producer index is
     stashed in ``attr_last_index``, alongside its flat (last-write-wins) entry.
@@ -1499,13 +1537,13 @@ def _wire_all_predecessor_edges(
                     # ordinal onto the same (wrong) fallback. The slot key is
                     # synthesized (a separator no real attr name can contain)
                     # and stashed *before* that restore, so it always survives.
-                    resolved = attr_last_index.get(
-                        _multi_return_slot_key(pred, consumed_ordinal)
+                    resolved = _producer_node_index(
+                        graph,
+                        attr_last_index,
+                        pred,
+                        consumed_ordinal,
+                        return_producers[consumed_ordinal],
                     )
-                    if resolved is None:
-                        resolved = attr_last_index.get(
-                            return_producers[consumed_ordinal]
-                        )
                     if resolved is not None and resolved != source_index:
                         # The consumer was chained onto the frame's last op by the
                         # source-order sequential fallback in ``_add_chain`` (a
@@ -1705,6 +1743,20 @@ def _wire_all_predecessor_edges(
                         source_index = _prefer_activation_followup(
                             attr_last_index, pred, source_index
                         )
+                if source_index is None and arg_name in ordinal_map:
+                    # The call's own attr was popped from the flat index, so
+                    # the tail lookup missed. The ordinal still names a slot
+                    # whose producer node is in the graph.
+                    producers = block.forward_step_return_producers.get(pred) or []
+                    ordinal = ordinal_map[arg_name]
+                    if 0 <= ordinal < len(producers):
+                        source_index = _producer_node_index(
+                            graph,
+                            attr_last_index,
+                            pred,
+                            ordinal,
+                            producers[ordinal],
+                        )
                 if source_index is None:
                     continue
                 # When the predecessor is a multi-return module, resolve the
@@ -1714,6 +1766,7 @@ def _wire_all_predecessor_edges(
                 # The callee's own name for the slot the redirect landed on, so
                 # the edge can ask that producer which of ITS ports the slot is.
                 resolved_slot_name: str | None = None
+                previous_source = None
                 if arg_name and source_index is not None:
                     pred_node = steps_by_attr.get(pred)
                     if pred_node is not None and pred_node.forward_return_slots:
@@ -1752,13 +1805,14 @@ def _wire_all_predecessor_edges(
                             # is one of this frame's own internal steps and can
                             # already be popped (or reused by another scope) by
                             # the time this post-hoc pass runs.
-                            resolved = attr_last_index.get(
-                                _multi_return_slot_key(pred, ordinal)
+                            previous_source = source_index
+                            resolved = _producer_node_index(
+                                graph,
+                                attr_last_index,
+                                pred,
+                                ordinal,
+                                return_producers[ordinal],
                             )
-                            if resolved is None:
-                                resolved = attr_last_index.get(
-                                    return_producers[ordinal]
-                                )
                             if resolved is not None:
                                 source_index = resolved
                                 ordinal_slot_resolved = True
@@ -1926,6 +1980,36 @@ def _wire_all_predecessor_edges(
                     # vanished from a graph whose source multiplies by it.
                     continue
                 link = (source_index, target_index)
+                if previous_source is not None and previous_source != source_index:
+                    stale = (previous_source, target_index)
+                    if stale in graph.links:
+                        graph.links.remove(stale)
+                        graph.link_output_ports.pop(stale, None)
+                        graph.link_port_labels.pop(stale, None)
+                if arg_name in ordinal_map:
+                    # A tuple slot's consumer was chained onto the frame tail.
+                    # Drop the other slots' edges so it keeps only its own.
+                    slot_producers = block.forward_step_return_producers.get(pred) or []
+                    keep_ordinal = ordinal_map[arg_name]
+                    for other_ordinal, other_attr in enumerate(slot_producers):
+                        if other_ordinal == keep_ordinal or not isinstance(
+                            other_attr, str
+                        ):
+                            continue
+                        other_index = _producer_node_index(
+                            graph,
+                            attr_last_index,
+                            pred,
+                            other_ordinal,
+                            other_attr,
+                        )
+                        if other_index is None or other_index == source_index:
+                            continue
+                        stale = (other_index, target_index)
+                        if stale in graph.links:
+                            graph.links.remove(stale)
+                            graph.link_output_ports.pop(stale, None)
+                            graph.link_port_labels.pop(stale, None)
                 if link not in graph.links:
                     graph.links.append(link)
                 if arg_name:
@@ -3744,6 +3828,7 @@ def _add_linear_pipeline_chain(
             and not _reads_only_a_side_parameter(sub_step)
             and not _reads_only_named_boundary_parameters(sub_step)
             and not _is_pure_generator_source(sub_step)
+            and not _has_constant_extent(sub_step)
             and sub_step.attr_name != SYNTHETIC_ATTENTION
         ):
             if sub_index == 0:
@@ -4063,7 +4148,12 @@ def _append_step_link(
     last_index: int | None,
     step_index: int,
     fork_from_input: bool,
+    block: Any = None,
 ) -> None:
+    # A host-built tensor (``torch.tensor([merge_size]).expand(...)``) has no
+    # activation operand. The fallback below would hand it the chain input.
+    if block is not None and _has_constant_extent(block):
+        return
     if fork_from_input:
         if input_index is not None:
             graph.links.append((input_index, step_index))
@@ -5679,11 +5769,17 @@ def build_computation_graph(
                         last_index=last_index,
                         step_index=step_index,
                         fork_from_input=use_fork,
+                        block=sub_step,
                     )
                 last_index = step_index
                 _track_attr_index(attr_last_index, sub_step.attr_name, step_index)
             if expanded_steps:
-                _track_attr_index(attr_last_index, step.attr_name, last_index)
+                # Pass the wrapper so a tuple return (``q_embed, k_embed``)
+                # stashes each slot's producer. Without it every consumer
+                # docks on the last slot and the earlier one is dead.
+                _track_attr_index(
+                    attr_last_index, step.attr_name, last_index, block=step
+                )
 
     graph.attr_output_indices.update(attr_last_index)
     skip_fwd = strip_unused_return_branches and root.multi_return_module

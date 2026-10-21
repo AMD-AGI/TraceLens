@@ -1375,6 +1375,59 @@ def test_append_decoder_layers_non_variant_source_path(
     assert exits
 
 
+def test_append_decoder_layers_non_variant_uses_structural_chain_without_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A parsed spine without predecessor metadata must not disappear entirely."""
+    monkeypatch.setattr(merge, "expand_class_forward_dataflow", lambda *a, **k: None)
+    decoder = SimpleNamespace(forward_operations={}, forward_step_predecessors={})
+    norm = _component("norm", "norm", class_name="Norm")
+    head = _component("lm_head", "head", class_name="Linear")
+    spec = _spec(
+        decoder_class="Dec",
+        class_registry={"Dec": decoder},
+        layer_variants=[],
+        block_components=[norm, head],
+    )
+    seen: list[list[object]] = []
+
+    def fake_variant(merged_nodes, **kwargs):
+        seen.append(list(kwargs["previous_exits"]))
+        merged_nodes.append(
+            {
+                "id": "decoder/norm",
+                "namespace": kwargs["namespace_prefix"],
+                "incomingEdges": [
+                    merge._source_edge(source, "0")
+                    for source in kwargs["previous_exits"]
+                ],
+            }
+        )
+        return ["decoder/norm"]
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("source path needs predecessor metadata")
+
+    monkeypatch.setattr(merge, "_append_variant_layer", fake_variant)
+    monkeypatch.setattr(merge, "_append_source_decoder_layer", _unexpected)
+    merged: list[dict[str, object]] = []
+    exits = merge._append_decoder_layers(
+        merged,
+        spec=spec,
+        decoder_namespace="decoder",
+        basic_ops=BASIC,
+        previous_exits=["embed_tokens/@output"],
+        group_node_configs=[],
+        group_node_attributes={},
+    )
+    assert seen == [["embed_tokens/@output"]]
+    assert exits
+    node = next(node for node in merged if node["id"] == "decoder/norm")
+    assert node["incomingEdges"][0]["sourceNodeId"] == "decoder/@input"
+    boundary = next(node for node in merged if node["id"] == "decoder/@input")
+    assert boundary["incomingEdges"][0]["sourceNodeId"] == "embed_tokens/@output"
+
+
 # ---------------------------------------------------------------------------
 # _append_vision_section group config append (2776)
 # ---------------------------------------------------------------------------
@@ -1414,3 +1467,87 @@ def test_append_vision_section_appends_group_config(monkeypatch: pytest.MonkeyPa
     assert exit_ref == "visual/x"
     assert any("visual" in config["namespaceRegex"] for config in configs)
     assert nodes[0]["id"] == "@vision_input"
+
+
+def test_a_two_argument_call_binds_each_parameter_to_its_own_producer(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """residual stays the saved tensor; hidden_states stays the norm output."""
+    gate = SimpleNamespace(
+        forward_param_inputs=["residual", "hidden_states"],
+        forward_return_slots={},
+    )
+    norm = SimpleNamespace(forward_param_inputs=["x"], forward_return_slots={})
+    decoder = SimpleNamespace(
+        forward_calls=["norm1", "gate1"],
+        forward_operations={},
+        forward_step_predecessors={
+            "norm1": ("@method_input",),
+            "gate1": ("@method_input", "norm1"),
+        },
+        forward_step_predecessor_args={
+            "norm1": {"x": "@method_input"},
+            "gate1": {"residual": "@method_input", "hidden_states": "norm1"},
+        },
+        forward_param_inputs=["hidden_states"],
+        primary_return_slot=None,
+        forward_return_slots={},
+    )
+    spec = _spec(
+        decoder_class="Layer",
+        class_registry={"Layer": decoder, "Gate": gate, "Norm": norm},
+        block_components=[
+            _component("norm1", "norm", class_name="Norm"),
+            _component("gate1", "other", class_name="Gate"),
+        ],
+    )
+
+    def fake_append(merged_nodes, **kwargs):
+        prefix = kwargs["id_prefix"]
+        merged_nodes.append(
+            {
+                "id": f"{prefix}/@input",
+                "incomingEdges": [
+                    {
+                        "sourceNodeId": (
+                            source if isinstance(source, str) else source[0]
+                        ),
+                        "sourceNodeOutputId": "0",
+                        "targetNodeInputId": str(index),
+                    }
+                    for index, source in enumerate(kwargs["previous_exits"])
+                ],
+            }
+        )
+        merged_nodes.append(
+            {"id": f"{prefix}/@input:hidden_states", "incomingEdges": []}
+        )
+        merged_nodes.append(
+            {"id": f"{prefix}/@output", "outputsMetadata": [{"id": "out"}]}
+        )
+        return [f"{prefix}/@output"]
+
+    monkeypatch.setattr(merge, "_append_section", fake_append)
+    merged: list[dict[str, object]] = []
+    merge._append_source_decoder_layer(
+        merged,
+        spec=spec,
+        id_prefix="decoder",
+        namespace_prefix="decoder",
+        basic_ops=BASIC,
+        previous_exits=["layer_in"],
+        variant=None,
+        group_node_configs=[],
+        group_node_attributes={},
+        shape_inferencer=None,
+    )
+    by_id = {node["id"]: node for node in merged}
+    residual_sources = [
+        edge["sourceNodeId"] for edge in by_id["decoder/gate1/@input"]["incomingEdges"]
+    ]
+    hidden_sources = [
+        edge["sourceNodeId"]
+        for edge in by_id["decoder/gate1/@input:hidden_states"]["incomingEdges"]
+    ]
+    assert residual_sources == ["layer_in"]
+    assert hidden_sources == ["decoder/norm1/@output"]

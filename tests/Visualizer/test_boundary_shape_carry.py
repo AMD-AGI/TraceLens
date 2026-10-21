@@ -87,13 +87,28 @@ class TestTheShapeTravelsDownTheChain:
 
 
 class TestWhatIsLeftAlone:
-    def test_a_tile_that_already_has_a_shape(self) -> None:
+    def test_a_stale_boundary_shape_is_replaced_by_its_producer(self) -> None:
         nodes = [
-            _tile("producer", synthetic="@input_mirror", output_shape="[B, S] bool"),
-            _tile("outer/@input:mask", sources=["producer"], output_shape="[B] int64"),
+            _tile(
+                "producer",
+                synthetic="@input_mirror",
+                output_shape="[B, 1, S, S] bfloat16",
+                output_dtype="bfloat16",
+            ),
+            _tile(
+                "outer/@input:mask",
+                sources=["producer"],
+                output_shape="[B, S] int64",
+                output_dtype="int64",
+            ),
         ]
         _carry_producer_shape_to_boundary_tiles(nodes)
-        assert _shape(nodes, "outer/@input:mask") == "[B] int64"
+        assert _shape(nodes, "outer/@input:mask") == "[B, 1, S, S] bfloat16"
+        tile = next(n for n in nodes if n["id"] == "outer/@input:mask")
+        assert (
+            next(a["value"] for a in tile["attrs"] if a["key"] == "output_dtype")
+            == "bfloat16"
+        )
 
     def test_a_tile_with_several_producers(self) -> None:
         """Not a pass-through; it would have to pick one, so it says nothing."""

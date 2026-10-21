@@ -30,7 +30,15 @@ Two guards matter as much as the fix:
 
 from __future__ import annotations
 
-from TraceLens.ModelUtils.shape_inference import TensorSpec, _resolve_view_shape
+from TraceLens.ModelUtils.extract import ArchitectureSpec
+from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+from TraceLens.ModelUtils.shape_inference import (
+    ShapeContext,
+    ShapeInferencer,
+    TensorSpec,
+    _resolve_expand_shape,
+    _resolve_view_shape,
+)
 
 
 def _resolve(detail, source, *, named=None, snapshots=(), dims=None):
@@ -41,6 +49,16 @@ def _resolve(detail, source, *, named=None, snapshots=(), dims=None):
         named,
         frozenset(snapshots),
     )
+
+
+def test_expand_can_prepend_broadcast_axes_and_resolve_runtime_extents():
+    """A callable-hidden source can still declare its real broadcast target."""
+    result = _resolve_expand_shape(
+        "batch_size, -1, q_length, kv_length",
+        TensorSpec(("S",), "bool"),
+        {},
+    )
+    assert result == ("B", 1, "S", "S")
 
 
 class TestTheFrameInputIsReadWhenItWasMeasuredEarlier:
@@ -118,3 +136,46 @@ class TestTorchSaysWhatPreservesShape:
         import torch
 
         assert _neutral_scalar_args(torch, "not_a_real_aten_op") == []
+
+
+def test_an_arithmetic_product_is_one_reshape_axis():
+    """``reshape(t, h * w, s, s)`` states four axes even though the source has five.
+
+    A ``*`` inside an axis is multiplication, not ``*x.shape``. Treating every
+    star as an unpack skipped the rank the call states and published the
+    source shape instead.
+    """
+    spec = ArchitectureSpec(
+        name="Test", model_type="test", hidden_size=32, raw_config={"hidden_size": 32}
+    )
+    inferred = ShapeInferencer(spec, context=ShapeContext.from_spec(spec))
+    node = ModelGraphNode(
+        id="@op_reshape",
+        label="reshape",
+        kind=NodeKind.LEAF,
+        operation=OperationKind.TORCH_FUNCTIONAL,
+        metadata={
+            "details": [
+                "shape: grid_t, num_windows_h * num_windows_w, "
+                "vit_merger_window_size, vit_merger_window_size"
+            ]
+        },
+    )
+    source = TensorSpec(
+        shape=(
+            "grid_t",
+            "num_windows_h",
+            "num_windows_w",
+            "vit_merger_window_size",
+            "vit_merger_window_size",
+        ),
+        dtype="int64",
+    )
+    out = inferred._infer_node_output(node, [source], root=None)
+    assert out is not None
+    assert out.shape == (
+        "grid_t",
+        "num_windows_h * num_windows_w",
+        "vit_merger_window_size",
+        "vit_merger_window_size",
+    )

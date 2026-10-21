@@ -975,3 +975,64 @@ def test_ports_that_declare_no_operand_are_not_guessed_at():
         "k:sdpa", ["q", "kv", "attention_mask"], roles=[None, None, None]
     )
     assert type_check_graph_nodes(nodes) == []
+
+
+def test_a_renamed_size_boundary_is_not_a_second_tensor_operand():
+    """``host_params`` names the parameter; the tile may have been renamed.
+
+    ``torch.split(t, lengths.tolist(), dim=2)`` reads ``cu_seqlens`` on the
+    host. The edge says so, even when the boundary tile is labelled for a
+    different tensor. Counting that edge as a tensor operand reports a
+    one-operand op as taking two.
+    """
+    from TraceLens.Visualizer.model_explorer_export.merge import (
+        _annotate_op_input_signatures,
+    )
+
+    nodes = [
+        {
+            "id": "attn/q",
+            "label": "query",
+            "attrs": [
+                {"key": "output_dtype", "value": "bfloat16"},
+                {"key": "output_shape", "value": "[1, 24, nnz, 64]"},
+            ],
+            "incomingEdges": [],
+        },
+        {
+            "id": "attn/@input:window_index",
+            "label": "window_index",
+            "attrs": [
+                {"key": "port_label", "value": "window_index"},
+                {"key": "output_dtype", "value": "int64"},
+                {"key": "output_shape", "value": "[nnz]"},
+            ],
+            "incomingEdges": [],
+        },
+        {
+            "id": "attn/split",
+            "label": "Split",
+            "attrs": [
+                {"key": "raw_op", "value": "split"},
+                {
+                    "key": "details",
+                    "value": "host_params: cu_seqlens",
+                },
+            ],
+            "incomingEdges": [
+                {
+                    "sourceNodeId": "attn/q",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "0",
+                },
+                {
+                    "sourceNodeId": "attn/@input:window_index",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "1",
+                },
+            ],
+        },
+    ]
+    _annotate_op_input_signatures(nodes)
+    warnings = [w for w in type_check_graph_nodes(nodes) if "split" in w]
+    assert warnings == []

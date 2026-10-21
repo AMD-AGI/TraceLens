@@ -104,6 +104,34 @@ class TestTheFold:
         assert _sources(nodes[1]) == ["outer/op"]
         assert _sources(nodes[2]) == ["outer/op"]
 
+    def test_a_sibling_does_not_read_another_call_s_input_mirror(self) -> None:
+        """The saved residual and the next norm both read the layer input.
+
+        The gate's mirror is that call's own port. Folding the norm onto it
+        draws the norm as though the gate fed it.
+        """
+        nodes = [
+            _op("decoder/@input", "62x_Layer"),
+            _tile(
+                "decoder/gate/@input_mirror^residual",
+                "62x_Layer",
+                "residual",
+                "@input_mirror",
+                ["decoder/@input"],
+            ),
+            _tile(
+                "decoder/norm/@input",
+                "62x_Layer/norm",
+                "x",
+                "@input",
+                ["decoder/@input"],
+            ),
+        ]
+        _share_one_tile_per_entering_tensor(nodes)
+        assert _sources(nodes[1]) == ["decoder/@input"]
+        assert _sources(nodes[2]) == ["decoder/@input"]
+        assert nodes[2]["label"] == "x"
+
     def test_separate_output_ports_are_separate_tensors(self) -> None:
         nodes = [
             _op("op", ""),

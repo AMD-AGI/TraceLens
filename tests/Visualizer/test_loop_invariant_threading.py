@@ -488,7 +488,9 @@ def test_model_scope_frame_expansion_ops_are_sized():
         for node in graph["nodes"]
         if "create_sliding_window_causal_mask" in node["id"] and ":@op_" in node["id"]
     ]
-    assert len(ops) >= 5, len(ops)
+    # Only operations feeding the builder's selected primary result survive.
+    # Secondary tuple results and dead setup operations are deliberately pruned.
+    assert len(ops) >= 3, len(ops)
     for node in ops:
         shape = _shape_of(node)
         assert shape, f"{node['id']} left unsized"
@@ -897,7 +899,13 @@ def test_model_scope_mask_frame_names_its_inputs_and_keeps_shapes(model_id):
     for tile in tiles:
         assert _shape_of(tile), f"{tile['id']} carries no shape"
 
-    body = [node for node in graph["nodes"] if "_causal_mask:@op_" in node["id"]]
+    # The selected mask implementation is a nested helper, so its operations are
+    # descendants of the builder frame rather than necessarily direct children.
+    body = [
+        node
+        for node in graph["nodes"]
+        if "_causal_mask:" in node["id"] and "@op_" in node["id"]
+    ]
     assert body, "expected the expanded mask body"
     for node in body:
         assert _shape_of(node), f"{node['id']} left unsized"

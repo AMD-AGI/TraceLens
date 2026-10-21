@@ -965,3 +965,446 @@ def test_only_a_data_independent_extent_is_marked_constant():
     assert any(str(d) == "extent_inputs: 1" for d in by_bound["x.shape[1]"].details)
     # Host data read off ``grid`` each iteration is not a compile-time constant.
     assert not marked("w")
+
+
+def test_modulo_keeps_the_value_it_is_applied_to():
+    """``(arange - starts) % widths`` is a remainder, not the widths themselves.
+
+    With no label for ``%``, the operator collapsed to its right operand. The
+    subtraction was emitted and then nothing read it, and ``within`` was bound
+    to the product the remainder was supposed to divide by.
+    """
+    analysis = analyze_sources(
+        {
+            Path(
+                "modeling_mod.py"
+            ): """
+import torch
+class M(torch.nn.Module):
+    def forward(self, counts, starts, heights, widths):
+        within = (torch.arange(counts.sum()) - starts) % (heights * widths)
+        return within
+"""
+        },
+        all_tensor_ops=True,
+    )
+    ops = analysis.class_registry["M"].forward_operations
+    remainder = [op for op in ops.values() if op.label == "Remainder"]
+    assert len(remainder) == 1
+    subtract = next(op for op in ops.values() if op.label == "Subtract")
+    assert subtract.attr_name in remainder[0].predecessors
+
+
+def test_tolist_loop_arithmetic_is_host_and_arange_still_docks_the_grid():
+    """Unpacking ``grid_thw.tolist()`` yields Python ints, not the grid tensor.
+
+    Binding those names to the tensor drew ``h // merge`` as a floor-divide of
+    the whole grid and handed that tensor to ``arange`` and ``pad`` as an
+    operand. The range is still sized by the grid, so it keeps an extent edge.
+    """
+    analysis = analyze_sources(
+        {
+            Path(
+                "modeling_tolist.py"
+            ): """
+import torch
+class M(torch.nn.Module):
+    def forward(self, grid_thw):
+        chunks = []
+        for grid_t, grid_h, grid_w in grid_thw.tolist():
+            llm_h = grid_h // 2
+            llm_w = grid_w // 2
+            index = torch.arange(grid_t * llm_h * llm_w)
+            chunks.append(index)
+        return torch.cat(chunks, dim=0)
+"""
+        },
+        all_tensor_ops=True,
+    )
+    ops = list(analysis.class_registry["M"].forward_operations.values())
+    assert not any(op.label == "Floor divide" for op in ops)
+    arange = next(op for op in ops if op.label == "Arange")
+    assert any(str(d).startswith("extent_inputs:") for d in arange.details)
+    assert arange.predecessors or "grid_thw" in arange.param_inputs
+
+
+def test_a_zip_of_two_tolists_does_not_size_arange_from_the_other_sequence():
+    """``arange(h)`` reads the grid, not the merge-size sequence zipped with it.
+
+    ``for (t, h, w), merge_size in zip(grid.tolist(), merge.tolist())`` walks
+    Python ints. Binding every name to the whole ``zip`` made ``h`` depend on
+    both sequences, so the range took the constant expand of ``merge_size`` as
+    a second extent and the render named a boundary after that loop target.
+    Dropping the constant then left the boundary with no source.
+    """
+    analysis = analyze_sources(
+        {
+            Path(
+                "modeling_zip_tolist.py"
+            ): """
+import torch
+class M(torch.nn.Module):
+    def forward(self, grid_thw, spatial_merge_size):
+        if isinstance(spatial_merge_size, int):
+            spatial_merge_size = torch.tensor([spatial_merge_size]).expand(len(grid_thw))
+        for (t, h, w), merge_size in zip(grid_thw.tolist(), spatial_merge_size.tolist()):
+            torch.arange(h)
+            torch.arange(w)
+        return grid_thw
+"""
+        },
+        all_tensor_ops=True,
+    )
+    ops = list(analysis.class_registry["M"].forward_operations.values())
+    arange_h = next(op for op in ops if "arange_stop: h" in op.details)
+    expand = next(op for op in ops if op.label == "Expand")
+    assert expand.attr_name not in arange_h.predecessors
+    assert not any("spatial_merge_size" in str(detail) for detail in arange_h.details)
+    assert not any(str(detail).startswith("loop iterator") for detail in expand.details)
+    assert arange_h.predecessors or "grid_thw" in arange_h.param_inputs
+
+
+def test_parallel_list_accumulators_keep_their_own_appended_producers():
+    """Two lists grown in one loop must not both carry the body's last op."""
+    # The source has no model class, so inspect the helper directly through a
+    # tiny caller that makes its free-function analysis visible.
+    source = """
+import torch
+def helper(grid):
+    indices = []
+    lengths = []
+    for row in grid.tolist():
+        index = torch.arange(row)
+        indices.append(index + 1)
+        lengths.append(index.cumsum(0))
+    return torch.cat(indices), torch.cat(lengths)
+class M(torch.nn.Module):
+    def forward(self, grid):
+        return helper(grid)
+"""
+    analysis = analyze_sources(
+        {Path("modeling_parallel_accumulators.py"): source},
+        all_tensor_ops=True,
+    )
+    cls = analysis.class_registry["M"]
+    call = next(attr for attr in cls.multi_op_method_loop_carried if "helper" in attr)
+    carried = cls.multi_op_method_loop_carried[call]
+    producers = {item.variable: item.updated_producer for item in carried}
+    assert producers["indices"] != producers["lengths"], producers
+    assert "add" in producers["indices"]
+    assert "cumulative_sum" in producers["lengths"]
+
+
+def test_a_dict_subscript_keeps_every_tensor_the_key_can_select():
+    """``mapping[config.layer_types[i]]`` is a choice, not the last entry.
+
+    The two values are different tensors. Collapsing the subscript onto the
+    last one drops the other and, when that value is one slot of a tuple,
+    docks the consumer on the wrong slot.
+    """
+    analysis = analyze_sources(
+        {
+            Path(
+                "modeling_dict_select.py"
+            ): """
+import torch
+from torch import nn
+def helper(grid):
+    index = grid.cumsum(0)
+    lengths = index + 1
+    return index, lengths
+class Block(nn.Module):
+    def forward(self, hidden, cu):
+        return hidden
+class M(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.layers = nn.ModuleList([Block()])
+        self.config = config
+    def forward(self, hidden, grid):
+        index, lengths = helper(grid)
+        other = torch.arange(grid.shape[0])
+        mapping = {"full_attention": other, "window_attention": lengths}
+        for i, layer in enumerate(self.layers):
+            hidden = layer(hidden, cu=mapping[self.config.layer_types[i]])
+        return hidden
+"""
+        },
+        config={"layer_types": ["full_attention", "window_attention"]},
+        all_tensor_ops=True,
+    )
+    cls = analysis.class_registry["M"]
+    producer = cls.forward_step_predecessor_args["layers"]["cu"]
+    merge = cls.forward_operations[producer]
+    assert merge.label == "Mutually exclusive branch"
+    helper = next(attr for attr in merge.predecessors if "helper" in attr)
+    assert any("arange" in attr for attr in merge.predecessors)
+    assert (helper, 1) in merge.predecessor_ports
+
+
+def test_a_conditionally_called_helper_referenced_by_a_merge_is_expanded():
+    """A live helper outside the linear spine still publishes its operations."""
+    analysis = analyze_sources(
+        {
+            Path(
+                "modeling_conditional_builder.py"
+            ): """
+import torch
+def build_full(x):
+    return x + 1
+def build_window(x):
+    return x * 2
+class Layer(torch.nn.Module):
+    def forward(self, x, mask):
+        return x + mask
+class M(torch.nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.layers = torch.nn.ModuleList([Layer()])
+    def forward(self, x):
+        if x is not None:
+            masks = {"full": build_full(x), "window": build_window(x)}
+        for i, layer in enumerate(self.layers):
+            x = layer(x, masks[self.config.layer_types[i]])
+        return x
+"""
+        },
+        config={"layer_types": ["full", "window"]},
+        all_tensor_ops=True,
+    )
+    cls = analysis.class_registry["M"]
+    calls = {
+        producer
+        for operation in cls.forward_operations.values()
+        for producer in operation.predecessors
+        if "build_" in producer
+    }
+    assert len(calls) == 2, calls
+    assert calls <= set(cls.multi_op_methods), (
+        calls,
+        set(cls.multi_op_methods),
+    )
+    assert {cls.multi_op_methods[call][0].label for call in calls} == {
+        "Add",
+        "Multiply",
+    }
+
+
+def test_a_config_selected_local_dispatch_resolves_from_source(tmp_path, monkeypatch):
+    """A local selected from any class table resolves without executing it."""
+    support = tmp_path / "dispatch_support.py"
+    support.write_text(
+        """
+def eager_impl(x):
+    return x + 1
+def other_impl(x):
+    return x * 2
+class Interface:
+    choices = {"eager": eager_impl, "other": other_impl}
+TABLE = Interface()
+def builder(config, x):
+    implementation = TABLE[config.mode]
+    return implementation(x)
+"""
+    )
+    monkeypatch.setattr(
+        aa,
+        "_module_origin",
+        lambda module: str(support) if module == "dispatch_support" else None,
+    )
+    registry = aa._ParsedModuleRegistry()
+    selected = registry.selected_table_functions("dispatch_support", {"mode": "eager"})
+    assert selected["implementation"].name == "eager_impl"
+
+
+def test_a_tuple_return_keeps_each_slot_after_the_helper_is_inlined():
+    """Each returned tensor stays its own op once the helper is inlined.
+
+    Inlining renames the primary return op to the call and prefixes the rest.
+    Publishing the original names then finds neither slot, and every consumer
+    reads the last op: the index and the sequence lengths become one tensor.
+    """
+    analysis = analyze_sources(
+        {
+            Path(
+                "modeling_two_returns.py"
+            ): """
+import torch
+def helper(x):
+    left = x + 1
+    right = x * 2
+    return left, right
+class M(torch.nn.Module):
+    def forward(self, x):
+        left, right = helper(x)
+        return left + right
+"""
+        },
+        all_tensor_ops=True,
+    )
+    cls = analysis.class_registry["M"]
+    call = next(attr for attr in cls.forward_step_return_producers if "helper" in attr)
+    slots = cls.forward_step_return_producers[call]
+    assert len(slots) == 2, slots
+    assert slots[0] and slots[1] and slots[0] != slots[1]
+    labels = []
+    for attr in slots:
+        match = next(
+            (op.label for op in cls.multi_op_methods[call] if op.attr_name == attr),
+            None,
+        )
+        labels.append(match)
+    assert labels == ["Add", "Multiply"], (slots, labels)
+
+
+def test_a_starred_dict_call_reads_every_tensor_value():
+    """``builder(**{"a": left, "b": right})`` reads both tensors, not just ``right``."""
+    analysis = analyze_sources(
+        {
+            Path(
+                "modeling_star_dict.py"
+            ): """
+import torch
+class M(torch.nn.Module):
+    def forward(self, x):
+        left = x + 1
+        right = x * 2
+        specs = {"a": left, "b": right}
+        return builder(**specs)
+"""
+        },
+        all_tensor_ops=True,
+    )
+    cls = analysis.class_registry["M"]
+    call = next(attr for attr in cls.forward_step_predecessors if "builder" in attr)
+    preds = cls.forward_step_predecessors[call]
+    labels = {
+        cls.forward_operations[pred].label
+        for pred in preds
+        if pred in cls.forward_operations
+    }
+    assert {"Add", "Multiply"} <= labels, labels
+
+
+def test_positional_activation_argument_uses_the_tower_config():
+    """``MLP(dim, hidden, config.hidden_act)`` selects the activation.
+
+    The key is a positional constructor argument. Keywords alone never bound
+    it, so ``ACT2FN[hidden_act]`` stayed an unknown module. A vision tower and
+    the text stack name different activations; the tower's own config wins.
+    """
+    analysis = analyze_sources(
+        {
+            Path(
+                "modeling_act.py"
+            ): """
+import torch
+from torch import nn
+class VisionMLP(nn.Module):
+    def __init__(self, dim, hidden, hidden_act):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, hidden)
+        self.act = ACT2FN[hidden_act]
+        self.fc2 = nn.Linear(hidden, dim)
+    def forward(self, x):
+        return self.fc2(self.act(self.fc1(x)))
+class Tower(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.mlp = VisionMLP(config.hidden_size, config.intermediate_size, config.hidden_act)
+    def forward(self, x):
+        return self.mlp(x)
+class Model(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.visual = Tower(config.vision_config)
+    def forward(self, x):
+        return self.visual(x)
+"""
+        },
+        config={
+            "hidden_act": "silu",
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "vision_config": {
+                "hidden_act": "gelu",
+                "hidden_size": 4,
+                "intermediate_size": 8,
+            },
+        },
+        all_tensor_ops=True,
+    )
+    assert analysis.class_registry["VisionMLP"].init_assignments["act"] == "GELU"
+
+
+def test_a_tuple_unpack_inside_a_branch_keeps_each_slot():
+    analysis = aa.analyze_sources(
+        {
+            "m.py": """
+def rope(q, k):
+    q_embed = q + k
+    k_embed = k + q
+    return q_embed, k_embed
+
+class Attn:
+    def forward(self, query, key, position_embeddings):
+        query = query + key
+        key = key + query
+        if position_embeddings is not None:
+            query, key = rope(query, key)
+        return query, key
+"""
+        },
+        all_tensor_ops=True,
+    )
+    ops = analysis.class_registry["Attn"].forward_operations
+    merges = [op for op in ops.values() if op.label == "Mutually exclusive branch"]
+    ordinals = sorted(port for op in merges for _producer, port in op.predecessor_ports)
+    assert len(merges) == 2
+    assert ordinals == [0, 1]
+
+
+def test_a_submodule_only_forward_records_which_argument_each_parameter_takes():
+    """A residual saved before a norm stays distinct from the norm's output."""
+    analysis = aa.analyze_source(
+        """
+class Norm:
+    def forward(self, x):
+        return x
+
+class Gate:
+    def forward(self, residual, hidden_states):
+        return residual + hidden_states
+
+class Layer:
+    def __init__(self):
+        self.norm1 = Norm()
+        self.gate1 = Gate()
+        self.norm2 = Norm()
+        self.gate2 = Gate()
+
+    def forward(self, hidden_states):
+        residual = hidden_states
+        hidden_states = self.norm1(hidden_states)
+        hidden_states = self.gate1(residual, hidden_states)
+        residual = hidden_states
+        hidden_states = self.norm2(hidden_states)
+        hidden_states = self.gate2(residual, hidden_states)
+        return hidden_states
+""",
+        all_tensor_ops=True,
+    )
+    layer = analysis.class_registry["Layer"]
+    assert not layer.forward_step_predecessors
+    aa.expand_class_forward_dataflow(layer, analysis.class_registry)
+    args = layer.forward_step_predecessor_args
+    assert args["gate1"] == {
+        "residual": "@method_input",
+        "hidden_states": "norm1",
+    }
+    assert args["gate2"] == {
+        "residual": "gate1",
+        "hidden_states": "norm2",
+    }
+    assert not layer.forward_operations

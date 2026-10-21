@@ -3582,7 +3582,7 @@ class ShapeInferencer:
             return TensorSpec(shape=(), dtype=dtype)
 
         if (
-            node.label in {"×", "+", "Elementwise ×", "Multiply", "Add"}
+            node.label in {"×", "+", "Elementwise ×", "Multiply", "Add", "Remainder"}
             or synthetic == "@combine"
         ):
             operands = list(inputs)
@@ -3941,9 +3941,15 @@ class ShapeInferencer:
             # after that and the concat at the end all inherited the missing axes.
             # Keep the stated rank, carrying an unresolved name as a symbolic
             # extent -- a starred prefix (``*x.shape[:-1]``) stands for an unknown
-            # NUMBER of axes, so that one genuinely cannot be counted.
+            # NUMBER of axes, so that one genuinely cannot be counted. A ``*``
+            # inside an axis (``num_windows_h * num_windows_w``) is arithmetic,
+            # not an unpack, and still counts as one axis.
             tokens = [token.strip() for token in shape_detail.split(",")]
-            if tokens and all(tokens) and not any("*" in token for token in tokens):
+            if (
+                tokens
+                and all(tokens)
+                and not any(token.startswith("*") for token in tokens)
+            ):
                 dims: list[Any] = []
                 negative_at: int | None = None
                 for position, token in enumerate(tokens):
@@ -6342,6 +6348,23 @@ def _resolve_dim_name(name: str, dims: dict[str, DimExpr]) -> DimExpr | None:
     val = dims.get(name)
     if val is not None:
         return val
+    # Runtime extents are often unpacked into local scalar names before they
+    # reach a shape-bearing op. They do not come from checkpoint config, but
+    # their meaning is universal: mask/layout helpers call the batch extent
+    # ``batch_size`` and the query/key sequence extents ``q_length`` /
+    # ``kv_length`` (plus their unabbreviated forms). Resolve those names to the
+    # same runtime symbols used everywhere else in the graph.
+    runtime_aliases: dict[str, DimExpr] = {
+        "batch_size": Symbol.BATCH.value,
+        "query_length": Symbol.SEQ.value,
+        "q_length": Symbol.SEQ.value,
+        "key_value_length": Symbol.SEQ.value,
+        "kv_length": Symbol.SEQ.value,
+        "sequence_length": Symbol.SEQ.value,
+        "seq_length": Symbol.SEQ.value,
+    }
+    if name in runtime_aliases:
+        return runtime_aliases[name]
     # Strip ``self.``/``config.``/``self.config.`` access prefixes, e.g.
     # ``self.config.out_hidden_size`` → ``out_hidden_size``.
     bare = name
@@ -7194,18 +7217,21 @@ def _resolve_expand_shape(
     ``expand`` broadcasts existing size-1 axes to a larger size; a ``-1`` (or a
     value matching the current axis) keeps that axis unchanged. This differs from
     ``view``/``reshape`` (whose ``-1`` means element conservation), so it needs
-    its own resolver. Alignment is positional against ``source.shape``: on any
-    rank mismatch — the args cannot be aligned axis-for-axis (e.g. the router's
-    ``-1, 1, 288`` against a 4-D source) — return ``None`` so the caller passes
-    the source through rather than corrupting its rank.
+    its own resolver. Alignment is positional from the right, matching
+    broadcasting. ``expand`` may prepend dimensions, so a target rank larger
+    than the recovered source rank left-pads that source with size-1 axes. A
+    smaller target rank is invalid and returns ``None``.
     """
     if not detail or not source.shape:
         return None
     parts = [p.strip() for p in detail.split(",") if p.strip()]
-    if len(parts) != len(source.shape):
-        return None  # cannot align axis-for-axis — pass through
+    if len(parts) < len(source.shape):
+        return None
+    source_shape: tuple[DimExpr, ...] = (1,) * (len(parts) - len(source.shape)) + tuple(
+        source.shape
+    )
     resolved: list[DimExpr] = []
-    for part, current in zip(parts, source.shape):
+    for part, current in zip(parts, source_shape):
         if part == "-1":
             resolved.append(current)
             continue

@@ -2984,6 +2984,96 @@ def test_merge_graph_emits_vision_group_and_visual_language_edge(
     assert sources == {"embed_tokens", "@image_mask", "visual/@output"}
 
 
+def test_vision_combine_uses_embeddings_not_a_later_positional_module(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A rotary pre-module is loop-invariant, not the text scatter input."""
+    embed = _component(
+        "embed_tokens", "embedding", class_name="Embedding", label="Embedding"
+    )
+    rotary = _component(
+        "rotary_emb", "positional", class_name="Rotary", label="Rotary", order=1
+    )
+    vision = _component(
+        "visual", "vision", class_name="VisionModel", label="Vision Tower", order=0
+    )
+    spec = _spec(
+        stack_pre=[embed, rotary],
+        stack_tail=[],
+        block_components=[],
+        stack_model_class="Stack",
+        class_registry={
+            "Stack": SimpleNamespace(
+                init_assignments={},
+                forward_calls=["embed_tokens", "rotary_emb"],
+                forward_step_predecessor_args={},
+            )
+        },
+    )
+    _vision_merge_monkeypatch(monkeypatch, embed=embed, vision=vision)
+    monkeypatch.setattr(merge, "_stack_pre_components", lambda _spec: [embed, rotary])
+    monkeypatch.setattr(
+        merge,
+        "stack_entry_dataflow",
+        lambda _cls: SimpleNamespace(
+            operations=(), output_producer="embed_tokens", var_producers={}
+        ),
+    )
+    monkeypatch.setattr(
+        merge,
+        "component_has_detail_section",
+        lambda component, _spec: component.attr_name == "visual",
+    )
+    monkeypatch.setattr(
+        merge,
+        "_resolve_section_tree_for_component",
+        lambda *args, **kwargs: (
+            "Vision Tower",
+            BlockNode("visual", "VisionModel", "vision", "Vision Tower"),
+        ),
+    )
+    monkeypatch.setattr(merge, "is_transparent_inline_expansion", lambda tree: False)
+    monkeypatch.setattr(
+        merge, "expand_block_tree_inplace", lambda tree, basic_ops=None: tree
+    )
+
+    def fake_append(nodes, **kwargs):
+        prefix, namespace = kwargs["id_prefix"], kwargs["namespace_prefix"]
+        if prefix == "visual":
+            nodes.append({"id": "visual/@output", "namespace": "visual"})
+            return [("visual/@output", "result")]
+        nodes.append(
+            {
+                "id": prefix,
+                "namespace": namespace,
+                "incomingEdges": [
+                    merge._source_edge(source, "0")
+                    for source in kwargs["previous_exits"]
+                ],
+            }
+        )
+        return [prefix]
+
+    seen_decoder_inputs: list[object] = []
+
+    def fake_decoder(nodes, **kwargs):
+        seen_decoder_inputs.extend(kwargs["previous_exits"])
+        return list(kwargs["previous_exits"])
+
+    monkeypatch.setattr(merge, "_append_section", fake_append)
+    monkeypatch.setattr(merge, "_append_decoder_layers", fake_decoder)
+    monkeypatch.setattr(
+        merge, "_thread_loop_invariant_inputs", lambda *args, **kwargs: None
+    )
+
+    graph = merge.build_merged_model_graph(spec)
+    combine = next(
+        node for node in graph["nodes"] if node["id"] == "@vision_language_combine"
+    )
+    assert combine["incomingEdges"][0]["sourceNodeId"] == "embed_tokens"
+    assert seen_decoder_inputs == [("@vision_language_combine", "0")]
+
+
 def _build_vision_graph_with_raw_config(monkeypatch, raw_config):
     """Build a merged vision graph under the standard vision monkeypatch."""
     embed = _component(
