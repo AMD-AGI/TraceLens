@@ -338,11 +338,8 @@ Execute the TraceLens Agentic Mode orchestrator preparation script:
   --trace-path <trace_path> \
   --platform <platform> \
   --output-dir <output_dir> \
-  --comparison-scope <comparison_scope> \
-  <capture_flag>
+  --comparison-scope <comparison_scope>
 ```
-
-`<capture_flag>` is `--capture-folder <capture_folder_path_1>` if `<capture_folder_path_1>` is provided, otherwise none.
 
 This script performs:
 - **Step 3:** Assess GPU utilization (computation, idle, communication times)
