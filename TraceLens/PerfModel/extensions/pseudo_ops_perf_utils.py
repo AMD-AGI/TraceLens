@@ -94,6 +94,10 @@ def get_pseudo_op_mappings():
         "aiter::fused_qk_rope_concat_and_cache_mla": perf_model_extensions.fused_qk_rope_concat_and_cache_mla,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
         "aiter::_gemm_a16w16_asm": perf_model_extensions.gemm_a16w16_asm,
+        # splitk_ws names the output tensor plus a split-K workspace, which is
+        # the gemm_a16w16_asm Input Dims layout. Assumed until an MI455X capture
+        # confirms the event layout.
+        "gemm_a16w16_clusterlaunch_tdm_splitk_ws_kernel_gfx1250": perf_model_extensions.gemm_a16w16_asm,
         "sglang_profiler::gemm_kernels_flydsl_hgemm": perf_model_extensions.gemm_a16w16_atomic_,
         "aiter::gemm_afp4wfp4_": perf_model_extensions.gemm_afp4wfp4,
         "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant": perf_model_extensions.batched_gemm_a8w8,
@@ -147,6 +151,10 @@ def get_pseudo_op_mappings():
         "aiter::mhc_pre_gemm_sqrsum": perf_model_extensions.mhc_pre_gemm_sqrsum,
         "aiter::mhc_pre_big_fuse_rmsnorm": perf_model_extensions.mhc_pre_big_fuse_rmsnorm,
         "aiter::mhc_fused_post_pre_gemm_sqrsum": perf_model_extensions.mhc_fused_post_pre_gemm_sqrsum,
+        # Graph-captured kernel names. Same Input Dims as the aiter:: ops above.
+        "mhc_post_kernel": perf_model_extensions.mhc_post,
+        "mhc_pre_big_fuse_rmsnorm_kernel": perf_model_extensions.mhc_pre_big_fuse_rmsnorm,
+        "mhc_fused_post_pre_gemm_sqrsum_kernel": perf_model_extensions.mhc_fused_post_pre_gemm_sqrsum,
         "aiter::topk_softplus": perf_model_extensions.topk_softplus,
         ## Fused RMSNorm + per-group dynamic FP8 quant.
         "aiter::rmsnorm_quant": rmsnorm_perf_model_extensions.aiter_rmsnorm_quant,
