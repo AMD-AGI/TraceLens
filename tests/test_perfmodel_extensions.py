@@ -3016,6 +3016,23 @@ class TestPerfModelExtensionsCoverage:
         model = cls(event)
         assert model.flops() == 2 * 128 * 512 * 256
 
+    def test_gemm_a16w16_asm_splitk_workspace_layout(self):
+        # Output at index 2; index 3 is a non-tensor split-K workspace.
+        event = {
+            "args": {
+                "Input Dims": [[128, 256], [512, 256], [128, 512], []],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "unsigned int",
+                ],
+            }
+        }
+        model = gemm_a16w16_asm(event)
+        assert model.flops() == 2 * 128 * 512 * 256
+        assert model.bytes() > 0
+
     def test_gemm_afp4wfp4(self):
         # M=64, N=256, K=256: packed X and W, E8M0 scales, BF16 output.
         event = {
@@ -3056,6 +3073,7 @@ class TestPerfModelExtensionsCoverage:
             }
         )
         assert post.flops() > 0
+        assert post.bytes() > 0
         pre = mhc_pre_gemm_sqrsum(
             {
                 "args": {
@@ -3082,6 +3100,7 @@ class TestPerfModelExtensionsCoverage:
                 }
             }
         )
+        assert fuse.flops() > 0
         assert fuse.bytes() > 0
         fused = mhc_fused_post_pre_gemm_sqrsum(
             {
@@ -3101,6 +3120,7 @@ class TestPerfModelExtensionsCoverage:
             }
         )
         assert fused.flops() > 0
+        assert fused.bytes() > 0
         topk = topk_softplus(
             {
                 "args": {
