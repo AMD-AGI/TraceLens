@@ -12,11 +12,11 @@ sgl_kernel::rotary_embedding,nn.Module: RotaryEmbedding,195.8154296875,195.81542
 sglang::store_cache,nn.Module: RadixAttention,173.54296875,173.54296875,36,0.17354296875,36,['InferenceAttention'],"['sglang::store_cache', 'nn.Module: RadixAttention_0', 'nn.Module: Qwen3Attention_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",1.7747189139568718,98.52574135370303
 aten::argmax,nn.Module: Sampler,53.83984375,53.83984375,1,0.05383984375,1,['reduce'],"['aten::argmax', 'nn.Module: Sampler_0']",0.550587498392139,99.07632885209516
 aten::copy_,NA,23.509765625,23.509765625,5,0.023509765625,5,['elementwise'],['aten::copy_'],0.24042014503904008,99.3167489971342
-aten::gather,nn.Module: VocabParallelEmbedding,13.4990234375,13.4990234375,1,0.0134990234375,1,['other'],"['aten::gather', 'nn.Module: VocabParallelEmbedding_0', 'nn.Module: Qwen3Model_0']",0.13804634314507977,99.45479534027928
+aten::gather,nn.Module: VocabParallelEmbedding,13.4990234375,13.4990234375,1,0.0134990234375,1,['data_movement'],"['aten::gather', 'nn.Module: VocabParallelEmbedding_0', 'nn.Module: Qwen3Model_0']",0.13804634314507977,99.45479534027928
 hipLaunchKernel,NA,12.1767578125,12.1767578125,2,0.0121767578125,2,['other'],['hipLaunchKernel'],0.12452433282760615,99.57931967310688
 aten::_foreach_copy_,NA,12.0966796875,12.0966796875,2,0.0120966796875,2,['multi_tensor_apply'],['aten::_foreach_copy_'],0.12370542230616388,99.70302509541304
 aten::copy_,nn.Module: LogitsProcessor,8.451171875,8.451171875,1,0.008451171875,1,['elementwise'],"['aten::copy_', 'nn.Module: LogitsProcessor_0']",0.0864250201531882,99.78945011556623
 aten::neg,NA,5.6884765625,5.6884765625,1,0.0056884765625,1,['elementwise'],['aten::neg'],0.05817260716342977,99.84762272272965
 hipModuleLaunchKernel,NA,5.4072265625,5.4072265625,1,0.0054072265625,1,['other'],['hipModuleLaunchKernel'],0.05529643362470569,99.90291915635436
 aten::cumsum,NA,5.2470703125,10.6943359375,1,0.0052470703125,1,['reduce'],['aten::cumsum'],0.05365861258182115,99.95657776893619
-aten::arange,NA,4.24609375,4.24609375,1,0.00424609375,1,['other'],['aten::arange'],0.04342223106379273,99.99999999999997
+aten::arange,NA,4.24609375,4.24609375,1,0.00424609375,1,['data_movement'],['aten::arange'],0.04342223106379273,99.99999999999997

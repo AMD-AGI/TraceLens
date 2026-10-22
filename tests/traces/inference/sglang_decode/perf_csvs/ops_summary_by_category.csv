@@ -10,8 +10,9 @@ elementwise,nn.Module: SiluAndMul,36,"['sgl_kernel::silu_and_mul', 'nn.Module: S
 RoPE_fwd,nn.Module: RotaryEmbedding,36,"['sgl_kernel::rotary_embedding', 'nn.Module: RotaryEmbedding_0', 'nn.Module: Qwen3Attention_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",0.1958154296875,2.002485892768261,98.52574135370303
 reduce,nn.Module: Sampler,1,"['aten::argmax', 'nn.Module: Sampler_0']",0.05383984375,0.550587498392139,99.07632885209516
 elementwise,NA,6,['aten::copy_'],0.0291982421875,0.29859275220246984,99.37492160429763
-other,NA,4,['aten::arange'],0.021830078125,0.22324299751610457,99.59816460181374
-other,nn.Module: VocabParallelEmbedding,1,"['aten::gather', 'nn.Module: VocabParallelEmbedding_0', 'nn.Module: Qwen3Model_0']",0.0134990234375,0.13804634314507977,99.73621094495881
-multi_tensor_apply,NA,2,['aten::_foreach_copy_'],0.0120966796875,0.12370542230616388,99.85991636726497
-elementwise,nn.Module: LogitsProcessor,1,"['aten::copy_', 'nn.Module: LogitsProcessor_0']",0.008451171875,0.0864250201531882,99.94634138741816
-reduce,NA,1,['aten::cumsum'],0.0052470703125,0.05365861258182115,99.99999999999999
+other,NA,3,['hipLaunchKernel'],0.017583984375,0.17982076645231185,99.55474237074993
+data_movement,nn.Module: VocabParallelEmbedding,1,"['aten::gather', 'nn.Module: VocabParallelEmbedding_0', 'nn.Module: Qwen3Model_0']",0.0134990234375,0.13804634314507977,99.69278871389501
+multi_tensor_apply,NA,2,['aten::_foreach_copy_'],0.0120966796875,0.12370542230616388,99.81649413620117
+elementwise,nn.Module: LogitsProcessor,1,"['aten::copy_', 'nn.Module: LogitsProcessor_0']",0.008451171875,0.0864250201531882,99.90291915635436
+reduce,NA,1,['aten::cumsum'],0.0052470703125,0.05365861258182115,99.95657776893619
+data_movement,NA,1,['aten::arange'],0.00424609375,0.04342223106379273,99.99999999999997

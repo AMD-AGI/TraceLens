@@ -121,6 +121,10 @@ def name2bpe(name):
             # ×2 K-unpacking explicitly when modelling FLOPs.
             "c10::float4_e2m1fn_x2",
             "fp4",
+            # PyTorch stores bool tensors as 1 byte/element. Needed so ops
+            # with a bool condition/mask input (e.g. aten::where) can
+            # compute bytes() instead of always returning None.
+            "bool",
         ],
     }
     dict_dtype2bpe = {

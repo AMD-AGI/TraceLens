@@ -4131,6 +4131,490 @@ class aten_reduce(Reduce):
         }
 
 
+def _index_like_output_shape(self_shape, index_shape, dim):
+    """Shared helper for aten::index_select-style (``dim`` replaced by
+    ``len(index)``) output-shape/element-count semantics."""
+    num_index_elems = prod(index_shape) if index_shape else 0
+    if not self_shape:
+        return 0, num_index_elems
+    ndim = len(self_shape)
+    d = dim if dim >= 0 else ndim + dim
+    out_shape = list(self_shape)
+    if 0 <= d < len(out_shape):
+        out_shape[d] = num_index_elems if num_index_elems else out_shape[d]
+    return prod(out_shape), num_index_elems
+
+
+def _bytes_for_touched_elems(num_touched_elems, bpe_self, bpe_values):
+    if bpe_values is None:
+        return None
+    bpe_write = bpe_self if bpe_self is not None else bpe_values
+    return num_touched_elems * bpe_values + num_touched_elems * bpe_write
+
+
+class aten_cat:
+    """
+    aten::cat(tensors, dim) -- concatenates a TensorList along `dim`.
+
+    Trace limitation: PyTorch's profiler records TensorList args as a single
+    'TensorList' placeholder in "Input type" (no per-tensor dtype), so bytes()
+    cannot be computed and returns None. Element counts (flops=0, since this
+    is pure data movement) are still exact, derived by summing the shape of
+    each tensor in the Input Dims[0] nested list.
+
+    Expected Input Dims from trace: [[[shape_1], [shape_2], ...], []]
+    Expected Input type from trace: ['TensorList', 'Scalar']
+    """
+
+    category = "data_movement"
+    bwd_category = None
+    sheet_category = "DataMovement"
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.num_input_elems = self.param_details["num_input_elems"]
+        self.num_output_elems = self.num_input_elems
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        tensor_shapes = args.get("Input Dims", [[]])[0] or []
+        num_input_elems = sum(prod(tuple(s)) for s in tensor_shapes if s)
+        return {"num_input_elems": num_input_elems}
+
+    def flops(self):
+        return 0
+
+    def flops_bwd(self):
+        return 0
+
+    def bytes(self):
+        # Per-tensor dtype is not recoverable from a TensorList arg.
+        return None
+
+    def get_compute_precision(self):
+        return None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class aten_index_select:
+    """
+    aten::index_select(self, dim, index) -- selects len(index) slices of
+    `self` along `dim`, gathering rows/columns by an integer index tensor.
+
+    Output shape = self.shape with dim replaced by len(index).
+
+    Expected Input Dims from trace: [[self_shape], [], [index_shape]]
+    Expected Input type from trace: [self_dtype, 'Scalar', index_dtype]
+    Expected Concrete Inputs from trace: ['', dim, '']
+    """
+
+    category = "data_movement"
+    bwd_category = None
+    sheet_category = "DataMovement"
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.num_output_elems = self.param_details["num_output_elems"]
+        self.num_index_elems = self.param_details["num_index_elems"]
+        dtype_self, dtype_index = self.param_details["dtype_self_index"]
+        self.bpe_self = name2bpe(dtype_self) if dtype_self else None
+        self.bpe_index = name2bpe(dtype_index) if dtype_index else None
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        input_dims = args.get("Input Dims", [])
+        input_types = args.get("Input type", [])
+        self_shape = tuple(input_dims[0]) if input_dims and input_dims[0] else ()
+        index_shape = (
+            tuple(input_dims[2]) if len(input_dims) > 2 and input_dims[2] else ()
+        )
+        dtype_self = input_types[0] if input_types else None
+        dtype_index = input_types[2] if len(input_types) > 2 else None
+
+        concrete = args.get("Concrete Inputs", [])
+        dim = 0
+        if len(concrete) > 1 and isinstance(concrete[1], (int, str)):
+            try:
+                dim = int(concrete[1])
+            except (TypeError, ValueError):
+                dim = 0
+
+        num_output_elems, num_index_elems = _index_like_output_shape(
+            self_shape, index_shape, dim
+        )
+
+        return {
+            "num_output_elems": num_output_elems,
+            "num_index_elems": num_index_elems,
+            "dtype_self_index": (dtype_self, dtype_index),
+        }
+
+    def flops(self):
+        return 0
+
+    def flops_bwd(self):
+        return 0
+
+    def bytes(self):
+        if self.bpe_self is None:
+            return None
+        # Read the selected rows + write the output (same element count),
+        # plus read the index tensor itself.
+        data_bytes = 2 * self.num_output_elems * self.bpe_self
+        index_bytes = self.num_index_elems * self.bpe_index if self.bpe_index else 0
+        return data_bytes + index_bytes
+
+    def get_compute_precision(self):
+        return None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class aten_gather:
+    """
+    aten::gather(self, dim, index) -- output has exactly the same shape as
+    `index` (unlike index_select, where only `dim` is replaced). Logic
+    mirrors aten_index_select but is kept self-contained (not a subclass)
+    since the two are registered independently.
+
+    Expected Input Dims from trace: [[self_shape], [], [index_shape], []]
+    Expected Input type from trace: [self_dtype, 'Scalar', index_dtype, 'Scalar']
+    """
+
+    category = "data_movement"
+    bwd_category = None
+    sheet_category = "DataMovement"
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.num_output_elems = self.param_details["num_output_elems"]
+        self.num_index_elems = self.param_details["num_index_elems"]
+        dtype_self, dtype_index = self.param_details["dtype_self_index"]
+        self.bpe_self = name2bpe(dtype_self) if dtype_self else None
+        self.bpe_index = name2bpe(dtype_index) if dtype_index else None
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        input_dims = args.get("Input Dims", [])
+        input_types = args.get("Input type", [])
+        index_shape = (
+            tuple(input_dims[2]) if len(input_dims) > 2 and input_dims[2] else ()
+        )
+        dtype_self = input_types[0] if input_types else None
+        dtype_index = input_types[2] if len(input_types) > 2 else None
+
+        num_output_elems = prod(index_shape) if index_shape else 0
+        return {
+            "num_output_elems": num_output_elems,
+            "num_index_elems": num_output_elems,
+            "dtype_self_index": (dtype_self, dtype_index),
+        }
+
+    def flops(self):
+        return 0
+
+    def flops_bwd(self):
+        return 0
+
+    def bytes(self):
+        if self.bpe_self is None:
+            return None
+        data_bytes = 2 * self.num_output_elems * self.bpe_self
+        index_bytes = self.num_index_elems * self.bpe_index if self.bpe_index else 0
+        return data_bytes + index_bytes
+
+    def get_compute_precision(self):
+        return None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class aten_index_put_impl:
+    """
+    aten::_index_put_impl_(self, indices, values, accumulate, unsafe) --
+    in-place scatter of `values` into `self` at positions given by `indices`.
+
+    Trace limitation: `indices` is a TensorList/Optional[Tensor[]] arg and its
+    shape is not resolved in "Input Dims" (shows as an empty placeholder), so
+    its read cost is not included. The number of elements touched is taken
+    to be numel(values), which matches the common case where values' shape
+    already reflects the selected destination region.
+
+    Expected Input Dims from trace: [[self_shape], [], [values_shape], [], []]
+    Expected Input type from trace: [self_dtype, '', values_dtype, 'Scalar', 'Scalar']
+    """
+
+    category = "data_movement"
+    bwd_category = None
+    sheet_category = "DataMovement"
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.num_touched_elems = self.param_details["num_touched_elems"]
+        dtype_self, dtype_values = self.param_details["dtype_self_values"]
+        self.bpe_self = name2bpe(dtype_self) if dtype_self else None
+        self.bpe_values = name2bpe(dtype_values) if dtype_values else None
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        input_dims = args.get("Input Dims", [])
+        input_types = args.get("Input type", [])
+        values_shape = (
+            tuple(input_dims[2]) if len(input_dims) > 2 and input_dims[2] else ()
+        )
+        dtype_self = input_types[0] if input_types else None
+        dtype_values = input_types[2] if len(input_types) > 2 else None
+        return {
+            "num_touched_elems": prod(values_shape) if values_shape else 0,
+            "dtype_self_values": (dtype_self, dtype_values),
+        }
+
+    def flops(self):
+        return 0
+
+    def flops_bwd(self):
+        return 0
+
+    def bytes(self):
+        return _bytes_for_touched_elems(
+            self.num_touched_elems, self.bpe_self, self.bpe_values
+        )
+
+    def get_compute_precision(self):
+        return None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class aten_masked_scatter:
+    """
+    aten::masked_scatter_(self, mask, source) -- writes elements of `source`
+    into `self` at positions where `mask` is True. Logic mirrors
+    aten_index_put_impl but is kept self-contained (not a subclass) since the
+    two are registered independently.
+
+    APPROXIMATION: the true number of elements written equals mask.sum(),
+    which is data-dependent and unknowable from static shape info alone
+    (same fundamental limitation as aten::nonzero). We upper-bound using
+    numel(source) (you cannot write more elements than `source` provides),
+    which may overestimate cost when the mask is sparse.
+
+    Expected Input Dims from trace: [[self_shape], [mask_shape], [source_shape]]
+    Expected Input type from trace: [self_dtype, 'bool', source_dtype]
+    """
+
+    category = "data_movement"
+    bwd_category = None
+    sheet_category = "DataMovement"
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.num_touched_elems = self.param_details["num_touched_elems"]
+        dtype_self, dtype_values = self.param_details["dtype_self_values"]
+        self.bpe_self = name2bpe(dtype_self) if dtype_self else None
+        self.bpe_values = name2bpe(dtype_values) if dtype_values else None
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        input_dims = args.get("Input Dims", [])
+        input_types = args.get("Input type", [])
+        source_shape = (
+            tuple(input_dims[2]) if len(input_dims) > 2 and input_dims[2] else ()
+        )
+        dtype_self = input_types[0] if input_types else None
+        dtype_source = input_types[2] if len(input_types) > 2 else None
+        return {
+            "num_touched_elems": prod(source_shape) if source_shape else 0,
+            "dtype_self_values": (dtype_self, dtype_source),
+        }
+
+    def flops(self):
+        return 0
+
+    def flops_bwd(self):
+        return 0
+
+    def bytes(self):
+        return _bytes_for_touched_elems(
+            self.num_touched_elems, self.bpe_self, self.bpe_values
+        )
+
+    def get_compute_precision(self):
+        return None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class aten_arange:
+    """
+    aten::arange(start, end, step, dtype, layout, device, pin_memory) --
+    generates a 1D sequence; has no input tensor, so output size comes
+    purely from the scalar start/end/step args.
+
+    Trace limitation: output dtype is not directly recoverable (all args
+    show as 'Scalar'/blank in "Input type"), so bytes() returns None.
+
+    Expected Input Dims from trace: [[], [], [], [], [], []]
+    Expected Concrete Inputs from trace: [start, end, step, '', '', pin_memory]
+    """
+
+    category = "data_movement"
+    bwd_category = None
+    sheet_category = "DataMovement"
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.num_output_elems = self.param_details["num_output_elems"]
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        concrete = args.get("Concrete Inputs", [])
+
+        def _to_num(v, default):
+            if v is None or v == "":
+                return default
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return default
+
+        start = _to_num(concrete[0] if len(concrete) > 0 else None, 0.0)
+        end = _to_num(concrete[1] if len(concrete) > 1 else None, 0.0)
+        step = _to_num(concrete[2] if len(concrete) > 2 else None, 1.0)
+        num_output_elems = 0
+        if step != 0:
+            num_output_elems = max(0, math.ceil((end - start) / step))
+        return {"num_output_elems": num_output_elems}
+
+    def flops(self):
+        # Negligible arithmetic to generate each element; approximate as 0
+        # (consistent with treating this as a data-movement/generation op).
+        return 0
+
+    def flops_bwd(self):
+        return 0
+
+    def bytes(self):
+        # Output dtype is not recoverable from trace args for this op.
+        return None
+
+    def get_compute_precision(self):
+        return None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class aten_where:
+    """
+    aten::where(condition, x, y) -- ternary elementwise select. `condition`
+    is a bool tensor; `x`/`y` may each be a tensor or a Scalar (shown as an
+    empty dims list, broadcast as a 0-d tensor, matching the convention used
+    by aten_binary_elementwise).
+
+    Expected Input Dims from trace: [[cond_shape], [x_shape_or_[]], [y_shape_or_[]]]
+    Expected Input type from trace: ['bool', x_dtype_or_'Scalar', y_dtype_or_'Scalar']
+    """
+
+    category = "elementwise"
+    bwd_category = None
+    sheet_category = "TernaryElementwise"
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.num_output_elems = self.param_details["num_output_elems"]
+        dtype_cond, dtype_x, dtype_y = self.param_details["dtype_cond_x_y"]
+        self.bpe_cond = name2bpe(dtype_cond) if dtype_cond else None
+        self.bpe_x = name2bpe(dtype_x) if dtype_x else None
+        self.bpe_y = name2bpe(dtype_y) if dtype_y else None
+        # Output dtype: prefer whichever of x/y is a real (non-Scalar) tensor.
+        dtype_out = None
+        if dtype_x and dtype_x.lower() != "scalar":
+            dtype_out = dtype_x
+        elif dtype_y and dtype_y.lower() != "scalar":
+            dtype_out = dtype_y
+        self.bpe_out = name2bpe(dtype_out) if dtype_out else None
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        input_dims = args.get("Input Dims", [[], [], []])
+        input_types = args.get("Input type", [None, None, None])
+        cond_shape = tuple(input_dims[0]) if input_dims and input_dims[0] else ()
+        x_shape = tuple(input_dims[1]) if len(input_dims) > 1 and input_dims[1] else ()
+        y_shape = tuple(input_dims[2]) if len(input_dims) > 2 and input_dims[2] else ()
+
+        shapes = [s for s in (cond_shape, x_shape, y_shape) if s]
+        ndim = max((len(s) for s in shapes), default=0)
+        out_shape = []
+        for i in range(ndim):
+            dim_size = 1
+            for s in shapes:
+                padded = (1,) * (ndim - len(s)) + s
+                dim_size = max(dim_size, padded[i])
+            out_shape.append(dim_size)
+        num_output_elems = prod(out_shape) if out_shape else 0
+
+        dtype_cond = input_types[0] if input_types else None
+        dtype_x = input_types[1] if len(input_types) > 1 else None
+        dtype_y = input_types[2] if len(input_types) > 2 else None
+        return {
+            "num_output_elems": num_output_elems,
+            "dtype_cond_x_y": (dtype_cond, dtype_x, dtype_y),
+        }
+
+    def flops(self):
+        # One select op per output element.
+        return self.num_output_elems
+
+    def flops_bwd(self):
+        return self.num_output_elems
+
+    def bytes(self):
+        if self.bpe_cond is None or self.bpe_out is None:
+            return None
+        read_x = self.num_output_elems * self.bpe_x if self.bpe_x else 0
+        read_y = self.num_output_elems * self.bpe_y if self.bpe_y else 0
+        return (
+            self.num_output_elems * self.bpe_cond
+            + read_x
+            + read_y
+            + self.num_output_elems * self.bpe_out
+        )
+
+    def get_compute_precision(self):
+        return None
+
+    def get_maf_type(self):
+        return "vector"
+
+
 class GroupedGemm:
     """
     Grouped General Matrix Multiplication (GEMM).
