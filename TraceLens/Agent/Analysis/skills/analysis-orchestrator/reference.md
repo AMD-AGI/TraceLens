@@ -47,7 +47,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 The prompt selects the input mode:
 
-- **YAML mode**: the prompt says "from config `<config_path>`", optionally with a scope (`standalone`, `comparative` or `semantic`). Resolve `<config_path>` to an absolute path. Read `output_dir` from the file and ask only the environment questions (item 5), unless the prompt answers them. Skip the other items.
+- **YAML mode**: the prompt says "from config `<config_path>`", optionally with a scope (`standalone`, `comparative`, `semantic` or `multi_trace`). Resolve `<config_path>` to an absolute path. Read `output_dir` from the file and ask only the environment questions (item 5), unless the prompt answers them. Skip the other items.
 - **Interactive mode**: the prompt names no config.
 
 **In Interactive mode, when this skill is invoked, immediately ask the user for:**
@@ -57,6 +57,7 @@ The prompt selects the input mode:
 1. **Comparison scope** → `<comparison_scope>`
    - Set from the user’s intent **before** deep-diving on paths:
      - **`comparative`** if the skill was triggered by **“comparative analysis”**, **“compare two traces”**, or the user supplies **two** trace paths / explicitly asks to compare trace A vs B.
+     - **`multi_trace`** if the user supplies **several named jobs of one workload on one platform** (for example prefill and decode captures); ask which job is the focus (fusion and system analysis run on it) → `<focus_job>`. `<comparison_scope>` stays `standalone`.
      - **`standalone`** otherwise (including triggers **“standalone analysis”**, **“analyze trace standalone”**, single trace only).
 
 2. **Trace File Path(s)**
@@ -181,7 +182,7 @@ Run one `config_utils` command. It completes the config, writes `<output_dir>/ca
   [--scope <scope>]
 ```
 
-**Interactive mode** (`<scope>` is the comparison scope, or `semantic` for the `comparative` graph replay only case):
+**Interactive mode** (`<scope>` is the comparison scope, `multi_trace`, or `semantic` for the `comparative` graph replay only case):
 
 ```bash
 <prefix> python3 -m TraceLens.Agent.Analysis.utils.config_utils build \
@@ -190,10 +191,11 @@ Run one `config_utils` command. It completes the config, writes `<output_dir>/ca
   --output_dir <output_dir> \
   --job trace_path=<trace_path>,platform=<platform>[,capture_folder=<capture_folder_path_1>] \
   [--job trace_path=<trace2_path>,platform=<platform2>[,capture_folder=<capture_folder_path_2>]] \
-  [--set extension_file=<extension_file>]
+  [--set extension_file=<extension_file>] \
+  [--set focus_job=<focus_job>]
 ```
 
-Pass the second `--job` for `comparative` and `semantic`, a `capture_folder` only for graph replay + capture, and `--set` only when an extension file was provided.
+Pass the second `--job` for `comparative` and `semantic`, a `capture_folder` only for graph replay + capture, and `--set extension_file` only when an extension file was provided. For `multi_trace`, pass one `--job name=<name>,...` per job (2 or more, same platform) and `--set focus_job=<focus_job>`; the variables then describe the focus job and include `focus_job`.
 
 If it exits non-zero, the errors are on stderr. In YAML mode, show them and stop. In Interactive mode, re-ask the field an error names once and rebuild.
 
@@ -248,12 +250,14 @@ This call can run for several minutes, longer for comparative graph-capture runs
 
 If it exits non-zero or times out, show the tail of its output, emit `[DIAG:pipeline:STEP1_FAIL]`, and stop.
 
+On `multi_trace` runs it writes `perf_report_<job>_csvs/` per job and `perf_report_aggregated_csvs/`, every job's rows combined with a `phase` column. There is no `perf_report_csvs/`.
+
 ---
 
 ## Step 2: Trace-Quality Gate
 
 
-`<unified_perf_csv>` is `<output_dir>/perf_report_csvs/unified_perf_summary.csv` (`standalone`) or `<output_dir>/perf_report_trace1_csvs/unified_perf_summary.csv` (`comparative`, primary trace).
+`<unified_perf_csv>` is under `<output_dir>/perf_report_csvs/` (`standalone`), `<output_dir>/perf_report_aggregated_csvs/` (`multi_trace`), or `<output_dir>/perf_report_trace1_csvs/` (`comparative`, primary trace), as `unified_perf_summary.csv`.
 
 ```bash
 <prefix> python3 -c \"
@@ -264,7 +268,7 @@ print(f'STATUS={status}')
 print(f'GRAPH_REPLAY_FRACTION={coverage.graph_replay_fraction}')
 " 
 ```
-<graph_replay_fraction> refers to the returned GRAPH_REPLAY_FRACTION value.
+<graph_replay_fraction> refers to the returned GRAPH_REPLAY_FRACTION value. On `multi_trace` runs the gate is judged per phase and the reason names the failing phase; the fallback below is taken exactly as for `standalone`.
 
 **`STATUS=OK`:** Proceed
 **`STATUS=GRAPH_UNDER_RECORDED`:**
@@ -296,10 +300,11 @@ Execute the TraceLens Agentic Mode orchestrator preparation script:
   --output-dir <output_dir> \
   --comparison-scope <comparison_scope> \
   [--platform2 <platform2>] \
-  [--capture-folder <capture_folder>]
+  [--capture-folder <capture_folder>] \
+  [--focus-job <focus_job>]
 ```
 
-Pass `--platform2` only for comparative, and `--capture-folder` only if `config_utils` printed one. Use your longest command timeout.
+Pass `--platform2` only for comparative, `--capture-folder` only if `config_utils` printed one, and `--focus-job` only for `multi_trace`. Use your longest command timeout.
 
 This script performs:
 - **Step 3:** Assess GPU utilization (computation, idle, communication times)
@@ -351,7 +356,7 @@ Launch system-level sub-agents simultaneously using the Task tool. Do NOT wait b
 | `kernel_fusion` | `kernel-fusion-analyzer.md` |
 
 **Invocation conditions:**
-- **CPU/Idle**: Read `category_data/category_manifest.json` and check `gpu_utilization.idle_time_percent`. Only invoke the subagent if `idle_time_percent > 15`. Skip otherwise -- the deterministic script already captured the factual data.
+- **CPU/Idle**: Read `category_data/category_manifest.json` and check `gpu_utilization.idle_time_percent`. On `multi_trace` runs system analysis is scoped to the focus job, so apply this and the Multi-Kernel condition to `gpu_utilization.phases[<focus_job>]` (what Step 7.1 prints), not the combined top-level values. Only invoke the subagent if `idle_time_percent > 15`. Skip otherwise -- the deterministic script already captured the factual data.
 - **Multi-Kernel**: `multi_kernel` category exists in manifest OR `gpu_util['exposed_comm_time_percent'] > 0` OR `gpu_util['exposed_memcpy_time_percent'] > 0`
 - **Kernel Fusion**: `kernel_fusion` category exists in manifest
 
@@ -576,6 +581,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
 
    a. **Initialize** — truncate and write the title line, the `report_mode` + any `kind=warning` markers (see the template title block and the Warnings rule below), then `## Executive Summary` (metrics table, `{{PERF_PLOT}}` placeholder). Use `<prefix> tee <output_dir>/analysis.md << 'SECTION_EOF'` (truncating `tee`, not append) for this first write only.
       - Data sources: `category_data/category_manifest.json` (`gpu_utilization` keys), `priority_data.json` (top bottleneck).
+      - `multi_trace`: Total Time is the combined time; add one sentence giving each phase's window from `gpu_utilization.phases`.
 
    b. **Compute Kernel Optimizations** — append `## Compute Kernel Optimizations` with `### Top Operations` table and P-item cards. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
       - Data sources: `priority_data.json` — P1 = `findings[0]`, P2 = `findings[1]`, ... ; each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting).
@@ -584,9 +590,11 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
 
    c. **Kernel Fusion** — append `## Kernel Fusion Opportunities (Experimental)`. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
       - Data source: `system_findings/kernel_fusion_findings.md`.
+      - `multi_trace`: add the template's scope line.
 
    d. **System-Level** — append `## System-Level Optimizations`. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
       - Data sources: remaining `system_findings/*.md` (cpu_idle, multi_kernel).
+      - `multi_trace`: add the template's scope line.
 
    e. **Detailed Analysis** — append `## Detailed Analysis` with `### Compute Kernel Insights`, `### Kernel Fusion Insights`, `### System-Level Insights` subsections. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
       - Data sources: copy the `## Detailed Analysis` blocks verbatim from each `*_findings.md` file. Follow the template for formatting.
@@ -636,7 +644,7 @@ d. For placeholder values (`X ms`, `Y%`, `Z%`, `W%`) in the Executive Summary me
 e. For unfilled `<Brief Title>` / `<Library>` / `<platform>` placeholders: substitute the real title/backend/platform from the corresponding findings file or `metadata/*_metadata.json`.
 f. For Args cell mismatches: copy the matching `operations[].args` value verbatim (preserving `<br>`) from the corresponding `category_data/<cat>_metrics.json` and string-replace the bad cell.
 g. For marker errors: restore or add the missing/broken marker in place — never delete a card or block to silence an error. Source numeric values from `priority_data.json` (P-items) or `<cat>_metrics.json::impact_estimates[]` (detail estimates); use `null` or the sentinel `not quantifiable from trace data` for non-quantifiable items.
-h. For priority-consistency errors (R1 P-item count mismatch, R2 P-item category-order mismatch, R3 marker numeric mismatch, R4 Top Ops row-count mismatch): re-render the affected card(s) by re-reading `priority_data.json::findings[N-1]` for `category`, `low` (impact_score_low), `mid` (impact_score), `high` (impact_score_high), and `priorities[]` for the Top Operations table rows (one row per entry, in array order).
+h. For priority-consistency errors (R1 P-item count mismatch, R2 P-item category-order mismatch, R3 marker numeric mismatch, R4 Top Ops row-count mismatch, R6 phase mismatch): re-render the affected card(s) by re-reading `priority_data.json::findings[N-1]` for `category`, `phase` (copy from `findings[N].phase`, into both the marker and the `**Phase**` field), `low` (impact_score_low), `mid` (impact_score), `high` (impact_score_high), and `priorities[]` for the Top Operations table rows (one row per entry, in array order).
 2. Run validation again.
 3. Maximum 2 retry attempts. If still failing after retry, proceed with a warning.
 

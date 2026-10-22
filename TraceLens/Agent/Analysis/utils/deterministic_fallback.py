@@ -38,6 +38,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_MID,
     _KERNEL_NAME_TRUNC_LEN,
 )
+from TraceLens.Reporting.aggregate_perf_reports import PHASE_COL
 
 # Real traces have CSV cells far larger than csv's 131072-char default, which
 # would crash the trace-quality gate; lift the limit to the platform maximum.
@@ -93,16 +94,20 @@ class GraphReplayCoverage:
 
 
 def check_graph_replay_coverage(unified_perf_csv: Path) -> GraphReplayCoverage:
-    total_time = 0.0
-    graph_replay_time = 0.0
+    # Keyed by phase (None outside multi_trace) so one phase cannot hide in another.
+    total_time = defaultdict(float)
+    graph_replay_time = defaultdict(float)
     with open(unified_perf_csv, newline="", encoding="utf-8") as csv_file:
         for row in csv.DictReader(csv_file):
+            phase = row.get(PHASE_COL)
             weight = float(row["Kernel Time (µs)_sum"])
-            total_time += weight
+            total_time[phase] += weight
             if _is_graph_replay_wrapper(row["name"]):
-                graph_replay_time += weight
+                graph_replay_time[phase] += weight
 
-    graph_replay_fraction = graph_replay_time / total_time if total_time > 0 else 0.0
+    fractions = {p: graph_replay_time[p] / t for p, t in total_time.items() if t > 0}
+    worst = max(fractions, key=fractions.get, default=None)
+    graph_replay_fraction = fractions.get(worst, 0.0)
     graph_under_recorded = graph_replay_fraction > GRAPH_REPLAY_FRACTION_MAX
 
     if graph_under_recorded:
@@ -110,6 +115,8 @@ def check_graph_replay_coverage(unified_perf_csv: Path) -> GraphReplayCoverage:
             f"graph-replay fraction {graph_replay_fraction:.1%} > "
             f"{GRAPH_REPLAY_FRACTION_MAX:.0%}"
         )
+        if worst is not None:
+            reason += f" in phase {worst}"
     else:
         reason = "graph-replay fraction within bounds"
 

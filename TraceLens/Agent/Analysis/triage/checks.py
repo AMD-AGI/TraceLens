@@ -985,7 +985,10 @@ def check_subagent_budget(run_dir, _stream_file):
     findings_dir = os.path.join(run_dir, "category_findings")
     system_dir = os.path.join(run_dir, "system_findings")
 
-    idle_pct = manifest.get("gpu_utilization", {}).get("idle_time_percent")
+    gpu_util = manifest.get("gpu_utilization", {})
+    if manifest.get("focus_job"):
+        gpu_util = gpu_util["phases"][manifest["focus_job"]]
+    idle_pct = gpu_util.get("idle_time_percent")
 
     missing = []
     for cat in manifest.get("categories", []):

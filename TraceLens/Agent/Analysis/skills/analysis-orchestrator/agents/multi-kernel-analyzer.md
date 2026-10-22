@@ -42,7 +42,7 @@ When invoked by the orchestrator, you will receive the following context:
 ## Error Handling
 
 **If multi_kernel_data.json is missing:**
-1. Read gpu_utilization from category_data/category_manifest.json
+1. Read gpu_utilization from metadata/multi_kernel_metadata.json (the manifest's is joint across jobs on `multi_trace` runs), else category_data/category_manifest.json
 2. Report based on exposed_memcpy_time_percent and exposed_comm_time_percent
 3. Note limitations in findings
 

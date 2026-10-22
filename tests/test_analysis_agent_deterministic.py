@@ -210,6 +210,28 @@ def test_detector_threshold_boundary(tmp_path, graph_weight, expected):
 
 
 # ---------------------------------------------------------------------------
+# multi_trace: the worst phase decides, not the whole-file fraction
+# ---------------------------------------------------------------------------
+def test_detector_judges_each_phase(tmp_path):
+    perf_csv = tmp_path / "unified_perf_summary.csv"
+    with open(perf_csv, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["name", "Kernel Time (µs)_sum", "phase"])
+        writer.writerows(
+            [
+                ("aten::mm", 900, "prefill"),
+                ("hipGraphLaunch->k1 (Synthetic Op)", 20, "decode"),
+                ("aten::mm", 80, "decode"),
+            ]
+        )
+    verdict = check_graph_replay_coverage(perf_csv)
+
+    assert verdict.graph_under_recorded is True
+    assert verdict.graph_replay_fraction == pytest.approx(0.20)
+    assert "decode" in verdict.reason
+
+
+# ---------------------------------------------------------------------------
 # wrapper-strip + exact-name grouping
 # ---------------------------------------------------------------------------
 def test_writer_strips_wrapper_and_groups_by_name(tmp_path):

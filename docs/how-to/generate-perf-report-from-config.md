@@ -57,6 +57,7 @@ jobs:
 | `analysis_mode` | yes | `default` for training and plain PyTorch traces. `inference` for vLLM, SGLang, ATOM, and xDiT traces, with or without graph capture. |
 | `output_dir` | yes | Directory for the reports. |
 | `jobs` | yes | List of jobs. See the job keys below. |
+| `aggregation` | no | `{policy: combine_only_same_phase}` or `{policy: combine}`. Combines the jobs' reports. See [Combine reports](#combine-reports). |
 | any report option | no | Any parameter of the selected report function, by its Python name (for example `kernel_summary: true`, `topk_ops: 50`). Applies to every job. |
 
 ### Job keys
@@ -64,6 +65,7 @@ jobs:
 | Key | Required | Description |
 |-----|----------|-------------|
 | `name` | when there's more than one job | Used in the output file names. Letters, digits, `_`, `-`, and `.`. |
+| `phase` | when `aggregation` is set | Phase label used by the aggregation, for example `prefill`, `decode`, or `mixed`. |
 | `trace_path` | yes | Trace to analyze. |
 | `platform` | one of the two | Bundled or `TL_EXTENSION` architecture name, for example `MI300X`. |
 | `gpu_arch_json_path` | one of the two | Path to an architecture JSON file, for hardware that isn't bundled. |
@@ -95,6 +97,7 @@ group_by_parent_module: true   # inference only
 |------|-----------------------|
 | One, without `name` | `perf_report.xlsx`, `perf_report_csvs/` |
 | Any job with `name` | `perf_report_<name>.xlsx`, `perf_report_<name>_csvs/` |
+| With `aggregation` | also `perf_report_aggregated_csvs/` |
 
 Before the first job runs, TraceLens writes `run_config.resolved.yaml` to
 `output_dir`. It's the same config with every report option spelled out and
@@ -162,6 +165,50 @@ jobs:
     platform: MI300X
     capture_folder: /data/dsv2lite_pd/decode/capture_traces
 ```
+
+### Combine reports
+
+Add `aggregation` and a `phase` on every job to combine the jobs' CSVs into
+`perf_report_aggregated_csvs/` after the last job:
+
+```yaml
+analysis_mode: inference
+output_dir: /data/dsv2lite_pd/analysis_output
+aggregation:
+  policy: combine_only_same_phase
+jobs:
+  - name: prefill_rank0
+    phase: prefill
+    trace_path: /data/dsv2lite_pd/prefill/rank0.json.gz
+    platform: MI300X
+    capture_folder: /data/dsv2lite_pd/prefill/capture_traces
+  - name: decode_rank0
+    phase: decode
+    trace_path: /data/dsv2lite_pd/decode/rank0.json.gz
+    platform: MI300X
+    capture_folder: /data/dsv2lite_pd/decode/capture_traces
+```
+
+| Policy | Rows with the same key in different reports |
+|--------|---------------------------------------------|
+| `combine_only_same_phase` | Combined only when the reports have the same `phase`. Rows of different phases stay separate, each tagged with its phase. |
+| `combine` | Combined regardless of phase. The `phase` column lists every contributing phase. |
+
+When rows combine:
+- times and counts add up;
+- means and standard deviations are recomputed from the per-report counts;
+- minimum and maximum take the overall extreme;
+- `Percentage (%)` is recomputed as a share of all reports together.
+
+`gpu_timeline` is always one timeline summed over all reports, so its
+`busy_time` covers the whole run. Medians and per-kernel summaries can't be
+combined exactly. They're taken from the contributing row with the most
+instances. Reports with sheets or columns the aggregation doesn't know, for
+example `kernel_summary` or the `_kl_overlap` sheets, stop the run with an error.
+
+Splitting a trace into contiguous chunks and combining their reports gives the
+same numbers as the report of the whole trace. The only differences are
+`total_time` and `idle_time`, which lose the gaps between chunks.
 
 ### Compare two traces
 

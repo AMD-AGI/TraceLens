@@ -1150,13 +1150,13 @@ def test_collective_report_main_cli(tmp_path):
 
 
 class TestAnalysisUtilsAndReporting:
-    def test_perf_report_csv_dir_comparative(self, tmp_path):
+    def test_perf_report_csv_dir_reads_manifest(self, tmp_path):
         cat_dir = tmp_path / "category_data"
         cat_dir.mkdir()
         (cat_dir / "category_manifest.json").write_text(
-            json.dumps({"comparison_scope": "comparative"})
+            json.dumps({"focus_csv_dir": "/focus/csvs"})
         )
-        assert "perf_report_trace1_csvs" in au.perf_report_csv_dir(str(tmp_path))
+        assert au.perf_report_csv_dir(str(tmp_path)) == "/focus/csvs"
 
     def test_resolve_gpu_arch_and_node_span(self):
         arch = ru.resolve_gpu_arch(
@@ -2365,7 +2365,7 @@ class TestPush95Phase2:
         (fusion_dir / "kernel_fusion_metrics.json").write_text(
             json.dumps({"high_confidence_op_keys": [["aten::mm", "x", "y"]]})
         )
-        assert au._load_fusion_op_keys(str(tmp_path)) == {("aten::mm", "x", "y")}
+        assert au._load_fusion_op_keys(str(tmp_path)) == {(None, "aten::mm", "x", "y")}
 
     def test_reporting_pftrace_and_collective(self, tmp_path):
 
@@ -2537,6 +2537,7 @@ class TestPush95Phase3:
             json.dumps(
                 {
                     "platform": "MI300X",
+                    "focus_csv_dir": str(csv_dir),
                     "gpu_utilization": {"total_time_ms": 1000.0},
                 }
             )

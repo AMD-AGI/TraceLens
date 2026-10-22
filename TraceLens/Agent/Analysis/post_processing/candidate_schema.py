@@ -67,6 +67,7 @@ class ComputeTask(TypedDict):
     prose_truncated: bool
     impact: Impact
     members: list[ComputeMember]
+    phase: NotRequired[str]
 
 
 class FusionTask(TypedDict):

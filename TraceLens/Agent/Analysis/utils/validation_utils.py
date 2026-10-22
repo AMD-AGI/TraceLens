@@ -825,6 +825,8 @@ def _validate_report_priority_consistency(content, output_dir):
     R2: Each kind=p_item marker's category attr (in doc order) == findings[N-1].category.
     R3: Each marker's low/mid/high attrs match findings[N-1] impact_score_low / impact_score / impact_score_high.
     R4: Top Operations marker rows == len(priorities).
+    R6: Each kind=p_item marker's phase attr == findings[N-1].phase (both absent
+    outside multi_trace).
 
     Silently skips when priority_data.json is absent (Step 9 already warns).
     Numeric attrs are compared as 2-decimal strings to match the writer's
@@ -878,6 +880,11 @@ def _validate_report_priority_consistency(content, output_dir):
             errors.append(
                 f"R2: P-item marker #{idx + 1} category={cat_attr!r} != "
                 f"findings[{idx}].category={f.get('category')!r}"
+            )
+        if attrs.get("phase") != f.get("phase"):
+            errors.append(
+                f"R6: P-item marker #{idx + 1} phase={attrs.get('phase')!r} != "
+                f"findings[{idx}].phase={f.get('phase')!r}"
             )
         for attr_name, json_key in (
             ("low", "impact_score_low"),

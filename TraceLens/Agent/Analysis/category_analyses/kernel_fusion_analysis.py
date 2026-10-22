@@ -187,6 +187,7 @@ def main():
         "platform": platform,
         "peak_mem_bw_tbs": peak_bw_tbs,
         "baseline_ms": baseline_ms,
+        "phase": manifest.get("focus_job"),
         "impact_estimates": [e.to_dict() for e in impact_estimates],
         **scope_metrics,
     }

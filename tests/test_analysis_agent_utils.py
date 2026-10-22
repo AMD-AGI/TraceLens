@@ -899,6 +899,18 @@ def test_build_category_findings_quantified_grouping_standalone():
     assert f["rank"] == 1
 
 
+def test_findings_split_by_phase():
+    """Same-shaped ops in different phases stay separate findings, tagged by phase."""
+    eff = {"efficiency_percent": 50.0, "is_anomaly": False, "bound_type": "compute"}
+    operations = [
+        {"name": "op_a", "time_ms": 10.0, "efficiency": eff, "phase": phase}
+        for phase in ("prefill", "decode")
+    ]
+    estimates = compute_impact_estimates(operations, "gemm", baseline_ms=100.0)
+    findings = build_category_findings(estimates)
+    assert sorted(f["phase"] for f in findings) == ["decode", "prefill"]
+
+
 def test_build_category_findings_drops_below_min_pitem():
     """A group summing below MIN_PITEM_IMPACT_SCORE (0.5) is dropped."""
     estimates = [
@@ -1471,6 +1483,14 @@ def test_priority_consistency_r2_category_mismatch(tmp_path):
     (tmp_path / "priority_data.json").write_text(json.dumps(_priority_data_two()))
     errors = _validate_report_priority_consistency(content, str(tmp_path))
     assert any(e.startswith("R2:") for e in errors)
+
+
+def test_priority_consistency_r6_phase_mismatch(tmp_path):
+    pd_data = _priority_data_two()
+    pd_data["findings"][0]["phase"] = "decode"
+    (tmp_path / "priority_data.json").write_text(json.dumps(pd_data))
+    errors = _validate_report_priority_consistency(_passing_report(), str(tmp_path))
+    assert any(e.startswith("R6:") for e in errors)
 
 
 def test_priority_consistency_r4_top_ops_row_count(tmp_path):
@@ -2415,6 +2435,31 @@ def test_build_operation_metrics_flags_row_matching_op_key(tmp_path):
     assert [bool(o.get("fusion_flagged")) for o in ops] == [True, False]
 
 
+def test_build_operation_metrics_flags_only_the_fusion_phase(tmp_path):
+    cat_dir = tmp_path / "category_data"
+    cat_dir.mkdir()
+    (cat_dir / "kernel_fusion_metrics.json").write_text(
+        json.dumps({"phase": "decode", "high_confidence_op_keys": [_FUSION_ADD_KEY]})
+    )
+    row = {
+        "name": "aten::add",
+        "Input Dims": "[[16, 64]]",
+        "Input type": "['float']",
+        "Input Strides": "",
+        "Concrete Inputs": "",
+        "process_name": "p",
+        "process_label": "",
+        "thread_name": "t1",
+        "kernel_details_summary": "[{'name': 'shared_kernel'}]",
+    }
+    df = pd.DataFrame([{**row, "phase": "prefill"}, {**row, "phase": "decode"}])
+    df["Kernel Time (µs)_sum"] = [300.0, 200.0]
+    metadata = {"output_dir": str(tmp_path), "peak_mem_bw_tbs": 5.3}
+    ops = build_operation_metrics(df, metadata, {})
+    assert [o["phase"] for o in ops] == ["prefill", "decode"]
+    assert [bool(o.get("fusion_flagged")) for o in ops] == [False, True]
+
+
 # ----- analysis_utils: build_operation_metrics call-chain cap -----
 
 
@@ -2534,6 +2579,11 @@ def test_orchestrator_main_writes_manifest(orchestrator_prepared_output):
     # cpu_idle is always inserted first as a system-tier category.
     assert "cpu_idle" in names
     assert manifest["gpu_utilization"]["total_time_ms"] > 0
+    assert manifest["focus_csv_dir"] == os.path.join(
+        orchestrator_prepared_output, "perf_report_csvs"
+    )
+    assert manifest["capture_folder"] is None
+    assert "focus_job" not in manifest
 
 
 def test_orchestrator_main_exports_category_data(orchestrator_prepared_output):
@@ -3217,20 +3267,10 @@ def test_prepare_model_identification_standalone(tmp_path, perf_csv_dir):
     src = os.path.join(perf_csv_dir, "unified_perf_summary.csv")
     dst = os.path.join(out, "perf_report_csvs", "unified_perf_summary.csv")
     pd.read_csv(src).to_csv(dst, index=False)
-    assert prepare_model_identification_data(out, "standalone") is True
+    assert prepare_model_identification_data(out) is True
     assert os.path.isfile(os.path.join(out, "metadata", "condensed_op_info.csv"))
     nn = open(os.path.join(out, "metadata", "nn_modules.txt")).read()
     assert "LlamaMLP" in nn
-
-
-def test_prepare_model_identification_comparative(tmp_path, perf_csv_dir):
-    out = str(tmp_path)
-    t1 = os.path.join(out, "perf_report_trace1_csvs")
-    os.makedirs(t1)
-    pd.read_csv(os.path.join(perf_csv_dir, "unified_perf_summary.csv")).to_csv(
-        os.path.join(t1, "unified_perf_summary.csv"), index=False
-    )
-    assert prepare_model_identification_data(out, "comparative") is True
 
 
 def test_prepare_model_identification_missing_csv(tmp_path):
@@ -3252,6 +3292,29 @@ def test_load_manifest_categories(capsys, output_dir_with_manifest):
     assert "cpu_idle" in [c["name"] for c in data["system_categories"]]
     captured = capsys.readouterr()
     assert "compute_categories" in captured.out
+
+
+def test_load_manifest_categories_prints_focus_job_utilization(
+    capsys, output_dir_with_manifest
+):
+    manifest_path = os.path.join(
+        output_dir_with_manifest, "category_data", "category_manifest.json"
+    )
+    manifest = json.load(open(manifest_path))
+    manifest["focus_job"] = "decode"
+    manifest["gpu_utilization"].update(
+        idle_time_percent=5.0,
+        phases={
+            "prefill": {"idle_time_percent": 5.0},
+            "decode": {"idle_time_percent": 40.0},
+        },
+    )
+    json.dump(manifest, open(manifest_path, "w"))
+    load_manifest_categories(output_dir_with_manifest)
+    assert (
+        json.loads(capsys.readouterr().out)["gpu_utilization"]["idle_time_percent"]
+        == 40.0
+    )
 
 
 def test_load_findings(capsys, output_dir_with_manifest):
@@ -4077,6 +4140,7 @@ def test_kernel_fusion_main_writes_metrics(tmp_path, with_manifest):
                 {
                     "platform": "MI300X",
                     "comparison_scope": "standalone",
+                    "focus_csv_dir": os.path.join(out, "perf_report_csvs"),
                     "gpu_utilization": {"total_time_ms": 1000.0},
                 },
                 f,
@@ -4304,6 +4368,7 @@ def test_comparative_fusion_producer_to_rows(
                 "comparison_scope": "comparative",
                 "platform": "GPU_A",
                 "platform2": platform2,
+                "focus_csv_dir": str(t1_dir),
                 "gpu_utilization": {"total_time_ms": 1000.0},
                 "trace2_gpu_utilization": {"total_time_ms": 800.0},
             }
@@ -4347,7 +4412,7 @@ def test_analysis_utils_efficiency_and_fusion(tmp_path):
     (fusion_dir / "kernel_fusion_metrics.json").write_text(
         json.dumps({"high_confidence_op_keys": [["aten::mm", "x", "y"]]})
     )
-    assert au._load_fusion_op_keys(str(tmp_path)) == {("aten::mm", "x", "y")}
+    assert au._load_fusion_op_keys(str(tmp_path)) == {(None, "aten::mm", "x", "y")}
 
 
 def test_tracediff_enrich_perf_report_dict_inplace():

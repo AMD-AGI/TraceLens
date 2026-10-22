@@ -15,7 +15,11 @@ perf report wrapper.
 Every front end (interactive answers, a user YAML, Hyperloom) produces a dict in
 the wrapper's schema. ``check_config`` rejects a wrong shape for the scope,
 adds the wiring and forces the agent report flags on, then lets the wrapper
-validate the result. Every change is printed. The completed config is written to
+validate the result. Scopes: standalone (1 job), comparative and semantic (2
+jobs), multi_trace (2 or more named jobs of one workload and platform, plus a
+top-level ``focus_job`` that is stripped here; each job's ``phase`` is its name
+and the wrapper aggregates them).
+Every change is printed. The completed config is written to
 ``<output_dir>/cache/run_config.yaml`` only when all three phases pass. That
 file is the wrapper's input only: a re-check of it reports job 1's platform as
 platform2.
@@ -30,6 +34,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
+from TraceLens.Reporting.aggregate_perf_reports import POLICY_SAME_PHASE
 from TraceLens.Reporting.generate_perf_report_from_config import (
     ConfigError,
     load_run_config,
@@ -37,7 +42,8 @@ from TraceLens.Reporting.generate_perf_report_from_config import (
 )
 
 # Constants
-SCOPES = ("standalone", "comparative", "semantic")
+SCOPES = ("standalone", "comparative", "semantic", "multi_trace")
+_PAIR_SCOPES = ("comparative", "semantic")
 _DEFAULT_FLAGS = {
     "enable_pseudo_ops": True,
     "group_by_num_kernels": True,
@@ -113,6 +119,11 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
         if isinstance(value, str) and not os.path.isabs(value)
     ]
     errors += _shape_errors(scope, jobs, config.get("analysis_mode"))
+    if scope == "multi_trace":
+        if config.get("focus_job") not in {job.get("name") for job in jobs} - {None}:
+            errors.append(
+                f"multi_trace: focus_job must be one of the job names, got {config.get('focus_job')!r}."
+            )
     if errors:
         raise ConfigError("\n".join(errors))
 
@@ -123,7 +134,7 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
         name = jobs[0].pop("name", None)
         if name is not None:
             changes.append(("removed", f"jobs[0].name: {name}"))
-    else:
+    elif scope in _PAIR_SCOPES:
         for index, job in enumerate(jobs):
             name = f"trace{index + 1}"
             if job.get("name") is None:
@@ -150,10 +161,17 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
                 )
             )
         jobs[1]["platform"] = platform
+    else:
+        changes.append(("removed", f"focus_job: {completed.pop('focus_job')}"))
+        for index, job in enumerate(jobs):
+            if "phase" not in job:
+                job["phase"] = job["name"]
+                changes.append(("added", f"jobs[{index}].phase: {job['phase']}"))
 
-    for flag, value in AGENT_REPORT_FLAGS.get(
-        completed.get("analysis_mode"), {}
-    ).items():
+    forced = dict(AGENT_REPORT_FLAGS.get(completed.get("analysis_mode"), {}))
+    if scope == "multi_trace":
+        forced["aggregation"] = {"policy": POLICY_SAME_PHASE}
+    for flag, value in forced.items():
         if flag not in completed:
             changes.append(("added", f"{flag}: {json.dumps(value)}"))
         elif completed[flag] != value:
@@ -167,15 +185,20 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
 
     plans = plan_reports(completed)
 
+    focus = plans[0]
+    if scope == "multi_trace":
+        focus = next(plan for plan in plans if plan.name == config["focus_job"])
     variables = {
-        "comparison_scope": "standalone" if scope == "standalone" else "comparative",
-        "trace_path": plans[0].trace_path,
-        "platform": plans[0].platform,
-        "output_dir": os.path.dirname(plans[0].output_xlsx_path),
+        "comparison_scope": "comparative" if scope in _PAIR_SCOPES else "standalone",
+        "trace_path": focus.trace_path,
+        "platform": focus.platform,
+        "output_dir": os.path.dirname(focus.output_xlsx_path),
     }
-    if plans[0].capture_folder is not None:
-        variables["capture_folder"] = plans[0].capture_folder
-    if scope != "standalone":
+    if focus.capture_folder is not None:
+        variables["capture_folder"] = focus.capture_folder
+    if scope == "multi_trace":
+        variables["focus_job"] = focus.name
+    elif scope in _PAIR_SCOPES:
         variables.update(
             comparison_method="semantic" if scope == "semantic" else "tracediff",
             trace2_path=plans[1].trace_path,
@@ -287,6 +310,16 @@ def _shape_errors(
         if analysis_mode != "inference":
             errors.append("semantic needs analysis_mode inference.")
         keys += ("capture_folder",)
+    elif scope == "multi_trace":
+        if len(jobs) < 2:
+            errors.append(f"multi_trace takes 2 or more jobs, got {len(jobs)}.")
+        if len({job.get("platform") for job in jobs}) > 1:
+            errors.append("multi_trace: every job needs the same platform.")
+        errors += [
+            f"multi_trace: jobs[{index}].phase must be its name or omitted."
+            for index, job in enumerate(jobs)
+            if job.get("phase", job.get("name")) != job.get("name")
+        ]
     else:
         if len(jobs) != 2:
             return [f"comparative takes exactly 2 jobs, got {len(jobs)}."]

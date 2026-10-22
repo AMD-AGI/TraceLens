@@ -45,7 +45,7 @@ Each P-item maps 1:1 to a `## Detailed Analysis` reasoning candidate at the same
 ### P1: <Brief Title> (<Library>)            <!-- (<Library>) only on compute tier -->
 **Insight**: [1 sentence — what's wrong]
 **Action**: [1-2 sentences — what to do]
-<!-- impact-begin kind=p_item low=<impact_score_low> mid=<impact_score> high=<impact_score_high> -->
+<!-- impact-begin kind=p_item low=<impact_score_low> mid=<impact_score> high=<impact_score_high> phase=<phase> -->
 **Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]
 <!-- impact-end -->
 ```
@@ -54,6 +54,8 @@ Each P-item maps 1:1 to a `## Detailed Analysis` reasoning candidate at the same
 - **System tier**: omit the `(<Library>)` title suffix. Always emit `**Impact**: Not quantifiable from trace data` wrapped in `kind=p_item` markers with `low=null mid=null high=null`.
 - **Field labels are exact** — `**Insight**`, `**Action**`, `**Impact**`.
 - **`(<Library>)` suffix**: the single `category_findings[i].library` for this card (one library per finding by construction). Omit the parenthetical when the value is `Unknown`.
+- **`phase=`**: only when `category_findings[i].phase` is present (`multi_trace` runs); omit the attribute otherwise.
+- **`**Phase**: <phase>`**: on the same condition, add this line as the first field after the heading, before `**Insight**`, and before `**Identification:**` in the matching Detailed Analysis block. Do not repeat the phase in the title, insight text, or the Operation column.
 - **Marker required** — see § Impact markers (REQUIRED). The `low`/`mid`/`high` attributes carry the raw `impact_score_low/impact_score/impact_score_high` values from `category_findings[i]`. For non-quantifiable cards (system tier) use `low=null mid=null high=null`.
 
 ---
@@ -250,6 +252,7 @@ The set of P-items is decided by `category_findings[]` alone — `MIN_PITEM_IMPA
 | `rank` | Card order within your category (1 = highest impact). Also the `rank=` value in `<!-- reasoning-candidate -->`. |
 | `bound_type` | `compute` \| `memory`. Selects the matching Action Prose Guidance row. |
 | `library` | One per finding. Drives the `(<Library>)` title suffix. |
+| `phase` | `multi_trace` runs only: the job the finding's ops came from. One per finding. Copy into the `kind=p_item` marker and the `**Phase**` field. |
 | `eff_bucket` | Roofline-efficiency band: `"0-30"`, `"30-60"`, `"60-100"`, or `"unknown"` (standalone); `"all"` (comparative). Members within a finding share the same band. |
 | `impact_score` / `_low` / `_high` | Group-summed % of E2E. Render verbatim into `kind=p_item` and `kind=detail_estimate` markers. |
 | `estimate_method` | `"quantified"` (impact from a perf model — standalone roofline gap or comparative t2/t1 ratio) or `"heuristic"` (op has no perf model; impact estimated from E2E share — see below). |
@@ -310,7 +313,7 @@ The block between them is exactly the `impact_score`-based markdown you would ot
 
 | `kind` | Where | Required attributes | Optional attributes |
 |--------|-------|--------------------|---------------------|
-| `p_item` | Around every P-item `**Impact**` line in `## Recommendations`. | `low`, `mid`, `high` (all three; use `null` only for system-tier non-quantifiable). | `category` is reserved for the orchestrator template; sub-agents do **not** emit it. |
+| `p_item` | Around every P-item `**Impact**` line in `## Recommendations`. | `low`, `mid`, `high` (all three; use `null` only for system-tier non-quantifiable); `phase` when the finding has one. | `category` is reserved for the orchestrator template; sub-agents do **not** emit it. |
 | `detail_estimate` | Around the two-bullet `Low end ... / High end ...` block under `**Impact estimate:**` in each `## Detailed Analysis` candidate. Skip only for system-tier non-quantifiable estimates. | `low`, `mid`, `high` (impact_score values, % of E2E). | none |
 | `op_row` | After the last row of each compute-tier `**Data:**` table (see § Operations Table Schema → Per-row impact marker). | `rank`, `impacts` (CSV of per-row `impact_score`, one per data row in table order; `—` for null). | none |
 

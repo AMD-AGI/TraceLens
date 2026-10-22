@@ -158,6 +158,39 @@ jobs:
 """,
         None,
     ),
+    "multi_trace": (
+        "multi_trace",
+        """
+analysis_mode: inference
+output_dir: ROOT/out
+focus_job: decode
+jobs:
+  - {name: prefill, trace_path: ROOT/t1.json.gz, platform: MI300X, capture_folder: ROOT/c1}
+  - {name: decode, trace_path: ROOT/t2.json.gz, platform: MI300X, capture_folder: ROOT/c2}
+""",
+        """
+analysis_mode: inference
+output_dir: ROOT/out
+enable_pseudo_ops: true
+group_by_num_kernels: true
+include_call_stack: true
+group_by_parent_module: true
+aggregation: {policy: combine_only_same_phase}
+jobs:
+  - {name: prefill, phase: prefill, trace_path: ROOT/t1.json.gz, platform: MI300X, capture_folder: ROOT/c1}
+  - {name: decode, phase: decode, trace_path: ROOT/t2.json.gz, platform: MI300X, capture_folder: ROOT/c2}
+""",
+        [
+            "removed focus_job: decode",
+            "added   jobs[0].phase: prefill",
+            "added   jobs[1].phase: decode",
+            "added   enable_pseudo_ops: true",
+            "added   group_by_num_kernels: true",
+            "added   include_call_stack: true",
+            "added   group_by_parent_module: true",
+            'added   aggregation: {"policy": "combine_only_same_phase"}',
+        ],
+    ),
 }
 
 
@@ -274,6 +307,20 @@ def test_build_matches_yaml(root, tmp_path, capsys, case):
             id="semantic_errors",
         ),
         pytest.param(
+            "multi_trace",
+            "{analysis_mode: default, output_dir: ROOT/out, focus_job: nope, jobs: ["
+            "{name: a, phase: x, trace_path: ROOT/t1.json.gz, platform: MI300X},"
+            "{name: b, trace_path: ROOT/t2.json.gz, platform: MI325X,"
+            " compare_to: {trace_path: ROOT/t1.json.gz}}]}",
+            [
+                "multi_trace: every job needs the same platform",
+                "multi_trace: jobs[1] takes no compare_to",
+                "multi_trace: jobs[0].phase must be its name or omitted",
+                "focus_job must be one of the job names, got 'nope'",
+            ],
+            id="multi_trace_errors",
+        ),
+        pytest.param(
             "comparative",
             "{analysis_mode: inference, output_dir: ROOT/out, jobs: ["
             "{trace_path: ROOT/t1.json.gz, platform: MI300X, capture_folder: ROOT/c1,"
@@ -381,6 +428,19 @@ def test_add_diff_stats(root, tmp_path, monkeypatch, capsys):
                 "wrote   ROOT/out/cache/run_config.yaml",
             ],
             id="semantic",
+        ),
+        pytest.param(
+            "multi_trace",
+            [
+                "comparison_scope=standalone",
+                "trace_path=ROOT/t2.json.gz",
+                "platform=MI300X",
+                "output_dir=ROOT/out",
+                "capture_folder=ROOT/c2",
+                "focus_job=decode",
+                "wrote   ROOT/out/cache/run_config.yaml",
+            ],
+            id="multi_trace",
         ),
     ],
 )

@@ -38,6 +38,23 @@ from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
 from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
 
+# Constants
+# Base group-by columns of the per-unique-args summaries (ops_unique_args and
+# unified_perf_summary). Optional columns are inserted per flag at build time.
+UNIQUE_ARGS_GROUPING_COLS = (
+    "name",
+    "op category",
+    "process_name",
+    "process_label",
+    "thread_name",
+    "Input Dims",
+    "Input type",
+    "Input Strides",
+    "Concrete Inputs",
+)
+# Prefix of the perf-model parameter columns that roofline sheets group by.
+PERF_PARAM_PREFIX = "param: "
+
 
 def normalize_dtype_to_precision(dtype_str):
     """
@@ -726,7 +743,7 @@ class TreePerfAnalyzer:
 
         # Identify parameter columns for grouping
         param_cols = [
-            col for col in df_perf_metrics.columns if col.startswith("param: ")
+            col for col in df_perf_metrics.columns if col.startswith(PERF_PARAM_PREFIX)
         ]
         if group_by_num_kernels and "num_kernels" in df_perf_metrics.columns:
             param_cols.append("num_kernels")
@@ -1434,17 +1451,7 @@ class TreePerfAnalyzer:
         Returns:
             pd.DataFrame: DataFrame with unique arguments for each operation.
         """
-        grouping_cols_original = [
-            "name",
-            "op category",
-            "process_name",
-            "process_label",
-            "thread_name",
-            "Input Dims",
-            "Input type",
-            "Input Strides",
-            "Concrete Inputs",
-        ]
+        grouping_cols_original = list(UNIQUE_ARGS_GROUPING_COLS)
         if group_by_parent_module:
             idx = grouping_cols_original.index("op category") + 1
             grouping_cols_original.insert(idx, "parent_module")
@@ -2263,17 +2270,7 @@ class TreePerfAnalyzer:
             return pd.DataFrame()
 
         df_temp = df_unified_perf.copy()
-        grouping_cols = [
-            "name",
-            "op category",
-            "process_name",
-            "process_label",
-            "thread_name",
-            "Input Dims",
-            "Input type",
-            "Input Strides",
-            "Concrete Inputs",
-        ]
+        grouping_cols = list(UNIQUE_ARGS_GROUPING_COLS)
         if (
             include_overlapping_kernels
             and "overlapping_kernel_names" in df_temp.columns

@@ -84,9 +84,13 @@ Generate one report per job from a YAML file. The same entry point is
 | `jobs[].capture_folder` | no | Graph-capture folder. `inference` only. |
 | `jobs[].compare_to` | no | `trace_path` and, in `inference`, `capture_folder` of a trace to compare against. |
 | `jobs[].precomputed_diff_stats` | no | `diff_stats.csv` to use instead of TraceDiff. |
+| `jobs[].phase` | when `aggregation` is set | Phase label, for example `prefill` or `decode`. |
+| `aggregation.policy` | no | `combine_only_same_phase` or `combine`. Combines every job's CSVs into `perf_report_aggregated_csvs/`. |
 | any report parameter | no | Top-level, by Python name. Applies to every job. |
 
-**Output:** one report per job. See
+**Output:** one report per job, plus the aggregated CSVs when `aggregation` is
+set. The aggregation is also available from Python as
+`TraceLens.Reporting.aggregate_perf_reports.aggregate_perf_report_csvs`. See
 [Generate performance reports from a YAML config](../how-to/generate-perf-report-from-config.md)
 for defaults and examples.
 

@@ -1635,7 +1635,12 @@ def _write_fusion_inputs(base, candidates):
         json.dump(candidates, f)
     with open(os.path.join(cat_dir, "category_manifest.json"), "w") as f:
         json.dump(
-            {"platform": "MI300X", "gpu_utilization": {"total_time_ms": 100.0}}, f
+            {
+                "platform": "MI300X",
+                "focus_csv_dir": csv_dir,
+                "gpu_utilization": {"total_time_ms": 100.0},
+            },
+            f,
         )
     with open(os.path.join(meta_dir, "gemm_metadata.json"), "w") as f:
         json.dump(

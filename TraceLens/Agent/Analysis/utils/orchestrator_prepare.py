@@ -26,6 +26,12 @@ from TraceLens.Agent.Analysis.utils.kernel_fusion import (
     FusionForms,
     FusionLabeler,
 )
+from TraceLens.Reporting.generate_perf_report_from_config import (
+    AGGREGATED_CSVS_DIR,
+    RESOLVED_CONFIG_NAME,
+    load_run_config,
+    plan_reports,
+)
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
@@ -182,6 +188,14 @@ def main():
         ),
     )
     parser.add_argument(
+        "--focus-job",
+        default=None,
+        help=(
+            "multi_trace only: trace 1 is <output-dir>/perf_report_aggregated_csvs; "
+            "this job's CSVs feed fusion and system analysis."
+        ),
+    )
+    parser.add_argument(
         "--disable_pseudo_ops",
         action="store_false",
         dest="enable_pseudo_ops",
@@ -199,6 +213,9 @@ def main():
     if comparison_scope == "comparative":
         trace1_csv_dir = os.path.join(output_dir, "perf_report_trace1_csvs")
         trace2_csv_dir = os.path.join(output_dir, "perf_report_trace2_csvs")
+    elif args.focus_job is not None:
+        trace1_csv_dir = os.path.join(output_dir, AGGREGATED_CSVS_DIR)
+        trace2_csv_dir = None
     else:
         trace1_csv_dir = os.path.join(output_dir, "perf_report_csvs")
         trace2_csv_dir = None
@@ -247,6 +264,23 @@ def main():
     gpu_utilization_metrics = _gpu_utilization_metrics_from_gpu_timeline_df(
         gpu_timeline
     )
+    if args.focus_job is not None:
+        plans = plan_reports(
+            load_run_config(os.path.join(output_dir, RESOLVED_CONFIG_NAME))
+        )
+        phase_utilization = {
+            plan.name: _gpu_utilization_metrics_from_gpu_timeline_df(
+                pd.read_csv(os.path.join(plan.output_csvs_dir, "gpu_timeline.csv"))
+            )
+            for plan in plans
+        }
+        focus_csv_dir = next(
+            p.output_csvs_dir for p in plans if p.name == args.focus_job
+        )
+        system_utilization = phase_utilization[args.focus_job]
+    else:
+        focus_csv_dir = trace1_csv_dir
+        system_utilization = gpu_utilization_metrics
     trace2_gpu_utilization = None
     trace2_ops_summary_by_category = None
 
@@ -317,13 +351,13 @@ def main():
     # ============================================================================
     print("\n[STEP 5] Pre-computing Tree Data for Bottleneck Operations...")
 
+    merged_tree = None
     try:
         print(f"  Loading trace: {trace_path}")
         print(f"  Pseudo ops: {'enabled' if enable_pseudo_ops else 'disabled'}")
         # Build the tree the perf report built: merge the capture folder (Step 1
         # wrote its execution_details.json), and fall back to the raw trace when
         # the merge fails.
-        merged_tree = None
         if args.capture_folder is not None:
             merged_tree = merge_capture_trace_into_graph(
                 args.capture_folder,
@@ -575,7 +609,7 @@ def main():
         builder = FusionCandidateBuilder(
             tree,
             analyzer,
-            load_perf_rows(os.path.join(trace1_csv_dir, "unified_perf_summary.csv")),
+            load_perf_rows(os.path.join(focus_csv_dir, "unified_perf_summary.csv")),
             FusionLabeler(TAXONOMY, FusionForms(TAXONOMY)),
         )
         if comparison_scope == "comparative":
@@ -680,7 +714,7 @@ def main():
     # CPU/Idle Category Creation (always created)
     # ============================================================================
     print(f"\n  Category: CPU/Idle Analysis (cpu_idle)")
-    print(f"    Idle time: {gpu_utilization_metrics['idle_time_percent']:.1f}%")
+    print(f"    Idle time: {system_utilization['idle_time_percent']:.1f}%")
 
     cpu_idle_metadata = {
         "platform": platform,
@@ -691,7 +725,7 @@ def main():
         "output_dir": output_dir,
         "category": "CPU/Idle Analysis",
         "category_name": "cpu_idle",
-        "gpu_utilization": gpu_utilization_metrics,
+        "gpu_utilization": system_utilization,
     }
 
     cpu_idle_metadata_file = f"{output_dir}/metadata/cpu_idle_metadata.json"
@@ -744,7 +778,7 @@ def main():
             "output_dir": output_dir,
             "category": "Multi-Kernel Issues",
             "category_name": "multi_kernel",
-            "gpu_utilization": gpu_utilization_metrics,
+            "gpu_utilization": system_utilization,
             "tier": "system",
         }
 
@@ -879,6 +913,8 @@ def main():
         "output_dir": output_dir,
         "comparison_scope": comparison_scope,
         "gpu_utilization": gpu_utilization_metrics,
+        "focus_csv_dir": focus_csv_dir,
+        "capture_folder": args.capture_folder if merged_tree is not None else None,
         "categories": exported_categories,
         "time_metric_note": "Use gpu_kernel_time_ms for bottleneck prioritization. cpu_duration_ms includes sync/launch overhead.",
     }
@@ -886,6 +922,13 @@ def main():
         manifest["platform2"] = args.platform2
         manifest["trace2_gpu_utilization"] = trace2_gpu_utilization
         manifest["trace2_ops_summary_by_category"] = trace2_ops_summary_by_category
+
+    if args.focus_job is not None:
+        manifest["focus_job"] = args.focus_job
+        manifest["gpu_utilization"] = {
+            **gpu_utilization_metrics,
+            "phases": phase_utilization,
+        }
 
     manifest_file = f"{output_dir}/category_data/category_manifest.json"
     with open(manifest_file, "w") as f:

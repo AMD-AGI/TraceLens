@@ -643,6 +643,21 @@ def test_impact_sum_and_task_order(tmp_path):
     assert [t["priority"] for t in tasks] == list(range(1, len(tasks) + 1))
 
 
+def test_compute_tasks_split_by_phase(tmp_path):
+    md = (
+        _AGENTIC_MD.replace("category=gemm", "category=gemm phase=prefill")
+        .replace("category=moe_unfused", "category=moe_unfused phase=decode")
+        .replace("| pseudo_op::moe_flydsl_stage1 |", "| aiter::gemm_a16w16 |")
+    )
+    report, _ = _render_text(md, tmp_path)
+    gemm = [
+        t
+        for t in report["compute_optimizations"]
+        if t["operation"] == "aiter::gemm_a16w16"
+    ]
+    assert sorted(t["phase"] for t in gemm) == ["decode", "prefill"]
+
+
 def test_op_row_impacts_read_from_marker(tmp_path):
     report, _ = _render_text(_AGENTIC_MD, tmp_path)
     # P1 op_row marker: impacts=3.55,3.29,1.77 on the gemm_a16w16 rows.
