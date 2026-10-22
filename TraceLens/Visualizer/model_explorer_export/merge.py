@@ -71,12 +71,12 @@ from TraceLens.Visualizer.model_explorer_export.type_check import (
 from TraceLens.Visualizer.model_explorer_export.shapes import (
     annotate_nodes_with_shapes,
     apply_shape_attrs,
+    canonicalize_port_shape_keys,
     fill_missing_node_shapes,
     group_boundary_shapes,
     infer_block_tree_shapes,
     node_output_spec,
     format_shape_dims,
-    format_shape_tensor,
     format_shape_with_dtype,
     parse_shape_dims,
     SHAPE_SEPARATOR,
@@ -2935,7 +2935,6 @@ def _declare_tuple_boundary_ports(nodes: list[dict[str, Any]]) -> None:
             attrs.extend(
                 [
                     {"key": "shape", "value": format_shape_with_dtype(spec)},
-                    {"key": "tensor_shape", "value": format_shape_tensor(spec)},
                     {"key": "dtype", "value": spec.dtype},
                 ]
             )
@@ -4081,15 +4080,20 @@ def _carry_producer_shape_to_boundary_tiles(nodes: list[dict[str, Any]]) -> None
                 _set_node_attr(tile, "output_dtype", dtype)
             for metadata in tile.get("outputsMetadata", []) or []:
                 metadata_attrs = metadata.setdefault("attrs", [])
-                for key in ("shape", "tensor_shape"):
-                    existing = next(
-                        (attr for attr in metadata_attrs if attr.get("key") == key),
-                        None,
-                    )
-                    if existing is None:
-                        metadata_attrs.append({"key": key, "value": shape})
-                    else:
-                        existing["value"] = shape
+                existing = next(
+                    (attr for attr in metadata_attrs if attr.get("key") == "shape"),
+                    None,
+                )
+                if existing is None:
+                    metadata_attrs.append({"key": "shape", "value": shape})
+                else:
+                    existing["value"] = shape
+                metadata_attrs = [
+                    attr
+                    for attr in metadata_attrs
+                    if attr.get("key") != "tensor_shape"
+                ]
+                metadata["attrs"] = metadata_attrs
                 if dtype:
                     existing_dtype = next(
                         (attr for attr in metadata_attrs if attr.get("key") == "dtype"),
@@ -4121,8 +4125,8 @@ def _publish_declared_shapes_as_output_ports(nodes: list[dict[str, Any]]) -> Non
 
     One port, because a node with several has already published them -- that is
     where several come from. Its id is the one its readers dock on, so a tile
-    read at a named slot keeps that name. ``shape`` and ``tensor_shape`` carry
-    the same text, as they do on every port the shape pass writes.
+    read at a named slot keeps that name. The port carries that text on
+    ``shape``, the key the viewer draws on the edge.
     """
     docked: dict[str, set[str]] = {}
     for node in nodes:
@@ -4136,10 +4140,7 @@ def _publish_declared_shapes_as_output_ports(nodes: list[dict[str, Any]]) -> Non
         shape = _node_attr(node, "output_shape")
         if not shape:
             continue
-        attrs = [
-            {"key": "shape", "value": shape},
-            {"key": "tensor_shape", "value": shape},
-        ]
+        attrs = [{"key": "shape", "value": shape}]
         dtype = _node_attr(node, "output_dtype")
         if dtype:
             attrs.append({"key": "dtype", "value": dtype})
@@ -5742,6 +5743,7 @@ def _reconcile_edge_endpoint_shapes(nodes: list[dict[str, Any]]) -> None:
     ``masked_scatter`` combine) must be preserved, not papered over — and only
     ever replace a weak dim with a concrete one, never the reverse.
     """
+    canonicalize_port_shape_keys(nodes)
     node_by_id = {str(node.get("id")): node for node in nodes}
 
     def _reconcile(a: dict[str, Any], b: dict[str, Any]) -> None:
@@ -5846,10 +5848,9 @@ def _write_port_shape(
     if dtype:
         display = f"{display} {dtype}"
     shape_attr["value"] = display
-    for attr in metadata.get("attrs", []):
-        if attr.get("key") == "tensor_shape":
-            tensor = format_shape_dims(dims)
-            attr["value"] = f"{tensor} {dtype}" if dtype else tensor
+    metadata["attrs"] = [
+        attr for attr in metadata.get("attrs", []) if attr.get("key") != "tensor_shape"
+    ]
 
 
 def _prune_unconsumed_outputs(
@@ -7763,10 +7764,7 @@ def _copy_carried_shape(dst: dict[str, Any], src: dict[str, Any] | None) -> None
         return
     dtype = _node_attr(src, "output_dtype")
     dst["attrs"].append({"key": "output_shape", "value": shape})
-    port_attrs = [
-        {"key": "shape", "value": shape},
-        {"key": "tensor_shape", "value": shape},
-    ]
+    port_attrs = [{"key": "shape", "value": shape}]
     if dtype is not None:
         dst["attrs"].append({"key": "output_dtype", "value": dtype})
         port_attrs.append({"key": "dtype", "value": dtype})
@@ -9899,6 +9897,9 @@ def build_merged_model_graph(
     # Right behind it: that pass is the last thing to state a shape, and this
     # is what makes a stated shape one the reader can actually see.
     _publish_declared_shapes_as_output_ports(nodes)
+    # Ports leave with one shape key. A copied adapter alias is promoted here,
+    # after the last pass that writes port metadata.
+    canonicalize_port_shape_keys(nodes)
     if shape_inferencer is not None:
         for namespace, boundary in group_boundary_shapes(nodes).items():
             graph_attributes.setdefault(namespace, {}).update(boundary)

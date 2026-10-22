@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Callable
 
 from TraceLens.ModelUtils.block_tree import BlockNode
@@ -29,14 +30,13 @@ SHAPE_SEPARATOR = " x "
 BRACKET_SEPARATOR = ", "
 
 
-def _font_safe(dim: Any, *, star: str = "x") -> str:
+def _font_safe(dim: Any) -> str:
     """Model Explorer renders characters outside its font atlas as ``?``.
 
-    ``star`` controls how a multiplication marker is rendered. The compact
-    ``tensor_shape`` form uses ``"x"`` (Model-Explorer-native); the human display
-    form keeps ``"*"`` so a merged reshape dim reads ``B*S``.
+    A multiplication marker is written as ``*`` so a merged reshape dim reads
+    ``B*S``.
     """
-    text = str(dim).replace("\u00d7", star).replace("\u2217", star).replace("*", star)
+    text = str(dim).replace("\u00d7", "*").replace("\u2217", "*")
     return "".join(char if 32 <= ord(char) < 127 else "" for char in text)
 
 
@@ -44,7 +44,7 @@ def format_shape(spec: TensorSpec) -> str:
     """Bracketed human-readable shape for node attrs, e.g. ``[B, S, 4096]``."""
     if not spec.shape:
         return ""
-    inner = BRACKET_SEPARATOR.join(_font_safe(dim, star="*") for dim in spec.shape)
+    inner = BRACKET_SEPARATOR.join(_font_safe(dim) for dim in spec.shape)
     return f"[{inner}]"
 
 
@@ -69,7 +69,7 @@ def parse_shape_dims(text: str) -> list[str]:
 
 
 def format_shape_with_dtype(spec: TensorSpec) -> str:
-    """Shape string with dtype suffix for display on edges and node attrs."""
+    """Shape string with dtype suffix for port metadata, edges, and node attrs."""
     dims = format_shape(spec)
     if not dims:
         return ""
@@ -78,24 +78,88 @@ def format_shape_with_dtype(spec: TensorSpec) -> str:
     return f"{dims} {spec.dtype}"
 
 
-def format_shape_tensor(spec: TensorSpec) -> str:
-    """Bracket ``[B, S, H]`` shape for outputsMetadata tensor_shape / edge labels.
+def _promote_tensor_shape_text(value: str) -> str:
+    """Rewrite an adapter ``tensor_shape`` value the way the viewer used to.
 
-    Model Explorer labels edges from the ``tensor_shape`` attr, so this uses the
-    same bracket form as node attrs (``*`` for merged reshape dims) rather than a
-    compact ``BxSxH`` string.
+    Model Explorer renames ``tensor_shape`` to ``shape`` and, on the way, strips
+    a ``tensor<...>`` wrapper, substitutes a font-safe multiply sign, and spaces
+    a compact ``1x2`` separator. Promoting with the same rules keeps an imported
+    port reading as it did before the alias was dropped.
     """
-    dims = format_shape_dims([_font_safe(dim, star="*") for dim in spec.shape])
-    if not dims or not spec.dtype:
-        return dims
-    return f"{dims} {spec.dtype}"
+    text = str(value).replace("tensor<", "").replace(">", "").replace("*", "\u2217")
+    return re.sub(r"(\d|\?)x", r"\1 x ", text)
+
+
+def _canonicalize_metadata(metadata: dict[str, Any]) -> None:
+    attrs = metadata.get("attrs")
+    if not isinstance(attrs, list):
+        return
+    shape = next((attr for attr in attrs if attr.get("key") == "shape"), None)
+    tensor = next((attr for attr in attrs if attr.get("key") == "tensor_shape"), None)
+    if shape is None and tensor is not None:
+        attrs.append(
+            {
+                "key": "shape",
+                "value": _promote_tensor_shape_text(str(tensor.get("value") or "")),
+            }
+        )
+    if tensor is not None:
+        metadata["attrs"] = [
+            attr for attr in attrs if attr.get("key") != "tensor_shape"
+        ]
+
+
+def canonicalize_port_shape_keys(nodes: list[dict[str, Any]]) -> None:
+    """Keep one shape key on every port.
+
+    ``shape`` is the key Model Explorer draws on an edge. Built-in adapters
+    still emit ``tensor_shape``; the viewer renames that alias onto ``shape``,
+    and a later alias overwrites an earlier ``shape``. TraceLens writes only
+    ``shape``. A port that arrived with only the alias is promoted. A port that
+    already has ``shape`` keeps that text, and the alias is removed.
+    """
+    for node in nodes:
+        for key in ("inputsMetadata", "outputsMetadata"):
+            for metadata in node.get(key) or []:
+                if isinstance(metadata, dict):
+                    _canonicalize_metadata(metadata)
+
+
+def canonicalize_payload_shapes(payload: dict[str, Any]) -> None:
+    """Fold ``tensor_shape`` into ``shape`` on every graph in a payload."""
+    if not isinstance(payload, dict):
+        return
+    graphs: list[dict[str, Any]] = []
+    collections = payload.get("graphCollections")
+    if isinstance(collections, list):
+        for collection in collections:
+            if not isinstance(collection, dict):
+                continue
+            for graph in collection.get("graphs") or []:
+                if isinstance(graph, dict):
+                    graphs.append(graph)
+    for graph in payload.get("graphs") or []:
+        if isinstance(graph, dict):
+            graphs.append(graph)
+    nodes = payload.get("nodes")
+    if isinstance(nodes, list):
+        graphs.append(payload)
+    seen: set[int] = set()
+    for graph in graphs:
+        graph_nodes = graph.get("nodes")
+        if not isinstance(graph_nodes, list):
+            continue
+        marker = id(graph_nodes)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        canonicalize_port_shape_keys(graph_nodes)
 
 
 def _apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
     display_text = format_shape_with_dtype(spec)
     if not display_text:
         return
-    tensor_shape = format_shape_tensor(spec)
     attrs = [
         item
         for item in node.get("attrs", [])
@@ -118,7 +182,6 @@ def _apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
             "attrs": [
                 *labels.get(port_id, []),
                 {"key": "shape", "value": display_text},
-                {"key": "tensor_shape", "value": tensor_shape},
                 {"key": "dtype", "value": spec.dtype},
             ],
         }
@@ -192,7 +255,6 @@ def _apply_multi_port_shape_attrs(
                 "attrs": [
                     {"key": "port_label", "value": label},
                     {"key": "shape", "value": format_shape_with_dtype(port_spec)},
-                    {"key": "tensor_shape", "value": format_shape_tensor(port_spec)},
                     {"key": "dtype", "value": port_spec.dtype},
                 ],
             }
@@ -208,6 +270,7 @@ def annotate_nodes_with_shapes(
     id_prefix: str,
 ) -> None:
     """Match exported nodes to computation-graph keys under ``id_prefix``."""
+    canonicalize_port_shape_keys(nodes)
     if not shape_specs:
         return
     prefix = f"{id_prefix}/" if id_prefix else ""
@@ -257,10 +320,6 @@ def annotate_nodes_with_shapes(
                     # module's ``output_shape`` layer attribute, so dropping the
                     # dtype here left collapsed modules showing shape without type.
                     {"key": "shape", "value": format_shape_with_dtype(port_spec)},
-                    {
-                        "key": "tensor_shape",
-                        "value": format_shape_tensor(port_spec),
-                    },
                     {"key": "dtype", "value": port_spec.dtype},
                 ]
             output_by_port = {
@@ -616,6 +675,7 @@ def fill_missing_node_shapes(
     ``(B, S, hidden)``) -- what the model actually passed, observed rather than
     inferred from the parameter's name.
     """
+    canonicalize_port_shape_keys(nodes)
     hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
     activation = TensorSpec(
         (Symbol.BATCH.value, Symbol.SEQ.value, hidden), context.dtype

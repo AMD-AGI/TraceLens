@@ -63,17 +63,13 @@ class TestAStatedShapeIsPublished:
         _publish_declared_shapes_as_output_ports(nodes)
         assert _attrs(_ports(nodes[0])[0]) == {
             "shape": "[B, S, 96, 128] bfloat16",
-            "tensor_shape": "[B, S, 96, 128] bfloat16",
             "dtype": "bfloat16",
         }
 
     def test_a_shape_with_no_dtype_still_publishes(self) -> None:
         nodes = [_node("v", shape="[B, S]")]
         _publish_declared_shapes_as_output_ports(nodes)
-        assert _attrs(_ports(nodes[0])[0]) == {
-            "shape": "[B, S]",
-            "tensor_shape": "[B, S]",
-        }
+        assert _attrs(_ports(nodes[0])[0]) == {"shape": "[B, S]"}
 
     def test_a_node_stating_nothing_publishes_nothing(self) -> None:
         """Inventing a shape is worse than drawing ``?``."""

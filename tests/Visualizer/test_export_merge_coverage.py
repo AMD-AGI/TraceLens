@@ -709,8 +709,7 @@ def test_shape_format_annotation_and_empty_shape_paths():
     # Human display is bracketed and keeps ``*`` for merged dims; the unicode
     # multiply signs fold to ``*`` and the non-ASCII ``λ`` drops out.
     assert shapes.format_shape(spec) == "[B, 2*H, N*D, ]"
-    # tensor_shape (edge labels) now uses the same bracket form as node attrs.
-    assert shapes.format_shape_tensor(spec) == "[B, 2*H, N*D, ] bfloat16"
+    assert shapes.format_shape_with_dtype(spec) == "[B, 2*H, N*D, ] bfloat16"
 
     node = {
         "id": "p/key",
@@ -1826,7 +1825,6 @@ def test_fill_missing_node_shapes_cast_resolves_downcast_dtype():
                     "id": "0",
                     "attrs": [
                         {"key": "shape", "value": "B x S x 4 float32"},
-                        {"key": "tensor_shape", "value": "BxSx4 float32"},
                         {"key": "dtype", "value": "float32"},
                     ],
                 }
@@ -2765,10 +2763,7 @@ def _port(node_id, key, port_id, shape):
         key: [
             {
                 "id": port_id,
-                "attrs": [
-                    {"key": "shape", "value": shape},
-                    {"key": "tensor_shape", "value": shape.replace(" x ", "x")},
-                ],
+                "attrs": [{"key": "shape", "value": shape}],
             }
         ],
     }
@@ -3242,12 +3237,73 @@ def test_bracket_shape_display_round_trips():
     assert shapes.parse_shape_dims(shapes.format_shape(spec)) == ["B", "S", "4096"]
     # Legacy `` x `` form is still parseable defensively.
     assert shapes.parse_shape_dims("B x S x 4096") == ["B", "S", "4096"]
-    # tensor_shape (edge labels) now uses the bracket form on every edge.
-    assert shapes.format_shape_tensor(spec) == "[B, S, 4096] bfloat16"
-    # A shape without a dtype omits the suffix in both display forms.
+    # A shape without a dtype omits the suffix.
     no_dtype = TensorSpec(("B", "S", 4096), "")
     assert shapes.format_shape_with_dtype(no_dtype) == "[B, S, 4096]"
-    assert shapes.format_shape_tensor(no_dtype) == "[B, S, 4096]"
+
+
+def test_tensor_shape_alias_is_folded_into_shape():
+    nodes = [
+        {
+            "id": "adapter",
+            "outputsMetadata": [
+                {
+                    "id": "0",
+                    "attrs": [{"key": "tensor_shape", "value": "tensor<1x2x3>"}],
+                }
+            ],
+        },
+        {
+            "id": "both",
+            "inputsMetadata": [
+                {
+                    "id": "0",
+                    "attrs": [
+                        {"key": "shape", "value": "[B, S]"},
+                        {"key": "tensor_shape", "value": "BxS"},
+                        {"key": "port_label", "value": "hidden"},
+                    ],
+                }
+            ],
+        },
+    ]
+    shapes.canonicalize_port_shape_keys(nodes)
+    assert nodes[0]["outputsMetadata"][0]["attrs"] == [
+        {"key": "shape", "value": "1 x 2 x 3"}
+    ]
+    assert nodes[1]["inputsMetadata"][0]["attrs"] == [
+        {"key": "shape", "value": "[B, S]"},
+        {"key": "port_label", "value": "hidden"},
+    ]
+
+    payload = {
+        "graphCollections": [
+            {
+                "graphs": [
+                    {
+                        "nodes": [
+                            {
+                                "id": "n",
+                                "outputsMetadata": [
+                                    {
+                                        "id": "0",
+                                        "attrs": [
+                                            {"key": "tensor_shape", "value": "4x8"}
+                                        ],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+    shapes.canonicalize_payload_shapes(payload)
+    attrs = payload["graphCollections"][0]["graphs"][0]["nodes"][0]["outputsMetadata"][
+        0
+    ]["attrs"]
+    assert attrs == [{"key": "shape", "value": "4 x 8"}]
 
 
 def test_split_and_write_port_shape_bracket_round_trip():
@@ -3264,11 +3320,7 @@ def test_split_and_write_port_shape_bracket_round_trip():
     shape_attr = metadata["attrs"][0]
     merge._write_port_shape(metadata, shape_attr, ["B*S", "4096"], "bfloat16")
     assert shape_attr["value"] == "[B*S, 4096] bfloat16"
-    tensor_val = next(
-        a["value"] for a in metadata["attrs"] if a["key"] == "tensor_shape"
-    )
-    # tensor_shape (edge labels) now uses the bracket form on every edge.
-    assert tensor_val == "[B*S, 4096] bfloat16"
+    assert [attr["key"] for attr in metadata["attrs"]] == ["shape"]
 
 
 def test_merge_data_movement_reshape_flatten_and_expand():
