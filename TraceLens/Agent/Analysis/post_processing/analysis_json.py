@@ -48,7 +48,6 @@ _KIND_RE = re.compile(r"surfaced as\s+`(\w+)`", re.IGNORECASE)
 _FUSION_KINDS = FusionForms(TAXONOMY).kinds
 _EFFICIENCY_RE = re.compile(r"([\d.]+)%\s*of\s*([\d.]+)\s*(\S+)")
 _ANCHOR_LINK_RE = re.compile(r"#detailed-analysis-compute-p(\d+)")
-_CATEGORY_ATTR_RE = re.compile(r"\bcategory=(\S+)")
 _LIBRARY_PARENS_RE = re.compile(r"\(([^()]+)\)\s*$")
 _FLOAT_RE = re.compile(r"-?\d+(?:\.\d+)?")
 _PRIORITY_PREFIX_RE = re.compile(r"^(?:[🔴🟡🟢]\s*)?(?:P\d+:\s*)?")
@@ -210,9 +209,9 @@ class AnalysisMdParser:
 
     def findings(self, tier: str) -> list:
         """Parse every ``tier`` reasoning-candidate block into finding dicts."""
-        category_by_rank = self._card_categories() if tier == "compute" else {}
+        attrs_by_rank = self._card_attrs() if tier == "compute" else {}
         return [
-            self._parse_finding(start, end, tier, category_by_rank)
+            self._parse_finding(start, end, tier, attrs_by_rank)
             for start, end in _iter_candidate_blocks(self.text, tier)
         ]
 
@@ -231,13 +230,13 @@ class AnalysisMdParser:
         return {"model_architecture": model, "hardware_reference": hardware}
 
     def _parse_finding(
-        self, start: int, end: int, tier: str, category_by_rank: dict
+        self, start: int, end: int, tier: str, attrs_by_rank: dict
     ) -> dict:
         """Parse one ``tier`` reasoning-candidate block into a finding dict.
 
-        ``category_by_rank`` joins each compute finding to its card ``p_item``
-        category via the compute rank; the category is per-finding and is stamped
-        on every member.
+        ``attrs_by_rank`` joins each compute finding to its card ``p_item``
+        marker attrs via the compute rank; the category is per-finding and is
+        stamped on every member, the phase on the finding.
         """
         lines = self.lines
         block = "\n".join(lines[start:end])
@@ -246,7 +245,9 @@ class AnalysisMdParser:
             rf"reasoning-candidate\s+tier={tier}\s+rank=(\d+)", lines[start]
         )
         md_rank = f"P{rank_m.group(1)}" if rank_m else None
-        category = category_by_rank.get(int(rank_m.group(1))) if rank_m else None
+        attrs = attrs_by_rank.get(int(rank_m.group(1)), {}) if rank_m else {}
+        category = attrs.get("category")
+        phase = attrs.get("phase") or self._parse_block_phase(block)
 
         heading = next((ln for ln in lines[start:end] if ln.startswith("####")), None)
         library = None
@@ -289,6 +290,7 @@ class AnalysisMdParser:
             "low": low,
             "mid": mid,
             "high": high,
+            "phase": phase,
         }
 
     def _parse_data_table(self, start: int, end: int) -> list:
@@ -335,29 +337,25 @@ class AnalysisMdParser:
             )
         return members
 
-    def _card_categories(self) -> dict:
-        """Map compute rank -> card ``p_item`` category via the detailed anchor.
+    def _card_attrs(self) -> dict:
+        """Map compute rank -> card ``p_item`` marker attrs via the detailed anchor.
 
         Each compute card carries a ``kind=p_item category=<cat>`` marker followed
         by a ``#detailed-analysis-compute-p{N}`` link; the anchor's N is the rank
-        the detailed block is keyed on. Cards without a category or anchor are
-        skipped, so findings with no matching card (e.g. fallback reports) keep
-        ``category=null``.
+        the detailed block is keyed on. Cards without an anchor are skipped, so
+        findings with no matching card (e.g. fallback reports) keep
+        ``category=null`` and take ``phase`` from their own p_item marker.
         """
         mapping: dict = {}
         for m in MarkerValidator.BEGIN_RE.finditer(self.text):
-            inner = m.group(1)
-            km = MarkerValidator.KIND_ATTR_RE.search(inner)
-            if not km or km.group(1) != "p_item":
-                continue
-            cat_m = _CATEGORY_ATTR_RE.search(inner)
-            if not cat_m:
+            attrs = dict(MarkerValidator.ATTR_RE.findall(m.group(1)))
+            if attrs.get("kind") != "p_item":
                 continue
             end = MarkerValidator.END_RE.search(self.text, m.end())
             tail = self.text[end.end() : end.end() + 400] if end else ""
             link_m = _ANCHOR_LINK_RE.search(tail)
             if link_m:
-                mapping[int(link_m.group(1))] = cat_m.group(1)
+                mapping[int(link_m.group(1))] = attrs
         return mapping
 
     def _parse_op_row_marker(self, block: str) -> "list[float | None] | None":
@@ -378,6 +376,18 @@ class AnalysisMdParser:
                 for v in im.group(1).split(",")
                 if v.strip()
             ]
+        return None
+
+    def _parse_block_phase(self, block: str) -> "str | None":
+        """Return ``phase=`` from the block's own ``kind=p_item`` marker, if any.
+
+        Fallback reports carry no card anchors, so the phase rides on the p_item
+        marker inside the reasoning-candidate block instead.
+        """
+        for m in MarkerValidator.BEGIN_RE.finditer(block):
+            attrs = dict(MarkerValidator.ATTR_RE.findall(m.group(1)))
+            if attrs.get("kind") == "p_item":
+                return attrs.get("phase")
         return None
 
     def _parse_finding_range(self, block: str) -> tuple:
@@ -592,7 +602,13 @@ class TaskGrouper:
                     key = operation or ""
 
                 bucket = buckets.setdefault(
-                    key, {"operation": operation, "members": [], "findings": {}}
+                    (finding["phase"], key),
+                    {
+                        "operation": operation,
+                        "phase": finding["phase"],
+                        "members": [],
+                        "findings": {},
+                    },
                 )
                 bucket["members"].append((self._emit_member(member, row_impact), fi))
                 bucket["findings"].setdefault(fi, finding)
@@ -647,6 +663,8 @@ class TaskGrouper:
         prose = self._accumulate_prose(ordered_fi, bucket["findings"])
 
         task = {"operation": bucket["operation"]}
+        if bucket["phase"] is not None:
+            task["phase"] = bucket["phase"]
         if self.tier == "fusion":
             task["kind"] = bucket["findings"][ordered_fi[0]]["kind"]
         return {**task, "members": members, "impact": {"mid": mid}, **prose}
@@ -675,6 +693,7 @@ class TaskGrouper:
         return (
             neg_mid,
             task["operation"] or "",
+            task.get("phase") or "",
             "".join(task["members"][0]["kernel_name"]) if task["members"] else "",
         )
 

@@ -112,7 +112,7 @@ Follow the analysis orchestrator installed with TraceLens and run the full
 agentic analysis workflow from config <run.yaml>, <scope>
 ```
 
-Replace `<scope>` with `standalone`, `comparative`, or `semantic`. The scope is
+Replace `<scope>` with `standalone`, `comparative`, `semantic`, or `multi_trace`. The scope is
 optional: the agent derives it when the shape is unambiguous (one job is `standalone`,
 two jobs with `compare_to` on job 1 is `comparative`). The config must already have the
 shape the scope needs. The agent only adds wiring and its own report flags, and prints
@@ -125,6 +125,7 @@ details.
 | `standalone` | One job. |
 | `comparative` | Two jobs. `capture_folder` is optional per job. The agent compares them with TraceDiff. |
 | `semantic` | Two jobs, `analysis_mode: inference`, no `capture_folder`. Both traces are graph-replay-only. |
+| `multi_trace` | Two or more jobs on one platform, no `compare_to`, and a top-level `focus_job`. One report ranks findings across all jobs, each labeled with its job name as the phase. Kernel fusion and system analysis use the focus job. |
 
 Every job needs `platform`, and the trace, capture folder, and output paths must be absolute. For the full schema and
 examples, see

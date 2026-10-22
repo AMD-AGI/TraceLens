@@ -28,6 +28,7 @@ import pandas as pd
 
 from TraceLens.NcclAnalyser.nccl_analyser import list_to_tuple
 from TraceLens.PerfModel.utils import torch_dtype_map
+from TraceLens.Reporting.aggregate_perf_reports import PHASE_COL
 
 TARGET_HIGH = 100.0
 TARGET_LOW = 75.0
@@ -103,19 +104,13 @@ def _eff_bucket(pct):
 
 
 def perf_report_csv_dir(output_dir: str) -> str:
-    """
-    Directory containing perf-report CSV exports for the primary (Trace 1) trace.
-
-    When ``category_data/category_manifest.json`` exists and ``comparison_scope``
-    is ``comparative``, returns ``<output_dir>/perf_report_trace1_csvs``.
-    Otherwise returns ``<output_dir>/perf_report_csvs`` (standalone or missing manifest).
+    """The perf-report CSV dir of the trace fusion and system analysis read: the
+    manifest's ``focus_csv_dir``, or ``<output_dir>/perf_report_csvs`` before prepare.
     """
     manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
     if os.path.isfile(manifest_path):
         with open(manifest_path, "r", encoding="utf-8") as f:
-            scope = json.load(f).get("comparison_scope", "standalone")
-        if scope == "comparative":
-            return os.path.join(output_dir, "perf_report_trace1_csvs")
+            return json.load(f)["focus_csv_dir"]
     return os.path.join(output_dir, "perf_report_csvs")
 
 
@@ -434,10 +429,13 @@ def _load_fusion_op_keys(output_dir: str) -> Set[tuple]:
         return set()
     try:
         with open(path, "r") as f:
-            keys = json.load(f).get("high_confidence_op_keys", [])
+            metrics = json.load(f)
     except json.JSONDecodeError:
         return set()
-    return {tuple(key) for key in keys}
+    return {
+        (metrics.get("phase"), *key)
+        for key in metrics.get("high_confidence_op_keys", [])
+    }
 
 
 def _parse_call_stack(call_stack_full: str) -> List[str]:
@@ -584,6 +582,8 @@ def build_operation_metrics(
             "percent_of_total": percent_of_total,
             "efficiency": efficiency,
         }
+        if PHASE_COL in row:
+            op_metric["phase"] = row[PHASE_COL]
 
         # Add efficiency warning if present (for anomaly detection)
         if efficiency.get("warning"):
@@ -645,9 +645,13 @@ def build_operation_metrics(
 
         op_metric["library"] = classify_kernel_library(op_name, kd_str)
 
-        if fusion_op_keys and (
-            perf_row_key(
-                op_name, *(row.get(c) for c in PERF_ARG_COLS + PERF_THREAD_COLS)
+        if (
+            fusion_op_keys
+            and (
+                row.get(PHASE_COL),
+                *perf_row_key(
+                    op_name, *(row.get(c) for c in PERF_ARG_COLS + PERF_THREAD_COLS)
+                ),
             )
             in fusion_op_keys
         ):
@@ -790,6 +794,7 @@ def compute_impact_estimates(
             continue
         impact_score_mid = score["impact_score"]
         time_ms = op["time_ms"]
+        phase = {"phase": op["phase"]} if "phase" in op else {}
         if score["impact_estimate_method"] == "quantified":
             impact_score_high = impact_score_mid * (TARGET_HIGH / TARGET_MID)
             impact_score_low = impact_score_mid * (TARGET_LOW / TARGET_MID)
@@ -809,6 +814,7 @@ def compute_impact_estimates(
                     "bound_type": eff.get("bound_type"),
                     "library": op.get("library"),
                     "time_ms": round(time_ms, 3),
+                    **phase,
                 }
             )
         else:
@@ -827,6 +833,7 @@ def compute_impact_estimates(
                     "library": op.get("library"),
                     "time_ms": round(time_ms, 3),
                     "percent_of_total": pct,
+                    **phase,
                 }
             )
     return sorted(estimates, key=lambda x: x["impact_score"], reverse=True)
@@ -837,7 +844,8 @@ def build_category_findings(
 ) -> List[dict]:
     """Group one category's per-op impact estimates into P-item findings.
 
-    Quantified estimates (``estimate_method != "heuristic"``) group by
+    Groups are per phase (the ``phase`` of multi-trace estimates). Quantified
+    estimates (``estimate_method != "heuristic"``) group by
     ``(bound_type, library, eff_bucket)`` in standalone, or ``(bound_type,
     library)`` in comparative (``efficiency_pct`` is a trace-time ratio there).
     Heuristic estimates group by op-name (so a kernel fragmented across
@@ -864,19 +872,20 @@ def build_category_findings(
         bound = e.get("bound_type") or "unknown"
         lib = e.get("library") or "Unknown"
         bucket = _eff_bucket(e.get("efficiency_pct")) if use_eff_bucket else "all"
-        g = groups[(bound, lib, bucket)]
+        g = groups[(e.get("phase"), bound, lib, bucket)]
         g["members"].append(e)
         g["impact_score"] += e.get("impact_score", 0)
         g["impact_score_low"] += e.get("impact_score_low", 0)
         g["impact_score_high"] += e.get("impact_score_high", 0)
 
     findings = []
-    for (bound, lib, bucket), g in groups.items():
+    for (phase, bound, lib, bucket), g in groups.items():
         if g["impact_score"] < MIN_PITEM_IMPACT_SCORE:
             continue
         findings.append(
             {
                 "bound_type": bound,
+                **({"phase": phase} if phase is not None else {}),
                 "library": lib,
                 "eff_bucket": bucket,
                 "estimate_method": "quantified",
@@ -903,7 +912,7 @@ def build_category_findings(
         }
     )
     for e in heuristic:
-        g = hgroups[e.get("operation", "Unknown")]
+        g = hgroups[(e.get("phase"), e.get("operation", "Unknown"))]
         g["members"].append(e)
         g["impact_score"] += e.get("impact_score", 0)
         g["impact_score_low"] += e.get("impact_score_low", 0)
@@ -912,12 +921,13 @@ def build_category_findings(
         if g["library"] is None:
             g["library"] = e.get("library")
 
-    for g in hgroups.values():
+    for (phase, _), g in hgroups.items():
         if g["impact_score"] < MIN_PITEM_IMPACT_SCORE:
             continue
         findings.append(
             {
                 "bound_type": "unmodeled",
+                **({"phase": phase} if phase is not None else {}),
                 "library": g["library"] or "Unknown",
                 "eff_bucket": "unknown",
                 "estimate_method": "heuristic",

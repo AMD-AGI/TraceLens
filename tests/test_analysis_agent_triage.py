@@ -57,7 +57,6 @@ from TraceLens.Agent.Analysis.triage.checks import (
     check_corrupt_json,
     check_disk_full,
     check_docker_missing,
-    check_gpu_graph_replay,
     check_high_idle,
     check_hipgraph_launch_in_report,
     check_inference_annotation_missing,
@@ -398,7 +397,7 @@ def make_triage_csv(run_dir, rows):
 
 # Registry size is load-bearing: the reserved-stub and sublabel checks below
 # depend on it not drifting silently.
-_EXPECTED_CHECK_COUNT = 36
+_EXPECTED_CHECK_COUNT = 35
 
 _PARSE_FLOAT_CASES = [
     (None, None),
@@ -848,8 +847,8 @@ def test_stream_lines_strips_sdk_prefix_and_handles_missing(tmp_path):
 
 
 def test_stream_contains_is_case_insensitive(tmp_path):
-    path = write_stream(tmp_path / "s.log", ["some GPU_GRAPH_REPLAY line"])
-    assert stream_contains(path, r"gpu_graph_replay") is True
+    path = write_stream(tmp_path / "s.log", ["some SAMPLE_TOKEN line"])
+    assert stream_contains(path, r"sample_token") is True
     assert stream_contains(path, r"nomatch") is False
 
 
@@ -1301,26 +1300,6 @@ def test_high_idle_from_manifest(tmp_path):
 def test_high_idle_no_data_returns_none(tmp_path):
     run_dir = make_run_dir(tmp_path)
     assert check_high_idle(str(run_dir), None) is None
-
-
-# ---------------------------------------------------------------------------
-# 2h: check_gpu_graph_replay
-# ---------------------------------------------------------------------------
-
-
-def test_gpu_graph_replay_fires_from_stream(tmp_path):
-    stream = write_stream(
-        tmp_path / "s.log", ["... DIAG:trace_quality:GPU_GRAPH_REPLAY ..."]
-    )
-    finding = check_gpu_graph_replay(str(tmp_path), stream)
-    assert finding is not None
-    assert finding.failure_mode == "GPU Graph Replay detected in default mode"
-
-
-def test_gpu_graph_replay_no_match_returns_none(tmp_path):
-    stream = write_stream(tmp_path / "s.log", ["nothing interesting here"])
-    assert check_gpu_graph_replay(str(tmp_path), stream) is None
-    assert check_gpu_graph_replay(str(tmp_path), None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -1781,6 +1760,20 @@ def test_subagent_budget_none_when_all_written(tmp_path):
     write_text(run_dir / "category_findings" / "gemm_findings.md", "ok")
     write_text(run_dir / "system_findings" / "comm_findings.md", "ok")
     assert check_subagent_budget(str(run_dir), None) is None
+
+
+def test_subagent_budget_gates_cpu_idle_on_focus_phase(tmp_path):
+    manifest = {
+        "focus_job": "decode",
+        "gpu_utilization": {
+            "idle_time_percent": 5,
+            "phases": {"decode": {"idle_time_percent": 20}},
+        },
+        "categories": [{"name": "cpu_idle", "tier": "system"}],
+    }
+    run_dir = make_run_dir(tmp_path, manifest=manifest)
+    finding = check_subagent_budget(str(run_dir), None)
+    assert "Missing findings for: cpu_idle" in finding.evidence
 
 
 def test_subagent_budget_none_without_manifest(tmp_path):

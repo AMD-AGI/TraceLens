@@ -643,6 +643,46 @@ def test_impact_sum_and_task_order(tmp_path):
     assert [t["priority"] for t in tasks] == list(range(1, len(tasks) + 1))
 
 
+def test_compute_tasks_split_by_phase(tmp_path):
+    md = (
+        _AGENTIC_MD.replace("category=gemm", "category=gemm phase=prefill")
+        .replace("category=moe_unfused", "category=moe_unfused phase=decode")
+        .replace("| pseudo_op::moe_flydsl_stage1 |", "| aiter::gemm_a16w16 |")
+    )
+    report, _ = _render_text(md, tmp_path)
+    gemm = [
+        t
+        for t in report["compute_optimizations"]
+        if t["operation"] == "aiter::gemm_a16w16"
+    ]
+    assert sorted(t["phase"] for t in gemm) == ["decode", "prefill"]
+
+
+def test_fallback_tasks_split_by_phase(tmp_path):
+    # Same kernel in two phases: the p_item marker's phase splits the task.
+    cards = "".join(f"""<!-- reasoning-candidate tier=compute rank={rank} -->
+#### P{rank}: kernel_a
+<!-- impact-begin kind=p_item category=unknown low=1.0 mid=2.0 high=3.0 phase={phase} -->
+<!-- impact-end -->
+
+**Data:**
+
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|---|---|---|---|---|---|---|---|---|---|
+| — | — | — | kernel_a | 1.000 | 5.00 | 10 | — | — | — |
+<!-- impact-begin kind=op_row rank={rank} impacts=2.0 -->
+<!-- impact-end -->
+
+""" for rank, phase in enumerate(["prefill", "decode"], start=1))
+    md = (
+        "<!-- report-begin kind=report_mode mode=deterministic-fallback -->\n"
+        "<!-- report-end -->\n\n" + cards
+    )
+    report, _ = _render_text(md, tmp_path)
+    tasks = report["compute_optimizations"]
+    assert sorted(t["phase"] for t in tasks) == ["decode", "prefill"]
+
+
 def test_op_row_impacts_read_from_marker(tmp_path):
     report, _ = _render_text(_AGENTIC_MD, tmp_path)
     # P1 op_row marker: impacts=3.55,3.29,1.77 on the gemm_a16w16 rows.
