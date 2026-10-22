@@ -39,13 +39,14 @@ from TraceLens.PerfModel.triton_compiled_perf_model import (
     _parse_wrapper,
 )
 from TraceLens.PerfModel.utils import (
+    add_duration_rate_columns,
     add_simulation_time_columns,
     gemm_tflops,
     name2bpe,
     optional_float,
     optional_int,
     parse_bool,
-    simulation_dtype_map,
+    rates_for_duration,
     torch_dtype_map,
 )
 
@@ -81,7 +82,6 @@ class TestPerfModelUtils:
     def test_name2bpe_and_dtype_maps(self):
         assert name2bpe("c10::BFloat16") == 2
         assert name2bpe("unknown") is None
-        assert simulation_dtype_map("bf16") == "c10::bfloat16"
         assert torch_dtype_map("c10::bfloat16") == "bf16"
 
     @pytest.mark.parametrize(
@@ -107,7 +107,28 @@ class TestPerfModelUtils:
         )
         assert metrics["Origami Time (µs)"] == 100.0
         assert metrics["Origami TFLOPS/s"] == pytest.approx(2000.0)
+        assert metrics["Origami TB/s"] == pytest.approx(10000.0)
         assert metrics["Pct Origami"] == 50.0
+
+    def test_rates_for_duration(self):
+        tflops, tb_s = rates_for_duration(200.0, 1e12, 100.0)
+        assert tflops == pytest.approx(2000.0)
+        assert tb_s == pytest.approx(10000.0)
+
+        tflops, tb_s = rates_for_duration(200.0, None, 100.0)
+        assert tflops == pytest.approx(2000.0)
+        assert tb_s != tb_s
+
+        tflops, tb_s = rates_for_duration(200.0, 1e12, 0)
+        assert tflops != tflops
+        assert tb_s != tb_s
+
+    def test_add_duration_rate_columns_prefix(self):
+        metrics = {}
+        add_duration_rate_columns(metrics, 200.0, 1e12, 100.0, prefix="Roofline")
+        assert metrics["Roofline TFLOPS/s"] == pytest.approx(2000.0)
+        assert metrics["Roofline TB/s"] == pytest.approx(10000.0)
+        assert "TFLOPS/s" not in metrics
 
     def test_gemm_tflops(self):
         assert gemm_tflops(4096, 4096, 4096, 1.0) == pytest.approx(
@@ -262,3 +283,20 @@ class TestOrigamiHelper:
             hardware=hardware,
         )
         assert helper.get_simulation_time() > 0
+
+    @pytest.mark.parametrize("name", ["mi300x", "mi355x"])
+    def test_origami_helper_times_one_cu(self, name):
+        import origami
+
+        from TraceLens.PerfModel.origami_helper import OrigamiHelper
+
+        bf16 = origami.data_type_t.BFloat16
+
+        def time_us(num_cus):
+            hardware = OrigamiHelper.get_hardware({"name": name, "freq_mhz": 2100})
+            helper = OrigamiHelper(
+                128, 4096, 128, 1, bf16, bf16, bf16, hardware, num_cus=num_cus
+            )
+            return helper.get_simulation_time()
+
+        assert time_us(1) > time_us(None) > 0

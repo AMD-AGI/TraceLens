@@ -41,11 +41,12 @@ Generate a multi-sheet Excel report from a PyTorch (`torch.profiler`) trace.
 | `--include_unlinked_kernels` | off | Include kernels with no linked CPU op in the GPU-timeline analysis. |
 | `--micro_idle_thresh_us` | None | Threshold (µs) to classify an idle interval as micro-idle. |
 | `--comparison_json_path` | None | Second trace to compare against; runs TraceDiff and adds speedup/delta/LCA columns plus a `diff_stats` sheet. |
-| `--enable-origami` | off | Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided. |
+| `--enable-origami-gemm` | off | Add `Origami` GEMM times when a GPU arch is given. |
+| `--enable-origami-sdpa-tile` | off | Add `SDPA Tile Origami` attention times from TraceLens's tile model, with Origami timing each tile GEMM. |
 | `--detect_recompute` | off | Detect activation recomputation and add an `is_recompute` column. |
 | `--include_overlap_info` | off | Add kernel-overlap sheets. |
 | `--topk_ops`, `--topk_roofline_ops` | None | Limit rows in the unique-args and roofline tables. |
-| `--extension_file` | None | Custom extensions for `TraceTree` and `PerfModel`. |
+| `--extension_file` | None | Python file with custom hooks: tree post-processing, perf models, op categories, op models (your own predicted times and columns), and kernel filters. See [Extend the report](../how-to/generate-perf-report-pytorch.md#extend-the-report-custom-hooks). |
 
 **Output:** an `.xlsx` workbook with the GPU-timeline, operator-category,
 operator, unique-argument, and roofline sheets.
@@ -76,7 +77,7 @@ trace).
 | `--output_xlsx_path` | auto | Output Excel file. |
 | `--output_csvs_dir` | None | Directory for CSV output. |
 | `--kernel_metadata_keyword_filters` | None | Only analyze events whose metadata contains the given keyword(s), for example `remat checkpoint`. |
-| `--enable-origami` | off | Use Origami simulated GEMM/SDPA times when a GPU arch JSON is provided. |
+| `--enable-origami-gemm` | off | Add `Origami` GEMM times when a GPU arch is given. |
 
 ### TraceLens_generate_perf_report_rocprof
 
@@ -203,7 +204,7 @@ example notebook under `examples/`.
 |--------|---------|-----------|
 | `Trace2Tree` | Build and navigate the hierarchical event tree (Python ops → CPU dispatch → GPU kernels). | [Trace2Tree data model](../conceptual/trace2tree.md), [`trace2tree_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace2tree_example.ipynb) |
 | `TreePerf` | GPU-timeline breakdown, per-op performance, and roofline metrics. | [Analyze traces with the TraceLens SDK](../how-to/sdk-analysis.md), [`tree_perf_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/tree_perf_example.ipynb) |
-| `PerfModel` | Compute and roofline performance models for operators. | [GEMM analysis](../conceptual/gemm-analysis.md), [Triton kernel performance model](../conceptual/triton-perf-model-walkthrough.md) |
+| `PerfModel` | Perf models (each operator's parameters, FLOPs, and bytes) and op models (per-op values computed from that work, usually a predicted time: roofline, Origami, or your own). | [GEMM analysis](../conceptual/gemm-analysis.md), [Triton kernel performance model](../conceptual/triton-perf-model-walkthrough.md), [Add an op model](../how-to/generate-perf-report-pytorch.md#add-an-op-model) |
 | `NcclAnalyser` | Multi-rank collective latency/bandwidth/skew analysis. | [Analyze collectives with NcclAnalyser](../how-to/nccl-analysis.md), [`nccl_analyser_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/nccl_analyser_example.ipynb) |
 | `TraceDiff` | Morphological comparison of two trace trees. | [Compare two traces](../how-to/compare-traces.md), [`trace_diff_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace_diff_example.ipynb) |
 | `EventReplay` | Extract and replay isolated operations. | [Replay a single operation](../how-to/event-replay.md), [`event_replayer_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/event_replayer_example.ipynb) |

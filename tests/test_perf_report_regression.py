@@ -49,13 +49,6 @@ def find_test_cases(ref_root):
     return test_cases
 
 
-COLS_IGNORE = [
-    "Non-Data-Mov TFLOPS/s_mean",
-    "Non-Data-Mov Kernel Time (µs)_sum",
-    "Non-Data-Mov Kernel Time (µs)_mean",
-]
-
-
 @pytest.mark.parametrize(
     "dirpath,gz,report_csv_dirname", find_test_cases("tests/traces")
 )
@@ -92,11 +85,7 @@ def test_perf_report_regression(
         df_fn = read_perf_report_csv(fn_csv_dir, sheet)
         if df_ref.empty:
             continue
-        cols = [
-            col
-            for col in df_ref.columns
-            if col not in COLS_IGNORE and col in df_fn.columns
-        ]
+        cols = [col for col in df_ref.columns if col in df_fn.columns]
         diff_cols = compare_cols(df_fn, df_ref, cols, tol=tol)
         assert (
             not diff_cols
