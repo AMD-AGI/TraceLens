@@ -22,7 +22,9 @@ default-agent `analysis.md` contract that `parse_analysis_md` reads:
 top-of-report `report-begin kind=report_mode mode=deterministic-fallback` and
 `kind=warning` markers, then per P-item a `#### P{rank}:` heading, a
 `reasoning-candidate` marker, an `impact-begin kind=p_item category=unknown`
-marker, and a one-value `impact-begin kind=op_row` marker.
+marker, and a one-value `impact-begin kind=op_row` marker. On multi_trace runs
+(a `phase` CSV column) each P-item is per phase: a `**Phase**` line and a
+`phase=` attr on the p_item marker.
 """
 
 import argparse
@@ -137,8 +139,8 @@ def render_fallback_report(unified_perf_csv: Path, graph_replay_fraction: float)
     group_time = defaultdict(float)
     group_count = defaultdict(int)
     for row in rows:
-        group_time[row["op"]] += row["weight"]
-        group_count[row["op"]] += row["count"]
+        group_time[row["phase"], row["op"]] += row["weight"]
+        group_count[row["phase"], row["op"]] += row["count"]
     total_time = sum(group_time.values())
 
     filtered = [row for row in rows if row["percent"] >= MIN_PITEM_PERCENT_E2E]
@@ -170,17 +172,24 @@ def render_fallback_report(unified_perf_csv: Path, graph_replay_fraction: float)
 
     for rank, row in enumerate(filtered, start=1):
         op = row["op"]
+        phase = row["phase"]
         display = _normalize_kernel_name(op)
-        group_pct = (group_time[op] / total_time * 100.0) if total_time > 0 else 0.0
+        group_pct = (
+            (group_time[phase, op] / total_time * 100.0) if total_time > 0 else 0.0
+        )
         low = round(group_pct * HEURISTIC_FRACTION_LOW, 2)
         mid = round(group_pct * HEURISTIC_FRACTION_MID, 2)
         high = round(group_pct * HEURISTIC_FRACTION_HIGH, 2)
 
         lines.append(f"<!-- reasoning-candidate tier=compute rank={rank} -->")
         lines.append(f"#### P{rank}: {display}")
+        phase_attr = ""
+        if phase is not None:
+            lines.append(f"**Phase**: {phase}")
+            phase_attr = f" phase={phase}"
         lines.append(
             "<!-- impact-begin kind=p_item category=unknown "
-            f"low={low} mid={mid} high={high} -->"
+            f"low={low} mid={mid} high={high}{phase_attr} -->"
         )
         lines.append("<!-- impact-end -->")
         lines.append("")
@@ -191,7 +200,7 @@ def render_fallback_report(unified_perf_csv: Path, graph_replay_fraction: float)
         time_ms = row["weight"] / 1000.0
         lines.append(
             f"| — | — | — | {op} | {time_ms:.3f} | "
-            f"{row['percent']:.2f} | {group_count[op]} | — | — | "
+            f"{row['percent']:.2f} | {group_count[phase, op]} | — | — | "
             f"— |"
         )
         lines.append(f"<!-- impact-begin kind=op_row rank={rank} impacts={mid} -->")
@@ -226,6 +235,7 @@ def _surviving_rows(csv_rows):
         rows.append(
             {
                 "op": op,
+                "phase": row.get(PHASE_COL),
                 "weight": float(row["Kernel Time (µs)_sum"]),
                 "percent": float(row["Percentage (%)"]),
                 "count": int(float(row.get("operation_count", 0) or 0)),

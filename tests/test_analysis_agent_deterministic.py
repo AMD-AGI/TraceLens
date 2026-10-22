@@ -261,6 +261,44 @@ def test_writer_strips_wrapper_and_groups_by_name(tmp_path):
     assert lows.count(bar_low) == 1
 
 
+def test_writer_cards_per_phase(tmp_path):
+    perf_csv = tmp_path / "unified_perf_summary.csv"
+    with open(perf_csv, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(
+            [
+                "name",
+                "Kernel Time (µs)_sum",
+                "Percentage (%)",
+                "operation_count",
+                "phase",
+            ]
+        )
+        writer.writerows(
+            [
+                ("hipGraphLaunch->foo (Synthetic Op)", 75.0, 75.0, 3, "prefill"),
+                ("hipGraphLaunch->foo (Synthetic Op)", 25.0, 25.0, 1, "decode"),
+            ]
+        )
+    md = render_fallback_report(perf_csv, 0.95)
+
+    # Each phase's impact is its own share of the combined 100us, not 100% for both.
+    assert (
+        "#### P1: foo\n**Phase**: prefill\n"
+        "<!-- impact-begin kind=p_item category=unknown "
+        "low=11.25 mid=22.5 high=33.75 phase=prefill -->"
+    ) in md
+    assert (
+        "#### P2: foo\n**Phase**: decode\n"
+        "<!-- impact-begin kind=p_item category=unknown "
+        "low=3.75 mid=7.5 high=11.25 phase=decode -->"
+    ) in md
+    assert "| foo | 0.075 | 75.00 | 3 |" in md
+    assert "| foo | 0.025 | 25.00 | 1 |" in md
+    scan_errors, _ = MarkerValidator.scan(md, "analysis.md")
+    assert not scan_errors, scan_errors
+
+
 def test_writer_keeps_tile_variants_separate(tmp_path):
     rows = [
         ("hipGraphLaunch->f4gemm_192x128 (Synthetic Op)", 30.0, 30.0),

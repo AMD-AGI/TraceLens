@@ -247,6 +247,7 @@ class AnalysisMdParser:
         md_rank = f"P{rank_m.group(1)}" if rank_m else None
         attrs = attrs_by_rank.get(int(rank_m.group(1)), {}) if rank_m else {}
         category = attrs.get("category")
+        phase = attrs.get("phase") or self._parse_block_phase(block)
 
         heading = next((ln for ln in lines[start:end] if ln.startswith("####")), None)
         library = None
@@ -289,7 +290,7 @@ class AnalysisMdParser:
             "low": low,
             "mid": mid,
             "high": high,
-            "phase": attrs.get("phase"),
+            "phase": phase,
         }
 
     def _parse_data_table(self, start: int, end: int) -> list:
@@ -343,7 +344,7 @@ class AnalysisMdParser:
         by a ``#detailed-analysis-compute-p{N}`` link; the anchor's N is the rank
         the detailed block is keyed on. Cards without an anchor are skipped, so
         findings with no matching card (e.g. fallback reports) keep
-        ``category=null`` and ``phase=null``.
+        ``category=null`` and take ``phase`` from their own p_item marker.
         """
         mapping: dict = {}
         for m in MarkerValidator.BEGIN_RE.finditer(self.text):
@@ -375,6 +376,18 @@ class AnalysisMdParser:
                 for v in im.group(1).split(",")
                 if v.strip()
             ]
+        return None
+
+    def _parse_block_phase(self, block: str) -> "str | None":
+        """Return ``phase=`` from the block's own ``kind=p_item`` marker, if any.
+
+        Fallback reports carry no card anchors, so the phase rides on the p_item
+        marker inside the reasoning-candidate block instead.
+        """
+        for m in MarkerValidator.BEGIN_RE.finditer(block):
+            attrs = dict(MarkerValidator.ATTR_RE.findall(m.group(1)))
+            if attrs.get("kind") == "p_item":
+                return attrs.get("phase")
         return None
 
     def _parse_finding_range(self, block: str) -> tuple:
