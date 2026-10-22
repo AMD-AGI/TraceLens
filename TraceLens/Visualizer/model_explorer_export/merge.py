@@ -2415,10 +2415,9 @@ def _port_unnamed_kernel_operands(nodes: list[dict[str, Any]]) -> None:
     """
     by_id = {str(node["id"]): node for node in nodes}
     additions: list[dict[str, Any]] = []
-    # One tensor read by several kernels is one tile, the way
-    # ``_share_one_tile_per_kernel_operand`` already draws it: Kimi's three
-    # ``ShortConvolution`` kernels read the same ``cu_seqlens``, and a port each
-    # would put three tiles of that name in one box.
+    # One producer port is one tensor. Kernels that read it share the port
+    # already drawn for it. Two operands of one kernel do not: sdpa reads one
+    # ``kv`` tensor as both ``key`` and ``value``, and those stay two ports.
     shared: dict[tuple[str, str, str], dict[str, Any]] = {}
     for node in nodes:
         if _node_attr(node, "operation") != "gpu_kernel":
@@ -2452,8 +2451,18 @@ def _port_unnamed_kernel_operands(nodes: list[dict[str, Any]]) -> None:
             )
             namespace = str(node.get("namespace") or "")
             source_id = str(edge.get("sourceNodeId"))
-            existing = shared.get((namespace, label, source_id))
-            if existing is not None:
+            source_port = str(edge.get("sourceNodeOutputId") or "0")
+            # One producer port is one tensor. Another kernel that reads it
+            # uses the port already drawn. A second operand of THIS kernel is
+            # a different port even when the tensor is the same one -- sdpa
+            # takes ``kv`` as both ``key`` and ``value``.
+            identity = (namespace, source_id, source_port)
+            existing = shared.get(identity)
+            feeds_this_kernel = existing is not None and any(
+                str(item.get("sourceNodeId")) == str(existing["id"])
+                for item in node.get("incomingEdges") or []
+            )
+            if existing is not None and not feeds_this_kernel:
                 edge["sourceNodeId"] = str(existing["id"])
                 edge["sourceNodeOutputId"] = "0"
                 continue
@@ -2481,7 +2490,7 @@ def _port_unnamed_kernel_operands(nodes: list[dict[str, Any]]) -> None:
             }
             additions.append(port)
             by_id[port_id] = port
-            shared[(namespace, label, source_id)] = port
+            shared.setdefault(identity, port)
             edge["sourceNodeId"] = port_id
             edge["sourceNodeOutputId"] = "0"
     nodes.extend(additions)
@@ -5437,6 +5446,43 @@ def _passes_whole_tuple(node: dict[str, Any], nodes: list[dict[str, Any]]) -> bo
     return len(ports) >= 2 or any(not port.isdigit() for port in ports)
 
 
+def _existing_ancestor_input(
+    producer: dict[str, Any],
+    by_id: dict[str, dict[str, Any]],
+    namespace: str,
+) -> str | None:
+    """An ``@input`` in a scope enclosing *namespace* that carries this tensor.
+
+    Identity is the producer port, followed through boundary tiles. Two tiles
+    of one tensor are one tile; shape is a consequence of that, not the test.
+    The closest enclosing input wins, so a rope helper reads the attention
+    tile rather than one further out.
+    """
+    seen: set[str] = set()
+    current: dict[str, Any] | None = producer
+    while current is not None and str(current.get("id")) not in seen:
+        seen.add(str(current["id"]))
+        other_ns = str(current.get("namespace") or "")
+        if (
+            _node_attr(current, "synthetic") == "@input"
+            and other_ns
+            and namespace.startswith(other_ns + "/")
+        ):
+            return str(current["id"])
+        if _node_attr(current, "synthetic") not in {
+            "@input",
+            "@input_mirror",
+            "@output",
+            "@output_mirror",
+        }:
+            return None
+        edges = list(current.get("incomingEdges") or [])
+        if len(edges) != 1:
+            return None
+        current = by_id.get(str(edges[0].get("sourceNodeId")))
+    return None
+
+
 def _split_tuple_boundary_slots(nodes: list[dict[str, Any]]) -> None:
     """A boundary carrying a tuple is drawn as one tile per component.
 
@@ -5468,9 +5514,25 @@ def _split_tuple_boundary_slots(nodes: list[dict[str, Any]]) -> None:
 
 
 def _split_one_tuple_boundary(nodes: list[dict[str, Any]]) -> bool:
-    """Split the first tuple boundary that can be split soundly."""
+    """Split the outermost tuple boundary that can be split soundly.
+
+    Outermost first, so a component tile exists in the enclosing scope before
+    a nested rope helper is asked whether it needs one of its own.
+    """
     by_id = {str(node.get("id")): node for node in nodes}
-    for node in nodes:
+    candidates = [
+        node
+        for node in nodes
+        if _node_attr(node, "synthetic") in {"@input", "@input_mirror"}
+        and _tuple_slot_producers(node, by_id) is not None
+    ]
+    candidates.sort(
+        key=lambda node: (
+            str(node.get("namespace") or "").count("/"),
+            str(node.get("id")),
+        )
+    )
+    for node in candidates:
         kind = _node_attr(node, "synthetic")
         if kind not in {"@input", "@input_mirror"}:
             continue
@@ -5482,11 +5544,26 @@ def _split_one_tuple_boundary(nodes: list[dict[str, Any]]) -> bool:
         prefix = node_id.rsplit("/", 1)[0] if "/" in node_id else ""
         slot_ids: list[str] = []
         additions: list[dict[str, Any]] = []
+        named_slots: dict[str, str] = {}
         for index, (edge, producer, slot) in enumerate(components):
             # A component already carrying the qualified name (a mirror of an
             # upstream ``position_embeddings.cos``) keeps it rather than being
             # qualified twice.
             name = slot if slot.startswith(f"{base}.") else f"{base}.{slot}"
+            # A rope helper inlined inside the module that already declares
+            # this tensor does not declare it again. The helper's readers use
+            # the tile the enclosing scope already has. A real nested module
+            # still gets a boundary of its own, and a kernel port is never
+            # decided here.
+            if _is_positional_frame_boundary(node):
+                existing = _existing_ancestor_input(
+                    producer, by_id, str(node.get("namespace") or "")
+                )
+                if existing:
+                    slot_ids.append(existing)
+                    named_slots[slot] = existing
+                    named_slots[name.rsplit(".", 1)[-1]] = existing
+                    continue
             token = "@input_mirror" if kind == "@input_mirror" else "@input"
             suffix = f"{name}^{name}" if kind == "@input_mirror" else name
             tile_id = f"{prefix}/{token}:{suffix}" if prefix else f"{token}:{suffix}"
@@ -5514,12 +5591,12 @@ def _split_one_tuple_boundary(nodes: list[dict[str, Any]]) -> bool:
                 }
             )
             slot_ids.append(tile_id)
+            named_slots[slot] = tile_id
+            named_slots[name.rsplit(".", 1)[-1]] = tile_id
         if len(slot_ids) != len(components):
             continue
 
-        by_slot_name = {
-            str(tile["label"]).rsplit(".", 1)[-1]: tile["id"] for tile in additions
-        }
+        by_slot_name = named_slots
         # Work out every consumer's new edge BEFORE committing: a consumer whose
         # port names no component cannot be re-pointed, and guessing would hand a
         # reader the wrong tensor.
@@ -5621,64 +5698,6 @@ def _is_positional_frame_boundary(node: dict[str, Any]) -> bool:
         segment.startswith("_positional_")
         for segment in str(node.get("namespace") or "").split("/")
     )
-
-
-def _same_declared_tensor(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    """Both tiles state one shape and one dtype, and those statements agree."""
-    shape = _node_attr(left, "output_shape")
-    if not shape or shape != _node_attr(right, "output_shape"):
-        return False
-    return (_node_attr(left, "output_dtype") or "") == (
-        _node_attr(right, "output_dtype") or ""
-    )
-
-
-def _collapse_positional_input_passthroughs(nodes: list[dict[str, Any]]) -> None:
-    """Fold a rope helper's input onto the same tensor its caller already named.
-
-    ``DeepseekV4Attention`` declares ``position_embeddings.cos``. The inlined
-    ``apply_rotary_pos_emb`` then declares that component again and reads the
-    attention tile unchanged, so the diagram draws one tile into a second tile
-    of the same name. The helper's operations read the caller's tile directly.
-
-    The tuple split creates these tiles after the same-name boundary fold, and
-    that fold only joins an ``@output`` to an ``@input`` inside one module. A
-    same-scope mirror sits between the two inputs until
-    ``_fold_same_scope_mirrors`` removes it, so this pass runs after that fold
-    and after the shape carry. It then removes a positional frame's ``@input``
-    whose single producer is an ``@input`` of the same component, shape, and
-    dtype. A module boundary that receives ``position_embeddings.cos`` from its
-    caller keeps its tile, and so does a helper input whose name or tensor
-    differs (the query ``x``, or a ``cos`` produced by the helper's own
-    ``rotary_emb``).
-    """
-    by_id = {str(node.get("id")): node for node in nodes}
-    redirect: dict[str, tuple[str, str]] = {}
-    for node in nodes:
-        if _node_attr(node, "synthetic") != "@input":
-            continue
-        if not _is_positional_frame_boundary(node):
-            continue
-        edges = list(node.get("incomingEdges") or [])
-        if len(edges) != 1:
-            continue
-        producer = by_id.get(str(edges[0].get("sourceNodeId")))
-        if producer is None or _node_attr(producer, "synthetic") != "@input":
-            continue
-        name = str(node.get("label") or "").strip()
-        if not name or name != str(producer.get("label") or "").strip():
-            continue
-        if not _same_declared_tensor(node, producer):
-            continue
-        producer_id = str(producer.get("id"))
-        node_id = str(node.get("id"))
-        if producer_id == node_id:
-            continue
-        redirect[node_id] = (
-            producer_id,
-            str(edges[0].get("sourceNodeOutputId") or "0"),
-        )
-    _apply_tile_redirects(nodes, redirect)
 
 
 def _name_a_boundary_for_its_mirror(nodes: list[dict[str, Any]]) -> None:
@@ -9951,10 +9970,6 @@ def build_merged_model_graph(
     # redundant once its neighbours are final.
     _fold_same_scope_mirrors(nodes)
     _fold_same_source_twins(nodes)
-    # The mirror fold is what leaves the rope helper's ``position_embeddings.cos``
-    # reading the attention tile of the same name directly. Fold that copy now
-    # that the shape carry has shown they are the same tensor.
-    _collapse_positional_input_passthroughs(nodes)
     _name_kernel_leaves_for_their_kernel(nodes)
     _share_one_tile_per_kernel_operand(nodes)
     _name_kernel_ports_after_their_source(nodes)

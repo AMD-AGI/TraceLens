@@ -430,6 +430,7 @@ def test_rope_frame_names_its_query_and_position_inputs_apart():
         if "apply_rotary_pos_emb" in node["id"] and "/@input" in node["id"]
     }
     assert frames, "expected rope frames with input boundaries"
+    folded_frames: list[str] = []
 
     for frame in frames:
         tiles = [
@@ -441,7 +442,18 @@ def test_rope_frame_names_its_query_and_position_inputs_apart():
         # One tile per entering tensor, and no two share a name.
         labels = [str(node["label"]) for node in tiles]
         assert len(labels) == len(set(labels)), (frame, labels)
-        assert len(tiles) >= 2, (frame, labels)
+        # A helper that receives ``(cos, sin)`` from its own rotary still names
+        # both. A helper that was handed the caller's ``position_embeddings``
+        # component folds that tile away, so only the tensor it rotates remains.
+        position_tiles = [
+            label for label in labels if label in {"cos", "sin"} or "position" in label
+        ]
+        if position_tiles:
+            assert len(tiles) >= 2, (frame, labels)
+        else:
+            assert tiles, (frame, labels)
+            assert all("position" not in label for label in labels), (frame, labels)
+            folded_frames.append(frame)
 
         # The tile fed by the query does not claim the position tensor's name.
         for tile in tiles:
@@ -452,6 +464,39 @@ def test_rope_frame_names_its_query_and_position_inputs_apart():
             ]
             if any(str(s.get("label")) == "q" for s in sources):
                 assert "position" not in str(tile["label"]), tile["id"]
+
+    # The attention rope helper used to redraw ``position_embeddings.cos`` and
+    # feed that copy from the attention's own tile. The helper's first op now
+    # reads the attention tile.
+    redrawn = [
+        node["id"]
+        for node in graph["nodes"]
+        if "@positional_" in node["id"]
+        and str(node.get("label", "")).startswith("position_embeddings.")
+        and _node_attr(node, "synthetic") == "@input"
+    ]
+    assert redrawn == [], redrawn
+    assert folded_frames, "the attention rope helper should fold the caller's component"
+    readers = [
+        node
+        for node in graph["nodes"]
+        if node.get("label") == "Repeat interleave"
+        and any(
+            node["id"].startswith(frame) and node["id"] != frame
+            for frame in folded_frames
+        )
+    ]
+    assert readers, "expected the folded rope helper to read the position tensor"
+    for reader in readers:
+        sources = [
+            by_id[edge["sourceNodeId"]]
+            for edge in reader.get("incomingEdges", []) or []
+            if edge["sourceNodeId"] in by_id
+        ]
+        assert len(sources) == 1, reader["id"]
+        source = sources[0]
+        assert str(source.get("label", "")).startswith("position_embeddings."), source
+        assert "@positional_" not in source["id"], source["id"]
 
 
 def _is_constant(node) -> bool:

@@ -196,6 +196,69 @@ class TestAPassThroughTakesEveryComponent:
         ]
 
 
+class TestARopeHelperReusesTheTensorItsCallerAlreadyNamed:
+    def test_the_helper_is_not_given_a_second_copy(self) -> None:
+        """The helper reads the attention tile. The tile is not drawn again."""
+        nodes = _bundle([])
+        nodes[2]["namespace"] = "DeepseekV4Attention"
+        nodes.append(
+            _tile(
+                "attn/seq:6:@positional_l810_apply_rotary_pos_emb:@/@input:position_embeddings",
+                "position_embeddings",
+                "@input",
+                [("box/@input:position_embeddings", "0")],
+            )
+        )
+        nodes[-1]["namespace"] = (
+            "DeepseekV4Attention/_positional_l810_apply_rotary_pos_emb"
+        )
+        for port in ("0", "1"):
+            reader = _tile(
+                f"rope/@op_use{port}",
+                f"Use{port}",
+                None,
+                [("attn/seq:6:@positional_l810_apply_rotary_pos_emb:@/@input:position_embeddings", port)],
+            )
+            reader["namespace"] = nodes[-1]["namespace"]
+            nodes.append(reader)
+        _split_tuple_boundary_slots(nodes)
+        assert "attn/seq:6:@positional_l810_apply_rotary_pos_emb:@/@input:position_embeddings.cos" not in {
+            node["id"] for node in nodes
+        }
+        assert _sources_of(nodes, "rope/@op_use0") == [
+            "box/@input:position_embeddings.cos"
+        ]
+        assert _sources_of(nodes, "rope/@op_use1") == [
+            "box/@input:position_embeddings.sin"
+        ]
+
+    def test_a_real_nested_module_still_names_its_own_boundary(self) -> None:
+        nodes = _bundle([])
+        nodes[2]["namespace"] = "DeepseekV4Attention"
+        nodes.append(
+            _tile(
+                "compressor/@input:position_embeddings",
+                "position_embeddings",
+                "@input",
+                [("box/@input:position_embeddings", "0")],
+            )
+        )
+        nodes[-1]["namespace"] = "DeepseekV4Attention/DeepseekV4CSACompressor"
+        for port in ("0", "1"):
+            reader = _tile(
+                f"compressor/@op_use{port}",
+                f"Use{port}",
+                None,
+                [("compressor/@input:position_embeddings", port)],
+            )
+            reader["namespace"] = nodes[-1]["namespace"]
+            nodes.append(reader)
+        _split_tuple_boundary_slots(nodes)
+        assert _sources_of(nodes, "compressor/@op_use0") == [
+            "compressor/@input:position_embeddings.cos"
+        ]
+
+
 class TestAddressingVersusForwarding:
     """Which component a consumer wants is read from how it ADDRESSES them.
 
