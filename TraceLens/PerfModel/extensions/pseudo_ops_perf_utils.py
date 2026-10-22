@@ -52,6 +52,7 @@ def get_pseudo_op_mappings():
         "aiter::biased_grouped_topk_hip": moe_perf_model_extensions.BiasedGroupedTopk,
         "aiter::moe_sorting_fwd": moe_perf_model_extensions.MoeSortScatterGather,
         "aiter::mxfp4_moe_sort_hip": moe_perf_model_extensions.MoeSortScatterGather,
+        "aiter::moe_sorting_opus_fwd": moe_perf_model_extensions.MoeSortScatterGather,
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
@@ -138,6 +139,7 @@ def get_pseudo_op_mappings():
         ## KV cache ops
         "sglang::store_cache": perf_model_extensions.sglang_store_cache,
         "aiter::fused_qk_rope_cat_and_cache_mla": perf_model_extensions.aiter_fused_qk_rope_cat_and_cache_mla,
+        "sglang_profiler::fused_bmm_rope_kv_cache_fused_fp8_bmm_rope_cat_and_cache_mla": perf_model_extensions.fused_fp8_bmm_rope_cat_and_cache_mla,
         "sglang_profiler::fused_moe_triton_kernels_fused_append_shared_experts": moe_perf_model_extensions.sglang_fused_append_shared_experts,
         "sglang_profiler::quant_dynamic_mxfp4_quant": perf_model_extensions.sglang_quant_dynamic_mxfp4_quant,
         "aiter::fused_dynamic_mxfp4_quant_moe_sort_hip": perf_model_extensions.aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,

@@ -5080,3 +5080,177 @@ class TestPerfModelDeepCoverage2:
             }
         )
         assert ce.get_compute_precision() is not None
+
+
+_GLM53_MOE_SORTING_OPUS_EVENT = {
+    "name": "aiter::moe_sorting_opus_fwd",
+    "args": {
+        "Input Dims": [
+            [1113, 9],
+            [1113, 9],
+            [26456],
+            [26456],
+            [414],
+            [2],
+            [1113, 6144],
+            [],
+            [],
+            [],
+            [],
+            [289120],
+            [],
+            [],
+            [],
+            [],
+        ],
+        "Input type": [
+            "int",
+            "float",
+            "int",
+            "float",
+            "int",
+            "int",
+            "c10::BFloat16",
+            "Scalar",
+            "Scalar",
+            "",
+            "",
+            "unsigned char",
+            "Scalar",
+            "",
+            "",
+            "",
+        ],
+    },
+}
+
+_GLM52_MOE_SORTING_OPUS_EVENT = {
+    "name": "aiter::moe_sorting_opus_fwd",
+    "args": {
+        "Input Dims": [
+            [8567, 9],
+            [8567, 9],
+            [93542],
+            [93542],
+            [1462],
+            [2],
+            [8567, 6144],
+            [],
+            [],
+            [257],
+            [],
+            [2205312],
+            [],
+            [],
+            [],
+            [],
+        ],
+        "Input type": [
+            "int",
+            "float",
+            "int",
+            "float",
+            "int",
+            "int",
+            "c10::BFloat16",
+            "Scalar",
+            "Scalar",
+            "int",
+            "",
+            "unsigned char",
+            "Scalar",
+            "",
+            "",
+            "",
+        ],
+    },
+}
+
+_GLM53_FUSED_FP8_BMM_ROPE_EVENT = {
+    "name": "sglang_profiler::fused_bmm_rope_kv_cache_fused_fp8_bmm_rope_cat_and_cache_mla",
+    "args": {
+        "Input Dims": [
+            [8, 12, 192],
+            [8, 512, 192],
+            [],
+            [12, 8, 64],
+            [12, 1, 512],
+            [12, 1, 64],
+            [2991488, 1, 576],
+            [12],
+            [12],
+            [1048576, 1, 1, 32],
+            [1048576, 1, 1, 32],
+            [],
+        ],
+        "Input type": [
+            "c10::BFloat16",
+            "c10::Float8_e4m3fn",
+            "float",
+            "c10::BFloat16",
+            "c10::BFloat16",
+            "c10::BFloat16",
+            "c10::Float8_e4m3fn",
+            "long int",
+            "long int",
+            "c10::BFloat16",
+            "c10::BFloat16",
+            "float",
+        ],
+    },
+}
+
+
+class TestGlm5xMapsAndSubclass:
+    @pytest.mark.parametrize(
+        "op_name, cls",
+        [
+            (
+                "aiter::moe_sorting_opus_fwd",
+                moe_ext.MoeSortScatterGather,
+            ),
+            (
+                "sglang_profiler::fused_bmm_rope_kv_cache_fused_fp8_bmm_rope_cat_and_cache_mla",
+                pext.fused_fp8_bmm_rope_cat_and_cache_mla,
+            ),
+        ],
+    )
+    def test_glm5x_map_resolves(self, op_name, cls):
+        assert get_pseudo_op_mappings()[op_name] is cls
+
+    @pytest.mark.parametrize(
+        "event", [_GLM53_MOE_SORTING_OPUS_EVENT, _GLM52_MOE_SORTING_OPUS_EVENT]
+    )
+    def test_moe_sorting_opus_live_dims(self, event):
+        model = MoeSortScatterGather(event)
+        M = event["args"]["Input Dims"][6][0]
+        assert model.flops() == M * 6144
+        assert model.bytes() >= M * 6144 * 2
+        assert model.get_compute_precision() == "bf16"
+
+    def test_fused_fp8_bmm_rope_is_subclass_not_alias(self):
+        cls = pext.fused_fp8_bmm_rope_cat_and_cache_mla
+        assert issubclass(cls, pext.aiter_fused_qk_rope_cat_and_cache_mla)
+        assert cls is not pext.aiter_fused_qk_rope_cat_and_cache_mla
+
+    def test_fused_fp8_bmm_rope_glm53_decode_dims(self):
+        model = pext.fused_fp8_bmm_rope_cat_and_cache_mla(
+            _GLM53_FUSED_FP8_BMM_ROPE_EVENT
+        )
+        p = model.param_details
+        assert (p["QH"], p["B"], p["N"], p["K"]) == (8, 12, 512, 192)
+        assert (p["B_slot"], p["KH"], p["D_lora"], p["D_pe"]) == (12, 1, 512, 64)
+
+        bmm = 2 * 8 * 12 * 512 * 192
+        rope = 3 * (12 * 8 * 64 + 12 * 1 * 64)
+        assert model.flops() == bmm + rope
+
+        read_q = (8 * 12 * 192 + 12 * 8 * 64) * 2
+        read_w = 8 * 512 * 192 * 1
+        read_k = 12 * 1 * (512 + 64) * 2
+        write_q = 12 * 8 * (512 + 64) * 2
+        write_kv = 12 * 1 * (512 + 64) * 1
+        assert model.bytes() == read_q + read_w + read_k + write_q + write_kv
+
+        assert model.get_maf_type() == "matrix"
+        assert model.get_compute_precision() == "fp8"

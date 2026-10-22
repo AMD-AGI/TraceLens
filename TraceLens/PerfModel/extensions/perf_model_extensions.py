@@ -1293,6 +1293,116 @@ class fused_qk_rope_concat_and_cache_mla(aiter_fused_qk_rope_cat_and_cache_mla):
         return read_q + read_k + write_q + write_kv
 
 
+class fused_fp8_bmm_rope_cat_and_cache_mla(aiter_fused_qk_rope_cat_and_cache_mla):
+    """
+    Performance model for aiter fused_fp8_bmm_rope_cat_and_cache_mla
+    (kernel _fused_fp8_bmm_rope_cat_and_cache_mla_kernel; GLM-5.x / DeepSeek MLA),
+    traced by SGLang as
+    sglang_profiler::fused_bmm_rope_kv_cache_fused_fp8_bmm_rope_cat_and_cache_mla.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/fusions/fused_bmm_rope_kv_cache.py
+        (fused_fp8_bmm_rope_cat_and_cache_mla)
+
+    Fuses two independent pieces in one launch:
+      1. FP8 BMM (per-token-group prequant of q_nope): ql_nope = q_nope @ w_k^T,
+         written to q_out[:, :, :N]
+      2. RoPE on q_pe / k_rope, q_pe written to q_out[:, :, N:], and
+         (k_nope || rotated k_rope) written into kv_cache at slot_mapping.
+
+    Signature:
+        fused_fp8_bmm_rope_cat_and_cache_mla(q_nope, w_k, w_k_scale, q_pe,
+            k_nope, k_rope, kv_cache, slot_mapping, positions, cos, sin,
+            group_size=128, transpose_bm=True, config=None, k_scale=None,
+            is_neox=False, q_out_dtype=torch.bfloat16,
+            num_decode_toks_for_zeros=0)
+
+    Expected Input Dims from trace:
+        [0]  q_nope       = (QH, B, K)
+        [1]  w_k          = (QH, N, K)          N = kv_lora_rank
+        [2]  w_k_scale    = ()
+        [3]  q_pe         = (B, QH, D_pe)
+        [4]  k_nope       = (B_slot, KH, N)
+        [5]  k_rope       = (B_slot, KH, D_pe)
+        [6]  kv_cache     = (B_cache, KH, N + D_pe)
+        [7]  slot_mapping = (B_slot,)
+        [8]  positions    = (B_slot,)
+        [9]  cos, [10] sin, [11] k_scale
+
+    Expected Input type from trace:
+        [bf16, fp8, float, bf16, bf16, bf16, <kv_cache dtype, e.g. fp8>,
+         long int, long int, bf16, bf16, float]
+
+    Roofline -- FLOPs:
+        BMM  : 2 * QH * B * N * K
+        RoPE : 3 * (B * QH * D_pe + B_slot * KH * D_pe)
+
+    Roofline -- bytes moved:
+        read  q_nope + q_pe + k_nope + k_rope : nelems * bpe_in
+        read  w_k                             : QH * N * K * bpe_w
+        write q_out  (B, QH, N + D_pe)        : * bpe_in (q_out_dtype bf16)
+        write kv rows (B_slot tokens written) : B_slot * KH * (N + D_pe) * bpe_kv
+
+    Approximation: only the B_slot written KV slots are counted, not the full
+    paged cache at Input Dims[6]; cos/sin/positions/scales are small and
+    omitted; the q_nope prequant FLOPs are omitted.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        QH, B, K = tuple(dims[0])
+        _, N, _ = tuple(dims[1])
+        D_pe = dims[3][2]
+        B_slot, KH, D_lora = tuple(dims[4])
+        dtype_in = types[0]
+        dtype_w = types[1]
+        dtype_kv = types[6] if len(types) > 6 and types[6] else dtype_in
+        return {
+            "T": B,
+            "B": B,
+            "B_slot": B_slot,
+            "QH": QH,
+            "KH": KH,
+            "N": N,
+            "K": K,
+            "D_lora": D_lora,
+            "D_pe": D_pe,
+            "dtype_in": dtype_in,
+            "dtype_w": dtype_w,
+            "dtype_kv": dtype_kv,
+        }
+
+    def flops(self):
+        p = self.param_details
+        bmm = 2 * p["QH"] * p["B"] * p["N"] * p["K"]
+        rope = 3 * (p["B"] * p["QH"] * p["D_pe"] + p["B_slot"] * p["KH"] * p["D_pe"])
+        return bmm + rope
+
+    def bytes(self):
+        p = self.param_details
+        bpe_in = self.bpe_in
+        bpe_w = name2bpe(p["dtype_w"])
+        if bpe_in is None or bpe_w is None:
+            return None
+        bpe_kv = self.bpe_kv if self.bpe_kv is not None else bpe_in
+        QH, B, B_slot, KH = p["QH"], p["B"], p["B_slot"], p["KH"]
+        N, K, D_lora, D_pe = p["N"], p["K"], p["D_lora"], p["D_pe"]
+        read_q = (QH * B * K + B * QH * D_pe) * bpe_in
+        read_w = QH * N * K * bpe_w
+        read_k = B_slot * KH * (D_lora + D_pe) * bpe_in
+        write_q = B * QH * (N + D_pe) * bpe_in
+        write_kv = B_slot * KH * (D_lora + D_pe) * bpe_kv
+        return read_q + read_w + read_k + write_q + write_kv
+
+    def get_maf_type(self):
+        return "matrix"
+
+    def get_compute_precision(self):
+        return torch_dtype_map(self.param_details["dtype_w"])
+
+
 class sglang_quant_dynamic_mxfp4_quant(fused_flatten_mxfp4_quant):
     """
     Performance model for sglang_profiler::quant_dynamic_mxfp4_quant.
