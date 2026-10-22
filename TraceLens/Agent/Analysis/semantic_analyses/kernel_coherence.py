@@ -249,7 +249,7 @@ def cmd_prepare_context(args):  # pragma: no cover
         "fallback_remap_regex_a": "optional {python_regex -> final_block} for trace A, "
         "checked in order after fallback_remap_a, first re.search match against the "
         "first_pass_block wins -- use for a whole kernel-name family (e.g. every "
-        "Cijk_* Tensile GEMM solution variant) instead of enumerating every exact name",
+        "<vendor_gemm_prefix>_* GEMM solution variant) instead of enumerating every exact name",
         "fallback_remap_regex_b": "optional {python_regex -> final_block} for trace B, same semantics",
         "notes": "optional string",
     }

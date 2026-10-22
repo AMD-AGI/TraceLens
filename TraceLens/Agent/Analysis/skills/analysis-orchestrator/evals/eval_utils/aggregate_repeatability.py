@@ -587,18 +587,15 @@ def main():
     print("Part A: Aggregating eval_summary.csv files...")
     eval_rows = aggregate_eval_summaries(runs)
     aggregated_path = os.path.join(OUTPUT_DIR, "aggregated_results.csv")
-    write_csv(aggregated_path, eval_rows, EVAL_COLS)
-    print("  Written: {} ({} rows)".format(aggregated_path, len(eval_rows)))
+    write_csv(aggregated_path, eval_rows, EVAL_COLS, verbose=True)
     summary_rows, summary_cols = build_pass_rate_summary(eval_rows)
     pass_rate_path = os.path.join(OUTPUT_DIR, "pass_rate_summary.csv")
-    write_csv(pass_rate_path, summary_rows, summary_cols)
-    print("  Written: {} ({} rows)".format(pass_rate_path, len(summary_rows)))
+    write_csv(pass_rate_path, summary_rows, summary_cols, verbose=True)
 
     print("\nPart A2: Building run-level summary...")
     run_level_rows = build_run_level_summary(eval_rows)
     run_level_path = os.path.join(OUTPUT_DIR, "run_level_summary.csv")
-    write_csv(run_level_path, run_level_rows, RUN_LEVEL_COLS)
-    print("  Written: {} ({} rows)".format(run_level_path, len(run_level_rows)))
+    write_csv(run_level_path, run_level_rows, RUN_LEVEL_COLS, verbose=True)
     catastrophic = [r for r in run_level_rows if r["is_catastrophic"]]
     if catastrophic:
         print(
@@ -616,22 +613,20 @@ def main():
         failure_nature_path,
         [failure_nature],
         ["catastrophic_pipeline", "stable", "flaky", "total"],
+        verbose=True,
     )
-    print("  Written: {} ({} rows)".format(failure_nature_path, 1))
     print("  Failure nature: {}".format(failure_nature))
 
     print("\nPart A4: Building stability classification...")
     stability_rows, stability_cols, class_totals = build_stability_summary(eval_rows)
     stability_path = os.path.join(OUTPUT_DIR, "stability_summary.csv")
-    write_csv(stability_path, stability_rows, stability_cols)
-    print("  Written: {} ({} rows)".format(stability_path, len(stability_rows)))
+    write_csv(stability_path, stability_rows, stability_cols, verbose=True)
     print("  Stability breakdown: {}".format(class_totals))
 
     print("\nPart B: Parsing analysis_stream.ndjson files...")
     stream_rows = aggregate_stream_diagnostics(runs)
     stream_path = os.path.join(OUTPUT_DIR, "stream_diagnostics.csv")
-    write_csv(stream_path, stream_rows, STREAM_COLS)
-    print("  Written: {} ({} rows)".format(stream_path, len(stream_rows)))
+    write_csv(stream_path, stream_rows, STREAM_COLS, verbose=True)
 
     print("\n=== Summary ===")
     total_evals = sum(1 for r in eval_rows if r["result"] not in ("MISSING", ""))

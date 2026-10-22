@@ -515,67 +515,15 @@ def _write_execution_details(execution_details, output_dir):
 
 
 def run(args: argparse.Namespace) -> list[dict]:
-    """Core split orchestration: detect, gap-fill, extract, classify, write.
+    """Programmatic entry point: run the split pipeline on a prepared args
+    Namespace (no argv parsing) and return the execution_details list.
 
-    Shared by the CLI's main() and the in-process split_and_enumerate() entry
-    point. Always writes split_manifest.json to args.output_dir (and
-    execution_details.json/.csv when anything was extracted), exactly as the
-    CLI does today. Returns the execution_details list (same shape written to
+    Thin wrapper over main(), which holds the orchestration. Used by the
+    in-process split_and_enumerate() entry point; the CLI goes through main()
+    directly. Returns the execution_details list (same shape written to
     execution_details.json), or [] when nothing was extracted.
     """
-    loaded = _load_and_detect(args)
-    if loaded is None:
-        return []
-    detection, trace_json, trace_index = loaded
-    events = trace_json.get("traceEvents", [])
-    iteration_roots = detection.roots
-    manifest = detection.to_manifest()
-
-    root_tiles = _gap_fill_tiles(iteration_roots, manifest, args)
-    ctx = ExtractContext(
-        trace=TraceData(
-            events=events,
-            trace_json=trace_json,
-            gpu_corr_map=trace_index.gpu_corr_map,
-            flow_corr_map=trace_index.flow_corr_map,
-            meta_events=trace_index.meta_events,
-        ),
-        output_dir=args.output_dir,
-        base_name=_base_name(args.trace_path),
-        root_tiles=root_tiles,
-    )
-
-    execution_details = []
-    # Only the --store-single-iteration pass can be audited for kernel conservation.
-    per_iteration_details: list | None = None
-    if iteration_roots:
-        start, end = parse_range(args.iterations, len(iteration_roots))
-        extracted, per_iteration_details = _extract_iterations(
-            detection, ctx, args, start, end
-        )
-        execution_details.extend(extracted)
-
-        working_roots = _working_roots(iteration_roots, args, start, end)
-        has_annotations = _has_serving_annotations(working_roots)
-        batch_sizes = _derive_batch_sizes(working_roots, has_annotations, ctx, args)
-
-        if args.divide_phases:
-            execution_details.extend(
-                _divide_phases(working_roots, batch_sizes, has_annotations, ctx, args)
-            )
-        if args.find_steady_state:
-            execution_details.extend(
-                _find_steady_state_windows(
-                    working_roots, batch_sizes, has_annotations, ctx, args
-                )
-            )
-
-    print(f"\nDone! Extracted {len(execution_details)} traces to {args.output_dir}")
-    manifest.update(_conservation(events, per_iteration_details, args))
-    _write_manifest(args.output_dir, manifest)
-    if execution_details:
-        _write_execution_details(execution_details, args.output_dir)
-    return execution_details
+    return main(args)
 
 
 def split_and_enumerate(
@@ -622,7 +570,7 @@ def split_and_enumerate(
     return run(args)
 
 
-def main():
+def main(args: argparse.Namespace | None = None) -> list[dict]:
     parser = argparse.ArgumentParser(
         description="Split vLLM trace into per-iteration traces"
     )
@@ -734,8 +682,62 @@ def main():
             "prefill-bearing. When not set, a heuristic is used."
         ),
     )
-    args = parser.parse_args()
-    run(args)
+    if args is None:
+        args = parser.parse_args()
+
+    loaded = _load_and_detect(args)
+    if loaded is None:
+        return []
+    detection, trace_json, trace_index = loaded
+    events = trace_json.get("traceEvents", [])
+    iteration_roots = detection.roots
+    manifest = detection.to_manifest()
+
+    root_tiles = _gap_fill_tiles(iteration_roots, manifest, args)
+    ctx = ExtractContext(
+        trace=TraceData(
+            events=events,
+            trace_json=trace_json,
+            gpu_corr_map=trace_index.gpu_corr_map,
+            flow_corr_map=trace_index.flow_corr_map,
+            meta_events=trace_index.meta_events,
+        ),
+        output_dir=args.output_dir,
+        base_name=_base_name(args.trace_path),
+        root_tiles=root_tiles,
+    )
+
+    execution_details = []
+    # Only the --store-single-iteration pass can be audited for kernel conservation.
+    per_iteration_details: list | None = None
+    if iteration_roots:
+        start, end = parse_range(args.iterations, len(iteration_roots))
+        extracted, per_iteration_details = _extract_iterations(
+            detection, ctx, args, start, end
+        )
+        execution_details.extend(extracted)
+
+        working_roots = _working_roots(iteration_roots, args, start, end)
+        has_annotations = _has_serving_annotations(working_roots)
+        batch_sizes = _derive_batch_sizes(working_roots, has_annotations, ctx, args)
+
+        if args.divide_phases:
+            execution_details.extend(
+                _divide_phases(working_roots, batch_sizes, has_annotations, ctx, args)
+            )
+        if args.find_steady_state:
+            execution_details.extend(
+                _find_steady_state_windows(
+                    working_roots, batch_sizes, has_annotations, ctx, args
+                )
+            )
+
+    print(f"\nDone! Extracted {len(execution_details)} traces to {args.output_dir}")
+    manifest.update(_conservation(events, per_iteration_details, args))
+    _write_manifest(args.output_dir, manifest)
+    if execution_details:
+        _write_execution_details(execution_details, args.output_dir)
+    return execution_details
 
 
 if __name__ == "__main__":

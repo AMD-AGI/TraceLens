@@ -108,10 +108,10 @@ Resolution order applied per kernel (see `apply`):
    in declaration order with `re.search` against the first-pass symbol; first
    match wins. Use this for a whole vendor kernel-name **family** in one rule
    instead of enumerating every exact mangled name -- vendor GEMM solution
-   libraries (Tensile `Cijk_*`, CUTLASS `nvjet_*`) emit a distinct, near-unique
+   libraries (e.g. `<vendor_gemm_prefix>_*`) emit a distinct, near-unique
    name per tile-shape/tuning variant of the *same* logical op, so listing every
    variant in `fallback_remap_a`/`_b` is impractical and silently leaves most
-   instances unmatched. One regex (e.g. `"^Cijk_"`) covers the whole family.
+   instances unmatched. One regex (e.g. `"^<vendor_gemm_prefix>_"`) covers the whole family.
 4. Otherwise the first-pass name is kept.
 
 ### Guidance
@@ -123,7 +123,7 @@ Resolution order applied per kernel (see `apply`):
   bucket is one variant of a vendor kernel-name family with many tile-shape/
   tuning variants (vendor GEMM solution libraries in particular). An exact
   `fallback_remap` entry only catches the one variant you saw in the context
-  catalog; a `fallback_remap_regex` entry (e.g. `"^Cijk_"` or `"^nvjet_sm103_"`)
+  catalog; a `fallback_remap_regex` entry (e.g. `"^<vendor_gemm_prefix>_"`)
   catches every variant of that family, including ones that didn't surface as
   their own one-sided context.
 - Prefer merging a one-sided bucket into an **existing shared** symbol when the
