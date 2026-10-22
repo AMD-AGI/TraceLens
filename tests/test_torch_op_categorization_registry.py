@@ -10,12 +10,20 @@ Tests for the registry-based torch op categorizer.
 
 import pytest
 
+from TraceLens.PerfModel.extensions.perf_model_extensions import (
+    gemm_a16w16_asm,
+    gemm_a8w8_blockscale,
+    mhc_fused_post_pre_gemm_sqrsum,
+    mhc_post,
+    mhc_pre_big_fuse_rmsnorm,
+)
 from TraceLens.PerfModel.torch_op_mapping import (
     OP_CATEGORY_REGISTRY,
     build_sheet_category_to_op_names,
     categorize_torch_op,
     op_to_perf_model_class_map,
     register_op_categories,
+    resolve_perf_model_class,
 )
 
 
@@ -61,10 +69,12 @@ def _row(name, kernel_details=None):
         ("mhc_pre_big_fuse_rmsnorm_kernel", "mHC"),
         ("mhc_fused_post_pre_gemm_sqrsum_kernel", "mHC"),
         ("gemm_a8w8_mx128_bf16_128x256", "GEMM"),
+        ("void gemm_a8w8_mx128_kernel<128>(float)", "GEMM"),
         (
             "gemm_a16w16_clusterlaunch_tdm_splitk_ws_kernel_gfx1250",
             "GEMM",
         ),
+        ("batched_gemm_a8w8_mx128_bf16_128x256", "other"),
         ("aten::sum", "reduce"),
         ("triton_per_token_quant_fp8", "triton"),
         ("record_param_comms_alltoall_base", "record_param_comms"),
@@ -73,6 +83,36 @@ def _row(name, kernel_details=None):
 )
 def test_categorize_torch_op_expected_categories(name, expected):
     assert categorize_torch_op(_row(name)) == expected
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("gemm_a8w8_mx128_bf16_128x256", gemm_a8w8_blockscale),
+        ("void gemm_a8w8_mx128_kernel<128>(float)", gemm_a8w8_blockscale),
+        (
+            "gemm_a16w16_clusterlaunch_tdm_splitk_ws_kernel_gfx1250",
+            gemm_a16w16_asm,
+        ),
+        ("mhc_post_kernel", mhc_post),
+        ("mhc_pre_big_fuse_rmsnorm_kernel", mhc_pre_big_fuse_rmsnorm),
+        ("mhc_fused_post_pre_gemm_sqrsum_kernel", mhc_fused_post_pre_gemm_sqrsum),
+        ("aiter::mhc_post", mhc_post),
+    ],
+)
+def test_resolve_dsv4_kernel_names(name, expected):
+    assert resolve_perf_model_class(name) is expected
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "batched_gemm_a8w8_mx128_bf16_128x256",
+        "prefix_batched_gemm_a8w8_mx128_bf16_128x256_suffix",
+    ],
+)
+def test_batched_mx128_is_not_resolved(name):
+    assert resolve_perf_model_class(name) is None
 
 
 @pytest.mark.parametrize(
