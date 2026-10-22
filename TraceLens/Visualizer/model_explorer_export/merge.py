@@ -65,6 +65,7 @@ from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
     build_fact_sheet_group_attributes,
 )
 from TraceLens.Visualizer.model_explorer_export.type_check import (
+    _walls_crossed,
     group_cycle_check_graph_nodes,
     integrity_check_graph_nodes,
     type_check_graph_nodes,
@@ -74,6 +75,7 @@ from TraceLens.Visualizer.model_explorer_export.shapes import (
     apply_shape_attrs,
     canonicalize_port_shape_keys,
     fill_missing_node_shapes,
+    widen_broadcast_results,
     group_boundary_shapes,
     infer_block_tree_shapes,
     node_output_spec,
@@ -338,6 +340,23 @@ def _append_stack_entry_dataflow(
 
 def _source_parts(source: SourceRef) -> tuple[str, str]:
     return source if isinstance(source, tuple) else (source, "0")
+
+
+def _spine_entry_spec(
+    nodes: list[dict[str, Any]], previous_exits: list[SourceRef]
+) -> TensorSpec | None:
+    """Shape of the tensor the previous spine section hands this one.
+
+    A block inferred on its own has no caller. The exit it is wired from is
+    that caller, and its shape is the block's ``hidden_states``.
+    """
+    if not previous_exits:
+        return None
+    source_id, port = _source_parts(previous_exits[0])
+    for node in reversed(nodes):
+        if str(node.get("id")) == source_id:
+            return node_output_spec(node, port)
+    return None
 
 
 def _source_edge(source: SourceRef, target_input_id: str) -> dict[str, str]:
@@ -5362,25 +5381,22 @@ def _producer_output_spec(
     class_name: str | None,
     nested_block: Any,
     known: dict[str, TensorSpec],
+    inherited: TensorSpec | None = None,
 ) -> TensorSpec | None:
-    """Spec of the tensor a nested method expansion is handed.
+    """Spec of the tensor a nested section is handed.
 
-    ``self.indexer.build_block_mask(block_indices, ...)`` is inferred as its own
-    section, so nothing tells its ``@input`` what ``block_indices`` is and the
-    body computes the decoder's geometry instead. The step's FIRST recorded
-    predecessor is what produced that tensor (``indexer@l466``, the indexer's own
-    forward), and sibling sections are annotated in order, so its output is
-    already known.
-
-    Scoped to a method expansion -- a block whose ``input_label`` names something
-    other than the activation it would otherwise inherit. A plain submodule
-    section is fed by the spine and must keep inheriting it.
+    A plain submodule is fed by the spine, so it inherits that stream. A method
+    expansion is not: ``self.indexer.build_block_mask(block_indices, ...)`` is
+    inferred as its own section, and the tensor it is handed is the step's first
+    recorded predecessor (``indexer@l466``), already annotated because siblings
+    are walked in order. It does not inherit the spine.
     """
-    if not getattr(nested_block, "input_label", None) or not class_name:
-        return None
-    if not any(
+    is_method = any(
         str(detail).startswith("method:") for detail in nested_block.details or ()
-    ):
+    )
+    if not is_method:
+        return inherited
+    if not getattr(nested_block, "input_label", None) or not class_name:
         return None
     structure = spec.class_registry.get(class_name)
     predecessors = (getattr(structure, "forward_step_predecessors", None) or {}).get(
@@ -5559,7 +5575,14 @@ def _split_one_tuple_boundary(nodes: list[dict[str, Any]]) -> bool:
                 existing = _existing_ancestor_input(
                     producer, by_id, str(node.get("namespace") or "")
                 )
-                if existing:
+                ancestor = by_id.get(existing) if existing else None
+                # Reuse only when the hop into the helper crosses one box. The
+                # attention tile is that hop. A tile two boxes out, wired
+                # straight at the helper's own op, never lands on the box it
+                # enters.
+                if ancestor is not None and all(
+                    len(walls) <= 1 for walls in _walls_crossed(ancestor, node)
+                ):
                     slot_ids.append(existing)
                     named_slots[slot] = existing
                     named_slots[name.rsplit(".", 1)[-1]] = existing
@@ -6399,6 +6422,31 @@ def _summary_node(
     return node
 
 
+def _stamp_module_summary(
+    summary: dict[str, Any],
+    component: BlockComponent,
+    merged_nodes: list[dict[str, Any]],
+    previous_exits: list[SourceRef],
+    shape_inferencer: ShapeInferencer | None,
+) -> None:
+    """Shape a collapsed module tile from its own weight before later sections read it.
+
+    An embedding drawn as one tile has no body to infer. The sections after it
+    are sized from this tile, so the weight's answer has to be on it now -- the
+    pass that fills missing shapes runs only once every section has already
+    been inferred.
+    """
+    if shape_inferencer is None:
+        return
+    if component.role == "embedding":
+        source = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value), "int64")
+    else:
+        source = _spine_entry_spec(merged_nodes, previous_exits)
+    produced = shape_inferencer.module_output_spec(component.attr_name, source)
+    if produced is not None:
+        apply_shape_attrs(summary, produced)
+
+
 def _append_section(
     merged_nodes: list[dict[str, Any]],
     *,
@@ -6453,6 +6501,13 @@ def _append_section(
             summary["incomingEdges"] = [
                 _source_edge(source, "0") for source in previous_exits
             ]
+        _stamp_module_summary(
+            summary,
+            component,
+            merged_nodes,
+            previous_exits,
+            shape_inferencer,
+        )
         merged_nodes.append(summary)
         return [id_prefix]
 
@@ -6477,6 +6532,13 @@ def _append_section(
             summary["incomingEdges"] = [
                 _source_edge(source, "0") for source in previous_exits
             ]
+        _stamp_module_summary(
+            summary,
+            component,
+            merged_nodes,
+            previous_exits,
+            shape_inferencer,
+        )
         merged_nodes.append(summary)
         return [id_prefix]
 
@@ -6532,11 +6594,35 @@ def _append_section(
         # Resolve the nested modules FIRST, so this section knows what each of
         # them returns before it sizes the node that stands for one. They are
         # annotated properly further down; this pass only warms that knowledge.
+        # A plain submodule inherits the spine stream. A method expansion does
+        # not: its argument is a sibling's output, which this pass has not
+        # annotated yet.
+        # The previous section's multiply may still say ``[1]`` from the scalar
+        # it saw first. Its activation edge is already drawn; widen that result
+        # before this section is sized from it.
+        widen_broadcast_results(merged_nodes)
+        section_entry = _spine_entry_spec(merged_nodes, previous_exits)
         for _label, nested in collect_nested_diagrams(block_tree, basic_ops=basic_ops):
-            infer_block_tree_shapes(shape_inferencer, nested, title=_label)
+            infer_block_tree_shapes(
+                shape_inferencer,
+                nested,
+                title=_label,
+                entry_spec=_producer_output_spec(
+                    spec,
+                    block_tree.class_name,
+                    nested,
+                    {},
+                    inherited=section_entry,
+                ),
+            )
         annotate_nodes_with_shapes(
             section_nodes,
-            infer_block_tree_shapes(shape_inferencer, block_tree, title=_title),
+            infer_block_tree_shapes(
+                shape_inferencer,
+                block_tree,
+                title=_title,
+                entry_spec=section_entry,
+            ),
             id_prefix=id_prefix,
         )
 
@@ -6662,6 +6748,7 @@ def _append_section(
                         block_tree.class_name,
                         nested_block,
                         nested_output_specs,
+                        inherited=section_entry,
                     ),
                 ),
                 id_prefix=nested_prefix,
@@ -9977,6 +10064,11 @@ def build_merged_model_graph(
     # stamped left GLM's ``hc_head`` recorded as taking three tensors while its
     # edges, correctly, showed one.
     _untie_host_constructors_from_the_activation(nodes)
+    # The tuple split and the kernel-port passes wire edges after the first
+    # boundary-level pass. An edge created then can descend two boxes at once;
+    # the same pass, run on the final edges, lands it on each box it enters.
+    _insert_missing_boundary_levels(nodes)
+    _carry_producer_shape_to_boundary_tiles(nodes)
     _annotate_op_input_signatures(nodes)
     # After the second annotation: no-op casts materialised by the loop-invariant
     # pass have been elided, and operand edges match the graph being written.
@@ -10009,6 +10101,7 @@ def build_merged_model_graph(
     # without the shape of what crosses it. Idempotent -- a tile that already has
     # one is left alone.
     _carry_producer_shape_to_boundary_tiles(nodes)
+    widen_broadcast_results(nodes)
     # Right behind it: that pass is the last thing to state a shape, and this
     # is what makes a stated shape one the reader can actually see.
     _publish_declared_shapes_as_output_ports(nodes)

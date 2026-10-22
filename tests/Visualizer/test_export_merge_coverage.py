@@ -2660,7 +2660,7 @@ def test_shape_external_spec_and_empty_combine_fallbacks():
     combine = inferencer._infer_node_output(
         _model_node("Combine", synthetic="@combine"), [], root=None
     )
-    assert combine == TensorSpec(("B", "S", 16))
+    assert combine is None
     parameter_view = inferencer._infer_node_output(
         _model_node("view", external_inputs=["self.matrix"]), [], root=None
     )
@@ -2674,7 +2674,7 @@ def test_shape_external_spec_and_empty_combine_fallbacks():
     )
     assert bias_unsqueeze == TensorSpec((1, 8))
     default_view = inferencer._infer_node_output(_model_node("reshape"), [], root=None)
-    assert default_view == TensorSpec(("B", "S", 16))
+    assert default_view is None
 
 
 def test_shape_build_and_save_operator_export_fallbacks(
@@ -2889,8 +2889,8 @@ def test_ensure_image_mask_node_dedupes_and_stamps_bool_shape():
 
 
 def test_attach_vision_language_combine_applies_shape_from_context():
-    # With a shape inferencer available, the combine carries the (B, S, hidden)
-    # embedding shape so downstream nodes resolve their inputs.
+    # The combine is the scatter of the text embeddings. With no text tensor
+    # recorded, it stays unshaped rather than being given the hidden activation.
     context = SimpleNamespace(dims={merge.Symbol.HIDDEN.value: 4096}, dtype="float16")
     shape_inferencer = SimpleNamespace(context=context)
     nodes: list[dict] = []
@@ -2901,14 +2901,7 @@ def test_attach_vision_language_combine_applies_shape_from_context():
         shape_inferencer=shape_inferencer,
     )
     combine = nodes[-1]
-    shape_attr = next(
-        attr
-        for meta in combine["outputsMetadata"]
-        for attr in meta["attrs"]
-        if attr["key"] == "shape"
-    )
-    assert "4096" in shape_attr["value"]
-    assert "float16" in shape_attr["value"]
+    assert not combine.get("outputsMetadata")
 
 
 def test_attach_vision_language_combine_noop_without_text_exits():

@@ -870,6 +870,8 @@ def fill_missing_node_shapes(
                     sources.append((target_port, spec))
             if not sources or len(sources) == len(incoming_sources):
                 continue
+            if max(len(spec.shape) for _port, spec in sources) < 2:
+                continue
             spec = _fallback_node_spec(
                 node,
                 sources,
@@ -992,6 +994,68 @@ def group_boundary_shapes(nodes: list[dict[str, Any]]) -> dict[str, dict[str, st
             values = [shape for _label, shape in entries]
         attributes.setdefault(namespace, {})[key] = ", ".join(dict.fromkeys(values))
     return attributes
+
+
+def widen_broadcast_results(nodes: list[dict[str, Any]]) -> None:
+    """Replace a broadcast result that is narrower than its operands.
+
+    A multiply inferred before its activation had a spec keeps the scalar that
+    already had one. The activation is on the edge; once that edge is drawn,
+    the result is the broadcast, and a boundary that only forwards it takes
+    the same shape. A conversion that never received a spec copies the operand
+    the edge names, so the multiply can see it. A later section then sees the
+    activation it is handed.
+    """
+    node_by_id = {str(node.get("id", "")): node for node in nodes}
+    for _ in range(8):
+        progressed = False
+        for node in nodes:
+            incoming = _incoming_sources(node)
+            if not incoming:
+                continue
+            sources: list[tuple[str, TensorSpec]] = []
+            complete = True
+            for source_id, source_port, target_port in incoming:
+                source = node_by_id.get(source_id)
+                spec = _node_spec(source, source_port) if source is not None else None
+                if spec is None or not spec.shape:
+                    complete = False
+                    break
+                sources.append((target_port, spec))
+            if not complete or not sources:
+                continue
+            synthetic = _node_synthetic(node)
+            operation = _operation_of(node)
+            current = _node_spec(node, "0")
+            if operation in _BROADCASTING_OPS:
+                updated = _fallback_node_spec(node, sources)
+            elif synthetic in {"@output", "@input"} and len(sources) == 1:
+                updated = sources[0][1]
+            elif (
+                current is None
+                and len(sources) == 1
+                and synthetic
+                not in {
+                    "@input",
+                    "@output",
+                    "@input_mirror",
+                    "@output_mirror",
+                }
+            ):
+                # A conversion inferred before its operand had a spec stays
+                # blank, and the multiply reading it then keeps the scalar it
+                # could already see. The operand is on the edge now.
+                updated = sources[0][1]
+            else:
+                continue
+            if updated is None or not updated.shape:
+                continue
+            if current is not None and len(updated.shape) <= len(current.shape):
+                continue
+            apply_shape_attrs(node, updated)
+            progressed = True
+        if not progressed:
+            return
 
 
 def infer_block_tree_shapes(

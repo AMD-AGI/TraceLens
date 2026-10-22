@@ -238,6 +238,45 @@ class TestARopeHelperReusesTheTensorItsCallerAlreadyNamed:
             "box/@input:position_embeddings.sin"
         ]
 
+    def test_a_helper_two_boxes_in_keeps_its_own_boundary(self) -> None:
+        """The caller's tile is two boxes out. The helper still declares its own.
+
+        Reusing the further tile wires the op straight across both boxes, so
+        the inner box renders with an input it never declares.
+        """
+        nodes = _bundle([])
+        nodes[2]["namespace"] = "DecoderLayer"
+        helper = (
+            "DecoderLayer/MiniMaxM3VLAttention/_positional_l810_apply_rotary_pos_emb"
+        )
+        nodes.append(
+            _tile(
+                "attn/seq:6:@positional_l810_apply_rotary_pos_emb:@/@input:position_embeddings",
+                "position_embeddings",
+                "@input",
+                [("box/@input:position_embeddings", "0")],
+            )
+        )
+        nodes[-1]["namespace"] = helper
+        for port in ("0", "1"):
+            reader = _tile(
+                f"rope/@op_use{port}",
+                f"Use{port}",
+                None,
+                [
+                    (
+                        "attn/seq:6:@positional_l810_apply_rotary_pos_emb:@/@input:position_embeddings",
+                        port,
+                    )
+                ],
+            )
+            reader["namespace"] = helper
+            nodes.append(reader)
+        _split_tuple_boundary_slots(nodes)
+        assert _sources_of(nodes, "rope/@op_use0") == [
+            "attn/seq:6:@positional_l810_apply_rotary_pos_emb:@/@input:position_embeddings.cos"
+        ]
+
     def test_a_real_nested_module_still_names_its_own_boundary(self) -> None:
         nodes = _bundle([])
         nodes[2]["namespace"] = "DeepseekV4Attention"

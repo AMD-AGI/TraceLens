@@ -3056,6 +3056,39 @@ class ShapeInferencer:
                 if self._entry_spec_for(node, root) is not None:
                     self._entry_seeded_ids.add(node_id)
 
+        # A multiply inferred before its activation had a spec answers with the
+        # scalar that already had one, and the norm below it inherits that
+        # ``[1]``. The activation is in the graph; it just was not stored yet.
+        # Infer again once it is, and keep the new result only when it is wider.
+        for _pass in range(3):
+            widened = False
+            for node_id in order:
+                node = node_by_id[node_id]
+                if node.metadata.get("synthetic") == "@input":
+                    continue
+                previous = self._tensor_specs.get(node_id)
+                input_specs, input_labels = self._gather_input_specs(graph, node_id)
+                if not input_specs:
+                    continue
+                if previous is not None and max(
+                    len(item.shape) for item in input_specs
+                ) <= len(previous.shape):
+                    continue
+                output = self._infer_node_output(
+                    node, input_specs, root=root, input_labels=input_labels
+                )
+                if output is None or (
+                    previous is not None and len(output.shape) <= len(previous.shape)
+                ):
+                    continue
+                output = self._resolve_extent_dims(node, output, input_specs)
+                output = _with_explicit_dtype(node, output)
+                self._tensor_specs[node_id] = output
+                self._publish_output_port_specs(node, self._tensor_specs, root)
+                widened = True
+            if not widened:
+                break
+
         if root is not None and "HyperConnection" in root.class_name:
             batch = Symbol.BATCH.value
             seq = Symbol.SEQ.value
@@ -3287,33 +3320,54 @@ class ShapeInferencer:
         block_trees = architecture_section_trees(self.spec)
         basic_ops = self.spec.basic_ops or BasicOpFilter.for_detailed()
         sections: list[dict[str, Any]] = []
+        # This export draws each section on its own, so there is no spine exit
+        # to read. A text section consumes the architecture's hidden width.
+        previous_entry = self._caller_entry_spec
+        if previous_entry is None and self.spec.hidden_size:
+            self._caller_entry_spec = TensorSpec(
+                (
+                    Symbol.BATCH.value,
+                    Symbol.SEQ.value,
+                    self.spec.hidden_size,
+                ),
+                self.context.dtype,
+            )
         lm_head_tensor: str | None = None
 
         from TraceLens.ModelUtils.block_tree import subgraph_warrants_json_export
 
         seen_shape_signatures: set[tuple[Any, ...]] = set()
-        for title, block_tree in block_trees:
-            graph = build_model_graph(block_tree, title=title, basic_ops=basic_ops)
-            operators = self.export_operators(graph, root=block_tree)
-            for op in operators:
-                if op.name == "lm_head":
-                    lm_head_tensor = "lm_head"
-            if not subgraph_warrants_json_export(block_tree, basic_ops=basic_ops):
-                continue
-            signature = subgraph_boundary_signature(
-                operators,
-                class_name=block_tree.class_name,
-            )
-            if signature is not None:
-                if signature in seen_shape_signatures:
+        try:
+            for title, block_tree in block_trees:
+                graph = build_model_graph(block_tree, title=title, basic_ops=basic_ops)
+                operators = self.export_operators(graph, root=block_tree)
+                for op in operators:
+                    if op.name == "lm_head":
+                        lm_head_tensor = "lm_head"
+                if not subgraph_warrants_json_export(block_tree, basic_ops=basic_ops):
                     continue
-                seen_shape_signatures.add(signature)
-            sections.append(
-                {
-                    "title": title,
-                    "operators": [op.to_dict() for op in operators],
-                }
-            )
+                signature = subgraph_boundary_signature(
+                    operators,
+                    class_name=block_tree.class_name,
+                )
+                if signature is None and not any(
+                    op.operation not in {"input", "output"} for op in operators
+                ):
+                    # No operand resolved, so every copy of this class exports the
+                    # same empty boundary. That is one section, as a shared shape was.
+                    signature = ("unshaped", block_tree.class_name)
+                if signature is not None:
+                    if signature in seen_shape_signatures:
+                        continue
+                    seen_shape_signatures.add(signature)
+                sections.append(
+                    {
+                        "title": title,
+                        "operators": [op.to_dict() for op in operators],
+                    }
+                )
+        finally:
+            self._caller_entry_spec = previous_entry
 
         if include_model_output:
             output_op = self.model_output_operator(
@@ -4605,13 +4659,23 @@ class ShapeInferencer:
             # primitive is compiled -- there is no Python body to introspect --
             # and without it the op fell through to the per-module FX probe,
             # which is both slower and noisier than reading the two operands.
-            if len(inputs) >= 3 and inputs[0].shape and inputs[2].shape:
-                query, value = inputs[0], inputs[2]
+            query = (
+                self._operand_at(inputs, 0)
+                if self._last_input_positions
+                else (inputs[0] if inputs else None)
+            )
+            value = (
+                self._operand_at(inputs, 2)
+                if self._last_input_positions
+                else (inputs[2] if len(inputs) >= 3 else None)
+            )
+            if query is None or not query.shape:
+                return None
+            if value is not None and value.shape:
                 return TensorSpec(
                     shape=(*query.shape[:-1], value.shape[-1]), dtype=query.dtype
                 )
-            if inputs and inputs[0].shape:
-                return inputs[0]
+            return query
 
         if operation_label in {"matmul", "batchmatmul", "mm", "bmm"}:
             if len(inputs) >= 2:
@@ -4693,8 +4757,13 @@ class ShapeInferencer:
         if operation_label in {"cast", "contiguous"}:
             # Both keep the source shape. ``contiguous`` is a pure layout no-op
             # (shape *and* dtype pass through); ``cast`` reads its ``dtype:``
-            # detail to change dtype only.
-            source = inputs[0] if inputs else external_spec()
+            # detail to change dtype only. The source is argument 0: a later
+            # operand that resolved cannot stand in for one that did not.
+            source = self._operand_at(inputs, 0)
+            if source is None and not self._last_input_positions:
+                source = inputs[0] if inputs else None
+            if source is None:
+                source = external_spec()
             if source is None:
                 return None
             cast_dtype = source.dtype
@@ -5003,6 +5072,11 @@ class ShapeInferencer:
             operation_label in _POINTWISE_LABELS
             or (class_name or "").strip().lower() in _POINTWISE_LABELS
         ):
+            if inputs and self._operand_positions_skip():
+                # A missing operand has a rank of its own. The one that did
+                # resolve is not the result: ``hidden * weight`` with ``hidden``
+                # unknown is not the weight's ``[H]``.
+                return None
             if inputs:
                 if op_writes_into_its_first_operand(
                     _detail_value(details, "raw_op") or operation_label
@@ -5947,7 +6021,15 @@ class ShapeInferencer:
                         "external_inputs": list(op.external_inputs),
                     },
                 )
-                inferred = self._infer_node_output(temp_node, pred_specs, root=root)
+                # This walk hands each op the specs it already resolved.
+                # The positions recorded for the outer graph node do not
+                # describe that list, and a gap in them would blank the op.
+                previous_positions = self._last_input_positions
+                self._last_input_positions = []
+                try:
+                    inferred = self._infer_node_output(temp_node, pred_specs, root=root)
+                finally:
+                    self._last_input_positions = previous_positions
                 if inferred is not None:
                     op_shapes[op_id] = inferred
 
@@ -6178,6 +6260,18 @@ class ShapeInferencer:
                     dtype=source.dtype,
                 )
         return None
+
+    def _operand_positions_skip(self) -> bool:
+        """True when a wired operand was dropped before ``inputs`` was built.
+
+        ``inputs`` only contains operands whose shapes resolved, so a binary op
+        can be left holding just its second argument. Positions record the
+        argument index of each survivor; a gap means one is missing.
+        """
+        positions = self._last_input_positions
+        if not positions:
+            return False
+        return positions != list(range(positions[-1] + 1))
 
     def _operand_at(
         self, inputs: list[TensorSpec], argument_position: int
