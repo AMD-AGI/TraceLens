@@ -9,8 +9,10 @@
 import csv
 
 
-def write_csv(path, rows, fieldnames):
+def write_csv(path, rows, fieldnames, verbose=False):
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+    if verbose:
+        print("  Written: {} ({} rows)".format(path, len(rows)))
