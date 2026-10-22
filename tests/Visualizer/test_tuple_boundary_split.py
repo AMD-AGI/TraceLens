@@ -209,22 +209,28 @@ class TestARopeHelperReusesTheTensorItsCallerAlreadyNamed:
                 [("box/@input:position_embeddings", "0")],
             )
         )
-        nodes[-1]["namespace"] = (
-            "DeepseekV4Attention/_positional_l810_apply_rotary_pos_emb"
-        )
+        nodes[-1][
+            "namespace"
+        ] = "DeepseekV4Attention/_positional_l810_apply_rotary_pos_emb"
         for port in ("0", "1"):
             reader = _tile(
                 f"rope/@op_use{port}",
                 f"Use{port}",
                 None,
-                [("attn/seq:6:@positional_l810_apply_rotary_pos_emb:@/@input:position_embeddings", port)],
+                [
+                    (
+                        "attn/seq:6:@positional_l810_apply_rotary_pos_emb:@/@input:position_embeddings",
+                        port,
+                    )
+                ],
             )
             reader["namespace"] = nodes[-1]["namespace"]
             nodes.append(reader)
         _split_tuple_boundary_slots(nodes)
-        assert "attn/seq:6:@positional_l810_apply_rotary_pos_emb:@/@input:position_embeddings.cos" not in {
-            node["id"] for node in nodes
-        }
+        assert (
+            "attn/seq:6:@positional_l810_apply_rotary_pos_emb:@/@input:position_embeddings.cos"
+            not in {node["id"] for node in nodes}
+        )
         assert _sources_of(nodes, "rope/@op_use0") == [
             "box/@input:position_embeddings.cos"
         ]
