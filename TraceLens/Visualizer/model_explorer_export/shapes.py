@@ -517,7 +517,7 @@ def _fallback_node_spec(
         dict[str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] | None
     ) = None,
     module_spec: Callable[[str, TensorSpec], TensorSpec | None] | None = None,
-) -> TensorSpec:
+) -> TensorSpec | None:
     """Infer merge-only synthetic ops that have no block-tree shape record."""
     specs = [spec for _target_port, spec in sources]
     # The operation the node records, never its display label. A label is for
@@ -576,6 +576,9 @@ def _fallback_node_spec(
         resolved = _resolve_view_shape(shape_detail, specs[0], dims or {})
         if resolved is not None:
             return TensorSpec(resolved, specs[0].dtype)
+        declared = [part.strip() for part in shape_detail.split(",") if part.strip()]
+        if len(declared) >= 2 and len(declared) != len(specs[0].shape):
+            return None
 
     if operation in {"permute", "transpose"} and specs:
         dims_detail = next(
@@ -734,11 +737,11 @@ def fill_missing_node_shapes(
     boundary_spec: Callable[[str, str], TensorSpec | None] | None = None,
     module_spec: Callable[[str, TensorSpec], TensorSpec | None] | None = None,
 ) -> None:
-    """Give every node a shape so the viewer never falls back to rendering ``?``.
+    """Give a node the shape its producer or a meta trace already established.
 
     Spine summaries, group input ports and nested-diagram nodes have no entry in the
-    per-section inference results, so they inherit the shape of whatever feeds them and
-    otherwise fall back to the model's activation shape.
+    per-section inference results, so they inherit the shape of whatever feeds them.
+    A node with neither stays unshaped.
 
     ``boundary_spec(label, namespace)`` optionally supplies the meta-device ground
     truth for a leaf ``@input`` boundary parameter (e.g. the sparse-attention
@@ -747,10 +750,6 @@ def fill_missing_node_shapes(
     inferred from the parameter's name.
     """
     canonicalize_port_shape_keys(nodes)
-    hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-    activation = TensorSpec(
-        (Symbol.BATCH.value, Symbol.SEQ.value, hidden), context.dtype
-    )
     tokens = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value), "int64")
 
     node_by_id = {str(node.get("id", "")): node for node in nodes}
@@ -836,27 +835,63 @@ def fill_missing_node_shapes(
                 conv_geometry=context.conv_geometry,
                 module_spec=module_spec,
             )
+            if spec is None:
+                continue
             node_id = str(node.get("id", ""))
             known[(node_id, "0")] = spec
             _apply_shape_attrs(node, spec)
             pending.remove(node)
             progressed = True
+        if progressed:
+            continue
+        # An operand that never gets a shape must not blank the ones that did.
+        # A broadcast op can be read off the operands that resolved; a join or
+        # a view cannot, and stays unshaped.
+        for node in list(pending):
+            if _operation_of(node) not in {
+                "add",
+                "subtract",
+                "multiply",
+                "divide",
+                "power",
+                "maximum",
+                "minimum",
+            }:
+                continue
+            sources = []
+            incoming_sources = _incoming_sources(node)
+            for source_id, source_port, target_port in incoming_sources:
+                spec = known.get((source_id, source_port))
+                if spec is None:
+                    source_node = node_by_id.get(source_id)
+                    if source_node is not None:
+                        spec = _node_spec(source_node, source_port)
+                if spec is not None:
+                    sources.append((target_port, spec))
+            if not sources or len(sources) == len(incoming_sources):
+                continue
+            spec = _fallback_node_spec(
+                node,
+                sources,
+                working_dtype=context.dtype,
+                dims=context.dims,
+                conv_geometry=context.conv_geometry,
+                module_spec=module_spec,
+            )
+            if spec is None:
+                continue
+            node_id = str(node.get("id", ""))
+            known[(node_id, "0")] = spec
+            _apply_shape_attrs(node, spec)
+            pending.remove(node)
+            progressed = True
+            break
         if not progressed:
             break
 
-    for node in pending:
-        # A node still unresolved here has no spec of its own and nothing usable
-        # feeding it. Stamping the model's activation shape on a boundary or a
-        # summary tile is a reasonable default -- they carry the hidden stream.
-        # Stamping it on a COMPUTATION with no inputs is not: it asserts a shape
-        # the op cannot have (a sourceless ``torch.arange`` reported
-        # ``[B, S, hidden]`` when it produces a 1-D index range). Leave those
-        # alone so the gap is visible and gets fixed at the source instead of
-        # being papered over with a plausible-looking wrong answer.
-        if _node_synthetic(node) or not node.get("incomingEdges"):
-            if not _node_synthetic(node):
-                continue
-        _apply_shape_attrs(node, activation)
+    # Whatever is still pending has no shape of its own and no shaped producer.
+    # Leave it unshaped. Inventing the activation here is what made a padding
+    # mask report ``[B, S, H]``.
 
 
 def _namespace_chain(namespace: str) -> list[str]:

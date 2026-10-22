@@ -225,15 +225,15 @@ def _append_stack_entry_dataflow(
     node_by_id = {str(node.get("id", "")): node for node in nodes}
     ref_specs: dict[str, TensorSpec] = {}
     if shape_inferencer is not None:
-        context = shape_inferencer.context
+        token_ids = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value), "int64")
         for component in spec.stack_pre:
             if component.role != "embedding" or component.attr_name not in refs:
                 continue
-            hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            ref_specs[component.attr_name] = TensorSpec(
-                (Symbol.BATCH.value, Symbol.SEQ.value, hidden),
-                context.dtype,
+            embedded = shape_inferencer.module_output_spec(
+                component.attr_name, token_ids
             )
+            if embedded is not None:
+                ref_specs[component.attr_name] = embedded
     for operation in dataflow.operations:
         source_pairs = [
             (predecessor, refs[predecessor])
@@ -7719,13 +7719,6 @@ def _attach_vision_language_combine(
             },
         ],
     }
-    if shape_inferencer is not None:
-        context = shape_inferencer.context
-        hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-        apply_shape_attrs(
-            node,
-            TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value, hidden), context.dtype),
-        )
     nodes.append(node)
     return [(combine_id, "0")]
 

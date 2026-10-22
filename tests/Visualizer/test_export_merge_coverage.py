@@ -48,6 +48,7 @@ from TraceLens.ModelUtils.shape_inference import (
     _dim_term,
     _int_dim,
     _nested_dim_aliases,
+    _param_is_rank2_matrix,
     _parse_module_ctor,
     _parse_tensor_ctor_shape,
     _replace_last_dim,
@@ -1987,6 +1988,13 @@ def test_shape_module_registry_lookup_and_ambiguity():
         # reduces the same way. Only an axis this shape does not carry is left.
         ("sum", [TensorSpec(("B", "S", 8))], ["dim: 2"], ("B", "S"), "float16"),
         (
+            "sum",
+            [TensorSpec(("B", "S", 7168), "bfloat16")],
+            ["dtype: torch.int32", "dim: -1"],
+            ("B", "S"),
+            "bfloat16",
+        ),
+        (
             "multiply",
             [TensorSpec((8,)), TensorSpec(("B", "S", 16))],
             [],
@@ -2055,12 +2063,39 @@ def test_shape_special_nodes_linear_router_and_fallbacks():
         [TensorSpec(("B", "S", 16))],
         root=None,
     ).shape == ("B", "S", 16)
-    assert inferencer._infer_node_output(
-        _model_node("Kernel", operation=OperationKind.GPU_KERNEL), [], root=None
-    ).shape == ("B", "S", 16)
-    assert inferencer._infer_node_output(
-        _model_node("Unknown", operation=OperationKind.UNKNOWN), [], root=None
-    ).shape == ("B", "S", 16)
+    assert (
+        inferencer._infer_node_output(
+            _model_node("Kernel", operation=OperationKind.GPU_KERNEL), [], root=None
+        )
+        is None
+    )
+    assert (
+        inferencer._infer_node_output(
+            _model_node("Unknown", operation=OperationKind.UNKNOWN), [], root=None
+        )
+        is None
+    )
+
+
+def test_raising_rank2_guard_and_matrix_slice_names_batch_and_sequence():
+    source = ast.parse("""
+class Attention:
+    def forward(self, hidden_states, attention_mask=None):
+        if attention_mask is not None:
+            if attention_mask.dim() != 2:
+                attention_mask = kwargs.get("padding_mask")
+            if attention_mask is not None and attention_mask.dim() != 2:
+                raise ValueError("attention_mask must be [batch_size, seq_len]")
+        batch_size, q_len, _ = hidden_states.shape
+        if attention_mask is not None:
+            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
+        if pixel_values is not None and pixel_values.dim() != 4:
+            raise ValueError("pixel_values must be rank 4")
+""")
+    forward = source.body[0].body[0]
+    assert _param_is_rank2_matrix(forward, "attention_mask")
+    assert not _param_is_rank2_matrix(forward, "pixel_values")
+    assert not _param_is_rank2_matrix(forward, "hidden_states")
 
 
 def test_fx_op_fallback_join_and_occurrence_counting():
