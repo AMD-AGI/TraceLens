@@ -524,17 +524,14 @@ def resolve_source_files(
             files.append(path)
             labels.append(label)
         else:
-            # The flattened ``model_type`` is often the text backbone
-            # (``muse_spark_text``), whose classes live in the wrapper package
-            # (``modeling_muse_spark.py``). Try every type the config names,
-            # wrapper first, and stop at the first installed module.
-            for candidate in _config_model_types(config):
-                tf_path = _transformers_modeling_path(candidate)
-                if tf_path is None:
-                    continue
+            # Only the flattened model type. An installed wrapper module
+            # (``modeling_glm5_next.py``) can be a different revision than
+            # ``TRANSFORMERS_GITHUB_SOURCE``, which is what the graph tests
+            # pin their op ids to. The wrapper is tried after that pin.
+            tf_path = _transformers_modeling_path(model_type)
+            if tf_path is not None:
                 files.append(tf_path)
                 labels.append(str(tf_path))
-                break
 
     auto_map_files = _collect_auto_map_files(config)
 
@@ -573,6 +570,20 @@ def resolve_source_files(
             path, label = upstream
             files.append(path)
             labels.append(label)
+        else:
+            # The flattened type is often the text backbone
+            # (``muse_spark_text``), whose classes live in the wrapper
+            # package (``modeling_muse_spark.py``). Use that installed
+            # module when the pinned GitHub ref does not have it.
+            for candidate in _config_model_types(config):
+                if candidate == model_type:
+                    continue
+                tf_path = _transformers_modeling_path(candidate)
+                if tf_path is None:
+                    continue
+                files.append(tf_path)
+                labels.append(str(tf_path))
+                break
 
     # Analysis reads the files in order, so modeling code has to precede the
     # config and processing helpers a checkpoint may also ship.
