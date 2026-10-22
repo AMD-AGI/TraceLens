@@ -60,7 +60,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
     the library name(s) in parentheses when present in the sub-agent findings. Omit when no
     library is identified. System-Level and Kernel Fusion titles do NOT include a library
     parenthetical.
-13. Multi-trace (`multi_trace` scope, `comparison_scope` stays `standalone`): use the STANDALONE
+13. Multi-trace standalone (`multi_trace` scope): use the STANDALONE
     blocks. Impact scores are a percent of the combined time of all jobs. Compute P-items carry a
     `**Phase**: <phase>` field when the finding has a phase (see the P-item card notes); Fusion and
     System sections cover the focus job only and open with a scope line.
@@ -156,7 +156,7 @@ _Times and percentages are summed across all phases (<phase_1> + <phase_2>). See
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- One card per entry in priority_data.findings[] in array order. Title uses the entry's category and library; Action text is category-appropriate. Do NOT recommend "fuse the SDPA kernel" (already fused — defer upstream/downstream fusion to Kernel Fusion section). -->
 <!-- Skip categories that have empty category_findings[] in category_data/<cat>_metrics.json (no P-items for that category). -->
-<!-- `phase=` is omitted from the marker when the finding has no phase. On multi_trace runs each card also opens with `**Phase**: <priority_data.findings[i].phase>` as its first field, before **Insight**, and the Detailed Analysis block carries the same line before **Identification:**. Omit the line when the finding has no phase. Headings stay plain, and the phase is not repeated in titles, insight text, or the Operation column. -->
+<!-- `phase=` is omitted from the marker when the finding has no phase. On multi-trace standalone runs each card also opens with `**Phase**: <priority_data.findings[i].phase>` as its first field, before **Insight**, and the Detailed Analysis block carries the same line before **Identification:**. Omit the line when the finding has no phase. Headings stay plain, and the phase is not repeated in titles, insight text, or the Operation column. -->
 <!-- Heuristic findings (priority_data.findings[i].estimate_method == "heuristic") carry a numeric estimated impact and sort by impact_score like any other compute finding; render per sub_agent_spec.md § Heuristic findings. -->
 
 ### 🔴 P1: <Brief Title> (<Library>)

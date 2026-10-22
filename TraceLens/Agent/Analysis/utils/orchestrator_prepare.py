@@ -768,26 +768,6 @@ def main():
         print(f"\n  Category: Multi-Kernel Issues (multi_kernel)")
         print(f"    ℹ️  Multi-kernel data available (memcpy/NCCL events present)")
 
-        # Create multi-kernel metadata
-        multi_kernel_metadata = {
-            "platform": platform,
-            "peak_mem_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
-            "max_achievable_tflops": platform_specs["max_achievable_tflops"],
-            "memory_gb": platform_specs.get("memory_gb"),
-            "trace_path": trace_path,
-            "output_dir": output_dir,
-            "category": "Multi-Kernel Issues",
-            "category_name": "multi_kernel",
-            "gpu_utilization": system_utilization,
-            "tier": "system",
-        }
-
-        multi_kernel_metadata_file = f"{output_dir}/metadata/multi_kernel_metadata.json"
-        with open(multi_kernel_metadata_file, "w") as f:
-            json.dump(multi_kernel_metadata, f, indent=2)
-
-        print(f"    ✓ Exported metadata")
-
         # Add to categories list (system tier)
         exported_categories.append(
             {
@@ -797,7 +777,7 @@ def main():
                 "tier": "system",
                 "ops_count": 0,
                 "csv_file": None,
-                "metadata_file": multi_kernel_metadata_file,
+                "metadata_file": None,
                 "data_file": multi_kernel_data_file,
             }
         )

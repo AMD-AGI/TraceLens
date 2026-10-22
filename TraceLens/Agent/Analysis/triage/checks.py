@@ -613,17 +613,6 @@ def check_high_idle(run_dir, stream_file):
     return None
 
 
-def check_gpu_graph_replay(run_dir, stream_file):
-    if stream_contains(stream_file, r"DIAG:trace_quality:GPU_GRAPH_REPLAY"):
-        return FindingDraft(
-            "GPU Graph Replay detected in default mode",
-            "DIAG tag found in agent stream",
-            "Switch to inference analysis mode (--analysis_mode inference)",
-        )
-    # ToDo: add detailed trace-scan check once we have a stream file
-    return None
-
-
 def check_corrupt_json(run_dir, _stream_file):
     trace_path = resolve_trace_path(run_dir)
     if not trace_path or not os.path.exists(trace_path):
@@ -1363,7 +1352,6 @@ ALL_CHECKS = [
         detailed_only=True,
     ),
     CheckSpec("2g", "HIGH_IDLE", "trace_quality", check_high_idle),
-    CheckSpec("2h", "GPU_GRAPH_REPLAY", "trace_quality", check_gpu_graph_replay),
     CheckSpec("2i", "CORRUPT_JSON", "trace_quality", check_corrupt_json),
     CheckSpec("2j", "RUNTIME_INSTABILITY", "trace_quality", check_runtime_instability),
     # -- 3x: perf_model -----------------------------------------------------

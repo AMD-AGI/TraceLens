@@ -125,7 +125,7 @@ details.
 | `standalone` | One job. |
 | `comparative` | Two jobs. `capture_folder` is optional per job. The agent compares them with TraceDiff. |
 | `semantic` | Two jobs, `analysis_mode: inference`, no `capture_folder`. Both traces are graph-replay-only. |
-| `multi_trace` | Two or more named jobs on one platform, no `compare_to`, plus a top-level `focus_job` naming one job. Compute findings are ranked jointly across jobs and each carries a Phase field; kernel fusion and system analysis run on the focus job. Each job's `phase` is its name; a different `phase` is rejected. |
+| `multi_trace` | Two or more jobs on one platform, no `compare_to`, and a top-level `focus_job`. One report ranks findings across all jobs, each labeled with its job name as the phase. Kernel fusion and system analysis use the focus job. |
 
 Every job needs `platform`, and the trace, capture folder, and output paths must be absolute. For the full schema and
 examples, see

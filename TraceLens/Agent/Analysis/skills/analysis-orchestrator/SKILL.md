@@ -22,7 +22,7 @@ Coordinate **system-level** analysis (CPU/idle, kernel fusion, multi-kernel / co
 
 ## Full procedure
 
-Follow **[reference.md](reference.md)** for every step (user prompts, `<prefix>` / `{CMD}` usage, CLI commands, subagent launch text, validation, report `tee` order, plot embedding, and trace diagnostics).
+Follow **[reference.md](reference.md)** for every step (user prompts, `<prefix>` / `{CMD}` usage, CLI commands, subagent launch text, validation, report `tee` order, and plot embedding).
 
 ## Workflow index
 

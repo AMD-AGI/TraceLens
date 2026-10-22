@@ -25,7 +25,7 @@ When invoked by the orchestrator, you will receive the following context:
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - `comparison_scope`: `standalone` (default) or `comparative`
 
-On `multi_trace` runs the candidates and metrics are for the focus job only; do not attribute findings to other phases.
+On multi-trace standalone runs the candidates and metrics are for the focus job only; do not attribute findings to other phases.
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/fusion_candidates.json` - Candidate summaries with kernel details

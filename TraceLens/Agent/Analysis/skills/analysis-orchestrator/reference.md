@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 # Analysis orchestrator — reference
 
-This document is the detailed specification for the TraceLens **analysis-orchestrator** skill ([SKILL.md](SKILL.md)). Read it when executing the workflow: step-by-step user prompts, CLI commands, subagent contracts, validation, report assembly, and trace diagnostics.
+This document is the detailed specification for the TraceLens **analysis-orchestrator** skill ([SKILL.md](SKILL.md)). Read it when executing the workflow: step-by-step user prompts, CLI commands, subagent contracts, validation, and report assembly.
 
 ## Workflow overview
 
@@ -54,22 +54,32 @@ The prompt selects the input mode:
 
 ### Required Information:
 
-1. **Comparison scope** → `<comparison_scope>`
-   - Set from the user’s intent **before** deep-diving on paths:
-     - **`comparative`** if the skill was triggered by **“comparative analysis”**, **“compare two traces”**, or the user supplies **two** trace paths / explicitly asks to compare trace A vs B.
-     - **`multi_trace`** if the user supplies **several named jobs of one workload on one platform** (for example prefill and decode captures); ask which job is the focus (fusion and system analysis run on it) → `<focus_job>`. `<comparison_scope>` stays `standalone`.
-     - **`standalone`** otherwise (including triggers **“standalone analysis”**, **“analyze trace standalone”**, single trace only).
+1. **Scope** → `<scope>`
 
-2. **Trace File Path(s)**
+   | `<scope>` | `<comparison_scope>` |
+   |---|---|
+   | `standalone` | standalone |
+   | `multi_trace` | standalone |
+   | `comparative` | comparative |
+   | `semantic` | comparative |
+
+   - Set from the user’s intent before asking for paths:
+     - **`comparative`** if the user asks for a comparative analysis, to compare two traces, or supplies two trace paths.
+     - **`multi_trace`** (multi-trace standalone) if the user supplies several named jobs of one workload on one platform (for example prefill and decode captures); ask which job is the focus → `<focus_job>`.
+     - **`standalone`** otherwise, including a request for standalone analysis or a single trace.
+
+2. **Trace File Path(s)** (PyTorch trace, `.json` or `.json.gz`)
    - **`standalone`:** **Trace File Path** → `<trace_path>`
-     - Ask: "Please provide the full path to your PyTorch trace file (.json or .json.gz)"
+     - Ask: "Please provide the full path to your trace file"
    - **`comparative`:** ask for both:
      - **Primary trace (trace1)** → `<trace_path>`
      - **Comparison trace (trace2)** → `<trace2_path>`
-     - Ask: "Please provide the full path to your primary trace file and your comparison trace file (.json or .json.gz)"
+     - Ask: "Please provide the full path to your primary trace file and your comparison trace file"
+   - **`multi_trace`:** ask for each job (2 or more) a name and **Trace File Path**
+     - Ask: "Please provide a name and the full path to the trace file for each job"
 
 3. **Platform** → `<platform>`
-   **`standalone`**: Ask: "Which platform are you analyzing?"
+   **`standalone`, `multi_trace`**: Ask: "Which platform are you analyzing?" (`multi_trace`: one platform for all jobs)
    **`comparative`**: Ask: "Which platform is baseline trace (trace1)?"
    - Options:
      1. **MI300X**
@@ -91,14 +101,15 @@ The prompt selects the input mode:
       Ask for the **Capture Folder Path(s)**:
       - `standalone`: one folder → `<capture_folder_path_1>`. Ask: "Please provide the full path to the graph capture traces folder"
       - `comparative`: one folder per trace → `<capture_folder_path_1>` (primary/trace1) and `<capture_folder_path_2>` (comparison/trace2). Ask: "Please provide the graph capture traces folder for the primary trace and for the comparison trace."
+      - `multi_trace`: one folder per job, optional. Ask: "Please provide the graph capture traces folder for each job that has one."
 
      3. **Graph replay only** (`<inference_exec_mode>` = `graph_replay_only`) — graph replay with no capture folder available:
-     - `standalone`: abort.
+     - `standalone`, `multi_trace`: continue without a capture folder; the Step 2 gate routes to the deterministic fallback.
      - `comparative`: use scope `semantic`.
 
 5. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"
-     - If **local**: No further environment questions — prefix is blank (commands run directly).
+     - If **local**: No further environment questions,prefix is blank (commands run directly).
      - If **cluster**:
        - Ask "Which node should we use?" → `<node>`
        - Ask "Are you working in a containerized environment (e.g. Docker)?" → if yes, ask for container name → `<container>`
@@ -182,7 +193,7 @@ Run one `config_utils` command. It completes the config, writes `<output_dir>/ca
   [--scope <scope>]
 ```
 
-**Interactive mode** (`<scope>` is the comparison scope, `multi_trace`, or `semantic` for the `comparative` graph replay only case):
+**Interactive mode:**
 
 ```bash
 <prefix> python3 -m TraceLens.Agent.Analysis.utils.config_utils build \
@@ -207,7 +218,7 @@ Otherwise, show the change lines to the user and assign each `key=value` line to
 
 ### Pre-processing
 
-Only when `<comparison_method>` = semantic; otherwise skip to Generate Report.
+Only when `<scope>` = semantic; otherwise skip to Generate Report.
 
 1. **Semantic diff (subagent)** — launch a Task subagent that reads and follows the FULL instructions in `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/semantic-comparison-agent.md`. Prompt context:
 
@@ -250,8 +261,6 @@ This call can run for several minutes, longer for comparative graph-capture runs
 
 If it exits non-zero or times out, show the tail of its output, emit `[DIAG:pipeline:STEP1_FAIL]`, and stop.
 
-On `multi_trace` runs it writes `perf_report_<job>_csvs/` per job and `perf_report_aggregated_csvs/`, every job's rows combined with a `phase` column. There is no `perf_report_csvs/`.
-
 ---
 
 ## Step 2: Trace-Quality Gate
@@ -268,11 +277,11 @@ print(f'STATUS={status}')
 print(f'GRAPH_REPLAY_FRACTION={coverage.graph_replay_fraction}')
 " 
 ```
-<graph_replay_fraction> refers to the returned GRAPH_REPLAY_FRACTION value. On `multi_trace` runs the gate is judged per phase and the reason names the failing phase; the fallback below is taken exactly as for `standalone`.
+<graph_replay_fraction> refers to the returned GRAPH_REPLAY_FRACTION value.
 
 **`STATUS=OK`:** Proceed
 **`STATUS=GRAPH_UNDER_RECORDED`:**
-If <comparison_method> = semantic, skip the rest of this step and proceed with Steps 3-6.
+If <scope> = semantic, skip the rest of this step and proceed with Steps 3-6.
 
 Otherwise,
 
@@ -356,7 +365,7 @@ Launch system-level sub-agents simultaneously using the Task tool. Do NOT wait b
 | `kernel_fusion` | `kernel-fusion-analyzer.md` |
 
 **Invocation conditions:**
-- **CPU/Idle**: Read `category_data/category_manifest.json` and check `gpu_utilization.idle_time_percent`. On `multi_trace` runs system analysis is scoped to the focus job, so apply this and the Multi-Kernel condition to `gpu_utilization.phases[<focus_job>]` (what Step 7.1 prints), not the combined top-level values. Only invoke the subagent if `idle_time_percent > 15`. Skip otherwise -- the deterministic script already captured the factual data.
+- **CPU/Idle**: Read `category_data/category_manifest.json` and check `gpu_utilization.idle_time_percent`. On multi-trace standalone runs system analysis is scoped to the focus job, so apply this and the Multi-Kernel condition to `gpu_utilization.phases[<focus_job>]` (what Step 7.1 prints). Only invoke the subagent if `idle_time_percent > 15`.
 - **Multi-Kernel**: `multi_kernel` category exists in manifest OR `gpu_util['exposed_comm_time_percent'] > 0` OR `gpu_util['exposed_memcpy_time_percent'] > 0`
 - **Kernel Fusion**: `kernel_fusion` category exists in manifest
 
@@ -682,11 +691,3 @@ embed_plot_in_report(sys.argv[1])
 ```
 
 If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
----
-
-## Trace Feature Detection
-
-If Steps 1 or many of Steps 3-6 fail or produce unexpected results, check whether the trace uses the following features before retrying:
-- **GPU Graph Replay**: raw trace JSON contains `hipGraphLaunch` or `cudaGraphLaunch`.
-  - **Default mode** (analysis_mode = `default`): Inform the user with `[DIAG:trace_quality:GPU_GRAPH_REPLAY]` that GPU graph replay was detected and that the default analysis mode supports typical PyTorch traces. **Abort** -- do not retry or continue.
-  - **Inference mode** (analysis_mode = `inference`): Graph launches are expected and supported if graph capture folder is provided, do not abort. If no capture folder was provided, continue.

@@ -14,7 +14,7 @@ The TraceLens Agent is an agentic performance analysis tool that generates actio
 
 **Comparative**: Two-trace gap analysis. The agent compares a primary trace against a reference trace (e.g. a different platform, a tuned config) and identifies inefficiencies in the primary trace relative to the reference. Suitable when the goal is to understand where the primary trace is slower than the reference. Comparative analysis works best when both traces are collected from the same framework (e.g. both from vLLM, both from SGLang, or both from ATOM). Cross-framework comparisons may produce misleading gap estimates due to structural differences in operation call stacks.
 
-**Multi-trace** (`multi_trace` scope): Several named jobs of one workload on one platform (for example prefill and decode captures) analyzed as one run. Compute findings are ranked jointly, each `impact_score` is a percent of the combined time of all jobs, and each P-item carries a Phase field. Kernel fusion and system-level analysis run on one `focus_job`. Config shape: [Run the agent from a YAML config](../../../docs/how-to/agent.md). Combined CSVs are in `perf_report_aggregated_csvs/`.
+**Multi-trace standalone**: Several traces of one workload on one platform, such as the prefill and decode phases of an inference server, analyzed together into a single report. Findings are ranked by their impact on the combined runtime, and each one names the phase it came from. Kernel fusion and system-level analysis focus on one phase you choose. Suitable when no single trace represents the workload. Set it up with a [YAML config](../../../docs/how-to/agent.md).
 
 ### Supported Analyses
 
@@ -204,7 +204,7 @@ The snippets below are illustrative excerpts showing the format of the agent's a
 
 Every report embeds HTML comment markers that a downstream system can leverage without parsing prose:
 
-- `<!-- impact-begin kind=p_item category=<cat> low=<x> mid=<y> high=<z> -->` … `<!-- impact-end -->` wraps every P-item's Impact line. `mid` is the canonical `impact_score`. `<cat>` is the analyzer category (`gemm`, `sdpa_fwd`, `elementwise`, `norm_fwd`, etc.). On multi-trace runs the marker also carries `phase=<name>`, the job the finding came from, and each card and Detailed Analysis block carries a `**Phase**: <phase>` field.
+- `<!-- impact-begin kind=p_item category=<cat> low=<x> mid=<y> high=<z> -->` … `<!-- impact-end -->` wraps every P-item's Impact line. `mid` is the canonical `impact_score`. `<cat>` is the analyzer category (`gemm`, `sdpa_fwd`, `elementwise`, `norm_fwd`, etc.). On multi-trace runs the marker also carries `phase=<name>`.
 - `<!-- impact-begin kind=top_ops -->` … `<!-- impact-end -->` wraps the Top Operations table at the start of the Compute Kernel Optimizations section.
 - Per-P-item anchors `#detailed-analysis-compute-pN`, `#detailed-analysis-fusion-PN`, and `#detailed-analysis-system-pN` link each summary card to its detailed reasoning section.
 
