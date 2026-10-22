@@ -65,7 +65,7 @@ The prompt selects the input mode:
 
    - Set from the user’s intent before asking for paths:
      - **`comparative`** if the user asks for a comparative analysis, to compare two traces, or supplies two trace paths.
-     - **`multi_trace`** (multi-trace standalone) if the user supplies several named jobs of one workload on one platform (for example prefill and decode captures); ask which job is the focus → `<focus_job>`.
+     - **`multi_trace`** (multi-trace standalone) if the user supplies several named jobs of one workload on one platform (for example prefill and decode captures).
      - **`standalone`** otherwise, including a request for standalone analysis or a single trace.
 
 2. **Trace File Path(s)** (PyTorch trace, `.json` or `.json.gz`)
@@ -75,8 +75,8 @@ The prompt selects the input mode:
      - **Primary trace (trace1)** → `<trace_path>`
      - **Comparison trace (trace2)** → `<trace2_path>`
      - Ask: "Please provide the full path to your primary trace file and your comparison trace file"
-   - **`multi_trace`:** ask for each job (2 or more) a name and **Trace File Path**
-     - Ask: "Please provide a name and the full path to the trace file for each job"
+   - **`multi_trace`:** ask for each job (2 or more) a name, a phase and **Trace File Path**; jobs that share a phase are combined
+     - Ask: "Please provide a name, a phase and the full path to the trace file for each job, starting with the job that kernel fusion and system analysis should focus on"
 
 3. **Platform** → `<platform>`
    **`standalone`, `multi_trace`**: Ask: "Which platform are you analyzing?" (`multi_trace`: one platform for all jobs)
@@ -202,11 +202,10 @@ Run one `config_utils` command. It completes the config, writes `<output_dir>/ca
   --output_dir <output_dir> \
   --job trace_path=<trace_path>,platform=<platform>[,capture_folder=<capture_folder_path_1>] \
   [--job trace_path=<trace2_path>,platform=<platform2>[,capture_folder=<capture_folder_path_2>]] \
-  [--set extension_file=<extension_file>] \
-  [--set focus_job=<focus_job>]
+  [--set extension_file=<extension_file>]
 ```
 
-Pass the second `--job` for `comparative` and `semantic`, a `capture_folder` only for graph replay + capture, and `--set extension_file` only when an extension file was provided. For `multi_trace`, pass one `--job name=<name>,...` per job (2 or more, same platform) and `--set focus_job=<focus_job>`; the variables then describe the focus job and include `focus_job`.
+Pass the second `--job` for `comparative` and `semantic`, a `capture_folder` only for graph replay + capture, and `--set extension_file` only when an extension file was provided. For `multi_trace`, pass one `--job name=<name>,phase=<phase>,...` per job (2 or more, same platform), the focus job first; the variables then describe the focus job and include `focus_job`.
 
 If it exits non-zero, the errors are on stderr. In YAML mode, show them and stop. In Interactive mode, re-ask the field an error names once and rebuild.
 
@@ -309,11 +308,10 @@ Execute the TraceLens Agentic Mode orchestrator preparation script:
   --output-dir <output_dir> \
   --comparison-scope <comparison_scope> \
   [--platform2 <platform2>] \
-  [--capture-folder <capture_folder>] \
-  [--focus-job <focus_job>]
+  [--capture-folder <capture_folder>]
 ```
 
-Pass `--platform2` only for comparative, `--capture-folder` only if `config_utils` printed one, and `--focus-job` only for `multi_trace`. Use your longest command timeout.
+Pass `--platform2` only for comparative and `--capture-folder` only if `config_utils` printed one. Use your longest command timeout.
 
 This script performs:
 - **Step 3:** Assess GPU utilization (computation, idle, communication times)
@@ -365,7 +363,7 @@ Launch system-level sub-agents simultaneously using the Task tool. Do NOT wait b
 | `kernel_fusion` | `kernel-fusion-analyzer.md` |
 
 **Invocation conditions:**
-- **CPU/Idle**: Read `category_data/category_manifest.json` and check `gpu_utilization.idle_time_percent`. On multi-trace standalone runs system analysis is scoped to the focus job, so apply this and the Multi-Kernel condition to `gpu_utilization.phases[<focus_job>]` (what Step 7.1 prints). Only invoke the subagent if `idle_time_percent > 15`.
+- **CPU/Idle**: Read `category_data/category_manifest.json` and check `gpu_utilization.idle_time_percent`. On multi-trace standalone runs system analysis is scoped to the focus job, so apply this and the Multi-Kernel condition to `gpu_utilization.jobs[<focus_job>]` (what Step 7.1 prints). Only invoke the subagent if `idle_time_percent > 15`.
 - **Multi-Kernel**: `multi_kernel` category exists in manifest OR `gpu_util['exposed_comm_time_percent'] > 0` OR `gpu_util['exposed_memcpy_time_percent'] > 0`
 - **Kernel Fusion**: `kernel_fusion` category exists in manifest
 
@@ -590,7 +588,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
 
    a. **Initialize** — truncate and write the title line, the `report_mode` + any `kind=warning` markers (see the template title block and the Warnings rule below), then `## Executive Summary` (metrics table, `{{PERF_PLOT}}` placeholder). Use `<prefix> tee <output_dir>/analysis.md << 'SECTION_EOF'` (truncating `tee`, not append) for this first write only.
       - Data sources: `category_data/category_manifest.json` (`gpu_utilization` keys), `priority_data.json` (top bottleneck).
-      - `multi_trace`: Total Time is the combined time; add one sentence giving each phase's window from `gpu_utilization.phases`.
+      - `multi_trace`: Total Time is the combined time; add one sentence naming the phases (the distinct `phase` values in `gpu_utilization.jobs`) with each phase's time, the sum of `total_time_ms` over its jobs.
 
    b. **Compute Kernel Optimizations** — append `## Compute Kernel Optimizations` with `### Top Operations` table and P-item cards. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
       - Data sources: `priority_data.json` — P1 = `findings[0]`, P2 = `findings[1]`, ... ; each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting).

@@ -187,7 +187,11 @@ def main():
         "platform": platform,
         "peak_mem_bw_tbs": peak_bw_tbs,
         "baseline_ms": baseline_ms,
-        "phase": manifest.get("focus_job"),
+        "phase": (
+            None
+            if manifest.get("focus_job") is None
+            else manifest["gpu_utilization"]["jobs"][manifest["focus_job"]]["phase"]
+        ),
         "impact_estimates": [e.to_dict() for e in impact_estimates],
         **scope_metrics,
     }

@@ -14,7 +14,7 @@ The TraceLens Agent is an agentic performance analysis tool that generates actio
 
 **Comparative**: Two-trace gap analysis. The agent compares a primary trace against a reference trace (e.g. a different platform, a tuned config) and identifies inefficiencies in the primary trace relative to the reference. Suitable when the goal is to understand where the primary trace is slower than the reference. Comparative analysis works best when both traces are collected from the same framework (e.g. both from vLLM, both from SGLang, or both from ATOM). Cross-framework comparisons may produce misleading gap estimates due to structural differences in operation call stacks.
 
-**Multi-trace standalone**: Several traces of one workload on one platform, such as the prefill and decode phases of an inference server, analyzed together into a single report. Findings are ranked by their impact on the combined runtime, and each one names the phase it came from. Kernel fusion and system-level analysis focus on one phase you choose. Suitable when no single trace represents the workload. Set it up with a [YAML config](../../../docs/how-to/agent.md).
+**Multi-trace standalone**: Several traces of one workload on one platform, such as the prefill and decode phases of an inference server, analyzed together into a single report. Findings are ranked by their impact on the combined runtime, and each one names the phase it came from. Kernel fusion and system-level analysis focus on the first job you list. Suitable when no single trace represents the workload. Set it up with a [YAML config](../../../docs/how-to/agent.md).
 
 ### Supported Analyses
 
@@ -100,7 +100,7 @@ Roofline analysis compares each measured kernel against your GPU's max-achievabl
     **NOTE**: Always pass **baseline** trace as trace1
    - Multi-trace standalone (one trace per job, e.g. prefill and decode):
     ```
-    "Follow the analysis orchestrator installed with TraceLens and run a multi-trace standalone analysis on jobs prefill <path_to_prefill.json> and decode <path_to_decode.json>, focus job decode"
+    "Follow the analysis orchestrator installed with TraceLens and run a multi-trace standalone analysis on jobs decode (phase decode) <path_to_decode.json> and prefill (phase prefill) <path_to_prefill.json>"
     ```
 
 

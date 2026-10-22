@@ -90,7 +90,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 ## Executive Summary
 
 <!-- === STANDALONE Executive Summary === -->
-[1 paragraph overview + key metrics table. multi_trace: Total Time is the combined time; add one sentence giving each phase's window from `gpu_utilization.phases`.]
+[1 paragraph overview + key metrics table. multi_trace: Total Time is the combined time; add one sentence naming the phases (the distinct `phase` values in `gpu_utilization.jobs`) with each phase's time, the sum of `total_time_ms` over its jobs.]
 
 <!-- MANDATORY: This table must contain exactly these 5 rows:
      Total Time | Compute % | Idle % | Exposed Communication % | Top Bottleneck Category
@@ -129,7 +129,7 @@ Summaries of recommendations from Step 8 sub-agents, focused on individual kerne
 One row per entry in `priority_data.json::priorities[]`, in array order (no manifest-sort, no extra rows). For row N (= `priorities[N-1]`): `Rank`/`Category` = `rank`/`display_name`; `Time (ms)` = matching `manifest.categories[].gpu_kernel_time_ms` (verbatim); `Ops` = matching `manifest.categories[].ops_count`; `% of Compute Time` = `Time (ms) / (gpu_utilization.total_time_ms * computation_time_percent / 100)`; trailer `low`/`high` = `priorities[N-1].impact_score_low`/`impact_score_high` (use `null` for `source: "manifest_fallback"`). Wrap the whole block (header + separator + rows) in the `kind=top_ops` marker.
 
 <!-- === STANDALONE Top Operations === -->
-<!-- === MULTI_TRACE Top Operations: add this line above the standalone table, outside the marker. Phase names are the keys of gpu_utilization.phases === -->
+<!-- === MULTI_TRACE Top Operations: add this line above the standalone table, outside the marker. Phase names are the distinct `phase` values in gpu_utilization.jobs === -->
 _Times and percentages are summed across all phases (<phase_1> + <phase_2>). See each P-item's Phase field for where the time is spent._
 
 <!-- impact-begin kind=top_ops -->

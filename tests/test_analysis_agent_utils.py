@@ -14,7 +14,7 @@
 - Unit tests for utils/validation_utils (pure markdown/JSON validation heuristics).
 """
 
-import json, os, subprocess, sys, pandas as pd, pytest
+import json, os, shutil, subprocess, sys, pandas as pd, pytest, yaml
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
@@ -3304,9 +3304,9 @@ def test_load_manifest_categories_prints_focus_job_utilization(
     manifest["focus_job"] = "decode"
     manifest["gpu_utilization"].update(
         idle_time_percent=5.0,
-        phases={
-            "prefill": {"idle_time_percent": 5.0},
-            "decode": {"idle_time_percent": 40.0},
+        jobs={
+            "prefill": {"phase": "prefill", "idle_time_percent": 5.0},
+            "decode": {"phase": "decode", "idle_time_percent": 40.0},
         },
     )
     json.dump(manifest, open(manifest_path, "w"))
@@ -3920,6 +3920,86 @@ def test_orchestrator_main_standalone_mocked(tmp_path, monkeypatch):
     assert [(c["base_name"], c["fusion_kind"]) for c in candidates] == [
         ("MLP", "gemm_epilogue")
     ]
+
+
+def test_orchestrator_main_multi_trace_mocked(tmp_path, monkeypatch):
+    out = str(tmp_path)
+    _write_minimal_orchestrator_csvs(out, comparative=False)
+    for name in ("aggregated", "prefill_0", "prefill_1", "decode"):
+        shutil.copytree(
+            os.path.join(out, "perf_report_csvs"),
+            os.path.join(out, f"perf_report_{name}_csvs"),
+        )
+    trace = tmp_path / "trace.json.gz"
+    trace.touch()
+    with open(tmp_path / "run_config.resolved.yaml", "w") as f:
+        yaml.safe_dump(
+            {
+                "analysis_mode": "default",
+                "output_dir": out,
+                "aggregation": {"policy": "combine_only_same_phase"},
+                "jobs": [
+                    {
+                        "name": name,
+                        "phase": phase,
+                        "trace_path": str(trace),
+                        "platform": "MI300X",
+                    }
+                    for name, phase in (
+                        ("prefill_0", "prefill"),
+                        ("prefill_1", "prefill"),
+                        ("decode", "decode"),
+                    )
+                ],
+            },
+            f,
+        )
+    module = {"name": "nn.Module: MLP_0", "_category": "aten", "gpu_events": [10, 11]}
+    tree = _StubTree(
+        [module],
+        {10: _kernel_event(10, _GEMM_KERNEL), 11: _kernel_event(11, _ADD_KERNEL)},
+    )
+
+    class _FakeTreePerfAnalyzer:
+        @classmethod
+        def from_file(cls, *args, **kwargs):
+            return _StubAnalyzer(tree)
+
+    monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "orchestrator_prepare",
+            "--trace-path",
+            "/fake/trace.json",
+            "--platform",
+            "MI300X",
+            "--output-dir",
+            out,
+        ],
+    )
+    op.main()
+    with open(os.path.join(out, "category_data", "fusion_candidates.json"), "w") as f:
+        json.dump([_fusion_candidate().to_dict()], f)
+    monkeypatch.setattr(sys, "argv", ["kernel_fusion_analysis", "--output-dir", out])
+    kfa.main()
+
+    manifest = json.loads(
+        open(os.path.join(out, "category_data", "category_manifest.json")).read()
+    )
+    assert manifest["focus_job"] == "prefill_0"
+    assert manifest["focus_csv_dir"] == os.path.join(out, "perf_report_prefill_0_csvs")
+    jobs = manifest["gpu_utilization"]["jobs"]
+    assert {name: job["phase"] for name, job in jobs.items()} == {
+        "prefill_0": "prefill",
+        "prefill_1": "prefill",
+        "decode": "decode",
+    }
+    metrics = json.loads(
+        open(os.path.join(out, "category_data", "kernel_fusion_metrics.json")).read()
+    )
+    assert metrics["phase"] == "prefill"
 
 
 class TestOrchestratorPhase11:
