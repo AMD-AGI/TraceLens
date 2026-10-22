@@ -182,7 +182,7 @@ def test_deepseek_v4_attention_kernel_q_key_value_are_rank4():
     def _rank(node) -> int | None:
         for out in node.get("outputsMetadata", []) or []:
             for attr in out.get("attrs", []) or []:
-                if attr.get("key") == "tensor_shape":
+                if attr.get("key") == "shape":
                     inner = str(attr.get("value", "")).split("]", 1)[0].lstrip("[")
                     return (
                         len([d for d in inner.split(",") if d.strip()])
@@ -460,7 +460,7 @@ def test_deepseek_v4_indexer_masked_fill_two_tensor_operands_and_future_mask_cha
     def _shape_str(n) -> str:
         for out in n.get("outputsMetadata", []) or []:
             for attr in out.get("attrs", []) or []:
-                if attr.get("key") == "tensor_shape":
+                if attr.get("key") == "shape":
                     return str(attr.get("value", ""))
         return ""
 

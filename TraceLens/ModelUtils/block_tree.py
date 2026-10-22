@@ -1100,14 +1100,15 @@ def _expanded_free_function_node(
             extra_predecessors: list[str] = []
             extra_predecessor_ports: list[tuple[str, int]] = []
             # A parameter can reach an op as a per-parameter boundary token
-            # among its predecessors (``@method_input:value``) rather than being
-            # listed among its reads. That only needs acting on when the tensor
-            # it names is bound to MORE THAN ONE of the call's parameters --
-            # DeepSeek hands one ``kv`` to both ``key`` and ``value``. Then the
-            # boundary cannot tell them apart, only the first gets a tile, and
-            # the rest must be wired to the producer or they fall back to the
-            # frame's primary (a different tensor). A parameter with a producer
-            # of its own already docks correctly and is left alone.
+            # among its predecessors (``@method_input:k``) rather than being
+            # listed among its reads. The first consumer of that parameter
+            # claims the boundary tile. A later read -- ``rotate_half(k)``
+            # after ``k * cos`` has already claimed ``k`` -- has no internal
+            # predecessor, so without the producer wired here the slices are
+            # sourceless. The same path covers one tensor bound to two
+            # parameters (DeepSeek hands one ``kv`` to both ``key`` and
+            # ``value``): the second parameter has no tile of its own and must
+            # read the producer directly.
             read_params = list(operation.param_inputs)
             read_params += [
                 param
@@ -1115,10 +1116,6 @@ def _expanded_free_function_node(
                 if is_method_input(predecessor)
                 and (param := method_input_param(predecessor))
                 and param not in operation.param_inputs
-                and shared_arg_producers.get(
-                    (producer_arg_params.get(param), ordinal_arg_params.get(param)), 0
-                )
-                > 1
             ]
             for param in read_params:
                 mapping = boundary_arg_params.get(param)

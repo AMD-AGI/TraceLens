@@ -45,6 +45,9 @@ from TraceLens.Visualizer.model_explorer_export.ast_build import (
 from TraceLens.Visualizer.model_explorer_export.build import (
     save_model_explorer_payload,
 )
+from TraceLens.Visualizer.model_explorer_export.shapes import (
+    canonicalize_payload_shapes,
+)
 from TraceLens.Visualizer.model_explorer_export.serve import (
     open_viewer,
     serve_viewer,
@@ -396,6 +399,7 @@ def _run_from_payload(args: argparse.Namespace, parser: argparse.ArgumentParser)
         return 1
     try:
         payload = json.loads(source.read_text(encoding="utf-8"))
+        canonicalize_payload_shapes(payload)
     except (OSError, ValueError) as exc:
         print(f"Error reading payload {source}: {exc}", file=sys.stderr)
         return 1

@@ -61,3 +61,26 @@ class M(nn.Module):
 """
         labels = _labels(source)
         assert {"cos", "sin"} <= labels, labels
+
+    def test_a_scaled_tensor_keeps_the_tensor_name(self) -> None:
+        """``weights * self.scale`` is still ``weights``; the scale has no name."""
+        source = """
+class M(nn.Module):
+    def forward(self, weights):
+        return (weights * self.routed_scaling_factor).to(weights.dtype)
+"""
+        assert "weights" in _labels(source)
+
+    def test_a_sum_of_two_named_tensors_is_not_named_for_one_factor(self) -> None:
+        """``alpha * residual + beta * hidden`` is the sum, not ``alpha``."""
+        source = """
+class M(nn.Module):
+    def forward(self, residual, hidden_states):
+        alpha = residual.sigmoid()
+        beta = hidden_states.sigmoid()
+        return (alpha * residual + beta * hidden_states).to(residual.dtype)
+"""
+        labels = _labels(source)
+        assert "alpha" not in labels, labels
+        assert "residual" not in labels, labels
+        assert "hidden_states" not in labels, labels
