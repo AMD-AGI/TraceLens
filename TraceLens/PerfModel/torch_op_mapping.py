@@ -67,12 +67,7 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     # gsplat 3DGS kernels; ".*" matches the symbol behind a launcher/synthetic prefix (re.match).
     (re.compile(r".*gsplat::projection_ewa_3dgs_packed_fwd"), "GaussianSplat"),
     (re.compile(r".*gsplat::intersect_(tile|offset)_kernel"), "GaussianSplat"),
-    # Templated INT8 block-scale GEMM. The lookahead keeps
-    # batched_gemm_a8w8_mx128_* unmapped; that family needs its own subclass.
-    (
-        re.compile(r"^(?!.*batched_gemm_a8w8_mx128).*gemm_a8w8_mx128"),
-        "GEMM",
-    ),
+    (re.compile(r"^(?!.*batched_gemm_a8w8_mx128).*gemm_a8w8_mx128"), "GEMM"),
 ]
 
 
@@ -469,12 +464,6 @@ register_perf_model_matcher(_match_gsplat)
 
 
 def _match_gemm_a8w8_mx128(name):
-    """Resolve templated ``gemm_a8w8_mx128_*`` names to ``gemm_a8w8_blockscale``.
-
-    A dict key cannot match the template suffix. ``batched_gemm_a8w8_mx128_*``
-    contains the same substring but needs a shape-extraction subclass, so it
-    stays unmapped. Exact ``aiter::gemm_a8w8_*`` rows are consulted first.
-    """
     if "batched_gemm_a8w8_mx128" in name:
         return None
     if "gemm_a8w8_mx128" in name:
