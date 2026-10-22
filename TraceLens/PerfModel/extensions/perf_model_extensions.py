@@ -1295,11 +1295,6 @@ class fused_qk_rope_concat_and_cache_mla(aiter_fused_qk_rope_cat_and_cache_mla):
 
 class fused_fp8_bmm_rope_cat_and_cache_mla(aiter_fused_qk_rope_cat_and_cache_mla):
     """
-    Performance model for aiter fused_fp8_bmm_rope_cat_and_cache_mla
-    (kernel _fused_fp8_bmm_rope_cat_and_cache_mla_kernel; GLM-5.x / DeepSeek MLA),
-    traced by SGLang as
-    sglang_profiler::fused_bmm_rope_kv_cache_fused_fp8_bmm_rope_cat_and_cache_mla.
-
     Reference implementation:
         aiter/aiter/ops/triton/fusions/fused_bmm_rope_kv_cache.py
         (fused_fp8_bmm_rope_cat_and_cache_mla)
@@ -1309,13 +1304,6 @@ class fused_fp8_bmm_rope_cat_and_cache_mla(aiter_fused_qk_rope_cat_and_cache_mla
          written to q_out[:, :, :N]
       2. RoPE on q_pe / k_rope, q_pe written to q_out[:, :, N:], and
          (k_nope || rotated k_rope) written into kv_cache at slot_mapping.
-
-    Signature:
-        fused_fp8_bmm_rope_cat_and_cache_mla(q_nope, w_k, w_k_scale, q_pe,
-            k_nope, k_rope, kv_cache, slot_mapping, positions, cos, sin,
-            group_size=128, transpose_bm=True, config=None, k_scale=None,
-            is_neox=False, q_out_dtype=torch.bfloat16,
-            num_decode_toks_for_zeros=0)
 
     Expected Input Dims from trace:
         [0]  q_nope       = (QH, B, K)
@@ -1329,10 +1317,6 @@ class fused_fp8_bmm_rope_cat_and_cache_mla(aiter_fused_qk_rope_cat_and_cache_mla
         [8]  positions    = (B_slot,)
         [9]  cos, [10] sin, [11] k_scale
 
-    Expected Input type from trace:
-        [bf16, fp8, float, bf16, bf16, bf16, <kv_cache dtype, e.g. fp8>,
-         long int, long int, bf16, bf16, float]
-
     Roofline -- FLOPs:
         BMM  : 2 * QH * B * N * K
         RoPE : 3 * (B * QH * D_pe + B_slot * KH * D_pe)
@@ -1342,10 +1326,6 @@ class fused_fp8_bmm_rope_cat_and_cache_mla(aiter_fused_qk_rope_cat_and_cache_mla
         read  w_k                             : QH * N * K * bpe_w
         write q_out  (B, QH, N + D_pe)        : * bpe_in (q_out_dtype bf16)
         write kv rows (B_slot tokens written) : B_slot * KH * (N + D_pe) * bpe_kv
-
-    Approximation: only the B_slot written KV slots are counted, not the full
-    paged cache at Input Dims[6]; cos/sin/positions/scales are small and
-    omitted; the q_nope prequant FLOPs are omitted.
     """
 
     @staticmethod
