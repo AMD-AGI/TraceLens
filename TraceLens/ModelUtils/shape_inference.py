@@ -4818,6 +4818,23 @@ class ShapeInferencer:
             # disagrees with its sibling operand's real rank on.
             keepdim = _detail_value(details, "keepdim") == "True"
             axes = _reduction_axes(_detail_value(details, "dim"))
+            # An integer reduction of the generic activation is a mask the
+            # boundary inherited, not a sum over hidden features.
+            # ``mask.sum(dim=-1, dtype=torch.int32)`` counts a ``[B, S]``
+            # padding mask; without a meta trace that mask is still the
+            # ``[B, S, H]`` default, so the axis dropped is H and the pad that
+            # follows reports ``[B, S + 1]`` where the offsets are ``[B + 1]``.
+            declared_dtype = _detail_value(details, "dtype") or ""
+            if (
+                "int" in declared_dtype
+                and source.shape
+                and tuple(source.shape) == tuple(self._active_hidden_shape())
+                and axes is not None
+            ):
+                last = len(source.shape) - 1
+                reduced_axes = {axis + last + 1 if axis < 0 else axis for axis in axes}
+                if last in reduced_axes:
+                    source = TensorSpec(shape=source.shape[:-1], dtype=source.dtype)
             if axes is not None:
                 # Every axis the call names is reduced, whether it names one
                 # (``sum(dim=2)``) or several (``expert_mask.sum(dim=(-1, -2))``,

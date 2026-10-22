@@ -216,15 +216,13 @@ def test_expanding_a_host_int_is_not_the_activation() -> None:
     from TraceLens.ModelUtils.computation_graph import build_computation_graph
 
     analysis = analyze_sources(
-        {
-            "m.py": """
+        {"m.py": """
 import torch
 class Tower(torch.nn.Module):
     def forward(self, pixel_values, grid_thw):
         size = torch.tensor([2]).expand(len(grid_thw))
         return size
-"""
-        },
+"""},
         all_tensor_ops=True,
     )
     root = build_block_node(

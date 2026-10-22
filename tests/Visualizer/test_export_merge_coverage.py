@@ -1484,6 +1484,115 @@ def test_collapse_same_name_boundary_leaves_renamed_crossing_intact():
     ]
 
 
+def _shaped_input(node_id, namespace, source, *, label, shape, dtype):
+    node = _synthetic_input(node_id, namespace, source, label=label)
+    node["attrs"].extend(
+        [
+            {"key": "output_shape", "value": shape},
+            {"key": "output_dtype", "value": dtype},
+        ]
+    )
+    return node
+
+
+def test_positional_helper_folds_onto_the_callers_same_component():
+    """A rope helper's ``position_embeddings.cos`` reads the attention tile.
+
+    The helper is marked ``@positional_`` and repeats a component the caller
+    already declared, with the same shape and dtype. Its op is rewired to that
+    caller tile and the helper tile is removed.
+    """
+    shape = "[B, 4096, S] bfloat16"
+    caller = _shaped_input(
+        "attn/@input:position_embeddings.cos",
+        "DeepseekV4Attention",
+        "layer/@input:position_embeddings.cos",
+        label="position_embeddings.cos",
+        shape=shape,
+        dtype="bfloat16",
+    )
+    helper = _shaped_input(
+        "attn/seq:6:@positional_l810_apply_rotary_pos_emb:@/@input:position_embeddings.cos",
+        "DeepseekV4Attention/_positional_l810_apply_rotary_pos_emb",
+        caller["id"],
+        label="position_embeddings.cos",
+        shape=shape,
+        dtype="bfloat16",
+    )
+    op = _plain(
+        "attn/seq:6:@positional_l810_apply_rotary_pos_emb:@op_repeat",
+        helper["namespace"],
+        [helper["id"]],
+    )
+    nodes = [caller, helper, op]
+    merge._collapse_positional_input_passthroughs(nodes)
+    by_id = {node["id"]: node for node in nodes}
+
+    assert helper["id"] not in by_id
+    assert [edge["sourceNodeId"] for edge in by_id[op["id"]]["incomingEdges"]] == [
+        caller["id"]
+    ]
+
+
+def test_positional_fold_keeps_a_module_boundary_of_the_same_name():
+    """Attention's own ``position_embeddings.cos`` is a module input and stays."""
+    shape = "[B, 4096, S] bfloat16"
+    outer = _shaped_input(
+        "layer/@input:position_embeddings.cos",
+        "20x_CSACompressor_TopKRouter",
+        "rotary/@output:cos",
+        label="position_embeddings.cos",
+        shape=shape,
+        dtype="bfloat16",
+    )
+    attention = _shaped_input(
+        "attn/@input:position_embeddings.cos",
+        "DeepseekV4Attention",
+        outer["id"],
+        label="position_embeddings.cos",
+        shape=shape,
+        dtype="bfloat16",
+    )
+    nodes = [outer, attention]
+    merge._collapse_positional_input_passthroughs(nodes)
+    assert {node["id"] for node in nodes} == {outer["id"], attention["id"]}
+
+
+def test_positional_fold_keeps_a_differently_shaped_or_named_input():
+    """The query, and a component whose shape disagrees, each keep their tile."""
+    caller = _shaped_input(
+        "attn/@input:position_embeddings.cos",
+        "DeepseekV4Attention",
+        "layer/@input:position_embeddings.cos",
+        label="position_embeddings.cos",
+        shape="[B, 4096, S] bfloat16",
+        dtype="bfloat16",
+    )
+    mismatched = _shaped_input(
+        "attn/seq:6:@positional_l810_apply_rotary_pos_emb:@/@input:position_embeddings.cos",
+        "DeepseekV4Attention/_positional_l810_apply_rotary_pos_emb",
+        caller["id"],
+        label="position_embeddings.cos",
+        shape="[B, S, 128] bfloat16",
+        dtype="bfloat16",
+    )
+    query = _shaped_input(
+        "attn/seq:6:@positional_l810_apply_rotary_pos_emb:@/@input:x",
+        mismatched["namespace"],
+        "attn/@input:q",
+        label="x",
+        shape="[B, H, S, D] bfloat16",
+        dtype="bfloat16",
+    )
+    nodes = [caller, mismatched, query]
+    merge._collapse_positional_input_passthroughs(nodes)
+    assert {node["id"] for node in nodes} == {
+        caller["id"],
+        mismatched["id"],
+        query["id"],
+    }
+
+
 def _cast_node(
     node_id: str, *, source: str, dtype: str, shape: str = "B x S x 4"
 ) -> dict:
@@ -3669,6 +3778,22 @@ def _shape_node(label: str, details: list[str] | None = None) -> dict:
         attrs.append({"key": "details", "value": "; ".join(details)})
     node["attrs"] = attrs
     return node
+
+
+def test_fallback_mean_drops_the_axis_its_dim_names():
+    """A collapsed ``mean(dim=2)`` must not keep the stream it reduces away."""
+    source = TensorSpec(("B", "S", 4, 4096), "bfloat16")
+    result = shapes._fallback_node_spec(
+        _shape_node("Mean", ["dim: 2", "raw_op: mean"]), [("0", source)]
+    )
+    assert result.shape == ("B", "S", 4096)
+    assert result.dtype == "bfloat16"
+
+
+def test_fallback_mean_without_a_dim_passes_its_input_through():
+    source = TensorSpec(("B", "S", 4, 4096), "bfloat16")
+    result = shapes._fallback_node_spec(_shape_node("Mean"), [("0", source)])
+    assert result.shape == ("B", "S", 4, 4096)
 
 
 def test_fallback_squeeze_without_a_dim_drops_every_unit_axis():

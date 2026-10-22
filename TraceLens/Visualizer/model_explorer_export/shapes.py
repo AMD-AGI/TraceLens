@@ -21,9 +21,32 @@ from TraceLens.ModelUtils.shape_inference import (
     TensorSpec,
     _permute_shape,
     _reduce_conv_spatial,
+    _reduction_axes,
     _resolve_cast_dtype,
     _resolve_expand_shape,
     _resolve_view_shape,
+)
+
+# Torch reductions a collapsed spine tile can still be. Keyed on ``raw_op``,
+# the name the extractor records, which is the method the model called.
+_REDUCTION_OPS = frozenset(
+    {
+        "all",
+        "amax",
+        "amin",
+        "any",
+        "argmax",
+        "argmin",
+        "logsumexp",
+        "max",
+        "mean",
+        "min",
+        "norm",
+        "prod",
+        "std",
+        "sum",
+        "var",
+    }
 )
 
 SHAPE_SEPARATOR = " x "
@@ -445,6 +468,45 @@ def _operation_of(node: dict[str, Any]) -> str:
     return ""
 
 
+def _detail_parts(details: list[str]) -> list[str]:
+    """Split joined ``details`` attr text into the extractor's own entries."""
+    parts: list[str] = []
+    for detail in details:
+        parts.extend(part.strip() for part in str(detail).split(";") if part.strip())
+    return parts
+
+
+def _reduce_recorded_axes(source: TensorSpec, details: list[str]) -> TensorSpec | None:
+    """Drop the axes a reduction's ``dim`` names, or ``None`` when it names none.
+
+    ``keepdim=True`` leaves a size-1 axis. An axis this rank does not carry is
+    left alone: the symbolic view sometimes omits a stream the call indexes.
+    """
+    parts = _detail_parts(details)
+    dim = next(
+        (part.split(":", 1)[1].strip() for part in parts if part.startswith("dim:")),
+        None,
+    )
+    axes = _reduction_axes(dim)
+    if not axes:
+        return None
+    rank = len(source.shape)
+    present = sorted(
+        {axis + rank if axis < 0 else axis for axis in axes} & set(range(rank))
+    )
+    if not present:
+        return None
+    keepdim = any(part.strip() == "keepdim: True" for part in parts)
+    dims = list(source.shape)
+    if keepdim:
+        for axis in present:
+            dims[axis] = 1
+    else:
+        for axis in reversed(present):
+            del dims[axis]
+    return TensorSpec(tuple(dims), source.dtype)
+
+
 def _fallback_node_spec(
     node: dict[str, Any],
     sources: list[tuple[str, TensorSpec]],
@@ -646,6 +708,15 @@ def _fallback_node_spec(
         residual = by_input.get("residual")
         if comb is not None and residual is not None and comb.shape and residual.shape:
             return TensorSpec((*comb.shape[:-1], residual.shape[-1]), residual.dtype)
+
+    # A one-op module collapsed onto the spine (GLM's ``hc_head`` is
+    # ``hidden_streams.mean(dim=2)``) has no block-tree shape record. Without
+    # this it inherits the tensor it was handed, so the axis the mean drops
+    # stays in the shape and the norm that reads it disagrees with its cast.
+    if operation in _REDUCTION_OPS and specs and specs[0].shape:
+        reduced = _reduce_recorded_axes(specs[0], details)
+        if reduced is not None:
+            return reduced
 
     return max(
         specs,

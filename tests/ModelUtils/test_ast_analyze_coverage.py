@@ -975,17 +975,13 @@ def test_modulo_keeps_the_value_it_is_applied_to():
     to the product the remainder was supposed to divide by.
     """
     analysis = analyze_sources(
-        {
-            Path(
-                "modeling_mod.py"
-            ): """
+        {Path("modeling_mod.py"): """
 import torch
 class M(torch.nn.Module):
     def forward(self, counts, starts, heights, widths):
         within = (torch.arange(counts.sum()) - starts) % (heights * widths)
         return within
-"""
-        },
+"""},
         all_tensor_ops=True,
     )
     ops = analysis.class_registry["M"].forward_operations
@@ -1003,10 +999,7 @@ def test_tolist_loop_arithmetic_is_host_and_arange_still_docks_the_grid():
     operand. The range is still sized by the grid, so it keeps an extent edge.
     """
     analysis = analyze_sources(
-        {
-            Path(
-                "modeling_tolist.py"
-            ): """
+        {Path("modeling_tolist.py"): """
 import torch
 class M(torch.nn.Module):
     def forward(self, grid_thw):
@@ -1017,8 +1010,7 @@ class M(torch.nn.Module):
             index = torch.arange(grid_t * llm_h * llm_w)
             chunks.append(index)
         return torch.cat(chunks, dim=0)
-"""
-        },
+"""},
         all_tensor_ops=True,
     )
     ops = list(analysis.class_registry["M"].forward_operations.values())
@@ -1038,10 +1030,7 @@ def test_a_zip_of_two_tolists_does_not_size_arange_from_the_other_sequence():
     Dropping the constant then left the boundary with no source.
     """
     analysis = analyze_sources(
-        {
-            Path(
-                "modeling_zip_tolist.py"
-            ): """
+        {Path("modeling_zip_tolist.py"): """
 import torch
 class M(torch.nn.Module):
     def forward(self, grid_thw, spatial_merge_size):
@@ -1051,8 +1040,7 @@ class M(torch.nn.Module):
             torch.arange(h)
             torch.arange(w)
         return grid_thw
-"""
-        },
+"""},
         all_tensor_ops=True,
     )
     ops = list(analysis.class_registry["M"].forward_operations.values())
@@ -1103,10 +1091,7 @@ def test_a_dict_subscript_keeps_every_tensor_the_key_can_select():
     docks the consumer on the wrong slot.
     """
     analysis = analyze_sources(
-        {
-            Path(
-                "modeling_dict_select.py"
-            ): """
+        {Path("modeling_dict_select.py"): """
 import torch
 from torch import nn
 def helper(grid):
@@ -1128,8 +1113,7 @@ class M(nn.Module):
         for i, layer in enumerate(self.layers):
             hidden = layer(hidden, cu=mapping[self.config.layer_types[i]])
         return hidden
-"""
-        },
+"""},
         config={"layer_types": ["full_attention", "window_attention"]},
         all_tensor_ops=True,
     )
@@ -1145,10 +1129,7 @@ class M(nn.Module):
 def test_a_conditionally_called_helper_referenced_by_a_merge_is_expanded():
     """A live helper outside the linear spine still publishes its operations."""
     analysis = analyze_sources(
-        {
-            Path(
-                "modeling_conditional_builder.py"
-            ): """
+        {Path("modeling_conditional_builder.py"): """
 import torch
 def build_full(x):
     return x + 1
@@ -1168,8 +1149,7 @@ class M(torch.nn.Module):
         for i, layer in enumerate(self.layers):
             x = layer(x, masks[self.config.layer_types[i]])
         return x
-"""
-        },
+"""},
         config={"layer_types": ["full", "window"]},
         all_tensor_ops=True,
     )
@@ -1194,8 +1174,7 @@ class M(torch.nn.Module):
 def test_a_config_selected_local_dispatch_resolves_from_source(tmp_path, monkeypatch):
     """A local selected from any class table resolves without executing it."""
     support = tmp_path / "dispatch_support.py"
-    support.write_text(
-        """
+    support.write_text("""
 def eager_impl(x):
     return x + 1
 def other_impl(x):
@@ -1206,8 +1185,7 @@ TABLE = Interface()
 def builder(config, x):
     implementation = TABLE[config.mode]
     return implementation(x)
-"""
-    )
+""")
     monkeypatch.setattr(
         aa,
         "_module_origin",
@@ -1226,10 +1204,7 @@ def test_a_tuple_return_keeps_each_slot_after_the_helper_is_inlined():
     reads the last op: the index and the sequence lengths become one tensor.
     """
     analysis = analyze_sources(
-        {
-            Path(
-                "modeling_two_returns.py"
-            ): """
+        {Path("modeling_two_returns.py"): """
 import torch
 def helper(x):
     left = x + 1
@@ -1239,8 +1214,7 @@ class M(torch.nn.Module):
     def forward(self, x):
         left, right = helper(x)
         return left + right
-"""
-        },
+"""},
         all_tensor_ops=True,
     )
     cls = analysis.class_registry["M"]
@@ -1261,10 +1235,7 @@ class M(torch.nn.Module):
 def test_a_starred_dict_call_reads_every_tensor_value():
     """``builder(**{"a": left, "b": right})`` reads both tensors, not just ``right``."""
     analysis = analyze_sources(
-        {
-            Path(
-                "modeling_star_dict.py"
-            ): """
+        {Path("modeling_star_dict.py"): """
 import torch
 class M(torch.nn.Module):
     def forward(self, x):
@@ -1272,8 +1243,7 @@ class M(torch.nn.Module):
         right = x * 2
         specs = {"a": left, "b": right}
         return builder(**specs)
-"""
-        },
+"""},
         all_tensor_ops=True,
     )
     cls = analysis.class_registry["M"]
@@ -1295,10 +1265,7 @@ def test_positional_activation_argument_uses_the_tower_config():
     the text stack name different activations; the tower's own config wins.
     """
     analysis = analyze_sources(
-        {
-            Path(
-                "modeling_act.py"
-            ): """
+        {Path("modeling_act.py"): """
 import torch
 from torch import nn
 class VisionMLP(nn.Module):
@@ -1321,8 +1288,7 @@ class Model(nn.Module):
         self.visual = Tower(config.vision_config)
     def forward(self, x):
         return self.visual(x)
-"""
-        },
+"""},
         config={
             "hidden_act": "silu",
             "hidden_size": 8,
@@ -1340,8 +1306,7 @@ class Model(nn.Module):
 
 def test_a_tuple_unpack_inside_a_branch_keeps_each_slot():
     analysis = aa.analyze_sources(
-        {
-            "m.py": """
+        {"m.py": """
 def rope(q, k):
     q_embed = q + k
     k_embed = k + q
@@ -1354,8 +1319,7 @@ class Attn:
         if position_embeddings is not None:
             query, key = rope(query, key)
         return query, key
-"""
-        },
+"""},
         all_tensor_ops=True,
     )
     ops = analysis.class_registry["Attn"].forward_operations
@@ -1420,10 +1384,7 @@ def test_extent_names_are_traced_from_the_binding_source():
     on the arm that builds the mask is still the size that call passes.
     """
     analysis = analyze_sources(
-        {
-            Path(
-                "modeling_extent_trace.py"
-            ): """
+        {Path("modeling_extent_trace.py"): """
 import torch
 def lengths(inputs_embeds, attention_mask, past: Cache | None, encoder=None):
     if attention_mask is not None and len(attention_mask.shape) == 4:
@@ -1449,8 +1410,7 @@ def build(inputs_embeds, attention_mask, past: Cache | None):
 class M(torch.nn.Module):
     def forward(self, inputs_embeds, attention_mask, past: Cache | None = None):
         return build(inputs_embeds, attention_mask, past)
-"""
-        },
+"""},
         all_tensor_ops=True,
     )
     details = [

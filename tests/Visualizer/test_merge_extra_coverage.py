@@ -889,7 +889,13 @@ def test_append_section_wrapper_around_single_op(monkeypatch: pytest.MonkeyPatch
         "Wrapper",
         children=[BlockNode("c", "C", "other", "C")],
     )
-    prepared = BlockNode("hc_head", "Mean", "other", "Mean")  # childless
+    prepared = BlockNode(
+        "hc_head",
+        "Mean",
+        "other",
+        "Mean",
+        details=["dim: 2", "raw_op: mean"],
+    )
     _patch_section_pipeline(monkeypatch, root=root, prepared=prepared)
     nodes: list[dict[str, object]] = []
     exits = merge._append_section(
@@ -904,6 +910,9 @@ def test_append_section_wrapper_around_single_op(monkeypatch: pytest.MonkeyPatch
     assert exits == ["decoder/hc_head"]
     assert nodes[0]["label"] == "Mean"
     assert nodes[0]["incomingEdges"] == [_edge("prev")]
+    recorded = {attr["key"]: attr["value"] for attr in nodes[0]["attrs"]}
+    assert recorded["raw_op"] == "mean"
+    assert "dim: 2" in recorded["details"]
 
 
 # ---------------------------------------------------------------------------

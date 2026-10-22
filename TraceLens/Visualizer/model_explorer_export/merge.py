@@ -21,6 +21,7 @@ from TraceLens.ModelUtils.ast_analyze import (
     base_submodule_attr,
     expand_class_forward_dataflow,
     FORWARD_METHOD_INPUT,
+    POSITIONAL_SYNTHETIC_PREFIX,
     method_input_param,
     stack_entry_dataflow,
 )
@@ -4089,9 +4090,7 @@ def _carry_producer_shape_to_boundary_tiles(nodes: list[dict[str, Any]]) -> None
                 else:
                     existing["value"] = shape
                 metadata_attrs = [
-                    attr
-                    for attr in metadata_attrs
-                    if attr.get("key") != "tensor_shape"
+                    attr for attr in metadata_attrs if attr.get("key") != "tensor_shape"
                 ]
                 metadata["attrs"] = metadata_attrs
                 if dtype:
@@ -5602,6 +5601,86 @@ def _split_one_tuple_boundary(nodes: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _positional_frame_owner(node_id: str) -> str:
+    """The frame path of a boundary tile, excluding its ``/@input`` token."""
+    marker = "/@"
+    return node_id[: node_id.rfind(marker)] if marker in node_id else ""
+
+
+def _is_positional_frame_boundary(node: dict[str, Any]) -> bool:
+    """True when this tile is the input of an inlined rope helper.
+
+    Those helpers are marked ``@positional_`` on the frame id. Sanitising that
+    marker for a namespace yields a ``_positional_`` segment, so either form
+    identifies the frame.
+    """
+    owner = _positional_frame_owner(str(node.get("id") or ""))
+    if POSITIONAL_SYNTHETIC_PREFIX in owner:
+        return True
+    return any(
+        segment.startswith("_positional_")
+        for segment in str(node.get("namespace") or "").split("/")
+    )
+
+
+def _same_declared_tensor(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Both tiles state one shape and one dtype, and those statements agree."""
+    shape = _node_attr(left, "output_shape")
+    if not shape or shape != _node_attr(right, "output_shape"):
+        return False
+    return (_node_attr(left, "output_dtype") or "") == (
+        _node_attr(right, "output_dtype") or ""
+    )
+
+
+def _collapse_positional_input_passthroughs(nodes: list[dict[str, Any]]) -> None:
+    """Fold a rope helper's input onto the same tensor its caller already named.
+
+    ``DeepseekV4Attention`` declares ``position_embeddings.cos``. The inlined
+    ``apply_rotary_pos_emb`` then declares that component again and reads the
+    attention tile unchanged, so the diagram draws one tile into a second tile
+    of the same name. The helper's operations read the caller's tile directly.
+
+    The tuple split creates these tiles after the same-name boundary fold, and
+    that fold only joins an ``@output`` to an ``@input`` inside one module. A
+    same-scope mirror sits between the two inputs until
+    ``_fold_same_scope_mirrors`` removes it, so this pass runs after that fold
+    and after the shape carry. It then removes a positional frame's ``@input``
+    whose single producer is an ``@input`` of the same component, shape, and
+    dtype. A module boundary that receives ``position_embeddings.cos`` from its
+    caller keeps its tile, and so does a helper input whose name or tensor
+    differs (the query ``x``, or a ``cos`` produced by the helper's own
+    ``rotary_emb``).
+    """
+    by_id = {str(node.get("id")): node for node in nodes}
+    redirect: dict[str, tuple[str, str]] = {}
+    for node in nodes:
+        if _node_attr(node, "synthetic") != "@input":
+            continue
+        if not _is_positional_frame_boundary(node):
+            continue
+        edges = list(node.get("incomingEdges") or [])
+        if len(edges) != 1:
+            continue
+        producer = by_id.get(str(edges[0].get("sourceNodeId")))
+        if producer is None or _node_attr(producer, "synthetic") != "@input":
+            continue
+        name = str(node.get("label") or "").strip()
+        if not name or name != str(producer.get("label") or "").strip():
+            continue
+        if not _same_declared_tensor(node, producer):
+            continue
+        producer_id = str(producer.get("id"))
+        node_id = str(node.get("id"))
+        if producer_id == node_id:
+            continue
+        redirect[node_id] = (
+            producer_id,
+            str(edges[0].get("sourceNodeOutputId") or "0"),
+        )
+    _apply_tile_redirects(nodes, redirect)
+
+
 def _name_a_boundary_for_its_mirror(nodes: list[dict[str, Any]]) -> None:
     """A boundary fed by a tensor's own mirror carries that tensor's name.
 
@@ -6259,6 +6338,25 @@ def _resolve_section_tree(
     return max(matches, key=lambda item: len(item[1].children or ()))
 
 
+def _single_op_attrs(node: BlockNode) -> list[dict[str, str]]:
+    """The collapsed op's own record, so the spine tile still computes it.
+
+    ``hc_head`` is one ``mean`` and the spine shows that mean under the
+    component id. The tile is still a summary: without ``dim`` and ``raw_op``
+    nothing reduces it, and it inherits the multi-stream tensor it was handed.
+    """
+    details = [str(item) for item in node.details if str(item).strip()]
+    if not details:
+        return []
+    attrs: list[dict[str, str]] = [{"key": "details", "value": "; ".join(details)}]
+    for item in details:
+        name, separator, value = item.partition(":")
+        if separator and name.strip() == "raw_op" and value.strip():
+            attrs.append({"key": "raw_op", "value": value.strip()})
+            break
+    return attrs
+
+
 def _summary_node(
     node_id: str,
     label: str,
@@ -6315,6 +6413,7 @@ def _append_section(
             variant=variant,
             basic_ops=basic_ops,
         )
+        collapsed_op: BlockNode | None = None
         if single_op is not None:
             _single_title, single_tree = single_op
             prepared_single = expand_block_tree_inplace(
@@ -6322,12 +6421,15 @@ def _append_section(
             )
             if single_tree.children and not prepared_single.children:
                 summary_label = prepared_single.label
+                collapsed_op = prepared_single
         summary = _summary_node(
             id_prefix,
             summary_label,
             namespace=summary_namespace,
             component=component,
         )
+        if collapsed_op is not None:
+            summary["attrs"].extend(_single_op_attrs(collapsed_op))
         if previous_exits:
             summary["incomingEdges"] = [
                 _source_edge(source, "0") for source in previous_exits
@@ -6374,6 +6476,7 @@ def _append_section(
             ),
             component=component,
         )
+        summary["attrs"].extend(_single_op_attrs(prepared_tree))
         if previous_exits:
             summary["incomingEdges"] = [
                 _source_edge(source, "0") for source in previous_exits
@@ -9848,6 +9951,10 @@ def build_merged_model_graph(
     # redundant once its neighbours are final.
     _fold_same_scope_mirrors(nodes)
     _fold_same_source_twins(nodes)
+    # The mirror fold is what leaves the rope helper's ``position_embeddings.cos``
+    # reading the attention tile of the same name directly. Fold that copy now
+    # that the shape carry has shown they are the same tensor.
+    _collapse_positional_input_passthroughs(nodes)
     _name_kernel_leaves_for_their_kernel(nodes)
     _share_one_tile_per_kernel_operand(nodes)
     _name_kernel_ports_after_their_source(nodes)
