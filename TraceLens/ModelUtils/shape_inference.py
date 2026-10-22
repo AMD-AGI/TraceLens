@@ -2390,6 +2390,41 @@ class ShapeInferencer:
                 resolved[name] = shape
         return resolved
 
+    def _extent_name_shapes(
+        self, node: Any, root: BlockNode | None, source: TensorSpec | None
+    ) -> dict[str, tuple]:
+        """``{tensor name -> shape}`` for extents traced back to a shape read.
+
+        Frame parameters and locals win, because those are the tensors this op
+        can see. A name bound in some analysed forward is filled in only when
+        every recorded producer of that name has the same shape, so one class's
+        ``x`` cannot answer another's.
+        """
+        shapes: dict[str, tuple] = dict(self._boundary_shapes)
+        for name, spec in self._meta_input_specs.items():
+            if spec.shape:
+                shapes[name] = tuple(spec.shape)
+        shapes.update(self._frame_parameter_shapes(node, root))
+        shapes.update(self._frame_local_shapes(node, root, source))
+        by_producer: dict[str, set[tuple]] = {}
+        for (_frame, attr), shape in self._frame_step_shapes.items():
+            by_producer.setdefault(str(attr), set()).add(tuple(shape))
+            by_producer.setdefault(base_submodule_attr(str(attr)), set()).add(
+                tuple(shape)
+            )
+        registry = getattr(self.spec, "class_registry", None) or {}
+        for structure in registry.values():
+            bindings = getattr(structure, "forward_var_bindings", None) or {}
+            for name, sites in bindings.items():
+                if name in shapes:
+                    continue
+                found: set[tuple] = set()
+                for _line, producer in sites:
+                    found |= by_producer.get(str(producer), set())
+                if len(found) == 1:
+                    shapes[name] = next(iter(found))
+        return shapes
+
     def _shape_read_expression(
         self,
         token: str,
@@ -3685,7 +3720,11 @@ class ShapeInferencer:
             arange_dims = self.context.dims
             if owner_scalars:
                 arange_dims = {**self.context.dims, **owner_scalars}
-            length = _arange_axis(details, arange_dims)
+            length = _arange_axis(
+                details,
+                arange_dims,
+                self._extent_name_shapes(node, root, None),
+            )
             return TensorSpec(shape=(length,), dtype="int64")
 
         if operation_label in {
@@ -4572,7 +4611,13 @@ class ShapeInferencer:
                 else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
             )
             shape_detail = _detail_value(details, "shape") or ""
-            resolved = _resolve_expand_shape(shape_detail, source, self.context.dims)
+            resolved = _resolve_expand_shape(
+                shape_detail,
+                source,
+                self.context.dims,
+                self._extent_name_shapes(node, root, source),
+                _shape_local_reads(details),
+            )
             if resolved is not None:
                 return TensorSpec(shape=resolved, dtype=source.dtype)
             return source
@@ -6348,23 +6393,6 @@ def _resolve_dim_name(name: str, dims: dict[str, DimExpr]) -> DimExpr | None:
     val = dims.get(name)
     if val is not None:
         return val
-    # Runtime extents are often unpacked into local scalar names before they
-    # reach a shape-bearing op. They do not come from checkpoint config, but
-    # their meaning is universal: mask/layout helpers call the batch extent
-    # ``batch_size`` and the query/key sequence extents ``q_length`` /
-    # ``kv_length`` (plus their unabbreviated forms). Resolve those names to the
-    # same runtime symbols used everywhere else in the graph.
-    runtime_aliases: dict[str, DimExpr] = {
-        "batch_size": Symbol.BATCH.value,
-        "query_length": Symbol.SEQ.value,
-        "q_length": Symbol.SEQ.value,
-        "key_value_length": Symbol.SEQ.value,
-        "kv_length": Symbol.SEQ.value,
-        "sequence_length": Symbol.SEQ.value,
-        "seq_length": Symbol.SEQ.value,
-    }
-    if name in runtime_aliases:
-        return runtime_aliases[name]
     # Strip ``self.``/``config.``/``self.config.`` access prefixes, e.g.
     # ``self.config.out_hidden_size`` → ``out_hidden_size``.
     bare = name
@@ -6754,7 +6782,7 @@ def _constructed_shape(
         token = token.strip()
         read = shape_locals.get(token)
         if read is not None:
-            measured = _snapshot_axis(read, frozenset({read}), named_shapes)
+            measured = _agreeing_shape_reads(read, named_shapes)
             if measured is not None:
                 axes.append(measured)
                 index += 1
@@ -6870,7 +6898,11 @@ def _constructed_dtype(details: Sequence[str]) -> str | None:
     return name or None
 
 
-def _arange_axis(details: Sequence[str], dims: dict[str, DimExpr]) -> DimExpr:
+def _arange_axis(
+    details: Sequence[str],
+    dims: dict[str, DimExpr],
+    named_shapes: dict[str, tuple[DimExpr, ...]] | None = None,
+) -> DimExpr:
     """Length of the 1-D axis produced by ``torch.arange(start, stop, step)``.
 
     Bounds are the expressions the extractor stamped (``arange_start`` /
@@ -6888,6 +6920,11 @@ def _arange_axis(details: Sequence[str], dims: dict[str, DimExpr]) -> DimExpr:
         as_int = _int_dim(token)
         if as_int is not None:
             return as_int
+        traced = _shape_local_reads(details).get(token)
+        if traced:
+            measured = _agreeing_shape_reads(traced, named_shapes)
+            if measured is not None:
+                return measured
         val = _resolve_dim_name(token, dims)
         if val is not None:
             return val
@@ -6920,6 +6957,32 @@ def _arange_axis(details: Sequence[str], dims: dict[str, DimExpr]) -> DimExpr:
 _NODE_SOURCE_LINE_RE = re.compile(r"@(?:op|fn|positional)_l(?P<line>\d+)[_:]")
 #: One ``<tensor>.shape[i]`` read inside a host-scalar expression.
 _SHAPE_READ_RE = re.compile(r"(?P<name>[A-Za-z_]\w*)\.shape\[(?P<axis>-?\d+)\]")
+
+
+def _agreeing_shape_reads(
+    spec: str,
+    named_shapes: dict[str, tuple[DimExpr, ...]] | None,
+) -> DimExpr | None:
+    """The extent every traced read in ``spec`` names, when they agree.
+
+    ``spec`` is one ``<tensor>.shape[axis]`` or several joined with ``|`` — the
+    reads a local was bound to across the branches that reach the use. The
+    extent is reported only when each read resolves and they are the same axis.
+    A name with no trace, or traces that disagree, is not guessed.
+    """
+    tokens = [part.strip() for part in str(spec).split("|") if part.strip()]
+    if not tokens:
+        return None
+    resolved: list[DimExpr] = []
+    for token in tokens:
+        value = _snapshot_axis(token, frozenset({token}), named_shapes)
+        if value is None:
+            return None
+        resolved.append(value)
+    first = resolved[0]
+    if any(item != first for item in resolved[1:]):
+        return None
+    return first
 
 
 def _shape_local_reads(details: Sequence[str]) -> dict[str, str]:
@@ -7211,6 +7274,8 @@ def _resolve_expand_shape(
     detail: str,
     source: TensorSpec,
     dims: dict[str, DimExpr],
+    named_shapes: dict[str, tuple[DimExpr, ...]] | None = None,
+    shape_locals: dict[str, str] | None = None,
 ) -> tuple[DimExpr, ...] | None:
     """Resolve ``Tensor.expand`` arguments into a concrete broadcast shape.
 
@@ -7238,7 +7303,13 @@ def _resolve_expand_shape(
         try:
             target: DimExpr | None = int(part)
         except ValueError:
-            target = _resolve_dim_name(part, dims)
+            traced = (shape_locals or {}).get(part)
+            if traced:
+                target = _agreeing_shape_reads(traced, named_shapes)
+            else:
+                target = _snapshot_axis(part, frozenset({part}), named_shapes)
+            if target is None:
+                target = _resolve_dim_name(part, dims)
         # Only a genuine size-1 axis broadcasts; every other axis keeps its
         # current (possibly symbolic) size — matching what a ``-1`` would do and
         # torch's requirement that a non-1 axis equal the requested size.

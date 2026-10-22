@@ -1408,3 +1408,67 @@ class Layer:
         "hidden_states": "norm2",
     }
     assert not layer.forward_operations
+
+
+def test_extent_names_are_traced_from_the_binding_source():
+    """Expand sizes record the shape reads the source assigned them to.
+
+    A cold run does not take the cache arm, so ``past.shape[0]`` is not a
+    candidate. The two arms that do run read different tensors, and both reads
+    are kept until inference can see whether they name the same axis. An early
+    return of empty slots does not erase a later read, and a size assigned only
+    on the arm that builds the mask is still the size that call passes.
+    """
+    analysis = analyze_sources(
+        {
+            Path(
+                "modeling_extent_trace.py"
+            ): """
+import torch
+def lengths(inputs_embeds, attention_mask, past: Cache | None, encoder=None):
+    if attention_mask is not None and len(attention_mask.shape) == 4:
+        return True, None, None
+    q_length = inputs_embeds.shape[1]
+    if past is not None:
+        kv_length = past.shape[0]
+    else:
+        if attention_mask is None:
+            kv_length = encoder.shape[1] if encoder is not None else q_length
+        else:
+            kv_length, _offset = attention_mask.shape[-1], 0
+    return False, q_length, kv_length
+def paint(batch_size, q_length, kv_length):
+    row = torch.arange(q_length)
+    return row.expand(batch_size, -1, q_length, kv_length)
+def build(inputs_embeds, attention_mask, past: Cache | None):
+    early, q_length, kv_length = lengths(inputs_embeds, attention_mask, past)
+    if early:
+        return attention_mask
+    batch_size = inputs_embeds.shape[0]
+    return paint(batch_size=batch_size, q_length=q_length, kv_length=kv_length)
+class M(torch.nn.Module):
+    def forward(self, inputs_embeds, attention_mask, past: Cache | None = None):
+        return build(inputs_embeds, attention_mask, past)
+"""
+        },
+        all_tensor_ops=True,
+    )
+    details = [
+        detail
+        for ops in analysis.class_registry["M"].multi_op_methods.values()
+        for op in ops
+        if op.label == "Expand"
+        for detail in op.details
+        if str(detail).startswith("shape_locals:")
+    ]
+    assert len(details) == 1, details
+    text = details[0]
+    assert "batch_size=inputs_embeds.shape[0]" in text
+    assert "q_length=inputs_embeds.shape[1]" in text
+    assert "past.shape" not in text
+    kv = next(
+        item.strip()
+        for item in text.split(",")
+        if item.strip().startswith("kv_length=")
+    )
+    assert kv == "kv_length=inputs_embeds.shape[1]|attention_mask.shape[-1]"

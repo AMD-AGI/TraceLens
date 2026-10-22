@@ -3669,6 +3669,7 @@ def _inline_nested_free_functions(
     class_nodes: Iterable[ast.AST] = (),
     caller: ast.FunctionDef | None = None,
     param_values: dict[str, Any] | None = None,
+    caller_origins: dict[str, tuple[str, ...]] | None = None,
     _seen: frozenset[str] = frozenset(),
     _depth: int = 0,
 ) -> list[ForwardOperation]:
@@ -3731,6 +3732,16 @@ def _inline_nested_free_functions(
             if bound is not None
             else {}
         )
+        call_node = (
+            _call_at_source_line(caller, name, call_attr)
+            if caller is not None
+            else None
+        )
+        # The call saw the extents in force at its own line. The body's final
+        # map has already merged away a name that only the taken arm assigned.
+        site_origins = analysis.call_extent_origins.get(call_attr)
+        if site_origins is None:
+            site_origins = caller_origins or {}
         nested = _forward_operations_from_forward(
             nested_func,
             self_values=self_values,
@@ -3738,6 +3749,11 @@ def _inline_nested_free_functions(
             module_functions=module_functions,
             is_free_function_body=True,
             param_values=nested_values,
+            shape_origins=(
+                _extent_seeds_for_call(nested_func, call_node, site_origins)
+                if call_node is not None
+                else None
+            ),
         )
         nested_ops = _inline_nested_free_functions(
             nested,
@@ -3747,6 +3763,7 @@ def _inline_nested_free_functions(
             class_nodes=class_nodes,
             caller=nested_func,
             param_values=nested_values,
+            caller_origins=nested.shape_extent_origins,
             _seen=_seen | {name},
             _depth=_depth + 1,
         )
@@ -3929,6 +3946,7 @@ def _multi_op_free_functions(
             class_nodes=class_nodes,
             caller=func,
             param_values=settled,
+            caller_origins=analysis.shape_extent_origins,
             _seen=frozenset({name}),
         )
         # A free function whose body reduces to a *single* traced op (``index_first_axis``:
@@ -4485,6 +4503,14 @@ class ForwardAnalysis:
     return_order: list[str]
     primary_return_slot: str | None
     loop_carried: list[LoopCarriedSpec]
+    #: Names traced to ``<tensor>.shape[axis]`` reads while this body ran.
+    shape_extent_origins: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    #: The same map as it stood at each free-function call. A name assigned on
+    #: only one side of a later branch is gone from the final map, and the call
+    #: inside that side still passed it.
+    call_extent_origins: dict[str, dict[str, tuple[str, ...]]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -5422,6 +5448,22 @@ def _bound_call_param_values(
     return bound
 
 
+def _call_at_source_line(
+    caller: ast.FunctionDef, name: str, call_attr: str
+) -> ast.Call | None:
+    """The call in ``caller`` that ``call_attr`` was recorded from."""
+    line = _synthetic_call_line(call_attr)
+    for node in ast.walk(caller):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != name:
+            continue
+        if line is not None and node.lineno != line:
+            continue
+        return node
+    return None
+
+
 def _synthetic_call_line(call_attr: str) -> int | None:
     """Source line a traced free-function synthetic attr was called from."""
     match = re.search(r"_l(\d+)_", call_attr)
@@ -6338,6 +6380,7 @@ class _ForwardOperationExtractor:
         class_methods: dict[str, ast.FunctionDef] | None = None,
         is_free_function_body: bool = False,
         param_values: dict[str, Any] | None = None,
+        shape_origins: dict[str, tuple[str, ...]] | None = None,
     ) -> None:
         self.self_values = self_values
         self.all_tensor_ops = all_tensor_ops
@@ -6433,6 +6476,15 @@ class _ForwardOperationExtractor:
         # positional read token (``x.shape[0]``) so a later ``view``/``reshape``
         # arg naming ``a`` resolves to that axis instead of an opaque local.
         self.shape_unpack_tokens: dict[str, str] = {}
+        # Name -> shape reads it was traced to (``batch_size`` ->
+        # ``inputs_embeds.shape[0]``). Several reads mean the live branches
+        # disagree about which tensor the extent came from.
+        self.shape_extent_origins: dict[str, tuple[str, ...]] = {}
+        # Extents visible to one call, keyed by its synthetic attr. Filled when
+        # the call is walked, before a later branch merge drops a name.
+        self.call_extent_origins: dict[str, dict[str, tuple[str, ...]]] = {}
+        for name, tokens in (shape_origins or {}).items():
+            self._remember_extent(name, tokens)
         # Locals holding a host-side integer (``number_of_pools = (seq_len + k - 1)
         # // k``) rather than a tensor. Arithmetic over only these (and shape ints /
         # config scalars / int literals) is index/shape bookkeeping — it must not
@@ -8409,6 +8461,16 @@ class _ForwardOperationExtractor:
             # depend on; without this they resolve to whatever fed the call instead, and
             # an operation reading the result looks like it has no source at all.
             own_step = self._call_step_producer(node, method_name)
+            if own_step is not None and (
+                is_function_synthetic(own_step) or is_positional_synthetic(own_step)
+            ):
+                self.call_extent_origins.setdefault(
+                    own_step,
+                    {
+                        name: tuple(tokens)
+                        for name, tokens in self.shape_extent_origins.items()
+                    },
+                )
             if own_step is not None:
                 self.step_predecessors[own_step] = self._dedupe(
                     [value for value in (base_producer, *arg_producers) if value]
@@ -8545,6 +8607,9 @@ class _ForwardOperationExtractor:
                 details.append(
                     "shape_snapshots: " + ", ".join(self._pending_shape_snapshots)
                 )
+            extent_detail = self._extent_local_detail(node.args)
+            if extent_detail:
+                details.append(extent_detail)
         if call_name in {"split", "chunk"}:
             bound = _schema_arguments(call_name, node)
             # The same quantity is spelled ``split_size`` by ``split``, ``chunks``
@@ -8654,6 +8719,9 @@ class _ForwardOperationExtractor:
                     details.append(f"{bound}: {ast.unparse(keyword.value)}")
                     if bound != "arange_step":
                         extent_bounds.append(keyword.value)
+            extent_detail = self._extent_local_detail(extent_bounds)
+            if extent_detail:
+                details.append(extent_detail)
         if call_name not in _CONSTRUCTOR_SIZE_CALLS:
             # Any call given an explicit dtype produces that dtype, not its
             # input's. ``seqlens.cumsum(dim=0, dtype=torch.int32)`` is how a
@@ -8701,8 +8769,13 @@ class _ForwardOperationExtractor:
             locals_read: list[str] = []
             for index, size in enumerate(sizes):
                 details.append(f"size{index}: {ast.unparse(size)}")
-                if isinstance(size, ast.Name) and size.id in self.shape_unpack_tokens:
-                    entry = f"{size.id}={self.shape_unpack_tokens[size.id]}"
+                tokens = (
+                    self.shape_extent_origins.get(size.id)
+                    if isinstance(size, ast.Name)
+                    else None
+                )
+                if tokens:
+                    entry = f"{size.id}={'|'.join(tokens)}"
                     if entry not in locals_read:
                         locals_read.append(entry)
                 extent_bounds.append(size)
@@ -9130,6 +9203,64 @@ class _ForwardOperationExtractor:
                 if inherited is not None:
                     self.param_alias_ordinal[target.id] = inherited
 
+    def _install_extent_origins(self, origins: dict[str, tuple[str, ...]]) -> None:
+        """Replace traced extents and keep the single-read reshape tokens in step."""
+        self.shape_extent_origins = {
+            name: tuple(tokens) for name, tokens in origins.items() if tokens
+        }
+        for name in list(self.shape_unpack_tokens):
+            if name not in self.shape_extent_origins:
+                self.shape_unpack_tokens.pop(name, None)
+        for name, tokens in self.shape_extent_origins.items():
+            if len(tokens) == 1:
+                self.shape_unpack_tokens[name] = tokens[0]
+            else:
+                self.shape_unpack_tokens.pop(name, None)
+
+    def _remember_extent(self, name: str, tokens: tuple[str, ...] | None) -> None:
+        """Record ``name`` as the shape reads it traces to, or forget it.
+
+        One read is also the reshape token the existing resolver substitutes.
+        Several reads stay on the side detail and are not substituted: picking
+        one would hide that the branches disagreed.
+        """
+        if not tokens:
+            self.shape_extent_origins.pop(name, None)
+            self.shape_unpack_tokens.pop(name, None)
+            return
+        self.shape_extent_origins[name] = tuple(tokens)
+        if len(tokens) == 1:
+            self.shape_unpack_tokens[name] = tokens[0]
+        else:
+            self.shape_unpack_tokens.pop(name, None)
+
+    def _extent_decide(self, test: ast.expr) -> bool | None:
+        outcome = self._regime_outcome(test)
+        if outcome is not None:
+            return outcome
+        settled = _settled_presence(test, self.param_values)
+        if settled is not None:
+            return settled
+        config = _config_value(test, self.config, self.self_values, self.param_values)
+        return config if isinstance(config, bool) else None
+
+    def _extent_local_detail(self, nodes: Iterable[ast.AST]) -> str | None:
+        """``shape_locals:`` for extent names used in ``nodes``."""
+        entries: list[str] = []
+        seen: set[str] = set()
+        for node in nodes:
+            for inner in ast.walk(node):
+                if not isinstance(inner, ast.Name) or inner.id in seen:
+                    continue
+                tokens = self.shape_extent_origins.get(inner.id)
+                if not tokens:
+                    continue
+                seen.add(inner.id)
+                entries.append(f"{inner.id}={'|'.join(tokens)}")
+        if not entries:
+            return None
+        return "shape_locals: " + ", ".join(entries)
+
     def _track_shape_assignment(self, targets: list[ast.expr], value: ast.AST) -> None:
         """Record shape-derived locals so reshape args resolve to real axes.
 
@@ -9145,11 +9276,11 @@ class _ForwardOperationExtractor:
             if base is not None:
                 for index, elt in enumerate(targets[0].elts):
                     if isinstance(elt, ast.Name):
-                        self.shape_unpack_tokens[elt.id] = f"{base}.shape[{index}]"
+                        self._remember_extent(elt.id, (f"{base}.shape[{index}]",))
         if len(targets) == 1 and isinstance(targets[0], ast.Name):
             token = _single_shape_index_token(value)
             if token is not None:
-                self.shape_unpack_tokens[targets[0].id] = token
+                self._remember_extent(targets[0].id, (token,))
             slice_token = _shape_slice_token(value) or _whole_shape_token(value)
             if slice_token is not None:
                 self.shape_slice_tokens[targets[0].id] = slice_token
@@ -9157,6 +9288,28 @@ class _ForwardOperationExtractor:
             for target in targets:
                 if isinstance(target, ast.Name):
                     self.shape_tuple_vars[target.id] = value
+        # A local can be an extent without being a reshape of the tensor in
+        # this frame: ``batch_size, dtype, device = x.shape[0], ...`` and
+        # ``q_length, kv_length = helper(...)`` where the helper returns a
+        # shape read. Follow those reads. The name is what the source bound.
+        _bind_extent_targets(
+            targets,
+            value,
+            self.shape_extent_origins,
+            self._extent_decide,
+            self.module_functions,
+            self.config,
+            self.regime,
+            frozenset(),
+        )
+        for name, tokens in list(self.shape_extent_origins.items()):
+            if len(tokens) == 1:
+                self.shape_unpack_tokens[name] = tokens[0]
+            else:
+                self.shape_unpack_tokens.pop(name, None)
+        for name in list(self.shape_unpack_tokens):
+            if name not in self.shape_extent_origins:
+                self.shape_unpack_tokens.pop(name, None)
         # A shape built by CONCATENATION rather than as one tuple:
         # ``size_out = x.size()[:-1] + (self.nf,)``, which is how every GPT-2
         # ``Conv1D`` states the shape it restores after its projection. Left
@@ -9823,10 +9976,12 @@ class _ForwardOperationExtractor:
                         self.undecided_tests.append(test)
                     before_env = dict(self.var_producer)
                     before_host = dict(self.host_scalar_values)
+                    before_extents = dict(self.shape_extent_origins)
                     before = len(self.operations)
                     self.statements(stmt.body, condition=test)
                     body_env = dict(self.var_producer)
                     body_host = dict(self.host_scalar_values)
+                    body_extents = dict(self.shape_extent_origins)
                     for index in range(before, len(self.operations)):
                         op = self.operations[index]
                         self.operations[index] = ForwardOperation(
@@ -9837,10 +9992,12 @@ class _ForwardOperationExtractor:
                         )
                     self.var_producer = dict(before_env)
                     self.host_scalar_values = dict(before_host)
+                    self._install_extent_origins(before_extents)
                     before_else = len(self.operations)
                     self.statements(stmt.orelse, condition=f"not ({test})")
                     else_env = dict(self.var_producer)
                     else_host = dict(self.host_scalar_values)
+                    else_extents = dict(self.shape_extent_origins)
                     for index in range(before_else, len(self.operations)):
                         op = self.operations[index]
                         self.operations[index] = ForwardOperation(
@@ -9849,6 +10006,9 @@ class _ForwardOperationExtractor:
                                 "details": (*op.details, f"condition: not ({test})"),
                             }
                         )
+                    self._install_extent_origins(
+                        _merge_extent_maps(body_extents, else_extents)
+                    )
                     survivor_env = else_env if stmt.orelse else body_env
                     other_env = body_env if stmt.orelse else else_env
                     # A variable assigned in both mutually-exclusive branches to
@@ -10920,6 +11080,7 @@ def _forward_operations_from_forward(
     param_values: dict[str, Any] | None = None,
     unbuilt_attrs: frozenset[str] = frozenset(),
     local_object_methods: dict[str, LocalMethod] | None = None,
+    shape_origins: dict[str, tuple[str, ...]] | None = None,
 ) -> ForwardAnalysis:
     # The primary parameter is the main path, so only the extra ones can identify
     # which step consumes a side feed.
@@ -10938,6 +11099,7 @@ def _forward_operations_from_forward(
         is_free_function_body=is_free_function_body,
         param_values=param_values,
         local_object_methods=_local_method_call_sites(func, local_object_methods or {}),
+        shape_origins=shape_origins,
     )
     # An operation reading the primary parameter partway through the forward reads the
     # value arriving at the chain, not the previous step. Naming it lets those reads
@@ -11054,6 +11216,14 @@ def _forward_operations_from_forward(
         skipped_spans=tuple(extractor.skipped_spans),
         skipped_attrs=frozenset(extractor.skipped_attrs),
         undecided_tests=tuple(extractor.undecided_tests),
+        shape_extent_origins={
+            name: tuple(tokens)
+            for name, tokens in extractor.shape_extent_origins.items()
+        },
+        call_extent_origins={
+            call: {name: tuple(tokens) for name, tokens in origins.items()}
+            for call, origins in extractor.call_extent_origins.items()
+        },
         step_predecessors=dict(extractor.step_predecessors),
         step_predecessor_args=dict(extractor.step_predecessor_args),
         step_predecessor_ordinals=dict(extractor.step_predecessor_ordinals),
@@ -12217,6 +12387,25 @@ def _shape_read_base(value: ast.AST) -> str | None:
     return None
 
 
+def _literal_axis(index: ast.AST) -> int | None:
+    """A static shape axis, including the unary ``-1`` Python's parser emits."""
+    if (
+        isinstance(index, ast.Constant)
+        and isinstance(index.value, int)
+        and not isinstance(index.value, bool)
+    ):
+        return index.value
+    if (
+        isinstance(index, ast.UnaryOp)
+        and isinstance(index.op, ast.USub)
+        and isinstance(index.operand, ast.Constant)
+        and isinstance(index.operand.value, int)
+        and not isinstance(index.operand.value, bool)
+    ):
+        return -index.operand.value
+    return None
+
+
 def _single_shape_index_token(value: ast.AST) -> str | None:
     """Positional-axis read bound to a scalar local, as a resolver token.
 
@@ -12237,14 +12426,322 @@ def _single_shape_index_token(value: ast.AST) -> str | None:
         and not _is_self_attr(base, base.attr)
     ):
         return None
-    index = value.slice
-    if (
-        isinstance(index, ast.Constant)
-        and isinstance(index.value, int)
-        and not isinstance(index.value, bool)
-    ):
-        return f"{ast.unparse(base.value)}.shape[{index.value}]"
+    axis = _literal_axis(value.slice)
+    if axis is None:
+        return None
+    return f"{ast.unparse(base.value)}.shape[{axis}]"
+
+
+def _merge_extent_maps(
+    left: dict[str, tuple[str, ...]],
+    right: dict[str, tuple[str, ...]],
+) -> dict[str, tuple[str, ...]]:
+    """Extents a name has on both sides of a branch.
+
+    A name cleared on one side, or bound on only one side, is not an extent the
+    continuation can rely on. Both sides of an untouched name still carry the
+    value they were copied with, so that name stays.
+    """
+    merged: dict[str, tuple[str, ...]] = {}
+    for name in set(left) | set(right):
+        left_tokens = left.get(name)
+        right_tokens = right.get(name)
+        if not left_tokens or not right_tokens:
+            continue
+        merged[name] = tuple(dict.fromkeys((*left_tokens, *right_tokens)))
+    return merged
+
+
+def _extent_candidates(
+    expr: ast.AST,
+    origins: dict[str, tuple[str, ...]],
+    decide,
+) -> tuple[str, ...] | None:
+    """Shape-axis reads ``expr`` stands for, traced through the names in scope.
+
+    ``None`` when the expression is not an extent. Several tokens mean the
+    branches that reach here name different reads; they stay distinct so shape
+    inference can keep the extent only when those reads agree.
+    """
+    token = _single_shape_index_token(expr)
+    if token:
+        return (token,)
+    if isinstance(expr, ast.Name):
+        return origins.get(expr.id) or None
+    if isinstance(expr, ast.IfExp):
+        chosen = decide(expr.test) if decide is not None else None
+        if chosen is True:
+            return _extent_candidates(expr.body, origins, decide)
+        if chosen is False:
+            return _extent_candidates(expr.orelse, origins, decide)
+        left = _extent_candidates(expr.body, origins, decide)
+        right = _extent_candidates(expr.orelse, origins, decide)
+        if not left or not right:
+            return None
+        return tuple(dict.fromkeys((*left, *right)))
     return None
+
+
+def _settled_presence(test: ast.expr, values: dict[str, Any]) -> bool | None:
+    """``name is None`` when this call settled ``name`` to a value."""
+    if (
+        not isinstance(test, ast.Compare)
+        or len(test.ops) != 1
+        or len(test.comparators) != 1
+        or not isinstance(test.ops[0], (ast.Is, ast.IsNot))
+    ):
+        return None
+    other = test.comparators[0]
+    if not isinstance(other, ast.Constant) or other.value is not None:
+        return None
+    if not isinstance(test.left, ast.Name) or test.left.id not in values:
+        return None
+    present = values[test.left.id] is not None
+    return present if isinstance(test.ops[0], ast.IsNot) else not present
+
+
+def _extent_decider(
+    func: ast.FunctionDef,
+    config: dict[str, Any] | None,
+    regime: RuntimeRegime,
+    values: dict[str, Any],
+):
+    """Which arm of ``func`` this run takes, plus defaults this call settled."""
+    decider = _RegimeDecider(regime, _regime_facts(func), config, {}, values)
+
+    def decide(test: ast.expr) -> bool | None:
+        outcome = decider.outcome(test)
+        if outcome is not None:
+            return outcome
+        return _settled_presence(test, values)
+
+    return decide
+
+
+def _call_constant_params(callee: ast.FunctionDef, call: ast.Call) -> dict[str, Any]:
+    """Constants this call settles, including defaults the caller left alone."""
+    names = [arg.arg for arg in callee.args.posonlyargs + callee.args.args]
+    bound: dict[str, Any] = {}
+    defaults = callee.args.defaults
+    if defaults:
+        for name, default in zip(names[-len(defaults) :], defaults):
+            if isinstance(default, ast.Constant):
+                bound[name] = default.value
+    for index, arg in enumerate(call.args):
+        if index < len(names) and isinstance(arg, ast.Constant):
+            bound[names[index]] = arg.value
+    for keyword in call.keywords:
+        if keyword.arg in names and isinstance(keyword.value, ast.Constant):
+            bound[keyword.arg] = keyword.value.value
+    return bound
+
+
+def _extent_seeds_for_call(
+    callee: ast.FunctionDef,
+    call: ast.Call,
+    origins: dict[str, tuple[str, ...]],
+) -> dict[str, tuple[str, ...]]:
+    """Callee parameters this call passes as shape extents the caller already traced."""
+    names = [arg.arg for arg in callee.args.posonlyargs + callee.args.args]
+    seeds: dict[str, tuple[str, ...]] = {}
+
+    def take(param: str, expr: ast.expr) -> None:
+        candidates = _extent_candidates(expr, origins, None)
+        if candidates:
+            seeds[param] = candidates
+
+    for index, arg in enumerate(call.args):
+        if index < len(names):
+            take(names[index], arg)
+    for keyword in call.keywords:
+        if keyword.arg in names:
+            take(keyword.arg, keyword.value)
+    return seeds
+
+
+def _union_return_slots(
+    returns: list[tuple[tuple[str, ...], ...]],
+) -> list[tuple[str, ...]]:
+    """One candidate list per tuple-return slot.
+
+    A slot left empty on an early return (``None``) does not compete with a
+    later return that names the extent. Two different reads stay candidates.
+    """
+    if not returns:
+        return []
+    width = max(len(item) for item in returns)
+    slots: list[tuple[str, ...]] = []
+    for index in range(width):
+        tokens: list[str] = []
+        for item in returns:
+            if index >= len(item):
+                continue
+            for token in item[index]:
+                if token not in tokens:
+                    tokens.append(token)
+        slots.append(tuple(tokens))
+    return slots
+
+
+def _walk_extent_statements(
+    body: list[ast.stmt],
+    origins: dict[str, tuple[str, ...]],
+    decide,
+    functions: dict[str, ast.FunctionDef],
+    config: dict[str, Any] | None,
+    regime: RuntimeRegime,
+    seen: frozenset[str],
+    returns: list[tuple[tuple[str, ...], ...]],
+) -> None:
+    """Record extent names and tuple-return slots along ``body``."""
+    for stmt in body:
+        if isinstance(stmt, ast.If):
+            outcome = decide(stmt.test)
+            if outcome is True:
+                _walk_extent_statements(
+                    stmt.body, origins, decide, functions, config, regime, seen, returns
+                )
+            elif outcome is False:
+                _walk_extent_statements(
+                    stmt.orelse,
+                    origins,
+                    decide,
+                    functions,
+                    config,
+                    regime,
+                    seen,
+                    returns,
+                )
+            else:
+                before = dict(origins)
+                _walk_extent_statements(
+                    stmt.body, origins, decide, functions, config, regime, seen, returns
+                )
+                left = dict(origins)
+                origins.clear()
+                origins.update(before)
+                _walk_extent_statements(
+                    stmt.orelse,
+                    origins,
+                    decide,
+                    functions,
+                    config,
+                    regime,
+                    seen,
+                    returns,
+                )
+                right = dict(origins)
+                origins.clear()
+                origins.update(_merge_extent_maps(left, right))
+            continue
+        if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Tuple):
+            returns.append(
+                tuple(
+                    _extent_candidates(elt, origins, decide) or ()
+                    for elt in stmt.value.elts
+                )
+            )
+            continue
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
+            targets = (
+                list(stmt.targets) if isinstance(stmt, ast.Assign) else [stmt.target]
+            )
+            _bind_extent_targets(
+                targets,
+                stmt.value,
+                origins,
+                decide,
+                functions,
+                config,
+                regime,
+                seen,
+            )
+
+
+def _bind_extent_targets(
+    targets: list[ast.expr],
+    value: ast.AST,
+    origins: dict[str, tuple[str, ...]],
+    decide,
+    functions: dict[str, ast.FunctionDef],
+    config: dict[str, Any] | None,
+    regime: RuntimeRegime,
+    seen: frozenset[str],
+) -> None:
+    """Bind names in ``targets`` to the shape reads ``value`` traces back to."""
+    if len(targets) == 1 and isinstance(targets[0], (ast.Tuple, ast.List)):
+        elements = targets[0].elts
+        if isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(
+            elements
+        ):
+            for element, expr in zip(elements, value.elts):
+                _bind_extent_targets(
+                    [element], expr, origins, decide, functions, config, regime, seen
+                )
+            return
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+            callee = functions.get(value.func.id)
+            slots = (
+                _callee_return_extents(
+                    callee, value, origins, functions, config, regime, seen
+                )
+                if callee is not None
+                else None
+            )
+            if slots is None:
+                for element in elements:
+                    if isinstance(element, ast.Name):
+                        origins.pop(element.id, None)
+                return
+            for element, slot in zip(elements, slots):
+                if isinstance(element, ast.Name):
+                    if slot:
+                        origins[element.id] = slot
+                    else:
+                        origins.pop(element.id, None)
+            return
+        base = _shape_read_base(value)
+        if base is not None:
+            for index, element in enumerate(elements):
+                if isinstance(element, ast.Name):
+                    origins[element.id] = (f"{base}.shape[{index}]",)
+        return
+    if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+        return
+    name = targets[0].id
+    candidates = _extent_candidates(value, origins, decide)
+    if candidates:
+        origins[name] = candidates
+    else:
+        origins.pop(name, None)
+
+
+def _callee_return_extents(
+    callee: ast.FunctionDef,
+    call: ast.Call,
+    origins: dict[str, tuple[str, ...]],
+    functions: dict[str, ast.FunctionDef],
+    config: dict[str, Any] | None,
+    regime: RuntimeRegime,
+    seen: frozenset[str],
+) -> list[tuple[str, ...]] | None:
+    """Extent each tuple-return slot of ``callee`` carries at ``call``."""
+    if callee.name in seen:
+        return None
+    seeded = dict(_extent_seeds_for_call(callee, call, origins))
+    values = _call_constant_params(callee, call)
+    returns: list[tuple[tuple[str, ...], ...]] = []
+    _walk_extent_statements(
+        callee.body,
+        seeded,
+        _extent_decider(callee, config, regime, values),
+        functions,
+        config,
+        regime,
+        seen | {callee.name},
+        returns,
+    )
+    return _union_return_slots(returns)
 
 
 # A whole shape read into a local reads as the slice that selects all of it, so

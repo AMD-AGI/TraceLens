@@ -51,12 +51,45 @@ def _resolve(detail, source, *, named=None, snapshots=(), dims=None):
     )
 
 
-def test_expand_can_prepend_broadcast_axes_and_resolve_runtime_extents():
-    """A callable-hidden source can still declare its real broadcast target."""
+def test_expand_resolves_extents_traced_to_shape_reads():
+    """Broadcast sizes come from the shape reads the source bound those names to."""
     result = _resolve_expand_shape(
         "batch_size, -1, q_length, kv_length",
         TensorSpec(("S",), "bool"),
         {},
+        {"inputs_embeds": ("B", "S", "H"), "attention_mask": ("B", "S")},
+        {
+            "batch_size": "inputs_embeds.shape[0]",
+            "q_length": "inputs_embeds.shape[1]",
+            "kv_length": "inputs_embeds.shape[1]|attention_mask.shape[-1]",
+        },
+    )
+    assert result == ("B", 1, "S", "S")
+
+
+def test_expand_leaves_an_untraced_extent_name_unsized():
+    """A bare ``batch_size`` stays a broadcast of the source until a shape read names its axis."""
+    result = _resolve_expand_shape(
+        "batch_size, -1, q_length, kv_length",
+        TensorSpec(("S",), "bool"),
+        {},
+    )
+    assert result == (1, 1, 1, "S")
+
+
+def test_expand_resolves_the_shape_string_a_mask_builder_emits():
+    """Single-read sizes are substituted; a size with two reads stays a name.
+
+    That is the string ``sdpa_mask``'s expand carries once the builder has been
+    traced: batch and query each come from one axis of ``inputs_embeds``, and
+    the key length is the two reads the cold path can still reach.
+    """
+    result = _resolve_expand_shape(
+        "inputs_embeds.shape[0], -1, inputs_embeds.shape[1], kv_length",
+        TensorSpec(("S",), "bool"),
+        {},
+        {"inputs_embeds": ("B", "S", "H"), "attention_mask": ("B", "S")},
+        {"kv_length": "inputs_embeds.shape[1]|attention_mask.shape[-1]"},
     )
     assert result == ("B", 1, "S", "S")
 
