@@ -18,11 +18,14 @@ The TraceLens Agent is an agentic performance analysis tool that generates actio
 
 ### Supported Analyses
 
-| | Standalone | Comparative |
-|---|---|---|
-| **Eager** | ✅ | ✅ |
-| **Graph + Capture** | ✅ | ✅ |
-| **Graph** | ❌ | ❌ |
+| | Standalone | Comparative | Multi-trace |
+|---|---|---|---|
+| **Eager** | ✅ | ✅ | ✅ |
+| **Graph + Capture** | ✅ | ✅ | ✅ |
+| **Graph** | ⚠️ ¹ | ✅ ² | ⚠️ ¹ |
+
+¹ Deterministic fallback report only.
+² Semantic comparison, inference mode.
 
 ---
 
@@ -95,6 +98,10 @@ Roofline analysis compares each measured kernel against your GPU's max-achievabl
     "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace1.json> with capture folder <path_to_capture1.json> and <path_to_trace2.json> with capture folder <path_to_capture2.json>"
     ```
     **NOTE**: Always pass **baseline** trace as trace1
+   - Multi-trace standalone (one trace per job, e.g. prefill and decode):
+    ```
+    "Follow the analysis orchestrator installed with TraceLens and run a multi-trace standalone analysis on jobs prefill <path_to_prefill.json> and decode <path_to_decode.json>, focus job decode"
+    ```
 
 
 2. **Provide if prompted:**
