@@ -588,7 +588,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
 
    a. **Initialize** — truncate and write the title line, the `report_mode` + any `kind=warning` markers (see the template title block and the Warnings rule below), then `## Executive Summary` (metrics table, `{{PERF_PLOT}}` placeholder). Use `<prefix> tee <output_dir>/analysis.md << 'SECTION_EOF'` (truncating `tee`, not append) for this first write only.
       - Data sources: `category_data/category_manifest.json` (`gpu_utilization` keys), `priority_data.json` (top bottleneck).
-      - `multi_trace`: Total Time is the combined time; add one sentence naming the phases (the distinct `phase` values in `gpu_utilization.jobs`) with each phase's time, the sum of `total_time_ms` over its jobs.
+      - `multi_trace`: Total Time is the combined time; add one sentence giving each phase's time, summed over its jobs in `gpu_utilization.jobs`.
 
    b. **Compute Kernel Optimizations** — append `## Compute Kernel Optimizations` with `### Top Operations` table and P-item cards. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
       - Data sources: `priority_data.json` — P1 = `findings[0]`, P2 = `findings[1]`, ... ; each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting).

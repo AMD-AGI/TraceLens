@@ -97,11 +97,9 @@ def load_manifest_categories(output_dir):
     }
 
     # System analysis is scoped to the focus job on multi_trace runs.
-    gpu_util = (
-        result["gpu_utilization"]
-        .get("jobs", {})
-        .get(manifest.get("focus_job"), result["gpu_utilization"])
-    )
+    gpu_util = result["gpu_utilization"]
+    if "focus_job" in manifest:
+        gpu_util = gpu_util["jobs"][manifest["focus_job"]]
     print(
         json.dumps(
             {

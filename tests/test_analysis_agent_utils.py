@@ -90,6 +90,7 @@ from tests.fixtures.agent import (
     _StubTree,
     _kernel_event,
     _write_minimal_orchestrator_csvs,
+    _write_resolved_config,
 )
 from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op, plot_utils
 from TraceLens.Agent.Analysis.category_analyses import (
@@ -2523,6 +2524,7 @@ def orchestrator_prepared_output(tmp_path_factory):
         pytest.skip("demo trace not available")
 
     out = str(tmp_path_factory.mktemp("orch_prep"))
+    _write_resolved_config(out)
     csv_dir = os.path.join(out, "perf_report_csvs")
 
     env = os.environ.copy()
@@ -3747,6 +3749,7 @@ def _write_minimal_orchestrator_csvs(base, comparative=False):
         base, "perf_report_trace1_csvs" if comparative else "perf_report_csvs"
     )
     os.makedirs(t1)
+    _write_resolved_config(base)
     pd.DataFrame(
         {
             "type": ["total_time", "computation_time", "idle_time"],
@@ -3924,36 +3927,28 @@ def test_orchestrator_main_standalone_mocked(tmp_path, monkeypatch):
 
 def test_orchestrator_main_multi_trace_mocked(tmp_path, monkeypatch):
     out = str(tmp_path)
-    _write_minimal_orchestrator_csvs(out, comparative=False)
-    for name in ("aggregated", "prefill_0", "prefill_1", "decode"):
+    _write_minimal_orchestrator_csvs(out)
+    for name in ("aggregated", "job_a", "job_b"):
         shutil.copytree(
             os.path.join(out, "perf_report_csvs"),
             os.path.join(out, f"perf_report_{name}_csvs"),
         )
-    trace = tmp_path / "trace.json.gz"
-    trace.touch()
-    with open(tmp_path / "run_config.resolved.yaml", "w") as f:
-        yaml.safe_dump(
+    (tmp_path / "trace.json.gz").touch()
+    resolved = {
+        "analysis_mode": "default",
+        "output_dir": out,
+        "aggregation": {"policy": "combine_only_same_phase"},
+        "jobs": [
             {
-                "analysis_mode": "default",
-                "output_dir": out,
-                "aggregation": {"policy": "combine_only_same_phase"},
-                "jobs": [
-                    {
-                        "name": name,
-                        "phase": phase,
-                        "trace_path": str(trace),
-                        "platform": "MI300X",
-                    }
-                    for name, phase in (
-                        ("prefill_0", "prefill"),
-                        ("prefill_1", "prefill"),
-                        ("decode", "decode"),
-                    )
-                ],
-            },
-            f,
-        )
+                "name": name,
+                "phase": phase,
+                "trace_path": str(tmp_path / "trace.json.gz"),
+                "platform": "MI300X",
+            }
+            for name, phase in (("job_a", "prefill"), ("job_b", "decode"))
+        ],
+    }
+    (tmp_path / "run_config.resolved.yaml").write_text(yaml.safe_dump(resolved))
     module = {"name": "nn.Module: MLP_0", "_category": "aten", "gpu_events": [10, 11]}
     tree = _StubTree(
         [module],
@@ -3966,39 +3961,23 @@ def test_orchestrator_main_multi_trace_mocked(tmp_path, monkeypatch):
             return _StubAnalyzer(tree)
 
     monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "orchestrator_prepare",
-            "--trace-path",
-            "/fake/trace.json",
-            "--platform",
-            "MI300X",
-            "--output-dir",
-            out,
-        ],
-    )
+    argv = f"orchestrator_prepare --trace-path /fake/trace.json --platform MI300X --output-dir {out}"
+    monkeypatch.setattr(sys, "argv", argv.split())
     op.main()
-    with open(os.path.join(out, "category_data", "fusion_candidates.json"), "w") as f:
+    cat_dir = os.path.join(out, "category_data")
+    with open(os.path.join(cat_dir, "fusion_candidates.json"), "w") as f:
         json.dump([_fusion_candidate().to_dict()], f)
     monkeypatch.setattr(sys, "argv", ["kernel_fusion_analysis", "--output-dir", out])
     kfa.main()
 
-    manifest = json.loads(
-        open(os.path.join(out, "category_data", "category_manifest.json")).read()
-    )
-    assert manifest["focus_job"] == "prefill_0"
-    assert manifest["focus_csv_dir"] == os.path.join(out, "perf_report_prefill_0_csvs")
-    jobs = manifest["gpu_utilization"]["jobs"]
-    assert {name: job["phase"] for name, job in jobs.items()} == {
-        "prefill_0": "prefill",
-        "prefill_1": "prefill",
-        "decode": "decode",
+    manifest = json.load(open(os.path.join(cat_dir, "category_manifest.json")))
+    assert manifest["focus_job"] == "job_a"
+    assert manifest["focus_csv_dir"] == os.path.join(out, "perf_report_job_a_csvs")
+    assert {k: v["phase"] for k, v in manifest["gpu_utilization"]["jobs"].items()} == {
+        "job_a": "prefill",
+        "job_b": "decode",
     }
-    metrics = json.loads(
-        open(os.path.join(out, "category_data", "kernel_fusion_metrics.json")).read()
-    )
+    metrics = json.load(open(os.path.join(cat_dir, "kernel_fusion_metrics.json")))
     assert metrics["phase"] == "prefill"
 
 
@@ -4516,6 +4495,7 @@ class TestOrchestratorPush95Coverage:
         out = str(tmp_path)
         csv_dir = os.path.join(out, "perf_report_csvs")
         os.makedirs(csv_dir)
+        _write_resolved_config(out)
         pd.DataFrame(
             {
                 "type": ["total_time", "computation_time", "idle_time"],

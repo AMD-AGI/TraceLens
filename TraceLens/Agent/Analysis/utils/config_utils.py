@@ -14,18 +14,15 @@ perf report wrapper.
 
 Every front end (interactive answers, a user YAML, Hyperloom) produces a dict in
 the wrapper's schema. ``check_config`` rejects a wrong shape for the scope,
-adds the wiring, then lets the wrapper validate the result. Scopes: standalone
-(1 job), comparative and semantic (2 jobs), multi_trace (2 or more named jobs of
-one workload and platform, a ``phase`` on every job, and ``aggregation`` with
-policy combine_only_same_phase; the first job is the focus). The agent report
-flags are forced on, except in multi_trace, where a wrapper YAML is only
-completed: missing flags are added and a ``false`` is rejected.
+adds the wiring and the agent report flags, then lets the wrapper validate the
+result. Scopes: standalone (1 job), comparative and semantic (2 jobs),
+multi_trace (2 or more jobs with ``aggregation``; the first job is the focus).
+In multi_trace the flags are only checked: a ``false`` is rejected, not
+overwritten.
 Every change is printed. The completed config is written to
 ``<output_dir>/cache/run_config.yaml`` only when all three phases pass. That
-file is the wrapper's input only: for comparative and semantic it loses the
-original ``platform2`` when job 2 has no arch file, because job 2's platform is
-rewritten to job 1's only then, so re-checking it would report job 1's platform
-as platform2.
+file is the wrapper's input only: if job 2 had no arch file, a re-check of it
+reports job 1's platform as platform2.
 """
 
 import argparse
@@ -317,10 +314,6 @@ def _shape_errors(scope: str, config: dict) -> List[str]:
             errors.append(f"multi_trace takes 2 or more jobs, got {len(jobs)}.")
         if len({job.get("platform") for job in jobs}) > 1:
             errors.append("multi_trace: every job needs the same platform.")
-        if "focus_job" in config:
-            errors.append(
-                "multi_trace: focus_job is not a wrapper key; list the focus job first."
-            )
         aggregation = config.get("aggregation")
         if (
             not isinstance(aggregation, dict)

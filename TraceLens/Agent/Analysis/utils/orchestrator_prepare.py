@@ -202,14 +202,15 @@ def main():
     output_dir = args.output_dir
     enable_pseudo_ops = args.enable_pseudo_ops
     comparison_scope = args.comparison_scope
-    # Reports from a multi_trace run are aggregated; trace 1 is their combination.
-    # No resolved config: the reports were not made by the wrapper, so this is not multi_trace.
+    # multi_trace is the wrapper config with an aggregation; trace 1 is the combined report.
     resolved_config = os.path.join(output_dir, RESOLVED_CONFIG_NAME)
-    plans = None
-    if os.path.isfile(resolved_config):
-        config = load_run_config(resolved_config)
-        if "aggregation" in config:
-            plans = plan_reports(config)
+    if not os.path.isfile(resolved_config):
+        print(
+            f"[DIAG:pipeline:STEP1_FAIL] Resolved run config missing at {resolved_config}"
+        )
+        sys.exit(1)
+    config = load_run_config(resolved_config)
+    plans = plan_reports(config) if "aggregation" in config else None
     if comparison_scope == "comparative":
         trace1_csv_dir = os.path.join(output_dir, "perf_report_trace1_csvs")
         trace2_csv_dir = os.path.join(output_dir, "perf_report_trace2_csvs")

@@ -103,6 +103,7 @@ from tests.fixtures.agent import (
     _StubTree,
     _kernel_event,
     _write_minimal_orchestrator_csvs,
+    _write_resolved_config,
 )
 from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION
 from TraceLens.Trace2Tree.extensions import pseudo_ops_registry as por
@@ -2686,6 +2687,7 @@ class TestPush95Phase4:
         out = str(tmp_path)
         csv_dir = os.path.join(out, "perf_report_csvs")
         os.makedirs(csv_dir)
+        _write_resolved_config(out)
         pd.DataFrame(
             {
                 "type": ["total_time", "computation_time", "idle_time"],

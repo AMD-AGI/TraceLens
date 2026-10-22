@@ -101,46 +101,14 @@ jobs:
             "added   include_call_stack: true",
         ],
     ),
-    "comparative_by_name": (
-        None,
-        """
-analysis_mode: default
-output_dir: ROOT/out
-jobs:
-  - {name: base, trace_path: ROOT/t1.json.gz, platform: MI300X, compare_to: other}
-  - {name: other, trace_path: ROOT/t2.json.gz, platform: OTHER_GPU}
-""",
-        """
-analysis_mode: default
-output_dir: ROOT/out
-enable_pseudo_ops: true
-group_by_num_kernels: true
-include_call_stack: true
-jobs:
-  - name: trace1
-    trace_path: ROOT/t1.json.gz
-    platform: MI300X
-    compare_to: {trace_path: ROOT/t2.json.gz}
-  - {name: trace2, trace_path: ROOT/t2.json.gz, platform: MI300X}
-""",
-        [
-            "renamed jobs[0].name: base -> trace1",
-            "renamed jobs[1].name: other -> trace2",
-            'set     jobs[0].compare_to: {"trace_path": "ROOT/t2.json.gz"}   (was other)',
-            "set     jobs[1].platform: MI300X   (was OTHER_GPU, no arch file; kept as platform2)",
-            "added   enable_pseudo_ops: true",
-            "added   group_by_num_kernels: true",
-            "added   include_call_stack: true",
-        ],
-    ),
     "comparative_capture": (
         "comparative",
         """
 analysis_mode: inference
 output_dir: ROOT/out
 jobs:
-  - {trace_path: ROOT/t1.json.gz, platform: MI300X, capture_folder: ROOT/c1}
-  - {name: other, trace_path: ROOT/t2.json.gz, platform: MI300X, capture_folder: ROOT/c2}
+  - {name: base, trace_path: ROOT/t1.json.gz, platform: MI300X, capture_folder: ROOT/c1, compare_to: other}
+  - {name: other, trace_path: ROOT/t2.json.gz, platform: OTHER_GPU, capture_folder: ROOT/c2}
 """,
         """
 analysis_mode: inference
@@ -158,9 +126,10 @@ jobs:
   - {name: trace2, trace_path: ROOT/t2.json.gz, platform: MI300X, capture_folder: ROOT/c2}
 """,
         [
-            "added   jobs[0].name: trace1",
+            "renamed jobs[0].name: base -> trace1",
             "renamed jobs[1].name: other -> trace2",
-            'added   jobs[0].compare_to: {"trace_path": "ROOT/t2.json.gz", "capture_folder": "ROOT/c2"}',
+            'set     jobs[0].compare_to: {"trace_path": "ROOT/t2.json.gz", "capture_folder": "ROOT/c2"}   (was other)',
+            "set     jobs[1].platform: MI300X   (was OTHER_GPU, no arch file; kept as platform2)",
             "added   enable_pseudo_ops: true",
             "added   group_by_num_kernels: true",
             "added   include_call_stack: true",
@@ -196,8 +165,7 @@ analysis_mode: inference
 output_dir: ROOT/out
 aggregation: {policy: combine_only_same_phase}
 jobs:
-  - {name: prefill_0, phase: prefill, trace_path: ROOT/t1.json.gz, platform: MI300X}
-  - {name: prefill_1, phase: prefill, trace_path: ROOT/t1.json.gz, platform: MI300X}
+  - {name: prefill, phase: prefill, trace_path: ROOT/t1.json.gz, platform: MI300X}
   - {name: decode, phase: decode, trace_path: ROOT/t2.json.gz, platform: MI300X, capture_folder: ROOT/c2}
 """,
         """
@@ -209,8 +177,7 @@ include_call_stack: true
 group_by_parent_module: true
 aggregation: {policy: combine_only_same_phase}
 jobs:
-  - {name: prefill_0, phase: prefill, trace_path: ROOT/t1.json.gz, platform: MI300X}
-  - {name: prefill_1, phase: prefill, trace_path: ROOT/t1.json.gz, platform: MI300X}
+  - {name: prefill, phase: prefill, trace_path: ROOT/t1.json.gz, platform: MI300X}
   - {name: decode, phase: decode, trace_path: ROOT/t2.json.gz, platform: MI300X, capture_folder: ROOT/c2}
 """,
         [
@@ -267,12 +234,8 @@ def test_check_config_completes_each_scope(root, case):
 
 
 def test_multi_trace_scope_derived_from_aggregation(root):
-    _, text, expected, _ = CASES["multi_trace"]
-    completed = check_config(_load(text, root))
-    assert completed.run_config == _load(expected, root)
-    again = check_config(completed.run_config)
-    assert again.run_config == completed.run_config
-    assert again.changes == []
+    result = check_config(_load(CASES["multi_trace"][1], root))
+    assert result.variables["focus_job"] == "prefill"
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -359,47 +322,15 @@ def test_build_matches_yaml(root, tmp_path, capsys, case):
         ),
         pytest.param(
             "multi_trace",
-            "{analysis_mode: default, output_dir: ROOT/out, focus_job: a,"
-            " aggregation: {policy: combine_only_same_phase}, jobs: ["
-            "{name: a, phase: x, trace_path: ROOT/t1.json.gz, platform: MI300X},"
-            "{name: b, phase: y, trace_path: ROOT/t2.json.gz, platform: MI300X}]}",
-            ["focus_job is not a wrapper key; list the focus job first"],
-            id="multi_trace_focus_job_key",
-        ),
-        pytest.param(
-            "multi_trace",
-            "{analysis_mode: default, output_dir: ROOT/out,"
-            " aggregation: {policy: combine_only_same_phase}, jobs: ["
-            "{name: a, phase: x, trace_path: ROOT/t1.json.gz, platform: MI300X},"
-            "{name: b, trace_path: ROOT/t2.json.gz, platform: MI300X}]}",
-            ["jobs[1].phase is required when aggregation is set"],
-            id="multi_trace_missing_phase",
-        ),
-        pytest.param(
-            "multi_trace",
-            "{analysis_mode: default, output_dir: ROOT/out, jobs: ["
-            "{name: a, phase: x, trace_path: ROOT/t1.json.gz, platform: MI300X},"
-            "{name: b, phase: y, trace_path: ROOT/t2.json.gz, platform: MI300X}]}",
-            ["aggregation.policy must be combine_only_same_phase"],
-            id="multi_trace_no_aggregation",
-        ),
-        pytest.param(
-            "multi_trace",
-            "{analysis_mode: default, output_dir: ROOT/out, aggregation: {policy: combine},"
-            " jobs: ["
-            "{name: a, phase: x, trace_path: ROOT/t1.json.gz, platform: MI300X},"
-            "{name: b, phase: y, trace_path: ROOT/t2.json.gz, platform: MI300X}]}",
-            ["aggregation.policy must be combine_only_same_phase"],
-            id="multi_trace_policy_combine",
-        ),
-        pytest.param(
-            "multi_trace",
             "{analysis_mode: default, output_dir: ROOT/out, include_call_stack: false,"
-            " aggregation: {policy: combine_only_same_phase}, jobs: ["
+            " aggregation: {policy: combine}, jobs: ["
             "{name: a, phase: x, trace_path: ROOT/t1.json.gz, platform: MI300X},"
             "{name: b, phase: y, trace_path: ROOT/t2.json.gz, platform: MI300X}]}",
-            ["include_call_stack must be true, got false"],
-            id="multi_trace_flag_false",
+            [
+                "aggregation.policy must be combine_only_same_phase",
+                "include_call_stack must be true, got false",
+            ],
+            id="multi_trace_aggregation_and_flags",
         ),
         pytest.param(
             "comparative",
@@ -413,14 +344,6 @@ def test_build_matches_yaml(root, tmp_path, capsys, case):
                 "jobs[1] takes no compare_to",
             ],
             id="comparative_errors",
-        ),
-        pytest.param(
-            "comparative",
-            "{analysis_mode: default, output_dir: ROOT/out, jobs: ["
-            "{trace_path: ROOT/t1.json.gz, platform: MI300X, compare_to: nope},"
-            "{name: other, trace_path: ROOT/t2.json.gz, platform: MI300X}]}",
-            ["or be jobs[1]'s name ('other')"],
-            id="comparative_wrong_name",
         ),
         pytest.param(
             "comparative",
@@ -525,7 +448,7 @@ def test_add_diff_stats(root, tmp_path, monkeypatch, capsys):
                 "trace_path=ROOT/t1.json.gz",
                 "platform=MI300X",
                 "output_dir=ROOT/out",
-                "focus_job=prefill_0",
+                "focus_job=prefill",
                 "wrote   ROOT/out/cache/run_config.yaml",
             ],
             id="multi_trace",

@@ -90,7 +90,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 ## Executive Summary
 
 <!-- === STANDALONE Executive Summary === -->
-[1 paragraph overview + key metrics table. multi_trace: Total Time is the combined time; add one sentence naming the phases (the distinct `phase` values in `gpu_utilization.jobs`) with each phase's time, the sum of `total_time_ms` over its jobs.]
+[1 paragraph overview + key metrics table. multi_trace: Total Time is the combined time; add one sentence giving each phase's time, summed over its jobs in `gpu_utilization.jobs`.]
 
 <!-- MANDATORY: This table must contain exactly these 5 rows:
      Total Time | Compute % | Idle % | Exposed Communication % | Top Bottleneck Category

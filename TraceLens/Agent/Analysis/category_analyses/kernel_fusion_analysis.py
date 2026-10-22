@@ -188,9 +188,9 @@ def main():
         "peak_mem_bw_tbs": peak_bw_tbs,
         "baseline_ms": baseline_ms,
         "phase": (
-            None
-            if manifest.get("focus_job") is None
-            else manifest["gpu_utilization"]["jobs"][manifest["focus_job"]]["phase"]
+            manifest["gpu_utilization"]["jobs"][manifest["focus_job"]]["phase"]
+            if "focus_job" in manifest
+            else None
         ),
         "impact_estimates": [e.to_dict() for e in impact_estimates],
         **scope_metrics,

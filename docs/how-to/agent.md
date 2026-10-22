@@ -114,21 +114,20 @@ agentic analysis workflow from config <run.yaml>, <scope>
 
 Replace `<scope>` with `standalone`, `comparative`, `semantic`, or `multi_trace`. The scope is
 optional: the agent derives it when the shape is unambiguous (one job is `standalone`,
-two jobs with `compare_to` on job 1 is `comparative`, two or more jobs with `aggregation`
-is `multi_trace`). The config must already have the shape the scope needs. The agent only
-adds wiring and its own report flags, and prints every change it makes. In two-trace runs
-the second trace's platform is kept as written when it has an arch file. Otherwise both
-reports use the first trace's platform, and the second trace's platform is kept as a
-label. The agent still asks for environment details.
+two jobs with `compare_to` on job 1 is `comparative`, a config with `aggregation` is
+`multi_trace`). The config must already have the shape the scope needs. The agent only
+adds wiring and its own report flags, and prints every change it makes. In two-trace runs,
+a second platform without an arch file is replaced by the first trace's platform and kept
+as a label. The agent still asks for environment details.
 
 | Scope | Config shape |
 |---|---|
 | `standalone` | One job. |
-| `comparative` | Two jobs. `capture_folder` is optional per job. `compare_to` on job 1 may name job 2 instead of repeating its paths; the agent expands it, so only the agent accepts the name. The agent compares them with TraceDiff. |
+| `comparative` | Two jobs. `capture_folder` is optional per job. `compare_to` on job 1 may be job 2's name. The agent compares them with TraceDiff. |
 | `semantic` | Two jobs, `analysis_mode: inference`, no `capture_folder`. Both traces are graph-replay-only. |
-| `multi_trace` | Two or more named jobs on one platform, no `compare_to`, a `phase` on every job, and `aggregation` with policy `combine_only_same_phase`. This is a plain wrapper YAML: the agent only adds missing report flags. Jobs that share a phase are combined. One report ranks findings across all jobs, each labeled with its phase. The first job is the focus: kernel fusion and system analysis use it. |
+| `multi_trace` | Two or more named jobs on one platform, no `compare_to`, a `phase` on every job, and `aggregation` with policy `combine_only_same_phase`. Jobs that share a phase are combined into one report. The first job is the focus: kernel fusion and system analysis use it. |
 
-For example, a `multi_trace` config with system analysis on `prefill_0`:
+For example, a `multi_trace` config:
 
 ```yaml
 analysis_mode: inference
@@ -140,28 +139,9 @@ jobs:
     phase: prefill
     trace_path: /abs/path/prefill_0.json.gz
     platform: MI300X
-  - name: prefill_1
-    phase: prefill
-    trace_path: /abs/path/prefill_1.json.gz
-    platform: MI300X
   - name: decode
     phase: decode
     trace_path: /abs/path/decode.json.gz
-    platform: MI300X
-```
-
-A `comparative` config can name job 2 in `compare_to`:
-
-```yaml
-analysis_mode: default
-output_dir: /abs/path/analysis_output
-jobs:
-  - name: baseline
-    trace_path: /abs/path/baseline.json.gz
-    platform: MI300X
-    compare_to: target
-  - name: target
-    trace_path: /abs/path/target.json.gz
     platform: MI300X
 ```
 
