@@ -296,21 +296,8 @@ unary_elemwise_ops = [
     "aten::neg",
     "aten::pow",
     "aten::_to_copy",
-    "aten::fill_",
-    "aten::zero_",
     "aten::clone",
     "aten::gelu",
-    "aten::cos",
-    "aten::sin",
-    "aten::exp",
-    "aten::log",
-    "aten::sqrt",
-    "aten::clamp",
-    "aten::clamp_",
-    "aten::bitwise_not",
-    "aten::uniform_",
-    "aten::normal_",
-    "aten::exponential_",
 ]
 
 binary_elemwise_ops = [
@@ -322,16 +309,6 @@ binary_elemwise_ops = [
     "aten::add_",
     "aten::sigmoid_backward",
     "aten::threshold_backward",
-    "aten::sub",
-    "aten::sub_",
-    "aten::eq",
-    "aten::ne",
-    "aten::gt",
-    "aten::lt",
-    "aten::ge",
-    "aten::le",
-    "aten::bitwise_and",
-    "aten::bitwise_or",
 ]
 
 # aten::batch_norm_backward and similar ops do not appear in traces
@@ -399,9 +376,6 @@ reduce_ops = [
     "aten::cumprod",
     "aten::amin",
     "aten::amax",
-    "aten::argmax",
-    "aten::all",
-    "aten::any",
 ]
 
 replication_pad_ops = [
@@ -437,18 +411,9 @@ for op in upsample_ops:
 for op in bilinear_upsample_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_upsample_bilinear
 
-# Memory/data-movement ops. Unlike the generic unary/binary/reduce lists
-# above, each of these has a dedicated class (variable arity, or an
-# index-tensor-driven output shape), so they are registered individually
-# rather than via a shared-class loop. Observed in VLA/robotics workloads
-# (CogACT, GR00T, DDVLA) as previously-unmodeled time.
+# Memory/data-movement op. Has a dedicated class (variable arity), so it
+# is registered individually rather than via a shared-class loop.
 op_to_perf_model_class_map["aten::cat"] = perf_model.aten_cat
-op_to_perf_model_class_map["aten::index_select"] = perf_model.aten_index_select
-op_to_perf_model_class_map["aten::gather"] = perf_model.aten_gather
-op_to_perf_model_class_map["aten::_index_put_impl_"] = perf_model.aten_index_put_impl
-op_to_perf_model_class_map["aten::masked_scatter_"] = perf_model.aten_masked_scatter
-op_to_perf_model_class_map["aten::arange"] = perf_model.aten_arange
-op_to_perf_model_class_map["aten::where"] = perf_model.aten_where
 
 # ---------------------------------------------------------------------------
 # Pattern-based matchers for perf models with generated kernel names.
