@@ -458,9 +458,14 @@ TraceLens_generate_perf_report_pytorch_inference \
 When `--capture_folder` is set, TraceLens first classifies the capture traces
 (writing an `execution_details.json` in the folder if one isn't already present),
 then merges the matching subtrees into the graph tree before running the standard
-analysis. Each `execution_details.json` entry lists `file`, `batch_size`, `mode`
-and `capture_type` (`target`, `drafter` or `drafter_extend`; `target` when
-absent). Captures from the same rank as the replay trace are preferred.
+analysis. Each `execution_details.json` entry lists `file`, `batch_size`, `mode`,
+`capture_type` (`target`, `drafter` or `drafter_extend`; `target` when absent),
+`request_bs`, `token`, and `num_captures`. `batch_size` is the number parsed from a `capture_{N}_{mode}`
+annotation when that annotation lines up with a dummy-run root, and otherwise
+the most common leading input dimension. `token` is that same leading
+dimension. `request_bs` is the request count from the filename when the name carries
+one. `num_captures` is the number of `StreamBeginCapture` runtime events in the
+file; one or fewer is `FULL`, and more than one is `PIECEWISE`. Captures from the same rank as the replay trace are preferred.
 
 ### Speculative decoding
 

@@ -241,9 +241,6 @@ def resolve_main_trace_path(run_dir):
 
 def resolve_capture_folder(run_dir):
     """Resolve the ``capture_traces`` folder for a run."""
-    capture_folder = (_load_manifest(run_dir) or {}).get("capture_folder_path")
-    if capture_folder and os.path.isdir(capture_folder):
-        return capture_folder
     trace_input = _trace_input_dir(run_dir)
     if not trace_input:
         return None

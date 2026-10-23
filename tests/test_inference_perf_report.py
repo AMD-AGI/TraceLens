@@ -653,17 +653,19 @@ class TestInferenceZipPhase8:
         classify_graph_capture_trace(str(capture_dir))
         details = json.loads((capture_dir / "execution_details.json").read_text())
         assert details[0]["batch_size"] == 4
+        assert details[0]["request_bs"] is None
+        assert details[0]["token"] == 4
+        assert details[0]["num_captures"] == 1
 
     def test_classify_sglang_spec_decode_captures(self, tmp_path):
-        """Runner names give request bs; legacy draft-extend resolves via tokens."""
+        """Filename request count is bs; batch_size is the leading token dim."""
         capture_dir = tmp_path / "cap"
         capture_dir.mkdir()
         files = {
             # name: tokens (most common first dim)
             "DecodeCudaGraphRunner_bs_7_rank0.json.gz": 42,
             "EAGLEDraftCudaGraphRunner_bs_7_rank0.json.gz": 7,
-            "EAGLEDraftExtendCudaGraphRunner_capture_6_rank0.json.gz": 42,
-            "EAGLEDraftExtendCudaGraphRunner_capture_9_rank0.json.gz": 30,
+            "EAGLEDraftExtendCudaGraphRunner_bs_7_rank0.json.gz": 42,
             "graph_capture_rank_0.json.gz": 16,
         }
         for name, tokens in files.items():
@@ -677,19 +679,31 @@ class TestInferenceZipPhase8:
                 json.dump({"traceEvents": events}, f)
         classify_graph_capture_trace(str(capture_dir))
         details = json.loads((capture_dir / "execution_details.json").read_text())
-        got = {d["file"]: (d["capture_type"], d["batch_size"]) for d in details}
+        got = {
+            d["file"]: (
+                d["capture_type"],
+                d["batch_size"],
+                d["request_bs"],
+                d["token"],
+                d["num_captures"],
+            )
+            for d in details
+        }
         assert got == {
-            "DecodeCudaGraphRunner_bs_7_rank0.json.gz": ("target", 7),
-            "EAGLEDraftCudaGraphRunner_bs_7_rank0.json.gz": ("drafter", 7),
-            "EAGLEDraftExtendCudaGraphRunner_capture_6_rank0.json.gz": (
+            "DecodeCudaGraphRunner_bs_7_rank0.json.gz": ("target", 42, 7, 42, 1),
+            "EAGLEDraftCudaGraphRunner_bs_7_rank0.json.gz": ("drafter", 7, 7, 7, 1),
+            "EAGLEDraftExtendCudaGraphRunner_bs_7_rank0.json.gz": (
                 "drafter_extend",
+                42,
                 7,
+                42,
+                1,
             ),
-            "graph_capture_rank_0.json.gz": ("target", 16),
+            "graph_capture_rank_0.json.gz": ("target", 16, None, 16, 1),
         }
 
     def test_classify_atom_spec_decode_captures(self, tmp_path):
-        """ATOM filenames give request bs, not the token dim inside the file."""
+        """ATOM filenames give bs; batch_size is the leading token dim."""
         capture_dir = tmp_path / "cap"
         capture_dir.mkdir()
         files = {
@@ -709,12 +723,27 @@ class TestInferenceZipPhase8:
         classify_graph_capture_trace(str(capture_dir))
         details = json.loads((capture_dir / "execution_details.json").read_text())
         got = {
-            d["file"]: (d["capture_type"], d["batch_size"], d["mode"]) for d in details
+            d["file"]: (
+                d["capture_type"],
+                d["batch_size"],
+                d["request_bs"],
+                d["token"],
+                d["mode"],
+                d["num_captures"],
+            )
+            for d in details
         }
         assert got == {
-            "bs_32_q_4_rank0.json.gz": ("target", 32, "FULL"),
-            "bs_7_rank0.json.gz": ("target", 7, "FULL"),
-            "draft_step_forward_bs_32_rank0.json.gz": ("drafter", 32, "FULL"),
+            "bs_32_q_4_rank0.json.gz": ("target", 128, 32, 128, "FULL", 1),
+            "bs_7_rank0.json.gz": ("target", 28, 7, 28, "FULL", 1),
+            "draft_step_forward_bs_32_rank0.json.gz": (
+                "drafter",
+                32,
+                32,
+                32,
+                "FULL",
+                1,
+            ),
         }
 
 
