@@ -253,7 +253,7 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
     if tier == "fusion":
         errors.extend(_validate_fusion_data_tables(content))
 
-    # Marker structure (folded in from the former Level-4 validate_markers).
+    # Marker structure validation.
     file_class = "category_findings" if tier == "compute" else "system_findings"
     errors.extend(
         MarkerValidator.check_findings_file(
@@ -1241,3 +1241,284 @@ class MarkerValidator:
                 f"warning prose to top-of-report kind=warning markers"
             )
         return errors
+
+
+# ===========================================================================
+# Semantic-analysis artifact validators
+#
+# The semantic-comparison path (skills/analysis-orchestrator/agents/) has three
+# LLM-authored JSON artifacts. Each validator does a schema check plus a
+# referential check against the context the agent was given, and returns
+# (passed, errors) so the orchestrator can use it as a retry gate before the
+# corresponding apply step rewrites semantic_block.
+# ===========================================================================
+
+
+def _load_json_for_validation(path):
+    """Load a JSON file for validation; return (doc, errors)."""
+    if not os.path.exists(path):
+        return None, [f"File not found: {path}"]
+    try:
+        with open(path) as f:
+            return json.load(f), []
+    except (json.JSONDecodeError, OSError) as e:
+        return None, [f"Could not parse {path}: {e}"]
+
+
+def _missing_backrefs(replacement, rx):
+    """Group references in a re.sub replacement that the pattern can't satisfy.
+
+    Catches the failure that ``re`` only raises at substitution time (a
+    backreference with no matching capture group), which ``stem_for`` silently
+    swallows at runtime. Returns the set of offending references.
+    """
+    bad = set()
+    for m in re.finditer(r"\\(\d+)|\\g<([^>]*)>", replacement):
+        num, name = m.group(1), m.group(2)
+        if num is not None:
+            if int(num) > rx.groups:
+                bad.add(num)
+        elif name is not None:
+            if name.isdigit():
+                if int(name) > rx.groups:
+                    bad.add(name)
+            elif name not in rx.groupindex:
+                bad.add(name)
+    return bad
+
+
+def validate_stem_rules(rules_path):
+    """Validate a kernel-stem-preprocessing ``stem_rules.json``.
+
+    Schema: ``{"rules": [...]}`` (or a bare list); each rule a dict with a
+    compilable ``pattern``, ``action`` in collapse/preserve/drop, a string
+    ``replacement`` and a non-empty ``note``. Referential: a ``collapse``
+    replacement may only reference capture groups the pattern defines, and
+    duplicate patterns are flagged (first match wins, so a later duplicate is
+    dead).
+
+    Returns:
+        (passed: bool, errors: list[str])
+    """
+    doc, errors = _load_json_for_validation(rules_path)
+    if errors:
+        return False, errors
+
+    rules = doc.get("rules") if isinstance(doc, dict) else doc
+    if not isinstance(rules, list):
+        return False, ["Top-level must be a list or an object with a 'rules' list."]
+
+    seen_patterns = {}
+    for i, r in enumerate(rules):
+        if not isinstance(r, dict):
+            errors.append(f"rule {i}: must be an object")
+            continue
+
+        action = r.get("action", "collapse")
+        if action not in ("collapse", "preserve", "drop"):
+            errors.append(
+                f"rule {i}: invalid action {action!r} (collapse/preserve/drop)"
+            )
+
+        pattern = r.get("pattern")
+        rx = None
+        if not isinstance(pattern, str) or pattern == "":
+            errors.append(f"rule {i}: 'pattern' must be a non-empty string")
+        else:
+            try:
+                rx = re.compile(pattern)
+            except re.error as e:
+                errors.append(f"rule {i}: bad regex {pattern!r}: {e}")
+            else:
+                if pattern in seen_patterns:
+                    errors.append(
+                        f"rule {i}: duplicate pattern {pattern!r} (rule "
+                        f"{seen_patterns[pattern]} matches first; this one is dead)"
+                    )
+                else:
+                    seen_patterns[pattern] = i
+
+        note = r.get("note")
+        if not isinstance(note, str) or not note.strip():
+            errors.append(f"rule {i}: 'note' is required (non-empty rationale)")
+
+        replacement = r.get("replacement", "")
+        if not isinstance(replacement, str):
+            errors.append(f"rule {i}: 'replacement' must be a string")
+        elif action == "collapse" and rx is not None:
+            bad = _missing_backrefs(replacement, rx)
+            if bad:
+                errors.append(
+                    f"rule {i}: replacement {replacement!r} references missing "
+                    f"group(s) {sorted(bad)} (pattern defines {rx.groups})"
+                )
+
+    return (not errors), errors
+
+
+def validate_kernel_unification_map(decisions_path, context_path):
+    """Validate id-referenced kernel-unification decisions against the context.
+
+    The agent emits ``{"pairs": [{"a": <id>, "b": <id>, "label": str}, ...],
+    "renames_a": [...], "renames_b": [...]}`` referencing the ``id`` fields that
+    ``kernel_unification.py prepare-context`` stamps onto each candidate. Schema:
+    pairs/renames are objects with non-empty string labels. Referential (against
+    ``kernel_unification_context.json``): every id exists in the matching
+    ``only_in_<name>`` list, no id is used twice, and a paired candidate's
+    ``perf_categories`` must intersect (never unify across perf categories).
+
+    Returns:
+        (passed: bool, errors: list[str])
+    """
+    decisions, errors = _load_json_for_validation(decisions_path)
+    if errors:
+        return False, errors
+    context, errors = _load_json_for_validation(context_path)
+    if errors:
+        return False, errors
+
+    name_a = context.get("name_a")
+    name_b = context.get("name_b")
+    ids_a = {
+        e["id"]: e
+        for e in context.get(f"only_in_{name_a}", [])
+        if isinstance(e, dict) and "id" in e
+    }
+    ids_b = {
+        e["id"]: e
+        for e in context.get(f"only_in_{name_b}", [])
+        if isinstance(e, dict) and "id" in e
+    }
+
+    errors = []
+    if not ids_a and not ids_b:
+        errors.append(
+            "context has no id-stamped candidates; regenerate with a "
+            "prepare-context that stamps ids"
+        )
+
+    pairs = decisions.get("pairs", [])
+    if not isinstance(pairs, list):
+        return False, errors + ["'pairs' must be a list"]
+
+    used_a, used_b = {}, {}
+    for i, p in enumerate(pairs):
+        if not isinstance(p, dict):
+            errors.append(f"pair {i}: must be an object")
+            continue
+        aid, bid, label = p.get("a"), p.get("b"), p.get("label")
+        if not isinstance(label, str) or not label.strip():
+            errors.append(f"pair {i}: 'label' must be a non-empty string")
+
+        ea = ids_a.get(aid)
+        eb = ids_b.get(bid)
+        if ea is None:
+            errors.append(f"pair {i}: 'a' id {aid!r} not in only_in_{name_a}")
+        elif aid in used_a:
+            errors.append(f"pair {i}: 'a' id {aid!r} reused (also pair {used_a[aid]})")
+        else:
+            used_a[aid] = i
+        if eb is None:
+            errors.append(f"pair {i}: 'b' id {bid!r} not in only_in_{name_b}")
+        elif bid in used_b:
+            errors.append(f"pair {i}: 'b' id {bid!r} reused (also pair {used_b[bid]})")
+        else:
+            used_b[bid] = i
+
+        if ea is not None and eb is not None:
+            pca = set(ea.get("perf_categories", []))
+            pcb = set(eb.get("perf_categories", []))
+            if pca and pcb and not (pca & pcb):
+                errors.append(
+                    f"pair {i}: perf_category mismatch {sorted(pca)} vs "
+                    f"{sorted(pcb)} (never unify across perf categories)"
+                )
+
+    for side, key, ids, nm in (
+        ("a", "renames_a", ids_a, name_a),
+        ("b", "renames_b", ids_b, name_b),
+    ):
+        entries = decisions.get(key, []) or []
+        if not isinstance(entries, list):
+            errors.append(f"'{key}' must be a list")
+            continue
+        for i, r in enumerate(entries):
+            if not isinstance(r, dict):
+                errors.append(f"{key}[{i}]: must be an object")
+                continue
+            rid = r.get("id", r.get(side))
+            if rid not in ids:
+                errors.append(f"{key}[{i}]: id {rid!r} not in only_in_{nm}")
+            lbl = r.get("label")
+            if not isinstance(lbl, str) or not lbl.strip():
+                errors.append(f"{key}[{i}]: 'label' must be a non-empty string")
+
+    return (not errors), errors
+
+
+def validate_kernel_coherence_decisions(decisions_path, context_path):
+    """Validate a kernel-coherence ``kernel_coherence_decisions.json``.
+
+    Schema: ``context_renames`` / ``fallback_remap_a`` / ``fallback_remap_b`` /
+    ``fallback_remap_regex_a`` / ``fallback_remap_regex_b`` are string->string
+    maps with non-empty values; ``notes`` optional string. Referential (against
+    ``kernel_coherence_context.json``): ``context_renames`` keys are
+    ``context_catalog`` ids, ``fallback_remap_*`` keys are symbols from the
+    matching ``one_sided_in_*`` list, and every ``fallback_remap_regex_*`` key
+    compiles as a regex.
+
+    Returns:
+        (passed: bool, errors: list[str])
+    """
+    decisions, errors = _load_json_for_validation(decisions_path)
+    if errors:
+        return False, errors
+    context, errors = _load_json_for_validation(context_path)
+    if errors:
+        return False, errors
+
+    errors = []
+    catalog_ids = {
+        e.get("id") for e in context.get("context_catalog", []) if isinstance(e, dict)
+    }
+    one_sided = {
+        "a": set(context.get("one_sided_in_a", [])),
+        "b": set(context.get("one_sided_in_b", [])),
+    }
+
+    def _check_str_map(obj, key):
+        if not isinstance(obj, dict):
+            errors.append(f"'{key}' must be an object")
+            return {}
+        for k, v in obj.items():
+            if not isinstance(v, str) or not v.strip():
+                errors.append(f"{key}[{k!r}]: value must be a non-empty string")
+        return obj
+
+    renames = _check_str_map(
+        decisions.get("context_renames", {}) or {}, "context_renames"
+    )
+    for k in renames:
+        if k not in catalog_ids:
+            errors.append(f"context_renames: id {k!r} not in context_catalog")
+
+    for side in ("a", "b"):
+        key = f"fallback_remap_{side}"
+        fr = _check_str_map(decisions.get(key, {}) or {}, key)
+        for k in fr:
+            if k not in one_sided[side]:
+                errors.append(f"{key}: symbol {k!r} not in one_sided_in_{side}")
+
+        rkey = f"fallback_remap_regex_{side}"
+        rr = _check_str_map(decisions.get(rkey, {}) or {}, rkey)
+        for k in rr:
+            try:
+                re.compile(k)
+            except re.error as e:
+                errors.append(f"{rkey}: bad regex {k!r}: {e}")
+
+    notes = decisions.get("notes")
+    if notes is not None and not isinstance(notes, str):
+        errors.append("'notes' must be a string")
+
+    return (not errors), errors
