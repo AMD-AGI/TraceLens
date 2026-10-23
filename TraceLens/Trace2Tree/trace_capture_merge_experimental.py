@@ -24,7 +24,7 @@ import TraceLens
 
 UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
-from ..TraceIndex.scanner import extract_rank
+from ..util import extract_rank
 from ..TraceUtils.utils.annotation_utils import (
     SPEC_ROLE_TARGET,
     find_known_annotations,
