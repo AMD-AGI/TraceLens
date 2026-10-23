@@ -4,15 +4,18 @@
 # See LICENSE for license information.
 ###############################################################################
 
-# Run skillscope on evals.json (same intake criteria as amd/skills)
+# Pinned to the skillscope v0.1.3 release tag rather than main, so this required
+# check runs the commit that tag names, not whatever merges upstream next. Both
+# `uses:` lines below carry the pin; bump them together.
+# Branch protection should require "AMD Skills Checks / Results".
 
 name: AMD Skills Checks
 
 on:
+  # Required checks must run on every PR, including changes outside the skill.
   pull_request:
-    paths:
-      - "TraceLens/Agent/Analysis/skills/**"
-      - ".github/workflows/skill-evals.yml"
+  schedule:
+    - cron: "17 6 * * *"
   workflow_dispatch:
     inputs:
       structural:
@@ -34,12 +37,28 @@ permissions:
 jobs:
   evals:
     name: AMD Skills Checks
-    uses: amd/skillscope/.github/workflows/reusable.yml@main
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.3
     secrets:
-      api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      api_key: ${{ github.event_name == 'workflow_dispatch' && (inputs.routing || inputs.behavioral) && secrets.ANTHROPIC_API_KEY || '' }}
     with:
       skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
       # Each step can be set to `required`, `optional`, or `off`.
       structural: ${{ github.event_name != 'workflow_dispatch' && 'required' || inputs.structural && 'required' || 'off' }}
       routing: ${{ github.event_name == 'workflow_dispatch' && inputs.routing && 'required' || 'off' }}
       behavioral: ${{ github.event_name == 'workflow_dispatch' && inputs.behavioral && 'required' || 'off' }}
+
+  external-references:
+    name: External References
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Remote outages should be visible without blocking the offline Results gate.
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Check external skill references
+        uses: amd/skillscope@v0.1.3
+        with:
+          command: structural
+          args: --external
+          skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
