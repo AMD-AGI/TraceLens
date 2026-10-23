@@ -325,6 +325,7 @@ def extract_and_save_split(
                 "num_gpu_events": num_gpu_events,
                 "gpu_duration": gpu_dur,
                 "gpu_busy_duration": gpu_busy,
+                "busy_ratio": gpu_busy / gpu_dur if gpu_dur else 0,
                 "steps": iter_details,
                 "phase": phase_details,
             }
@@ -361,7 +362,7 @@ def extract_and_save_single_trace(
     for a in ancestors:
         if id(a) not in existing_events:
             iter_trace["traceEvents"].append(a)
-    range_label = f"{start}:{end}" if end - start > 1 else str(start)
+    range_label = f"{start}-{end}" if end - start > 1 else str(start)
     out_path = os.path.join(
         ctx.output_dir, f"{ctx.base_name}_iteration_{range_label}.json.gz"
     )
@@ -379,6 +380,7 @@ def extract_and_save_single_trace(
             "num_gpu_events": num_gpu,
             "gpu_duration": gpu_dur,
             "gpu_busy_duration": gpu_busy,
+            "busy_ratio": gpu_busy / gpu_dur if gpu_dur else 0,
         }
     ]
 
