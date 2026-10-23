@@ -67,7 +67,6 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     # gsplat 3DGS kernels; ".*" matches the symbol behind a launcher/synthetic prefix (re.match).
     (re.compile(r".*gsplat::projection_ewa_3dgs_packed_fwd"), "GaussianSplat"),
     (re.compile(r".*gsplat::intersect_(tile|offset)_kernel"), "GaussianSplat"),
-    (re.compile(r"^(?!.*batched_gemm_a8w8_mx128).*gemm_a8w8_mx128"), "GEMM"),
 ]
 
 
@@ -461,21 +460,6 @@ def _match_gsplat(name):
 
 
 register_perf_model_matcher(_match_gsplat)
-
-
-def _match_gemm_a8w8_mx128(name):
-    if "batched_gemm_a8w8_mx128" in name:
-        return None
-    if "gemm_a8w8_mx128" in name:
-        from TraceLens.PerfModel.extensions.perf_model_extensions import (
-            gemm_a8w8_blockscale,
-        )
-
-        return gemm_a8w8_blockscale
-    return None
-
-
-register_perf_model_matcher(_match_gemm_a8w8_mx128)
 
 OP_CATEGORY_REGISTRY = build_op_category_registry(
     op_to_perf_model_class_map,

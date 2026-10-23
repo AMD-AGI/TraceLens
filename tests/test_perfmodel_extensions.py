@@ -1264,8 +1264,51 @@ class TestPerfModelExtensionsCoverage:
             }
         }
         model = gemm_a16w16_asm(event)
+        assert model.B == 1
+        assert (model.M, model.N, model.K) == (128, 512, 256)
         assert model.flops() == 2 * 128 * 512 * 256
-        assert model.bytes() > 0
+        assert model.bytes() == (128 * 256 + 512 * 256 + 128 * 512) * 2
+
+    def test_opus_gemm_a16w16_launch_raw_3d_layout(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [1, 2048, 7168],
+                    [1, 64, 7168],
+                    [1, 2048, 64],
+                    [],
+                    [3, 2048, 64],
+                    [],
+                    [],
+                ],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "",
+                    "float",
+                    "Scalar",
+                    "Scalar",
+                ],
+            }
+        }
+        model = gemm_a16w16_asm(event)
+        assert model.B == 1
+        assert (model.M, model.N, model.K) == (2048, 64, 7168)
+        assert model.flops() == 2 * 2048 * 64 * 7168
+        assert model.bytes() == (2048 * 7168 + 64 * 7168 + 2048 * 64) * 2
+
+        batched = {
+            "args": {
+                "Input Dims": [[2, 8, 16], [2, 4, 16], [2, 8, 4]],
+                "Input type": ["c10::BFloat16", "c10::BFloat16", "c10::BFloat16"],
+            }
+        }
+        batched_model = gemm_a16w16_asm(batched)
+        assert batched_model.B == 2
+        assert (batched_model.M, batched_model.N, batched_model.K) == (8, 4, 16)
+        assert batched_model.flops() == 2 * 2 * 8 * 4 * 16
+        assert batched_model.bytes() == 2 * (8 * 16 + 4 * 16 + 8 * 4) * 2
 
     def test_gemm_afp4wfp4(self):
         event = {
