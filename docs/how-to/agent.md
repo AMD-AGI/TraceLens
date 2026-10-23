@@ -112,22 +112,19 @@ Follow the analysis orchestrator installed with TraceLens and run the full
 agentic analysis workflow from config <run.yaml>, <scope>
 ```
 
-Replace `<scope>` with `standalone`, `comparative`, `semantic`, or `multi_trace`. The scope is
-optional: the agent derives it when the shape is unambiguous (one job is `standalone`,
-two jobs with `compare_to` on job 1 is `comparative`, a config with `aggregation` is
-`multi_trace`). The config must already have the shape the scope needs. The agent only
-adds wiring and its own report flags, and prints every change it makes. In two-trace runs,
-a second platform without an arch file is replaced by the first trace's platform and kept
-as a label. The agent still asks for environment details.
+Replace `<scope>` with `standalone`, `comparative`, `semantic`, or `multi_trace`. You can
+leave the scope out when the config already implies it: a single job runs as `standalone`,
+two jobs with `compare_to` on the first job run as `comparative`, and a config with an
+`aggregation` block runs as `multi_trace`.
 
 | Scope | Config shape |
 |---|---|
 | `standalone` | One job. |
-| `comparative` | Two jobs. `capture_folder` is optional per job. `compare_to` on job 1 may be job 2's name. The agent compares them with TraceDiff. |
-| `semantic` | Two jobs, `analysis_mode: inference`, no `capture_folder`. Both traces are graph-replay-only. |
-| `multi_trace` | Two or more named jobs on one platform, no `compare_to`, a `phase` on every job, and `aggregation` with policy `combine_only_same_phase`. Jobs that share a phase are combined into one report. The first job is the focus: kernel fusion and system analysis use it. |
+| `comparative` | Two jobs, each with an optional `capture_folder`. `compare_to` on the first job can name the second job instead of repeating its paths. |
+| `semantic` | Two graph-replay-only jobs with `analysis_mode: inference` and no `capture_folder`. |
+| `multi_trace` | Two or more named jobs on the same platform, each with a `phase`, and an `aggregation` block with policy `combine_only_same_phase`. Jobs that share a phase are combined in the report, and the first job is the one that kernel fusion and system analysis focus on. |
 
-For example, a `multi_trace` config:
+For example, a `multi_trace` config for a prefill trace and a decode trace:
 
 ```yaml
 analysis_mode: inference
@@ -145,8 +142,8 @@ jobs:
     platform: MI300X
 ```
 
-Every job needs `platform`, and the trace, capture folder, and output paths must be absolute. For the full schema and
-examples, see
+Every job needs a `platform`, and all trace, capture folder, and output paths must be
+absolute. For the full schema and more examples, see
 [Generate performance reports from a YAML config](./generate-perf-report-from-config.md).
 
 ## Read the results
