@@ -45,20 +45,19 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
 from TraceLens.Agent.Analysis.utils.classify_kernels import (
     COMPILED,
     LAYOUT_TRANSFORM,
+    PRIMITIVES,
     UNKNOWN,
     KernelClass,
     KernelTaxonomy,
 )
-from TraceLens.PerfModel.perf_model import BinaryElementwise
+from TraceLens.PerfModel.perf_model import GEMM, BinaryElementwise, Reduce
 from TraceLens.PerfModel.utils import name2bpe
 from TraceLens.TreePerf.tree_perf import event_process_thread_names
+from TraceLens.util import TraceEventUtils
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-# FusionCandidate fields that hold KernelRecord tuples.
-KERNEL_FIELDS = ("kernels", "kernels_trace1", "kernels_trace2")
 
 # The generic kinds of a group that matches no form.
 GEMM_EPILOGUE = "gemm_epilogue"
@@ -69,9 +68,6 @@ KIND_NAMES = {
     ("collective", "norm"): "allreduce_norm",
     ("softmax", "topk"): "routing_topk",
 }
-# Kinds whose fused kernel replaces every kernel between its first and last
-# element, matrix kernels included (a flash kernel replaces QK, mask, softmax, PV).
-SPAN_KINDS = frozenset({"attention"})
 # Fused types that are not fusion targets: MoE GEMMs and MoE routing, found by
 # primitive, and compiled kernels, found by type (their pointwise/reduce mix is
 # unknown, so no form can describe them).
@@ -85,16 +81,27 @@ MAX_FUSION_KERNEL_COUNT = 15
 # Unrelated kernels allowed between two elements of a form.
 MAX_GAP = 1
 
-MODULE_INDEX_RE = re.compile(r"_(\d+)$")
+NN_MODULE_PREFIX = "nn.Module: "
 # Case-A gates (comparative mode): trace 1 has more kernels than trace 2, by at
 # most CASE_A_MAX_DELTA, and has at most CASE_A_MAX_N1 kernels in all.
 CASE_A_MAX_DELTA = 15
 CASE_A_MAX_N1 = 30
 # Event categories that are never fusion candidate containers.
 SKIP_CATEGORIES = frozenset(
-    {"kernel", "gpu_memcpy", "gpu_memset", "cuda_runtime", "cuda_driver"}
+    {
+        *TraceEventUtils.GpuEventCategories,
+        TraceEventUtils.CpuEventCategories.Runtime,
+        TraceEventUtils.CpuEventCategories.Driver,
+    }
 )
-SIBLING_SOURCE = "sibling_sequence"
+# Pricing confidence, bound and fusion-type labels.
+CONFIDENCE_LOW = "low"
+CONFIDENCE_MEDIUM = "medium"
+CONFIDENCE_HIGH = "high"
+BOUND_COMPUTE = "compute"
+BOUND_MEMORY = "memory"
+FUSION_TYPE_MATRIX = "matrix_compute"
+FUSION_TYPE_MEMORY = "memory_bound"
 
 # Memory/compute pipeline overlap fraction (0 = no overlap, 1 = perfect overlap).
 OVERLAP_EFFICIENCY = 0.85
@@ -106,8 +113,6 @@ MIN_MODELED_FRAC = 0.5
 MIN_MODELED_FRAC_LONG = 0.75
 LONG_GROUP_KERNELS = 5
 NO_VALUE = "—"  # Table cell for a value the perf report does not provide
-# "Data Moved (MB)" in the perf report is MiB, as in the perf model.
-BYTES_PER_MB = 1024 * 1024
 
 # ---------------------------------------------------------------------------
 # Records
@@ -218,9 +223,9 @@ class FusionCandidate:
     @classmethod
     def from_dict(cls, data: dict) -> "FusionCandidate":
         kernels = {
-            name: tuple(KernelRecord(**k) for k in data[name])
-            for name in KERNEL_FIELDS
-            if name in data
+            f.name: tuple(KernelRecord(**k) for k in data[f.name])
+            for f in fields(cls)
+            if f.type == tuple[KernelRecord, ...] | None and f.name in data
         }
         return cls(**{**data, **kernels})
 
@@ -265,6 +270,16 @@ class FusionForms:
     matrix and fusable predicates."""
 
     def __init__(self, taxonomy: KernelTaxonomy):
+        named = {p for covers in KIND_NAMES for p in covers}
+        unknown = (
+            NON_TARGET_COVERS
+            | MATRIX_COVERS
+            | NON_FUSABLE_COVERS
+            | NORM_ONLY_COVERS
+            | named
+        ) - PRIMITIVES
+        if unknown:
+            raise ValueError(f"Cover names not in PRIMITIVES: {sorted(unknown)}")
         self.taxonomy = taxonomy
         by_covers = {}
         for kc in taxonomy.types():
@@ -274,8 +289,12 @@ class FusionForms:
                 and NON_TARGET_COVERS.isdisjoint(kc.covers)
             ):
                 kind = KIND_NAMES.get(kc.covers, "_".join(kc.covers))
+                # A form with a matrix element replaces every kernel between its first
+                # and last element, matrix kernels included (a flash kernel replaces
+                # QK, mask, softmax, PV).
                 by_covers.setdefault(
-                    kc.covers, FusedForm(kind, kc.covers, kind in SPAN_KINDS)
+                    kc.covers,
+                    FusedForm(kind, kc.covers, not MATRIX_COVERS.isdisjoint(kc.covers)),
                 )
         self.forms = tuple(
             sorted(by_covers.values(), key=lambda f: len(f.elements), reverse=True)
@@ -313,7 +332,7 @@ class FusionForms:
         return NON_FUSABLE_COVERS.isdisjoint(kc.covers)
 
     def replaces_span(self, kind: str) -> bool:
-        return kind in SPAN_KINDS
+        return any(f.replaces_span for f in self.forms if f.kind == kind)
 
 
 class FusionLabeler:
@@ -362,11 +381,11 @@ class FusionLabeler:
         else:
             kind = ELEMENTWISE_CHAIN
         if any(kc.type == UNKNOWN for kc in classes):
-            confidence = "low"
+            confidence = CONFIDENCE_LOW
         elif kind == GEMM_EPILOGUE:
-            confidence = "medium"
+            confidence = CONFIDENCE_MEDIUM
         else:
-            confidence = "high"
+            confidence = CONFIDENCE_HIGH
         return Label(kind, confidence, span)
 
     def _seam(self, classes: list) -> tuple[FusedForm | None, tuple | None]:
@@ -480,7 +499,7 @@ class FusionCandidateBuilder:
             names = tuple(k.name for k, _ in g.instances[0])
             if any(self._contains_run(names, hay) for hay in accepted):
                 continue
-            if c := self._candidate(g, SIBLING_SOURCE):
+            if c := self._candidate(g, "sibling_sequence"):
                 candidates.append(c)
         candidates = self._dedup_by_kernel_set(candidates)
         print(
@@ -546,7 +565,7 @@ class FusionCandidateBuilder:
     def _resolve_launch(self, uid) -> tuple[KernelRecord, int] | None:
         try:
             k = self.tree.get_UID2event(uid)
-            if self.categorizer(k) != "kernel":
+            if self.categorizer(k) != TraceEventUtils.GpuEventCategories.Kernel:
                 return None
             name = k.get("name", "")
             op = self.resolver.fields(uid)
@@ -765,8 +784,7 @@ class FusionCandidateBuilder:
 
     @staticmethod
     def _strip_module_index(name: str) -> str:
-        prefix = name[len("nn.Module: ") :] if name.startswith("nn.Module: ") else name
-        return MODULE_INDEX_RE.sub("", prefix)
+        return re.sub(r"_(\d+)$", "", name.removeprefix(NN_MODULE_PREFIX))
 
     def _parent_chain(self, ev) -> list:
         """Walk ancestors and return a list of cleaned parent names (outermost last)."""
@@ -776,8 +794,8 @@ class FusionCandidateBuilder:
             ancestor = self.tree.get_parent_event(ancestor)
             pname = ancestor.get("name", "")
             if pname:
-                if pname.startswith("nn.Module: "):
-                    pname = pname[len("nn.Module: ") :]
+                if pname.startswith(NN_MODULE_PREFIX):
+                    pname = pname.removeprefix(NN_MODULE_PREFIX)
                 elif "/" in pname:
                     pname = pname.rsplit("/", 1)[-1]
                 parent_chain.append(pname)
@@ -819,7 +837,7 @@ class FusionCandidateBuilder:
         nn.Module, then the one with the deeper parent chain."""
 
         def score(c):
-            return c.module_name.startswith("nn.Module:"), len(c.parent_chain)
+            return c.module_name.startswith(NN_MODULE_PREFIX), len(c.parent_chain)
 
         seen: dict = {}
         for c in candidates:
@@ -859,7 +877,7 @@ class FusionCandidateBuilder:
     def _in_out_sizes(op_category, params: dict) -> tuple | None:
         """(input, output) size of a perf-summary op, in elements or bytes, or None
         when its category and params do not give them."""
-        if op_category == "reduce" and "num_input_elems" in params:
+        if op_category == Reduce.category and "num_input_elems" in params:
             dtype_in, dtype_out = params["dtype_in_out"]
             bpe_in = name2bpe(dtype_in)
             # Like Reduce: an output without its own dtype keeps the input's.
@@ -870,10 +888,10 @@ class FusionCandidateBuilder:
                 params["num_input_elems"] * bpe_in,
                 params["num_output_elems"] * bpe_out,
             )
-        if op_category == "GEMM":
+        if op_category == GEMM.category:
             M, N, K = params.get("M"), params.get("N"), params.get("K")
             return (M * K + K * N, M * N) if all((M, N, K)) else None
-        if op_category == "elementwise" and "shape_in1" in params:
+        if op_category == BinaryElementwise.category and "shape_in1" in params:
             shape1, shape2 = params["shape_in1"], params["shape_in2"]
             dtype1, dtype2, dtype_out = params["dtype_in1_in2_out"]
             bpe1, bpe2 = name2bpe(dtype1), name2bpe(dtype2)
@@ -928,7 +946,8 @@ class FusionPricer:
         """Drop candidates whose total time cannot reach MIN_IMPACT_SCORE of baseline,
         to avoid pricing them. It is a strict upper bound, as savings never exceed
         the group's time."""
-        min_time_us = baseline_ms * 10 * MIN_IMPACT_SCORE
+        # Microseconds per millisecond over percent.
+        min_time_us = baseline_ms * (1000 / 100) * MIN_IMPACT_SCORE
         return [c for c in candidates if c.time_us >= min_time_us]
 
     def price_all(
@@ -963,7 +982,7 @@ class FusionPricer:
         """
         keys = []
         for c, est in pairs:
-            if est.confidence != "high":
+            if est.confidence != CONFIDENCE_HIGH:
                 continue
             matrix_keys = {
                 tuple(k.perf_key)
@@ -1003,7 +1022,7 @@ class FusionPricer:
             impact_score_low=round(impact_score_low, 2),
             impact_score_high=round(impact_score_high, 2),
             estimation="measured",
-            bound_type="compute" if has_matrix_ops else "memory",
+            bound_type=BOUND_COMPUTE if has_matrix_ops else BOUND_MEMORY,
             time_ms=round(time_ms, 3),
             instance_count=c.instance_count,
             kernel_count=len(c.kernels_trace1),
@@ -1011,7 +1030,7 @@ class FusionPricer:
             delta_kernel_count=c.delta,
             confidence=c.confidence,
             fusion_kind=c.fusion_kind,
-            fusion_type="matrix_compute" if has_matrix_ops else "memory_bound",
+            fusion_type=FUSION_TYPE_MATRIX if has_matrix_ops else FUSION_TYPE_MEMORY,
             rows_trace1=self.build_rows(c.ops_trace1, self.perf_rows, self.baseline_ms),
             rows_trace2=self.build_rows(
                 c.ops_trace2,
@@ -1071,17 +1090,19 @@ class FusionPricer:
         has_matrix_ops = any(e["is_matrix"] for e in enriched)
 
         total_savings_us = 0.0
-        for sg_type, sg_kernels in subgroups:
-            if sg_type == "gemm_epilogue":
+        for has_epilogue, sg_kernels in subgroups:
+            if has_epilogue:
                 non_gemm_time = sum(
                     e["dur_us"] for e in sg_kernels if not e["is_matrix"]
                 )
                 total_savings_us += non_gemm_time
-            elif sg_type == "elementwise":
+            elif not any(e["is_matrix"] for e in sg_kernels):
                 total_savings_us += self._roofline_savings_us(sg_kernels, TARGET_HIGH)
 
         bound_type = (
-            "compute" if "gemm_epilogue" in [t for t, _ in subgroups] else "memory"
+            BOUND_COMPUTE
+            if any(has_epilogue for has_epilogue, _ in subgroups)
+            else BOUND_MEMORY
         )
 
         gap_high = total_savings_us / current_per_instance_us
@@ -1114,7 +1135,7 @@ class FusionPricer:
             modeled_kernel_count=len(modeled),
             confidence=c.confidence,
             fusion_kind=c.fusion_kind,
-            fusion_type="matrix_compute" if has_matrix_ops else "memory_bound",
+            fusion_type=FUSION_TYPE_MATRIX if has_matrix_ops else FUSION_TYPE_MEMORY,
             warning=(
                 f"{unmodeled_count} of {len(c.kernels)} kernels lack perf models; "
                 f"savings estimate uses trace time for unmodeled kernels"
@@ -1129,10 +1150,9 @@ class FusionPricer:
     def _split_into_subgroups(enriched: list) -> list:
         """Split kernel sequence at GEMM boundaries into fusable sub-groups.
 
-        Returns list of (subgroup_type, kernels) where subgroup_type is:
-          "gemm_epilogue" - GEMM followed by elementwise ops
-          "elementwise"   - consecutive non-GEMM ops
-          "gemm_only"     - standalone GEMM with no trailing elementwise
+        Returns list of (has_epilogue, kernels): ``has_epilogue`` is True for a GEMM
+        followed by elementwise ops; the other sub-groups are consecutive non-GEMM ops
+        or a standalone GEMM.
         """
         subgroups = []
         current = []
@@ -1145,17 +1165,13 @@ class FusionPricer:
         if current:
             subgroups.append(current)
 
-        typed = []
-        for sg in subgroups:
-            has_gemm = any(k["is_matrix"] for k in sg)
-            has_non_gemm = any(not k["is_matrix"] for k in sg)
-            if has_gemm and has_non_gemm:
-                typed.append(("gemm_epilogue", sg))
-            elif has_gemm:
-                typed.append(("gemm_only", sg))
-            else:
-                typed.append(("elementwise", sg))
-        return typed
+        return [
+            (
+                any(k["is_matrix"] for k in sg) and any(not k["is_matrix"] for k in sg),
+                sg,
+            )
+            for sg in subgroups
+        ]
 
     def _roofline_savings_us(self, enriched: list, target_pct: float) -> float:
         """Roofline-projected savings for an elementwise sub-group.
@@ -1168,13 +1184,10 @@ class FusionPricer:
 
         first = modeled[0]
         last = modeled[-1]
-        data_in_mb = first.get("data_in_mb")
-        if data_in_mb is None:
-            data_in_mb = first["data_moved_mb"] / 2.0
-        data_out_mb = last.get("data_out_mb")
-        if data_out_mb is None:
-            data_out_mb = last["data_moved_mb"] / 2.0
-        total_ext_data_bytes = (data_in_mb + data_out_mb) * BYTES_PER_MB
+        # "Data Moved (MB)" in the perf report is MiB, as in the perf model.
+        total_ext_data_bytes = (
+            (first["data_in_mb"] or 0.0) + (last["data_out_mb"] or 0.0)
+        ) * 2**20
 
         vector_gflops = sum(
             e["gflops"] for e in modeled if e["gflops"] and not e["is_matrix"]
@@ -1241,6 +1254,7 @@ class FusionPricer:
         rows = []
         for g in ops:
             key = g["perf_key"]
+            operation, dims, dtypes = key[:3] if key else (NO_VALUE, None, None)
             perf = perf_rows.get(tuple(key)) if key else None
             eff = (
                 calculate_efficiency(perf, self.peak_bw_tbs, self.peak_maf_tflops)
@@ -1256,8 +1270,8 @@ class FusionPricer:
             time_ms = g["time_us"] / 1000
             rows.append(
                 {
-                    "operation": key[0] if key else NO_VALUE,
-                    "args": (key and format_args(key[1], key[2])) or NO_VALUE,
+                    "operation": operation,
+                    "args": (key and format_args(dims, dtypes)) or NO_VALUE,
                     "kernel_path": (
                         entry_point if isinstance(entry_point, str) else "Not found"
                     ),

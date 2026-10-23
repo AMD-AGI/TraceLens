@@ -56,8 +56,8 @@ class ComputeMember(TaskMember):
     impact_score: float
 
 
-class ComputeTask(TypedDict):
-    """An operation-grouped compute optimization task."""
+class _TaskBase(TypedDict):
+    """Fields shared by both task tiers."""
 
     priority: int
     operation: Optional[str]
@@ -66,11 +66,16 @@ class ComputeTask(TypedDict):
     resolution: Optional[str]
     prose_truncated: bool
     impact: Impact
-    members: list[ComputeMember]
     phase: NotRequired[str]
 
 
-class FusionTask(TypedDict):
+class ComputeTask(_TaskBase):
+    """An operation-grouped compute optimization task."""
+
+    members: list[ComputeMember]
+
+
+class FusionTask(_TaskBase):
     """One kernel-fusion candidate; ``operation`` is the heading's pattern name.
 
     The severity color and ``P<N>:`` prefix are stripped from the heading.
@@ -81,14 +86,7 @@ class FusionTask(TypedDict):
     ``impact.mid``.
     """
 
-    priority: int
-    operation: Optional[str]
     kind: Optional[str]
-    identification: Optional[str]
-    reasoning: Optional[str]
-    resolution: Optional[str]
-    prose_truncated: bool
-    impact: Impact
     members: list[TaskMember]
 
 

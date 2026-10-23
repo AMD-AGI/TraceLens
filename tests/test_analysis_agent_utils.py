@@ -1778,7 +1778,7 @@ def test_fusion_data_tables_canonical_header():
 
 def test_iter_candidate_blocks_filters_by_tier():
     content = _fusion_block() + _fusion_block(tier="compute")
-    assert len(list(_iter_candidate_blocks(content, "fusion"))) == 1
+    assert [rank for _, _, rank in _iter_candidate_blocks(content, "fusion")] == [1]
     assert len(list(_iter_candidate_blocks(content, "compute"))) == 1
     assert list(_iter_candidate_blocks(content, "system")) == []
 
@@ -3867,6 +3867,7 @@ def test_orchestrator_main_comparative_mocked(tmp_path, monkeypatch):
     )
     assert manifest["comparison_scope"] == "comparative"
     assert "trace2_gpu_utilization" in manifest
+    assert manifest["trace2_csv_dir"] == os.path.join(out, "perf_report_trace2_csvs")
     assert os.path.isfile(os.path.join(out, "metadata", "trace2_gpu_utilization.json"))
     candidates = json.loads(
         open(os.path.join(out, "category_data", "fusion_candidates.json")).read()
@@ -4427,6 +4428,7 @@ def test_comparative_fusion_producer_to_rows(
                 "comparison_scope": "comparative",
                 "platform": "GPU_A",
                 "platform2": platform2,
+                "trace2_csv_dir": str(t2_dir),
                 "focus_csv_dir": str(t1_dir),
                 "gpu_utilization": {"total_time_ms": 1000.0},
                 "trace2_gpu_utilization": {"total_time_ms": 800.0},
