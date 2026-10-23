@@ -451,7 +451,11 @@ def _enrich_unmatched_roots(roots: list[dict], annotations: Sequence[dict]) -> N
     sq/sk aggregates, phase).
     """
     annot_by_ts = sorted(
-        (a for a in annotations if a.get("cat") == ANNOTATION_CAT and a.get("ph") == "X"),
+        (
+            a
+            for a in annotations
+            if a.get("cat") == ANNOTATION_CAT and a.get("ph") == "X"
+        ),
         key=lambda a: a.get("ts", 0),
     )
     for root in roots:

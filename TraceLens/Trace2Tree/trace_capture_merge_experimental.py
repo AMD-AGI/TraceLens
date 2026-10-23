@@ -16,7 +16,7 @@ model suitable for performance analysis.
 """
 
 from collections import OrderedDict, deque, defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import json
 import os
 import warnings
