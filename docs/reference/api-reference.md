@@ -90,7 +90,7 @@ Generate one report per job from a YAML file. The same entry point is
 
 **Output:** one report per job, plus the aggregated CSVs when `aggregation` is
 set. The aggregation is also available from Python as
-`TraceLens.Reporting.aggregate_perf_reports.aggregate_perf_report_csvs`. See
+`TraceLens.Reporting.aggregate_perf_reports_experimental.aggregate_perf_report_csvs`. See
 [Generate performance reports from a YAML config](../how-to/generate-perf-report-from-config.md)
 for defaults and examples.
 

@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from TraceLens.Reporting.aggregate_perf_reports import (
+from TraceLens.Reporting.aggregate_perf_reports_experimental import (
     AggregationError,
     aggregate_perf_report_csvs,
 )
