@@ -253,7 +253,7 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
     if tier == "fusion":
         errors.extend(_validate_fusion_data_tables(content))
 
-    # Marker structure (folded in from the former Level-4 validate_markers).
+    # Marker structure validation.
     file_class = "category_findings" if tier == "compute" else "system_findings"
     errors.extend(
         MarkerValidator.check_findings_file(

@@ -19,12 +19,13 @@ Usage:
             key = get_steady_state_key(metadata)
 """
 
+import json
 import os
 import tempfile
 from typing import List, Optional, Tuple
 
 from TraceLens.TraceUtils.split_trace import split_and_enumerate
-from TraceLens.util import DataLoader
+from TraceLens.util import DataLoader, get_filename
 
 
 def get_steady_state_key(metadata: dict) -> str:
@@ -112,8 +113,33 @@ def _iter_type_key(phase: dict) -> str:
     return f"empty_{bs}"
 
 
+def _stamp_and_rewrite_gpu_op_uid(trace_path: str, tmpdir: str) -> str:
+    """Stamp a trace-unique ``gpu_op_uid`` on every event before splitting.
+
+    ``split_and_enumerate`` stamps no ``gpu_op_uid``, so split regions come
+    back with ``gpu_op_uid = None`` everywhere -- which collapses to all-NaN
+    diffs and duplicate ``(source, gpu_op_uid)`` keys downstream.
+
+    This wrapper loads the trace exactly as the splitter does, stamps
+    ``gpu_op_uid = index`` (the event's position in the original, unfiltered
+    ``traceEvents`` array) on every event, and writes a stamped copy that is
+    fed to ``split_and_enumerate``. The slicer preserves extra event fields,
+    so each region kernel keeps a globally-unique, source-aligned uid. The
+    canonical splitter is left untouched.
+    """
+    trace_json = DataLoader.load_data(get_filename(trace_path))
+    for i, e in enumerate(trace_json.get("traceEvents", [])):
+        if isinstance(e, dict):
+            e["gpu_op_uid"] = i
+    stamped_path = os.path.join(tmpdir, "stamped_source.json")
+    with open(stamped_path, "w") as f:
+        json.dump(trace_json, f)
+    return stamped_path
+
+
 def split_vllm_trace(
     trace_path: str,
+    emit_gpu_op_uid: bool = False,
 ) -> Optional[List[Tuple[dict, dict]]]:  # pragma: no cover
     """
     Split a vLLM/SGLang/ATOM trace using the canonical TraceUtils trace splitter.
@@ -126,10 +152,21 @@ def split_vllm_trace(
 
     Returns None if no annotation iterations are found, or if the trace is
     not splittable (caller falls back to whole-trace extraction).
+
+    When ``emit_gpu_op_uid`` is True (opt-in; off by default so non-semantic
+    callers are byte-for-byte unaffected), each split-region kernel is tagged
+    with a ``gpu_op_uid`` equal to its index in the source trace, which
+    scoreable semantic diffs need.
     """
     with tempfile.TemporaryDirectory(prefix="trace_split_") as tmpdir:
+        split_input = trace_path
+        if emit_gpu_op_uid:
+            # Stamp source-array indices onto events before splitting so
+            # split-region kernels keep a unique, source-aligned gpu_op_uid
+            # (see helper above).
+            split_input = _stamp_and_rewrite_gpu_op_uid(trace_path, tmpdir)
         execution_details = split_and_enumerate(
-            trace_path,
+            split_input,
             tmpdir,
             find_steady_state=True,
             store_single_iteration=True,
