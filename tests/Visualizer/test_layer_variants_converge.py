@@ -83,15 +83,15 @@ class TestTheArmsConverge:
         attrs = {a["key"]: a["value"] for a in _phis(nodes)[0]["attrs"]}
         assert attrs["class_name"] == PHI_CLASS
 
-    def test_it_sits_where_the_variants_and_the_consumer_meet(self) -> None:
-        """Inside the stack its value would leave without an output tile."""
+    def test_it_sits_inside_the_stack_that_holds_the_variants(self) -> None:
+        """Beside the stack, the collapsed box is its only visible input."""
         nodes = [
             _node("a", f"{STACK}/31x_A"),
             _node("b", f"{STACK}/11x_B"),
             _node("head", "", sources=["a", "b"]),
         ]
         _converge_layer_variants_through_a_phi(nodes)
-        assert _phis(nodes)[0]["namespace"] == ""
+        assert _phis(nodes)[0]["namespace"] == STACK
 
     def test_it_carries_the_arms_shape(self) -> None:
         nodes = [

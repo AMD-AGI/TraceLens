@@ -30,6 +30,7 @@ from TraceLens.ModelUtils.block_tree import (
     collect_nested_diagrams,
     expand_block_tree_inplace,
     is_transparent_inline_expansion,
+    resolved_phi_arms,
     subgraph_warrants_json_export,
 )
 from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant
@@ -69,6 +70,7 @@ from TraceLens.Visualizer.model_explorer_export.type_check import (
     group_cycle_check_graph_nodes,
     integrity_check_graph_nodes,
     type_check_graph_nodes,
+    warn_degenerate_mutually_exclusive_branches,
 )
 from TraceLens.Visualizer.model_explorer_export.shapes import (
     annotate_nodes_with_shapes,
@@ -2204,9 +2206,9 @@ def _converge_layer_variants_through_a_phi(nodes: list[dict[str, Any]]) -> None:
     ``Select``: ``torch.select`` slices and drops an axis, which is not what
     this does. The same node is owed here, for the same reason, one rank up.
 
-    The phi sits in the scope that CONTAINS the variant groups, since that is
-    where the choice between them is made, and the consumer then reads one
-    tensor.
+    The phi sits inside the stack that contains the variant groups. Placing it
+    next to the collapsed stack draws it with one input, the stack itself,
+    because both arms are inside the box. The consumer still reads one tensor.
     """
     by_id = {str(node["id"]): node for node in nodes}
 
@@ -2245,11 +2247,12 @@ def _converge_layer_variants_through_a_phi(nodes: list[dict[str, Any]]) -> None:
             group = [edge for edge in by_variant.values() if edge is not None]
             if len(group) < 2 or len(group) != len(by_variant):
                 continue
-            # The choice is resolved where the stack's result is READ, so the
-            # phi sits at the level both the variants and their consumer share.
-            # Inside the stack it would be a node whose value leaves the box
-            # without passing through the box's own output tile.
-            scope = _common_namespace(parent, str(node.get("namespace") or ""))
+            # Both arms live in the stack. A phi placed beside the collapsed
+            # stack has one visible input -- the stack -- because the arms are
+            # inside the box. The branch belongs in the stack, where opening
+            # it shows one input per variant. The consumer still reads the one
+            # tensor the branch forwards.
+            scope = parent
             phi_id = (
                 f"{scope}/@variant_merge:{node['id']}"
                 if scope
@@ -7252,6 +7255,10 @@ def _append_source_decoder_layer(
         return list(previous_exits)
     components = {component.attr_name: component for component in spec.block_components}
     refs: dict[str, SourceRef] = {}
+    omitted = (
+        frozenset(variant.omitted_components) if variant is not None else frozenset()
+    )
+    dead_steps, phi_live_arms = resolved_phi_arms(decoder, omitted)
     if previous_exits:
         refs["@method_input"] = previous_exits[0]
         # A per-parameter boundary token resolves to the same chain input here:
@@ -7263,9 +7270,11 @@ def _append_source_decoder_layer(
     for step in decoder.forward_calls:
         operation = decoder.forward_operations.get(step)
         if operation is not None:
+            if step in dead_steps:
+                continue
             sources = [
                 refs[predecessor]
-                for predecessor in operation.predecessors
+                for predecessor in phi_live_arms.get(step, operation.predecessors)
                 if predecessor in refs
             ]
             if not sources:
@@ -10343,6 +10352,11 @@ def build_merged_model_graph(
     if shape_inferencer is not None:
         for namespace, boundary in group_boundary_shapes(nodes).items():
             graph_attributes.setdefault(namespace, {}).update(boundary)
+
+    # Last structural pass: a branch reduced to one live input is that input.
+    # Anything still standing with fewer than two is reported, not drawn as a choice.
+    _elide_noop_merges_and_casts(nodes)
+    warn_degenerate_mutually_exclusive_branches(nodes)
 
     return {
         "id": graph_id,

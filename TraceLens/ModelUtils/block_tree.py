@@ -25,6 +25,7 @@ from TraceLens.ModelUtils.ast_analyze import (
     _HOST_MATERIALIZE_METHODS,
     ClassStructure,
     ForwardOperation,
+    exclusive_init_branches,
     LoopCarriedSpec,
     SideInputSpec,
     attention_kernel_details,
@@ -2144,27 +2145,69 @@ def _statically_decided_phi_arms(
     return live
 
 
-def _dead_forward_steps(
+def _condition_is_statically_false(expr: str, decided: dict[str, bool]) -> bool:
+    """True when *expr* cannot hold given conditions ``__init__`` already settled."""
+    expr = expr.strip()
+    if expr in decided:
+        return decided[expr] is False
+    if expr.startswith("not (") and expr.endswith(")"):
+        inner = expr[len("not (") : -1].strip()
+        return decided.get(inner) is True
+    return False
+
+
+def _decided_init_conditions(
     cls: ClassStructure, omitted_attrs: frozenset[str]
+) -> dict[str, bool]:
+    """Conditions an ``if``/``elif`` in ``__init__`` has already settled.
+
+    Omitting every submodule of a chain except one means this variant took
+    the remaining arm: that arm's condition is true and the omitted arms'
+    conditions are false. A forward phi on the true condition is not a choice.
+    """
+    node = getattr(cls, "node", None)
+    if node is None or not omitted_attrs:
+        return {}
+    decided: dict[str, bool] = {}
+    for group in exclusive_init_branches(node):
+        omitted = [attr for attr in group if attr in omitted_attrs]
+        kept = [attr for attr in group if attr not in omitted_attrs]
+        if not omitted:
+            continue
+        for attr in omitted:
+            decided[group[attr]] = False
+        if len(kept) == 1 and len(omitted) + 1 == len(group):
+            decided[group[kept[0]]] = True
+    return decided
+
+
+def _dead_forward_steps(
+    cls: ClassStructure,
+    omitted_attrs: frozenset[str],
+    decided: dict[str, bool] | None = None,
 ) -> frozenset[str]:
     """Forward-op steps to drop when *omitted_attrs* submodules are absent this variant.
 
     Seeds from the omitted submodules plus any op whose ``condition:`` detail asserts one
-    of them is present (a statically-false guard), then removes, to a fixpoint, every op
-    whose predecessors are ALL dead. An op keeping ≥1 live predecessor (a phi/select over
+    of them is present (a statically-false guard), or asserts a condition ``__init__``
+    already settled the other way, then removes, to a fixpoint, every op whose
+    predecessors are ALL dead. An op keeping ≥1 live predecessor (a phi/select over
     a pruned branch) survives; ops reading only external inputs (no predecessors) survive.
     Returns only ``@op`` step keys — the omitted submodule calls are skipped separately.
     """
     ops = cls.forward_operations
     if not ops:
         return frozenset()
+    decided = decided or {}
     dead: set[str] = set(omitted_attrs)
     for key, op in ops.items():
         for detail in op.details:
             if not detail.startswith("condition:"):
                 continue
             expr = detail[len("condition:") :].strip()
-            if any(_condition_requires_presence(expr, attr) for attr in omitted_attrs):
+            if any(
+                _condition_requires_presence(expr, attr) for attr in omitted_attrs
+            ) or _condition_is_statically_false(expr, decided):
                 dead.add(key)
                 break
     changed = True
@@ -2178,6 +2221,89 @@ def _dead_forward_steps(
                 dead.add(key)
                 changed = True
     return frozenset(dead - omitted_attrs)
+
+
+def _drop_dead_phi_inputs(
+    cls: ClassStructure,
+    phi_live_arms: dict[str, tuple[str, ...]],
+    dead_steps: frozenset[str],
+    omitted_attrs: frozenset[str],
+    decided: dict[str, bool],
+) -> dict[str, tuple[str, ...]]:
+    """Narrow a phi to the arms that can still run.
+
+    A mutually exclusive branch needs more than one input. An input whose
+    producer was pruned, or that belongs to a condition ``__init__`` already
+    decided against, is dead. When one arm remains, the phi is that arm and
+    the later fold removes the branch node.
+    """
+    ops = cls.forward_operations
+    if not ops:
+        return phi_live_arms
+    built_under: dict[str, set[str]] = {}
+    node = getattr(cls, "node", None)
+    if node is not None and decided:
+        for group in exclusive_init_branches(node):
+            for attr, condition in group.items():
+                built_under.setdefault(condition, set()).add(attr)
+    narrowed = dict(phi_live_arms)
+    for key, op in ops.items():
+        merge = next(
+            (
+                detail[len("merge:") :].strip()
+                for detail in op.details
+                if detail.startswith("merge:")
+            ),
+            None,
+        )
+        if merge is None:
+            continue
+        preds = tuple(narrowed.get(key, op.predecessors))
+        kept = [
+            pred
+            for pred in preds
+            if pred not in dead_steps and pred not in omitted_attrs
+        ]
+        if decided.get(merge) is True:
+            taken = []
+            for pred in kept:
+                pred_op = ops.get(pred)
+                carries = pred_op is not None and any(
+                    str(detail).strip() == f"condition: {merge}"
+                    for detail in pred_op.details
+                )
+                if base_submodule_attr(pred) in built_under.get(merge, ()) or carries:
+                    taken.append(pred)
+            if taken:
+                kept = taken
+        if kept and len(kept) < len(op.predecessors):
+            narrowed[key] = tuple(kept)
+    return narrowed
+
+
+def resolved_phi_arms(
+    cls: ClassStructure,
+    omitted_attrs: frozenset[str],
+    present_attrs: frozenset[str] = frozenset(),
+    *,
+    decided_omitted: frozenset[str] | None = None,
+) -> tuple[frozenset[str], dict[str, tuple[str, ...]]]:
+    """Dead forward steps, and the phi arms that survive them.
+
+    ``decided_omitted`` is the set that settles an ``__init__`` if/elif. It
+    defaults to *omitted_attrs*. Pass a narrower set when *omitted_attrs* also
+    contains submodules no instance builds, which do not decide a sibling arm.
+    """
+    branch_omitted = omitted_attrs if decided_omitted is None else decided_omitted
+    decided = _decided_init_conditions(cls, branch_omitted)
+    dead_steps = (
+        _dead_forward_steps(cls, omitted_attrs, decided)
+        if omitted_attrs or decided
+        else frozenset()
+    )
+    live = _statically_decided_phi_arms(cls, present_attrs) if present_attrs else {}
+    live = _drop_dead_phi_inputs(cls, live, dead_steps, omitted_attrs, decided)
+    return dead_steps, live
 
 
 def build_block_node(
@@ -2319,11 +2445,12 @@ def build_block_node(
     # also drops the forward ops that submodule feeds: the ops directly guarded by its
     # presence, and transitively every strict op left with no live producer. A phi/select
     # spanning the pruned branch survives and collapses onto its surviving input.
-    omitted_attrs = frozenset(
+    override_omitted = frozenset(
         attr
         for attr, val in (class_overrides or {}).items()
         if val is SUBMODULE_OMITTED and "." not in attr
-    ) | frozenset(
+    )
+    omitted_attrs = override_omitted | frozenset(
         # A submodule assigned only inside an `__init__` branch the config rules
         # out is missing from EVERY instance, not just this variant. GPT-2's
         # `q_attn` exists only for cross-attention, and nothing constructs the
@@ -2333,9 +2460,6 @@ def build_block_node(
         getattr(cls, "unbuilt_attrs", frozenset())
         or frozenset()
     )
-    dead_steps = (
-        _dead_forward_steps(cls, omitted_attrs) if omitted_attrs else frozenset()
-    )
     # The other half of the same ``__init__`` outcome: a submodule this variant
     # really does BUILD rules out the branch guarded by its absence.
     present_attrs = frozenset(
@@ -2343,8 +2467,8 @@ def build_block_node(
         for attr, val in (class_overrides or {}).items()
         if val is not SUBMODULE_OMITTED and "." not in attr
     )
-    phi_live_arms = (
-        _statically_decided_phi_arms(cls, present_attrs) if present_attrs else {}
+    dead_steps, phi_live_arms = resolved_phi_arms(
+        cls, omitted_attrs, present_attrs, decided_omitted=override_omitted
     )
 
     for index, call_attr in enumerate(forward_steps):

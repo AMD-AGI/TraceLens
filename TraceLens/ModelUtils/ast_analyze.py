@@ -16149,6 +16149,79 @@ def _class_init_method(class_node: ast.ClassDef) -> ast.FunctionDef | None:
     return None
 
 
+def _self_constructor_attr(stmt: ast.stmt) -> str | None:
+    """``self.<attr>`` when *stmt* assigns it from a constructor call."""
+    targets: list[ast.AST]
+    value: ast.AST | None
+    if isinstance(stmt, ast.Assign):
+        targets = list(stmt.targets)
+        value = stmt.value
+    elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+        targets = [stmt.target]
+        value = stmt.value
+    else:
+        return None
+    if not isinstance(value, ast.Call):
+        return None
+    for target in targets:
+        if (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+        ):
+            return target.attr
+    return None
+
+
+def _assignments_along_if_chain(node: ast.If) -> dict[str, str]:
+    """``{attr: test}`` for each constructor assigned on an ``if``/``elif`` arm.
+
+    The test is the arm's own condition, unparsed the same way a forward phi
+    records the test it merges on, so the two can be compared as text.
+    """
+    group: dict[str, str] = {}
+    current: ast.stmt = node
+    while isinstance(current, ast.If):
+        test = ast.unparse(current.test).strip()
+        for stmt in current.body:
+            attr = _self_constructor_attr(stmt)
+            if attr is not None:
+                group.setdefault(attr, test)
+        if len(current.orelse) == 1 and isinstance(current.orelse[0], ast.If):
+            current = current.orelse[0]
+            continue
+        break
+    return group
+
+
+def exclusive_init_branches(class_node: ast.ClassDef) -> list[dict[str, str]]:
+    """``if``/``elif`` chains in ``__init__`` that build different submodules.
+
+    Each group is ``{attr: condition}``. A variant that builds one of them and
+    omits the rest has already decided which condition holds, and a forward
+    phi on that same condition is not a choice.
+    """
+    init = _class_init_method(class_node)
+    if init is None:
+        return []
+    elif_nodes: set[int] = set()
+    for node in ast.walk(init):
+        if (
+            isinstance(node, ast.If)
+            and len(node.orelse) == 1
+            and isinstance(node.orelse[0], ast.If)
+        ):
+            elif_nodes.add(id(node.orelse[0]))
+    groups: list[dict[str, str]] = []
+    for node in ast.walk(init):
+        if not isinstance(node, ast.If) or id(node) in elif_nodes:
+            continue
+        group = _assignments_along_if_chain(node)
+        if len(group) >= 2:
+            groups.append(group)
+    return groups
+
+
 def _is_module_list(node: ast.AST) -> bool:
     return isinstance(node, ast.Call) and (
         (isinstance(node.func, ast.Name) and node.func.id == "ModuleList")
