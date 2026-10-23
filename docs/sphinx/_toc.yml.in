@@ -38,6 +38,8 @@ subtrees:
       title: Collective-communication report
     - file: how-to/compare-perf-reports
       title: Compare performance reports
+  - file: how-to/analyze-idle-time
+    title: Analyze GPU idle time
   - file: how-to/compare-traces
     title: Compare two traces
   - file: how-to/event-replay
@@ -78,6 +80,8 @@ subtrees:
     title: API reference
   - file: reference/perf-report-columns
     title: Performance report columns
+  - file: reference/idle-time-columns
+    title: Idle time sheets
   - file: reference/trace-index-schema
     title: TraceIndex catalog schema
   - url: https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html
