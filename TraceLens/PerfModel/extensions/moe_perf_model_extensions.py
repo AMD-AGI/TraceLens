@@ -11,7 +11,12 @@ Performance models for pseudo-op extensions.
 from math import prod
 
 from TraceLens.PerfModel.perf_model import BinaryElementwise
-from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
+from TraceLens.PerfModel.utils import (
+    dense_counted_tensor,
+    name2bpe,
+    torch_dtype_map,
+)
+from TraceLens.TraceUtils.utils.annotation_utils import add_logical_batch_size
 
 DTYPE_TO_BYTES = {
     "Float8_e4m3fn": 1,
@@ -1164,6 +1169,120 @@ class moe_aiter_ck_stage1(UnfusedMoE_Up):
         return "matrix"
 
 
+class moe_opus_stage1_a8w4(UnfusedMoE_Up):
+    """HBM bytes of the routed FP8 tokens, the active FP4 experts, and their scales; the padded sort buffers are not read."""
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        types = args.get("Input type") or []
+        offset = 0
+        if (
+            dims
+            and dims[0]
+            and len(dims[0]) == 1
+            and len(dims) > 1
+            and dims[1]
+            and len(dims[1]) == 2
+        ):
+            offset = 1
+        try:
+            activation = dims[offset]
+            weight = dims[offset + 1]
+            out = dims[offset + 8]
+            num_tokens, hidden_packed = activation
+            num_experts, n_packed, k_packed = weight
+            if n_packed % 2 or "float4" not in str(types[offset + 1]).lower():
+                raise ValueError
+            inter_dim = n_packed // 2
+            hidden_dim = k_packed * 2
+            topk = out[1]
+        except (IndexError, TypeError, ValueError):
+            return {"_no_perf": True}
+        return add_logical_batch_size(
+            {
+                "num_tokens": num_tokens,
+                "hidden_dim": hidden_dim,
+                "inter_dim": inter_dim,
+                "num_experts": num_experts,
+                "topk": topk,
+                "gated": True,
+                "input_dtype": types[offset] if len(types) > offset else "",
+                "weight_dtype": types[offset + 1],
+                "output_dtype": types[offset + 8] if len(types) > offset + 8 else "",
+                "a_scale_shape": tuple(dims[offset + 2]) if dims[offset + 2] else (),
+                "w_scale_shape": tuple(dims[offset + 3]) if dims[offset + 3] else (),
+                "out_scale_shape": tuple(dims[offset + 9]) if len(dims) > offset + 9 and dims[offset + 9] else (),
+                "scale_dtype": types[offset + 2] if len(types) > offset + 2 else "",
+            },
+            event,
+        )
+
+    def flops(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return self.flops_func(
+            self.param_details["num_tokens"],
+            self.param_details["hidden_dim"],
+            self.param_details["inter_dim"],
+            self.param_details["topk"],
+            True,
+        )
+
+    def bytes(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        packed_bpe = name2bpe(self.param_details["weight_dtype"])
+        output_bpe = name2bpe(self.param_details["output_dtype"])
+        scale_bpe = name2bpe(self.param_details["scale_dtype"])
+        if None in {input_bpe, packed_bpe, output_bpe, scale_bpe}:
+            return None
+        weight_bpe = packed_bpe / 2
+        total = self.bytes_func(
+            self.param_details["num_tokens"],
+            self.param_details["hidden_dim"],
+            self.param_details["inter_dim"],
+            self.param_details["num_experts"],
+            self.param_details["topk"],
+            True,
+            input_bpe,
+            weight_bpe,
+            output_bpe,
+        )
+        if total is None:
+            return None
+        M = self.param_details["num_tokens"]
+        topk = self.param_details["topk"]
+        E = self.param_details["num_experts"]
+        a_scale = self.param_details["a_scale_shape"]
+        w_scale = self.param_details["w_scale_shape"]
+        out_scale = self.param_details["out_scale_shape"]
+        if a_scale:
+            total += M * a_scale[-1] * scale_bpe
+        if w_scale and E:
+            active = E * (1 - ((E - topk) / E) ** M)
+            total += active * (prod(w_scale) / E) * scale_bpe
+        if out_scale:
+            total += M * topk * out_scale[-1] * scale_bpe
+        return total
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return torch_dtype_map("mxfp4")
+
+    def get_maf_type(self):
+        return "matrix"
+
+
 class moe_aiter_ck_stage2(UnfusedMoE_Down):
     """
     Performance model for AITER CK-based unfused MoE stage2 (down projection).
@@ -1953,3 +2072,140 @@ class MoeSortScatterGather:
 
     def get_maf_type(self):
         return "vector"
+
+
+def _next_pow2(n):
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
+
+
+def _moe_sort_block_size(sorted_len, max_blocks, pairs, topk):
+    """Invert ``sorted_ids = pairs + num_experts * block_size - topk``."""
+    for block in (16, 32, 64, 128, 256):
+        if (sorted_len + block - 1) // block != max_blocks:
+            continue
+        expert_slots = sorted_len - pairs + topk
+        if expert_slots > 0 and expert_slots % block == 0:
+            return block, expert_slots // block
+    return None, None
+
+
+def _compact_sort_ops(p2):
+    """Integer ops in the compact P x P ranking tile."""
+    return 9 * p2 * p2 + 5 * p2
+
+
+def _distributed_sort_ops(pairs, p2, num_experts):
+    """Integer ops in the distributed sort used when P > 64."""
+    p_chunk = 64
+    e_ceil = -(-num_experts // p_chunk) * p_chunk
+    n_chunks = e_ceil // p_chunk
+
+    def chunk_ops():
+        return 2 * p2 * p_chunk + p_chunk
+
+    per_chunk_cta = chunk_ops() * (1 + n_chunks) + 2 * p_chunk * p_chunk
+    per_pair = 4 * p2 + n_chunks * chunk_ops()
+    return n_chunks * per_chunk_cta + pairs * per_pair
+
+
+class SglangMoeSortingSmall(MoeSortScatterGather):
+    """HBM bytes of the routed pairs and the compiled pad stores; the unused tail of sorted_ids is not written."""
+
+    @staticmethod
+    def get_param_details(event):
+        details = MoeSortScatterGather.get_param_details(event)
+        dims = event.get("args", {}).get("Input Dims") or []
+        if len(dims) >= 5 and dims[0] and dims[2] and dims[4]:
+            rows, topk = dims[0]
+            pairs = rows * topk
+            block, num_experts = _moe_sort_block_size(
+                dims[2][0], dims[4][0], pairs, topk
+            )
+            details.update(
+                {
+                    "rows": rows,
+                    "topk": topk,
+                    "pairs": pairs,
+                    "block_size": block,
+                    "num_experts": num_experts,
+                    "compact": bool(
+                        block and pairs <= 64 and pairs <= 2 * block
+                    ),
+                }
+            )
+        return add_logical_batch_size(details, event)
+
+    def flops(self):
+        pairs = self.param_details.get("pairs")
+        block = self.param_details.get("block_size")
+        num_experts = self.param_details.get("num_experts")
+        if not pairs or not block or not num_experts:
+            return None
+        p2 = _next_pow2(pairs)
+        if self.param_details.get("compact"):
+            return _compact_sort_ops(p2)
+        return _distributed_sort_ops(pairs, p2, num_experts)
+
+    def bytes(self):
+        if not dense_counted_tensor(self.event, (0, 1)):
+            return None
+        pairs = self.param_details.get("pairs")
+        block = self.param_details.get("block_size")
+        if not pairs or not block:
+            return None
+        p2 = _next_pow2(pairs)
+        pad = _next_pow2(pairs * block)
+        # ids and weights, int32 and fp32.
+        pair_bytes = pairs * 4 + pairs * 4
+        pad_bytes = pad * 4 + pad * 4
+        expert_bytes = 2 * p2 * 4
+        num_valid_bytes = 8
+        dims = self.event.get("args", {}).get("Input Dims") or []
+        types = self.event.get("args", {}).get("Input type") or []
+        moe_bytes = 0
+        if len(dims) > 6 and dims[6] and prod(dims[6]) > 0:
+            bpe = name2bpe(types[6]) if len(types) > 6 else None
+            if bpe is None:
+                return None
+            moe_bytes = prod(dims[6]) * bpe
+        return pair_bytes + pad_bytes + expert_bytes + num_valid_bytes + moe_bytes
+
+    def get_compute_precision(self):
+        return None
+
+
+class moe_sorting_opus_fwd(SglangMoeSortingSmall):
+    """HBM bytes of the routed pairs and the compiled pad stores; the workspace and the unused sorted-id tail are not written."""
+
+    @staticmethod
+    def get_param_details(event):
+        details = SglangMoeSortingSmall.get_param_details(event)
+        if details.get("block_size") and details.get("num_experts"):
+            return details
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        concrete = args.get("Concrete Inputs") or []
+        if not dims or not dims[0] or len(dims[0]) < 2 or len(concrete) <= 8:
+            return details
+        try:
+            rows, topk = dims[0]
+            num_experts = int(concrete[7])
+            block = int(concrete[8])
+        except (TypeError, ValueError):
+            return details
+        if not rows or not topk or not num_experts or not block:
+            return details
+        pairs = rows * topk
+        details.update(
+            {
+                "rows": rows,
+                "topk": topk,
+                "pairs": pairs,
+                "block_size": block,
+                "num_experts": num_experts,
+                "compact": pairs <= 64 and pairs <= 2 * block,
+            }
+        )
+        return details

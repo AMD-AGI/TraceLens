@@ -8,6 +8,7 @@
 Performance models for pseudo-op extensions.
 """
 
+import re
 from math import prod
 
 from TraceLens.PerfModel.perf_model import (
@@ -16,7 +17,13 @@ from TraceLens.PerfModel.perf_model import (
     FusedRoPE,
     UnaryElementwise,
 )
-from TraceLens.PerfModel.utils import name2bpe, optional_int, torch_dtype_map
+from TraceLens.PerfModel.utils import (
+    dense_counted_tensor,
+    name2bpe,
+    optional_int,
+    torch_dtype_map,
+)
+from TraceLens.TraceUtils.utils.annotation_utils import add_logical_batch_size
 
 
 class gemm_a8w8_blockscale(GEMM):
@@ -117,6 +124,257 @@ class gemm_a8w8_blockscale(GEMM):
             bpe_bias=self.bpe_bias,
             bpe_output=self.bpe_output,
         )
+
+
+_PRESHUFFLE_KERNEL_RE = re.compile(
+    r"GROUP_K_(\d+)_GROUP_N_(\d+)_BLOCK_SIZE_M_(\d+)_BLOCK_SIZE_N_(\d+)"
+    r"_BLOCK_SIZE_K_(\d+)_.*?NUM_KSPLIT_(\d+)_SPLITK_BLOCK_SIZE_(\d+)"
+) ## Full the Tile Size for the GEMM
+_PRESHUFFLE_REDUCE_RE = re.compile(
+    r"reduce_kernel_BLOCK_SIZE_M_(\d+)_BLOCK_SIZE_N_(\d+)"
+    r"_ACTUAL_KSPLIT_(\d+)_MAX_KSPLIT_(\d+)"
+) ## Add partial results and reduce the result
+
+
+def _event_kernel_names(event):
+    names = list(event.get("kernel_names") or [])
+    for kernel in event.get("kernel_details") or []:
+        if isinstance(kernel, dict) and kernel.get("name"):
+            names.append(kernel["name"])
+    return names
+
+
+_OPUS_TILE_RE = re.compile(
+    r"flatmm_splitk_traits_gfx950ILi\d+E.*?seqIJLi(\d+)ELi(\d+)ELi(\d+)E"
+) ## B_M, B_N, B_K of the launched Opus tile
+
+
+def _parse_opus_tile(event):
+    """Tile sizes baked into the launched Opus traits symbol."""
+    for name in _event_kernel_names(event):
+        match = _OPUS_TILE_RE.search(name)
+        if match:
+            bm, bn, bk = (int(v) for v in match.groups())
+            return {"bm": bm, "bn": bn, "bk": bk}
+    return None
+
+
+def _parse_preshuffle_launch(event):
+    """Tile and split-K settings baked into the launched Triton kernel names."""
+    tile = None
+    reduce = None
+    for name in _event_kernel_names(event):
+        match = _PRESHUFFLE_KERNEL_RE.search(name)
+        if match:
+            group_k, group_n, bm, bn, bk, ksplit, splitk = (
+                int(v) for v in match.groups()
+            )
+            tile = {
+                "group_k": group_k,
+                "group_n": group_n,
+                "bm": bm,
+                "bn": bn,
+                "bk": bk,
+                "num_ksplit": ksplit,
+                "splitk_block": splitk,
+            }
+        reduce_match = _PRESHUFFLE_REDUCE_RE.search(name)
+        if reduce_match:
+            rbm, rbn, actual, maximum = (int(v) for v in reduce_match.groups())
+            reduce = {
+                "bm": rbm,
+                "bn": rbn,
+                "actual_ksplit": actual,
+                "max_ksplit": maximum,
+            }
+    return tile, reduce
+
+
+class gemm_a8w8_blockscale_preshuffle(gemm_a8w8_blockscale):
+    """HBM bytes of the FP8 GEMM, its scales, the BF16 output, and the fp32 split-K partials; masked tile rows are not stored."""
+
+    @staticmethod
+    def get_param_details(event):
+        args = event["args"]
+        dims = args["Input Dims"]
+        types = args.get("Input type", []) or []
+        M, K = dims[0]
+        N = dims[4][-1]
+        details = {
+            "B": 1,
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "dtype_A_B": (
+                types[0] if len(types) > 0 else "",
+                types[1] if len(types) > 1 else "",
+                types[4] if len(types) > 4 else "c10::bfloat16",
+            ),
+            "quant_scheme": "a8w8_blockscale_preshuffle",
+            "quant_granularity": "per_block",
+            "output_shape": tuple(dims[4]),
+            "output_dtype": (
+                types[4] if len(types) > 4 else "c10::bfloat16"
+            ),
+            "x_scale_shape": tuple(dims[2]) if len(dims) > 2 else (),
+            "w_scale_shape": tuple(dims[3]) if len(dims) > 3 else (),
+            "scale_dtype": types[2] if len(types) > 2 else "float32",
+        }
+        if len(dims) > 3 and dims[2] and dims[3]:
+            x_scale, w_scale = dims[2], dims[3]
+            details["block_k"] = (
+                -(-K // x_scale[-1]) if x_scale[-1] else None
+            )
+            details["block_n"] = (
+                -(-N // w_scale[0]) if w_scale[0] else None
+            )
+        tile, reduce = _parse_preshuffle_launch(event)
+        details["tile"] = tile
+        details["reduce"] = reduce
+        return add_logical_batch_size(details, event)
+
+    def flops(self):
+        M, N, K = self.M, self.N, self.K
+        tile = self.param_details.get("tile")
+        if not tile:
+            block_k = self.param_details.get("block_k") or 0
+            scale = M * N * (K // block_k) if block_k else 0
+            return 2 * M * N * K + scale
+
+        bm, bn, bk = tile["bm"], tile["bn"], tile["bk"]
+        programs = (
+            tile["num_ksplit"] * -(-M // bm) * -(-N // bn)
+        )
+        k_iters = -(-tile["splitk_block"] // bk)
+        dot = programs * k_iters * (2 * bm * bn * bk)
+        # Scale the accumulator once per K tile.
+        if tile["group_n"] >= bn and tile["group_k"] >= bk:
+            scale = programs * k_iters * (bm + bm * bn)
+        else:
+            scale = programs * k_iters * (2 * bm * bn)
+        reduce_flops = 0
+        reduce = self.param_details.get("reduce")
+        if reduce and reduce["actual_ksplit"] > 1:
+            tiles = -(-M // reduce["bm"]) * -(-N // reduce["bn"])
+            reduce_flops = (
+                tiles * reduce["bm"] * reduce["bn"] * (reduce["actual_ksplit"] - 1)
+            )
+        return dot + scale + reduce_flops
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        if not dense_counted_tensor(self.event, (0, 1, 2, 3, 4)):
+            return None
+        dtype_A_B = self.param_details["dtype_A_B"]
+        bpe_x = name2bpe(dtype_A_B[0])
+        bpe_w = name2bpe(dtype_A_B[1])
+        bpe_y = name2bpe(dtype_A_B[2])
+        bpe_scale = name2bpe(self.param_details.get("scale_dtype"))
+        if None in {bpe_x, bpe_w, bpe_y, bpe_scale}:
+            return None
+        M, N, K = self.M, self.N, self.K
+        total = M * K * bpe_x + N * K * bpe_w + M * N * bpe_y
+        total += prod(self.param_details.get("x_scale_shape") or ()) * bpe_scale
+        total += prod(self.param_details.get("w_scale_shape") or ()) * bpe_scale
+        tile = self.param_details.get("tile")
+        if tile and tile["num_ksplit"] > 1:
+            # fp32 partials, written by the GEMM and read back by the reduce.
+            total += 2 * tile["num_ksplit"] * M * N * 4
+        return total
+
+
+class gemm_a8w8_blockscale_bpreshuffle(gemm_a8w8_blockscale_preshuffle):
+    """HBM bytes of the FP8 GEMM, its scales, the implied BF16 output, and the fp32 split-K partials; masked tile rows are not stored."""
+
+    _OUT_DTYPE = {"15": "c10::BFloat16"}
+
+    @staticmethod
+    def get_param_details(event):
+        args = event["args"]
+        dims = args["Input Dims"]
+        types = args.get("Input type", []) or []
+        concrete = args.get("Concrete Inputs") or []
+        if (
+            len(dims) < 2
+            or not dims[0]
+            or len(dims[0]) < 2
+            or not dims[1]
+            or not dims[1][0]
+        ):
+            return {
+                "B": 1,
+                "M": 0,
+                "N": 0,
+                "K": 0,
+                "bias": False,
+                "dtype_A_B": ("", "", ""),
+                "_no_perf": True,
+            }
+        M, K = dims[0]
+        if len(dims) > 4 and dims[4]:
+            N = dims[4][-1]
+            out_dtype = types[4] if len(types) > 4 else "c10::BFloat16"
+        else:
+            N = dims[1][0]
+            code = str(concrete[4]) if len(concrete) > 4 else "15"
+            out_dtype = gemm_a8w8_blockscale_bpreshuffle._OUT_DTYPE.get(
+                code, "c10::BFloat16"
+            )
+        details = {
+            "B": 1,
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "dtype_A_B": (
+                types[0] if len(types) > 0 else "",
+                types[1] if len(types) > 1 else "",
+                out_dtype,
+            ),
+            "quant_scheme": "a8w8_blockscale_preshuffle",
+            "quant_granularity": "per_block",
+            "output_shape": (M, N),
+            "output_dtype": out_dtype,
+            "x_scale_shape": tuple(dims[2]) if len(dims) > 2 else (),
+            "w_scale_shape": tuple(dims[3]) if len(dims) > 3 else (),
+            "scale_dtype": types[2] if len(types) > 2 else "float32",
+        }
+        if len(dims) > 3 and dims[2] and dims[3]:
+            x_scale, w_scale = dims[2], dims[3]
+            details["block_k"] = -(-K // x_scale[-1]) if x_scale[-1] else None
+            details["block_n"] = -(-N // w_scale[0]) if w_scale[0] else None
+        tile, reduce = _parse_preshuffle_launch(event)
+        details["tile"] = tile
+        details["reduce"] = reduce
+        return add_logical_batch_size(details, event)
+
+    def flops(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return super().flops()
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        if self.param_details.get("_no_perf"):
+            return None
+        dims = self.event["args"]["Input Dims"]
+        indexes = (0, 1, 2, 3, 4) if len(dims) > 4 and dims[4] else (0, 1, 2, 3)
+        if not dense_counted_tensor(self.event, indexes):
+            return None
+        dtype_A_B = self.param_details["dtype_A_B"]
+        bpe_x = name2bpe(dtype_A_B[0])
+        bpe_w = name2bpe(dtype_A_B[1])
+        bpe_y = name2bpe(dtype_A_B[2])
+        bpe_scale = name2bpe(self.param_details.get("scale_dtype"))
+        if None in {bpe_x, bpe_w, bpe_y, bpe_scale}:
+            return None
+        M, N, K = self.M, self.N, self.K
+        total = M * K * bpe_x + N * K * bpe_w + M * N * bpe_y
+        total += prod(self.param_details.get("x_scale_shape") or ()) * bpe_scale
+        total += prod(self.param_details.get("w_scale_shape") or ()) * bpe_scale
+        tile = self.param_details.get("tile")
+        if tile and tile["num_ksplit"] > 1:
+            total += 2 * tile["num_ksplit"] * M * N * 4
+        return total
 
 
 class vllm_rocm_unquantized_gemm(GEMM):
@@ -332,6 +590,84 @@ class batched_gemm_a8w8(GEMM):
 
     def get_compute_precision(self):
         return torch_dtype_map(self.param_details["dtype_A_B"][1])
+
+
+class opus_bmm_a8w8_mxscale_raw(GEMM):
+    """HBM bytes of the five FP8 tensors; splitK=1 stores Y directly, so no fp32 workspace is allocated."""
+
+    @staticmethod
+    def get_param_details(event):
+        args = event["args"]
+        dims = args["Input Dims"]
+        types = args.get("Input type", []) or []
+        outer_batch, groups, K = dims[0]
+        weight_groups, N, weight_k = dims[1]
+        if groups != weight_groups or K != weight_k:
+            raise ValueError(
+                "Opus BMM activation and weight shapes do not agree"
+            )
+        details = {
+            "B": outer_batch,
+            "M": groups,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "outer_batch": outer_batch,
+            "groups": groups,
+            "dtype_A_B": (
+                types[0] if len(types) > 0 else "",
+                types[1] if len(types) > 1 else "",
+                types[2] if len(types) > 2 else "c10::bfloat16",
+            ),
+            "a_scale_shape": tuple(dims[3]),
+            "b_scale_shape": tuple(dims[4]),
+            "scale_dtype": types[3] if len(types) > 3 else "unsigned char",
+            "output_shape": tuple(dims[2]),
+            "output_dtype": (
+                types[2] if len(types) > 2 else "c10::bfloat16"
+            ),
+        }
+        concrete = args.get("Concrete Inputs") or []
+        if len(concrete) > 5 and concrete[5] not in ("", None):
+            details["split_k"] = int(concrete[5])
+        if len(concrete) > 6 and concrete[6] not in ("", None):
+            details["kernel_id"] = int(concrete[6])
+        details["tile"] = _parse_opus_tile(event)
+        return add_logical_batch_size(details, event)
+
+    def flops(self):
+        tokens = self.param_details["outer_batch"]
+        groups = self.param_details["groups"]
+        tile = self.param_details.get("tile")
+        if tile:
+            # A 16-row tile still runs in full for the 8 real decode rows.
+            m = -(-tokens // tile["bm"]) * tile["bm"]
+            n = -(-self.N // tile["bn"]) * tile["bn"]
+            k = -(-self.K // tile["bk"]) * tile["bk"]
+        else:
+            m, n, k = tokens, self.N, self.K
+        gemm = groups * 2 * m * n * k
+        scale_groups = self.param_details.get("a_scale_shape") or ()
+        if len(scale_groups) < 3 or not scale_groups[-1]:
+            return gemm
+        # One acc * (a_scale * b_scale) per output element per K-block.
+        return gemm + groups * m * n * scale_groups[-1]
+
+    def bytes(self, **_kwargs):
+        if not dense_counted_tensor(self.event, (0, 1, 2, 3, 4)):
+            return None
+        dims = self.event["args"]["Input Dims"]
+        types = self.event["args"].get("Input type", []) or []
+        total = 0
+        for index in range(5):
+            bpe = name2bpe(types[index]) if index < len(types) else None
+            if bpe is None:
+                return None
+            total += prod(dims[index]) * bpe
+        return total
+
+    def get_compute_precision(self):
+        return torch_dtype_map(self.param_details["dtype_A_B"][0])
 
 
 class gemm_a16w16_atomic_(GEMM):
@@ -922,6 +1258,96 @@ class fused_dynamic_mx_quant_moe_sort_hip(fused_flatten_mxfp4_quant):
             "stride_input": stride_input,
             "stride_output": None,
         }
+
+
+def _bounded_mx_quant_config(event):
+    """Recover the routed-row bound from the five scalar arguments."""
+    args = event.get("args", {})
+    dims = args.get("Input Dims") or []
+    if len(dims) < 4 or not dims[3]:
+        return None
+    ints = []
+    for item in args.get("Concrete Inputs") or []:
+        if item in ("", None):
+            continue
+        try:
+            ints.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    if len(ints) < 5:
+        return None
+    token_num, block_m, row_bound, num_experts, group_size = ints[:5]
+    if token_num <= 0 or row_bound % token_num != 0 or group_size <= 0:
+        return None
+    routing_topk = row_bound // token_num
+    sorted_len = dims[3][0]
+    if sorted_len != row_bound + num_experts * block_m - routing_topk:
+        return None
+    return {
+        "token_num": token_num,
+        "block_m": block_m,
+        "row_bound": row_bound,
+        "num_experts": num_experts,
+        "group_size": group_size,
+        "routing_topk": routing_topk,
+    }
+
+
+class fused_dynamic_mx_quant_moe_sort_hip_bounded(
+    fused_dynamic_mx_quant_moe_sort_hip
+):
+    """HBM bytes of the routed rows only; the padded scale allocation and the sorted-id tail are not touched."""
+
+    @staticmethod
+    def get_param_details(event):
+        details = fused_dynamic_mx_quant_moe_sort_hip.get_param_details(event)
+        config = _bounded_mx_quant_config(event)
+        details["bounded"] = config is not None
+        if config:
+            details.update(config)
+        args = event["args"]
+        types = args.get("Input type", []) or []
+        dims = args.get("Input Dims") or []
+        details["dtype_out"] = types[0] if types else ""
+        details["dtype_scale"] = types[1] if len(types) > 1 else ""
+        details["cols"] = dims[2][-1] if len(dims) > 2 and dims[2] else 0
+        return add_logical_batch_size(details, event)
+
+    def flops(self):
+        rows = self.param_details.get("row_bound")
+        cols = self.param_details.get("cols") or 0
+        if not rows or not cols:
+            return None
+        return 3 * rows * cols
+
+    def bytes(self):
+        if not dense_counted_tensor(self.event, (0, 1, 2)):
+            return None
+        rows = self.param_details.get("row_bound")
+        cols = self.param_details.get("cols") or 0
+        group = self.param_details.get("group_size") or 0
+        if not rows or not cols or not group:
+            return None
+        bpe_in = name2bpe(self.param_details["dtype_in_out"][0])
+        bpe_out = name2bpe(self.param_details.get("dtype_out"))
+        bpe_scale = name2bpe(self.param_details.get("dtype_scale"))
+        if None in {bpe_in, bpe_out, bpe_scale}:
+            return None
+        scale_cols = -(-cols // group)
+        # sorted id (int32) + sorted weight (fp32) + the num_valid scalar.
+        metadata = rows * 4 + rows * 4 + 4
+        return (
+            rows * cols * bpe_in
+            + rows * cols * bpe_out
+            + rows * scale_cols * bpe_scale
+            + metadata
+        )
+
+    def get_compute_precision(self):
+        return "fp32"
+
+    def get_maf_type(self):
+        return "vector"
 
 
 class aiter_rope_cached_positions_2c_fwd_impl(FusedRoPE):
@@ -1701,3 +2127,189 @@ class topk_softplus(_MHCBase):
         write_w = self.M * topk * 4
         write_idx = self.M * topk * 4
         return read_gating + read_bias + write_w + write_idx
+
+
+_SQRTSOFTPLUS_FLOPS = 6  # mul, exp2, add, log2, mul, sqrt
+_SIGMOID_FLOPS = 5  # mul, neg, exp2, add, rcp
+_SCORE_FLOPS = {
+    "sqrtsoftplus": _SQRTSOFTPLUS_FLOPS,
+    "sigmoid": _SIGMOID_FLOPS,
+    "softmax": 0,
+}
+# Comparator counts in topk_gating_kernels.cu sort_network_desc.
+_SORT_NETWORK_COMPARATORS = {1: 0, 2: 1, 3: 3, 4: 5, 6: 12, 8: 19}
+_TOPK_WAVE_SIZE = 64
+
+
+def _sort_network_comparators(ept):
+    if ept in _SORT_NETWORK_COMPARATORS:
+        return _SORT_NETWORK_COMPARATORS[ept]
+    return ept * (ept - 1) // 2
+
+
+class topk_gating_fwd(topk_softplus):
+    """HBM bytes of the gating row, the bias, and the top-k outputs; the sort stays in registers."""
+
+    @staticmethod
+    def get_param_details(event):
+        args = event["args"]
+        dims = args["Input Dims"]
+        types = args.get("Input type", []) or []
+        concrete = args.get("Concrete Inputs") or []
+        M, E = dims[2]
+        score_func = "sqrtsoftplus"
+        if len(concrete) > 6 and concrete[6] not in ("", None):
+            score_func = str(concrete[6])
+        need_renorm = True
+        if len(concrete) > 4 and concrete[4] not in ("", None):
+            need_renorm = str(concrete[4]).lower() == "true"
+        if score_func == "softmax":
+            need_renorm = False
+        details = {
+            "M": M,
+            "n": 1,
+            "C": E,
+            "E": E,
+            "topk": dims[0][1],
+            "dtype_in": types[2] if len(types) > 2 else "c10::BFloat16",
+            "dtype_bias": (
+                types[3] if len(types) > 3 else "c10::BFloat16"
+            ),
+            "dtype_weights": types[0] if len(types) > 0 else "float",
+            "dtype_indices": types[1] if len(types) > 1 else "int",
+            "score_func": score_func,
+            "need_renorm": need_renorm,
+            "has_bias": len(dims) > 3 and bool(dims[3]),
+        }
+        return add_logical_batch_size(details, event)
+
+    def flops(self):
+        M = self.M
+        E = self.param_details["E"]
+        topk = self.param_details["topk"]
+        score = _SCORE_FLOPS.get(self.param_details["score_func"], _SQRTSOFTPLUS_FLOPS)
+        per_token = score * E
+        if self.param_details.get("has_bias"):
+            per_token += E
+        if E % _TOPK_WAVE_SIZE == 0:
+            ept = E // _TOPK_WAVE_SIZE
+            per_token += _TOPK_WAVE_SIZE * _sort_network_comparators(ept)
+            per_token += topk * 6  # warpReduceMax_softplus
+        if self.param_details.get("need_renorm"):
+            per_token += topk + 1 + topk
+        else:
+            per_token += topk
+        return M * per_token
+
+    def get_compute_precision(self):
+        return "fp32"
+
+    def bytes(self):
+        if not dense_counted_tensor(self.event, (0, 1, 2, 3)):
+            return None
+        E = self.param_details["E"]
+        topk = self.param_details["topk"]
+        bpe_bias = name2bpe(self.param_details["dtype_bias"])
+        bpe_weights = name2bpe(self.param_details["dtype_weights"])
+        bpe_indices = name2bpe(self.param_details["dtype_indices"])
+        if None in {self.bpe_in, bpe_bias, bpe_weights, bpe_indices}:
+            return None
+        return (
+            self.M * E * self.bpe_in
+            + E * bpe_bias
+            + self.M * topk * bpe_weights
+            + self.M * topk * bpe_indices
+        )
+
+
+class topk_softplus_sqrt(topk_gating_fwd):
+    """HBM bytes of the gating row, the bias, and the top-k outputs; a hash lookup touches one row, not the whole table."""
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        types = args.get("Input type") or []
+        concrete = args.get("Concrete Inputs") or []
+        bad = (
+            len(dims) < 4
+            or not dims[0]
+            or len(dims[0]) < 2
+            or not dims[3]
+            or len(dims[3]) < 2
+        )
+        if bad:
+            return {
+                "M": 0,
+                "n": 1,
+                "C": 0,
+                "E": 0,
+                "topk": 0,
+                "dtype_in": "float",
+                "dtype_bias": "float",
+                "dtype_weights": "float",
+                "dtype_indices": "int",
+                "score_func": "sqrtsoftplus",
+                "need_renorm": False,
+                "has_bias": False,
+                "use_hash": False,
+                "_no_perf": True,
+            }
+        need_renorm = True
+        if len(concrete) > 4 and concrete[4] not in ("", None):
+            need_renorm = str(concrete[4]).lower() == "true"
+        details = {
+            "M": dims[0][0],
+            "n": 1,
+            "C": dims[3][1],
+            "E": dims[3][1],
+            "topk": dims[0][1],
+            "dtype_in": types[3] if len(types) > 3 else "float",
+            "dtype_bias": types[6] if len(types) > 6 and types[6] else "float",
+            "dtype_weights": types[0] if types else "float",
+            "dtype_indices": types[1] if len(types) > 1 else "int",
+            "score_func": "sqrtsoftplus",
+            "need_renorm": need_renorm,
+            "has_bias": len(dims) > 6 and bool(dims[6]),
+            "use_hash": len(dims) > 8 and bool(dims[8]),
+        }
+        return add_logical_batch_size(details, event)
+
+    def flops(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        if not self.param_details.get("use_hash"):
+            return super().flops()
+        E = self.param_details["E"]
+        topk = self.param_details["topk"]
+        per_token = _SQRTSOFTPLUS_FLOPS * E
+        if self.param_details.get("need_renorm"):
+            per_token += topk + 1 + topk
+        else:
+            per_token += topk
+        return self.M * per_token
+
+    def bytes(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        if not dense_counted_tensor(self.event, (0, 1, 2, 3)):
+            return None
+        E = self.param_details["E"]
+        topk = self.param_details["topk"]
+        bpe_w = name2bpe(self.param_details["dtype_weights"])
+        bpe_i = name2bpe(self.param_details["dtype_indices"])
+        if None in {self.bpe_in, bpe_w, bpe_i}:
+            return None
+        total = self.M * E * self.bpe_in
+        total += self.M * topk * bpe_w + 2 * self.M * topk * bpe_i
+        if self.param_details.get("has_bias"):
+            bpe_bias = name2bpe(self.param_details["dtype_bias"])
+            if bpe_bias is None:
+                return None
+            total += E * bpe_bias
+        dims = self.event["args"]["Input Dims"]
+        if len(dims) > 9 and dims[9]:
+            total += self.M  # one bool flag per token
+        if self.param_details.get("use_hash"):
+            total += self.M * bpe_i + self.M * topk * bpe_i
+        return total

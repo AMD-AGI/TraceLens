@@ -193,6 +193,16 @@ class TestPseudoOpsPerfUtils:
             category_only["aiter::fused_dynamic_mxfp4_quant_moe_sort_hip"] == "MoE_aux"
         )
         assert category_only["aiter::indexer_score_topk"] == "InferenceAttention"
+        assert (
+            category_only[
+                "hipModuleLaunchKernel->_fwd_kernel_stage2_asm (Synthetic Op)"
+            ]
+            == "InferenceAttention"
+        )
+        assert (
+            category_only["sglang_profiler::topk_topk_transform_paged_v2"]
+            == "InferenceAttention"
+        )
 
 
 class TestPackageExports:
@@ -392,6 +402,1044 @@ class TestPerfModelExtensions:
         assert model.param_details["K"] == 256
         assert model.flops() == 2 * 128 * 512 * 256
         assert model.bytes() > 0
+
+    def test_deepseek_v4_preshuffle_gemm_uses_output_shape(self):
+        event = {
+            "annotation": "step[DECODE bs=5 g_sq=5 g_sqsq=5 g_sqsk=25 g_sk=5]",
+            "args": {
+                "Input Dims": [
+                    [8, 7168],
+                    [128, 114688],
+                    [8, 56],
+                    [16, 56],
+                    [8, 2048],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "float",
+                    "float",
+                    "c10::BFloat16",
+                ],
+            },
+            "kernel_details": [
+                {
+                    "name": (
+                        "_gemm_a8w8_blockscale_preshuffle_kernel_GROUP_K_128"
+                        "_GROUP_N_128_BLOCK_SIZE_M_16_BLOCK_SIZE_N_16"
+                        "_BLOCK_SIZE_K_128_GROUP_SIZE_M_1_NUM_KSPLIT_8"
+                        "_SPLITK_BLOCK_SIZE_896_EVEN_K_1_GRID_MN_128"
+                        "_cache_modifier_CG"
+                    )
+                },
+                {
+                    "name": (
+                        "_gemm_a8w8_blockscale_reduce_kernel_BLOCK_SIZE_M_32"
+                        "_BLOCK_SIZE_N_32_ACTUAL_KSPLIT_8_MAX_KSPLIT_8"
+                        "_ADD_BIAS_0_activation_NONE_use_activation_0"
+                    )
+                },
+            ],
+        }
+        model = pext.gemm_a8w8_blockscale_preshuffle(event)
+        assert (model.M, model.N, model.K) == (8, 2048, 7168)
+        assert model.param_details["logical_batch_size"] == 5
+        assert model.get_compute_precision() == "fp8"
+        assert model.get_maf_type() == "matrix"
+        # 16x16 tiles, 8-way split-K, plus the fp32 reduce of 8 partials.
+        assert model.flops() == 472_170_496
+        assert model.bytes() == (
+            8 * 7168
+            + 2048 * 7168
+            + 8 * 2048 * 2
+            + 8 * 56 * 4
+            + 16 * 56 * 4
+            + 2 * 8 * 8 * 2048 * 4
+        )
+
+    def test_deepseek_v4_bounded_mx_quant_uses_captured_buffers(self):
+        dims = [
+            [8, 7168],
+            [12384, 224],
+            [8, 7168],
+            [12369],
+            [2],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [12369],
+        ]
+        types = [
+            "c10::Float8_e4m3fn",
+            "c10::Float8_e8m0fnu",
+            "c10::BFloat16",
+            "int",
+            "int",
+            "Scalar",
+            "Scalar",
+            "Scalar",
+            "Scalar",
+            "Scalar",
+            "float",
+        ]
+        event = {
+            "annotation": "step[DECODE bs=5 g_sq=5 g_sqsq=5 g_sqsk=25 g_sk=5]",
+            "args": {
+                "Input Dims": dims,
+                "Input type": types,
+                "Input Strides": [[], [], [7168, 1]],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "8",
+                    "32",
+                    "56",
+                    "385",
+                    "32",
+                    "",
+                ],
+            },
+        }
+        model = pext.fused_dynamic_mx_quant_moe_sort_hip_bounded(event)
+        # 56 routed pairs, not the 12369-element padded allocation.
+        # 3 fp32 FLOPs per element: abs, max, scale multiply.
+        assert model.param_details["logical_batch_size"] == 5
+        assert model.param_details["row_bound"] == 56
+        assert model.get_compute_precision() == "fp32"
+        assert model.get_maf_type() == "vector"
+        assert model.flops() == 3 * 56 * 7168
+        assert model.bytes() == (
+            56 * 7168 * 2
+            + 56 * 7168
+            + 56 * (7168 // 32)
+            + 56 * 4
+            + 56 * 4
+            + 4
+        )
+
+    def test_deepseek_v4_opus_bmm_uses_fp8_matrix_spec(self):
+        event = {
+            "annotation": "step[DECODE bs=5 g_sq=5 g_sqsq=5 g_sqsk=25 g_sk=5]",
+            "args": {
+                "Input Dims": [
+                    [8, 2, 4096],
+                    [2, 1024, 4096],
+                    [8, 2, 1024],
+                    [8, 2, 32],
+                    [2, 8, 32],
+                    [],
+                    [],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "unsigned char",
+                    "unsigned char",
+                    "Scalar",
+                    "Scalar",
+                ],
+            },
+        }
+        model = pext.opus_bmm_a8w8_mxscale_raw(event)
+        assert (model.B, model.M, model.N, model.K) == (8, 2, 1024, 4096)
+        assert model.param_details["logical_batch_size"] == 5
+        assert model.get_compute_precision() == "fp8"
+        # No kernel name, so the logical matmul is the fallback.
+        assert model.flops() == 2 * 2 * 8 * 1024 * 4096 + 2 * 8 * 1024 * 32
+        assert model.bytes() == (
+            8 * 2 * 4096
+            + 2 * 1024 * 4096
+            + 8 * 2 * 1024 * 2
+            + 8 * 2 * 32
+            + 2 * 8 * 32
+        )
+
+        tiled = dict(event)
+        tiled["kernel_details"] = [
+            {
+                "name": "_Z38gemm_a8w8_mxscale_flatmm_splitk_kernelI50opus_gemm_"
+                "a8w8_mxscale_flatmm_splitk_traits_gfx950ILi256EN4opus3seqIJLi16"
+                "ELi32ELi512EEEENS1_5tupleIJDB8_S5_ffhEEENS2_IJLi16ELi16ELi4EEEE"
+                "NS2_IJLi1ELi128ELi128EEEELi2EEDF16bLb0ELb1ELb0EEv35opus_gemm_"
+                "scale_splitk_kargs_gfx950"
+            }
+        ]
+        tiled_model = pext.opus_bmm_a8w8_mxscale_raw(tiled)
+        assert tiled_model.param_details["tile"] == {"bm": 16, "bn": 32, "bk": 512}
+        # 8 real rows run as a full 16-row tile; N and K already fill their tiles.
+        assert tiled_model.flops() == 2 * 2 * 16 * 1024 * 4096 + 2 * 16 * 1024 * 32
+        assert tiled_model.bytes() == model.bytes()
+
+    def test_deepseek_v4_mla_decode_uses_page_indices(self):
+        num_kv = 67072
+        event = {
+            "annotation": "step[DECODE bs=5 g_sq=5 g_sqsq=5 g_sqsk=25 g_sk=5]",
+            "args": {
+                "Input Dims": [
+                    [8, 16, 512],
+                    [8, 16, 64],
+                    [197068, 1, 1, 512],
+                    [197068, 1, 1, 64],
+                    [9],
+                    [9],
+                    [num_kv],
+                    [9],
+                    [16],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [8, 16, 16, 512],
+                    [8, 16, 16, 1],
+                    [8, 16, 512],
+                    [8],
+                    [],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                    "int",
+                    "int",
+                    "float",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "float",
+                    "float",
+                    "c10::BFloat16",
+                    "int",
+                    "Scalar",
+                ],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "1",
+                    "0.",
+                    "0",
+                    "16",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "1",
+                    "",
+                ],
+            },
+        }
+        model = aext.mla_decode_v4_asm(event)
+        assert model.param_details["logical_batch_size"] == 5
+        assert model.param_details["annotation_g_sk"] == 5
+        assert model.param_details["g_sqsk"] == num_kv
+        assert model.param_details["num_kv"] == num_kv
+        assert model.get_compute_precision() == "fp8"
+        assert model.get_maf_type() == "matrix"
+        assert model.flops() == 4 * 16 * 512 * num_kv
+        assert model.bytes() == (
+            8 * 16 * 512
+            + 8 * 16 * 64 * 2
+            + num_kv * 512
+            + num_kv * 64 * 2
+            + num_kv * 4
+            + 9 * 4 * 3
+            + 16 * 4
+            + 8 * 16 * 16 * 512 * 4
+            + 8 * 16 * 16 * 4
+            + 8 * 4
+        )
+
+    def test_mla_bytes_reject_broadcast_stride(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [8, 16, 512],
+                    [8, 16, 64],
+                    [4, 1, 1, 512],
+                    [4, 1, 1, 64],
+                    [9],
+                    [9],
+                    [4],
+                    [9],
+                    [16],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [8, 16, 16, 512],
+                    [8, 16, 16, 1],
+                    [8, 16, 512],
+                    [8],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                    "int",
+                    "int",
+                    "float",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "float",
+                    "float",
+                    "c10::BFloat16",
+                    "int",
+                ],
+                "Concrete Inputs": ["1", "0", "16", "1"],
+                "Input Strides": [
+                    [0, 512, 1],
+                    [1024, 64, 1],
+                    [512, 512, 512, 1],
+                    [64, 64, 64, 1],
+                    [1],
+                    [1],
+                    [1],
+                    [1],
+                    [1],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [131072, 8192, 512, 1],
+                    [256, 16, 1, 1],
+                    [8192, 512, 1],
+                    [1],
+                ],
+            },
+        }
+        assert aext.mla_decode_v4_asm(event).bytes() is None
+
+    def test_stage2_launch_receives_mla_shapes(self):
+        from TraceLens.Trace2Tree.extensions.mla_v4_stage2_shapes import (
+            copy_mla_v4_stage2_shapes,
+        )
+
+        dims = [[8, 16, 512]]
+        events = {
+            1: {
+                "UID": 1,
+                "name": "aiter/mla.py(1595): mla_decode_fwd_v4_nm",
+                "cat": "python_function",
+                "children": [2, 3],
+                "args": {},
+            },
+            2: {
+                "UID": 2,
+                "name": "aiter::mla_decode_v4_asm",
+                "cat": "cpu_op",
+                "parent": 1,
+                "children": [],
+                "args": {"Input Dims": dims, "Input type": ["c10::Float8_e4m3fn"]},
+            },
+            3: {
+                "UID": 3,
+                "name": "hipModuleLaunchKernel",
+                "cat": "cuda_runtime",
+                "parent": 1,
+                "children": [4],
+                "args": {},
+            },
+            4: {
+                "UID": 4,
+                "name": "_fwd_kernel_stage2_asm",
+                "cat": "kernel",
+                "parent": 3,
+                "children": [],
+                "args": {},
+            },
+        }
+
+        class _Tree:
+            def __init__(self):
+                self.events_by_uid = events
+                self.name2event_uids = {
+                    "_fwd_kernel_stage2_asm": [4],
+                }
+
+            def get_UID2event(self, uid):
+                return self.events_by_uid[uid]
+
+            def get_parent_event(self, event):
+                parent = event.get("parent")
+                if parent is None:
+                    return None
+                return self.events_by_uid[parent]
+
+        copy_mla_v4_stage2_shapes(_Tree())
+        assert events[3]["args"]["Input Dims"] == dims
+        assert events[3]["args"]["Input type"] == ["c10::Float8_e4m3fn"]
+
+    def test_deepseek_v4_topk_gating_uses_score_dtype(self):
+        event = {
+            "annotation": "step[DECODE bs=5 g_sq=5 g_sqsq=5 g_sqsk=25 g_sk=5]",
+            "args": {
+                "Input Dims": [[8, 6], [8, 6], [8, 384], [384], [], [], []],
+                "Input type": [
+                    "float",
+                    "int",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "Scalar",
+                    "Scalar",
+                    "",
+                ],
+            },
+        }
+        model = pext.topk_gating_fwd(event)
+        assert model.param_details["logical_batch_size"] == 5
+        assert model.get_compute_precision() == "fp32"
+        assert model.get_maf_type() == "vector"
+        # sqrtsoftplus + bias + 12-comparator network + warp max + renorm.
+        assert model.flops() == 8 * (7 * 384 + 64 * 12 + 6 * 6 + 13)
+        assert model.bytes() == (
+            8 * 384 * 2 + 384 * 2 + 8 * 6 * 4 + 8 * 6 * 4
+        )
+
+    def test_deepseek_v4_moe_small_sort_selects_float_precision(self):
+        event = {
+            "annotation": "step[DECODE bs=5 g_sq=5 g_sqsq=5 g_sqsk=25 g_sk=5]",
+            "args": {
+                "Input Dims": [
+                    [8, 7],
+                    [8, 7],
+                    [12369],
+                    [12369],
+                    [387],
+                    [2],
+                    [0, 0],
+                ],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                ],
+            },
+        }
+        model = moe_ext.SglangMoeSortingSmall(event)
+        assert model.param_details["logical_batch_size"] == 5
+        assert model.param_details["compact"] is True
+        assert model.param_details["block_size"] == 32
+        assert model.get_compute_precision() is None
+        assert model.flops() == 9 * 64 * 64 + 5 * 64
+        assert model.bytes() == (
+            56 * 4
+            + 56 * 4
+            + 2048 * 4
+            + 2048 * 4
+            + 2 * 64 * 4
+            + 8
+        )
+
+    def test_preshuffle_without_tile_counts_logical_gemm(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [8, 7168],
+                    [128, 114688],
+                    [8, 56],
+                    [16, 56],
+                    [8, 2048],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "float",
+                    "float",
+                    "c10::BFloat16",
+                ],
+            },
+        }
+        model = pext.gemm_a8w8_blockscale_preshuffle(event)
+        assert model.param_details["tile"] is None
+        # block_k is 128, so the scale term is one multiply per 128-wide K block.
+        assert model.flops() == 2 * 8 * 2048 * 7168 + 8 * 2048 * 56
+        assert model.bytes() == (
+            8 * 7168
+            + 2048 * 7168
+            + 8 * 2048 * 2
+            + 8 * 56 * 4
+            + 16 * 56 * 4
+        )
+
+    def test_mla_single_split_writes_bf16_output(self):
+        num_kv = 4
+        event = {
+            "args": {
+                "Input Dims": [
+                    [2, 2, 512],
+                    [2, 2, 64],
+                    [10, 1, 1, 512],
+                    [10, 1, 1, 64],
+                    [3],
+                    [3],
+                    [num_kv],
+                    [3],
+                    [2],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [2, 2, 4, 512],
+                    [2, 2, 4, 1],
+                    [2, 2, 512],
+                    [2],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                    "int",
+                    "int",
+                    "float",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "float",
+                    "float",
+                    "c10::BFloat16",
+                    "int",
+                ],
+                "Concrete Inputs": ["1", "0", "1"],
+            },
+        }
+        model = aext.mla_decode_v4_asm(event)
+        assert model.param_details["num_kv_splits"] == 1
+        assert model.flops() == 4 * 2 * 512 * num_kv
+        assert model.bytes() == (
+            2 * 2 * 512
+            + 2 * 2 * 64 * 2
+            + num_kv * 512
+            + num_kv * 64 * 2
+            + num_kv * 4
+            + 3 * 4 * 3
+            + 2 * 4
+            + 2 * 2 * 512 * 2
+        )
+
+    def test_topk_gating_sigmoid_and_softmax(self):
+        dims = [[8, 6], [8, 6], [8, 384], [384], [], [], []]
+        types = [
+            "float",
+            "int",
+            "c10::BFloat16",
+            "c10::BFloat16",
+            "Scalar",
+            "Scalar",
+            "",
+        ]
+        sigmoid = pext.topk_gating_fwd(
+            {
+                "args": {
+                    "Input Dims": dims,
+                    "Input type": types,
+                    "Concrete Inputs": ["", "", "", "", "true", "", "sigmoid"],
+                },
+            }
+        )
+        assert sigmoid.param_details["score_func"] == "sigmoid"
+        assert sigmoid.flops() == 8 * (6 * 384 + 64 * 12 + 6 * 6 + 13)
+        softmax = pext.topk_gating_fwd(
+            {
+                "args": {
+                    "Input Dims": dims,
+                    "Input type": types,
+                    "Concrete Inputs": ["", "", "", "", "true", "", "softmax"],
+                },
+            }
+        )
+        assert softmax.param_details["need_renorm"] is False
+        assert softmax.flops() == 8 * (384 + 64 * 12 + 6 * 6 + 6)
+
+    def test_moe_sort_distributed_path(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [16, 8],
+                    [16, 8],
+                    [376],
+                    [376],
+                    [12],
+                    [2],
+                    [0, 0],
+                ],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                ],
+            },
+        }
+        model = moe_ext.SglangMoeSortingSmall(event)
+        assert model.param_details["compact"] is False
+        assert model.param_details["pairs"] == 128
+        chunk = 2 * 128 * 64 + 64
+        assert model.flops() == (chunk * 2 + 2 * 64 * 64) + 128 * (4 * 128 + chunk)
+        assert model.bytes() == (
+            128 * 4
+            + 128 * 4
+            + 4096 * 4
+            + 4096 * 4
+            + 2 * 128 * 4
+            + 8
+        )
+
+    def test_bounded_mx_quant_rejects_short_scalar_list(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [8, 7168],
+                    [12384, 224],
+                    [8, 7168],
+                    [12369],
+                    [2],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e8m0fnu",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                ],
+                "Input Strides": [[], [], [7168, 1]],
+                "Concrete Inputs": ["8", "32"],
+            },
+        }
+        model = pext.fused_dynamic_mx_quant_moe_sort_hip_bounded(event)
+        assert model.param_details["bounded"] is False
+        assert model.flops() is None
+        assert model.bytes() is None
+
+    def test_vllm_top_ops_models(self):
+        from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
+            vllm_all_reduce,
+        )
+        from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
+            _compact_sort_ops,
+            _distributed_sort_ops,
+            _next_pow2,
+            moe_opus_stage1_a8w4,
+            moe_sorting_opus_fwd,
+        )
+        from TraceLens.PerfModel.torch_op_mapping import CATEGORY_ONLY_OP_MAPPING
+
+        reduce_event = {
+            "args": {
+                "Input Dims": [[1, 7168], []],
+                "Input type": ["c10::BFloat16", ""],
+            }
+        }
+        model = vllm_all_reduce(reduce_event)
+        assert model.flops() == 0
+        assert model.bytes() == 2 * 7168 * 2
+        gapped = {
+            "args": {
+                "Input Dims": [[1, 7168], []],
+                "Input type": ["c10::BFloat16", ""],
+                "Input Strides": [[1, 2], []],
+            }
+        }
+        assert vllm_all_reduce(gapped).bytes() is None
+
+        gemm = {
+            "args": {
+                "Input Dims": [[1, 7168], [2048, 7168], [1, 56], [16, 56], [], []],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "float",
+                    "float",
+                    "Scalar",
+                    "",
+                ],
+                "Concrete Inputs": ["", "", "", "", "15", ""],
+            },
+            "kernel_details": [
+                {
+                    "name": (
+                        "_gemm_a8w8_blockscale_preshuffle_kernel_GROUP_K_128_"
+                        "GROUP_N_128_BLOCK_SIZE_M_8_BLOCK_SIZE_N_16_BLOCK_SIZE_K_128_"
+                        "GROUP_SIZE_M_1_NUM_KSPLIT_4_SPLITK_BLOCK_SIZE_1792"
+                    )
+                },
+                {
+                    "name": (
+                        "_gemm_a8w8_blockscale_reduce_kernel_BLOCK_SIZE_M_32_"
+                        "BLOCK_SIZE_N_32_ACTUAL_KSPLIT_4_MAX_KSPLIT_4"
+                    )
+                },
+            ],
+        }
+        preshuffle = pext.gemm_a8w8_blockscale_bpreshuffle(gemm)
+        assert preshuffle.N == 2048
+        assert preshuffle.flops() == 236052480
+        assert preshuffle.bytes() == 14760672
+        assert preshuffle.get_compute_precision() == "fp8"
+        assert preshuffle.get_maf_type() == "matrix"
+        no_tile = {
+            "args": gemm["args"],
+        }
+        logical = pext.gemm_a8w8_blockscale_bpreshuffle(no_tile)
+        assert logical.param_details["tile"] is None
+        assert logical.flops() == 2 * 1 * 2048 * 7168 + 1 * 2048 * (7168 // 128)
+        assert logical.bytes() == 14760672 - 2 * 4 * 1 * 2048 * 4
+        assert pext.gemm_a8w8_blockscale_bpreshuffle(
+            {"args": {"Input Dims": [[1, 8], [], [], []], "Input type": []}}
+        ).flops() is None
+
+        stage = {
+            "args": {
+                "Input Dims": [
+                    [1],
+                    [1, 7168],
+                    [384, 768, 3584],
+                    [12288, 224],
+                    [294912, 224],
+                    [],
+                    [12288],
+                    [384],
+                    [2],
+                    [1, 6, 384],
+                    [12288, 16],
+                ],
+                "Input type": [
+                    "float",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float4_e2m1fn_x2",
+                    "c10::Float8_e8m0fnu",
+                    "c10::Float8_e8m0fnu",
+                    "",
+                    "int",
+                    "int",
+                    "int",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e8m0fnu",
+                ],
+                "Concrete Inputs": ["", "", "", "", "", "", "", "", "", "", "", "6", "32"],
+            }
+        }
+        stage1 = moe_opus_stage1_a8w4(stage)
+        assert stage1.flops() == 2 * 1 * 7168 * 384 * 6 * 2
+        assert stage1.bytes() == 17557056
+        assert stage1.get_compute_precision() == "fp4"
+        assert stage1.get_maf_type() == "matrix"
+        assert moe_opus_stage1_a8w4(
+            {"args": {"Input Dims": [[1, 8]], "Input type": ["float"]}}
+        ).flops() is None
+
+        router = {
+            "args": {
+                "Input Dims": [
+                    [1, 6],
+                    [1, 6],
+                    [1, 6],
+                    [1, 384],
+                    [],
+                    [],
+                    [384],
+                    [1],
+                    [],
+                    [1],
+                ],
+                "Input type": [
+                    "float",
+                    "int",
+                    "int",
+                    "float",
+                    "Scalar",
+                    "Scalar",
+                    "float",
+                    "int",
+                    "",
+                    "bool",
+                ],
+                "Concrete Inputs": ["", "", "", "", "True", "2.5"],
+            }
+        }
+        routed = pext.topk_softplus_sqrt(router)
+        assert routed.flops() == 3505
+        assert routed.bytes() == 3145
+        assert routed.get_compute_precision() == "fp32"
+        assert routed.get_maf_type() == "vector"
+        hashed = {
+            "args": {
+                "Input Dims": [
+                    [1, 6],
+                    [1, 6],
+                    [1, 6],
+                    [1, 384],
+                    [],
+                    [],
+                    [],
+                    [1],
+                    [129280, 6],
+                    [1],
+                ],
+                "Input type": router["args"]["Input type"],
+                "Concrete Inputs": ["", "", "", "", "True", "2.5"],
+            }
+        }
+        hash_model = pext.topk_softplus_sqrt(hashed)
+        assert hash_model.param_details["use_hash"] is True
+        assert hash_model.flops() == 2317
+        assert hash_model.bytes() == 1637
+        assert pext.topk_softplus_sqrt({"args": {"Input Dims": []}}).flops() is None
+
+        sort_decode = {
+            "args": {
+                "Input Dims": [[1, 6], [1, 6], [12288], [12288], [384], [2], [1, 7168]],
+                "Input type": ["int", "float", "int", "float", "int", "int", "c10::BFloat16"],
+                "Concrete Inputs": ["", "", "", "", "", "", "", "384", "32"],
+            }
+        }
+        sorter = moe_sorting_opus_fwd(sort_decode)
+        assert sorter.param_details["compact"] is True
+        assert sorter.flops() == _compact_sort_ops(8)
+        assert sorter.get_compute_precision() is None
+        assert sorter.get_maf_type() == "vector"
+        prefill = {
+            "args": {
+                "Input Dims": [[1754, 6], [1754, 6], [35136], [35136], [549], [2], [0, 0]],
+                "Input type": ["int", "float", "int", "float", "int", "int", "c10::BFloat16"],
+                "Concrete Inputs": ["", "", "", "", "", "", "", "384", "64", "", "", "", "0"],
+            }
+        }
+        prefill_sort = moe_sorting_opus_fwd(prefill)
+        pairs = 1754 * 6
+        assert prefill_sort.param_details["compact"] is False
+        assert prefill_sort.param_details["block_size"] == 64
+        assert prefill_sort.flops() == _distributed_sort_ops(
+            pairs, _next_pow2(pairs), 384
+        )
+        assert moe_sorting_opus_fwd(
+            {
+                "args": {
+                    "Input Dims": [[3, 6], [3, 6], [10], [10], [3], [2], [0, 0]],
+                    "Input type": ["int", "float", "int", "float", "int", "int", "c10::BFloat16"],
+                    "Concrete Inputs": ["3"],
+                }
+            }
+        ).flops() is None
+
+        sparse = aext.vllm_sparse_attn_decode(
+            {
+                "args": {
+                    "Input Dims": [[1, 16, 512], [1, 32, 16]],
+                    "Input type": ["c10::BFloat16", "float"],
+                    "v4_block_k": 32,
+                }
+            }
+        )
+        assert sparse.flops() == 16 * 4 * 1 * 1024 * 512
+        assert sparse.bytes() == 2 * 1 * 16 * 512 * 2 + 1 * 1024 * 576 + 2 * 1 * 32 * 16 * 4
+        assert sparse.get_compute_precision() == "bf16"
+        assert sparse.get_maf_type() == "matrix"
+        assert aext.vllm_sparse_attn_decode(
+            {"args": {"Input Dims": [[1, 16, 512]], "v4_block_k": 32}}
+        ).flops() is None
+
+        mappings = get_pseudo_op_mappings()
+        assert mappings["vllm::all_reduce"] is vllm_all_reduce
+        assert mappings["aiter::gemm_a8w8_blockscale_bpreshuffle"] is pext.gemm_a8w8_blockscale_bpreshuffle
+        assert mappings["aiter::_opus_moe_stage1_a8w4_fwd_raw"] is moe_opus_stage1_a8w4
+        assert mappings["_moe_C::topk_softplus_sqrt"] is pext.topk_softplus_sqrt
+        assert mappings["aiter::moe_sorting_opus_fwd"] is moe_sorting_opus_fwd
+        assert mappings["pseudo_vllm_sparse_attn_decode"] is aext.vllm_sparse_attn_decode
+        categories = get_pseudo_op_category_only_mappings()
+        assert categories["_C::top_k_per_row_decode"] == "InferenceAttention"
+        assert "aiter::moe_sorting_opus_fwd" not in CATEGORY_ONLY_OP_MAPPING
+        assert "aiter::moe_sorting_opus_fwd" not in categories
+
+    def test_vllm_sparse_decode_has_one_owner(self):
+        from copy import deepcopy
+
+        from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+        from TraceLens.Trace2Tree.extensions.vllm_sparse_decode_pseudo_ops import (
+            create_pseudo_ops_vllm_sparse_decode,
+        )
+        from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+
+        def ev(ts, dur, cat, name, pid=100, tid=100, args=None):
+            event = {
+                "ph": "X",
+                "ts": ts,
+                "dur": dur,
+                "cat": cat,
+                "name": name,
+                "pid": pid,
+                "tid": tid,
+            }
+            if args is not None:
+                event["args"] = args
+            return event
+
+        def ac2g(corr, ts, phase):
+            marker = {
+                "ph": phase,
+                "id": corr,
+                "pid": 0,
+                "tid": 7,
+                "ts": ts,
+                "cat": "ac2g",
+                "name": "ac2g",
+            }
+            if phase == "f":
+                marker["bp"] = "e"
+            return marker
+
+        events = [
+            ev(
+                1000,
+                800,
+                "python_function",
+                "vllm/models/deepseek_v4/amd/rocm.py(736): forward_mqa",
+            ),
+            ev(
+                1010,
+                5,
+                "cpu_op",
+                "aten::slice",
+                args={
+                    "Input Dims": [[1, 16, 512], [], [], [], []],
+                    "Input type": ["c10::BFloat16", "Scalar", "Scalar", "Scalar", "Scalar"],
+                },
+            ),
+            ev(
+                1050,
+                700,
+                "python_function",
+                "vllm/models/deepseek_v4/amd/rocm.py(817): _forward_decode",
+            ),
+            ev(
+                1060,
+                5,
+                "cpu_op",
+                "aten::empty_like",
+                args={
+                    "Input Dims": [[1, 32, 16], [], [], [], [], []],
+                    "Input type": ["float", "", "", "", "Scalar", ""],
+                },
+            ),
+            ev(
+                1100,
+                200,
+                "python_function",
+                "vllm/v1/attention/ops/rocm_aiter_mla_sparse.py(3065): _rocm_sparse_attn_decode_triton",
+            ),
+            ev(1110, 10, "cuda_runtime", "hipModuleLaunchKernel", args={"correlation": 1}),
+            ev(
+                5000,
+                30,
+                "kernel",
+                "_sparse_attn_decode_gfx950_partial_kernel.kd",
+                pid=0,
+                tid=7,
+                args={"correlation": 1, "stream": 7},
+            ),
+            ac2g(1, 5000, "s"),
+            ac2g(1, 5030, "f"),
+            ev(1200, 10, "cuda_runtime", "hipModuleLaunchKernel", args={"correlation": 2}),
+            ev(
+                5100,
+                30,
+                "kernel",
+                "_sparse_attn_decode_reduce_kernel.kd",
+                pid=0,
+                tid=7,
+                args={"correlation": 2, "stream": 7},
+            ),
+            ac2g(2, 5100, "s"),
+            ac2g(2, 5130, "f"),
+        ]
+        tree = TraceToTree(deepcopy(events), prune_nongpu_paths=False)
+        tree.build_tree(add_python_func=True)
+        create_pseudo_ops_vllm_sparse_decode(tree)
+        parents = [
+            evt
+            for evt in tree.events
+            if evt.get("name") == "pseudo_vllm_sparse_attn_decode"
+        ]
+        assert len(parents) == 1
+        parent = parents[0]
+        assert parent["args"]["Input Dims"] == [[1, 16, 512], [1, 32, 16]]
+        kernel_uids = []
+        for evt in tree.events:
+            if evt.get("cat") == "kernel" and "sparse_attn_decode" in evt.get("name", ""):
+                kernel_uids.append(evt["UID"])
+        assert sorted(parent["gpu_events"]) == sorted(kernel_uids)
+        assert len(parent["gpu_events"]) == len(set(parent["gpu_events"])) == 2
+        analyzer = TreePerfAnalyzer(tree, add_python_func=True, rebuild_tree=False)
+        collected = analyzer.collect_unified_perf_events()
+        owners = [
+            evt
+            for evt in collected
+            if any(
+                "sparse_attn_decode" in tree.get_UID2event(uid).get("name", "")
+                for uid in evt.get("gpu_events") or []
+            )
+        ]
+        assert len(owners) == 1
+        assert owners[0]["name"] == "pseudo_vllm_sparse_attn_decode"
+        owned = 0
+        for uid in owners[0]["gpu_events"]:
+            owned += tree.get_UID2event(uid)["dur"]
+        assert owned == 60
+
+    def test_deepseek_v4_model_mappings(self):
+        mappings = get_pseudo_op_mappings()
+        assert (
+            mappings[
+                "sglang_profiler::gemm_a8w8_blockscale_gemm_a8w8_blockscale_preshuffle"
+            ]
+            is pext.gemm_a8w8_blockscale_preshuffle
+        )
+        assert (
+            mappings["aiter::fused_dynamic_mx_quant_moe_sort_hip_bounded"]
+            is pext.fused_dynamic_mx_quant_moe_sort_hip_bounded
+        )
+        assert (
+            mappings["aiter::_opus_bmm_a8w8_mxscale_raw"]
+            is pext.opus_bmm_a8w8_mxscale_raw
+        )
+        assert (
+            mappings["aiter::topk_gating_fwd"] is pext.topk_gating_fwd
+        )
+        assert (
+            mappings["sglang_profiler::moe_sorting_small__run_small_sort"]
+            is moe_ext.SglangMoeSortingSmall
+        )
 
     @pytest.mark.parametrize(
         "model_cls,flops_per_elem",
