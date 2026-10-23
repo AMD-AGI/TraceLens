@@ -90,8 +90,6 @@ _CALL_CHAIN_SKIP = frozenset(
 _KERNEL_NAME_TRUNC_LEN = 75
 PERF_ARG_COLS = ("Input Dims", "Input type", "Input Strides", "Concrete Inputs")
 PERF_THREAD_COLS = ("process_name", "process_label", "thread_name")
-PEAK_MEM_BW_KEY = "peak_mem_bw_tbs"
-HIGH_CONFIDENCE_OP_KEYS = "high_confidence_op_keys"
 
 
 def _eff_bucket(pct):
@@ -114,14 +112,6 @@ def perf_report_csv_dir(output_dir: str) -> str:
         with open(manifest_path, "r", encoding="utf-8") as f:
             return json.load(f)["focus_csv_dir"]
     return os.path.join(output_dir, "perf_report_csvs")
-
-
-def focus_job_utilization(manifest: dict) -> dict:
-    """The manifest's ``gpu_utilization``; on multi_trace runs, the focus job's entry."""
-    gpu_util = manifest.get("gpu_utilization", {})
-    if manifest.get("focus_job"):
-        return gpu_util["jobs"][manifest["focus_job"]]
-    return gpu_util
 
 
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
@@ -359,7 +349,7 @@ def standalone_efficiency(result: Dict[str, Any], row: pd.Series) -> None:
 def calculate_efficiency(
     row: pd.Series,
     peak_mem_bw: float,
-    max_achievable_tflops: dict,
+    peak_maf_or_maf_dict,
     comparison_scope: str = "standalone",
 ) -> Dict[str, Optional[float]]:
     """
@@ -368,8 +358,8 @@ def calculate_efficiency(
     Args:
         row: DataFrame row with operation metrics
         peak_mem_bw: Peak memory bandwidth in TB/s
-        max_achievable_tflops: Per-precision peak TFLOPS dict, for resolving the
-            precision-aware peak
+        peak_maf_or_maf_dict: Either a float or a dict (max_achievable_tflops)
+            for resolving the precision-aware peak
         comparison_scope:
             ``standalone`` uses roofline efficiency
             ``comparative`` uses comparative efficiency
@@ -407,9 +397,11 @@ def calculate_efficiency(
     if tb_s is not None:
         result["tb_s_achieved"] = round(tb_s, 2)
 
-    peak_maf = _resolve_peak_maf(
-        row, max_achievable_tflops, get_matrix_maf_tflops(max_achievable_tflops)
-    )
+    if isinstance(peak_maf_or_maf_dict, dict):
+        fallback_maf = peak_maf_or_maf_dict.get("matrix_bf16", 1)
+        peak_maf = _resolve_peak_maf(row, peak_maf_or_maf_dict, fallback_maf)
+    else:
+        peak_maf = peak_maf_or_maf_dict
     result["resolved_peak_maf"] = round(peak_maf, 2) if peak_maf else None
     result["resolved_peak_mem_bw"] = round(peak_mem_bw, 2) if peak_mem_bw else None
 
@@ -441,8 +433,8 @@ def _load_fusion_op_keys(output_dir: str) -> Set[tuple]:
     except json.JSONDecodeError:
         return set()
     return {
-        (metrics.get(PHASE_COL), *key)
-        for key in metrics.get(HIGH_CONFIDENCE_OP_KEYS, [])
+        (metrics.get("phase"), *key)
+        for key in metrics.get("high_confidence_op_keys", [])
     }
 
 
@@ -549,8 +541,8 @@ def build_operation_metrics(
         category_config: Optional extra_fields / operation_classifier
         comparison_scope: ``"standalone"`` or ``"comparative"``
     """
-    peak_mem_bw = get_peak_mem_bw_tbs(metadata)
-    maf = metadata["max_achievable_tflops"]
+    peak_mem_bw = metadata["peak_mem_bw_tbs"]
+    maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
     fusion_op_keys = _load_fusion_op_keys(metadata.get("output_dir", ""))
     e2e_ms_total = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
 
@@ -591,7 +583,7 @@ def build_operation_metrics(
             "efficiency": efficiency,
         }
         if PHASE_COL in row:
-            op_metric[PHASE_COL] = row[PHASE_COL]
+            op_metric["phase"] = row[PHASE_COL]
 
         # Add efficiency warning if present (for anomaly detection)
         if efficiency.get("warning"):
@@ -655,7 +647,12 @@ def build_operation_metrics(
 
         if (
             fusion_op_keys
-            and (row.get(PHASE_COL), *row_perf_key(row, with_thread=True))
+            and (
+                row.get(PHASE_COL),
+                *perf_row_key(
+                    op_name, *(row.get(c) for c in PERF_ARG_COLS + PERF_THREAD_COLS)
+                ),
+            )
             in fusion_op_keys
         ):
             op_metric["fusion_flagged"] = True
@@ -797,7 +794,7 @@ def compute_impact_estimates(
             continue
         impact_score_mid = score["impact_score"]
         time_ms = op["time_ms"]
-        phase = phase_field(op.get(PHASE_COL))
+        phase = {"phase": op["phase"]} if "phase" in op else {}
         if score["impact_estimate_method"] == "quantified":
             impact_score_high = impact_score_mid * (TARGET_HIGH / TARGET_MID)
             impact_score_low = impact_score_mid * (TARGET_LOW / TARGET_MID)
@@ -875,7 +872,7 @@ def build_category_findings(
         bound = e.get("bound_type") or "unknown"
         lib = e.get("library") or "Unknown"
         bucket = _eff_bucket(e.get("efficiency_pct")) if use_eff_bucket else "all"
-        g = groups[(e.get(PHASE_COL), bound, lib, bucket)]
+        g = groups[(e.get("phase"), bound, lib, bucket)]
         g["members"].append(e)
         g["impact_score"] += e.get("impact_score", 0)
         g["impact_score_low"] += e.get("impact_score_low", 0)
@@ -888,7 +885,7 @@ def build_category_findings(
         findings.append(
             {
                 "bound_type": bound,
-                **phase_field(phase),
+                **({"phase": phase} if phase is not None else {}),
                 "library": lib,
                 "eff_bucket": bucket,
                 "estimate_method": "quantified",
@@ -915,7 +912,7 @@ def build_category_findings(
         }
     )
     for e in heuristic:
-        g = hgroups[(e.get(PHASE_COL), e.get("operation", "Unknown"))]
+        g = hgroups[(e.get("phase"), e.get("operation", "Unknown"))]
         g["members"].append(e)
         g["impact_score"] += e.get("impact_score", 0)
         g["impact_score_low"] += e.get("impact_score_low", 0)
@@ -930,7 +927,7 @@ def build_category_findings(
         findings.append(
             {
                 "bound_type": "unmodeled",
-                **phase_field(phase),
+                **({"phase": phase} if phase is not None else {}),
                 "library": g["library"] or "Unknown",
                 "eff_bucket": "unknown",
                 "estimate_method": "heuristic",
@@ -1002,17 +999,6 @@ def perf_row_key(name, *args) -> tuple:
     )
 
 
-def row_perf_key(row, with_thread: bool) -> tuple:
-    """``perf_row_key`` of a unified_perf_summary.csv row; see ``load_perf_rows``."""
-    cols = PERF_ARG_COLS + PERF_THREAD_COLS if with_thread else PERF_ARG_COLS
-    return perf_row_key(row.get("name", "Unknown"), *(row.get(c) for c in cols))
-
-
-def phase_field(phase) -> dict:
-    """``{"phase": phase}`` when a phase is set, else ``{}``."""
-    return {PHASE_COL: phase} if phase is not None else {}
-
-
 def load_perf_rows(csv_path: str, with_thread: bool = True) -> Dict[tuple, pd.Series]:
     """unified_perf_summary.csv rows keyed by ``perf_row_key`` (first row wins).
 
@@ -1020,9 +1006,11 @@ def load_perf_rows(csv_path: str, with_thread: bool = True) -> Dict[tuple, pd.Se
     the thread for a trace whose events carry no thread (diff_stats), so rows that
     differ only by thread collapse onto the first one.
     """
+    cols = PERF_ARG_COLS + PERF_THREAD_COLS if with_thread else PERF_ARG_COLS
     rows: Dict[tuple, pd.Series] = {}
     for _, row in pd.read_csv(csv_path).iterrows():
-        rows.setdefault(row_perf_key(row, with_thread), row)
+        key = perf_row_key(row["name"], *(row.get(c) for c in cols))
+        rows.setdefault(key, row)
     return rows
 
 
@@ -1052,21 +1040,19 @@ def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
     return output_path
 
 
-def get_peak_mem_bw_tbs(metadata: dict) -> float:
-    """Peak memory bandwidth (TB/s) of a metadata dict; a missing key raises."""
-    return metadata[PEAK_MEM_BW_KEY]
-
-
-def get_matrix_maf_tflops(maf: dict) -> float:
-    """Peak bf16 matrix TFLOPS of a max_achievable_tflops dict; 1 when absent."""
-    return maf.get("matrix_bf16", 1)
-
-
 def get_peak_specs(metadata: dict) -> dict:
-    """Extract peak MAF and memory bandwidth from metadata dict."""
+    """Extract peak MAF and memory bandwidth from metadata dict.
+
+    Handles both the dict-style max_achievable_tflops and the legacy
+    scalar peak_bf16_maf_tflops formats.
+    """
     return {
-        "peak_maf_tflops": get_matrix_maf_tflops(metadata["max_achievable_tflops"]),
-        "peak_mem_bw_tbs": get_peak_mem_bw_tbs(metadata),
+        "peak_maf_tflops": (
+            metadata.get("max_achievable_tflops", {}).get("matrix_bf16")
+            if isinstance(metadata.get("max_achievable_tflops"), dict)
+            else metadata.get("peak_bf16_maf_tflops")
+        ),
+        "peak_mem_bw_tbs": metadata["peak_mem_bw_tbs"],
     }
 
 

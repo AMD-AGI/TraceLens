@@ -22,20 +22,10 @@ _ANALYSIS_DIR = os.path.dirname(_THIS_DIR)
 sys.path.insert(0, _THIS_DIR)
 sys.path.insert(0, _ANALYSIS_DIR)
 
-from analysis_utils import (
-    HIGH_CONFIDENCE_OP_KEYS,
-    PEAK_MEM_BW_KEY,
-    focus_job_utilization,
-    get_peak_mem_bw_tbs,
-    load_perf_rows,
-    perf_report_csv_dir,
-    write_metrics_json,
-)
-from TraceLens.Reporting.aggregate_perf_reports import PHASE_COL
+from analysis_utils import load_perf_rows, perf_report_csv_dir, write_metrics_json
 from utils.arch_utils import load_arch
 from utils.classify_kernels import TAXONOMY
 from utils.kernel_fusion import (
-    CONFIDENCE_HIGH,
     OVERLAP_EFFICIENCY,
     FusionCandidate,
     FusionForms,
@@ -75,9 +65,9 @@ def load_arch_config(output_dir: str, platform: str) -> dict:
             if fname.endswith("_metadata.json"):
                 with open(os.path.join(metadata_dir, fname), "r") as f:
                     meta = json.load(f)
-                if PEAK_MEM_BW_KEY in meta and "max_achievable_tflops" in meta:
+                if "peak_mem_bw_tbs" in meta and "max_achievable_tflops" in meta:
                     return {
-                        "peak_mem_bw_tbs": get_peak_mem_bw_tbs(meta),
+                        "peak_mem_bw_tbs": meta["peak_mem_bw_tbs"],
                         "max_achievable_tflops": meta["max_achievable_tflops"],
                     }
 
@@ -157,7 +147,9 @@ def main():
 
     trace2_kwargs = {}
     if is_comparative:
-        csv_path2 = os.path.join(manifest["trace2_csv_dir"], "unified_perf_summary.csv")
+        csv_path2 = os.path.join(
+            args.output_dir, "perf_report_trace2_csvs", "unified_perf_summary.csv"
+        )
         # Trace 2's perf CSV is optional; without it Trace 2 perf cells render as "—".
         trace2_kwargs = {
             "perf_rows2": (
@@ -195,7 +187,11 @@ def main():
         "platform": platform,
         "peak_mem_bw_tbs": peak_bw_tbs,
         "baseline_ms": baseline_ms,
-        PHASE_COL: focus_job_utilization(manifest).get(PHASE_COL),
+        "phase": (
+            manifest["gpu_utilization"]["jobs"][manifest["focus_job"]]["phase"]
+            if "focus_job" in manifest
+            else None
+        ),
         "impact_estimates": [e.to_dict() for e in impact_estimates],
         **scope_metrics,
     }
@@ -207,14 +203,14 @@ def main():
         metrics["warnings"] = warnings
 
     high_confidence_op_keys = pricer.suppressed_op_keys(priced)
-    metrics[HIGH_CONFIDENCE_OP_KEYS] = high_confidence_op_keys
+    metrics["high_confidence_op_keys"] = high_confidence_op_keys
 
     output_path = write_metrics_json(metrics, args.output_dir, "kernel_fusion")
     print(f"Kernel fusion analysis complete:")
     print(f"  Candidates: {len(candidates)}")
     print(f"  With estimates: {len(impact_estimates)}")
     print(f"  Total impact_score (mid): {total_impact_score:.2f}")
-    high_count = sum(1 for e in impact_estimates if e.confidence == CONFIDENCE_HIGH)
+    high_count = sum(1 for e in impact_estimates if e.confidence == "high")
     print(f"  High confidence: {high_count}, op keys: {len(high_confidence_op_keys)}")
     if warnings:
         print(f"  Warnings: {len(warnings)}")

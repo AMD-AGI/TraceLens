@@ -26,18 +26,10 @@ import json
 import os
 import re
 from collections import Counter
-from dataclasses import fields
 
-from .kernel_fusion import FusionEstimate
 from .report_utils import load_manifest, _scan_findings_dir
 
 # Constants
-
-TIER_COMPUTE = "compute"
-TIER_FUSION = "fusion"
-_FUSION_ROW_KEYS = tuple(
-    f.name for f in fields(FusionEstimate) if f.name.startswith("rows")
-)
 
 _REQUIRED_FINDINGS_HEADERS = ["## Recommendations", "## Detailed Analysis"]
 _COMPUTE_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
@@ -180,7 +172,7 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
         content = f.read()
 
     # With no impact_estimates the spec's file is a heading and this one sentence.
-    if tier == TIER_FUSION and _fusion_estimates_empty(filepath):
+    if tier == "fusion" and _fusion_estimates_empty(filepath):
         if _FUSION_EMPTY_SENTENCE in content:
             return True, []
         return False, [
@@ -258,7 +250,7 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
             _validate_compute_data_tables(content, filepath, comparison_scope)
         )
 
-    if tier == TIER_FUSION:
+    if tier == "fusion":
         errors.extend(_validate_fusion_data_tables(content))
 
     # Marker structure (folded in from the former Level-4 validate_markers).
@@ -322,7 +314,7 @@ def _load_valid_args(*metrics_paths):
         valid.update(
             row["args"]
             for est in d.get("impact_estimates", [])
-            for key in _FUSION_ROW_KEYS
+            for key in ("rows", "rows_trace1", "rows_trace2")
             for row in est.get(key, [])
             if isinstance(row.get("args"), str)
         )
@@ -352,8 +344,7 @@ def _load_compute_data_metrics(metrics_path):
 
 
 def _iter_candidate_blocks(content, tier):
-    """Yield (start, end, rank) for each candidate block of ``tier``: the line-index
-    range and the integer rank."""
+    """Yield (start, end) line-index range for each candidate block of ``tier``."""
     lines = content.splitlines()
     starts = [
         (idx, _CANDIDATE_RE.search(line))
@@ -361,10 +352,10 @@ def _iter_candidate_blocks(content, tier):
         if _CANDIDATE_RE.search(line)
     ]
     for i, (idx, m) in enumerate(starts):
-        if m.group(1) != tier:
+        if f"tier={tier}" not in m.group(0):
             continue
         end = starts[i + 1][0] if i + 1 < len(starts) else len(lines)
-        yield idx, end, int(m.group(2))
+        yield idx, end
 
 
 def _find_data_table(lines, start, end):
@@ -422,7 +413,7 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
     )
     lines = content.splitlines()
     errors = []
-    for start, end, _ in _iter_candidate_blocks(content, TIER_COMPUTE):
+    for start, end in _iter_candidate_blocks(content, "compute"):
         table = _find_data_table(lines, start, end)
         if table is None:
             errors.append(
@@ -484,7 +475,7 @@ def _validate_fusion_data_tables(content):
     """
     lines = content.splitlines()
     errors = []
-    for start, end, _ in _iter_candidate_blocks(content, TIER_FUSION):
+    for start, end in _iter_candidate_blocks(content, "fusion"):
         table = _find_data_table(lines, start, end)
         if table is None:
             errors.append(
@@ -1149,7 +1140,7 @@ class MarkerValidator:
         """
         lines = text.splitlines()
         errors = []
-        for start, end, _ in _iter_candidate_blocks(text, TIER_COMPUTE):
+        for start, end in _iter_candidate_blocks(text, "compute"):
             table = _find_data_table(lines, start, end)
             if table is None:
                 continue

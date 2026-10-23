@@ -43,19 +43,8 @@ from TraceLens.Reporting.generate_perf_report_from_config import (
 )
 
 # Constants
-SCOPE_STANDALONE = "standalone"
-SCOPE_COMPARATIVE = "comparative"
-SCOPE_SEMANTIC = "semantic"
-SCOPE_MULTI_TRACE = "multi_trace"
-SCOPES = (SCOPE_STANDALONE, SCOPE_COMPARATIVE, SCOPE_SEMANTIC, SCOPE_MULTI_TRACE)
-_PAIR_SCOPES = (SCOPE_COMPARATIVE, SCOPE_SEMANTIC)
-# Jobs each scope takes; multi_trace takes at least this many.
-_SCOPE_JOBS = {
-    SCOPE_STANDALONE: 1,
-    SCOPE_COMPARATIVE: 2,
-    SCOPE_SEMANTIC: 2,
-    SCOPE_MULTI_TRACE: 2,
-}
+SCOPES = ("standalone", "comparative", "semantic", "multi_trace")
+_PAIR_SCOPES = ("comparative", "semantic")
 _DEFAULT_FLAGS = {
     "enable_pseudo_ops": True,
     "group_by_num_kernels": True,
@@ -66,6 +55,9 @@ AGENT_REPORT_FLAGS = {
     "inference": {**_DEFAULT_FLAGS, "group_by_parent_module": True},
 }
 _PATH_KEYS = ("trace_path", "capture_folder")
+_COMPARISON_KEYS = ("compare_to", "precomputed_diff_stats")
+_EXPLICIT_KEYS = ("analysis_mode", "output_dir", "jobs")
+_CACHE_CONFIG_PATH = os.path.join("cache", "run_config.yaml")
 
 
 @dataclass(frozen=True)
@@ -93,14 +85,12 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
         plan_reports(config)
 
     if scope is None:
-        if len(jobs) == _SCOPE_JOBS[SCOPE_STANDALONE]:
-            scope = SCOPE_STANDALONE
-        elif len(jobs) == _SCOPE_JOBS[SCOPE_COMPARATIVE] and any(
-            job.get("compare_to") for job in jobs
-        ):
-            scope = SCOPE_COMPARATIVE
+        if len(jobs) == 1:
+            scope = "standalone"
+        elif len(jobs) == 2 and any(job.get("compare_to") for job in jobs):
+            scope = "comparative"
         elif "aggregation" in config:
-            scope = SCOPE_MULTI_TRACE
+            scope = "multi_trace"
         else:
             raise ConfigError(
                 "scope is not stated and cannot be derived from this config; "
@@ -138,7 +128,7 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
     completed = copy.deepcopy(config)
     jobs = completed["jobs"]
     changes = []
-    if scope == SCOPE_STANDALONE:
+    if scope == "standalone":
         name = jobs[0].pop("name", None)
         if name is not None:
             changes.append(("removed", f"jobs[0].name: {name}"))
@@ -152,7 +142,7 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
                     ("renamed", f"jobs[{index}].name: {job['name']} -> {name}")
                 )
             job["name"] = name
-        if scope == SCOPE_COMPARATIVE:
+        if scope == "comparative":
             target = {
                 key: jobs[1][key] for key in _PATH_KEYS if jobs[1].get(key) is not None
             }
@@ -203,11 +193,11 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
     }
     if focus.capture_folder is not None:
         variables["capture_folder"] = focus.capture_folder
-    if scope == SCOPE_MULTI_TRACE:
+    if scope == "multi_trace":
         variables["focus_job"] = focus.name
     elif scope in _PAIR_SCOPES:
         variables.update(
-            comparison_method="semantic" if scope == SCOPE_SEMANTIC else "tracediff",
+            comparison_method="semantic" if scope == "semantic" else "tracediff",
             trace2_path=plans[1].trace_path,
             platform2=platform2,
         )
@@ -221,7 +211,7 @@ def add_diff_stats(config: dict, path: str) -> Tuple[dict, Tuple[str, str]]:
     and the wrapper accepts the result."""
     updated = copy.deepcopy(config)
     old = updated["jobs"][0].pop("precomputed_diff_stats", None)
-    errors = _shape_errors(SCOPE_SEMANTIC, updated)
+    errors = _shape_errors("semantic", updated)
     if not os.path.isabs(path):
         errors.append(f"path must be an absolute path: {path}")
     if errors:
@@ -279,18 +269,16 @@ def main(argv=None) -> None:
                 config = {
                     "analysis_mode": args.analysis_mode,
                     "output_dir": args.output_dir,
-                    **_assign_pairs(args.set, ("analysis_mode", "output_dir", "jobs")),
+                    **_assign_pairs(args.set, _EXPLICIT_KEYS),
                     "jobs": [_assign_pairs(job.split(",")) for job in args.job],
                 }
-                if args.scope == SCOPE_MULTI_TRACE:
+                if args.scope == "multi_trace":
                     config.setdefault("aggregation", {"policy": POLICY_SAME_PHASE})
             else:
                 config = load_run_config(args.config)
             result = check_config(config, args.scope)
             config = result.run_config
-            path = os.path.join(
-                result.variables["output_dir"], "cache", "run_config.yaml"
-            )
+            path = os.path.join(result.variables["output_dir"], _CACHE_CONFIG_PATH)
             rows = [
                 *result.changes,
                 *((None, f"{key}={value}") for key, value in result.variables.items()),
@@ -311,20 +299,19 @@ def _shape_errors(scope: str, config: dict) -> List[str]:
     jobs = config["jobs"]
     analysis_mode = config.get("analysis_mode")
     checked = list(enumerate(jobs))
-    keys = ("compare_to", "precomputed_diff_stats")
-    count = _SCOPE_JOBS[scope]
-    if scope == SCOPE_STANDALONE:
-        if len(jobs) != count:
-            errors.append(f"{scope} takes exactly {count} job, got {len(jobs)}.")
-    elif scope == SCOPE_SEMANTIC:
-        if len(jobs) != count:
-            errors.append(f"{scope} takes exactly {count} jobs, got {len(jobs)}.")
+    keys = _COMPARISON_KEYS
+    if scope == "standalone":
+        if len(jobs) != 1:
+            errors.append(f"standalone takes exactly 1 job, got {len(jobs)}.")
+    elif scope == "semantic":
+        if len(jobs) != 2:
+            errors.append(f"semantic takes exactly 2 jobs, got {len(jobs)}.")
         if analysis_mode != "inference":
             errors.append("semantic needs analysis_mode inference.")
         keys += ("capture_folder",)
-    elif scope == SCOPE_MULTI_TRACE:
-        if len(jobs) < count:
-            errors.append(f"{scope} takes {count} or more jobs, got {len(jobs)}.")
+    elif scope == "multi_trace":
+        if len(jobs) < 2:
+            errors.append(f"multi_trace takes 2 or more jobs, got {len(jobs)}.")
         if len({job.get("platform") for job in jobs}) > 1:
             errors.append("multi_trace: every job needs the same platform.")
         aggregation = config.get("aggregation")
@@ -341,8 +328,8 @@ def _shape_errors(scope: str, config: dict) -> List[str]:
             if config.get(flag, value) != value
         ]
     else:
-        if len(jobs) != count:
-            return [f"{scope} takes exactly {count} jobs, got {len(jobs)}."]
+        if len(jobs) != 2:
+            return [f"comparative takes exactly 2 jobs, got {len(jobs)}."]
         checked = [(1, jobs[1])]
         target = {
             key: jobs[1][key] for key in _PATH_KEYS if jobs[1].get(key) is not None
