@@ -50,7 +50,6 @@ def get_pseudo_op_mappings():
         "pseudo_op::moe_flydsl_stage2": moe_perf_model_extensions.moe_flydsl_stage2,
         "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel": moe_perf_model_extensions.moe_triton_invoke_grouped_gemm,
         "aiter::biased_grouped_topk_hip": moe_perf_model_extensions.BiasedGroupedTopk,
-        "aiter::topk_gating_fwd": moe_perf_model_extensions.BiasedGroupedTopk,
         "aiter::moe_sorting_fwd": moe_perf_model_extensions.MoeSortScatterGather,
         "aiter::mxfp4_moe_sort_hip": moe_perf_model_extensions.MoeSortScatterGather,
         # Attention pseudo ops
@@ -89,7 +88,6 @@ def get_pseudo_op_mappings():
         "aiter::gemm_a8w8_ck": perf_model_extensions.gemm_a8w8_blockscale,
         "aiter::gemm_a8w8_bpreshuffle_ck": perf_model_extensions.gemm_a8w8_blockscale,
         "aiter::gemm_a8w8_bpreshuffle": perf_model_extensions.gemm_a8w8_blockscale,
-        "aiter::gemm_a8w8_blockscale_bpreshuffle": perf_model_extensions.gemm_a8w8_blockscale,
         "aiter::gemm_a8w8_mxfp8": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::_rocm_aiter_preshuffled_per_token_w8a8_gemm": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
@@ -103,7 +101,6 @@ def get_pseudo_op_mappings():
         "aiter::gemm_afp4wfp4_": perf_model_extensions.gemm_afp4wfp4,
         "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant": perf_model_extensions.batched_gemm_a8w8,
         "aiter::batched_gemm_a8w8_mxscale_bpreshuffle": perf_model_extensions.batched_gemm_a8w8,
-        "aiter::_opus_bmm_a8w8_mxscale_raw": perf_model_extensions.batched_gemm_a8w8,
         ## Quantization ops
         "vllm::triton_per_token_group_quant_fp8": perf_model_extensions.vllm_triton_per_token_group_quant_fp8,
         "sglang_profiler::fused_mxfp4_quant_fused_flatten_mxfp4_quant": perf_model_extensions.fused_flatten_mxfp4_quant,
