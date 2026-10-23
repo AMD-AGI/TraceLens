@@ -2911,10 +2911,89 @@ def _add_submodule_boundary_param_inputs(
     param_index: dict[str, int] = {}
     for call_attr, params in boundary.items():
         recorded_args = root.forward_step_predecessor_args.get(call_attr) or {}
+        call_block = next(
+            (block for block in _iter_all_blocks(root) if block.attr_name == call_attr),
+            None,
+        )
+        member_indices = {
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.block is not None
+            and (
+                spec.block.attr_name == call_attr
+                or (call_block is not None and _is_in_subtree(spec.block, call_block))
+            )
+        }
+
+        # An inline-expanded helper has a primary input of its own. If the
+        # caller passes a bare forward parameter there, chain position is not
+        # its source: ``helper(alternate, metadata)`` must read ``alternate``
+        # even when the enclosing forward has a different primary. Redirect
+        # the helper's declared primary readers from whichever sibling happened
+        # to precede the frame onto a dedicated boundary for that parameter.
+        # This is driven entirely by the call's recovered signature and bare
+        # parameter binding; it applies to any helper and any tensor names.
+        call_primary = call_block.input_label if call_block is not None else None
+        routed_call_primary = (
+            call_primary
+            and call_primary != primary
+            and call_primary in params
+            and call_primary in root.forward_param_inputs
+            and call_primary not in recorded_args
+            and member_indices
+        )
+        if routed_call_primary:
+            source = param_index.get(call_primary)
+            if source is None:
+                source = _add_node(
+                    graph,
+                    key=f"{SYNTHETIC_INPUT}:{call_primary}",
+                    label=call_primary,
+                    synthetic=SYNTHETIC_INPUT,
+                )
+                param_index[call_primary] = source
+            primary_readers = {
+                index
+                for index in member_indices
+                if (
+                    graph.nodes[index].block is not None
+                    and (
+                        graph.nodes[index].block.boundary_input_name == call_primary
+                        or FORWARD_METHOD_INPUT
+                        in graph.nodes[index].block.operation_predecessors
+                        or FORWARD_METHOD_INPUT
+                        in (
+                            call_block.forward_step_predecessor_args.get(
+                                graph.nodes[index].block.attr_name, {}
+                            ).values()
+                            if call_block is not None
+                            else ()
+                        )
+                    )
+                )
+            }
+            for target in sorted(primary_readers):
+                for stale_source, stale_target in list(graph.links):
+                    if stale_target != target or stale_source in member_indices:
+                        continue
+                    stale = (stale_source, stale_target)
+                    graph.links.remove(stale)
+                    graph.link_output_ports.pop(stale, None)
+                    graph.link_port_labels.pop(stale, None)
+                link = (source, target)
+                if link not in graph.links:
+                    graph.links.append(link)
+            # The expanded frame builds boundaries for its own secondary
+            # parameters from its operation declarations. Applying the plain
+            # submodule fallback below as well would mint a duplicate boundary
+            # and attach that secondary tensor to the frame's primary reader.
+            continue
+
         secondary = [
             param
             for param in params
-            if param != primary and param in root.forward_param_inputs
+            if param not in {primary, call_primary}
+            and param in root.forward_param_inputs
             # A param the extractor already resolved to a producer reads that
             # producer, not a boundary.
             and param not in recorded_args
@@ -2951,19 +3030,6 @@ def _add_submodule_boundary_param_inputs(
         # ``get_unpad_data(attention_mask[:, -q_len:])`` is such a frame: its
         # first op kept reading the module's ``hidden_states``, which then set
         # the shape of everything the unpad path derives.
-        call_block = next(
-            (block for block in _iter_all_blocks(root) if block.attr_name == call_attr),
-            None,
-        )
-        member_indices = {
-            index
-            for index, spec in enumerate(graph.nodes)
-            if spec.block is not None
-            and (
-                spec.block.attr_name == call_attr
-                or (call_block is not None and _is_in_subtree(spec.block, call_block))
-            )
-        }
         if not member_indices:
             continue
         source = param_index.get(param)

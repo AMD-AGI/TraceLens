@@ -15,6 +15,7 @@ from TraceLens.Visualizer.model_explorer_export.type_check import (
     group_cycle_check_graph_nodes,
     integrity_check_graph_nodes,
     type_check_graph_nodes,
+    warn_degenerate_mutually_exclusive_branches,
 )
 
 
@@ -158,6 +159,20 @@ def test_concat_same_rank_is_clean():
         ["float16", "float16"],
         [["B", "S", "128"], ["B", "S", "128"]],
         raw_op="cat",
+    )
+    assert type_check_graph_nodes([node]) == []
+
+
+def test_broadcasting_builtin_with_opaque_inspect_signature_is_not_a_tensor_list():
+    # torch.eq exposes an opaque varargs signature to ``inspect`` in some torch
+    # builds. Its aten schema is still the authoritative binary contract, so
+    # broadcasting a scalar/rank-1 value against a matrix is legal.
+    node = _op_node(
+        "n:eq_broadcast",
+        "Equal",
+        ["float16", "float16"],
+        [["1"], ["B", "S", "H"]],
+        raw_op="eq",
     )
     assert type_check_graph_nodes([node]) == []
 
@@ -1036,3 +1051,35 @@ def test_a_renamed_size_boundary_is_not_a_second_tensor_operand():
     _annotate_op_input_signatures(nodes)
     warnings = [w for w in type_check_graph_nodes(nodes) if "split" in w]
     assert warnings == []
+
+
+def _branch(node_id, edges, *, synthetic=False):
+    attrs = [{"key": "class_name", "value": "Merge"}]
+    if synthetic:
+        attrs.append({"key": "synthetic", "value": "true"})
+    return {
+        "id": node_id,
+        "label": "Mutually exclusive branch",
+        "attrs": attrs,
+        "incomingEdges": edges,
+    }
+
+
+def _edge(source):
+    return {
+        "sourceNodeId": source,
+        "sourceNodeOutputId": "0",
+        "targetNodeInputId": "0",
+    }
+
+
+def test_a_branch_with_one_live_input_warns_at_the_end_of_generation():
+    nodes = [
+        {"id": "live", "label": "Linear", "incomingEdges": []},
+        {"id": "missing-only", "label": "Linear", "incomingEdges": []},
+        _branch("one", [_edge("live")]),
+        _branch("two", [_edge("live"), _edge("missing-only")]),
+        _branch("boundary", [_edge("live")], synthetic=True),
+    ]
+    warnings = warn_degenerate_mutually_exclusive_branches(nodes)
+    assert [line.split(":")[0] for line in warnings] == ["one"]

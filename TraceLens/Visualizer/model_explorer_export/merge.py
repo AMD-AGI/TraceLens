@@ -30,6 +30,7 @@ from TraceLens.ModelUtils.block_tree import (
     collect_nested_diagrams,
     expand_block_tree_inplace,
     is_transparent_inline_expansion,
+    resolved_phi_arms,
     subgraph_warrants_json_export,
 )
 from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant
@@ -69,16 +70,18 @@ from TraceLens.Visualizer.model_explorer_export.type_check import (
     group_cycle_check_graph_nodes,
     integrity_check_graph_nodes,
     type_check_graph_nodes,
+    warn_degenerate_mutually_exclusive_branches,
 )
 from TraceLens.Visualizer.model_explorer_export.shapes import (
     annotate_nodes_with_shapes,
     apply_shape_attrs,
     canonicalize_port_shape_keys,
     fill_missing_node_shapes,
-    widen_broadcast_results,
     group_boundary_shapes,
     infer_block_tree_shapes,
     node_output_spec,
+    refine_multi_output_port_shapes,
+    widen_broadcast_results,
     format_shape_dims,
     format_shape_with_dtype,
     parse_shape_dims,
@@ -2186,8 +2189,25 @@ def _collapse_mirror_boundary_passthroughs(nodes: list[dict[str, Any]]) -> None:
         nodes[:] = [node for node in nodes if str(node["id"]) not in removed]
 
 
-def _converge_layer_variants_through_a_phi(nodes: list[dict[str, Any]]) -> None:
-    """Mutually-exclusive layer variants converge in a Merge, not side by side.
+_LOOP_END_LABEL = re.compile(
+    r"^loop (?:in|out): (?P<name>.+?)"
+    r"(?: iterations: \d+| - \d+ of \d+ iterations)?$"
+)
+
+
+def _carried_loop_variable(label: str) -> str | None:
+    """The tensor a ``loop in`` / ``loop out`` tile is named for, if it is one."""
+    match = _LOOP_END_LABEL.match(label.strip())
+    if match is None:
+        return None
+    name = match.group("name").strip()
+    return name or None
+
+
+def _converge_layer_variants_through_an_output_tile(
+    nodes: list[dict[str, Any]],
+) -> None:
+    """Mutually-exclusive layer variants leave through the stack's output tile.
 
     A repeat stack whose layers are not all alike is drawn as one group per
     variant -- GLM's decoder splits into ``31x_``/``11x_``/``3x_``, DeepSeek's
@@ -2197,15 +2217,12 @@ def _converge_layer_variants_through_a_phi(nodes: list[dict[str, Any]]) -> None:
     ``hc_head``, a ``mean``, appeared to take three operands, and the operand
     contract of every such consumer was unreadable in the same way.
 
-    The graph already has a name for arms that converge: the ``Merge`` phi
-    ``ast_analyze`` emits for the two arms of an unresolved ``if`` -- forward
-    whichever is live, same shape as each arm. Deliberately ``Merge`` and not
-    ``Select``: ``torch.select`` slices and drops an axis, which is not what
-    this does. The same node is owed here, for the same reason, one rank up.
-
-    The phi sits in the scope that CONTAINS the variant groups, since that is
-    where the choice between them is made, and the consumer then reads one
-    tensor.
+    Each variant already has the tiles a consumer reads: its own ``@input`` and
+    ``@output``, which are the loop's ends. A value leaves every other block
+    through an output tile, and the consumer's input tile reads that. The stack
+    is the block those alternatives share, so they meet in one output tile of
+    the stack and the consumer reads that tile. The choice is the tiles. A
+    ``Mutually exclusive branch`` beside them would restate it.
     """
     by_id = {str(node["id"]): node for node in nodes}
 
@@ -2222,8 +2239,19 @@ def _converge_layer_variants_through_a_phi(nodes: list[dict[str, Any]]) -> None:
                 return "/".join(parts[:depth]), parts[depth]
         return None
 
+    def exit_label(group: list[dict[str, Any]]) -> str:
+        names = [
+            _carried_loop_variable(
+                str(by_id[str(edge.get("sourceNodeId"))].get("label") or "")
+            )
+            for edge in group
+        ]
+        if names and all(names) and len(set(names)) == 1:
+            return str(names[0])
+        return "output"
+
     additions: list[dict[str, Any]] = []
-    for node in nodes:
+    for node in list(nodes):
         edges = node.get("incomingEdges", []) or []
         if len(edges) < 2:
             continue
@@ -2244,54 +2272,54 @@ def _converge_layer_variants_through_a_phi(nodes: list[dict[str, Any]]) -> None:
             group = [edge for edge in by_variant.values() if edge is not None]
             if len(group) < 2 or len(group) != len(by_variant):
                 continue
-            # The choice is resolved where the stack's result is READ, so the
-            # phi sits at the level both the variants and their consumer share.
-            # Inside the stack it would be a node whose value leaves the box
-            # without passing through the box's own output tile.
-            scope = _common_namespace(parent, str(node.get("namespace") or ""))
-            phi_id = (
-                f"{scope}/@variant_merge:{node['id']}"
-                if scope
-                else (f"@variant_merge:{node['id']}")
-            )
-            if phi_id in by_id:
-                continue
-            first = by_id[str(group[0].get("sourceNodeId"))]
-            phi = {
-                "id": phi_id,
-                "label": PHI_LABEL,
-                "namespace": scope,
-                "attrs": [
-                    {"key": "class_name", "value": PHI_CLASS},
-                    {"key": "role", "value": "other"},
-                    {"key": "operation", "value": "torch_functional"},
-                    {
-                        "key": "details",
-                        "value": f"merge: one layer variant of {len(group)}",
-                    },
-                    {
-                        "key": "output_shape",
-                        "value": _node_attr(first, "output_shape") or "",
-                    },
-                    {
-                        "key": "output_dtype",
-                        "value": _node_attr(first, "output_dtype") or "",
-                    },
-                ],
-                # Every operation tile is coloured for what it does, and the
-                # colour is per LABEL -- a phi added here must look like the
-                # phis the extractor emits, not like an unstyled box.
-                "style": ensure_readable_text(operation_tile_style(PHI_LABEL)),
-                "incomingEdges": [dict(edge) for edge in group],
-            }
-            for position, edge in enumerate(phi["incomingEdges"]):
-                edge["targetNodeInputId"] = str(position)
-            additions.append(phi)
-            by_id[phi_id] = phi
+            # The tile is the stack's output, the same port any other block
+            # hands its consumer. It lives in the stack, so opening the stack
+            # shows one input per variant and the collapsed stack still has
+            # one edge out.
+            scope = parent
+            label = exit_label(group)
+            base_id = f"{scope}/@output:{label}" if scope else f"@output:{label}"
+            wanted = {str(edge.get("sourceNodeId")) for edge in group}
+            tile_id = base_id
+            existing = by_id.get(tile_id)
+            if (
+                existing is not None
+                and {
+                    str(edge.get("sourceNodeId"))
+                    for edge in existing.get("incomingEdges") or []
+                }
+                != wanted
+            ):
+                tile_id = f"{base_id}:{node['id']}"
+                existing = by_id.get(tile_id)
+            if existing is None:
+                first = by_id[str(group[0].get("sourceNodeId"))]
+                tile = {
+                    "id": tile_id,
+                    "label": label,
+                    "namespace": scope,
+                    "attrs": [{"key": "synthetic", "value": "@output"}],
+                    "style": ensure_readable_text(output_port_style()),
+                    "incomingEdges": [dict(edge) for edge in group],
+                }
+                for position, edge in enumerate(tile["incomingEdges"]):
+                    edge["targetNodeInputId"] = str(position)
+                carried = node_output_spec(
+                    first, str(group[0].get("sourceNodeOutputId", "0"))
+                )
+                if carried is not None:
+                    apply_shape_attrs(tile, carried)
+                else:
+                    for key in ("output_shape", "output_dtype"):
+                        value = _node_attr(first, key)
+                        if value:
+                            tile["attrs"].append({"key": key, "value": value})
+                additions.append(tile)
+                by_id[tile_id] = tile
             kept = [edge for edge in edges if edge not in group]
             kept.append(
                 {
-                    "sourceNodeId": phi_id,
+                    "sourceNodeId": tile_id,
                     "sourceNodeOutputId": "0",
                     "targetNodeInputId": str(group[0].get("targetNodeInputId") or "0"),
                 }
@@ -2323,20 +2351,42 @@ def _publish_state_stores_through_output_tiles(nodes: list[dict[str, Any]]) -> N
     for node in nodes:
         if str(node["id"]) in consumed or _node_attr(node, "synthetic"):
             continue
+        parts = [
+            part.strip()
+            for part in str(_node_attr(node, "details") or "").split(";")
+            if part.strip()
+        ]
         stored = next(
             (
                 part.split(":", 1)[1].strip()
-                for part in str(_node_attr(node, "details") or "").split(";")
-                if part.strip().startswith("stores:")
+                for part in parts
+                if part.startswith("stores:")
             ),
             None,
         )
-        if not stored:
+        side_effect = next(
+            (
+                part.split(":", 1)[1].strip()
+                for part in parts
+                if part.startswith("side_effect:")
+            ),
+            None,
+        )
+        if stored:
+            sink_id = f"{node['id']}:@state_out:{stored}"
+            sink_label = stored
+        elif side_effect:
+            # A discarded call (a shape check, a log) is the consumer of the
+            # tensor it was handed. The call itself is not a tensor op, so the
+            # tensor it reads is given the same kind of sink a store gets.
+            sink_id = f"{node['id']}:@side_effect:{side_effect}"
+            sink_label = side_effect
+        else:
             continue
         additions.append(
             {
-                "id": f"{node['id']}:@state_out:{stored}",
-                "label": stored,
+                "id": sink_id,
+                "label": sink_label,
                 "namespace": node.get("namespace"),
                 "attrs": [
                     {"key": "synthetic", "value": "@output"},
@@ -2393,6 +2443,7 @@ def _drop_undrawn_state_reads(nodes: list[dict[str, Any]]) -> None:
             and not _node_attr(node, "synthetic")
             and "method_params:" in str(_node_attr(node, "details") or "")
             and "stores:" not in str(_node_attr(node, "details") or "")
+            and "side_effect:" not in str(_node_attr(node, "details") or "")
         }
         # A constant tile belongs to the op that reads it; when that op is not
         # drawn, neither is the weight it was reading.
@@ -3327,9 +3378,9 @@ def _loop_end_label(side: str, variable: str, namespace: str) -> str:
     variant for its own count made Kimi's decoder read as three loops running
     68, 24 and 1 times, when it is one loop of 93 whose body differs by slot --
     every one of those layers runs, which is what their summing to the stack's
-    own count says. The arms all read the same tensor in and all converge in the
-    one ``Mutually exclusive branch`` below, so the picture was already a single
-    stack; only these labels claimed otherwise.
+    own count says.     The arms all read the same tensor in and all leave through the stack's one
+    output tile, so the picture was already a single stack; only these labels
+    claimed otherwise.
     """
     share = _variant_share_of_stack(namespace)
     if share is not None:
@@ -4817,6 +4868,37 @@ def _dock_nullary_ops_on_what_sizes_them(nodes: list[dict[str, Any]]) -> None:
         node["incomingEdges"] = moved
 
 
+def _drop_mismatched_boundary_operands(nodes: list[dict[str, Any]]) -> None:
+    """Remove a sibling parameter boundary from an over-full fixed-arity op.
+
+    An expanded helper can have several bare caller parameters. If its chain
+    fallback lands the helper's primary boundary on an op that explicitly names
+    another parameter as its boundary input, that op receives both siblings.
+    The op's own fixed tensor arity and declared boundary name provide the full
+    structural proof needed to discard the mismatched boundary edge.
+    """
+    by_id = {str(node.get("id") or ""): node for node in nodes}
+    for node in nodes:
+        boundary = str(_node_attr(node, "boundary_input") or "").strip()
+        ceiling, variadic = _operand_ceiling(_node_attr(node, "raw_op") or "")
+        edges = list(node.get("incomingEdges") or [])
+        if not boundary or variadic or ceiling is None or len(edges) <= ceiling:
+            continue
+        removable = []
+        for edge in edges:
+            source = by_id.get(str(edge.get("sourceNodeId") or ""))
+            if source is None or not _is_synthetic_input(source):
+                continue
+            source_name = str(
+                _node_attr(source, "boundary_input") or source.get("label") or ""
+            ).strip()
+            if source_name and source_name != boundary:
+                removable.append(edge)
+        while len(edges) > ceiling and removable:
+            edges.remove(removable.pop(0))
+        node["incomingEdges"] = edges
+
+
 def _drop_unconsumed_input_boundaries(nodes: list[dict[str, Any]]) -> None:
     """Remove a frame ``@input`` tile that nothing inside the frame reads.
 
@@ -4863,6 +4945,18 @@ def _drop_unconsumed_input_boundaries(nodes: list[dict[str, Any]]) -> None:
             kept = [e for e in edges if str(e.get("sourceNodeId")) not in doomed]
             if len(kept) != len(edges):
                 node["incomingEdges"] = kept
+
+
+def _merged_variable(node: dict[str, Any]) -> str | None:
+    """The variable a phi rebinds, recorded as ``merges: <name>``."""
+    for part in str(_node_attr(node, "details") or "").split(";"):
+        part = part.strip()
+        if not part.startswith("merges:"):
+            continue
+        name = part.split(":", 1)[1].strip()
+        if name.isidentifier():
+            return name
+    return None
 
 
 def _elide_noop_merges_and_casts(nodes: list[dict[str, Any]]) -> None:
@@ -4918,6 +5012,31 @@ def _elide_noop_merges_and_casts(nodes: list[dict[str, Any]]) -> None:
         redirect[str(node.get("id"))] = (source_id, source_port)
     if not redirect:
         return
+    # A boundary minted while the branch still existed is named after the
+    # branch. Once the branch is folded away the name describes a node the
+    # reader cannot see; the variable the branch rebound is the tensor.
+    merged_name = {
+        phi_id: name
+        for phi_id, phi in ((phi_id, node_by_id.get(phi_id)) for phi_id in redirect)
+        if phi is not None and (name := _merged_variable(phi))
+    }
+    for node in nodes:
+        if _node_attr(node, "synthetic") not in {"@input", "@output"}:
+            continue
+        label = str(node.get("label") or "")
+        if label != PHI_LABEL and not label.startswith(f"{PHI_LABEL}_"):
+            continue
+        names = {
+            merged_name[str(edge.get("sourceNodeId"))]
+            for edge in node.get("incomingEdges", []) or []
+            if str(edge.get("sourceNodeId")) in merged_name
+        }
+        if len(names) != 1:
+            continue
+        node["label"] = names.pop()
+        for attr in node.get("attrs") or []:
+            if attr.get("key") == "port_label":
+                attr["value"] = node["label"]
     for node in nodes:
         if str(node.get("id")) in redirect:
             continue
@@ -4936,6 +5055,49 @@ def _elide_noop_merges_and_casts(nodes: list[dict[str, Any]]) -> None:
         if rebuilt:
             node["incomingEdges"] = rebuilt
     nodes[:] = [n for n in nodes if str(n.get("id")) not in redirect]
+    _rename_branch_boundaries_after_their_tensor(nodes)
+
+
+def _rename_branch_boundaries_after_their_tensor(nodes: list[dict[str, Any]]) -> None:
+    """An input still called ``Mutually exclusive branch`` names the tensor instead.
+
+    The branch node is gone: it had one arm left and was folded onto that arm.
+    Another boundary of the same producer may already carry the tensor's name
+    (``position_ids`` beside the ``Expand`` that builds it). A boundary that
+    kept the branch's label is the same tensor.
+    """
+    by_id = {str(node.get("id")): node for node in nodes}
+    names_for: dict[str, set[str]] = {}
+    for node in nodes:
+        if _node_attr(node, "synthetic") not in {"@input", "@input_mirror"}:
+            continue
+        label = str(node.get("label") or "")
+        if not label or label == PHI_LABEL or label.startswith(f"{PHI_LABEL}_"):
+            continue
+        edges = node.get("incomingEdges", []) or []
+        if len(edges) != 1:
+            continue
+        source_id = str(edges[0].get("sourceNodeId"))
+        source = by_id.get(source_id)
+        if source is None or label == str(source.get("label") or ""):
+            continue
+        names_for.setdefault(source_id, set()).add(label)
+    for node in nodes:
+        if _node_attr(node, "synthetic") != "@input":
+            continue
+        label = str(node.get("label") or "")
+        if label != PHI_LABEL and not label.startswith(f"{PHI_LABEL}_"):
+            continue
+        edges = node.get("incomingEdges", []) or []
+        if len(edges) != 1:
+            continue
+        found = names_for.get(str(edges[0].get("sourceNodeId")), set())
+        if len(found) != 1:
+            continue
+        node["label"] = next(iter(found))
+        for attr in node.get("attrs") or []:
+            if attr.get("key") == "port_label":
+                attr["value"] = node["label"]
 
 
 def _elide_noop_single_input_concat(nodes: list[dict[str, Any]]) -> None:
@@ -5268,6 +5430,20 @@ def _host_param_names(node: dict[str, Any]) -> set[str]:
     return names
 
 
+def _host_predecessor_names(node: dict[str, Any]) -> set[str]:
+    """Producer attrs whose values this op consumes after host materialisation."""
+    names: set[str] = set()
+    for part in str(_node_attr(node, "details") or "").split(";"):
+        part = part.strip()
+        if part.startswith("host_predecessors:"):
+            names.update(
+                item.strip()
+                for item in part.split(":", 1)[1].split(",")
+                if item.strip()
+            )
+    return names
+
+
 def _is_host_param_operand(
     node: dict[str, Any],
     source: dict[str, Any],
@@ -5282,12 +5458,18 @@ def _is_host_param_operand(
     read as a second tensor operand.
     """
     names = _host_param_names(node)
-    if not names:
+    host_predecessors = _host_predecessor_names(node)
+    if not names and not host_predecessors:
         return False
     labels = {str(source.get("label") or "").strip()}
     for key in ("boundary_input", "port_label"):
         labels.add(str(_node_attr(source, key) or "").strip())
     source_id = str(source.get("id") or "")
+    if any(
+        f":{producer}:" in source_id or source_id.endswith(f":{producer}")
+        for producer in host_predecessors
+    ):
+        return True
     if "@input:" in source_id:
         labels.add(source_id.rsplit("@input:", 1)[-1].split("/")[0].split("^")[0])
     if edge is not None:
@@ -7177,6 +7359,10 @@ def _append_source_decoder_layer(
         return list(previous_exits)
     components = {component.attr_name: component for component in spec.block_components}
     refs: dict[str, SourceRef] = {}
+    omitted = (
+        frozenset(variant.omitted_components) if variant is not None else frozenset()
+    )
+    dead_steps, phi_live_arms = resolved_phi_arms(decoder, omitted)
     if previous_exits:
         refs["@method_input"] = previous_exits[0]
         # A per-parameter boundary token resolves to the same chain input here:
@@ -7188,9 +7374,11 @@ def _append_source_decoder_layer(
     for step in decoder.forward_calls:
         operation = decoder.forward_operations.get(step)
         if operation is not None:
+            if step in dead_steps:
+                continue
             sources = [
                 refs[predecessor]
-                for predecessor in operation.predecessors
+                for predecessor in phi_live_arms.get(step, operation.predecessors)
                 if predecessor in refs
             ]
             if not sources:
@@ -7599,6 +7787,153 @@ def _name_loop_frames_for_the_axis_they_walk(
         }
         if walked & set(passthrough):
             frame.label = f"loop iterations: {Symbol.VISION_GRID.value}"
+
+
+def _coalesce_duplicate_section_inputs(nodes: list[dict[str, Any]]) -> None:
+    """One synthetic section input per id, with every incoming edge preserved.
+
+    Independent consumers of one outer parameter can each ask the computation
+    builder for its boundary. Once namespaced into the merged graph those
+    requests denote the same section port. Keeping both creates duplicate ids
+    and makes integrity diagnostics report the same orphan more than once.
+    """
+    keeper_by_id: dict[str, dict[str, Any]] = {}
+    duplicates: set[int] = set()
+    for node in nodes:
+        if not _is_synthetic_input(node):
+            continue
+        node_id = str(node.get("id") or "")
+        keeper = keeper_by_id.get(node_id)
+        if keeper is None:
+            keeper_by_id[node_id] = node
+            continue
+        duplicates.add(id(node))
+        existing = {
+            (
+                str(edge.get("sourceNodeId") or ""),
+                str(edge.get("sourceNodeOutputId") or "0"),
+                str(edge.get("targetNodeInputId") or "0"),
+            )
+            for edge in keeper.get("incomingEdges", []) or []
+        }
+        for edge in node.get("incomingEdges", []) or []:
+            key = (
+                str(edge.get("sourceNodeId") or ""),
+                str(edge.get("sourceNodeOutputId") or "0"),
+                str(edge.get("targetNodeInputId") or "0"),
+            )
+            if key not in existing:
+                keeper.setdefault("incomingEdges", []).append(edge)
+                existing.add(key)
+        keeper_attrs = {str(attr.get("key")) for attr in keeper.get("attrs", []) or []}
+        for attr in node.get("attrs", []) or []:
+            if str(attr.get("key")) not in keeper_attrs:
+                keeper.setdefault("attrs", []).append(attr)
+    if duplicates:
+        nodes[:] = [node for node in nodes if id(node) not in duplicates]
+
+
+def _clear_unverified_output_spec(node: dict[str, Any]) -> None:
+    """Remove a heuristic output spec from a newly exposed graph input."""
+    node["attrs"] = [
+        attr
+        for attr in node.get("attrs", []) or []
+        if str(attr.get("key")) not in {"output_shape", "output_dtype"}
+    ]
+    for metadata in node.get("outputsMetadata", []) or []:
+        metadata["attrs"] = [
+            attr
+            for attr in metadata.get("attrs", []) or []
+            if str(attr.get("key")) not in {"shape", "dtype"}
+        ]
+
+
+def _clear_unverified_boundary_chain(
+    nodes: list[dict[str, Any]], source_id: str
+) -> None:
+    """Carry an unknown external spec through pass-through boundary tiles."""
+    frontier = [source_id]
+    visited: set[str] = set()
+    while frontier:
+        current = frontier.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        for tile in nodes:
+            if _node_attr(tile, "synthetic") not in {"@input", "@input_mirror"}:
+                continue
+            edges = tile.get("incomingEdges") or []
+            if len(edges) != 1 or str(edges[0].get("sourceNodeId")) != current:
+                continue
+            _clear_unverified_output_spec(tile)
+            frontier.append(str(tile.get("id") or ""))
+
+
+def _expose_unfed_section_inputs(
+    nodes: list[dict[str, Any]],
+    shape_inferencer: ShapeInferencer | None = None,
+) -> None:
+    """Surface each unfed outer-section input as a top-level model input.
+
+    A section can contain an expanded helper whose primary is a bare parameter
+    of the enclosing model rather than the section's chain input. The helper's
+    ``section/@input:param`` is then a genuine external graph source. Give it a
+    root-scope source tile instead of leaving a namespaced boundary orphaned.
+
+    Only the first namespace level is eligible. A deeper ``a/b/@input:param`` is
+    an internal module boundary and still has to be wired by its caller.
+    """
+    by_id = {str(node.get("id") or ""): node for node in nodes}
+    additions: list[dict[str, Any]] = []
+    for target in list(nodes):
+        if not _is_synthetic_input(target) or target.get("incomingEdges"):
+            continue
+        namespace = str(target.get("namespace") or "")
+        if not namespace or "/" in namespace:
+            continue
+        target_id = str(target.get("id") or "")
+        if not target_id.startswith(f"{namespace}/@input:"):
+            continue
+        param = str(
+            _node_attr(target, "boundary_input") or target.get("label") or ""
+        ).strip()
+        if not param:
+            continue
+        source_id = f"@input:{param}"
+        source = by_id.get(source_id)
+        verified_spec = (
+            shape_inferencer.boundary_input_spec(param, namespace)
+            if shape_inferencer is not None
+            else None
+        )
+        if shape_inferencer is not None:
+            if verified_spec is None:
+                _clear_unverified_output_spec(target)
+            else:
+                apply_shape_attrs(target, verified_spec)
+        if source is None:
+            source = _make_group_input_node(
+                input_id=source_id,
+                label=param,
+                namespace="",
+                port_label=param,
+            )
+            if verified_spec is not None:
+                apply_shape_attrs(source, verified_spec)
+            elif shape_inferencer is None and (
+                shape := _node_attr(target, "output_shape")
+            ):
+                source.setdefault("attrs", []).append(
+                    {"key": "output_shape", "value": shape}
+                )
+            additions.append(source)
+            by_id[source_id] = source
+        elif verified_spec is not None:
+            apply_shape_attrs(source, verified_spec)
+        target["incomingEdges"] = [_source_edge((source_id, "0"), param)]
+        if shape_inferencer is not None and verified_spec is None:
+            _clear_unverified_boundary_chain(nodes, source_id)
+    nodes.extend(additions)
 
 
 def _grid_descriptor_columns(nodes: list[dict[str, Any]], boundary_id: str) -> int:
@@ -10025,8 +10360,11 @@ def build_merged_model_graph(
     # loop body and each ``@loop_carried_out`` after it.
     # After the loop-invariant threading, which is what wires several of
     # these boundaries in the first place.
+    _coalesce_duplicate_section_inputs(nodes)
+    _expose_unfed_section_inputs(nodes, shape_inferencer)
     _share_one_tile_per_entering_tensor(nodes)
     _name_a_boundary_for_its_mirror(nodes)
+    refine_multi_output_port_shapes(nodes)
     _split_tuple_boundary_slots(nodes)
     _order_model_inputs(nodes)
     _topologically_order_nodes(nodes)
@@ -10044,7 +10382,7 @@ def build_merged_model_graph(
     _route_frame_exits_through_output_tiles(nodes)
     _carry_producer_shape_to_boundary_tiles(nodes)
     _name_iterated_block_ends(nodes)
-    _converge_layer_variants_through_a_phi(nodes)
+    _converge_layer_variants_through_an_output_tile(nodes)
 
     # After every boundary pass has placed its tiles: a mirror is only
     # redundant once its neighbours are final.
@@ -10058,8 +10396,8 @@ def build_merged_model_graph(
     # this pass then mirrors outside the box.
     _name_kernel_pipeline_inputs_outside_it(nodes)
     _publish_state_stores_through_output_tiles(nodes)
-    # Both the phi above and the kernel ports change which node an operand
-    # arrives FROM (and the phi changes how many there are), so the
+    # Both the stack output tile above and the kernel ports change which node
+    # an operand arrives FROM (and the tile changes how many there are), so the
     # profiler-style operand annotation is re-read here. Leaving it as first
     # stamped left GLM's ``hc_head`` recorded as taking three tensors while its
     # edges, correctly, showed one.
@@ -10068,7 +10406,13 @@ def build_merged_model_graph(
     # boundary-level pass. An edge created then can descend two boxes at once;
     # the same pass, run on the final edges, lands it on each box it enters.
     _insert_missing_boundary_levels(nodes)
+    refine_multi_output_port_shapes(nodes)
     _carry_producer_shape_to_boundary_tiles(nodes)
+    _drop_mismatched_boundary_operands(nodes)
+    # Boundary rewrites above can change the operand a shape-preserving op
+    # finally reads. Reconcile its output before operand annotation/type-check,
+    # so both sides of the same edge are checked in their final state.
+    widen_broadcast_results(nodes)
     _annotate_op_input_signatures(nodes)
     # After the second annotation: no-op casts materialised by the loop-invariant
     # pass have been elided, and operand edges match the graph being written.
@@ -10102,6 +10446,7 @@ def build_merged_model_graph(
     # one is left alone.
     _carry_producer_shape_to_boundary_tiles(nodes)
     widen_broadcast_results(nodes)
+    refine_multi_output_port_shapes(nodes)
     # Right behind it: that pass is the last thing to state a shape, and this
     # is what makes a stated shape one the reader can actually see.
     _publish_declared_shapes_as_output_ports(nodes)
@@ -10111,6 +10456,11 @@ def build_merged_model_graph(
     if shape_inferencer is not None:
         for namespace, boundary in group_boundary_shapes(nodes).items():
             graph_attributes.setdefault(namespace, {}).update(boundary)
+
+    # Last structural pass: a branch reduced to one live input is that input.
+    # Anything still standing with fewer than two is reported, not drawn as a choice.
+    _elide_noop_merges_and_casts(nodes)
+    warn_degenerate_mutually_exclusive_branches(nodes)
 
     return {
         "id": graph_id,

@@ -233,6 +233,7 @@ def forward(self, x, flag):
     merge = merges[0]
     # The Merge carries the branch condition and joins the two branch producers.
     assert any(detail.startswith("merge: ") for detail in merge.details), merge.details
+    assert "merges: y" in merge.details
     reshape = by_label("Reshape")[0]
     cast = by_label("Cast")[0]
     assert set(merge.predecessors) == {reshape.attr_name, cast.attr_name}

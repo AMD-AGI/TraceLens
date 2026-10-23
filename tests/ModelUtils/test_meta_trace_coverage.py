@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import types
+from dataclasses import dataclass
 
 import pytest
 import torch
@@ -657,3 +658,63 @@ def test_instantiate_meta_robust_text_submodel_fallback(monkeypatch):
     model, cfg = result
     assert isinstance(model, FakeTextForCausalLM)
     assert isinstance(cfg, _TypedTextConfig)
+
+
+def test_structured_module_output_reports_its_result_tensor():
+    hidden = torch.empty(2, 5, 8)
+    cache = torch.empty(2, 4, 5, 2)
+    output = {
+        "past_key_values": cache,
+        "last_hidden_state": hidden,
+    }
+    assert mt._tensor_shape_from_output(hidden) == (2, 5, 8)
+    assert mt._tensor_shape_from_output((cache, hidden)) == (2, 4, 5, 2)
+    # A plain mapping makes no promise about which tensor is the result.
+    # Its declared insertion order is the only structural ordering available.
+    assert mt._tensor_shape_from_output(output) == (2, 4, 5, 2)
+
+    class Result:
+        def __init__(self):
+            self.cache = torch.empty(2, 4, 5, 2)
+            self.hidden = hidden
+
+        def to_tuple(self):
+            # This is the output contract ModelOutput exposes. No field name
+            # has to be known to select its result tensor.
+            return (self.hidden, self.cache)
+
+    assert mt._tensor_shape_from_output(Result()) == (2, 5, 8)
+
+    @dataclass
+    class DataclassResult:
+        result: torch.Tensor
+        cache: torch.Tensor
+
+    assert mt._tensor_shape_from_output(DataclassResult(hidden, cache)) == (2, 5, 8)
+
+    class Ordered(dict):
+        def to_tuple(self):
+            return (self["hidden"], self["cache"])
+
+    assert mt._tensor_shape_from_output(Ordered(cache=cache, hidden=hidden)) == (
+        2,
+        5,
+        8,
+    )
+
+    class Broken:
+        def __init__(self):
+            self.hidden = hidden
+
+        def to_tuple(self):
+            raise RuntimeError("the positional contract is unavailable")
+
+    assert mt._tensor_shape_from_output(Broken()) == (2, 5, 8)
+
+    cycle = Broken()
+    cycle.self = cycle
+    assert mt._tensor_shape_from_output(cycle) == (2, 5, 8)
+    assert mt._tensor_shape_from_output((None, "name", [hidden])) == (2, 5, 8)
+    assert mt._tensor_shape_from_output("name") is None
+    assert mt._tensor_shape_from_output(b"name") is None
+    assert mt._tensor_shape_from_output(object()) is None

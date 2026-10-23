@@ -3637,6 +3637,327 @@ def _multi_op_forward_methods(
     )
 
 
+def _function_body_statements(func: ast.FunctionDef) -> list[ast.stmt]:
+    """Body statements, ignoring a leading docstring."""
+    body = list(func.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        return body[1:]
+    return body
+
+
+def _callee_positional_params(func: ast.FunctionDef) -> list[str]:
+    return [
+        arg.arg for arg in func.args.posonlyargs + func.args.args if arg.arg != "self"
+    ]
+
+
+def _direct_self_method_call(func: ast.FunctionDef) -> tuple[str, ast.Call] | None:
+    """A body that is only ``return self.<method>(...)``.
+
+    ``self.child.transform(...)`` is a call on a child module, not a
+    forward to a sibling method, so it does not match.
+    """
+    body = _function_body_statements(func)
+    if len(body) != 1 or not isinstance(body[0], ast.Return):
+        return None
+    call = body[0].value
+    if not isinstance(call, ast.Call):
+        return None
+    callee = call.func
+    if not (
+        isinstance(callee, ast.Attribute)
+        and isinstance(callee.value, ast.Name)
+        and callee.value.id == "self"
+    ):
+        return None
+    return callee.attr, call
+
+
+def _self_call_argument_rebind(
+    call: ast.Call, callee: ast.FunctionDef
+) -> dict[str, str] | None:
+    """Map each callee parameter to the caller's argument name.
+
+    Only a bare name can be rebound onto the caller's own parameter. A computed
+    argument is not a forward of the caller's tensors, so the call is left opaque.
+    Constants and ``**kwargs`` carry no tensor rename.
+    """
+    mapping: dict[str, str] = {}
+    positional = _callee_positional_params(callee)
+    for index, arg in enumerate(call.args):
+        if isinstance(arg, ast.Starred):
+            return None
+        if index >= len(positional):
+            return None
+        if isinstance(arg, ast.Name):
+            mapping[positional[index]] = arg.id
+        elif isinstance(arg, ast.Constant):
+            continue
+        else:
+            return None
+    for keyword in call.keywords:
+        if keyword.arg is None:
+            if not isinstance(keyword.value, ast.Name):
+                return None
+            continue
+        if isinstance(keyword.value, ast.Name):
+            mapping[keyword.arg] = keyword.value.id
+        elif isinstance(keyword.value, ast.Constant):
+            continue
+        else:
+            return None
+    return mapping
+
+
+def _resolve_self_method_delegation(
+    func: ast.FunctionDef,
+    methods: dict[str, ast.FunctionDef],
+    seen: frozenset[str],
+) -> tuple[ast.FunctionDef, dict[str, str]] | None:
+    """Follow ``return self.<method>(...)`` to the method that does the work.
+
+    The returned map renames the ultimate callee's parameters to the original
+    caller's argument names, across a chain of pure forwards.
+    """
+    found = _direct_self_method_call(func)
+    if found is None or func.name in seen:
+        return None
+    target_name, call = found
+    target = methods.get(target_name)
+    if target is None or target_name in seen:
+        return None
+    rebind = _self_call_argument_rebind(call, target)
+    if rebind is None:
+        return None
+    if _direct_self_method_call(target) is not None:
+        nested = _resolve_self_method_delegation(target, methods, seen | {func.name})
+        if nested is None:
+            return None
+        ultimate, inner = nested
+        return ultimate, {
+            param: rebind.get(argument, argument) for param, argument in inner.items()
+        }
+    return target, rebind
+
+
+def _rebind_forward_operation(
+    operation: ForwardOperation,
+    mapping: dict[str, str],
+    *,
+    callee_primary: str | None,
+    caller_primary: str | None,
+) -> ForwardOperation:
+    """Rename *operation* so it reads the caller's parameters.
+
+    The callee's primary is ``@method_input`` on the callee. After the forward,
+    that tensor is the caller's primary only when the caller passes its own
+    primary through. Anything else is one of the caller's other parameters and
+    has to be named in ``param_inputs``, which is how a method frame docks a
+    secondary boundary. Putting a method-input token on that read instead makes
+    the frame treat it as the primary.
+    """
+
+    def _fed_by(callee_param: str | None) -> str | None:
+        if callee_param is None:
+            return None
+        return mapping.get(callee_param, callee_param)
+
+    predecessors: list[str] = []
+    params: list[str] = []
+
+    def _as_primary() -> None:
+        if FORWARD_METHOD_INPUT not in predecessors:
+            predecessors.append(FORWARD_METHOD_INPUT)
+
+    def _as_secondary(name: str) -> None:
+        if name not in params:
+            params.append(name)
+
+    def _take(callee_param: str | None) -> None:
+        fed = _fed_by(callee_param)
+        if fed is None:
+            return
+        if caller_primary and fed == caller_primary:
+            _as_primary()
+        else:
+            _as_secondary(fed)
+
+    for predecessor in operation.predecessors:
+        if predecessor == FORWARD_METHOD_INPUT:
+            _take(callee_primary)
+            continue
+        named = method_input_param(predecessor)
+        if named is not None:
+            _take(named)
+            continue
+        renamed = mapping.get(predecessor, predecessor)
+        if renamed not in predecessors:
+            predecessors.append(renamed)
+    for name in operation.param_inputs:
+        _take(name)
+    ordinals = tuple(
+        (mapping.get(name, name), ordinal)
+        for name, ordinal in operation.param_input_ordinals
+        if not (caller_primary and mapping.get(name, name) == caller_primary)
+    )
+    return replace(
+        operation,
+        predecessors=tuple(predecessors),
+        param_inputs=tuple(params),
+        param_input_ordinals=ordinals,
+        external_inputs=tuple(
+            mapping.get(name, name) for name in operation.external_inputs
+        ),
+        predecessor_ports=tuple(
+            (mapping.get(producer, producer), ordinal)
+            for producer, ordinal in operation.predecessor_ports
+        ),
+    )
+
+
+def _rebind_producer_token(
+    token: str,
+    mapping: dict[str, str],
+    *,
+    callee_primary: str | None,
+    caller_primary: str | None,
+) -> str:
+    """Rename a producer token the same way an operation's operands are renamed."""
+    if token == FORWARD_METHOD_INPUT:
+        fed = mapping.get(callee_primary, callee_primary) if callee_primary else None
+        if fed and caller_primary and fed != caller_primary:
+            return fed
+        return FORWARD_METHOD_INPUT
+    named = method_input_param(token)
+    if named is not None:
+        fed = mapping.get(named, named)
+        if caller_primary and fed == caller_primary:
+            return FORWARD_METHOD_INPUT
+        return fed
+    return mapping.get(token, token)
+
+
+def _alias_delegating_self_methods(
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+    class_methods: dict[str, ast.FunctionDef],
+    single_op_methods: dict[str, ForwardOperation],
+    multi_op_methods: dict[str, list[ForwardOperation]],
+    multi_op_method_returns: dict[str, tuple[dict[str, str], list[str], str | None]],
+    multi_op_method_inputs: dict[str, str],
+    multi_op_method_step_predecessors: dict[str, dict[str, tuple[str, ...]]],
+    multi_op_method_order: dict[str, list[str]],
+    multi_op_method_step_predecessor_args: dict[str, dict[str, dict[str, str]]],
+    *,
+    self_values: dict[str, Any],
+    all_tensor_ops: bool,
+) -> None:
+    """Expand a method whose body only forwards to another method on ``self``.
+
+    A method such as ``alias`` may only ``return self.implementation(...)``.
+    That extracts no tensor operation, so it is neither a one-op leaf nor a
+    multi-op frame and renders as an unconnected tile. The target method is the body.
+    Copy it onto the forward, with the caller's argument names in place of the
+    callee's parameters, so the alias carries the target's subgraph.
+    """
+    seen: set[str] = set()
+    for call_attr in forward_calls:
+        base = base_submodule_attr(call_attr)
+        if base in seen:
+            continue
+        seen.add(base)
+        if (
+            base in init_assignments
+            or call_attr.startswith("@")
+            or base.startswith("@")
+            or call_attr == SYNTHETIC_ATTENTION
+            or base in single_op_methods
+            or base in multi_op_methods
+        ):
+            continue
+        func = class_methods.get(base)
+        if func is None:
+            continue
+        resolved = _resolve_self_method_delegation(func, class_methods, frozenset())
+        if resolved is None:
+            continue
+        target, mapping = resolved
+        analysis = _forward_operations_from_forward(
+            target,
+            self_values=self_values,
+            all_tensor_ops=all_tensor_ops,
+        )
+        if not analysis.operations:
+            continue
+        callee_primary = _primary_forward_input_name(target)
+        caller_primary = _primary_forward_input_name(func)
+        operations = [
+            _rebind_forward_operation(
+                operation,
+                mapping,
+                callee_primary=callee_primary,
+                caller_primary=caller_primary,
+            )
+            for operation in analysis.operations
+        ]
+        if len(operations) == 1:
+            single_op_methods[base] = operations[0]
+            continue
+        multi_op_methods[base] = operations
+        if caller_primary is not None:
+            multi_op_method_inputs[base] = caller_primary
+        if len(analysis.return_order) >= 2:
+            op_attrs = {operation.attr_name for operation in operations}
+            if all(producer in op_attrs for producer in analysis.return_slots.values()):
+                multi_op_method_returns[base] = (
+                    dict(analysis.return_slots),
+                    list(analysis.return_order),
+                    analysis.primary_return_slot,
+                )
+        multi_op_method_step_predecessors[base] = {
+            step: tuple(
+                _rebind_producer_token(
+                    producer,
+                    mapping,
+                    callee_primary=callee_primary,
+                    caller_primary=caller_primary,
+                )
+                for producer in producers
+            )
+            for step, producers in analysis.step_predecessors.items()
+        }
+        multi_op_method_step_predecessor_args[base] = {
+            step: {
+                arg_name: _rebind_producer_token(
+                    producer,
+                    mapping,
+                    callee_primary=callee_primary,
+                    caller_primary=caller_primary,
+                )
+                for arg_name, producer in arg_map.items()
+            }
+            for step, arg_map in analysis.step_predecessor_args.items()
+        }
+        op_attrs = {operation.attr_name for operation in operations}
+        embedded = [
+            name
+            for name in analysis.step_predecessors
+            if name not in op_attrs
+            and base_submodule_attr(name) in init_assignments
+            and init_assignments[base_submodule_attr(name)]
+            not in _SKIP_INIT_CLASS_NAMES
+        ]
+        if embedded:
+            multi_op_method_order[base] = _forward_calls_in_source_order(
+                target, embedded, operations
+            )
+
+
 def _synthetic_call_function_name(call_attr: str) -> str | None:
     """Recover the source function name from a traced free-function synthetic attr.
 
@@ -6600,6 +6921,15 @@ class _ForwardOperationExtractor:
         # The op owns the boundary param it read, so an enclosing expression must
         # not re-attribute that param to itself (it reads the new op instead).
         self._materialized_subscripts: set[int] = set()
+        # Calls materialised into their own op own their parameter reads for the
+        # same reason. In ``grid.prod(-1) // scale``, Product reads ``grid`` and
+        # Floor divide reads Product; attributing ``grid`` to both gives the
+        # binary divide a third tensor edge.
+        self._materialized_calls: set[int] = set()
+        # A local assigned from ``tensor.tolist()`` / ``item()`` still retains
+        # the tensor producer as a graph dependency, while consumers receive a
+        # host value rather than another tensor operand.
+        self._host_value_producers: dict[str, str] = {}
         self._pending_shape_snapshots: list[str] = []
 
     @staticmethod
@@ -6710,6 +7040,18 @@ class _ForwardOperationExtractor:
                     )
                 )
             )
+        host_predecessors = self._dedupe(
+            self._host_value_producers[name]
+            for name in {
+                current.id
+                for current in ast.walk(node)
+                if isinstance(current, ast.Name)
+                and current.id in self._host_value_producers
+            }
+            if self._host_value_producers[name] in predecessors
+        )
+        if host_predecessors:
+            emitted_details.append("host_predecessors: " + ", ".join(host_predecessors))
         param_input_ordinals = tuple(
             (self.param_alias_origin.get(name, name), self.param_alias_ordinal[name])
             for name in raw_param_refs
@@ -6798,6 +7140,7 @@ class _ForwardOperationExtractor:
         other_producer: str,
         test: str,
         ports: tuple[tuple[str, int], ...] = (),
+        variable: str | None = None,
     ) -> str:
         """Emit an explicit Merge (phi) node joining two mutually-exclusive branch
         producers of one reassigned variable, and return its id.
@@ -6839,7 +7182,14 @@ class _ForwardOperationExtractor:
                 # submodule makes unreachable, and a merge over a pruned arm is
                 # exactly the node that must SURVIVE such a variant -- it still
                 # has a live arm to forward, and pruning it orphans that arm.
-                details=(f"merge: {test}",),
+                # ``merges:`` names the variable the arms rebind, so a boundary
+                # that took this node's label can take the variable's name once
+                # the branch itself is no longer drawn.
+                details=(
+                    (f"merge: {test}", f"merges: {variable}")
+                    if variable and variable.isidentifier()
+                    else (f"merge: {test}",)
+                ),
             )
         )
         return attr_name
@@ -6922,7 +7272,7 @@ class _ForwardOperationExtractor:
             if (
                 not is_root
                 and isinstance(current, ast.Call)
-                and _owns_own_step(current)
+                and (_owns_own_step(current) or id(current) in self._materialized_calls)
             ):
                 return
             # A subscript already emitted as its own Slice/Unsqueeze op owns the
@@ -8953,6 +9303,8 @@ class _ForwardOperationExtractor:
             raw_op=functional_name or call_name,
             extra_param_refs=extra_param_refs,
         )
+        if producer is not None:
+            self._materialized_calls.add(id(node))
         return producer, []
 
     @staticmethod
@@ -9009,6 +9361,81 @@ class _ForwardOperationExtractor:
                 operation, details=(*operation.details, f"stores: {attr}")
             )
             return
+
+    def _note_discarded_call(self, call: ast.Call, before_ops: int) -> None:
+        """A call used as a statement consumes its new tensor arguments.
+
+        The statement throws the call's result away, so an argument op emitted
+        while evaluating it (``a == b`` inside ``check(a == b, message)``) has
+        no reader in the dataflow. Record that the call took the value. The
+        render then draws a sink, which is the consumer the check actually is.
+        An argument a real node already reads is left alone.
+        """
+        callee = (_expr_name(call.func) or "call").split(".")[-1]
+        # Only another tensor op counts as a reader here. A free-function step
+        # (``check(comparison, message)``) records the comparison as its
+        # argument, but inside a helper method that step is not drawn, so the
+        # comparison would still have no consumer. The render adds a sink only
+        # when nothing in the finished graph reads the value.
+        referenced: set[str] = set()
+        for operation in self.operations:
+            referenced.update(operation.predecessors)
+        for index in range(before_ops, len(self.operations)):
+            operation = self.operations[index]
+            if operation.attr_name in referenced:
+                continue
+            if any(
+                str(detail).startswith("side_effect:") for detail in operation.details
+            ):
+                continue
+            self.operations[index] = replace(
+                operation,
+                details=(*operation.details, f"side_effect: {callee}"),
+            )
+
+    def _drop_unconsumed_merges(self, kept_producers: set[str]) -> None:
+        """Remove a branch merge that no later read, return, or store uses.
+
+        ``image, _ = ...`` followed by ``_, video = ...`` rebinds ``_`` on both
+        sides of an ``if``. The two values are joined by a merge because the
+        name was assigned twice, but nothing ever reads ``_``. The merge is not
+        a tensor the model computes for a consumer; it is the assignment itself.
+        A merge that feeds a return, a later op, or a loop is kept.
+        """
+        while True:
+            referenced: set[str] = set(kept_producers)
+            referenced.update(self.return_producer_slots.values())
+            referenced.update(self.step_output_names)
+            for operation in self.operations:
+                referenced.update(operation.predecessors)
+                referenced.update(
+                    producer for producer, _ordinal in operation.predecessor_ports
+                )
+            for predecessors in self.step_predecessors.values():
+                referenced.update(predecessors)
+            for arguments in self.step_predecessor_args.values():
+                referenced.update(arguments.values())
+            for carried in self.loop_carried:
+                if carried.initial_producer:
+                    referenced.add(carried.initial_producer)
+                referenced.add(carried.updated_producer)
+                referenced.update(carried.operation_ids)
+            dropped = {
+                operation.attr_name
+                for operation in self.operations
+                if operation.class_name == PHI_CLASS
+                and operation.attr_name not in referenced
+            }
+            if not dropped:
+                return
+            self.operations = [
+                operation
+                for operation in self.operations
+                if operation.attr_name not in dropped
+            ]
+            for name, producer in list(self.var_producer.items()):
+                if producer in dropped:
+                    del self.var_producer[name]
 
     def _bind(self, stmt: ast.Assign | ast.AnnAssign, producer: str | None) -> None:
         self._record_state_store(stmt, producer)
@@ -9790,6 +10217,15 @@ class _ForwardOperationExtractor:
                     continue
                 operations_before = len(self.operations)
                 producer, _ = self.expression(value)
+                for name in self._target_names(stmt):
+                    self._host_value_producers.pop(name, None)
+                if (
+                    producer is not None
+                    and isinstance(value, ast.Call)
+                    and _call_forces_host(value)
+                ):
+                    for name in self._target_names(stmt):
+                        self._host_value_producers[name] = producer
                 if self._reassigns_its_own_arguments(
                     stmt, value, operations_before, producer
                 ):
@@ -9907,7 +10343,14 @@ class _ForwardOperationExtractor:
                         )
                         self.var_producer[root] = producer
                         continue
+                before_ops = len(self.operations)
                 producer, _ = self.expression(value)
+                # ``check(a == b, message)`` throws the comparison away. The
+                # comparison is still a real tensor op, and with nothing reading
+                # it the graph reports a dead node. The call is the consumer;
+                # mark the value it takes so the render can give that value a sink.
+                if isinstance(value, ast.Call):
+                    self._note_discarded_call(value, before_ops)
                 if (
                     producer
                     and isinstance(value, ast.Call)
@@ -10053,6 +10496,7 @@ class _ForwardOperationExtractor:
                                 other_producer,
                                 test,
                                 tuple(ports),
+                                variable,
                             )
                             # The merge is one tensor. Leaving the unpack
                             # ordinal on the name would make the next read
@@ -11206,6 +11650,7 @@ def _forward_operations_from_forward(
                 primary_return_slot = submodule_call_slot
     if primary_return_slot is None and return_order:
         primary_return_slot = return_order[-1]
+    extractor._drop_unconsumed_merges(set(return_slots.values()))
     _release_extent_only_params(extractor.operations)
     return ForwardAnalysis(
         operations=extractor.operations,
@@ -11630,6 +12075,27 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 ),
                 all_tensor_ops=self.all_tensor_ops,
             )
+            # A method that only returns another method on this class
+            # (``return self.get_image_features(...)``) extracted nothing above.
+            # Expand it as the method it forwards to, under the caller's names.
+            _alias_delegating_self_methods(
+                forward_calls,
+                init_assignments,
+                class_methods,
+                single_op_methods,
+                multi_op_methods,
+                multi_op_method_returns,
+                multi_op_method_inputs,
+                multi_op_method_step_predecessors,
+                multi_op_method_order,
+                multi_op_method_step_predecessor_args,
+                self_values=_self_config_values(
+                    init_func,
+                    self._config_for_class(node.name),
+                    self.ctor_defaults.get(node.name),
+                ),
+                all_tensor_ops=self.all_tensor_ops,
+            )
             # Traced free-function calls (rope helpers, ...) expand from their
             # module-level definition. Keys are synthetic attrs (``@positional_``/
             # ``@function_``), disjoint from method names, so they share the same
@@ -11733,20 +12199,26 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     class_methods=class_methods,
                     local_object_methods=self.local_object_methods,
                 )
+                # Call wiring is useful even when the forward owns no primitive
+                # tensor op of its own. A pure dispatcher such as
+                # ``return self.helper(primary, metadata)`` still establishes which
+                # model parameters feed the helper. Gating this metadata on
+                # ``analysis.operations`` leaves the helper chained to the
+                # enclosing primary merely because the caller did no arithmetic.
+                forward_step_predecessors = dict(analysis.step_predecessors)
+                forward_step_predecessor_args = dict(analysis.step_predecessor_args)
+                forward_step_predecessor_ordinals = dict(
+                    analysis.step_predecessor_ordinals
+                )
+                forward_step_output_names = dict(analysis.step_output_names)
+                forward_var_bindings = dict(analysis.var_bindings)
+                forward_undecided_tests = list(analysis.undecided_tests)
+                forward_step_boundary_params = dict(analysis.step_boundary_params)
+                forward_step_boundary_arg_params = dict(
+                    analysis.step_boundary_arg_params
+                )
+                forward_loop_carried = list(analysis.loop_carried)
                 if analysis.operations:
-                    forward_step_predecessors = dict(analysis.step_predecessors)
-                    forward_step_predecessor_args = dict(analysis.step_predecessor_args)
-                    forward_step_predecessor_ordinals = dict(
-                        analysis.step_predecessor_ordinals
-                    )
-                    forward_step_output_names = dict(analysis.step_output_names)
-                    forward_var_bindings = dict(analysis.var_bindings)
-                    forward_undecided_tests = list(analysis.undecided_tests)
-                    forward_step_boundary_params = dict(analysis.step_boundary_params)
-                    forward_step_boundary_arg_params = dict(
-                        analysis.step_boundary_arg_params
-                    )
-                    forward_loop_carried = list(analysis.loop_carried)
                     module_calls = _module_calls_for_forward_merge(
                         forward_calls,
                         init_assignments,
@@ -15684,6 +16156,79 @@ def _class_init_method(class_node: ast.ClassDef) -> ast.FunctionDef | None:
         if isinstance(item, ast.FunctionDef) and item.name == "__init__":
             return item
     return None
+
+
+def _self_constructor_attr(stmt: ast.stmt) -> str | None:
+    """``self.<attr>`` when *stmt* assigns it from a constructor call."""
+    targets: list[ast.AST]
+    value: ast.AST | None
+    if isinstance(stmt, ast.Assign):
+        targets = list(stmt.targets)
+        value = stmt.value
+    elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+        targets = [stmt.target]
+        value = stmt.value
+    else:
+        return None
+    if not isinstance(value, ast.Call):
+        return None
+    for target in targets:
+        if (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+        ):
+            return target.attr
+    return None
+
+
+def _assignments_along_if_chain(node: ast.If) -> dict[str, str]:
+    """``{attr: test}`` for each constructor assigned on an ``if``/``elif`` arm.
+
+    The test is the arm's own condition, unparsed the same way a forward phi
+    records the test it merges on, so the two can be compared as text.
+    """
+    group: dict[str, str] = {}
+    current: ast.stmt = node
+    while isinstance(current, ast.If):
+        test = ast.unparse(current.test).strip()
+        for stmt in current.body:
+            attr = _self_constructor_attr(stmt)
+            if attr is not None:
+                group.setdefault(attr, test)
+        if len(current.orelse) == 1 and isinstance(current.orelse[0], ast.If):
+            current = current.orelse[0]
+            continue
+        break
+    return group
+
+
+def exclusive_init_branches(class_node: ast.ClassDef) -> list[dict[str, str]]:
+    """``if``/``elif`` chains in ``__init__`` that build different submodules.
+
+    Each group is ``{attr: condition}``. A variant that builds one of them and
+    omits the rest has already decided which condition holds, and a forward
+    phi on that same condition is not a choice.
+    """
+    init = _class_init_method(class_node)
+    if init is None:
+        return []
+    elif_nodes: set[int] = set()
+    for node in ast.walk(init):
+        if (
+            isinstance(node, ast.If)
+            and len(node.orelse) == 1
+            and isinstance(node.orelse[0], ast.If)
+        ):
+            elif_nodes.add(id(node.orelse[0]))
+    groups: list[dict[str, str]] = []
+    for node in ast.walk(init):
+        if not isinstance(node, ast.If) or id(node) in elif_nodes:
+            continue
+        group = _assignments_along_if_chain(node)
+        if len(group) >= 2:
+            groups.append(group)
+    return groups
 
 
 def _is_module_list(node: ast.AST) -> bool:

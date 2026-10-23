@@ -698,6 +698,41 @@ def _phi_forwards_an_arm_warnings(nodes: list[dict[str, Any]]) -> list[str]:
     return warnings
 
 
+def warn_degenerate_mutually_exclusive_branches(
+    nodes: list[dict[str, Any]],
+) -> list[str]:
+    """Warn when a mutually exclusive branch no longer has two live inputs.
+
+    A branch joins alternatives. One live input means the other inputs are
+    dead and the branch should already have been removed. A boundary tile
+    that only carries the branch's name is not the branch.
+    """
+    by_id = {str(node.get("id")): node for node in nodes}
+    warnings: list[str] = []
+    for node in nodes:
+        label = str(node.get("label") or "")
+        identity = str(_node_attr_value(node, "class_name") or "")
+        if PHI_LABEL not in (label, identity) and PHI_CLASS not in (label, identity):
+            continue
+        if _node_attr_value(node, "synthetic"):
+            continue
+        live = [
+            str(edge.get("sourceNodeId") or "")
+            for edge in node.get("incomingEdges") or []
+            if str(edge.get("sourceNodeId") or "") in by_id
+        ]
+        if len(live) > 1:
+            continue
+        warnings.append(
+            f"{node.get('id')}: Mutually exclusive branch has {len(live)} live "
+            f"input(s); it must have more than one. Remove it when every other "
+            f"input is dead."
+        )
+    for line in warnings:
+        _log.warning("graph generation: %s", line)
+    return warnings
+
+
 def type_check_graph_nodes(nodes: list[dict[str, Any]]) -> list[str]:
     """Type-check every checkable operation node; return + log warning lines.
 

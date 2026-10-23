@@ -1559,9 +1559,17 @@ def _ceiling_via_aten_schema(name: str) -> tuple[int | None, bool]:
             any_variadic = True
         else:
             counts.append(count)
+    # Some operator names have both a fixed tensor overload and unrelated
+    # Python-list overloads (``eq.Tensor`` beside ``eq.Tensor_list``). A tensor
+    # operation node can use the fixed contract; treating the mere existence of
+    # another list overload as proof this call is a tensor-list join turns every
+    # broadcasting equality into a concat-style rank check. A genuine
+    # tensor-list primitive such as ``cat`` has no fixed tensor overload.
+    if counts:
+        return max(counts), False
     if any_variadic:
         return None, True
-    return (max(counts) if counts else None), False
+    return None, False
 
 
 @functools.lru_cache(maxsize=None)
@@ -1574,6 +1582,17 @@ def _operand_ceiling(raw_op: str) -> tuple[int | None, bool]:
         return None, False
     via_inspect = _ceiling_via_inspect(name)
     if via_inspect is not None:
+        # Several torch builtins expose only ``(*args, **kwargs)`` to inspect
+        # even though their aten schema has a fixed tensor signature
+        # (``eq(self, other)`` is binary). Treating inspect's opaque varargs as
+        # a tensor-list contract makes the type-check apply concat/stack rank
+        # rules to ordinary broadcasting ops. Prefer the concrete schema when
+        # it can refine that opaque answer; a genuine tensor-list op remains
+        # variadic in both sources.
+        if via_inspect == (None, True):
+            via_schema = _ceiling_via_aten_schema(name)
+            if via_schema != (None, False):
+                return via_schema
         return via_inspect
     return _ceiling_via_aten_schema(name)
 
@@ -2749,9 +2768,18 @@ class ShapeInferencer:
         meta_input = self._meta_input_specs_for(node.label, root)
         if meta_input is not None:
             return meta_input
-        # Nothing authoritative named this boundary; fall back to what the caller
-        # hands this section, when that is known.
-        return self._caller_entry_spec
+        # Nothing authoritative named this boundary. The caller entry is the
+        # section's PRIMARY parameter only; assigning it to every unresolved
+        # secondary boundary makes a descriptor/mask/grid claim the activation's
+        # shape and dtype. A secondary parameter with no observed spec remains
+        # unknown until its real producer supplies one.
+        if (
+            root is not None
+            and node.label
+            and node.label == (root.input_label or "hidden_states")
+        ):
+            return self._caller_entry_spec
+        return None
 
     def _meta_input_specs_for(
         self, label: str | None, root: BlockNode | None
@@ -5390,6 +5418,15 @@ class ShapeInferencer:
         if torch_op_spec is not None:
             return torch_op_spec
 
+        # An unresolved module (``AutoModel.from_config`` leaves the class
+        # unnamed) still has the output the meta-device forward recorded for
+        # that attribute. Passing the first wired tensor through would publish
+        # whatever happened to be plugged into the call, which is not the
+        # module's result.
+        meta_module_spec = self._lookup_meta_module_shape(node)
+        if meta_module_spec is not None:
+            return meta_module_spec
+
         if inputs:
             _log.warning(
                 "No shape inference rule for %s (label=%r, class=%r, kind=%s); "
@@ -5958,7 +5995,30 @@ class ShapeInferencer:
                 extractor.var_producer[input_name] = input_name
             extractor.statements(method_func.body)
             if not extractor.operations:
-                return None
+                # ``return self.other(...)`` has no op of its own. The shape is
+                # the other method's shape; the caller's inputs are that
+                # method's inputs, in the same order.
+                from TraceLens.ModelUtils.ast_analyze import (
+                    _direct_self_method_call,
+                )
+
+                found = _direct_self_method_call(method_func)
+                if found is None:
+                    return None
+                target_name = found[0]
+                target_guard = f"method:{target_name}"
+                if target_name == method_name or target_guard in self._introspecting:
+                    return None
+                self._introspecting.add(guard)
+                try:
+                    followed = self._introspect_method_shape(
+                        target_name, inputs, root=root
+                    )
+                finally:
+                    self._introspecting.discard(guard)
+                if followed is not None:
+                    return followed
+                continue
             fwd_ops = {op.attr_name: op for op in extractor.operations}
             _slots, _order, primary = _extract_forward_return_metadata(
                 method_func, extractor.var_producer
