@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -521,60 +521,53 @@ def harvest_meta_tensors(checkpoint: str | Path) -> MetaTensorIndex | None:
     return MetaTensorIndex(by_qualified=by_qualified, by_class_attr=by_class_attr)
 
 
-# A module that returns a structured result (``last_hidden_state`` on a
-# model-output object, rather than a bare tensor) still has one tensor that
-# is the result. These names are the ones modeling code uses for that result.
-_PRIMARY_OUTPUT_FIELDS = (
-    "last_hidden_state",
-    "logits",
-    "hidden_states",
-    "pooler_output",
-)
-
-
 def _tensor_shape_from_output(output: Any) -> tuple[int, ...] | None:
-    """The shape of the tensor a module returned, including a structured result.
+    """Return the first tensor shape in the result's declared output order.
 
-    A bare tensor is itself. A tuple returns its first tensor. A mapping or
-    object with fields (a model-output dataclass) prefers the field modeling
-    code treats as the result, then the first tensor it carries.
+    Meta hooks see the value a module *actually returned*, which can be a
+    tensor, a positional tuple, a mapping, or a Transformers ``ModelOutput``.
+    ``ModelOutput.to_tuple()`` defines its positional-output contract, so use
+    it rather than guessing that a field called ``logits`` or
+    ``last_hidden_state`` is primary. Generic mappings have no stronger output
+    contract; their insertion order is the only order they declare.
     """
-    if isinstance(output, (str, bytes)):
-        return None
-    if not isinstance(output, (tuple, list, dict)):
-        shape = getattr(output, "shape", None)
+
+    def first_shape(value: Any, seen: set[int]) -> tuple[int, ...] | None:
+        if isinstance(value, (str, bytes)) or id(value) in seen:
+            return None
+        seen.add(id(value))
+
+        shape = getattr(value, "shape", None)
         if isinstance(shape, tuple):
             return tuple(shape)
-    if isinstance(output, (tuple, list)):
-        for item in output:
-            found = _tensor_shape_from_output(item)
+
+        if isinstance(value, (tuple, list)):
+            values = value
+        elif isinstance(value, Mapping):
+            to_tuple = getattr(value, "to_tuple", None)
+            values = to_tuple() if callable(to_tuple) else value.values()
+        else:
+            to_tuple = getattr(value, "to_tuple", None)
+            values = None
+            if callable(to_tuple):
+                try:
+                    values = to_tuple()
+                except Exception:  # noqa: BLE001 - its stored fields remain visible
+                    values = None
+            if values is None:
+                if is_dataclass(value) and not isinstance(value, type):
+                    values = (getattr(value, field.name) for field in fields(value))
+                else:
+                    attrs = getattr(value, "__dict__", None)
+                    values = attrs.values() if isinstance(attrs, dict) else ()
+
+        for item in values:
+            found = first_shape(item, seen)
             if found is not None:
                 return found
         return None
-    if isinstance(output, Mapping):
-        for name in _PRIMARY_OUTPUT_FIELDS:
-            if name in output:
-                found = _tensor_shape_from_output(output[name])
-                if found is not None:
-                    return found
-        for item in output.values():
-            found = _tensor_shape_from_output(item)
-            if found is not None:
-                return found
-        return None
-    for name in _PRIMARY_OUTPUT_FIELDS:
-        item = getattr(output, name, None)
-        if item is not None and item is not output:
-            found = _tensor_shape_from_output(item)
-            if found is not None:
-                return found
-    values = getattr(output, "__dict__", None)
-    if isinstance(values, dict):
-        for item in values.values():
-            found = _tensor_shape_from_output(item)
-            if found is not None:
-                return found
-    return None
+
+    return first_shape(output, set())
 
 
 def trace_meta_shapes(
