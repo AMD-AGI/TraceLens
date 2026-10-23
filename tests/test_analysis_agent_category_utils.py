@@ -1829,7 +1829,7 @@ class TestArchUtils:
 
 
 class TestCategoryAnalysisHelpers:
-    _META = {"peak_mem_bw_tbs": 5.3, "peak_maf_tflops": {"matrix_fp16": 654}}
+    _META = {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_fp16": 654}}
 
     def test_gemm_classifiers(self):
         assert gemm_analysis.detect_quantized_gemm("aten::w8a8_mm")

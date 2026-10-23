@@ -359,7 +359,7 @@ def standalone_efficiency(result: Dict[str, Any], row: pd.Series) -> None:
 def calculate_efficiency(
     row: pd.Series,
     peak_mem_bw: float,
-    peak_maf_or_maf_dict,
+    max_achievable_tflops: dict,
     comparison_scope: str = "standalone",
 ) -> Dict[str, Optional[float]]:
     """
@@ -368,8 +368,8 @@ def calculate_efficiency(
     Args:
         row: DataFrame row with operation metrics
         peak_mem_bw: Peak memory bandwidth in TB/s
-        peak_maf_or_maf_dict: Either a float or a dict (max_achievable_tflops)
-            for resolving the precision-aware peak
+        max_achievable_tflops: Per-precision peak TFLOPS dict, for resolving the
+            precision-aware peak
         comparison_scope:
             ``standalone`` uses roofline efficiency
             ``comparative`` uses comparative efficiency
@@ -407,11 +407,9 @@ def calculate_efficiency(
     if tb_s is not None:
         result["tb_s_achieved"] = round(tb_s, 2)
 
-    if isinstance(peak_maf_or_maf_dict, dict):
-        fallback_maf = peak_maf_or_maf_dict.get("matrix_bf16", 1)
-        peak_maf = _resolve_peak_maf(row, peak_maf_or_maf_dict, fallback_maf)
-    else:
-        peak_maf = peak_maf_or_maf_dict
+    peak_maf = _resolve_peak_maf(
+        row, max_achievable_tflops, get_matrix_maf_tflops(max_achievable_tflops)
+    )
     result["resolved_peak_maf"] = round(peak_maf, 2) if peak_maf else None
     result["resolved_peak_mem_bw"] = round(peak_mem_bw, 2) if peak_mem_bw else None
 
@@ -552,7 +550,7 @@ def build_operation_metrics(
         comparison_scope: ``"standalone"`` or ``"comparative"``
     """
     peak_mem_bw = get_peak_mem_bw_tbs(metadata)
-    maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
+    maf = metadata["max_achievable_tflops"]
     fusion_op_keys = _load_fusion_op_keys(metadata.get("output_dir", ""))
     e2e_ms_total = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
 
@@ -1059,18 +1057,15 @@ def get_peak_mem_bw_tbs(metadata: dict) -> float:
     return metadata[PEAK_MEM_BW_KEY]
 
 
-def get_peak_specs(metadata: dict) -> dict:
-    """Extract peak MAF and memory bandwidth from metadata dict.
+def get_matrix_maf_tflops(maf: dict) -> float:
+    """Peak bf16 matrix TFLOPS of a max_achievable_tflops dict; 1 when absent."""
+    return maf.get("matrix_bf16", 1)
 
-    Handles both the dict-style max_achievable_tflops and the legacy
-    scalar peak_bf16_maf_tflops formats.
-    """
+
+def get_peak_specs(metadata: dict) -> dict:
+    """Extract peak MAF and memory bandwidth from metadata dict."""
     return {
-        "peak_maf_tflops": (
-            metadata.get("max_achievable_tflops", {}).get("matrix_bf16")
-            if isinstance(metadata.get("max_achievable_tflops"), dict)
-            else metadata.get("peak_bf16_maf_tflops")
-        ),
+        "peak_maf_tflops": get_matrix_maf_tflops(metadata["max_achievable_tflops"]),
         "peak_mem_bw_tbs": get_peak_mem_bw_tbs(metadata),
     }
 

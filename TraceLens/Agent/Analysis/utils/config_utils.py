@@ -66,8 +66,6 @@ AGENT_REPORT_FLAGS = {
     "inference": {**_DEFAULT_FLAGS, "group_by_parent_module": True},
 }
 _PATH_KEYS = ("trace_path", "capture_folder")
-_COMPARISON_KEYS = ("compare_to", "precomputed_diff_stats")
-_EXPLICIT_KEYS = ("analysis_mode", "output_dir", "jobs")
 
 
 @dataclass(frozen=True)
@@ -281,7 +279,7 @@ def main(argv=None) -> None:
                 config = {
                     "analysis_mode": args.analysis_mode,
                     "output_dir": args.output_dir,
-                    **_assign_pairs(args.set, _EXPLICIT_KEYS),
+                    **_assign_pairs(args.set, ("analysis_mode", "output_dir", "jobs")),
                     "jobs": [_assign_pairs(job.split(",")) for job in args.job],
                 }
                 if args.scope == SCOPE_MULTI_TRACE:
@@ -313,7 +311,7 @@ def _shape_errors(scope: str, config: dict) -> List[str]:
     jobs = config["jobs"]
     analysis_mode = config.get("analysis_mode")
     checked = list(enumerate(jobs))
-    keys = _COMPARISON_KEYS
+    keys = ("compare_to", "precomputed_diff_stats")
     count = _SCOPE_JOBS[scope]
     if scope == SCOPE_STANDALONE:
         if len(jobs) != count:

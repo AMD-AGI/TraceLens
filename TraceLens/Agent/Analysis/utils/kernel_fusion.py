@@ -39,6 +39,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     calculate_efficiency,
     format_args,
     format_kernel_names,
+    get_matrix_maf_tflops,
     perf_float,
     perf_row_key,
 )
@@ -94,9 +95,7 @@ SKIP_CATEGORIES = frozenset(
         TraceEventUtils.CpuEventCategories.Driver,
     }
 )
-# Pricing confidence, bound and fusion-type labels.
-CONFIDENCE_LOW = "low"
-CONFIDENCE_MEDIUM = "medium"
+# Confidence, bound and fusion-type labels used at more than one site.
 CONFIDENCE_HIGH = "high"
 BOUND_COMPUTE = "compute"
 BOUND_MEMORY = "memory"
@@ -381,9 +380,9 @@ class FusionLabeler:
         else:
             kind = ELEMENTWISE_CHAIN
         if any(kc.type == UNKNOWN for kc in classes):
-            confidence = CONFIDENCE_LOW
+            confidence = "low"
         elif kind == GEMM_EPILOGUE:
-            confidence = CONFIDENCE_MEDIUM
+            confidence = "medium"
         else:
             confidence = CONFIDENCE_HIGH
         return Label(kind, confidence, span)
@@ -931,7 +930,7 @@ class FusionPricer:
         self.forms = forms
         self.peak_bw_tbs, self.peak_maf_tflops = peaks
         self.peak_bw_bytes_s = self.peak_bw_tbs * 1e12
-        self.matrix_maf = self.peak_maf_tflops.get("matrix_bf16", 1)
+        self.matrix_maf = get_matrix_maf_tflops(self.peak_maf_tflops)
         self.vector_maf = self.peak_maf_tflops.get("vector_bf16", self.matrix_maf)
         self.perf_rows = perf_rows
         self.baseline_ms = baseline_ms

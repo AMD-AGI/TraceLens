@@ -35,7 +35,6 @@ from .report_utils import load_manifest, _scan_findings_dir
 
 TIER_COMPUTE = "compute"
 TIER_FUSION = "fusion"
-TIERS = (TIER_COMPUTE, TIER_FUSION)
 _FUSION_ROW_KEYS = tuple(
     f.name for f in fields(FusionEstimate) if f.name.startswith("rows")
 )

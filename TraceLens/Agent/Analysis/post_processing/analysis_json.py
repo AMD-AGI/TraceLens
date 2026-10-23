@@ -29,7 +29,6 @@ from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionForms
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     TIER_COMPUTE,
     TIER_FUSION,
-    TIERS,
     MarkerValidator,
     _find_data_table,
     _iter_candidate_blocks,
@@ -51,7 +50,6 @@ _LABEL_RE = re.compile(
 )
 _KIND_RE = re.compile(r"surfaced as\s+`(\w+)`", re.IGNORECASE)
 _FUSION_KINDS = FusionForms(TAXONOMY).kinds
-_MEMBER_KEYS = tuple(TaskMember.__annotations__)
 _EFFICIENCY_RE = re.compile(r"([\d.]+)%\s*of\s*([\d.]+)\s*(\S+)")
 _ANCHOR_LINK_RE = re.compile(r"#detailed-analysis-compute-p(\d+)")
 _LIBRARY_PARENS_RE = re.compile(r"\(([^()]+)\)\s*$")
@@ -106,7 +104,7 @@ def render_analysis_json(analysis_md: "str | Path") -> Path:
     if top_ops is not None:
         report["top_operations"] = top_ops
 
-    for tier in TIERS:
+    for tier in (TIER_COMPUTE, TIER_FUSION):
         report[f"{tier}_optimizations"] = TaskGrouper(
             parser.findings(tier), tier, mode
         ).group()
@@ -622,7 +620,7 @@ class TaskGrouper:
 
     def _emit_member(self, member: dict, row_impact: float) -> dict:
         """The per-row member fields; compute rows lead with their ``impact_score``."""
-        fields = {k: member[k] for k in _MEMBER_KEYS}
+        fields = {k: member[k] for k in TaskMember.__annotations__}
         if self.tier == TIER_FUSION:
             return fields
         return {"impact_score": row_impact, **fields}
