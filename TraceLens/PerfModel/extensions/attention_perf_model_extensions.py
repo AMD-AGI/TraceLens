@@ -10,7 +10,7 @@ Performance models for pseudo-op extensions.
 
 from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.utils import (
-    counted_tensors_are_dense,
+    dense_counted_tensor,
     name2bpe,
     torch_dtype_map,
 )
@@ -1075,7 +1075,7 @@ class mla_decode_v4_asm(InferenceAttention):
         p = self.param_details
         if p.get("_no_perf"):
             return None
-        if not counted_tensors_are_dense(
+        if not dense_counted_tensor(
             self.event, (0, 1, 2, 3, 6, 8, 13, 14, 15)
         ):
             return None

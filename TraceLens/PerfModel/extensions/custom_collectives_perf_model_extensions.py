@@ -9,7 +9,7 @@ Performance models for custom collective operation extensions.
 """
 
 from math import prod
-from TraceLens.PerfModel.utils import counted_tensors_are_dense, name2bpe
+from TraceLens.PerfModel.utils import dense_counted_tensor, name2bpe
 
 
 class CustomCollective:
@@ -180,7 +180,7 @@ class vllm_all_reduce(custom_ar_all_reduce):
     def bytes(self):
         if not self.num_elems or self.bpe_in is None:
             return None
-        if not counted_tensors_are_dense(self.event, (0,)):
+        if not dense_counted_tensor(self.event, (0,)):
             return None
         return 2 * self.num_elems * self.bpe_in
 

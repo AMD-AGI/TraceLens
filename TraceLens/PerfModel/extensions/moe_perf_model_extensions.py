@@ -12,7 +12,7 @@ from math import prod
 
 from TraceLens.PerfModel.perf_model import BinaryElementwise
 from TraceLens.PerfModel.utils import (
-    counted_tensors_are_dense,
+    dense_counted_tensor,
     name2bpe,
     torch_dtype_map,
 )
@@ -2149,7 +2149,7 @@ class SglangMoeSortingSmall(MoeSortScatterGather):
         return _distributed_sort_ops(pairs, p2, num_experts)
 
     def bytes(self):
-        if not counted_tensors_are_dense(self.event, (0, 1)):
+        if not dense_counted_tensor(self.event, (0, 1)):
             return None
         pairs = self.param_details.get("pairs")
         block = self.param_details.get("block_size")

@@ -18,7 +18,7 @@ from TraceLens.PerfModel.perf_model import (
     UnaryElementwise,
 )
 from TraceLens.PerfModel.utils import (
-    counted_tensors_are_dense,
+    dense_counted_tensor,
     name2bpe,
     optional_int,
     torch_dtype_map,
@@ -263,7 +263,7 @@ class gemm_a8w8_blockscale_preshuffle(gemm_a8w8_blockscale):
         return dot + scale + reduce_flops
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
-        if not counted_tensors_are_dense(self.event, (0, 1, 2, 3, 4)):
+        if not dense_counted_tensor(self.event, (0, 1, 2, 3, 4)):
             return None
         dtype_A_B = self.param_details["dtype_A_B"]
         bpe_x = name2bpe(dtype_A_B[0])
@@ -358,7 +358,7 @@ class gemm_a8w8_blockscale_bpreshuffle(gemm_a8w8_blockscale_preshuffle):
             return None
         dims = self.event["args"]["Input Dims"]
         indexes = (0, 1, 2, 3, 4) if len(dims) > 4 and dims[4] else (0, 1, 2, 3)
-        if not counted_tensors_are_dense(self.event, indexes):
+        if not dense_counted_tensor(self.event, indexes):
             return None
         dtype_A_B = self.param_details["dtype_A_B"]
         bpe_x = name2bpe(dtype_A_B[0])
@@ -654,7 +654,7 @@ class opus_bmm_a8w8_mxscale_raw(GEMM):
         return gemm + groups * m * n * scale_groups[-1]
 
     def bytes(self, **_kwargs):
-        if not counted_tensors_are_dense(self.event, (0, 1, 2, 3, 4)):
+        if not dense_counted_tensor(self.event, (0, 1, 2, 3, 4)):
             return None
         dims = self.event["args"]["Input Dims"]
         types = self.event["args"].get("Input type", []) or []
@@ -1321,7 +1321,7 @@ class fused_dynamic_mx_quant_moe_sort_hip_bounded(
         return 3 * rows * cols
 
     def bytes(self):
-        if not counted_tensors_are_dense(self.event, (0, 1, 2)):
+        if not dense_counted_tensor(self.event, (0, 1, 2)):
             return None
         rows = self.param_details.get("row_bound")
         cols = self.param_details.get("cols") or 0
@@ -2205,7 +2205,7 @@ class topk_gating_fwd(topk_softplus):
         return "fp32"
 
     def bytes(self):
-        if not counted_tensors_are_dense(self.event, (0, 1, 2, 3)):
+        if not dense_counted_tensor(self.event, (0, 1, 2, 3)):
             return None
         E = self.param_details["E"]
         topk = self.param_details["topk"]
@@ -2292,7 +2292,7 @@ class topk_softplus_sqrt(topk_gating_fwd):
     def bytes(self):
         if self.param_details.get("_no_perf"):
             return None
-        if not counted_tensors_are_dense(self.event, (0, 1, 2, 3)):
+        if not dense_counted_tensor(self.event, (0, 1, 2, 3)):
             return None
         E = self.param_details["E"]
         topk = self.param_details["topk"]

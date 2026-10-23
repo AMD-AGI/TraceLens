@@ -113,7 +113,7 @@ def dense_layout(shape, stride):
     return True
 
 
-def counted_tensors_are_dense(event, indexes):
+def dense_counted_tensor(event, indexes):
     """False when a counted tensor's recorded stride is not dense."""
     args = event.get("args") or {}
     dims = args.get("Input Dims") or []
