@@ -157,19 +157,21 @@ followed by the path to your local TraceLens clone and any standard
 `docker build` flags. Every supported image runs on both MI300 and MI350, so
 there is no GPU-type argument:
 
-| Version   | Base image                              | ATOM version | Patch directory  |
-| --------- | --------------------------------------- | ------------ | ---------------- |
-| `v13`   | `rocm/atom-dev:nightly_202605301523`  | 0.1.3        | `atom_0_1_3`   |
-| `v14`   | `rocm/atom-dev:atom0.1.4-aiter0.1.15` | 0.1.4        | `atom_0_1_4`   |
-| `v15`   | `rocm/atom-dev:atom0.1.5-aiter0.1.16` | 0.1.5        | `atom_0_1_5`   |
-| `v16rc` | `rocm/atom-dev:nightly_202607091539`  | 0.1.6rc      | `atom_0_1_6rc` |
+| Version   | Base image                                    | ATOM version | Patch directory  |
+| --------- | --------------------------------------------- | ------------ | ---------------- |
+| `v13`   | `rocm/atom-dev:nightly_202605301523`          | 0.1.3        | `atom_0_1_3`   |
+| `v14`   | `rocm/atom-dev:atom0.1.4-aiter0.1.15`        | 0.1.4        | `atom_0_1_4`   |
+| `v15`   | `rocm/atom-dev:atom0.1.5-aiter0.1.16`        | 0.1.5        | `atom_0_1_5`   |
+| `v16rc` | `rocm/atom-dev:nightly_202607091539`          | 0.1.6rc      | `atom_0_1_6rc` |
+| `v18`   | `rocm/atom-dev:nightly_202610191518-rocm10.0` | 0.1.8        | `atom_0_1_8`   |
 
 ```{note}
-The annotations these patches add ([ROCm/ATOM#477](https://github.com/ROCm/ATOM/pull/477))
+The roofline annotation patches ([ROCm/ATOM#477](https://github.com/ROCm/ATOM/pull/477))
 were merged into ATOM `main` on **2026-07-21**, after `release/v0.1.6` was
-branched. No tagged release contains them, so all four versions above need a
-patched image; conversely, **nightly builds from 2026-07-22 onward** need no
-patched image at all - run a stock `rocm/atom-dev:nightly_*` image.
+branched. No tagged release contains them, so versions v13–v16rc need a
+patched image; **nightly builds from 2026-07-22 onward** need no roofline patch.
+
+The `v18` patches add EAGLE3 speculative decoding support.
 ```
 
 ```bash
@@ -229,7 +231,7 @@ To apply them:
    SGLang patches are in
    [`sglang_roofline_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/sglang_roofline_patches);
    ATOM patches are in
-   [`atom_roofline_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/atom_roofline_patches),
+   [`atom_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/atom_patches),
    one directory per version, each applied in full.
    xDiT patches are in
    [`xdit_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/xdit_patches).
