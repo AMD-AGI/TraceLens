@@ -1762,12 +1762,12 @@ def test_subagent_budget_none_when_all_written(tmp_path):
     assert check_subagent_budget(str(run_dir), None) is None
 
 
-def test_subagent_budget_gates_cpu_idle_on_focus_phase(tmp_path):
+def test_subagent_budget_gates_cpu_idle_on_focus_job(tmp_path):
     manifest = {
         "focus_job": "decode",
         "gpu_utilization": {
             "idle_time_percent": 5,
-            "phases": {"decode": {"idle_time_percent": 20}},
+            "jobs": {"decode": {"phase": "decode", "idle_time_percent": 20}},
         },
         "categories": [{"name": "cpu_idle", "tier": "system"}],
     }

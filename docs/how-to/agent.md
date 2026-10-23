@@ -112,23 +112,38 @@ Follow the analysis orchestrator installed with TraceLens and run the full
 agentic analysis workflow from config <run.yaml>, <scope>
 ```
 
-Replace `<scope>` with `standalone`, `comparative`, `semantic`, or `multi_trace`. The scope is
-optional: the agent derives it when the shape is unambiguous (one job is `standalone`,
-two jobs with `compare_to` on job 1 is `comparative`). The config must already have the
-shape the scope needs. The agent only adds wiring and its own report flags, and prints
-every change it makes. In two-trace runs both reports use the first trace's platform,
-and the second trace's platform is kept as a label. The agent still asks for environment
-details.
+Replace `<scope>` with `standalone`, `comparative`, `semantic`, or `multi_trace`. You can
+leave the scope out when the config already implies it: a single job runs as `standalone`,
+two jobs with `compare_to` on the first job run as `comparative`, and a config with an
+`aggregation` block runs as `multi_trace`.
 
 | Scope | Config shape |
 |---|---|
 | `standalone` | One job. |
-| `comparative` | Two jobs. `capture_folder` is optional per job. The agent compares them with TraceDiff. |
-| `semantic` | Two jobs, `analysis_mode: inference`, no `capture_folder`. Both traces are graph-replay-only. |
-| `multi_trace` | Two or more jobs on one platform, no `compare_to`, and a top-level `focus_job`. One report ranks findings across all jobs, each labeled with its job name as the phase. Kernel fusion and system analysis use the focus job. |
+| `comparative` | Two jobs, each with an optional `capture_folder`. `compare_to` on the first job can name the second job instead of repeating its paths. |
+| `semantic` | Two graph-replay-only jobs with `analysis_mode: inference` and no `capture_folder`. |
+| `multi_trace` | Two or more named jobs on the same platform, each with a `phase`, and an `aggregation` block with policy `combine_only_same_phase`. Jobs that share a phase are combined in the report, and the first job is the one that kernel fusion and system analysis focus on. |
 
-Every job needs `platform`, and the trace, capture folder, and output paths must be absolute. For the full schema and
-examples, see
+For example, a `multi_trace` config for a prefill trace and a decode trace:
+
+```yaml
+analysis_mode: inference
+output_dir: /abs/path/analysis_output
+aggregation:
+  policy: combine_only_same_phase
+jobs:
+  - name: prefill_0
+    phase: prefill
+    trace_path: /abs/path/prefill_0.json.gz
+    platform: MI300X
+  - name: decode
+    phase: decode
+    trace_path: /abs/path/decode.json.gz
+    platform: MI300X
+```
+
+Every job needs a `platform`, and all trace, capture folder, and output paths must be
+absolute. For the full schema and more examples, see
 [Generate performance reports from a YAML config](./generate-perf-report-from-config.md).
 
 ## Read the results

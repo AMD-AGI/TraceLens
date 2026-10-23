@@ -14,15 +14,15 @@ perf report wrapper.
 
 Every front end (interactive answers, a user YAML, Hyperloom) produces a dict in
 the wrapper's schema. ``check_config`` rejects a wrong shape for the scope,
-adds the wiring and forces the agent report flags on, then lets the wrapper
-validate the result. Scopes: standalone (1 job), comparative and semantic (2
-jobs), multi_trace (2 or more named jobs of one workload and platform, plus a
-top-level ``focus_job`` that is stripped here; each job's ``phase`` is its name
-and the wrapper aggregates them).
+adds the wiring and the agent report flags, then lets the wrapper validate the
+result. Scopes: standalone (1 job), comparative and semantic (2 jobs),
+multi_trace (2 or more jobs with ``aggregation``; the first job is the focus).
+In multi_trace the flags are only checked: a ``false`` is rejected, not
+overwritten.
 Every change is printed. The completed config is written to
 ``<output_dir>/cache/run_config.yaml`` only when all three phases pass. That
-file is the wrapper's input only: a re-check of it reports job 1's platform as
-platform2.
+file is the wrapper's input only: if job 2 had no arch file, a re-check of it
+reports job 1's platform as platform2.
 """
 
 import argparse
@@ -34,6 +34,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
+from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
 from TraceLens.Reporting.aggregate_perf_reports import POLICY_SAME_PHASE
 from TraceLens.Reporting.generate_perf_report_from_config import (
     ConfigError,
@@ -88,6 +89,8 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
             scope = "standalone"
         elif len(jobs) == 2 and any(job.get("compare_to") for job in jobs):
             scope = "comparative"
+        elif "aggregation" in config:
+            scope = "multi_trace"
         else:
             raise ConfigError(
                 "scope is not stated and cannot be derived from this config; "
@@ -118,12 +121,7 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
         for where, value in paths.items()
         if isinstance(value, str) and not os.path.isabs(value)
     ]
-    errors += _shape_errors(scope, jobs, config.get("analysis_mode"))
-    if scope == "multi_trace":
-        if config.get("focus_job") not in {job.get("name") for job in jobs} - {None}:
-            errors.append(
-                f"multi_trace: focus_job must be one of the job names, got {config.get('focus_job')!r}."
-            )
+    errors += _shape_errors(scope, config)
     if errors:
         raise ConfigError("\n".join(errors))
 
@@ -144,34 +142,35 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
                     ("renamed", f"jobs[{index}].name: {job['name']} -> {name}")
                 )
             job["name"] = name
-        if scope == "comparative" and jobs[0].get("compare_to") is None:
-            jobs[0]["compare_to"] = {
+        if scope == "comparative":
+            target = {
                 key: jobs[1][key] for key in _PATH_KEYS if jobs[1].get(key) is not None
             }
-            changes.append(
-                ("added", f"jobs[0].compare_to: {json.dumps(jobs[0]['compare_to'])}")
-            )
+            compare = jobs[0].get("compare_to")
+            if compare is None:
+                changes.append(("added", f"jobs[0].compare_to: {json.dumps(target)}"))
+            elif compare != target:
+                changes.append(
+                    (
+                        "set",
+                        f"jobs[0].compare_to: {json.dumps(target)}   (was {compare})",
+                    )
+                )
+            jobs[0]["compare_to"] = target
         platform = jobs[0]["platform"]
         platform2 = jobs[1]["platform"]
-        if platform2 != platform:
+        if platform2 != platform and platform2 not in list_platforms():
             changes.append(
                 (
                     "set",
-                    f"jobs[1].platform: {platform}   (was {platform2}, kept as platform2)",
+                    f"jobs[1].platform: {platform}   (was {platform2}, no arch file; kept as platform2)",
                 )
             )
-        jobs[1]["platform"] = platform
-    else:
-        changes.append(("removed", f"focus_job: {completed.pop('focus_job')}"))
-        for index, job in enumerate(jobs):
-            if "phase" not in job:
-                job["phase"] = job["name"]
-                changes.append(("added", f"jobs[{index}].phase: {job['phase']}"))
+            jobs[1]["platform"] = platform
 
-    forced = dict(AGENT_REPORT_FLAGS.get(completed.get("analysis_mode"), {}))
-    if scope == "multi_trace":
-        forced["aggregation"] = {"policy": POLICY_SAME_PHASE}
-    for flag, value in forced.items():
+    for flag, value in AGENT_REPORT_FLAGS.get(
+        completed.get("analysis_mode"), {}
+    ).items():
         if flag not in completed:
             changes.append(("added", f"{flag}: {json.dumps(value)}"))
         elif completed[flag] != value:
@@ -186,8 +185,6 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
     plans = plan_reports(completed)
 
     focus = plans[0]
-    if scope == "multi_trace":
-        focus = next(plan for plan in plans if plan.name == config["focus_job"])
     variables = {
         "comparison_scope": "comparative" if scope in _PAIR_SCOPES else "standalone",
         "trace_path": focus.trace_path,
@@ -214,7 +211,7 @@ def add_diff_stats(config: dict, path: str) -> Tuple[dict, Tuple[str, str]]:
     and the wrapper accepts the result."""
     updated = copy.deepcopy(config)
     old = updated["jobs"][0].pop("precomputed_diff_stats", None)
-    errors = _shape_errors("semantic", updated["jobs"], updated.get("analysis_mode"))
+    errors = _shape_errors("semantic", updated)
     if not os.path.isabs(path):
         errors.append(f"path must be an absolute path: {path}")
     if errors:
@@ -275,6 +272,8 @@ def main(argv=None) -> None:
                     **_assign_pairs(args.set, _EXPLICIT_KEYS),
                     "jobs": [_assign_pairs(job.split(",")) for job in args.job],
                 }
+                if args.scope == "multi_trace":
+                    config.setdefault("aggregation", {"policy": POLICY_SAME_PHASE})
             else:
                 config = load_run_config(args.config)
             result = check_config(config, args.scope)
@@ -295,10 +294,10 @@ def main(argv=None) -> None:
         print(text if verb is None else f"{verb:<8}{text}")
 
 
-def _shape_errors(
-    scope: str, jobs: List[dict], analysis_mode: Optional[str]
-) -> List[str]:
+def _shape_errors(scope: str, config: dict) -> List[str]:
     errors = []
+    jobs = config["jobs"]
+    analysis_mode = config.get("analysis_mode")
     checked = list(enumerate(jobs))
     keys = _COMPARISON_KEYS
     if scope == "standalone":
@@ -315,10 +314,18 @@ def _shape_errors(
             errors.append(f"multi_trace takes 2 or more jobs, got {len(jobs)}.")
         if len({job.get("platform") for job in jobs}) > 1:
             errors.append("multi_trace: every job needs the same platform.")
+        aggregation = config.get("aggregation")
+        if (
+            not isinstance(aggregation, dict)
+            or aggregation.get("policy") != POLICY_SAME_PHASE
+        ):
+            errors.append(
+                f"multi_trace: aggregation.policy must be {POLICY_SAME_PHASE}."
+            )
         errors += [
-            f"multi_trace: jobs[{index}].phase must be its name or omitted."
-            for index, job in enumerate(jobs)
-            if job.get("phase", job.get("name")) != job.get("name")
+            f"multi_trace: {flag} must be {json.dumps(value)}, got {json.dumps(config[flag])}."
+            for flag, value in AGENT_REPORT_FLAGS.get(analysis_mode, {}).items()
+            if config.get(flag, value) != value
         ]
     else:
         if len(jobs) != 2:
@@ -327,10 +334,11 @@ def _shape_errors(
         target = {
             key: jobs[1][key] for key in _PATH_KEYS if jobs[1].get(key) is not None
         }
-        if jobs[0].get("compare_to") not in (None, target):
+        name2 = jobs[1].get("name", "trace2")
+        if jobs[0].get("compare_to") not in (None, target, name2):
             errors.append(
                 "comparative: jobs[0].compare_to must point at jobs[1]'s "
-                "trace_path and capture_folder."
+                f"trace_path and capture_folder, or be jobs[1]'s name ({name2!r})."
             )
     return errors + [
         f"{scope}: jobs[{index}] takes no {key}."

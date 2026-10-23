@@ -188,14 +188,6 @@ def main():
         ),
     )
     parser.add_argument(
-        "--focus-job",
-        default=None,
-        help=(
-            "multi_trace only: trace 1 is <output-dir>/perf_report_aggregated_csvs; "
-            "this job's CSVs feed fusion and system analysis."
-        ),
-    )
-    parser.add_argument(
         "--disable_pseudo_ops",
         action="store_false",
         dest="enable_pseudo_ops",
@@ -210,10 +202,19 @@ def main():
     output_dir = args.output_dir
     enable_pseudo_ops = args.enable_pseudo_ops
     comparison_scope = args.comparison_scope
+    # multi_trace is the wrapper config with an aggregation; trace 1 is the combined report.
+    resolved_config = os.path.join(output_dir, RESOLVED_CONFIG_NAME)
+    if not os.path.isfile(resolved_config):
+        print(
+            f"[DIAG:pipeline:STEP1_FAIL] Resolved run config missing at {resolved_config}"
+        )
+        sys.exit(1)
+    config = load_run_config(resolved_config)
+    plans = plan_reports(config) if "aggregation" in config else None
     if comparison_scope == "comparative":
         trace1_csv_dir = os.path.join(output_dir, "perf_report_trace1_csvs")
         trace2_csv_dir = os.path.join(output_dir, "perf_report_trace2_csvs")
-    elif args.focus_job is not None:
+    elif plans is not None:
         trace1_csv_dir = os.path.join(output_dir, AGGREGATED_CSVS_DIR)
         trace2_csv_dir = None
     else:
@@ -264,20 +265,16 @@ def main():
     gpu_utilization_metrics = _gpu_utilization_metrics_from_gpu_timeline_df(
         gpu_timeline
     )
-    if args.focus_job is not None:
-        plans = plan_reports(
-            load_run_config(os.path.join(output_dir, RESOLVED_CONFIG_NAME))
-        )
-        phase_utilization = {
+    if plans is not None:
+        job_utilization = {
             plan.name: _gpu_utilization_metrics_from_gpu_timeline_df(
                 pd.read_csv(os.path.join(plan.output_csvs_dir, "gpu_timeline.csv"))
             )
             for plan in plans
         }
-        focus_csv_dir = next(
-            p.output_csvs_dir for p in plans if p.name == args.focus_job
-        )
-        system_utilization = phase_utilization[args.focus_job]
+        focus_job = plans[0].name
+        focus_csv_dir = plans[0].output_csvs_dir
+        system_utilization = job_utilization[focus_job]
     else:
         focus_csv_dir = trace1_csv_dir
         system_utilization = gpu_utilization_metrics
@@ -903,11 +900,14 @@ def main():
         manifest["trace2_gpu_utilization"] = trace2_gpu_utilization
         manifest["trace2_ops_summary_by_category"] = trace2_ops_summary_by_category
 
-    if args.focus_job is not None:
-        manifest["focus_job"] = args.focus_job
+    if plans is not None:
+        manifest["focus_job"] = focus_job
         manifest["gpu_utilization"] = {
             **gpu_utilization_metrics,
-            "phases": phase_utilization,
+            "jobs": {
+                plan.name: {"phase": plan.phase, **job_utilization[plan.name]}
+                for plan in plans
+            },
         }
 
     manifest_file = f"{output_dir}/category_data/category_manifest.json"
