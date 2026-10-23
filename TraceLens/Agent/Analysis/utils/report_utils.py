@@ -19,6 +19,7 @@ import re
 import pandas as pd
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    focus_job_utilization,
     perf_report_csv_dir,
 )
 
@@ -97,9 +98,7 @@ def load_manifest_categories(output_dir):
     }
 
     # System analysis is scoped to the focus job on multi_trace runs.
-    gpu_util = result["gpu_utilization"]
-    if "focus_job" in manifest:
-        gpu_util = gpu_util["jobs"][manifest["focus_job"]]
+    gpu_util = focus_job_utilization(manifest)
     print(
         json.dumps(
             {

@@ -520,7 +520,7 @@ def _reparse_rows(md_text):
     """Independently pull (operation, kernel_names, time_ms, pct_e2e) per row."""
     lines = md_text.splitlines()
     rows = []
-    for start, end in _iter_candidate_blocks(md_text, "compute"):
+    for start, end, _ in _iter_candidate_blocks(md_text, "compute"):
         table = _find_data_table(lines, start, end)
         if table is None:
             continue

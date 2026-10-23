@@ -2357,7 +2357,7 @@ class TestPush95Phase2:
             }
         )
         eff = au.calculate_efficiency(
-            row, peak_maf_or_maf_dict={"vector_fp32": 100.0}, peak_mem_bw=5300
+            row, max_achievable_tflops={"vector_fp32": 100.0}, peak_mem_bw=5300
         )
         assert eff["bound_type"] == "memory"
 

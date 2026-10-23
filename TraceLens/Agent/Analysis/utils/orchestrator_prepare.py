@@ -897,6 +897,7 @@ def main():
     }
     if comparison_scope == "comparative" and trace2_gpu_utilization is not None:
         manifest["platform2"] = args.platform2
+        manifest["trace2_csv_dir"] = trace2_csv_dir
         manifest["trace2_gpu_utilization"] = trace2_gpu_utilization
         manifest["trace2_ops_summary_by_category"] = trace2_ops_summary_by_category
 

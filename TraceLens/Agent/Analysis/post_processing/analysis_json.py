@@ -21,10 +21,14 @@ from pathlib import Path
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_MID,
+    phase_field,
 )
+from TraceLens.Agent.Analysis.post_processing.candidate_schema import TaskMember
 from TraceLens.Agent.Analysis.utils.classify_kernels import TAXONOMY
 from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionForms
 from TraceLens.Agent.Analysis.utils.validation_utils import (
+    TIER_COMPUTE,
+    TIER_FUSION,
     MarkerValidator,
     _find_data_table,
     _iter_candidate_blocks,
@@ -100,11 +104,10 @@ def render_analysis_json(analysis_md: "str | Path") -> Path:
     if top_ops is not None:
         report["top_operations"] = top_ops
 
-    findings = parser.findings("compute")
-    report["compute_optimizations"] = TaskGrouper(findings, "compute", mode).group()
-    report["fusion_optimizations"] = TaskGrouper(
-        parser.findings("fusion"), "fusion", mode
-    ).group()
+    for tier in (TIER_COMPUTE, TIER_FUSION):
+        report[f"{tier}_optimizations"] = TaskGrouper(
+            parser.findings(tier), tier, mode
+        ).group()
 
     appendix = parser.appendix()
     if appendix is not None:
@@ -209,10 +212,10 @@ class AnalysisMdParser:
 
     def findings(self, tier: str) -> list:
         """Parse every ``tier`` reasoning-candidate block into finding dicts."""
-        attrs_by_rank = self._card_attrs() if tier == "compute" else {}
+        attrs_by_rank = self._card_attrs() if tier == TIER_COMPUTE else {}
         return [
-            self._parse_finding(start, end, tier, attrs_by_rank)
-            for start, end in _iter_candidate_blocks(self.text, tier)
+            self._parse_finding(start, end, rank, tier, attrs_by_rank)
+            for start, end, rank in _iter_candidate_blocks(self.text, tier)
         ]
 
     def appendix(self) -> "dict | None":
@@ -230,7 +233,7 @@ class AnalysisMdParser:
         return {"model_architecture": model, "hardware_reference": hardware}
 
     def _parse_finding(
-        self, start: int, end: int, tier: str, attrs_by_rank: dict
+        self, start: int, end: int, rank: int, tier: str, attrs_by_rank: dict
     ) -> dict:
         """Parse one ``tier`` reasoning-candidate block into a finding dict.
 
@@ -241,18 +244,15 @@ class AnalysisMdParser:
         lines = self.lines
         block = "\n".join(lines[start:end])
 
-        rank_m = re.search(
-            rf"reasoning-candidate\s+tier={tier}\s+rank=(\d+)", lines[start]
-        )
-        md_rank = f"P{rank_m.group(1)}" if rank_m else None
-        attrs = attrs_by_rank.get(int(rank_m.group(1)), {}) if rank_m else {}
+        md_rank = f"P{rank}"
+        attrs = attrs_by_rank.get(rank, {})
         category = attrs.get("category")
         phase = attrs.get("phase") or self._parse_block_phase(block)
 
         heading = next((ln for ln in lines[start:end] if ln.startswith("####")), None)
         library = None
         title = None
-        if tier == "compute":
+        if tier == TIER_COMPUTE:
             lib_m = _LIBRARY_PARENS_RE.search(heading) if heading else None
             library = lib_m.group(1).strip() if lib_m else None
         elif heading:
@@ -337,6 +337,14 @@ class AnalysisMdParser:
             )
         return members
 
+    @staticmethod
+    def _marker_attrs(text: str, kind: str):
+        """Yield (match, attrs) for each ``kind`` marker in ``text``."""
+        for m in MarkerValidator.BEGIN_RE.finditer(text):
+            attrs = dict(MarkerValidator.ATTR_RE.findall(m.group(1)))
+            if attrs.get("kind") == kind:
+                yield m, attrs
+
     def _card_attrs(self) -> dict:
         """Map compute rank -> card ``p_item`` marker attrs via the detailed anchor.
 
@@ -347,10 +355,7 @@ class AnalysisMdParser:
         ``category=null`` and take ``phase`` from their own p_item marker.
         """
         mapping: dict = {}
-        for m in MarkerValidator.BEGIN_RE.finditer(self.text):
-            attrs = dict(MarkerValidator.ATTR_RE.findall(m.group(1)))
-            if attrs.get("kind") != "p_item":
-                continue
+        for m, attrs in self._marker_attrs(self.text, "p_item"):
             end = MarkerValidator.END_RE.search(self.text, m.end())
             tail = self.text[end.end() : end.end() + 400] if end else ""
             link_m = _ANCHOR_LINK_RE.search(tail)
@@ -384,10 +389,8 @@ class AnalysisMdParser:
         Fallback reports carry no card anchors, so the phase rides on the p_item
         marker inside the reasoning-candidate block instead.
         """
-        for m in MarkerValidator.BEGIN_RE.finditer(block):
-            attrs = dict(MarkerValidator.ATTR_RE.findall(m.group(1)))
-            if attrs.get("kind") == "p_item":
-                return attrs.get("phase")
+        for _, attrs in self._marker_attrs(block, "p_item"):
+            return attrs.get("phase")
         return None
 
     def _parse_finding_range(self, block: str) -> tuple:
@@ -592,7 +595,7 @@ class TaskGrouper:
                 else:
                     row_impact = impacts[ri] or 0.0
 
-                if self.tier == "fusion":
+                if self.tier == TIER_FUSION:
                     key, operation = fi, finding["title"]
                 elif self.is_fallback:
                     key = member["kernel_name"][0] if member["kernel_name"] else ""
@@ -617,30 +620,14 @@ class TaskGrouper:
 
     def _emit_member(self, member: dict, row_impact: float) -> dict:
         """The per-row member fields; compute rows lead with their ``impact_score``."""
-        fields = {
-            "kernel_launcher_path": member["kernel_launcher_path"],
-            "library": member["library"],
-            "category": member["category"],
-            "analysis_md_rank": member["analysis_md_rank"],
-            "kernel_name": member["kernel_name"],
-            "args_shapes": member["args_shapes"],
-            "args_datatypes": member["args_datatypes"],
-            "time_ms": member["time_ms"],
-            "count": member["count"],
-            "pct_e2e": member["pct_e2e"],
-            "flops_per_byte": member["flops_per_byte"],
-            "efficiency_percent": member["efficiency_percent"],
-            "efficiency_peak_value": member["efficiency_peak_value"],
-            "efficiency_peak_unit": member["efficiency_peak_unit"],
-            "bound": member["bound"],
-        }
-        if self.tier == "fusion":
+        fields = {k: member[k] for k in TaskMember.__annotations__}
+        if self.tier == TIER_FUSION:
             return fields
         return {"impact_score": row_impact, **fields}
 
     def _build_task(self, bucket: dict) -> dict:
         entries = bucket["members"]
-        if self.tier == "compute":
+        if self.tier == TIER_COMPUTE:
             entries.sort(
                 key=lambda e: (
                     -e[0]["impact_score"],
@@ -655,17 +642,15 @@ class TaskGrouper:
             if fi not in ordered_fi:
                 ordered_fi.append(fi)
 
-        if self.tier == "fusion":
+        if self.tier == TIER_FUSION:
             mid = bucket["findings"][ordered_fi[0]]["mid"]
         else:
             mid = sum(m["impact_score"] for m in members)
 
         prose = self._accumulate_prose(ordered_fi, bucket["findings"])
 
-        task = {"operation": bucket["operation"]}
-        if bucket["phase"] is not None:
-            task["phase"] = bucket["phase"]
-        if self.tier == "fusion":
+        task = {"operation": bucket["operation"], **phase_field(bucket["phase"])}
+        if self.tier == TIER_FUSION:
             task["kind"] = bucket["findings"][ordered_fi[0]]["kind"]
         return {**task, "members": members, "impact": {"mid": mid}, **prose}
 
@@ -688,7 +673,7 @@ class TaskGrouper:
 
     def _sort_key(self, task: dict) -> tuple:
         neg_mid = -(task["impact"]["mid"] or 0.0)
-        if self.tier == "fusion":
+        if self.tier == TIER_FUSION:
             return (neg_mid,)
         return (
             neg_mid,

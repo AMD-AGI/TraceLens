@@ -411,7 +411,7 @@ def test_comparative_impact_from_operations_trace2_faster():
             "delta_us (trace2 - trace1)": [-5_000.0, 1_000.0, -200.0],
         }
     )
-    metadata = {"peak_mem_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    metadata = {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_bf16": 700.0}}
     config: dict = {}
     operations = build_operation_metrics(
         df, metadata, config, comparison_scope="comparative"
@@ -451,7 +451,7 @@ def test_comparative_roofline_cap_clamps_savings():
             "Pct Roofline_mean": [60.0],  # roofline floor
         }
     )
-    metadata = {"peak_mem_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    metadata = {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_bf16": 700.0}}
     operations = build_operation_metrics(
         df, metadata, {}, comparison_scope="comparative"
     )
@@ -483,7 +483,7 @@ def test_comparative_roofline_cap_no_clamp_when_trace2_above_roofline():
             "Pct Roofline_mean": [60.0],
         }
     )
-    metadata = {"peak_mem_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    metadata = {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_bf16": 700.0}}
     operations = build_operation_metrics(
         df, metadata, {}, comparison_scope="comparative"
     )
@@ -507,7 +507,7 @@ def test_comparative_roofline_cap_no_roofline_column():
             # no Pct Roofline_mean column
         }
     )
-    metadata = {"peak_mem_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    metadata = {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_bf16": 700.0}}
     operations = build_operation_metrics(
         df, metadata, {}, comparison_scope="comparative"
     )
@@ -1778,7 +1778,7 @@ def test_fusion_data_tables_canonical_header():
 
 def test_iter_candidate_blocks_filters_by_tier():
     content = _fusion_block() + _fusion_block(tier="compute")
-    assert len(list(_iter_candidate_blocks(content, "fusion"))) == 1
+    assert [rank for _, _, rank in _iter_candidate_blocks(content, "fusion")] == [1]
     assert len(list(_iter_candidate_blocks(content, "compute"))) == 1
     assert list(_iter_candidate_blocks(content, "system")) == []
 
@@ -2171,7 +2171,7 @@ def test_calculate_efficiency_standalone_dict_maf_precision_aware():
     assert r["tflops_achieved"] == 400.0
 
 
-def test_calculate_efficiency_standalone_scalar_maf_and_memory_bound():
+def test_calculate_efficiency_standalone_matrix_fallback_and_memory_bound():
     row = pd.Series(
         {
             "TFLOPS/s_mean": 300.0,
@@ -2181,7 +2181,7 @@ def test_calculate_efficiency_standalone_scalar_maf_and_memory_bound():
             "Pct Roofline_mean": 70.0,
         }
     )
-    r = calculate_efficiency(row, 5.3, 700.0, "standalone")
+    r = calculate_efficiency(row, 5.3, {"matrix_bf16": 700.0}, "standalone")
     assert r["resolved_peak_maf"] == 700.0
     assert r["bound_type"] == "memory"
     assert r["efficiency_percent"] == 70.0
@@ -2196,7 +2196,7 @@ def test_calculate_efficiency_standalone_missing_roofline_is_none():
             "Pct Roofline_mean": float("nan"),
         }
     )
-    r = calculate_efficiency(row, 5.3, 700.0, "standalone")
+    r = calculate_efficiency(row, 5.3, {"matrix_bf16": 700.0}, "standalone")
     assert r["efficiency_percent"] is None
 
 
@@ -2209,7 +2209,7 @@ def test_calculate_efficiency_standalone_roofline_anomaly():
             "Pct Roofline_mean": 120.0,
         }
     )
-    r = calculate_efficiency(row, 5.3, 700.0, "standalone")
+    r = calculate_efficiency(row, 5.3, {"matrix_bf16": 700.0}, "standalone")
     assert r["efficiency_percent"] == 120.0
     assert r["is_anomaly"] is True
     assert "[ANOMALY]" in r["warning"]
@@ -2225,7 +2225,7 @@ def test_calculate_efficiency_comparative_delta_col():
             "delta_us (trace2 - trace1)": -2_000.0,
         }
     )
-    r = calculate_efficiency(row, 5.3, 700.0, "comparative")
+    r = calculate_efficiency(row, 5.3, {"matrix_bf16": 700.0}, "comparative")
     assert r["efficiency_percent"] == 80.0
     assert r["warning"] is None
 
@@ -2284,11 +2284,6 @@ def test_get_peak_specs_dict_form():
         {"max_achievable_tflops": {"matrix_bf16": 708}, "peak_mem_bw_tbs": 5.3}
     )
     assert specs == {"peak_maf_tflops": 708, "peak_mem_bw_tbs": 5.3}
-
-
-def test_get_peak_specs_scalar_form():
-    specs = get_peak_specs({"peak_bf16_maf_tflops": 700.0, "peak_mem_bw_tbs": 5.3})
-    assert specs == {"peak_maf_tflops": 700.0, "peak_mem_bw_tbs": 5.3}
 
 
 # ----- analysis_utils: _eff_bucket -----
@@ -2430,7 +2425,11 @@ def test_build_operation_metrics_flags_row_matching_op_key(tmp_path):
         ]
     )
     df["Kernel Time (µs)_sum"] = [300.0, 200.0]
-    metadata = {"output_dir": str(tmp_path), "peak_mem_bw_tbs": 5.3}
+    metadata = {
+        "output_dir": str(tmp_path),
+        "peak_mem_bw_tbs": 5.3,
+        "max_achievable_tflops": {"matrix_bf16": 708},
+    }
     ops = build_operation_metrics(df, metadata, {})
     # Same name + args on another thread is a different row.
     assert [bool(o.get("fusion_flagged")) for o in ops] == [True, False]
@@ -2455,7 +2454,11 @@ def test_build_operation_metrics_flags_only_the_fusion_phase(tmp_path):
     }
     df = pd.DataFrame([{**row, "phase": "prefill"}, {**row, "phase": "decode"}])
     df["Kernel Time (µs)_sum"] = [300.0, 200.0]
-    metadata = {"output_dir": str(tmp_path), "peak_mem_bw_tbs": 5.3}
+    metadata = {
+        "output_dir": str(tmp_path),
+        "peak_mem_bw_tbs": 5.3,
+        "max_achievable_tflops": {"matrix_bf16": 708},
+    }
     ops = build_operation_metrics(df, metadata, {})
     assert [o["phase"] for o in ops] == ["prefill", "decode"]
     assert [bool(o.get("fusion_flagged")) for o in ops] == [False, True]
@@ -3867,6 +3870,7 @@ def test_orchestrator_main_comparative_mocked(tmp_path, monkeypatch):
     )
     assert manifest["comparison_scope"] == "comparative"
     assert "trace2_gpu_utilization" in manifest
+    assert manifest["trace2_csv_dir"] == os.path.join(out, "perf_report_trace2_csvs")
     assert os.path.isfile(os.path.join(out, "metadata", "trace2_gpu_utilization.json"))
     candidates = json.loads(
         open(os.path.join(out, "category_data", "fusion_candidates.json")).read()
@@ -4427,6 +4431,7 @@ def test_comparative_fusion_producer_to_rows(
                 "comparison_scope": "comparative",
                 "platform": "GPU_A",
                 "platform2": platform2,
+                "trace2_csv_dir": str(t2_dir),
                 "focus_csv_dir": str(t1_dir),
                 "gpu_utilization": {"total_time_ms": 1000.0},
                 "trace2_gpu_utilization": {"total_time_ms": 800.0},
@@ -4462,7 +4467,7 @@ def test_analysis_utils_efficiency_and_fusion(tmp_path):
         }
     )
     result = au.calculate_efficiency(
-        row, peak_maf_or_maf_dict={"matrix_bf16": 1000}, peak_mem_bw=5300
+        row, max_achievable_tflops={"matrix_bf16": 1000}, peak_mem_bw=5300
     )
     assert result["bound_type"] == "compute"
 

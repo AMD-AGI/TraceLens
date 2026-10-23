@@ -37,6 +37,7 @@ from TraceLens.Agent.Analysis.utils.classify_kernels import (
     classify_kernel,
     run_assertions,
 )
+from TraceLens.Agent.Analysis.utils import kernel_fusion
 from TraceLens.Agent.Analysis.utils.kernel_fusion import (
     MIN_IMPACT_SCORE,
     OVERLAP_EFFICIENCY,
@@ -408,6 +409,12 @@ def test_matrix_mask_groups_kernels_by_op_key():
     assert forms.matrix_mask(classes, [None] * 5) == [False, True, False, False, True]
 
 
+def test_forms_reject_cover_name_outside_primitives(monkeypatch):
+    monkeypatch.setattr(kernel_fusion, "NORM_ONLY_COVERS", frozenset({"typo"}))
+    with pytest.raises(ValueError, match="typo"):
+        FusionForms(TAXONOMY)
+
+
 # ----- FusionCandidate -----
 
 
@@ -478,35 +485,32 @@ def test_fusion_candidate_json_round_trip(candidate):
 
 def test_split_gemm_epilogue():
     kernels = [{"is_matrix": True}, {"is_matrix": False}]
-    typed = FusionPricer._split_into_subgroups(kernels)
-    assert len(typed) == 1
-    assert typed[0][0] == "gemm_epilogue"
+    assert FusionPricer._split_into_subgroups(kernels) == [(True, kernels)]
 
 
 def test_split_gemm_only():
-    typed = FusionPricer._split_into_subgroups([{"is_matrix": True}])
-    assert len(typed) == 1
-    assert typed[0][0] == "gemm_only"
+    kernels = [{"is_matrix": True}]
+    assert FusionPricer._split_into_subgroups(kernels) == [(False, kernels)]
 
 
 def test_split_elementwise_only():
-    typed = FusionPricer._split_into_subgroups(
-        [{"is_matrix": False}, {"is_matrix": False}]
-    )
-    assert len(typed) == 1
-    assert typed[0][0] == "elementwise"
+    kernels = [{"is_matrix": False}, {"is_matrix": False}]
+    assert FusionPricer._split_into_subgroups(kernels) == [(False, kernels)]
 
 
 def test_split_multiple_gemm_boundaries():
-    """E, GEMM, E, GEMM splits at each GEMM into three typed sub-groups."""
+    """E, GEMM, E, GEMM splits at each GEMM into three sub-groups."""
     kernels = [
         {"is_matrix": False},
         {"is_matrix": True},
         {"is_matrix": False},
         {"is_matrix": True},
     ]
-    typed = FusionPricer._split_into_subgroups(kernels)
-    assert [t for t, _ in typed] == ["elementwise", "gemm_epilogue", "gemm_only"]
+    assert FusionPricer._split_into_subgroups(kernels) == [
+        (False, kernels[:1]),
+        (True, kernels[1:3]),
+        (False, kernels[3:]),
+    ]
 
 
 # ----- FusionPricer._roofline_savings_us -----
@@ -1825,7 +1829,7 @@ class TestArchUtils:
 
 
 class TestCategoryAnalysisHelpers:
-    _META = {"peak_mem_bw_tbs": 5.3, "peak_maf_tflops": {"matrix_fp16": 654}}
+    _META = {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_fp16": 654}}
 
     def test_gemm_classifiers(self):
         assert gemm_analysis.detect_quantized_gemm("aten::w8a8_mm")

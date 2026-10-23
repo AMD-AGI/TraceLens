@@ -25,6 +25,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    focus_job_utilization,
+)
 from TraceLens.util import DataLoader
 
 # ---------------------------------------------------------------------------
@@ -974,9 +977,7 @@ def check_subagent_budget(run_dir, _stream_file):
     findings_dir = os.path.join(run_dir, "category_findings")
     system_dir = os.path.join(run_dir, "system_findings")
 
-    gpu_util = manifest.get("gpu_utilization", {})
-    if manifest.get("focus_job"):
-        gpu_util = gpu_util["jobs"][manifest["focus_job"]]
+    gpu_util = focus_job_utilization(manifest)
     idle_pct = gpu_util.get("idle_time_percent")
 
     missing = []

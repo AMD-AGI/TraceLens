@@ -1447,7 +1447,7 @@ class TestAnalysisUtilsPhase13:
             }
         )
         eff = au.calculate_efficiency(
-            row, peak_maf_or_maf_dict={"matrix_fp16": 100.0}, peak_mem_bw=5300
+            row, max_achievable_tflops={"matrix_fp16": 100.0}, peak_mem_bw=5300
         )
         assert eff["bound_type"] == "memory"
         assert au._load_fusion_op_keys(str(tmp_path)) == set()
@@ -1465,7 +1465,7 @@ class TestAnalysisUtilsPhase7:
             }
         )
         eff = au.calculate_efficiency(
-            row, peak_maf_or_maf_dict={"matrix_fp16": 100.0}, peak_mem_bw=5300
+            row, max_achievable_tflops={"matrix_fp16": 100.0}, peak_mem_bw=5300
         )
         assert eff["bound_type"] == "compute"
 
