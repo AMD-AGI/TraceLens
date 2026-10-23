@@ -52,6 +52,7 @@ def get_pseudo_op_mappings():
         "aiter::biased_grouped_topk_hip": moe_perf_model_extensions.BiasedGroupedTopk,
         "aiter::moe_sorting_fwd": moe_perf_model_extensions.MoeSortScatterGather,
         "aiter::mxfp4_moe_sort_hip": moe_perf_model_extensions.MoeSortScatterGather,
+        "sglang_profiler::moe_sorting_small__run_small_sort": moe_perf_model_extensions.SglangMoeSortingSmall,
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
@@ -63,6 +64,8 @@ def get_pseudo_op_mappings():
         "pseudo_mla_decode_fwd": attention_perf_model_extensions.mla_decode_fwd,
         "pseudo_mla_prefill_fwd": attention_perf_model_extensions.pseudo_mla_prefill_fwd,
         "aiter::pa_decode_gluon": attention_perf_model_extensions.pa_decode_gluon,
+        "aiter::mla_decode_v4_asm": attention_perf_model_extensions.mla_decode_v4_asm,
+        "pseudo_vllm_sparse_attn_decode": attention_perf_model_extensions.vllm_sparse_attn_decode,
         # DeepSeek-V4 sparse paged decode (mode-specific pseudo ops)
         "pseudo_v4_paged_decode_swa": attention_perf_model_extensions.pseudo_v4_paged_decode_swa,
         "pseudo_v4_paged_decode_csa": attention_perf_model_extensions.pseudo_v4_paged_decode_csa,
@@ -77,6 +80,8 @@ def get_pseudo_op_mappings():
         "aiter::mixed_sample_outer_exponential": perf_model_extensions.mixed_sample_outer_exponential,
         "sglang_profiler::fp8_utils_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
         "sglang_profiler::gemm_a8w8_blockscale_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
+        "sglang_profiler::gemm_a8w8_blockscale_gemm_a8w8_blockscale_preshuffle": perf_model_extensions.gemm_a8w8_blockscale_preshuffle,
+        "aiter::gemm_a8w8_blockscale_bpreshuffle": perf_model_extensions.gemm_a8w8_blockscale_bpreshuffle,
         "vllm::rocm_aiter_triton_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
         "aiter::gemm_a8w8_blockscale_ck": perf_model_extensions.gemm_a8w8_blockscale,
         "aiter::gemm_a8w8_blockscale_cktile": perf_model_extensions.gemm_a8w8_blockscale,
@@ -91,6 +96,8 @@ def get_pseudo_op_mappings():
         "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
         "aiter::gemm_a16w16": perf_model_extensions.gemm_a16w16,
         "aiter::fused_dynamic_mx_quant_moe_sort_hip": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip,
+        "aiter::fused_dynamic_mx_quant_moe_sort_hip_bounded": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip_bounded,
+        "aiter::_opus_bmm_a8w8_mxscale_raw": perf_model_extensions.opus_bmm_a8w8_mxscale_raw,
         "aiter::fused_qk_rope_concat_and_cache_mla": perf_model_extensions.fused_qk_rope_concat_and_cache_mla,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
         "aiter::_gemm_a16w16_asm": perf_model_extensions.gemm_a16w16_asm,
@@ -148,6 +155,11 @@ def get_pseudo_op_mappings():
         "aiter::mhc_pre_big_fuse_rmsnorm": perf_model_extensions.mhc_pre_big_fuse_rmsnorm,
         "aiter::mhc_fused_post_pre_gemm_sqrsum": perf_model_extensions.mhc_fused_post_pre_gemm_sqrsum,
         "aiter::topk_softplus": perf_model_extensions.topk_softplus,
+        "aiter::topk_gating_fwd": perf_model_extensions.topk_gating_fwd,
+        "_moe_C::topk_softplus_sqrt": perf_model_extensions.topk_softplus_sqrt,
+        "aiter::_opus_moe_stage1_a8w4_fwd_raw": moe_perf_model_extensions.moe_opus_stage1_a8w4,
+        "aiter::moe_sorting_opus_fwd": moe_perf_model_extensions.moe_sorting_opus_fwd,
+        "vllm::all_reduce": custom_collectives_perf_model_extensions.vllm_all_reduce,
         ## Fused RMSNorm + per-group dynamic FP8 quant.
         "aiter::rmsnorm_quant": rmsnorm_perf_model_extensions.aiter_rmsnorm_quant,
         ## AITER GroupNorm (same math as aten::group_norm, different event layout)
@@ -173,29 +185,33 @@ def get_pseudo_op_category_only_mappings():
     """
 
     return {
-        # MoE sorting / permutation auxiliary kernels.
-        # Reference: aiter/aiter/ops/triton/moe_op_mxfp4.py (mxfp4_moe_sort_hip,
-        # fused_dynamic_mxfp4_quant_moe_sort_hip). Memory-bound shuffle/sort ops
-        # with negligible FLOPs; we only classify them.
+        # MoE sort/permutation aux kernels (aiter moe_op_mxfp4.py); memory-bound, negligible FLOPs, classify only.
         "aiter::fused_dynamic_mxfp4_quant_moe_sort_hip": "MoE_aux",
         "aiter::unified_attention_with_output_base->_fused_qk_rope_reshape_and_cache_kernel (Synthetic Op)": "FusedRoPE",
         "hipModuleLaunchKernel->kv_indices_generate_kernel (Synthetic Op)": "InferenceAttention",
         "aiter::get_mla_metadata_v1": "InferenceAttention",
-        # DeepSeek-V4 sparse-attention indexer (lightning indexer + top-k). Its
-        # FLOPs/bytes depend on the per-forward KV context length, which is not
-        # present in the trace Input Dims, so it is classified only (no roofline).
-        # Reference: ATOM/atom/model_ops/module_dispatch_ops.py (indexer_score_topk),
-        # aiter kernel cp_gather_indexer_k_quant_cache_kernel.
+        # DeepSeek-V4 sparse-attention indexer; FLOPs depend on device-side KV context length, not in Input Dims, so classify only (ATOM module_dispatch_ops.py indexer_score_topk).
         "aiter::indexer_score_topk": "InferenceAttention",
-        # DeepSeek-V4 attention synthetic child ops with FIXED names (no shape
-        # params).
+        # Paged top-k walks scores[row, 0:seq_len] where seq_len is a device value, so classify only (sglang topk_v2.cuh).
+        "sglang_profiler::topk_topk_transform_paged_v2": "InferenceAttention",
+        # vLLM per-row top-k walks logits[row, 0:seq_len] where seq_len is a device tensor, so classify only.
+        "_C::top_k_per_row_decode": "InferenceAttention",
+        "hipGraphLaunch->void vllm::topKPerRowDecode<1024, true, false, true>(float const*, int const*, int*, int, int, int, int, int, float*, int, int const*) [clone .kd] (Synthetic Op)": "InferenceAttention",
+        "hipGraphLaunch->void vllm::topKPerRowDecode<1024, true, true, false>(float const*, int const*, int*, int, int, int, int, int, float*, int, int const*) [clone .kd] (Synthetic Op)": "InferenceAttention",
+        # Shapeless graph-launch orphan of the vLLM all-reduce; the tensor-bearing parent is modeled.
+        "hipGraphLaunch->void aiter::ar_ll_gfx9<std::bfloat16_t, 8, 256>(std::bfloat16_t* const*, std::bfloat16_t*, std::bfloat16_t const*, unsigned long, int, unsigned int*, unsigned long) [clone .kd] (Synthetic Op)": "CustomCollective",
+        # Fallback when the sparse partial/reduce kernels have no tensor-bearing python parent.
+        "hipModuleLaunchKernel->_sparse_attn_decode_gfx950_partial_kernel.kd (Synthetic Op)": "InferenceAttention",
+        "hipModuleLaunchKernel->_sparse_attn_decode_reduce_kernel.kd (Synthetic Op)": "InferenceAttention",
+        "hipGraphLaunch->_sparse_attn_decode_gfx950_partial_kernel.kd (Synthetic Op)": "InferenceAttention",
+        "hipGraphLaunch->_sparse_attn_decode_reduce_kernel.kd (Synthetic Op)": "InferenceAttention",
+        # Launched by mla_decode_fwd_v4_nm after mla_decode_v4_asm; merge trip count is device-side, so classify only (tensors copied from MLA parent).
+        "hipModuleLaunchKernel->_fwd_kernel_stage2_asm (Synthetic Op)": "InferenceAttention",
+        # DeepSeek-V4 attention synthetic child ops with fixed names (no shape params).
         "aiter::v4_attention_with_output->_inverse_rope_gptj_kernel (Synthetic Op)": "FusedRoPE",
         "aiter::v4_attention_with_output->_update_compressor_states_kernel (Synthetic Op)": "InferenceAttention",
         "aiter::v4_attention_with_output->_swa_write_kernel (Synthetic Op)": "InferenceAttention",
-        # DeepSeek-V4 attention synthetic child ops whose names embed shape/
-        # template params (D512/D128, H32/H64, RD64, KB32, NW4/NW8, ...). Listed
-        # by exact full name; add new shape variants here as they appear in
-        # traces. Reference: ATOM flydsl v4 attention kernels.
+        # DeepSeek-V4 attention synthetic child ops with shape/template params in the name; add new variants as they appear (ATOM flydsl v4 attention kernels).
         "aiter::v4_attention_with_output->qk_norm_rope_H32_D512_RD64_flydsl (Synthetic Op)": "FusedRoPE",
         "aiter::v4_attention_with_output->qk_norm_rope_H64_D512_RD64_flydsl (Synthetic Op)": "FusedRoPE",
         "aiter::v4_attention_with_output->hca_norm_rope_scatter_D512_RD64_R128_KB1_rmsbf16_flydsl (Synthetic Op)": "FusedRoPE",
@@ -203,8 +219,7 @@ def get_pseudo_op_category_only_mappings():
         "aiter::v4_attention_with_output->fused_compress_attn_D128_RD64_R4_OVL_SS8_KB32_Q_ue8m0_psh_rmsbf16_pf_flydsl (Synthetic Op)": "InferenceAttention",
         "aiter::v4_attention_with_output->hca_compress_forward_D512_R128_NW4_SL256_S128_flydsl (Synthetic Op)": "InferenceAttention",
         "aiter::v4_attention_with_output->hca_compress_forward_D512_R128_NW8_SL128_S128_flydsl (Synthetic Op)": "InferenceAttention",
-        # DeepSeek-V4 fused all-gather (custom collective); one entry per world
-        # size (template arg). Add new world sizes/dtypes here as needed.
+        # DeepSeek-V4 fused all-gather (custom collective); one entry per world size/dtype template arg, add new variants as needed.
         "aiter::allgather_lastdim<std::bfloat16_t, 2>(aiter::RankData*, aiter::RankSignals, aiter::Signal*, std::bfloat16_t*, int, int, int) (Synthetic Op)": "CustomCollective",
         "aiter::allgather_lastdim<std::bfloat16_t, 4>(aiter::RankData*, aiter::RankSignals, aiter::Signal*, std::bfloat16_t*, int, int, int) (Synthetic Op)": "CustomCollective",
     }

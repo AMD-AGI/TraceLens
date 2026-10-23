@@ -9,8 +9,15 @@ Performance models for pseudo-op extensions.
 """
 
 from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
-from TraceLens.TraceUtils.utils.annotation_utils import IterationAnnotation
+from TraceLens.PerfModel.utils import (
+    counted_tensors_are_dense,
+    name2bpe,
+    torch_dtype_map,
+)
+from TraceLens.TraceUtils.utils.annotation_utils import (
+    IterationAnnotation,
+    add_logical_batch_size,
+)
 import math
 
 
@@ -445,6 +452,73 @@ class pseudo_v4_paged_decode_hca(_V4PagedDecodeBase):
     """DeepSeek-V4 hierarchical compressed attention (HCA) paged decode."""
 
     MODE = "hca"
+
+
+class vllm_sparse_attn_decode(_V4PagedDecodeBase):
+    """HBM bytes of the BF16 query and output, the FP8 KV records, and the fp32 split partials; the page pool is not read."""
+
+    _KV_RECORD_BYTES = 576
+
+    @classmethod
+    def get_param_details(cls, event):
+        try:
+            args = event.get("args") or {}
+            dims = args.get("Input Dims") or []
+            q, partial = dims[0], dims[1]
+            tokens, heads, d_h = int(q[0]), int(q[1]), int(q[2])
+            block_k = int(args["v4_block_k"])
+            if partial[0] != tokens:
+                raise ValueError
+            if partial[2] == heads:
+                splits = int(partial[1])
+            elif partial[1] == heads:
+                splits = int(partial[2])
+            else:
+                raise ValueError
+            if tokens <= 0 or heads <= 0 or d_h <= 0 or splits <= 0 or block_k <= 0:
+                raise ValueError
+            attended = splits * block_k
+            details = {
+                "B": 1,
+                "N_Q": tokens,
+                "H_Q": heads,
+                "H_V": 1,
+                "H_K": 1,
+                "N_KV": attended,
+                "H_KV": 1,
+                "d_h_qk": d_h,
+                "d_h_v": d_h,
+                "dropout": 0.0,
+                "causal": False,
+                "flash_impl": True,
+                "c_sq": 0,
+                "c_sk": 0,
+                "c_sqsq": 0,
+                "c_sqsk": 0,
+                "g_sq": tokens,
+                "g_sk": tokens * attended,
+                "g_sqsq": tokens,
+                "g_sqsk": tokens * attended,
+                "dtype_Q": "c10::BFloat16",
+                "dtype_KV": "c10::Float8_e4m3fn",
+                "sliding_window": attended,
+                "attended_kv": attended,
+                "num_splits": splits,
+            }
+            return add_logical_batch_size(details, event)
+        except (IndexError, KeyError, TypeError, ValueError):
+            return InferenceAttention.no_perf_param_details()
+
+    def bytes(self, bytes_per_element=None):
+        if self.param_details.get("_no_perf"):
+            return None
+        tokens = self.param_details["g_sq"]
+        attended = self.param_details["attended_kv"]
+        splits = self.param_details["num_splits"]
+        q_bytes = 2 * tokens * self.H_Q * self.d_h_qk * 2
+        kv_bytes = tokens * attended * self._KV_RECORD_BYTES
+        partial_bytes = 2 * tokens * splits * self.H_Q * 4
+        return q_bytes + kv_bytes + partial_bytes
 
 
 class pa_sparse_prefill_opus_fwd(InferenceAttention):
@@ -914,3 +988,120 @@ class gdn_attention_core(InferenceAttention):
 
     def get_maf_type(self):
         return "matrix"
+
+
+class mla_decode_v4_asm(InferenceAttention):
+    """HBM bytes of the gathered KV pages, not the page pool; a multi-split launch leaves the BF16 output to stage 2."""
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        dims = args.get("Input Dims") or []
+        types = args.get("Input type") or []
+        if len(dims) < 16 or len(dims[0]) != 3 or len(dims[2]) != 4 or not dims[6]:
+            return add_logical_batch_size(
+                InferenceAttention.no_perf_param_details(), event
+            )
+        page_size = dims[2][1]
+        h_kv = dims[2][2]
+        num_kv = dims[6][0] * page_size
+        q_tokens, h_q, d_qk = dims[0]
+        d_v = dims[15][-1]
+        ints = []
+        for item in args.get("Concrete Inputs") or []:
+            if item in ("", None):
+                continue
+            try:
+                ints.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        max_seqlen_q = ints[0] if ints else 1
+        num_kv_splits = ints[2] if len(ints) > 2 else 1
+        write_valid = len(ints) > 3 and ints[3] == 1
+        if (
+            page_size != 1
+            or h_kv != 1
+            or max_seqlen_q != 1
+            or q_tokens <= 0
+            or num_kv <= 0
+            or d_qk != 512
+        ):
+            return add_logical_batch_size(
+                InferenceAttention.no_perf_param_details(), event
+            )
+        # g_sqsk is the page-index length; one query token per page.
+        details = {
+            "B": 1,
+            "N_Q": q_tokens,
+            "H_Q": h_q,
+            "N_KV": num_kv,
+            "H_KV": h_kv,
+            "d_h_qk": d_qk,
+            "d_h_v": d_v,
+            "c_sq": 0,
+            "c_sk": 0,
+            "c_sqsq": 0,
+            "c_sqsk": 0,
+            "g_sq": q_tokens,
+            "g_sk": num_kv,
+            "g_sqsq": q_tokens,
+            "g_sqsk": num_kv,
+            "dtype_Q": types[0] if types else None,
+            "q_tokens": q_tokens,
+            "num_kv": num_kv,
+            "num_kv_splits": num_kv_splits,
+            "dtype_rope": types[1] if len(types) > 1 else None,
+            "dtype_kv": types[2] if len(types) > 2 else None,
+            "dtype_kvrope": types[3] if len(types) > 3 else None,
+            "dtype_index": types[6] if len(types) > 6 else "int",
+            "split_shape": dims[13],
+            "lse_shape": dims[14],
+            "out_shape": dims[15],
+            "indptr_elems": sum(dims[i][0] for i in (4, 5, 7) if dims[i]),
+            "sink_elems": dims[8][0] if dims[8] else 0,
+            "valid_elems": dims[16][0]
+            if write_valid and len(dims) > 16 and dims[16]
+            else 0,
+            "rope_elems": math.prod(dims[1]) if len(dims) > 1 and dims[1] else 0,
+            "kv_rope_dim": dims[3][-1] if len(dims) > 3 and dims[3] else 64,
+        }
+        return add_logical_batch_size(details, event)
+
+    def flops(self):
+        # QK + PV via InferenceAttention.flops_func; FlashAttention arXiv:2205.14135, Section 2.
+        return super().flops()
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        if not counted_tensors_are_dense(
+            self.event, (0, 1, 2, 3, 6, 8, 13, 14, 15)
+        ):
+            return None
+        bpe_q = name2bpe(str(p["dtype_Q"]).lower())
+        bpe_kv = name2bpe(str(p["dtype_kv"]).lower())
+        bpe_rope = name2bpe(str(p["dtype_rope"]).lower())
+        bpe_kvrope = name2bpe(str(p["dtype_kvrope"]).lower())
+        bpe_index = name2bpe(str(p["dtype_index"]).lower())
+        if None in (bpe_q, bpe_kv, bpe_rope, bpe_kvrope, bpe_index):
+            return None
+        read = (
+            p["q_tokens"] * p["H_Q"] * p["d_h_qk"] * bpe_q
+            + p["rope_elems"] * bpe_rope
+            + p["num_kv"] * p["d_h_qk"] * bpe_kv
+            + p["num_kv"] * p["kv_rope_dim"] * bpe_kvrope
+            + p["num_kv"] * bpe_index
+            + p["indptr_elems"] * 4
+            + p["sink_elems"] * 4
+        )
+        if p["num_kv_splits"] == 1:
+            written = math.prod(p["out_shape"]) * 2
+        else:
+            written = math.prod(p["split_shape"]) * 4 + math.prod(p["lse_shape"]) * 4
+        return read + written + p["valid_elems"] * 4
+
+    def get_maf_type(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return super().get_maf_type()
