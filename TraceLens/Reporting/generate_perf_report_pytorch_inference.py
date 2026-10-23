@@ -600,6 +600,7 @@ def generate_perf_report_pytorch(
             "vllm::gdn_attention_core",
             "aiter::fmha_v3_varlen_fwd",
             "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd",
+            "sgl_kernel::fast_topk_transform_fused",
             "sglang_profiler::attention_paged_attention_ragged",
             "aiter::mha_batch_prefill",
             "aiter::pa_decode_gluon",
