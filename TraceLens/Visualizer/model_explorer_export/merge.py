@@ -75,10 +75,11 @@ from TraceLens.Visualizer.model_explorer_export.shapes import (
     apply_shape_attrs,
     canonicalize_port_shape_keys,
     fill_missing_node_shapes,
-    widen_broadcast_results,
     group_boundary_shapes,
     infer_block_tree_shapes,
     node_output_spec,
+    refine_multi_output_port_shapes,
+    widen_broadcast_results,
     format_shape_dims,
     format_shape_with_dtype,
     parse_shape_dims,
@@ -2323,20 +2324,42 @@ def _publish_state_stores_through_output_tiles(nodes: list[dict[str, Any]]) -> N
     for node in nodes:
         if str(node["id"]) in consumed or _node_attr(node, "synthetic"):
             continue
+        parts = [
+            part.strip()
+            for part in str(_node_attr(node, "details") or "").split(";")
+            if part.strip()
+        ]
         stored = next(
             (
                 part.split(":", 1)[1].strip()
-                for part in str(_node_attr(node, "details") or "").split(";")
-                if part.strip().startswith("stores:")
+                for part in parts
+                if part.startswith("stores:")
             ),
             None,
         )
-        if not stored:
+        side_effect = next(
+            (
+                part.split(":", 1)[1].strip()
+                for part in parts
+                if part.startswith("side_effect:")
+            ),
+            None,
+        )
+        if stored:
+            sink_id = f"{node['id']}:@state_out:{stored}"
+            sink_label = stored
+        elif side_effect:
+            # A discarded call (a shape check, a log) is the consumer of the
+            # tensor it was handed. The call itself is not a tensor op, so the
+            # tensor it reads is given the same kind of sink a store gets.
+            sink_id = f"{node['id']}:@side_effect:{side_effect}"
+            sink_label = side_effect
+        else:
             continue
         additions.append(
             {
-                "id": f"{node['id']}:@state_out:{stored}",
-                "label": stored,
+                "id": sink_id,
+                "label": sink_label,
                 "namespace": node.get("namespace"),
                 "attrs": [
                     {"key": "synthetic", "value": "@output"},
@@ -2393,6 +2416,7 @@ def _drop_undrawn_state_reads(nodes: list[dict[str, Any]]) -> None:
             and not _node_attr(node, "synthetic")
             and "method_params:" in str(_node_attr(node, "details") or "")
             and "stores:" not in str(_node_attr(node, "details") or "")
+            and "side_effect:" not in str(_node_attr(node, "details") or "")
         }
         # A constant tile belongs to the op that reads it; when that op is not
         # drawn, neither is the weight it was reading.
@@ -4817,6 +4841,37 @@ def _dock_nullary_ops_on_what_sizes_them(nodes: list[dict[str, Any]]) -> None:
         node["incomingEdges"] = moved
 
 
+def _drop_mismatched_boundary_operands(nodes: list[dict[str, Any]]) -> None:
+    """Remove a sibling parameter boundary from an over-full fixed-arity op.
+
+    An expanded helper can have several bare caller parameters. If its chain
+    fallback lands the helper's primary boundary on an op that explicitly names
+    another parameter as its boundary input, that op receives both siblings.
+    The op's own fixed tensor arity and declared boundary name provide the full
+    structural proof needed to discard the mismatched boundary edge.
+    """
+    by_id = {str(node.get("id") or ""): node for node in nodes}
+    for node in nodes:
+        boundary = str(_node_attr(node, "boundary_input") or "").strip()
+        ceiling, variadic = _operand_ceiling(_node_attr(node, "raw_op") or "")
+        edges = list(node.get("incomingEdges") or [])
+        if not boundary or variadic or ceiling is None or len(edges) <= ceiling:
+            continue
+        removable = []
+        for edge in edges:
+            source = by_id.get(str(edge.get("sourceNodeId") or ""))
+            if source is None or not _is_synthetic_input(source):
+                continue
+            source_name = str(
+                _node_attr(source, "boundary_input") or source.get("label") or ""
+            ).strip()
+            if source_name and source_name != boundary:
+                removable.append(edge)
+        while len(edges) > ceiling and removable:
+            edges.remove(removable.pop(0))
+        node["incomingEdges"] = edges
+
+
 def _drop_unconsumed_input_boundaries(nodes: list[dict[str, Any]]) -> None:
     """Remove a frame ``@input`` tile that nothing inside the frame reads.
 
@@ -5268,6 +5323,20 @@ def _host_param_names(node: dict[str, Any]) -> set[str]:
     return names
 
 
+def _host_predecessor_names(node: dict[str, Any]) -> set[str]:
+    """Producer attrs whose values this op consumes after host materialisation."""
+    names: set[str] = set()
+    for part in str(_node_attr(node, "details") or "").split(";"):
+        part = part.strip()
+        if part.startswith("host_predecessors:"):
+            names.update(
+                item.strip()
+                for item in part.split(":", 1)[1].split(",")
+                if item.strip()
+            )
+    return names
+
+
 def _is_host_param_operand(
     node: dict[str, Any],
     source: dict[str, Any],
@@ -5282,12 +5351,18 @@ def _is_host_param_operand(
     read as a second tensor operand.
     """
     names = _host_param_names(node)
-    if not names:
+    host_predecessors = _host_predecessor_names(node)
+    if not names and not host_predecessors:
         return False
     labels = {str(source.get("label") or "").strip()}
     for key in ("boundary_input", "port_label"):
         labels.add(str(_node_attr(source, key) or "").strip())
     source_id = str(source.get("id") or "")
+    if any(
+        f":{producer}:" in source_id or source_id.endswith(f":{producer}")
+        for producer in host_predecessors
+    ):
+        return True
     if "@input:" in source_id:
         labels.add(source_id.rsplit("@input:", 1)[-1].split("/")[0].split("^")[0])
     if edge is not None:
@@ -7599,6 +7674,153 @@ def _name_loop_frames_for_the_axis_they_walk(
         }
         if walked & set(passthrough):
             frame.label = f"loop iterations: {Symbol.VISION_GRID.value}"
+
+
+def _coalesce_duplicate_section_inputs(nodes: list[dict[str, Any]]) -> None:
+    """One synthetic section input per id, with every incoming edge preserved.
+
+    Independent consumers of one outer parameter can each ask the computation
+    builder for its boundary. Once namespaced into the merged graph those
+    requests denote the same section port. Keeping both creates duplicate ids
+    and makes integrity diagnostics report the same orphan more than once.
+    """
+    keeper_by_id: dict[str, dict[str, Any]] = {}
+    duplicates: set[int] = set()
+    for node in nodes:
+        if not _is_synthetic_input(node):
+            continue
+        node_id = str(node.get("id") or "")
+        keeper = keeper_by_id.get(node_id)
+        if keeper is None:
+            keeper_by_id[node_id] = node
+            continue
+        duplicates.add(id(node))
+        existing = {
+            (
+                str(edge.get("sourceNodeId") or ""),
+                str(edge.get("sourceNodeOutputId") or "0"),
+                str(edge.get("targetNodeInputId") or "0"),
+            )
+            for edge in keeper.get("incomingEdges", []) or []
+        }
+        for edge in node.get("incomingEdges", []) or []:
+            key = (
+                str(edge.get("sourceNodeId") or ""),
+                str(edge.get("sourceNodeOutputId") or "0"),
+                str(edge.get("targetNodeInputId") or "0"),
+            )
+            if key not in existing:
+                keeper.setdefault("incomingEdges", []).append(edge)
+                existing.add(key)
+        keeper_attrs = {str(attr.get("key")) for attr in keeper.get("attrs", []) or []}
+        for attr in node.get("attrs", []) or []:
+            if str(attr.get("key")) not in keeper_attrs:
+                keeper.setdefault("attrs", []).append(attr)
+    if duplicates:
+        nodes[:] = [node for node in nodes if id(node) not in duplicates]
+
+
+def _clear_unverified_output_spec(node: dict[str, Any]) -> None:
+    """Remove a heuristic output spec from a newly exposed graph input."""
+    node["attrs"] = [
+        attr
+        for attr in node.get("attrs", []) or []
+        if str(attr.get("key")) not in {"output_shape", "output_dtype"}
+    ]
+    for metadata in node.get("outputsMetadata", []) or []:
+        metadata["attrs"] = [
+            attr
+            for attr in metadata.get("attrs", []) or []
+            if str(attr.get("key")) not in {"shape", "dtype"}
+        ]
+
+
+def _clear_unverified_boundary_chain(
+    nodes: list[dict[str, Any]], source_id: str
+) -> None:
+    """Carry an unknown external spec through pass-through boundary tiles."""
+    frontier = [source_id]
+    visited: set[str] = set()
+    while frontier:
+        current = frontier.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        for tile in nodes:
+            if _node_attr(tile, "synthetic") not in {"@input", "@input_mirror"}:
+                continue
+            edges = tile.get("incomingEdges") or []
+            if len(edges) != 1 or str(edges[0].get("sourceNodeId")) != current:
+                continue
+            _clear_unverified_output_spec(tile)
+            frontier.append(str(tile.get("id") or ""))
+
+
+def _expose_unfed_section_inputs(
+    nodes: list[dict[str, Any]],
+    shape_inferencer: ShapeInferencer | None = None,
+) -> None:
+    """Surface each unfed outer-section input as a top-level model input.
+
+    A section can contain an expanded helper whose primary is a bare parameter
+    of the enclosing model rather than the section's chain input. The helper's
+    ``section/@input:param`` is then a genuine external graph source. Give it a
+    root-scope source tile instead of leaving a namespaced boundary orphaned.
+
+    Only the first namespace level is eligible. A deeper ``a/b/@input:param`` is
+    an internal module boundary and still has to be wired by its caller.
+    """
+    by_id = {str(node.get("id") or ""): node for node in nodes}
+    additions: list[dict[str, Any]] = []
+    for target in list(nodes):
+        if not _is_synthetic_input(target) or target.get("incomingEdges"):
+            continue
+        namespace = str(target.get("namespace") or "")
+        if not namespace or "/" in namespace:
+            continue
+        target_id = str(target.get("id") or "")
+        if not target_id.startswith(f"{namespace}/@input:"):
+            continue
+        param = str(
+            _node_attr(target, "boundary_input") or target.get("label") or ""
+        ).strip()
+        if not param:
+            continue
+        source_id = f"@input:{param}"
+        source = by_id.get(source_id)
+        verified_spec = (
+            shape_inferencer.boundary_input_spec(param, namespace)
+            if shape_inferencer is not None
+            else None
+        )
+        if shape_inferencer is not None:
+            if verified_spec is None:
+                _clear_unverified_output_spec(target)
+            else:
+                apply_shape_attrs(target, verified_spec)
+        if source is None:
+            source = _make_group_input_node(
+                input_id=source_id,
+                label=param,
+                namespace="",
+                port_label=param,
+            )
+            if verified_spec is not None:
+                apply_shape_attrs(source, verified_spec)
+            elif shape_inferencer is None and (
+                shape := _node_attr(target, "output_shape")
+            ):
+                source.setdefault("attrs", []).append(
+                    {"key": "output_shape", "value": shape}
+                )
+            additions.append(source)
+            by_id[source_id] = source
+        elif verified_spec is not None:
+            apply_shape_attrs(source, verified_spec)
+        target["incomingEdges"] = [_source_edge((source_id, "0"), param)]
+        if shape_inferencer is not None and verified_spec is None:
+            _clear_unverified_boundary_chain(nodes, source_id)
+    nodes.extend(additions)
 
 
 def _grid_descriptor_columns(nodes: list[dict[str, Any]], boundary_id: str) -> int:
@@ -10025,8 +10247,11 @@ def build_merged_model_graph(
     # loop body and each ``@loop_carried_out`` after it.
     # After the loop-invariant threading, which is what wires several of
     # these boundaries in the first place.
+    _coalesce_duplicate_section_inputs(nodes)
+    _expose_unfed_section_inputs(nodes, shape_inferencer)
     _share_one_tile_per_entering_tensor(nodes)
     _name_a_boundary_for_its_mirror(nodes)
+    refine_multi_output_port_shapes(nodes)
     _split_tuple_boundary_slots(nodes)
     _order_model_inputs(nodes)
     _topologically_order_nodes(nodes)
@@ -10068,7 +10293,13 @@ def build_merged_model_graph(
     # boundary-level pass. An edge created then can descend two boxes at once;
     # the same pass, run on the final edges, lands it on each box it enters.
     _insert_missing_boundary_levels(nodes)
+    refine_multi_output_port_shapes(nodes)
     _carry_producer_shape_to_boundary_tiles(nodes)
+    _drop_mismatched_boundary_operands(nodes)
+    # Boundary rewrites above can change the operand a shape-preserving op
+    # finally reads. Reconcile its output before operand annotation/type-check,
+    # so both sides of the same edge are checked in their final state.
+    widen_broadcast_results(nodes)
     _annotate_op_input_signatures(nodes)
     # After the second annotation: no-op casts materialised by the loop-invariant
     # pass have been elided, and operand edges match the graph being written.
@@ -10102,6 +10333,7 @@ def build_merged_model_graph(
     # one is left alone.
     _carry_producer_shape_to_boundary_tiles(nodes)
     widen_broadcast_results(nodes)
+    refine_multi_output_port_shapes(nodes)
     # Right behind it: that pass is the last thing to state a shape, and this
     # is what makes a stated shape one the reader can actually see.
     _publish_declared_shapes_as_output_ports(nodes)

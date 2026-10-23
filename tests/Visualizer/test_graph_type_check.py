@@ -162,6 +162,20 @@ def test_concat_same_rank_is_clean():
     assert type_check_graph_nodes([node]) == []
 
 
+def test_broadcasting_builtin_with_opaque_inspect_signature_is_not_a_tensor_list():
+    # torch.eq exposes an opaque varargs signature to ``inspect`` in some torch
+    # builds. Its aten schema is still the authoritative binary contract, so
+    # broadcasting a scalar/rank-1 value against a matrix is legal.
+    node = _op_node(
+        "n:eq_broadcast",
+        "Equal",
+        ["float16", "float16"],
+        [["1"], ["B", "S", "H"]],
+        raw_op="eq",
+    )
+    assert type_check_graph_nodes([node]) == []
+
+
 def test_unknown_op_is_skipped():
     # An op whose raw name resolves to no signature / aten schema has no known
     # operand contract, so it is skipped -- no false positives on custom kernels.

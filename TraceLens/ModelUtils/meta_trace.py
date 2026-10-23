@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -520,6 +521,62 @@ def harvest_meta_tensors(checkpoint: str | Path) -> MetaTensorIndex | None:
     return MetaTensorIndex(by_qualified=by_qualified, by_class_attr=by_class_attr)
 
 
+# A module that returns a structured result (``last_hidden_state`` on a
+# model-output object, rather than a bare tensor) still has one tensor that
+# is the result. These names are the ones modeling code uses for that result.
+_PRIMARY_OUTPUT_FIELDS = (
+    "last_hidden_state",
+    "logits",
+    "hidden_states",
+    "pooler_output",
+)
+
+
+def _tensor_shape_from_output(output: Any) -> tuple[int, ...] | None:
+    """The shape of the tensor a module returned, including a structured result.
+
+    A bare tensor is itself. A tuple returns its first tensor. A mapping or
+    object with fields (a model-output dataclass) prefers the field modeling
+    code treats as the result, then the first tensor it carries.
+    """
+    if isinstance(output, (str, bytes)):
+        return None
+    if not isinstance(output, (tuple, list, dict)):
+        shape = getattr(output, "shape", None)
+        if isinstance(shape, tuple):
+            return tuple(shape)
+    if isinstance(output, (tuple, list)):
+        for item in output:
+            found = _tensor_shape_from_output(item)
+            if found is not None:
+                return found
+        return None
+    if isinstance(output, Mapping):
+        for name in _PRIMARY_OUTPUT_FIELDS:
+            if name in output:
+                found = _tensor_shape_from_output(output[name])
+                if found is not None:
+                    return found
+        for item in output.values():
+            found = _tensor_shape_from_output(item)
+            if found is not None:
+                return found
+        return None
+    for name in _PRIMARY_OUTPUT_FIELDS:
+        item = getattr(output, name, None)
+        if item is not None and item is not output:
+            found = _tensor_shape_from_output(item)
+            if found is not None:
+                return found
+    values = getattr(output, "__dict__", None)
+    if isinstance(values, dict):
+        for item in values.values():
+            found = _tensor_shape_from_output(item)
+            if found is not None:
+                return found
+    return None
+
+
 def trace_meta_shapes(
     checkpoint: str | Path,
     config: dict[str, Any] | None = None,
@@ -579,13 +636,9 @@ def trace_meta_shapes(
     def _make_hook(name: str):
         def hook(_module, _input, output):
             try:
-                if isinstance(output, torch.Tensor):
-                    shapes[name] = tuple(output.shape)
-                elif isinstance(output, (tuple, list)):
-                    for item in output:
-                        if isinstance(item, torch.Tensor):
-                            shapes[name] = tuple(item.shape)
-                            break
+                shape = _tensor_shape_from_output(output)
+                if shape is not None:
+                    shapes[name] = shape
             except Exception:
                 pass
 

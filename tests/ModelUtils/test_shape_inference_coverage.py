@@ -2076,6 +2076,57 @@ class Passthrough(nn.Module):
 """
 
 
+DELEGATE_SRC = """
+import torch.nn as nn
+
+
+class Delegator(nn.Module):
+    def delegate(self, values, grid=None):
+        return self.implement(values, grid)
+
+    def implement(self, hidden_states, grid=None):
+        return hidden_states.sum(dim=1)
+"""
+
+
+def test_introspect_method_follows_a_self_delegation():
+    analysis = analyze_source(DELEGATE_SRC, config={"hidden_size": 8})
+    spec = ArchitectureSpec(
+        name="d",
+        model_type="t",
+        hidden_size=8,
+        raw_config={"hidden_size": 8},
+        class_registry=analysis.class_registry,
+    )
+    inf = ShapeInferencer(spec)
+    out = inf._introspect_method_shape(
+        "delegate", [TensorSpec(("B", "S", 8))], root=None
+    )
+    assert out is not None
+    assert out.shape == ("B", 8)
+
+
+def test_unresolved_module_takes_its_meta_traced_output(caplog):
+    inf = _make_inferencer(hidden_size=32)
+    inf._meta_shapes["model.language_model"] = TensorSpec(("B", "S", 32), "bfloat16")
+    node = _node(
+        "from_config",
+        operation=OperationKind.UNKNOWN,
+        class_name="",
+        node_id="seq:14:language_model:language_model:0",
+    )
+    with caplog.at_level(
+        logging.WARNING, logger="TraceLens.ModelUtils.shape_inference"
+    ):
+        out = inf._infer_node_output(
+            node,
+            [TensorSpec((3, "S"), "int64"), TensorSpec(("B", "S"), "bfloat16")],
+            root=None,
+        )
+    assert out.shape == ("B", "S", 32)
+    assert "No shape inference rule" not in caplog.text
+
+
 def test_introspect_method_without_operations_returns_none():
     analysis = analyze_source(METHOD_NOOP_SRC, config={"hidden_size": 8})
     spec = ArchitectureSpec(

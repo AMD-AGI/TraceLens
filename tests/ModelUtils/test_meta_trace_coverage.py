@@ -657,3 +657,21 @@ def test_instantiate_meta_robust_text_submodel_fallback(monkeypatch):
     model, cfg = result
     assert isinstance(model, FakeTextForCausalLM)
     assert isinstance(cfg, _TypedTextConfig)
+
+
+def test_structured_module_output_reports_its_result_tensor():
+    hidden = torch.empty(2, 5, 8)
+    cache = torch.empty(2, 4, 5, 2)
+    output = {
+        "past_key_values": cache,
+        "last_hidden_state": hidden,
+    }
+    assert mt._tensor_shape_from_output(hidden) == (2, 5, 8)
+    assert mt._tensor_shape_from_output((cache, hidden)) == (2, 4, 5, 2)
+    assert mt._tensor_shape_from_output(output) == (2, 5, 8)
+
+    class Result:
+        def __init__(self):
+            self.logits = torch.empty(2, 5, 32)
+
+    assert mt._tensor_shape_from_output(Result()) == (2, 5, 32)

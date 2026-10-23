@@ -903,6 +903,8 @@ def _ops_feeding_only_discarded_slots(
     output_names: list[str] | None,
     fn_return_order: list[str],
     fn_return_slots: dict[str, str],
+    *,
+    any_position: bool = False,
 ) -> set[str]:
     """Ops that exist only to build a return value the caller throws away.
 
@@ -913,28 +915,46 @@ def _ops_feeding_only_discarded_slots(
     ones, and return the ops reachable ONLY from the discarded side; anything a
     surviving slot also needs is kept.
 
-    Only a discarded SUFFIX is honoured, so the kept slots keep their ordinals and
-    no consumer is re-indexed.
+    Only a discarded SUFFIX is honoured by default, so the kept slots keep their
+    ordinals and no consumer is re-indexed. ``any_position`` also drops a
+    leading or middle ``_`` (``_, kept = method(...)``) without removing the
+    slot, so the caller's ordinals stay put. An op the discarded slot shares
+    with anything else — a kept return, or a check that reads the same tensor —
+    stays.
     """
     if not method_ops or not output_names or not fn_return_order:
         return set()
-    trailing = 0
-    for name in reversed(output_names):
-        if name != "_":
-            break
-        trailing += 1
-    if not trailing or trailing >= len(output_names):
-        return set()
     if len(output_names) != len(fn_return_order):
         return set()
-    discarded = fn_return_order[len(fn_return_order) - trailing :]
-    kept = fn_return_order[: len(fn_return_order) - trailing]
+    if any_position:
+        discarded = [
+            slot
+            for slot, unpacked in zip(fn_return_order, output_names, strict=False)
+            if unpacked == "_"
+        ]
+        kept = [
+            slot
+            for slot, unpacked in zip(fn_return_order, output_names, strict=False)
+            if unpacked != "_"
+        ]
+        if not discarded or not kept:
+            return set()
+    else:
+        trailing = 0
+        for name in reversed(output_names):
+            if name != "_":
+                break
+            trailing += 1
+        if not trailing or trailing >= len(output_names):
+            return set()
+        discarded = fn_return_order[len(fn_return_order) - trailing :]
+        kept = fn_return_order[: len(fn_return_order) - trailing]
 
     by_attr = {op.attr_name: op for op in method_ops}
 
-    def _upstream(names: list[str]) -> set[str]:
+    def _upstream_from(attrs: list[str | None]) -> set[str]:
         seen: set[str] = set()
-        stack = [fn_return_slots.get(name) for name in names]
+        stack = list(attrs)
         while stack:
             attr = stack.pop()
             if not attr or attr in seen or attr not in by_attr:
@@ -943,7 +963,20 @@ def _ops_feeding_only_discarded_slots(
             stack.extend(by_attr[attr].predecessors)
         return seen
 
-    return _upstream(discarded) - _upstream(kept)
+    discarded_upstream = _upstream_from(
+        [fn_return_slots.get(name) for name in discarded]
+    )
+    # Ops outside the discarded return still read its producers: the check
+    # ``n == features.numel()`` reads the mask the discarded slot unsqueezes.
+    # Walking from those ops keeps the shared mask and drops only the unsqueeze
+    # the caller never reads.
+    other = [
+        op.attr_name for op in method_ops if op.attr_name not in discarded_upstream
+    ]
+    live = _upstream_from(
+        [fn_return_slots.get(name) for name in kept]
+    ) | _upstream_from(other)
+    return discarded_upstream - live
 
 
 def _expanded_free_function_node(
@@ -2636,6 +2669,21 @@ def build_block_node(
                 m_return_slots, m_return_order, m_primary_return = (
                     method_returns if method_returns else ({}, [], None)
                 )
+                # ``kept, _ = self.method(...)`` throws the method's last return
+                # away. The op that builds only that slot has no consumer in
+                # this call, the same way a free function's discarded suffix
+                # does. Drop it here, before it is drawn as a dead leaf.
+                _discarded = _ops_feeding_only_discarded_slots(
+                    method_ops,
+                    cls.forward_step_output_names.get(call_attr),
+                    m_return_order,
+                    m_return_slots,
+                    any_position=True,
+                )
+                if _discarded:
+                    method_ops = [
+                        op for op in method_ops if op.attr_name not in _discarded
+                    ]
                 m_primary_output_step = (
                     m_return_slots.get(m_primary_return)
                     if m_primary_return and m_return_slots
