@@ -7140,6 +7140,7 @@ class _ForwardOperationExtractor:
         other_producer: str,
         test: str,
         ports: tuple[tuple[str, int], ...] = (),
+        variable: str | None = None,
     ) -> str:
         """Emit an explicit Merge (phi) node joining two mutually-exclusive branch
         producers of one reassigned variable, and return its id.
@@ -7181,7 +7182,14 @@ class _ForwardOperationExtractor:
                 # submodule makes unreachable, and a merge over a pruned arm is
                 # exactly the node that must SURVIVE such a variant -- it still
                 # has a live arm to forward, and pruning it orphans that arm.
-                details=(f"merge: {test}",),
+                # ``merges:`` names the variable the arms rebind, so a boundary
+                # that took this node's label can take the variable's name once
+                # the branch itself is no longer drawn.
+                details=(
+                    (f"merge: {test}", f"merges: {variable}")
+                    if variable and variable.isidentifier()
+                    else (f"merge: {test}",)
+                ),
             )
         )
         return attr_name
@@ -10488,6 +10496,7 @@ class _ForwardOperationExtractor:
                                 other_producer,
                                 test,
                                 tuple(ports),
+                                variable,
                             )
                             # The merge is one tensor. Leaving the unpack
                             # ordinal on the name would make the next read
