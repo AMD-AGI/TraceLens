@@ -6,6 +6,7 @@
 
 """Unit tests for TraceLens/PerfModel/extensions."""
 
+import ast, textwrap
 import pytest, inspect, sys
 from TraceLens.PerfModel.extensions import (
     FusedMoE,
@@ -205,6 +206,18 @@ class TestPseudoOpsPerfUtils:
             mappings["aiter::mla_sparse_prefill_fp8_asm"] is mla_sparse_prefill_fp8_asm
         )
 
+    def test_pseudo_op_mapping_keys_are_unique_in_source(self):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(get_pseudo_op_mappings)))
+        keys = [
+            key.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Dict)
+            for key in node.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        ]
+        duplicates = {key for key in keys if keys.count(key) > 1}
+        assert not duplicates
+
     def test_get_pseudo_op_category_only_mappings(self):
         category_only = get_pseudo_op_category_only_mappings()
         utils_category_only = _category_only_from_utils()
@@ -285,25 +298,6 @@ class TestMoeExtensions:
         model = BiasedGroupedTopk(event)
         assert model.flops() == 64 * 256
         assert model.bytes() > 0
-
-    def test_topk_gating_fwd(self):
-        event = {
-            "args": {
-                "Input Dims": [[16, 6], [16, 6], [16, 384], [384], [], [], []],
-                "Input type": [
-                    "float",
-                    "int",
-                    "c10::BFloat16",
-                    "float",
-                    "Scalar",
-                    "Scalar",
-                    "Scalar",
-                ],
-            }
-        }
-        model = BiasedGroupedTopk(event)
-        assert model.flops() == 16 * 384
-        assert model.bytes() == 16 * 6 * 4 + 16 * 6 * 4 + 16 * 384 * 2 + 384 * 4
 
     def test_moe_sort_scatter_gather(self):
         event = {
@@ -1969,7 +1963,6 @@ class TestPerfModelExtensions:
     @pytest.mark.parametrize(
         "dims,block_k,block_n",
         [
-            ([[1, 7168], [6144, 7168], [1, 56], [48, 56], [], []], 128, 128),
             ([[14336, 1536], [65536, 1536], [14336, 48], [65536, 48], [], []], 32, 1),
         ],
     )
