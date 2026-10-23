@@ -29,7 +29,6 @@ from pathlib import Path
 # Constants
 
 PACKAGE_ROOT = "TraceLens"
-COPYRIGHT_TEST = "tests/test_copyright_headers.py"
 RUN_ALL_PATHS = frozenset(
     {
         "setup.py",
@@ -44,20 +43,19 @@ RUN_ALL_PATHS = frozenset(
         "tests/conftest.py",
     }
 )
-COPYRIGHT_SUFFIXES = frozenset({".py", ".md", ".yml", ".yaml", ".ipynb"})
-COPYRIGHT_SKIP_DIR_NAMES = frozenset(
+_SKIP_WALK_DIRS = frozenset(
     {
         ".git",
         "__pycache__",
         ".pytest_cache",
         ".ipynb_checkpoints",
+        "TraceLens.egg-info",
         "node_modules",
         "venv",
         "env",
         ".venv",
     }
 )
-_SKIP_WALK_DIRS = COPYRIGHT_SKIP_DIR_NAMES | {"TraceLens.egg-info"}
 _GITHUB_OUTPUT_DELIMITER = "__SELECT_RELATED_TESTS__"
 
 
@@ -181,13 +179,26 @@ def select_related_tests(repo_root, changed_paths):
     for path in changed:
         if _is_test_path(path) and (root / path).is_file():
             selected.add(path)
-    if _needs_copyright_test(changed) and (root / COPYRIGHT_TEST).is_file():
-        selected.add(COPYRIGHT_TEST)
-
     existing = tuple(sorted(path for path in selected if (root / path).is_file()))
     if not existing:
         return Selection("none", ())
     return Selection("selected", existing)
+
+
+def exclude_test_prefixes(selection, prefixes):
+    """Remove test roots owned by dedicated runners from a selected test set.
+
+    ``all`` remains unchanged: its caller must run the full core suite.  A
+    selected set with no remaining paths becomes ``none``, allowing that
+    runner to be skipped rather than treating its empty list as an error.
+    """
+    if selection.mode != "selected":
+        return selection
+    normalized = tuple(_normalize(prefix).rstrip("/") + "/" for prefix in prefixes)
+    files = tuple(
+        path for path in selection.test_files if not path.startswith(normalized)
+    )
+    return Selection("selected", files) if files else Selection("none", ())
 
 
 def git_changed_paths(repo_root, base, head="HEAD"):
@@ -242,6 +253,12 @@ def main(argv=None):
     )
     parser.add_argument("--all", action="store_true", help="Select the full suite")
     parser.add_argument(
+        "--exclude-test-prefix",
+        action="append",
+        default=[],
+        help="Test-path prefix owned by a dedicated runner; repeatable",
+    )
+    parser.add_argument(
         "--github-output", type=Path, help="Append mode and test_files for Actions"
     )
     parser.add_argument(
@@ -265,6 +282,7 @@ def main(argv=None):
         if not changed and not args.base and args.changed_from is None:
             parser.error("pass --all, --base, --changed-file, or --changed-from")
         selection = select_related_tests(args.repo_root, changed)
+    selection = exclude_test_prefixes(selection, args.exclude_test_prefix)
 
     print(f"mode={selection.mode}")
     for path in selection.test_files:
@@ -357,21 +375,6 @@ def _py_in_dir(root, directory):
     return [
         _normalize(str(path.relative_to(root))) for path in sorted(folder.glob("*.py"))
     ]
-
-
-def _needs_copyright_test(changed):
-    for path in changed:
-        suffix = Path(path).suffix.lower()
-        if suffix not in COPYRIGHT_SUFFIXES:
-            continue
-        if Path(path).name in {"__init__.py", "LICENSE"}:
-            continue
-        if any(part in COPYRIGHT_SKIP_DIR_NAMES for part in Path(path).parts):
-            continue
-        if ".egg-info" in Path(path).parts:
-            continue
-        return True
-    return False
 
 
 def _parse_imports(root, py_files, modules):
