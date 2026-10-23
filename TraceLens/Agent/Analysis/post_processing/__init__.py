@@ -20,8 +20,10 @@ from TraceLens.Agent.Analysis.post_processing.candidate_schema import (
     ComputeMember,
     ComputeTask,
     ExecutiveSummary,
+    FusionTask,
     Impact,
     ReportInfo,
+    TaskMember,
     TopOperationRow,
 )
 
@@ -32,7 +34,9 @@ __all__ = [
     "ComputeMember",
     "ComputeTask",
     "ExecutiveSummary",
+    "FusionTask",
     "Impact",
     "ReportInfo",
+    "TaskMember",
     "TopOperationRow",
 ]

@@ -38,6 +38,23 @@ from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
 from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
 
+# Constants
+# Base group-by columns of the per-unique-args summaries (ops_unique_args and
+# unified_perf_summary). Optional columns are inserted per flag at build time.
+UNIQUE_ARGS_GROUPING_COLS = (
+    "name",
+    "op category",
+    "process_name",
+    "process_label",
+    "thread_name",
+    "Input Dims",
+    "Input type",
+    "Input Strides",
+    "Concrete Inputs",
+)
+# Prefix of the perf-model parameter columns that roofline sheets group by.
+PERF_PARAM_PREFIX = "param: "
+
 
 def normalize_dtype_to_precision(dtype_str):
     """
@@ -154,6 +171,16 @@ def _perf_model_init_kwargs(
     if "inductor_cache_dir" in sig.parameters or has_var_keyword:
         kwargs["inductor_cache_dir"] = inductor_cache_dir
     return kwargs
+
+
+def event_process_thread_names(tree, event):
+    """The unified perf table's ``process_name`` / ``process_label`` / ``thread_name`` of ``event``."""
+    meta = tree.metadata.get(event.get("pid"), {})
+    return {
+        "process_name": meta.get(0, {}).get("process_name", "Unknown"),
+        "process_label": meta.get(0, {}).get("process_labels", "Unknown"),
+        "thread_name": meta.get(event.get("tid"), {}).get("thread_name", "Unknown"),
+    }
 
 
 class TreePerfAnalyzer:
@@ -716,7 +743,7 @@ class TreePerfAnalyzer:
 
         # Identify parameter columns for grouping
         param_cols = [
-            col for col in df_perf_metrics.columns if col.startswith("param: ")
+            col for col in df_perf_metrics.columns if col.startswith(PERF_PARAM_PREFIX)
         ]
         if group_by_num_kernels and "num_kernels" in df_perf_metrics.columns:
             param_cols.append("num_kernels")
@@ -1424,17 +1451,7 @@ class TreePerfAnalyzer:
         Returns:
             pd.DataFrame: DataFrame with unique arguments for each operation.
         """
-        grouping_cols_original = [
-            "name",
-            "op category",
-            "process_name",
-            "process_label",
-            "thread_name",
-            "Input Dims",
-            "Input type",
-            "Input Strides",
-            "Concrete Inputs",
-        ]
+        grouping_cols_original = list(UNIQUE_ARGS_GROUPING_COLS)
         if group_by_parent_module:
             idx = grouping_cols_original.index("op category") + 1
             grouping_cols_original.insert(idx, "parent_module")
@@ -2025,15 +2042,7 @@ class TreePerfAnalyzer:
                 "UID": event.get("UID"),
                 "pid": event.get("pid"),
                 "tid": event.get("tid"),
-                "process_name": self.tree.metadata.get(event.get("pid"), {})
-                .get(0, {})
-                .get("process_name", "Unknown"),
-                "process_label": self.tree.metadata.get(event.get("pid"), {})
-                .get(0, {})
-                .get("process_labels", "Unknown"),
-                "thread_name": self.tree.metadata.get(event.get("pid"), {})
-                .get(event.get("tid"), {})
-                .get("thread_name", "Unknown"),
+                **event_process_thread_names(self.tree, event),
                 "External id": args.get("External id"),
                 "duration_us": event.get("dur"),
                 "has_perf_model": has_own_perf_model or is_sole_bwd,
@@ -2261,17 +2270,7 @@ class TreePerfAnalyzer:
             return pd.DataFrame()
 
         df_temp = df_unified_perf.copy()
-        grouping_cols = [
-            "name",
-            "op category",
-            "process_name",
-            "process_label",
-            "thread_name",
-            "Input Dims",
-            "Input type",
-            "Input Strides",
-            "Concrete Inputs",
-        ]
+        grouping_cols = list(UNIQUE_ARGS_GROUPING_COLS)
         if (
             include_overlapping_kernels
             and "overlapping_kernel_names" in df_temp.columns
