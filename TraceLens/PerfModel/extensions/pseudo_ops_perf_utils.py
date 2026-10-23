@@ -52,6 +52,7 @@ def get_pseudo_op_mappings():
         "aiter::biased_grouped_topk_hip": moe_perf_model_extensions.BiasedGroupedTopk,
         "aiter::moe_sorting_fwd": moe_perf_model_extensions.MoeSortScatterGather,
         "aiter::mxfp4_moe_sort_hip": moe_perf_model_extensions.MoeSortScatterGather,
+        "sglang_profiler::moe_sorting_small__run_small_sort": moe_perf_model_extensions.MoeSortScatterGather,
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
@@ -125,6 +126,7 @@ def get_pseudo_op_mappings():
         ## Collective ops
         "aiter::fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm,
         "aiter::fused_allreduce_rmsnorm_": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
+        "sglang_profiler::communication_op_tensor_model_parallel_fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
         "_C_custom_ar::all_reduce": custom_collectives_perf_model_extensions.custom_ar_all_reduce,
         "aiter::reduce_scatter": custom_collectives_perf_model_extensions.aiter_reduce_scatter,
         "aiter::all_gather_reg": custom_collectives_perf_model_extensions.aiter_all_gather_reg,
