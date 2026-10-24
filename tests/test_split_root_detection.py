@@ -411,15 +411,59 @@ class TestDetectionFlow:
         assert len(result) == 16
         assert result.coverage.covered_selected == 1.0
 
-    def test_partial_known_falls_through_to_unknown_family(self):
-        """Only 3 of 20 iterations match a known pattern. Known annotations
-        have poor coverage, so the unknown family path picks up
-        scheduler.run_batch which covers all 20.
+    def test_scheduler_run_batch_preferred_over_step_annotations(self):
+        """scheduler.run_batch is in the preferred tier and wins over
+        step[DECODE] even when those are also present.  Unmatched roots
+        are enriched with the single contained known annotation.
         """
         events, corr = [], 400
         for i in range(20):
             base = 1000 + i * 1000
             events.append(annotation("scheduler.run_batch", base, 500))
+            inner = f"step[DECODE bs={i + 1}]"
+            events.append(annotation(inner, base + 50, 200))
+            events.append(launch(base + 60, corr))
+            events.append(kernel(base + 600, 300, corr))
+            corr += 1
+
+        result = _detect(events)
+        assert len(result) == 20
+        assert result.method == "annotation:tier"
+        assert result.status is DetectStatus.SPLITTABLE
+        root_names = {r["name"] for r in result.roots}
+        assert all(n.startswith("step[DECODE") for n in root_names)
+
+    def test_scheduler_run_batch_enrichment_skipped_with_multiple_known(self):
+        """When a scheduler.run_batch contains multiple known annotations,
+        enrichment is skipped and the root keeps its original name.
+        """
+        events, corr = [], 600
+        for i in range(12):
+            base = 1000 + i * 1000
+            events.append(annotation("scheduler.run_batch", base, 800))
+            # Two step[DECODE] inside each run_batch -> enrichment skipped
+            for step in range(2):
+                inner = f"step[DECODE bs={step + 1}]"
+                events.append(annotation(inner, base + 50 + step * 300, 200))
+                events.append(launch(base + 60 + step * 300, corr))
+                events.append(kernel(base + 900 + step * 50, 100, corr))
+                corr += 1
+
+        result = _detect(events)
+        assert result.method == "annotation:tier"
+        assert len(result) == 12
+        # No enrichment: all roots stay as scheduler.run_batch
+        assert all(r["name"] == "scheduler.run_batch" for r in result.roots)
+
+    def test_partial_known_falls_through_to_unknown_family(self):
+        """Only 3 of 20 iterations match a known pattern and there is no
+        preferred-tier annotation.  The unknown family path picks up the
+        enclosing annotation that covers all 20.
+        """
+        events, corr = [], 400
+        for i in range(20):
+            base = 1000 + i * 1000
+            events.append(annotation("scheduler.process_batch_result", base, 500))
             inner = (
                 f"step[DECODE bs={i + 1}]" if i < 3 else f"step[TARGET_VERIFY bs={i}]"
             )
@@ -431,17 +475,17 @@ class TestDetectionFlow:
         result = _detect(events)
         assert len(result) == 20
         assert result.method == "family:unknown_only"
-        assert result.diagnostics["root_family"] == "scheduler.run_batch"
+        assert result.diagnostics["root_family"] == "scheduler.process_batch_result"
         assert result.status is DetectStatus.SPLITTABLE
 
     def test_unknown_family_with_nested_known_annotations(self):
-        """When known annotations are nested inside an unknown family,
-        the unknown family is selected because it covers all iterations.
+        """When known annotations are nested inside an unknown family
+        (not scheduler.run_batch), the unknown family is selected.
         """
         events, corr = [], 600
         for i in range(12):
             base = 1000 + i * 1000
-            events.append(annotation("scheduler.run_batch", base, 800))
+            events.append(annotation("custom_engine_step", base, 800))
             for step in range(2):
                 inner = (
                     f"step[DECODE bs={step + 1}]" if i < 6 else f"step[UNKNOWN {step}]"
@@ -454,7 +498,7 @@ class TestDetectionFlow:
         result = _detect(events)
         assert result.method == "family:unknown_only"
         assert len(result) == 12
-        assert result.diagnostics["root_family"] == "scheduler.run_batch"
+        assert result.diagnostics["root_family"] == "custom_engine_step"
 
     def test_unknown_family_catches_enclosing_annotation(self):
         """When only a few iterations have known annotations, the unknown

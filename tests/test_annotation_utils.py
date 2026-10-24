@@ -25,18 +25,24 @@ from TraceLens.TraceUtils.utils.annotation_utils import (
     PHASE_DECODE_ONLY,
     PHASE_PREFILL_ONLY,
     PHASE_PREFILLDECODE,
+    SPEC_ROLE_DRAFTER,
+    SPEC_ROLE_DRAFTER_EXTEND,
+    SPEC_ROLE_TARGET,
     CaptureAnnotation,
     IterationAnnotation,
     average_detail,
     classify_phase,
     find_known_annotations,
     find_phase_from_window,
+    find_spec_decode_annotations,
     has_context,
     has_generation,
     is_decode_only,
     is_mixed,
     is_prefill_only,
     iteration_details,
+    spec_decode_batch_sizes,
+    spec_decode_role,
 )
 
 # Case tables: (name, kind, expected_fields, expected_meta)
@@ -228,6 +234,10 @@ VLLM_CASES = [
     ),
 ]
 
+DETAILED_VERIFY = (
+    "step[TARGET_VERIFY bs=32 c_sq=128 c_sqsq=512 c_sqsk=188244 c_sk=47061]"
+)
+
 SGLANG_CASES = [
     # --- native (no roofline_annotations) ---
     (
@@ -252,6 +262,41 @@ SGLANG_CASES = [
             g_sq=64,
             context_requests=0,
             has_sqsk=False,
+        ),
+        {},
+    ),
+    (  # spec-decode verify: bs counts requests, not draft tokens
+        "step[VERIFY bs=32]",
+        "sglang_native",
+        dict(
+            batch_size=32,
+            generation_requests=32,
+            g_sq=32,
+            context_requests=0,
+            has_sqsk=False,
+        ),
+        {},
+    ),
+    (
+        "step[TARGET_VERIFY bs=7]",
+        "sglang_native",
+        dict(batch_size=7, generation_requests=7, context_requests=0),
+        {},
+    ),
+    (  # roofline-patched verify: decode requests, causal c_* aggregates
+        DETAILED_VERIFY,
+        "sglang_detailed",
+        dict(
+            batch_size=128,
+            generation_requests=32,
+            generation_sum=128,
+            context_requests=0,
+            c_sq=128,
+            c_sqsq=512,
+            c_sqsk=188244,
+            c_sk=47061,
+            g_sq=0,
+            has_sqsk=True,
         ),
         {},
     ),
@@ -835,6 +880,17 @@ def _event(name, ts=0, cat="user_annotation"):
     return {"name": name, "ts": ts, "cat": cat}
 
 
+def test_find_known_annotations_prefers_preferred_tier():
+    events = [
+        _event("scheduler.run_batch", ts=5),
+        _event(DETAILED_DECODE, ts=10),
+        _event(NATIVE_DECODE, ts=20),
+        _event("step[DECODE bs=64]", ts=30),
+    ]
+    roots = find_known_annotations(events)
+    assert [e["name"] for e in roots] == ["scheduler.run_batch"]
+
+
 def test_find_known_annotations_prefers_the_detailed_tier():
     events = [
         _event(DETAILED_DECODE, ts=10),
@@ -855,6 +911,178 @@ def test_find_known_annotations_on_no_match():
     assert find_known_annotations([_event("unrelated")]) == []
     wrong_cat = [_event(DETAILED_DECODE, cat="cpu_op")]
     assert find_known_annotations(wrong_cat) == []
+
+
+# --------------------------------------------------------------------------- #
+# Speculative decoding roots
+# --------------------------------------------------------------------------- #
+DETAILED_EXTEND = (
+    "step[EXTEND bs=2 toks=14721 c_sq=14721 c_sqsq=108745533 "
+    "c_sqsk=108745533 c_sk=14721]"
+)
+
+
+def _span(name, ts, dur=10, cat="user_annotation"):
+    return {"name": name, "ts": ts, "dur": dur, "cat": cat}
+
+
+def test_verify_is_decode_only_but_not_an_iteration_root():
+    detail = IterationAnnotation("step[VERIFY bs=32]").iter_details()
+    assert classify_phase(detail) == PHASE_DECODE_ONLY
+    events = [_event("step[DECODE bs=8]", ts=10), _event("step[VERIFY bs=8]", ts=20)]
+    assert [e["ts"] for e in find_known_annotations(events)] == [10]
+
+
+def test_detailed_verify_is_a_primary_iteration_root():
+    detail = IterationAnnotation(DETAILED_VERIFY).iter_details()
+    assert classify_phase(detail) == PHASE_DECODE_ONLY
+    events = [_event(DETAILED_EXTEND, ts=0), _event(DETAILED_VERIFY, ts=20)]
+    assert [e["ts"] for e in find_known_annotations(events)] == [0, 20]
+    assert [e["ts"] for e in find_spec_decode_annotations(events)] == [20]
+
+
+@pytest.mark.parametrize("name", ["draft", "draft_extend", "step[DRAFT bs=32]"])
+def test_draft_spans_are_not_iteration_roots(name):
+    assert not IterationAnnotation(name).matched
+    assert find_known_annotations([_event(name)]) == []
+
+
+def test_spec_decode_role():
+    assert spec_decode_role("step[VERIFY bs=32]") == SPEC_ROLE_TARGET
+    assert spec_decode_role("step[TARGET_VERIFY bs=7]") == SPEC_ROLE_TARGET
+    assert spec_decode_role("draft") == SPEC_ROLE_DRAFTER
+    assert spec_decode_role("draft_extend") == SPEC_ROLE_DRAFTER_EXTEND
+    assert spec_decode_role("step[DRAFT bs=32]") is None
+    assert spec_decode_role("step[DECODE bs=32]") is None
+
+
+def test_find_spec_decode_annotations_coexists_with_detailed_tier():
+    events = [
+        _event(DETAILED_EXTEND, ts=0),
+        _event("draft_extend", ts=40),
+        _event("step[DRAFT bs=32]", ts=41),
+        _event("step[VERIFY bs=32]", ts=30),
+        _event("draft", ts=20),
+        _event("draft", ts=50, cat="cpu_op"),
+    ]
+    assert [e["name"] for e in find_known_annotations(events)] == [DETAILED_EXTEND]
+    roots = find_spec_decode_annotations(events)
+    assert [e["name"] for e in roots] == ["draft", "step[VERIFY bs=32]", "draft_extend"]
+
+
+VLLM_SAMPLE = (
+    "sample_128_context_0(sq0sk0sqsq0sqsk0)"
+    "_generation_32(sq128sk42473sqsq512sqsk169892)"
+)
+VLLM_SAMPLE_PARTIAL = (
+    "sample_124_context_0(sq0sk0sqsq0sqsk0)"
+    "_generation_31(sq124sk41406sqsq496sqsk165624)"
+)
+
+
+def test_vllm_sample_is_drafter_not_an_iteration_root():
+    assert spec_decode_role(VLLM_SAMPLE) == SPEC_ROLE_DRAFTER
+    assert not IterationAnnotation(VLLM_SAMPLE).matched
+    assert find_known_annotations([_event(VLLM_SAMPLE)]) == []
+    assert [e["name"] for e in find_spec_decode_annotations([_event(VLLM_SAMPLE)])] == [
+        VLLM_SAMPLE
+    ]
+
+
+def test_vllm_sample_batch_is_generation_requests():
+    execute = (
+        "execute_128_context_0(sq0sk0sqsq0sqsk0)"
+        "_generation_32(sq128sk42473sqsq512sqsk169892)"
+    )
+    assert spec_decode_batch_sizes(
+        [
+            _span(VLLM_SAMPLE, ts=0),
+            _span(execute, ts=10),
+            _span(VLLM_SAMPLE_PARTIAL, ts=20),
+        ]
+    ) == [32, None, 31]
+
+
+def test_spec_decode_batch_sizes_borrow_from_nearest_verify():
+    roots = [
+        _span("draft", ts=0),
+        _span("step[VERIFY bs=32]", ts=20),
+        _span("draft_extend", ts=40),
+        _span("draft", ts=1000),
+        _span("step[TARGET_VERIFY bs=7]", ts=1020),
+        _span(DETAILED_EXTEND, ts=2000),
+        _span("draft", ts=3000),
+        _span(DETAILED_VERIFY, ts=3020),  # requests, not its 128 tokens
+    ]
+    assert spec_decode_batch_sizes(roots) == [32, 32, 32, 7, 7, None, 32, 32]
+    assert spec_decode_batch_sizes([_span("draft", ts=0)]) == [None]
+
+
+# --------------------------------------------------------------------------- #
+# ATOM speculative decoding roots
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "propose_eagle[0/3 tok=4 bs=1]",
+        "propose_eagle[1/3 tok=1 bs=1/1 graph]",
+    ],
+)
+def test_atom_proposer_spans_are_not_iteration_roots(name):
+    assert not IterationAnnotation(name).matched
+    assert find_known_annotations([_event(name)]) == []
+
+
+def test_atom_spec_decode_role():
+    assert spec_decode_role("decode[bs=32 tok=128 d=32 spec=3]") == SPEC_ROLE_TARGET
+    assert (
+        spec_decode_role(
+            "decode[bs=32 tok=128 d=32 spec=3 sqsq=512 sqsk=262144 sk=65536]"
+        )
+        == SPEC_ROLE_TARGET
+    )
+    assert spec_decode_role("decode[bs=64 tok=64 d=64]") is None
+    assert spec_decode_role("prefill[bs=2 tok=14721 ctx=[7803, 6918]]") is None
+    assert spec_decode_role("propose_eagle[0/3 tok=4 bs=1]") == SPEC_ROLE_DRAFTER_EXTEND
+    assert (
+        spec_decode_role("propose_eagle[1/3 tok=1 bs=1/1 graph]") == SPEC_ROLE_DRAFTER
+    )
+    assert (
+        spec_decode_role("propose_eagle[2/3 tok=1 bs=1/1 graph]") == SPEC_ROLE_DRAFTER
+    )
+
+
+def test_atom_find_spec_decode_annotations():
+    events = [
+        _event("prefill[bs=2 tok=14721 ctx=[7803, 6918]]", ts=0),
+        _event("decode[bs=32 tok=128 d=32 spec=3]", ts=100),
+        _event("propose_eagle[0/3 tok=4 bs=1]", ts=80),
+        _event("propose_eagle[1/3 tok=1 bs=1/1 graph]", ts=85),
+        _event("dspark_sched[bs=32]", ts=90),
+    ]
+    known = find_known_annotations(events)
+    assert len(known) == 2
+    spec = find_spec_decode_annotations(events)
+    names = [e["name"] for e in spec]
+    assert "propose_eagle[0/3 tok=4 bs=1]" in names
+    assert "propose_eagle[1/3 tok=1 bs=1/1 graph]" in names
+    assert "decode[bs=32 tok=128 d=32 spec=3]" in names
+    assert "dspark_sched[bs=32]" not in names
+
+
+def test_atom_spec_decode_batch_sizes_borrow_from_nearest_verify():
+    roots = [
+        _span("propose_eagle[0/3 tok=4 bs=1]", ts=0),
+        _span("propose_eagle[1/3 tok=1 bs=1/1 graph]", ts=5),
+        _span("decode[bs=32 tok=128 d=32 spec=3]", ts=20),
+        _span("propose_eagle[0/3 tok=4 bs=1]", ts=1000),
+        _span("decode[bs=64 tok=256 d=64 spec=3]", ts=1020),
+        _span("prefill[bs=2 tok=14721 ctx=[7803, 6918]]", ts=2000),
+    ]
+    sizes = spec_decode_batch_sizes(roots)
+    assert sizes == [32, 32, 32, 64, 64, None]
 
 
 # --------------------------------------------------------------------------- #
