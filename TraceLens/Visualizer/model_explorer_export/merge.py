@@ -2273,10 +2273,10 @@ def _converge_layer_variants_through_an_output_tile(
             if len(group) < 2 or len(group) != len(by_variant):
                 continue
             # The tile is the stack's output, the same port any other block
-            # hands its consumer. It lives in the stack, so opening the stack
-            # shows one input per variant and the collapsed stack still has
-            # one edge out.
+            # hands its consumer. It is drawn beside the stack: the stack box
+            # holds the variants, and this tile is the one value they hand on.
             scope = parent
+            boundary = scope.rsplit("/", 1)[0] if "/" in scope else ""
             label = exit_label(group)
             base_id = f"{scope}/@output:{label}" if scope else f"@output:{label}"
             wanted = {str(edge.get("sourceNodeId")) for edge in group}
@@ -2297,7 +2297,7 @@ def _converge_layer_variants_through_an_output_tile(
                 tile = {
                     "id": tile_id,
                     "label": label,
-                    "namespace": scope,
+                    "namespace": boundary,
                     "attrs": [{"key": "synthetic", "value": "@output"}],
                     "style": ensure_readable_text(output_port_style()),
                     "incomingEdges": [dict(edge) for edge in group],

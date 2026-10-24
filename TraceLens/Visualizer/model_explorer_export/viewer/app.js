@@ -182,14 +182,14 @@ const LEGACY_SHOW_ON_NODE_KEYS = ["model_explorer_show_on_node_item_v3"];
 // Model Explorer enum string values from ShowOnNodeItemType / ShowOnEdgeItemType.
 const TRACE_LENS_SHOW_ON_NODE = {
   "Op node id": { selected: false },
-  "Op node attributes": { selected: false, filterRegex: "output_shape" },
+  "Op node attributes": { selected: true, filterRegex: "parallel" },
   "Op node inputs": { selected: false },
   "Op node outputs": { selected: false },
   "Layer node children count": { selected: false },
   "Layer node descendants count": { selected: false },
   // Model Explorer leaves an edge unlabeled when either end is a collapsed group, so
   // expandable blocks carry their boundary shapes as layer attributes instead.
-  "Layer node attributes": { selected: true, filterRegex: "shape" },
+  "Layer node attributes": { selected: true, filterRegex: "shape|parallel" },
 };
 
 const TRACE_LENS_SHOW_ON_EDGE = {
@@ -199,7 +199,7 @@ const TRACE_LENS_SHOW_ON_EDGE = {
 // Bump when the defaults below change so one refresh picks them up; between bumps the
 // viewer keeps whatever the user selected in the Model Explorer display menu.
 const DEFAULTS_VERSION_KEY = "tracelens_display_defaults_version";
-const DEFAULTS_VERSION = "4";
+const DEFAULTS_VERSION = "5";
 
 function configureModelExplorerDisplay() {
   for (const legacyKey of LEGACY_SHOW_ON_NODE_KEYS) {

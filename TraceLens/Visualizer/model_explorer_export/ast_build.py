@@ -66,6 +66,11 @@ def build_model_explorer_payload(
         shape_inferencer=inferencer,
         inline_expansion=inline_expansion,
     )
+    layout = getattr(spec, "parallel_layout", None)
+    if layout is not None:
+        from TraceLens.ModelUtils.parallel_plan import annotate_parallel_nodes
+
+        annotate_parallel_nodes(graph, layout)
 
     viewer_meta: dict[str, Any] = {
         "factSheet": build_fact_sheet_viewer(spec),

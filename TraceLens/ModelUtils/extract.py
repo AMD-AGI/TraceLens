@@ -142,6 +142,9 @@ class ArchitectureSpec:
     # depicts -- a decided branch leaves no trace in the drawing otherwise.
     runtime_regime: RuntimeRegime = field(default_factory=RuntimeRegime)
     config_overrides: dict[str, Any] = field(default_factory=dict)
+    # Set when the export is asked to split the model. Holds the Hugging Face
+    # tensor / pipeline / expert plans evaluated at the requested partition counts.
+    parallel_layout: Any = None
 
 
 def parse_config_overrides(items: Sequence[str] | None) -> dict[str, Any]:
