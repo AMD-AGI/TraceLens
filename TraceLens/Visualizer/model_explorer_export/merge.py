@@ -79,6 +79,7 @@ from TraceLens.Visualizer.model_explorer_export.shapes import (
     fill_missing_node_shapes,
     group_boundary_shapes,
     infer_block_tree_shapes,
+    stamp_full_shapes,
     node_output_spec,
     refine_multi_output_port_shapes,
     widen_broadcast_results,
@@ -10455,12 +10456,18 @@ def build_merged_model_graph(
     canonicalize_port_shape_keys(nodes)
     if shape_inferencer is not None:
         for namespace, boundary in group_boundary_shapes(nodes).items():
-            graph_attributes.setdefault(namespace, {}).update(boundary)
+            bucket = graph_attributes.setdefault(namespace, {})
+            bucket.update(boundary)
+            for key, value in boundary.items():
+                bucket.setdefault(f"full_{key}", value)
 
     # Last structural pass: a branch reduced to one live input is that input.
     # Anything still standing with fewer than two is reported, not drawn as a choice.
     _elide_noop_merges_and_casts(nodes)
     warn_degenerate_mutually_exclusive_branches(nodes)
+    # After the last pass that writes a shape. Same text as ``output_shape``
+    # until a partition rewrites the displayed key.
+    stamp_full_shapes(nodes)
 
     return {
         "id": graph_id,

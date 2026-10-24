@@ -259,6 +259,20 @@ def test_fact_sheet_lists_the_partition_counts():
     assert body.splitlines()[model_type + 1] == "- Parallelism: TP 4, PP 2"
 
 
+def _shape(node: dict) -> str | None:
+    return next(
+        (item["value"] for item in node["attrs"] if item["key"] == "output_shape"),
+        None,
+    )
+
+
+def _full_shape(node: dict) -> str | None:
+    return next(
+        (item["value"] for item in node["attrs"] if item["key"] == "full_shape"),
+        None,
+    )
+
+
 def _edge(source: str) -> dict:
     return {
         "sourceNodeId": source,
@@ -309,12 +323,14 @@ def test_rowwise_output_is_all_reduced_on_its_way_to_consumers():
     comm = next(
         node for node in graph["nodes"] if node["label"].startswith("all-reduce")
     )
-    assert comm["label"] == "all-reduce ×48"
+    assert comm["label"] == "all-reduce x48"
     assert "8192*B*S bytes" in next(
         item["value"] for item in comm["attrs"] if item["key"] == "parallel"
     )
     consumer = next(node for node in graph["nodes"] if node["id"] == "consumer")
     assert consumer["incomingEdges"][0]["sourceNodeId"] == comm["id"]
+    assert _shape(producer) == "[B, S, 4096] bfloat16"
+    assert _full_shape(producer) == "[B, S, 4096] bfloat16"
     assert integrity_check_graph_nodes(graph["nodes"]) == []
 
 
@@ -356,6 +372,87 @@ def test_a_gather_moves_each_ranks_shard():
         item["value"] for item in comm["attrs"] if item["key"] == "parallel"
     )
     assert comm["attrs"][2]["value"] == "[2, 4, 8] float32"
+    assert _shape(producer) == "[2, 4, 2] float32"
+    assert _full_shape(producer) == "[2, 4, 8] float32"
+    assert _full_shape(comm) == "[2, 4, 8] float32"
+
+
+def test_a_column_parallel_shape_is_per_gpu_and_keeps_the_full_tensor():
+    layout = _layout(ParallelDegree(tp=4))
+    producer = {
+        "id": "block/self_attn/q_proj",
+        "label": "q_proj",
+        "namespace": "block/self_attn",
+        "attrs": [
+            {"key": "attr_name", "value": "q_proj"},
+            {"key": "output_shape", "value": "[2, 4, 8] float32"},
+        ],
+        "outputsMetadata": [
+            {"id": "0", "attrs": [{"key": "shape", "value": "[2, 4, 8] float32"}]}
+        ],
+    }
+    consumer = {
+        "id": "block/self_attn/view",
+        "label": "view",
+        "namespace": "block/self_attn",
+        "attrs": [{"key": "output_shape", "value": "[2, 4, 8] float32"}],
+        "incomingEdges": [_edge(producer["id"])],
+    }
+    graph = _wired(producer)
+    graph["nodes"].append(consumer)
+    annotate_parallel_nodes(graph, layout)
+    assert _shape(producer) == "[2, 4, 2] float32"
+    assert _full_shape(producer) == "[2, 4, 8] float32"
+    assert producer["outputsMetadata"][0]["attrs"][0]["value"] == "[2, 4, 2] float32"
+    assert producer["outputsMetadata"][0]["attrs"][1]["value"] == "[2, 4, 8] float32"
+    assert _shape(consumer) == "[2, 4, 2] float32"
+    assert _full_shape(consumer) == "[2, 4, 8] float32"
+
+    uneven = {
+        "id": "block/self_attn/q_proj",
+        "label": "q_proj",
+        "namespace": "block/self_attn",
+        "attrs": [
+            {"key": "attr_name", "value": "q_proj"},
+            {"key": "output_shape", "value": "[5] float32"},
+        ],
+    }
+    uneven_graph = _wired(uneven)
+    annotate_parallel_nodes(uneven_graph, _layout(ParallelDegree(tp=2)))
+    assert _shape(uneven) == "[3] float32"
+    assert _full_shape(uneven) == "[5] float32"
+    from TraceLens.ModelUtils.parallel_plan import _localize_gpu_shapes
+
+    uneven_layout = _layout(ParallelDegree(tp=2))
+    uneven_layout.gpu_group = GpuGroup(index=1, gpus=(1,))
+    # Rank 0 was drawn first. Rank 1 reads the saved full shape, not that shard.
+    _localize_gpu_shapes({"nodes": uneven_graph["nodes"]}, uneven_layout)
+    assert _shape(uneven) == "[2] float32"
+    assert _full_shape(uneven) == "[5] float32"
+
+
+def test_expert_count_on_one_gpu_is_the_local_slice():
+    classes = parse_class_plans(_SOURCE)
+    spec = ArchitectureSpec(
+        name="expert",
+        model_type="expert",
+        num_experts=64,
+        raw_config={"model_type": "expert", "architectures": []},
+    )
+    layout = layout_from_plans(classes, spec, ParallelDegree(ep=8), spec.raw_config)
+    one_hot = {
+        "id": "block/mlp/sidefeed:2:experts:@op_one_hot:1",
+        "label": "One hot",
+        "namespace": "block/mlp",
+        "attrs": [
+            {"key": "attr_name", "value": "@op_one_hot"},
+            {"key": "output_shape", "value": "[B*S, 4, 64] int64"},
+        ],
+    }
+    graph = {"nodes": [one_hot]}
+    annotate_parallel_nodes(graph, layout)
+    assert _shape(one_hot) == "[B*S, 4, 8] int64"
+    assert _full_shape(one_hot) == "[B*S, 4, 64] int64"
 
 
 def test_gradient_all_reduce_is_drawn_only_for_a_training_run():
@@ -410,8 +507,8 @@ def test_pipeline_boundaries_send_the_hidden_state():
     }
     annotate_parallel_nodes(graph, layout)
     labels = [node["label"] for node in graph["nodes"]]
-    assert labels.count("send stage 0→1 hidden_states") == 1
-    assert labels.count("send stage 1→2 hidden_states") == 1
+    assert labels.count("send stage 0->1 hidden_states") == 1
+    assert labels.count("send stage 1->2 hidden_states") == 1
     assert sum(label.startswith("recv") for label in labels) == 2
     recv = next(node for node in graph["nodes"] if node["label"].startswith("recv"))
     assert next(

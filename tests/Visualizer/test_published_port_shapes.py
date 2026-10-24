@@ -27,6 +27,7 @@ from __future__ import annotations
 from TraceLens.Visualizer.model_explorer_export.merge import (
     _publish_declared_shapes_as_output_ports,
 )
+from TraceLens.Visualizer.model_explorer_export.shapes import stamp_full_shapes
 
 
 def _node(node_id, shape=None, dtype=None, ports=None, sources=()):
@@ -114,3 +115,27 @@ class TestAStatedShapeIsPublished:
         nodes: list[dict] = []
         _publish_declared_shapes_as_output_ports(nodes)
         assert nodes == []
+
+
+def test_the_full_shape_is_recorded_even_when_the_graph_is_not_split() -> None:
+    node = _node(
+        "linear",
+        shape="[B, S, 8192] bfloat16",
+        ports=[
+            {"id": "0", "attrs": [{"key": "shape", "value": "[B, S, 8192] bfloat16"}]}
+        ],
+    )
+    stamp_full_shapes([node])
+    assert {item["key"]: item["value"] for item in node["attrs"]}["full_shape"] == (
+        "[B, S, 8192] bfloat16"
+    )
+    assert node["outputsMetadata"][0]["attrs"][1] == {
+        "key": "full_shape",
+        "value": "[B, S, 8192] bfloat16",
+    }
+    # A second pass must not replace a full shape already saved.
+    node["attrs"][0]["value"] = "[B, S, 4096] bfloat16"
+    stamp_full_shapes([node])
+    assert {item["key"]: item["value"] for item in node["attrs"]}["full_shape"] == (
+        "[B, S, 8192] bfloat16"
+    )

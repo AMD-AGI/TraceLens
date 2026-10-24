@@ -438,9 +438,24 @@ def prepare_gpu_group_payloads(
         layout.gpu_group = group
         stamped = payload if len(groups) == 1 else copy.deepcopy(payload)
         scope_payload_to_gpu_group(stamped, layout)
+        _refresh_displayed_shapes(stamped)
         _refresh_fact_sheet(spec, stamped)
         prepared.append((group, stamped))
     return prepared
+
+
+def _refresh_displayed_shapes(payload: dict) -> None:
+    """Drawn group shapes follow the per-GPU node shapes just written."""
+    from TraceLens.Visualizer.model_explorer_export.shapes import (
+        refresh_displayed_group_shapes,
+    )
+
+    for collection in payload.get("graphCollections") or []:
+        if not isinstance(collection, dict):
+            continue
+        for graph in collection.get("graphs") or []:
+            if isinstance(graph, dict):
+                refresh_displayed_group_shapes(graph)
 
 
 def _refresh_fact_sheet(spec: Any, payload: dict) -> None:

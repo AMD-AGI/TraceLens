@@ -189,7 +189,12 @@ const TRACE_LENS_SHOW_ON_NODE = {
   "Layer node descendants count": { selected: false },
   // Model Explorer leaves an edge unlabeled when either end is a collapsed group, so
   // expandable blocks carry their boundary shapes as layer attributes instead.
-  "Layer node attributes": { selected: true, filterRegex: "shape|parallel" },
+  // Anchored so ``full_shape`` stays in the JSON and off the drawing. The drawn
+  // keys are the per-GPU shape when the graph is partitioned.
+  "Layer node attributes": {
+    selected: true,
+    filterRegex: "^(output_shape|input_shape|shape)$|parallel",
+  },
 };
 
 const TRACE_LENS_SHOW_ON_EDGE = {
@@ -199,7 +204,7 @@ const TRACE_LENS_SHOW_ON_EDGE = {
 // Bump when the defaults below change so one refresh picks them up; between bumps the
 // viewer keeps whatever the user selected in the Model Explorer display menu.
 const DEFAULTS_VERSION_KEY = "tracelens_display_defaults_version";
-const DEFAULTS_VERSION = "5";
+const DEFAULTS_VERSION = "6";
 
 function configureModelExplorerDisplay() {
   for (const legacyKey of LEGACY_SHOW_ON_NODE_KEYS) {

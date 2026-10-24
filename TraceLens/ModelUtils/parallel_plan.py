@@ -347,6 +347,9 @@ def scope_payload_to_gpu_group(payload: dict[str, Any], layout: ParallelLayout) 
 
 def scope_graph_to_gpu_group(graph: dict[str, Any], layout: ParallelLayout) -> None:
     """Drop modules and pipeline hops that this group's stage does not run."""
+    # This group's tensor and expert ranks, which may differ from the rank the
+    # shared graph was first drawn with. ``full_shape`` is the source both times.
+    _localize_gpu_shapes(graph, layout)
     group = layout.gpu_group
     if group is None or layout.degree.pp <= 1 or not layout.stages:
         return
@@ -417,6 +420,7 @@ def annotate_parallel_nodes(graph: dict[str, Any], layout: ParallelLayout) -> No
             }
         )
     _add_communications(nodes, layout)
+    _localize_gpu_shapes(graph, layout)
 
 
 # Collectives that move an activation. Anything else (a sharded output, a
@@ -608,7 +612,8 @@ def _communication_node(
     repeated: bool = True,
 ) -> dict[str, Any]:
     repeats = _repeat_count(producer) if repeated else None
-    label = kind if repeats is None else f"{kind} ×{repeats}"
+    # The viewer font has no multiplication sign, so a count is written "x57".
+    label = kind if repeats is None else f"{kind} x{repeats}"
     if detail:
         label = f"{label} {detail}"
     node_id = f"{producer.get('id')}/@comm:{kind}{':' + detail if detail else ''}"
@@ -617,7 +622,7 @@ def _communication_node(
     if payload:
         value = f"{value}; {payload}"
     if repeats is not None:
-        value = f"{value}; ×{repeats} layers"
+        value = f"{value}; x{repeats} layers"
     attrs = [
         {"key": "parallel", "value": value},
         {
@@ -654,7 +659,7 @@ def _add_pipeline_transfers(nodes: list[Any], layout: ParallelLayout) -> None:
     carried = _stack_outputs(layout)
     for hop in range(hops):
         for name in carried:
-            detail = f"stage {hop}→{hop + 1} {name}"
+            detail = f"stage {hop}->{hop + 1} {name}"
             send = _communication_node(
                 producer,
                 "send",
@@ -770,8 +775,251 @@ def _shard_last(dims: list[str], partitions: int) -> list[str]:
     return dims
 
 
+# Shown on the node and on the edge. ``full_shape`` keeps the unpartitioned
+# tensor beside it; the viewer filter does not draw that key.
+_FULL_SHAPE_KEY = "full_shape"
+_SHARD_OUTPUT_FEATURES = frozenset(
+    {"colwise", "packed_colwise", "colwise_gather_output", "colwise_rep"}
+)
+# A gather restores the full tensor on every rank, so the shard stops at the
+# module. Column-parallel output stays sharded for whoever reads it.
+_PROPAGATE_SHARD = frozenset({"colwise", "packed_colwise"})
+
+
+class _ShapeEdit:
+    """Replacements applied to the unpartitioned dims of one node."""
+
+    __slots__ = ("experts", "last", "sequence")
+
+    def __init__(self) -> None:
+        self.last: tuple[int, int] | None = None
+        self.sequence: tuple[int, int] | None = None
+        self.experts: tuple[int, int] | None = None
+
+
+def _localize_gpu_shapes(graph: dict[str, Any], layout: ParallelLayout) -> None:
+    """Put one GPU's shape on the displayed keys.
+
+    ``output_shape`` and port ``shape`` are what the HTML draws. ``full_shape``
+    stays the whole tensor, whether or not this graph is split. Gather and
+    all-reduce outputs are already the tensor each GPU holds, so they are left
+    as they are.
+    """
+    nodes = graph.get("nodes")
+    if not isinstance(nodes, list) or not layout.degree.requested():
+        return
+    for node in nodes:
+        if isinstance(node, dict):
+            _ensure_full_shape(node)
+    tp_rank, ep_rank = _local_ranks(layout)
+    edits: dict[str, _ShapeEdit] = {}
+    for node in nodes:
+        if not isinstance(node, dict) or _is_collective(node):
+            continue
+        rule = _rule_for_module(node, layout.rules)
+        if rule is None or rule.partitions <= 1 or rule.mesh != "tp":
+            continue
+        if rule.style in _SHARD_OUTPUT_FEATURES:
+            extent = _full_last_extent(node)
+            if extent is None:
+                continue
+            local = _share(extent, rule.partitions, tp_rank)
+            _edit_for(edits, node).last = (extent, local)
+            if rule.style in _PROPAGATE_SHARD and local != extent:
+                _propagate_last_dim(nodes, layout, node, extent, local, edits)
+        elif rule.style == "sequence_parallel":
+            _edit_for(edits, node).sequence = (rule.partitions, tp_rank)
+    _note_local_experts(nodes, layout, ep_rank, edits)
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        edit = edits.get(str(node.get("id")))
+        if edit is not None:
+            _apply_shape_edit(node, edit)
+
+
+def _edit_for(edits: dict[str, _ShapeEdit], node: dict[str, Any]) -> _ShapeEdit:
+    return edits.setdefault(str(node.get("id")), _ShapeEdit())
+
+
+def _is_collective(node: dict[str, Any]) -> bool:
+    return "@comm:" in str(node.get("id") or "")
+
+
+def _local_ranks(layout: ParallelLayout) -> tuple[int, int]:
+    group = layout.gpu_group
+    if group is None or not group.gpus:
+        return 0, 0
+    _pp, ep_rank, tp_rank = _gpu_coord(group.gpus[0], layout.degree)
+    return tp_rank, ep_rank
+
+
+def _full_last_extent(node: dict[str, Any]) -> int | None:
+    dims, _dtype = _parsed_shape_text(_attr(node, _FULL_SHAPE_KEY))
+    if not dims or not dims[-1].isdigit():
+        return None
+    return int(dims[-1])
+
+
+def _propagate_last_dim(
+    nodes: list[Any],
+    layout: ParallelLayout,
+    origin: dict[str, Any],
+    extent: int,
+    local: int,
+    edits: dict[str, _ShapeEdit],
+) -> None:
+    seen = {str(origin.get("id"))}
+    queue = _consumers(nodes, str(origin.get("id")))
+    while queue:
+        node = queue.pop(0)
+        node_id = str(node.get("id"))
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        if _is_collective(node):
+            continue
+        rule = _rule_for_module(node, layout.rules)
+        if rule is not None and rule.style not in _PROPAGATE_SHARD:
+            continue
+        dims, _dtype = _parsed_shape_text(_attr(node, _FULL_SHAPE_KEY))
+        if not dims or str(extent) not in dims:
+            continue
+        edit = _edit_for(edits, node)
+        if edit.last is None:
+            edit.last = (extent, local)
+        queue.extend(_consumers(nodes, node_id))
+
+
+def _note_local_experts(
+    nodes: list[Any],
+    layout: ParallelLayout,
+    ep_rank: int,
+    edits: dict[str, _ShapeEdit],
+) -> None:
+    if layout.degree.ep <= 1:
+        return
+    count = next((check.size for check in layout.checks if check.mesh == "ep"), None)
+    if not isinstance(count, int) or count <= 0:
+        return
+    local = len(_expert_ids(count, layout.degree.ep, ep_rank))
+    if local == count or layout.hidden_size == count:
+        return
+    if not any(
+        rule.style in {"grouped_gemm", "megamoe_experts"} for rule in layout.rules
+    ):
+        return
+    token = str(count)
+    for node in nodes:
+        if not isinstance(node, dict) or _is_collective(node):
+            continue
+        if "experts" not in _module_path(node):
+            continue
+        dims, _dtype = _parsed_shape_text(_attr(node, _FULL_SHAPE_KEY))
+        if not dims or token not in dims:
+            continue
+        _edit_for(edits, node).experts = (count, local)
+
+
+def _apply_shape_edit(node: dict[str, Any], edit: _ShapeEdit) -> None:
+    full = _attr(node, _FULL_SHAPE_KEY)
+    dims, dtype = _parsed_shape_text(full)
+    if not dims:
+        return
+    if edit.sequence is not None and len(dims) > 1:
+        parts, rank = edit.sequence
+        dim = dims[1]
+        if dim.isdigit():
+            local = _share(int(dim), parts, rank)
+            if local != int(dim):
+                dims[1] = str(local)
+        elif dim == "S" and parts > 1:
+            dims[1] = f"S/{parts}"
+    if edit.last is not None:
+        extent, local = edit.last
+        if local != extent:
+            token = str(extent)
+            dims = [str(local) if dim == token else dim for dim in dims]
+    if edit.experts is not None:
+        count, local = edit.experts
+        token = str(count)
+        dims = [str(local) if dim == token else dim for dim in dims]
+    displayed = _format_shape(dims, dtype)
+    if displayed != full:
+        _write_displayed_shape(node, displayed, full or "")
+
+
+def _ensure_full_shape(node: dict[str, Any]) -> None:
+    current = _attr(node, "output_shape")
+    if current and not _attr(node, _FULL_SHAPE_KEY):
+        _set_attr(node, _FULL_SHAPE_KEY, current)
+    for metadata in node.get("outputsMetadata") or []:
+        if isinstance(metadata, dict):
+            _copy_shape_key(metadata.get("attrs"), "shape", _FULL_SHAPE_KEY)
+    for metadata in node.get("inputsMetadata") or []:
+        if isinstance(metadata, dict):
+            _copy_shape_key(metadata.get("attrs"), "shape", _FULL_SHAPE_KEY)
+
+
+def _copy_shape_key(attrs: Any, source: str, dest: str) -> None:
+    if not isinstance(attrs, list):
+        return
+    if any(isinstance(item, dict) and item.get("key") == dest for item in attrs):
+        return
+    value = next(
+        (
+            item.get("value")
+            for item in attrs
+            if isinstance(item, dict) and item.get("key") == source
+        ),
+        None,
+    )
+    if isinstance(value, str) and value:
+        attrs.append({"key": dest, "value": value})
+
+
+def _write_displayed_shape(node: dict[str, Any], displayed: str, full: str) -> None:
+    _set_attr(node, "output_shape", displayed)
+    for metadata in node.get("outputsMetadata") or []:
+        if not isinstance(metadata, dict):
+            continue
+        attrs = metadata.get("attrs")
+        if not isinstance(attrs, list):
+            continue
+        for attr in attrs:
+            if not isinstance(attr, dict) or attr.get("key") != "shape":
+                continue
+            full_attr = next(
+                (
+                    item
+                    for item in attrs
+                    if isinstance(item, dict) and item.get("key") == _FULL_SHAPE_KEY
+                ),
+                None,
+            )
+            if full_attr is None or full_attr.get("value") == full:
+                attr["value"] = displayed
+
+
+def _format_shape(dims: list[str], dtype: str | None) -> str:
+    text = f"[{', '.join(dims)}]"
+    return f"{text} {dtype}" if dtype else text
+
+
+def _set_attr(node: dict[str, Any], key: str, value: str) -> None:
+    attrs = node.setdefault("attrs", [])
+    for item in attrs:
+        if isinstance(item, dict) and item.get("key") == key:
+            item["value"] = value
+            return
+    attrs.append({"key": key, "value": value})
+
+
 def _parsed_shape(node: dict[str, Any]) -> tuple[list[str] | None, str | None]:
-    value = _attr(node, "output_shape")
+    return _parsed_shape_text(_attr(node, "output_shape"))
+
+
+def _parsed_shape_text(value: str | None) -> tuple[list[str] | None, str | None]:
     if not value:
         return None, None
     start = value.find("[")
@@ -1064,7 +1312,7 @@ def _path_owned(segments: list[str], excluded: set[str], stack: set[str]) -> boo
 
 def _pipeline_hop(node: dict[str, Any]) -> tuple[int, int] | None:
     text = f"{node.get('id') or ''} {node.get('label') or ''}"
-    match = re.search(r"stage (\d+)→(\d+)", text)
+    match = re.search(r"stage (\d+)(?:→|->)(\d+)", text)
     if match is None:
         return None
     return int(match.group(1)), int(match.group(2))
