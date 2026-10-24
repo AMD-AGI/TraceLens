@@ -17,13 +17,22 @@ tensor shapes the static analysis can't infer.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from TraceLens.ModelUtils.basic_ops import DEFAULT_BASIC_OP_PATTERNS
+from TraceLens.ModelUtils.parallel_plan import (
+    ParallelDegree,
+    build_parallel_layout,
+    gpu_group_report,
+    scope_payload_to_gpu_group,
+    unique_gpu_groups,
+)
 from TraceLens.ModelUtils.ast_analyze import RuntimeRegime
 from TraceLens.ModelUtils.extract import (
     ArchitectureSpec,
@@ -148,6 +157,35 @@ def build_parser() -> argparse.ArgumentParser:
             "newer. The environment is cached and reused. "
             "Use --no-auto-venv to always stay in the current interpreter."
         ),
+    )
+
+    partition_group = parser.add_argument_group(
+        "device partitions",
+        "How many ways to split the model. The split itself comes from the "
+        "plans on its Hugging Face config (base_model_tp_plan, "
+        "base_model_pp_plan, base_model_ep_plan, plus the causal-LM head). "
+        "1 leaves that axis unsplit.",
+    )
+    partition_group.add_argument(
+        "--tp",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Tensor-parallel partitions (default: 1).",
+    )
+    partition_group.add_argument(
+        "--pp",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Pipeline-parallel partitions (default: 1).",
+    )
+    partition_group.add_argument(
+        "--ep",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Expert-parallel partitions (default: 1).",
     )
 
     regime_group = parser.add_argument_group(
@@ -372,6 +410,77 @@ def file_created_at(path: Path) -> datetime:
     return datetime.fromtimestamp(timestamp)
 
 
+def subgraph_output_path(output: Path, index: int, count: int) -> Path:
+    """``model_subgraph_0.html`` when more than one group is written."""
+    if count <= 1:
+        return output
+    return output.with_name(f"{output.stem}_subgraph_{index}{output.suffix}")
+
+
+def prepare_gpu_group_payloads(
+    spec: Any, payload: dict
+) -> list[tuple[Any, dict]] | None:
+    """One payload per unique GPU group. ``None`` when the model is not split.
+
+    Prints the GPU-to-subgraph map. A single group keeps the caller's payload
+    object; several groups are copies so each file can name its own devices.
+    """
+    layout = getattr(spec, "parallel_layout", None)
+    if layout is None or not layout.degree.requested():
+        return None
+    groups = unique_gpu_groups(layout, spec)
+    if not groups:
+        return None
+    for line in gpu_group_report(groups, layout.degree):
+        print(line)
+    prepared: list[tuple[Any, dict]] = []
+    for group in groups:
+        layout.gpu_group = group
+        stamped = payload if len(groups) == 1 else copy.deepcopy(payload)
+        scope_payload_to_gpu_group(stamped, layout)
+        _refresh_displayed_shapes(stamped)
+        _refresh_fact_sheet(spec, stamped)
+        prepared.append((group, stamped))
+    return prepared
+
+
+def _refresh_displayed_shapes(payload: dict) -> None:
+    """Drawn group shapes follow the per-GPU node shapes just written."""
+    from TraceLens.Visualizer.model_explorer_export.shapes import (
+        refresh_displayed_group_shapes,
+    )
+
+    for collection in payload.get("graphCollections") or []:
+        if not isinstance(collection, dict):
+            continue
+        for graph in collection.get("graphs") or []:
+            if isinstance(graph, dict):
+                refresh_displayed_group_shapes(graph)
+
+
+def _refresh_fact_sheet(spec: Any, payload: dict) -> None:
+    from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
+        build_fact_sheet_viewer,
+    )
+
+    viewer = build_fact_sheet_viewer(spec)
+    viewer_meta = payload.setdefault("tracelensViewer", {})
+    if isinstance(viewer_meta, dict):
+        viewer_meta["factSheet"] = viewer
+    for collection in payload.get("graphCollections") or []:
+        if not isinstance(collection, dict):
+            continue
+        for graph in collection.get("graphs") or []:
+            if not isinstance(graph, dict):
+                continue
+            attrs = graph.get("groupNodeAttributes")
+            if not isinstance(attrs, dict):
+                continue
+            root = attrs.get("")
+            if isinstance(root, dict):
+                root["architecture_fact_sheet"] = viewer["body"]
+
+
 def write_optional_output(
     payload: dict,
     output: Path,
@@ -496,6 +605,18 @@ def _build_ast_payload(
     basic_ops = build_detailed_basic_ops(
         add=args.basic_op_add, remove=args.basic_op_remove
     )
+    degree = ParallelDegree(tp=args.tp, pp=args.pp, ep=args.ep)
+    if degree.requested():
+        spec.parallel_layout = build_parallel_layout(spec, degree)
+        for line in spec.parallel_layout.fact_lines():
+            text = line.strip()
+            if (
+                "does not divide" in text
+                or text.startswith("The model declares")
+                or text.startswith("No Hugging Face")
+            ):
+                print(f"Warning: {text}", file=sys.stderr)
+
     payload = build_ast_model_explorer_payload(
         spec,
         basic_ops=basic_ops,
@@ -645,6 +766,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         return _run_torch_module(args, parser)
 
+    for name in ("tp", "pp", "ep"):
+        if getattr(args, name) < 1:
+            parser.error(f"--{name} must be a positive number of partitions")
+
     checkpoint = resolve_checkpoint_arg(checkpoint=args.checkpoint, source=args.source)
 
     if checkpoint is None and args.github is None:
@@ -687,36 +812,38 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error writing operator export: {exc}", file=sys.stderr)
             return 1
 
+    prepared = prepare_gpu_group_payloads(spec, payload)
+    serve_payload = prepared[0][1] if prepared else payload
     serve_requested = args.serve or args.open
-
-    if args.output is not None:
+    write_files = (
+        args.output is not None
+        or not serve_requested
+        or (prepared is not None and len(prepared) > 1)
+    )
+    if write_files:
         output = (
             default_html_output_path(checkpoint, getattr(args, "github", None))
-            if args.output == Path("__default__")
+            if args.output is None or args.output == Path("__default__")
             else args.output
         )
-        try:
-            write_optional_output(
-                payload,
-                output,
-                generated_at=datetime.now(),
-                drop_constants=args.drop_constants,
+        outputs = prepared if prepared else [(None, payload)]
+        count = len(prepared) if prepared else 1
+        for group, stamped in outputs:
+            path = (
+                output
+                if group is None
+                else subgraph_output_path(output, group.index, count)
             )
-        except Exception as exc:  # noqa: BLE001
-            print(f"Error writing output: {exc}", file=sys.stderr)
-            return 1
-    elif not serve_requested:
-        try:
-            output = default_html_output_path(checkpoint, getattr(args, "github", None))
-            write_optional_output(
-                payload,
-                output,
-                generated_at=datetime.now(),
-                drop_constants=args.drop_constants,
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"Error writing output: {exc}", file=sys.stderr)
-            return 1
+            try:
+                write_optional_output(
+                    stamped,
+                    path,
+                    generated_at=datetime.now(),
+                    drop_constants=args.drop_constants,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"Error writing output: {exc}", file=sys.stderr)
+                return 1
 
     if serve_requested:
         url = viewer_url(args.port)
@@ -725,7 +852,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.open:
                 open_viewer(url)
             serve_viewer(
-                payload=payload,
+                payload=serve_payload,
                 port=args.port,
                 block=args.serve,
                 drop_constants=args.drop_constants,

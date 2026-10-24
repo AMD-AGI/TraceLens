@@ -826,3 +826,42 @@ def test_fact_sheet_layers_mix_analysis_and_empty_highlights():
 def test_fact_sheet_analysis_filters_operation_notes():
     spec = _spec(analysis_notes=["@op generated"])
     assert "AST:" not in fact_sheet.build_fact_sheet_viewer(spec)["body"]
+
+
+def test_subgraph_suffix_is_added_only_for_several_groups():
+    single = Path("model.html")
+    assert cli.subgraph_output_path(single, 0, 1) == single
+    assert cli.subgraph_output_path(single, 0, 2) == Path("model_subgraph_0.html")
+    assert cli.subgraph_output_path(single, 1, 2) == Path("model_subgraph_1.html")
+
+
+def test_cli_writes_one_file_per_unique_gpu_group(monkeypatch, tmp_path, capsys):
+    from TraceLens.ModelUtils.parallel_plan import GpuGroup
+
+    _patch_cli_success(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "unique_gpu_groups",
+        lambda layout, spec: [
+            GpuGroup(index=0, gpus=(0, 1)),
+            GpuGroup(index=1, gpus=(2, 3)),
+        ],
+    )
+    write_output = Mock(side_effect=lambda payload, path, **kwargs: path)
+    monkeypatch.setattr(cli, "write_optional_output", write_output)
+
+    output = tmp_path / "model.html"
+    assert cli.main(["org/model", "--tp", "2", "-o", str(output)]) == 0
+    printed = capsys.readouterr().out
+    assert "subgraph 0: GPUs 0-1" in printed
+    assert "subgraph 1: GPUs 2-3" in printed
+    assert [call.args[1] for call in write_output.call_args_list] == [
+        tmp_path / "model_subgraph_0.html",
+        tmp_path / "model_subgraph_1.html",
+    ]
+    assert (
+        "Subgraph 0: GPUs 0-1"
+        in write_output.call_args_list[0].args[0]["tracelensViewer"]["factSheet"][
+            "body"
+        ]
+    )

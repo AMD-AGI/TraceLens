@@ -120,15 +120,28 @@ class TestTheArmsConverge:
                 tiles[0]["id"]
             ]
 
-    def test_it_sits_inside_the_stack_that_holds_the_variants(self) -> None:
-        """Beside the stack, the collapsed box is its only visible input."""
+    def test_it_is_drawn_beside_the_stack_that_holds_the_variants(self) -> None:
+        """The stack box holds the variants. Their join sits one level up."""
         nodes = [
             _node("a", f"{STACK}/31x_A"),
             _node("b", f"{STACK}/11x_B"),
             _node("head", "", sources=["a", "b"]),
         ]
         _converge_layer_variants_through_an_output_tile(nodes)
-        assert _outputs(nodes)[0]["namespace"] == STACK
+        tile = _outputs(nodes)[0]
+        assert tile["namespace"] == ""
+        assert tile["id"] == f"{STACK}/@output:output"
+
+        nested = "decoder/45x_Decoder"
+        nodes = [
+            _node("a", f"{nested}/31x_A"),
+            _node("b", f"{nested}/11x_B"),
+            _node("head", "", sources=["a", "b"]),
+        ]
+        _converge_layer_variants_through_an_output_tile(nodes)
+        tile = _outputs(nodes)[0]
+        assert tile["namespace"] == "decoder"
+        assert tile["id"] == f"{nested}/@output:output"
 
     def test_it_carries_the_arms_shape(self) -> None:
         nodes = [

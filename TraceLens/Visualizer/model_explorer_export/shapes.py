@@ -150,6 +150,74 @@ def canonicalize_port_shape_keys(nodes: list[dict[str, Any]]) -> None:
                     _canonicalize_metadata(metadata)
 
 
+# The viewer draws ``output_shape`` and port ``shape``. This key keeps the whole
+# tensor in the JSON, including when those displayed keys are later rewritten
+# to one GPU's shard. The name is not drawn: the on-node filter matches the
+# displayed keys only.
+FULL_SHAPE_KEY = "full_shape"
+
+
+def _copy_missing_attr(attrs: Any, source: str, dest: str) -> None:
+    if not isinstance(attrs, list):
+        return
+    if any(isinstance(item, dict) and item.get("key") == dest for item in attrs):
+        return
+    value = next(
+        (
+            item.get("value")
+            for item in attrs
+            if isinstance(item, dict)
+            and item.get("key") == source
+            and isinstance(item.get("value"), str)
+            and item.get("value")
+        ),
+        None,
+    )
+    if isinstance(value, str):
+        attrs.append({"key": dest, "value": value})
+
+
+def stamp_full_shapes(nodes: list[Any]) -> None:
+    """Record the unpartitioned shape next to the one the viewer draws.
+
+    With no device split the two texts match. A later partition pass rewrites
+    only ``output_shape`` and port ``shape``.
+    """
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        _copy_missing_attr(node.get("attrs"), "output_shape", FULL_SHAPE_KEY)
+        for metadata_key in ("outputsMetadata", "inputsMetadata"):
+            for metadata in node.get(metadata_key) or []:
+                if isinstance(metadata, dict):
+                    _copy_missing_attr(metadata.get("attrs"), "shape", FULL_SHAPE_KEY)
+
+
+def refresh_displayed_group_shapes(graph: dict[str, Any]) -> None:
+    """Point each group's drawn shape at the tensors currently on its boundary.
+
+    ``full_input_shape`` and ``full_output_shape`` stay the unpartitioned
+    values. ``input_shape`` and ``output_shape`` are what the viewer draws, so
+    they follow a per-GPU rewrite of the nodes.
+    """
+    nodes = graph.get("nodes")
+    attributes = graph.get("groupNodeAttributes")
+    if not isinstance(nodes, list) or not isinstance(attributes, dict):
+        return
+    for namespace, boundary in group_boundary_shapes(nodes).items():
+        bucket = attributes.setdefault(namespace, {})
+        if not isinstance(bucket, dict):
+            continue
+        for key, value in boundary.items():
+            full_key = f"full_{key}"
+            if full_key not in bucket:
+                existing = bucket.get(key)
+                bucket[full_key] = (
+                    existing if isinstance(existing, str) and existing else value
+                )
+            bucket[key] = value
+
+
 def canonicalize_payload_shapes(payload: dict[str, Any]) -> None:
     """Fold ``tensor_shape`` into ``shape`` on every graph in a payload."""
     if not isinstance(payload, dict):
