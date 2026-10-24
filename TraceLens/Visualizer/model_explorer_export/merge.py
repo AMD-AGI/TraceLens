@@ -4187,6 +4187,31 @@ def _carry_producer_shape_to_boundary_tiles(nodes: list[dict[str, Any]]) -> None
             return
 
 
+def publish_stated_shapes_and_check(graph: dict[str, Any], *, label: str) -> list[str]:
+    """Publish every stated shape, then run the post-processing checks.
+
+    Communication nodes are added after the build's own finishing passes. A
+    node that states ``output_shape`` and never publishes a port is drawn as
+    ``?`` on the edge that leaves it. The checks are the same ones the build
+    runs, so a node added later is held to the same graph.
+    """
+    nodes = graph.get("nodes")
+    if not isinstance(nodes, list):
+        return []
+    _publish_declared_shapes_as_output_ports(nodes)
+    canonicalize_port_shape_keys(nodes)
+    stamp_full_shapes(nodes)
+    # input_shapes was stamped before the per-GPU rewrite. The checks compare
+    # an op with the tensor it reads, which is the port just published.
+    _annotate_op_input_signatures(nodes)
+    warnings: list[str] = []
+    warnings.extend(type_check_graph_nodes(nodes))
+    warnings.extend(integrity_check_graph_nodes(nodes, label=label))
+    warnings.extend(group_cycle_check_graph_nodes(nodes, label=label))
+    warnings.extend(warn_degenerate_mutually_exclusive_branches(nodes))
+    return warnings
+
+
 def _publish_declared_shapes_as_output_ports(nodes: list[dict[str, Any]]) -> None:
     """A node that states a shape has to publish it, or the reader sees ``?``.
 

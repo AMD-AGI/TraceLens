@@ -74,6 +74,14 @@ def build_model_explorer_payload(
         )
 
         annotate_parallel_nodes(graph, layout)
+        # The build already published shapes and checked the graph. These nodes
+        # did not exist then, so both have to run again or an edge leaves a
+        # collective with no shape and the viewer draws "?".
+        from TraceLens.Visualizer.model_explorer_export.merge import (
+            publish_stated_shapes_and_check,
+        )
+
+        publish_stated_shapes_and_check(graph, label="parallel")
         if layout.degree.requested():
             refresh_displayed_group_shapes(graph)
 
