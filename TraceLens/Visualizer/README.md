@@ -146,6 +146,10 @@ python -m TraceLens.Visualizer.model_explorer_export.cli --from-payload kimi.jso
 | `--config-override KEY=VALUE`   | Override one config key, repeatable. Applied last, over the checkpoint, the config-class defaults, and the model's own constructor writes. A dotted key reaches a nested config (`vision_config.hidden_size=1024`). The value is JSON when it parses as JSON (`8`, `true`, `null`, `[1, 2]`) and text otherwise. Stating one key twice keeps the last value |
 | `--config-path`                 | Explicit `config.json` path inside a checkpoint                                                         |
 | `--code-path`                   | Explicit path to `modeling_*.py` when auto-discovery fails                                              |
+| `--engine {vllm,sglang}`        | Draw the architecture from vLLM's or SGLang's own pinned modeling source instead of transformers', and read `--tp`/`--pp`/`--ep` from that engine's sharding classes instead of a declared `base_model_tp_plan` |
+| `--tp N`                        | Tensor-parallel partitions (default: `1`)                                                               |
+| `--pp N`                        | Pipeline-parallel partitions (default: `1`)                                                             |
+| `--ep N`                        | Expert-parallel partitions (default: `1`)                                                               |
 | `--dump-ast`                    | Write parsed modeling-file AST dump to a path                                                           |
 | `--basic-op-add REGEX`          | Treat matching block names as leaf/basic ops (repeatable)                                               |
 | `--basic-op-remove REGEX`       | Remove a default basic-op pattern (repeatable)                                                          |
@@ -175,6 +179,30 @@ python -m TraceLens.Visualizer.model_explorer_export.cli moonshotai/Kimi-K3 \
   --config-override num_hidden_layers=2 \
   -o kimi-decode.html
 ```
+
+### Device partitioning (`--tp`/`--pp`/`--ep`/`--engine`)
+
+`--tp`, `--pp`, and `--ep` split the graph across GPUs and annotate each node with its
+partition style and the collectives (all-reduce, send/recv) that cross a device boundary.
+The split comes from the checkpoint's declared `base_model_tp_plan` / `base_model_pp_plan`
+/ `base_model_ep_plan`, by default.
+
+`--engine {vllm,sglang}` draws the architecture from that inference engine's own pinned
+modeling source instead — vLLM's or SGLang's `ColumnParallelLinear`, `RowParallelLinear`,
+`QKVParallelLinear`, `VocabParallelEmbedding`, `make_layers`/`make_pp_layers`, and
+`FusedMoE`-style experts — and reads `--tp`/`--pp`/`--ep` from those sharding idioms instead
+of a declared plan. It is ignored once `--code-path` or `--github` already name the source
+(it still selects the engine-aware plan parser in that case).
+
+```bash
+python -m TraceLens.Visualizer.model_explorer_export.cli meta-llama/Llama-3.1-70B \
+  --engine vllm --tp 8 --pp 2 -o llama3-70b.html
+
+python -m TraceLens.Visualizer.model_explorer_export.cli MiniMaxAI/MiniMax-M3.1-flash \
+  --engine sglang --tp 2 --ep 4 -o minimax-m3-sglang.html
+```
+
+A GPU count that does not divide evenly into partitions is still exported, with a warning.
 
 ### Debugging: standalone `nn.Module` introspection (`--torch-module`)
 
@@ -245,6 +273,7 @@ Generic AST introspection reads Python from:
 - your local `--code-path`
 - `**huggingface/transformers**` (installed package or GitHub fallback)
 - `**fla-org/flash-linear-attention**` (kernel dependency introspection)
+- `**vllm-project/vllm**` and `**sgl-project/sglang**`, pinned (`--engine vllm` / `--engine sglang`)
 
 Other GitHub repositories are blocked unless you explicitly allow them:
 
@@ -261,6 +290,12 @@ modeling code, so `modeling_<model_type>.py` is read from `huggingface/transform
 on GitHub — for a multimodal wrapper, the nested text backbone's `model_type` is tried
 too. The file is cached under `~/.cache/tracelens`, and if the fetch fails the export
 falls back to config heuristics.
+
+`--engine vllm` / `--engine sglang` read from a fixed tag of each engine instead
+(`vllm-project/vllm@v0.32.0`, `sgl-project/sglang@v0.5.22`), resolved the same way: vLLM's
+static model registry, or SGLang's filename convention under `srt/models/`, following
+out-of-tree package re-exports (e.g. vLLM's `minimax_m3` package) to the file that
+actually defines the architecture class.
 
 ## How it works
 

@@ -19,6 +19,7 @@ from TraceLens.ModelUtils.parallel_plan import (
     gpu_group_report,
     layout_from_plans,
     parse_class_plans,
+    parse_engine_class_plans,
     scope_graph_to_gpu_group,
     unique_gpu_groups,
 )
@@ -921,6 +922,220 @@ def _send(namespace: str, hop: str) -> dict:
         "label": f"send stage {hop} hidden_states",
         "namespace": namespace,
     }
+
+
+# Trimmed to the lines that matter, but the idioms (class/kwarg names, the
+# make_layers/make_pp_layers tuple order, the is_first_rank/is_last_rank
+# conditionals) are read straight off vllm==0.32.0 and sglang==0.5.22 --
+# the engines this plan recognizes.
+_VLLM_ENGINE_SOURCE = """
+class LlamaMLP(nn.Module):
+    def __init__(self, hidden_size, intermediate_size, prefix=""):
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size, [intermediate_size] * 2, prefix=f"{prefix}.gate_up_proj"
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size, hidden_size, prefix=f"{prefix}.down_proj"
+        )
+
+class LlamaAttention(nn.Module):
+    def __init__(self, hidden_size, prefix=""):
+        self.qkv_proj = QKVParallelLinear(hidden_size, head_dim, total_num_heads)
+        self.o_proj = RowParallelLinear(hidden_size, hidden_size)
+
+class LlamaModel(nn.Module):
+    def __init__(self, config, prefix=""):
+        if get_pp_group().is_first_rank:
+            self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
+        else:
+            self.embed_tokens = PPMissingLayer()
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers, lambda prefix: LlamaDecoderLayer(config, prefix), prefix
+        )
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(config.hidden_size)
+        else:
+            self.norm = PPMissingLayer()
+
+class LlamaForCausalLM(nn.Module):
+    def __init__(self, config):
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
+            if config.tie_word_embeddings:
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        else:
+            self.lm_head = PPMissingLayer()
+"""
+
+_SGLANG_ENGINE_SOURCE = """
+class MiniMaxM3MLP(nn.Module):
+    def __init__(self, hidden_size, intermediate_size, prefix=""):
+        self.gate_up_proj = MergedColumnParallelLinear(hidden_size, [intermediate_size] * 2)
+        self.down_proj = RowParallelLinear(intermediate_size, hidden_size)
+
+class MiniMaxM3MoE(nn.Module):
+    def __init__(self, config, layer_id, prefix=""):
+        self.experts = get_moe_impl_class(quant_config)(
+            num_experts=config.num_local_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            prefix=add_prefix("experts", prefix),
+        )
+
+class MiniMaxM3SparseAttention(nn.Module):
+    def __init__(self, hidden_size, prefix=""):
+        self.qkv_proj = MinimaxM3QKVParallelLinearWithIndexer(hidden_size, head_dim, total_num_heads)
+        self.o_proj = RowParallelLinear(hidden_size, hidden_size, reduce_results=False)
+
+class MiniMaxM3Model(nn.Module):
+    def __init__(self, config, prefix=""):
+        if self.pp_group.is_first_rank:
+            self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
+        else:
+            self.embed_tokens = PPMissingLayer()
+        self.layers, self.start_layer, self.end_layer = make_pp_layers(
+            config.num_hidden_layers, layer_fn, prefix=add_prefix("layers", prefix)
+        )
+        if self.pp_group.is_last_rank:
+            if self.use_gemma_norm:
+                self.norm = GemmaRMSNorm(config.hidden_size)
+            else:
+                self.norm = RMSNorm(config.hidden_size)
+        else:
+            self.norm = PPMissingLayer(return_tuple=True)
+
+class MiniMaxM3SparseForCausalLM(nn.Module):
+    def __init__(self, config):
+        if self.pp_group.is_last_rank:
+            self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
+        else:
+            self.lm_head = PPMissingLayer()
+"""
+
+
+def test_vllm_linear_classes_read_as_the_matching_hf_style():
+    classes = {c.name: c for c in parse_engine_class_plans(_VLLM_ENGINE_SOURCE)}
+    assert classes["LlamaMLP"].tp == {
+        "gate_up_proj": "packed_colwise",
+        "down_proj": "rowwise",
+    }
+    assert classes["LlamaAttention"].tp == {
+        "qkv_proj": "packed_colwise",
+        "o_proj": "rowwise",
+    }
+    assert classes["LlamaModel"].tp == {"embed_tokens": "embedding_rowwise"}
+    assert classes["LlamaForCausalLM"].tp == {"lm_head": "embedding_rowwise"}
+
+
+def test_vllm_pipeline_boundaries_follow_pp_group_rank_checks():
+    classes = {c.name: c for c in parse_engine_class_plans(_VLLM_ENGINE_SOURCE)}
+    assert classes["LlamaModel"].pp == [
+        ("embed_tokens", ["input_ids"], ["inputs_embeds"]),
+        ("layers", ["hidden_states"], ["hidden_states"]),
+        ("norm", ["hidden_states"], []),
+    ]
+    # lm_head's real-module branch runs tie_weights() after the assignment;
+    # the boundary still reads off the FIRST self.lm_head assignment.
+    assert classes["LlamaForCausalLM"].pp == [("lm_head", ["hidden_states"], [])]
+
+
+def test_sglang_reduce_results_false_reads_as_rowwise_split_input():
+    classes = {c.name: c for c in parse_engine_class_plans(_SGLANG_ENGINE_SOURCE)}
+    assert classes["MiniMaxM3SparseAttention"].tp == {
+        "qkv_proj": "packed_colwise",  # matched via its indexer-subclass suffix
+        "o_proj": "rowwise_split_input",
+    }
+
+
+def test_sglang_expert_factory_is_read_by_its_num_experts_keyword():
+    classes = {c.name: c for c in parse_engine_class_plans(_SGLANG_ENGINE_SOURCE)}
+    assert classes["MiniMaxM3MoE"].ep == {"experts": "grouped_gemm"}
+    assert classes["MiniMaxM3MoE"].tp is None
+
+
+def test_sglang_make_pp_layers_puts_modules_first_not_last():
+    classes = {c.name: c for c in parse_engine_class_plans(_SGLANG_ENGINE_SOURCE)}
+    # A nested if/else picking GemmaRMSNorm vs. RMSNorm still reads as one
+    # norm boundary entry, on the pp_group.is_last_rank side.
+    assert classes["MiniMaxM3Model"].pp == [
+        ("embed_tokens", ["input_ids"], ["inputs_embeds"]),
+        ("layers", ["hidden_states"], ["hidden_states"]),
+        ("norm", ["hidden_states"], []),
+    ]
+
+
+def _engine_spec(
+    engine: str, path, architectures: list[str], **overrides
+) -> ArchitectureSpec:
+    values = dict(
+        name=architectures[0],
+        model_type=architectures[0],
+        engine=engine,
+        code_paths=[str(path)],
+        raw_config={"model_type": architectures[0], "architectures": architectures},
+    )
+    values.update(overrides)
+    return ArchitectureSpec(**values)
+
+
+def test_vllm_engine_layout_shards_a_dense_model_across_tp_and_pp(tmp_path):
+    path = tmp_path / "llama.py"
+    path.write_text(_VLLM_ENGINE_SOURCE, encoding="utf-8")
+    spec = _engine_spec(
+        "vllm",
+        path,
+        ["LlamaForCausalLM"],
+        num_hidden_layers=80,
+        num_attention_heads=64,
+        num_key_value_heads=8,
+        intermediate_size=28672,
+        vocab_size=128256,
+    )
+    layout = build_parallel_layout(spec, ParallelDegree(tp=8, pp=2))
+    by_pattern = {rule.pattern: rule for rule in layout.rules}
+    assert by_pattern["down_proj"].collective == "all-reduce"
+    assert by_pattern["qkv_proj"].collective == "sharded output"
+    assert [(stage.layer_start, stage.layer_end) for stage in layout.stages] == [
+        (0, 40),
+        (40, 80),
+    ]
+    assert layout.stages[0].modules == ("embed_tokens",)
+    assert layout.stages[-1].modules == ("norm", "lm_head")
+    text = "\n".join(layout.fact_lines())
+    assert "vocab_size 128256 divides by 8" in text
+
+
+def test_sglang_engine_layout_shards_a_moe_model_across_tp_pp_and_ep(tmp_path):
+    path = tmp_path / "minimax_m3.py"
+    path.write_text(_SGLANG_ENGINE_SOURCE, encoding="utf-8")
+    spec = _engine_spec(
+        "sglang",
+        path,
+        ["MiniMaxM3SparseForCausalLM"],
+        num_hidden_layers=60,
+        num_attention_heads=64,
+        num_key_value_heads=4,
+        intermediate_size=3072,
+        vocab_size=200064,
+        num_experts=128,
+        num_experts_per_tok=4,
+    )
+    layout = build_parallel_layout(spec, ParallelDegree(tp=8, pp=2, ep=4))
+    by_pattern = {rule.pattern: rule for rule in layout.rules}
+    assert by_pattern["experts"].mesh == "ep"
+    assert by_pattern["experts"].partitions == 4
+    assert by_pattern["o_proj"].collective == "local output"
+    groups = unique_gpu_groups(layout, spec)
+    assert len(groups) == 4  # one per expert-parallel rank; tp/pp ranks match shapes
+    text = "\n".join(layout.fact_lines())
+    assert "num_key_value_heads 4 does not divide by 8" in text
+    assert "num_experts 128 divides by 4" in text
+
+
+def test_default_engine_is_unaffected_by_the_new_parser():
+    classes = parse_class_plans(_SOURCE)
+    assert classes  # the existing Hugging Face fixture still parses as before
+    assert parse_engine_class_plans(_SOURCE) == []  # no vLLM/SGLang idiom in it
 
 
 def test_partition_flags_default_to_one_and_reject_zero(capsys):

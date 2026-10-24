@@ -145,6 +145,10 @@ class ArchitectureSpec:
     # Set when the export is asked to split the model. Holds the Hugging Face
     # tensor / pipeline / expert plans evaluated at the requested partition counts.
     parallel_layout: Any = None
+    # Which engine's own parallel-layer idioms "parallel_layout" above was read
+    # from, when the modeling source is a vLLM / SGLang model implementation
+    # instead of a Hugging Face one that declares base_model_tp_plan etc.
+    engine: str | None = None
 
 
 def parse_config_overrides(items: Sequence[str] | None) -> dict[str, Any]:
@@ -695,6 +699,48 @@ def _resolve_attention_from_config_lists(
     return options[0]
 
 
+def _resolve_attention_from_sparse_frequency(
+    layer_idx: int,
+    config: dict[str, Any],
+    *,
+    class_registry: dict | None,
+    decoder_class: str | None,
+) -> str | None:
+    """Map a per-layer sparse-attention frequency flag to the attention class built.
+
+    vLLM/SGLang's MiniMax-M3 decoder picks between a sparse-indexer attention and
+    a dense one per layer via ``layer_id in some_helper(config)``, which the
+    conditional-branch extractor cannot evaluate (an arbitrary free function, not
+    a declared ``config.`` attribute) — so fall back to the same per-layer
+    frequency-list convention ``moe_layer_freq`` already uses for FFN selection,
+    reading ``sparse_attention_config.sparse_attention_freq`` instead.
+    """
+    sparse_cfg = _get(config, "sparse_attention_config")
+    freq = (
+        sparse_cfg.get("sparse_attention_freq")
+        if isinstance(sparse_cfg, dict)
+        else None
+    )
+    if not isinstance(freq, list) or layer_idx >= len(freq):
+        return None
+    if not class_registry or not decoder_class:
+        return None
+    from TraceLens.ModelUtils.ast_analyze import ClassStructure
+
+    decoder = class_registry.get(decoder_class)
+    if not isinstance(decoder, ClassStructure):
+        return None
+    options = decoder.init_assignment_options.get("self_attn") or []
+    if len(options) < 2:
+        return None
+    sparse_option = next((name for name in options if "sparse" in name.lower()), None)
+    dense_option = next((name for name in options if name != sparse_option), None)
+    wants_sparse = bool(_as_int(freq[layer_idx]))
+    if wants_sparse:
+        return sparse_option or options[0]
+    return dense_option or options[0]
+
+
 def _resolve_ffn_from_config_lists(
     layer_idx: int,
     config: dict[str, Any],
@@ -833,6 +879,36 @@ def _apply_uniform_ffn_component(
         return
 
 
+def _apply_uniform_attention_component(
+    spec: ArchitectureSpec,
+    *,
+    attn_class: str | None,
+) -> None:
+    """Name the spine's ``self_attn`` tile after the class every layer builds.
+
+    Mirrors ``_apply_uniform_ffn_component``: a decoder's ``__init__`` can bind
+    ``self_attn`` to either of two classes depending on a per-layer condition the
+    AST cannot evaluate (e.g. membership in a helper function's result), and the
+    AST keeps whichever assignment it saw last, which is not necessarily the one
+    every layer in this checkpoint builds.
+    """
+    if not attn_class:
+        return
+    from dataclasses import replace
+
+    from TraceLens.ModelUtils.ast_analyze import _label_for
+
+    for index, comp in enumerate(spec.block_components):
+        if comp.attr_name not in _ATTENTION_ATTRS or comp.class_name == attn_class:
+            continue
+        spec.block_components[index] = replace(
+            comp,
+            class_name=attn_class,
+            label=_label_for("attention", attn_class, comp.attr_name),
+        )
+        return
+
+
 def _infer_layer_variants(
     config: dict[str, Any],
     spec: ArchitectureSpec,
@@ -932,6 +1008,13 @@ def _infer_layer_variants(
                 decoder_class=decoder_class,
             )
         if attn_class is None:
+            attn_class = _resolve_attention_from_sparse_frequency(
+                layer_idx,
+                config,
+                class_registry=class_registry,
+                decoder_class=decoder_class,
+            )
+        if attn_class is None:
             attn_class = _default_attention_class(class_registry, decoder_class)
 
         ffn_attr, ffn_class = (
@@ -1000,6 +1083,9 @@ def _infer_layer_variants(
         if variants[0].attention_class:
             spec.attention_notes.append(
                 f"Attention module: {variants[0].attention_class}"
+            )
+            _apply_uniform_attention_component(
+                spec, attn_class=variants[0].attention_class
             )
 
     mix_parts = [f"{variant.count} {variant.label}" for variant in variants]
@@ -2365,12 +2451,20 @@ def load_architecture(
     revision: str | None = None,
     regime: RuntimeRegime | None = None,
     config_overrides: dict[str, Any] | None = None,
+    engine: str | None = None,
 ) -> ArchitectureSpec:
     """Load architecture metadata from an HF checkpoint and/or GitHub modeling code.
 
     ``revision`` reads a hub checkpoint at one fixed commit. Unset -- what an
     export does -- the checkpoint resolves to its head, so the model's newest
     code is what gets drawn.
+
+    ``engine`` ("vllm" or "sglang") reads the checkpoint's config as usual but
+    draws from that engine's own pinned modeling source instead of
+    transformers', and reads its device-split plan from that engine's
+    parallel-layer idioms (``TraceLens.ModelUtils.parallel_plan``) rather than
+    from a declared ``base_model_tp_plan``. Ignored once ``code_path`` /
+    ``github`` already name the source to read.
     """
     from TraceLens.ModelUtils.source_policy import SourcePolicy, set_source_policy
 
@@ -2393,13 +2487,18 @@ def load_architecture(
     code_labels: list[str] = []
 
     if analyze_code:
-        source_files, code_labels = resolve_source_files(
-            resolved_checkpoint,
-            config,
-            code_path=code_path,
-            github=github,
-            revision=revision,
-        )
+        if engine and not code_path and not github:
+            from TraceLens.ModelUtils.source import resolve_engine_modeling_files
+
+            source_files, code_labels = resolve_engine_modeling_files(engine, config)
+        else:
+            source_files, code_labels = resolve_source_files(
+                resolved_checkpoint,
+                config,
+                code_path=code_path,
+                github=github,
+                revision=revision,
+            )
         if source_files:
             from TraceLens.ModelUtils.kernel_pipeline import register_kernel_search_root
 
@@ -2444,6 +2543,7 @@ def load_architecture(
     )
     spec.runtime_regime = resolved_regime
     spec.config_overrides = overrides
+    spec.engine = engine
     spec.checkpoint_source = config_label
     spec.source_path = config_label
     if config.get("_has_vision_tower"):
