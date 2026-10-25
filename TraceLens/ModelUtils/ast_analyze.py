@@ -2184,6 +2184,14 @@ PHI_LABEL = "Mutually exclusive branch"
 #: rejected), so nothing can mistake this node for an operator.
 PHI_CLASS = "Merge"
 
+#: Several already-tracked tensors grouped into one Python tuple/list literal
+#: (``inner_state = (q, k, v, forward_batch)``), threaded onward under that one
+#: name. Unlike a phi, every predecessor here is simultaneously live -- this is
+#: a conjunction, not a mutually-exclusive choice -- so it is its own label/class,
+#: never ``PHI_LABEL``/``PHI_CLASS``.
+PACK_LABEL = "Pack"
+PACK_CLASS = "Pack"
+
 
 def is_method_input(name: str) -> bool:
     """True for the frame boundary token, shared or per-parameter."""
@@ -3145,7 +3153,7 @@ def named_method_operations(
     # block_indices, ...)`` carries ``block_indices`` while the indexer's forward
     # leads with ``hidden_states``. Stamp it so the boundary drawn for the call
     # can name the tensor it actually carries.
-    primary = _primary_forward_input_name(func)
+    primary = _primary_forward_input_name(func, cls.init_assignments)
     if not primary:
         return list(analysis.operations)
     # Only a parameter some op NAMES can be given a boundary inside the
@@ -3613,7 +3621,7 @@ def _multi_op_forward_methods(
                 step_order[base] = _forward_calls_in_source_order(
                     func, embedded_submodule_calls, operations.operations
                 )
-            primary_input = _primary_forward_input_name(func)
+            primary_input = _primary_forward_input_name(func, init_assignments)
             if primary_input is not None:
                 inputs[base] = primary_input
             if len(operations.return_order) >= 2:
@@ -3894,8 +3902,8 @@ def _alias_delegating_self_methods(
         )
         if not analysis.operations:
             continue
-        callee_primary = _primary_forward_input_name(target)
-        caller_primary = _primary_forward_input_name(func)
+        callee_primary = _primary_forward_input_name(target, init_assignments)
+        caller_primary = _primary_forward_input_name(func, init_assignments)
         operations = [
             _rebind_forward_operation(
                 operation,
@@ -4288,7 +4296,7 @@ def _multi_op_free_functions(
             ]
             if surviving:
                 loop_carried[call_attr] = surviving
-            primary = _primary_forward_input_name(func)
+            primary = _primary_forward_input_name(func, self_values)
             if primary:
                 primary_params[call_attr] = primary
             if len(analysis.return_order) >= 2:
@@ -5043,7 +5051,7 @@ def stack_entry_dataflow(cls: ClassStructure) -> StackEntryDataflow | None:
         ),
         None,
     )
-    primary = _primary_forward_input_name(forward)
+    primary = _primary_forward_input_name(forward, cls.init_assignments)
     extractor = _ForwardOperationExtractor(
         self_values=_self_config_values(init_func, {}),
         all_tensor_ops=True,
@@ -6005,14 +6013,23 @@ def _config_value(
     return _UNKNOWN
 
 
-def _expr_is_scalar_typed(node: ast.AST, values: dict[str, Any]) -> bool:
+def _expr_is_scalar_typed(
+    node: ast.AST,
+    values: dict[str, Any],
+    local_scalars: set[str] | None = None,
+) -> bool:
     """True when a constructor RHS builds a scalar setting, not a tensor/module.
 
     Recognizes the expression shapes model ``__init__``s use for int/float/str
     hyper-parameters: literals, ``config.<key>`` reads, references to other
-    already-recorded scalar attributes, arithmetic / comparison / boolean over
-    those, and host builtins (``len``/``int``/``getattr(config, ...)``). A tensor
-    or submodule assignment (``nn.Linear(...)``, ``nn.Parameter(...)``,
+    already-recorded scalar attributes or scalar LOCAL variables (``attn_tp_size
+    = get_parallel().attn_tp_size`` then ``self.num_heads = self.total_num_heads
+    // attn_tp_size``), arithmetic / comparison / boolean over those, a property
+    read off an arbitrary call's result (a parallel-group rank/size helper is
+    never how a constructor surfaces a tensor -- those come from
+    ``nn.Linear(...)``/``nn.Parameter(...)``/a submodule call), and host
+    builtins (``len``/``int``/``getattr(config, ...)``). A tensor or submodule
+    assignment (``nn.Linear(...)``, ``nn.Parameter(...)``,
     ``self.forget_gate(...)``, a bare passed-in ``weight`` name) matches none of
     these, so it is *not* scalar-typed and stays a genuine tensor attribute. Kept
     general -- structural, no attribute-name or config-key literals.
@@ -6020,26 +6037,28 @@ def _expr_is_scalar_typed(node: ast.AST, values: dict[str, Any]) -> bool:
     if isinstance(node, ast.Constant):
         return not isinstance(node.value, bytes)
     if isinstance(node, ast.Name):
-        return node.id == "config"
+        return node.id == "config" or node.id in (local_scalars or ())
     if isinstance(node, ast.Attribute):
         if isinstance(node.value, ast.Name):
             if node.value.id == "config":
                 return True
             if node.value.id == "self":
                 return node.attr in values
-        return _expr_is_scalar_typed(node.value, values)
+        if isinstance(node.value, ast.Call):
+            return True
+        return _expr_is_scalar_typed(node.value, values, local_scalars)
     if isinstance(node, ast.BinOp):
-        return _expr_is_scalar_typed(node.left, values) and _expr_is_scalar_typed(
-            node.right, values
-        )
+        return _expr_is_scalar_typed(
+            node.left, values, local_scalars
+        ) and _expr_is_scalar_typed(node.right, values, local_scalars)
     if isinstance(node, ast.UnaryOp):
-        return _expr_is_scalar_typed(node.operand, values)
+        return _expr_is_scalar_typed(node.operand, values, local_scalars)
     if isinstance(node, (ast.BoolOp, ast.Compare)):
         return True
     if isinstance(node, ast.IfExp):
-        return _expr_is_scalar_typed(node.body, values) and _expr_is_scalar_typed(
-            node.orelse, values
-        )
+        return _expr_is_scalar_typed(
+            node.body, values, local_scalars
+        ) and _expr_is_scalar_typed(node.orelse, values, local_scalars)
     if isinstance(node, ast.Call):
         return _expr_name(node.func) in {
             "len",
@@ -6105,6 +6124,13 @@ def _self_config_values(
     values: dict[str, Any] = {}
     if init_func is None:
         return values
+    # A constructor commonly settles a scalar through a LOCAL first
+    # (``attn_tp_size = get_parallel().attn_tp_size``) before storing it on
+    # ``self`` (``self.num_heads = self.total_num_heads // attn_tp_size``).
+    # Track which local names are themselves scalar-typed so a later
+    # ``self.<attr>`` arithmetic expression referencing one still resolves as a
+    # setting instead of falling through as an unresolved tensor operand.
+    local_scalars: set[str] = set()
     for stmt in _flatten_control_flow_body(init_func.body):
         if not isinstance(stmt, (ast.Assign, ast.AnnAssign)):
             continue
@@ -6117,12 +6143,16 @@ def _self_config_values(
             if isinstance(target, ast.Attribute) and _is_self_attr(target, target.attr):
                 if value is not _UNKNOWN:
                     values[target.attr] = value
-                elif _expr_is_scalar_typed(value_node, values):
+                elif _expr_is_scalar_typed(value_node, values, local_scalars):
                     # Scalar-typed but unresolvable (config key absent / derived
                     # from such): record under the sentinel so it is treated as a
                     # setting, never fabricated as a tensor operand, yet is not
                     # mistaken for a concrete value by the folding paths.
                     values[target.attr] = _SCALAR_SETTING
+            elif isinstance(target, ast.Name) and _expr_is_scalar_typed(
+                value_node, values, local_scalars
+            ):
+                local_scalars.add(target.id)
     return values
 
 
@@ -6933,7 +6963,7 @@ class _ForwardOperationExtractor:
         self._pending_shape_snapshots: list[str] = []
 
     @staticmethod
-    def _dedupe(values: list[str]) -> tuple[str, ...]:
+    def _dedupe(values: list[Any]) -> tuple[Any, ...]:
         return tuple(dict.fromkeys(value for value in values if value))
 
     def _operation_id(self, node: ast.AST, label: str) -> str:
@@ -8420,12 +8450,46 @@ class _ForwardOperationExtractor:
         if isinstance(node, (ast.Tuple, ast.List)):
             producers: list[str] = []
             external: list[str] = []
+            # Identify each element by (producer, ordinal), not producer alone:
+            # ``q, k, v`` unpacked from one ``split`` share a producer but read
+            # three distinct ports, and a plain string dedupe would collapse
+            # them into what looks like a single repeated element.
+            keys: list[tuple[str, int | None]] = []
             for item in node.elts:
                 producer, item_external = self.expression(item)
-                if producer:
-                    producers.append(producer)
                 external.extend(item_external)
-            return (producers[-1] if producers else None), external
+                if not producer:
+                    continue
+                producers.append(producer)
+                ordinal = (
+                    self.var_output_ordinal.get(item.id)
+                    if isinstance(item, ast.Name)
+                    else None
+                )
+                keys.append((producer, ordinal))
+            if len(self._dedupe(keys)) <= 1:
+                return (producers[-1] if producers else None), external
+            # Several already-tracked tensors packed into one tuple/list literal
+            # and threaded onward under a single name (SGLang's ``inner_state =
+            # (q, k, v, forward_batch)``, later read back out element by
+            # element): collapsing to the last producer alone -- the historical
+            # behaviour -- drops every earlier element's consumer edge, so its
+            # own producer op (a ``qkv.split``) reports those slots dead. Group
+            # every distinct packed tensor behind one synthetic ``Pack`` node so
+            # each keeps a real edge; downstream readers of the whole tuple see
+            # one value, exactly as before.
+            ports = self._read_output_ports(node)
+            attr_name = self._operation_id(node, PACK_LABEL)
+            self.operations.append(
+                ForwardOperation(
+                    attr_name=attr_name,
+                    label=PACK_LABEL,
+                    class_name=PACK_CLASS,
+                    predecessors=self._dedupe_predecessors(producers, ports),
+                    predecessor_ports=ports,
+                )
+            )
+            return attr_name, external
         if isinstance(node, ast.Dict):
             # A tensor value bound inside a dict literal is a real producer just
             # like a tuple/list element: ``position_embeddings = {'main':
@@ -9524,6 +9588,12 @@ class _ForwardOperationExtractor:
             ):
                 return
             self.operations[index] = replace(operation, output_names=tuple(names))
+            # A branch merge over one of these names (``_emit_branch_select``,
+            # above) looks up its port here, not on the op's own
+            # ``output_names`` -- without this, a mutually-exclusive branch's
+            # ``q``/``k``/``v`` all merge as ordinal 0, dropping ``k``/``v``'s
+            # real edges.
+            self.step_output_names[producer] = names
             for ordinal, name in enumerate(names):
                 self.var_output_ordinal[name] = ordinal
             return
@@ -11528,7 +11598,7 @@ def _forward_operations_from_forward(
 ) -> ForwardAnalysis:
     # The primary parameter is the main path, so only the extra ones can identify
     # which step consumes a side feed.
-    primary = _primary_forward_input_name(func)
+    primary = _primary_forward_input_name(func, self_values)
     extractor = _ForwardOperationExtractor(
         self_values=self_values,
         unbuilt_attrs=unbuilt_attrs,
@@ -11624,7 +11694,7 @@ def _forward_operations_from_forward(
         # slots, so a partially-parsed return can't silently drop one.
         if set(reordered) == set(return_order):
             return_order = reordered
-        input_name = _primary_forward_input_name(func)
+        input_name = _primary_forward_input_name(func, self_values)
         main_names = {
             "hidden_states",
             "hidden_state",
@@ -11950,7 +12020,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 param_values=self.ctor_defaults.get(node.name),
             )
         if forward_func is not None:
-            forward_input_name = _primary_forward_input_name(forward_func)
+            forward_input_name = _primary_forward_input_name(
+                forward_func, init_assignments
+            )
             forward_call_output_names = _forward_call_output_names(forward_func)
             resolved_forward_func = _resolve_local_module_alias_calls(forward_func)
             (
@@ -14910,7 +14982,10 @@ def _keyword_source_names(value: ast.expr, pre_loop: list[ast.stmt]) -> list[str
     return names
 
 
-def _primary_forward_input_name(func: ast.FunctionDef) -> str | None:
+def _primary_forward_input_name(
+    func: ast.FunctionDef,
+    init_assignments: dict[str, str] | None = None,
+) -> str | None:
     """The first parameter carrying a TENSOR (typically the hidden state).
 
     The primary parameter is what an expansion docks its input boundary on, so a
@@ -14921,12 +14996,138 @@ def _primary_forward_input_name(func: ast.FunctionDef) -> str | None:
 
     An UNANNOTATED parameter still leads: absence of an annotation says nothing,
     and most forwards annotate nothing at all.
+
+    A parameter a SUBMODULE call rebinds (``hidden_states = self.norm(hidden_states)``)
+    or hands straight to a submodule (``self.qkv_proj(hidden_states)``) is the
+    residual/activation stream threaded through the block; one that is only ever read
+    and passed along unchanged (``positions``, carried through for RoPE) is auxiliary
+    even when it leads the signature. vLLM/SGLang's ``forward(self, positions,
+    hidden_states)`` puts the position ids first, so signature order alone would dock
+    the boundary on the wrong parameter -- prefer whichever leading candidate the body
+    actually routes through a REAL submodule (``init_assignments``). A plain tensor
+    method (``cos = cos.unsqueeze(dim)``) does not count -- RoPE's ``cos``/``sin`` get
+    exactly this kind of in-place touch-up without being the primary tensor, so only a
+    submodule call distinguishes the residual stream from an incidentally-reassigned
+    secondary one. A call on a sibling helper METHOD (not in ``init_assignments``)
+    does not count either: ``forward(self, tokens, pixels, grid): return
+    self.helper(pixels, grid)`` must keep ``tokens`` primary even though
+    ``pixels``/``grid`` are what the delegate call forwards -- a delegate's call-site
+    arguments are its caller's own secondary parameters, not evidence of who leads.
     """
     host_values = _host_scalar_param_names(func)
-    for arg in func.args.posonlyargs + func.args.args:
-        if arg.arg != "self" and arg.arg not in host_values:
-            return arg.arg
-    return None
+    candidates = [
+        arg.arg
+        for arg in func.args.posonlyargs + func.args.args
+        if arg.arg != "self" and arg.arg not in host_values
+    ]
+    if not candidates:
+        return None
+    touches_submodule = _names_touched_by_submodule_calls(func, init_assignments or {})
+    leader = candidates[0]
+    if leader in touches_submodule or leader not in _merely_forwarded_names(func):
+        # Either the leading parameter already routes through a submodule itself,
+        # or it is used for something beyond riding along as a bare argument
+        # (DeepSeek's scorer calls ``q.float()`` directly on its own leading
+        # parameter) -- either way it stays primary even if a later parameter
+        # separately feeds a submodule.
+        return leader
+    # The leading parameter is a pure passthrough (vLLM/SGLang's ``positions``,
+    # which never does anything but ride along to a kernel call) -- a later
+    # parameter that actually feeds a real submodule is the one that leads.
+    for name in candidates[1:]:
+        if name in touches_submodule:
+            return name
+    return leader
+
+
+def _is_real_submodule_call(node: ast.AST, init_assignments: dict[str, str]) -> bool:
+    """Whether *node* calls a REAL submodule (``self.<attr>(...)``, ``attr`` in
+    ``__init__``) rather than a free function, a sibling helper METHOD, or a
+    plain tensor method (``.unsqueeze(...)``)."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+        and node.func.attr in init_assignments
+    )
+
+
+def _merely_forwarded_names(func: ast.FunctionDef) -> set[str]:
+    """Parameter names that are NEVER operated on directly -- only ever read as a
+    bare argument passed along to some call, by position or keyword.
+
+    Excludes a name the body assigns to, slices, accesses an attribute/method of,
+    or uses as a ``BinOp``/``Compare`` operand: any of those is real use of the
+    value itself, not a pure passthrough, even if the name also happens to ride
+    along to a submodule call elsewhere.
+    """
+    all_names: set[str] = set()
+    touched: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Name):
+            all_names.add(node.id)
+            continue
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                elements = (
+                    target.elts
+                    if isinstance(target, (ast.Tuple, ast.List))
+                    else [target]
+                )
+                touched.update(
+                    element.id for element in elements if isinstance(element, ast.Name)
+                )
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            touched.add(node.value.id)
+        elif isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+            touched.add(node.value.id)
+        elif isinstance(node, ast.BinOp):
+            for operand in (node.left, node.right):
+                if isinstance(operand, ast.Name):
+                    touched.add(operand.id)
+        elif isinstance(node, ast.Compare):
+            for operand in (node.left, *node.comparators):
+                if isinstance(operand, ast.Name):
+                    touched.add(operand.id)
+    return all_names - touched
+
+
+def _names_touched_by_submodule_calls(
+    func: ast.FunctionDef, init_assignments: dict[str, str]
+) -> set[str]:
+    """Names a REAL submodule call rebinds (or is handed) anywhere in *func*.
+
+    Covers both directions: a name assigned the RESULT of ``self.<attr>(...)``,
+    and a name passed as the call's FIRST POSITIONAL argument -- not a later or
+    keyword one, which a submodule call just as routinely takes for a genuinely
+    secondary tensor (``self.self_attn(positions=positions,
+    hidden_states=hidden_states)`` keywords BOTH in, so position in the call
+    (not mere participation) is what still points at the one that leads.
+    """
+    names: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and _is_real_submodule_call(
+            node.value, init_assignments
+        ):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                elements = (
+                    target.elts
+                    if isinstance(target, (ast.Tuple, ast.List))
+                    else [target]
+                )
+                names.update(
+                    element.id for element in elements if isinstance(element, ast.Name)
+                )
+        if (
+            _is_real_submodule_call(node, init_assignments)
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+        ):
+            names.add(node.args[0].id)
+    return names
 
 
 def kernel_kwarg_ports(details: list[str]) -> dict[str, str]:
