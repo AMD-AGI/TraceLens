@@ -541,3 +541,65 @@ def test_main_exits_on_config_error(tmp_path):
         handle.write("analysis_mode: default\n")
     with pytest.raises(SystemExit):
         main(["--config", path])
+
+
+@pytest.mark.parametrize("path", ["", None])
+def test_load_run_config_rejects_bad_path(path):
+    with pytest.raises(ConfigError, match="non-empty string"):
+        load_run_config(path)
+
+
+def test_load_run_config_missing_file(tmp_path):
+    with pytest.raises(ConfigError, match="not found"):
+        load_run_config(str(tmp_path / "missing.yaml"))
+
+
+def test_load_run_config_invalid_yaml(tmp_path):
+    path = os.path.join(str(tmp_path), "bad.yaml")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("[\n")
+    with pytest.raises(ConfigError, match="invalid YAML"):
+        load_run_config(path)
+
+
+def test_load_run_config_must_be_a_mapping(tmp_path):
+    path = os.path.join(str(tmp_path), "list.yaml")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("- a\n- b\n")
+    with pytest.raises(ConfigError, match="YAML mapping"):
+        load_run_config(path)
+
+
+def test_plan_reports_rejects_non_mapping():
+    with pytest.raises(ConfigError, match="must be a mapping"):
+        plan_reports([])
+
+
+def test_run_config_rejects_unregistered_mode(tmp_path):
+    with pytest.raises(ConfigError, match="no report function"):
+        run_config(_config(tmp_path), runners={})
+
+
+def test_job_must_be_a_mapping(tmp_path):
+    with pytest.raises(ConfigError, match="must be a mapping"):
+        plan_reports(_config(tmp_path, jobs=["nope"]))
+
+
+@pytest.mark.parametrize("phase", ["", "   ", 1])
+def test_blank_phase_rejected(tmp_path, phase):
+    jobs = _phase_jobs(tmp_path, [phase])
+    with pytest.raises(ConfigError, match="phase must be a non-empty string"):
+        plan_reports(_config(tmp_path, jobs=jobs, aggregation={"policy": "combine"}))
+
+
+def test_capture_folder_must_be_a_real_directory(tmp_path):
+    job = {
+        "trace_path": _touch(tmp_path, "t.json"),
+        "platform": "MI300X",
+        "capture_folder": "  ",
+    }
+    with pytest.raises(ConfigError, match="non-empty string"):
+        plan_reports(_config(tmp_path, mode="inference", jobs=[job]))
+    job["capture_folder"] = str(tmp_path / "missing_capture")
+    with pytest.raises(ConfigError, match="not found"):
+        plan_reports(_config(tmp_path, mode="inference", jobs=[job]))
