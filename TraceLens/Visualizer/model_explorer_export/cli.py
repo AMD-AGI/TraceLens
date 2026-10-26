@@ -695,7 +695,7 @@ def _load_torch_module(target: str):  # pragma: no cover
 
 
 def _build_torch_module_payload(args: argparse.Namespace) -> dict:  # pragma: no cover
-    from TraceLens.ModelUtils.torch_introspect import (
+    from TraceLens.Visualizer.model_explorer_export.torch_payload import (
         build_exported_module_payload,
         build_torch_module_payload,
     )
