@@ -11,15 +11,18 @@ The component and its static files follow the
 element from unpkg, ``assetFilesBaseUrl`` may point at that package's
 ``dist/static_files``, and ``workerScriptPath`` must be a same-origin URL.
 This module downloads the pinned ``dist/worker.js`` so the local server can
-serve it. The Apache-2.0 license and attribution live next to the viewer.
+serve it. The bytes come from ``github._download_bytes``, the same opener
+every other fetch uses. The Apache-2.0 license and attribution live next
+to the viewer.
 """
 
 from __future__ import annotations
 
 import hashlib
 import threading
-import urllib.request
 from pathlib import Path
+
+from TraceLens.ModelUtils.github import _download_bytes
 
 VISUALIZER_VERSION = "0.1.2"
 VISUALIZER_PACKAGE = "ai-edge-model-explorer-visualizer"
@@ -49,7 +52,7 @@ def worker_js_bytes() -> bytes:
         cached = _cached_worker(path)
         if cached is not None:
             return cached
-        data = _download(WORKER_URL)
+        data = _download_bytes(WORKER_URL)
         digest = hashlib.sha256(data).hexdigest()
         if digest != WORKER_SHA256:
             raise RuntimeError(
@@ -70,9 +73,3 @@ def _cached_worker(path: Path) -> bytes | None:
     if hashlib.sha256(cached).hexdigest() != WORKER_SHA256:
         return None
     return cached
-
-
-def _download(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "TraceLens-Visualizer/0.3"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return response.read()

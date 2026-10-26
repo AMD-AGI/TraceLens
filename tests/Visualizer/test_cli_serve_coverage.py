@@ -427,14 +427,14 @@ def test_worker_js_bytes_checks_the_pinned_digest(monkeypatch, tmp_path):
     monkeypatch.setattr(viewer_assets, "_CACHE_ROOT", tmp_path)
     digest = hashlib.sha256(b"layout-worker").hexdigest()
     monkeypatch.setattr(viewer_assets, "WORKER_SHA256", digest)
-    monkeypatch.setattr(viewer_assets, "_download", lambda url: b"not-the-worker")
+    monkeypatch.setattr(viewer_assets, "_download_bytes", lambda url: b"not-the-worker")
     with pytest.raises(RuntimeError, match="sha256"):
         viewer_assets.worker_js_bytes()
 
-    monkeypatch.setattr(viewer_assets, "_download", lambda url: b"layout-worker")
+    monkeypatch.setattr(viewer_assets, "_download_bytes", lambda url: b"layout-worker")
     assert viewer_assets.worker_js_bytes() == b"layout-worker"
     assert viewer_assets.worker_cache_path().read_bytes() == b"layout-worker"
-    monkeypatch.setattr(viewer_assets, "_download", lambda url: (_ for _ in ()).throw(AssertionError("cache hit")))
+    monkeypatch.setattr(viewer_assets, "_download_bytes", lambda url: (_ for _ in ()).throw(AssertionError("cache hit")))
     assert viewer_assets.worker_js_bytes() == b"layout-worker"
 
 
