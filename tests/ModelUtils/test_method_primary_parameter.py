@@ -54,8 +54,7 @@ from TraceLens.ModelUtils.ast_analyze import (
     _primary_forward_input_name,
 )
 
-_SOURCE = textwrap.dedent(
-    """
+_SOURCE = textwrap.dedent("""
     class Cache:
         def store_compression_weights(self, name: str, kv, gate):
             first_window_position = self.entry_count[name] * self.compress_rate
@@ -67,11 +66,9 @@ _SOURCE = textwrap.dedent(
 
         def every_parameter_is_a_scalar(self, start: int, stop: int):
             return stop - start
-"""
-)
+""")
 
-_POSITION_ORDER_SOURCE = textwrap.dedent(
-    """
+_POSITION_ORDER_SOURCE = textwrap.dedent("""
     class Decoder:
         def forward(self, positions, hidden_states):
             hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
@@ -87,8 +84,7 @@ _POSITION_ORDER_SOURCE = textwrap.dedent(
             scores = torch.matmul(q.float(), compressed_kv.transpose(-1, -2))
             weights = self.weights_proj(hidden_states)
             return scores * weights
-"""
-)
+""")
 
 _DECODER_INIT_ASSIGNMENTS = {"self_attn": "Attention"}
 _ROPE_INIT_ASSIGNMENTS = {"rotary_emb": "RotaryEmbedding"}
