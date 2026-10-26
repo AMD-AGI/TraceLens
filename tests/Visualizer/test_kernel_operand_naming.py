@@ -14,53 +14,9 @@ is a glyph for the arithmetic it does, unprintable in the viewer.
 
 from __future__ import annotations
 
-import ast
-
-from TraceLens.ModelUtils.kernel_pipeline import _operand_parameter_bindings
 from TraceLens.Visualizer.model_explorer_export.merge import (
     _share_one_tile_per_kernel_operand,
 )
-
-
-def _call(source: str) -> ast.Call:
-    node = ast.parse(source).body[0]
-    assert isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-    return node.value
-
-
-class TestOperandBindings:
-    def test_keywords_bind_each_operand_to_its_parameter(self) -> None:
-        call = _call("chunk_kda_fwd_intra(q=q, k=k, v=v, gk=g, beta=beta)")
-        bindings = _operand_parameter_bindings(
-            call,
-            {"q": "l2norm_q", "k": "l2norm_k", "g": "cumsum", "beta": "sigmoid"},
-            {},
-            set(),
-        )
-        assert dict(bindings) == {
-            "l2norm_q": "q",
-            "l2norm_k": "k",
-            "cumsum": "gk",
-            "sigmoid": "beta",
-        }
-
-    def test_the_parameter_name_wins_over_the_variable_name(self) -> None:
-        """``gk=g`` means the kernel calls it ``gk``, whatever the caller called it."""
-        call = _call("kernel(gk=g)")
-        assert dict(_operand_parameter_bindings(call, {"g": "cumsum"}, {}, set())) == {
-            "cumsum": "gk"
-        }
-
-    def test_a_positional_argument_is_not_guessed_at(self) -> None:
-        """Without the callee's signature in hand, a wrong binding beats none."""
-        call = _call("kernel(q, k)")
-        assert _operand_parameter_bindings(call, {"q": "a", "k": "b"}, {}, set()) == ()
-
-    def test_an_unresolvable_operand_is_skipped(self) -> None:
-        call = _call("kernel(q=q, scale=1.0)")
-        assert dict(_operand_parameter_bindings(call, {"q": "a"}, {}, set())) == {
-            "a": "q"
-        }
 
 
 def _node(node_id, label, namespace, synthetic=None, sources=()):

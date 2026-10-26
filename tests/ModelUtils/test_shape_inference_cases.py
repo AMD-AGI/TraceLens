@@ -2447,3 +2447,116 @@ def test_required_tensor_operand_names_variadic_and_unknown_are_empty():
     # A custom free function with no aten/inspect signature -> empty (check skipped).
     assert _required_tensor_operand_names("some_custom_kernel_xyz") == ()
     assert _required_tensor_operand_names("") == ()
+
+
+class TestEinopsPatterns:
+    """The pattern string is the whole specification; apply it exactly."""
+
+    def test_collapsing_leading_axes_keeps_the_ellipsis_tail(self) -> None:
+        from TraceLens.ModelUtils.shape_inference import _einops_shape
+
+        assert _einops_shape("b s ... -> (b s) ...", ("B", "S", 7168), {}) == (
+            "B*S",
+            7168,
+        )
+
+    def test_splitting_an_axis_uses_the_given_size(self) -> None:
+        from TraceLens.ModelUtils.shape_inference import _einops_shape
+
+        assert _einops_shape("... (h d) -> ... h d", (1, "nnz", 12288), {"d": 128}) == (
+            1,
+            "nnz",
+            96,
+            128,
+        )
+
+    def test_merging_trailing_axes_multiplies_them(self) -> None:
+        from TraceLens.ModelUtils.shape_inference import _einops_shape
+
+        assert _einops_shape("b t h d -> b t (h d)", ("B", "S", 64, 128), {}) == (
+            "B",
+            "S",
+            8192,
+        )
+
+    def test_a_split_with_no_size_given_is_declined(self) -> None:
+        from TraceLens.ModelUtils.shape_inference import _einops_shape
+
+        assert _einops_shape("... (h d) -> ... h d", (1, "nnz", 12288), {}) is None
+
+    def test_a_pattern_with_no_arrow_is_declined(self) -> None:
+        from TraceLens.ModelUtils.shape_inference import _einops_shape
+
+        assert _einops_shape("b s d", ("B", "S", 8), {}) is None
+
+    def test_a_right_side_name_from_nowhere_is_declined(self) -> None:
+        from TraceLens.ModelUtils.shape_inference import _einops_shape
+
+        assert _einops_shape("b s -> b s k", ("B", "S"), {}) is None
+
+    def test_a_rank_the_pattern_does_not_describe_is_declined(self) -> None:
+        from TraceLens.ModelUtils.shape_inference import _einops_shape
+
+        assert _einops_shape("b s -> s b", ("B", "S", 8), {}) is None
+
+
+class TestSliceBoundedByALocalName:
+    """A slice bound names the axis it narrows, including a bound counted from the end."""
+
+    @staticmethod
+    def _bound(raw):
+        from TraceLens.ModelUtils.shape_inference import _slice_bound_name
+
+        return _slice_bound_name(raw)
+
+    def test_head_slice_takes_the_named_width(self) -> None:
+        assert self._bound("(..., :rotary_dim)") == ("rotary_dim", True, -1, False)
+
+    def test_tail_slice_takes_the_remainder(self) -> None:
+        assert self._bound("(..., rotary_dim:)") == ("rotary_dim", False, -1, False)
+
+    def test_the_bound_names_the_axis_it_sits_at(self) -> None:
+        assert self._bound("(:, :usable)") == ("usable", True, 1, False)
+        assert self._bound("(:, :, :head)") == ("head", True, 2, False)
+
+    def test_two_named_bounds_name_two_axes(self) -> None:
+        assert self._bound("(:, :x, :y)") is None
+
+    def test_a_numeric_bound_is_left_to_the_folding_branches(self) -> None:
+        assert self._bound("(..., :2051)") is None
+
+    def test_a_full_slice_narrows_nothing(self) -> None:
+        assert self._bound("(..., :)") is None
+
+    def test_the_two_halves_sum_back_to_the_whole(self) -> None:
+        from TraceLens.ModelUtils.shape_inference import _sum_dim_sizes
+
+        assert _sum_dim_sizes(["rotary_dim", "128-(rotary_dim)"]) == 128
+
+
+class TestTorchDecidesTheClass:
+    """Membership in the shape-preserving class is decided by torch."""
+
+    def test_ops_that_cannot_change_a_shape(self) -> None:
+        from TraceLens.ModelUtils.shape_inference import op_cannot_change_shape
+
+        for name in ("float", "dropout", "contiguous", "clone", "detach", "silu"):
+            assert op_cannot_change_shape(name), name
+
+    def test_ops_that_can(self) -> None:
+        from TraceLens.ModelUtils.shape_inference import op_cannot_change_shape
+
+        for name in ("transpose", "flatten", "reshape", "sum", "cat", "expand"):
+            assert not op_cannot_change_shape(name), name
+
+    def test_an_op_a_small_shape_would_hide(self) -> None:
+        from TraceLens.ModelUtils.shape_inference import op_cannot_change_shape
+
+        assert not op_cannot_change_shape("squeeze")
+        assert not op_cannot_change_shape("view")
+
+    def test_an_op_torch_does_not_know_is_not_answered_for(self) -> None:
+        from TraceLens.ModelUtils.shape_inference import op_cannot_change_shape
+
+        assert not op_cannot_change_shape("some_custom_kernel")
+        assert not op_cannot_change_shape("")

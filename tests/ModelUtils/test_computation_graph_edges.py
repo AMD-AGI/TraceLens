@@ -402,7 +402,7 @@ def test_add_chain_wrapper_expansion(monkeypatch):
     # and restores each expanded scope's step names so a nested submodule's
     # internal name (a ``compressor``'s own ``kv_norm``) cannot collide with an
     # identically-named sibling instance (see the repeated-rope regression in
-    # tests/Visualizer/test_deepseek_v4_indexer_dead_nodes.py).
+    # tests/Visualizer/test_deepseek_v4_rotary_mask_kernel_shapes.py).
     inner_b_index = next(i for i, n in enumerate(graph.nodes) if n.block is inner_b)
     assert attr_last["wrap"] == inner_b_index
     assert "inner_a" not in attr_last and "inner_b" not in attr_last
@@ -2159,3 +2159,58 @@ def test_build_kernel_output_ports_end_to_end(monkeypatch):
     )
     graph = cg.build_computation_graph(root)
     assert isinstance(graph, cg.ComputationGraph)
+
+
+def test_each_side_feed_reads_its_own_slot() -> None:
+    from TraceLens.ModelUtils.ast_analyze import SideInputSpec
+    from TraceLens.ModelUtils.block_tree import BlockNode
+    from TraceLens.ModelUtils.computation_graph import _side_slot_sources
+
+    root = BlockNode(attr_name="block", class_name="Block", role="other", label="Block")
+    root.forward_step_return_producers = {"gate": ["@op_topk", "@op_mul"]}
+    sides = [
+        SideInputSpec(
+            arg_name="top_k_index", port_label="top_k_index", source_chain=["gate"]
+        ),
+        SideInputSpec(
+            arg_name="top_k_weights", port_label="top_k_weights", source_chain=["gate"]
+        ),
+    ]
+    attr_last_index = {"gate": 9, "@op_topk": 4, "@op_mul": 7}
+
+    assert _side_slot_sources(root, sides, attr_last_index) == {0: 4, 1: 7}
+
+
+def test_partial_unpack_keeps_the_module_tail() -> None:
+    from TraceLens.ModelUtils.ast_analyze import SideInputSpec
+    from TraceLens.ModelUtils.block_tree import BlockNode
+    from TraceLens.ModelUtils.computation_graph import _side_slot_sources
+
+    root = BlockNode(attr_name="block", class_name="Block", role="other", label="Block")
+    root.forward_step_return_producers = {"gate": ["@op_topk", "@op_mul"]}
+    sides = [
+        SideInputSpec(
+            arg_name="top_k_weights", port_label="top_k_weights", source_chain=["gate"]
+        )
+    ]
+
+    assert _side_slot_sources(root, sides, {"gate": 9, "@op_mul": 7}) == {}
+
+
+def test_a_stale_slot_index_is_replaced_by_the_node_that_owns_the_attr() -> None:
+    from types import SimpleNamespace
+
+    from TraceLens.ModelUtils.computation_graph import (
+        ComputationGraph,
+        GraphNodeSpec,
+        _producer_node_index,
+    )
+
+    graph = ComputationGraph(
+        nodes=[
+            GraphNodeSpec(key="tail", block=SimpleNamespace(attr_name="@op_weights")),
+            GraphNodeSpec(key="indices", block=SimpleNamespace(attr_name="@op_indices")),
+        ]
+    )
+    found = _producer_node_index(graph, {"call\x00slot0": 0}, "call", 0, "@op_indices")
+    assert found == 1

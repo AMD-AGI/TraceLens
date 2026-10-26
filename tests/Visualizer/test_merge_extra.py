@@ -22,7 +22,7 @@ from TraceLens.ModelUtils.extract import ArchitectureSpec
 from TraceLens.ModelUtils.shape_inference import ShapeContext, TensorSpec
 
 # ---------------------------------------------------------------------------
-# Shared helpers (mirroring test_export_merge_coverage.py conventions)
+# Shared helpers (mirroring test_export_merge.py conventions)
 # ---------------------------------------------------------------------------
 
 

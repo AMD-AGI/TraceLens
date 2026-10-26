@@ -295,6 +295,15 @@ jobs:
         with:
           filter: blob:none
 
+      - name: Restore built model graphs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/tracelens/graph-nodes
+            ~/.cache/tracelens/model-envs
+          key: tracelens-graphs-${{ hashFiles('tests/model_pins.py', 'tests/Visualizer/conftest.py', 'tests/Visualizer/build_graph_in_env.py', 'TraceLens/ModelUtils/**/*.py', 'TraceLens/Visualizer/**/*.py') }}
+          restore-keys: tracelens-graphs-
+
       - name: Drop incompatible toolcache Python
         run: sh scripts/reset_incompatible_toolcache_python.sh
 
@@ -366,6 +375,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           filter: blob:none
+
+      - name: Restore built model graphs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/tracelens/graph-nodes
+            ~/.cache/tracelens/model-envs
+          key: tracelens-graphs-${{ hashFiles('tests/model_pins.py', 'tests/Visualizer/conftest.py', 'tests/Visualizer/build_graph_in_env.py', 'TraceLens/ModelUtils/**/*.py', 'TraceLens/Visualizer/**/*.py') }}
+          restore-keys: tracelens-graphs-
 
       - name: Restore test durations
         uses: actions/cache/restore@v4
@@ -541,3 +559,40 @@ jobs:
         with:
           path: .test_durations
           key: test-durations-${{ github.run_id }}-${{ github.run_attempt }}
+
+  # One check name for branch protection. Shard jobs are skipped on purpose
+  # when a pull request does not touch them, and a skipped required check
+  # would block that pull request. This job fails when any of them failed
+  # and passes when they succeeded or were skipped.
+  unit-tests-gate:
+    name: Unit Tests
+    needs: [select-pr-tests, changes, unit-tests, modelutils-tests, visualizer-tests, codecov]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless every suite succeeded or was skipped
+        env:
+          SELECT: ${{ needs.select-pr-tests.result }}
+          CHANGES: ${{ needs.changes.result }}
+          UNIT: ${{ needs.unit-tests.result }}
+          MODELUTILS: ${{ needs.modelutils-tests.result }}
+          VISUALIZER: ${{ needs.visualizer-tests.result }}
+          CODECOV: ${{ needs.codecov.result }}
+        run: |
+          python3 - << 'PY'
+          import os
+          import sys
+
+          results = {
+              "Select PR tests": os.environ["SELECT"],
+              "changes": os.environ["CHANGES"],
+              "unit-tests": os.environ["UNIT"],
+              "modelutils-tests": os.environ["MODELUTILS"],
+              "visualizer-tests": os.environ["VISUALIZER"],
+              "Codecov": os.environ["CODECOV"],
+          }
+          print(results)
+          bad = {name: result for name, result in results.items() if result not in ("success", "skipped")}
+          if bad:
+              sys.exit(f"required jobs did not pass: {bad}")
+          PY

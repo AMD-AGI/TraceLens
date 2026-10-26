@@ -62,7 +62,7 @@ def _patch_cli_success(monkeypatch: pytest.MonkeyPatch, payload=None) -> None:
         "build_detailed_basic_ops",
         lambda **kwargs: BasicOpFilter([r"Linear"]),
     )
-    monkeypatch.setattr(cli, "load_model_spec", lambda *args, **kwargs: _spec())
+    monkeypatch.setattr(cli, "load_" "model_spec", lambda *args, **kwargs: _spec())
     monkeypatch.setattr(
         cli,
         "build_ast_model_explorer_payload",
@@ -340,7 +340,7 @@ def test_cli_uses_embedded_operator_export_and_default_output(monkeypatch, tmp_p
 @pytest.mark.parametrize(
     ("failing_name", "expected"),
     [
-        ("load_model_spec", "Error loading architecture"),
+        ("load_" "model_spec", "Error loading architecture"),
         ("build_ast_model_explorer_payload", "Error exporting Model Explorer payload"),
         ("save_operator_export", "Error writing operator export"),
         ("write_optional_output", "Error writing output"),

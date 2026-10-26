@@ -20,6 +20,8 @@ the tightened I2 no-source check is clean across the built + render-filtered gra
 
 from __future__ import annotations
 
+from build_graph_in_env import pinned_model_spec
+
 import pytest
 
 from TraceLens.Visualizer.model_explorer_export.merge import (
@@ -29,12 +31,11 @@ from TraceLens.Visualizer.model_explorer_export.merge import (
 from TraceLens.Visualizer.model_explorer_export.type_check import (
     integrity_check_graph_nodes,
 )
-from TraceLens.ModelUtils.loader import load_model_spec
 from TraceLens.ModelUtils.shape_inference import ShapeInferencer
 
 
 def _build_nodes(model_id: str):
-    spec = load_model_spec(model_id, detailed=True)
+    spec = pinned_model_spec(model_id, detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     return graph, {n["id"]: n for n in graph["nodes"]}
 

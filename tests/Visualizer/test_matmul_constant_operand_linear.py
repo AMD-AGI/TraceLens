@@ -20,9 +20,10 @@ weight's whole producer subgraph is already ``constant``-tagged
 
 from __future__ import annotations
 
+from build_graph_in_env import pinned_model_spec
+
 import pytest
 
-from TraceLens.ModelUtils.loader import load_model_spec
 from TraceLens.ModelUtils.shape_inference import ShapeInferencer
 from TraceLens.Visualizer.model_explorer_export.merge import (
     _last_dim,
@@ -107,7 +108,7 @@ def test_deepseek_v4_grouped_linear_bmm_renders_as_single_input_linear():
     ``Constant`` -- no hardcoded node id or line number.
     """
     pytest.importorskip("huggingface_hub")
-    spec = load_model_spec("deepseek-ai/DeepSeek-V4-Flash", detailed=True)
+    spec = pinned_model_spec("deepseek-ai/DeepSeek-V4-Flash", detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 

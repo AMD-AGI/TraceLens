@@ -1532,3 +1532,50 @@ def test_model_graph_node_kinds_classify_and_reduced_issues():
         )
     )
     assert issues and issues[0].reason.startswith("composite block")
+
+
+def _kernel_call(source: str) -> ast.Call:
+    node = ast.parse(source).body[0]
+    assert isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+    return node.value
+
+
+def test_keywords_bind_each_operand_to_its_parameter() -> None:
+    from TraceLens.ModelUtils.kernel_pipeline import _operand_parameter_bindings
+
+    call = _kernel_call("chunk_kda_fwd_intra(q=q, k=k, v=v, gk=g, beta=beta)")
+    bindings = _operand_parameter_bindings(
+        call,
+        {"q": "l2norm_q", "k": "l2norm_k", "g": "cumsum", "beta": "sigmoid"},
+        {},
+        set(),
+    )
+    assert dict(bindings) == {
+        "l2norm_q": "q",
+        "l2norm_k": "k",
+        "cumsum": "gk",
+        "sigmoid": "beta",
+    }
+
+
+def test_the_parameter_name_wins_over_the_variable_name() -> None:
+    from TraceLens.ModelUtils.kernel_pipeline import _operand_parameter_bindings
+
+    call = _kernel_call("kernel(gk=g)")
+    assert dict(_operand_parameter_bindings(call, {"g": "cumsum"}, {}, set())) == {
+        "cumsum": "gk"
+    }
+
+
+def test_a_positional_argument_is_not_guessed_at() -> None:
+    from TraceLens.ModelUtils.kernel_pipeline import _operand_parameter_bindings
+
+    call = _kernel_call("kernel(q, k)")
+    assert _operand_parameter_bindings(call, {"q": "a", "k": "b"}, {}, set()) == ()
+
+
+def test_an_unresolvable_operand_is_skipped() -> None:
+    from TraceLens.ModelUtils.kernel_pipeline import _operand_parameter_bindings
+
+    call = _kernel_call("kernel(q=q, scale=1.0)")
+    assert dict(_operand_parameter_bindings(call, {"q": "a"}, {}, set())) == {"a": "q"}

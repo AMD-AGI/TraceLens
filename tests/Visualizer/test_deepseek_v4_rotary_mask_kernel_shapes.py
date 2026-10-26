@@ -32,14 +32,15 @@ build source (never by pruning a node or suppressing a warning):
 
 These tests rebuild the real model graph and assert the fix holds end to end,
 not just at the unit level covered in
-``tests/ModelUtils/test_ast_graph_coverage.py::test_subscript_target_assignment_consumes_rhs_and_rebinds_root``.
+``tests/ModelUtils/test_ast_graph_edges.py::test_subscript_target_assignment_consumes_rhs_and_rebinds_root``.
 """
 
 from __future__ import annotations
 
+from build_graph_in_env import pinned_model_spec
+
 import pytest
 
-from TraceLens.ModelUtils.loader import load_model_spec
 from TraceLens.ModelUtils.shape_inference import ShapeInferencer
 from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
 from TraceLens.Visualizer.model_explorer_export.type_check import (
@@ -53,7 +54,7 @@ from TraceLens.Visualizer.model_explorer_export.viewer_page import (
 
 
 def _build_graph():
-    spec = load_model_spec("deepseek-ai/DeepSeek-V4-Flash", detailed=True)
+    spec = pinned_model_spec("deepseek-ai/DeepSeek-V4-Flash", detailed=True)
     return build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
 
 

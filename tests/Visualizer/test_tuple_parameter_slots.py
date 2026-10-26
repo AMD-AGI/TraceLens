@@ -30,11 +30,12 @@ multiplies by one of the two things the source multiplies by.
 
 from __future__ import annotations
 
+from build_graph_in_env import pinned_model_spec
+
 import collections
 
 import pytest
 
-from TraceLens.ModelUtils.loader import load_model_spec
 from TraceLens.ModelUtils.shape_inference import ShapeInferencer
 from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
 
@@ -47,7 +48,7 @@ MODEL = "deepseek-ai/DeepSeek-V4-Flash"
 def nodes() -> list[dict]:
     pytest.importorskip("huggingface_hub")
     pin = pin_for(MODEL)
-    spec = load_model_spec(MODEL, detailed=True, revision=pin.revision if pin else None)
+    spec = pinned_model_spec(MODEL, detailed=True, revision=pin.revision if pin else None)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     return graph["nodes"]
 

@@ -18,8 +18,87 @@ defaults apply, exactly as an export with no flags would.
 
 from __future__ import annotations
 
+import dataclasses
+import fcntl
+import hashlib
 import json
+import os
 import sys
+from pathlib import Path
+
+_SPECS: dict[tuple, object] = {}
+
+
+def _graph_cache_dir() -> Path:
+    root = os.environ.get("TRACELENS_GRAPH_CACHE")
+    if root:
+        return Path(root)
+    return Path.home() / ".cache" / "tracelens" / "graph-nodes"
+
+
+def _regime_payload(regime) -> object:
+    if regime is None:
+        return None
+    if dataclasses.is_dataclass(regime):
+        return dataclasses.asdict(regime)
+    return regime
+
+
+def pinned_model_spec(model_id, *, detailed=True, revision=None, regime=None):
+    """Load a spec at the pin, reusing the one already loaded in this process.
+
+    Callers that pass ``revision`` keep it. Callers that do not get the
+    revision in ``tests/model_pins.py`` when the model is pinned.
+    """
+    tests_dir = str(Path(__file__).resolve().parents[1])
+    if tests_dir not in sys.path:
+        sys.path.insert(0, tests_dir)
+    from model_pins import pin_for
+    from TraceLens.ModelUtils.loader import load_model_spec
+
+    pin = pin_for(model_id)
+    resolved = revision if revision is not None else (pin.revision if pin else None)
+    key = (str(model_id), bool(detailed), resolved, json.dumps(_regime_payload(regime), sort_keys=True, default=str))
+    if key not in _SPECS:
+        _SPECS[key] = load_model_spec(
+            model_id, detailed=detailed, revision=resolved, regime=regime
+        )
+    return _SPECS[key]
+
+
+def cached_graph_nodes(model_id, revision, transformers, regime, build):
+    """Return merged graph nodes, reading and writing the on-disk cache.
+
+    The key is the model, the pin, and the regime. A lock keeps two pytest
+    workers from writing the same file. ``build`` runs only on a miss.
+    """
+    payload = json.dumps(
+        {
+            "model": model_id,
+            "revision": revision,
+            "transformers": transformers,
+            "regime": _regime_payload(regime),
+        },
+        sort_keys=True,
+        default=str,
+    )
+    digest = hashlib.sha256(payload.encode()).hexdigest()
+    directory = _graph_cache_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{digest}.json"
+    lock_path = directory / f"{digest}.lock"
+    with open(lock_path, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            if path.is_file():
+                return json.loads(path.read_text())
+            nodes = build()
+            temporary = path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(nodes, default=str))
+            temporary.replace(path)
+            return nodes
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def main(argv: list[str]) -> int:

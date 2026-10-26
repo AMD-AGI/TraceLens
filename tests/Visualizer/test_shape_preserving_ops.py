@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import json
 
-from TraceLens.ModelUtils.shape_inference import TensorSpec, op_cannot_change_shape
+from TraceLens.ModelUtils.shape_inference import TensorSpec
 from TraceLens.Visualizer.model_explorer_export.shapes import (
     apply_shape_attrs,
     refine_multi_output_port_shapes,
@@ -307,26 +307,3 @@ class TestWhereItSaysNothing:
 
     def test_nothing_recorded(self) -> None:
         assert _shape_preserving_op_warnings([_node(None, None)]) == []
-
-
-class TestTorchDecidesTheClass:
-    """The membership the check relies on, asked directly."""
-
-    def test_ops_that_cannot_change_a_shape(self) -> None:
-        for name in ("float", "dropout", "contiguous", "clone", "detach", "silu"):
-            assert op_cannot_change_shape(name), name
-
-    def test_ops_that_can(self) -> None:
-        for name in ("transpose", "flatten", "reshape", "sum", "cat", "expand"):
-            assert not op_cannot_change_shape(name), name
-
-    def test_an_op_a_small_shape_would_hide(self) -> None:
-        """A squeeze needs a size-1 axis, and ``view`` keeps a one-axis shape
-        through its dtype overload -- both look like the identity if the probe
-        is not wide enough."""
-        assert not op_cannot_change_shape("squeeze")
-        assert not op_cannot_change_shape("view")
-
-    def test_an_op_torch_does_not_know_is_not_answered_for(self) -> None:
-        assert not op_cannot_change_shape("some_custom_kernel")
-        assert not op_cannot_change_shape("")
