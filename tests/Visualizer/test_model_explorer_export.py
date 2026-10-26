@@ -649,37 +649,44 @@ def test_inject_group_inputs_treats_nested_ops_as_internal():
 
 
 def test_kimi_layer_variants_export_three_decoder_splits():
-    # The Kimi-K3 KimiLinearForCausalLM backbone (config + modeling source) is
-    # vendored under tests/fixtures/kimi_k3 so this runs source-only, without a
-    # cached Hugging Face snapshot or any download.
-    fixture = FIXTURES / "kimi_k3"
-    code_path = fixture / "modeling_kimi_linear.py"
-
-    spec = load_architecture(
-        fixture,
-        code_path=code_path,
-        detailed=True,
-        basic_ops=BasicOpFilter.for_detailed(),
+    # A hand-written four-layer decoder under tests/fixtures/kimi_k3. The kernel
+    # stub beside it supplies chunk_kda, so this runs without a download.
+    from TraceLens.ModelUtils.kernel_pipeline import (
+        _KERNEL_SEARCH_ROOTS,
+        register_kernel_search_root,
     )
-    payload = build_model_explorer_payload(spec)
+
+    fixture = FIXTURES / "kimi_k3"
+    kernel_root = FIXTURES / "kda_kernel"
+    code_path = fixture / "modeling_kimi_linear.py"
+    before = list(_KERNEL_SEARCH_ROOTS)
+    register_kernel_search_root(kernel_root)
+    try:
+        spec = load_architecture(
+            fixture,
+            code_path=code_path,
+            detailed=True,
+            basic_ops=BasicOpFilter.for_detailed(),
+        )
+        payload = build_model_explorer_payload(spec)
+    finally:
+        _KERNEL_SEARCH_ROOTS[:] = before
     graph = payload["graphCollections"][0]["graphs"][0]
-    decoder_ns = "93x_KimiDecoderLayer"
+    decoder_ns = "4x_KimiDecoderLayer"
     attrs = graph["groupNodeAttributes"]
     variant_keys = sorted(
         key for key in attrs if key.startswith(f"{decoder_ns}/") and key.count("/") == 1
     )
     assert len(variant_keys) == 3
     joined = " ".join(variant_keys)
-    assert "68x_KimiDeltaAttention_KimiSparseMoeBlock" in joined
-    assert "24x_KimiMLAAttention_KimiSparseMoeBlock" in joined
+    assert "2x_KimiDeltaAttention_KimiSparseMoeBlock" in joined
+    assert "1x_KimiMLAAttention_KimiSparseMoeBlock" in joined
     assert "1x_KimiDeltaAttention_KimiMLP" in joined
     delta_prefix = (
-        f"{decoder_ns}/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention"
+        f"{decoder_ns}/2x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention"
     )
     assert any(node["namespace"].startswith(delta_prefix) for node in graph["nodes"])
-    mla_prefix = (
-        f"{decoder_ns}/24x_KimiMLAAttention_KimiSparseMoeBlock/KimiMLAAttention"
-    )
+    mla_prefix = f"{decoder_ns}/1x_KimiMLAAttention_KimiSparseMoeBlock/KimiMLAAttention"
     assert any(node["namespace"].startswith(mla_prefix) for node in graph["nodes"])
     q_norm_ns = next(
         node["namespace"]
@@ -704,7 +711,7 @@ def test_kimi_layer_variants_export_three_decoder_splits():
     assert not any(
         "_attn_pipeline" in (node.get("namespace") or "") for node in graph["nodes"]
     )
-    pipeline_ns = f"{decoder_ns}/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline"
+    pipeline_ns = f"{decoder_ns}/2x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline"
     assert (
         graph["groupNodeAttributes"].get(pipeline_ns, {}).get("label")
         == "chunk_kda pipeline"

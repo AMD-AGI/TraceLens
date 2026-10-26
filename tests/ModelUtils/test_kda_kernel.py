@@ -25,6 +25,19 @@ from TraceLens.ModelUtils.kernel_pipeline import (
     parse_kernel_import,
 )
 
+
+@pytest.fixture
+def kda_kernel_root():
+    """Resolve ``fla.ops.kda`` to the hand-written stub, then put the path back."""
+    import TraceLens.ModelUtils.kernel_pipeline as kernel_pipeline
+
+    root = Path(__file__).resolve().parents[1] / "fixtures" / "kda_kernel"
+    before = list(kernel_pipeline._KERNEL_SEARCH_ROOTS)
+    kernel_pipeline.register_kernel_search_root(root)
+    yield root
+    kernel_pipeline._KERNEL_SEARCH_ROOTS[:] = before
+
+
 def _kimi_code_path() -> Path | None:
     """Return the vendored Kimi-K3 modeling source shipped as a test fixture.
 
@@ -162,7 +175,9 @@ def test_kernel_kwarg_ports_read_modeling_kwargs():
     assert ordered == ["q", "k", "v", "g", "beta"]
 
 
-def test_introspect_kernel_pipeline_discovers_steps_from_imported_kernel():
+def test_introspect_kernel_pipeline_discovers_steps_from_imported_kernel(
+    kda_kernel_root,
+):
     details = [
         "kernel: chunk_kda",
         "import: fla.ops.kda#chunk_kda",
@@ -179,7 +194,7 @@ def test_introspect_kernel_pipeline_discovers_steps_from_imported_kernel():
     assert gated.call_name == "chunk_gated_delta_rule_fwd_h"
 
 
-def test_introspect_kernel_op_substeps_expand_fused_beta_sigmoid():
+def test_introspect_kernel_op_substeps_expand_fused_beta_sigmoid(kda_kernel_root):
     from TraceLens.ModelUtils.kernel_pipeline import (
         _collect_import_map,
         _discover_pipeline_entrypoints,
@@ -213,7 +228,7 @@ def test_introspect_kernel_op_substeps_expand_fused_beta_sigmoid():
     assert [step.label for step in substeps] == ["Sigmoid", "× scale"]
 
 
-def test_introspect_l2norm_substeps_use_real_second_operands():
+def test_introspect_l2norm_substeps_use_real_second_operands(kda_kernel_root):
     from TraceLens.ModelUtils.kernel_pipeline import (
         _collect_import_map,
         _discover_pipeline_entrypoints,
@@ -252,7 +267,7 @@ def test_introspect_l2norm_substeps_use_real_second_operands():
     ]
 
 
-def test_l2norm_inv_sqrt_wires_only_real_operands():
+def test_l2norm_inv_sqrt_wires_only_real_operands(kda_kernel_root):
     from TraceLens.ModelUtils.computation_graph import build_computation_graph
 
     pipeline, _ = _load_chunk_kda_pipeline()
@@ -306,7 +321,7 @@ def test_l2norm_inv_sqrt_wires_only_real_operands():
     assert multiply.second_operand == "gate_step_sub_0"
 
 
-def test_introspect_kernel_pipeline_expands_helper_kernels():
+def test_introspect_kernel_pipeline_expands_helper_kernels(kda_kernel_root):
     details = [
         "kernel: chunk_kda",
         "import: fla.ops.kda#chunk_kda",

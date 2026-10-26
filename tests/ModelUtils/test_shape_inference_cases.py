@@ -1251,7 +1251,8 @@ def test_kimi_gate_export_integration():
         "routed_scaling_factor": 1.0,
     }
     analysis = analyze_source(
-        (FIXTURES / "kimi_moe_gate.py").read_text(), config=config
+        (FIXTURES / "kimi_k3" / "modeling_kimi_linear.py").read_text(),
+        config=config,
     )
     basic = BasicOpFilter.for_detailed()
     gate = build_block_node(
