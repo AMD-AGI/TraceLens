@@ -1774,6 +1774,10 @@ def test_fusion_data_tables_canonical_header():
     assert _validate_fusion_data_tables(_fusion_block()) == []
     errors = _validate_fusion_data_tables(_fusion_block("| bogus |"))
     assert any("canonical columns" in e for e in errors)
+    no_table = "<!-- reasoning-candidate tier=fusion rank=1 -->\nNo data here.\n"
+    assert any(
+        "no **Data:** table" in e for e in _validate_fusion_data_tables(no_table)
+    )
 
 
 def test_iter_candidate_blocks_filters_by_tier():
@@ -2773,19 +2777,21 @@ def test_validate_findings_file_relaxed_empty_category(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "impact_estimates, expected",
-    [([], True), ([{"operation": "Block"}], False)],
-    ids=["no_estimates", "has_estimates"],
+    "body, impact_estimates, expected",
+    [
+        ("No kernel fusion opportunities detected.\n", [], True),
+        ("No kernel fusion opportunities detected.\n", [{"operation": "Block"}], False),
+        ("", [], False),
+    ],
+    ids=["no_estimates", "has_estimates", "missing_sentence"],
 )
-def test_validate_findings_file_fusion_empty(tmp_path, impact_estimates, expected):
+def test_validate_findings_file_fusion_empty(
+    tmp_path, body, impact_estimates, expected
+):
     findings_dir = tmp_path / "system_findings"
     findings_dir.mkdir()
     fp = findings_dir / "kernel_fusion_findings.md"
-    _write(
-        str(fp),
-        "# Kernel Fusion Analysis Summary (Experimental)\n\n"
-        "No kernel fusion opportunities detected.\n",
-    )
+    _write(str(fp), "# Kernel Fusion Analysis Summary (Experimental)\n\n" + body)
     (tmp_path / "category_data").mkdir()
     (tmp_path / "category_data" / "kernel_fusion_metrics.json").write_text(
         json.dumps({"impact_estimates": impact_estimates})
@@ -3878,6 +3884,38 @@ def test_orchestrator_main_comparative_mocked(tmp_path, monkeypatch):
     assert [(c["fusion_kind"], c["delta"]) for c in candidates] == [
         ("gemm_epilogue", 1)
     ]
+
+
+@pytest.mark.parametrize("merge_ok", [True, False], ids=["merged", "merge_failed"])
+def test_orchestrator_main_capture_folder_tree(tmp_path, monkeypatch, merge_ok):
+    out = str(tmp_path)
+    _write_minimal_orchestrator_csvs(out, comparative=False)
+    tree = _StubTree([], {})
+    analyzer = _StubAnalyzer(tree)
+    built = []
+
+    class _FakeTreePerfAnalyzer:
+        def __new__(cls, **kwargs):
+            built.append(("merged_tree", kwargs["tree"], kwargs["rebuild_tree"]))
+            return analyzer
+
+        @classmethod
+        def from_file(cls, *args, **kwargs):
+            built.append(("raw_trace",))
+            return analyzer
+
+    monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
+    monkeypatch.setattr(
+        op, "merge_capture_trace_into_graph", lambda *args: tree if merge_ok else None
+    )
+    argv = (
+        "orchestrator_prepare --trace-path /fake/trace.json --platform MI300X "
+        f"--output-dir {out} --capture-folder /fake/capture"
+    )
+    monkeypatch.setattr(sys, "argv", argv.split())
+    op.main()
+
+    assert built == ([("merged_tree", tree, False)] if merge_ok else [("raw_trace",)])
 
 
 def test_orchestrator_main_standalone_mocked(tmp_path, monkeypatch):
