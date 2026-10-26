@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import torch
+
 _log = logging.getLogger(__name__)
 
 # What each Hugging Face parallel style does to the activation. The mesh the
@@ -65,6 +67,34 @@ _PLAN_FIELDS = {
     "_tp_plan": "tp_head",
     "_pp_plan": "pp_head",
 }
+
+# vLLM and SGLang shard a model by instantiating these parallel-layer classes
+# directly in ``__init__``, rather than declaring a plan dict the way Hugging
+# Face does. SGLang's layer classes are the same names as vLLM's (one project
+# tracks the other's layer API), so one table reads either engine's modeling
+# source. A subclass that still shards the way its base class does
+# (``MinimaxM3QKVParallelLinearWithIndexer``, ``DCPGroupColumnParallelLinear``)
+# is matched by its longest matching suffix when the exact name misses.
+# ``ReplicatedLinear`` is intentionally absent: it is not sharded, so it earns
+# no rule, the same as any module no plan names.
+_ENGINE_LINEAR_STYLES: dict[str, str] = {
+    "ColumnParallelLinear": "colwise",
+    "MergedColumnParallelLinear": "packed_colwise",
+    "QKVParallelLinear": "packed_colwise",
+    "RowParallelLinear": "rowwise",
+    "VocabParallelEmbedding": "embedding_rowwise",
+    "ParallelLMHead": "embedding_rowwise",
+}
+# ``make_layers`` (vLLM) returns ``(start, end, modules)``; ``make_pp_layers``
+# (SGLang) returns ``(modules, start, end)`` -- the same idiom, a different
+# tuple order. The value is which unpacked target holds the layer list.
+_ENGINE_LAYER_FACTORIES: dict[str, int] = {"make_layers": 2, "make_pp_layers": 0}
+_ENGINE_MISSING_LAYER = "PPMissingLayer"
+# The expert count is always passed as one of these keywords, whatever the
+# factory callable is named (vLLM's ``FusedMoEFactory``, SGLang's
+# ``get_moe_impl_class(...)()``) -- the attribute still has to be named
+# ``experts`` for the rest of this module's expert-parallel handling to apply.
+_ENGINE_EP_COUNT_KWARGS = {"num_experts", "num_local_experts"}
 
 
 @dataclass(frozen=True)
@@ -203,8 +233,27 @@ def parse_class_plans(source: str) -> list[ClassPlans]:
     return plans
 
 
+def parse_engine_class_plans(source: str) -> list[ClassPlans]:
+    """Read vLLM/SGLang parallel-layer idioms in place of a declared HF plan."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    plans: list[ClassPlans] = []
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            parsed = _engine_class_plans(node)
+            if parsed is not None:
+                plans.append(parsed)
+    return plans
+
+
 def build_parallel_layout(spec: Any, degree: ParallelDegree) -> ParallelLayout:
     """Evaluate ``spec``'s declared plans at ``degree``."""
+    engine = getattr(spec, "engine", None)
+    parse = (
+        parse_engine_class_plans if engine in ("vllm", "sglang") else parse_class_plans
+    )
     classes: list[ClassPlans] = []
     for path in _plan_sources(spec):
         try:
@@ -212,7 +261,7 @@ def build_parallel_layout(spec: Any, degree: ParallelDegree) -> ParallelLayout:
         except OSError as exc:
             _log.warning("Could not read parallel plans from %s: %s", path, exc)
             continue
-        classes.extend(parse_class_plans(text))
+        classes.extend(parse(text))
     raw = spec.raw_config if isinstance(getattr(spec, "raw_config", None), dict) else {}
     layout = layout_from_plans(classes, spec, degree, raw)
     for note in layout.notes:
@@ -432,20 +481,17 @@ _ACTIVATION_COLLECTIVES = {
     "gradient all-reduce": "gradient all-reduce",
 }
 
-_DTYPE_BYTES = {
-    "float32": 4,
-    "fp32": 4,
-    "float": 4,
-    "float16": 2,
-    "fp16": 2,
-    "half": 2,
-    "bfloat16": 2,
-    "bf16": 2,
-    "int8": 1,
-    "uint8": 1,
-    "int32": 4,
-    "int64": 8,
-    "bool": 1,
+# TraceLens/model-config shorthand that is not itself a ``torch`` attribute name
+# (``torch.float32``/``torch.half``/``torch.float`` all resolve directly; these
+# do not). ``fp8_e4m3``/``fp8_e5m2`` are shape_inference's own canonical names
+# for a quantized weight's storage dtype (``_CONCRETE_DTYPE_TOKENS``), one byte
+# either way.
+_DTYPE_ALIASES = {
+    "fp32": "float32",
+    "fp16": "float16",
+    "bf16": "bfloat16",
+    "fp8_e4m3": "float8_e4m3fn",
+    "fp8_e5m2": "float8_e5m2",
 }
 
 _COMM_STYLE = {
@@ -1073,14 +1119,14 @@ def _is_activation_dtype(dtype: str | None) -> bool:
 
 
 def _dtype_bytes(dtype: str | None) -> int | None:
+    """Bytes per element, read from the real ``torch.dtype`` -- never a hand-kept
+    table of numbers that can drift from what the installed torch build does."""
     if not dtype:
         return None
     key = dtype.lower()
-    if key in _DTYPE_BYTES:
-        return _DTYPE_BYTES[key]
-    if key.startswith(("float8", "fp8")):
-        return 1
-    return None
+    key = _DTYPE_ALIASES.get(key, key)
+    torch_dtype = getattr(torch, key, None)
+    return torch_dtype.itemsize if isinstance(torch_dtype, torch.dtype) else None
 
 
 def _repeat_count(node: dict[str, Any]) -> int | None:
@@ -1464,6 +1510,195 @@ def _pipeline_entries(
         ):
             entries.append((key, list(value[0]), list(value[1])))
     return entries
+
+
+def _engine_class_plans(node: ast.ClassDef) -> ClassPlans | None:
+    init = next(
+        (
+            item
+            for item in node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+        ),
+        None,
+    )
+    if init is None:
+        return None
+    tp, ep, pp = _engine_init_plans(init.body)
+    if not tp and not ep and not pp:
+        return None
+    return ClassPlans(
+        name=node.name,
+        tp=tp or None,
+        ep=ep or None,
+        pp=pp or None,
+        tp_declared=bool(tp),
+        ep_declared=bool(ep),
+        pp_declared=bool(pp),
+    )
+
+
+def _engine_init_plans(
+    stmts: list[ast.stmt],
+) -> tuple[dict[str, str], dict[str, str], list[tuple[str, list[str], list[str]]]]:
+    """One pass over ``__init__``, in source order: pipeline-boundary order
+    matters, since later code places a module before or after "the stack"
+    by where its plan entry falls relative to the entry ``make_layers``
+    names (see ``_pipeline_stages``)."""
+    tp: dict[str, str] = {}
+    ep: dict[str, str] = {}
+    pp: list[tuple[str, list[str], list[str]]] = []
+    for stmt in stmts:
+        if isinstance(stmt, ast.If):
+            boundary = _pp_boundary_from_if(stmt)
+            if boundary is not None:
+                attr, is_before = boundary
+                pp.append((attr, *_boundary_io(attr, is_before)))
+            inner_tp, inner_ep, inner_pp = _engine_init_plans(stmt.body + stmt.orelse)
+            tp.update(inner_tp)
+            ep.update(inner_ep)
+            pp.extend(inner_pp)
+            continue
+        attr, style, kind = _engine_assign_style(stmt)
+        if kind == "tp" and attr and style:
+            tp[attr] = style
+        elif kind == "ep" and attr and style:
+            ep[attr] = style
+        elif kind == "stack" and attr:
+            pp.append((attr, ["hidden_states"], ["hidden_states"]))
+    return tp, ep, pp
+
+
+def _boundary_io(attr: str, is_before: bool) -> tuple[list[str], list[str]]:
+    if attr == "embed_tokens":
+        return ["input_ids"], ["inputs_embeds"]
+    return ([], ["hidden_states"]) if is_before else (["hidden_states"], [])
+
+
+def _pp_boundary_from_if(node: ast.If) -> tuple[str, bool] | None:
+    """``if <pp rank check>: self.attr = Real(...) else: self.attr = PPMissingLayer()``.
+
+    Which branch is which does not matter; the test alone says whether the
+    real module is this rank's first-stage or last-stage side.
+    """
+    body_attr, body_missing = _branch_self_assign(node.body)
+    else_attr, else_missing = _branch_self_assign(node.orelse)
+    if not body_attr or body_attr != else_attr or body_missing == else_missing:
+        return None
+    is_before = _rank_before(node.test)
+    return (body_attr, is_before) if is_before is not None else None
+
+
+def _branch_self_assign(stmts: list[ast.stmt]) -> tuple[str | None, bool]:
+    """The first ``self.attr = Call(...)`` in this branch, if any.
+
+    A branch that builds the real module may run extra setup after assigning
+    it (``ParallelLMHead(...)`` then ``tie_weights(...)``), or pick between two
+    constructors with a nested ``if`` of its own (``GemmaRMSNorm`` vs.
+    ``RMSNorm``) -- nested ``if``s are flattened first so either still reads as
+    one branch's assignment.
+    """
+    for stmt in _flatten_ifs(stmts):
+        if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+            continue
+        if not isinstance(stmt.value, ast.Call):
+            continue
+        attr = _self_attr(stmt.targets[0])
+        if attr is not None:
+            return attr, _callee_name(stmt.value.func) == _ENGINE_MISSING_LAYER
+    return None, False
+
+
+def _flatten_ifs(stmts: list[ast.stmt]) -> list[ast.stmt]:
+    flat: list[ast.stmt] = []
+    for stmt in stmts:
+        if isinstance(stmt, ast.If):
+            flat.extend(_flatten_ifs(stmt.body + stmt.orelse))
+        else:
+            flat.append(stmt)
+    return flat
+
+
+def _rank_before(test: ast.expr) -> bool | None:
+    names = {leaf.attr for leaf in ast.walk(test) if isinstance(leaf, ast.Attribute)}
+    if "is_first_rank" in names:
+        return True
+    if "is_last_rank" in names:
+        return False
+    return None
+
+
+def _engine_assign_style(
+    stmt: ast.stmt,
+) -> tuple[str | None, str | None, str | None]:
+    """A plain or tuple-unpacked ``self.<attr> = <Call>``; (attr, style, kind)."""
+    if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+        return None, None, None
+    target = stmt.targets[0]
+    value = stmt.value
+    if not isinstance(value, ast.Call):
+        return None, None, None
+    if isinstance(target, ast.Tuple):
+        callee = _callee_name(value.func)
+        index = _ENGINE_LAYER_FACTORIES.get(callee or "")
+        if index is None or index >= len(target.elts):
+            return None, None, None
+        attr = _self_attr(target.elts[index])
+        return (attr, None, "stack") if attr else (None, None, None)
+    attr = _self_attr(target)
+    if attr is None:
+        return None, None, None
+    if attr == "experts" and _has_expert_count_kwarg(value):
+        return attr, "grouped_gemm", "ep"
+    callee = _callee_name(value.func)
+    style = _engine_linear_style(callee, value.keywords) if callee else None
+    return (attr, style, "tp") if style else (None, None, None)
+
+
+def _has_expert_count_kwarg(call: ast.Call) -> bool:
+    return any(kw.arg in _ENGINE_EP_COUNT_KWARGS for kw in call.keywords)
+
+
+def _engine_linear_style(callee: str, keywords: list[ast.keyword]) -> str | None:
+    style = _ENGINE_LINEAR_STYLES.get(callee)
+    if style is None:
+        for name in sorted(_ENGINE_LINEAR_STYLES, key=len, reverse=True):
+            if name in callee:
+                style = _ENGINE_LINEAR_STYLES[name]
+                break
+    if style is None:
+        return None
+    if style == "colwise" and _keyword_bool(keywords, "gather_output") is True:
+        return "colwise_gather_output"
+    if style == "rowwise" and _keyword_bool(keywords, "reduce_results") is False:
+        return "rowwise_split_input"
+    return style
+
+
+def _keyword_bool(keywords: list[ast.keyword], name: str) -> bool | None:
+    for kw in keywords:
+        if kw.arg == name and isinstance(kw.value, ast.Constant):
+            value = kw.value.value
+            if isinstance(value, bool):
+                return value
+    return None
+
+
+def _self_attr(target: ast.expr) -> str | None:
+    if (
+        isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "self"
+    ):
+        return target.attr
+    return None
+
+
+def _callee_name(func: ast.expr) -> str | None:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
 
 
 def _select_groups(classes: list[ClassPlans], raw: dict[str, Any]) -> list[ClassPlans]:

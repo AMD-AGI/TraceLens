@@ -1341,6 +1341,51 @@ def test_forward_side_combine_producers_intermediate_and_missing():
     assert "prod" in result
 
 
+def test_attrs_with_ordinary_consumer_collects_predecessors():
+    producer = node("qkv_proj", "Linear")
+    guard = node("guard", "new_zeros", operation_predecessors=["qkv_proj"])
+    unrelated = node("other", "Linear")
+    assert bt._attrs_with_ordinary_consumer([producer, guard, unrelated]) == {
+        "qkv_proj"
+    }
+
+
+def test_collect_segments_keeps_side_chain_producer_with_ordinary_consumer():
+    # Reproduces the vLLM/SGLang "fused qkv" shape: qkv_proj feeds a private
+    # _run_attention helper purely as a side input, but its output is ALSO read
+    # directly by a sibling guard op (qkv.new_zeros(...)) -- dropping qkv_proj's
+    # segment because it's side-chained would silently drop its node too.
+    producer = node("qkv_proj", "Linear")
+    guard = node("guard", "new_zeros", operation_predecessors=["qkv_proj"])
+    attn = node("_run_attention", "Function")
+    n = node(
+        "self_attn",
+        "Attention",
+        basic=False,
+        children=[producer, guard, attn],
+    )
+    n.side_inputs = {
+        "_run_attention": [
+            SideInputSpec("qkv_proj", "qkv_proj", ["qkv_proj"], "prior_step")
+        ]
+    }
+    segments = bt.collect_computation_segments(n)
+    assert any(getattr(s, "step", None) is producer for s in segments)
+
+
+def test_collect_segments_drops_pure_side_chain_producer_without_ordinary_consumer():
+    producer = node("qkv_proj", "Linear")
+    attn = node("_run_attention", "Function")
+    n = node("self_attn", "Attention", basic=False, children=[producer, attn])
+    n.side_inputs = {
+        "_run_attention": [
+            SideInputSpec("qkv_proj", "qkv_proj", ["qkv_proj"], "prior_step")
+        ]
+    }
+    segments = bt.collect_computation_segments(n)
+    assert not any(getattr(s, "step", None) is producer for s in segments)
+
+
 def test_collect_segments_post_merge_side_skip():
     q = node("q_proj")
     k = node("k_proj")

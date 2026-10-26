@@ -163,8 +163,20 @@ def build_parser() -> argparse.ArgumentParser:
         "device partitions",
         "How many ways to split the model. The split itself comes from the "
         "plans on its Hugging Face config (base_model_tp_plan, "
-        "base_model_pp_plan, base_model_ep_plan, plus the causal-LM head). "
-        "1 leaves that axis unsplit.",
+        "base_model_pp_plan, base_model_ep_plan, plus the causal-LM head), or, "
+        "with --engine, from that inference engine's own parallel-layer "
+        "classes. 1 leaves that axis unsplit.",
+    )
+    partition_group.add_argument(
+        "--engine",
+        choices=("vllm", "sglang"),
+        help=(
+            "Draw this checkpoint's architecture from vLLM's or SGLang's own "
+            "pinned modeling source (ColumnParallelLinear, make_layers, FusedMoE, "
+            "...) instead of transformers', and read --tp/--pp/--ep from that "
+            "engine's sharding idioms instead of a declared base_model_tp_plan. "
+            "Ignored once --code-path / --github already name the source."
+        ),
     )
     partition_group.add_argument(
         "--tp",
@@ -596,6 +608,7 @@ def _load_ast_spec(
             mode=args.mode,
         ),
         config_overrides=parse_config_overrides(args.config_override),
+        engine=args.engine,
     )
 
 

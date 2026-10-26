@@ -26,6 +26,18 @@ from TraceLens.ModelUtils.github import (
 )
 from TraceLens.ModelUtils.source_policy import SourcePolicy, get_source_policy
 
+# Pinned exactly like TRANSFORMERS_GITHUB_SOURCE: a checkpoint's vLLM/SGLang
+# parallel-layer idioms (TraceLens.ModelUtils.parallel_plan) are read against
+# one fixed release, not whatever the engine's main branch does today.
+ENGINE_GITHUB_SOURCES = {
+    "vllm": "github:vllm-project/vllm@v0.32.0",
+    "sglang": "github:sgl-project/sglang@v0.5.22",
+}
+VLLM_REGISTRY_SUBPATH = "vllm/model_executor/models/registry.py"
+VLLM_MODELS_SUBPATH = "vllm/model_executor/models/{module}.py"
+# sglang's importable package sits under python/, unlike vLLM's at the repo root.
+SGLANG_MODELS_SUBPATH = "python/sglang/srt/models/{candidate}.py"
+
 MODELING_CANDIDATES = (
     "modeling_{model_type}.py",
     "modeling.py",
@@ -353,6 +365,177 @@ def _transformers_github_modeling_file(
             )
             return path, ref.display
     return None
+
+
+def _engine_literal(node: ast.AST) -> Any:
+    """Just enough of ``ast.literal_eval`` for a registry's dict-of-tuples shape."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return tuple(_engine_literal(item) for item in node.elts)
+    if isinstance(node, ast.Dict):
+        result: dict[Any, Any] = {}
+        for key, value in zip(node.keys, node.values):
+            parsed_key = _engine_literal(key) if key is not None else None
+            if isinstance(parsed_key, str):
+                result[parsed_key] = _engine_literal(value)
+        return result
+    return None
+
+
+def _vllm_registry_entry(text: str, architecture: str) -> tuple[str, str] | None:
+    """``architecture``'s ``(module, class_name)`` from one of vLLM's registry dicts.
+
+    ``model_executor/models/registry.py`` keeps several module-level dicts
+    (``_TEXT_GENERATION_MODELS``, ``_MULTIMODAL_MODELS``, ...), each a literal
+    mapping of architecture name to a 2-tuple of strings. A few entries build
+    their value with a function call instead (dynamic defaults); those are
+    skipped, not guessed at.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict):
+            continue
+        parsed = _engine_literal(node.value)
+        if not isinstance(parsed, dict):
+            continue
+        entry = parsed.get(architecture)
+        if (
+            isinstance(entry, tuple)
+            and len(entry) == 2
+            and all(isinstance(item, str) for item in entry)
+        ):
+            return entry
+    return None
+
+
+def _module_candidate_paths(module: str, template: str) -> list[str]:
+    """Where ``module`` (dotted or bare) lives, as subpaths relative to the repo root.
+
+    A bare name (``llama``) sits under the models package itself (``template``).
+    A dotted one (``vllm.models.minimax_m3``) names its own top-level package, a
+    file or, more often, a directory whose ``__init__.py`` re-exports the real
+    implementation (mirroring ``vllm.models.deepseek_v4`` and siblings).
+    """
+    if "." not in module:
+        return [template.format(module=module)]
+    as_path = "/".join(module.split("."))
+    return [f"{as_path}.py", f"{as_path}/__init__.py"]
+
+
+def _resolve_defining_file(
+    ref: GitHubRef, subpath: str, path: Path, architectures: set[str]
+) -> tuple[Path, str]:
+    """``(path, subpath)`` itself, or whichever sibling it re-exports from actually
+    defines the class.
+
+    A registry entry can point at a package ``__init__.py`` that only imports
+    the real implementation from a platform-specific neighbour (mirrors
+    ``vllm.models.minimax_m3`` re-exporting from ``nvidia/model.py``).
+    """
+    if not architectures or _defines_any_class(path, architectures):
+        return path, subpath
+    package = Path(subpath).parent
+    for module in _own_package_imports(path.read_text(encoding="utf-8")):
+        relative = Path(*module.split("."))
+        for sibling_subpath in (
+            (package / relative).with_suffix(".py").as_posix(),
+            (package / relative / "__init__.py").as_posix(),
+        ):
+            sibling = fetch_github_file(ref, sibling_subpath)
+            if sibling is not None and _defines_any_class(sibling, architectures):
+                return sibling, sibling_subpath
+    return path, subpath
+
+
+def _fetch_engine_file(
+    ref: GitHubRef, subpath: str, architectures: set[str]
+) -> Path | None:
+    """One engine source file -- or the real one it re-exports from -- plus its
+    own-package neighbours, all read at the same pinned commit."""
+    path = fetch_github_file(ref, subpath)
+    if path is None:
+        return None
+    _fetch_own_package(ref, subpath, path)
+    resolved, resolved_subpath = _resolve_defining_file(
+        ref, subpath, path, architectures
+    )
+    if resolved != path:
+        _fetch_own_package(ref, resolved_subpath, resolved)
+    return resolved
+
+
+def _sglang_filename_candidates(config: dict[str, Any]) -> list[str]:
+    """Model-type spellings to try under sglang's flat ``srt/models/`` layout.
+
+    Mirrors ``_config_model_types`` (outer wrapper first), plus each with one
+    trailing ``_text`` / ``_vl`` / ``_mtp`` component stripped -- sglang names
+    its file after the architecture family, not after transformers' internal
+    tower suffixes (``minimax_m3_text`` ships as ``minimax_m3.py``).
+    """
+    candidates: list[str] = []
+    for model_type in _config_model_types(config):
+        if model_type not in candidates:
+            candidates.append(model_type)
+        stem, _sep, suffix = model_type.rpartition("_")
+        if stem and suffix in {"text", "vl", "mtp"} and stem not in candidates:
+            candidates.append(stem)
+    return candidates
+
+
+def resolve_engine_modeling_files(
+    engine: str,
+    config: dict[str, Any],
+    *,
+    source_policy: SourcePolicy | None = None,
+) -> tuple[list[Path], list[str]]:
+    """vLLM / SGLang's own modeling file for this checkpoint, at a pinned release.
+
+    Resolves which file implements ``config``'s declared architecture inside
+    the chosen inference engine, the same way ``_transformers_github_modeling_file``
+    resolves one inside transformers -- a fixed tag, not the engine's main branch.
+    """
+    source = ENGINE_GITHUB_SOURCES.get(engine)
+    if source is None:
+        raise ValueError(
+            f"Unknown engine {engine!r}; expected one of {sorted(ENGINE_GITHUB_SOURCES)}"
+        )
+    ref = parse_github_url(source)
+    policy = source_policy or get_source_policy()
+    if isinstance(policy, SourcePolicy):
+        policy.require_github_repo_allowed(ref.owner, ref.repo)
+    architectures = _declared_architectures(config) or {
+        str(name) for name in config.get("architectures") or []
+    }
+
+    if engine == "vllm":
+        registry = fetch_github_file(ref, VLLM_REGISTRY_SUBPATH)
+        registry_text = registry.read_text(encoding="utf-8") if registry else ""
+        for architecture in architectures:
+            entry = _vllm_registry_entry(registry_text, architecture)
+            if entry is None:
+                continue
+            module, _class_name = entry
+            for subpath in _module_candidate_paths(module, VLLM_MODELS_SUBPATH):
+                path = _fetch_engine_file(ref, subpath, architectures)
+                if path is not None:
+                    return [path], [ref.display]
+        return [], []
+
+    if engine == "sglang":
+        for candidate in _sglang_filename_candidates(config):
+            subpath = SGLANG_MODELS_SUBPATH.format(candidate=candidate)
+            path = _fetch_engine_file(ref, subpath, architectures)
+            if path is not None and _defines_any_class(path, architectures):
+                return [path], [ref.display]
+        return [], []
+
+    raise ValueError(
+        f"Unknown engine {engine!r}; expected one of {sorted(ENGINE_GITHUB_SOURCES)}"
+    )
 
 
 def _has_modeling_implementation(files: list[Path]) -> bool:
