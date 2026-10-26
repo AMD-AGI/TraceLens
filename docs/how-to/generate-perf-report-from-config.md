@@ -168,6 +168,8 @@ jobs:
 
 ### Combine reports
 
+Aggregation is experimental. The policies and the columns that combine may still change.
+
 Add `aggregation` and a `phase` on every job to combine the jobs' CSVs into
 `perf_report_aggregated_csvs/` after the last job:
 

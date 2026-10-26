@@ -45,7 +45,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 import yaml
 
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
-from TraceLens.Reporting.aggregate_perf_reports_experimental import (
+from TraceLens.Reporting.aggregate_perf_reports import (
     POLICIES,
     aggregate_perf_report_csvs,
 )

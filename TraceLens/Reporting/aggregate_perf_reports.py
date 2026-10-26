@@ -182,7 +182,7 @@ def _row_keys(table: str, columns: Sequence[str]) -> List[str]:
     else:
         raise AggregationError(
             f"{table}.csv has no aggregation rule; add one to "
-            "TraceLens/Reporting/aggregate_perf_reports_experimental.py."
+            "TraceLens/Reporting/aggregate_perf_reports.py."
         )
     keys = [c for c in base if c in columns]
     keys += [c for c in _OPTIONAL_KEYS if c in columns and c not in keys]
