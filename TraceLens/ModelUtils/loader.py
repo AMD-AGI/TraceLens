@@ -53,6 +53,7 @@ def load_model_spec(
     revision: str | None = None,
     regime: RuntimeRegime | None = None,
     config_overrides: dict[str, Any] | None = None,
+    engine: str | None = None,
 ) -> ArchitectureSpec:
     """Load architecture metadata for Model Explorer export.
 
@@ -85,6 +86,7 @@ def load_model_spec(
         revision=revision,
         regime=regime,
         config_overrides=config_overrides,
+        engine=engine,
     )
 
     if require_code and analyze_code and not spec.class_registry:

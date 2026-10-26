@@ -21,6 +21,7 @@ from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis
 from TraceLens.ModelUtils.extract import (
     ArchitectureSpec,
+    _apply_uniform_attention_component,
     _apply_uniform_ffn_component,
     _as_bool,
     _build_export_block_trees,
@@ -37,6 +38,7 @@ from TraceLens.ModelUtils.extract import (
     _rebuild_stack_components,
     _refine_positional_from_code,
     _resolve_attention_from_config_lists,
+    _resolve_attention_from_sparse_frequency,
     _resolve_checkpoint,
     _resolve_ffn_for_layer,
     dump_model_ast,
@@ -275,6 +277,127 @@ def test_apply_uniform_ffn_component_skip_and_noop():
     # ffn_class -> return without replacing (545)
     _apply_uniform_ffn_component(spec, ffn_attr="mlp", ffn_class="DenseMLP")
     assert spec.block_components[1].class_name == "DenseMLP"
+
+
+# --------------------------------------------------------------------------- #
+# _apply_uniform_attention_component
+# --------------------------------------------------------------------------- #
+
+
+def test_apply_uniform_attention_component_replaces_class_and_label():
+    spec = ArchitectureSpec(
+        name="x",
+        model_type="x",
+        block_components=[
+            BlockComponent("self_attn", "DenseAttn", "attention", "Dense Attn", 0),
+            BlockComponent("mlp", "MLP", "ffn", "FFN", 1),
+        ],
+    )
+    _apply_uniform_attention_component(spec, attn_class="SparseAttn")
+    assert spec.block_components[0].class_name == "SparseAttn"
+    assert spec.block_components[1].class_name == "MLP"
+
+
+def test_apply_uniform_attention_component_noop_when_already_matching():
+    spec = ArchitectureSpec(
+        name="x",
+        model_type="x",
+        block_components=[
+            BlockComponent("self_attn", "SparseAttn", "attention", "Sparse Attn", 0),
+        ],
+    )
+    _apply_uniform_attention_component(spec, attn_class="SparseAttn")
+    assert spec.block_components[0].class_name == "SparseAttn"
+
+
+def test_apply_uniform_attention_component_noop_when_no_class():
+    spec = ArchitectureSpec(
+        name="x",
+        model_type="x",
+        block_components=[
+            BlockComponent("self_attn", "DenseAttn", "attention", "Dense Attn", 0),
+        ],
+    )
+    _apply_uniform_attention_component(spec, attn_class=None)
+    assert spec.block_components[0].class_name == "DenseAttn"
+
+
+# --------------------------------------------------------------------------- #
+# _resolve_attention_from_sparse_frequency: vLLM/SGLang "sparse_attention_config"
+# per-layer frequency convention (nested one level, same shape as moe_layer_freq)
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_attention_from_sparse_frequency_picks_sparse_and_dense():
+    decoder = _structure(
+        "Decoder",
+        assignments={"self_attn": "SparseAttn"},
+    )
+    decoder.init_assignment_options = {"self_attn": ["SparseAttn", "DenseAttn"]}
+    registry = {"Decoder": decoder}
+    config = {"sparse_attention_config": {"sparse_attention_freq": [0, 1]}}
+    assert (
+        _resolve_attention_from_sparse_frequency(
+            0, config, class_registry=registry, decoder_class="Decoder"
+        )
+        == "DenseAttn"
+    )
+    assert (
+        _resolve_attention_from_sparse_frequency(
+            1, config, class_registry=registry, decoder_class="Decoder"
+        )
+        == "SparseAttn"
+    )
+
+
+def test_resolve_attention_from_sparse_frequency_missing_config_returns_none():
+    decoder = _structure("Decoder")
+    decoder.init_assignment_options = {"self_attn": ["SparseAttn", "DenseAttn"]}
+    registry = {"Decoder": decoder}
+    assert (
+        _resolve_attention_from_sparse_frequency(
+            0, {}, class_registry=registry, decoder_class="Decoder"
+        )
+        is None
+    )
+    assert (
+        _resolve_attention_from_sparse_frequency(
+            5,
+            {"sparse_attention_config": {"sparse_attention_freq": [0, 1]}},
+            class_registry=registry,
+            decoder_class="Decoder",
+        )
+        is None
+    )
+
+
+def test_resolve_attention_from_sparse_frequency_no_registry_returns_none():
+    config = {"sparse_attention_config": {"sparse_attention_freq": [1]}}
+    assert (
+        _resolve_attention_from_sparse_frequency(
+            0, config, class_registry=None, decoder_class="Decoder"
+        )
+        is None
+    )
+    assert (
+        _resolve_attention_from_sparse_frequency(
+            0, config, class_registry={}, decoder_class=None
+        )
+        is None
+    )
+
+
+def test_resolve_attention_from_sparse_frequency_single_option_returns_none():
+    decoder = _structure("Decoder")
+    decoder.init_assignment_options = {"self_attn": ["OnlyAttn"]}
+    registry = {"Decoder": decoder}
+    config = {"sparse_attention_config": {"sparse_attention_freq": [1]}}
+    assert (
+        _resolve_attention_from_sparse_frequency(
+            0, config, class_registry=registry, decoder_class="Decoder"
+        )
+        is None
+    )
 
 
 # --------------------------------------------------------------------------- #

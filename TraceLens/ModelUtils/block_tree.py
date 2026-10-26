@@ -732,6 +732,21 @@ def _side_feed_chain_attrs(node: BlockNode) -> set[str]:
     return attrs
 
 
+def _attrs_with_ordinary_consumer(children: list[BlockNode]) -> set[str]:
+    """Attrs any sibling reads as a regular (non-side) forward predecessor.
+
+    A side-feed chain's own link (e.g. a fused ``qkv`` projection feeding an
+    attention step's side input) can still be a regular predecessor of other,
+    earlier-ordered siblings in the same forward (``qkv.new_zeros(...)``,
+    ``qkv.split(...)``) -- so dropping its segment on that basis alone would
+    silently drop its node (the ``qkv`` bug this guards against).
+    """
+    attrs: set[str] = set()
+    for child in children:
+        attrs.update(child.operation_predecessors or ())
+    return attrs
+
+
 def _segment_for_step(node: BlockNode, step: BlockNode) -> ComputationSegment:
     side_specs = node.side_inputs.get(step.attr_name, [])
     if not side_specs:
@@ -1960,11 +1975,13 @@ def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
     if merge_idx is None:
         side_chain_attrs = _side_feed_chain_attrs(node)
         side_combine_producers = _forward_side_combine_producers(node)
+        ordinary_consumers = _attrs_with_ordinary_consumer(children)
         return [
             _segment_for_step(node, child)
             for child in children
             if child.attr_name not in side_chain_attrs
             or child.attr_name in side_combine_producers
+            or child.attr_name in ordinary_consumers
         ]
 
     pre_merge = children[:merge_idx]
