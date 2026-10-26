@@ -15,6 +15,7 @@ from pathlib import Path
 import TraceLens.ModelUtils.ast_analyze as aa
 from TraceLens.ModelUtils.ast_analyze import (
     ClassStructure,
+    _capture_attention_inputs,
     _build_components,
     _classify_role,
     _config_value,
@@ -1515,10 +1516,14 @@ class Block(torch.nn.Module):
     tree = ast.parse(source)
     cls = tree.body[-1]
     forward = next(
-        item for item in cls.body if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        item
+        for item in cls.body
+        if isinstance(item, ast.FunctionDef) and item.name == "forward"
     )
     init = next(
-        item for item in cls.body if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+        item
+        for item in cls.body
+        if isinstance(item, ast.FunctionDef) and item.name == "__init__"
     )
     ops = _forward_operations_from_forward(
         forward,
@@ -1545,9 +1550,13 @@ class Block(torch.nn.Module):
     tree = ast.parse(source)
     cls = tree.body[-1]
     forward = next(
-        item for item in cls.body if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        item
+        for item in cls.body
+        if isinstance(item, ast.FunctionDef) and item.name == "forward"
     )
-    ops = _forward_operations_from_forward(forward, self_values={}, all_tensor_ops=False)
+    ops = _forward_operations_from_forward(
+        forward, self_values={}, all_tensor_ops=False
+    )
     assert len(ops.operations) == 1
     op = ops.operations[0]
     assert op.label == "MatMul"
@@ -1584,10 +1593,14 @@ class Rotary(torch.nn.Module):
     tree = ast.parse(source)
     cls = tree.body[-1]
     forward = next(
-        item for item in cls.body if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        item
+        for item in cls.body
+        if isinstance(item, ast.FunctionDef) and item.name == "forward"
     )
     init = next(
-        item for item in cls.body if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+        item
+        for item in cls.body
+        if isinstance(item, ast.FunctionDef) and item.name == "__init__"
     )
     method_names = {item.name for item in cls.body if isinstance(item, ast.FunctionDef)}
     forward_calls = ["recompose"]
@@ -1653,3 +1666,54 @@ class Tower(torch.nn.Module):
     index = graph.nodes.index(expand)
     assert expand.constant
     assert not any(target == index for _source, target in graph.links)
+
+
+def _attention_stmt(source: str) -> ast.stmt:
+    return ast.parse(source).body[0]
+
+
+class TestBoundaryOperandIsRecorded:
+    """A forward parameter written into an attention call is an operand."""
+
+    def test_a_positional_forward_parameter_is_an_operand(self) -> None:
+        captured: dict[str, list[str]] = {}
+        _capture_attention_inputs(
+            _attention_stmt(
+                "out, _ = attention_interface(self, q, k, v, attention_mask)"
+            ),
+            {"q": ["@op_q"], "k": ["@op_k"], "v": ["@op_v"]},
+            captured,
+            forward_input_names={"attention_mask", "hidden_states"},
+        )
+        assert "attention_mask" in captured, captured
+        assert captured["attention_mask"] == []
+
+    def test_the_same_parameter_by_keyword_is_recorded_identically(self) -> None:
+        positional: dict[str, list[str]] = {}
+        keyword: dict[str, list[str]] = {}
+        names = {"attention_mask"}
+        _capture_attention_inputs(
+            _attention_stmt("out = attention_interface(self, q, attention_mask)"),
+            {"q": ["@op_q"]},
+            positional,
+            forward_input_names=names,
+        )
+        _capture_attention_inputs(
+            _attention_stmt(
+                "out = attention_interface(self, q, attention_mask=attention_mask)"
+            ),
+            {"q": ["@op_q"]},
+            keyword,
+            forward_input_names=names,
+        )
+        assert positional == keyword
+
+    def test_a_local_that_is_not_a_forward_parameter_is_still_skipped(self) -> None:
+        captured: dict[str, list[str]] = {}
+        _capture_attention_inputs(
+            _attention_stmt("out = attention_interface(self, q, scratch)"),
+            {"q": ["@op_q"]},
+            captured,
+            forward_input_names={"attention_mask"},
+        )
+        assert "scratch" not in captured

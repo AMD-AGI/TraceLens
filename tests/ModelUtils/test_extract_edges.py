@@ -952,3 +952,54 @@ def test_image_placeholder_token_id_absent_or_invalid_is_none():
     # bool is an int subclass but is never a real token id.
     assert extract.image_placeholder_token_id({"image_token_id": True}) is None
     assert extract.image_placeholder_token_id({"image_token_id": "154854"}) is None
+
+
+def test_build_export_block_trees_appends_vision_tower_section(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
+
+    source = """
+class VisionMLP:
+    def __init__(self):
+        self.fc1 = Linear()
+        self.fc2 = Linear()
+
+    def forward(self, x):
+        return self.fc2(self.fc1(x))
+
+class FooVisionModel:
+    def __init__(self):
+        self.patch_embed = PatchEmbed()
+        self.mlp = VisionMLP()
+
+    def forward(self, x):
+        x = self.patch_embed(x)
+        return self.mlp(x)
+"""
+    analysis = analyze_sources({Path("m.py"): source})
+    monkeypatch.setitem(CONFIG_MAPPING_NAMES, "foo_vision", "FooVisionConfig")
+    spec = ArchitectureSpec(
+        name="Synthetic",
+        model_type="test",
+        hidden_size=16,
+        vocab_size=101,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_experts=8,
+        num_experts_per_tok=2,
+        intermediate_size=32,
+        class_registry=dict(analysis.class_registry),
+        stack_model_class=None,
+        export_block_trees=[],
+        raw_config={"vision_config": {"model_type": "foo_vision"}},
+    )
+    _build_export_block_trees(spec, BasicOpFilter.for_detailed())
+
+    vision = [
+        tree for _title, tree in spec.export_block_trees if tree.attr_name == "visual"
+    ]
+    assert (
+        vision
+    ), "vision tower detail tree should be appended alongside the text spine"
+    assert vision[0].class_name == "FooVisionModel"

@@ -8,16 +8,14 @@
 
 from __future__ import annotations
 
-from build_graph_in_env import pinned_model_spec
+from build_graph_in_env import pinned_merged_graph, pinned_model_spec
 
 import json
+import re
 
 import pytest
 
-from TraceLens.Visualizer.model_explorer_export.merge import (
-    _loop_trip_count,
-    build_merged_model_graph,
-)
+from TraceLens.Visualizer.model_explorer_export.merge import _loop_trip_count
 from TraceLens.Visualizer.model_explorer_export.type_check import type_check_graph_nodes
 from TraceLens.ModelUtils.computation_graph import (
     add_forward_output,
@@ -31,38 +29,65 @@ def _linear_attn_tree(spec):
     return next((item for item in spec.export_block_trees if "Linear Attn" in item[0]))
 
 
+def _at(line: int, col: int, name: str) -> str:
+    return f"@op_l{line}_c{col}_{name}"
+
+
+def _line_tag(line: int) -> str:
+    return f"@op_l{line}"
+
+
+_OP_LINE = re.compile(r"@op_l\d+(?:_c\d+_)?")
+
+
+def _opid(text: str) -> str:
+    """Identity of an op with the source line and column removed."""
+    return _OP_LINE.sub("", str(text))
+
+
+def _op_in(haystack, needle: str) -> bool:
+    return _opid(needle) in _opid(haystack)
+
+
+def _op_endswith(haystack, needle: str) -> bool:
+    return _opid(haystack).endswith(_opid(needle))
+
+
+def _op_is(actual, needle: str) -> bool:
+    return _opid(actual) == _opid(needle)
+
+
+def _op_get(mapping, needle: str):
+    want = _opid(needle)
+    if needle in mapping:
+        return mapping[needle]
+    matches = [value for key, value in mapping.items() if _opid(key) == want]
+    assert len(matches) == 1, (needle, [_opid(key) for key in mapping])
+    return matches[0]
+
+
 def _graph_key(graph, suffix: str) -> str:
-    matches = [node.key for node in graph.nodes if node.key.endswith(suffix)]
+    matches = [node.key for node in graph.nodes if _op_endswith(node.key, suffix)]
     assert len(matches) == 1, matches
     return matches[0]
 
 
 def _graph_key_for_op(graph, fragment: str) -> str:
-    """Locate a node by block and op identity, ignoring its slot within the block.
-
-    Materialized constant-operand leaves (``...:const:<name>``) share the op's key
-    prefix but are not the op itself, so they are excluded.
-    """
+    """Locate a node by block and op name, ignoring source line and slot."""
     matches = [
         node.key
         for node in graph.nodes
-        if fragment in node.key and ":const:" not in node.key
+        if _op_in(node.key, fragment) and ":const:" not in node.key
     ]
     assert len(matches) == 1, matches
     return matches[0]
 
 
 def _export_node(nodes, fragment: str) -> dict:
-    """The unique export node whose id contains ``fragment`` (ordinal-agnostic).
-
-    An op's slot ordinal (the trailing ``:N`` in its id) shifts whenever unrelated
-    nodes are added or removed from its block; matching on the stable
-    ``@op_l<line>_c<col>_<name>`` fragment keeps these tests robust to that churn.
-
-    Materialized constant-operand leaves (``...:const:<name>``) share the op's id
-    prefix but are not the op itself, so they are excluded.
-    """
-    matches = [n for n in nodes if fragment in n["id"] and ":const:" not in n["id"]]
+    """The unique export node whose id contains ``fragment`` (ordinal-agnostic)."""
+    matches = [
+        n for n in nodes if _op_in(n["id"], fragment) and ":const:" not in n["id"]
+    ]
     assert len(matches) == 1, (fragment, [n["id"] for n in matches])
     return matches[0]
 
@@ -270,11 +295,13 @@ def test_glm53_linear_attention_gate_chain_is_not_short_circuited():
 
     g_a_key = _graph_key(graph, ":g_a_proj")
     g_b_key = _graph_key(graph, ":g_b_proj")
-    o_norm_power_key = _graph_key_for_op(graph, ":o_norm:@op_l353_c19_power:")
-    o_norm_mean_key = _graph_key_for_op(graph, ":o_norm:@op_l353_c19_mean:")
-    o_norm_rsqrt_key = _graph_key_for_op(graph, ":o_norm:@op_l354_c40_reciprocal_sqrt:")
-    o_norm_gate_key = _graph_key_for_op(graph, ":o_norm:@op_l358_c40_sigmoid:")
-    o_norm_mul_key = _graph_key_for_op(graph, ":o_norm:@op_l358_c24_multiply:")
+    o_norm_power_key = _graph_key_for_op(graph, f":o_norm:{_at(353, 19, 'power')}:")
+    o_norm_mean_key = _graph_key_for_op(graph, f":o_norm:{_at(353, 19, 'mean')}:")
+    o_norm_rsqrt_key = _graph_key_for_op(
+        graph, f":o_norm:{_at(354, 40, 'reciprocal_sqrt')}:"
+    )
+    o_norm_gate_key = _graph_key_for_op(graph, f":o_norm:{_at(358, 40, 'sigmoid')}:")
+    o_norm_mul_key = _graph_key_for_op(graph, f":o_norm:{_at(358, 24, 'multiply')}:")
 
     assert g_a_key in keys
     assert g_b_key in keys
@@ -312,7 +339,7 @@ def test_glm53_gate_view_has_no_recurrent_state_cast_edge():
     graph = build_computation_graph(tree, basic_ops=spec.basic_ops)
 
     key_to_index = {node.key: index for index, node in enumerate(graph.nodes)}
-    view_key = _graph_key_for_op(graph, ":@op_l732_c15_view:")
+    view_key = _graph_key_for_op(graph, f":{_at(732, 15, 'view')}:")
     g_b_key = _graph_key(graph, ":g_b_proj")
     view_index = key_to_index[view_key]
     incoming = [source for source, target in graph.links if target == view_index]
@@ -323,7 +350,7 @@ def test_glm53_gate_view_has_no_recurrent_state_cast_edge():
     cast_indices = [
         index
         for index, node in enumerate(graph.nodes)
-        if "@op_l729_c48_cast" in node.key
+        if f"{_at(729, 48, 'cast')}" in node.key
     ]
     for cast_index in cast_indices:
         assert not any(source == cast_index for source, _target in graph.links)
@@ -332,7 +359,7 @@ def test_glm53_gate_view_has_no_recurrent_state_cast_edge():
 def test_glm53_spine_hyperconnection_stays_on_variant_namespace():
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
     prefix = _linear_attn_variant_prefix(spec)
     variant_namespace = next(
         node["namespace"]
@@ -395,7 +422,7 @@ def test_glm53_hyperconnection_expands_mhc_math():
     assert "Sum" in labels
     assert any(frame.label == "loop iterations: 19" for frame in graph.inline_frames)
     assert set(graph.output_ports) == {"post", "comb", "collapsed"}
-    carried_out_index = graph.loop_carried_nodes["@op_l291_c19_divide"]
+    carried_out_index = graph.loop_carried_nodes[f"{_at(291, 19, 'divide')}"]
     assert graph.nodes[carried_out_index].label == "Loop out"
     carried_out_inputs = {
         graph.link_port_labels[(source, carried_out_index)]
@@ -420,7 +447,8 @@ def test_glm53_hyperconnection_expands_mhc_math():
     multiply_index = next(
         index
         for index, node in enumerate(graph.nodes)
-        if node.block is not None and node.block.attr_name == "@op_l295_c21_multiply"
+        if node.block is not None
+        and node.block.attr_name == f"{_at(295, 21, 'multiply')}"
     )
     incoming_labels = {
         graph.nodes[source].label
@@ -514,7 +542,7 @@ def test_glm53_gated_norm_boundary_inputs_come_from_their_own_producers():
     """Each boundary tile is fed by the producer of the tensor it is named for."""
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     prefix = _linear_attn_variant_prefix(spec)
 
     namespace = next(
@@ -578,7 +606,7 @@ def test_glm53_gated_norm_boundary_inputs_come_from_their_own_producers():
 def test_glm53_o_norm_expands_rmsnorm_math_in_merged_graph():
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     prefix = _linear_attn_variant_prefix(spec)
     o_norm_nodes = [
         node
@@ -613,7 +641,7 @@ def test_glm53_forget_gate_expands_internal_computation():
     assert "Sigmoid" in labels
     assert "Multiply" in labels
 
-    merged = build_merged_model_graph(spec)
+    merged = pinned_merged_graph(spec)
     prefix = _linear_attn_variant_prefix(spec)
     forget_nodes = [
         node
@@ -659,12 +687,16 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges(phase):
     key_to_index = {node.key: index for index, node in enumerate(graph.nodes)}
     sources = {source for source, _target in graph.links}
 
-    concat_key = _graph_key(graph, ":@op_l645_c20_concat:@op_l645_c20_concat:0")
-    transpose_key = _graph_key_for_op(graph, ":@op_l689_c12_transpose:")
-    split_key = _graph_key_for_op(graph, ":@op_l688_c28_split:")
+    concat_key = _graph_key(
+        graph, f":{_at(645, 20, 'concat')}:{_at(645, 20, 'concat')}:0"
+    )
+    transpose_key = _graph_key_for_op(graph, f":{_at(689, 12, 'transpose')}:")
+    split_key = _graph_key_for_op(graph, f":{_at(688, 28, 'split')}:")
     forget_entry_key = _graph_key(graph, ":forget_gate:f_a_proj:0")
-    branch_mul_key = _graph_key_for_op(graph, ":forget_gate:@op_l330_c19_multiply:")
-    branch_add_key = _graph_key_for_op(graph, ":forget_gate:@op_l324_c13_add:")
+    branch_mul_key = _graph_key_for_op(
+        graph, f":forget_gate:{_at(330, 19, 'multiply')}:"
+    )
+    branch_add_key = _graph_key_for_op(graph, f":forget_gate:{_at(324, 13, 'add')}:")
     input_index = next(
         index for index, node in enumerate(graph.nodes) if node.synthetic == "@input"
     )
@@ -673,17 +705,24 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges(phase):
 
     def _present(fragment: str) -> bool:
         return any(
-            fragment in node.key and ":const:" not in node.key for node in graph.nodes
+            _op_in(node.key, fragment) and ":const:" not in node.key
+            for node in graph.nodes
         )
 
     taken, not_taken = (
-        (":@op_l677_c24_causal_conv1d:", ":@op_l662_c24_causal_conv1d_update:")
+        (
+            f":{_at(677, 24, 'causal_conv1d')}:",
+            f":{_at(662, 24, 'causal_conv1d_update')}:",
+        )
         if phase == "prefill"
-        else (":@op_l662_c24_causal_conv1d_update:", ":@op_l677_c24_causal_conv1d:")
+        else (
+            f":{_at(662, 24, 'causal_conv1d_update')}:",
+            f":{_at(677, 24, 'causal_conv1d')}:",
+        )
     )
     assert not _present(not_taken), f"{phase} must not draw {not_taken}"
     # Nothing joins two alternatives any more, so there is no phi to join them.
-    assert not _present(":@op_l661_c8_merge:")
+    assert not _present(f":{_at(661, 8, 'merge')}:")
 
     conv_key = _graph_key_for_op(graph, taken)
     assert _has_computation_path(
@@ -691,7 +730,7 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges(phase):
     )
     if phase == "prefill":
         # ``mixed_qkv[:, :, -seq_len:]`` -- the narrowing only prefill performs.
-        slice_key = _graph_key_for_op(graph, ":@op_l686_c24_slice:")
+        slice_key = _graph_key_for_op(graph, f":{_at(686, 24, 'slice')}:")
         assert _has_computation_path(
             graph, key_to_index[conv_key], key_to_index[slice_key]
         )
@@ -699,7 +738,7 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges(phase):
             graph, key_to_index[slice_key], key_to_index[transpose_key]
         )
     else:
-        assert not _present(":@op_l686_c24_slice:")
+        assert not _present(f":{_at(686, 24, 'slice')}:")
         assert _has_computation_path(
             graph, key_to_index[conv_key], key_to_index[transpose_key]
         )
@@ -744,7 +783,7 @@ def test_glm53_linear_attention_branch_merge_and_slice_in_merged_graph(phase):
     spec = pinned_model_spec(
         "zai-org/GLM-5.3-Flash", detailed=True, regime=RuntimeRegime(phase=phase)
     )
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {n["id"]: n for n in nodes}
 
@@ -763,19 +802,21 @@ def test_glm53_linear_attention_branch_merge_and_slice_in_merged_graph(phase):
         n
         for n in nodes
         if n["id"].startswith(prefix)
-        and n["id"].endswith("@op_l689_c12_transpose:@op_l689_c12_transpose:0")
+        and n["id"].endswith(
+            f"{_at(689, 12, 'transpose')}:{_at(689, 12, 'transpose')}:0"
+        )
     )
     (t_src,) = _activation_incoming(transpose, node_by_id)
     feeding = node_by_id[t_src["sourceNodeId"]]
     assert feeding.get("label") != PHI_LABEL, feeding["id"]
-    assert not any(":@op_l661_c8_merge:" in n["id"] for n in nodes)
+    assert not any(f":{_at(661, 8, 'merge')}:" in n["id"] for n in nodes)
 
     def _within(fragment: str) -> list[dict]:
         return [
             n
             for n in nodes
             if n["id"].startswith(prefix)
-            and fragment in n["id"]
+            and _op_in(n["id"], fragment)
             and ":const:" not in n["id"]
         ]
 
@@ -783,17 +824,19 @@ def test_glm53_linear_attention_branch_merge_and_slice_in_merged_graph(phase):
         # C: the narrowing ``mixed_qkv[:, :, -seq_len:]`` is a visible Slice,
         # and it is what the transpose reads.
         assert feeding.get("label") == "Slice", feeding["id"]
-        assert ":@op_l686_c24_slice:" in feeding["id"], feeding["id"]
+        assert f":{_at(686, 24, 'slice')}:" in feeding["id"], feeding["id"]
         (slice_src,) = _activation_incoming(feeding, node_by_id)
         assert slice_src["sourceNodeId"].endswith(
-            ":@op_l677_c24_causal_conv1d:@op_l677_c24_causal_conv1d:0"
+            f":{_at(677, 24, 'causal_conv1d')}:{_at(677, 24, 'causal_conv1d')}:0"
         ), slice_src
-        assert not _within(":@op_l662_c24_causal_conv1d_update:")
+        assert not _within(f":{_at(662, 24, 'causal_conv1d_update')}:")
     else:
-        assert ":@op_l662_c24_causal_conv1d_update:" in feeding["id"], feeding["id"]
+        assert f":{_at(662, 24, 'causal_conv1d_update')}:" in feeding["id"], feeding[
+            "id"
+        ]
         # Decode writes one token into the cache; there is nothing to narrow.
-        assert not _within(":@op_l686_c24_slice:")
-        assert not _within(":@op_l677_c24_causal_conv1d:")
+        assert not _within(f":{_at(686, 24, 'slice')}:")
+        assert not _within(f":{_at(677, 24, 'causal_conv1d')}:")
 
     # A1: the operand type-check and I4 boundary check are clean on the built graph
     # and on the render-filtered graph -- apart from ONE documented, pre-existing
@@ -893,7 +936,7 @@ def test_glm53_flinear_weight_operand_is_hidden():
     )
 
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
 
     linear_nodes = [node for node in graph["nodes"] if node.get("label") == "Linear"]
     # The export contains hyper-connection, experts and router F.linear ops.
@@ -1054,7 +1097,7 @@ def test_glm53_ffn_hc_input_norm_precedes_linear():
 def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
     prefix = _linear_attn_variant_prefix(spec)
     node_by_id = {node["id"]: node for node in graph["nodes"]}
 
@@ -1195,8 +1238,8 @@ def test_glm53_decoder_residual_ops_use_return_slot_producers():
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     decoder = spec.class_registry["Glm5NextTextDecoderLayer"]
     attn_hc = spec.class_registry["Glm5NextTextHyperConnection"]
-    matmul = decoder.forward_operations["@op_l1319_c85_matmul"]
-    multiply = decoder.forward_operations["@op_l1319_c24_multiply"]
+    matmul = decoder.forward_operations[f"{_at(1319, 85, 'matmul')}"]
+    multiply = decoder.forward_operations[f"{_at(1319, 24, 'multiply')}"]
     operations = decoder.forward_operations
 
     def depends_on(operation, producer):
@@ -1246,7 +1289,7 @@ def test_glm53_ffn_hc_expands_hyperconnection_not_moe():
     )
     assert title == "FFN"
 
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     ffn_nodes = [
         node for node in graph["nodes"] if node["id"].startswith(f"{prefix}/ffn_hc/")
     ]
@@ -1300,7 +1343,7 @@ def test_glm53_ffn_hc_expands_hyperconnection_not_moe():
 def test_glm53_expert_helper_stays_inside_loop_without_cycle():
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
     prefix = _linear_attn_variant_prefix(spec)
 
     helper_nodes = [
@@ -1324,7 +1367,7 @@ def test_glm53_expert_helper_stays_inside_loop_without_cycle():
 def test_glm53_moe_keeps_only_the_live_residual_add():
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
     prefix = _linear_attn_variant_prefix(spec)
     nodes = graph["nodes"]
 
@@ -1335,7 +1378,7 @@ def test_glm53_moe_keeps_only_the_live_residual_add():
         node
         for node in nodes
         if node["id"].startswith(f"{prefix}/mlp/")
-        and ":@op_l207_c24_add:" in node["id"]
+        and f":{_at(207, 24, 'add')}:" in node["id"]
     )
     assert any(
         edge["sourceNodeId"] == add["id"]
@@ -1350,7 +1393,7 @@ def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
     from TraceLens.ModelUtils.computation_graph import build_computation_graph
 
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
     prefix = _linear_attn_variant_prefix(spec)
     loop_inputs = [
         node
@@ -1449,7 +1492,7 @@ def test_glm53_loop_carried_pairs_are_well_formed():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
     _assert_export_is_acyclic(nodes)
@@ -1504,7 +1547,7 @@ def test_glm53_loop_carried_pairs_are_well_formed():
 def test_glm53_decoder_boundary_keeps_hyper_stream_shape():
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     boundary = graph["groupNodeAttributes"]["45x_Glm5NextTextDecoderLayer"]
 
     # The hyper stream dominates the boundary; the decoder also receives the
@@ -1516,7 +1559,7 @@ def test_glm53_decoder_boundary_keeps_hyper_stream_shape():
 
     prefix = _linear_attn_variant_prefix(spec)
     node_by_id = {node["id"]: node for node in graph["nodes"]}
-    for operation_id in ("@op_l1319_c24_add", "@op_l1328_c24_add"):
+    for operation_id in (f"{_at(1319, 24, 'add')}", f"{_at(1328, 24, 'add')}"):
         residual_add = node_by_id[f"{prefix}/{operation_id}"]
         output_shape = next(
             attr["value"]
@@ -1530,7 +1573,7 @@ def test_glm53_spine_norms_do_not_share_a_namespace():
     """Merging both norms into one group made the spine look like it loops."""
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
     prefix = _linear_attn_variant_prefix(spec)
     namespace_of = {node["id"]: node.get("namespace", "") for node in graph["nodes"]}
 
@@ -1598,7 +1641,7 @@ def test_glm53_attention_lora_norms_do_not_share_a_namespace():
     """q_a_layernorm and kv_a_layernorm are two RMSNorms, not one looping group."""
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
 
     def namespace_for(attr: str) -> str:
         node = next(
@@ -1621,7 +1664,7 @@ def test_glm53_attention_lora_norms_do_not_share_a_namespace():
     residual = next(
         node
         for node in graph["nodes"]
-        if node["id"].endswith("/@op_l1319_c55_unsqueeze")
+        if node["id"].endswith(f"/{_at(1319, 55, 'unsqueeze')}")
         and "Glm5NextTextAttention_Glm5NextTextMoE" in node["id"]
     )
     assert residual["incomingEdges"][0]["sourceNodeId"].endswith(
@@ -1633,7 +1676,7 @@ def test_glm53_operation_tile_colors_are_consistent_per_label():
     """One op must not render gray in one block and white in another."""
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
 
     fills: dict[str, set[str]] = {}
     for node in graph["nodes"]:
@@ -1676,7 +1719,7 @@ def test_glm53_operation_tile_colors_are_consistent_per_label():
 def test_glm53_decoder_input_uses_source_data_movement_chain():
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     # The decoder-input data-movement chain lives under ``@model_forward/@op_``.
     # A materialized mask-builder producer (``@model_forward/@fn_l...``) also lives
     # in that scope now (Task A) -- assert it separately below, keep this focused on
@@ -1762,7 +1805,7 @@ def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     by_id = {n["id"]: n for n in nodes}
     _assert_export_is_acyclic(nodes)
@@ -1816,7 +1859,7 @@ def test_glm53_vision_tower_carries_patch_axis_not_text_seq():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {node["id"]: node for node in nodes}
 
@@ -1840,7 +1883,9 @@ def test_glm53_vision_tower_carries_patch_axis_not_text_seq():
     pe = "visual/seq:1:patch_embed:patch_embed:0"
     assert _output_shape(node_by_id[f"{pe}/@input"]) == "[Pv, 1176] bfloat16"
     assert (
-        _output_shape(node_by_id[f"{pe}/seq:0:@op_l1713_c24_view:@op_l1713_c24_view:0"])
+        _output_shape(
+            node_by_id[f"{pe}/seq:0:{_at(1713, 24, 'view')}:{_at(1713, 24, 'view')}:0"]
+        )
         == "[Pv, 3, 2, 14, 14] bfloat16"
     )
     assert (
@@ -1861,7 +1906,9 @@ def test_glm53_vision_tower_carries_patch_axis_not_text_seq():
     assert len(combine.get("incomingEdges", [])) == 3
 
     # Decoder path is untouched: the text RMSNorm still speaks [B, S, H].
-    text_norm = next(n for n in nodes if "kv_a_layernorm:@op_l78_c24_cast" in n["id"])
+    text_norm = next(
+        n for n in nodes if f"kv_a_layernorm:{_at(78, 24, 'cast')}" in n["id"]
+    )
     assert "Pv" not in (_output_shape(text_norm) or "")
     assert (_output_shape(text_norm) or "").startswith("[B, S,")
 
@@ -1869,7 +1916,7 @@ def test_glm53_vision_tower_carries_patch_axis_not_text_seq():
 def test_glm53_forget_gate_has_real_boundary_nodes():
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
     prefix = _linear_attn_variant_prefix(spec)
     forget_nodes = [
         node
@@ -1924,7 +1971,7 @@ def test_glm53_norm_boundary_connects_to_attention_input_across_module_edge():
     ``@input``, which self_attn's first op then reads."""
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
     prefix = _linear_attn_variant_prefix(spec)
     node_by_id = {node["id"]: node for node in graph["nodes"]}
     norm_prefix = f"{prefix}/input_layernorm/"
@@ -1985,7 +2032,7 @@ def test_glm53_hyper_head_precedes_final_norm():
         "lm_head",
     ]
 
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     node_by_id = {node["id"]: node for node in graph["nodes"]}
     norm_input = node_by_id["norm/@input"]
     norm_output = node_by_id["norm/@output"]
@@ -2015,7 +2062,7 @@ def test_glm53_vision_attention_resolves_single_kernel_branch():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
     nodes = graph["nodes"]
 
     _assert_export_is_acyclic(nodes)
@@ -2043,7 +2090,9 @@ def test_glm53_vision_attention_resolves_single_kernel_branch():
 
     # The output reshape reads the attention's result, with a path back through
     # the ops inside it.
-    reshape = _export_node(nodes, "visual/seq:3:blocks:attn:@op_l1665_c22_reshape")
+    reshape = _export_node(
+        nodes, f"visual/seq:3:blocks:attn:{_at(1665, 22, 'reshape')}"
+    )
     reshape_sources = [e["sourceNodeId"] for e in reshape.get("incomingEdges", [])]
     assert len(reshape_sources) == 1, reshape_sources
     assert ":@attention:" in reshape_sources[0], reshape_sources
@@ -2065,7 +2114,7 @@ def test_glm53_vision_attention_flags_impl_dead_interface_input():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
     nodes = graph["nodes"]
 
     _assert_export_is_acyclic(nodes)
@@ -2110,7 +2159,7 @@ def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
     nodes = graph["nodes"]
 
     _assert_export_is_acyclic(nodes)
@@ -2161,7 +2210,9 @@ def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
     ] == ["visual/@input_mirror:cu_seqlens^cu_seqlens"]
 
     # ...and it reaches the split it sizes, so the producer is not an orphan.
-    split = next(n for n in nodes if "blocks:attn:@op_l1646_c16_split:" in n["id"])
+    split = next(
+        n for n in nodes if f"blocks:attn:{_at(1646, 16, 'split')}:" in n["id"]
+    )
     assert _has_export_path(nodes, producer_id, split["id"])
 
 
@@ -2182,7 +2233,7 @@ def test_glm53_vision_attention_kernel_reads_all_qkv_no_orphans():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {n["id"]: n for n in nodes}
 
@@ -2211,7 +2262,7 @@ def test_glm53_vision_attention_kernel_reads_all_qkv_no_orphans():
         for label, sources in producers.items()
     }
     for label, sources in splits.items():
-        assert len(sources) == 1 and "@op_l1646_c16_split" in sources[0], (
+        assert len(sources) == 1 and f"{_at(1646, 16, 'split')}" in sources[0], (
             label,
             sources,
         )
@@ -2224,7 +2275,9 @@ def test_glm53_vision_attention_kernel_reads_all_qkv_no_orphans():
         "visual/@input:cu_seqlens"
     ]
     # ...and cu_seqlens reaches the split it sizes, so its producer is no orphan.
-    split = next(n for n in nodes if "blocks:attn:@op_l1646_c16_split:" in n["id"])
+    split = next(
+        n for n in nodes if f"blocks:attn:{_at(1646, 16, 'split')}:" in n["id"]
+    )
     assert _has_export_path(nodes, attn_boundary["id"], split["id"])
 
 
@@ -2246,7 +2299,7 @@ def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {node["id"]: node for node in nodes}
 
@@ -2296,11 +2349,11 @@ def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
     for slot, suffix in (
         (
             "cos",
-            "@positional_l1615_apply_rotary_pos_emb_vision:@op_l1574_c15_unsqueeze:2",
+            f"@positional_l1615_apply_rotary_pos_emb_vision:{_at(1574, 15, 'unsqueeze')}:2",
         ),
         (
             "sin",
-            "@positional_l1615_apply_rotary_pos_emb_vision:@op_l1574_c42_unsqueeze:4",
+            f"@positional_l1615_apply_rotary_pos_emb_vision:{_at(1574, 42, 'unsqueeze')}:4",
         ),
     ):
         # unsqueeze -> frame @input:<slot> -> attention module @input:<slot> ->
@@ -2345,7 +2398,7 @@ def test_glm53_vision_rotary_cos_and_sin_have_distinct_producers():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {node["id"]: node for node in nodes}
 
@@ -2425,7 +2478,7 @@ def test_glm53_vision_rotary_recomposition_slice_concat_tile_widths():
     import re
 
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {node["id"]: node for node in nodes}
 
@@ -2511,7 +2564,7 @@ def test_glm53_vision_rotary_position_ids_two_coordinate_axes():
     import re
 
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
     # The rotary *embedding* frame (``self.rotary_pos_emb(...)``), not the
@@ -2567,7 +2620,7 @@ def test_glm53_rotary_multiply_has_inv_freq_constant_operand():
     import re
 
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {n["id"]: n for n in nodes}
 
@@ -2654,7 +2707,7 @@ def test_glm53_constants_stay_in_json_but_drop_from_rendered_html():
     )
 
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
     constants = [n for n in nodes if _attr_value(n, "constant") == "true"]
@@ -2676,7 +2729,7 @@ def test_glm53_every_constant_node_has_a_consumer():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
     consumed = {e["sourceNodeId"] for n in nodes for e in n.get("incomingEdges", [])}
@@ -2702,7 +2755,7 @@ def test_glm53_no_single_input_concat_survives_anywhere():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
     _assert_export_is_acyclic(nodes)
@@ -2720,8 +2773,10 @@ def test_glm53_no_single_input_concat_survives_anywhere():
     # the implementation the model runs, expanded into its own ops, so what the
     # reshape sees is that expansion's output boundary -- with a path back
     # through the ops inside it.
-    assert not any("@op_l1663_c26_concat" in n["id"] for n in nodes)
-    reshape = _export_node(nodes, "visual/seq:3:blocks:attn:@op_l1665_c22_reshape")
+    assert not any(f"{_at(1663, 26, 'concat')}" in n["id"] for n in nodes)
+    reshape = _export_node(
+        nodes, f"visual/seq:3:blocks:attn:{_at(1665, 22, 'reshape')}"
+    )
     reshape_sources = [e["sourceNodeId"] for e in reshape.get("incomingEdges", [])]
     assert len(reshape_sources) == 1, reshape_sources
     assert ":@attention:" in reshape_sources[0], reshape_sources
@@ -2749,7 +2804,7 @@ def test_glm53_multi_input_concat_sums_operand_widths_not_identity():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {node["id"]: node for node in nodes}
 
@@ -2759,7 +2814,7 @@ def test_glm53_multi_input_concat_sums_operand_widths_not_identity():
         if node.get("label") == "Concat" and "append_visible_tail" in node["id"]
         # Anchor on the stable line/col of the ``torch.cat`` call; the trailing
         # per-scope emission ordinal shifts whenever a sibling op becomes visible.
-        and "@op_l1027_c15_concat" in node["id"]
+        and f"{_at(1027, 15, 'concat')}" in node["id"]
     )
     edges = concat.get("incomingEdges", []) or []
     assert len(edges) == 2, [e["sourceNodeId"] for e in edges]
@@ -2823,7 +2878,7 @@ def test_glm53_vision_rotary_output_edges_reference_real_producer_ports():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {node["id"]: node for node in nodes}
 
@@ -2856,7 +2911,7 @@ def test_glm53_vision_apply_rotary_tuple_returns_dock_per_ordinal():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {node["id"]: node for node in nodes}
 
@@ -2865,8 +2920,8 @@ def test_glm53_vision_apply_rotary_tuple_returns_dock_per_ordinal():
     def _one(suffix: str) -> dict:
         return next(n for n in nodes if n["id"].endswith(suffix))
 
-    q_embed = _export_node(nodes, ":@op_l1577_c14_cast:")  # rotary tuple slot 0
-    k_embed = _export_node(nodes, ":@op_l1578_c14_cast:")  # rotary tuple slot 1
+    q_embed = _export_node(nodes, f":{_at(1577, 14, 'cast')}:")  # rotary tuple slot 0
+    k_embed = _export_node(nodes, f":{_at(1578, 14, 'cast')}:")  # rotary tuple slot 1
 
     # Each tuple slot exits through its own frame @output tile, backed by that
     # slot's internal producer.
@@ -2881,8 +2936,8 @@ def test_glm53_vision_apply_rotary_tuple_returns_dock_per_ordinal():
     q_out_mirror = q_out["id"] + "^result_1"
     k_out_mirror = k_out["id"] + "^result_2"
     assert q_out_mirror in node_by_id and k_out_mirror in node_by_id
-    q_transpose = _export_node(nodes, ":@op_l1616_c23_transpose:")
-    k_transpose = _export_node(nodes, ":@op_l1617_c21_transpose:")
+    q_transpose = _export_node(nodes, f":{_at(1616, 23, 'transpose')}:")
+    k_transpose = _export_node(nodes, f":{_at(1617, 21, 'transpose')}:")
     assert [e["sourceNodeId"] for e in q_transpose["incomingEdges"]] == [q_out_mirror]
     assert [e["sourceNodeId"] for e in k_transpose["incomingEdges"]] == [k_out_mirror]
 
@@ -2908,7 +2963,7 @@ def test_glm53_vision_rotary_frame_has_module_like_boundaries():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
     _assert_export_is_acyclic(nodes)
@@ -2962,7 +3017,7 @@ def test_glm53_vision_attention_qk_norm_read_distinct_unbind_slices():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
     _assert_export_is_acyclic(nodes)
@@ -2971,7 +3026,8 @@ def test_glm53_vision_attention_qk_norm_read_distinct_unbind_slices():
     unbind = next(
         n
         for n in nodes
-        if "attn:@op_l1608_c12_unbind:" in n["id"] and "^@slice_out:" not in n["id"]
+        if f"attn:{_at(1608, 12, 'unbind')}:" in n["id"]
+        and "^@slice_out:" not in n["id"]
     )
     tiles_by_port = {
         n["id"].rsplit(":", 1)[1]: n
@@ -3026,7 +3082,7 @@ def test_glm53_vision_rotary_frame_named_after_source_function():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
     # The clean function name appears as a namespace segment...
@@ -3061,7 +3117,7 @@ def test_glm53_vision_index_helpers_expand_to_device_ops():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
     def _labels(fragment: str) -> set[str]:
@@ -3116,7 +3172,7 @@ def test_glm53_router_outputs_no_redundant_mirror_passthrough():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {node["id"]: node for node in nodes}
 
@@ -3151,7 +3207,7 @@ def test_glm53_router_outputs_no_redundant_mirror_passthrough():
     # gather reads the kept group input.
     router_mirror = (
         "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/"
-        "sideproducer:1:gate:@op_l1/@output:topk_weights^topk_weights"
+        f"sideproducer:1:gate:{_line_tag(1)}/@output:topk_weights^topk_weights"
     )
     group_input = (
         "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/@input:topk_weights"
@@ -3166,7 +3222,7 @@ def test_glm53_router_outputs_no_redundant_mirror_passthrough():
     # index shifts whenever the loop body gains or loses a step.
     gather_prefix = (
         "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/"
-        "sidefeed:1:experts:@op_l134_c70_indexing:"
+        f"sidefeed:1:experts:{_at(134, 70, 'indexing')}:"
     )
     gather_ids = [nid for nid in node_by_id if nid.startswith(gather_prefix)]
     assert len(gather_ids) == 1, gather_ids
@@ -3175,7 +3231,7 @@ def test_glm53_router_outputs_no_redundant_mirror_passthrough():
     # topk_indices wiring into the experts one-hot is untouched.
     one_hot = node_by_id[
         "decoder/11x_Glm5NextTextAttention_Glm5NextTextMoE/mlp/"
-        "sidefeed:1:experts:@op_l126_c19_one_hot:1"
+        f"sidefeed:1:experts:{_at(126, 19, 'one_hot')}:1"
     ]
     assert any("topk_indices" in e["sourceNodeId"] for e in one_hot["incomingEdges"])
 
@@ -3231,7 +3287,7 @@ def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     # Per-slice port shapes are only stamped when shape inference runs.
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
     _assert_export_is_acyclic(nodes)
@@ -3243,7 +3299,8 @@ def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
     unbind = next(
         n
         for n in nodes
-        if "attn:@op_l1608_c12_unbind:" in n["id"] and "^@slice_out:" not in n["id"]
+        if f"attn:{_at(1608, 12, 'unbind')}:" in n["id"]
+        and "^@slice_out:" not in n["id"]
     )
     tiles_by_port = {
         n["id"].rsplit(":", 1)[1]: n
@@ -3325,7 +3382,7 @@ def test_glm53_view_split_stays_visible_with_named_slice_tiles():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {node["id"]: node for node in nodes}
 
@@ -3351,7 +3408,7 @@ def test_glm53_view_split_stays_visible_with_named_slice_tiles():
         n
         for n in nodes
         if "/self_attn/" in n["id"]
-        and n["id"].endswith("@op_l688_c28_split:@op_l688_c28_split:0")
+        and n["id"].endswith(f"{_at(688, 28, 'split')}:{_at(688, 28, 'split')}:0")
     )
     qkv_tiles = _slice_tiles(qkv_split)
     assert {port: tile.get("label") for port, tile in qkv_tiles.items()} == {
@@ -3366,7 +3423,7 @@ def test_glm53_view_split_stays_visible_with_named_slice_tiles():
     (split_src,) = _activation_incoming(qkv_split, node_by_id)
     transpose = node_by_id[split_src["sourceNodeId"]]
     assert transpose["id"].endswith(
-        "@op_l689_c12_transpose:@op_l689_c12_transpose:0"
+        f"{_at(689, 12, 'transpose')}:{_at(689, 12, 'transpose')}:0"
     ), transpose["id"]
 
     # --- The F.linear-fed pre_w/post_w/comb_w split also stays, with its tiles,
@@ -3394,7 +3451,7 @@ def test_glm53_vision_mlp_gate_and_up_are_parallel():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
     nodes = graph["nodes"]
 
     _assert_export_is_acyclic(nodes)
@@ -3436,7 +3493,7 @@ def test_glm53_hyperconnection_weight_only_ops_are_hidden():
     )
 
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     _assert_export_is_acyclic(nodes)
 
@@ -3446,8 +3503,10 @@ def test_glm53_hyperconnection_weight_only_ops_are_hidden():
     # The learned base/scale weight-only unpacks are present in the JSON but
     # tagged ``constant`` (so operand annotation still sees them); the render
     # filter drops them so they are never drawn.
-    base_split = [n for n in attn_hc if n["id"].endswith(":@op_l281_c32_split:0")]
-    scale_unbind = [n for n in attn_hc if n["id"].endswith(":@op_l282_c44_unbind:0")]
+    base_split = [n for n in attn_hc if n["id"].endswith(f":{_at(281, 32, 'split')}:0")]
+    scale_unbind = [
+        n for n in attn_hc if n["id"].endswith(f":{_at(282, 44, 'unbind')}:0")
+    ]
     assert base_split, "expected the base.split weight-only unpack in the JSON"
     assert scale_unbind, "expected the scale.unbind weight-only unpack in the JSON"
     assert all(_node_is_constant(n) for n in base_split), [n["id"] for n in base_split]
@@ -3542,7 +3601,7 @@ def test_glm53_vision_block_renders_as_secondary_nx_group():
     spec = pinned_model_spec(checkpoint, detailed=True)
     reconcile_live_module_groups(spec, walk_meta_module_tree(checkpoint))
 
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     _assert_export_is_acyclic(nodes)
 
@@ -3582,7 +3641,7 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     _assert_export_is_acyclic(nodes)
     by_id = {node["id"]: node for node in nodes}
@@ -3613,7 +3672,7 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     ]
     assert len(variant_inputs) == 3
     for node_id in variant_inputs:
-        assert _sources(node_id) == {"@model_forward/@op_l1477_c24_contiguous"}
+        assert _sources(node_id) == {f"@model_forward/{_at(1477, 24, 'contiguous')}"}
 
     # The three variants are mutually exclusive -- exactly one is what any given
     # layer IS -- so they leave through one output tile of the stack and the
@@ -3720,7 +3779,7 @@ def test_glm53_vision_attention_qkv_linear_is_restored():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {n["id"]: n for n in nodes}
 
@@ -3737,7 +3796,7 @@ def test_glm53_vision_attention_qkv_linear_is_restored():
 
     # It feeds the reshape that opens the qkv split chain (reshape -> permute ->
     # unbind), so the fused projection is really wired into the attention path.
-    reshape = _export_node(nodes, "seq:3:blocks:attn:@op_l1608_c12_reshape:")
+    reshape = _export_node(nodes, f"seq:3:blocks:attn:{_at(1608, 12, 'reshape')}:")
     reshape_sources = {e["sourceNodeId"] for e in reshape["incomingEdges"]}
     assert qkv["id"] in reshape_sources, reshape_sources
     assert node_by_id[qkv["id"]]  # sanity: node is present in the export
@@ -3754,7 +3813,7 @@ def test_glm53_graph_has_no_dead_nodes():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     _assert_no_dead_nodes(graph["nodes"])
 
 
@@ -3770,10 +3829,10 @@ def test_glm53_vision_rotary_unsqueeze_single_tensor_operand():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
-    unsqueeze = next(n for n in nodes if "@op_l1766_c32_unsqueeze" in n["id"])
+    unsqueeze = next(n for n in nodes if f"{_at(1766, 32, 'unsqueeze')}" in n["id"])
     # Exactly one incoming edge, from the position_ids boundary -- no hidden_states.
     assert len(unsqueeze.get("incomingEdges", [])) == 1
     source = unsqueeze["incomingEdges"][0]["sourceNodeId"]
@@ -3807,7 +3866,7 @@ def test_glm53_graph_type_check_clean():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     warnings = type_check_graph_nodes(graph["nodes"])
     assert warnings == [], warnings
 
@@ -3824,7 +3883,7 @@ def test_glm53_indexer_append_visible_tail_concat_operands_rank_consistent():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     by_id = {n["id"]: n for n in nodes}
 
@@ -3877,7 +3936,7 @@ def test_glm53_build_attention_mask_frame_is_not_opaque():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
     frame = "seq:12:build_attention_mask_from_topk"
@@ -3912,9 +3971,9 @@ def test_glm53_build_attention_mask_frame_is_not_opaque():
     # The internal chain must be correctly ordered, not short-circuited: the
     # final Unsqueeze reads the Not equal, which reads the Scatter add (not the
     # Cast directly, as the incomplete extraction did).
-    unsqueeze = _export_node(nodes, f"{frame}:@op_l1249_c15_unsqueeze")
-    not_equal = _export_node(nodes, f"{frame}:@op_l1249_c15_not_equal")
-    scatter_add = _export_node(nodes, f"{frame}:@op_l1246_c8_scatter_add")
+    unsqueeze = _export_node(nodes, f"{frame}:{_at(1249, 15, 'unsqueeze')}")
+    not_equal = _export_node(nodes, f"{frame}:{_at(1249, 15, 'not_equal')}")
+    scatter_add = _export_node(nodes, f"{frame}:{_at(1246, 8, 'scatter_add')}")
     assert not_equal["id"] in {e["sourceNodeId"] for e in unsqueeze["incomingEdges"]}
     assert scatter_add["id"] in {e["sourceNodeId"] for e in not_equal["incomingEdges"]}
 
@@ -3970,7 +4029,7 @@ def test_glm53_graph_integrity_checks_emit_no_warnings():
     )
 
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
 
     built = integrity_check_graph_nodes(graph["nodes"], label="built")
     assert built == [], built
@@ -4008,7 +4067,7 @@ def test_glm53_attention_nodes_show_real_resolved_kernel():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     node_by_id = {n["id"]: n for n in nodes}
 
@@ -4080,7 +4139,7 @@ def test_glm53_attn_hc_constant_closure_is_well_formed():
     )
 
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
     # Root parameter leaves are materialized, constant, and sourceless.
@@ -4131,7 +4190,7 @@ def test_glm53_heterogeneous_decoder_group_has_no_loop_carried_tiles():
     """
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
 
     container = "45x_Glm5NextTextDecoderLayer"
@@ -4217,7 +4276,7 @@ def test_glm53_decode_shows_the_kernel_a_decode_step_runs():
     spec = pinned_model_spec(
         "zai-org/GLM-5.3-Flash", detailed=True, regime=RuntimeRegime(phase="decode")
     )
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
     labels = {n.get("label") for n in nodes if n["id"].endswith(":@attention:0")}
     assert "recurrent_kimi_delta_attention" in labels, sorted(labels)

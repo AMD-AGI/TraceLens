@@ -2109,12 +2109,15 @@ def test_fx_op_fallback_join_and_occurrence_counting():
 
     # Occurrence indexing: two `diff`s on the same source line in the same block
     # instance get 0 and 1; a `diff` in a different block restarts at 0.
+    def _line_op(block: str, line: int, col: int, slot: int) -> str:
+        return f"{block}:@op_l{line}_c{col}_diff:{slot}"
+
     graph = ModelGraph(
         title="t",
         nodes=[
-            _model_node("Diff", node_id="blk:0:@op_l500_c4_diff:0"),
-            _model_node("Diff", node_id="blk:0:@op_l500_c9_diff:1"),
-            _model_node("Diff", node_id="blk:1:@op_l500_c4_diff:0"),
+            _model_node("Diff", node_id=_line_op("blk:0", 500, 4, 0)),
+            _model_node("Diff", node_id=_line_op("blk:0", 500, 9, 1)),
+            _model_node("Diff", node_id=_line_op("blk:1", 500, 4, 0)),
         ],
     )
     inferencer._register_op_line_occurrences(graph)
@@ -2122,7 +2125,7 @@ def test_fx_op_fallback_join_and_occurrence_counting():
     assert keys == [(500, "diff", 0), (500, "diff", 1), (500, "diff", 0)]
 
     # No checkpoint retained → fallback is a strict no-op (never traces).
-    unknown = _model_node("Diff", node_id="blk:0:@op_l500_c4_diff:0")
+    unknown = _model_node("Diff", node_id=_line_op("blk:0", 500, 4, 0))
     assert inferencer._fx_op_shape(unknown, [TensorSpec(("B", "S", 16))]) is None
 
     # With a checkpoint and a pre-populated map, an unknown op (`diff` has no
@@ -3199,53 +3202,6 @@ def test_merge_graph_text_only_spec_has_no_vision_section(
     assert not any(node["namespace"].startswith("visual") for node in graph["nodes"])
     assert "visual" not in graph["groupNodeAttributes"]
     assert graph["nodes"][0]["id"] == "@input"
-
-
-def test_build_export_block_trees_appends_vision_tower_section(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from pathlib import Path
-
-    from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
-
-    from TraceLens.ModelUtils import ast_analyze as aa
-    from TraceLens.ModelUtils.extract import _build_export_block_trees
-
-    source = """
-class VisionMLP:
-    def __init__(self):
-        self.fc1 = Linear()
-        self.fc2 = Linear()
-
-    def forward(self, x):
-        return self.fc2(self.fc1(x))
-
-class FooVisionModel:
-    def __init__(self):
-        self.patch_embed = PatchEmbed()
-        self.mlp = VisionMLP()
-
-    def forward(self, x):
-        x = self.patch_embed(x)
-        return self.mlp(x)
-"""
-    analysis = aa.analyze_sources({Path("m.py"): source})
-    monkeypatch.setitem(CONFIG_MAPPING_NAMES, "foo_vision", "FooVisionConfig")
-    spec = _spec(
-        class_registry=dict(analysis.class_registry),
-        stack_model_class=None,
-        export_block_trees=[],
-        raw_config={"vision_config": {"model_type": "foo_vision"}},
-    )
-    _build_export_block_trees(spec, BasicOpFilter.for_detailed())
-
-    vision = [
-        tree for _title, tree in spec.export_block_trees if tree.attr_name == "visual"
-    ]
-    assert (
-        vision
-    ), "vision tower detail tree should be appended alongside the text spine"
-    assert vision[0].class_name == "FooVisionModel"
 
 
 # ---------------------------------------------------------------------------

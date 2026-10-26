@@ -4,23 +4,54 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Regression tests for per-op host-ness (``get_unpad_data`` expansion).
-
-``get_unpad_data`` ends in a scalar ``lens.max().item()``, so the whole helper was
-tagged ``device: cpu`` and collapsed into one opaque tile -- hiding its
-``torch.nonzero`` / ``torch.max`` device work. Host-ness is now a *per-op*
-property: the helper expands into its real ops and none is tagged ``device: cpu``
-because the only host crossing (``.item()``) collapses to a Python scalar that is
-never traced as a visible op. The device gather/nonzero work is shown as the
-device ops it is.
-
-Kimi's graph comes from the ``kimi_packed_nodes`` fixture, which builds it under the
-``transformers`` Kimi's own code needs. Built in this interpreter instead, a
-DIFFERENT ``get_unpad_data`` is parsed and the model cannot reach the meta
-device -- so these assertions would describe a file the model never runs.
-"""
+"""Kimi K3 index and unpad shapes on the exported graph."""
 
 from __future__ import annotations
+
+# --- test_kimi_k3_index_select.py ---
+
+
+def test_kimi_index_first_axis_is_no_longer_an_opaque_leaf(kimi_packed_nodes):
+    nodes = kimi_packed_nodes
+    opaque = [n for n in nodes if n.get("label") == "Index first axis"]
+    assert not opaque, [n["id"] for n in opaque]
+
+
+def test_kimi_index_select_reads_base_and_indices_and_feeds_unsqueeze(
+    kimi_packed_nodes,
+):
+    nodes = kimi_packed_nodes
+    by_id = {n["id"]: n for n in nodes}
+    selects = [n for n in nodes if n.get("label") == "Index select"]
+    assert selects, "expected at least one Index select node"
+
+    node = selects[0]
+    # Two real tensor operands: the rearranged base and the gathered indices. The
+    # ``indices`` operand now flows from the *expanded* ``get_unpad_data`` body
+    # (its ``torch.nonzero(...).flatten()`` int64 ``[nnz]`` result) rather than the
+    # former opaque ``Get unpad data`` tile.
+    edges = {
+        edge["metadata"].get("port_label"): edge
+        for edge in (node.get("incomingEdges") or [])
+    }
+    assert by_id.get(edges["x"]["sourceNodeId"], {}).get("label") == "Rearrange"
+    indices_src = by_id.get(edges["indices"]["sourceNodeId"], {})
+    assert "get_unpad_data" in indices_src.get("id", "")
+
+    # The ``.unsqueeze(0)`` chained on the call result reconnects to the op (no
+    # orphaned consumer left behind by the inlining).
+    consumers = [
+        m.get("label")
+        for m in nodes
+        if any(
+            edge.get("sourceNodeId") == node["id"]
+            for edge in (m.get("incomingEdges") or [])
+        )
+    ]
+    assert "Unsqueeze" in consumers
+
+
+# --- test_kimi_k3_get_unpad_data.py ---
 
 
 def _is_cpu(node) -> bool:

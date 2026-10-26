@@ -36,19 +36,20 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from build_graph_in_env import cached_graph_nodes, pinned_model_spec
+from build_graph_in_env import (
+    cached_graph_nodes,
+    pinned_merged_graph,
+    pinned_model_spec,
+)
 
 _BUILDER = Path(__file__).with_name("build_graph_in_env.py")
 
 
 def _build_here(model_id: str, revision: str | None = None, regime=None) -> list[dict]:
     from TraceLens.ModelUtils.shape_inference import ShapeInferencer
-    from TraceLens.Visualizer.model_explorer_export.merge import (
-        build_merged_model_graph,
-    )
 
     spec = pinned_model_spec(model_id, revision=revision, regime=regime)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     return graph["nodes"]
 
 

@@ -8,11 +8,10 @@
 
 from __future__ import annotations
 
-from build_graph_in_env import pinned_model_spec
+from build_graph_in_env import pinned_merged_graph, pinned_model_spec
 
 import pytest
 
-from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
 from TraceLens.ModelUtils.block_tree import build_block_node
 
 
@@ -47,7 +46,7 @@ def test_rotary_pos_emb_shows_multiply_not_buffer():
 
     # The text stack never calls this vision module, so it stays out of the graph
     # rather than hanging off the embedding as a branch that feeds nothing.
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
     assert not any(
         node["id"] == "rotary_pos_emb" or node["id"].startswith("rotary_pos_emb/")
         for node in graph["nodes"]
@@ -58,7 +57,7 @@ def test_rotary_pos_emb_shows_multiply_not_buffer():
 def test_glm_attention_expand_kv_assembles_key_states_from_split_and_expand():
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
 
     def synthetic(node):
         return next(
@@ -161,7 +160,7 @@ def test_glm_attention_expand_kv_assembles_key_states_from_split_and_expand():
 def test_glm_experts_expands_router_boundary_into_named_parameters():
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
 
     def synthetic(node):
         return next(
@@ -201,7 +200,7 @@ def test_glm_experts_expands_router_boundary_into_named_parameters():
 def test_merged_graph_uses_operator_labels_not_op_ids():
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = pinned_merged_graph(spec)
     bad = [
         node
         for node in graph["nodes"]

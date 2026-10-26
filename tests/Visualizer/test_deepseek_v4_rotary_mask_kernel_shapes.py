@@ -4,45 +4,17 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Regression tests for DeepSeek-V4-Flash compressor/indexer structural integrity.
-
-Expanding ``compressor`` from an opaque leaf into its real class
-(``DeepseekV4CSACompressor``) surfaced a batch of I1 dead-node / I2 no-source
-integrity warnings. Two distinct wiring bugs were fixed at the extraction/graph-
-build source (never by pruning a node or suppressing a warning):
-
-1. A fully inline-flattened, multi-return composite (``cos, sin =
-   self.rotary_emb(...)``) collapsed its identity onto a single physical node (the
-   last-built internal producer) in ``attr_last_index``. A sibling step reading a
-   *specific* return ordinal then fabricated a port tag onto that one node instead
-   of docking onto the return slot's own producer, permanently orphaning the other
-   slot's real op (``computation_graph._track_attr_index`` / ``_multi_return_slot_key``
-   / ``_operation_source_indices``).
-2. ``DeepseekV4Indexer.forward`` mutates a host-allocated buffer via slice
-   assignment (``new_kv[:, :, ratio:] = chunk_kv[..., self.head_dim:]``). The
-   assignment target is a ``Subscript``, not a ``Name``, so the generic
-   name-keyed ``_bind`` path silently dropped it: the RHS operand's producer
-   (``chunk_kv``'s View, ``chunk_gate``'s Add) was resolved by ``expression()``
-   but never wired to anything, and the mutated buffer's own ``var_producer``
-   entry was never rebound, so later reads of it kept resolving to the original
-   allocation instead of the assignment chain
-   (``ast_analyze._ForwardOperationExtractor.statements``, the ``ast.Assign``
-   Subscript-target branch, mirroring the pre-existing ``x[idx].copy_(y)``
-   in-place-method handler).
-
-These tests rebuild the real model graph and assert the fix holds end to end,
-not just at the unit level covered in
-``tests/ModelUtils/test_ast_graph_edges.py::test_subscript_target_assignment_consumes_rhs_and_rebinds_root``.
-"""
+"""DeepSeek-V4 rotary, mask, kernel, and constant-matmul shapes."""
 
 from __future__ import annotations
 
-from build_graph_in_env import pinned_model_spec
+# --- test_deepseek_v4_rotary_mask_kernel_shapes.py ---
+
+from build_graph_in_env import pinned_merged_graph, pinned_model_spec
 
 import pytest
 
 from TraceLens.ModelUtils.shape_inference import ShapeInferencer
-from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
 from TraceLens.Visualizer.model_explorer_export.type_check import (
     group_cycle_check_graph_nodes,
     integrity_check_graph_nodes,
@@ -55,7 +27,7 @@ from TraceLens.Visualizer.model_explorer_export.viewer_page import (
 
 def _build_graph():
     spec = pinned_model_spec("deepseek-ai/DeepSeek-V4-Flash", detailed=True)
-    return build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    return pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
 
 
 def test_deepseek_v4_flash_integrity_clean_built_and_render_filtered():
@@ -106,7 +78,6 @@ def test_deepseek_v4_flash_group_cycle_clean_and_kv_norm_single_input():
         for node in graph["nodes"]
         if str(node.get("namespace", "")).endswith("DeepseekV4Attention/kv_norm")
         and node.get("label") == "Cast"
-        and ":@op_l57" in str(node.get("id", ""))
     ]
     assert casts, "attention kv_norm Cast node not found"
     for cast in casts:
@@ -667,3 +638,190 @@ def test_deepseek_v4_main_decoder_has_no_loop_carried_boundary():
     ]
     assert consumers, "decoder @output orphaned after boundary removal"
     assert all("@loop_carried" not in c for c in consumers), consumers
+
+
+# --- test_matmul_constant_operand_linear.py ---
+
+from build_graph_in_env import pinned_model_spec
+
+import pytest
+
+from TraceLens.ModelUtils.shape_inference import ShapeInferencer
+from TraceLens.Visualizer.model_explorer_export.merge import (
+    _last_dim,
+    _relabel_constant_operand_matmul_as_linear,
+)
+from TraceLens.Visualizer.model_explorer_export.viewer_page import (
+    _graph_without_constants,
+)
+
+
+def _op_node(node_id: str, label: str, producers: list[str]) -> dict:
+    return {
+        "id": node_id,
+        "label": label,
+        "attrs": [{"key": "class_name", "value": label}],
+        "incomingEdges": [{"sourceNodeId": p} for p in producers],
+    }
+
+
+def _const_node(node_id: str) -> dict:
+    return {
+        "id": node_id,
+        "label": "weight",
+        "attrs": [{"key": "constant", "value": "true"}],
+    }
+
+
+def _activation_node(node_id: str) -> dict:
+    return {"id": node_id, "label": "Transpose", "attrs": []}
+
+
+def test_bmm_against_learned_weight_relabels_to_linear():
+    """A ``BatchMatMul`` with one constant operand and one activation -> ``Linear``."""
+    nodes = [
+        _activation_node("x"),
+        _const_node("w"),
+        _op_node("bmm", "BatchMatMul", ["x", "w"]),
+    ]
+    _relabel_constant_operand_matmul_as_linear(nodes)
+    bmm = nodes[-1]
+    assert bmm["label"] == "Linear"
+    assert any(
+        a["key"] == "class_name" and a["value"] == "Linear" for a in bmm["attrs"]
+    )
+
+
+def test_matmul_of_two_activations_stays_matmul():
+    """A genuine activation-activation contraction (attention scores) is untouched."""
+    nodes = [
+        _activation_node("q"),
+        _activation_node("k"),
+        _op_node("scores", "MatMul", ["q", "k"]),
+    ]
+    _relabel_constant_operand_matmul_as_linear(nodes)
+    assert nodes[-1]["label"] == "MatMul"
+
+
+def test_matmul_of_two_constants_stays_matmul():
+    """No activation operand means it is not an activation projection -- left as is."""
+    nodes = [
+        _const_node("a"),
+        _const_node("b"),
+        _op_node("folded", "MatMul", ["a", "b"]),
+    ]
+    _relabel_constant_operand_matmul_as_linear(nodes)
+    assert nodes[-1]["label"] == "MatMul"
+
+
+def _attr(node: dict, key: str):
+    for a in node.get("attrs", []) or []:
+        if a.get("key") == key:
+            return a.get("value")
+    return None
+
+
+def test_deepseek_v4_grouped_linear_bmm_renders_as_single_input_linear():
+    """The DeepSeek ``o_a_proj`` grouped-linear ``bmm(x, self.weight...)`` reads
+    ``Linear`` and, after the constant weight edge is filtered, draws one input.
+
+    Keyed structurally: the sole ``bmm`` op whose annotated operands include a
+    ``Constant`` -- no hardcoded node id or line number.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = pinned_model_spec("deepseek-ai/DeepSeek-V4-Flash", detailed=True)
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+
+    weighted_bmm = [
+        node
+        for node in nodes
+        if _attr(node, "raw_op") == "bmm"
+        and "Constant" in (_attr(node, "input_types") or "")
+    ]
+    assert weighted_bmm, "expected a bmm with a constant weight operand"
+    for node in weighted_bmm:
+        assert node.get("label") == "Linear", node.get("label")
+        assert _attr(node, "op_type") == "Linear"
+
+    filtered = _graph_without_constants(graph)
+    kept = {n["id"] for n in filtered["nodes"]}
+    by_id = {n["id"]: n for n in filtered["nodes"]}
+    for node in weighted_bmm:
+        assert node["id"] in kept
+        drawn = by_id[node["id"]]
+        assert len(drawn.get("incomingEdges", [])) == 1, drawn.get("incomingEdges")
+
+
+def _shaped(node: dict, shape: str) -> dict:
+    node["attrs"].append({"key": "output_shape", "value": shape})
+    return node
+
+
+class TestAProjectionTakesItsWidthFromTheWeight:
+    """What separates a projection from an outer product against a buffer.
+
+    MiniMax's RoPE computes ``inv_freq[None, :, None] @ position_ids[:, None, :]``.
+    ``inv_freq`` is a registered BUFFER, so its whole chain is constant-tagged
+    and the relabel read it as a learned weight -- drawing the frequency
+    computation as an ``nn.Linear`` whose real operand is then hidden by the
+    render filter.
+
+    A projection takes its output width FROM the weight; that is what makes the
+    contraction affine. The outer product's width comes from the positions, so
+    the two are told apart by the tensors themselves rather than by what the
+    constant is called.
+    """
+
+    def test_an_outer_product_against_a_buffer_stays_matmul(self) -> None:
+        nodes = [
+            _shaped(_activation_node("pos"), "[1, 1, S] float32"),
+            _shaped(_const_node("inv_freq"), "[1, 32, 1] float32"),
+            _shaped(
+                _op_node("freqs", "MatMul", ["inv_freq", "pos"]), "[1, 32, S] float"
+            ),
+        ]
+        _relabel_constant_operand_matmul_as_linear(nodes)
+        assert nodes[2]["label"] == "MatMul"
+
+    def test_a_projection_still_relabels(self) -> None:
+        nodes = [
+            _shaped(_activation_node("x"), "[B, S, 4096] bfloat16"),
+            _shaped(_const_node("w"), "[4096, 1024] bfloat16"),
+            _shaped(_op_node("proj", "MatMul", ["x", "w"]), "[B, S, 1024] bfloat16"),
+        ]
+        _relabel_constant_operand_matmul_as_linear(nodes)
+        assert nodes[2]["label"] == "Linear"
+
+    def test_a_square_projection_still_relabels(self) -> None:
+        """In/out equal is the common case and must not be read as ambiguous."""
+        nodes = [
+            _shaped(_activation_node("x"), "[B, S, 6144] bfloat16"),
+            _shaped(_const_node("w"), "[6144, 6144] bfloat16"),
+            _shaped(_op_node("proj", "MatMul", ["x", "w"]), "[B, S, 6144] bfloat16"),
+        ]
+        _relabel_constant_operand_matmul_as_linear(nodes)
+        assert nodes[2]["label"] == "Linear"
+
+    def test_an_unshaped_node_is_judged_as_before(self) -> None:
+        """No shape to read means no reason to decline -- the old behaviour."""
+        nodes = [
+            _activation_node("x"),
+            _const_node("w"),
+            _op_node("proj", "BatchMatMul", ["x", "w"]),
+        ]
+        _relabel_constant_operand_matmul_as_linear(nodes)
+        assert nodes[2]["label"] == "Linear"
+
+
+class TestReadingTheTrailingExtent:
+    def test_a_rendered_shape(self) -> None:
+        assert _last_dim("[B, S, 4096] bfloat16") == "4096"
+
+    def test_a_single_axis(self) -> None:
+        assert _last_dim("[32] float32") == "32"
+
+    def test_a_scalar_and_a_blank(self) -> None:
+        assert _last_dim("[] float32") is None
+        assert _last_dim(None) is None
+        assert _last_dim("no brackets") is None

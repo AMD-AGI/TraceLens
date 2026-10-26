@@ -18,6 +18,7 @@ defaults apply, exactly as an export with no flags would.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import fcntl
 import hashlib
@@ -27,6 +28,8 @@ import sys
 from pathlib import Path
 
 _SPECS: dict[tuple, object] = {}
+_SPEC_KEYS: dict[int, tuple] = {}
+_MERGED: dict[tuple, dict] = {}
 
 
 def _graph_cache_dir() -> Path:
@@ -58,12 +61,19 @@ def pinned_model_spec(model_id, *, detailed=True, revision=None, regime=None):
 
     pin = pin_for(model_id)
     resolved = revision if revision is not None else (pin.revision if pin else None)
-    key = (str(model_id), bool(detailed), resolved, json.dumps(_regime_payload(regime), sort_keys=True, default=str))
+    key = (
+        str(model_id),
+        bool(detailed),
+        resolved,
+        json.dumps(_regime_payload(regime), sort_keys=True, default=str),
+    )
     if key not in _SPECS:
         _SPECS[key] = load_model_spec(
             model_id, detailed=detailed, revision=resolved, regime=regime
         )
-    return _SPECS[key]
+    spec = _SPECS[key]
+    _SPEC_KEYS[id(spec)] = key
+    return spec
 
 
 def cached_graph_nodes(model_id, revision, transformers, regime, build):
@@ -99,6 +109,52 @@ def cached_graph_nodes(model_id, revision, transformers, regime, build):
             return nodes
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def pinned_merged_graph(spec, *, shape_inferencer=None):
+    """Return the merged graph for a pinned spec, built once per process.
+
+    A spec loaded through ``pinned_model_spec`` is cached in memory and on
+    disk, keyed by the same pin and by whether shapes were inferred. The
+    caller gets a copy. Any other spec is built immediately and not cached.
+    """
+    from TraceLens.Visualizer.model_explorer_export.merge import (
+        build_merged_model_graph,
+    )
+
+    def build():
+        if shape_inferencer is None:
+            return build_merged_model_graph(spec)
+        return build_merged_model_graph(spec, shape_inferencer=shape_inferencer)
+
+    meta = _SPEC_KEYS.get(id(spec))
+    if meta is None:
+        return build()
+    shaped = shape_inferencer is not None
+    cache_key = (meta, shaped)
+    if cache_key not in _MERGED:
+        payload = json.dumps(
+            {"spec": meta, "shaped": shaped}, sort_keys=True, default=str
+        )
+        digest = hashlib.sha256(payload.encode()).hexdigest()
+        directory = _graph_cache_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"graph-{digest}.json"
+        lock_path = directory / f"graph-{digest}.lock"
+        with open(lock_path, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                if path.is_file():
+                    _MERGED[cache_key] = json.loads(path.read_text())
+                else:
+                    graph = build()
+                    temporary = path.with_suffix(".json.tmp")
+                    temporary.write_text(json.dumps(graph, default=str))
+                    temporary.replace(path)
+                    _MERGED[cache_key] = graph
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+    return copy.deepcopy(_MERGED[cache_key])
 
 
 def main(argv: list[str]) -> int:
