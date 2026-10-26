@@ -25,9 +25,6 @@ from TraceLens.ModelUtils.kernel_pipeline import (
     parse_kernel_import,
 )
 
-_FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "kda_kernel"
-
-
 def _kimi_code_path() -> Path | None:
     """Return the vendored Kimi-K3 modeling source shipped as a test fixture.
 
@@ -66,11 +63,6 @@ def _load_chunk_kda_pipeline():
     return pipeline, basic
 
 
-@pytest.fixture(autouse=True)
-def _kernel_fixture_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TRACELENS_KERNEL_FIXTURE_ROOT", str(_FIXTURE_ROOT))
-
-
 def test_kernel_search_root_expands_kernel_module_beside_modeling_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -96,7 +88,6 @@ def test_kernel_search_root_expands_kernel_module_beside_modeling_file(
         encoding="utf-8",
     )
     monkeypatch.setattr(kernel_pipeline, "_KERNEL_SEARCH_ROOTS", [])
-    monkeypatch.setattr(kernel_pipeline, "_KERNEL_FIXTURE_ROOT", None)
 
     details = ["kernel: sibling_attn", "import: sibling_kernel#sibling_attn"]
     # A kernel module on no import path reads as opaque until its directory is known.

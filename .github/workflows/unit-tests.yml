@@ -14,6 +14,10 @@ on:
     branches: [ main ]
     paths:
       - "**/*.py"
+      - "TraceLens/Visualizer/**/*.js"
+      - "TraceLens/Visualizer/**/*.html"
+      - "TraceLens/Visualizer/**/NOTICE"
+      - "TraceLens/Visualizer/**/*.LICENSE"
       - "tests/**"
       - "setup.py"
       - "MANIFEST.in"
@@ -25,6 +29,10 @@ on:
     branches: [ main ]
     paths:
       - "**/*.py"
+      - "TraceLens/Visualizer/**/*.js"
+      - "TraceLens/Visualizer/**/*.html"
+      - "TraceLens/Visualizer/**/NOTICE"
+      - "TraceLens/Visualizer/**/*.LICENSE"
       - "tests/**"
       - "setup.py"
       - "MANIFEST.in"
@@ -96,7 +104,6 @@ jobs:
         id: filter
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BEFORE: ${{ github.event.before }}
         run: |
           python - << 'PY'
           import os
@@ -118,17 +125,15 @@ jobs:
           visualizer_paths = ("TraceLens/Visualizer/", "tests/Visualizer/") + shared
 
           event = os.environ["EVENT_NAME"]
-          before = os.environ.get("BEFORE", "")
-          if event == "push" and (not before or set(before) == {"0"}):
-              # A new branch has no parent to diff against.
+          if event == "push":
+              # A push that skips a package still reports coverage for all of
+              # TraceLens. Run both suites so the 95% gate is not counting
+              # untested packages as uncovered.
               modelutils = visualizer = True
           else:
-              if event == "push":
-                  base = before
-              else:
-                  base = subprocess.check_output(
-                      ["git", "merge-base", "HEAD", "origin/main"], text=True
-                  ).strip()
+              base = subprocess.check_output(
+                  ["git", "merge-base", "HEAD", "origin/main"], text=True
+              ).strip()
               files = subprocess.check_output(
                   ["git", "diff", "--name-only", base, "HEAD"], text=True
               ).splitlines()

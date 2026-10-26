@@ -12,10 +12,7 @@ import ast
 import importlib
 import importlib.util
 import inspect
-import os
 import re
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -26,7 +23,6 @@ from TraceLens.ModelUtils.ast_analyze import (
 )
 
 _KERNEL_SOURCE_CACHE = Path.home() / ".cache" / "tracelens" / "kernel_sources"
-_KERNEL_FIXTURE_ROOT = os.environ.get("TRACELENS_KERNEL_FIXTURE_ROOT")
 
 # Directories of the modeling files under analysis, searched for imported kernel sources.
 _KERNEL_SEARCH_ROOTS: list[Path] = []
@@ -318,10 +314,7 @@ def register_kernel_search_root(path: str | Path) -> None:
 
 
 def _kernel_search_roots() -> list[Path]:
-    roots = list(_KERNEL_SEARCH_ROOTS)
-    if _KERNEL_FIXTURE_ROOT:
-        roots.insert(0, Path(_KERNEL_FIXTURE_ROOT))
-    return roots
+    return list(_KERNEL_SEARCH_ROOTS)
 
 
 def _search_root_module_file(module: str) -> Path | None:
@@ -364,29 +357,19 @@ def _module_file_path(module: str) -> Path | None:
         return None
     org_repo, branch = repo
     owner, repo_name = org_repo.split("/", 1)
-    from TraceLens.ModelUtils.source_policy import get_source_policy
+    from TraceLens.ModelUtils.github import GitHubRef, fetch_github_file
 
-    get_source_policy().require_github_repo_allowed(owner, repo_name)
+    ref = GitHubRef(owner=owner, repo=repo_name, ref=branch)
     relative = Path(*module.split(".")).with_suffix(".py")
-    url = f"https://raw.githubusercontent.com/{org_repo}/{branch}/{relative.as_posix()}"
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            text = response.read().decode("utf-8")
-    except (OSError, urllib.error.URLError):
-        package_init = Path(*module.split(".")) / "__init__.py"
-        url = f"https://raw.githubusercontent.com/{org_repo}/{branch}/{package_init.as_posix()}"
-        try:
-            with urllib.request.urlopen(url, timeout=10) as response:
-                text = response.read().decode("utf-8")
-        except (OSError, urllib.error.URLError):
-            return None
-        cache_init.parent.mkdir(parents=True, exist_ok=True)
-        cache_init.write_text(text, encoding="utf-8")
-        return cache_init
-
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(text, encoding="utf-8")
-    return cache_file
+    found = fetch_github_file(
+        ref, relative.as_posix(), cache_root=_KERNEL_SOURCE_CACHE
+    )
+    if found is not None:
+        return found
+    package_init = Path(*module.split(".")) / "__init__.py"
+    return fetch_github_file(
+        ref, package_init.as_posix(), cache_root=_KERNEL_SOURCE_CACHE
+    )
 
 
 def _read_module_source(module: str) -> tuple[str, str] | None:

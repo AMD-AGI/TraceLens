@@ -22,11 +22,10 @@ from TraceLens.Visualizer.model_explorer_export.type_check import (
     integrity_check_graph_nodes,
 )
 
+from TraceLens.Visualizer.model_explorer_export.viewer_assets import worker_js_bytes
+
 VIEWER_DIR = Path(__file__).resolve().parent / "viewer"
-PACKAGE_ROOT = Path(__file__).resolve().parent
-VISUALIZER_DIST = (
-    PACKAGE_ROOT / "node_modules" / "ai-edge-model-explorer-visualizer" / "dist"
-)
+_BUNDLED_VIEWER = VIEWER_DIR
 APP_JS_PATTERN = re.compile(r'    <script src="\./app\.js\?v=\d+"></script>')
 
 
@@ -41,19 +40,34 @@ def render_payload_script(payload: dict[str, Any]) -> str:
     return f'    <script id="tracelens-payload" type="application/json">{blob}</script>'
 
 
-def _worker_js_source() -> Path:
-    for candidate in (VISUALIZER_DIST / "worker.js", VIEWER_DIR / "worker.js"):
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        "worker.js not found; install ai-edge-model-explorer-visualizer or bundle viewer/worker.js"
-    )
+def _attribution_comment() -> str:
+    """Apache-2.0 license and copyright for the embedded layout worker."""
+    notice = (_BUNDLED_VIEWER / "NOTICE").read_text(encoding="utf-8").strip()
+    license_text = (_BUNDLED_VIEWER / "ai-edge-model-explorer-visualizer.LICENSE").read_text(
+        encoding="utf-8"
+    ).strip()
+    body = f"{notice}\n\n{license_text}".replace("--", "- -")
+    return f"<!--\n{body}\n-->"
 
 
-def render_worker_script(worker_js: str) -> str:
+def _worker_js_source() -> str:
+    """Return the pinned layout worker.
+
+    A served page loads ``./worker.js`` from this origin. A standalone HTML
+    file cannot: ``Worker`` rejects ``file:`` script URLs, so those bytes are
+    embedded and ``app.js`` turns them into a same-origin blob URL.
+    """
+    return worker_js_bytes().decode("utf-8")
+
+
+def render_worker_script(worker_js: str | None = None) -> str:
     """Embed layout worker source for file:// exports (Workers cannot load local paths)."""
-    safe = worker_js.replace("</", "<\\/")
-    return f'    <script id="tracelens-worker-source" type="text/plain">{safe}</script>'
+    source = _worker_js_source() if worker_js is None else worker_js
+    safe = source.replace("</", "<\\/")
+    return (
+        f"    {_attribution_comment()}\n"
+        f'    <script id="tracelens-worker-source" type="text/plain">{safe}</script>'
+    )
 
 
 def _payload_with_generated_timestamp(
@@ -225,9 +239,7 @@ def compose_viewer_html(
             payload = _payload_without_constants(payload)
         replacement_parts.append(render_payload_script(payload))
     if inline_app:
-        replacement_parts.append(
-            render_worker_script(_worker_js_source().read_text(encoding="utf-8"))
-        )
+        replacement_parts.append(render_worker_script())
         replacement_parts.append(f"    <script>\n{app_js}\n    </script>")
     else:
         replacement_parts.append('    <script src="./app.js?v=10"></script>')

@@ -543,7 +543,6 @@ def test_kernel_module_resolution_and_search_roots(tmp_path: Path, monkeypatch):
     module_file.write_text("def run():\n    return 1\n", encoding="utf-8")
     (package / "__init__.py").write_text("", encoding="utf-8")
     monkeypatch.setattr(kernel, "_KERNEL_SEARCH_ROOTS", [])
-    monkeypatch.setattr(kernel, "_KERNEL_FIXTURE_ROOT", None)
 
     kernel.register_kernel_search_root(module_file)
     kernel.register_kernel_search_root(root)
@@ -917,8 +916,8 @@ def test_kernel_ast_helpers_and_import_map():
 
 def test_kernel_module_file_cache_find_spec_and_github(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(kernel, "_KERNEL_SEARCH_ROOTS", [])
-    monkeypatch.setattr(kernel, "_KERNEL_FIXTURE_ROOT", str(tmp_path / "fixtures"))
     (tmp_path / "fixtures").mkdir()
+    kernel.register_kernel_search_root(tmp_path / "fixtures")
     assert kernel._kernel_search_roots()[0] == Path(tmp_path / "fixtures")
     assert kernel._search_root_module_file("missing.mod") is None
 
@@ -957,23 +956,10 @@ def test_kernel_module_file_cache_find_spec_and_github(tmp_path: Path, monkeypat
     )
     source_policy.set_source_policy(source_policy.SourcePolicy())
 
-    class Response:
-        def __init__(self, payload: bytes):
-            self._payload = payload
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return None
-
-        def read(self):
-            return self._payload
-
     monkeypatch.setattr(
-        kernel.urllib.request,
-        "urlopen",
-        lambda url, timeout: Response(b"def run():\n    return 1\n"),
+        github,
+        "_download_bytes",
+        lambda url: b"def run():\n    return 1\n",
     )
     fetched = kernel._module_file_path("fla.ops.chunk")
     assert fetched is not None and fetched.read_text(encoding="utf-8").startswith(
@@ -982,21 +968,21 @@ def test_kernel_module_file_cache_find_spec_and_github(tmp_path: Path, monkeypat
 
     calls: list[str] = []
 
-    def urlopen(url, timeout):
-        calls.append(str(url))
+    def download(url: str) -> bytes:
+        calls.append(url)
         if len(calls) == 1:
             raise urllib.error.URLError("missing py")
-        return Response(b"# package init\n")
+        return b"# package init\n"
 
-    monkeypatch.setattr(kernel.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(github, "_download_bytes", download)
     init_path = kernel._module_file_path("fla.ops.missing")
     assert init_path is not None and init_path.name == "__init__.py"
     assert len(calls) == 2
 
     monkeypatch.setattr(
-        kernel.urllib.request,
-        "urlopen",
-        lambda url, timeout: (_ for _ in ()).throw(urllib.error.URLError("offline")),
+        github,
+        "_download_bytes",
+        lambda url: (_ for _ in ()).throw(urllib.error.URLError("offline")),
     )
     assert kernel._module_file_path("fla.ops.offline") is None
     assert kernel._module_file_path("unknownpkg.ops") is None
@@ -1004,7 +990,6 @@ def test_kernel_module_file_cache_find_spec_and_github(tmp_path: Path, monkeypat
 
 def test_kernel_read_source_import_and_symbol_inspect(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(kernel, "_KERNEL_SEARCH_ROOTS", [])
-    monkeypatch.setattr(kernel, "_KERNEL_FIXTURE_ROOT", None)
     imported = tmp_path / "imported_mod.py"
     imported.write_text("VALUE = 7\n", encoding="utf-8")
     mod = types.ModuleType("imported_mod")
@@ -1034,7 +1019,6 @@ def test_kernel_read_source_import_and_symbol_inspect(tmp_path: Path, monkeypatc
     sys.modules.pop("other_mod", None)
     monkeypatch.undo()
     monkeypatch.setattr(kernel, "_KERNEL_SEARCH_ROOTS", [])
-    monkeypatch.setattr(kernel, "_KERNEL_FIXTURE_ROOT", None)
     monkeypatch.syspath_prepend(str(tmp_path))
     found = kernel._find_symbol_definition("star_mod", "Widget")
     assert found is not None and found[1] == "Widget.forward"

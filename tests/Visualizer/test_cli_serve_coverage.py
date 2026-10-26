@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -22,6 +23,7 @@ from TraceLens.Visualizer.model_explorer_export import (
     cli,
     fact_sheet,
     serve,
+    viewer_assets,
     viewer_page,
 )
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
@@ -415,16 +417,25 @@ def test_load_payload_and_asset_copy(monkeypatch, tmp_path):
     json_path.write_text('{"name": "disk"}', encoding="utf-8")
     assert serve._load_payload(payload=None, json_path=json_path) == {"name": "disk"}
 
-    dist = tmp_path / "dist"
-    viewer = tmp_path / "viewer"
-    dist.mkdir()
-    (dist / "worker.js").write_text("worker", encoding="utf-8")
-    monkeypatch.setattr(serve, "VISUALIZER_DIST", dist)
-    monkeypatch.setattr(serve, "VIEWER_DIR", viewer)
+    fetched: list[bytes] = []
+    monkeypatch.setattr(serve, "worker_js_bytes", lambda: fetched.append(b"worker") or b"worker")
     serve.ensure_viewer_assets()
-    assert (viewer / "worker.js").read_text(encoding="utf-8") == "worker"
-    (dist / "worker.js").unlink()
-    serve.ensure_viewer_assets()
+    assert fetched == [b"worker"]
+
+
+def test_worker_js_bytes_checks_the_pinned_digest(monkeypatch, tmp_path):
+    monkeypatch.setattr(viewer_assets, "_CACHE_ROOT", tmp_path)
+    digest = hashlib.sha256(b"layout-worker").hexdigest()
+    monkeypatch.setattr(viewer_assets, "WORKER_SHA256", digest)
+    monkeypatch.setattr(viewer_assets, "_download", lambda url: b"not-the-worker")
+    with pytest.raises(RuntimeError, match="sha256"):
+        viewer_assets.worker_js_bytes()
+
+    monkeypatch.setattr(viewer_assets, "_download", lambda url: b"layout-worker")
+    assert viewer_assets.worker_js_bytes() == b"layout-worker"
+    assert viewer_assets.worker_cache_path().read_bytes() == b"layout-worker"
+    monkeypatch.setattr(viewer_assets, "_download", lambda url: (_ for _ in ()).throw(AssertionError("cache hit")))
+    assert viewer_assets.worker_js_bytes() == b"layout-worker"
 
 
 def test_serve_viewer_handler_and_thread_lifecycle(monkeypatch, tmp_path):
@@ -491,6 +502,14 @@ def test_serve_viewer_handler_and_thread_lifecycle(monkeypatch, tmp_path):
     handler.path = "/asset.js"
     handler.do_GET()
     parent_get.assert_called_once_with()
+
+    monkeypatch.setattr(serve, "worker_js_bytes", lambda: b"layout-worker")
+    handler.path = "/worker.js"
+    handler.wfile = io.BytesIO()
+    handler.send_response.reset_mock()
+    handler.do_GET()
+    handler.send_response.assert_called_once_with(200)
+    assert handler.wfile.getvalue() == b"layout-worker"
 
     parent_headers = Mock()
     monkeypatch.setattr(serve.SimpleHTTPRequestHandler, "end_headers", parent_headers)
@@ -613,16 +632,18 @@ def _viewer_files(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def test_viewer_page_rendering_and_worker_fallback(monkeypatch, tmp_path):
-    viewer, dist = _viewer_files(tmp_path)
+    viewer, _dist = _viewer_files(tmp_path)
     monkeypatch.setattr(viewer_page, "VIEWER_DIR", viewer)
-    monkeypatch.setattr(viewer_page, "VISUALIZER_DIST", dist)
-    (viewer / "worker.js").write_text("worker </script>", encoding="utf-8")
+    monkeypatch.setattr(viewer_page, "worker_js_bytes", lambda: b"worker </script>")
 
     assert viewer_page.is_html_output("X.HTML")
     assert not viewer_page.is_html_output("x.json")
     payload_script = viewer_page.render_payload_script({"x": "</script>", "u": "→"})
     assert "<\\/script>" in payload_script and "→" in payload_script
-    assert "<\\/script>" in viewer_page.render_worker_script("</script>")
+    rendered = viewer_page.render_worker_script("</script>")
+    assert "<\\/script>" in rendered
+    assert "Apache License" in rendered
+    assert "The Model Explorer Authors" in rendered
 
     external = viewer_page.compose_viewer_html({"x": 1})
     assert 'id="tracelens-payload"' in external
@@ -630,20 +651,22 @@ def test_viewer_page_rendering_and_worker_fallback(monkeypatch, tmp_path):
     inline = viewer_page.compose_viewer_html({"x": 1}, inline_app=True)
     assert 'id="tracelens-worker-source"' in inline
     assert "const close" in inline
+    assert "Apache License" in inline
 
-    (dist / "worker.js").write_text("preferred", encoding="utf-8")
-    assert viewer_page._worker_js_source() == dist / "worker.js"
-    (dist / "worker.js").unlink()
-    (viewer / "worker.js").unlink()
+    assert viewer_page._worker_js_source() == "worker </script>"
+
+    def _missing() -> bytes:
+        raise FileNotFoundError("worker.js not found")
+
+    monkeypatch.setattr(viewer_page, "worker_js_bytes", _missing)
     with pytest.raises(FileNotFoundError, match="worker.js not found"):
         viewer_page._worker_js_source()
 
 
 def test_viewer_page_missing_script_and_save(monkeypatch, tmp_path):
-    viewer, dist = _viewer_files(tmp_path)
+    viewer, _dist = _viewer_files(tmp_path)
     monkeypatch.setattr(viewer_page, "VIEWER_DIR", viewer)
-    monkeypatch.setattr(viewer_page, "VISUALIZER_DIST", dist)
-    (dist / "worker.js").write_text("worker", encoding="utf-8")
+    monkeypatch.setattr(viewer_page, "worker_js_bytes", lambda: b"worker")
 
     target = viewer_page.save_viewer_html({"x": 1}, tmp_path / "out" / "page.html")
     assert target.exists()
