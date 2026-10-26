@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import torch
+
 _log = logging.getLogger(__name__)
 
 # What each Hugging Face parallel style does to the activation. The mesh the
@@ -479,20 +481,17 @@ _ACTIVATION_COLLECTIVES = {
     "gradient all-reduce": "gradient all-reduce",
 }
 
-_DTYPE_BYTES = {
-    "float32": 4,
-    "fp32": 4,
-    "float": 4,
-    "float16": 2,
-    "fp16": 2,
-    "half": 2,
-    "bfloat16": 2,
-    "bf16": 2,
-    "int8": 1,
-    "uint8": 1,
-    "int32": 4,
-    "int64": 8,
-    "bool": 1,
+# TraceLens/model-config shorthand that is not itself a ``torch`` attribute name
+# (``torch.float32``/``torch.half``/``torch.float`` all resolve directly; these
+# do not). ``fp8_e4m3``/``fp8_e5m2`` are shape_inference's own canonical names
+# for a quantized weight's storage dtype (``_CONCRETE_DTYPE_TOKENS``), one byte
+# either way.
+_DTYPE_ALIASES = {
+    "fp32": "float32",
+    "fp16": "float16",
+    "bf16": "bfloat16",
+    "fp8_e4m3": "float8_e4m3fn",
+    "fp8_e5m2": "float8_e5m2",
 }
 
 _COMM_STYLE = {
@@ -1120,14 +1119,14 @@ def _is_activation_dtype(dtype: str | None) -> bool:
 
 
 def _dtype_bytes(dtype: str | None) -> int | None:
+    """Bytes per element, read from the real ``torch.dtype`` -- never a hand-kept
+    table of numbers that can drift from what the installed torch build does."""
     if not dtype:
         return None
     key = dtype.lower()
-    if key in _DTYPE_BYTES:
-        return _DTYPE_BYTES[key]
-    if key.startswith(("float8", "fp8")):
-        return 1
-    return None
+    key = _DTYPE_ALIASES.get(key, key)
+    torch_dtype = getattr(torch, key, None)
+    return torch_dtype.itemsize if isinstance(torch_dtype, torch.dtype) else None
 
 
 def _repeat_count(node: dict[str, Any]) -> int | None:
