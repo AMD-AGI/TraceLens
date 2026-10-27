@@ -1219,7 +1219,11 @@ class moe_opus_stage1_a8w4(UnfusedMoE_Up):
                 "output_dtype": types[offset + 8] if len(types) > offset + 8 else "",
                 "a_scale_shape": tuple(dims[offset + 2]) if dims[offset + 2] else (),
                 "w_scale_shape": tuple(dims[offset + 3]) if dims[offset + 3] else (),
-                "out_scale_shape": tuple(dims[offset + 9]) if len(dims) > offset + 9 and dims[offset + 9] else (),
+                "out_scale_shape": (
+                    tuple(dims[offset + 9])
+                    if len(dims) > offset + 9 and dims[offset + 9]
+                    else ()
+                ),
                 "scale_dtype": types[offset + 2] if len(types) > offset + 2 else "",
             },
             event,
@@ -2130,9 +2134,7 @@ class SglangMoeSortingSmall(MoeSortScatterGather):
                     "pairs": pairs,
                     "block_size": block,
                     "num_experts": num_experts,
-                    "compact": bool(
-                        block and pairs <= 64 and pairs <= 2 * block
-                    ),
+                    "compact": bool(block and pairs <= 64 and pairs <= 2 * block),
                 }
             )
         return add_logical_batch_size(details, event)

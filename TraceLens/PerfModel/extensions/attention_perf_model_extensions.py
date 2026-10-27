@@ -1074,9 +1074,9 @@ class mla_decode_v4_asm(InferenceAttention):
             "out_shape": dims[15],
             "indptr_elems": sum(dims[i][0] for i in (4, 5, 7) if dims[i]),
             "sink_elems": dims[8][0] if dims[8] else 0,
-            "valid_elems": dims[16][0]
-            if write_valid and len(dims) > 16 and dims[16]
-            else 0,
+            "valid_elems": (
+                dims[16][0] if write_valid and len(dims) > 16 and dims[16] else 0
+            ),
             "rope_elems": math.prod(dims[1]) if len(dims) > 1 and dims[1] else 0,
             "kv_rope_dim": dims[3][-1] if len(dims) > 3 and dims[3] else 64,
         }
@@ -1090,9 +1090,7 @@ class mla_decode_v4_asm(InferenceAttention):
         p = self.param_details
         if p.get("_no_perf"):
             return None
-        if not dense_counted_tensor(
-            self.event, (0, 1, 2, 3, 6, 8, 13, 14, 15)
-        ):
+        if not dense_counted_tensor(self.event, (0, 1, 2, 3, 6, 8, 13, 14, 15)):
             return None
         bpe_q = name2bpe(str(p["dtype_Q"]).lower())
         bpe_kv = name2bpe(str(p["dtype_kv"]).lower())

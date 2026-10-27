@@ -129,11 +129,11 @@ class gemm_a8w8_blockscale(GEMM):
 _PRESHUFFLE_KERNEL_RE = re.compile(
     r"GROUP_K_(\d+)_GROUP_N_(\d+)_BLOCK_SIZE_M_(\d+)_BLOCK_SIZE_N_(\d+)"
     r"_BLOCK_SIZE_K_(\d+)_.*?NUM_KSPLIT_(\d+)_SPLITK_BLOCK_SIZE_(\d+)"
-) ## Full the Tile Size for the GEMM
+)  ## Full the Tile Size for the GEMM
 _PRESHUFFLE_REDUCE_RE = re.compile(
     r"reduce_kernel_BLOCK_SIZE_M_(\d+)_BLOCK_SIZE_N_(\d+)"
     r"_ACTUAL_KSPLIT_(\d+)_MAX_KSPLIT_(\d+)"
-) ## Add partial results and reduce the result
+)  ## Add partial results and reduce the result
 
 
 def _event_kernel_names(event):
@@ -146,7 +146,7 @@ def _event_kernel_names(event):
 
 _OPUS_TILE_RE = re.compile(
     r"flatmm_splitk_traits_gfx950ILi\d+E.*?seqIJLi(\d+)ELi(\d+)ELi(\d+)E"
-) ## B_M, B_N, B_K of the launched Opus tile
+)  ## B_M, B_N, B_K of the launched Opus tile
 
 
 def _parse_opus_tile(event):
@@ -214,21 +214,15 @@ class gemm_a8w8_blockscale_preshuffle(gemm_a8w8_blockscale):
             "quant_scheme": "a8w8_blockscale_preshuffle",
             "quant_granularity": "per_block",
             "output_shape": tuple(dims[4]),
-            "output_dtype": (
-                types[4] if len(types) > 4 else "c10::bfloat16"
-            ),
+            "output_dtype": (types[4] if len(types) > 4 else "c10::bfloat16"),
             "x_scale_shape": tuple(dims[2]) if len(dims) > 2 else (),
             "w_scale_shape": tuple(dims[3]) if len(dims) > 3 else (),
             "scale_dtype": types[2] if len(types) > 2 else "float32",
         }
         if len(dims) > 3 and dims[2] and dims[3]:
             x_scale, w_scale = dims[2], dims[3]
-            details["block_k"] = (
-                -(-K // x_scale[-1]) if x_scale[-1] else None
-            )
-            details["block_n"] = (
-                -(-N // w_scale[0]) if w_scale[0] else None
-            )
+            details["block_k"] = -(-K // x_scale[-1]) if x_scale[-1] else None
+            details["block_n"] = -(-N // w_scale[0]) if w_scale[0] else None
         tile, reduce = _parse_preshuffle_launch(event)
         details["tile"] = tile
         details["reduce"] = reduce
@@ -243,9 +237,7 @@ class gemm_a8w8_blockscale_preshuffle(gemm_a8w8_blockscale):
             return 2 * M * N * K + scale
 
         bm, bn, bk = tile["bm"], tile["bn"], tile["bk"]
-        programs = (
-            tile["num_ksplit"] * -(-M // bm) * -(-N // bn)
-        )
+        programs = tile["num_ksplit"] * -(-M // bm) * -(-N // bn)
         k_iters = -(-tile["splitk_block"] // bk)
         dot = programs * k_iters * (2 * bm * bn * bk)
         # Scale the accumulator once per K tile.
@@ -603,9 +595,7 @@ class opus_bmm_a8w8_mxscale_raw(GEMM):
         outer_batch, groups, K = dims[0]
         weight_groups, N, weight_k = dims[1]
         if groups != weight_groups or K != weight_k:
-            raise ValueError(
-                "Opus BMM activation and weight shapes do not agree"
-            )
+            raise ValueError("Opus BMM activation and weight shapes do not agree")
         details = {
             "B": outer_batch,
             "M": groups,
@@ -623,9 +613,7 @@ class opus_bmm_a8w8_mxscale_raw(GEMM):
             "b_scale_shape": tuple(dims[4]),
             "scale_dtype": types[3] if len(types) > 3 else "unsigned char",
             "output_shape": tuple(dims[2]),
-            "output_dtype": (
-                types[2] if len(types) > 2 else "c10::bfloat16"
-            ),
+            "output_dtype": (types[2] if len(types) > 2 else "c10::bfloat16"),
         }
         concrete = args.get("Concrete Inputs") or []
         if len(concrete) > 5 and concrete[5] not in ("", None):
@@ -1293,9 +1281,7 @@ def _bounded_mx_quant_config(event):
     }
 
 
-class fused_dynamic_mx_quant_moe_sort_hip_bounded(
-    fused_dynamic_mx_quant_moe_sort_hip
-):
+class fused_dynamic_mx_quant_moe_sort_hip_bounded(fused_dynamic_mx_quant_moe_sort_hip):
     """HBM bytes of the routed rows only; the padded scale allocation and the sorted-id tail are not touched."""
 
     @staticmethod
@@ -2172,9 +2158,7 @@ class topk_gating_fwd(topk_softplus):
             "E": E,
             "topk": dims[0][1],
             "dtype_in": types[2] if len(types) > 2 else "c10::BFloat16",
-            "dtype_bias": (
-                types[3] if len(types) > 3 else "c10::BFloat16"
-            ),
+            "dtype_bias": (types[3] if len(types) > 3 else "c10::BFloat16"),
             "dtype_weights": types[0] if len(types) > 0 else "float",
             "dtype_indices": types[1] if len(types) > 1 else "int",
             "score_func": score_func,

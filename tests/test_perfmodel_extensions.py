@@ -514,12 +514,7 @@ class TestPerfModelExtensions:
         assert model.get_maf_type() == "vector"
         assert model.flops() == 3 * 56 * 7168
         assert model.bytes() == (
-            56 * 7168 * 2
-            + 56 * 7168
-            + 56 * (7168 // 32)
-            + 56 * 4
-            + 56 * 4
-            + 4
+            56 * 7168 * 2 + 56 * 7168 + 56 * (7168 // 32) + 56 * 4 + 56 * 4 + 4
         )
 
     def test_deepseek_v4_opus_bmm_uses_fp8_matrix_spec(self):
@@ -553,11 +548,7 @@ class TestPerfModelExtensions:
         # No kernel name, so the logical matmul is the fallback.
         assert model.flops() == 2 * 2 * 8 * 1024 * 4096 + 2 * 8 * 1024 * 32
         assert model.bytes() == (
-            8 * 2 * 4096
-            + 2 * 1024 * 4096
-            + 8 * 2 * 1024 * 2
-            + 8 * 2 * 32
-            + 2 * 8 * 32
+            8 * 2 * 4096 + 2 * 1024 * 4096 + 8 * 2 * 1024 * 2 + 8 * 2 * 32 + 2 * 8 * 32
         )
 
         tiled = dict(event)
@@ -812,9 +803,7 @@ class TestPerfModelExtensions:
         assert model.get_maf_type() == "vector"
         # sqrtsoftplus + bias + 12-comparator network + warp max + renorm.
         assert model.flops() == 8 * (7 * 384 + 64 * 12 + 6 * 6 + 13)
-        assert model.bytes() == (
-            8 * 384 * 2 + 384 * 2 + 8 * 6 * 4 + 8 * 6 * 4
-        )
+        assert model.bytes() == (8 * 384 * 2 + 384 * 2 + 8 * 6 * 4 + 8 * 6 * 4)
 
     def test_deepseek_v4_moe_small_sort_selects_float_precision(self):
         event = {
@@ -846,14 +835,7 @@ class TestPerfModelExtensions:
         assert model.param_details["block_size"] == 32
         assert model.get_compute_precision() is None
         assert model.flops() == 9 * 64 * 64 + 5 * 64
-        assert model.bytes() == (
-            56 * 4
-            + 56 * 4
-            + 2048 * 4
-            + 2048 * 4
-            + 2 * 64 * 4
-            + 8
-        )
+        assert model.bytes() == (56 * 4 + 56 * 4 + 2048 * 4 + 2048 * 4 + 2 * 64 * 4 + 8)
 
     def test_preshuffle_without_tile_counts_logical_gemm(self):
         event = {
@@ -879,11 +861,7 @@ class TestPerfModelExtensions:
         # block_k is 128, so the scale term is one multiply per 128-wide K block.
         assert model.flops() == 2 * 8 * 2048 * 7168 + 8 * 2048 * 56
         assert model.bytes() == (
-            8 * 7168
-            + 2048 * 7168
-            + 8 * 2048 * 2
-            + 8 * 56 * 4
-            + 16 * 56 * 4
+            8 * 7168 + 2048 * 7168 + 8 * 2048 * 2 + 8 * 56 * 4 + 16 * 56 * 4
         )
 
     def test_mla_single_split_writes_bf16_output(self):
@@ -1008,12 +986,7 @@ class TestPerfModelExtensions:
         chunk = 2 * 128 * 64 + 64
         assert model.flops() == (chunk * 2 + 2 * 64 * 64) + 128 * (4 * 128 + chunk)
         assert model.bytes() == (
-            128 * 4
-            + 128 * 4
-            + 4096 * 4
-            + 4096 * 4
-            + 2 * 128 * 4
-            + 8
+            128 * 4 + 128 * 4 + 4096 * 4 + 4096 * 4 + 2 * 128 * 4 + 8
         )
 
     def test_bounded_mx_quant_rejects_short_scalar_list(self):
@@ -1115,9 +1088,12 @@ class TestPerfModelExtensions:
         assert logical.param_details["tile"] is None
         assert logical.flops() == 2 * 1 * 2048 * 7168 + 1 * 2048 * (7168 // 128)
         assert logical.bytes() == 14760672 - 2 * 4 * 1 * 2048 * 4
-        assert pext.gemm_a8w8_blockscale_bpreshuffle(
-            {"args": {"Input Dims": [[1, 8], [], [], []], "Input type": []}}
-        ).flops() is None
+        assert (
+            pext.gemm_a8w8_blockscale_bpreshuffle(
+                {"args": {"Input Dims": [[1, 8], [], [], []], "Input type": []}}
+            ).flops()
+            is None
+        )
 
         stage = {
             "args": {
@@ -1147,7 +1123,21 @@ class TestPerfModelExtensions:
                     "c10::Float8_e4m3fn",
                     "c10::Float8_e8m0fnu",
                 ],
-                "Concrete Inputs": ["", "", "", "", "", "", "", "", "", "", "", "6", "32"],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "6",
+                    "32",
+                ],
             }
         }
         stage1 = moe_opus_stage1_a8w4(stage)
@@ -1155,9 +1145,12 @@ class TestPerfModelExtensions:
         assert stage1.bytes() == 17557056
         assert stage1.get_compute_precision() == "fp4"
         assert stage1.get_maf_type() == "matrix"
-        assert moe_opus_stage1_a8w4(
-            {"args": {"Input Dims": [[1, 8]], "Input type": ["float"]}}
-        ).flops() is None
+        assert (
+            moe_opus_stage1_a8w4(
+                {"args": {"Input Dims": [[1, 8]], "Input type": ["float"]}}
+            ).flops()
+            is None
+        )
 
         router = {
             "args": {
@@ -1220,7 +1213,15 @@ class TestPerfModelExtensions:
         sort_decode = {
             "args": {
                 "Input Dims": [[1, 6], [1, 6], [12288], [12288], [384], [2], [1, 7168]],
-                "Input type": ["int", "float", "int", "float", "int", "int", "c10::BFloat16"],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                ],
                 "Concrete Inputs": ["", "", "", "", "", "", "", "384", "32"],
             }
         }
@@ -1231,9 +1232,39 @@ class TestPerfModelExtensions:
         assert sorter.get_maf_type() == "vector"
         prefill = {
             "args": {
-                "Input Dims": [[1754, 6], [1754, 6], [35136], [35136], [549], [2], [0, 0]],
-                "Input type": ["int", "float", "int", "float", "int", "int", "c10::BFloat16"],
-                "Concrete Inputs": ["", "", "", "", "", "", "", "384", "64", "", "", "", "0"],
+                "Input Dims": [
+                    [1754, 6],
+                    [1754, 6],
+                    [35136],
+                    [35136],
+                    [549],
+                    [2],
+                    [0, 0],
+                ],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                ],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "384",
+                    "64",
+                    "",
+                    "",
+                    "",
+                    "0",
+                ],
             }
         }
         prefill_sort = moe_sorting_opus_fwd(prefill)
@@ -1243,15 +1274,26 @@ class TestPerfModelExtensions:
         assert prefill_sort.flops() == _distributed_sort_ops(
             pairs, _next_pow2(pairs), 384
         )
-        assert moe_sorting_opus_fwd(
-            {
-                "args": {
-                    "Input Dims": [[3, 6], [3, 6], [10], [10], [3], [2], [0, 0]],
-                    "Input type": ["int", "float", "int", "float", "int", "int", "c10::BFloat16"],
-                    "Concrete Inputs": ["3"],
+        assert (
+            moe_sorting_opus_fwd(
+                {
+                    "args": {
+                        "Input Dims": [[3, 6], [3, 6], [10], [10], [3], [2], [0, 0]],
+                        "Input type": [
+                            "int",
+                            "float",
+                            "int",
+                            "float",
+                            "int",
+                            "int",
+                            "c10::BFloat16",
+                        ],
+                        "Concrete Inputs": ["3"],
+                    }
                 }
-            }
-        ).flops() is None
+            ).flops()
+            is None
+        )
 
         sparse = aext.vllm_sparse_attn_decode(
             {
@@ -1263,20 +1305,31 @@ class TestPerfModelExtensions:
             }
         )
         assert sparse.flops() == 16 * 4 * 1 * 1024 * 512
-        assert sparse.bytes() == 2 * 1 * 16 * 512 * 2 + 1 * 1024 * 576 + 2 * 1 * 32 * 16 * 4
+        assert (
+            sparse.bytes()
+            == 2 * 1 * 16 * 512 * 2 + 1 * 1024 * 576 + 2 * 1 * 32 * 16 * 4
+        )
         assert sparse.get_compute_precision() == "bf16"
         assert sparse.get_maf_type() == "matrix"
-        assert aext.vllm_sparse_attn_decode(
-            {"args": {"Input Dims": [[1, 16, 512]], "v4_block_k": 32}}
-        ).flops() is None
+        assert (
+            aext.vllm_sparse_attn_decode(
+                {"args": {"Input Dims": [[1, 16, 512]], "v4_block_k": 32}}
+            ).flops()
+            is None
+        )
 
         mappings = get_pseudo_op_mappings()
         assert mappings["vllm::all_reduce"] is vllm_all_reduce
-        assert mappings["aiter::gemm_a8w8_blockscale_bpreshuffle"] is pext.gemm_a8w8_blockscale_bpreshuffle
+        assert (
+            mappings["aiter::gemm_a8w8_blockscale_bpreshuffle"]
+            is pext.gemm_a8w8_blockscale_bpreshuffle
+        )
         assert mappings["aiter::_opus_moe_stage1_a8w4_fwd_raw"] is moe_opus_stage1_a8w4
         assert mappings["_moe_C::topk_softplus_sqrt"] is pext.topk_softplus_sqrt
         assert mappings["aiter::moe_sorting_opus_fwd"] is moe_sorting_opus_fwd
-        assert mappings["pseudo_vllm_sparse_attn_decode"] is aext.vllm_sparse_attn_decode
+        assert (
+            mappings["pseudo_vllm_sparse_attn_decode"] is aext.vllm_sparse_attn_decode
+        )
         categories = get_pseudo_op_category_only_mappings()
         assert categories["_C::top_k_per_row_decode"] == "InferenceAttention"
         assert "aiter::moe_sorting_opus_fwd" not in CATEGORY_ONLY_OP_MAPPING
@@ -1333,7 +1386,13 @@ class TestPerfModelExtensions:
                 "aten::slice",
                 args={
                     "Input Dims": [[1, 16, 512], [], [], [], []],
-                    "Input type": ["c10::BFloat16", "Scalar", "Scalar", "Scalar", "Scalar"],
+                    "Input type": [
+                        "c10::BFloat16",
+                        "Scalar",
+                        "Scalar",
+                        "Scalar",
+                        "Scalar",
+                    ],
                 },
             ),
             ev(
@@ -1358,7 +1417,13 @@ class TestPerfModelExtensions:
                 "python_function",
                 "vllm/v1/attention/ops/rocm_aiter_mla_sparse.py(3065): _rocm_sparse_attn_decode_triton",
             ),
-            ev(1110, 10, "cuda_runtime", "hipModuleLaunchKernel", args={"correlation": 1}),
+            ev(
+                1110,
+                10,
+                "cuda_runtime",
+                "hipModuleLaunchKernel",
+                args={"correlation": 1},
+            ),
             ev(
                 5000,
                 30,
@@ -1370,7 +1435,13 @@ class TestPerfModelExtensions:
             ),
             ac2g(1, 5000, "s"),
             ac2g(1, 5030, "f"),
-            ev(1200, 10, "cuda_runtime", "hipModuleLaunchKernel", args={"correlation": 2}),
+            ev(
+                1200,
+                10,
+                "cuda_runtime",
+                "hipModuleLaunchKernel",
+                args={"correlation": 2},
+            ),
             ev(
                 5100,
                 30,
@@ -1396,7 +1467,9 @@ class TestPerfModelExtensions:
         assert parent["args"]["Input Dims"] == [[1, 16, 512], [1, 32, 16]]
         kernel_uids = []
         for evt in tree.events:
-            if evt.get("cat") == "kernel" and "sparse_attn_decode" in evt.get("name", ""):
+            if evt.get("cat") == "kernel" and "sparse_attn_decode" in evt.get(
+                "name", ""
+            ):
                 kernel_uids.append(evt["UID"])
         assert sorted(parent["gpu_events"]) == sorted(kernel_uids)
         assert len(parent["gpu_events"]) == len(set(parent["gpu_events"])) == 2
@@ -1433,9 +1506,7 @@ class TestPerfModelExtensions:
             mappings["aiter::_opus_bmm_a8w8_mxscale_raw"]
             is pext.opus_bmm_a8w8_mxscale_raw
         )
-        assert (
-            mappings["aiter::topk_gating_fwd"] is pext.topk_gating_fwd
-        )
+        assert mappings["aiter::topk_gating_fwd"] is pext.topk_gating_fwd
         assert (
             mappings["sglang_profiler::moe_sorting_small__run_small_sort"]
             is moe_ext.SglangMoeSortingSmall

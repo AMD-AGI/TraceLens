@@ -619,9 +619,7 @@ def generate_perf_report_pytorch(
             )
 
     ## Apply annotation for vLLM eager and replay phase
-    perf_analyzer.tree.apply_annotation(
-        name_filters=_INFERENCE_ANNOTATION_OP_PREFIXES
-    )
+    perf_analyzer.tree.apply_annotation(name_filters=_INFERENCE_ANNOTATION_OP_PREFIXES)
 
     if extension_file:
         apply_extension(perf_analyzer, extension_file)

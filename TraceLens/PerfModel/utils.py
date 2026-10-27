@@ -99,9 +99,7 @@ def dense_layout(shape, stride):
     """True when ``stride`` is dense, including column-major; a missing stride counts as dense."""
     if not shape or not stride or len(stride) != len(shape):
         return True
-    pairs = [
-        (size, step) for size, step in zip(shape, stride) if size > 1
-    ]
+    pairs = [(size, step) for size, step in zip(shape, stride) if size > 1]
     if any(step <= 0 for _, step in pairs):
         return False
     pairs.sort(key=lambda item: item[1])

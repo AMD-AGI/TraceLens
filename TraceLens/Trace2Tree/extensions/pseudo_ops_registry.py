@@ -128,9 +128,7 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
             create_pseudo_ops_vllm_sparse_decode,
         )
 
-        extensions.append(
-            ("VLLM_Sparse_Decode", create_pseudo_ops_vllm_sparse_decode)
-        )
+        extensions.append(("VLLM_Sparse_Decode", create_pseudo_ops_vllm_sparse_decode))
         if verbose:
             logger.info("Auto-detected vLLM ROCm sparse-decode kernels")
 
@@ -139,9 +137,7 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
 
         extensions.append(("MLA_V4_Stage2_Shapes", copy_mla_v4_stage2_shapes))
         if verbose:
-            logger.info(
-                "Auto-detected MLA v4 stage2 kernels — will copy parent shapes"
-            )
+            logger.info("Auto-detected MLA v4 stage2 kernels — will copy parent shapes")
     if "_rocm_C::paged_attention" in tree.name2event_uids:
         from .paged_attn_perf_meta import mark_rocm_paged_attn_kvcache_dtype
 
