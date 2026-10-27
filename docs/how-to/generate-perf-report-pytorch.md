@@ -225,44 +225,54 @@ TraceLens_generate_perf_report_pytorch \
 
 ### Add an op model
 
-A *perf model* says what work an op does: its parameters, FLOPs, and bytes.
-An *op model* takes that description and returns anything you want reported
-per op: usually a predicted time, but also values such as the kernel
-configuration a library would pick, an occupancy estimate, or a flag.
-TraceLens reports each op model under a label, next to the measured metrics
-and the roofline.
+A *perf model* describes the work an op does: its parameters, FLOPs, and
+bytes. An *op model* predicts how that work runs, usually as a time, and can
+report other per-op values, such as the kernel tile a library would pick.
+Each op model has a label, and its columns appear next to the measured
+metrics and the roofline.
 
-The contract:
+An op model is a function of the op's category, parameters, and GPU arch:
 
 ```python
 def my_model(category, params, arch):
     ...
-    return None            # this op isn't handled
-    return 12.5            # predicted time in µs
+    return None                                     # op not covered
+    return 12.5                                     # predicted time in µs
     return {"time_us": 12.5, "Tile": "256x128x64"}  # time plus extra columns
 ```
 
-- `category` is the perf-model category (`"GEMM"`, `"SDPA_fwd"`, ...). For a
-  backward op it is the backward category (`"SDPA_bwd"`, `"CONV_bwd"`, ...)
-  with the forward op's params; ops without one, such as GEMM backward, are
-  skipped.
-- `params` is a copy of the perf model's parameters, the same values as the
-  report's `param:` columns; look at those columns to see what a category
-  provides. Any key can be missing: `transpose`, for example, is only set
-  when the GEMM's kernel name parses. `dtype_A_B` holds the trace's dtype
-  strings, such as `"c10::BFloat16"`;
-  `TraceLens.PerfModel.utils.torch_dtype_map` turns them into `"bf16"`.
-- `arch` is the report's GPU arch dict, or `None` without one. A model is
-  free to ignore it and target another GPU.
-- A dict's `time_us` is optional. Every other key becomes a `<label> <key>`
-  column. Only scalars (numbers, strings, bools) are written.
-- The model is called once per op launch, so the same shape can arrive many
-  times. Cache results in the model if a call is slow.
-- If the model raises, TraceLens leaves its columns empty for that op, keeps
-  the op's other metrics, and prints one warning per model, category, and
-  error type. Return `None` to skip ops on purpose.
+The return value decides which columns the op gets. For a model labeled
+`MyModel`:
 
-Register models in the extension file:
+| Return value | Columns added |
+| --- | --- |
+| `None` | None |
+| A number, or a dict with `time_us` | `MyModel Time (µs)`, `MyModel TFLOPS/s`, `MyModel TB/s`, `Pct MyModel` |
+| Any other dict key, such as `Tile` | `MyModel Tile` |
+
+`Pct MyModel` is the predicted time as a percentage of the measured kernel
+time. `time_us` is optional: a dict without it leaves the time columns empty
+and fills only its other keys. Only numbers, strings, and bools are written.
+
+The inputs are:
+
+- `category`: the perf-model category, such as `"GEMM"` or `"SDPA_fwd"`. A
+  backward op gets its backward category, such as `"SDPA_bwd"`, with the
+  forward op's params. Ops without a backward category, such as GEMM
+  backward, are skipped.
+- `params`: a copy of the op's `param:` columns. Any key can be missing;
+  `transpose`, for example, is set only when the GEMM kernel name parses.
+  Dtypes are trace strings such as `"c10::BFloat16"`;
+  `TraceLens.PerfModel.utils.torch_dtype_map` converts them to `"bf16"`.
+- `arch`: the report's GPU arch dict, or `None`. A model can ignore it and
+  target another GPU.
+
+The model runs once per op launch, so the same shape arrives many times;
+cache slow calls. If the model raises, its columns stay empty for that op,
+the op's other metrics are kept, and TraceLens warns once per model,
+category, and error type. Return `None` to skip an op on purpose.
+
+Register models in the extension file with an `op_models` dict:
 
 ```python
 from functools import lru_cache
@@ -283,12 +293,11 @@ def gemm_model(category, params, arch):
 op_models = {"MyModel": gemm_model}
 ```
 
-This adds `MyModel Time (µs)`, `MyModel TFLOPS/s`, `MyModel TB/s`,
-`MyModel Tile`, and `Pct MyModel` (the time as a percentage of the measured
-kernel time); the summary sheets pick up every label (see the
+Every per-op sheet gets the `MyModel` columns from the table above, and the
+summary sheets pick up the label on their own (see the
 [column reference](../reference/perf-report-columns.md#op-model-columns)).
-Keep the import and call of a proprietary library in the extension file. A
-placeholder is in `examples/external_op_model_stub.py`.
+Keep proprietary library calls in the extension file.
+`examples/external_op_model_stub.py` is a placeholder to start from.
 
 From Python, register a model with
 `TreePerfAnalyzer.register_op_model(label, fn)`, then
