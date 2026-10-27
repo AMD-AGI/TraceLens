@@ -717,6 +717,99 @@ class Model:
     assert dataflow.operations[2].predecessors == (dataflow.operations[1].attr_name,)
 
 
+def test_stack_entry_dataflow_skips_malformed_loops_before_the_real_one():
+    """Two decoys precede the real decoder loop: a plain ``range`` loop with no
+    submodule call at all, and a submodule loop called all-keyword with no
+    assignment capturing its result -- neither names a carried tensor, so the
+    search must move past both and still find the loop that does."""
+    source = """
+class Model:
+    def __init__(self, config):
+        self.embed = Embedding()
+        self.extra = ModuleList([Extra() for _ in range(2)])
+        self.layers = ModuleList([Layer() for _ in range(config.depth)])
+
+    def forward(self, input_ids):
+        hidden = self.embed(input_ids)
+        for i in range(3):
+            print(i)
+        for extra_layer in self.extra:
+            extra_layer(hidden_states=hidden)
+        for layer in self.layers:
+            hidden = layer(hidden)
+        return hidden
+"""
+    classes = aa.build_class_registry(
+        source,
+        filename="stack_dataflow_skip.py",
+        config={"depth": 2},
+        all_tensor_ops=False,
+    )
+    dataflow = aa.stack_entry_dataflow(classes["Model"])
+
+    assert dataflow is not None
+    assert dataflow.output_producer == "embed"
+
+
+def test_stack_entry_dataflow_finds_a_loop_wrapped_in_an_if():
+    """``if self.pp_group.is_first_rank:`` around the decoder loop is exactly
+    the kind of wrapper ``_statements_before`` flattens: the loop sits one
+    level deeper than ``forward``'s own top-level statements, so finding it
+    takes the recursive branch, not the direct one."""
+    source = """
+class Model:
+    def __init__(self, config):
+        self.embed = Embedding()
+        self.layers = ModuleList([Layer() for _ in range(config.depth)])
+
+    def forward(self, input_ids):
+        hidden = self.embed(input_ids)
+        if self.pp_group.is_first_rank:
+            for layer in self.layers:
+                hidden = layer(hidden)
+        return hidden
+"""
+    classes = aa.build_class_registry(
+        source,
+        filename="stack_dataflow_if.py",
+        config={"depth": 2},
+        all_tensor_ops=False,
+    )
+    dataflow = aa.stack_entry_dataflow(classes["Model"])
+
+    assert dataflow is not None
+    assert dataflow.output_producer == "embed"
+
+
+def test_stack_entry_dataflow_misses_a_loop_hidden_in_an_except_handler():
+    """``_statements_before`` flattens if/for/while/with wrappers but not a
+    ``try``'s exception handlers, so a decoder loop nested inside one is not
+    reachable as a straight-line prefix and the function correctly bails out
+    instead of fabricating a prefix."""
+    source = """
+class Model:
+    def __init__(self, config):
+        self.embed = Embedding()
+        self.layers = ModuleList([Layer() for _ in range(config.depth)])
+
+    def forward(self, input_ids):
+        hidden = self.embed(input_ids)
+        try:
+            hidden = risky(hidden)
+        except Exception:
+            for layer in self.layers:
+                hidden = layer(hidden)
+        return hidden
+"""
+    classes = aa.build_class_registry(
+        source,
+        filename="stack_dataflow_except.py",
+        config={"depth": 2},
+        all_tensor_ops=False,
+    )
+    assert aa.stack_entry_dataflow(classes["Model"]) is None
+
+
 def test_registry_finalization_refines_tuple_return_dependencies():
     source = """
 class SparseMoeGate:

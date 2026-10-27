@@ -34,6 +34,9 @@ from TraceLens.ModelUtils.extract import (
 from TraceLens.ModelUtils.ast_analyze import (
     PHI_CLASS,
     PHI_LABEL,
+    _PARALLEL_GROUP_GETTER_NAMES,
+    _PARALLEL_RANK_FUNCS,
+    _PARALLEL_WORLD_SIZE_FUNCS,
     analyze_source,
     base_submodule_attr,
     is_forward_operation,
@@ -3077,7 +3080,7 @@ class ShapeInferencer:
             # can only fall back to the undivided tensor. That is how a
             # ``cat((q_pass, q_rot))`` of a [..., 128] and a [..., 64] slice came
             # out [..., 384] -- it was handed the [..., 192] parent twice.
-            self._publish_output_port_specs(node, self._tensor_specs, root)
+            self._publish_output_port_specs(node, self._tensor_specs, root, graph)
             if node.metadata.get("synthetic") == "@input":
                 self._forward_input_specs.add(id(output))
                 self._forward_input_spec_refs.append(output)
@@ -3112,7 +3115,7 @@ class ShapeInferencer:
                 output = self._resolve_extent_dims(node, output, input_specs)
                 output = _with_explicit_dtype(node, output)
                 self._tensor_specs[node_id] = output
-                self._publish_output_port_specs(node, self._tensor_specs, root)
+                self._publish_output_port_specs(node, self._tensor_specs, root, graph)
                 widened = True
             if not widened:
                 break
@@ -3213,7 +3216,7 @@ class ShapeInferencer:
         # exporter can label each output port with its slice shape ([B, S, 16] for
         # ``comb_w``) instead of the undivided tensor.
         for node in graph.nodes:
-            self._publish_output_port_specs(node, merged, root)
+            self._publish_output_port_specs(node, merged, root, graph)
 
         self._tensor_specs = merged
         self._active_seq_axes, self._active_hidden = prev_axes, prev_hidden
@@ -3557,19 +3560,49 @@ class ShapeInferencer:
         node: ModelGraphNode,
         specs: dict[str, TensorSpec],
         root: BlockNode | None = None,
+        graph: ModelGraph | None = None,
     ) -> None:
-        """Record one spec per ordinal for a tuple-unpacked split/chunk/unbind.
+        """Record one spec per ordinal for a tuple-unpacked split/chunk/unbind,
+        or for a ``Pack`` that bundles several independently-shaped tensors.
 
-        The node's own spec is the whole (pre-split) tensor; each consumer edge
-        selects an ordinal. Publishing each slice under a reserved key lets both
-        the exporter label the output port with its slice shape and a consumer
-        read the slot it actually takes.
+        For split/chunk/unbind the node's own spec is the whole (pre-split)
+        tensor; each consumer edge selects an ordinal, sliced out of that whole
+        below. A ``Pack`` has no such whole -- its elements are genuinely
+        different tensors -- so each port is simply the shape already inferred
+        for the predecessor wired to that port. Publishing each slice/element
+        under a reserved key lets both the exporter label the output port with
+        its real shape and a consumer read the slot it actually takes.
         """
         output_names = node.metadata.get("output_names")
         if not output_names or len(output_names) < 2:
             return
         class_name = (node.metadata.get("class_name") or node.label or "").strip()
         op_label = (node.label or class_name).strip().lower()
+        if op_label == "pack":
+            if graph is None:
+                return
+            input_specs, _labels = self._gather_input_specs(graph, node.id)
+            for ordinal, spec in enumerate(input_specs[: len(output_names)]):
+                specs[f"{node.id}{PORT_SPEC_SEP}{ordinal}"] = spec
+            return
+        if class_name.lower() == "merge":
+            # Both arms built their own whole bundle with the same slot names
+            # (a ``Pack`` on each side of an ``if``) -- there is no single
+            # producer to slice, so ordinal K's shape is whichever arm's own
+            # port K already resolved (the same "take the first predecessor
+            # that answers" rule the merge's own whole-value rule uses).
+            if graph is None:
+                return
+            predecessor_ids = [
+                edge.source for edge in graph.edges if edge.target == node.id
+            ]
+            for ordinal in range(len(output_names)):
+                for predecessor_id in predecessor_ids:
+                    sliced = specs.get(f"{predecessor_id}{PORT_SPEC_SEP}{ordinal}")
+                    if sliced is not None:
+                        specs[f"{node.id}{PORT_SPEC_SEP}{ordinal}"] = sliced
+                        break
+            return
         if op_label not in {"split", "chunk", "unbind"}:
             return
         whole = specs.get(node.id)
@@ -3762,6 +3795,20 @@ class ShapeInferencer:
         synthetic = node.metadata.get("synthetic")
         class_name = (node.metadata.get("class_name") or node.label or "").strip()
         block_class = class_name or node.label
+
+        output_names = node.metadata.get("output_names")
+        if (
+            (node.label or "").strip() == "Pack"
+            and output_names
+            and len(output_names) >= 2
+        ):
+            # A real tensor per port (``_publish_output_port_specs`` already
+            # records each one from its own predecessor), not one whole value --
+            # there is no single shape a bundling ``Pack`` could honestly report
+            # for itself. Returning early here skips the generic rules below,
+            # which would otherwise trip the "no shape inference rule" warning
+            # and publish a bogus passthrough of ``inputs[0]``.
+            return None
 
         # A module drawn as a subgraph reports what its own graph returns. It is
         # sized here before that graph is walked, so the fallback passes its input
@@ -8807,6 +8854,34 @@ def _optional_argument_guard(node: ast.IfExp) -> str | None:
     return None
 
 
+def _distributed_degree_dim(node: ast.AST) -> int | None:
+    """World size (1) or rank (0) for a distributed-parallelism accessor, else ``None``.
+
+    Same two call shapes ``_distributed_degree_value`` in ``ast_analyze.py``
+    resolves (see that function's docstring for why 1/0, not the real degree) --
+    duplicated here only because this module's expression resolver returns a
+    plain ``int`` where that one returns ``Any``; the recognized names
+    (``_PARALLEL_GROUP_GETTER_NAMES`` and friends) are the single, shared source.
+    """
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id in _PARALLEL_GROUP_GETTER_NAMES
+    ):
+        if node.attr.endswith("_size"):
+            return 1
+        if node.attr.endswith("_rank"):
+            return 0
+        return None
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        if node.func.id in _PARALLEL_WORLD_SIZE_FUNCS:
+            return 1
+        if node.func.id in _PARALLEL_RANK_FUNCS:
+            return 0
+    return None
+
+
 def _resolve_dim_expr(
     node: ast.AST,
     *,
@@ -8814,6 +8889,9 @@ def _resolve_dim_expr(
     local_vars: dict[str, DimExpr],
     context: ShapeContext,
 ) -> DimExpr | None:
+    degree = _distributed_degree_dim(node)
+    if degree is not None:
+        return degree
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         return int(node.value)
     if isinstance(node, ast.Name):
@@ -8908,6 +8986,25 @@ def _resolve_dim_expr(
             return _resolve_dim_expr(
                 node.args[0], config=config, local_vars=local_vars, context=context
             )
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in ("min", "max")
+        and node.args
+        and not node.keywords
+    ):
+        # ``self.idx_head_tp_size = min(attn_tp_size, self.total_idx_heads)``
+        # -- a distributed degree capped at a head count, a common idiom once
+        # the parallelism accessors above resolve to a concrete int.
+        args = [
+            _resolve_dim_expr(
+                arg, config=config, local_vars=local_vars, context=context
+            )
+            for arg in node.args
+        ]
+        if all(isinstance(arg, int) for arg in args):
+            return min(args) if node.func.id == "min" else max(args)
+        return None
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
@@ -9348,6 +9445,98 @@ def _parse_module_ctor(
                 stride=stride,
                 padding=padding,
             )
+    if class_name == "QKVParallelLinear":
+        # vLLM/SGLang's fused QKV projection: ``(hidden_size, head_size,
+        # total_num_heads, total_num_kv_heads=None, ...)``. Unlike a plain
+        # ``nn.Linear``, the second positional argument is a PER-HEAD width,
+        # not the whole layer's ``out_features`` -- the combined output packs
+        # Q, K and V side by side, V's own head width (``v_head_size``)
+        # defaulting to ``head_size`` but overridable (SGLang's sparse
+        # index-attention QKV projection sizes V independently, down to 0 when
+        # that arm is disabled). Matched before the generic ``Linear$`` rule
+        # below, which would otherwise read ``head_size`` alone as the whole
+        # output and leave the split that follows -- ``qkv.split([q_size,
+        # kv_size, kv_size])`` -- unable to tile a parent far narrower than
+        # its own slices.
+        keywords = {
+            keyword.arg: keyword.value for keyword in node.keywords if keyword.arg
+        }
+        head_size_node = args[1] if len(args) >= 2 else keywords.get("head_size")
+        total_num_heads_node = (
+            args[2] if len(args) >= 3 else keywords.get("total_num_heads")
+        )
+        total_num_kv_heads_node = (
+            args[3] if len(args) >= 4 else keywords.get("total_num_kv_heads")
+        )
+        in_features = (
+            _resolve_dim_expr(
+                args[0], config=config, local_vars=local_vars, context=context
+            )
+            if args
+            else None
+        )
+        head_size = (
+            _resolve_dim_expr(
+                head_size_node, config=config, local_vars=local_vars, context=context
+            )
+            if head_size_node is not None
+            else None
+        )
+        total_num_heads = (
+            _resolve_dim_expr(
+                total_num_heads_node,
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
+            if total_num_heads_node is not None
+            else None
+        )
+        total_num_kv_heads = (
+            _resolve_dim_expr(
+                total_num_kv_heads_node,
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
+            if total_num_kv_heads_node is not None
+            else total_num_heads
+        )
+        # ``v_head_size`` is as often set from a runtime flag the caller computed
+        # (MiniMax's ``0 if self.disable_index_value else self.idx_head_dim``,
+        # itself derived from a per-layer frequency list this module cannot
+        # evaluate) as from config. Falling back to the override keyword's own
+        # API default (``head_size``) rather than giving up the whole spec means
+        # a width still comes out -- and it is the width that one of the arms a
+        # Merge combines (the split sizes two branches disagree on) actually
+        # tiles, instead of every arm falling through to an unrelated default.
+        v_head_size = head_size
+        if "v_head_size" in keywords:
+            resolved_v_head_size = _resolve_dim_expr(
+                keywords["v_head_size"],
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
+            if resolved_v_head_size is not None:
+                v_head_size = resolved_v_head_size
+        if all(
+            isinstance(value, int)
+            for value in (
+                in_features,
+                head_size,
+                total_num_heads,
+                total_num_kv_heads,
+                v_head_size,
+            )
+        ):
+            out_features = (
+                head_size * total_num_heads
+                + total_num_kv_heads * head_size
+                + total_num_kv_heads * v_head_size
+            )
+            return ModuleLinearSpec(in_features=in_features, out_features=out_features)
+        return None
     if re.search(r"Linear$", class_name):
         in_features = (
             _resolve_dim_expr(

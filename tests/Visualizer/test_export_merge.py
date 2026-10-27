@@ -1516,6 +1516,40 @@ def test_group_output_boundary_shape_keeps_dtype():
     assert boundary["decoder/mod"]["output_shape"] == "[B, S, H] bfloat16"
 
 
+def test_annotate_nodes_with_shapes_names_each_split_port_from_output_names():
+    """A tuple-unpacked split (``q, k = x.unbind(...)``) records its real
+    output names in ``output_names``; each per-ordinal slice spec the
+    inferencer published under a ``PORT_SPEC_SEP``-suffixed key is matched to
+    the port with that name, not left numbered ``"0"``/``"1"``. A stray key
+    whose suffix isn't an ordinal at all is skipped rather than raising.
+    """
+    from TraceLens.ModelUtils.shape_inference import PORT_SPEC_SEP, TensorSpec
+
+    nodes = [
+        {
+            "id": "unbind",
+            "label": "Unbind",
+            "attrs": [{"key": "output_names", "value": "q,k"}],
+            "outputsMetadata": [{"id": "0"}, {"id": "1"}],
+        },
+    ]
+    shape_specs = {
+        "unbind": TensorSpec(("B", "S", 3, 128), "bfloat16"),
+        f"unbind{PORT_SPEC_SEP}0": TensorSpec(("B", "S", 128), "bfloat16"),
+        f"unbind{PORT_SPEC_SEP}1": TensorSpec(("B", "S", 128), "bfloat16"),
+        f"unbind{PORT_SPEC_SEP}notanint": TensorSpec(("B",), "bfloat16"),
+    }
+    shapes.annotate_nodes_with_shapes(nodes, shape_specs, id_prefix="")
+
+    ports = {
+        port["id"]: {attr["key"]: attr["value"] for attr in port["attrs"]}
+        for port in nodes[0]["outputsMetadata"]
+    }
+    assert ports["0"]["port_label"] == "q"
+    assert ports["1"]["port_label"] == "k"
+    assert ports["0"]["shape"] == "[B, S, 128] bfloat16"
+
+
 def test_fill_missing_node_shapes_cast_resolves_downcast_dtype():
     # A residual-mix `.to(dtype)` cast fed a float32 HyperConnection output must
     # render as a genuine float32 -> float16 downcast, not a float32 no-op.
@@ -1614,10 +1648,39 @@ def _unsqueeze_node(detail: str) -> dict:
             None,
             id="unsqueeze_non_integer_dim_defaults_to_zero",
         ),
+        pytest.param(
+            {
+                "id": "decoder/v/@residual:attention:mul",
+                "attrs": [{"key": "raw_op", "value": "mul"}],
+            },
+            [
+                ("post", TensorSpec(("B", "S"), "float16")),
+                ("hidden_states", TensorSpec(("B", "S", "H"), "float16")),
+            ],
+            {},
+            ("B", "S", "H"),
+            "float16",
+            id="hyperconnection_residual_mul_broadcasts_a_scalar_mix_over_hidden",
+        ),
+        pytest.param(
+            {
+                "id": "decoder/v/@residual:attention:matmul",
+                "attrs": [{"key": "raw_op", "value": "matmul"}],
+            },
+            [
+                ("comb", TensorSpec(("B", "S", "H"), "float16")),
+                ("residual", TensorSpec(("B", "S", "H2"), "bfloat16")),
+            ],
+            {},
+            ("B", "S", "H2"),
+            "bfloat16",
+            id="hyperconnection_residual_matmul_takes_the_residual_feature_width_and_dtype",
+        ),
     ],
 )
 def test_fallback_node_spec(node, spec, kwargs, shape, dtype):
-    result = shapes._fallback_node_spec(node, [("0", spec)], **kwargs)
+    sources = spec if isinstance(spec, list) else [("0", spec)]
+    result = shapes._fallback_node_spec(node, sources, **kwargs)
     assert result.shape == shape
     if dtype is not None:
         assert result.dtype == dtype

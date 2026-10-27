@@ -161,6 +161,59 @@ def test_config_value_self_config_fallback():
     assert _config_value(_expr("self.something"), config, {}) is aa._UNKNOWN
 
 
+def test_distributed_degree_value_resolves_group_object_and_standalone_styles():
+    """Both engine styles settle to the same convention: world size 1, rank 0 --
+    answering "the full, unsharded degree" rather than guessing an actual
+    distributed topology at parse time."""
+    from TraceLens.ModelUtils.ast_analyze import _distributed_degree_value
+
+    # SGLang's group-object style.
+    assert _distributed_degree_value(_expr("get_parallel().attn_tp_size")) == 1
+    assert _distributed_degree_value(_expr("get_parallel().attn_tp_rank")) == 0
+    # Neither a ``*_size`` nor a ``*_rank`` attribute -> unresolved.
+    assert _distributed_degree_value(_expr("get_parallel().pp_group")) is None
+
+    # vLLM's standalone-function style.
+    assert (
+        _distributed_degree_value(_expr("get_tensor_model_parallel_world_size()")) == 1
+    )
+    assert _distributed_degree_value(_expr("get_tensor_model_parallel_rank()")) == 0
+    # An unrelated call or attribute is not a distributed-degree accessor at all.
+    assert _distributed_degree_value(_expr("some_other_call()")) is None
+    assert _distributed_degree_value(_expr("config.hidden")) is None
+
+
+def test_config_value_caps_a_distributed_degree_with_min_and_max():
+    """``self.idx_head_tp_size = min(attn_tp_size, self.total_idx_heads)`` --
+    once the parallelism accessor above resolves to a concrete int, capping it
+    against another resolvable int must fold too."""
+    config = {"heads": 4}
+    assert (
+        _config_value(
+            _expr("min(get_tensor_model_parallel_world_size(), config.heads)"),
+            config,
+            {},
+        )
+        == 1
+    )
+    assert (
+        _config_value(
+            _expr("max(get_tensor_model_parallel_world_size(), config.heads)"),
+            config,
+            {},
+        )
+        == 4
+    )
+    # A keyword argument disqualifies the fold (only the plain positional shape
+    # is recognized).
+    assert _config_value(_expr("min(config.heads, key=abs)"), config, {}) is aa._UNKNOWN
+    # An operand that does not resolve to an int leaves the whole call unknown.
+    assert (
+        _config_value(_expr("min(config.heads, config.missing)"), config, {})
+        is aa._UNKNOWN
+    )
+
+
 def test_parse_forward_prunes_dead_config_branch():
     # Path A (forward_calls): a build-time-resolvable config predicate selects one
     # arm; the dead arm's submodule calls never enter the flat call sequence.
@@ -1330,6 +1383,43 @@ class Attn:
     assert ordinals == [0, 1]
 
 
+def test_a_pruned_merge_still_rewires_the_call_after_it():
+    """``act_fn`` is a lambda, not a submodule, for this config -- the merge of
+    its arm and ``gate``'s collapses onto ``gate`` alone, and ``proj`` must
+    still be wired to ``gate`` rather than falling back to plain source order
+    (which would point at the never-built ``act_fn``) or being left isolated."""
+    analysis = aa.analyze_source(
+        """
+class Gate:
+    def forward(self, x):
+        return x
+
+class Proj:
+    def forward(self, x):
+        return x
+
+class MLP:
+    def __init__(self, config):
+        if config.hidden_act == "gated":
+            self.gate = Gate()
+        else:
+            self.act_fn = lambda x: x
+        self.proj = Proj()
+
+    def forward(self, x):
+        y = self.gate(x)
+        if y is None:
+            y = self.act_fn(x)
+        return self.proj(y)
+""",
+        config={"hidden_act": "gated"},
+        all_tensor_ops=True,
+    )
+    mlp = analysis.class_registry["MLP"]
+    assert "act_fn" in mlp.unbuilt_attrs
+    assert mlp.forward_step_predecessors.get("proj") == ("gate",)
+
+
 def test_a_submodule_only_forward_records_which_argument_each_parameter_takes():
     """A residual saved before a norm stays distinct from the norm's output."""
     analysis = aa.analyze_source(
@@ -1622,6 +1712,417 @@ class Rotary(torch.nn.Module):
     assert any(op.label == "Multiply" for op in operations.values())
 
 
+def test_mixes_modules_and_inline_ops_keeps_an_inline_add_beside_a_submodule():
+    """``left, right = self.split(x); return self.proj(right) + left`` -- the
+    Add is real computation the module owns, so wiring stays attached even
+    though every call is otherwise a plain submodule."""
+    from TraceLens.ModelUtils.ast_analyze import (
+        _forward_mixes_modules_and_inline_ops,
+        _forward_operations_from_forward,
+    )
+
+    source = """
+class Model:
+    def forward(self, x):
+        left, right = self.split(x)
+        return self.proj(right) + left
+"""
+    forward = ast.parse(source).body[0].body[0]
+    ops = _forward_operations_from_forward(forward, self_values={}, all_tensor_ops=True)
+    assert _forward_mixes_modules_and_inline_ops(
+        ["split", "proj"],
+        {"split": "Split", "proj": "Proj"},
+        ops.operations,
+        ops.step_predecessors,
+    )
+
+
+def test_mixes_modules_and_inline_ops_rewires_a_pruned_merge():
+    """A call's predecessor dropping the plain source-order default (a pruned
+    two-arm merge collapsed to one arm) counts as real rewiring even when no
+    ``Merge`` operation node survives to report."""
+    from TraceLens.ModelUtils.ast_analyze import _forward_mixes_modules_and_inline_ops
+
+    assert _forward_mixes_modules_and_inline_ops(
+        ["a", "b"],
+        {"a": "A", "b": "B"},
+        [],
+        {"b": ("@method_input",)},
+    )
+
+
+def test_mixes_modules_and_inline_ops_is_false_without_predecessor_evidence():
+    """No inline op and no predecessor evidence at all: nothing to add, so the
+    caller's plain source-order wiring is left untouched."""
+    from TraceLens.ModelUtils.ast_analyze import _forward_mixes_modules_and_inline_ops
+
+    assert not _forward_mixes_modules_and_inline_ops(
+        ["a", "b"],
+        {"a": "A", "b": "B"},
+        [],
+        {},
+    )
+    # Plain source-order wiring (``b``'s only predecessor is the call right
+    # before it): the loop runs to completion and finds no rewiring.
+    assert not _forward_mixes_modules_and_inline_ops(
+        ["a", "b"],
+        {"a": "A", "b": "B"},
+        [],
+        {"b": ("a",)},
+    )
+
+
+def test_mixes_modules_and_inline_ops_is_false_with_no_module_calls():
+    from TraceLens.ModelUtils.ast_analyze import _forward_mixes_modules_and_inline_ops
+
+    assert not _forward_mixes_modules_and_inline_ops(["mystery"], {}, [], {})
+
+
+def test_resolve_host_scalars_substitutes_through_lists_tuples_and_unary_ops():
+    """``q_size = self.num_idx_heads * self.idx_head_dim`` then
+    ``idx_qkv.split([q_size, self.idx_head_dim, -self.idx_head_dim], ...)`` --
+    a folded local substitutes its concrete int, one this module's own
+    (weaker) resolution could not fold substitutes its own RHS expression
+    instead, and both must come through unscathed inside a List, a Tuple, and
+    a UnaryOp operand, not just a bare Name."""
+    from TraceLens.ModelUtils.ast_analyze import _ForwardOperationExtractor
+
+    extractor = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    extractor.host_scalar_values["head_dim"] = 128
+    extractor.host_scalar_exprs["q_size"] = ast.parse(
+        "num_idx_heads * idx_head_dim", mode="eval"
+    ).body
+
+    node = ast.parse(
+        "[head_dim, q_size, -idx_head_dim, (q_size, idx_head_dim)]", mode="eval"
+    ).body
+    resolved = extractor._resolve_host_scalars(node)
+    assert (
+        ast.unparse(resolved) == "[128, num_idx_heads * idx_head_dim, -idx_head_dim, "
+        "(num_idx_heads * idx_head_dim, idx_head_dim)]"
+    )
+
+
+def test_resolve_host_scalars_guards_a_local_reassigned_from_itself():
+    """``x = x + 1``: expanding ``x``'s own definition would recurse into
+    itself forever without the ``_seen`` guard. An unexpandable local is left
+    as a bare name instead of looping."""
+    from TraceLens.ModelUtils.ast_analyze import _ForwardOperationExtractor
+
+    extractor = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    extractor.host_scalar_exprs["x"] = ast.parse("x + 1", mode="eval").body
+
+    node = ast.parse("x", mode="eval").body
+    resolved = extractor._resolve_host_scalars(node)
+    assert ast.unparse(resolved) == "x + 1"
+
+
+def test_expression_at_operation_line_falls_back_to_the_enclosing_statement():
+    """``@op_l{line}_c{col}_...`` names the operation's own AST position. When
+    nothing at that exact position is a labelled BinOp/Call (the position is
+    the enclosing STATEMENT's own, not an inner expression's -- a bare
+    ``return x``, or an assignment whose RHS starts further right than the
+    statement itself), the expression is read off whichever statement shape
+    sits there: a return's value, an assignment's RHS, an annotated
+    assignment's RHS, or an augmented assignment's RHS. An attr_name that
+    does not even match the position pattern resolves to nothing."""
+    from TraceLens.ModelUtils.ast_analyze import _expression_at_operation_line
+
+    def op_at(stmt: ast.stmt) -> str:
+        return f"@op_l{stmt.lineno}_c{stmt.col_offset}_whatever"
+
+    return_func = ast.parse("def forward(self, x):\n    return x\n").body[0]
+    result = _expression_at_operation_line(
+        return_func, op_at(return_func.body[0]), "SomeLabel"
+    )
+    assert ast.unparse(result) == "x"
+
+    assign_func = ast.parse("def forward(self, x):\n    y = x + 1\n").body[0]
+    result = _expression_at_operation_line(
+        assign_func, op_at(assign_func.body[0]), "SomeLabel"
+    )
+    assert ast.unparse(result) == "x + 1"
+
+    ann_assign_func = ast.parse("def forward(self, x):\n    y: int = x\n").body[0]
+    result = _expression_at_operation_line(
+        ann_assign_func, op_at(ann_assign_func.body[0]), "SomeLabel"
+    )
+    assert ast.unparse(result) == "x"
+
+    aug_assign_func = ast.parse("def forward(self, x):\n    y = 0\n    y += x\n").body[
+        0
+    ]
+    result = _expression_at_operation_line(
+        aug_assign_func, op_at(aug_assign_func.body[1]), "SomeLabel"
+    )
+    assert ast.unparse(result) == "x"
+
+    assert _expression_at_operation_line(return_func, "not_a_match", "Label") is None
+
+
+def test_subscript_resize_dims_folds_a_lower_and_upper_bound_pair():
+    """``x[..., :output_width]`` folds a bare upper bound to its own value; an
+    ``a:b`` slice folds to the span between them; a span that folds negative
+    (a lower bound above the upper one) is not a real resize and is skipped,
+    same as an unresolvable bound, a full ``:`` slice, or a stepped slice.
+    An axis after an ``Ellipsis`` is numbered from the end."""
+    import ast
+
+    from TraceLens.ModelUtils.ast_analyze import _ForwardOperationExtractor
+
+    extractor = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    extractor.host_scalar_values = {"B": 32, "A": 8}
+
+    def resize(expr: str) -> list[tuple[int, int]]:
+        subscript = ast.parse(expr, mode="eval").body
+        return extractor._subscript_resize_dims(subscript.slice)
+
+    assert resize("x[:B]") == [(0, 32)]
+    assert resize("x[A:B]") == [(0, 24)]
+    assert resize("x[B:A]") == []
+    assert resize("x[..., :B]") == [(-1, 32)]
+    assert resize("x[:unknown]") == []
+    assert resize("x[:]") == []
+    assert resize("x[::2]") == []
+
+
+def test_rebind_producer_token_renames_the_bare_and_the_named_boundary_token():
+    """A producer token is renamed the same way an operation's own operands
+    are: the bare primary-input token (``@method_input``) renames to whatever
+    the callee's own primary parameter now maps to, but collapses back to the
+    generic token when that happens to BE the caller's own primary (nothing
+    distinguishes it then); a per-parameter secondary token
+    (``@method_input:attention_mask``) renames through the mapping the same
+    way, and ALSO collapses to the generic token if the renamed name turns
+    out to be the caller's primary. A plain producer attr just goes through
+    the mapping like any other name."""
+    from TraceLens.ModelUtils.ast_analyze import (
+        FORWARD_METHOD_INPUT,
+        _rebind_producer_token,
+    )
+
+    renamed = _rebind_producer_token(
+        FORWARD_METHOD_INPUT,
+        {"x": "hidden_states"},
+        callee_primary="x",
+        caller_primary="other_primary",
+    )
+    assert renamed == "hidden_states"
+
+    collapses_to_generic = _rebind_producer_token(
+        FORWARD_METHOD_INPUT,
+        {"x": "hidden_states"},
+        callee_primary="x",
+        caller_primary="hidden_states",
+    )
+    assert collapses_to_generic == FORWARD_METHOD_INPUT
+
+    no_callee_primary = _rebind_producer_token(
+        FORWARD_METHOD_INPUT, {}, callee_primary=None, caller_primary="hidden_states"
+    )
+    assert no_callee_primary == FORWARD_METHOD_INPUT
+
+    named_renamed = _rebind_producer_token(
+        "@method_input:attention_mask",
+        {"attention_mask": "mask_param"},
+        callee_primary="x",
+        caller_primary="hidden_states",
+    )
+    assert named_renamed == "mask_param"
+
+    named_collapses = _rebind_producer_token(
+        "@method_input:attention_mask",
+        {"attention_mask": "hidden_states"},
+        callee_primary="x",
+        caller_primary="hidden_states",
+    )
+    assert named_collapses == FORWARD_METHOD_INPUT
+
+    plain_mapped = _rebind_producer_token(
+        "q_proj",
+        {"q_proj": "renamed_q"},
+        callee_primary="x",
+        caller_primary="hidden_states",
+    )
+    assert plain_mapped == "renamed_q"
+
+    plain_unmapped = _rebind_producer_token(
+        "unmapped", {}, callee_primary="x", caller_primary="hidden_states"
+    )
+    assert plain_unmapped == "unmapped"
+
+
+def test_self_call_argument_rebind_covers_positional_and_keyword_shapes():
+    """Only a bare name rebinds a callee parameter onto the caller's own
+    tensor; a constant carries no rename and is skipped; anything else
+    (a starred arg, a computed expression, too many positional args) makes
+    the call opaque to this rebind. A bare ``**kwargs`` forward is harmless
+    (no rename it could offer) but a computed keyword dict is not."""
+    from TraceLens.ModelUtils.ast_analyze import _self_call_argument_rebind
+
+    callee = ast.parse("def method(self, x, y, z=None): pass").body[0]
+
+    def rebind(expr: str):
+        return _self_call_argument_rebind(ast.parse(expr).body[0].value, callee)
+
+    assert rebind("self.method(a, 5)") == {"x": "a"}
+    assert rebind("self.method(a, b, c, d)") is None
+    assert rebind("self.method(*args)") is None
+    assert rebind("self.method(**extra_kwargs)") == {}
+    assert rebind("self.method(**{'a': 1})") is None
+    assert rebind("self.method(z=w)") == {"z": "w"}
+    assert rebind("self.method(z=5)") == {}
+    assert rebind("self.method(z=w + 1)") is None
+
+
+def test_fold_host_int_covers_every_arithmetic_op_and_a_zero_divisor():
+    """``q_size = self.num_idx_heads * self.idx_head_dim`` folds through
+    ``+ - * // %`` over already-folded host-scalar locals; true division is
+    outside the set this gives a constant width for (``/`` always returns a
+    float, never the integer bound a slice needs) and a zero divisor is
+    caught rather than raising."""
+    from TraceLens.ModelUtils.ast_analyze import _ForwardOperationExtractor
+
+    extractor = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    extractor.host_scalar_values = {"a": 6, "b": 4}
+
+    def fold(expr: str) -> int | None:
+        return extractor._fold_host_int(ast.parse(expr, mode="eval").body)
+
+    assert fold("a + b") == 10
+    assert fold("a - b") == 2
+    assert fold("a * b") == 24
+    assert fold("a // b") == 1
+    assert fold("a % b") == 2
+    assert fold("a // 0") is None
+    assert fold("a % 0") is None
+    assert fold("a / b") is None
+
+
+def test_apply_branch_alternatives_expands_both_the_operation_and_the_step():
+    """After an if/else merge only the survivor's producer (``norm_a``) lives
+    in ``var_producer``; a consumer that read the merged variable must be
+    expanded to depend on the recorded alternative (``norm_b``) too, so the
+    branch the model did not take on THIS call still stays live rather than
+    orphaned into a dead end. Both an operation's predecessors and a step's
+    own recorded predecessors are expanded alike. With no recorded
+    alternatives at all, this is a pure no-op."""
+    from TraceLens.ModelUtils.ast_analyze import (
+        ForwardOperation,
+        _ForwardOperationExtractor,
+    )
+
+    extractor = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    extractor.branch_alternatives = {"norm_a": {"norm_b"}}
+    extractor.operations = [
+        ForwardOperation("consumer", "Add", "", predecessors=("norm_a",))
+    ]
+    extractor.step_predecessors = {"head": ("norm_a",)}
+
+    extractor._apply_branch_alternatives()
+
+    assert extractor.operations[0].predecessors == ("norm_a", "norm_b")
+    assert extractor.step_predecessors["head"] == ("norm_a", "norm_b")
+
+    untouched = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    untouched.operations = [
+        ForwardOperation("consumer", "Add", "", predecessors=("norm_a",))
+    ]
+    untouched._apply_branch_alternatives()
+    assert untouched.operations[0].predecessors == ("norm_a",)
+
+
+def test_reconstruct_attention_step_recovers_qkv_from_the_dispatch_call():
+    """A dispatched attention call (``attention_interface(self, q, k, v,
+    attention_mask)``) that a branch or comprehension hid from the regular
+    walk still leaves each operand's producer resolvable in ``var_producer``;
+    recovered here, named after the argument so the kernel ports read
+    ``q``/``k``/``v`` rather than nothing. Already-populated predecessors, a
+    body with no dispatch call, and operands with no resolvable producer are
+    all left alone."""
+    from TraceLens.ModelUtils.ast_analyze import (
+        SYNTHETIC_ATTENTION,
+        _ForwardOperationExtractor,
+    )
+
+    body = ast.parse(
+        "attn_output, attn_weights = attention_interface(self, q, k, v, attention_mask)"
+    ).body
+
+    extractor = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    extractor.var_producer = {"q": "q_proj", "k": "k_proj", "v": "v_proj"}
+    extractor.step_predecessors = {}
+    extractor.step_predecessor_args = {}
+    extractor._reconstruct_attention_step(body)
+    assert extractor.step_predecessors[SYNTHETIC_ATTENTION] == (
+        "q_proj",
+        "k_proj",
+        "v_proj",
+    )
+    assert extractor.step_predecessor_args[SYNTHETIC_ATTENTION] == {
+        "q": "q_proj",
+        "k": "k_proj",
+        "v": "v_proj",
+    }
+
+    already_wired = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    already_wired.step_predecessors = {SYNTHETIC_ATTENTION: ("existing",)}
+    already_wired._reconstruct_attention_step(body)
+    assert already_wired.step_predecessors[SYNTHETIC_ATTENTION] == ("existing",)
+
+    no_call = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    no_call.step_predecessors = {}
+    no_call._reconstruct_attention_step(ast.parse("x = y + 1").body)
+    assert SYNTHETIC_ATTENTION not in no_call.step_predecessors
+
+    unresolvable = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    unresolvable.var_producer = {}
+    unresolvable.step_predecessors = {}
+    unresolvable._reconstruct_attention_step(body)
+    assert SYNTHETIC_ATTENTION not in unresolvable.step_predecessors
+
+
+def test_drop_phantom_attention_steps_removes_the_empty_kernel_and_its_readers():
+    """A ``@attention`` step hoisted up from a submodule's own forward (``for
+    blk in self.blocks: blk(...)``) carries no predecessors at this scope --
+    never a genuine call -- and would otherwise form a cycle once the exporter
+    mirrors it into the real nested diagram. It, its step-predecessor-args
+    entry, and its own operation are dropped outright; any OTHER step or
+    operation that named it as a predecessor has that reference stripped
+    rather than being dropped itself. A step with real predecessors is
+    untouched."""
+    from TraceLens.ModelUtils.ast_analyze import (
+        SYNTHETIC_ATTENTION,
+        ForwardOperation,
+        _ForwardOperationExtractor,
+    )
+
+    extractor = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    extractor.step_predecessors = {
+        SYNTHETIC_ATTENTION: (),
+        "head": (SYNTHETIC_ATTENTION,),
+    }
+    extractor.step_predecessor_args = {SYNTHETIC_ATTENTION: {"q": "q_proj"}}
+    extractor.operations = [
+        ForwardOperation(SYNTHETIC_ATTENTION, "AttentionOp", "", predecessors=()),
+        ForwardOperation("head", "Linear", "", predecessors=(SYNTHETIC_ATTENTION,)),
+    ]
+
+    extractor._drop_phantom_attention_steps()
+
+    assert SYNTHETIC_ATTENTION not in extractor.step_predecessors
+    assert extractor.step_predecessors["head"] == ()
+    assert SYNTHETIC_ATTENTION not in extractor.step_predecessor_args
+    assert [op.attr_name for op in extractor.operations] == ["head"]
+    assert extractor.operations[0].predecessors == ()
+
+    real_attention = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    real_attention.step_predecessors = {SYNTHETIC_ATTENTION: ("q_proj",)}
+    real_attention.operations = []
+    real_attention._drop_phantom_attention_steps()
+    assert real_attention.step_predecessors[SYNTHETIC_ATTENTION] == ("q_proj",)
+
+
 def test_sibling_method_delegation_rejects_submodule_and_free_calls():
     from TraceLens.ModelUtils.ast_analyze import (
         _forward_delegates_only_to_sibling_methods,
@@ -1633,6 +2134,104 @@ def test_sibling_method_delegation_rejects_submodule_and_free_calls():
     )
     assert not _forward_delegates_only_to_sibling_methods(["mystery"], {}, method_names)
     assert not _forward_delegates_only_to_sibling_methods([], {}, method_names)
+
+
+def test_trivial_self_attr_getter_names_the_attribute_it_returns():
+    """``def get_input_embeddings(self): return self.embed_tokens`` -> ``embed_tokens``."""
+    from TraceLens.ModelUtils.ast_analyze import _trivial_self_attr_getter
+
+    func = ast.parse(
+        "def get_input_embeddings(self):\n    return self.embed_tokens\n"
+    ).body[0]
+    assert _trivial_self_attr_getter(func) == "embed_tokens"
+
+
+def test_trivial_self_attr_getter_sees_through_a_leading_docstring():
+    from TraceLens.ModelUtils.ast_analyze import _trivial_self_attr_getter
+
+    func = ast.parse(
+        "def get_input_embeddings(self):\n"
+        '    """Return the embedding submodule."""\n'
+        "    return self.embed_tokens\n"
+    ).body[0]
+    assert _trivial_self_attr_getter(func) == "embed_tokens"
+
+
+def test_trivial_self_attr_getter_rejects_a_getter_with_a_side_effect():
+    """More than ``return self.<attr>`` in the body is not trivial."""
+    from TraceLens.ModelUtils.ast_analyze import _trivial_self_attr_getter
+
+    func = ast.parse(
+        "def get_input_embeddings(self):\n"
+        "    self.touched = True\n"
+        "    return self.embed_tokens\n"
+    ).body[0]
+    assert _trivial_self_attr_getter(func) is None
+
+
+def test_trivial_self_attr_getter_rejects_a_non_attribute_return():
+    from TraceLens.ModelUtils.ast_analyze import _trivial_self_attr_getter
+
+    func = ast.parse("def get_scale(self):\n    return 1.0\n").body[0]
+    assert _trivial_self_attr_getter(func) is None
+
+
+def test_trivial_self_attr_getter_rejects_a_nested_attribute_chain():
+    """``self.container.inner`` is not a bare ``self.<attr>``."""
+    from TraceLens.ModelUtils.ast_analyze import _trivial_self_attr_getter
+
+    func = ast.parse("def get_inner(self):\n    return self.container.inner\n").body[0]
+    assert _trivial_self_attr_getter(func) is None
+
+
+def test_a_trivial_getter_accessor_resolves_to_the_same_submodule_as_direct_attr():
+    """``self.get_input_embeddings()(input_ids)`` wires to the same submodule as
+    ``self.embed_tokens(input_ids)`` would.
+
+    The standard HF/vLLM/SGLang accessor interface exists so a caller never has
+    to know the submodule's own attribute name; seeing through it keeps both
+    call forms wired to the same child instead of the accessor form collapsing
+    into a phantom kernel tile with no producer.
+    """
+    from TraceLens.ModelUtils.ast_analyze import analyze_sources
+    from TraceLens.ModelUtils.basic_ops import BasicOpFilter
+    from TraceLens.ModelUtils.block_tree import build_block_node
+
+    source = """
+import torch
+
+
+class Embed(torch.nn.Module):
+    def forward(self, x):
+        return x
+
+
+class Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed_tokens = Embed()
+
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+    def forward(self, input_ids):
+        embeds = self.get_input_embeddings()
+        return embeds(input_ids)
+"""
+    analysis = analyze_sources({"model.py": source}, all_tensor_ops=True)
+    root = build_block_node(
+        attr_name="model",
+        class_name="Model",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter([]),
+    )
+    child_names = {child.attr_name for child in root.children} | {
+        child.class_name for child in root.children
+    }
+    assert "embed_tokens" in child_names or "Embed" in child_names, child_names
+    assert not any(
+        child.attr_name == "embeds" for child in root.children
+    ), "the accessor call should resolve to the real submodule, not a phantom tile"
 
 
 def test_expanding_a_host_int_is_not_the_activation() -> None:

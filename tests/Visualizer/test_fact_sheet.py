@@ -18,6 +18,7 @@ from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
     github_source_url,
     hf_model_id,
 )
+from TraceLens.ModelUtils.ast_analyze import RuntimeRegime
 from TraceLens.ModelUtils.extract import ArchitectureSpec
 
 
@@ -82,6 +83,21 @@ def test_build_fact_sheet_viewer_uses_https_links_in_html():
         in viewer["bodyHtml"]
     )
     assert 'href="https://github.com/org/repo/blob/v1/model.py"' in viewer["bodyHtml"]
+
+
+def test_fact_sheet_states_the_device_only_when_it_mattered():
+    # The source branched on which accelerator is modeled, so the choice is
+    # part of what this drawing says -- not every model's business.
+    spec = ArchitectureSpec(name="Npu", model_type="npu", device_sensitive=True)
+    spec.runtime_regime = RuntimeRegime(device="npu")
+    viewer = build_fact_sheet_viewer(spec)
+    assert "- Device: npu" in viewer["body"]
+
+
+def test_fact_sheet_omits_the_device_when_the_source_never_checked_it():
+    spec = ArchitectureSpec(name="Plain", model_type="plain")
+    viewer = build_fact_sheet_viewer(spec)
+    assert "Device:" not in viewer["body"]
 
 
 def test_build_fact_sheet_omits_raw_forward_op_ids():
