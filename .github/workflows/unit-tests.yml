@@ -14,10 +14,10 @@ on:
     branches: [ main ]
     paths:
       - "**/*.py"
-      - "TraceLens/Visualizer/**/*.js"
-      - "TraceLens/Visualizer/**/*.html"
-      - "TraceLens/Visualizer/**/NOTICE"
-      - "TraceLens/Visualizer/**/*.LICENSE"
+      - "**/*.js"
+      - "**/*.html"
+      - "**/NOTICE"
+      - "**/*LICENSE"
       - "tests/**"
       - "setup.py"
       - "MANIFEST.in"
@@ -29,10 +29,10 @@ on:
     branches: [ main ]
     paths:
       - "**/*.py"
-      - "TraceLens/Visualizer/**/*.js"
-      - "TraceLens/Visualizer/**/*.html"
-      - "TraceLens/Visualizer/**/NOTICE"
-      - "TraceLens/Visualizer/**/*.LICENSE"
+      - "**/*.js"
+      - "**/*.html"
+      - "**/NOTICE"
+      - "**/*LICENSE"
       - "tests/**"
       - "setup.py"
       - "MANIFEST.in"
