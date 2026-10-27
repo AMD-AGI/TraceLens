@@ -828,6 +828,29 @@ def test_flatten_collapses_explicit_span_symbolic():
     assert result.shape == ("B", "S*4", 8)
 
 
+def test_rearrange_applies_the_einops_pattern_to_the_source_shape():
+    """``rearrange(x, "b s (h d) -> b h s d", d=64)`` states exactly what each
+    axis becomes; this must be applied directly rather than passed through,
+    including resolving the grouped axis's sibling size (``h``) from the
+    source shape's leftover extent."""
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 256), dtype="float16")
+    node = _node(
+        "Rearrange",
+        details=["pattern: b s (h d) -> b h s d", "axis d: 64"],
+    )
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", 4, "S", 64)
+
+
+def test_rearrange_passes_through_on_an_unsupported_pattern():
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 256), dtype="float16")
+    node = _node("Rearrange", details=["pattern: not an einops pattern"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == inp.shape
+
+
 def test_matmul_shape_inference():
     inf = _make_inferencer()
     a = TensorSpec(shape=("B", "S", 4096), dtype="float16")
@@ -1495,3 +1518,79 @@ def test_publish_output_port_specs_without_a_graph_is_a_no_op_for_pack_and_merge
     inf._publish_output_port_specs(pack_node, specs, root=None, graph=None)
     inf._publish_output_port_specs(merge_node, specs, root=None, graph=None)
     assert specs == {}
+
+
+def test_introspect_kernel_source_simulates_the_kernels_own_class(monkeypatch):
+    """When the dispatched kernel's own source (``flash_attn_fn``) is found and
+    its class has real forward ops, those ops are simulated directly -- no
+    need to fall back to an eager/pure-torch sibling."""
+    from TraceLens.ModelUtils import shape_inference as si
+
+    source = """
+class EagerAttn(torch.nn.Module):
+    def forward(self, x):
+        y = x.transpose(1, 2)
+        return y
+"""
+    monkeypatch.setattr(
+        si,
+        "_find_symbol_definition",
+        lambda module, symbol: (source, "EagerAttn", "mod"),
+    )
+    inf = _make_inferencer()
+    result = inf._introspect_kernel_source(
+        ("mod", "flash_attn_fn"),
+        [TensorSpec(shape=(2, 4, 8, 16))],
+        root=None,
+    )
+    assert result is not None and result.shape == (2, 8, 4, 16)
+
+
+def test_introspect_kernel_source_falls_back_to_an_eager_sibling(monkeypatch):
+    """A dispatcher (``flash_attn_fn``) with no introspectable source of its
+    own still resolves through its conventionally-named eager fallback
+    (``eager_attn_fn``) living in the same module."""
+    from TraceLens.ModelUtils import shape_inference as si
+
+    eager_source = """
+class EagerFallback(torch.nn.Module):
+    def forward(self, x):
+        y = x.transpose(1, 2)
+        return y
+"""
+
+    def fake_find(module, symbol):
+        if symbol == "eager_attn_fn":
+            return eager_source, "EagerFallback", "mod"
+        return None
+
+    monkeypatch.setattr(si, "_find_symbol_definition", fake_find)
+    inf = _make_inferencer()
+    result = inf._introspect_kernel_source(
+        ("mod", "flash_attn_fn"),
+        [TensorSpec(shape=(2, 4, 8, 16))],
+        root=None,
+    )
+    assert result is not None and result.shape == (2, 8, 4, 16)
+
+
+def test_introspect_kernel_source_is_none_when_nothing_is_found(monkeypatch):
+    from TraceLens.ModelUtils import shape_inference as si
+
+    monkeypatch.setattr(si, "_find_symbol_definition", lambda module, symbol: None)
+    inf = _make_inferencer()
+    result = inf._introspect_kernel_source(("mod", "flash_attn_fn"), [], root=None)
+    assert result is None
+
+
+def test_product_dim_merges_a_run_of_axes_into_one_readable_extent():
+    """A merged run of axes (``view(B, S, -1)`` collapsing the head/dim axes
+    back into one) reads as a number when every merged axis is concrete, a
+    symbolic product (``B*S``) when none is, and a mixed ``sym*number`` when
+    some axes are concrete and others are not."""
+    from TraceLens.ModelUtils.shape_inference import _product_dim
+
+    assert _product_dim(()) is None
+    assert _product_dim((2, 3)) == 6
+    assert _product_dim(("B", "S")) == "B*S"
+    assert _product_dim((2, "B")) == "B*2"
