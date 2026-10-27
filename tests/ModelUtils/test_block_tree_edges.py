@@ -4,7 +4,11 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Line-coverage tests for :mod:`TraceLens.ModelUtils.block_tree`."""
+"""Block-tree construction.
+
+An ``@op_l`` id in this file is a name this test gives a node. It is not a
+lookup into an upstream modeling file.
+"""
 
 from __future__ import annotations
 

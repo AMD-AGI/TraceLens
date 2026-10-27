@@ -4,12 +4,15 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Coverage-focused unit tests for shape_inference internals.
+"""Unit tests for shape-inference internals.
 
 These exercise the individual per-op shape branches, module ctor parsing, the
 torch/meta op builders, and the many small helper functions directly. They do
 not modify any source file and are independent of the existing
 ``test_shape_inference.py`` suite.
+
+An ``@op_l`` id in this file is a key this test builds. It is not a lookup
+into an upstream modeling file.
 """
 
 from __future__ import annotations
@@ -1365,7 +1368,7 @@ def test_parse_module_ctor_non_call_returns_none():
 
 
 # ---------------------------------------------------------------------------
-# Additional per-op branch coverage in _infer_node_output
+# Per-op output shapes from _infer_node_output
 # ---------------------------------------------------------------------------
 
 

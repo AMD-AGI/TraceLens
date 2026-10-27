@@ -1272,160 +1272,124 @@ def _real_node(node_id: str, *, dtype: str, source: str | None = None) -> dict:
     return node
 
 
-def test_prune_noop_cast_removes_same_dtype_cast_and_rewires_consumer():
-    """A `Cast` whose output dtype equals its (real, non-synthetic) input's
-    dtype is a no-op — it must be removed and its consumer rewired straight
-    to the real producer."""
-    nodes = [
-        _real_node("producer", dtype="bfloat16"),
-        _cast_node("noop_cast", source="producer", dtype="bfloat16"),
-        {
-            "id": "consumer",
-            "incomingEdges": [_edge("noop_cast")],
-        },
-    ]
-
-    merge._prune_noop_cast_nodes(nodes)
-
-    by_id = {node["id"]: node for node in nodes}
-    assert "noop_cast" not in by_id
-    assert by_id["consumer"]["incomingEdges"][0]["sourceNodeId"] == "producer"
-
-
-def test_prune_noop_cast_keeps_genuine_dtype_change():
-    """A `Cast` that actually changes dtype must remain in the graph."""
-    nodes = [
-        _real_node("producer", dtype="bfloat16"),
-        _cast_node("real_cast", source="producer", dtype="float32"),
-        {
-            "id": "consumer",
-            "incomingEdges": [_edge("real_cast")],
-        },
-    ]
-
-    merge._prune_noop_cast_nodes(nodes)
-
-    by_id = {node["id"]: node for node in nodes}
-    assert "real_cast" in by_id
-    assert by_id["consumer"]["incomingEdges"][0]["sourceNodeId"] == "real_cast"
+def _dtype_tile(node_id: str, dtype: str, *, source: str | None = None) -> dict:
+    """A synthetic boundary whose own dtype is not ground truth."""
+    node: dict = {
+        "id": node_id,
+        "attrs": [{"key": "synthetic", "value": "@input"}],
+        "outputsMetadata": [
+            {
+                "id": "0",
+                "attrs": [
+                    {"key": "shape", "value": f"B x S x 4 {dtype}"},
+                    {"key": "dtype", "value": dtype},
+                ],
+            }
+        ],
+    }
+    if source:
+        node["incomingEdges"] = [_edge(source)]
+    return node
 
 
-def test_prune_noop_cast_skips_synthetic_predecessor():
-    """A synthetic boundary port's OWN dtype has no independent ground
-    truth (it can be back-filled from whatever it feeds) — a same-dtype
-    match against one must NOT be treated as proof of a no-op, or a
-    genuine cast right after a boundary would be wrongly erased."""
-    nodes = [
-        {
-            "id": "@input:gate",
-            "attrs": [{"key": "synthetic", "value": "@input"}],
-            "outputsMetadata": [
-                {
-                    "id": "0",
-                    "attrs": [
-                        {"key": "shape", "value": "B x S x 4 float32"},
-                        {"key": "dtype", "value": "float32"},
-                    ],
-                }
+@pytest.mark.parametrize(
+    ("nodes", "removed", "kept", "consumer", "source"),
+    [
+        pytest.param(
+            [
+                _real_node("producer", dtype="bfloat16"),
+                _cast_node("noop_cast", source="producer", dtype="bfloat16"),
+                {"id": "consumer", "incomingEdges": [_edge("noop_cast")]},
             ],
-        },
-        _cast_node("maybe_real_cast", source="@input:gate", dtype="float32"),
-        {
-            "id": "consumer",
-            "incomingEdges": [_edge("maybe_real_cast")],
-        },
-    ]
-
-    merge._prune_noop_cast_nodes(nodes)
-
-    by_id = {node["id"]: node for node in nodes}
-    assert "maybe_real_cast" in by_id
-    assert by_id["consumer"]["incomingEdges"][0]["sourceNodeId"] == "maybe_real_cast"
-
-
-def test_prune_noop_cast_resolves_chained_removals():
-    """Two consecutive no-op casts must both be removed, with the final
-    consumer wired all the way back to the real producer."""
-    nodes = [
-        _real_node("producer", dtype="bfloat16"),
-        _cast_node("noop_1", source="producer", dtype="bfloat16"),
-        _cast_node("noop_2", source="noop_1", dtype="bfloat16"),
-        {
-            "id": "consumer",
-            "incomingEdges": [_edge("noop_2")],
-        },
-    ]
-
-    merge._prune_noop_cast_nodes(nodes)
-
-    by_id = {node["id"]: node for node in nodes}
-    assert "noop_1" not in by_id
-    assert "noop_2" not in by_id
-    assert by_id["consumer"]["incomingEdges"][0]["sourceNodeId"] == "producer"
-
-
-def test_prune_noop_cast_walks_back_through_synthetic_boundary():
-    """A no-op cast whose immediate source is a synthetic `@input` boundary that
-    itself traces (single-input) to a real same-dtype producer is elided; the
-    consumer rewires to the boundary (kept), not past it — the hc_head pattern
-    where `input_norm`'s `.to(float32)` runs on a pre-`.float()`-ed input."""
-    nodes = [
-        _real_node("real_float", dtype="float32"),
-        {
-            "id": "mod/@input:x",
-            "attrs": [{"key": "synthetic", "value": "@input"}],
-            "incomingEdges": [_edge("real_float")],
-            "outputsMetadata": [
-                {
-                    "id": "0",
-                    "attrs": [
-                        {"key": "shape", "value": "B x S x 4 float32"},
-                        {"key": "dtype", "value": "float32"},
-                    ],
-                }
+            ["noop_cast"],
+            [],
+            "consumer",
+            "producer",
+            id="same_dtype_cast_is_removed_and_rewired",
+        ),
+        pytest.param(
+            [
+                _real_node("producer", dtype="bfloat16"),
+                _cast_node("real_cast", source="producer", dtype="float32"),
+                {"id": "consumer", "incomingEdges": [_edge("real_cast")]},
             ],
-        },
-        _cast_node("mod/noop_cast", source="mod/@input:x", dtype="float32"),
-        {"id": "mod/square", "incomingEdges": [_edge("mod/noop_cast")]},
-    ]
-
-    merge._prune_noop_cast_nodes(nodes)
-
-    by_id = {node["id"]: node for node in nodes}
-    assert "mod/noop_cast" not in by_id
-    assert "mod/@input:x" in by_id  # module boundary preserved
-    assert by_id["mod/square"]["incomingEdges"][0]["sourceNodeId"] == "mod/@input:x"
-
-
-def test_prune_noop_cast_keeps_cast_when_boundary_traces_to_other_dtype():
-    """A genuine downcast right after a boundary must stay even when the boundary
-    tile's OWN (circularly back-fillable) dtype happens to match the cast's
-    output: the walk-back to the real bfloat16 producer is the ground truth."""
-    nodes = [
-        _real_node("real_bf16", dtype="bfloat16"),
-        {
-            "id": "mod/@input:gate",
-            "attrs": [{"key": "synthetic", "value": "@input"}],
-            "incomingEdges": [_edge("real_bf16")],
-            "outputsMetadata": [
-                {
-                    "id": "0",
-                    "attrs": [
-                        {"key": "shape", "value": "B x S x 4 float32"},
-                        {"key": "dtype", "value": "float32"},
-                    ],
-                }
+            [],
+            ["real_cast"],
+            "consumer",
+            "real_cast",
+            id="genuine_dtype_change_stays",
+        ),
+        pytest.param(
+            [
+                _dtype_tile("@input:gate", "float32"),
+                _cast_node("maybe_real_cast", source="@input:gate", dtype="float32"),
+                {"id": "consumer", "incomingEdges": [_edge("maybe_real_cast")]},
             ],
-        },
-        _cast_node("mod/real_cast", source="mod/@input:gate", dtype="float32"),
-        {"id": "mod/consumer", "incomingEdges": [_edge("mod/real_cast")]},
-    ]
-
+            [],
+            ["maybe_real_cast"],
+            "consumer",
+            "maybe_real_cast",
+            id="synthetic_predecessor_is_not_proof_of_a_noop",
+        ),
+        pytest.param(
+            [
+                _real_node("producer", dtype="bfloat16"),
+                _cast_node("noop_1", source="producer", dtype="bfloat16"),
+                _cast_node("noop_2", source="noop_1", dtype="bfloat16"),
+                {"id": "consumer", "incomingEdges": [_edge("noop_2")]},
+            ],
+            ["noop_1", "noop_2"],
+            [],
+            "consumer",
+            "producer",
+            id="chained_noops_rewire_to_the_real_producer",
+        ),
+        pytest.param(
+            [
+                _real_node("real_float", dtype="float32"),
+                _dtype_tile("mod/@input:x", "float32", source="real_float"),
+                _cast_node("mod/noop_cast", source="mod/@input:x", dtype="float32"),
+                {"id": "mod/square", "incomingEdges": [_edge("mod/noop_cast")]},
+            ],
+            ["mod/noop_cast"],
+            ["mod/@input:x"],
+            "mod/square",
+            "mod/@input:x",
+            id="walks_back_through_a_boundary_and_keeps_the_boundary",
+        ),
+        pytest.param(
+            [
+                _real_node("real_bf16", dtype="bfloat16"),
+                _dtype_tile("mod/@input:gate", "float32", source="real_bf16"),
+                _cast_node("mod/real_cast", source="mod/@input:gate", dtype="float32"),
+                {"id": "mod/consumer", "incomingEdges": [_edge("mod/real_cast")]},
+            ],
+            [],
+            ["mod/real_cast"],
+            "mod/consumer",
+            "mod/real_cast",
+            id="downcast_after_a_boundary_stays",
+        ),
+        pytest.param(
+            [{"id": "c", "label": "Cast", "incomingEdges": [_edge("ghost")]}],
+            [],
+            ["c"],
+            None,
+            None,
+            id="cast_with_a_missing_source_stays",
+        ),
+    ],
+)
+def test_prune_noop_cast(nodes, removed, kept, consumer, source):
+    """A same-dtype cast of a real producer is removed; every other cast stays."""
     merge._prune_noop_cast_nodes(nodes)
-
     by_id = {node["id"]: node for node in nodes}
-    assert "mod/real_cast" in by_id
-    assert by_id["mod/consumer"]["incomingEdges"][0]["sourceNodeId"] == "mod/real_cast"
+    for node_id in removed:
+        assert node_id not in by_id
+    for node_id in kept:
+        assert node_id in by_id
+    if consumer is not None:
+        assert by_id[consumer]["incomingEdges"][0]["sourceNodeId"] == source
 
 
 def test_shape_fill_and_boundary_multiple_crossings():
@@ -1588,68 +1552,75 @@ def test_fill_missing_node_shapes_cast_resolves_downcast_dtype():
     assert shape_attr["value"] == "[B, S, 4] float16"
 
 
-def test_fallback_node_spec_cast_without_detail_keeps_source_dtype():
-    source = TensorSpec(("B", "S", 4), "float32")
-    node = {"id": "@op_cast", "label": "Cast"}
-    result = shapes._fallback_node_spec(node, [("0", source)], working_dtype="float16")
-    assert result.dtype == "float32"
-    assert result.shape == ("B", "S", 4)
-
-
-def test_fallback_node_spec_conv_reduces_spatial_from_geometry():
-    # Vision patch-merger downsample reaches the fallback (never keyed by the
-    # block-tree inference); geometry from the constructor collapses 2x2 -> 1x1.
-    source = TensorSpec(("B*S/4", 4096, 2, 2), "bfloat16")
-    node = {
+def _conv_node() -> dict:
+    return {
         "id": "visual/seq:6:downsample:downsample:0",
         "label": "Conv2d",
         "attrs": [{"key": "attr_name", "value": "downsample"}],
     }
-    result = shapes._fallback_node_spec(
-        node,
-        [("0", source)],
-        conv_geometry={"downsample": ((2, 2), (2, 2), (0, 0))},
-    )
-    assert result.shape == ("B*S/4", 4096, 1, 1)
 
 
-def test_fallback_node_spec_conv_without_geometry_passes_through():
-    source = TensorSpec(("B*S/4", 4096, 2, 2), "bfloat16")
-    node = {
-        "id": "visual/seq:6:downsample:downsample:0",
-        "label": "Conv2d",
-        "attrs": [{"key": "attr_name", "value": "downsample"}],
-    }
-    # No geometry recorded -> spatial axes pass through unchanged.
-    assert shapes._fallback_node_spec(node, [("0", source)]).shape == (
-        "B*S/4",
-        4096,
-        2,
-        2,
-    )
-
-
-def test_fallback_node_spec_unsqueeze_non_integer_dim_defaults_to_zero():
-    source = TensorSpec(("B", "S", 4), "float16")
-    node = {
+def _unsqueeze_node(detail: str) -> dict:
+    return {
         "id": "u",
         "label": "Unsqueeze",
         "attrs": [
             {"key": "raw_op", "value": "unsqueeze"},
-            {"key": "detail", "value": "dim: -1"},
+            {"key": "detail", "value": detail},
         ],
     }
-    # A negative dim resolves against rank; a non-integer would default to 0.
-    assert shapes._fallback_node_spec(node, [("0", source)]).shape == ("B", "S", 4, 1)
-    bad = {
-        "id": "u",
-        "label": "Unsqueeze",
-        "attrs": [
-            {"key": "raw_op", "value": "unsqueeze"},
-            {"key": "detail", "value": "dim: n"},
-        ],
-    }
-    assert shapes._fallback_node_spec(bad, [("0", source)]).shape == (1, "B", "S", 4)
+
+
+@pytest.mark.parametrize(
+    ("node", "spec", "kwargs", "shape", "dtype"),
+    [
+        pytest.param(
+            {"id": "@op_cast", "label": "Cast"},
+            TensorSpec(("B", "S", 4), "float32"),
+            {"working_dtype": "float16"},
+            ("B", "S", 4),
+            "float32",
+            id="cast_without_detail_keeps_source_dtype",
+        ),
+        pytest.param(
+            _conv_node(),
+            TensorSpec(("B*S/4", 4096, 2, 2), "bfloat16"),
+            {"conv_geometry": {"downsample": ((2, 2), (2, 2), (0, 0))}},
+            ("B*S/4", 4096, 1, 1),
+            None,
+            id="conv_reduces_spatial_from_geometry",
+        ),
+        pytest.param(
+            _conv_node(),
+            TensorSpec(("B*S/4", 4096, 2, 2), "bfloat16"),
+            {},
+            ("B*S/4", 4096, 2, 2),
+            None,
+            id="conv_without_geometry_passes_through",
+        ),
+        pytest.param(
+            _unsqueeze_node("dim: -1"),
+            TensorSpec(("B", "S", 4), "float16"),
+            {},
+            ("B", "S", 4, 1),
+            None,
+            id="unsqueeze_negative_dim_resolves_against_rank",
+        ),
+        pytest.param(
+            _unsqueeze_node("dim: n"),
+            TensorSpec(("B", "S", 4), "float16"),
+            {},
+            (1, "B", "S", 4),
+            None,
+            id="unsqueeze_non_integer_dim_defaults_to_zero",
+        ),
+    ],
+)
+def test_fallback_node_spec(node, spec, kwargs, shape, dtype):
+    result = shapes._fallback_node_spec(node, [("0", spec)], **kwargs)
+    assert result.shape == shape
+    if dtype is not None:
+        assert result.dtype == dtype
 
 
 def test_shape_context_config_aliases_and_serialization():

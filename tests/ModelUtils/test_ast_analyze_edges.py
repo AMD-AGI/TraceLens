@@ -461,7 +461,7 @@ def test_parse_architecture_layer_variants_from_conditionals():
 
 
 # --------------------------------------------------------------------------- #
-# Additional cheap edge-branch coverage
+# Config values the architecture parser resolves or refuses
 # --------------------------------------------------------------------------- #
 
 

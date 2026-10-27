@@ -637,25 +637,30 @@ class TestTheFold:
 
 
 @pytest.mark.parametrize(
-    "model_id,producer",
-    [
-        ("MiniMaxAI/MiniMax-M3", "@op_l758_c27_unsqueeze"),
-        ("deepseek-ai/DeepSeek-V4-Flash", "@op_l1296_c27_unsqueeze"),
-    ],
+    "model_id",
+    ["MiniMaxAI/MiniMax-M3", "deepseek-ai/DeepSeek-V4-Flash"],
 )
-def test_position_ids_enters_every_box_through_one_tile(
-    model_graph_nodes, model_id, producer
-):
-    """That Unsqueeze feeds one tile, and the tile is position_ids."""
+def test_position_ids_enters_every_box_through_one_tile(model_graph_nodes, model_id):
+    """The Unsqueeze that produces position_ids feeds that one tile.
+
+    The producer is the Unsqueeze whose only consumer is labeled position_ids.
+    That role is the same on both models, so the test does not name a line of
+    either upstream modeling file.
+    """
     nodes = model_graph_nodes(model_id)
-    fanout = [
-        node
-        for node in nodes
-        for edge in node.get("incomingEdges") or []
-        if producer in str(edge.get("sourceNodeId"))
-    ]
-    assert len(fanout) == 1, [str(node["id"]) for node in fanout]
-    assert (fanout[0].get("label") or "") == "position_ids", fanout[0].get("label")
+    consumers: dict[str, list[dict]] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges") or []:
+            consumers.setdefault(str(edge.get("sourceNodeId")), []).append(node)
+
+    entering = []
+    for node in nodes:
+        if (node.get("label") or "") != "Unsqueeze":
+            continue
+        fed = consumers.get(node["id"], [])
+        if [item.get("label") for item in fed] == ["position_ids"]:
+            entering.append(fed[0]["id"])
+    assert len(set(entering)) == 1, entering
 
 
 # --- test_mirror_name_qualification.py ---

@@ -4,7 +4,11 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Focused branch coverage for AST analysis and computation graph construction."""
+"""AST analysis and computation-graph construction.
+
+An ``@op_l`` id in this file is a key the test builds, or a line of a snippet
+defined here. It is not a lookup into an upstream modeling file.
+"""
 
 from __future__ import annotations
 

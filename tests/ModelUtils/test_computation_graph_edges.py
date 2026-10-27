@@ -4,11 +4,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Line-coverage tests for TraceLens.ModelUtils.computation_graph.
+"""Graph-building helpers in TraceLens.ModelUtils.computation_graph.
 
-These tests exercise the graph-building helpers directly and drive
-``build_computation_graph`` with hand-built block trees and monkeypatched
-segment streams so that every branch of the module is reached.
+These tests drive ``build_computation_graph`` with hand-built block trees and
+monkeypatched segment streams.
+
+An ``@op_l`` id in this file is a name this test gives a node. It is not a
+lookup into an upstream modeling file.
 """
 
 from __future__ import annotations

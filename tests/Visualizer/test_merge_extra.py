@@ -683,19 +683,6 @@ def test_mirror_boundary_outputs_skips_empty_port_and_unconsumed():
 
 
 # ---------------------------------------------------------------------------
-# _prune_noop_cast_nodes missing-source branch (1608)
-# ---------------------------------------------------------------------------
-
-
-def test_prune_noop_cast_ignores_cast_with_missing_source():
-    nodes = [
-        {"id": "c", "label": "Cast", "incomingEdges": [_edge("ghost")]},
-    ]
-    merge._prune_noop_cast_nodes(nodes)
-    assert [node["id"] for node in nodes] == ["c"]
-
-
-# ---------------------------------------------------------------------------
 # _prune_unconsumed_outputs keeps synthetic-input producers (1717)
 # ---------------------------------------------------------------------------
 
