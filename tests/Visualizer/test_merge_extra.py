@@ -124,6 +124,141 @@ def test_computation_nodes_multi_output_split_and_skipped_input():
 
 
 # ---------------------------------------------------------------------------
+# _is_host_param_operand
+# ---------------------------------------------------------------------------
+
+
+def test_is_host_param_operand_matches_a_later_unlabeled_boundary_read():
+    """The entry-point edge for a host dependency (``host_params:
+    cu_seqlens``) is labelled with the parameter; a LATER op reading the same
+    host value is linked without that label, so only the edge's own slot (not
+    port 0, the activation slot) and the fact that its source is a boundary
+    tile (rather than a genuine second tensor operand) identify it.
+    """
+    node = {"attrs": [{"key": "details", "value": "host_params: cu_seqlens"}]}
+
+    matching_source = {"id": "cu_seqlens_producer", "label": "cu_seqlens"}
+    assert merge._is_host_param_operand(node, matching_source)
+
+    unrelated_source = {"id": "other", "label": "other"}
+    assert not merge._is_host_param_operand(node, unrelated_source)
+
+    boundary_source = {
+        "id": "decoder/l3/@input",
+        "label": "something_else",
+        "attrs": [{"key": "synthetic", "value": "@input"}],
+    }
+    non_primary_edge = {"targetNodeInputId": "1"}
+    assert merge._is_host_param_operand(node, boundary_source, non_primary_edge)
+
+    real_op_source = {"id": "real_op", "label": "something_else"}
+    assert not merge._is_host_param_operand(node, real_op_source, non_primary_edge)
+
+    primary_edge = {"targetNodeInputId": "0"}
+    assert not merge._is_host_param_operand(node, boundary_source, primary_edge)
+
+
+# ---------------------------------------------------------------------------
+# _producer_tile_name
+# ---------------------------------------------------------------------------
+
+
+def test_producer_tile_name_prefers_the_loop_iterators_own_bound_name():
+    """A loop body's input tile is normally named after its producer's label,
+    but a loop ITERATOR is the one exception: the value entering the body is
+    one row per iteration, so the tile takes the name each iteration binds
+    (recorded beside the iterator marker), not the op that built the whole
+    sequence. A missing/empty bound name, or no loop-iterator detail at all,
+    falls back to the producer's own label, and a label-less producer falls
+    back to the generic ``"input"``.
+    """
+    loop_iter_producer = {
+        "label": "Nonzero",
+        "attrs": [{"key": "detail", "value": "loop iterator: token_row"}],
+    }
+    assert merge._producer_tile_name(loop_iter_producer) == "token_row"
+
+    plain = {"label": "RMSNorm", "attrs": []}
+    assert merge._producer_tile_name(plain) == "RMSNorm"
+
+    no_label = {"attrs": []}
+    assert merge._producer_tile_name(no_label) == "input"
+
+    empty_bound = {
+        "label": "Nonzero",
+        "attrs": [{"key": "details", "value": "loop iterator: "}],
+    }
+    assert merge._producer_tile_name(empty_bound) == "Nonzero"
+
+
+# ---------------------------------------------------------------------------
+# _generator_shape
+# ---------------------------------------------------------------------------
+
+
+def test_generator_shape_resolves_a_shape_expression_dim_off_its_wired_operand():
+    """``torch.arange(inputs_embeds.shape[1])`` reports the recorded bound
+    expression, not a readable length; resolved here against the operand it
+    is actually wired to. Without a matching source (or without ANY wired
+    source at all) the raw expression is left alone; an inferencer that
+    raises or declines leaves the generator with no shape at all.
+    """
+    operation = SimpleNamespace(
+        attr_name="@op_arange", label="Range", details=["raw_op: arange"]
+    )
+    node_by_id = {
+        "inputs_embeds": {
+            "id": "inputs_embeds",
+            "outputsMetadata": [
+                {
+                    "id": "0",
+                    "attrs": [
+                        {"key": "shape", "value": "B x 128 x 8"},
+                        {"key": "dtype", "value": "float16"},
+                    ],
+                }
+            ],
+        }
+    }
+
+    class ArangeInferencer:
+        def _infer_node_output(self, node, preds, root=None):
+            return TensorSpec(("inputs_embeds.shape[1]",), "int64")
+
+    resolved = merge._generator_shape(
+        operation, ["inputs_embeds"], node_by_id, ArangeInferencer()
+    )
+    assert resolved.shape == ("128",)
+    assert resolved.dtype == "int64"
+
+    # No wired source at all: the raw expression passes through unresolved.
+    unresolved = merge._generator_shape(operation, [], node_by_id, ArangeInferencer())
+    assert unresolved.shape == ("inputs_embeds.shape[1]",)
+
+    class RaisingInferencer:
+        def _infer_node_output(self, node, preds, root=None):
+            raise RuntimeError("unresolvable generator")
+
+    assert (
+        merge._generator_shape(
+            operation, ["inputs_embeds"], node_by_id, RaisingInferencer()
+        )
+        is None
+    )
+
+    class DecliningInferencer:
+        def _infer_node_output(self, node, preds, root=None):
+            return None
+
+    assert (
+        merge._generator_shape(
+            operation, ["inputs_embeds"], node_by_id, DecliningInferencer()
+        )
+        is None
+    )
+
+
+# ---------------------------------------------------------------------------
 # _producer_output_spec
 # ---------------------------------------------------------------------------
 
