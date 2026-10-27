@@ -19,15 +19,16 @@ This module provides common functions for:
 import ast
 import json
 import os
-import re
 import sys
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
 
+from TraceLens.NcclAnalyser.nccl_analyser import list_to_tuple
 from TraceLens.PerfModel.utils import torch_dtype_map
+from TraceLens.Reporting.aggregate_perf_reports import PHASE_COL
 
 TARGET_HIGH = 100.0
 TARGET_LOW = 75.0
@@ -87,6 +88,10 @@ _CALL_CHAIN_SKIP = frozenset(
 )
 
 _KERNEL_NAME_TRUNC_LEN = 75
+PERF_ARG_COLS = ("Input Dims", "Input type", "Input Strides", "Concrete Inputs")
+PERF_THREAD_COLS = ("process_name", "process_label", "thread_name")
+PEAK_MEM_BW_KEY = "peak_mem_bw_tbs"
+HIGH_CONFIDENCE_OP_KEYS = "high_confidence_op_keys"
 
 
 def _eff_bucket(pct):
@@ -101,20 +106,22 @@ def _eff_bucket(pct):
 
 
 def perf_report_csv_dir(output_dir: str) -> str:
-    """
-    Directory containing perf-report CSV exports for the primary (Trace 1) trace.
-
-    When ``category_data/category_manifest.json`` exists and ``comparison_scope``
-    is ``comparative``, returns ``<output_dir>/perf_report_trace1_csvs``.
-    Otherwise returns ``<output_dir>/perf_report_csvs`` (standalone or missing manifest).
+    """The perf-report CSV dir of the trace fusion and system analysis read: the
+    manifest's ``focus_csv_dir``, or ``<output_dir>/perf_report_csvs`` before prepare.
     """
     manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
     if os.path.isfile(manifest_path):
         with open(manifest_path, "r", encoding="utf-8") as f:
-            scope = json.load(f).get("comparison_scope", "standalone")
-        if scope == "comparative":
-            return os.path.join(output_dir, "perf_report_trace1_csvs")
+            return json.load(f)["focus_csv_dir"]
     return os.path.join(output_dir, "perf_report_csvs")
+
+
+def focus_job_utilization(manifest: dict) -> dict:
+    """The manifest's ``gpu_utilization``; on multi_trace runs, the focus job's entry."""
+    gpu_util = manifest.get("gpu_utilization", {})
+    if manifest.get("focus_job"):
+        return gpu_util["jobs"][manifest["focus_job"]]
+    return gpu_util
 
 
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
@@ -352,7 +359,7 @@ def standalone_efficiency(result: Dict[str, Any], row: pd.Series) -> None:
 def calculate_efficiency(
     row: pd.Series,
     peak_mem_bw: float,
-    peak_maf_or_maf_dict,
+    max_achievable_tflops: dict,
     comparison_scope: str = "standalone",
 ) -> Dict[str, Optional[float]]:
     """
@@ -361,8 +368,8 @@ def calculate_efficiency(
     Args:
         row: DataFrame row with operation metrics
         peak_mem_bw: Peak memory bandwidth in TB/s
-        peak_maf_or_maf_dict: Either a float or a dict (max_achievable_tflops)
-            for resolving the precision-aware peak
+        max_achievable_tflops: Per-precision peak TFLOPS dict, for resolving the
+            precision-aware peak
         comparison_scope:
             ``standalone`` uses roofline efficiency
             ``comparative`` uses comparative efficiency
@@ -400,11 +407,9 @@ def calculate_efficiency(
     if tb_s is not None:
         result["tb_s_achieved"] = round(tb_s, 2)
 
-    if isinstance(peak_maf_or_maf_dict, dict):
-        fallback_maf = peak_maf_or_maf_dict.get("matrix_bf16", 1)
-        peak_maf = _resolve_peak_maf(row, peak_maf_or_maf_dict, fallback_maf)
-    else:
-        peak_maf = peak_maf_or_maf_dict
+    peak_maf = _resolve_peak_maf(
+        row, max_achievable_tflops, get_matrix_maf_tflops(max_achievable_tflops)
+    )
     result["resolved_peak_maf"] = round(peak_maf, 2) if peak_maf else None
     result["resolved_peak_mem_bw"] = round(peak_mem_bw, 2) if peak_mem_bw else None
 
@@ -423,29 +428,22 @@ def calculate_efficiency(
     return result
 
 
-def _load_fusion_map(output_dir: str) -> Dict[str, str]:
-    """Load high-confidence GPU kernel name -> fusion candidate name mapping."""
+def _load_fusion_op_keys(output_dir: str) -> Set[tuple]:
+    """Load the perf-row keys of the ops covered by high-confidence fusion candidates."""
     if not output_dir:
-        return {}
+        return set()
     path = os.path.join(output_dir, "category_data", "kernel_fusion_metrics.json")
     if not os.path.exists(path):
-        return {}
+        return set()
     try:
         with open(path, "r") as f:
-            return json.load(f).get("high_confidence_kernel_map", {})
-    except (json.JSONDecodeError, KeyError):
-        return {}
-
-
-def _match_fusion_op(kd_str: str, fusion_map: Dict[str, str]) -> Optional[str]:
-    """Match kernel_details_summary against fusion kernel map with prefix fallback."""
-    for kn in re.findall(r"'name':\s*'([^']+)'", kd_str):
-        if kn in fusion_map:
-            return fusion_map[kn]
-        for fk, bn in fusion_map.items():
-            if fk.startswith(kn) or kn.startswith(fk):
-                return bn
-    return None
+            metrics = json.load(f)
+    except json.JSONDecodeError:
+        return set()
+    return {
+        (metrics.get(PHASE_COL), *key)
+        for key in metrics.get(HIGH_CONFIDENCE_OP_KEYS, [])
+    }
 
 
 def _parse_call_stack(call_stack_full: str) -> List[str]:
@@ -480,6 +478,29 @@ def _extract_call_chain(call_stack_full: str) -> List[str]:
     ]
 
 
+def format_kernel_names(kernels: List[str]) -> tuple:
+    """Render kernel names for a table cell.
+
+    Returns ``(full, trunc)``: a lone kernel is its bare name; several are
+    ``Kernel 1: ...<br>Kernel 2: ...``. ``trunc`` clips each individual name to
+    ``_KERNEL_NAME_TRUNC_LEN`` chars.
+    """
+
+    def _trunc(name: str) -> str:
+        return (
+            name[:_KERNEL_NAME_TRUNC_LEN] + "..."
+            if len(name) > _KERNEL_NAME_TRUNC_LEN
+            else name
+        )
+
+    if len(kernels) == 1:
+        return kernels[0], _trunc(kernels[0])
+
+    full = "<br>".join(f"Kernel {i+1}: {k}" for i, k in enumerate(kernels))
+    trunc = "<br>".join(f"Kernel {i+1}: {_trunc(k)}" for i, k in enumerate(kernels))
+    return full, trunc
+
+
 def _extract_kernel_names(call_stack_full: str) -> tuple:
     """Extract GPU kernel name(s) from call_stack_full.
 
@@ -511,19 +532,7 @@ def _extract_kernel_names(call_stack_full: str) -> tuple:
     if not kernels:
         return "", ""
 
-    def _trunc(name: str) -> str:
-        return (
-            name[:_KERNEL_NAME_TRUNC_LEN] + "..."
-            if len(name) > _KERNEL_NAME_TRUNC_LEN
-            else name
-        )
-
-    if len(kernels) == 1:
-        return kernels[0], _trunc(kernels[0])
-
-    full = "<br>".join(f"Kernel {i+1}: {k}" for i, k in enumerate(kernels))
-    trunc = "<br>".join(f"Kernel {i+1}: {_trunc(k)}" for i, k in enumerate(kernels))
-    return full, trunc
+    return format_kernel_names(kernels)
 
 
 def build_operation_metrics(
@@ -540,9 +549,9 @@ def build_operation_metrics(
         category_config: Optional extra_fields / operation_classifier
         comparison_scope: ``"standalone"`` or ``"comparative"``
     """
-    peak_mem_bw = get_peak_mem_bw_tbs(metadata, default=1)
-    maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
-    fusion_map = _load_fusion_map(metadata.get("output_dir", ""))
+    peak_mem_bw = get_peak_mem_bw_tbs(metadata)
+    maf = metadata["max_achievable_tflops"]
+    fusion_op_keys = _load_fusion_op_keys(metadata.get("output_dir", ""))
     e2e_ms_total = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
 
     # Calculate category total for % of category (kept for analyzer screening)
@@ -581,6 +590,8 @@ def build_operation_metrics(
             "percent_of_total": percent_of_total,
             "efficiency": efficiency,
         }
+        if PHASE_COL in row:
+            op_metric[PHASE_COL] = row[PHASE_COL]
 
         # Add efficiency warning if present (for anomaly detection)
         if efficiency.get("warning"):
@@ -642,11 +653,12 @@ def build_operation_metrics(
 
         op_metric["library"] = classify_kernel_library(op_name, kd_str)
 
-        if fusion_map and kd_str:
-            matched = _match_fusion_op(kd_str, fusion_map)
-            if matched:
-                op_metric["fusion_flagged"] = True
-                op_metric["fusion_candidate_name"] = matched
+        if (
+            fusion_op_keys
+            and (row.get(PHASE_COL), *row_perf_key(row, with_thread=True))
+            in fusion_op_keys
+        ):
+            op_metric["fusion_flagged"] = True
 
         # After fusion_flagged is set: the ladder reads it to skip fused rows.
         score = _row_impact_score(op_metric, e2e_ms_total, comparison_scope)
@@ -785,6 +797,7 @@ def compute_impact_estimates(
             continue
         impact_score_mid = score["impact_score"]
         time_ms = op["time_ms"]
+        phase = phase_field(op.get(PHASE_COL))
         if score["impact_estimate_method"] == "quantified":
             impact_score_high = impact_score_mid * (TARGET_HIGH / TARGET_MID)
             impact_score_low = impact_score_mid * (TARGET_LOW / TARGET_MID)
@@ -804,6 +817,7 @@ def compute_impact_estimates(
                     "bound_type": eff.get("bound_type"),
                     "library": op.get("library"),
                     "time_ms": round(time_ms, 3),
+                    **phase,
                 }
             )
         else:
@@ -822,6 +836,7 @@ def compute_impact_estimates(
                     "library": op.get("library"),
                     "time_ms": round(time_ms, 3),
                     "percent_of_total": pct,
+                    **phase,
                 }
             )
     return sorted(estimates, key=lambda x: x["impact_score"], reverse=True)
@@ -832,7 +847,8 @@ def build_category_findings(
 ) -> List[dict]:
     """Group one category's per-op impact estimates into P-item findings.
 
-    Quantified estimates (``estimate_method != "heuristic"``) group by
+    Groups are per phase (the ``phase`` of multi-trace estimates). Quantified
+    estimates (``estimate_method != "heuristic"``) group by
     ``(bound_type, library, eff_bucket)`` in standalone, or ``(bound_type,
     library)`` in comparative (``efficiency_pct`` is a trace-time ratio there).
     Heuristic estimates group by op-name (so a kernel fragmented across
@@ -859,19 +875,20 @@ def build_category_findings(
         bound = e.get("bound_type") or "unknown"
         lib = e.get("library") or "Unknown"
         bucket = _eff_bucket(e.get("efficiency_pct")) if use_eff_bucket else "all"
-        g = groups[(bound, lib, bucket)]
+        g = groups[(e.get(PHASE_COL), bound, lib, bucket)]
         g["members"].append(e)
         g["impact_score"] += e.get("impact_score", 0)
         g["impact_score_low"] += e.get("impact_score_low", 0)
         g["impact_score_high"] += e.get("impact_score_high", 0)
 
     findings = []
-    for (bound, lib, bucket), g in groups.items():
+    for (phase, bound, lib, bucket), g in groups.items():
         if g["impact_score"] < MIN_PITEM_IMPACT_SCORE:
             continue
         findings.append(
             {
                 "bound_type": bound,
+                **phase_field(phase),
                 "library": lib,
                 "eff_bucket": bucket,
                 "estimate_method": "quantified",
@@ -898,7 +915,7 @@ def build_category_findings(
         }
     )
     for e in heuristic:
-        g = hgroups[e.get("operation", "Unknown")]
+        g = hgroups[(e.get(PHASE_COL), e.get("operation", "Unknown"))]
         g["members"].append(e)
         g["impact_score"] += e.get("impact_score", 0)
         g["impact_score_low"] += e.get("impact_score_low", 0)
@@ -907,12 +924,13 @@ def build_category_findings(
         if g["library"] is None:
             g["library"] = e.get("library")
 
-    for g in hgroups.values():
+    for (phase, _), g in hgroups.items():
         if g["impact_score"] < MIN_PITEM_IMPACT_SCORE:
             continue
         findings.append(
             {
                 "bound_type": "unmodeled",
+                **phase_field(phase),
                 "library": g["library"] or "Unknown",
                 "eff_bucket": "unknown",
                 "estimate_method": "heuristic",
@@ -933,21 +951,6 @@ def build_category_findings(
     for rank, f in enumerate(findings, start=1):
         f["rank"] = rank
     return findings
-
-
-def parse_first_shape(dims_str):
-    """Extract first input tensor shape as a hashable tuple from an Input Dims string."""
-    if dims_str is None or (isinstance(dims_str, float) and pd.isna(dims_str)):
-        return None
-    try:
-        parsed = ast.literal_eval(str(dims_str))
-        return (
-            tuple(parsed[0])
-            if parsed and isinstance(parsed[0], (list, tuple))
-            else None
-        )
-    except Exception:
-        return None
 
 
 def format_args(input_dims_str, input_type_str) -> Optional[str]:
@@ -982,20 +985,51 @@ def format_args(input_dims_str, input_type_str) -> Optional[str]:
     return "<br>".join(parts) or None
 
 
-def shape_aware_lookup(table, kname, input_dims=None):
-    """Look up perf metrics by (kernel_name, shape), fall back to any entry for that name.
+def perf_row_key(name, *args) -> tuple:
+    """Key of one unified_perf_summary.csv row: op name + its arg (and thread) columns.
 
-    Uses prefix matching as fallback when exact key misses, since trace kernel
-    names can be longer than the truncated names stored in perf CSV lookups.
+    Each part is normalized to the CSV's string form (``str`` of the tuple-ified
+    value; missing -> ``""``), so a raw trace event's args and a CSV cell yield
+    the same key.
     """
-    shapes = table.get(kname, {})
-    if not shapes:
-        for csv_name in table:
-            if kname.startswith(csv_name) or csv_name.startswith(kname):
-                shapes = table[csv_name]
-                break
-    shape_key = parse_first_shape(input_dims) if input_dims else None
-    return shapes.get(shape_key) or next(iter(shapes.values()), {})
+    return tuple(
+        (
+            ""
+            if a is None or (isinstance(a, float) and pd.isna(a))
+            else str(list_to_tuple(a))
+        )
+        for a in (name, *args)
+    )
+
+
+def row_perf_key(row, with_thread: bool) -> tuple:
+    """``perf_row_key`` of a unified_perf_summary.csv row; see ``load_perf_rows``."""
+    cols = PERF_ARG_COLS + PERF_THREAD_COLS if with_thread else PERF_ARG_COLS
+    return perf_row_key(row.get("name", "Unknown"), *(row.get(c) for c in cols))
+
+
+def phase_field(phase) -> dict:
+    """``{"phase": phase}`` when a phase is set, else ``{}``."""
+    return {PHASE_COL: phase} if phase is not None else {}
+
+
+def load_perf_rows(csv_path: str, with_thread: bool = True) -> Dict[tuple, pd.Series]:
+    """unified_perf_summary.csv rows keyed by ``perf_row_key`` (first row wins).
+
+    The key is name, the args, then the thread columns; ``with_thread=False`` drops
+    the thread for a trace whose events carry no thread (diff_stats), so rows that
+    differ only by thread collapse onto the first one.
+    """
+    rows: Dict[tuple, pd.Series] = {}
+    for _, row in pd.read_csv(csv_path).iterrows():
+        rows.setdefault(row_perf_key(row, with_thread), row)
+    return rows
+
+
+def perf_float(perf, col) -> Optional[float]:
+    """A numeric cell of a perf-summary row; None if the row or the cell is missing."""
+    val = perf.get(col) if perf is not None else None
+    return None if val is None or pd.isna(val) else float(val)
 
 
 def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
@@ -1018,28 +1052,20 @@ def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
     return output_path
 
 
-def get_peak_mem_bw_tbs(metadata: dict, default: Optional[float] = None):
-    """Return peak memory bandwidth (TB/s) from metadata.
+def get_peak_mem_bw_tbs(metadata: dict) -> float:
+    """Peak memory bandwidth (TB/s) of a metadata dict; a missing key raises."""
+    return metadata[PEAK_MEM_BW_KEY]
 
-    Also accepts the legacy ``peak_hbm_bw_tbs`` key found in older metadata files.
-    """
-    if "peak_mem_bw_tbs" in metadata:
-        return metadata["peak_mem_bw_tbs"]
-    return metadata.get("peak_hbm_bw_tbs", default)
+
+def get_matrix_maf_tflops(maf: dict) -> float:
+    """Peak bf16 matrix TFLOPS of a max_achievable_tflops dict; 1 when absent."""
+    return maf.get("matrix_bf16", 1)
 
 
 def get_peak_specs(metadata: dict) -> dict:
-    """Extract peak MAF and memory bandwidth from metadata dict.
-
-    Handles both the dict-style max_achievable_tflops and the legacy
-    scalar peak_bf16_maf_tflops formats.
-    """
+    """Extract peak MAF and memory bandwidth from metadata dict."""
     return {
-        "peak_maf_tflops": (
-            metadata.get("max_achievable_tflops", {}).get("matrix_bf16")
-            if isinstance(metadata.get("max_achievable_tflops"), dict)
-            else metadata.get("peak_bf16_maf_tflops")
-        ),
+        "peak_maf_tflops": get_matrix_maf_tflops(metadata["max_achievable_tflops"]),
         "peak_mem_bw_tbs": get_peak_mem_bw_tbs(metadata),
     }
 

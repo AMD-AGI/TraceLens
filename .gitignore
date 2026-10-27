@@ -46,6 +46,7 @@ venv.bak/
 .coverage
 .coverage.*
 coverage.xml
+coverage.json
 htmlcov/
 *.cover
 *.py.cover
@@ -101,6 +102,10 @@ cmake-build-*/
 .next/
 .nuxt/
 .output/
+
+# Generated standalone Model Explorer viewer HTML (repo root only; the
+# viewer template under Visualizer/model_explorer_export/viewer/ is tracked)
+/*.html
 
 # Large binaries / artifacts (archives, ML weights, dumps)
 *.pt

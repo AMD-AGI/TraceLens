@@ -3309,18 +3309,26 @@ class BinaryElementwise:
         dtype_in1, dtype_in2, dtype_out = self.dtype_in1_in2_out
         self.bpe_in1 = name2bpe(dtype_in1)
         self.bpe_in2 = name2bpe(dtype_in2)
+        self.bpe_out = self.output_bpe(
+            self.param_details["shape_in1"],
+            self.param_details["shape_in2"],
+            self.bpe_in1,
+            self.bpe_in2,
+            dtype_out,
+        )
+
+    @staticmethod
+    def output_bpe(shape_in1, shape_in2, bpe_in1, bpe_in2, dtype_out):
+        """Bytes per element of the output: its own dtype when given, else the
+        wider input when both inputs are tensors, else input 1's."""
         if dtype_out is not None:
-            self.bpe_out = name2bpe(dtype_out)
-        elif self.bpe_in1 and self.bpe_in2:
-            in1_is_tensor = self.param_details["shape_in1"] != ()
-            in2_is_tensor = self.param_details["shape_in2"] != ()
-            if in1_is_tensor and in2_is_tensor:
-                # cast to higher precision if both are tensors
-                self.bpe_out = max(self.bpe_in1, self.bpe_in2)
-            else:
-                self.bpe_out = self.bpe_in1
-        else:
-            self.bpe_out = None
+            return name2bpe(dtype_out)
+        if not (bpe_in1 and bpe_in2):
+            return None
+        if shape_in1 != () and shape_in2 != ():
+            # cast to higher precision if both are tensors
+            return max(bpe_in1, bpe_in2)
+        return bpe_in1
 
     @staticmethod
     def flops_func(nelems_out):
