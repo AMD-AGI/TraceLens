@@ -132,6 +132,8 @@ def get_pseudo_op_mappings():
         ## Collective ops
         "aiter::fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm,
         "aiter::fused_allreduce_rmsnorm_": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
+        "sglang_profiler::communication_op_tensor_model_parallel_fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
+        "vllm::rocm_aiter_fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
         "_C_custom_ar::all_reduce": custom_collectives_perf_model_extensions.custom_ar_all_reduce,
         "aiter::reduce_scatter": custom_collectives_perf_model_extensions.aiter_reduce_scatter,
         "aiter::all_gather_reg": custom_collectives_perf_model_extensions.aiter_all_gather_reg,

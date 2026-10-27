@@ -837,6 +837,51 @@ class TestPerfModelExtensions:
         assert model.flops() == 9 * 64 * 64 + 5 * 64
         assert model.bytes() == (56 * 4 + 56 * 4 + 2048 * 4 + 2048 * 4 + 2 * 64 * 4 + 8)
 
+    def test_glm53_moe_small_sort_uses_sglang_sort(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [12, 9],
+                    [12, 9],
+                    [4211],
+                    [4211],
+                    [264],
+                    [2],
+                    [12, 6144],
+                ],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                ],
+                "Input Strides": [
+                    [9, 1],
+                    [9, 1],
+                    [1],
+                    [1],
+                    [1],
+                    [1],
+                    [6144, 1],
+                ],
+            }
+        }
+        model = moe_ext.SglangMoeSortingSmall(event)
+        assert model.param_details["block_size"] == 16
+        assert model.param_details["num_experts"] == 257
+        assert model.param_details["compact"] is False
+        assert model.flops() == moe_ext._distributed_sort_ops(108, 128, 257)
+        assert model.bytes() == 165736
+        assert (
+            get_pseudo_op_mappings()[
+                "sglang_profiler::moe_sorting_small__run_small_sort"
+            ]
+            is moe_ext.SglangMoeSortingSmall
+        )
+
     def test_preshuffle_without_tile_counts_logical_gemm(self):
         event = {
             "args": {
@@ -3423,6 +3468,38 @@ class TestCustomCollectivesPerfModels:
         assert model.num_elems == 64 * 7168
         assert model.flops() > 0
         assert model.bytes() > 0
+
+    def test_glm_fused_allreduce_rmsnorm_uses_python_layout(self):
+        sglang = {
+            "args": {
+                "Input Dims": [(12, 6144), (12, 6144), (6144,)],
+                "Input type": ["c10::BFloat16"] * 3,
+                "Input Strides": [(6144, 1), (6144, 1), (1,)],
+            }
+        }
+        vllm = {
+            "args": {
+                "Input Dims": [(4, 6144), (4, 6144), (6144,), ()],
+                "Input type": ["c10::BFloat16"] * 3 + ["Scalar"],
+                "Input Strides": [(6144, 1), (6144, 1), (1,), ()],
+            }
+        }
+        sglang_model = aiter_fused_allreduce_rmsnorm_(sglang)
+        vllm_model = aiter_fused_allreduce_rmsnorm_(vllm)
+        assert sglang_model.num_elems == 12 * 6144
+        assert sglang_model.flops() == 368664
+        assert vllm_model.num_elems == 4 * 6144
+        mappings = get_pseudo_op_mappings()
+        assert (
+            mappings[
+                "sglang_profiler::communication_op_tensor_model_parallel_fused_allreduce_rmsnorm"
+            ]
+            is aiter_fused_allreduce_rmsnorm_
+        )
+        assert (
+            mappings["vllm::rocm_aiter_fused_allreduce_rmsnorm"]
+            is aiter_fused_allreduce_rmsnorm_
+        )
 
     def test_custom_ar_all_reduce(self):
         model = custom_ar_all_reduce(_allreduce_event())
