@@ -264,6 +264,7 @@ class TreePerfAnalyzer:
                 profile_filepath,
                 graph_tree=tree,
             )
+            kwargs["rebuild_tree"] = False
 
         return TreePerfAnalyzer(
             tree,
