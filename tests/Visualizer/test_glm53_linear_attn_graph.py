@@ -3574,9 +3574,10 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
     misrepresent that sequence of distinct variant runs, so
     ``_wrap_container_loop_carried`` detects the heterogeneity (more than one
     distinct interior exit source) and returns before synthesizing anything --
-    restoring the pre-synthesis direct wiring: each variant ``@input`` reads the
-    embedded ``hidden_states`` producer, and the hyper-head reads the variant
-    ``@output``s directly. No group ``@input``/``@output``, no back edge.
+    restoring the pre-synthesis direct wiring on the way in: each variant
+    ``@input`` reads the embedded ``hidden_states`` producer. On the way out
+    the three variant ``@output``s meet in one output tile of the stack, and
+    the hyper-head reads that tile. No loop-carried boundary, no back edge.
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -3614,10 +3615,12 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
         assert _sources(node_id) == {"@model_forward/@op_l1477_c24_contiguous"}
 
     # The three variants are mutually exclusive -- exactly one is what any given
-    # layer IS -- so they converge in a phi and the hyper-head reads ONE tensor.
-    # Wiring all three into it drew three tensors arriving at once, and made the
-    # head, a ``mean``, look like it took three operands. Still no loop-out
-    # intermediary on the arms, and the final norm still follows the head.
+    # layer IS -- so they leave through one output tile of the stack and the
+    # hyper-head reads that one tensor. Wiring all three into it drew three
+    # tensors arriving at once, and made the head, a ``mean``, look like it
+    # took three operands. The tile is named for the carried hidden state.
+    # Still no loop-out intermediary on the arms, and the final norm still
+    # follows the head.
     variant_outputs = {
         node["id"]
         for node in nodes
@@ -3626,11 +3629,13 @@ def test_glm53_heterogeneous_decoder_spine_keeps_direct_wiring():
         and node["id"].count("/") == 2
     }
     assert len(variant_outputs) == 3
-    phi = _sources("hc_head")
-    assert len(phi) == 1, phi
-    phi_id = next(iter(phi))
-    assert by_id[phi_id].get("label") == PHI_LABEL, phi_id
-    assert _sources(phi_id) == variant_outputs
+    exit_tiles = _sources("hc_head")
+    assert len(exit_tiles) == 1, exit_tiles
+    exit_id = next(iter(exit_tiles))
+    assert by_id[exit_id].get("label") == "hidden_states", exit_id
+    assert _attr_value(by_id[exit_id], "synthetic") == "@output"
+    assert exit_id.startswith("45x_Glm5NextTextDecoderLayer/")
+    assert _sources(exit_id) == variant_outputs
     assert _sources("norm/@input") == {"hc_head"}
 
     # The hidden_states spine keeps its direct wiring: it is never surfaced as an

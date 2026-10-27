@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Callable
 
 from TraceLens.ModelUtils.block_tree import BlockNode
@@ -18,25 +19,49 @@ from TraceLens.ModelUtils.shape_inference import (
     ShapeInferencer,
     Symbol,
     TensorSpec,
+    _multi_output_slice_shape,
     _permute_shape,
     _reduce_conv_spatial,
+    _reduction_axes,
     _resolve_cast_dtype,
     _resolve_expand_shape,
     _resolve_view_shape,
+    op_cannot_change_shape,
+)
+
+# Torch reductions a collapsed spine tile can still be. Keyed on ``raw_op``,
+# the name the extractor records, which is the method the model called.
+_REDUCTION_OPS = frozenset(
+    {
+        "all",
+        "amax",
+        "amin",
+        "any",
+        "argmax",
+        "argmin",
+        "logsumexp",
+        "max",
+        "mean",
+        "min",
+        "norm",
+        "prod",
+        "std",
+        "sum",
+        "var",
+    }
 )
 
 SHAPE_SEPARATOR = " x "
 BRACKET_SEPARATOR = ", "
 
 
-def _font_safe(dim: Any, *, star: str = "x") -> str:
+def _font_safe(dim: Any) -> str:
     """Model Explorer renders characters outside its font atlas as ``?``.
 
-    ``star`` controls how a multiplication marker is rendered. The compact
-    ``tensor_shape`` form uses ``"x"`` (Model-Explorer-native); the human display
-    form keeps ``"*"`` so a merged reshape dim reads ``B*S``.
+    A multiplication marker is written as ``*`` so a merged reshape dim reads
+    ``B*S``.
     """
-    text = str(dim).replace("\u00d7", star).replace("\u2217", star).replace("*", star)
+    text = str(dim).replace("\u00d7", "*").replace("\u2217", "*")
     return "".join(char if 32 <= ord(char) < 127 else "" for char in text)
 
 
@@ -44,7 +69,7 @@ def format_shape(spec: TensorSpec) -> str:
     """Bracketed human-readable shape for node attrs, e.g. ``[B, S, 4096]``."""
     if not spec.shape:
         return ""
-    inner = BRACKET_SEPARATOR.join(_font_safe(dim, star="*") for dim in spec.shape)
+    inner = BRACKET_SEPARATOR.join(_font_safe(dim) for dim in spec.shape)
     return f"[{inner}]"
 
 
@@ -69,7 +94,7 @@ def parse_shape_dims(text: str) -> list[str]:
 
 
 def format_shape_with_dtype(spec: TensorSpec) -> str:
-    """Shape string with dtype suffix for display on edges and node attrs."""
+    """Shape string with dtype suffix for port metadata, edges, and node attrs."""
     dims = format_shape(spec)
     if not dims:
         return ""
@@ -78,24 +103,156 @@ def format_shape_with_dtype(spec: TensorSpec) -> str:
     return f"{dims} {spec.dtype}"
 
 
-def format_shape_tensor(spec: TensorSpec) -> str:
-    """Bracket ``[B, S, H]`` shape for outputsMetadata tensor_shape / edge labels.
+def _promote_tensor_shape_text(value: str) -> str:
+    """Rewrite an adapter ``tensor_shape`` value the way the viewer used to.
 
-    Model Explorer labels edges from the ``tensor_shape`` attr, so this uses the
-    same bracket form as node attrs (``*`` for merged reshape dims) rather than a
-    compact ``BxSxH`` string.
+    Model Explorer renames ``tensor_shape`` to ``shape`` and, on the way, strips
+    a ``tensor<...>`` wrapper, substitutes a font-safe multiply sign, and spaces
+    a compact ``1x2`` separator. Promoting with the same rules keeps an imported
+    port reading as it did before the alias was dropped.
     """
-    dims = format_shape_dims([_font_safe(dim, star="*") for dim in spec.shape])
-    if not dims or not spec.dtype:
-        return dims
-    return f"{dims} {spec.dtype}"
+    text = str(value).replace("tensor<", "").replace(">", "").replace("*", "\u2217")
+    return re.sub(r"(\d|\?)x", r"\1 x ", text)
+
+
+def _canonicalize_metadata(metadata: dict[str, Any]) -> None:
+    attrs = metadata.get("attrs")
+    if not isinstance(attrs, list):
+        return
+    shape = next((attr for attr in attrs if attr.get("key") == "shape"), None)
+    tensor = next((attr for attr in attrs if attr.get("key") == "tensor_shape"), None)
+    if shape is None and tensor is not None:
+        attrs.append(
+            {
+                "key": "shape",
+                "value": _promote_tensor_shape_text(str(tensor.get("value") or "")),
+            }
+        )
+    if tensor is not None:
+        metadata["attrs"] = [
+            attr for attr in attrs if attr.get("key") != "tensor_shape"
+        ]
+
+
+def canonicalize_port_shape_keys(nodes: list[dict[str, Any]]) -> None:
+    """Keep one shape key on every port.
+
+    ``shape`` is the key Model Explorer draws on an edge. Built-in adapters
+    still emit ``tensor_shape``; the viewer renames that alias onto ``shape``,
+    and a later alias overwrites an earlier ``shape``. TraceLens writes only
+    ``shape``. A port that arrived with only the alias is promoted. A port that
+    already has ``shape`` keeps that text, and the alias is removed.
+    """
+    for node in nodes:
+        for key in ("inputsMetadata", "outputsMetadata"):
+            for metadata in node.get(key) or []:
+                if isinstance(metadata, dict):
+                    _canonicalize_metadata(metadata)
+
+
+# The viewer draws ``output_shape`` and port ``shape``. This key keeps the whole
+# tensor in the JSON, including when those displayed keys are later rewritten
+# to one GPU's shard. The name is not drawn: the on-node filter matches the
+# displayed keys only.
+FULL_SHAPE_KEY = "full_shape"
+
+
+def _copy_missing_attr(attrs: Any, source: str, dest: str) -> None:
+    if not isinstance(attrs, list):
+        return
+    if any(isinstance(item, dict) and item.get("key") == dest for item in attrs):
+        return
+    value = next(
+        (
+            item.get("value")
+            for item in attrs
+            if isinstance(item, dict)
+            and item.get("key") == source
+            and isinstance(item.get("value"), str)
+            and item.get("value")
+        ),
+        None,
+    )
+    if isinstance(value, str):
+        attrs.append({"key": dest, "value": value})
+
+
+def stamp_full_shapes(nodes: list[Any]) -> None:
+    """Record the unpartitioned shape next to the one the viewer draws.
+
+    With no device split the two texts match. A later partition pass rewrites
+    only ``output_shape`` and port ``shape``.
+    """
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        _copy_missing_attr(node.get("attrs"), "output_shape", FULL_SHAPE_KEY)
+        for metadata_key in ("outputsMetadata", "inputsMetadata"):
+            for metadata in node.get(metadata_key) or []:
+                if isinstance(metadata, dict):
+                    _copy_missing_attr(metadata.get("attrs"), "shape", FULL_SHAPE_KEY)
+
+
+def refresh_displayed_group_shapes(graph: dict[str, Any]) -> None:
+    """Point each group's drawn shape at the tensors currently on its boundary.
+
+    ``full_input_shape`` and ``full_output_shape`` stay the unpartitioned
+    values. ``input_shape`` and ``output_shape`` are what the viewer draws, so
+    they follow a per-GPU rewrite of the nodes.
+    """
+    nodes = graph.get("nodes")
+    attributes = graph.get("groupNodeAttributes")
+    if not isinstance(nodes, list) or not isinstance(attributes, dict):
+        return
+    for namespace, boundary in group_boundary_shapes(nodes).items():
+        bucket = attributes.setdefault(namespace, {})
+        if not isinstance(bucket, dict):
+            continue
+        for key, value in boundary.items():
+            full_key = f"full_{key}"
+            if full_key not in bucket:
+                existing = bucket.get(key)
+                bucket[full_key] = (
+                    existing if isinstance(existing, str) and existing else value
+                )
+            bucket[key] = value
+
+
+def canonicalize_payload_shapes(payload: dict[str, Any]) -> None:
+    """Fold ``tensor_shape`` into ``shape`` on every graph in a payload."""
+    if not isinstance(payload, dict):
+        return
+    graphs: list[dict[str, Any]] = []
+    collections = payload.get("graphCollections")
+    if isinstance(collections, list):
+        for collection in collections:
+            if not isinstance(collection, dict):
+                continue
+            for graph in collection.get("graphs") or []:
+                if isinstance(graph, dict):
+                    graphs.append(graph)
+    for graph in payload.get("graphs") or []:
+        if isinstance(graph, dict):
+            graphs.append(graph)
+    nodes = payload.get("nodes")
+    if isinstance(nodes, list):
+        graphs.append(payload)
+    seen: set[int] = set()
+    for graph in graphs:
+        graph_nodes = graph.get("nodes")
+        if not isinstance(graph_nodes, list):
+            continue
+        marker = id(graph_nodes)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        canonicalize_port_shape_keys(graph_nodes)
 
 
 def _apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
     display_text = format_shape_with_dtype(spec)
     if not display_text:
         return
-    tensor_shape = format_shape_tensor(spec)
     attrs = [
         item
         for item in node.get("attrs", [])
@@ -118,7 +275,6 @@ def _apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
             "attrs": [
                 *labels.get(port_id, []),
                 {"key": "shape", "value": display_text},
-                {"key": "tensor_shape", "value": tensor_shape},
                 {"key": "dtype", "value": spec.dtype},
             ],
         }
@@ -192,7 +348,6 @@ def _apply_multi_port_shape_attrs(
                 "attrs": [
                     {"key": "port_label", "value": label},
                     {"key": "shape", "value": format_shape_with_dtype(port_spec)},
-                    {"key": "tensor_shape", "value": format_shape_tensor(port_spec)},
                     {"key": "dtype", "value": port_spec.dtype},
                 ],
             }
@@ -208,6 +363,7 @@ def annotate_nodes_with_shapes(
     id_prefix: str,
 ) -> None:
     """Match exported nodes to computation-graph keys under ``id_prefix``."""
+    canonicalize_port_shape_keys(nodes)
     if not shape_specs:
         return
     prefix = f"{id_prefix}/" if id_prefix else ""
@@ -257,10 +413,6 @@ def annotate_nodes_with_shapes(
                     # module's ``output_shape`` layer attribute, so dropping the
                     # dtype here left collapsed modules showing shape without type.
                     {"key": "shape", "value": format_shape_with_dtype(port_spec)},
-                    {
-                        "key": "tensor_shape",
-                        "value": format_shape_tensor(port_spec),
-                    },
                     {"key": "dtype", "value": port_spec.dtype},
                 ]
             output_by_port = {
@@ -386,6 +538,45 @@ def _operation_of(node: dict[str, Any]) -> str:
     return ""
 
 
+def _detail_parts(details: list[str]) -> list[str]:
+    """Split joined ``details`` attr text into the extractor's own entries."""
+    parts: list[str] = []
+    for detail in details:
+        parts.extend(part.strip() for part in str(detail).split(";") if part.strip())
+    return parts
+
+
+def _reduce_recorded_axes(source: TensorSpec, details: list[str]) -> TensorSpec | None:
+    """Drop the axes a reduction's ``dim`` names, or ``None`` when it names none.
+
+    ``keepdim=True`` leaves a size-1 axis. An axis this rank does not carry is
+    left alone: the symbolic view sometimes omits a stream the call indexes.
+    """
+    parts = _detail_parts(details)
+    dim = next(
+        (part.split(":", 1)[1].strip() for part in parts if part.startswith("dim:")),
+        None,
+    )
+    axes = _reduction_axes(dim)
+    if not axes:
+        return None
+    rank = len(source.shape)
+    present = sorted(
+        {axis + rank if axis < 0 else axis for axis in axes} & set(range(rank))
+    )
+    if not present:
+        return None
+    keepdim = any(part.strip() == "keepdim: True" for part in parts)
+    dims = list(source.shape)
+    if keepdim:
+        for axis in present:
+            dims[axis] = 1
+    else:
+        for axis in reversed(present):
+            del dims[axis]
+    return TensorSpec(tuple(dims), source.dtype)
+
+
 def _fallback_node_spec(
     node: dict[str, Any],
     sources: list[tuple[str, TensorSpec]],
@@ -396,7 +587,7 @@ def _fallback_node_spec(
         dict[str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] | None
     ) = None,
     module_spec: Callable[[str, TensorSpec], TensorSpec | None] | None = None,
-) -> TensorSpec:
+) -> TensorSpec | None:
     """Infer merge-only synthetic ops that have no block-tree shape record."""
     specs = [spec for _target_port, spec in sources]
     # The operation the node records, never its display label. A label is for
@@ -455,6 +646,9 @@ def _fallback_node_spec(
         resolved = _resolve_view_shape(shape_detail, specs[0], dims or {})
         if resolved is not None:
             return TensorSpec(resolved, specs[0].dtype)
+        declared = [part.strip() for part in shape_detail.split(",") if part.strip()]
+        if len(declared) >= 2 and len(declared) != len(specs[0].shape):
+            return None
 
     if operation in {"permute", "transpose"} and specs:
         dims_detail = next(
@@ -588,6 +782,15 @@ def _fallback_node_spec(
         if comb is not None and residual is not None and comb.shape and residual.shape:
             return TensorSpec((*comb.shape[:-1], residual.shape[-1]), residual.dtype)
 
+    # A one-op module collapsed onto the spine (GLM's ``hc_head`` is
+    # ``hidden_streams.mean(dim=2)``) has no block-tree shape record. Without
+    # this it inherits the tensor it was handed, so the axis the mean drops
+    # stays in the shape and the norm that reads it disagrees with its cast.
+    if operation in _REDUCTION_OPS and specs and specs[0].shape:
+        reduced = _reduce_recorded_axes(specs[0], details)
+        if reduced is not None:
+            return reduced
+
     return max(
         specs,
         key=lambda item: (
@@ -604,11 +807,11 @@ def fill_missing_node_shapes(
     boundary_spec: Callable[[str, str], TensorSpec | None] | None = None,
     module_spec: Callable[[str, TensorSpec], TensorSpec | None] | None = None,
 ) -> None:
-    """Give every node a shape so the viewer never falls back to rendering ``?``.
+    """Give a node the shape its producer or a meta trace already established.
 
     Spine summaries, group input ports and nested-diagram nodes have no entry in the
-    per-section inference results, so they inherit the shape of whatever feeds them and
-    otherwise fall back to the model's activation shape.
+    per-section inference results, so they inherit the shape of whatever feeds them.
+    A node with neither stays unshaped.
 
     ``boundary_spec(label, namespace)`` optionally supplies the meta-device ground
     truth for a leaf ``@input`` boundary parameter (e.g. the sparse-attention
@@ -616,10 +819,7 @@ def fill_missing_node_shapes(
     ``(B, S, hidden)``) -- what the model actually passed, observed rather than
     inferred from the parameter's name.
     """
-    hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-    activation = TensorSpec(
-        (Symbol.BATCH.value, Symbol.SEQ.value, hidden), context.dtype
-    )
+    canonicalize_port_shape_keys(nodes)
     tokens = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value), "int64")
 
     node_by_id = {str(node.get("id", "")): node for node in nodes}
@@ -705,27 +905,65 @@ def fill_missing_node_shapes(
                 conv_geometry=context.conv_geometry,
                 module_spec=module_spec,
             )
+            if spec is None:
+                continue
             node_id = str(node.get("id", ""))
             known[(node_id, "0")] = spec
             _apply_shape_attrs(node, spec)
             pending.remove(node)
             progressed = True
+        if progressed:
+            continue
+        # An operand that never gets a shape must not blank the ones that did.
+        # A broadcast op can be read off the operands that resolved; a join or
+        # a view cannot, and stays unshaped.
+        for node in list(pending):
+            if _operation_of(node) not in {
+                "add",
+                "subtract",
+                "multiply",
+                "divide",
+                "power",
+                "maximum",
+                "minimum",
+            }:
+                continue
+            sources = []
+            incoming_sources = _incoming_sources(node)
+            for source_id, source_port, target_port in incoming_sources:
+                spec = known.get((source_id, source_port))
+                if spec is None:
+                    source_node = node_by_id.get(source_id)
+                    if source_node is not None:
+                        spec = _node_spec(source_node, source_port)
+                if spec is not None:
+                    sources.append((target_port, spec))
+            if not sources or len(sources) == len(incoming_sources):
+                continue
+            if max(len(spec.shape) for _port, spec in sources) < 2:
+                continue
+            spec = _fallback_node_spec(
+                node,
+                sources,
+                working_dtype=context.dtype,
+                dims=context.dims,
+                conv_geometry=context.conv_geometry,
+                module_spec=module_spec,
+            )
+            if spec is None:
+                continue
+            node_id = str(node.get("id", ""))
+            known[(node_id, "0")] = spec
+            _apply_shape_attrs(node, spec)
+            pending.remove(node)
+            progressed = True
+            break
         if not progressed:
             break
 
-    for node in pending:
-        # A node still unresolved here has no spec of its own and nothing usable
-        # feeding it. Stamping the model's activation shape on a boundary or a
-        # summary tile is a reasonable default -- they carry the hidden stream.
-        # Stamping it on a COMPUTATION with no inputs is not: it asserts a shape
-        # the op cannot have (a sourceless ``torch.arange`` reported
-        # ``[B, S, hidden]`` when it produces a 1-D index range). Leave those
-        # alone so the gap is visible and gets fixed at the source instead of
-        # being papered over with a plausible-looking wrong answer.
-        if _node_synthetic(node) or not node.get("incomingEdges"):
-            if not _node_synthetic(node):
-                continue
-        _apply_shape_attrs(node, activation)
+    # Whatever is still pending has no shape of its own and no shaped producer.
+    # Leave it unshaped. Inventing the activation here is what made a padding
+    # mask report ``[B, S, H]``.
 
 
 def _namespace_chain(namespace: str) -> list[str]:
@@ -826,6 +1064,190 @@ def group_boundary_shapes(nodes: list[dict[str, Any]]) -> dict[str, dict[str, st
             values = [shape for _label, shape in entries]
         attributes.setdefault(namespace, {})[key] = ", ".join(dict.fromkeys(values))
     return attributes
+
+
+def widen_broadcast_results(nodes: list[dict[str, Any]]) -> None:
+    """Replace a broadcast result that is narrower than its operands.
+
+    A multiply inferred before its activation had a spec keeps the scalar that
+    already had one. The activation is on the edge; once that edge is drawn,
+    the result is the broadcast, and a boundary that only forwards it takes
+    the same shape. A conversion that never received a spec copies the operand
+    the edge names, so the multiply can see it. A later section then sees the
+    activation it is handed.
+    """
+    node_by_id = {str(node.get("id", "")): node for node in nodes}
+    for _ in range(8):
+        progressed = False
+        for node in nodes:
+            incoming = _incoming_sources(node)
+            if not incoming:
+                continue
+            sources: list[tuple[str, TensorSpec]] = []
+            complete = True
+            for source_id, source_port, target_port in incoming:
+                source = node_by_id.get(source_id)
+                spec = _node_spec(source, source_port) if source is not None else None
+                if spec is None or not spec.shape:
+                    complete = False
+                    break
+                sources.append((target_port, spec))
+            if not complete or not sources:
+                continue
+            synthetic = _node_synthetic(node)
+            operation = _operation_of(node)
+            current = _node_spec(node, "0")
+            shape_preserving = (
+                len(sources) == 1
+                and bool(operation)
+                and op_cannot_change_shape(operation)
+            )
+            if operation in _BROADCASTING_OPS:
+                updated = _fallback_node_spec(node, sources)
+            elif shape_preserving:
+                source_spec = sources[0][1]
+                updated = TensorSpec(
+                    source_spec.shape,
+                    current.dtype if current is not None else source_spec.dtype,
+                )
+            elif synthetic in {"@output", "@input"} and len(sources) == 1:
+                updated = sources[0][1]
+            elif (
+                current is None
+                and len(sources) == 1
+                and synthetic
+                not in {
+                    "@input",
+                    "@output",
+                    "@input_mirror",
+                    "@output_mirror",
+                }
+            ):
+                # A conversion inferred before its operand had a spec stays
+                # blank, and the multiply reading it then keeps the scalar it
+                # could already see. The operand is on the edge now.
+                updated = sources[0][1]
+            else:
+                continue
+            if updated is None or not updated.shape:
+                continue
+            if (
+                current is not None
+                and updated.shape == current.shape
+                and updated.dtype == current.dtype
+            ):
+                continue
+            if (
+                not shape_preserving
+                and current is not None
+                and len(updated.shape) <= len(current.shape)
+            ):
+                continue
+            apply_shape_attrs(node, updated)
+            progressed = True
+        if not progressed:
+            return
+
+
+def refine_multi_output_port_shapes(nodes: list[dict[str, Any]]) -> None:
+    """Restamp split/chunk/unbind ports from the final whole-tensor shape.
+
+    A node can be inferred again after its initial per-port specs were published.
+    The whole shape is then current while its output metadata still carries the
+    old undivided shape. Recomputing from the operation's recorded split contract
+    keeps each consumer on the slice it actually receives.
+    """
+    refined: dict[tuple[str, str], TensorSpec] = {}
+    for node in nodes:
+        operation = _operation_of(node)
+        if operation not in {"split", "chunk", "unbind"}:
+            continue
+        whole_shape = next(
+            (
+                str(attr.get("value") or "")
+                for attr in node.get("attrs", [])
+                if attr.get("key") == "output_shape"
+            ),
+            "",
+        )
+        whole_dtype = next(
+            (
+                str(attr.get("value") or "")
+                for attr in node.get("attrs", [])
+                if attr.get("key") == "output_dtype"
+            ),
+            "",
+        )
+        shape_only = whole_shape
+        if whole_dtype and shape_only.endswith(f" {whole_dtype}"):
+            shape_only = shape_only[: -len(whole_dtype) - 1]
+        whole = (
+            TensorSpec(tuple(parse_shape_dims(shape_only)), whole_dtype)
+            if shape_only
+            else None
+        )
+        metadata = node.get("outputsMetadata", []) or []
+        if whole is None or len(metadata) < 2:
+            continue
+        whole = TensorSpec(
+            tuple(
+                (
+                    int(dimension)
+                    if isinstance(dimension, str) and dimension.isdigit()
+                    else dimension
+                )
+                for dimension in whole.shape
+            ),
+            whole.dtype,
+        )
+        details = _detail_parts(
+            [
+                str(attr.get("value") or "")
+                for attr in node.get("attrs", [])
+                if attr.get("key") in {"detail", "details"}
+            ]
+        )
+        slices = [
+            _multi_output_slice_shape(
+                whole,
+                details,
+                operation,
+                ordinal,
+                {},
+                output_count=len(metadata),
+            )
+            for ordinal in range(len(metadata))
+        ]
+        if any(spec is None for spec in slices):
+            continue
+        for port, spec in zip(metadata, slices):
+            assert spec is not None
+            label_attrs = [
+                attr
+                for attr in port.get("attrs", [])
+                if attr.get("key") == "port_label"
+            ]
+            display = format_shape_with_dtype(spec)
+            port["attrs"] = [
+                *label_attrs,
+                {"key": "shape", "value": display},
+                {"key": "dtype", "value": spec.dtype},
+            ]
+            refined[(str(node.get("id") or ""), str(port.get("id", "0")))] = spec
+
+    # Tuple-boundary splitting materialises one ``@slice_out`` tile per output
+    # port. Those tiles may already carry the undivided shape copied before this
+    # final refinement, so restamp them from the exact port they read.
+    for node in nodes:
+        if _node_synthetic(node) != "@slice_out":
+            continue
+        incoming = _incoming_sources(node)
+        if len(incoming) != 1:
+            continue
+        source_id, source_port, _target_port = incoming[0]
+        spec = refined.get((source_id, source_port))
+        if spec is not None:
+            apply_shape_attrs(node, spec)
 
 
 def infer_block_tree_shapes(

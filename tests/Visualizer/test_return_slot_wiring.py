@@ -186,3 +186,86 @@ def test_two_slots_of_one_producer_are_not_the_same_tensor() -> None:
     _fold_same_source_twins(nodes)
 
     assert len(nodes) == 3
+
+
+def test_a_stale_slot_index_is_replaced_by_the_node_that_owns_the_attr() -> None:
+    from types import SimpleNamespace
+
+    from TraceLens.ModelUtils.computation_graph import (
+        ComputationGraph,
+        GraphNodeSpec,
+        _producer_node_index,
+    )
+
+    graph = ComputationGraph(
+        nodes=[
+            GraphNodeSpec(key="tail", block=SimpleNamespace(attr_name="@op_weights")),
+            GraphNodeSpec(
+                key="indices", block=SimpleNamespace(attr_name="@op_indices")
+            ),
+        ]
+    )
+    found = _producer_node_index(graph, {"call\x00slot0": 0}, "call", 0, "@op_indices")
+    assert found == 1
+
+
+def test_expanding_a_host_int_is_not_the_activation() -> None:
+    from TraceLens.ModelUtils.ast_analyze import analyze_sources
+    from TraceLens.ModelUtils.basic_ops import BasicOpFilter
+    from TraceLens.ModelUtils.block_tree import build_block_node
+    from TraceLens.ModelUtils.computation_graph import build_computation_graph
+
+    analysis = analyze_sources(
+        {"m.py": """
+import torch
+class Tower(torch.nn.Module):
+    def forward(self, pixel_values, grid_thw):
+        size = torch.tensor([2]).expand(len(grid_thw))
+        return size
+"""},
+        all_tensor_ops=True,
+    )
+    root = build_block_node(
+        attr_name="tower",
+        class_name="Tower",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    graph = build_computation_graph(root, basic_ops=BasicOpFilter.for_detailed())
+    expand = next(
+        spec
+        for spec in graph.nodes
+        if spec.block is not None and spec.block.attr_name.endswith("_expand")
+    )
+    index = graph.nodes.index(expand)
+    assert expand.constant
+    assert not any(target == index for _source, target in graph.links)
+
+
+def test_an_output_tile_still_leaves_its_parent_box() -> None:
+    from TraceLens.Visualizer.model_explorer_export.merge import (
+        _route_frame_exits_through_output_tiles,
+    )
+
+    inner = "embed/norm/@output:result"
+    mirror = {
+        "id": "mirror",
+        "label": "result",
+        "namespace": "",
+        "incomingEdges": [
+            {"sourceNodeId": inner, "sourceNodeOutputId": "0"},
+        ],
+    }
+    nodes = [
+        {
+            "id": inner,
+            "label": "result",
+            "namespace": "embed/norm",
+            "attrs": [{"key": "synthetic", "value": "@output"}],
+            "incomingEdges": [],
+        },
+        mirror,
+    ]
+    _route_frame_exits_through_output_tiles(nodes)
+    source = mirror["incomingEdges"][0]["sourceNodeId"]
+    assert source == "embed/@output:result"

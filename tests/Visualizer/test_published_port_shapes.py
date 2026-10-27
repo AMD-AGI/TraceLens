@@ -24,9 +24,18 @@ future tile-making pass cannot reintroduce the gap one tile at a time.
 
 from __future__ import annotations
 
+from TraceLens.ModelUtils.extract import ArchitectureSpec
+from TraceLens.ModelUtils.parallel_plan import (
+    ParallelDegree,
+    annotate_parallel_nodes,
+    layout_from_plans,
+    parse_class_plans,
+)
 from TraceLens.Visualizer.model_explorer_export.merge import (
     _publish_declared_shapes_as_output_ports,
+    publish_stated_shapes_and_check,
 )
+from TraceLens.Visualizer.model_explorer_export.shapes import stamp_full_shapes
 
 
 def _node(node_id, shape=None, dtype=None, ports=None, sources=()):
@@ -63,17 +72,13 @@ class TestAStatedShapeIsPublished:
         _publish_declared_shapes_as_output_ports(nodes)
         assert _attrs(_ports(nodes[0])[0]) == {
             "shape": "[B, S, 96, 128] bfloat16",
-            "tensor_shape": "[B, S, 96, 128] bfloat16",
             "dtype": "bfloat16",
         }
 
     def test_a_shape_with_no_dtype_still_publishes(self) -> None:
         nodes = [_node("v", shape="[B, S]")]
         _publish_declared_shapes_as_output_ports(nodes)
-        assert _attrs(_ports(nodes[0])[0]) == {
-            "shape": "[B, S]",
-            "tensor_shape": "[B, S]",
-        }
+        assert _attrs(_ports(nodes[0])[0]) == {"shape": "[B, S]"}
 
     def test_a_node_stating_nothing_publishes_nothing(self) -> None:
         """Inventing a shape is worse than drawing ``?``."""
@@ -118,3 +123,117 @@ class TestAStatedShapeIsPublished:
         nodes: list[dict] = []
         _publish_declared_shapes_as_output_ports(nodes)
         assert nodes == []
+
+
+def test_the_full_shape_is_recorded_even_when_the_graph_is_not_split() -> None:
+    node = _node(
+        "linear",
+        shape="[B, S, 8192] bfloat16",
+        ports=[
+            {"id": "0", "attrs": [{"key": "shape", "value": "[B, S, 8192] bfloat16"}]}
+        ],
+    )
+    stamp_full_shapes([node])
+    assert {item["key"]: item["value"] for item in node["attrs"]}["full_shape"] == (
+        "[B, S, 8192] bfloat16"
+    )
+    assert node["outputsMetadata"][0]["attrs"][1] == {
+        "key": "full_shape",
+        "value": "[B, S, 8192] bfloat16",
+    }
+    # A second pass must not replace a full shape already saved.
+    node["attrs"][0]["value"] = "[B, S, 4096] bfloat16"
+    stamp_full_shapes([node])
+    assert {item["key"]: item["value"] for item in node["attrs"]}["full_shape"] == (
+        "[B, S, 8192] bfloat16"
+    )
+
+
+def test_a_gather_added_after_the_build_publishes_the_shape_it_states() -> None:
+    """The edge leaving a gather reads the port. With no port the viewer draws ``?``."""
+    source = """
+class TextConfig:
+    model_type = "demo_text"
+    base_model_tp_plan = {
+        "layers.*.linear_attn.in_proj_qkv": "colwise_gather_output",
+    }
+    base_model_pp_plan = None
+    base_model_ep_plan = None
+"""
+    spec = ArchitectureSpec(
+        name="demo",
+        model_type="demo",
+        num_hidden_layers=32,
+        raw_config={"model_type": "demo", "architectures": []},
+    )
+    layout = layout_from_plans(
+        parse_class_plans(source), spec, ParallelDegree(tp=4), spec.raw_config
+    )
+    producer = {
+        "id": "block/linear_attn/in_proj_qkv",
+        "label": "in_proj_qkv",
+        "namespace": "",
+        "attrs": [
+            {"key": "attr_name", "value": "in_proj_qkv"},
+            {"key": "output_shape", "value": "[B, S, 8192] bfloat16"},
+        ],
+        "outputsMetadata": [
+            {
+                "id": "0",
+                "attrs": [{"key": "shape", "value": "[B, S, 8192] bfloat16"}],
+            }
+        ],
+        "incomingEdges": [
+            {
+                "sourceNodeId": "@input",
+                "sourceNodeOutputId": "0",
+                "targetNodeInputId": "0",
+            }
+        ],
+    }
+    graph = {
+        "nodes": [
+            {
+                "id": "@input",
+                "label": "hidden_states",
+                "namespace": "",
+                "attrs": [{"key": "synthetic", "value": "@input"}],
+            },
+            producer,
+            {
+                "id": "view",
+                "label": "view",
+                "namespace": "",
+                "attrs": [
+                    {"key": "synthetic", "value": "@output"},
+                    {"key": "output_shape", "value": "[B, S, 64, 128] bfloat16"},
+                ],
+                "outputsMetadata": [
+                    {
+                        "id": "0",
+                        "attrs": [
+                            {"key": "shape", "value": "[B, S, 64, 128] bfloat16"}
+                        ],
+                    }
+                ],
+                "incomingEdges": [
+                    {
+                        "sourceNodeId": producer["id"],
+                        "sourceNodeOutputId": "0",
+                        "targetNodeInputId": "0",
+                    }
+                ],
+            },
+        ]
+    }
+    annotate_parallel_nodes(graph, layout)
+    gather = next(node for node in graph["nodes"] if node["label"] == "gather")
+    assert gather.get("outputsMetadata") is None
+    warnings = publish_stated_shapes_and_check(graph, label="parallel")
+    port = {
+        item["key"]: item["value"] for item in gather["outputsMetadata"][0]["attrs"]
+    }
+    assert port["shape"] == "[B, S, 8192] bfloat16"
+    assert port["full_shape"] == "[B, S, 8192] bfloat16"
+    assert gather["outputsMetadata"][0]["id"] == "0"
+    assert warnings == []

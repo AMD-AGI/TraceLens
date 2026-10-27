@@ -154,7 +154,7 @@ class TestAViewKeepsTheRankItStates:
         """``hidden_states.shape[0]`` names no axis a reader could follow."""
         source = TensorSpec(("B", "H", "S", "S"), "float32")
         out = self._infer(["shape: hidden_states.shape[0], self.num_heads"], source)
-        assert out.shape == source.shape, out.shape
+        assert out is None
 
     def test_a_starred_prefix_is_resolved_by_the_structured_reader(self) -> None:
         """``*x.shape[:-1]`` expands to the leading axes; the fallback is not reached."""

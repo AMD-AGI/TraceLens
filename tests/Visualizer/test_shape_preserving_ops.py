@@ -35,7 +35,12 @@ from __future__ import annotations
 
 import json
 
-from TraceLens.ModelUtils.shape_inference import op_cannot_change_shape
+from TraceLens.ModelUtils.shape_inference import TensorSpec, op_cannot_change_shape
+from TraceLens.Visualizer.model_explorer_export.shapes import (
+    apply_shape_attrs,
+    refine_multi_output_port_shapes,
+    widen_broadcast_results,
+)
 from TraceLens.Visualizer.model_explorer_export.type_check import (
     _shape_preserving_op_warnings,
 )
@@ -80,6 +85,103 @@ class TestTheDefectItCatches:
         assert _shape_preserving_op_warnings(
             [_node(["B", "S", "128"], "[B, S] float32")]
         )
+
+    def test_the_final_edge_repairs_a_stale_same_rank_shape(self) -> None:
+        source = {
+            "id": "source",
+            "label": "Mean",
+        }
+        apply_shape_attrs(source, TensorSpec(("B", "S", 1), "bfloat16"))
+        target = _node(
+            ["B", "S", "1"],
+            "[1] bfloat16",
+            raw_op="rsqrt",
+            op_type="Reciprocal sqrt",
+            label="Reciprocal sqrt",
+        )
+        apply_shape_attrs(target, TensorSpec((1,), "bfloat16"))
+        target["incomingEdges"] = [
+            {
+                "sourceNodeId": "source",
+                "sourceNodeOutputId": "0",
+                "targetNodeInputId": "0",
+            }
+        ]
+        widen_broadcast_results([source, target])
+        shape = next(
+            attr["value"] for attr in target["attrs"] if attr["key"] == "output_shape"
+        )
+        assert shape == "[B, S, 1] bfloat16"
+
+    def test_the_final_edge_also_repairs_a_stale_wider_shape(self) -> None:
+        source = {"id": "source", "label": "Mean"}
+        apply_shape_attrs(source, TensorSpec((1,), "bfloat16"))
+        target = _node(
+            ["1"],
+            "[B, S, 1] bfloat16",
+            raw_op="rsqrt",
+            op_type="Reciprocal sqrt",
+            label="Reciprocal sqrt",
+        )
+        apply_shape_attrs(target, TensorSpec(("B", "S", 1), "bfloat16"))
+        target["incomingEdges"] = [
+            {
+                "sourceNodeId": "source",
+                "sourceNodeOutputId": "0",
+                "targetNodeInputId": "0",
+            }
+        ]
+        widen_broadcast_results([source, target])
+        shape = next(
+            attr["value"] for attr in target["attrs"] if attr["key"] == "output_shape"
+        )
+        assert shape == "[1] bfloat16"
+
+
+class TestFinalMultiOutputPortShapes:
+    def test_chunk_ports_are_slices_of_the_final_whole_shape(self) -> None:
+        node = {
+            "id": "chunk",
+            "label": "Chunk",
+            "attrs": [
+                {"key": "raw_op", "value": "chunk"},
+                {"key": "details", "value": "split_size: 2; dim: -1"},
+            ],
+            "outputsMetadata": [
+                {"id": "0", "attrs": [{"key": "port_label", "value": "left"}]},
+                {"id": "1", "attrs": [{"key": "port_label", "value": "right"}]},
+            ],
+        }
+        left = {
+            "id": "chunk^@slice_out:0",
+            "label": "left",
+            "attrs": [{"key": "synthetic", "value": "@slice_out"}],
+            "incomingEdges": [
+                {
+                    "sourceNodeId": "chunk",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "0",
+                }
+            ],
+        }
+        apply_shape_attrs(node, TensorSpec(("B", "S", 24, 512), "bfloat16"))
+        # ``apply_shape_attrs`` gives every port the whole shape; the final
+        # refinement reads the operation's own contract and divides them.
+        apply_shape_attrs(left, TensorSpec(("B", "S", 24, 512), "bfloat16"))
+        refine_multi_output_port_shapes([node, left])
+        refine_multi_output_port_shapes([node, left])
+        shapes = [
+            next(attr["value"] for attr in port["attrs"] if attr["key"] == "shape")
+            for port in node["outputsMetadata"]
+        ]
+        assert shapes == [
+            "[B, S, 24, 256] bfloat16",
+            "[B, S, 24, 256] bfloat16",
+        ]
+        left_shape = next(
+            attr["value"] for attr in left["attrs"] if attr["key"] == "output_shape"
+        )
+        assert left_shape == "[B, S, 24, 256] bfloat16"
 
 
 class TestTheRestOfTheClass:

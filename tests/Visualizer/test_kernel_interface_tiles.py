@@ -173,6 +173,28 @@ class TestThePassThatDrawsThem:
         added = [n for n in nodes if ":@kernel_in:" in n["id"] and n["id"] != "p:x"]
         assert [n["label"] for n in added] == ["cu_seqlens"]
 
+    def test_one_kernel_keeps_two_ports_for_one_tensor(self) -> None:
+        """``key`` and ``value`` are two operands even when both are ``kv``."""
+        nodes = [
+            _node("kv", "kv", namespace="other"),
+            _port("p:q", "query"),
+            _node(
+                "sdpa",
+                "sdpa",
+                operation="gpu_kernel",
+                details="kernel: sdpa; inputs: query,key,value",
+                sources=["p:q", "kv", "kv"],
+            ),
+        ]
+        _port_unnamed_kernel_operands(nodes)
+        added = [
+            node
+            for node in nodes
+            if ":@kernel_in:" in node["id"] and node["id"] != "p:q"
+        ]
+        assert {node["label"] for node in added} == {"key", "value"}
+        assert len(added) == 2
+
     def test_one_tensor_read_by_several_kernels_is_one_port(self) -> None:
         """The convention ``_share_one_tile_per_kernel_operand`` already draws."""
         nodes = [

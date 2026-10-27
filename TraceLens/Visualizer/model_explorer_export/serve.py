@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from TraceLens.Visualizer.model_explorer_export.shapes import (
+    canonicalize_payload_shapes,
+)
 from TraceLens.Visualizer.model_explorer_export.viewer_page import (
     VIEWER_DIR,
     compose_viewer_html,
@@ -44,10 +47,15 @@ def _load_payload(
     json_path: Path | None,
 ) -> dict[str, Any]:
     if payload is not None:
-        return payload
-    if json_path is None:
+        loaded = payload
+    elif json_path is None:
         raise ValueError("Provide payload or json_path.")
-    return json.loads(json_path.expanduser().resolve().read_text(encoding="utf-8"))
+    else:
+        loaded = json.loads(
+            json_path.expanduser().resolve().read_text(encoding="utf-8")
+        )
+    canonicalize_payload_shapes(loaded)
+    return loaded
 
 
 def viewer_url(port: int = 8765) -> str:

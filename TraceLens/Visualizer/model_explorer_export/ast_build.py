@@ -66,6 +66,24 @@ def build_model_explorer_payload(
         shape_inferencer=inferencer,
         inline_expansion=inline_expansion,
     )
+    layout = getattr(spec, "parallel_layout", None)
+    if layout is not None:
+        from TraceLens.ModelUtils.parallel_plan import annotate_parallel_nodes
+        from TraceLens.Visualizer.model_explorer_export.shapes import (
+            refresh_displayed_group_shapes,
+        )
+
+        annotate_parallel_nodes(graph, layout)
+        # The build already published shapes and checked the graph. These nodes
+        # did not exist then, so both have to run again or an edge leaves a
+        # collective with no shape and the viewer draws "?".
+        from TraceLens.Visualizer.model_explorer_export.merge import (
+            publish_stated_shapes_and_check,
+        )
+
+        publish_stated_shapes_and_check(graph, label="parallel")
+        if layout.degree.requested():
+            refresh_displayed_group_shapes(graph)
 
     viewer_meta: dict[str, Any] = {
         "factSheet": build_fact_sheet_viewer(spec),

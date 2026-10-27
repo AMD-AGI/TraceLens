@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import types
+from dataclasses import dataclass
 
 import pytest
 import torch
@@ -657,3 +658,468 @@ def test_instantiate_meta_robust_text_submodel_fallback(monkeypatch):
     model, cfg = result
     assert isinstance(model, FakeTextForCausalLM)
     assert isinstance(cfg, _TypedTextConfig)
+
+
+def test_structured_module_output_reports_its_result_tensor():
+    hidden = torch.empty(2, 5, 8)
+    cache = torch.empty(2, 4, 5, 2)
+    output = {
+        "past_key_values": cache,
+        "last_hidden_state": hidden,
+    }
+    assert mt._tensor_shape_from_output(hidden) == (2, 5, 8)
+    assert mt._tensor_shape_from_output((cache, hidden)) == (2, 4, 5, 2)
+    # A plain mapping makes no promise about which tensor is the result.
+    # Its declared insertion order is the only structural ordering available.
+    assert mt._tensor_shape_from_output(output) == (2, 4, 5, 2)
+
+    class Result:
+        def __init__(self):
+            self.cache = torch.empty(2, 4, 5, 2)
+            self.hidden = hidden
+
+        def to_tuple(self):
+            # This is the output contract ModelOutput exposes. No field name
+            # has to be known to select its result tensor.
+            return (self.hidden, self.cache)
+
+    assert mt._tensor_shape_from_output(Result()) == (2, 5, 8)
+
+    @dataclass
+    class DataclassResult:
+        result: torch.Tensor
+        cache: torch.Tensor
+
+    assert mt._tensor_shape_from_output(DataclassResult(hidden, cache)) == (2, 5, 8)
+
+    class Ordered(dict):
+        def to_tuple(self):
+            return (self["hidden"], self["cache"])
+
+    assert mt._tensor_shape_from_output(Ordered(cache=cache, hidden=hidden)) == (
+        2,
+        5,
+        8,
+    )
+
+    class Broken:
+        def __init__(self):
+            self.hidden = hidden
+
+        def to_tuple(self):
+            raise RuntimeError("the positional contract is unavailable")
+
+    assert mt._tensor_shape_from_output(Broken()) == (2, 5, 8)
+
+    cycle = Broken()
+    cycle.self = cycle
+    assert mt._tensor_shape_from_output(cycle) == (2, 5, 8)
+    assert mt._tensor_shape_from_output((None, "name", [hidden])) == (2, 5, 8)
+    assert mt._tensor_shape_from_output("name") is None
+    assert mt._tensor_shape_from_output(b"name") is None
+    assert mt._tensor_shape_from_output(object()) is None
+
+
+# ---------------------------------------------------------------------------
+# Config-attribute repair edges
+# ---------------------------------------------------------------------------
+
+
+def test_meta_build_rejects_an_attribute_error_it_cannot_parse():
+    """An AttributeError that does not name a missing attribute is not repaired."""
+
+    def builder(_config):
+        raise AttributeError("the modeling code failed for another reason")
+
+    assert mt._meta_build_with_attr_repair(_FakeConfig(), [builder], "ckpt") is None
+
+
+def test_meta_build_stops_when_the_repair_budget_is_spent(monkeypatch):
+    """A repair that would need another attempt past the budget returns None."""
+    monkeypatch.setattr(mt, "_MAX_CONFIG_ATTR_REPAIRS", 0)
+    config = _FakeConfig()
+
+    def builder(_config):
+        raise AttributeError("'X' object has no attribute 'fresh_attr'")
+
+    assert mt._meta_build_with_attr_repair(config, [builder], "ckpt") is None
+    assert config.fresh_attr == 1
+
+
+# ---------------------------------------------------------------------------
+# Text sub-model fallback early exits
+# ---------------------------------------------------------------------------
+
+
+def _reload_config(monkeypatch, config):
+    import transformers
+
+    monkeypatch.setattr(
+        transformers.AutoConfig, "from_pretrained", lambda *a, **k: config
+    )
+
+
+def test_text_submodel_returns_none_when_the_config_cannot_be_reloaded(monkeypatch):
+    import transformers
+
+    def boom(*_a, **_k):
+        raise OSError("config is unavailable")
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", boom)
+    assert mt._instantiate_text_submodel_meta(object(), [], "ckpt") is None
+
+
+def test_text_submodel_returns_none_when_text_config_lookup_fails(monkeypatch):
+    class Cfg:
+        def get_text_config(self):
+            raise RuntimeError("no text config")
+
+    _reload_config(monkeypatch, Cfg())
+    assert mt._instantiate_text_submodel_meta(object(), [], "ckpt") is None
+
+
+def test_text_submodel_returns_none_when_there_is_no_distinct_text_config(monkeypatch):
+    class Same:
+        def get_text_config(self):
+            return self
+
+    class Missing:
+        def get_text_config(self):
+            return None
+
+    _reload_config(monkeypatch, Same())
+    assert mt._instantiate_text_submodel_meta(object(), [], "ckpt") is None
+    _reload_config(monkeypatch, Missing())
+    assert mt._instantiate_text_submodel_meta(object(), [], "ckpt") is None
+
+
+def test_text_submodel_returns_none_when_no_model_class_resolves(monkeypatch):
+    class Cfg:
+        def get_text_config(self):
+            return object()
+
+    class Unmapped:
+        pass
+
+    _reload_config(monkeypatch, Cfg())
+    assert mt._instantiate_text_submodel_meta(object(), [Unmapped], "ckpt") is None
+
+
+def test_text_submodel_returns_none_when_the_model_mapping_lookup_fails(monkeypatch):
+    class Cfg:
+        def get_text_config(self):
+            return object()
+
+    class BadMap:
+        def __contains__(self, _key):
+            raise RuntimeError("mapping is unusable")
+
+    class Auto:
+        _model_mapping = BadMap()
+
+    _reload_config(monkeypatch, Cfg())
+    assert mt._instantiate_text_submodel_meta(object(), [Auto], "ckpt") is None
+
+
+def test_text_submodel_returns_none_when_the_modeling_module_is_not_loaded(monkeypatch):
+    class Full:
+        pass
+
+    Full.__module__ = "tracelens_modeling_module_not_loaded"
+
+    class Mapping:
+        def __contains__(self, _key):
+            return True
+
+        def __getitem__(self, _key):
+            return Full
+
+    class Auto:
+        _model_mapping = Mapping()
+
+    class Cfg:
+        def get_text_config(self):
+            return object()
+
+    _reload_config(monkeypatch, Cfg())
+    assert mt._instantiate_text_submodel_meta(object(), [Auto], "ckpt") is None
+
+
+def test_text_submodel_returns_none_when_the_module_has_no_causal_lm(monkeypatch):
+    import sys
+    import types
+
+    module = types.ModuleType("tracelens_modeling_without_causal_lm")
+    module.Helper = type("Helper", (), {})
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    class Full:
+        pass
+
+    Full.__module__ = module.__name__
+
+    class Mapping:
+        def __contains__(self, _key):
+            return True
+
+        def __getitem__(self, _key):
+            return Full
+
+    class Auto:
+        _model_mapping = Mapping()
+
+    class Cfg:
+        def get_text_config(self):
+            return object()
+
+    _reload_config(monkeypatch, Cfg())
+    assert mt._instantiate_text_submodel_meta(object(), [Auto], "ckpt") is None
+
+
+def test_text_submodel_uses_the_raw_config_when_retyping_fails(monkeypatch):
+    """A config class that cannot be constructed is discarded, and a build that
+    still fails on that raw config returns None."""
+    import sys
+    import types
+
+    module = types.ModuleType("tracelens_modeling_retype_fails")
+
+    class BadConfig:
+        def __init__(self, **_kw):
+            raise TypeError("typed config cannot be built")
+
+    class TextForCausalLM:
+        config_class = BadConfig
+
+        @classmethod
+        def _from_config(cls, _config):
+            raise RuntimeError("text model cannot be built")
+
+    module.TextForCausalLM = TextForCausalLM
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(tt, "_patch_config", lambda _c: None)
+
+    class Full:
+        pass
+
+    Full.__module__ = module.__name__
+
+    class Mapping:
+        def __contains__(self, _key):
+            return True
+
+        def __getitem__(self, _key):
+            return Full
+
+    class Auto:
+        _model_mapping = Mapping()
+
+    class Sub:
+        def to_dict(self):
+            return {"hidden": 8}
+
+    class Cfg:
+        def get_text_config(self):
+            return Sub()
+
+    _reload_config(monkeypatch, Cfg())
+    assert mt._instantiate_text_submodel_meta(object(), [Auto], "ckpt") is None
+
+
+def test_instantiate_meta_robust_returns_none_when_imports_fail(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "torch", None)
+    assert mt._instantiate_meta_robust("ckpt") is None
+
+
+# ---------------------------------------------------------------------------
+# harvest_meta_tensors
+# ---------------------------------------------------------------------------
+
+
+def test_harvest_meta_tensors_indexes_tied_weights_and_buffers(monkeypatch):
+    class TiedHead(nn.Module):
+        def __init__(self, weight):
+            super().__init__()
+            self.weight = weight
+
+    class HarvestModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed = nn.Embedding(5, 4)
+            self.head = TiedHead(self.embed.weight)
+            self.register_buffer("inv_freq", torch.empty(3))
+
+    model = HarvestModel()
+    monkeypatch.setattr(mt, "_instantiate_meta_robust", lambda _c: (model, None))
+    index = mt.harvest_meta_tensors("ckpt")
+    assert index is not None
+    assert index.by_qualified["embed.weight"].shape == (5, 4)
+    assert index.by_qualified["head.weight"].shape == (5, 4)
+    assert index.by_qualified["inv_freq"].shape == (3,)
+    assert index.by_qualified["embed.weight"].dtype == "float32"
+    assert index.by_class_attr[("Embedding", "weight")].shape == (5, 4)
+    assert index.by_class_attr[("TiedHead", "weight")].shape == (5, 4)
+    assert index.by_class_attr[("HarvestModel", "inv_freq")].shape == (3,)
+
+
+def test_harvest_meta_tensors_torch_unavailable(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "torch", None)
+    assert mt.harvest_meta_tensors("ckpt") is None
+
+
+def test_harvest_meta_tensors_returns_none_when_instantiation_fails(monkeypatch):
+    monkeypatch.setattr(mt, "_instantiate_meta_robust", lambda _c: None)
+    assert mt.harvest_meta_tensors("ckpt") is None
+
+
+def test_harvest_meta_tensors_returns_none_when_the_walk_fails(monkeypatch):
+    class Unwalkable(nn.Module):
+        def named_modules(self, *args, **kwargs):
+            raise RuntimeError("cannot walk")
+
+    monkeypatch.setattr(mt, "_instantiate_meta_robust", lambda _c: (Unwalkable(), None))
+    assert mt.harvest_meta_tensors("ckpt") is None
+
+
+# ---------------------------------------------------------------------------
+# Tracer failure branches
+# ---------------------------------------------------------------------------
+
+
+def test_trace_meta_shapes_returns_none_when_rotary_patch_fails(monkeypatch):
+    monkeypatch.setattr(tt, "_instantiate_meta", lambda _c: (nn.Linear(2, 2), None))
+
+    def boom(_model):
+        raise RuntimeError("rotary patch failed")
+
+    monkeypatch.setattr(tt, "_patch_rotary_embeddings", boom)
+    assert mt.trace_meta_shapes("x") is None
+
+
+def test_trace_meta_shapes_ignores_an_output_whose_shape_cannot_be_read(monkeypatch):
+    class Unreadable:
+        @property
+        def shape(self):
+            raise RuntimeError("shape is unavailable")
+
+    class BoomOut(nn.Module):
+        def forward(self, _x):
+            return Unreadable()
+
+    monkeypatch.setattr(tt, "_instantiate_meta", lambda _c: (BoomOut(), None))
+    monkeypatch.setattr(tt, "_patch_rotary_embeddings", lambda _m: None)
+    assert mt.trace_meta_shapes("x", seq_len=4, batch_size=1) is None
+
+
+def test_trace_meta_input_specs_torch_unavailable(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "torch", None)
+    assert mt.trace_meta_input_specs("x") is None
+
+
+def test_trace_meta_input_specs_returns_none_when_rotary_patch_fails(monkeypatch):
+    monkeypatch.setattr(tt, "_instantiate_meta", lambda _c: (nn.Linear(2, 2), None))
+
+    def boom(_model):
+        raise RuntimeError("rotary patch failed")
+
+    monkeypatch.setattr(tt, "_patch_rotary_embeddings", boom)
+    assert mt.trace_meta_input_specs("x") is None
+
+
+def test_trace_meta_input_specs_names_uninspectable_forward_arguments(monkeypatch):
+    class Odd(nn.Module):
+        def forward(self, x):
+            return torch.zeros(1, device=x.device)
+
+    Odd.forward.__signature__ = "not-a-signature"
+    monkeypatch.setattr(tt, "_instantiate_meta", lambda _c: (Odd().to("meta"), None))
+    monkeypatch.setattr(tt, "_patch_rotary_embeddings", lambda _m: None)
+    result = mt.trace_meta_input_specs("x", seq_len=5, batch_size=2)
+    assert result is not None
+    resolved, by_class = result
+    assert resolved["arg0"] == (("B", "S"), "int64")
+    assert by_class[("Odd", "arg0")] == (("B", "S"), "int64")
+
+
+def test_trace_meta_input_specs_returns_none_when_nothing_is_captured(monkeypatch):
+    class Silent:
+        def forward(self, x):
+            raise AssertionError("the probe must fail before forward")
+
+        def named_modules(self):
+            return [("", self)]
+
+        def register_forward_pre_hook(self, hook, with_kwargs=False):
+            return types.SimpleNamespace(remove=lambda: None)
+
+        def __call__(self, *args, **kwargs):
+            raise RuntimeError("probe failed before any tensor was recorded")
+
+    monkeypatch.setattr(mt, "_instantiate_meta_robust", lambda _c: (Silent(), None))
+    monkeypatch.setattr(tt, "_patch_rotary_embeddings", lambda _m: None)
+    assert mt.trace_meta_input_specs("x") is None
+
+
+def test_trace_meta_op_shapes_returns_none_when_rotary_patch_fails(monkeypatch):
+    monkeypatch.setattr(tt, "_instantiate_meta", lambda _c: (nn.Linear(4, 4), None))
+
+    def boom(_model):
+        raise RuntimeError("rotary patch failed")
+
+    monkeypatch.setattr(tt, "_patch_rotary_embeddings", boom)
+    assert mt.trace_meta_op_shapes("x") is None
+
+
+def test_trace_meta_op_shapes_keeps_going_when_the_probe_forward_fails(monkeypatch):
+    class Exploding(nn.Module):
+        def forward(self, _x):
+            raise RuntimeError("probe forward failed")
+
+    monkeypatch.setattr(tt, "_instantiate_meta", lambda _c: (Exploding(), None))
+    monkeypatch.setattr(tt, "_patch_rotary_embeddings", lambda _m: None)
+    assert mt.trace_meta_op_shapes("x", seq_len=137, batch_size=2) is None
+
+
+def test_trace_meta_op_shapes_skips_nodes_without_a_source_line(monkeypatch):
+    monkeypatch.setattr(
+        tt, "_instantiate_meta", lambda _c: (SyntheticNet().to("meta"), None)
+    )
+    monkeypatch.setattr(tt, "_patch_rotary_embeddings", lambda _m: None)
+    monkeypatch.setattr(mt, "_fx_source_line", lambda _node, _source: None)
+    assert mt.trace_meta_op_shapes("x", seq_len=137, batch_size=2) is None
+
+
+class _AddWide(nn.Module):
+    def forward(self, x):
+        return x + 1
+
+
+class _AddNarrow(nn.Module):
+    def forward(self, x):
+        return x + 1
+
+
+class _ConflictNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.wide = _AddWide()
+        self.narrow = _AddNarrow()
+
+    def forward(self, x):
+        return self.wide(x)[:, :1] + self.narrow(x[:, :1])
+
+
+def test_trace_meta_op_shapes_drops_conflicting_shapes(monkeypatch):
+    """Two classes whose same op lands on one source line with different shapes
+    are dropped instead of keeping either guess."""
+    monkeypatch.setattr(
+        tt, "_instantiate_meta", lambda _c: (_ConflictNet().to("meta"), None)
+    )
+    monkeypatch.setattr(tt, "_patch_rotary_embeddings", lambda _m: None)
+    monkeypatch.setattr(mt, "_fx_source_line", lambda _node, _source: 1)
+    result = mt.trace_meta_op_shapes("x", seq_len=137, batch_size=2)
+    assert result is not None
+    # Occurrence 0 is the add both classes emit, at two different shapes, so it
+    # is dropped. A later add that only one class produces is kept.
+    assert (1, "add", 0) not in result
+    assert result[(1, "add", 1)] == ("B", 1)

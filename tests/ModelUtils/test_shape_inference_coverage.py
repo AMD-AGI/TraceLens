@@ -480,7 +480,7 @@ def test_synthetic_catchall_no_inputs():
     inf = _make_inferencer(hidden_size=128)
     node = _node("hidden", meta={"synthetic": "@hidden_states"})
     out = inf._infer_node_output(node, [], root=None)
-    assert out.shape == ("B", "S", 128)
+    assert out is None
 
 
 def test_chunk_non_integer_split_size_falls_through():
@@ -494,7 +494,7 @@ def test_chunk_non_integer_split_size_falls_through():
 def test_concat_no_inputs_and_stack():
     inf = _make_inferencer(hidden_size=256)
     concat_empty = inf._infer_node_output(_node("Concat"), [], root=None)
-    assert concat_empty.shape == ("B", "S", 256)
+    assert concat_empty is None
 
     a = TensorSpec(("B", "S", 8), "float16")
     b = TensorSpec(("B", "S", 8), "float16")
@@ -523,7 +523,7 @@ def test_matmul_single_and_no_inputs():
     )
     assert single.shape == ("B", "S", 8)
     empty = inf._infer_node_output(_node("MatMul"), [], root=None)
-    assert empty.shape == ("B", "S", 64)
+    assert empty is None
 
 
 def test_einsum_fallbacks():
@@ -532,17 +532,16 @@ def test_einsum_fallbacks():
     node = _node("Einsum", details=["equation: bij"])
     out = inf._infer_node_output(node, [TensorSpec(("B", "S", 8))], root=None)
     assert out.shape == ("B", "S", 8)
-    # No inputs -> default hidden.
     empty = inf._infer_node_output(
         _node("Einsum", details=["equation: ij,jk->ik"]), [], root=None
     )
-    assert empty.shape == ("B", "S", 32)
+    assert empty is None
 
 
 def test_causal_conv1d_no_inputs():
     inf = _make_inferencer(hidden_size=48)
     out = inf._infer_node_output(_node("Causal Conv1d"), [], root=None)
-    assert out.shape == ("B", "S", 48)
+    assert out is None
 
 
 def test_gather_no_inputs_uses_default():
@@ -552,8 +551,7 @@ def test_gather_no_inputs_uses_default():
     # while ``torch.gather`` keeps ``Gather``.
     for label in ("Indexing", "Gather"):
         out = inf._infer_node_output(_node(label), [], root=None)
-        # replace_last_dim of default hidden shape with top-k.
-        assert out.shape == ("B", "S", 4), label
+        assert out is None, label
 
 
 def test_reduction_argmax_drops_the_axis_it_reduces_and_is_int64():
@@ -583,28 +581,28 @@ def test_reduction_over_an_axis_the_shape_does_not_carry_is_left_alone():
 def test_pointwise_no_inputs():
     inf = _make_inferencer(hidden_size=64)
     out = inf._infer_node_output(_node("relu"), [], root=None)
-    assert out.shape == ("B", "S", 64)
+    assert out is None
 
 
 def test_linear_out_features_defaults_to_hidden():
     inf = _make_inferencer(hidden_size=100)
     node = _node("Linear", operation=OperationKind.TORCH_FUNCTIONAL)
     out = inf._infer_node_output(node, [], root=None)
-    assert out.shape == ("B", "S", 100)
+    assert out is None
 
 
 def test_conv_empty_source_shape_returns_channel_only():
     inf = _make_inferencer(hidden_size=768)
     node = _node("Conv1d", operation=OperationKind.NN_MODULE)
     out = inf._infer_node_output(node, [TensorSpec((), "float16")], root=None)
-    assert out.shape == (768,)
+    assert out is None
 
 
 def test_norm_without_inputs():
     inf = _make_inferencer(hidden_size=128)
     node = _node("RMSNorm", operation=OperationKind.NN_MODULE)
     out = inf._infer_node_output(node, [], root=None)
-    assert out.shape == ("B", "S", 128)
+    assert out is None
 
 
 def test_gpu_kernel_falls_back_to_hidden_when_no_introspection():
@@ -613,7 +611,7 @@ def test_gpu_kernel_falls_back_to_hidden_when_no_introspection():
         "flash_attn", operation=OperationKind.GPU_KERNEL, class_name="KernelOp"
     )
     out = inf._infer_node_output(node, [], root=None)
-    assert out.shape == ("B", "S", 64)
+    assert out is None
 
 
 def test_torch_functional_unknown_warns_and_passes_through(caplog):
@@ -631,14 +629,14 @@ def test_torch_functional_unknown_no_inputs():
     inf = _make_inferencer(hidden_size=32)
     node = _node("frobnicate", operation=OperationKind.TORCH_FUNCTIONAL)
     out = inf._infer_node_output(node, [], root=None)
-    assert out.shape == ("B", "S", 32)
+    assert out is None
 
 
 def test_block_composite_without_inputs():
     inf = _make_inferencer(hidden_size=77)
     node = _node("DecoderLayer", operation=OperationKind.NN_MODULE, kind=NodeKind.BLOCK)
     out = inf._infer_node_output(node, [], root=None)
-    assert out.shape == ("B", "S", 77)
+    assert out is None
 
 
 def test_attention_name_fallback():
@@ -650,7 +648,7 @@ def test_attention_name_fallback():
         meta={"attr_name": "self_attention"},
     )
     out = inf._infer_node_output(node, [], root=None)
-    assert out.shape == ("B", "S", 99)
+    assert out is None
 
 
 def test_unhandled_op_uses_torch_op_builder():
@@ -690,7 +688,7 @@ def test_unknown_op_no_inputs_defaults_hidden():
         meta={"attr_name": "mystery"},
     )
     out = inf._infer_node_output(node, [], root=None)
-    assert out.shape == ("B", "S", 64)
+    assert out is None
 
 
 # ---------------------------------------------------------------------------
@@ -792,8 +790,7 @@ def test_fuzzy_attention_lookup_returns_bsh():
         "core_attention", operation=OperationKind.NN_MODULE, class_name="core_attention"
     )
     out = inf._introspect_forward_shape(node, [TensorSpec(("B", "S", 4))], root=None)
-    assert out is not None
-    assert out.shape == ("B", "S", 8)
+    assert out is None
 
 
 def test_fuzzy_non_attention_simulates_forward():
@@ -1274,7 +1271,11 @@ def test_kimi_gate_export_integration():
         basic_ops=basic,
         export_block_trees=[("KimiMoEGate", gate)],
     )
-    payload = build_operator_export(spec)
+    inferencer = ShapeInferencer(spec)
+    inferencer._caller_entry_spec = TensorSpec(
+        ("B", "S", 7168), inferencer.context.dtype
+    )
+    payload = inferencer.export_architecture()
     ops = payload["sections"][0]["operators"]
     by_comp = {op["computation"]: op for op in ops}
     assert by_comp["TopK"]["output"] == {"shape": ["B", "S", 16], "dtype": "int64"}
@@ -1410,7 +1411,7 @@ def test_elementwise_and_catchall_synthetic():
     add = inf._infer_node_output(
         _node("+", operation=OperationKind.SYNTHETIC), [], root=None
     )
-    assert add.shape == ("B", "S", 64)
+    assert add is None
     # catch-all synthetic with inputs passes through inputs[0].
     node = _synth("x", "@kernel_port_in")
     out = inf._infer_node_output(node, [TensorSpec(("B", "S", 5))], root=None)
@@ -1565,7 +1566,7 @@ def test_nonzero_and_one_hot():
     )
     assert nz.shape == ("nnz", 3) and nz.dtype == "int64"
     nz_empty = inf._infer_node_output(_node("nonzero"), [], root=None)
-    assert nz_empty.shape[0] == "nnz"
+    assert nz_empty is None
     oh = inf._infer_node_output(_node("one hot"), [TensorSpec(("B", "S"))], root=None)
     assert oh.shape == ("B", "S", 8) and oh.dtype == "int64"
 
@@ -1587,9 +1588,8 @@ def test_cast_contiguous_squeeze_expand():
     assert casted.dtype == "float32"
     squeezed = inf._infer_node_output(_node("squeeze"), [src], root=None)
     assert squeezed.shape == ("B", "S", 16)
-    # expand without inputs -> default hidden.
     expanded = inf._infer_node_output(_node("expand"), [], root=None)
-    assert expanded.shape[-1] == 4096
+    assert expanded is None
 
 
 def test_squeeze_drops_named_and_negative_size_one_axis():
@@ -2076,6 +2076,57 @@ class Passthrough(nn.Module):
 """
 
 
+DELEGATE_SRC = """
+import torch.nn as nn
+
+
+class Delegator(nn.Module):
+    def delegate(self, values, grid=None):
+        return self.implement(values, grid)
+
+    def implement(self, hidden_states, grid=None):
+        return hidden_states.sum(dim=1)
+"""
+
+
+def test_introspect_method_follows_a_self_delegation():
+    analysis = analyze_source(DELEGATE_SRC, config={"hidden_size": 8})
+    spec = ArchitectureSpec(
+        name="d",
+        model_type="t",
+        hidden_size=8,
+        raw_config={"hidden_size": 8},
+        class_registry=analysis.class_registry,
+    )
+    inf = ShapeInferencer(spec)
+    out = inf._introspect_method_shape(
+        "delegate", [TensorSpec(("B", "S", 8))], root=None
+    )
+    assert out is not None
+    assert out.shape == ("B", 8)
+
+
+def test_unresolved_module_takes_its_meta_traced_output(caplog):
+    inf = _make_inferencer(hidden_size=32)
+    inf._meta_shapes["model.language_model"] = TensorSpec(("B", "S", 32), "bfloat16")
+    node = _node(
+        "from_config",
+        operation=OperationKind.UNKNOWN,
+        class_name="",
+        node_id="seq:14:language_model:language_model:0",
+    )
+    with caplog.at_level(
+        logging.WARNING, logger="TraceLens.ModelUtils.shape_inference"
+    ):
+        out = inf._infer_node_output(
+            node,
+            [TensorSpec((3, "S"), "int64"), TensorSpec(("B", "S"), "bfloat16")],
+            root=None,
+        )
+    assert out.shape == ("B", "S", 32)
+    assert "No shape inference rule" not in caplog.text
+
+
 def test_introspect_method_without_operations_returns_none():
     analysis = analyze_source(METHOD_NOOP_SRC, config={"hidden_size": 8})
     spec = ArchitectureSpec(
@@ -2201,8 +2252,8 @@ def test_topological_order_handles_cycles():
     )
     inf = _make_inferencer(hidden_size=32)
     specs = inf.infer_model_graph(graph)
-    # Every node still receives a spec even though b/c cycle.
-    assert set(specs) == {"a", "b", "c"}
+    # Nothing here has a recorded operand, so the cycle stays unshaped.
+    assert specs == {}
 
 
 def test_infer_model_graph_merges_subgraph_specs_without_clobbering():
@@ -2240,6 +2291,8 @@ def test_infer_model_graph_merges_subgraph_specs_without_clobbering():
         },
     )
     inf = _make_inferencer(hidden_size=32)
+    hidden = TensorSpec(("B", "S", 32))
+    inf._entry_specs = {"x": hidden, "a": hidden, "b": hidden}
     specs = inf.infer_model_graph(graph)
     # Parent spec AND both subgraph specs are all present in the returned dict.
     assert {"top_in", "a_in", "b_in"} <= set(specs)

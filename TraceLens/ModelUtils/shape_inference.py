@@ -1559,9 +1559,17 @@ def _ceiling_via_aten_schema(name: str) -> tuple[int | None, bool]:
             any_variadic = True
         else:
             counts.append(count)
+    # Some operator names have both a fixed tensor overload and unrelated
+    # Python-list overloads (``eq.Tensor`` beside ``eq.Tensor_list``). A tensor
+    # operation node can use the fixed contract; treating the mere existence of
+    # another list overload as proof this call is a tensor-list join turns every
+    # broadcasting equality into a concat-style rank check. A genuine
+    # tensor-list primitive such as ``cat`` has no fixed tensor overload.
+    if counts:
+        return max(counts), False
     if any_variadic:
         return None, True
-    return (max(counts) if counts else None), False
+    return None, False
 
 
 @functools.lru_cache(maxsize=None)
@@ -1574,6 +1582,17 @@ def _operand_ceiling(raw_op: str) -> tuple[int | None, bool]:
         return None, False
     via_inspect = _ceiling_via_inspect(name)
     if via_inspect is not None:
+        # Several torch builtins expose only ``(*args, **kwargs)`` to inspect
+        # even though their aten schema has a fixed tensor signature
+        # (``eq(self, other)`` is binary). Treating inspect's opaque varargs as
+        # a tensor-list contract makes the type-check apply concat/stack rank
+        # rules to ordinary broadcasting ops. Prefer the concrete schema when
+        # it can refine that opaque answer; a genuine tensor-list op remains
+        # variadic in both sources.
+        if via_inspect == (None, True):
+            via_schema = _ceiling_via_aten_schema(name)
+            if via_schema != (None, False):
+                return via_schema
         return via_inspect
     return _ceiling_via_aten_schema(name)
 
@@ -1720,6 +1739,122 @@ def _owning_attr_candidates(node: Any, root: Any) -> list[str]:
     if root_attr and str(root_attr) not in candidates:
         candidates.append(str(root_attr))
     return candidates
+
+
+def _body_raises(statements: list[ast.stmt]) -> bool:
+    """True when every path through *statements* raises."""
+    saw_raise = False
+    for statement in statements:
+        if isinstance(statement, ast.Pass):
+            continue
+        if isinstance(statement, ast.Raise):
+            saw_raise = True
+            continue
+        if (
+            isinstance(statement, ast.If)
+            and _body_raises(statement.body)
+            and (not statement.orelse or _body_raises(statement.orelse))
+        ):
+            saw_raise = True
+            continue
+        return False
+    return saw_raise
+
+
+def _dim_ne_name(test: ast.AST) -> tuple[str, int] | None:
+    """``name.dim() != N`` inside *test*, including a conjunct of an ``and``."""
+    if isinstance(test, ast.BoolOp):
+        for value in test.values:
+            found = _dim_ne_name(value)
+            if found is not None:
+                return found
+        return None
+    if (
+        not isinstance(test, ast.Compare)
+        or len(test.ops) != 1
+        or not isinstance(test.ops[0], ast.NotEq)
+        or len(test.comparators) != 1
+    ):
+        return None
+    rank = test.comparators[0]
+    call = test.left
+    if (
+        isinstance(rank, ast.Constant)
+        and isinstance(rank.value, int)
+        and isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "dim"
+        and not call.args
+        and isinstance(call.func.value, ast.Name)
+    ):
+        return call.func.value.id, rank.value
+    return None
+
+
+def _slices_as_matrix(statement: ast.stmt, name: str) -> bool:
+    """True when *statement* indexes ``name[:, ...]`` as a rank-2 matrix."""
+    for node in ast.walk(statement):
+        if not isinstance(node, ast.Subscript) or not isinstance(node.value, ast.Name):
+            continue
+        if node.value.id != name or not isinstance(node.slice, ast.Tuple):
+            continue
+        if len(node.slice.elts) != 2:
+            continue
+        first, second = node.slice.elts
+        if (
+            isinstance(first, ast.Slice)
+            and first.lower is None
+            and first.upper is None
+            and isinstance(second, ast.Slice)
+        ):
+            return True
+    return False
+
+
+def _param_is_rank2_matrix(function: ast.FunctionDef, name: str) -> bool:
+    """True when a raising ``name.dim() != 2`` check is followed by a matrix slice.
+
+    The surviving path has ranked the parameter, and the slice addresses a
+    batch axis and a sequence window. That is ``[B, S]``.
+    """
+
+    def walk(statements: list[ast.stmt], ranked: bool) -> tuple[bool, bool]:
+        for statement in statements:
+            if (
+                isinstance(statement, ast.If)
+                and not statement.orelse
+                and _body_raises(statement.body)
+                and _dim_ne_name(statement.test) == (name, 2)
+            ):
+                # The check raises, so every statement after it runs only
+                # when the parameter has that rank.
+                ranked = True
+            if isinstance(statement, ast.If):
+                found, ranked_body = walk(statement.body, ranked)
+                if found:
+                    return True, True
+                _, ranked_else = walk(statement.orelse, ranked)
+                if ranked_body or ranked_else:
+                    ranked = True
+                continue
+            if ranked and _slices_as_matrix(statement, name):
+                return True, True
+        return False, ranked
+
+    return walk(function.body, False)[0]
+
+
+def _source_if_rank_matches(source: TensorSpec, tokens: list[str]) -> TensorSpec | None:
+    """The operand, when an unread view declares the same rank the operand has.
+
+    A view states its rank. Handing back an operand of a different rank says
+    the reshape did not happen. An unresolved ``x.shape[i]`` is that case:
+    the axis was not known, so the result is not known either.
+    """
+    declared = [token for token in tokens if token and not token.startswith("*")]
+    if declared and len(declared) != len(source.shape):
+        return None
+    return source
 
 
 class ShapeInferencer:
@@ -2061,6 +2196,37 @@ class ShapeInferencer:
             shape=(*self._active_seq_axes, h), dtype=dtype or self.context.dtype
         )
 
+    def _rank_constrained_param(
+        self, root: BlockNode | None, label: str | None
+    ) -> TensorSpec | None:
+        """``[B, S]`` for a parameter the forward itself has ranked as a matrix.
+
+        A raising ``attention_mask.dim() != 2`` followed by
+        ``attention_mask[:, -q_len:]`` says the mask that reaches that slice is
+        rank 2, with a batch axis and a sequence window. That shape is the
+        guard and the slice, not the hidden activation.
+        """
+        if root is None or not label:
+            return None
+        structure = self.spec.class_registry.get(root.class_name or "")
+        node = getattr(structure, "node", None)
+        if not isinstance(node, ast.ClassDef):
+            return None
+        forward = next(
+            (
+                item
+                for item in node.body
+                if isinstance(item, ast.FunctionDef) and item.name == "forward"
+            ),
+            None,
+        )
+        if forward is None or not _param_is_rank2_matrix(forward, label):
+            return None
+        return TensorSpec(
+            shape=(Symbol.BATCH.value, Symbol.SEQ.value),
+            dtype=self.context.dtype,
+        )
+
     def _vision_position_ids_seed(self) -> tuple[int, int, int] | None:
         """Resolve the vision rotary ``position_ids`` shape ``[Pv, N]`` from source.
 
@@ -2390,6 +2556,41 @@ class ShapeInferencer:
                 resolved[name] = shape
         return resolved
 
+    def _extent_name_shapes(
+        self, node: Any, root: BlockNode | None, source: TensorSpec | None
+    ) -> dict[str, tuple]:
+        """``{tensor name -> shape}`` for extents traced back to a shape read.
+
+        Frame parameters and locals win, because those are the tensors this op
+        can see. A name bound in some analysed forward is filled in only when
+        every recorded producer of that name has the same shape, so one class's
+        ``x`` cannot answer another's.
+        """
+        shapes: dict[str, tuple] = dict(self._boundary_shapes)
+        for name, spec in self._meta_input_specs.items():
+            if spec.shape:
+                shapes[name] = tuple(spec.shape)
+        shapes.update(self._frame_parameter_shapes(node, root))
+        shapes.update(self._frame_local_shapes(node, root, source))
+        by_producer: dict[str, set[tuple]] = {}
+        for (_frame, attr), shape in self._frame_step_shapes.items():
+            by_producer.setdefault(str(attr), set()).add(tuple(shape))
+            by_producer.setdefault(base_submodule_attr(str(attr)), set()).add(
+                tuple(shape)
+            )
+        registry = getattr(self.spec, "class_registry", None) or {}
+        for structure in registry.values():
+            bindings = getattr(structure, "forward_var_bindings", None) or {}
+            for name, sites in bindings.items():
+                if name in shapes:
+                    continue
+                found: set[tuple] = set()
+                for _line, producer in sites:
+                    found |= by_producer.get(str(producer), set())
+                if len(found) == 1:
+                    shapes[name] = next(iter(found))
+        return shapes
+
     def _shape_read_expression(
         self,
         token: str,
@@ -2567,9 +2768,18 @@ class ShapeInferencer:
         meta_input = self._meta_input_specs_for(node.label, root)
         if meta_input is not None:
             return meta_input
-        # Nothing authoritative named this boundary; fall back to what the caller
-        # hands this section, when that is known.
-        return self._caller_entry_spec
+        # Nothing authoritative named this boundary. The caller entry is the
+        # section's PRIMARY parameter only; assigning it to every unresolved
+        # secondary boundary makes a descriptor/mask/grid claim the activation's
+        # shape and dtype. A secondary parameter with no observed spec remains
+        # unknown until its real producer supplies one.
+        if (
+            root is not None
+            and node.label
+            and node.label == (root.input_label or "hidden_states")
+        ):
+            return self._caller_entry_spec
+        return None
 
     def _meta_input_specs_for(
         self, label: str | None, root: BlockNode | None
@@ -2839,6 +3049,8 @@ class ShapeInferencer:
             output = self._infer_node_output(
                 node, input_specs, root=root, input_labels=input_labels
             )
+            if output is None:
+                continue
             output = self._resolve_extent_dims(node, output, input_specs)
             output = _with_explicit_dtype(node, output)
             # Resolved WITH its class, so the shapes around it are this
@@ -2871,6 +3083,39 @@ class ShapeInferencer:
                 self._forward_input_spec_refs.append(output)
                 if self._entry_spec_for(node, root) is not None:
                     self._entry_seeded_ids.add(node_id)
+
+        # A multiply inferred before its activation had a spec answers with the
+        # scalar that already had one, and the norm below it inherits that
+        # ``[1]``. The activation is in the graph; it just was not stored yet.
+        # Infer again once it is, and keep the new result only when it is wider.
+        for _pass in range(3):
+            widened = False
+            for node_id in order:
+                node = node_by_id[node_id]
+                if node.metadata.get("synthetic") == "@input":
+                    continue
+                previous = self._tensor_specs.get(node_id)
+                input_specs, input_labels = self._gather_input_specs(graph, node_id)
+                if not input_specs:
+                    continue
+                if previous is not None and max(
+                    len(item.shape) for item in input_specs
+                ) <= len(previous.shape):
+                    continue
+                output = self._infer_node_output(
+                    node, input_specs, root=root, input_labels=input_labels
+                )
+                if output is None or (
+                    previous is not None and len(output.shape) <= len(previous.shape)
+                ):
+                    continue
+                output = self._resolve_extent_dims(node, output, input_specs)
+                output = _with_explicit_dtype(node, output)
+                self._tensor_specs[node_id] = output
+                self._publish_output_port_specs(node, self._tensor_specs, root)
+                widened = True
+            if not widened:
+                break
 
         if root is not None and "HyperConnection" in root.class_name:
             batch = Symbol.BATCH.value
@@ -3103,33 +3348,54 @@ class ShapeInferencer:
         block_trees = architecture_section_trees(self.spec)
         basic_ops = self.spec.basic_ops or BasicOpFilter.for_detailed()
         sections: list[dict[str, Any]] = []
+        # This export draws each section on its own, so there is no spine exit
+        # to read. A text section consumes the architecture's hidden width.
+        previous_entry = self._caller_entry_spec
+        if previous_entry is None and self.spec.hidden_size:
+            self._caller_entry_spec = TensorSpec(
+                (
+                    Symbol.BATCH.value,
+                    Symbol.SEQ.value,
+                    self.spec.hidden_size,
+                ),
+                self.context.dtype,
+            )
         lm_head_tensor: str | None = None
 
         from TraceLens.ModelUtils.block_tree import subgraph_warrants_json_export
 
         seen_shape_signatures: set[tuple[Any, ...]] = set()
-        for title, block_tree in block_trees:
-            graph = build_model_graph(block_tree, title=title, basic_ops=basic_ops)
-            operators = self.export_operators(graph, root=block_tree)
-            for op in operators:
-                if op.name == "lm_head":
-                    lm_head_tensor = "lm_head"
-            if not subgraph_warrants_json_export(block_tree, basic_ops=basic_ops):
-                continue
-            signature = subgraph_boundary_signature(
-                operators,
-                class_name=block_tree.class_name,
-            )
-            if signature is not None:
-                if signature in seen_shape_signatures:
+        try:
+            for title, block_tree in block_trees:
+                graph = build_model_graph(block_tree, title=title, basic_ops=basic_ops)
+                operators = self.export_operators(graph, root=block_tree)
+                for op in operators:
+                    if op.name == "lm_head":
+                        lm_head_tensor = "lm_head"
+                if not subgraph_warrants_json_export(block_tree, basic_ops=basic_ops):
                     continue
-                seen_shape_signatures.add(signature)
-            sections.append(
-                {
-                    "title": title,
-                    "operators": [op.to_dict() for op in operators],
-                }
-            )
+                signature = subgraph_boundary_signature(
+                    operators,
+                    class_name=block_tree.class_name,
+                )
+                if signature is None and not any(
+                    op.operation not in {"input", "output"} for op in operators
+                ):
+                    # No operand resolved, so every copy of this class exports the
+                    # same empty boundary. That is one section, as a shared shape was.
+                    signature = ("unshaped", block_tree.class_name)
+                if signature is not None:
+                    if signature in seen_shape_signatures:
+                        continue
+                    seen_shape_signatures.add(signature)
+                sections.append(
+                    {
+                        "title": title,
+                        "operators": [op.to_dict() for op in operators],
+                    }
+                )
+        finally:
+            self._caller_entry_spec = previous_entry
 
         if include_model_output:
             output_op = self.model_output_operator(
@@ -3491,7 +3757,7 @@ class ShapeInferencer:
         *,
         root: BlockNode | None,
         input_labels: list[str] | None = None,
-    ) -> TensorSpec:
+    ) -> TensorSpec | None:
         dtype = self.context.dtype
         synthetic = node.metadata.get("synthetic")
         class_name = (node.metadata.get("class_name") or node.label or "").strip()
@@ -3515,12 +3781,15 @@ class ShapeInferencer:
             entry = self._entry_spec_for(node, root)
             if entry is not None:
                 return entry
-            return self._activation_spec(dtype)
+            ranked = self._rank_constrained_param(root, node.label)
+            if ranked is not None:
+                return ranked
+            return None
 
         if synthetic in {"@output", "@loop_carried"}:
             if inputs:
                 return inputs[-1]
-            return self._activation_spec(dtype)
+            return None
 
         if node.metadata.get("constant") and not inputs:
             # A materialized constant/buffer leaf (e.g. the rotary ``inv_freq``):
@@ -3582,7 +3851,7 @@ class ShapeInferencer:
             return TensorSpec(shape=(), dtype=dtype)
 
         if (
-            node.label in {"×", "+", "Elementwise ×", "Multiply", "Add"}
+            node.label in {"×", "+", "Elementwise ×", "Multiply", "Add", "Remainder"}
             or synthetic == "@combine"
         ):
             operands = list(inputs)
@@ -3621,7 +3890,7 @@ class ShapeInferencer:
                             )
                     return widest
                 return self._elementwise_operand(operands)
-            return self._activation_spec(dtype)
+            return None
 
         # Catch-all for any remaining synthetic wiring nodes (kernel ports,
         # hidden_states, etc.) — silent passthrough, no warning.
@@ -3637,7 +3906,7 @@ class ShapeInferencer:
                     return meta_input
             if inputs:
                 return inputs[0]
-            return self._activation_spec(dtype)
+            return None
 
         # Meta-device ground-truth shapes (highest priority for real modules).
         meta_spec = self._lookup_meta_shape(node)
@@ -3685,7 +3954,11 @@ class ShapeInferencer:
             arange_dims = self.context.dims
             if owner_scalars:
                 arange_dims = {**self.context.dims, **owner_scalars}
-            length = _arange_axis(details, arange_dims)
+            length = _arange_axis(
+                details,
+                arange_dims,
+                self._extent_name_shapes(node, root, None),
+            )
             return TensorSpec(shape=(length,), dtype="int64")
 
         if operation_label in {
@@ -3742,7 +4015,7 @@ class ShapeInferencer:
             template = inputs[0] if inputs else None
             shape = _constructed_shape(details, size_dims, template, size_shapes)
             if shape is None:
-                return inputs[0] if inputs else self._activation_spec(dtype)
+                return inputs[0] if inputs else None
             return TensorSpec(
                 shape=shape,
                 dtype=_constructed_dtype(details)
@@ -3755,11 +4028,9 @@ class ShapeInferencer:
             # view/reshape there is no target-shape detail, so the old code path
             # (shared with view) always passed the tensor through unchanged,
             # leaving phantom rank downstream.
-            source = (
-                inputs[0]
-                if inputs
-                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            source = inputs[0] if inputs else external_spec()
+            if source is None:
+                return None
             shape = source.shape
             if not shape:
                 return source
@@ -3794,11 +4065,9 @@ class ShapeInferencer:
             )
 
         if operation_label == "pad":
-            source = (
-                inputs[0]
-                if inputs
-                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            source = inputs[0] if inputs else external_spec()
+            if source is None:
+                return None
             raw = _detail_value(details, "pad")
             if not raw or not source.shape:
                 return source
@@ -3830,11 +4099,9 @@ class ShapeInferencer:
         if operation_label in {"rearrange", "repeat"}:
             # einops already states the answer; apply it rather than passing
             # the tensor through at a rank the pattern just changed.
-            source = (
-                inputs[0]
-                if inputs
-                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            source = inputs[0] if inputs else external_spec()
+            if source is None:
+                return None
             pattern = _detail_value(details, "pattern")
             if not pattern or not source.shape:
                 return source
@@ -3866,11 +4133,9 @@ class ShapeInferencer:
             return TensorSpec(shape=rearranged, dtype=source.dtype)
 
         if operation_label in {"view", "reshape"}:
-            source = (
-                inputs[0]
-                if inputs
-                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            source = inputs[0] if inputs else external_spec()
+            if source is None:
+                return None
             shape_detail = next(
                 (
                     item.split(":", 1)[1].strip()
@@ -3941,9 +4206,15 @@ class ShapeInferencer:
             # after that and the concat at the end all inherited the missing axes.
             # Keep the stated rank, carrying an unresolved name as a symbolic
             # extent -- a starred prefix (``*x.shape[:-1]``) stands for an unknown
-            # NUMBER of axes, so that one genuinely cannot be counted.
+            # NUMBER of axes, so that one genuinely cannot be counted. A ``*``
+            # inside an axis (``num_windows_h * num_windows_w``) is arithmetic,
+            # not an unpack, and still counts as one axis.
             tokens = [token.strip() for token in shape_detail.split(",")]
-            if tokens and all(tokens) and not any("*" in token for token in tokens):
+            if (
+                tokens
+                and all(tokens)
+                and not any(token.startswith("*") for token in tokens)
+            ):
                 dims: list[Any] = []
                 negative_at: int | None = None
                 for position, token in enumerate(tokens):
@@ -4013,7 +4284,7 @@ class ShapeInferencer:
                         # as this one's -- the very thing every reader of a shape
                         # is entitled to assume it is not.
                         if ".shape[" in bare:
-                            return source
+                            return _source_if_rank_matches(source, tokens)
                         bare = " ".join(token.split())
                     dims.append(bare)
                 if negative_at is not None:
@@ -4034,10 +4305,10 @@ class ShapeInferencer:
                                 source.shape[: len(source.shape) - kept]
                             )
                     if residual is None:
-                        return source
+                        return _source_if_rank_matches(source, tokens)
                     dims[negative_at] = residual
                 return TensorSpec(shape=tuple(dims), dtype=source.dtype)
-            return source
+            return _source_if_rank_matches(source, tokens)
 
         if operation_label == "unsqueeze":
             source = inputs[0] if inputs else external_spec() or TensorSpec((), dtype)
@@ -4054,11 +4325,9 @@ class ShapeInferencer:
             )
 
         if operation_label == "slice":
-            source = (
-                inputs[0]
-                if inputs
-                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            source = inputs[0] if inputs else external_spec()
+            if source is None:
+                return None
             select_str = _detail_value(details, "select_dim")
             drop: set[int] = set()
             if select_str:
@@ -4240,14 +4509,12 @@ class ShapeInferencer:
                     (item for item in inputs if 0 not in tuple(item.shape)),
                     inputs[0],
                 )
-            return external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
+            return external_spec()
 
         if operation_label == "tile":
-            source = (
-                inputs[0]
-                if inputs
-                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            source = inputs[0] if inputs else external_spec()
+            if source is None:
+                return None
             repeat_str = _detail_value(details, "repeat")
             dim_str = _detail_value(details, "dim")
             dim = _int_dim(dim_str) if dim_str is not None else -1
@@ -4270,11 +4537,9 @@ class ShapeInferencer:
             return source
 
         if operation_label in {"split", "chunk", "unbind"}:
-            source = (
-                inputs[0]
-                if inputs
-                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            source = inputs[0] if inputs else external_spec()
+            if source is None:
+                return None
             # A tuple-unpacked split exposes one output port per slice (sized by
             # the ``PORT_SPEC_SEP`` post-pass in ``infer_model_graph``); the split
             # node itself represents the whole tensor being divided, so its own
@@ -4328,7 +4593,7 @@ class ShapeInferencer:
 
         if operation_label in {"concat", "stack"}:
             if not inputs:
-                return TensorSpec(self._active_hidden_shape(), dtype)
+                return None
             if operation_label == "stack":
                 # ``torch.stack`` inserts a brand-new size-N axis at ``dim``
                 # (default 0) -- NOT always at the front. Blindly prepending it
@@ -4393,9 +4658,9 @@ class ShapeInferencer:
             return base
 
         if operation_label in {"transpose", "permute"}:
-            source = (
-                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            source = inputs[0] if inputs else None
+            if source is None:
+                return None
             if operation_label == "transpose" and len(source.shape) >= 2:
                 dim0_str = _detail_value(details, "dim0")
                 dim1_str = _detail_value(details, "dim1")
@@ -4422,13 +4687,23 @@ class ShapeInferencer:
             # primitive is compiled -- there is no Python body to introspect --
             # and without it the op fell through to the per-module FX probe,
             # which is both slower and noisier than reading the two operands.
-            if len(inputs) >= 3 and inputs[0].shape and inputs[2].shape:
-                query, value = inputs[0], inputs[2]
+            query = (
+                self._operand_at(inputs, 0)
+                if self._last_input_positions
+                else (inputs[0] if inputs else None)
+            )
+            value = (
+                self._operand_at(inputs, 2)
+                if self._last_input_positions
+                else (inputs[2] if len(inputs) >= 3 else None)
+            )
+            if query is None or not query.shape:
+                return None
+            if value is not None and value.shape:
                 return TensorSpec(
                     shape=(*query.shape[:-1], value.shape[-1]), dtype=query.dtype
                 )
-            if inputs and inputs[0].shape:
-                return inputs[0]
+            return query
 
         if operation_label in {"matmul", "batchmatmul", "mm", "bmm"}:
             if len(inputs) >= 2:
@@ -4438,7 +4713,7 @@ class ShapeInferencer:
                     return TensorSpec(shape=out_shape, dtype=a.dtype)
             if inputs:
                 return inputs[0]
-            return TensorSpec(self._active_hidden_shape(), dtype)
+            return None
 
         # Scaled-dot-product attention's compiled core: the output keeps the
         # query's leading axes ``[..., S_q]`` and takes its last dim from the value
@@ -4471,7 +4746,7 @@ class ShapeInferencer:
                 return TensorSpec(shape=out_shape, dtype=query_spec.dtype)
             if inputs:
                 return inputs[0]
-            return TensorSpec(self._active_hidden_shape(), dtype)
+            return None
 
         if operation_label == "einsum":
             equation = _detail_value(details, "equation")
@@ -4481,19 +4756,19 @@ class ShapeInferencer:
                     return TensorSpec(shape=out_shape, dtype=inputs[0].dtype)
             if inputs:
                 return inputs[0]
-            return TensorSpec(self._active_hidden_shape(), dtype)
+            return None
 
         if operation_label == "nonzero":
-            source = (
-                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            source = inputs[0] if inputs else None
+            if source is None:
+                return None
             ndim = len(source.shape) if source.shape else 1
             return TensorSpec(shape=("nnz", ndim), dtype="int64")
 
         if operation_label == "one hot":
-            source = (
-                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            source = inputs[0] if inputs else None
+            if source is None:
+                return None
             num_classes = self.context.dims.get(
                 Symbol.EXPERTS.value, Symbol.EXPERTS.value
             )
@@ -4505,17 +4780,20 @@ class ShapeInferencer:
         }:
             if inputs:
                 return inputs[0]
-            return TensorSpec(self._active_hidden_shape(), dtype)
+            return None
 
         if operation_label in {"cast", "contiguous"}:
             # Both keep the source shape. ``contiguous`` is a pure layout no-op
             # (shape *and* dtype pass through); ``cast`` reads its ``dtype:``
-            # detail to change dtype only.
-            source = (
-                inputs[0]
-                if inputs
-                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            # detail to change dtype only. The source is argument 0: a later
+            # operand that resolved cannot stand in for one that did not.
+            source = self._operand_at(inputs, 0)
+            if source is None and not self._last_input_positions:
+                source = inputs[0] if inputs else None
+            if source is None:
+                source = external_spec()
+            if source is None:
+                return None
             cast_dtype = source.dtype
             if operation_label == "cast":
                 dtype_detail = _detail_value(details, "dtype") or ""
@@ -4529,11 +4807,9 @@ class ShapeInferencer:
             # Drop a size-1 axis (torch no-ops on any other size). ``x.squeeze(dim)``
             # normalizes a negative ``dim`` against rank; bare ``x.squeeze()`` drops
             # every size-1 axis.
-            source = (
-                inputs[0]
-                if inputs
-                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            source = inputs[0] if inputs else external_spec()
+            if source is None:
+                return None
             shape = source.shape
             if not shape:
                 return source
@@ -4560,21 +4836,25 @@ class ShapeInferencer:
             # unlike view/reshape, ``expand``'s ``-1`` means "keep this axis" (not
             # element conservation). Falls back to passthrough when the target
             # cannot be positionally aligned, never corrupting rank.
-            source = (
-                inputs[0]
-                if inputs
-                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            source = inputs[0] if inputs else external_spec()
+            if source is None:
+                return None
             shape_detail = _detail_value(details, "shape") or ""
-            resolved = _resolve_expand_shape(shape_detail, source, self.context.dims)
+            resolved = _resolve_expand_shape(
+                shape_detail,
+                source,
+                self.context.dims,
+                self._extent_name_shapes(node, root, source),
+                _shape_local_reads(details),
+            )
             if resolved is not None:
                 return TensorSpec(shape=resolved, dtype=source.dtype)
             return source
 
         if operation_label == "topk":
-            source = (
-                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            source = inputs[0] if inputs else None
+            if source is None:
+                return None
             top_k = self.context.dims.get(
                 Symbol.EXPERTS_PER_TOK.value, Symbol.EXPERTS_PER_TOK.value
             )
@@ -4624,9 +4904,9 @@ class ShapeInferencer:
                 return TensorSpec(shape=tuple(idx_shape) + tail, dtype=base.dtype)
             if base is not None:
                 return base
-            return (
-                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            if inputs:
+                return inputs[0]
+            return None
 
         if operation_label == "indexing":
             # A subscript whose recorded structure and wired operands line up
@@ -4738,7 +5018,7 @@ class ShapeInferencer:
             source = base if base is not None else (inputs[0] if inputs else None)
             index = int_indices[0] if int_indices else None
             if source is None:
-                source = TensorSpec(self._active_hidden_shape(), dtype)
+                return None
             shape = (
                 index.shape
                 if index is not None
@@ -4752,9 +5032,9 @@ class ShapeInferencer:
             return TensorSpec(shape=shape, dtype=source.dtype)
 
         if operation_label in _REDUCTION_LABELS:
-            source = (
-                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            source = inputs[0] if inputs else None
+            if source is None:
+                return None
             index_reduction = operation_label in {"argmax", "argmin"}
             boolean_reduction = operation_label in {"any", "all"}
             out_dtype = _reduction_dtype(
@@ -4810,7 +5090,7 @@ class ShapeInferencer:
             if inputs:
                 source = max(inputs, key=_broadcast_rank)
                 return TensorSpec(shape=source.shape, dtype="bool")
-            return TensorSpec(shape=self._active_hidden_shape(), dtype="bool")
+            return None
 
         # An activation module resolved from a registry (e.g. ``act_fn = ACT2FN[...]``)
         # keeps its attribute name as the label (``act_fn``) while its class is the
@@ -4820,6 +5100,11 @@ class ShapeInferencer:
             operation_label in _POINTWISE_LABELS
             or (class_name or "").strip().lower() in _POINTWISE_LABELS
         ):
+            if inputs and self._operand_positions_skip():
+                # A missing operand has a rank of its own. The one that did
+                # resolve is not the result: ``hidden * weight`` with ``hidden``
+                # unknown is not the weight's ``[H]``.
+                return None
             if inputs:
                 if op_writes_into_its_first_operand(
                     _detail_value(details, "raw_op") or operation_label
@@ -4841,8 +5126,11 @@ class ShapeInferencer:
                     # accumulator. With the receiver genuinely unavailable,
                     # fall through rather than answer with a different operand.
                     receiver = self._operand_at(inputs, 0)
-                    if receiver is not None:
-                        return TensorSpec(shape=receiver.shape, dtype=receiver.dtype)
+                    if receiver is None:
+                        # The tensor written into did not resolve. A later
+                        # operand is not that tensor.
+                        return None
+                    return TensorSpec(shape=receiver.shape, dtype=receiver.dtype)
                 source = max(inputs, key=_broadcast_rank)
                 if operation_label == "where" and len(inputs) == 1:
                     # ``torch.where(condition)`` is NOT the three-argument
@@ -4871,7 +5159,7 @@ class ShapeInferencer:
                             dtype=max(values, key=_broadcast_rank).dtype,
                         )
                 return TensorSpec(shape=source.shape, dtype=source.dtype)
-            return TensorSpec(shape=self._active_hidden_shape(), dtype=dtype)
+            return None
 
         linear_spec = self._lookup_linear_spec(node, root=root)
         if linear_spec is not None:
@@ -4917,11 +5205,9 @@ class ShapeInferencer:
                 stated = self._operand_at(inputs, 0)
                 if stated is not None and stated.shape:
                     activation_input = stated
-            in_shape = (
-                activation_input.shape
-                if activation_input is not None
-                else self._active_hidden_shape()
-            )
+            if activation_input is None or not activation_input.shape:
+                return None
+            in_shape = activation_input.shape
             out_features = linear_spec.out_features if linear_spec is not None else None
             if out_features is None and _detail_value(details, "raw_op") == "addmm":
                 # `addmm(bias, x, weight)` is an affine projection that stores
@@ -4978,9 +5264,7 @@ class ShapeInferencer:
             if out_features is None and inputs:
                 out_features = in_shape[-1]
             if out_features is None:
-                out_features = self.context.dims.get(
-                    Symbol.HIDDEN.value, Symbol.HIDDEN.value
-                )
+                return None
             output_dtype = (
                 "float32" if any("float32" in item for item in details) else dtype
             )
@@ -4990,14 +5274,12 @@ class ShapeInferencer:
 
         conv_spec = self._lookup_conv_spec(node, root=root)
         if conv_spec is not None or _is_conv(node):
-            source = (
-                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
-            )
-            out_channels = (
-                conv_spec.out_channels
-                if conv_spec is not None
-                else self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            )
+            source = inputs[0] if inputs else None
+            if source is None:
+                return None
+            out_channels = conv_spec.out_channels if conv_spec is not None else None
+            if out_channels is None:
+                return None
             shape = list(source.shape)
             if not shape:
                 return TensorSpec(shape=(out_channels,), dtype=source.dtype)
@@ -5021,20 +5303,16 @@ class ShapeInferencer:
             return TensorSpec(shape=tuple(shape), dtype=source.dtype)
 
         embedding_spec = self._lookup_embedding_spec(node, root=root)
-        if embedding_spec is not None or _is_embedding(block_class, node):
-            hidden = (
-                embedding_spec.embedding_dim
-                if embedding_spec
-                else self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            )
+        if embedding_spec is not None and inputs and inputs[0].shape:
             return TensorSpec(
-                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
+                shape=(*inputs[0].shape, embedding_spec.embedding_dim),
+                dtype=dtype,
             )
 
         if _is_norm(block_class, node):
             if inputs:
                 return inputs[0]
-            return self._activation_spec(dtype)
+            return None
 
         if node.operation == OperationKind.GPU_KERNEL or class_name in {
             "AttentionOp",
@@ -5060,7 +5338,7 @@ class ShapeInferencer:
             for operand in inputs:
                 if operand.shape:
                     return operand
-            return self._activation_spec(dtype)
+            return None
 
         # A module that is not a Linear, a Conv or an Embedding, but owns a
         # matrix weight of its own, still projects along it. A mixture-of-experts
@@ -5107,7 +5385,7 @@ class ShapeInferencer:
             )
             if inputs:
                 return inputs[0]
-            return self._activation_spec(dtype)
+            return None
 
         if (
             node.kind in {NodeKind.BLOCK, NodeKind.TOP_LEVEL}
@@ -5115,18 +5393,11 @@ class ShapeInferencer:
         ):
             if inputs:
                 return inputs[0]
-            return self._activation_spec(dtype)
+            return None
 
         introspected = self._introspect_forward_shape(node, inputs, root=root)
         if introspected is not None:
             return introspected
-
-        # Fallback: attention modules produce (B, S, H) — derive from config.
-        node_name = (
-            node.metadata.get("attr_name") or node.id.rsplit(":", 1)[-1] or ""
-        ).lower()
-        if "attention" in node_name:
-            return self._activation_spec(dtype)
 
         # A custom submodule whose forward no symbolic rule or AST simulation
         # resolved (``compressor`` -- data-dependent windowing, tuple return):
@@ -5147,6 +5418,15 @@ class ShapeInferencer:
         if torch_op_spec is not None:
             return torch_op_spec
 
+        # An unresolved module (``AutoModel.from_config`` leaves the class
+        # unnamed) still has the output the meta-device forward recorded for
+        # that attribute. Passing the first wired tensor through would publish
+        # whatever happened to be plugged into the call, which is not the
+        # module's result.
+        meta_module_spec = self._lookup_meta_module_shape(node)
+        if meta_module_spec is not None:
+            return meta_module_spec
+
         if inputs:
             _log.warning(
                 "No shape inference rule for %s (label=%r, class=%r, kind=%s); "
@@ -5160,13 +5440,13 @@ class ShapeInferencer:
 
         _log.warning(
             "No shape inference rule for %s (label=%r, class=%r, kind=%s); "
-            "defaulting to (B, S, H)",
+            "leaving it unshaped",
             node.id,
             node.label,
             node.metadata.get("class_name"),
             node.operation,
         )
-        return TensorSpec(shape=self._active_hidden_shape(), dtype=dtype)
+        return None
 
     # ------------------------------------------------------------------
     # Meta-device shape lookup
@@ -5539,11 +5819,6 @@ class ShapeInferencer:
             # multi-head view/transpose) that AST simulation cannot resolve.
             # Derive output from config: attention preserves the activation
             # geometry of its section (``(B, S, H)`` text, ``(Pv, Hv)`` vision).
-            if "attention" in (structure.name or "").lower():
-                return TensorSpec(
-                    shape=self._active_hidden_shape(),
-                    dtype=self.context.dtype,
-                )
             result = self._simulate_forward_ops(
                 structure, inputs, root=root, guard_name=class_name
             )
@@ -5720,7 +5995,30 @@ class ShapeInferencer:
                 extractor.var_producer[input_name] = input_name
             extractor.statements(method_func.body)
             if not extractor.operations:
-                return None
+                # ``return self.other(...)`` has no op of its own. The shape is
+                # the other method's shape; the caller's inputs are that
+                # method's inputs, in the same order.
+                from TraceLens.ModelUtils.ast_analyze import (
+                    _direct_self_method_call,
+                )
+
+                found = _direct_self_method_call(method_func)
+                if found is None:
+                    return None
+                target_name = found[0]
+                target_guard = f"method:{target_name}"
+                if target_name == method_name or target_guard in self._introspecting:
+                    return None
+                self._introspecting.add(guard)
+                try:
+                    followed = self._introspect_method_shape(
+                        target_name, inputs, root=root
+                    )
+                finally:
+                    self._introspecting.discard(guard)
+                if followed is not None:
+                    return followed
+                continue
             fwd_ops = {op.attr_name: op for op in extractor.operations}
             _slots, _order, primary = _extract_forward_return_metadata(
                 method_func, extractor.var_producer
@@ -5756,10 +6054,9 @@ class ShapeInferencer:
 
         self._introspecting.add(guard_name)
         try:
-            dtype = self.context.dtype
-            input_spec = (
-                inputs[0] if inputs else TensorSpec(self._active_hidden_shape(), dtype)
-            )
+            if not inputs:
+                return None
+            input_spec = inputs[0]
             op_shapes: dict[str, TensorSpec] = {}
             input_name = structure.forward_input_name
 
@@ -5784,9 +6081,17 @@ class ShapeInferencer:
                         "external_inputs": list(op.external_inputs),
                     },
                 )
-                op_shapes[op_id] = self._infer_node_output(
-                    temp_node, pred_specs, root=root
-                )
+                # This walk hands each op the specs it already resolved.
+                # The positions recorded for the outer graph node do not
+                # describe that list, and a gap in them would blank the op.
+                previous_positions = self._last_input_positions
+                self._last_input_positions = []
+                try:
+                    inferred = self._infer_node_output(temp_node, pred_specs, root=root)
+                finally:
+                    self._last_input_positions = previous_positions
+                if inferred is not None:
+                    op_shapes[op_id] = inferred
 
             # Return the primary return producer's shape, or the last op.
             ret_slot = structure.primary_return_slot
@@ -6015,6 +6320,18 @@ class ShapeInferencer:
                     dtype=source.dtype,
                 )
         return None
+
+    def _operand_positions_skip(self) -> bool:
+        """True when a wired operand was dropped before ``inputs`` was built.
+
+        ``inputs`` only contains operands whose shapes resolved, so a binary op
+        can be left holding just its second argument. Positions record the
+        argument index of each survivor; a gap means one is missing.
+        """
+        positions = self._last_input_positions
+        if not positions:
+            return False
+        return positions != list(range(positions[-1] + 1))
 
     def _operand_at(
         self, inputs: list[TensorSpec], argument_position: int
@@ -6731,7 +7048,7 @@ def _constructed_shape(
         token = token.strip()
         read = shape_locals.get(token)
         if read is not None:
-            measured = _snapshot_axis(read, frozenset({read}), named_shapes)
+            measured = _agreeing_shape_reads(read, named_shapes)
             if measured is not None:
                 axes.append(measured)
                 index += 1
@@ -6847,7 +7164,11 @@ def _constructed_dtype(details: Sequence[str]) -> str | None:
     return name or None
 
 
-def _arange_axis(details: Sequence[str], dims: dict[str, DimExpr]) -> DimExpr:
+def _arange_axis(
+    details: Sequence[str],
+    dims: dict[str, DimExpr],
+    named_shapes: dict[str, tuple[DimExpr, ...]] | None = None,
+) -> DimExpr:
     """Length of the 1-D axis produced by ``torch.arange(start, stop, step)``.
 
     Bounds are the expressions the extractor stamped (``arange_start`` /
@@ -6865,6 +7186,11 @@ def _arange_axis(details: Sequence[str], dims: dict[str, DimExpr]) -> DimExpr:
         as_int = _int_dim(token)
         if as_int is not None:
             return as_int
+        traced = _shape_local_reads(details).get(token)
+        if traced:
+            measured = _agreeing_shape_reads(traced, named_shapes)
+            if measured is not None:
+                return measured
         val = _resolve_dim_name(token, dims)
         if val is not None:
             return val
@@ -6897,6 +7223,32 @@ def _arange_axis(details: Sequence[str], dims: dict[str, DimExpr]) -> DimExpr:
 _NODE_SOURCE_LINE_RE = re.compile(r"@(?:op|fn|positional)_l(?P<line>\d+)[_:]")
 #: One ``<tensor>.shape[i]`` read inside a host-scalar expression.
 _SHAPE_READ_RE = re.compile(r"(?P<name>[A-Za-z_]\w*)\.shape\[(?P<axis>-?\d+)\]")
+
+
+def _agreeing_shape_reads(
+    spec: str,
+    named_shapes: dict[str, tuple[DimExpr, ...]] | None,
+) -> DimExpr | None:
+    """The extent every traced read in ``spec`` names, when they agree.
+
+    ``spec`` is one ``<tensor>.shape[axis]`` or several joined with ``|`` — the
+    reads a local was bound to across the branches that reach the use. The
+    extent is reported only when each read resolves and they are the same axis.
+    A name with no trace, or traces that disagree, is not guessed.
+    """
+    tokens = [part.strip() for part in str(spec).split("|") if part.strip()]
+    if not tokens:
+        return None
+    resolved: list[DimExpr] = []
+    for token in tokens:
+        value = _snapshot_axis(token, frozenset({token}), named_shapes)
+        if value is None:
+            return None
+        resolved.append(value)
+    first = resolved[0]
+    if any(item != first for item in resolved[1:]):
+        return None
+    return first
 
 
 def _shape_local_reads(details: Sequence[str]) -> dict[str, str]:
@@ -7188,31 +7540,42 @@ def _resolve_expand_shape(
     detail: str,
     source: TensorSpec,
     dims: dict[str, DimExpr],
+    named_shapes: dict[str, tuple[DimExpr, ...]] | None = None,
+    shape_locals: dict[str, str] | None = None,
 ) -> tuple[DimExpr, ...] | None:
     """Resolve ``Tensor.expand`` arguments into a concrete broadcast shape.
 
     ``expand`` broadcasts existing size-1 axes to a larger size; a ``-1`` (or a
     value matching the current axis) keeps that axis unchanged. This differs from
     ``view``/``reshape`` (whose ``-1`` means element conservation), so it needs
-    its own resolver. Alignment is positional against ``source.shape``: on any
-    rank mismatch — the args cannot be aligned axis-for-axis (e.g. the router's
-    ``-1, 1, 288`` against a 4-D source) — return ``None`` so the caller passes
-    the source through rather than corrupting its rank.
+    its own resolver. Alignment is positional from the right, matching
+    broadcasting. ``expand`` may prepend dimensions, so a target rank larger
+    than the recovered source rank left-pads that source with size-1 axes. A
+    smaller target rank is invalid and returns ``None``.
     """
     if not detail or not source.shape:
         return None
     parts = [p.strip() for p in detail.split(",") if p.strip()]
-    if len(parts) != len(source.shape):
-        return None  # cannot align axis-for-axis — pass through
+    if len(parts) < len(source.shape):
+        return None
+    source_shape: tuple[DimExpr, ...] = (1,) * (len(parts) - len(source.shape)) + tuple(
+        source.shape
+    )
     resolved: list[DimExpr] = []
-    for part, current in zip(parts, source.shape):
+    for part, current in zip(parts, source_shape):
         if part == "-1":
             resolved.append(current)
             continue
         try:
             target: DimExpr | None = int(part)
         except ValueError:
-            target = _resolve_dim_name(part, dims)
+            traced = (shape_locals or {}).get(part)
+            if traced:
+                target = _agreeing_shape_reads(traced, named_shapes)
+            else:
+                target = _snapshot_axis(part, frozenset({part}), named_shapes)
+            if target is None:
+                target = _resolve_dim_name(part, dims)
         # Only a genuine size-1 axis broadcasts; every other axis keeps its
         # current (possibly symbolic) size — matching what a ``-1`` would do and
         # torch's requirement that a non-1 axis equal the requested size.

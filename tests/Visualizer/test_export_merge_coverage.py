@@ -48,6 +48,7 @@ from TraceLens.ModelUtils.shape_inference import (
     _dim_term,
     _int_dim,
     _nested_dim_aliases,
+    _param_is_rank2_matrix,
     _parse_module_ctor,
     _parse_tensor_ctor_shape,
     _replace_last_dim,
@@ -709,8 +710,7 @@ def test_shape_format_annotation_and_empty_shape_paths():
     # Human display is bracketed and keeps ``*`` for merged dims; the unicode
     # multiply signs fold to ``*`` and the non-ASCII ``λ`` drops out.
     assert shapes.format_shape(spec) == "[B, 2*H, N*D, ]"
-    # tensor_shape (edge labels) now uses the same bracket form as node attrs.
-    assert shapes.format_shape_tensor(spec) == "[B, 2*H, N*D, ] bfloat16"
+    assert shapes.format_shape_with_dtype(spec) == "[B, 2*H, N*D, ] bfloat16"
 
     node = {
         "id": "p/key",
@@ -1826,7 +1826,6 @@ def test_fill_missing_node_shapes_cast_resolves_downcast_dtype():
                     "id": "0",
                     "attrs": [
                         {"key": "shape", "value": "B x S x 4 float32"},
-                        {"key": "tensor_shape", "value": "BxSx4 float32"},
                         {"key": "dtype", "value": "float32"},
                     ],
                 }
@@ -1989,6 +1988,13 @@ def test_shape_module_registry_lookup_and_ambiguity():
         # reduces the same way. Only an axis this shape does not carry is left.
         ("sum", [TensorSpec(("B", "S", 8))], ["dim: 2"], ("B", "S"), "float16"),
         (
+            "sum",
+            [TensorSpec(("B", "S", 7168), "bfloat16")],
+            ["dtype: torch.int32", "dim: -1"],
+            ("B", "S"),
+            "bfloat16",
+        ),
+        (
             "multiply",
             [TensorSpec((8,)), TensorSpec(("B", "S", 16))],
             [],
@@ -2057,12 +2063,39 @@ def test_shape_special_nodes_linear_router_and_fallbacks():
         [TensorSpec(("B", "S", 16))],
         root=None,
     ).shape == ("B", "S", 16)
-    assert inferencer._infer_node_output(
-        _model_node("Kernel", operation=OperationKind.GPU_KERNEL), [], root=None
-    ).shape == ("B", "S", 16)
-    assert inferencer._infer_node_output(
-        _model_node("Unknown", operation=OperationKind.UNKNOWN), [], root=None
-    ).shape == ("B", "S", 16)
+    assert (
+        inferencer._infer_node_output(
+            _model_node("Kernel", operation=OperationKind.GPU_KERNEL), [], root=None
+        )
+        is None
+    )
+    assert (
+        inferencer._infer_node_output(
+            _model_node("Unknown", operation=OperationKind.UNKNOWN), [], root=None
+        )
+        is None
+    )
+
+
+def test_raising_rank2_guard_and_matrix_slice_names_batch_and_sequence():
+    source = ast.parse("""
+class Attention:
+    def forward(self, hidden_states, attention_mask=None):
+        if attention_mask is not None:
+            if attention_mask.dim() != 2:
+                attention_mask = kwargs.get("padding_mask")
+            if attention_mask is not None and attention_mask.dim() != 2:
+                raise ValueError("attention_mask must be [batch_size, seq_len]")
+        batch_size, q_len, _ = hidden_states.shape
+        if attention_mask is not None:
+            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
+        if pixel_values is not None and pixel_values.dim() != 4:
+            raise ValueError("pixel_values must be rank 4")
+""")
+    forward = source.body[0].body[0]
+    assert _param_is_rank2_matrix(forward, "attention_mask")
+    assert not _param_is_rank2_matrix(forward, "pixel_values")
+    assert not _param_is_rank2_matrix(forward, "hidden_states")
 
 
 def test_fx_op_fallback_join_and_occurrence_counting():
@@ -2627,7 +2660,7 @@ def test_shape_external_spec_and_empty_combine_fallbacks():
     combine = inferencer._infer_node_output(
         _model_node("Combine", synthetic="@combine"), [], root=None
     )
-    assert combine == TensorSpec(("B", "S", 16))
+    assert combine is None
     parameter_view = inferencer._infer_node_output(
         _model_node("view", external_inputs=["self.matrix"]), [], root=None
     )
@@ -2641,7 +2674,7 @@ def test_shape_external_spec_and_empty_combine_fallbacks():
     )
     assert bias_unsqueeze == TensorSpec((1, 8))
     default_view = inferencer._infer_node_output(_model_node("reshape"), [], root=None)
-    assert default_view == TensorSpec(("B", "S", 16))
+    assert default_view is None
 
 
 def test_shape_build_and_save_operator_export_fallbacks(
@@ -2765,10 +2798,7 @@ def _port(node_id, key, port_id, shape):
         key: [
             {
                 "id": port_id,
-                "attrs": [
-                    {"key": "shape", "value": shape},
-                    {"key": "tensor_shape", "value": shape.replace(" x ", "x")},
-                ],
+                "attrs": [{"key": "shape", "value": shape}],
             }
         ],
     }
@@ -2859,8 +2889,8 @@ def test_ensure_image_mask_node_dedupes_and_stamps_bool_shape():
 
 
 def test_attach_vision_language_combine_applies_shape_from_context():
-    # With a shape inferencer available, the combine carries the (B, S, hidden)
-    # embedding shape so downstream nodes resolve their inputs.
+    # The combine is the scatter of the text embeddings. With no text tensor
+    # recorded, it stays unshaped rather than being given the hidden activation.
     context = SimpleNamespace(dims={merge.Symbol.HIDDEN.value: 4096}, dtype="float16")
     shape_inferencer = SimpleNamespace(context=context)
     nodes: list[dict] = []
@@ -2871,14 +2901,7 @@ def test_attach_vision_language_combine_applies_shape_from_context():
         shape_inferencer=shape_inferencer,
     )
     combine = nodes[-1]
-    shape_attr = next(
-        attr
-        for meta in combine["outputsMetadata"]
-        for attr in meta["attrs"]
-        if attr["key"] == "shape"
-    )
-    assert "4096" in shape_attr["value"]
-    assert "float16" in shape_attr["value"]
+    assert not combine.get("outputsMetadata")
 
 
 def test_attach_vision_language_combine_noop_without_text_exits():
@@ -2982,6 +3005,96 @@ def test_merge_graph_emits_vision_group_and_visual_language_edge(
     )
     sources = {edge["sourceNodeId"] for edge in combine["incomingEdges"]}
     assert sources == {"embed_tokens", "@image_mask", "visual/@output"}
+
+
+def test_vision_combine_uses_embeddings_not_a_later_positional_module(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A rotary pre-module is loop-invariant, not the text scatter input."""
+    embed = _component(
+        "embed_tokens", "embedding", class_name="Embedding", label="Embedding"
+    )
+    rotary = _component(
+        "rotary_emb", "positional", class_name="Rotary", label="Rotary", order=1
+    )
+    vision = _component(
+        "visual", "vision", class_name="VisionModel", label="Vision Tower", order=0
+    )
+    spec = _spec(
+        stack_pre=[embed, rotary],
+        stack_tail=[],
+        block_components=[],
+        stack_model_class="Stack",
+        class_registry={
+            "Stack": SimpleNamespace(
+                init_assignments={},
+                forward_calls=["embed_tokens", "rotary_emb"],
+                forward_step_predecessor_args={},
+            )
+        },
+    )
+    _vision_merge_monkeypatch(monkeypatch, embed=embed, vision=vision)
+    monkeypatch.setattr(merge, "_stack_pre_components", lambda _spec: [embed, rotary])
+    monkeypatch.setattr(
+        merge,
+        "stack_entry_dataflow",
+        lambda _cls: SimpleNamespace(
+            operations=(), output_producer="embed_tokens", var_producers={}
+        ),
+    )
+    monkeypatch.setattr(
+        merge,
+        "component_has_detail_section",
+        lambda component, _spec: component.attr_name == "visual",
+    )
+    monkeypatch.setattr(
+        merge,
+        "_resolve_section_tree_for_component",
+        lambda *args, **kwargs: (
+            "Vision Tower",
+            BlockNode("visual", "VisionModel", "vision", "Vision Tower"),
+        ),
+    )
+    monkeypatch.setattr(merge, "is_transparent_inline_expansion", lambda tree: False)
+    monkeypatch.setattr(
+        merge, "expand_block_tree_inplace", lambda tree, basic_ops=None: tree
+    )
+
+    def fake_append(nodes, **kwargs):
+        prefix, namespace = kwargs["id_prefix"], kwargs["namespace_prefix"]
+        if prefix == "visual":
+            nodes.append({"id": "visual/@output", "namespace": "visual"})
+            return [("visual/@output", "result")]
+        nodes.append(
+            {
+                "id": prefix,
+                "namespace": namespace,
+                "incomingEdges": [
+                    merge._source_edge(source, "0")
+                    for source in kwargs["previous_exits"]
+                ],
+            }
+        )
+        return [prefix]
+
+    seen_decoder_inputs: list[object] = []
+
+    def fake_decoder(nodes, **kwargs):
+        seen_decoder_inputs.extend(kwargs["previous_exits"])
+        return list(kwargs["previous_exits"])
+
+    monkeypatch.setattr(merge, "_append_section", fake_append)
+    monkeypatch.setattr(merge, "_append_decoder_layers", fake_decoder)
+    monkeypatch.setattr(
+        merge, "_thread_loop_invariant_inputs", lambda *args, **kwargs: None
+    )
+
+    graph = merge.build_merged_model_graph(spec)
+    combine = next(
+        node for node in graph["nodes"] if node["id"] == "@vision_language_combine"
+    )
+    assert combine["incomingEdges"][0]["sourceNodeId"] == "embed_tokens"
+    assert seen_decoder_inputs == [("@vision_language_combine", "0")]
 
 
 def _build_vision_graph_with_raw_config(monkeypatch, raw_config):
@@ -3152,12 +3265,73 @@ def test_bracket_shape_display_round_trips():
     assert shapes.parse_shape_dims(shapes.format_shape(spec)) == ["B", "S", "4096"]
     # Legacy `` x `` form is still parseable defensively.
     assert shapes.parse_shape_dims("B x S x 4096") == ["B", "S", "4096"]
-    # tensor_shape (edge labels) now uses the bracket form on every edge.
-    assert shapes.format_shape_tensor(spec) == "[B, S, 4096] bfloat16"
-    # A shape without a dtype omits the suffix in both display forms.
+    # A shape without a dtype omits the suffix.
     no_dtype = TensorSpec(("B", "S", 4096), "")
     assert shapes.format_shape_with_dtype(no_dtype) == "[B, S, 4096]"
-    assert shapes.format_shape_tensor(no_dtype) == "[B, S, 4096]"
+
+
+def test_tensor_shape_alias_is_folded_into_shape():
+    nodes = [
+        {
+            "id": "adapter",
+            "outputsMetadata": [
+                {
+                    "id": "0",
+                    "attrs": [{"key": "tensor_shape", "value": "tensor<1x2x3>"}],
+                }
+            ],
+        },
+        {
+            "id": "both",
+            "inputsMetadata": [
+                {
+                    "id": "0",
+                    "attrs": [
+                        {"key": "shape", "value": "[B, S]"},
+                        {"key": "tensor_shape", "value": "BxS"},
+                        {"key": "port_label", "value": "hidden"},
+                    ],
+                }
+            ],
+        },
+    ]
+    shapes.canonicalize_port_shape_keys(nodes)
+    assert nodes[0]["outputsMetadata"][0]["attrs"] == [
+        {"key": "shape", "value": "1 x 2 x 3"}
+    ]
+    assert nodes[1]["inputsMetadata"][0]["attrs"] == [
+        {"key": "shape", "value": "[B, S]"},
+        {"key": "port_label", "value": "hidden"},
+    ]
+
+    payload = {
+        "graphCollections": [
+            {
+                "graphs": [
+                    {
+                        "nodes": [
+                            {
+                                "id": "n",
+                                "outputsMetadata": [
+                                    {
+                                        "id": "0",
+                                        "attrs": [
+                                            {"key": "tensor_shape", "value": "4x8"}
+                                        ],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+    shapes.canonicalize_payload_shapes(payload)
+    attrs = payload["graphCollections"][0]["graphs"][0]["nodes"][0]["outputsMetadata"][
+        0
+    ]["attrs"]
+    assert attrs == [{"key": "shape", "value": "4 x 8"}]
 
 
 def test_split_and_write_port_shape_bracket_round_trip():
@@ -3174,11 +3348,7 @@ def test_split_and_write_port_shape_bracket_round_trip():
     shape_attr = metadata["attrs"][0]
     merge._write_port_shape(metadata, shape_attr, ["B*S", "4096"], "bfloat16")
     assert shape_attr["value"] == "[B*S, 4096] bfloat16"
-    tensor_val = next(
-        a["value"] for a in metadata["attrs"] if a["key"] == "tensor_shape"
-    )
-    # tensor_shape (edge labels) now uses the bracket form on every edge.
-    assert tensor_val == "[B*S, 4096] bfloat16"
+    assert [attr["key"] for attr in metadata["attrs"]] == ["shape"]
 
 
 def test_merge_data_movement_reshape_flatten_and_expand():
@@ -3527,6 +3697,22 @@ def _shape_node(label: str, details: list[str] | None = None) -> dict:
         attrs.append({"key": "details", "value": "; ".join(details)})
     node["attrs"] = attrs
     return node
+
+
+def test_fallback_mean_drops_the_axis_its_dim_names():
+    """A collapsed ``mean(dim=2)`` must not keep the stream it reduces away."""
+    source = TensorSpec(("B", "S", 4, 4096), "bfloat16")
+    result = shapes._fallback_node_spec(
+        _shape_node("Mean", ["dim: 2", "raw_op: mean"]), [("0", source)]
+    )
+    assert result.shape == ("B", "S", 4096)
+    assert result.dtype == "bfloat16"
+
+
+def test_fallback_mean_without_a_dim_passes_its_input_through():
+    source = TensorSpec(("B", "S", 4, 4096), "bfloat16")
+    result = shapes._fallback_node_spec(_shape_node("Mean"), [("0", source)])
+    assert result.shape == ("B", "S", 4, 4096)
 
 
 def test_fallback_squeeze_without_a_dim_drops_every_unit_axis():
