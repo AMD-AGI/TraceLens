@@ -415,3 +415,10 @@ def test_resolve_engine_modeling_files_misses_cleanly(tmp_path, monkeypatch):
     )
     assert files == []
     assert labels == []
+
+
+def test_fetch_github_file_rejects_a_repo_outside_the_policy():
+    from TraceLens.ModelUtils.github import GitHubRef, fetch_github_file
+
+    with pytest.raises(PermissionError):
+        fetch_github_file(GitHubRef(owner="not-allowed", repo="secret"), "model.py")

@@ -157,10 +157,10 @@ def _published_transformers_versions() -> list[str] | None:
     """Version strings PyPI publishes for transformers, or ``None`` if unread."""
     try:
         import json as _json
-        from urllib.request import urlopen
 
-        with urlopen(_PYPI_TRANSFORMERS_JSON, timeout=30) as response:
-            payload = _json.load(response)
+        from TraceLens.ModelUtils.github import _download_bytes
+
+        payload = _json.loads(_download_bytes(_PYPI_TRANSFORMERS_JSON))
     except Exception:  # noqa: BLE001 - an unread index is not an empty one
         return None
     releases = payload.get("releases") if isinstance(payload, dict) else None

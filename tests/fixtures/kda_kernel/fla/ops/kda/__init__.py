@@ -1,4 +1,9 @@
-from .chunk import chunk_kda
-from .chunk_fwd import chunk_kda_fwd
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
-__all__ = ["chunk_kda", "chunk_kda_fwd"]
+from .chunk import chunk_kda, fused_recurrent_kda
+
+__all__ = ["chunk_kda", "fused_recurrent_kda"]

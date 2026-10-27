@@ -6,11 +6,9 @@
 
 import subprocess
 from datetime import datetime
-from pathlib import Path
 from setuptools import setup, find_packages
 
 _BASE_VERSION = "0.1.0"
-_ROOT = Path(__file__).resolve().parent
 
 
 def _wheel_version():
@@ -30,16 +28,6 @@ def _wheel_version():
         return _BASE_VERSION
 
 
-def _read_requirements(path: Path) -> list[str]:
-    if not path.is_file():
-        return []
-    return [
-        line.strip()
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
-
-
 with open("README.md", encoding="utf-8") as _readme:
     _LONG_DESCRIPTION = _readme.read()
 
@@ -53,9 +41,14 @@ def _extras_require():
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
         ],
-        "Visualizer": _read_requirements(
-            _ROOT / "TraceLens" / "Visualizer" / "requirements.txt"
-        ),
+        "Visualizer": [
+            "torch",
+            "transformers",
+            "huggingface_hub>=0.20",
+            # fla-core imports Triton at package import. The visualizer never
+            # launches a kernel; it only needs that import to succeed.
+            'triton; platform_system == "Linux" and platform_machine == "x86_64"',
+        ],
         "kernel_source": [
             "itanium-demangler>=1.0",
         ],
@@ -83,7 +76,9 @@ setup(
         ],
         "TraceLens.Visualizer.model_explorer_export": [
             "viewer/*.html",
-            "viewer/*.js",
+            "viewer/app.js",
+            "viewer/NOTICE",
+            "viewer/ai-edge-model-explorer-visualizer.LICENSE",
         ],
     },
     exclude_package_data={

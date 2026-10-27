@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from build_graph_in_env import pinned_model_spec
+
 import pytest
 
 from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
@@ -84,9 +86,7 @@ def test_build_fact_sheet_viewer_uses_https_links_in_html():
 
 def test_build_fact_sheet_omits_raw_forward_op_ids():
     pytest.importorskip("huggingface_hub")
-    from TraceLens.ModelUtils.loader import load_model_spec
-
-    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     viewer = build_fact_sheet_viewer(spec)
 
     assert "@op_" not in viewer["body"]
