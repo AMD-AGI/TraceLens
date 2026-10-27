@@ -1252,19 +1252,16 @@ class TestPerfModelExtensionsCoverage:
         assert model.flops() == 2 * 128 * 512 * 256
 
     def test_gemm_afp4wfp4(self):
+        # M=64, N=256, K=256: packed X and W, E8M0 scales, BF16 output.
         event = {
             "args": {
-                "Input Dims": [[64, 128], [256, 64], [64, 4], [256, 4]],
-                "Input type": [
-                    "c10::BFloat16",
-                    "c10::Float4_e2m1fn_x2",
-                    "c10::Float",
-                    "c10::Float",
-                ],
+                "Input Dims": [[64, 128], [256, 128], [64, 8], [256, 8]],
+                "Input type": ["unsigned char"] * 4,
             }
         }
         model = gemm_afp4wfp4(event)
-        assert model.bytes() > 0
+        x, w, out, scales = 64 * 128, 256 * 128, 64 * 256 * 2, (64 + 256) * 8
+        assert model.bytes() == x + w + out + scales
 
     def test_mxfp4_quant_variants(self):
         base_event = {
