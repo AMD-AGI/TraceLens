@@ -28,9 +28,7 @@ VISUALIZER_VERSION = "0.1.2"
 VISUALIZER_PACKAGE = "ai-edge-model-explorer-visualizer"
 COMPONENT_SCRIPT_URL = f"https://unpkg.com/{VISUALIZER_PACKAGE}@{VISUALIZER_VERSION}"
 STATIC_FILES_BASE_URL = f"{COMPONENT_SCRIPT_URL}/dist/static_files"
-WORKER_URL = (
-    f"https://cdn.jsdelivr.net/npm/{VISUALIZER_PACKAGE}@{VISUALIZER_VERSION}/dist/worker.js"
-)
+WORKER_URL = f"https://cdn.jsdelivr.net/npm/{VISUALIZER_PACKAGE}@{VISUALIZER_VERSION}/dist/worker.js"
 # dist/worker.js from ai-edge-model-explorer-visualizer 0.1.2.
 WORKER_SHA256 = "f857968b63b0a40fb48ed2d63d50e86a73be943c558f4098fd44855735efd738"
 

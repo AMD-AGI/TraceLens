@@ -190,13 +190,11 @@ class PatternDecoderLayer(nn.Module):
         self.post_attention_layernorm = PatternRMSNorm(hidden, eps=config.rms_norm_eps)
 
     def forward(self, hidden_states, attention_mask=None):
-        residual = hidden_states
         normed = self.input_layernorm(hidden_states)
-        attn_out = self.self_attn(normed, attention_mask=attention_mask)
-        hidden_states = self.attn_hc(attn_out, residual)
-        residual = hidden_states
-        normed = self.post_attention_layernorm(hidden_states)
-        return self.ffn_hc(self.ffn(normed), residual)
+        attended = self.self_attn(normed, attention_mask=attention_mask)
+        mixed = self.attn_hc(attended, hidden_states)
+        normed = self.post_attention_layernorm(mixed)
+        return self.ffn_hc(self.ffn(normed), mixed)
 
 
 class PatternRotary(nn.Module):

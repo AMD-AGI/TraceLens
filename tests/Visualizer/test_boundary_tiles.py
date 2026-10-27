@@ -637,17 +637,25 @@ class TestTheFold:
 
 
 @pytest.mark.parametrize(
-    "model_id",
-    ["MiniMaxAI/MiniMax-M3", "deepseek-ai/DeepSeek-V4-Flash"],
+    "model_id,producer",
+    [
+        ("MiniMaxAI/MiniMax-M3", "@op_l758_c27_unsqueeze"),
+        ("deepseek-ai/DeepSeek-V4-Flash", "@op_l1296_c27_unsqueeze"),
+    ],
 )
-def test_position_ids_enters_every_box_through_one_tile(model_graph_nodes, model_id):
+def test_position_ids_enters_every_box_through_one_tile(
+    model_graph_nodes, model_id, producer
+):
+    """That Unsqueeze feeds one tile, and the tile is position_ids."""
     nodes = model_graph_nodes(model_id)
-    tiles = [n for n in nodes if (n.get("label") or "") == "position_ids"]
-    assert tiles, [str(n["id"]) for n in tiles]
-    sources = [e["sourceNodeId"] for e in tiles[0].get("incomingEdges") or []]
-    assert sources, sources
-    source = next(n for n in nodes if n["id"] == sources[0])
-    assert (source.get("label") or "") == "Unsqueeze", source.get("label")
+    fanout = [
+        node
+        for node in nodes
+        for edge in node.get("incomingEdges") or []
+        if producer in str(edge.get("sourceNodeId"))
+    ]
+    assert len(fanout) == 1, [str(node["id"]) for node in fanout]
+    assert (fanout[0].get("label") or "") == "position_ids", fanout[0].get("label")
 
 
 # --- test_mirror_name_qualification.py ---

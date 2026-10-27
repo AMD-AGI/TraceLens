@@ -361,9 +361,7 @@ def _module_file_path(module: str) -> Path | None:
 
     ref = GitHubRef(owner=owner, repo=repo_name, ref=branch)
     relative = Path(*module.split(".")).with_suffix(".py")
-    found = fetch_github_file(
-        ref, relative.as_posix(), cache_root=_KERNEL_SOURCE_CACHE
-    )
+    found = fetch_github_file(ref, relative.as_posix(), cache_root=_KERNEL_SOURCE_CACHE)
     if found is not None:
         return found
     package_init = Path(*module.split(".")) / "__init__.py"

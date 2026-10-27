@@ -43,9 +43,11 @@ def render_payload_script(payload: dict[str, Any]) -> str:
 def _attribution_comment() -> str:
     """Apache-2.0 license and copyright for the embedded layout worker."""
     notice = (_BUNDLED_VIEWER / "NOTICE").read_text(encoding="utf-8").strip()
-    license_text = (_BUNDLED_VIEWER / "ai-edge-model-explorer-visualizer.LICENSE").read_text(
-        encoding="utf-8"
-    ).strip()
+    license_text = (
+        (_BUNDLED_VIEWER / "ai-edge-model-explorer-visualizer.LICENSE")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
     body = f"{notice}\n\n{license_text}".replace("--", "- -")
     return f"<!--\n{body}\n-->"
 

@@ -2209,7 +2209,9 @@ def test_a_stale_slot_index_is_replaced_by_the_node_that_owns_the_attr() -> None
     graph = ComputationGraph(
         nodes=[
             GraphNodeSpec(key="tail", block=SimpleNamespace(attr_name="@op_weights")),
-            GraphNodeSpec(key="indices", block=SimpleNamespace(attr_name="@op_indices")),
+            GraphNodeSpec(
+                key="indices", block=SimpleNamespace(attr_name="@op_indices")
+            ),
         ]
     )
     found = _producer_node_index(graph, {"call\x00slot0": 0}, "call", 0, "@op_indices")
