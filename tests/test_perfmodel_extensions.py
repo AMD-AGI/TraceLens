@@ -5128,3 +5128,75 @@ class TestPerfModelDeepCoverage2:
             }
         )
         assert ce.get_compute_precision() is not None
+
+
+def test_moe_sorting_opus_fwd_maps_and_models():
+    cls = get_pseudo_op_mappings()["aiter::moe_sorting_opus_fwd"]
+    assert cls is MoeSortScatterGather
+    model = cls(
+        {
+            "args": {
+                "Input Dims": [
+                    [1113, 9],
+                    [1113, 9],
+                    [26456],
+                    [26456],
+                    [414],
+                    [2],
+                    [1113, 6144],
+                ],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                ],
+            }
+        }
+    )
+    assert model.flops() == 1113 * 6144
+    assert model.bytes() >= 1113 * 6144 * 2
+
+
+def test_fused_fp8_bmm_rope_cat_and_cache_mla():
+    name = (
+        "sglang_profiler::fused_bmm_rope_kv_cache_fused_fp8_bmm_rope_cat_and_cache_mla"
+    )
+    cls = get_pseudo_op_mappings()[name]
+    assert cls is pext.fused_fp8_bmm_rope_cat_and_cache_mla
+    model = cls(
+        {
+            "args": {
+                "Input Dims": [
+                    [8, 12, 192],
+                    [8, 512, 192],
+                    [],
+                    [12, 8, 64],
+                    [12, 1, 512],
+                    [12, 1, 64],
+                    [2991488, 1, 576],
+                ],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "float",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                ],
+            }
+        }
+    )
+    bmm = 2 * 8 * 12 * 512 * 192
+    rope = 3 * (12 * 8 * 64 + 12 * 1 * 64)
+    assert model.flops() == bmm + rope
+    read_q = (8 * 12 * 192 + 12 * 8 * 64) * 2
+    read_w = 8 * 512 * 192 * 1
+    read_k = 12 * 1 * (512 + 64) * 2
+    write_q = 12 * 8 * (512 + 64) * 2
+    write_kv = 12 * 1 * (512 + 64) * 1
+    assert model.bytes() == read_q + read_w + read_k + write_q + write_kv
