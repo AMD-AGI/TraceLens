@@ -1817,6 +1817,141 @@ def test_resolve_host_scalars_guards_a_local_reassigned_from_itself():
     assert ast.unparse(resolved) == "x + 1"
 
 
+def test_expression_at_operation_line_falls_back_to_the_enclosing_statement():
+    """``@op_l{line}_c{col}_...`` names the operation's own AST position. When
+    nothing at that exact position is a labelled BinOp/Call (the position is
+    the enclosing STATEMENT's own, not an inner expression's -- a bare
+    ``return x``, or an assignment whose RHS starts further right than the
+    statement itself), the expression is read off whichever statement shape
+    sits there: a return's value, an assignment's RHS, an annotated
+    assignment's RHS, or an augmented assignment's RHS. An attr_name that
+    does not even match the position pattern resolves to nothing."""
+    from TraceLens.ModelUtils.ast_analyze import _expression_at_operation_line
+
+    def op_at(stmt: ast.stmt) -> str:
+        return f"@op_l{stmt.lineno}_c{stmt.col_offset}_whatever"
+
+    return_func = ast.parse("def forward(self, x):\n    return x\n").body[0]
+    result = _expression_at_operation_line(
+        return_func, op_at(return_func.body[0]), "SomeLabel"
+    )
+    assert ast.unparse(result) == "x"
+
+    assign_func = ast.parse("def forward(self, x):\n    y = x + 1\n").body[0]
+    result = _expression_at_operation_line(
+        assign_func, op_at(assign_func.body[0]), "SomeLabel"
+    )
+    assert ast.unparse(result) == "x + 1"
+
+    ann_assign_func = ast.parse("def forward(self, x):\n    y: int = x\n").body[0]
+    result = _expression_at_operation_line(
+        ann_assign_func, op_at(ann_assign_func.body[0]), "SomeLabel"
+    )
+    assert ast.unparse(result) == "x"
+
+    aug_assign_func = ast.parse("def forward(self, x):\n    y = 0\n    y += x\n").body[
+        0
+    ]
+    result = _expression_at_operation_line(
+        aug_assign_func, op_at(aug_assign_func.body[1]), "SomeLabel"
+    )
+    assert ast.unparse(result) == "x"
+
+    assert _expression_at_operation_line(return_func, "not_a_match", "Label") is None
+
+
+def test_subscript_resize_dims_folds_a_lower_and_upper_bound_pair():
+    """``x[..., :output_width]`` folds a bare upper bound to its own value; an
+    ``a:b`` slice folds to the span between them; a span that folds negative
+    (a lower bound above the upper one) is not a real resize and is skipped,
+    same as an unresolvable bound, a full ``:`` slice, or a stepped slice.
+    An axis after an ``Ellipsis`` is numbered from the end."""
+    import ast
+
+    from TraceLens.ModelUtils.ast_analyze import _ForwardOperationExtractor
+
+    extractor = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    extractor.host_scalar_values = {"B": 32, "A": 8}
+
+    def resize(expr: str) -> list[tuple[int, int]]:
+        subscript = ast.parse(expr, mode="eval").body
+        return extractor._subscript_resize_dims(subscript.slice)
+
+    assert resize("x[:B]") == [(0, 32)]
+    assert resize("x[A:B]") == [(0, 24)]
+    assert resize("x[B:A]") == []
+    assert resize("x[..., :B]") == [(-1, 32)]
+    assert resize("x[:unknown]") == []
+    assert resize("x[:]") == []
+    assert resize("x[::2]") == []
+
+
+def test_rebind_producer_token_renames_the_bare_and_the_named_boundary_token():
+    """A producer token is renamed the same way an operation's own operands
+    are: the bare primary-input token (``@method_input``) renames to whatever
+    the callee's own primary parameter now maps to, but collapses back to the
+    generic token when that happens to BE the caller's own primary (nothing
+    distinguishes it then); a per-parameter secondary token
+    (``@method_input:attention_mask``) renames through the mapping the same
+    way, and ALSO collapses to the generic token if the renamed name turns
+    out to be the caller's primary. A plain producer attr just goes through
+    the mapping like any other name."""
+    from TraceLens.ModelUtils.ast_analyze import (
+        FORWARD_METHOD_INPUT,
+        _rebind_producer_token,
+    )
+
+    renamed = _rebind_producer_token(
+        FORWARD_METHOD_INPUT,
+        {"x": "hidden_states"},
+        callee_primary="x",
+        caller_primary="other_primary",
+    )
+    assert renamed == "hidden_states"
+
+    collapses_to_generic = _rebind_producer_token(
+        FORWARD_METHOD_INPUT,
+        {"x": "hidden_states"},
+        callee_primary="x",
+        caller_primary="hidden_states",
+    )
+    assert collapses_to_generic == FORWARD_METHOD_INPUT
+
+    no_callee_primary = _rebind_producer_token(
+        FORWARD_METHOD_INPUT, {}, callee_primary=None, caller_primary="hidden_states"
+    )
+    assert no_callee_primary == FORWARD_METHOD_INPUT
+
+    named_renamed = _rebind_producer_token(
+        "@method_input:attention_mask",
+        {"attention_mask": "mask_param"},
+        callee_primary="x",
+        caller_primary="hidden_states",
+    )
+    assert named_renamed == "mask_param"
+
+    named_collapses = _rebind_producer_token(
+        "@method_input:attention_mask",
+        {"attention_mask": "hidden_states"},
+        callee_primary="x",
+        caller_primary="hidden_states",
+    )
+    assert named_collapses == FORWARD_METHOD_INPUT
+
+    plain_mapped = _rebind_producer_token(
+        "q_proj",
+        {"q_proj": "renamed_q"},
+        callee_primary="x",
+        caller_primary="hidden_states",
+    )
+    assert plain_mapped == "renamed_q"
+
+    plain_unmapped = _rebind_producer_token(
+        "unmapped", {}, callee_primary="x", caller_primary="hidden_states"
+    )
+    assert plain_unmapped == "unmapped"
+
+
 def test_self_call_argument_rebind_covers_positional_and_keyword_shapes():
     """Only a bare name rebinds a callee parameter onto the caller's own
     tensor; a constant carries no rename and is skipped; anything else
