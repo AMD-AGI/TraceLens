@@ -588,17 +588,17 @@ def build_execution_graph_root_map(graph_tree):
 def load_capture_folder(
     capture_folder: str,
     metadata_json_path: str,
-) -> Tuple[Dict[str, List[Tuple[Any, List]]], List[int]]:
-    """Load capture traces from a folder and group by ``{batch_size}_{mode}``.
+) -> Tuple[Dict[str, str], List[int]]:
+    """Load capture traces keyed by role, batch size, and capture mode.
 
     Args:
         capture_folder: Directory containing ``graph_capture_rank_0*`` trace files.
         metadata_json_path: Path to a JSON file — a list of objects each with
-            ``file``, ``batch_size``, and ``mode`` keys.
+            ``file``, ``batch_size``, and ``mode`` keys, plus optional ``role``.
 
     Returns:
-        Dictionary keyed by ``"{batch_size}_{mode}"`` whose values are lists of
-        ``(capture_tree, capture_roots)`` tuples.
+        Dictionary keyed by ``"{batch_size}_{mode}"`` for generic captures or
+        ``"{role}_{batch_size}_{mode}"`` for role-specific captures.
     """
 
     with open(metadata_json_path, "r") as f:
@@ -610,10 +610,18 @@ def load_capture_folder(
         filename = entry["file"]
         batch_size = entry["batch_size"]
         mode = entry["mode"]
+        role = entry.get("role")
         if not (mode in ["FULL", "PIECEWISE"] and isinstance(batch_size, int)):
             print("Warning: invalid batch size or mode, skipping: {}".format(entry))
             continue
-        key = "{}_{}".format(batch_size, mode)
+        if role is not None and not isinstance(role, str):
+            print("Warning: invalid capture role, skipping: {}".format(entry))
+            continue
+        key = (
+            "{}_{}_{}".format(role.lower(), batch_size, mode)
+            if role
+            else "{}_{}".format(batch_size, mode)
+        )
         batch_sizes.append(int(batch_size))
         filepath = os.path.join(capture_folder, filename)
         if not os.path.isfile(filepath):
@@ -629,6 +637,31 @@ def load_capture_folder(
     )
 
     return result, batch_sizes
+
+
+def _capture_key(batch_size: int, mode: str, role: Optional[str] = None) -> str:
+    if role:
+        return "{}_{}_{}".format(role, batch_size, mode)
+    return "{}_{}".format(batch_size, mode)
+
+
+def find_closest_capture_batch_size(
+    batch_size: int,
+    capture_map: Dict[str, str],
+    capture_batch_sizes: List[int],
+    role: Optional[str] = None,
+) -> Optional[int]:
+    """Return the closest round-up size that has a capture for ``role``."""
+    candidates = []
+    for candidate in set(capture_batch_sizes):
+        if candidate < batch_size:
+            continue
+        if any(
+            _capture_key(candidate, mode, role) in capture_map
+            for mode in ("FULL", "PIECEWISE")
+        ):
+            candidates.append(candidate)
+    return min(candidates) if candidates else None
 
 
 def find_closest_batch_size(
@@ -660,6 +693,14 @@ def find_execution_details(execution_root) -> Optional[str]:
     if len(parts) > 1 and parts[1].lstrip("-").isdigit():
         return parts[1]
     return None
+
+
+def find_execution_role(execution_root) -> Optional[str]:
+    """Return the speculative graph role encoded in an iteration annotation."""
+    from ..TraceUtils.utils.annotation_utils import IterationAnnotation
+
+    ann = IterationAnnotation(execution_root["name"])
+    return ann.meta.get("capture_role") if ann.matched else None
 
 
 def merge_capture_trace_into_graph(
@@ -718,13 +759,24 @@ def merge_capture_trace_into_graph(
                 )
             )
             continue
-        closest_batch_size = find_closest_batch_size(
-            int(batch_size), capture_batch_sizes
+        role = find_execution_role(execution_root)
+        closest_batch_size = find_closest_capture_batch_size(
+            int(batch_size), capture_map, capture_batch_sizes, role
         )
+        if closest_batch_size is None and role:
+            closest_batch_size = find_closest_capture_batch_size(
+                int(batch_size), capture_map, capture_batch_sizes
+            )
+            if closest_batch_size is not None:
+                print(
+                    "Warning: no role-specific {} capture; using generic capture".format(
+                        role
+                    )
+                )
         if closest_batch_size is None:
             print(
-                "Warning: no capture batch size found for batch size {}".format(
-                    batch_size
+                "Warning: no {}capture batch size found for batch size {}".format(
+                    "{} ".format(role) if role else "", batch_size
                 )
             )
             continue
@@ -733,8 +785,11 @@ def merge_capture_trace_into_graph(
         # the capture trace's StreamBeginCapture count.  Try both modes
         # and use whichever is available; when both exist, prefer the one
         # matching the graph launch count.
-        full_key = "{}_FULL".format(closest_batch_size)
-        piece_key = "{}_PIECEWISE".format(closest_batch_size)
+        full_key = _capture_key(closest_batch_size, "FULL", role)
+        piece_key = _capture_key(closest_batch_size, "PIECEWISE", role)
+        if full_key not in capture_map and piece_key not in capture_map and role:
+            full_key = _capture_key(closest_batch_size, "FULL")
+            piece_key = _capture_key(closest_batch_size, "PIECEWISE")
         if full_key in capture_map and piece_key in capture_map:
             str_key = piece_key if len(graph_roots) != 1 else full_key
         elif full_key in capture_map:
