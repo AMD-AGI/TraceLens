@@ -306,6 +306,109 @@ def _wired(producer: dict, consumer_id: str = "consumer") -> dict:
     }
 
 
+def test_parse_class_plans_returns_empty_on_a_syntax_error():
+    assert parse_class_plans("def broken(:\n") == []
+
+
+def test_parse_engine_class_plans_returns_empty_on_a_syntax_error():
+    assert parse_engine_class_plans("def broken(:\n") == []
+
+
+def test_build_parallel_layout_warns_but_continues_when_a_plan_source_is_unreadable(
+    tmp_path, caplog
+):
+    """A declared plan source that exists but cannot be read (permissions
+    revoked out from under a cached checkout) is skipped with a warning
+    rather than crashing the whole layout -- a still-readable source is
+    still parsed."""
+    import logging
+
+    from TraceLens.ModelUtils.parallel_plan import ParallelDegree, build_parallel_layout
+
+    unreadable = tmp_path / "modeling_unreadable.py"
+    unreadable.write_text(_SOURCE, encoding="utf-8")
+    unreadable.chmod(0o000)
+    present = tmp_path / "modeling_present.py"
+    present.write_text(_SOURCE, encoding="utf-8")
+    try:
+        spec = _spec(code_paths=[unreadable, present])
+        with caplog.at_level(logging.WARNING):
+            layout = build_parallel_layout(spec, ParallelDegree(tp=4))
+    finally:
+        unreadable.chmod(0o644)
+    assert layout is not None
+    assert any(
+        "Could not read parallel plans" in message for message in caplog.messages
+    )
+    # The still-readable sibling source was parsed despite the failure.
+    assert layout.rules
+
+
+def test_literal_resolves_a_negated_int_constant_but_not_other_unary_ops():
+    """``-1`` in a config literal (a sentinel like ``num_key_value_heads: -1``)
+    must resolve through its ``UnaryOp``/``USub`` wrapper; a negated non-int
+    or any other unary op (``not x``) is not a literal this reads."""
+    import ast
+
+    from TraceLens.ModelUtils.parallel_plan import _literal
+
+    def parsed(src: str):
+        return ast.parse(src, mode="eval").body
+
+    assert _literal(parsed("-5")) == -5
+    assert _literal(parsed("-5.0")) is None
+    assert _literal(parsed("not True")) is None
+    assert _literal(parsed('[1, -2, "a"]')) == [1, -2, "a"]
+    assert _literal(parsed('{"a": -1, 2: "skip"}')) == {"a": -1}
+
+
+def test_apply_shape_edit_covers_sequence_last_and_expert_rewrites():
+    """``_ShapeEdit``'s three independent rewrite slots, applied directly to a
+    node's ``full_shape`` attr: a sharded sequence axis (both a concrete digit
+    and a symbolic ``S``), a sharded trailing feature width, and a sharded
+    expert count -- each only touching the dim token it names."""
+    from TraceLens.ModelUtils.parallel_plan import (
+        _ShapeEdit,
+        _apply_shape_edit,
+        _attr,
+        _set_attr,
+    )
+
+    def shaped(shape: str) -> dict:
+        node: dict = {}
+        _set_attr(node, "full_shape", shape)
+        return node
+
+    digit_node = shaped("[B, 128, 4096] float16")
+    digit_edit = _ShapeEdit()
+    digit_edit.sequence = (4, 0)
+    _apply_shape_edit(digit_node, digit_edit)
+    assert _attr(digit_node, "output_shape") == "[B, 32, 4096] float16"
+
+    symbolic_node = shaped("[B, S, 4096] float16")
+    symbolic_edit = _ShapeEdit()
+    symbolic_edit.sequence = (4, 0)
+    _apply_shape_edit(symbolic_node, symbolic_edit)
+    assert _attr(symbolic_node, "output_shape") == "[B, S/4, 4096] float16"
+
+    last_node = shaped("[B, S, 4096] float16")
+    last_edit = _ShapeEdit()
+    last_edit.last = (4096, 1024)
+    _apply_shape_edit(last_node, last_edit)
+    assert _attr(last_node, "output_shape") == "[B, S, 1024] float16"
+
+    experts_node = shaped("[256, 4096, 1024] float16")
+    experts_edit = _ShapeEdit()
+    experts_edit.experts = (256, 32)
+    _apply_shape_edit(experts_node, experts_edit)
+    assert _attr(experts_node, "output_shape") == "[32, 4096, 1024] float16"
+
+    # No shape to rewrite: a true no-op, not a crash.
+    bare_node: dict = {}
+    _apply_shape_edit(bare_node, _ShapeEdit())
+    assert _attr(bare_node, "output_shape") is None
+
+
 def test_rowwise_output_is_all_reduced_on_its_way_to_consumers():
     from TraceLens.Visualizer.model_explorer_export.type_check import (
         integrity_check_graph_nodes,
