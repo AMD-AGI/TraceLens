@@ -185,7 +185,11 @@ def test_single_file_cache_and_fetch_subpaths(tmp_path: Path, monkeypatch):
     assert len(downloads) == 1
 
     policy = source_policy.SourcePolicy()
-    monkeypatch.setattr(github, "_fetch_single_file", lambda item: tmp_path / "one.py")
+    monkeypatch.setattr(
+        github,
+        "_fetch_single_file",
+        lambda item, **_kwargs: tmp_path / "one.py",
+    )
     assert github.fetch_github_source(ref, source_policy=policy) == tmp_path / "one.py"
 
     repo = tmp_path / "repo"

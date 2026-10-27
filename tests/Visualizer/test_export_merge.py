@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Focused coverage for merged export helpers and symbolic shape fallbacks."""
+"""Merged export helpers and the symbolic shape fallbacks they apply."""
 
 from __future__ import annotations
 
@@ -3394,73 +3394,37 @@ def _shape_node(label: str, details: list[str] | None = None) -> dict:
     return node
 
 
-def test_fallback_mean_drops_the_axis_its_dim_names():
-    """A collapsed ``mean(dim=2)`` must not keep the stream it reduces away."""
-    source = TensorSpec(("B", "S", 4, 4096), "bfloat16")
-    result = shapes._fallback_node_spec(
-        _shape_node("Mean", ["dim: 2", "raw_op: mean"]), [("0", source)]
-    )
-    assert result.shape == ("B", "S", 4096)
+@pytest.mark.parametrize(
+    ("label", "details", "shape", "expected"),
+    [
+        ("Mean", ["dim: 2", "raw_op: mean"], ("B", "S", 4, 4096), ("B", "S", 4096)),
+        ("Mean", None, ("B", "S", 4, 4096), ("B", "S", 4, 4096)),
+        ("Squeeze", None, (1, "B", 1, "S"), ("B", "S")),
+        ("Squeeze", ["dim: 0"], (1, "B", 1, "S"), ("B", 1, "S")),
+        ("Squeeze", ["dim: -1"], ("B", "S", 1), ("B", "S")),
+        ("Squeeze", ["dim: 2"], ("B", "S", 4), ("B", "S", 4)),
+        ("Squeeze", ["dim: self.axis"], ("B", "S", 1), ("B", "S", 1)),
+        ("Squeeze", None, (), ()),
+        ("Expand", ["shape: self.mystery"], ("B", 1, "S"), ("B", 1, "S")),
+    ],
+    ids=[
+        "mean_drops_the_named_axis",
+        "mean_without_a_dim_passes_through",
+        "squeeze_without_a_dim_drops_every_unit_axis",
+        "squeeze_with_a_dim_drops_only_that_axis",
+        "squeeze_accepts_a_negative_dim",
+        "squeeze_leaves_a_non_unit_axis_alone",
+        "squeeze_with_an_unparseable_dim_passes_through",
+        "squeeze_of_a_scalar_passes_through",
+        "expand_without_a_resolvable_shape_passes_through",
+    ],
+)
+def test_fallback_shape_follows_the_recorded_reduction(label, details, shape, expected):
+    """Mean, squeeze, and expand follow the recorded dim, or pass the input through."""
+    source = TensorSpec(shape, "bfloat16")
+    result = shapes._fallback_node_spec(_shape_node(label, details), [("0", source)])
+    assert result.shape == expected
     assert result.dtype == "bfloat16"
-
-
-def test_fallback_mean_without_a_dim_passes_its_input_through():
-    source = TensorSpec(("B", "S", 4, 4096), "bfloat16")
-    result = shapes._fallback_node_spec(_shape_node("Mean"), [("0", source)])
-    assert result.shape == ("B", "S", 4, 4096)
-
-
-def test_fallback_squeeze_without_a_dim_drops_every_unit_axis():
-    source = TensorSpec((1, "B", 1, "S"), "float16")
-    result = shapes._fallback_node_spec(_shape_node("Squeeze"), [("0", source)])
-    assert result.shape == ("B", "S")
-
-
-def test_fallback_squeeze_with_a_dim_drops_only_that_axis():
-    source = TensorSpec((1, "B", 1, "S"), "float16")
-    result = shapes._fallback_node_spec(
-        _shape_node("Squeeze", ["dim: 0"]), [("0", source)]
-    )
-    assert result.shape == ("B", 1, "S")
-
-
-def test_fallback_squeeze_accepts_a_negative_dim():
-    source = TensorSpec(("B", "S", 1), "float16")
-    result = shapes._fallback_node_spec(
-        _shape_node("Squeeze", ["dim: -1"]), [("0", source)]
-    )
-    assert result.shape == ("B", "S")
-
-
-def test_fallback_squeeze_leaves_a_non_unit_axis_alone():
-    """Squeezing a real axis is a no-op in torch; it must not silently shrink."""
-    source = TensorSpec(("B", "S", 4), "float16")
-    result = shapes._fallback_node_spec(
-        _shape_node("Squeeze", ["dim: 2"]), [("0", source)]
-    )
-    assert result.shape == ("B", "S", 4)
-
-
-def test_fallback_squeeze_with_an_unparseable_dim_passes_through():
-    source = TensorSpec(("B", "S", 1), "float16")
-    result = shapes._fallback_node_spec(
-        _shape_node("Squeeze", ["dim: self.axis"]), [("0", source)]
-    )
-    assert result.shape == ("B", "S", 1)
-
-
-def test_fallback_squeeze_of_a_scalar_passes_through():
-    source = TensorSpec((), "float16")
-    result = shapes._fallback_node_spec(_shape_node("Squeeze"), [("0", source)])
-    assert result.shape == ()
-
-
-def test_fallback_expand_without_a_resolvable_shape_passes_through():
-    source = TensorSpec(("B", 1, "S"), "float16")
-    result = shapes._fallback_node_spec(
-        _shape_node("Expand", ["shape: self.mystery"]), [("0", source)]
-    )
-    assert result.shape == ("B", 1, "S")
 
 
 def test_fallback_elementwise_broadcasts_to_the_widest_operand():

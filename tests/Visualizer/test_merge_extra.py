@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Extra branch coverage for the merged Model Explorer graph builder."""
+"""Merged graph builder: sections, decoder layers, group boundaries, and prune paths."""
 
 from __future__ import annotations
 

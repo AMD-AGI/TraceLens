@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Focused branch coverage for Model Explorer export and serving helpers."""
+"""Model Explorer export CLI, viewer serving, and the fact-sheet helpers they call."""
 
 from __future__ import annotations
 
