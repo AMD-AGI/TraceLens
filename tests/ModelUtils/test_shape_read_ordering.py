@@ -6,6 +6,11 @@
 
 """Reading a tensor's SIZE is a dependency, even with no edge to carry it.
 
+An ``@op_l`` id in this file is a step this test builds, and the line number in
+it matches ``forward_var_bindings`` in this file. It is not a lookup into an
+upstream modeling file.
+
+
 ``F.pad(attention_mask, (0, kv.shape[2] - attention_mask.shape[-1]))`` needs
 ``kv``'s extent, not its data -- so nothing wires the two together and the
 topological sort was free to infer the pad first, with ``kv`` not yet known.

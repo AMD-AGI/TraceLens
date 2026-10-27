@@ -550,7 +550,7 @@ def test_kimi_router_export_uses_real_ops_and_topk_shapes():
         "routed_scaling_factor": 1.0,
     }
     analysis = analyze_source(
-        (FIXTURES / "kimi_moe_gate.py").read_text(),
+        (FIXTURES / "kimi_k3" / "modeling_kimi_linear.py").read_text(),
         config=config,
     )
     basic = BasicOpFilter.for_detailed()

@@ -6,6 +6,10 @@
 
 """A reshape argument that reads another tensor's axis, and who may answer it.
 
+An ``@op_l`` id in this file is a sample key this test builds to exercise id
+parsing. It is not a lookup into an upstream modeling file.
+
+
 MiniMax's indexer and DeepSeek's compressor both open on a tuple unpack::
 
     batch, q_len, _ = hidden_states.shape
