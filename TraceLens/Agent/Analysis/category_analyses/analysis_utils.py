@@ -501,39 +501,38 @@ def format_kernel_names(kernels: List[str]) -> tuple:
     return full, trunc
 
 
-def _kernel_name_list(call_stack_full: str) -> List[str]:
+def _extract_kernel_names(call_stack_full: str) -> tuple:
     """Extract GPU kernel name(s) from call_stack_full.
 
     Single kernel (flat list): last element is the kernel.
     Multi-kernel (sublists): last element of each sublist is a kernel.
+
+    Returns ``(kernel_name, kernel_name_trunc)`` where the truncated form
+    clips each individual kernel name to ``_KERNEL_NAME_TRUNC_LEN`` chars.
     """
     if not call_stack_full or call_stack_full == "nan":
-        return []
+        return "", ""
     try:
         stack = ast.literal_eval(str(call_stack_full))
     except Exception:
-        return []
+        return "", ""
     if not isinstance(stack, list) or not stack:
-        return []
+        return "", ""
 
     sublists = [f for f in stack if isinstance(f, list)]
 
     if not sublists:
         # Flat list — last element is the kernel
         k = stack[-1] if isinstance(stack[-1], str) else ""
-        return [k] if k else []
-    # Multi-kernel — last element of each sublist is a kernel
-    return [sub[-1] for sub in sublists if sub and isinstance(sub[-1], str)]
+        kernels = [k] if k else []
+    else:
+        # Multi-kernel — last element of each sublist is a kernel
+        kernels = [sub[-1] for sub in sublists if sub and isinstance(sub[-1], str)]
 
+    if not kernels:
+        return "", ""
 
-def _extract_kernel_names(call_stack_full: str) -> tuple:
-    """Render the kernel name(s) of call_stack_full for a table cell.
-
-    Returns ``(kernel_name, kernel_name_trunc)`` where the truncated form
-    clips each individual kernel name to ``_KERNEL_NAME_TRUNC_LEN`` chars.
-    """
-    kernels = _kernel_name_list(call_stack_full)
-    return format_kernel_names(kernels) if kernels else ("", "")
+    return format_kernel_names(kernels)
 
 
 def build_operation_metrics(
@@ -954,14 +953,16 @@ def build_category_findings(
     return findings
 
 
-def _arg_pairs(input_dims_str, input_type_str) -> list:
-    """``("(d1,d2,...)", dtype)`` per input from Input Dims + Input type strings.
+def format_args(input_dims_str, input_type_str) -> Optional[str]:
+    """Render "(d1,d2,...) dtype<br>..." from Input Dims + Input type strings.
 
     Drops empty/Scalar placeholder slots, normalizes dtypes via torch_dtype_map
-    (unmapped tokens fall through). Empty on missing or unparseable input.
+    (unmapped tokens fall through). Args are joined with <br> so each entry
+    renders on its own line inside a markdown table cell, keeping the column
+    narrow even for many-input ops. Returns None on missing or unparseable input.
     """
     if pd.isna(input_dims_str) or pd.isna(input_type_str):
-        return []
+        return None
     try:
         pairs = list(
             zip(
@@ -970,9 +971,9 @@ def _arg_pairs(input_dims_str, input_type_str) -> list:
             )
         )
     except Exception:
-        return []
+        return None
 
-    args = []
+    parts = []
     for dim, dtype in pairs:
         shape = tuple(dim) if isinstance(dim, (list, tuple)) else ()
         kind = (torch_dtype_map(str(dtype)) or str(dtype)) if dtype else ""
@@ -980,24 +981,8 @@ def _arg_pairs(input_dims_str, input_type_str) -> list:
             continue
         # Trailing comma keeps tuple syntax for 1-element shapes ((128,) not (128))
         body = ",".join(map(str, shape)) + ("," if len(shape) == 1 else "")
-        args.append((f"({body})", kind))
-    return args
-
-
-def format_args(input_dims_str, input_type_str) -> Optional[str]:
-    """Render "(d1,d2,...) dtype<br>..." from Input Dims + Input type strings.
-
-    Args are joined with <br> so each entry renders on its own line inside a
-    markdown table cell, keeping the column narrow even for many-input ops.
-    Returns None on missing or unparseable input.
-    """
-    return (
-        "<br>".join(
-            f"{shape} {kind}".rstrip()
-            for shape, kind in _arg_pairs(input_dims_str, input_type_str)
-        )
-        or None
-    )
+        parts.append(f"({body}) {kind}".rstrip())
+    return "<br>".join(parts) or None
 
 
 def perf_row_key(name, *args) -> tuple:

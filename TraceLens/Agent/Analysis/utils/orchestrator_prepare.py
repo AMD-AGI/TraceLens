@@ -18,10 +18,7 @@ import traceback
 
 import pandas as pd
 
-from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
-    PEAK_MEM_BW_KEY,
-    load_perf_rows,
-)
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import load_perf_rows
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms, load_arch
 from TraceLens.Agent.Analysis.utils.classify_kernels import TAXONOMY
 from TraceLens.Agent.Analysis.utils.kernel_fusion import (
@@ -153,21 +150,6 @@ def _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline: pd.DataFrame) ->
     }
 
 
-def perf_report_metadata(csv_dir: str, platform: str) -> dict:
-    """Peaks of ``platform`` plus the GPU utilization of the perf report in ``csv_dir``.
-
-    The metadata ``build_operation_metrics`` reads, shared by the agent route's
-    per-category metadata and any caller analyzing a perf report directly.
-    """
-    arch = load_arch(platform)
-    gpu_timeline = pd.read_csv(os.path.join(csv_dir, "gpu_timeline.csv"))
-    return {
-        PEAK_MEM_BW_KEY: arch["mem_bw_gbps"] / 1000,
-        "max_achievable_tflops": arch["max_achievable_tflops"],
-        "gpu_utilization": _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline),
-    }
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Prepare category data for TraceLens analysis"
@@ -279,8 +261,10 @@ def main():
     # ============================================================================
     print("\n[STEP 3] Assessing GPU Utilization...")
 
-    trace1_metadata = perf_report_metadata(trace1_csv_dir, platform)
-    gpu_utilization_metrics = trace1_metadata["gpu_utilization"]
+    gpu_timeline = pd.read_csv(os.path.join(trace1_csv_dir, "gpu_timeline.csv"))
+    gpu_utilization_metrics = _gpu_utilization_metrics_from_gpu_timeline_df(
+        gpu_timeline
+    )
     if plans is not None:
         job_utilization = {
             plan.name: _gpu_utilization_metrics_from_gpu_timeline_df(
@@ -290,8 +274,10 @@ def main():
         }
         focus_job = plans[0].name
         focus_csv_dir = plans[0].output_csvs_dir
+        system_utilization = job_utilization[focus_job]
     else:
         focus_csv_dir = trace1_csv_dir
+        system_utilization = gpu_utilization_metrics
     trace2_gpu_utilization = None
     trace2_ops_summary_by_category = None
 
@@ -693,12 +679,14 @@ def main():
         # Create metadata JSON
         metadata = {
             "platform": platform,
-            **trace1_metadata,
+            "peak_mem_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
+            "max_achievable_tflops": platform_specs["max_achievable_tflops"],
             "memory_gb": platform_specs.get("memory_gb"),
             "trace_path": trace_path,
             "output_dir": output_dir,
             "category": display_name,
             "category_name": category_name,
+            "gpu_utilization": gpu_utilization_metrics,
             "trace_loading_policy": "DO_NOT_LOAD_TRACE_use_precomputed_tree_data",
         }
 
@@ -723,19 +711,18 @@ def main():
     # CPU/Idle Category Creation (always created)
     # ============================================================================
     print(f"\n  Category: CPU/Idle Analysis (cpu_idle)")
-    focus_metadata = perf_report_metadata(focus_csv_dir, platform)
-    print(
-        f"    Idle time: {focus_metadata['gpu_utilization']['idle_time_percent']:.1f}%"
-    )
+    print(f"    Idle time: {system_utilization['idle_time_percent']:.1f}%")
 
     cpu_idle_metadata = {
         "platform": platform,
-        **focus_metadata,
+        "peak_mem_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
+        "max_achievable_tflops": platform_specs["max_achievable_tflops"],
         "memory_gb": platform_specs.get("memory_gb"),
         "trace_path": trace_path,
         "output_dir": output_dir,
         "category": "CPU/Idle Analysis",
         "category_name": "cpu_idle",
+        "gpu_utilization": system_utilization,
     }
 
     cpu_idle_metadata_file = f"{output_dir}/metadata/cpu_idle_metadata.json"
