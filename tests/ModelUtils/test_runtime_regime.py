@@ -175,6 +175,15 @@ class TestDeviceIsStatedNotDetected:
         tree = ast.parse("_is_npu = is_npu()\n")
         assert _device_check_globals(tree) == {"_is_npu": "npu"}
 
+    def test_a_non_module_tree_has_no_module_globals_to_find(self) -> None:
+        import ast
+
+        # ``_device_check_globals`` walks module-level statements; handed
+        # anything else (a bare expression, not a parsed file) there is no
+        # module scope to walk at all.
+        tree = ast.parse("is_npu()", mode="eval")
+        assert _device_check_globals(tree) == {}
+
     def test_a_global_bound_inside_a_try_is_still_found(self) -> None:
         import ast
 

@@ -958,6 +958,131 @@ def test_qkv_parallel_linear_still_uses_a_resolvable_v_head_size_override():
     assert spec.out_features == 128 * 4 + 1 * 128 + 1 * 0
 
 
+def test_qkv_parallel_linear_is_unresolved_when_a_required_arg_cannot_be_resolved():
+    """``in_features`` itself is unresolvable (not a literal, config read, or
+    bound local): there is no honest width to report, unlike the
+    ``v_head_size`` override above which has a documented default to fall
+    back on."""
+    import ast as _ast
+
+    from TraceLens.ModelUtils.shape_inference import _parse_module_ctor
+
+    call = (
+        _ast.parse("QKVParallelLinear(unknown_hidden, 128, 4, total_num_kv_heads=1)")
+        .body[0]
+        .value
+    )
+    ctx = ShapeContext.from_spec(
+        ArchitectureSpec(name="T", model_type="t", raw_config={})
+    )
+    assert _parse_module_ctor(call, config={}, local_vars={}, context=ctx) is None
+
+
+def test_resolve_dim_expr_distributed_degree_and_min_max():
+    """``_resolve_dim_expr`` shares the distributed-degree convention
+    (``_distributed_degree_dim``) and the ``min``/``max``-capped-degree idiom
+    with ``ast_analyze.py``'s ``_config_value`` -- duplicated because this
+    resolver returns a plain ``int`` rather than ``Any``, but the same
+    recognized names and the same answers."""
+    import ast
+
+    from TraceLens.ModelUtils.shape_inference import _resolve_dim_expr
+
+    ctx = ShapeContext.from_spec(
+        ArchitectureSpec(name="T", model_type="t", raw_config={})
+    )
+    config = {"heads": 4}
+
+    def _expr(src: str) -> ast.AST:
+        return ast.parse(src, mode="eval").body
+
+    # SGLang's group-object style.
+    assert (
+        _resolve_dim_expr(
+            _expr("get_parallel().attn_tp_size"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        == 1
+    )
+    assert (
+        _resolve_dim_expr(
+            _expr("get_parallel().attn_tp_rank"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        == 0
+    )
+    assert (
+        _resolve_dim_expr(
+            _expr("get_parallel().pp_group"), config=config, local_vars={}, context=ctx
+        )
+        is None
+    )
+
+    # vLLM's standalone-function style.
+    assert (
+        _resolve_dim_expr(
+            _expr("get_tensor_model_parallel_world_size()"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        == 1
+    )
+    assert (
+        _resolve_dim_expr(
+            _expr("get_tensor_model_parallel_rank()"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        == 0
+    )
+
+    # Capping a resolved degree against another resolvable int.
+    assert (
+        _resolve_dim_expr(
+            _expr("min(get_tensor_model_parallel_world_size(), config.heads)"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        == 1
+    )
+    assert (
+        _resolve_dim_expr(
+            _expr("max(get_tensor_model_parallel_world_size(), config.heads)"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        == 4
+    )
+    # A keyword argument disqualifies the fold.
+    assert (
+        _resolve_dim_expr(
+            _expr("min(config.heads, key=abs)"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        is None
+    )
+    # An unresolvable operand leaves the whole call unresolved.
+    assert (
+        _resolve_dim_expr(
+            _expr("min(config.heads, config.missing)"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        is None
+    )
+
+
 def test_conv_shape_inference_replaces_matched_channel_axis():
     from TraceLens.ModelUtils.shape_inference import ModuleConvSpec
 
@@ -1189,3 +1314,184 @@ def test_add_leaves_an_unambiguous_shape_alone():
         1,
         1,
     )
+
+
+_PACKED_QKV_SOURCE = """
+import torch
+import torch.nn as nn
+
+
+class Attn(nn.Module):
+    def forward(self, q, k, v):
+        return q
+
+
+class Model(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.q_proj = nn.Linear(config.hidden_size, 4096)
+        self.k_proj = nn.Linear(config.hidden_size, 2048)
+        self.v_proj = nn.Linear(config.hidden_size, 1024)
+        self.attn = Attn()
+
+    def forward(self, hidden_states):
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
+        packed = (q, k, v)
+        return self.attn(*packed)
+"""
+
+
+def _packed_qkv_graph():
+    config = {"hidden_size": 4096}
+    analysis = analyze_source(_PACKED_QKV_SOURCE, config=config)
+    basic = BasicOpFilter.for_detailed()
+    block = build_block_node(
+        attr_name="model",
+        class_name="Model",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    spec = ArchitectureSpec(
+        name="test",
+        model_type="test",
+        hidden_size=4096,
+        raw_config=config,
+        class_registry=analysis.class_registry,
+        basic_ops=basic,
+        export_block_trees=[("Model", block)],
+    )
+    graph = build_model_graph(block, title="Model", basic_ops=basic)
+    inferencer = ShapeInferencer(spec)
+    inferencer._caller_entry_spec = TensorSpec(
+        ("B", "S", 4096), inferencer.context.dtype
+    )
+    specs = inferencer.infer_model_graph(graph, root=block)
+    return graph, specs
+
+
+def test_pack_publishes_each_ports_own_producer_shape_not_one_shared_shape():
+    """A ``Pack`` of ``q``/``k``/``v`` from differently-sized projections has
+    no single whole shape to slice -- each port must report the shape of the
+    specific producer wired to it, or ``k``/``v`` would both read back as
+    ``q``'s 4096-wide projection."""
+    from TraceLens.ModelUtils.shape_inference import PORT_SPEC_SEP
+
+    graph, specs = _packed_qkv_graph()
+    pack_node = next(node for node in graph.nodes if node.label == "Pack")
+    assert specs.get(pack_node.id) is None, "a Pack has no single whole value"
+    ported = [specs[f"{pack_node.id}{PORT_SPEC_SEP}{i}"].shape for i in range(3)]
+    assert ported == [
+        ("B", "S", 4096),
+        ("B", "S", 2048),
+        ("B", "S", 1024),
+    ]
+
+
+_MUTUALLY_EXCLUSIVE_PACKED_QKV_SOURCE = """
+import torch
+import torch.nn as nn
+
+
+class Attn(nn.Module):
+    def forward(self, q, k, v):
+        return q
+
+
+class Model(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.q_proj = nn.Linear(config.hidden_size, 4096)
+        self.k_proj = nn.Linear(config.hidden_size, 2048)
+        self.v_proj = nn.Linear(config.hidden_size, 1024)
+        self.q_proj2 = nn.Linear(config.hidden_size, 4096)
+        self.k_proj2 = nn.Linear(config.hidden_size, 2048)
+        self.v_proj2 = nn.Linear(config.hidden_size, 1024)
+        self.attn = Attn()
+
+    def forward(self, hidden_states, use_alt=None):
+        if use_alt:
+            packed = (
+                self.q_proj2(hidden_states),
+                self.k_proj2(hidden_states),
+                self.v_proj2(hidden_states),
+            )
+        else:
+            packed = (
+                self.q_proj(hidden_states),
+                self.k_proj(hidden_states),
+                self.v_proj(hidden_states),
+            )
+        return self.attn(*packed)
+"""
+
+
+def test_merge_of_two_packs_takes_each_ports_shape_from_the_first_arm_that_answers():
+    """Both branches of the ``if`` build their own ``q``/``k``/``v`` bundle, so
+    the ``Merge`` that combines them has two Pack predecessors, not one
+    producer to slice. Ordinal K's shape comes from whichever arm's own port K
+    resolved first -- the same rule the Merge's whole-value case already uses."""
+    from TraceLens.ModelUtils.shape_inference import PORT_SPEC_SEP
+
+    config = {"hidden_size": 4096}
+    analysis = analyze_source(_MUTUALLY_EXCLUSIVE_PACKED_QKV_SOURCE, config=config)
+    basic = BasicOpFilter.for_detailed()
+    block = build_block_node(
+        attr_name="model",
+        class_name="Model",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    spec = ArchitectureSpec(
+        name="test",
+        model_type="test",
+        hidden_size=4096,
+        raw_config=config,
+        class_registry=analysis.class_registry,
+        basic_ops=basic,
+        export_block_trees=[("Model", block)],
+    )
+    graph = build_model_graph(block, title="Model", basic_ops=basic)
+    inferencer = ShapeInferencer(spec)
+    inferencer._caller_entry_spec = TensorSpec(
+        ("B", "S", 4096), inferencer.context.dtype
+    )
+    specs = inferencer.infer_model_graph(graph, root=block)
+
+    merge_node = next(
+        node for node in graph.nodes if node.metadata.get("class_name") == "Merge"
+    )
+    ported = [specs[f"{merge_node.id}{PORT_SPEC_SEP}{i}"].shape for i in range(3)]
+    assert ported == [
+        ("B", "S", 4096),
+        ("B", "S", 2048),
+        ("B", "S", 1024),
+    ]
+
+
+def test_publish_output_port_specs_without_a_graph_is_a_no_op_for_pack_and_merge():
+    """``graph`` is optional on this method's signature; a caller that has no
+    graph handy (or a Pack/Merge wired to nothing yet) must not crash, and
+    must leave the port specs unpublished rather than guess."""
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+
+    inf = _make_inferencer()
+    pack_node = ModelGraphNode(
+        id="pack1",
+        kind=NodeKind.LEAF,
+        label="Pack",
+        operation=OperationKind.TORCH_FUNCTIONAL,
+        metadata={"output_names": ["q", "k", "v"]},
+    )
+    merge_node = ModelGraphNode(
+        id="merge1",
+        kind=NodeKind.LEAF,
+        label="Merge",
+        operation=OperationKind.TORCH_FUNCTIONAL,
+        metadata={"class_name": "Merge", "output_names": ["q", "k", "v"]},
+    )
+    specs: dict[str, TensorSpec] = {}
+    inf._publish_output_port_specs(pack_node, specs, root=None, graph=None)
+    inf._publish_output_port_specs(merge_node, specs, root=None, graph=None)
+    assert specs == {}
