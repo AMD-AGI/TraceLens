@@ -124,6 +124,205 @@ def test_computation_nodes_multi_output_split_and_skipped_input():
 
 
 # ---------------------------------------------------------------------------
+# _producer_output_spec
+# ---------------------------------------------------------------------------
+
+
+def test_producer_output_spec_distinguishes_a_method_expansion_from_a_plain_submodule():
+    """A plain submodule is fed by the spine and simply inherits it. A method
+    expansion (``self.indexer.build_block_mask(block_indices, ...)``) is not:
+    it is handed whatever sibling step its own ``forward_step_predecessors``
+    entry names, resolved through the section's already-annotated ``known``
+    specs -- and nothing at all when any piece of that chase is missing.
+    """
+    inherited_spec = TensorSpec(("B", "S", 8), "float16")
+    plain = SimpleNamespace(details=(), input_label="x", attr_name="submod")
+    assert (
+        merge._producer_output_spec(None, "Cls", plain, {}, inherited=inherited_spec)
+        is inherited_spec
+    )
+
+    method_no_label = SimpleNamespace(
+        details=("method: build_block_mask",), input_label=None, attr_name="indexer"
+    )
+    assert merge._producer_output_spec(None, "Cls", method_no_label, {}) is None
+
+    method = SimpleNamespace(
+        details=("method: build_block_mask",),
+        input_label="block_indices",
+        attr_name="indexer",
+    )
+    assert merge._producer_output_spec(None, None, method, {}) is None
+
+    structure = SimpleNamespace(
+        forward_step_predecessors={"indexer": ("hidden_states",)}
+    )
+    spec = SimpleNamespace(class_registry={"Attention": structure})
+    resolved = merge._producer_output_spec(
+        spec, "Attention", method, {"hidden_states": inherited_spec}
+    )
+    assert resolved is inherited_spec
+
+    unmapped_structure = SimpleNamespace(forward_step_predecessors={})
+    unmapped_spec = SimpleNamespace(class_registry={"Attention": unmapped_structure})
+    assert merge._producer_output_spec(unmapped_spec, "Attention", method, {}) is None
+
+
+# ---------------------------------------------------------------------------
+# _declare_tuple_boundary_ports
+# ---------------------------------------------------------------------------
+
+
+def test_declare_tuple_boundary_ports_slices_one_component_off_an_inherited_tuple():
+    """A boundary tile mirroring a SPECIFIC ordinal off an already-ported
+    tuple-returning producer (``sin`` off ``rotary_emb``'s ports) carries that
+    one component's own shape -- not the generic activation default, and not
+    the whole producer's first port either.
+    """
+    source_node = {
+        "id": "rotary_emb",
+        "label": "RotaryEmbedding",
+        "outputsMetadata": [
+            {
+                "id": "0",
+                "attrs": [
+                    {"key": "port_label", "value": "cos"},
+                    {"key": "shape", "value": "[B, S, 8] float16"},
+                    {"key": "dtype", "value": "float16"},
+                ],
+            },
+            {
+                "id": "1",
+                "attrs": [
+                    {"key": "port_label", "value": "sin"},
+                    {"key": "shape", "value": "[B, S, 8] float16"},
+                    {"key": "dtype", "value": "float16"},
+                ],
+            },
+        ],
+    }
+    mirror_tile = {
+        "id": "decoder/layer1/@input_mirror",
+        "label": "sin",
+        "attrs": [{"key": "synthetic", "value": "@input_mirror"}],
+        "incomingEdges": [{"sourceNodeId": "rotary_emb", "sourceNodeOutputId": "1"}],
+    }
+    nodes = [source_node, mirror_tile]
+    merge._declare_tuple_boundary_ports(nodes)
+
+    ports = mirror_tile["outputsMetadata"]
+    assert len(ports) == 1
+    port_attrs = {attr["key"]: attr["value"] for attr in ports[0]["attrs"]}
+    assert port_attrs == {
+        "port_label": "sin",
+        "shape": "[B, S, 8] float16",
+        "dtype": "float16",
+    }
+    tile_attrs = {attr["key"]: attr["value"] for attr in mirror_tile["attrs"]}
+    assert tile_attrs["output_shape"] == "[B, S, 8] float16"
+
+
+# ---------------------------------------------------------------------------
+# _drop_undrawn_state_reads
+# ---------------------------------------------------------------------------
+
+
+def test_drop_undrawn_state_reads_cascades_through_an_unread_chain():
+    """``buffered_kv, buffered_gate = self.buffer_kv[name], ...`` reads
+    persistent state for a branch this call does not take; the op and its
+    const weight tile are both left pointing at nothing and must go, in the
+    same cascade a dead consumer chained onto it (``concat`` reading
+    ``buffered_kv``, its const tile keyed off ``concat``) also goes -- the
+    const tile only drops once its owner is actually gone, a second pass of
+    the loop. A ``stores:``/``side_effect:``/synthetic node is kept even
+    though nothing reads it, and a surviving node's own (unrelated) edge is
+    left alone.
+    """
+    nodes = [
+        {
+            "id": "buffered_kv",
+            "attrs": [{"key": "details", "value": "method_params: x"}],
+        },
+        {
+            "id": "concat",
+            "attrs": [{"key": "details", "value": "method_params: y"}],
+            "incomingEdges": [_edge("buffered_kv")],
+        },
+        {
+            "id": "stored_state",
+            "attrs": [
+                {"key": "details", "value": "method_params: x; stores: kv_cache"}
+            ],
+        },
+        {
+            "id": "side_effecting",
+            "attrs": [
+                {"key": "details", "value": "method_params: x; side_effect: true"}
+            ],
+            "incomingEdges": [_edge("stored_state")],
+        },
+        {"id": "synthetic_input", "attrs": [{"key": "synthetic", "value": "@input"}]},
+        {"id": "concat:const:0", "attrs": []},
+    ]
+    merge._drop_undrawn_state_reads(nodes)
+
+    remaining = {node["id"] for node in nodes}
+    assert remaining == {"stored_state", "side_effecting", "synthetic_input"}
+    side_effecting = next(node for node in nodes if node["id"] == "side_effecting")
+    assert side_effecting["incomingEdges"] == [_edge("stored_state")]
+
+
+# ---------------------------------------------------------------------------
+# _untie_host_constructors_from_the_activation
+# ---------------------------------------------------------------------------
+
+
+def test_untie_host_constructors_from_the_activation_drops_the_stand_in_edge():
+    """``torch.tensor([...]).expand(...)`` is marked ``constant_extent`` but
+    still carries the frame's activation as a stand-in operand (it has no
+    real tensor input). Once its only incoming edge is that stand-in, it is
+    dropped and the op is tagged constant. A sibling that ALSO reads a real
+    producer keeps that edge and is not tagged -- it genuinely has a tensor
+    operand; a plain op untouched by this (no ``constant_extent`` detail) is
+    left alone entirely.
+    """
+    nodes = [
+        {"id": "@input", "attrs": [{"key": "synthetic", "value": "@input"}]},
+        {
+            "id": "expand",
+            "attrs": [{"key": "details", "value": "constant_extent: true"}],
+            "incomingEdges": [_edge("@input")],
+        },
+        {
+            "id": "expand_mixed",
+            "attrs": [{"key": "details", "value": "constant_extent: true"}],
+            "incomingEdges": [_edge("@input"), _edge("real_producer")],
+        },
+        {"id": "real_producer"},
+        {
+            "id": "normal_op",
+            "attrs": [{"key": "details", "value": "nothing"}],
+            "incomingEdges": [_edge("@input")],
+        },
+    ]
+    merge._untie_host_constructors_from_the_activation(nodes)
+
+    by_id = {node["id"]: node for node in nodes}
+    assert by_id["expand"]["incomingEdges"] == []
+    assert {attr["key"]: attr["value"] for attr in by_id["expand"]["attrs"]}[
+        "constant"
+    ] == "true"
+
+    mixed_sources = {
+        edge["sourceNodeId"] for edge in by_id["expand_mixed"]["incomingEdges"]
+    }
+    assert mixed_sources == {"real_producer"}
+    assert all(attr.get("key") != "constant" for attr in by_id["expand_mixed"]["attrs"])
+
+    assert by_id["normal_op"]["incomingEdges"] == [_edge("@input")]
+
+
+# ---------------------------------------------------------------------------
 # _config_leaf / _data_movement_shape
 # ---------------------------------------------------------------------------
 
@@ -161,6 +360,17 @@ def test_data_movement_shape_covers_all_branches():
     assert resolved.shape == ("B", 4, 16, "dynamic")
     # Unknown label passes source through
     assert merge._data_movement_shape(_op("Softmax"), src, spec=spec) is src
+    # Permute/Transpose reorder by the recorded axes...
+    permuted = merge._data_movement_shape(
+        _op("Permute", ["dims: 2, 0, 1"]), src, spec=spec
+    )
+    assert permuted.shape == (8, "B", "S")
+    # ...or pass through when there is no (or an invalid) dims detail.
+    assert merge._data_movement_shape(_op("Transpose"), src, spec=spec) is src
+    assert (
+        merge._data_movement_shape(_op("Permute", ["dims: 0, 0, 1"]), src, spec=spec)
+        is src
+    )
 
 
 # ---------------------------------------------------------------------------
