@@ -17,7 +17,7 @@ import sys
 
 import pandas as pd
 
-from csv_io import write_csv
+from TraceLens.Agent.Analysis.utils import write_csv
 
 CSV_COLUMNS = [
     "index",

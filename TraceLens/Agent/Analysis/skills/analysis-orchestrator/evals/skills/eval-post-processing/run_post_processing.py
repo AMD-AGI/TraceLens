@@ -28,12 +28,13 @@ logger = logging.getLogger(__name__)
 
 import yaml
 
+from TraceLens.Agent.Analysis.utils import write_csv
+
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _EVAL_UTILS_DIR = os.path.join(_SCRIPT_DIR, "..", "..", "eval_utils")
 if _EVAL_UTILS_DIR not in sys.path:
     sys.path.insert(0, _EVAL_UTILS_DIR)
 from aggregate_repeatability import find_runs, parse_ndjson_stream
-from csv_io import write_csv
 
 REPO_ROOT = "/workspace/TraceLens"
 ANALYSIS_DIR = os.path.join(

@@ -43,11 +43,7 @@ import re
 import statistics
 import sys
 
-# csv_io lives two dirs up in eval_utils/ (not a package).
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ANALYSIS_EVAL_UTILS = os.path.abspath(os.path.join(_HERE, "..", "..", "eval_utils"))
-sys.path.insert(0, _ANALYSIS_EVAL_UTILS)
-from csv_io import write_csv  # noqa: E402
+from TraceLens.Agent.Analysis.utils import write_csv
 
 CSV_COLUMNS = [
     "index",

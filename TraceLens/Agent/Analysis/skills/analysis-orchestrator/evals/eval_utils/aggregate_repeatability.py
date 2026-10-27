@@ -13,7 +13,7 @@ import os
 import re
 from collections import defaultdict
 
-from csv_io import write_csv
+from TraceLens.Agent.Analysis.utils import write_csv
 from TraceLens.PerfModel.utils import optional_int
 
 RESULTS_ROOT = os.environ.get(

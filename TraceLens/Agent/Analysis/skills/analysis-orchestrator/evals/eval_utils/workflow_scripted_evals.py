@@ -20,7 +20,7 @@ import os
 import re
 import sys
 
-from csv_io import write_csv
+from TraceLens.Agent.Analysis.utils import write_csv
 
 CSV_COLUMNS = [
     "index",

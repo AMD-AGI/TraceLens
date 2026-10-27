@@ -36,6 +36,8 @@ import argparse
 import os
 import sys
 
+from TraceLens.Agent.Analysis.utils import write_csv
+
 # compare_lca_partitions lives two dirs up in eval_utils/ (not a package).
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ANALYSIS_EVAL_UTILS = os.path.abspath(os.path.join(_HERE, "..", "..", "eval_utils"))
@@ -46,7 +48,6 @@ from compare_lca_partitions import (
     both_strict,
     load,
 )  # noqa: E402
-from csv_io import write_csv  # noqa: E402
 
 CSV_COLUMNS = [
     "index",
