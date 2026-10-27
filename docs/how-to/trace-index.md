@@ -162,6 +162,8 @@ Query GEMM / SDPA / convolution shapes from the satellite tables, or with
 `json_extract` on the parsed JSON columns. For example
 `SELECT "M", "N", "K" FROM gemm_perf` or
 `SELECT json_extract(perf_params_json, '$.M') FROM unified_perf_rows`.
+Roofline stats are typed columns (`pct_roofline_mean`, `roofline_bound`,
+`roofline_time_us`), not JSON.
 
 ## Example queries
 
@@ -205,6 +207,21 @@ Channels equal groups (true depthwise) at 3×3 and 5×5 with widths 1536 / 3072 
 4096 / 8192, all in a single diffusion capture. If you're looking for a
 depthwise-conv workload, that's the file to open — found without reopening any
 trace.
+
+### Which GEMMs are compute-bound with low roofline utilization?
+
+```sql
+SELECT t.name, u.name AS op, u.pct_roofline_mean, u.roofline_bound
+FROM unified_perf_rows u
+JOIN traces t ON t.id = u.trace_id
+WHERE u.op_category = 'GEMM'
+  AND u.roofline_bound = 'COMPUTE_BOUND'
+  AND u.pct_roofline_mean < 40
+ORDER BY u.pct_roofline_mean;
+```
+
+Roofline bound and utilization are typed columns on `unified_perf_rows`, so this
+filter does not need `json_extract` on `raw_row_json`.
 
 ### What are the longest attention sequences in the catalog?
 
