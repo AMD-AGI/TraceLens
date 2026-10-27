@@ -11,6 +11,7 @@ and compute kernel subagents, and for extracting model-identification data
 for the analysis report pipeline.
 """
 
+import csv
 import json
 import os
 from collections import defaultdict
@@ -29,6 +30,17 @@ def load_manifest(output_dir: str) -> dict:
     manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
     with open(manifest_path) as f:
         return json.load(f)
+
+
+def write_csv(path, rows, fieldnames, verbose=False):
+    """Write ``rows`` (a list of dicts) to ``path`` as CSV with ``fieldnames``
+    as the header, ignoring any extra keys not in ``fieldnames``."""
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    if verbose:
+        print("  Written: {} ({} rows)".format(path, len(rows)))
 
 
 def prepare_model_identification_data(output_dir: str) -> bool:
