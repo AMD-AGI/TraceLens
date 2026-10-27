@@ -76,6 +76,7 @@ from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
     _build_trace2_ops_summary_by_enhanced_category,
     _gpu_utilization_metrics_from_gpu_timeline_df,
     _normalize_category,
+    perf_report_metadata,
 )
 from TraceLens.Agent.Analysis.utils.kernel_fusion import (
     FusionCandidate,
@@ -1927,6 +1928,26 @@ def test_gpu_utilization_metrics_missing_rows_default_zero():
     assert m["exposed_comm_time_percent"] == 0
     assert m["exposed_memcpy_time_percent"] == 0
     assert m["idle_time_percent"] == 0
+
+
+# ----- perf_report_metadata -----
+
+
+def test_perf_report_metadata_peaks_and_utilization(tmp_path):
+    pd.DataFrame(
+        {
+            "type": ["total_time", "idle_time"],
+            "time ms": [1000.0, 20.0],
+            "percent": [100.0, 2.0],
+        }
+    ).to_csv(tmp_path / "gpu_timeline.csv", index=False)
+
+    meta = perf_report_metadata(str(tmp_path), "MI300X")
+
+    assert meta["peak_mem_bw_tbs"] == 5.3
+    assert meta["max_achievable_tflops"]["matrix_bf16"] == 708
+    assert meta["gpu_utilization"]["total_time_ms"] == 1000.0
+    assert meta["gpu_utilization"]["idle_time_percent"] == 2.0
 
 
 # ----- _normalize_category -----
