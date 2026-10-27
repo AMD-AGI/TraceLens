@@ -195,6 +195,179 @@ def test_append_stack_entry_dataflow_skips_and_infers_shape(
     assert result == ["@model_forward/op_keep"]
 
 
+class TestResolveLoopInvariantSource:
+    """``_resolve_loop_invariant_source``'s structural fallback chain for a
+    loop-invariant decoder input, in both its "extractor recovered an exact
+    keyword producer" and "resolve by structure" regimes."""
+
+    def _cls(self):
+        return SimpleNamespace(forward_param_inputs=["attention_mask"])
+
+    def test_a_captured_producer_handed_a_different_runtime_value_is_resolved(
+        self, monkeypatch
+    ):
+        """GLM reassigns its mask AFTER the builder runs; the extractor's exact
+        keyword producer (``mask_builder``) is not what the loop was really
+        HANDED (``actual_runtime_producer``) -- the handed value wins."""
+        monkeypatch.setattr(
+            merge, "_materialize_model_scope_producer", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            merge,
+            "_resolve_existing_producer_node",
+            lambda node_by_id, attr: (
+                "resolved_runtime" if attr == "actual_runtime_producer" else None
+            ),
+        )
+        result = merge._resolve_loop_invariant_source(
+            [],
+            {},
+            cls=self._cls(),
+            param="attention_mask",
+            primary_param="hidden_states",
+            pred_args={"attention_mask": "mask_builder"},
+            producer_map={},
+            loop_param_producers={},
+            dataflow_producers={"attention_mask": "actual_runtime_producer"},
+        )
+        assert result == "resolved_runtime"
+
+    def test_a_bare_inline_producer_falls_back_to_a_top_level_boundary(
+        self, monkeypatch
+    ):
+        """The captured producer resolves to nothing renderable (a bare inline
+        op the export never surfaces as its own node) and nothing else
+        overrides it: the forward parameter gets its own model-input tile."""
+        monkeypatch.setattr(
+            merge, "_materialize_model_scope_producer", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            merge,
+            "_ensure_top_level_input",
+            lambda nodes, node_by_id, param: "model_input_tile",
+        )
+        result = merge._resolve_loop_invariant_source(
+            [],
+            {},
+            cls=self._cls(),
+            param="attention_mask",
+            primary_param="hidden_states",
+            pred_args={"attention_mask": "mask_builder"},
+            producer_map={},
+            loop_param_producers={},
+            dataflow_producers={},
+        )
+        assert result == "model_input_tile"
+
+    def test_without_a_recovered_keyword_producer_the_handed_value_still_wins(
+        self, monkeypatch
+    ):
+        """A variant loop that leaves ``pred_args`` empty still prefers what
+        the extractor recorded the loop as actually being HANDED over any
+        other structural guess."""
+        monkeypatch.setattr(
+            merge,
+            "_resolve_existing_producer_node",
+            lambda node_by_id, attr: "resolved_x" if attr == "producer_x" else None,
+        )
+        result = merge._resolve_loop_invariant_source(
+            [],
+            {},
+            cls=self._cls(),
+            param="attention_mask",
+            primary_param="hidden_states",
+            pred_args={},
+            producer_map={},
+            loop_param_producers={},
+            dataflow_producers={"attention_mask": "producer_x"},
+        )
+        assert result == "resolved_x"
+
+    def test_falls_back_to_a_submodule_output_when_nothing_else_resolves(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            merge,
+            "_resolve_submodule_output_node",
+            lambda node_by_id, attr: "submodule_out" if attr == "mask_attr" else None,
+        )
+        result = merge._resolve_loop_invariant_source(
+            [],
+            {},
+            cls=self._cls(),
+            param="attention_mask",
+            primary_param="hidden_states",
+            pred_args={},
+            producer_map={"attention_mask": "mask_attr"},
+            loop_param_producers={},
+            dataflow_producers={},
+        )
+        assert result == "submodule_out"
+
+
+def test_is_real_model_input_without_a_shape_inferencer():
+    assert not merge._is_real_model_input("attention_mask", None)
+
+
+def test_is_real_model_input_declines_without_a_meta_trace():
+    """No meta trace means no evidence of what was really passed -- not
+    proof that it WAS, so this must decline rather than guess."""
+
+    class _Raises:
+        def _ensure_meta_input_specs(self):
+            raise RuntimeError("no meta trace available")
+
+    assert not merge._is_real_model_input("attention_mask", _Raises())
+
+
+def test_is_real_model_input_reads_what_the_causal_lm_was_really_handed():
+    """GLM's forward ACCEPTS ``attention_mask`` but is never given one; the
+    meta trace is the record of what the top-level ``ForCausalLM`` class was
+    really called with, so only a param present there counts."""
+    inferencer = SimpleNamespace(
+        _ensure_meta_input_specs=lambda: None,
+        _meta_input_specs_by_class={("ModelForCausalLM", "input_ids"): object()},
+    )
+    assert merge._is_real_model_input("input_ids", inferencer)
+    assert not merge._is_real_model_input("attention_mask", inferencer)
+
+
+def test_append_stack_entry_dataflow_recovers_a_generators_shape_source(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """``torch.arange(inputs_embeds.shape[1])`` reads no tensor OPERAND, but
+    its extent comes from one; drawing it rootless hides that dependency, so
+    the tensor behind the recorded ``arange_stop:`` bound expression must be
+    recovered from ``var_producers`` and wired as the edge."""
+    op_arange = ForwardOperation(
+        "position_ids",
+        "Arange",
+        "",
+        predecessors=(),
+        details=("raw_op: arange", "arange_stop: inputs_embeds.shape[1]"),
+    )
+    dataflow = StackEntryDataflow(
+        operations=(op_arange,),
+        output_producer="position_ids",
+        var_producers={"inputs_embeds": "embed_proj"},
+    )
+    monkeypatch.setattr(merge, "stack_entry_dataflow", lambda cls: dataflow)
+    spec = _spec(stack_pre=[], stack_model_class="M", class_registry={"M": object()})
+    nodes = [{"id": "embed_proj", "label": "embed"}]
+
+    result = merge._append_stack_entry_dataflow(
+        nodes,
+        spec=spec,
+        module_sources={"embed_proj": "embed_proj"},
+        shape_inferencer=None,
+    )
+
+    by_id = {node["id"]: node for node in nodes}
+    arange_node = by_id["@model_forward/position_ids"]
+    assert arange_node["incomingEdges"][0]["sourceNodeId"] == "embed_proj"
+    assert result == ["@model_forward/position_ids"]
+
+
 def test_append_stack_entry_dataflow_returns_none_without_dataflow(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -322,6 +495,68 @@ def test_section_exits_falls_back_to_boundary_nodes():
 # ---------------------------------------------------------------------------
 # _inject_group_inputs skip + empty-entry branches (937, 969)
 # ---------------------------------------------------------------------------
+
+
+def test_name_unnamed_group_inputs_mints_a_tile_for_the_plain_edge():
+    """DeepSeek's expert loop names its three ``hidden_states`` slices on one
+    boundary but lets the routed token index cross on a plain op-to-op edge;
+    once a module already has a naming convention (one entrant IS named),
+    every other unnamed entrant must get its own boundary tile too, wired in
+    place of the raw cross-namespace edge."""
+    nodes = [
+        {"id": "ext/producer_a", "namespace": "ext", "label": "ProducerA"},
+        {"id": "ext/producer_b", "namespace": "ext", "label": "hidden_states"},
+        {
+            "id": "mod/@input:q",
+            "namespace": "mod",
+            "label": "q",
+            "attrs": [{"key": "synthetic", "value": "@input"}],
+            "incomingEdges": [_edge("ext/producer_a")],
+        },
+        {
+            "id": "mod/consumer",
+            "namespace": "mod",
+            "label": "Consumer",
+            "incomingEdges": [_edge("ext/producer_b")],
+        },
+    ]
+    merge._name_unnamed_group_inputs(nodes)
+    tile_ids = {n["id"] for n in nodes}
+    assert "mod/@input:hidden_states" in tile_ids
+    consumer = next(n for n in nodes if n["id"] == "mod/consumer")
+    assert consumer["incomingEdges"][0]["sourceNodeId"] == "mod/@input:hidden_states"
+
+
+def test_name_unnamed_group_inputs_dedupes_a_label_collision():
+    """Two distinct unnamed producers that would both earn the SAME tile name
+    (e.g. two different-shaped tensors both labeled ``weight``) must not
+    collapse onto one tile; the second gets a disambiguating suffix."""
+    nodes = [
+        {"id": "ext/named_src", "namespace": "ext", "label": "named"},
+        {"id": "ext/a", "namespace": "ext", "label": "weight"},
+        {"id": "ext/b", "namespace": "ext", "label": "weight"},
+        {
+            "id": "mod/@input:named",
+            "namespace": "mod",
+            "label": "named",
+            "attrs": [{"key": "synthetic", "value": "@input"}],
+            "incomingEdges": [_edge("ext/named_src")],
+        },
+        {
+            "id": "mod/consumer_a",
+            "namespace": "mod",
+            "incomingEdges": [_edge("ext/a")],
+        },
+        {
+            "id": "mod/consumer_b",
+            "namespace": "mod",
+            "incomingEdges": [_edge("ext/b")],
+        },
+    ]
+    merge._name_unnamed_group_inputs(nodes)
+    tile_ids = {n["id"] for n in nodes}
+    assert "mod/@input:weight" in tile_ids
+    assert "mod/@input:weight_2" in tile_ids
 
 
 def test_inject_group_inputs_skips_merged_tensor_port_parent():
