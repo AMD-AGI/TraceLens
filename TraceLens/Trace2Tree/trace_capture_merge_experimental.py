@@ -676,32 +676,52 @@ def _load_all_capture_sources(capture_map, role, batch_sizes):
     return sources
 
 
+def _find_closest_capture(kernel_count, all_counts):
+    """Find the pool index whose dispatch count is closest to *kernel_count*.
+
+    Exact matches are preferred.  When no exact match exists, the nearest
+    count wins (handles off-by-one mismatches common in profiler traces).
+    """
+    if kernel_count in all_counts:
+        return all_counts[kernel_count][0]
+    best_idx = None
+    best_diff = float("inf")
+    for dispatch_count, indices in all_counts.items():
+        diff = abs(dispatch_count - kernel_count)
+        if diff < best_diff:
+            best_diff = diff
+            best_idx = indices[0]
+    return best_idx
+
+
 def _match_graph_roots_to_captures(graph_tree, graph_roots, all_sources):
     """Match graph roots to capture roots from multiple capture sources by count.
 
-    Each graph root is matched to the capture root whose dispatch count equals
-    the graph root's kernel count.  Identical graph roots (same kernel count)
-    share the same capture root.
+    Each graph root is matched to the capture root whose dispatch count is
+    closest to the graph root's kernel count.  Identical graph roots (same
+    kernel count) share the same capture root.
 
     Returns ``(pairs, data, trees)`` — lists of ``(capture_root, graph_root)``,
     corresponding ``capture_root_data`` entries, and the ``capture_tree`` each
-    root came from — or ``None`` when any graph root cannot be matched.
+    root came from — or ``None`` when no captures are available.
     """
-    # Build a pool of (capture_tree, capture_root, capture_root_datum,
-    # dispatch_count).
+    # candidate capture roots
     pool = []
     for src_tree, cap_roots, cap_root_data in all_sources:
-        for cr, (events, filtered_uids) in zip(cap_roots, cap_root_data):
-            dc = len(filtered_uids)
-            pool.append((src_tree, cr, (events, filtered_uids), dc))
+        for capture_root, (events, filtered_uids) in zip(cap_roots, cap_root_data):
+            dispatch_count = len(filtered_uids)
+            pool.append(
+                (src_tree, capture_root, (events, filtered_uids), dispatch_count)
+            )
 
-    # Index pool by dispatch count for fast lookup.
-    by_count: Dict[int, List[int]] = defaultdict(list)
-    for idx, (_t, _cr, _crd, dc) in enumerate(pool):
-        by_count[dc].append(idx)
+    if not pool:
+        return None
 
-    # Match each graph root.  Cache by kernel count so identical graph roots
-    # reuse the same capture root.
+    # dispatch_count -> list of pool indices with that count
+    all_counts: Dict[int, List[int]] = defaultdict(list)
+    for idx, (_, _, _, dispatch_count) in enumerate(pool):
+        all_counts[dispatch_count].append(idx)
+
     match_cache: Dict[int, int] = {}
     pairs = []
     data = []
@@ -710,38 +730,16 @@ def _match_graph_roots_to_captures(graph_tree, graph_roots, all_sources):
         _, filtered = get_subtree_events(
             graph_tree, gr, cat_filter=list(GPU_KERNEL_CATEGORIES)
         )
-        kc = len(filtered)
-        if kc not in match_cache:
-            candidates = by_count.get(kc, [])
-            if not candidates:
-                return None
-            match_cache[kc] = candidates[0]
-        pool_idx = match_cache[kc]
-        src_tree, cr, crd, _ = pool[pool_idx]
-        pairs.append((cr, gr))
+        kernel_count = len(filtered)
+        if kernel_count not in match_cache:
+            match_cache[kernel_count] = _find_closest_capture(kernel_count, all_counts)
+        pool_idx = match_cache[kernel_count]
+        src_tree, capture_root, crd, _ = pool[pool_idx]
+        pairs.append((capture_root, gr))
         data.append(crd)
         trees.append(src_tree)
 
     return pairs, data, trees
-
-
-def _same_graph_replay(graph_tree, graph_roots) -> bool:
-    """True when every graph launch replays one kernel sequence.
-
-    Speculative decoding replays one FULL drafter graph several times in a
-    step. A piecewise capture is the case where those sequences differ.
-    """
-    if len(graph_roots) <= 1:
-        return True
-    signatures = []
-    for root in graph_roots:
-        _, filtered = get_subtree_events(
-            graph_tree,
-            root,
-            cat_filter=["kernel", "gpu_memset", "gpu_memcpy"],
-        )
-        signatures.append(tuple(event["name"] for event in filtered))
-    return len(set(signatures)) == 1
 
 
 def find_closest_batch_size(
@@ -860,7 +858,29 @@ def merge_capture_trace_into_graph(
         all_sources = _load_all_capture_sources(
             capture_map, role, sorted(candidate_batch_sizes)
         )
-        result = _match_graph_roots_to_captures(graph_tree, graph_roots, all_sources)
+        # When a single source has the right root count, pair positionally
+        # (preserves the old 1:1 and 1:N behaviour and avoids mis-pairing
+        # roots that share the same dispatch count).
+        result = None
+        for src_tree, cap_roots, cap_root_data in all_sources:
+            if len(cap_roots) == 1:
+                result = (
+                    [(cap_roots[0], g) for g in graph_roots],
+                    [cap_root_data[0]] * len(graph_roots),
+                    [src_tree] * len(graph_roots),
+                )
+                break
+            if len(cap_roots) == len(graph_roots):
+                result = (
+                    list(zip(cap_roots, graph_roots)),
+                    cap_root_data,
+                    [src_tree] * len(graph_roots),
+                )
+                break
+        if result is None:
+            result = _match_graph_roots_to_captures(
+                graph_tree, graph_roots, all_sources
+            )
         if result is None:
             print(
                 "Warning: could not match capture roots to graph roots "
