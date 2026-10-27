@@ -782,15 +782,16 @@ class gemm_afp4wfp4(GEMM):
     Roofline calculation -- FLOPs:
         FLOPs = 2 * M * N * K   (inherited from GEMM base class)
 
-        Per-block scale multiplications are O(M * N * K / 32) and negligible
-        relative to the matmul.
+        Per-block scale multiplications are not counted: the scaled MFMA applies
+        the E8M0 scales inside the instruction, and MXFP4 peak is quoted on
+        2 * M * N * K.
 
     Roofline calculation -- Bytes:
-        bytes_X      = M * K * 0.5             # FP4 packed
-        bytes_W      = N * K * 0.5             # FP4 packed
-        bytes_output = M * N * bpe(output)     # BF16/FP16 -> 2 bytes
-
-        Scale tensors are negligible and omitted.
+        bytes_X        = M * K * 0.5             # FP4 packed
+        bytes_W        = N * K * 0.5             # FP4 packed
+        bytes_x_scales = M * K / 32 * bpe(scale) # E8M0 -> 1 byte
+        bytes_w_scales = N * K / 32 * bpe(scale) # E8M0 -> 1 byte
+        bytes_output   = M * N * bpe(output)     # BF16/FP16 -> 2 bytes
 
     Compute precision:
         MXFP4 -> mapped via torch_dtype_map("mxfp4"). We override get_compute_precision
@@ -817,6 +818,10 @@ class gemm_afp4wfp4(GEMM):
                 event["args"]["Input type"][1],
                 "c10::bfloat16",
             ),
+            "x_scales_shape": event["args"]["Input Dims"][2],
+            "w_scales_shape": event["args"]["Input Dims"][3],
+            "dtype_x_scales": event["args"]["Input type"][2],
+            "dtype_w_scales": event["args"]["Input type"][3],
         }
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
@@ -826,12 +831,19 @@ class gemm_afp4wfp4(GEMM):
         self.bpe_output = name2bpe(dtype_A_B[2])
         self.bpe_bias = name2bpe(dtype_A_B[2])  # unused (bias=False)
 
-        return super().bytes(
+        operand_bytes = super().bytes(
             bpe_mat1=self.bpe_mat1,
             bpe_mat2=self.bpe_mat2,
             bpe_bias=self.bpe_bias,
             bpe_output=self.bpe_output,
         )
+        bytes_x_scales = prod(self.param_details["x_scales_shape"]) * name2bpe(
+            self.param_details["dtype_x_scales"]
+        )
+        bytes_w_scales = prod(self.param_details["w_scales_shape"]) * name2bpe(
+            self.param_details["dtype_w_scales"]
+        )
+        return operand_bytes + bytes_x_scales + bytes_w_scales
 
     def get_compute_precision(self):
         return torch_dtype_map("mxfp4")
