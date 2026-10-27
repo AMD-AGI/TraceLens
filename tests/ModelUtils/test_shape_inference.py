@@ -1583,6 +1583,132 @@ def test_introspect_kernel_source_is_none_when_nothing_is_found(monkeypatch):
     assert result is None
 
 
+def test_resolved_scalar_locals_feeds_arange_from_a_simple_local():
+    """A RoPE init helper's ``spatial_dim = dim // 2`` must resolve to a
+    concrete int so a later ``torch.arange(spatial_dim)`` in the same function
+    can size itself off it."""
+    import ast
+
+    from TraceLens.ModelUtils.shape_inference import _resolved_scalar_locals
+
+    ctx = _make_inferencer(dim=128).context
+    src = """
+def __init__(self, dim):
+    spatial_dim = dim // 2
+"""
+    func = ast.parse(src).body[0]
+    assert _resolved_scalar_locals(func, config={}, context=ctx) == {"spatial_dim": 64}
+
+
+def test_function_ast_locals_maps_tuple_unpacks_and_annotated_assigns():
+    """``inv_freq, self.scaling = rope_init_fn(...)`` records ``inv_freq`` at
+    its tuple ordinal (0) so a later alias chase through it lands on the right
+    unpacked element, not the whole call."""
+    import ast
+
+    from TraceLens.ModelUtils.shape_inference import _function_ast_locals
+
+    src = """
+def __init__(self, dim):
+    spatial_dim = dim // 2
+    inv_freq, self.scaling = rope_init_fn(dim)
+    other: int = 4
+"""
+    func = ast.parse(src).body[0]
+    locals_map = _function_ast_locals(func)
+    assert locals_map["spatial_dim"][1] is None
+    assert locals_map["inv_freq"][1] == 0
+    assert isinstance(locals_map["other"][0], ast.Constant)
+
+
+def test_arange_length_resolves_positional_and_keyword_bounds():
+    """A RoPE init helper's ``torch.arange(...)`` length, in every call shape
+    the source can spell: one bound, two, three, and the keyword form."""
+    import ast
+
+    from TraceLens.ModelUtils.shape_inference import _arange_length
+
+    ctx = _make_inferencer().context
+
+    def arange_call(src: str) -> ast.Call:
+        return ast.parse(src, mode="eval").body
+
+    length = lambda src: _arange_length(
+        arange_call(src), config={}, local_vars={}, context=ctx
+    )
+    assert length("torch.arange(10)") == 10
+    assert length("torch.arange(2, 10)") == 8
+    assert length("torch.arange(0, 10, 2)") == 5
+    assert length("torch.arange(start=0, end=10, step=2)") == 5
+
+
+def test_arange_length_is_none_when_unresolvable_or_non_positive_step():
+    import ast
+
+    from TraceLens.ModelUtils.shape_inference import _arange_length
+
+    ctx = _make_inferencer().context
+
+    def arange_call(src: str) -> ast.Call:
+        return ast.parse(src, mode="eval").body
+
+    length = lambda src: _arange_length(
+        arange_call(src), config={}, local_vars={}, context=ctx
+    )
+    # A bound that does not resolve to a concrete int (an unknown name).
+    assert length("torch.arange(some_unresolved_symbol)") is None
+    # A non-positive step produces no elements, not a negative-length answer.
+    assert length("torch.arange(0, 10, 0)") is None
+
+
+def test_triton_op_shape_resolves_scan_and_elementwise_families_without_running():
+    """A Triton-decomposed stage's result shape is fixed by its op family, not
+    by its (often unrunnable) torch fallback: an associative scan
+    (``cumsum``) always keeps its input's shape, and an elementwise op
+    (``add``) just broadcasts its operands."""
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+
+    inf = _make_inferencer()
+    a = TensorSpec(shape=("B", "S", 16), dtype="float16")
+    b = TensorSpec(shape=("B", "S", 1), dtype="float16")
+
+    def node(triton_op: str) -> ModelGraphNode:
+        return ModelGraphNode(
+            id="n",
+            kind=NodeKind.LEAF,
+            label="x",
+            operation=OperationKind.GPU_KERNEL,
+            metadata={"details": [f"triton_op: {triton_op}"]},
+        )
+
+    scan_result = inf._triton_op_shape(node("cumsum"), [a])
+    assert scan_result is not None and scan_result.shape == a.shape
+
+    elementwise_result = inf._triton_op_shape(node("add"), [a, b])
+    assert elementwise_result is not None and elementwise_result.shape == a.shape
+
+
+def test_triton_op_shape_declines_outside_its_two_known_families():
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+
+    inf = _make_inferencer()
+    a = TensorSpec(shape=("B", "S", 16), dtype="float16")
+    no_detail = ModelGraphNode(
+        id="n", kind=NodeKind.LEAF, label="x", operation=OperationKind.GPU_KERNEL
+    )
+    assert inf._triton_op_shape(no_detail, [a]) is None
+
+    unknown_op = ModelGraphNode(
+        id="n",
+        kind=NodeKind.LEAF,
+        label="x",
+        operation=OperationKind.GPU_KERNEL,
+        metadata={"details": ["triton_op: argmax"]},
+    )
+    assert inf._triton_op_shape(unknown_op, [a]) is None
+    assert inf._triton_op_shape(unknown_op, []) is None
+
+
 def test_product_dim_merges_a_run_of_axes_into_one_readable_extent():
     """A merged run of axes (``view(B, S, -1)`` collapsing the head/dim axes
     back into one) reads as a number when every merged axis is concrete, a
