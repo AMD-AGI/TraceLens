@@ -315,27 +315,37 @@ def test_parse_engine_class_plans_returns_empty_on_a_syntax_error():
 
 
 def test_build_parallel_layout_warns_but_continues_when_a_plan_source_is_unreadable(
-    tmp_path, caplog
+    tmp_path, monkeypatch, caplog
 ):
     """A declared plan source that exists but cannot be read (permissions
     revoked out from under a cached checkout) is skipped with a warning
     rather than crashing the whole layout -- a still-readable source is
-    still parsed."""
+    still parsed. Simulated via a monkeypatched ``read_text`` rather than a
+    real ``chmod``: root (as CI's container runs) ignores file permissions,
+    so a real unreadable file would not actually fail to read.
+    """
     import logging
+    from pathlib import Path
 
     from TraceLens.ModelUtils.parallel_plan import ParallelDegree, build_parallel_layout
 
     unreadable = tmp_path / "modeling_unreadable.py"
     unreadable.write_text(_SOURCE, encoding="utf-8")
-    unreadable.chmod(0o000)
     present = tmp_path / "modeling_present.py"
     present.write_text(_SOURCE, encoding="utf-8")
-    try:
-        spec = _spec(code_paths=[unreadable, present])
-        with caplog.at_level(logging.WARNING):
-            layout = build_parallel_layout(spec, ParallelDegree(tp=4))
-    finally:
-        unreadable.chmod(0o644)
+
+    real_read_text = Path.read_text
+
+    def fake_read_text(self, *args, **kwargs):
+        if self == unreadable:
+            raise OSError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+    spec = _spec(code_paths=[unreadable, present])
+    with caplog.at_level(logging.WARNING):
+        layout = build_parallel_layout(spec, ParallelDegree(tp=4))
+
     assert layout is not None
     assert any(
         "Could not read parallel plans" in message for message in caplog.messages
