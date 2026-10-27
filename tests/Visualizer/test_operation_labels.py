@@ -197,6 +197,19 @@ def test_glm_experts_expands_router_boundary_into_named_parameters():
         assert consumers.get(producer["id"]), name
 
 
+def test_inferred_glm_graph_has_nodes():
+    """Shape inference runs on the pinned GLM graph in this process."""
+    pytest.importorskip("huggingface_hub")
+    spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    from TraceLens.ModelUtils.shape_inference import ShapeInferencer
+    from TraceLens.Visualizer.model_explorer_export.merge import (
+        build_merged_model_graph,
+    )
+
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    assert graph["nodes"]
+
+
 def test_merged_graph_uses_operator_labels_not_op_ids():
     pytest.importorskip("huggingface_hub")
     spec = pinned_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
