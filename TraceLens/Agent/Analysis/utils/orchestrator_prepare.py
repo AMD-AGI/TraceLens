@@ -290,8 +290,10 @@ def main():
         }
         focus_job = plans[0].name
         focus_csv_dir = plans[0].output_csvs_dir
+        system_utilization = job_utilization[focus_job]
     else:
         focus_csv_dir = trace1_csv_dir
+        system_utilization = gpu_utilization_metrics
     trace2_gpu_utilization = None
     trace2_ops_summary_by_category = None
 
@@ -693,12 +695,14 @@ def main():
         # Create metadata JSON
         metadata = {
             "platform": platform,
-            **trace1_metadata,
+            PEAK_MEM_BW_KEY: trace1_metadata[PEAK_MEM_BW_KEY],
+            "max_achievable_tflops": trace1_metadata["max_achievable_tflops"],
             "memory_gb": platform_specs.get("memory_gb"),
             "trace_path": trace_path,
             "output_dir": output_dir,
             "category": display_name,
             "category_name": category_name,
+            "gpu_utilization": gpu_utilization_metrics,
             "trace_loading_policy": "DO_NOT_LOAD_TRACE_use_precomputed_tree_data",
         }
 
@@ -723,19 +727,18 @@ def main():
     # CPU/Idle Category Creation (always created)
     # ============================================================================
     print(f"\n  Category: CPU/Idle Analysis (cpu_idle)")
-    focus_metadata = perf_report_metadata(focus_csv_dir, platform)
-    print(
-        f"    Idle time: {focus_metadata['gpu_utilization']['idle_time_percent']:.1f}%"
-    )
+    print(f"    Idle time: {system_utilization['idle_time_percent']:.1f}%")
 
     cpu_idle_metadata = {
         "platform": platform,
-        **focus_metadata,
+        PEAK_MEM_BW_KEY: trace1_metadata[PEAK_MEM_BW_KEY],
+        "max_achievable_tflops": trace1_metadata["max_achievable_tflops"],
         "memory_gb": platform_specs.get("memory_gb"),
         "trace_path": trace_path,
         "output_dir": output_dir,
         "category": "CPU/Idle Analysis",
         "category_name": "cpu_idle",
+        "gpu_utilization": system_utilization,
     }
 
     cpu_idle_metadata_file = f"{output_dir}/metadata/cpu_idle_metadata.json"
