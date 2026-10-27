@@ -17,7 +17,7 @@ For example, this is the top-level visualization of GLM 5.3 Flash
 
 ## Features
 
-- **Single-page HTML export** — self-contained `.html` file (graph payload, viewer, and layout worker embedded); open directly in a browser, no local server or sidecar files
+- **Single-page HTML export** — self-contained `.html` file (graph payload, viewer, and the Apache-2.0 layout worker embedded, with its license); open directly in a browser, no local server or sidecar files
 - **Model Explorer export** — interactive layered graph with fact sheet, kernel styling, and collapsible pipelines
 - **Shape inference** — symbolic tensor shapes (`B x S x H`) on every exported node, shown on graph edges (disable with `--no-shapes`)
 - **Operator JSON export** — flat per-op shape lists for tooling (`--operators-json`)
@@ -40,61 +40,42 @@ For local development and tests, also install the dev extra:
 pip install -e ".[Visualizer,dev]"
 ```
 
-Or install from the repo root with `pip install -e ".[Visualizer]"`.
-
-Legacy standalone setup:
-
-```bash
-cd ~/tracelens/TraceLens/Visualizer
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-For development and tests:
-
-```bash
-pip install -r requirements-dev.txt
-```
-
-
-
 ## Quick start
 
 Serve an interactive Model Explorer viewer for a Hugging Face model:
 
 ```bash
-python visualize_model_in_explorer.py moonshotai/Kimi-K3 --serve --open
+visualize_model_in_explorer moonshotai/Kimi-K3 --serve --open
 ```
 
 Export a self-contained HTML file (default when not using `--serve`):
 
 ```bash
-python visualize_model_in_explorer.py moonshotai/Kimi-K3
+visualize_model_in_explorer moonshotai/Kimi-K3
 # writes moonshotai_Kimi-K3.html — one file, open directly in a browser
 
-python visualize_model_in_explorer.py moonshotai/Kimi-K3 -o
+visualize_model_in_explorer moonshotai/Kimi-K3 -o
 # same default HTML path
 ```
 
-The HTML export embeds the graph payload, TraceLens viewer, and Model Explorer layout worker inline. You can double-click the file or open it via `file://`; no `worker.js` or other companion files are written beside it. The bundled Model Explorer library is still loaded from unpkg on first open (network required unless cached by the browser).
+The HTML export embeds the graph payload, TraceLens viewer, and Model Explorer layout worker inline, including the Apache-2.0 license and the copyright notice for that worker. You can double-click the file or open it via `file://`; no `worker.js` or other companion files are written beside it. The `<model-explorer-visualizer>` element and its font textures still load from unpkg on first open (network required unless cached by the browser). `--serve` follows the package README: it serves the pinned `dist/worker.js` at `./worker.js` on the same origin, and points `assetFilesBaseUrl` at that package's `dist/static_files`.
 
 Export raw Model Explorer JSON:
 
 ```bash
-python visualize_model_in_explorer.py moonshotai/Kimi-K3 -o kimi.json
+visualize_model_in_explorer moonshotai/Kimi-K3 -o kimi.json
 ```
 
 Skip symbolic shape annotations on graph nodes (they are on by default):
 
 ```bash
-python visualize_model_in_explorer.py moonshotai/Kimi-K3 --serve --open --no-shapes
+visualize_model_in_explorer moonshotai/Kimi-K3 --serve --open --no-shapes
 ```
 
 Write a flat operator export with inferred shapes (also embeds `operatorExport` in the payload when used with `-o`):
 
 ```bash
-python visualize_model_in_explorer.py moonshotai/Kimi-K3 --operators-json kimi_operators.json
+visualize_model_in_explorer moonshotai/Kimi-K3 --operators-json kimi_operators.json
 ```
 
 
@@ -278,7 +259,7 @@ Generic AST introspection reads Python from:
 Other GitHub repositories are blocked unless you explicitly allow them:
 
 ```bash
-python visualize_model_in_explorer.py acme/custom-model \
+visualize_model_in_explorer acme/custom-model \
   --github github:acme/custom-model@main \
   --allow-repo acme/custom-model
 ```
@@ -303,7 +284,7 @@ actually defines the architecture class.
 2. **AST analysis** — parses `modeling_*.py` to discover module structure, `forward()` call order, norms, gates, and custom kernels
 3. **Block trees** — builds recursive block diagrams from the parsed structure
 4. **Computation graph** — converts block trees to a directed graph for Model Explorer export
-5. **Single-page HTML** — embeds payload, viewer script, and layout worker into one `.html` file for offline-friendly sharing (Model Explorer assets load from unpkg)
+5. **Single-page HTML** — embeds payload, viewer script, and layout worker into one `.html` file for offline-friendly sharing (the visualizer element and its static files load from unpkg; the worker is the pinned Apache-2.0 `ai-edge-model-explorer-visualizer` build)
 6. **Shape inference** — propagates symbolic dimensions (`B`, `S`, `H`, …) through the model graph and annotates exported nodes
 
 Composite GPU kernels (e.g. fused attention, MoE dispatch) remain opaque leaf nodes unless expanded by custom kernel pipeline parsing.
@@ -315,7 +296,6 @@ is shared with the rest of TraceLens and lives in `TraceLens/ModelUtils`.
 
 ```
 TraceLens/Visualizer/
-├── visualize_model_in_explorer.py   # CLI entry point
 └── model_explorer_export/           # Model Explorer payload, viewer, and server
     ├── cli.py                       # Argument parsing and the two-stage pipeline
     ├── ast_build.py                 # Payload built from the static analysis
@@ -328,8 +308,9 @@ TraceLens/Visualizer/
     ├── fact_sheet.py                # Model fact sheet panel
     ├── labels.py, styles.py         # Display labels and kernel styling
     ├── viewer_page.py               # Single-page HTML assembly
+    ├── viewer_assets.py             # Pinned same-origin layout worker
     ├── serve.py                     # Local server for --serve
-    └── viewer/                      # Bundled viewer shell (app.js, index.html, worker.js)
+    └── viewer/                      # Viewer shell, Apache-2.0 LICENSE, and NOTICE
 
 TraceLens/ModelUtils/                # Shared model analysis
 ├── loader.py                        # High-level model spec loading

@@ -24,6 +24,8 @@ from TraceLens.ModelUtils.parallel_plan import (
     unique_gpu_groups,
 )
 
+# ``@op_l`` ids produced from this string are lines of ``_SOURCE`` in this
+# file, not a lookup into an upstream modeling file.
 _SOURCE = """
 class TextConfig:
     model_type = "demo_text"

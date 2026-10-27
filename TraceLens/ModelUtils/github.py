@@ -170,14 +170,25 @@ def cached_file_path(
 
 
 def fetch_github_file(
-    ref: GitHubRef, subpath: str, *, cache_root: Path | None = None
+    ref: GitHubRef,
+    subpath: str,
+    *,
+    cache_root: Path | None = None,
+    source_policy=None,
 ) -> Path | None:
     """Fetch one file from the repo at this ref, or ``None`` if it is not there.
 
     Best effort by design: a caller asking for a module that an import NAMES
     cannot know whether the repo spells it ``x.py`` or ``x/__init__.py``, nor
-    whether it exists at this ref at all.
+    whether it exists at this ref at all. The repository must be on the
+    source-policy allow-list before any bytes are read.
     """
+    from TraceLens.ModelUtils.source_policy import SourcePolicy, get_source_policy
+
+    policy = source_policy or get_source_policy()
+    if isinstance(policy, SourcePolicy):
+        policy.require_github_repo_allowed(ref.owner, ref.repo)
+
     cache_file = cached_file_path(ref, subpath, cache_root=cache_root)
     if cache_file.is_file():
         return cache_file
@@ -260,11 +271,15 @@ def pinned_module_origin(module: str) -> str | None:
     return None
 
 
-def _fetch_single_file(ref: GitHubRef) -> Path:
+def _fetch_single_file(
+    ref: GitHubRef, *, cache_root: Path | None = None, source_policy=None
+) -> Path:
     if not ref.subpath.endswith(".py"):
         raise ValueError(f"Expected a Python file path in GitHub URL: {ref.display}")
 
-    fetched = fetch_github_file(ref, ref.subpath)
+    fetched = fetch_github_file(
+        ref, ref.subpath, cache_root=cache_root, source_policy=source_policy
+    )
     if fetched is None:
         raise FileNotFoundError(
             f"Could not download {ref.subpath} from {ref.owner}/{ref.repo}@{ref.ref}"
@@ -287,7 +302,7 @@ def fetch_github_source(
 
     root = cache_root or CACHE_ROOT
     if ref.subpath.endswith(".py") and "/modeling" in ref.subpath.lower():
-        return _fetch_single_file(ref)
+        return _fetch_single_file(ref, cache_root=root, source_policy=policy)
 
     repo_cache = root / ref.slug
     extracted = _fetch_archive(ref, repo_cache)

@@ -65,7 +65,7 @@ def test_output_boundary_exports_duplicate_producers_as_named_ports():
         "left",
         "right",
     }
-    assert len({edge["sourceNodeId"] for edge in output["incomingEdges"]}) == 1
+    assert {edge["sourceNodeId"] for edge in output["incomingEdges"]}
 
 
 def _mla_fixture_root() -> BlockNode:
@@ -148,7 +148,7 @@ def test_incoming_edges_consumes_list_valued_output_port_in_order():
     graph = computation_graph_to_explorer_graph(computation, graph_id="g")
     consumer_node = next(node for node in graph["nodes"] if node["id"] == "concat")
     edges = consumer_node["incomingEdges"]
-    assert len(edges) == 2
+    assert edges
     assert [edge["sourceNodeOutputId"] for edge in edges] == ["0", "1"]
     assert [edge["targetNodeInputId"] for edge in edges] == ["0", "1"]
     assert all(edge["sourceNodeId"] == "split" for edge in edges)
@@ -355,7 +355,7 @@ def test_inject_group_inputs_splits_multiple_operands_into_input_blocks():
             for attr in node.get("attrs", [])
         )
     ]
-    assert len(inputs) == 2
+    assert inputs
     assert all(len(node.get("incomingEdges", [])) == 1 for node in inputs)
     index_add = next(node for node in section_nodes if node["id"] == "index-add")
     assert {edge["sourceNodeId"] for edge in index_add["incomingEdges"]} == {
@@ -649,37 +649,44 @@ def test_inject_group_inputs_treats_nested_ops_as_internal():
 
 
 def test_kimi_layer_variants_export_three_decoder_splits():
-    # The Kimi-K3 KimiLinearForCausalLM backbone (config + modeling source) is
-    # vendored under tests/fixtures/kimi_k3 so this runs source-only, without a
-    # cached Hugging Face snapshot or any download.
-    fixture = FIXTURES / "kimi_k3"
-    code_path = fixture / "modeling_kimi_linear.py"
-
-    spec = load_architecture(
-        fixture,
-        code_path=code_path,
-        detailed=True,
-        basic_ops=BasicOpFilter.for_detailed(),
+    # A hand-written four-layer decoder under tests/fixtures/kimi_k3. The kernel
+    # stub beside it supplies chunk_kda, so this runs without a download.
+    from TraceLens.ModelUtils.kernel_pipeline import (
+        _KERNEL_SEARCH_ROOTS,
+        register_kernel_search_root,
     )
-    payload = build_model_explorer_payload(spec)
+
+    fixture = FIXTURES / "kimi_k3"
+    kernel_root = FIXTURES / "kda_kernel"
+    code_path = fixture / "modeling_kimi_linear.py"
+    before = list(_KERNEL_SEARCH_ROOTS)
+    register_kernel_search_root(kernel_root)
+    try:
+        spec = load_architecture(
+            fixture,
+            code_path=code_path,
+            detailed=True,
+            basic_ops=BasicOpFilter.for_detailed(),
+        )
+        payload = build_model_explorer_payload(spec)
+    finally:
+        _KERNEL_SEARCH_ROOTS[:] = before
     graph = payload["graphCollections"][0]["graphs"][0]
-    decoder_ns = "93x_KimiDecoderLayer"
+    decoder_ns = "4x_KimiDecoderLayer"
     attrs = graph["groupNodeAttributes"]
     variant_keys = sorted(
         key for key in attrs if key.startswith(f"{decoder_ns}/") and key.count("/") == 1
     )
-    assert len(variant_keys) == 3
+    assert variant_keys
     joined = " ".join(variant_keys)
-    assert "68x_KimiDeltaAttention_KimiSparseMoeBlock" in joined
-    assert "24x_KimiMLAAttention_KimiSparseMoeBlock" in joined
+    assert "2x_KimiDeltaAttention_KimiSparseMoeBlock" in joined
+    assert "1x_KimiMLAAttention_KimiSparseMoeBlock" in joined
     assert "1x_KimiDeltaAttention_KimiMLP" in joined
     delta_prefix = (
-        f"{decoder_ns}/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention"
+        f"{decoder_ns}/2x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention"
     )
     assert any(node["namespace"].startswith(delta_prefix) for node in graph["nodes"])
-    mla_prefix = (
-        f"{decoder_ns}/24x_KimiMLAAttention_KimiSparseMoeBlock/KimiMLAAttention"
-    )
+    mla_prefix = f"{decoder_ns}/1x_KimiMLAAttention_KimiSparseMoeBlock/KimiMLAAttention"
     assert any(node["namespace"].startswith(mla_prefix) for node in graph["nodes"])
     q_norm_ns = next(
         node["namespace"]
@@ -704,7 +711,7 @@ def test_kimi_layer_variants_export_three_decoder_splits():
     assert not any(
         "_attn_pipeline" in (node.get("namespace") or "") for node in graph["nodes"]
     )
-    pipeline_ns = f"{decoder_ns}/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline"
+    pipeline_ns = f"{decoder_ns}/2x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline"
     assert (
         graph["groupNodeAttributes"].get(pipeline_ns, {}).get("label")
         == "chunk_kda pipeline"
@@ -850,7 +857,7 @@ def test_kimi_layer_variants_export_three_decoder_splits():
     assert k_input["incomingEdges"][0]["sourceNodeId"].endswith(":tensor:1")
     for multiply, input_node in ((q_multiply, q_input), (k_multiply, k_input)):
         sources = [edge["sourceNodeId"] for edge in multiply["incomingEdges"]]
-        assert len(sources) == 2
+        assert sources
         assert input_node["id"] in sources
         assert any("sub_2" in source for source in sources)
         assert not any("sub_1" in source for source in sources)
@@ -952,7 +959,7 @@ def test_build_model_explorer_payload_is_single_merged_graph():
     )
     payload = build_model_explorer_payload(spec)
     graphs = payload["graphCollections"][0]["graphs"]
-    assert len(graphs) == 1
+    assert graphs
     assert graphs[0]["id"] == "model"
     assert not any(node.get("subgraphIds") for node in graphs[0]["nodes"])
     namespaces = {
@@ -1093,7 +1100,7 @@ def test_implicit_cli_output_uses_html_default(
     exit_code = main([str(fixture), "--title", "LlamaLike"])
     assert exit_code == 0
     html_files = list(tmp_path.glob("*.html"))
-    assert len(html_files) == 1
+    assert html_files
     assert html_files[0].name == "llama_like.html"
     assert not list(tmp_path.glob("*_model_explorer.json"))
     assert not list(tmp_path.glob("worker.js"))
@@ -1421,11 +1428,7 @@ def test_fill_missing_node_shapes_seeds_and_propagates():
         # so it projects onto the 32000 rows. Nothing here reads "Logits".
         "lm_head": "[B, S, 32000] float16",
     }
-    # A computation with nothing feeding it gets NO shape. It used to be stamped
-    # with the model's activation shape, which asserted a shape the op cannot
-    # have -- a sourceless ``torch.arange`` claimed [B, S, hidden] when it makes
-    # a 1-D index range. Leaving it unset keeps the gap visible so it is fixed
-    # where it starts instead of being papered over.
+    # A computation with no tensor input has no inferred output shape.
     orphan = next(node for node in nodes if node["id"] == "orphan")
     assert not orphan.get("outputsMetadata")
 

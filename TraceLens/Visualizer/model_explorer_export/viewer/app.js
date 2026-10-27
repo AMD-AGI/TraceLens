@@ -8,18 +8,25 @@
  * ?graph=<filename> (copied next to this page by the local server).
  */
 
+// ai-edge-model-explorer-visualizer@0.1.2 (Apache-2.0).
+// Copyright 2024 The Model Explorer Authors. See ./NOTICE.
+const MODEL_EXPLORER_VERSION = "0.1.2";
+
 function resolveWorkerScriptPath() {
   const embedded = document.getElementById("tracelens-worker-source");
   if (embedded?.textContent) {
     const blob = new Blob([embedded.textContent], { type: "application/javascript" });
     return URL.createObjectURL(blob);
   }
+  // The package README does not support a worker loaded from another origin.
   return "./worker.js";
 }
 
 if (window.modelExplorer) {
   window.modelExplorer.assetFilesBaseUrl =
-    "https://unpkg.com/ai-edge-model-explorer-visualizer@0.1.2/dist/static_files";
+    "https://unpkg.com/ai-edge-model-explorer-visualizer@" +
+    MODEL_EXPLORER_VERSION +
+    "/dist/static_files";
   window.modelExplorer.workerScriptPath = resolveWorkerScriptPath();
 }
 
