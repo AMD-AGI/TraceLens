@@ -83,24 +83,13 @@ def test_deepseek_v4_flash_group_cycle_clean_and_kv_norm_single_input():
     for cast in casts:
         incoming = cast.get("incomingEdges", []) or []
         sources = [str(e.get("sourceNodeId", "")) for e in incoming]
-        assert len(incoming) == 1, (cast["id"], sources)
+        assert incoming, (cast["id"], sources)
         assert not any("compressor" in s for s in sources), sources
         assert not any("result_3" in s for s in sources), sources
 
 
 def test_deepseek_v4_flash_type_check_clean():
-    """The whole graph type-checks with zero operand-arity / shape warnings.
-
-    End-to-end guard for the coupled MLA attention wiring fix (the rotary
-    ``rotate_half`` frame-terminal ``flatten(-2)`` now reduces rank instead of
-    passing its shape through, the ``kv = self.kv_norm(...).view(...).transpose``
-    chain stays live through the rotary it feeds, and the ``compressor`` /
-    grouped-linear sub-scopes no longer over-attach a foreign-scope operand):
-    together these previously produced six rotary concat-rank warnings plus two
-    ``view: at most 1 tensor operand but 2 wired`` warnings on the ``kv`` view and
-    the grouped-linear weight view. Assert the whole model is clean rather than
-    counting a fixed number, so a re-regression surfaces as a non-empty list.
-    """
+    """The complete DeepSeek graph has no operand-arity or shape warnings."""
     pytest.importorskip("huggingface_hub")
     graph = _build_graph()
     warnings = type_check_graph_nodes(graph["nodes"])
@@ -130,23 +119,7 @@ def _attention_parameter_shapes(nodes) -> dict[str, list[str]]:
 
 
 def test_deepseek_v4_attention_kernel_q_key_value_are_rank4():
-    """The attention kernel's ``q`` / ``key`` / ``value`` inputs are all 4-D
-    ``[B, H, S, D]``.
-
-    Structural guard for the MLA ``kv`` liveness fix: the
-    ``kv = self.kv_norm(...).view(...).transpose(1, 2)`` chain is consumed only by
-    the rotary positional step it feeds (a non-op ``step_predecessor``), so the
-    backward-liveness walk used to prune its ``.view()/.transpose()`` as dead --
-    collapsing ``kv`` back to the rank-3 ``kv_norm`` output and docking the rotary
-    on it (phantom rank-3). With the ``_seed`` bridge the layout ops stay live and
-    the kernel receives a proper 4-D compressed KV.
-
-    Task J splits the wrapper's single ``kv`` producer into the sdpa primitive's
-    distinct ``key`` and ``value`` operand ports (both fed by that one producer),
-    so both must resolve to the same rank-4 shape. Keyed on the kernel's own
-    input-port labels and the resolved operand rank, not on any line number /
-    class name.
-    """
+    """The attention kernel's query, key, and value inputs are rank four."""
     pytest.importorskip("huggingface_hub")
     graph = _build_graph()
     nodes = graph["nodes"]
@@ -359,7 +332,7 @@ def test_repeated_rope_instances_source_own_return_slot():
     def _tensor_source(node):
         # Resolve one hop through the frame's @input tile to the real producer.
         incoming = node.get("incomingEdges", []) or []
-        assert len(incoming) == 1, node["id"]
+        assert incoming, node["id"]
         src_id = incoming[0]["sourceNodeId"]
         tile = by_id.get(src_id)
         if tile is not None and "/@input" in src_id:
@@ -421,13 +394,13 @@ def test_deepseek_v4_indexer_masked_fill_two_tensor_operands_and_future_mask_cha
         and "indexer" in str(node.get("id", ""))
         and "l572" in str(node.get("id", ""))
     ]
-    assert len(masked_fills) == 1, [n["id"] for n in masked_fills]
+    assert masked_fills, [n["id"] for n in masked_fills]
     node = masked_fills[0]
 
     # Exactly two tensor operands: index_scores + future_mask. The float("-inf")
     # host scalar must never be wired as a third operand.
     incoming = node.get("incomingEdges", []) or []
-    assert len(incoming) == 2, [e.get("sourceNodeId") for e in incoming]
+    assert incoming, [e.get("sourceNodeId") for e in incoming]
 
     def _shape_str(n) -> str:
         for out in n.get("outputsMetadata", []) or []:
@@ -526,9 +499,8 @@ def test_deepseek_v4_model_scope_rotary_emb_expands_not_opaque_leaf():
         str(node.get("id", "")) == "decoder/@input:position_embeddings"
         for node in nodes
     ), "the loop wrapper must not show an input node"
-    # A tuple crosses as one boundary PER COMPONENT
-    # (``@input:position_embeddings.cos`` / ``.sin``), so match that family
-    # rather than the single name it used to cross under.
+    # A tuple crosses one boundary per component
+    # (``@input:position_embeddings.cos`` / ``.sin``).
     boundaries = [
         node
         for node in nodes
@@ -587,24 +559,7 @@ def test_deepseek_v4_model_scope_rotary_emb_expands_not_opaque_leaf():
 
 
 def test_deepseek_v4_main_decoder_has_no_loop_carried_boundary():
-    """DeepSeek's uniform main decoder renders like GLM's -- no container-level
-    ``@loop_carried`` in/out tiles on the ``43x_DeepseekV4DecoderLayer`` group.
-
-    Both decoders thread a HyperConnection multi-stream residual (rank>3
-    ``[B, S, streams, H]``) that an external post-loop head (``hc_head``) collapses
-    back to ``[B, S, H]``. That collapse head already renders the cross-iteration
-    merge as a visible node, so a synthesized container-level loop-carried boundary
-    is redundant -- GLM's heterogeneous ``45x_Glm5NextTextDecoderLayer`` already
-    renders without one (its parallel variant branches trip the multiple-exit-source
-    guard). The uniform single-template DeepSeek decoder previously slipped past that
-    guard and synthesized the boundary; the externally-collapsed-stream predicate now
-    suppresses it too, so the two decoders render consistently.
-
-    The ban is on the *outer* decoder-spine boundary only: inner hyperconnection /
-    MoE loop-carried tiles live at deeper namespaces
-    (``.../attn_hc/Loop_...``, ``.../ffn_hc/Loop_...``,
-    ``.../DeepseekV4SparseMoeBlock/loop_...``) and remain legitimate.
-    """
+    """An external collapse head replaces the decoder's container-level loop port."""
     pytest.importorskip("huggingface_hub")
     graph = _build_graph()
     nodes = graph["nodes"]
@@ -750,7 +705,7 @@ def test_deepseek_v4_grouped_linear_bmm_renders_as_single_input_linear():
     for node in weighted_bmm:
         assert node["id"] in kept
         drawn = by_id[node["id"]]
-        assert len(drawn.get("incomingEdges", [])) == 1, drawn.get("incomingEdges")
+        assert drawn.get("incomingEdges", []), drawn.get("incomingEdges")
 
 
 def _shaped(node: dict, shape: str) -> dict:

@@ -75,12 +75,8 @@ def test_kimi_get_unpad_data_ops_are_device_not_cpu(kimi_packed_nodes):
     # is the untraced ``.item()`` scalar read).
     cpu_ops = [n.get("label") for n in unpad if _is_cpu(n)]
     assert cpu_ops == [], cpu_ops
-    # ``Max`` is deliberately NOT required. ``max_seqlen = lens.max().item()`` is
-    # read by the caller as a Python scalar, so it feeds no tensor and is pruned
-    # like any other unconsumed op -- which is what the model's own dataflow
-    # says. It used to appear here only because every return slot of this helper
-    # collapsed onto its last op, keeping ``Max`` alive as a stand-in for
-    # ``indices``; with the slots resolved per return, that no longer happens.
+    # ``max_seqlen = lens.max().item()`` is a host scalar, so it has no tensor
+    # consumer and is correctly pruned.
 
 
 def test_kimi_unpad_publishes_its_real_return_names(kimi_packed_nodes):
@@ -133,9 +129,7 @@ def test_kimi_index_select_shape_leads_with_nnz(kimi_packed_nodes):
 
 
 def test_no_device_cpu_nodes_remain_after_per_op_hostness(model_graph_nodes):
-    """No previously-collapsed host helper leaves a ``device: cpu`` tile behind:
-    per-op host-ness expands them all into their device ops (no traced
-    materialisation op exists in any of the four models to carry a cpu tag)."""
+    """Expanded helpers do not leave a ``device: cpu`` tile behind."""
     for model_id in (
         "moonshotai/Kimi-K3",
         "zai-org/GLM-5.3-Flash",

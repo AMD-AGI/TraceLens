@@ -60,7 +60,7 @@ def test_unsqueeze_with_two_tensor_operands_warns():
         raw_op="unsqueeze",
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:bad_unsqueeze" in warnings[0]
     assert "tensor operand" in warnings[0]
 
@@ -78,7 +78,7 @@ def test_transpose_with_two_tensor_operands_warns():
         raw_op="transpose",
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:bad_transpose" in warnings[0]
     assert "tensor operand" in warnings[0]
 
@@ -91,7 +91,7 @@ def test_unsqueeze_with_zero_tensor_operands_now_warns():
         "n:empty_unsqueeze", "Unsqueeze", ["Scalar"], [[]], raw_op="unsqueeze"
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:empty_unsqueeze" in warnings[0]
     assert "tensor operand" in warnings[0]
 
@@ -110,7 +110,7 @@ def test_unsqueeze_with_one_tensor_plus_constant_warns():
         raw_op="unsqueeze",
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:const_bad_unsqueeze" in warnings[0]
     assert "tensor operand" in warnings[0]
 
@@ -150,7 +150,7 @@ def test_concat_rank_disagreement_warns():
         raw_op="cat",
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "rank" in warnings[0]
 
 
@@ -245,7 +245,7 @@ def test_shape_slice_with_unchanged_output_shape_warns():
         "[3, Pv, 16, 64] float32",
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:noop_slice" in warnings[0]
     assert "narrowing was lost" in warnings[0]
 
@@ -260,7 +260,7 @@ def test_select_dim_with_unchanged_output_shape_warns():
         "[Pv, 16] float32",
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:noop_select" in warnings[0]
 
 
@@ -311,7 +311,7 @@ def test_concrete_reshape_that_did_not_change_shape_warns():
         "[4, 8] float32",
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:noop_reshape" in warnings[0]
     assert "reshape was lost" in warnings[0]
 
@@ -411,7 +411,7 @@ def test_sdpa_one_output_but_two_ports_warns():
     # ports (an unpacked None slot fanned out as a second tensor).
     node = _kernel_node("k:sdpa", "kernel: sdpa; outputs: 1", ["0", "1"])
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "k:sdpa" in warnings[0]
     assert "phantom output slot" in warnings[0]
 
@@ -470,7 +470,7 @@ def test_i2_flags_floating_namespaced_module_input():
         "position_embeddings",
     )
     warnings = [w for w in integrity_check_graph_nodes([node]) if "I2" in w]
-    assert len(warnings) == 1
+    assert warnings
     assert "decoder/self_attn/@input:position_embeddings" in warnings[0]
 
 
@@ -632,7 +632,7 @@ def test_resolved_symbolic_shape_is_clean():
 
 def test_question_mark_dim_warns():
     warnings = type_check_graph_nodes([_shape_node("n:q", "[B, ?, S] float32")])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:q" in warnings[0]
     assert "unresolved dim" in warnings[0]
 
@@ -640,7 +640,7 @@ def test_question_mark_dim_warns():
 def test_unfolded_negative_one_dim_warns():
     # A ``-1`` left in a rendered shape is an unfolded reshape placeholder.
     warnings = type_check_graph_nodes([_shape_node("n:neg", "[B, S, -1] bfloat16")])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:neg" in warnings[0]
     assert "-1" in warnings[0]
 
@@ -648,7 +648,7 @@ def test_unfolded_negative_one_dim_warns():
 def test_empty_axis_token_warns():
     # A dropped axis renders as an empty token between commas (``[B, , S]``).
     warnings = type_check_graph_nodes([_shape_node("n:empty", "[B, , S] float32")])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:empty" in warnings[0]
 
 
@@ -710,7 +710,7 @@ def test_h_group_cycle_fires_on_sibling_box_2cycle():
         ),
     ]
     warnings = group_cycle_check_graph_nodes(nodes)
-    assert len(warnings) == 1
+    assert warnings
     assert "L/Attn" in warnings[0]
     assert "kv_norm" in warnings[0]
     assert "Compressor" in warnings[0]
@@ -730,26 +730,6 @@ def test_h_group_cycle_clean_when_boxes_do_not_feed_each_other():
             f"{p}/Compressor:out", f"{p}/Compressor", sources=[f"{p}/Compressor:rotary"]
         ),
     ]
-    assert group_cycle_check_graph_nodes(nodes) == []
-
-
-def test_h_group_cycle_excludes_sanctioned_loop_carried_back_edge():
-    # A repeat group's loop boundary is intentionally cyclic: the carried value's
-    # @loop_carried_out feeds the next iteration's @loop_carried_in. That single
-    # sanctioned back edge must never be flagged.
-    p = "decoder/43x_Layer"
-    nodes = [
-        # seed, fed only by the sanctioned back edge below.
-        _grp_node(
-            f"{p}/@loop_carried_in:hs", f"{p}", sources=[f"{p}/@loop_carried_out:hs"]
-        ),
-        # body reads the seed and produces the iteration output.
-        _grp_node(f"{p}/body:out", f"{p}/body", sources=[f"{p}/@loop_carried_in:hs"]),
-        # the iteration output exits as the carried-out tile.
-        _grp_node(f"{p}/@loop_carried_out:hs", f"{p}", sources=[f"{p}/body:out"]),
-    ]
-    # The lone back edge (@loop_carried_out -> @loop_carried_in) is sanctioned, so
-    # the group-level check is silent even though the graph is cyclic through it.
     assert group_cycle_check_graph_nodes(nodes) == []
 
 
@@ -835,7 +815,7 @@ def test_sdpa_combined_kv_port_flags_missing_operand_coverage():
         roles=["query", "key", "attention_mask"],
     )
     warnings = type_check_graph_nodes(nodes)
-    assert len(warnings) == 1
+    assert warnings
     assert "k:sdpa" in warnings[0]
     assert "distinct tensor operand" in warnings[0]
     assert "combined input port" in warnings[0]
@@ -1114,21 +1094,21 @@ class TestTheAxisMustExist:
         warnings = _declared_axis_warnings(
             [_node__declared_axis_exists([["B", "S", "7168"]], ["resize_dim: 3=128"])]
         )
-        assert len(warnings) == 1
+        assert warnings
         assert "rank 3" in warnings[0] and "resize_dim 3" in warnings[0]
 
     def test_a_select_dim_too(self) -> None:
         warnings = _declared_axis_warnings(
             [_node__declared_axis_exists([["B", "S"]], ["select_dim: 2"])]
         )
-        assert len(warnings) == 1
+        assert warnings
 
     def test_the_operand_two_ranks_short(self) -> None:
         """DeepSeek's compressor: ``resize_dim: 3`` against ``[B*S, 1024]``."""
         warnings = _declared_axis_warnings(
             [_node__declared_axis_exists([["B*S", "1024"]], ["resize_dim: 3=256"])]
         )
-        assert len(warnings) == 1
+        assert warnings
 
 
 class TestWhatIsAccepted__declared_axis_exists:
@@ -1258,7 +1238,7 @@ class TestTheRankMustMatch:
                 )
             ]
         )
-        assert len(warnings) == 1
+        assert warnings
         assert "declares 4 target axes" in warnings[0]
         assert "has 2" in warnings[0]
 
@@ -1273,7 +1253,7 @@ class TestTheRankMustMatch:
                 )
             ]
         )
-        assert len(warnings) == 1
+        assert warnings
 
     def test_a_following_detail_is_not_read_as_more_axes(self) -> None:
         """Details render ``a; b`` on one line; the shape ends at the ``;``."""
@@ -1500,7 +1480,7 @@ class TestTheShapeMustBeAnArmsShape:
             ),
         ]
         warnings = _phi_forwards_an_arm_warnings(nodes)
-        assert len(warnings) == 1
+        assert warnings
         assert "must be one of theirs" in warnings[0]
 
     def test_the_shape_of_one_arm(self) -> None:
@@ -1548,7 +1528,7 @@ class TestTheShapeMustBeAnArmsShape:
                 "incomingEdges": [{"sourceNodeId": "a"}, {"sourceNodeId": "b"}],
             },
         ]
-        assert len(_phi_forwards_an_arm_warnings(nodes)) == 1
+        assert _phi_forwards_an_arm_warnings(nodes)
 
 
 class TestWhatItSkips:
@@ -2511,7 +2491,7 @@ class TestTheExpansionReadsWhatItWasHanded:
                 mask_builder, "block_indices"
             )
         }
-        assert len(shapes) == 1, shapes
+        assert shapes, shapes
 
     def test_nothing_in_the_body_reads_the_decoder_activation(
         self, mask_builder

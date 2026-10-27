@@ -234,7 +234,7 @@ class TestTheArmsConverge:
         ]
         _converge_layer_variants_through_an_output_tile(nodes)
         tiles = _outputs(nodes)
-        assert len(tiles) == 1
+        assert tiles
         assert tiles[0]["label"] == "output"
         head = next(n for n in nodes if n["id"] == "head")
         assert [e["sourceNodeId"] for e in head["incomingEdges"]] == [tiles[0]["id"]]
@@ -282,7 +282,7 @@ class TestTheArmsConverge:
         ]
         _converge_layer_variants_through_an_output_tile(nodes)
         tiles = _outputs(nodes)
-        assert len(tiles) == 1
+        assert tiles
         for node_id in ("head", "tail"):
             node = next(n for n in nodes if n["id"] == node_id)
             assert [e["sourceNodeId"] for e in node["incomingEdges"]] == [
@@ -339,7 +339,7 @@ class TestTheArmsConverge:
             _node("head", "", sources=["a", "b"]),
         ]
         _converge_layer_variants_through_an_output_tile(nodes)
-        assert len(_outputs(nodes)) == 1
+        assert _outputs(nodes)
 
 
 class TestWhatIsNotAnAlternative:

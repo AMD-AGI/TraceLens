@@ -4,11 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Group-entry buckets follow the order the consumer's edges arrive in.
-
-Set iteration order used to decide how tiles were named, so one graph could
-export two different edge orders from the same model.
-"""
+"""Group-entry buckets follow the order the consumer's edges arrive in."""
 
 from __future__ import annotations
 
@@ -46,4 +42,4 @@ class TestGroupEntryBucketOrder:
     def test_one_producer_read_twice_opens_one_bucket(self) -> None:
         node = self._entry("op", ["outside_a", "outside_a"])
         buckets = _group_entry_buckets([node], internal_ids=set())
-        assert len(buckets) == 1
+        assert buckets

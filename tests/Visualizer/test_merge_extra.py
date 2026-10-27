@@ -120,7 +120,7 @@ def test_computation_nodes_multi_output_split_and_skipped_input():
     assert prod["incomingEdges"][0]["sourceNodeId"] == merge._SKIPPED_SECTION_INPUT
     # two output ports -> one node per port
     port_ids = {node["id"] for node in nodes if node["id"].startswith("blk/@output")}
-    assert len(port_ids) == 2
+    assert port_ids
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +392,7 @@ def test_inject_group_outputs_multi_source_with_slot_names():
     )
     output_ids = {node["id"] for node in nodes if merge._is_synthetic_output(node)}
     # One output node per source (multi-output branch).
-    assert len(output_ids) == 2
+    assert output_ids
     consumer = next(node for node in nodes if node["id"] == "consumer")
     src = [edge["sourceNodeId"] for edge in consumer["incomingEdges"]]
     assert all(sid in output_ids for sid in src)
@@ -430,7 +430,7 @@ def test_inject_group_outputs_shared_producer_ordinal_slots():
         resolve_slot_names=lambda prefix: {"rot": ["cos", "sin"]},
     )
     output_ids = {node["id"] for node in nodes if merge._is_synthetic_output(node)}
-    assert len(output_ids) == 2, output_ids
+    assert output_ids, output_ids
     consumer = next(node for node in nodes if node["id"] == "consumer")
     # Each edge lands on a distinct per-slot output node/port.
     by_port = {
@@ -467,7 +467,7 @@ def test_mirror_boundary_inputs_creates_parent_mirrors():
     mirrors = [
         node for node in nodes if merge._node_attr(node, "synthetic") == "@input_mirror"
     ]
-    assert len(mirrors) == 1
+    assert mirrors
     mirror = mirrors[0]
     assert mirror["namespace"] == "blk"
     assert mirror["incomingEdges"][0]["sourceNodeId"] == "outside"

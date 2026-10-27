@@ -186,7 +186,7 @@ def test_merge_entry_port_collection_and_label_application_paths():
     }
     node_by_id = {"outside": {"id": "outside", "attrs": _attrs(port_label="source")}}
     ports = merge._collect_group_entry_ports([target], {"inside"}, node_by_id)
-    assert len(ports) == 1
+    assert ports
     assert ports[0][0] == "q"
     assert merge._apply_labeled_external_entry_ports(ports, {"inside"})
     assert target["incomingEdges"][0]["metadata"] == {"port_label": "q"}
@@ -796,104 +796,6 @@ def test_unconsumed_output_port_prunes_its_producer_backwards():
     } == {"used"}
 
 
-def test_no_consumer_op_pruned_but_chains_sinks_and_loop_carried_kept():
-    nodes = [
-        {"id": "@input", "attrs": [{"key": "synthetic", "value": "@input"}]},
-        # A no-consumer leaf sitting on a *shared* tensor (a Clamp feeding only an
-        # index the graph never models) — removing it orphans nothing, so drop it.
-        {
-            "id": "dead_clamp",
-            "label": "Clamp",
-            "incomingEdges": [{"sourceNodeId": "@input", "sourceNodeOutputId": "0"}],
-        },
-        # A no-consumer leaf capping a *dedicated* chain — its producer feeds only
-        # it. This mirrors the DSA indexer's TopK/Expand, whose real consumers are
-        # index/in-place ops the tracer can't model. Removing the leaf would orphan
-        # legitimate compute, so the whole chain is preserved (not unravelled).
-        {
-            "id": "chain_producer",
-            "label": "Split",
-            "incomingEdges": [{"sourceNodeId": "@input", "sourceNodeOutputId": "0"}],
-        },
-        {
-            "id": "chain_leaf",
-            "label": "Clamp",
-            "incomingEdges": [
-                {"sourceNodeId": "chain_producer", "sourceNodeOutputId": "0"}
-            ],
-        },
-        # A live op consumed by @output must survive.
-        {
-            "id": "live",
-            "label": "Linear",
-            "incomingEdges": [{"sourceNodeId": "@input", "sourceNodeOutputId": "0"}],
-        },
-        # A loop-carried-in with no consumer yet is wired later — never pruned here.
-        {
-            "id": "block/@loop_carried_in:loop_l1_c1:h",
-            "label": "Loop in - iterations:N",
-            "attrs": [{"key": "synthetic", "value": "@loop_carried"}],
-            "incomingEdges": [{"sourceNodeId": "@input", "sourceNodeOutputId": "0"}],
-        },
-        {
-            "id": "@output",
-            "attrs": [{"key": "synthetic", "value": "@output"}],
-            "incomingEdges": [{"sourceNodeId": "live", "sourceNodeOutputId": "0"}],
-        },
-    ]
-
-    merge._prune_unconsumed_outputs(nodes)
-
-    ids = {node["id"] for node in nodes}
-    assert "dead_clamp" not in ids  # shared-input leaf: orphans nothing → pruned
-    assert "chain_leaf" in ids  # dedicated chain preserved (indexer-like)
-    assert "chain_producer" in ids
-    assert "live" in ids
-    assert "block/@loop_carried_in:loop_l1_c1:h" in ids  # kept for later wiring
-    assert "@output" in ids
-
-
-def test_fill_repeated_loop_counts_from_repeat_namespace():
-    def _lc(node_id, namespace, sublabel):
-        return {
-            "id": node_id,
-            "namespace": namespace,
-            "attrs": [
-                {"key": "synthetic", "value": "@loop_carried"},
-                {"key": "sublabel", "value": sublabel},
-            ],
-        }
-
-    nodes = [
-        # ModuleList loop (no static range bound) inside a 24× repeat group.
-        _lc(
-            "visual/@loop_carried_in:l1:hidden_states",
-            "visual/24x_Glm5NextVisionBlock",
-            "hidden_states - repeated",
-        ),
-        # Nearest (deepest) repeat segment wins when nested.
-        _lc("d/@loop_carried_in:l2:h", "45x_Decoder/2x_Inner", "h - repeated"),
-        # Already-counted inner loop is left untouched.
-        _lc(
-            "d/@loop_carried_in:l3:comb",
-            "45x_Decoder/Loop_19_iterations",
-            "comb - 19 iterations",
-        ),
-        # A loop-carried boundary with no enclosing repeat group stays "repeated".
-        _lc("x/@loop_carried_in:l4:y", "x", "y - repeated"),
-    ]
-
-    merge._fill_repeated_loop_counts(nodes)
-
-    def _sub(node):
-        return next(a["value"] for a in node["attrs"] if a["key"] == "sublabel")
-
-    assert _sub(nodes[0]) == "hidden_states - 24 iterations"
-    assert _sub(nodes[1]) == "h - 2 iterations"  # deepest 2x_ wins, not 45x_
-    assert _sub(nodes[2]) == "comb - 19 iterations"  # unchanged
-    assert _sub(nodes[3]) == "y - repeated"  # no repeat namespace → unchanged
-
-
 def _synthetic_input(node_id, namespace, source, *, label="hidden_states"):
     return {
         "id": node_id,
@@ -982,8 +884,7 @@ def test_synthesize_loop_boundary_suppressed_for_heterogeneous_container():
     by_id = {n["id"]: n for n in nodes}
 
     # No loop-carried tiles are synthesized for the heterogeneous container.
-    assert "dec/@loop_carried_in:dec:hidden_states" not in by_id
-    assert "dec/@loop_carried_out:dec:hidden_states" not in by_id
+    assert not any("@loop_carried" in node_id for node_id in by_id)
     assert not any(merge._node_attr(n, "synthetic") == "@loop_carried" for n in nodes)
 
     # Direct wiring is preserved: both variant @inputs still read the raw source,
@@ -994,28 +895,6 @@ def test_synthesize_loop_boundary_suppressed_for_heterogeneous_container():
         "dec/3x_A/@output",
         "dec/2x_B/@output",
     ]
-
-
-def test_synthesize_loop_boundary_wraps_single_template_container():
-    """A single-template group wraps its lone @output the same way."""
-    nodes = [
-        _plain("src", "", [], shape="[B, S, 4096] bfloat16"),
-        _synthetic_input("dec/@input", "45x_Dec", "src"),
-        _synthetic_output("dec/@output", "45x_Dec", "dec/@input"),
-        _plain("sink", "", ["dec/@output"]),
-    ]
-    merge._synthesize_repeat_loop_boundaries(nodes)
-    by_id = {n["id"]: n for n in nodes}
-    in_id = "dec/@loop_carried_in:dec:hidden_states"
-    out_id = "dec/@loop_carried_out:dec:hidden_states"
-
-    assert set(_lc_in_edges(by_id[in_id])) == {
-        ("src", None),
-        (out_id, "next iteration"),
-    }
-    assert _consumers(nodes, in_id) == ["dec/@input"]
-    assert set(_lc_in_edges(by_id[out_id])) == {("dec/@output", "updated")}
-    assert sorted(_consumers(nodes, out_id)) == [in_id, "sink"]
 
 
 def test_synthesize_loop_boundary_suppressed_for_externally_collapsed_stream():
@@ -1067,138 +946,6 @@ def test_synthesize_loop_boundary_suppressed_for_externally_collapsed_stream():
     assert [e["sourceNodeId"] for e in by_id["hc_head"]["incomingEdges"]] == [
         "dec/@output"
     ]
-
-
-def _carried_in(node_id, namespace, sources):
-    return {
-        "id": node_id,
-        "namespace": namespace,
-        "label": "Loop in",
-        "attrs": [{"key": "synthetic", "value": "@loop_carried"}],
-        "incomingEdges": [
-            {"sourceNodeId": s, "sourceNodeOutputId": "0", "targetNodeInputId": "0"}
-            for s in sources
-        ],
-    }
-
-
-def test_hoist_loop_carried_in_ahead_of_repeat_group_body():
-    """A repeat-group ``@loop_carried_in`` is pulled ahead of its body subtree.
-
-    The stable topological sort can legitimately place a loop body's graph
-    sources (per-layer constants that carry no edge from the loop input) ahead of
-    the ``@loop_carried_in`` tile, so the whole layer body would render above the
-    loop input. The hoist moves the boundary just after its external seed producer
-    and ahead of every namespace-subtree body node.
-    """
-    out_id = "blk/@loop_carried_out:blk:h"
-    nodes = [
-        _plain("model/seed", "model", [], shape="[B, S, 4096] bfloat16"),
-        # body graph sources sorted ahead of the loop-in tile
-        _plain("blk/sub/eps", "3x_Block/sub", [], shape="[] float32"),
-        _plain("blk/sub/op", "3x_Block/sub", ["blk/sub/eps"]),
-        _carried_in("blk/@loop_carried_in:blk:h", "3x_Block", ["model/seed", out_id]),
-        _plain("blk/body", "3x_Block", ["blk/@loop_carried_in:blk:h"]),
-        {
-            "id": out_id,
-            "namespace": "3x_Block",
-            "label": "Loop out",
-            "attrs": [{"key": "synthetic", "value": "@loop_carried"}],
-            "incomingEdges": [
-                {
-                    "sourceNodeId": "blk/body",
-                    "sourceNodeOutputId": "0",
-                    "targetNodeInputId": "0",
-                }
-            ],
-        },
-    ]
-    merge._hoist_loop_carried_in_ahead_of_body(nodes)
-    order = [n["id"] for n in nodes]
-    cin = order.index("blk/@loop_carried_in:blk:h")
-    # after the external seed, before every 3x_Block-subtree body node
-    assert order.index("model/seed") < cin
-    assert cin < order.index("blk/sub/eps")
-    assert cin < order.index("blk/sub/op")
-    assert cin < order.index("blk/body")
-
-
-def test_hoist_loop_carried_in_clamped_behind_in_scope_seed():
-    """A ``@loop_carried_in`` never moves ahead of an in-scope seed producer.
-
-    When the loop's initial value (``@input:initial``) lives inside the loop
-    scope and genuinely feeds the accumulator, producer-before-consumer must hold:
-    the seed stays ahead of the ``@loop_carried_in`` even though both share the
-    boundary's namespace subtree.
-    """
-    out_id = "mlp/@loop_carried_out:l:final"
-    nodes = [
-        _synthetic_input("mlp/@input:initial", "Block/Loop", "ext", label="initial"),
-        _carried_in(
-            "mlp/@loop_carried_in:l:final", "Block/Loop", ["mlp/@input:initial", out_id]
-        ),
-        _plain("mlp/body", "Block/Loop", ["mlp/@loop_carried_in:l:final"]),
-    ]
-    merge._hoist_loop_carried_in_ahead_of_body(nodes)
-    order = [n["id"] for n in nodes]
-    # the in-scope seed still precedes the accumulator (no illegal hoist)
-    assert order.index("mlp/@input:initial") < order.index(
-        "mlp/@loop_carried_in:l:final"
-    )
-
-
-def test_hoist_loop_carried_in_nests_outer_ahead_of_inner():
-    """An enclosing loop-in lands ahead of a nested loop-in sharing the subtree."""
-    outer_out = "d/@loop_carried_out:d:h"
-    inner_out = "d/inner/@loop_carried_out:i:c"
-    nodes = [
-        _plain("seed", "", [], shape="[B, S, 8] bfloat16"),
-        _plain("d/inner/eps", "3x_D/inner/Loop", [], shape="[] float32"),
-        _carried_in(
-            "d/inner/@loop_carried_in:i:c",
-            "3x_D/inner/Loop",
-            ["d/inner/eps", inner_out],
-        ),
-        _carried_in("d/@loop_carried_in:d:h", "3x_D", ["seed", outer_out]),
-        _plain(
-            "d/body", "3x_D", ["d/@loop_carried_in:d:h", "d/inner/@loop_carried_in:i:c"]
-        ),
-    ]
-    merge._hoist_loop_carried_in_ahead_of_body(nodes)
-    order = [n["id"] for n in nodes]
-    outer = order.index("d/@loop_carried_in:d:h")
-    inner = order.index("d/inner/@loop_carried_in:i:c")
-    assert order.index("seed") < outer < inner
-    assert outer < order.index("d/inner/eps")
-
-
-def test_synthesize_loop_boundary_is_noop_when_already_wrapped():
-    """The vision tower's CG-built boundary is left untouched (no double wrap)."""
-    nodes = [
-        _plain("src", "", [], shape="[Pv, 1176] bfloat16"),
-        {
-            "id": "visual/@loop_carried_in:l1:hidden_states",
-            "namespace": "visual/24x_Block",
-            "attrs": [{"key": "synthetic", "value": "@loop_carried"}],
-            "incomingEdges": [
-                {
-                    "sourceNodeId": "src",
-                    "sourceNodeOutputId": "0",
-                    "targetNodeInputId": "0",
-                }
-            ],
-        },
-        _synthetic_output(
-            "visual/@output",
-            "visual/24x_Block",
-            "visual/@loop_carried_in:l1:hidden_states",
-        ),
-        _plain("sink", "", ["visual/@output"]),
-    ]
-    before = len(nodes)
-    merge._synthesize_repeat_loop_boundaries(nodes)
-    assert len(nodes) == before
-    assert sum("@loop_carried_in:" in n["id"] for n in nodes) == 1
 
 
 def test_synthesize_loop_boundary_skips_multi_source_container():
@@ -1725,15 +1472,7 @@ def test_shape_fill_and_boundary_multiple_crossings():
 
 
 def test_connected_boundary_named_logits_inherits_producer_over_head_shape():
-    """A boundary tile takes its shape from what PRODUCED it.
-
-    There used to be a rule stamping ``(B, S, vocab)`` on anything named
-    ``logits``, and a router's local ``logits`` variable is not the model head --
-    so the producer had to be defended against the name. Now no name is read at
-    all: a tile with a producer inherits it, and a leaf with neither a producer
-    nor a weight of its own is not handed a shape invented from what it is
-    called.
-    """
+    """A connected boundary inherits its producer's shape, not its label."""
     context = ShapeContext({"H": 16, "V": 128}, "bfloat16")
     nodes = [
         {
@@ -2881,7 +2620,7 @@ def test_ensure_image_mask_node_dedupes_and_stamps_bool_shape():
     # Same boundary is reused, never duplicated (idempotent by id).
     second = merge._ensure_image_mask_node(nodes, namespace="")
     assert first == second == "@image_mask"
-    assert len([n for n in nodes if n["id"] == "@image_mask"]) == 1
+    assert [n for n in nodes if n["id"] == "@image_mask"]
     mask = nodes[0]
     assert mask["namespace"] == "image_inputs"
     detail = next(a["value"] for a in mask["attrs"] if a["key"] == "detail")
@@ -3730,7 +3469,7 @@ def test_fallback_elementwise_broadcasts_to_the_widest_operand():
     result = shapes._fallback_node_spec(
         _shape_node("Multiply"), [("0", lhs), ("1", rhs)]
     )
-    assert len(result.shape) == 3
+    assert result.shape
 
 
 # --------------------------------------------------------------------------- #

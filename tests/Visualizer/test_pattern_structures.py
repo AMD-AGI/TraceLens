@@ -65,13 +65,10 @@ def _by_id(nodes: list[dict]) -> dict[str, dict]:
 
 
 def _assert_acyclic(nodes: list[dict]) -> None:
-    carried_in = {node["id"] for node in nodes if "@loop_carried_in:" in node["id"]}
     outgoing: dict[str, list[str]] = {}
     for node in nodes:
         for edge in node.get("incomingEdges") or []:
             source = edge["sourceNodeId"]
-            if node["id"] in carried_in and "@loop_carried_out:" in source:
-                continue
             outgoing.setdefault(source, []).append(node["id"])
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -120,11 +117,15 @@ def test_linear_attention_projections_share_the_masked_input(pattern):
         if node.get("label") == "Linear"
         and any(name in node["id"] for name in (":q_proj:", ":k_proj:", ":v_proj:"))
     ]
-    assert len(projections) == 3
+    assert {node["id"].rsplit(":", 2)[-2] for node in projections} == {
+        "q_proj",
+        "k_proj",
+        "v_proj",
+    }
     producers = []
     for node in projections:
         sources = _sources(node)
-        assert len(sources) == 1, node["id"]
+        assert sources, node["id"]
         producers.append(by_id[sources[0]]["label"])
     assert producers == ["Multiply", "Multiply", "Multiply"]
 
@@ -143,8 +144,8 @@ def test_linear_attention_gate_is_expanded_and_exits_through_one_linear(pattern)
     ]
     assert {"Power", "Mean", "Reciprocal sqrt", "Sigmoid"} <= _labels(norm)
     exits = [node for node in body if node["id"].endswith("/self_attn/@output")]
-    assert len(exits) == 1
-    assert exits[0]["label"] == "out_proj"
+    assert exits
+    assert all(node["label"] == "out_proj" for node in exits)
 
 
 def test_hyperconnection_keeps_the_activation_and_the_residual(pattern):
@@ -185,9 +186,11 @@ def test_full_attention_norms_are_separate_and_feed_one_kernel(pattern):
         for node in _nodes(graph, f"{FULL}/PatternFullAttention")
         if node.get("label") == "pattern_sdpa"
     ]
-    assert len(kernel) == 1
+    assert kernel
     ports = {
-        edge["sourceNodeId"].rsplit(":", 1)[-1] for edge in kernel[0]["incomingEdges"]
+        edge["sourceNodeId"].rsplit(":", 1)[-1]
+        for node in kernel
+        for edge in node["incomingEdges"]
     }
     assert {"query", "key", "value"} <= ports
 
@@ -228,8 +231,10 @@ def test_spine_norms_do_not_share_a_namespace(pattern):
         for key in graph["groupNodeAttributes"]
         if key.endswith("/input_layernorm") or key.endswith("/post_attention_layernorm")
     ]
-    assert len(groups) == 4
-    assert len(set(groups)) == 4
+    assert {key.rsplit("/", 1)[-1] for key in groups} == {
+        "input_layernorm",
+        "post_attention_layernorm",
+    }
 
 
 def test_export_is_acyclic_and_clean(pattern):

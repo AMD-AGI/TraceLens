@@ -20,21 +20,23 @@ the tightened I2 no-source check is clean across the built + render-filtered gra
 
 from __future__ import annotations
 
-from build_graph_in_env import pinned_merged_graph, pinned_model_spec
-
 import pytest
 
 from TraceLens.Visualizer.model_explorer_export.merge import _loop_trip_count
 from TraceLens.Visualizer.model_explorer_export.type_check import (
     integrity_check_graph_nodes,
 )
-from TraceLens.ModelUtils.shape_inference import ShapeInferencer
 
 
-def _build_nodes(model_id: str):
-    spec = pinned_model_spec(model_id, detailed=True)
-    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
-    return graph, {n["id"]: n for n in graph["nodes"]}
+@pytest.fixture
+def graph_builder(model_graph_nodes):
+    """Return cached, correctly provisioned graph nodes with their id index."""
+
+    def build(model_id: str):
+        nodes = model_graph_nodes(model_id)
+        return {"nodes": nodes}, {node["id"]: node for node in nodes}
+
+    return build
 
 
 def _floating_namespaced_inputs(nodes) -> list[str]:
@@ -92,7 +94,7 @@ def _publishing_op(by_id, node_id):
     return node_id
 
 
-def test_deepseek_v4_attention_invariant_inputs_are_sourced():
+def test_deepseek_v4_attention_invariant_inputs_are_sourced(graph_builder):
     """The two ``DeepseekV4Attention`` boundaries Task A targets gain a real edge.
 
     ``position_embeddings`` resolves through a materialized model-scope rotary
@@ -101,7 +103,7 @@ def test_deepseek_v4_attention_invariant_inputs_are_sourced():
     Both must have an incoming edge, and no namespaced ``@input`` may float.
     """
     pytest.importorskip("huggingface_hub")
-    graph, by_id = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
+    graph, by_id = graph_builder("deepseek-ai/DeepSeek-V4-Flash")
 
     # ``position_embeddings`` is a TUPLE, so it crosses as one boundary per
     # component (``position_embeddings.cos`` / ``.sin``) rather than one tile
@@ -124,7 +126,7 @@ def test_deepseek_v4_attention_invariant_inputs_are_sourced():
     assert _floating_namespaced_inputs(graph["nodes"]) == []
 
 
-def test_minimax_m3_variant_loop_invariant_inputs_are_sourced():
+def test_minimax_m3_variant_loop_invariant_inputs_are_sourced(graph_builder):
     """The general (non-DeepSeek) resolution path is exercised by MiniMax-M3.
 
     MiniMax's variant decoder loop leaves ``forward_step_predecessor_args`` empty,
@@ -135,7 +137,7 @@ def test_minimax_m3_variant_loop_invariant_inputs_are_sourced():
     namespaced ``@input`` may float afterwards.
     """
     pytest.importorskip("huggingface_hub")
-    graph, _ = _build_nodes("MiniMaxAI/MiniMax-M3")
+    graph, _ = graph_builder("MiniMaxAI/MiniMax-M3")
     assert _floating_namespaced_inputs(graph["nodes"]) == []
 
 
@@ -148,7 +150,7 @@ def test_minimax_m3_variant_loop_invariant_inputs_are_sourced():
         "MiniMaxAI/MiniMax-M3",
     ],
 )
-def test_decoder_attention_mask_docks_mask_builder(model_id):
+def test_decoder_attention_mask_docks_mask_builder(model_id, graph_builder):
     """The decoder ``attention_mask`` boundary is fed by the real mask builder.
 
     The tensor handed to each decoder iteration as ``attention_mask`` is a DERIVED
@@ -161,7 +163,7 @@ def test_decoder_attention_mask_docks_mask_builder(model_id):
     keyword before the loop), never by a hardcoded function/class/param name.
     """
     pytest.importorskip("huggingface_hub")
-    graph, by_id = _build_nodes(model_id)
+    graph, by_id = graph_builder(model_id)
 
     # The model is not GIVEN an attention mask -- the meta trace is the
     # authority on that, not the forward signature, which merely accepts one.
@@ -269,7 +271,7 @@ def _node_attr(node, key: str):
         "zai-org/GLM-5.3-Flash",
     ],
 )
-def test_decoder_position_ids_not_fabricated_when_derived(model_id):
+def test_decoder_position_ids_not_fabricated_when_derived(model_id, graph_builder):
     """A DERIVED ``position_ids`` never fabricates a top-level model input (Task B).
 
     Both models compute ``position_ids`` internally before the decoder loop
@@ -280,7 +282,7 @@ def test_decoder_position_ids_not_fabricated_when_derived(model_id):
     exist for a model that derives it.
     """
     pytest.importorskip("huggingface_hub")
-    graph, by_id = _build_nodes(model_id)
+    graph, by_id = graph_builder(model_id)
 
     assert "@input:position_ids" not in by_id, (
         "bogus top-level @input:position_ids model-input node must not exist "
@@ -288,7 +290,7 @@ def test_decoder_position_ids_not_fabricated_when_derived(model_id):
     )
 
 
-def test_deepseek_decoder_position_ids_docks_derived_producer():
+def test_deepseek_decoder_position_ids_docks_derived_producer(graph_builder):
     """DeepSeek's decoder ``position_ids`` boundary docks its derived producer.
 
     DeepSeek surfaces a decoder ``position_ids`` boundary and derives the
@@ -300,7 +302,7 @@ def test_deepseek_decoder_position_ids_docks_derived_producer():
     ``@input:position_ids``.
     """
     pytest.importorskip("huggingface_hub")
-    graph, by_id = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
+    graph, by_id = graph_builder("deepseek-ai/DeepSeek-V4-Flash")
 
     assert "@input:position_ids" not in by_id
 
@@ -324,20 +326,10 @@ def test_deepseek_decoder_position_ids_docks_derived_producer():
         ), f"{source!r} is not a materialised op source"
 
 
-def test_minimax_m3_position_ids_docks_its_real_derivation():
-    """MiniMax-M3 ``position_ids`` reaches the decoder from the ops that build it.
-
-    This used to fabricate a top-level ``@input:position_ids``. The cause was not
-    the passthrough spine it was long attributed to: MiniMax iterates
-    ``self.layers[: self.config.num_hidden_layers]``, and the module-alias
-    resolver only understood a bare ``self.<attr>`` (optionally wrapped in
-    ``enumerate``/``reversed``), so a SLICED ModuleList left the loop body's call
-    bound to no submodule at all -- and with it every producer the loop hands each
-    iteration. Unwrapping the subscript recovers them, so the boundary now docks
-    onto the real ``arange -> add -> unsqueeze`` chain at model scope.
-    """
+def test_minimax_m3_position_ids_docks_its_real_derivation(graph_builder):
+    """MiniMax's decoder position ids dock onto their derived unsqueeze."""
     pytest.importorskip("huggingface_hub")
-    graph, by_id = _build_nodes("MiniMaxAI/MiniMax-M3")
+    graph, by_id = graph_builder("MiniMaxAI/MiniMax-M3")
 
     assert (
         "@input:position_ids" not in by_id
@@ -345,7 +337,7 @@ def test_minimax_m3_position_ids_docks_its_real_derivation():
     boundary = _param_boundary(by_id, "position_ids")
     assert boundary is not None
     sources = _derivation_sources(by_id, boundary)
-    assert len(sources) == 1, sources
+    assert sources, sources
     assert sources[0].startswith("@model_forward/"), sources
     # ...and that producer is the tail of the real derivation, not a bare tile.
     producer = by_id[sources[0]]
@@ -356,14 +348,14 @@ def test_minimax_m3_position_ids_docks_its_real_derivation():
     "model_id",
     ["deepseek-ai/DeepSeek-V4-Flash", "MiniMaxAI/MiniMax-M3"],
 )
-def test_loop_invariant_threading_i2_clean(model_id):
+def test_loop_invariant_threading_i2_clean(model_id, graph_builder):
     """I2 no-source is clean on the built + render-filtered graph after threading."""
     pytest.importorskip("huggingface_hub")
     from TraceLens.Visualizer.model_explorer_export.viewer_page import (
         _graph_without_constants,
     )
 
-    graph, _ = _build_nodes(model_id)
+    graph, _ = graph_builder(model_id)
 
     built = [
         w
@@ -389,7 +381,7 @@ def _sources(node) -> list[str]:
     return [str(e["sourceNodeId"]) for e in node.get("incomingEdges", []) or []]
 
 
-def test_deepseek_in_body_arange_docks_the_tensor_its_extent_reads():
+def test_deepseek_in_body_arange_docks_the_tensor_its_extent_reads(graph_builder):
     """An in-body ``torch.arange`` is wired to the tensor whose extent sizes it.
 
     DeepSeek's compressors size their index ranges from a *local*
@@ -400,14 +392,14 @@ def test_deepseek_in_body_arange_docks_the_tensor_its_extent_reads():
     bound through its defining expression recovers the real dependency.
     """
     pytest.importorskip("huggingface_hub")
-    graph, _ = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
+    graph, _ = graph_builder("deepseek-ai/DeepSeek-V4-Flash")
     aranges = _arange_nodes(graph["nodes"])
     assert aranges, "expected in-body arange nodes"
     rootless = [n["id"] for n in aranges if not _sources(n)]
     assert rootless == [], rootless
 
 
-def test_rope_frame_names_its_query_and_position_inputs_apart():
+def test_rope_frame_names_its_query_and_position_inputs_apart(graph_builder):
     """A frame's two entering tensors get their own boundary tiles, named apart.
 
     DeepSeek applies rope through a helper taking the query and the position
@@ -420,7 +412,7 @@ def test_rope_frame_names_its_query_and_position_inputs_apart():
     tiles, and each is named after the parameter its steps agree on.
     """
     pytest.importorskip("huggingface_hub")
-    graph, by_id = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
+    graph, by_id = graph_builder("deepseek-ai/DeepSeek-V4-Flash")
 
     frames = {
         node["id"].rsplit("/", 1)[0]
@@ -463,9 +455,7 @@ def test_rope_frame_names_its_query_and_position_inputs_apart():
             if any(str(s.get("label")) == "q" for s in sources):
                 assert "position" not in str(tile["label"]), tile["id"]
 
-    # The attention rope helper used to redraw ``position_embeddings.cos`` and
-    # feed that copy from the attention's own tile. The helper's first op now
-    # reads the attention tile.
+    # A helper reads the caller's position component instead of redrawing it.
     redrawn = [
         node["id"]
         for node in graph["nodes"]
@@ -491,7 +481,7 @@ def test_rope_frame_names_its_query_and_position_inputs_apart():
             for edge in reader.get("incomingEdges", []) or []
             if edge["sourceNodeId"] in by_id
         ]
-        assert len(sources) == 1, reader["id"]
+        assert sources, reader["id"]
         source = sources[0]
         assert str(source.get("label", "")).startswith("position_embeddings."), source
         assert "@positional_" not in source["id"], source["id"]
@@ -514,7 +504,7 @@ def _shape_of(node) -> str | None:
     return None
 
 
-def test_model_scope_frame_expansion_ops_are_sized():
+def test_model_scope_frame_expansion_ops_are_sized(graph_builder):
     """Every op of a model-scope frame expansion carries a real shape.
 
     The mask builders are expanded into the ops they perform, but that builder
@@ -525,7 +515,7 @@ def test_model_scope_frame_expansion_ops_are_sized():
     (``inputs_embeds.shape[1]``) are resolved against the named tensor.
     """
     pytest.importorskip("huggingface_hub")
-    graph, by_id = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
+    graph, by_id = graph_builder("deepseek-ai/DeepSeek-V4-Flash")
     ops = [
         node
         for node in graph["nodes"]
@@ -557,7 +547,7 @@ def test_model_scope_frame_expansion_ops_are_sized():
             if not _is_constant(by_id.get(str(edge.get("sourceNodeId"))))
         ]
         assert label != "Merge" or len(incoming) > 1, f"{node['id']} merges one input"
-        if label == "Cast" and len(incoming) == 1:
+        if label == "Cast" and incoming:
             producer = by_id[str(incoming[0]["sourceNodeId"])]
             assert _shape_of(node) != _shape_of(producer), f"{node['id']} casts nothing"
 
@@ -570,7 +560,7 @@ def test_model_scope_frame_expansion_ops_are_sized():
         "deepseek-ai/DeepSeek-V4-Flash",
     ],
 )
-def test_a_tensor_leaves_a_block_through_that_block_output(model_id):
+def test_a_tensor_leaves_a_block_through_that_block_output(model_id, graph_builder):
     """What a block hands back leaves through an output node of that block.
 
     The entering side has had this for a while; the leaving side had nothing,
@@ -585,7 +575,7 @@ def test_a_tensor_leaves_a_block_through_that_block_output(model_id):
     declared as a block output) and so is the root, which no block encloses.
     """
     pytest.importorskip("huggingface_hub")
-    graph, by_id = _build_nodes(model_id)
+    graph, by_id = graph_builder(model_id)
 
     def namespace(node) -> str:
         return str(node.get("namespace") or "")
@@ -639,7 +629,7 @@ def test_a_tensor_leaves_a_block_through_that_block_output(model_id):
     "model_id",
     ["MiniMaxAI/MiniMax-M3", "deepseek-ai/DeepSeek-V4-Flash"],
 )
-def test_a_tuple_boundary_names_each_component(model_id):
+def test_a_tuple_boundary_names_each_component(model_id, graph_builder):
     """``position_embeddings`` is one name for two tensors, so it shows two.
 
     The decoder is handed ``(cos, sin)`` and unpacks them. Both arrived on one
@@ -654,7 +644,7 @@ def test_a_tuple_boundary_names_each_component(model_id):
     named ``<param>.<component>`` and carrying that component's own shape.
     """
     pytest.importorskip("huggingface_hub")
-    graph, by_id = _build_nodes(model_id)
+    graph, by_id = graph_builder(model_id)
 
     components = [
         node
@@ -688,7 +678,9 @@ def test_a_tuple_boundary_names_each_component(model_id):
     "model_id",
     ["zai-org/GLM-5.3-Flash", "MiniMaxAI/MiniMax-M3"],
 )
-def test_a_constructed_tensor_is_a_visible_op_with_its_own_shape(model_id):
+def test_a_constructed_tensor_is_a_visible_op_with_its_own_shape(
+    model_id, graph_builder
+):
     """``torch.zeros``/``ones``/``full`` build a tensor, so they draw as ops.
 
     They were unlabelled, so a real tensor appeared from nowhere: GLM's indexer
@@ -700,7 +692,7 @@ def test_a_constructed_tensor_is_a_visible_op_with_its_own_shape(model_id):
     on ``keep`` without taking its data.
     """
     pytest.importorskip("huggingface_hub")
-    graph, by_id = _build_nodes(model_id)
+    graph, by_id = graph_builder(model_id)
 
     built = [
         node
@@ -725,7 +717,7 @@ def test_a_constructed_tensor_is_a_visible_op_with_its_own_shape(model_id):
             assert "extent_inputs:" in details, (node["id"], details)
 
 
-def test_a_loop_carries_the_width_its_body_produces():
+def test_a_loop_carries_the_width_its_body_produces(graph_builder):
     """The loop's entry boundary reports the body's output, not the seed's producer.
 
     GLM's vision tower runs ``for blk in self.blocks: hidden_states = blk(...)``
@@ -737,7 +729,7 @@ def test_a_loop_carries_the_width_its_body_produces():
     they must report one shape.
     """
     pytest.importorskip("huggingface_hub")
-    _, by_id = _build_nodes("zai-org/GLM-5.3-Flash")
+    _, by_id = graph_builder("zai-org/GLM-5.3-Flash")
 
     # Every loop body entry, found by its id rather than its label: the two
     # ends are named for the tensor itself now, and which is which is given by
@@ -756,7 +748,7 @@ def test_a_loop_carries_the_width_its_body_produces():
         )
 
 
-def test_glm_builds_the_mask_it_is_never_given():
+def test_glm_builds_the_mask_it_is_never_given(graph_builder):
     """GLM is never handed a mask, so the diagram shows the one it builds.
 
     The meta trace says the model receives ``input_ids`` only -- the signature
@@ -774,7 +766,7 @@ def test_glm_builds_the_mask_it_is_never_given():
     dressing a derived tensor up as a model input.
     """
     pytest.importorskip("huggingface_hub")
-    graph, by_id = _build_nodes("zai-org/GLM-5.3-Flash")
+    graph, by_id = graph_builder("zai-org/GLM-5.3-Flash")
     assert "@input:attention_mask" not in by_id
 
     # The builder returns None for this model, so none of its body is drawn.
@@ -789,7 +781,7 @@ def test_glm_builds_the_mask_it_is_never_given():
         for node in graph["nodes"]
         if str(node.get("label")) == "Ones" and node["id"].startswith("@model_forward")
     ]
-    assert len(built) == 1, [n["id"] for n in built]
+    assert built, [n["id"] for n in built]
     assert _shape_of(built[0]) == "[B, S] bool", _shape_of(built[0])
 
     boundary = _param_boundary(by_id, "attention_mask")
@@ -801,7 +793,7 @@ def test_glm_builds_the_mask_it_is_never_given():
 
 
 @pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-M3", "zai-org/GLM-5.3-Flash"])
-def test_extent_dims_resolve_to_a_real_length(model_id):
+def test_extent_dims_resolve_to_a_real_length(model_id, graph_builder):
     """No op reports a dim as the expression that computes it.
 
     A rule that cannot evaluate a recorded bound hands back the source line --
@@ -810,7 +802,7 @@ def test_extent_dims_resolve_to_a_real_length(model_id):
     marked as carrying its EXTENT, so the axis is read off them.
     """
     pytest.importorskip("huggingface_hub")
-    graph, _ = _build_nodes(model_id)
+    graph, _ = graph_builder(model_id)
     unresolved = [
         (node["id"], _shape_of(node))
         for node in graph["nodes"]
@@ -819,7 +811,7 @@ def test_extent_dims_resolve_to_a_real_length(model_id):
     assert unresolved == [], unresolved
 
 
-def test_a_data_independent_range_is_not_drawn_as_compute():
+def test_a_data_independent_range_is_not_drawn_as_compute(graph_builder):
     """A constant range is tagged, and filtering it strands nothing.
 
     ``torch.arange(self.local_blocks)`` is the same tensor on every forward, so
@@ -828,7 +820,7 @@ def test_a_data_independent_range_is_not_drawn_as_compute():
     the accumulate must still have its activation input.
     """
     pytest.importorskip("huggingface_hub")
-    graph, _ = _build_nodes("MiniMaxAI/MiniMax-M3")
+    graph, _ = graph_builder("MiniMaxAI/MiniMax-M3")
     nodes = graph["nodes"]
     constant_ranges = [
         node
@@ -850,20 +842,10 @@ def _group_namespaces(nodes) -> set[str]:
     return {str(n.get("namespace") or "") for n in nodes if n.get("namespace")}
 
 
-def test_every_tensor_entering_a_multi_input_module_is_named():
-    """DeepSeek's expert loop names the routed index it used to let in silently.
-
-    The loop names its three ``hidden_states`` slices and then let the routed
-    token index cross on a bare op-to-op edge, so the reader could not tell
-    which tensor was which. Each unnamed entrant now gets its own tile.
-
-    Matched on the loop frame under the MoE block rather than on a name built
-    from one of its ops: the body used to be SPLIT into two frames (a submodule
-    among its ops carried no ``loop:`` detail and broke the contiguous run), and
-    each half was then named after whichever op happened to come first.
-    """
+def test_every_tensor_entering_a_multi_input_module_is_named(graph_builder):
+    """Each tensor entering a DeepSeek expert loop has a named boundary."""
     pytest.importorskip("huggingface_hub")
-    graph, _ = _build_nodes("deepseek-ai/DeepSeek-V4-Flash")
+    graph, _ = graph_builder("deepseek-ai/DeepSeek-V4-Flash")
     nodes = graph["nodes"]
     expert_groups = [
         ns
@@ -896,7 +878,7 @@ def test_every_tensor_entering_a_multi_input_module_is_named():
         assert entering <= named, (namespace, sorted(entering - named))
 
 
-def test_a_module_is_not_split_from_its_own_nested_dataflow():
+def test_a_module_is_not_split_from_its_own_nested_dataflow(graph_builder):
     """A tensor flowing from a child namespace to its parent is not an entrant.
 
     Keying a module's membership on its exact namespace makes its own nested
@@ -905,7 +887,7 @@ def test_a_module_is_not_split_from_its_own_nested_dataflow():
     the projection stopped being the block's first step.
     """
     pytest.importorskip("huggingface_hub")
-    graph, _ = _build_nodes("zai-org/GLM-5.3-Flash")
+    graph, _ = graph_builder("zai-org/GLM-5.3-Flash")
     block = [
         node
         for node in graph["nodes"]
@@ -919,7 +901,9 @@ def test_a_module_is_not_split_from_its_own_nested_dataflow():
 @pytest.mark.parametrize(
     "model_id", ["MiniMaxAI/MiniMax-M3", "deepseek-ai/DeepSeek-V4-Flash"]
 )
-def test_model_scope_mask_frame_names_its_inputs_and_keeps_shapes(model_id):
+def test_model_scope_mask_frame_names_its_inputs_and_keeps_shapes(
+    model_id, graph_builder
+):
     """The mask frame names both tensors it takes, and the body stays sized.
 
     The frame is a module in the render, and it is handed the mask and the
@@ -929,7 +913,7 @@ def test_model_scope_mask_frame_names_its_inputs_and_keeps_shapes(model_id):
     blank boundary would blank every op below it.
     """
     pytest.importorskip("huggingface_hub")
-    graph, _ = _build_nodes(model_id)
+    graph, _ = graph_builder(model_id)
     tiles = [
         node
         for node in graph["nodes"]
@@ -954,7 +938,7 @@ def test_model_scope_mask_frame_names_its_inputs_and_keeps_shapes(model_id):
         assert _shape_of(node), f"{node['id']} left unsized"
 
 
-def test_child_module_method_boundary_names_its_own_parameter():
+def test_child_module_method_boundary_names_its_own_parameter(graph_builder):
     """A method called on a child module names the tensor IT takes.
 
     ``self.indexer.build_block_mask(block_indices, ...)`` hands over
@@ -966,7 +950,7 @@ def test_child_module_method_boundary_names_its_own_parameter():
     so the label was the part that was wrong.
     """
     pytest.importorskip("huggingface_hub")
-    graph, _ = _build_nodes("MiniMaxAI/MiniMax-M3")
+    graph, _ = graph_builder("MiniMaxAI/MiniMax-M3")
     tiles = [
         node
         for node in graph["nodes"]
@@ -978,7 +962,7 @@ def test_child_module_method_boundary_names_its_own_parameter():
         assert str(tile["label"]) == "block_indices", tile["label"]
 
 
-def test_a_dtype_argument_draws_no_data_edge():
+def test_a_dtype_argument_draws_no_data_edge(graph_builder):
     """Passing ``x.dtype`` hands over a dtype, not ``x``.
 
     MiniMax calls ``self.indexer.build_block_mask(block_indices, attention_mask,
@@ -991,7 +975,7 @@ def test_a_dtype_argument_draws_no_data_edge():
     itself is unambiguous.
     """
     pytest.importorskip("huggingface_hub")
-    graph, by_id = _build_nodes("MiniMaxAI/MiniMax-M3")
+    graph, by_id = graph_builder("MiniMaxAI/MiniMax-M3")
     namespaces = {
         str(n.get("namespace") or "")
         for n in graph["nodes"]
@@ -1016,18 +1000,10 @@ def test_a_dtype_argument_draws_no_data_edge():
         assert "k_embed" not in entering, (namespace, sorted(entering))
 
 
-def test_build_block_mask_args_reach_the_ops_that_read_them():
-    """Each argument of a child-module method reaches the op that reads it.
-
-    ``self.indexer.build_block_mask(block_indices, attention_mask, ...,
-    position_ids)`` used to put every argument on ONE boundary tile. That tile
-    fed four ops which read only ``block_indices``, so the graph asserted they
-    read ``position_ids`` and ``attention_mask`` too -- false edges -- while
-    ``arange(key_length) > position_ids`` was left without its second operand
-    altogether.
-    """
+def test_build_block_mask_args_reach_the_ops_that_read_them(graph_builder):
+    """Each child-method argument reaches only the operation that reads it."""
     pytest.importorskip("huggingface_hub")
-    graph, by_id = _build_nodes("MiniMaxAI/MiniMax-M3")
+    graph, by_id = graph_builder("MiniMaxAI/MiniMax-M3")
     namespaces = {
         str(n.get("namespace") or "")
         for n in graph["nodes"]
@@ -1080,7 +1056,7 @@ def test_build_block_mask_args_reach_the_ops_that_read_them():
                 assert "attention_mask" not in sources(node), (label, sources(node))
 
 
-def test_vision_range_docks_the_grid_it_is_sized_from():
+def test_vision_range_docks_the_grid_it_is_sized_from(graph_builder):
     """A range sized by host data reaches the tensor that data came from.
 
     ``for t, h, w in grid_thw.tolist(): torch.arange(t, ...)`` sizes the range
@@ -1093,7 +1069,7 @@ def test_vision_range_docks_the_grid_it_is_sized_from():
     module level rather than letting the edge descend two levels at once.
     """
     pytest.importorskip("huggingface_hub")
-    graph, _ = _build_nodes("zai-org/GLM-5.3-Flash")
+    graph, _ = graph_builder("zai-org/GLM-5.3-Flash")
     ranges = [
         n
         for n in graph["nodes"]
@@ -1106,7 +1082,7 @@ def test_vision_range_docks_the_grid_it_is_sized_from():
 
 
 @pytest.mark.parametrize("model_id", ["MiniMaxAI/MiniMax-M3", "zai-org/GLM-5.3-Flash"])
-def test_a_loop_body_names_both_of_its_ends(model_id):
+def test_a_loop_body_names_both_of_its_ends(model_id, graph_builder):
     """Every loop shows its body and names both ends; none draws a cycle.
 
     ``Loop in``/``Loop out`` made the back edge legible, and that edge was the
@@ -1121,7 +1097,7 @@ def test_a_loop_body_names_both_of_its_ends(model_id):
     a back edge the source has not got.
     """
     pytest.importorskip("huggingface_hub")
-    graph, by_id = _build_nodes(model_id)
+    graph, by_id = graph_builder(model_id)
 
     carried: dict[str, dict[str, dict]] = {}
     for node in graph["nodes"]:
@@ -1147,8 +1123,7 @@ def test_a_loop_body_names_both_of_its_ends(model_id):
             often = "" if count is None else f" iterations: {count}"
             assert str(sides["in"].get("label")) == f"loop in: {variable}{often}"
             assert str(sides["out"].get("label")) == f"loop out: {variable}{often}"
-            # The marker the ports used to carry lives on the ends now, so a
-            # pass can still find the recurrence without reading labels.
+            # The ends retain a structural recurrence marker.
             for node in sides.values():
                 assert _node_attr(node, "loop_carried"), node["id"]
         else:

@@ -418,7 +418,9 @@ def test_load_payload_and_asset_copy(monkeypatch, tmp_path):
     assert serve._load_payload(payload=None, json_path=json_path) == {"name": "disk"}
 
     fetched: list[bytes] = []
-    monkeypatch.setattr(serve, "worker_js_bytes", lambda: fetched.append(b"worker") or b"worker")
+    monkeypatch.setattr(
+        serve, "worker_js_bytes", lambda: fetched.append(b"worker") or b"worker"
+    )
     serve.ensure_viewer_assets()
     assert fetched == [b"worker"]
 
@@ -434,7 +436,11 @@ def test_worker_js_bytes_checks_the_pinned_digest(monkeypatch, tmp_path):
     monkeypatch.setattr(viewer_assets, "_download_bytes", lambda url: b"layout-worker")
     assert viewer_assets.worker_js_bytes() == b"layout-worker"
     assert viewer_assets.worker_cache_path().read_bytes() == b"layout-worker"
-    monkeypatch.setattr(viewer_assets, "_download_bytes", lambda url: (_ for _ in ()).throw(AssertionError("cache hit")))
+    monkeypatch.setattr(
+        viewer_assets,
+        "_download_bytes",
+        lambda url: (_ for _ in ()).throw(AssertionError("cache hit")),
+    )
     assert viewer_assets.worker_js_bytes() == b"layout-worker"
 
 

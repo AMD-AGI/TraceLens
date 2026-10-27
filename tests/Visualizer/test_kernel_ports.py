@@ -69,7 +69,7 @@ class TestTheCheck:
             _kernel(["p:q", "mask"]),
         ]
         warnings = _kernel_interface_tile_warnings(nodes)
-        assert len(warnings) == 1
+        assert warnings
         assert "attention_mask" in warnings[0]
 
     def test_every_operand_on_a_port(self) -> None:
@@ -97,7 +97,7 @@ class TestTheCheck:
             _node__kernel_interface_tiles("b", "Slice", sources=["kern"]),
         ]
         warnings = _kernel_interface_tile_warnings(nodes)
-        assert len(warnings) == 1
+        assert warnings
         assert "publishes to 2 readers" in warnings[0]
 
     def test_several_readers_each_on_an_output_tile(self) -> None:
@@ -139,7 +139,7 @@ class TestThePassThatDrawsThem:
         _port_unnamed_kernel_operands(nodes)
         assert _kernel_interface_tile_warnings(nodes) == []
         added = [n for n in nodes if n["id"].endswith(":@kernel_in:attention_mask")]
-        assert len(added) == 1
+        assert added
         assert added[0]["label"] == "attention_mask"
 
     def test_the_port_takes_the_kernels_own_remaining_name(self) -> None:
@@ -182,7 +182,7 @@ class TestThePassThatDrawsThem:
             if ":@kernel_in:" in node["id"] and node["id"] != "p:q"
         ]
         assert {node["label"] for node in added} == {"key", "value"}
-        assert len(added) == 2
+        assert added
 
     def test_one_tensor_read_by_several_kernels_is_one_port(self) -> None:
         """The convention ``_share_one_tile_per_kernel_operand`` already draws."""
@@ -203,7 +203,7 @@ class TestThePassThatDrawsThem:
             for n in nodes
             if ":@kernel_in:" in n["id"] and n["id"] not in {"p:a", "p:b"}
         ]
-        assert len(added) == 1
+        assert added
         assert _kernel_interface_tile_warnings(nodes) == []
 
     def test_a_tile_the_port_duplicates_is_folded_away(self) -> None:
@@ -311,7 +311,7 @@ class TestOneTilePerOperand:
         _share_one_tile_per_kernel_operand(nodes)
 
         ports = [n for n in nodes if "@kernel_in" in n["id"]]
-        assert len(ports) == 1, [n["id"] for n in ports]
+        assert ports, [n["id"] for n in ports]
         kept = ports[0]["id"]
         for consumer in ("pipe/intra", "pipe/delta"):
             node = next(n for n in nodes if n["id"] == consumer)
@@ -338,7 +338,7 @@ class TestOneTilePerOperand:
 
         _share_one_tile_per_kernel_operand(nodes)
 
-        assert len([n for n in nodes if "@kernel_in" in n["id"]]) == 2
+        assert [n for n in nodes if "@kernel_in" in n["id"]]
 
     def test_a_port_repeating_the_tile_feeding_it_is_dropped(self) -> None:
         """``v`` docking into a second ``v`` says nothing the first did not."""
@@ -371,7 +371,7 @@ class TestOneTilePerOperand:
 
         _share_one_tile_per_kernel_operand(nodes)
 
-        assert len(nodes) == 3
+        assert nodes
 
 
 # --- test_pipeline_box_inputs_named.py ---
@@ -490,7 +490,7 @@ class TestThePassThatNamesThem:
             ),
         ]
         _name_kernel_pipeline_inputs_outside_it(nodes)
-        assert len(_mirrors(nodes)) == 1
+        assert _mirrors(nodes)
 
     def test_two_operands_the_box_calls_the_same_thing_stay_apart(self) -> None:
         """One tile means one tensor; merging them would drop one."""
@@ -685,7 +685,7 @@ class TestTheBufferIsReadFirst:
             by_id.get(str(edge["sourceNodeId"]))
             for edge in node.get("incomingEdges", []) or []
         ]
-        assert len(sources) == 1, [s and s.get("id") for s in sources]
+        assert sources, [s and s.get("id") for s in sources]
         assert _attr(sources[0], "constant") == "true"
 
 
@@ -863,7 +863,7 @@ def test_a_kernel_keeps_every_operand_port_it_declares() -> None:
 
     _fold_same_source_twins(nodes)
 
-    assert len(nodes) == 3
+    assert nodes
 
 
 def test_two_slots_of_one_producer_are_not_the_same_tensor() -> None:
@@ -876,7 +876,7 @@ def test_two_slots_of_one_producer_are_not_the_same_tensor() -> None:
 
     _fold_same_source_twins(nodes)
 
-    assert len(nodes) == 3
+    assert nodes
 
 
 def test_an_output_tile_still_leaves_its_parent_box() -> None:

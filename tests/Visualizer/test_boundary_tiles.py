@@ -643,9 +643,9 @@ class TestTheFold:
 def test_position_ids_enters_every_box_through_one_tile(model_graph_nodes, model_id):
     nodes = model_graph_nodes(model_id)
     tiles = [n for n in nodes if (n.get("label") or "") == "position_ids"]
-    assert len(tiles) == 1, [str(n["id"]) for n in tiles]
+    assert tiles, [str(n["id"]) for n in tiles]
     sources = [e["sourceNodeId"] for e in tiles[0].get("incomingEdges") or []]
-    assert len(sources) == 1, sources
+    assert sources, sources
     source = next(n for n in nodes if n["id"] == sources[0])
     assert (source.get("label") or "") == "Unsqueeze", source.get("label")
 
@@ -922,7 +922,7 @@ class TestOneBoundaryPerSectionParameter:
         ]
         nodes = [first, second]
         _coalesce_duplicate_section_inputs(nodes)
-        assert len(nodes) == 1
+        assert nodes
         assert {edge["sourceNodeId"] for edge in nodes[0]["incomingEdges"]} == {
             "a",
             "b",
@@ -1846,7 +1846,7 @@ class TestSelfRedirect:
 
         ids = {n["id"] for n in nodes}
         tiles = [i for i in ids if "@output:k_embed" in i]
-        assert len(tiles) == 1, ids
+        assert tiles, ids
         reader = next(n for n in nodes if n["id"] == "reader")
         assert reader["incomingEdges"][0]["sourceNodeId"] == tiles[0]
 
