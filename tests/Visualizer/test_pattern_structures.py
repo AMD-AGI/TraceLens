@@ -154,8 +154,22 @@ def test_hyperconnection_keeps_the_activation_and_the_residual(pattern):
     assert any(
         ":mix:" in node["id"] and node.get("label") == "Linear" for node in block
     )
-    assert any(node.get("label") == "Add" for node in block)
-    assert any(node.get("label") == "residual" for node in block)
+    by_id = _by_id(graph["nodes"])
+    adds = [
+        node
+        for node in _nodes(graph, LINEAR)
+        if node.get("label") == "Add" and "attn_hc" not in (node.get("namespace") or "")
+    ]
+    assert adds
+    assert any(
+        any(
+            "attn_hc" in by_id[source]["id"]
+            for source in _sources(node)
+            if source in by_id
+        )
+        and len(_sources(node)) >= 2
+        for node in adds
+    )
 
 
 def test_expert_loop_stays_inside_the_moe_variant(pattern):

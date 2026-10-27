@@ -120,10 +120,10 @@ class PatternHyperConnection(nn.Module):
         self.mix = nn.Linear(hidden, hidden, bias=False)
         self.scale = nn.Parameter(torch.ones(hidden))
 
-    def forward(self, hidden_states, residual):
+    def forward(self, hidden_states):
         mixed = self.mix(hidden_states)
         closed = self.scale * self.scale
-        return residual + mixed * closed
+        return mixed * closed
 
 
 class PatternMLP(nn.Module):
@@ -192,9 +192,9 @@ class PatternDecoderLayer(nn.Module):
     def forward(self, hidden_states, attention_mask=None):
         normed = self.input_layernorm(hidden_states)
         attended = self.self_attn(normed, attention_mask=attention_mask)
-        mixed = self.attn_hc(attended, hidden_states)
-        normed = self.post_attention_layernorm(mixed)
-        return self.ffn_hc(self.ffn(normed), mixed)
+        hidden_states = hidden_states + self.attn_hc(attended)
+        normed = self.post_attention_layernorm(hidden_states)
+        return hidden_states + self.ffn_hc(self.ffn(normed))
 
 
 class PatternRotary(nn.Module):
