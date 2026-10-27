@@ -899,6 +899,65 @@ def test_parse_module_ctor_parses_conv_channels():
     assert spec.out_channels == 128
 
 
+def test_qkv_parallel_linear_defaults_v_head_size_when_override_is_unresolvable():
+    """An override expression the AST walk cannot evaluate (a runtime flag the
+    caller computed, not a config value) must not abandon the whole spec --
+    MiniMax's sparse index projection sizes ``v_head_size`` off a per-layer
+    frequency list via ``0 if self.disable_index_value else self.idx_head_dim``,
+    which this module cannot resolve."""
+    import ast as _ast
+
+    from TraceLens.ModelUtils.shape_inference import (
+        ModuleLinearSpec,
+        _parse_module_ctor,
+    )
+
+    call = (
+        _ast.parse(
+            "QKVParallelLinear(hidden_size, 128, 4, total_num_kv_heads=1, "
+            "v_head_size=(0 if self.disable_index_value else self.idx_head_dim))"
+        )
+        .body[0]
+        .value
+    )
+    ctx = ShapeContext.from_spec(
+        ArchitectureSpec(name="T", model_type="t", raw_config={})
+    )
+    spec = _parse_module_ctor(
+        call, config={}, local_vars={"hidden_size": 6144}, context=ctx
+    )
+    assert isinstance(spec, ModuleLinearSpec)
+    assert spec.in_features == 6144
+    # v_head_size falls back to head_size (128), matching the keyword's own
+    # documented default rather than reporting no spec at all.
+    assert spec.out_features == 128 * 4 + 1 * 128 + 1 * 128
+
+
+def test_qkv_parallel_linear_still_uses_a_resolvable_v_head_size_override():
+    import ast as _ast
+
+    from TraceLens.ModelUtils.shape_inference import (
+        ModuleLinearSpec,
+        _parse_module_ctor,
+    )
+
+    call = (
+        _ast.parse(
+            "QKVParallelLinear(hidden_size, 128, 4, total_num_kv_heads=1, v_head_size=0)"
+        )
+        .body[0]
+        .value
+    )
+    ctx = ShapeContext.from_spec(
+        ArchitectureSpec(name="T", model_type="t", raw_config={})
+    )
+    spec = _parse_module_ctor(
+        call, config={}, local_vars={"hidden_size": 6144}, context=ctx
+    )
+    assert isinstance(spec, ModuleLinearSpec)
+    assert spec.out_features == 128 * 4 + 1 * 128 + 1 * 0
+
+
 def test_conv_shape_inference_replaces_matched_channel_axis():
     from TraceLens.ModelUtils.shape_inference import ModuleConvSpec
 

@@ -32,11 +32,14 @@ import ast
 import pytest
 
 from TraceLens.ModelUtils.ast_analyze import (
+    DEVICE_CHECK_GLOBALS_KEY,
     RUNTIME_REGIME_KEY,
     RuntimeRegime,
+    _device_check_globals,
     _ForwardOperationExtractor,
     _merges_leading_axes,
     _regime_facts,
+    _with_device_check_globals,
 )
 from TraceLens.ModelUtils.extract import (
     _with_config_overrides,
@@ -135,6 +138,88 @@ class TestEachChoicePicksExactlyOneArm:
 
     def test_decoding_always_reads_a_cache(self) -> None:
         assert RuntimeRegime(phase="decode", cache="cold").has_cache
+
+
+DEVICE_MODULE_GLOBAL = """
+def forward(self, hidden_states):
+    if _is_npu:
+        out = self.npu_path(hidden_states)
+    else:
+        out = self.default_path(hidden_states)
+    return out
+"""
+
+DEVICE_DIRECT_CALL = """
+def forward(self, hidden_states):
+    if is_cuda():
+        out = self.cuda_path(hidden_states)
+    else:
+        out = self.default_path(hidden_states)
+    return out
+"""
+
+
+class TestDeviceIsStatedNotDetected:
+    """Which accelerator is modeled is a choice the caller states up front.
+
+    SGLang/vLLM read a platform-detection call ONCE, at import time
+    (``_is_npu = is_npu()``), then branch on the bare name later -- or branch
+    on the call directly. Either way this must resolve purely from the
+    declared :class:`RuntimeRegime.device`, never by probing this process's
+    own machine.
+    """
+
+    def test_a_module_global_bound_from_a_platform_check_is_found(self) -> None:
+        import ast
+
+        tree = ast.parse("_is_npu = is_npu()\n")
+        assert _device_check_globals(tree) == {"_is_npu": "npu"}
+
+    def test_a_global_bound_inside_a_try_is_still_found(self) -> None:
+        import ast
+
+        tree = ast.parse(
+            "try:\n    _is_hip = is_rocm()\nexcept ImportError:\n    _is_hip = False\n"
+        )
+        assert _device_check_globals(tree) == {"_is_hip": "hip"}
+
+    def test_merging_folds_in_without_dropping_existing_keys(self) -> None:
+        import ast
+
+        tree = ast.parse("_is_cuda = is_cuda()\n")
+        merged = _with_device_check_globals({"other": 1}, tree)
+        assert merged == {"other": 1, DEVICE_CHECK_GLOBALS_KEY: {"_is_cuda": "cuda"}}
+
+    @pytest.mark.parametrize("device, taken", [("hip", False), ("npu", True)])
+    def test_the_module_global_form_decides_the_branch(self, device, taken) -> None:
+        func = _func(DEVICE_MODULE_GLOBAL)
+        extractor = _ForwardOperationExtractor(
+            self_values={},
+            all_tensor_ops=False,
+            config={
+                RUNTIME_REGIME_KEY: RuntimeRegime(device=device),
+                DEVICE_CHECK_GLOBALS_KEY: {"_is_npu": "npu"},
+            },
+        )
+        extractor._function_root = func
+        extractor._regime_facts = _regime_facts(func)
+        assert extractor._regime_outcome(_test_of(func, 0)) is taken
+
+    @pytest.mark.parametrize("device, taken", [("hip", False), ("cuda", True)])
+    def test_the_direct_call_form_decides_the_branch(self, device, taken) -> None:
+        func = _func(DEVICE_DIRECT_CALL)
+        extractor = _ForwardOperationExtractor(
+            self_values={},
+            all_tensor_ops=False,
+            config={RUNTIME_REGIME_KEY: RuntimeRegime(device=device)},
+        )
+        extractor._function_root = func
+        extractor._regime_facts = _regime_facts(func)
+        assert extractor._regime_outcome(_test_of(func, 0)) is taken
+
+    def test_the_default_regime_models_amd_not_cuda(self) -> None:
+        # This repo's own vendor, stated once rather than guessed per model.
+        assert RuntimeRegime().device == "hip"
 
 
 class TestATestIsDecidedWhereverTheLanguageWouldDecideIt:

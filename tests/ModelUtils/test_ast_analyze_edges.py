@@ -1330,6 +1330,43 @@ class Attn:
     assert ordinals == [0, 1]
 
 
+def test_a_pruned_merge_still_rewires_the_call_after_it():
+    """``act_fn`` is a lambda, not a submodule, for this config -- the merge of
+    its arm and ``gate``'s collapses onto ``gate`` alone, and ``proj`` must
+    still be wired to ``gate`` rather than falling back to plain source order
+    (which would point at the never-built ``act_fn``) or being left isolated."""
+    analysis = aa.analyze_source(
+        """
+class Gate:
+    def forward(self, x):
+        return x
+
+class Proj:
+    def forward(self, x):
+        return x
+
+class MLP:
+    def __init__(self, config):
+        if config.hidden_act == "gated":
+            self.gate = Gate()
+        else:
+            self.act_fn = lambda x: x
+        self.proj = Proj()
+
+    def forward(self, x):
+        y = self.gate(x)
+        if y is None:
+            y = self.act_fn(x)
+        return self.proj(y)
+""",
+        config={"hidden_act": "gated"},
+        all_tensor_ops=True,
+    )
+    mlp = analysis.class_registry["MLP"]
+    assert "act_fn" in mlp.unbuilt_attrs
+    assert mlp.forward_step_predecessors.get("proj") == ("gate",)
+
+
 def test_a_submodule_only_forward_records_which_argument_each_parameter_takes():
     """A residual saved before a norm stays distinct from the norm's output."""
     analysis = aa.analyze_source(
