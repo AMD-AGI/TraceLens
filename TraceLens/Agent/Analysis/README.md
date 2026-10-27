@@ -14,13 +14,18 @@ The TraceLens Agent is an agentic performance analysis tool that generates actio
 
 **Comparative**: Two-trace gap analysis. The agent compares a primary trace against a reference trace (e.g. a different platform, a tuned config) and identifies inefficiencies in the primary trace relative to the reference. Suitable when the goal is to understand where the primary trace is slower than the reference. Comparative analysis works best when both traces are collected from the same framework (e.g. both from vLLM, both from SGLang, or both from ATOM). Cross-framework comparisons may produce misleading gap estimates due to structural differences in operation call stacks.
 
+**Multi-trace standalone**: Several traces of one workload on one platform, such as the prefill and decode phases of an inference server, analyzed together into a single report. Kernel fusion and system-level analysis focus on the first job you list. Suitable when no single trace represents the workload. Set it up with a [YAML config](../../../docs/how-to/agent.md).
+
 ### Supported Analyses
 
-| | Standalone | Comparative |
-|---|---|---|
-| **Eager** | ✅ | ✅ |
-| **Graph + Capture** | ✅ | ✅ |
-| **Graph** | ❌ | ❌ |
+| | Standalone | Comparative | Multi-trace |
+|---|---|---|---|
+| **Eager** | ✅ | ✅ | ✅ |
+| **Graph + Capture** | ✅ | ✅ | ✅ |
+| **Graph** | ⚠️ ¹ | ✅ ² | ⚠️ ¹ |
+
+¹ Deterministic fallback report only.
+² Semantic comparison, inference mode.
 
 ---
 
@@ -93,6 +98,10 @@ Roofline analysis compares each measured kernel against your GPU's max-achievabl
     "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace1.json> with capture folder <path_to_capture1.json> and <path_to_trace2.json> with capture folder <path_to_capture2.json>"
     ```
     **NOTE**: Always pass **baseline** trace as trace1
+   - Multi-trace standalone (one trace per job, e.g. prefill and decode):
+    ```
+    "Follow the analysis orchestrator installed with TraceLens and run a multi-trace standalone analysis on jobs decode (phase decode) <path_to_decode.json> and prefill (phase prefill) <path_to_prefill.json>"
+    ```
 
 
 2. **Provide if prompted:**
@@ -118,6 +127,8 @@ Any agentic CLI runner that supports skill-file discovery and headless (print/no
 ```
 
 Set `analysis mode inference` for vLLM/SGLang/ATOM traces (and include the `execution mode` / `capture folder` fields when using graph replay + capture); use `analysis mode default` for training and non-vLLM/SGLang eager inference. Passing all parameters inline avoids interactive prompts, which is useful for batch runs and CI pipelines (see `skills/analysis-orchestrator/evals/eval_scripts/generate_ref.sh` for an example).
+
+The agent can also run from a run YAML instead of prompts; see [Run the agent from a YAML config](../../../docs/how-to/agent.md#run-the-agent-from-a-yaml-config).
 
 ---
 
@@ -151,19 +162,19 @@ The snippets below are illustrative excerpts showing the format of the agent's a
 >
 > **Data:**
 >
-> | Operation | Args | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
-> |-----------|------|-----------|------|-------|------------|------------|-------|
-> | aten::mm | (24576,8192) × (8192,28672) bf16 | 7607.463 | 13.42 | 320 | 5059.76 | 68.74% of 708 TFLOPS | compute-bound |
-> | aten::mm | (24576,8192) × (8192,28672) bf16 | 6636.191 | 11.70 | 320 | 5059.76 | 79.04% of 708 TFLOPS | compute-bound |
-> | aten::mm | (28672,24576) × (24576,8192) bf16 | 6313.337 | 11.13 | 320 | 5059.76 | 82.70% of 708 TFLOPS | compute-bound |
-> | aten::mm | (24576,28672) × (28672,8192) bf16 | 6071.557 | 10.71 | 320 | 5059.76 | 85.99% of 708 TFLOPS | compute-bound |
+> | Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+> |-----------|------|-------------|-------------|-----------|------|-------|------------|------------|-------|
+> | aten::mm | (24576,8192) × (8192,28672) bf16 | ... | ... | 7607.463 | 13.42 | 320 | 5059.76 | 68.74% of 708 TFLOPS | compute-bound |
+> | aten::mm | (24576,8192) × (8192,28672) bf16 | ... | ... | 6636.191 | 11.70 | 320 | 5059.76 | 79.04% of 708 TFLOPS | compute-bound |
+> | aten::mm | (28672,24576) × (24576,8192) bf16 | ... | ... | 6313.337 | 11.13 | 320 | 5059.76 | 82.70% of 708 TFLOPS | compute-bound |
+> | aten::mm | (24576,28672) × (28672,8192) bf16 | ... | ... | 6071.557 | 10.71 | 320 | 5059.76 | 85.99% of 708 TFLOPS | compute-bound |
 >
 > **Reasoning for Slowdown:** Every flagged shape has very high arithmetic intensity (FLOPS/Byte 3510–5863), so each GEMM is correctly compute-bound against the BF16 matrix-FP roofline (708 TFLOPS) rather than HBM-bound. The achieved TFLOPS/s sit between 486.7 and 613.5, which is 68.7%–86.7% of peak — the heaviest shape (`(24576,8192) × (8192,28672)`, 7.6 s of kernel time, count = 320) lands at only 68.7%, and a second 6.6 s instance of the same shape only reaches 79.0%, indicating the same logical GEMM is hitting more than one Tensile kernel and at least one is sub-optimal.
 >
 > **Resolution:** Tile / wave-occupancy tuning targets the specific Tensile kernels selected for these shapes so the same FLOPs are issued under a better-utilized MFMA pipeline, raising achieved TFLOPS/s without changing the algorithm. Narrowing precision (BF16 → FP8/FP4 where the model tolerates it) doubles or quadruples the matrix roofline (708 → 1273 TFLOPS at FP8, higher at FP4), directly lowering the compute floor for these compute-bound shapes. Generate reproducers for the kernel team for the lowest-efficiency shapes (68.7%, 69.7%, 74.0%) so the Tensile selector can be revisited for those tile/M-N-K combinations.
 >
 > **Impact estimate:**
-> <!-- impact-begin kind=detail_estimate low=12.97 high=17.27 -->
+> <!-- impact-begin kind=detail_estimate low=12.97 mid=15.12 high=17.27 -->
 > - Low end impact_score: 12.97
 > - High end impact_score: 17.27
 > <!-- impact-end -->
@@ -171,47 +182,43 @@ The snippets below are illustrative excerpts showing the format of the agent's a
 #### Kernel Fusion Analysis
 
 > <a id="detailed-analysis-fusion-P1"></a>
-> <!-- reasoning-candidate tier=system rank=1 -->
-> #### 🔴 P1: Unfused RMSNorm (4.789 ms, 49 instances)
+> <!-- reasoning-candidate tier=fusion rank=1 -->
+> #### 🔴 P1: Unfused Attention
 >
-> **Identification:** The `Qwen2RMSNorm` module launches 8 distinct GPU kernels per call across 49 trace instances and contains no fused-kernel marker, so every step of the rsqrt/mean/mul normalization is a separate HBM-bound launch (source: `fusion_candidates.json` → `module_name`, `has_fused_kernel`, `kernels[]`).
+> **Identification:** Attention runs as separate bmm, softmax and bmm kernels, so the 5185x5185 score matrix round-trips through HBM between launches (source: `fusion_candidates.json`).
 >
 > **Data:**
 >
-> | Kernel | Type | Duration (us) | Perf model |
-> |--------|------|---------------|------------|
-> | `direct_copy_kernel_cuda` (float) | Elementwise | 22.09 | Yes |
-> | `pow_tensor_scalar_kernel_impl` (float, x²) | Elementwise | 17.92 | Yes |
-> | `reduce_kernel ... MeanOps<float>` | Reduction | 8.02 | Yes |
-> | `CUDAFunctorOnSelf_add` (float, +epsilon) | Elementwise | 1.60 | Yes |
-> | `rsqrt_kernel_cuda` (float) | Elementwise | 1.72 | Yes |
-> | `BinaryFunctor MulFunctor` (float×float) | Elementwise | 18.44 | Yes |
-> | `bfloat16_copy_kernel_cuda` | Elementwise | 14.91 | Yes |
-> | `BinaryFunctor MulFunctor` (bf16×bf16) | Elementwise | 13.03 | Yes |
+> | Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+> |---|---|---|---|---|---|---|---|---|---|
+> | aten::bmm | (16,5185,64) bf16<br>(16,64,5185) bf16 | ... | ... | 40.460 | 4.45 | 120 | 62.46 | 49.39% of 5.3 TB/s | memory-bound |
+> | aten::_softmax | (16,5185,5185) bf16 | ... | ... | 153.698 | 16.92 | 120 | — | — | — |
+> | aten::bmm | (16,5185,5185) bf16<br>(16,5185,64) bf16 | ... | ... | 55.056 | 6.06 | 120 | 62.46 | 36.51% of 5.3 TB/s | memory-bound |
+> | aten::bmm | (12,5,64) bf16<br>(12,64,5) bf16 | ... | ... | 0.356 | 0.04 | 60 | 2.41 | 0.05% of 5.3 TB/s | memory-bound |
+> | aten::_softmax | (12,5,5) bf16 | ... | ... | 0.295 | 0.03 | 60 | — | — | — |
+> | aten::bmm | (12,5,5) bf16<br>(12,5,64) bf16 | ... | ... | 0.385 | 0.04 | 60 | 2.41 | 0.05% of 5.3 TB/s | memory-bound |
+>
+> **Resolution:** Call a vendor library's fused attention if one exists; otherwise write a fused kernel.
 >
 > **Impact estimate:**
->
-> <!-- impact-begin kind=detail_estimate low=10.04 high=13.39 -->
-> - Low end impact_score: 10.04
-> - High end impact_score: 13.39
+> <!-- impact-begin kind=detail_estimate low=11.5 mid=13.5 high=15.5 -->
+> - Low end impact_score: 11.50
+> - High end impact_score: 15.50
 > <!-- impact-end -->
-> - Coverage: 8 of 8 kernels modelled
-> - Fusion pattern: memory-bound, memory_bound
-> - Confidence: High — module name and kernel composition both match the canonical RMSNorm decomposition.
 
 
 ### Programmatic Interface
 
 Every report embeds HTML comment markers that a downstream system can leverage without parsing prose:
 
-- `<!-- impact-begin kind=p_item category=<cat> low=<x> mid=<y> high=<z> -->` … `<!-- impact-end -->` wraps every P-item's Impact line. `mid` is the canonical `impact_score`. `<cat>` is the analyzer category (`gemm`, `sdpa_fwd`, `elementwise`, `norm_fwd`, etc.).
+- `<!-- impact-begin kind=p_item category=<cat> low=<x> mid=<y> high=<z> -->` … `<!-- impact-end -->` wraps every P-item's Impact line. `mid` is the canonical `impact_score`. `<cat>` is the analyzer category (`gemm`, `sdpa_fwd`, `elementwise`, `norm_fwd`, etc.). On multi-trace runs the marker also carries `phase=<name>`.
 - `<!-- impact-begin kind=top_ops -->` … `<!-- impact-end -->` wraps the Top Operations table at the start of the Compute Kernel Optimizations section.
 - Per-P-item anchors `#detailed-analysis-compute-pN`, `#detailed-analysis-fusion-PN`, and `#detailed-analysis-system-pN` link each summary card to its detailed reasoning section.
 
 ### Potential Consumption Loop
 
 1. Run the orchestrator on a baseline trace (see [Quick Start](#quick-start---how-to-use)).
-2. Study `analysis.md`, focusing on the `## Detailed Analysis` section. Within each tier subsection (`### Compute Kernel Insights`, `### Kernel Fusion Insights`, `### System-Level Insights`), follow the per-P-item anchors (`detailed-analysis-compute-pN`, `detailed-analysis-fusion-PN`, `detailed-analysis-system-pN`) and extract each P-item's Identification, Data, Reasoning, Resolution, and `impact-begin kind=detail_estimate` low/high bounds. The detailed cards carry the evidence and guidance an optimization agent needs to act on.
+2. Study `analysis.md`, focusing on the `## Detailed Analysis` section. Within each tier subsection (`### Compute Kernel Insights`, `### Kernel Fusion Insights`, `### System-Level Insights`), follow the per-P-item anchors (`detailed-analysis-compute-pN`, `detailed-analysis-fusion-PN`, `detailed-analysis-system-pN`) and extract each P-item's Identification, Data, Reasoning, Resolution, and `impact-begin kind=detail_estimate` low/mid/high bounds. The detailed cards carry the evidence and guidance an optimization agent needs to act on.
 3. Use the prioritization (P-item ordering, `impact_score`) to drive your model optimization workflow.
 
 ---
@@ -222,37 +229,38 @@ Every report embeds HTML comment markers that a downstream system can leverage w
 
 The analysis is split into three independent tiers that can be composed separately:
 
-- **System-Level Optimizations** (Step 6): Issues that affect the GPU pipeline as a whole -- idle time, memcpy overhead, NCCL blocking, compute/comm overlap. These are not about individual kernel efficiency.
-- **Kernel Fusion Opportunities** (Steps 4b + 6, Experimental): Identifies multi-kernel modules that could be fused and estimates savings.
-- **Compute Kernel Optimizations** (Step 7): Per-category kernel analysis (GEMM, SDPA, elementwise, etc.) focused on individual operation efficiency.
+- **System-Level Optimizations** (Step 7): Issues that affect the GPU pipeline as a whole -- idle time, memcpy overhead, NCCL blocking, compute/comm overlap. These are not about individual kernel efficiency.
+- **Kernel Fusion Opportunities** (Steps 3-6 + 7, Experimental): Identifies multi-kernel modules that could be fused and estimates savings.
+- **Compute Kernel Optimizations** (Step 8): Per-category kernel analysis (GEMM, SDPA, elementwise, etc.) focused on individual operation efficiency.
 
 Each tier writes to a separate findings directory and produces an independently composable report section.
 
 ```mermaid
 flowchart TD
-    Prep["Steps 0-5: Trace Processing, TraceLens Pre-Processing, Additional Pre-Computation"]
-    Prep --> Step6["Step 6: System-Level Analysis"]
-    Prep --> Step7["Step 7: Compute Kernel Analysis"]
+    Prep["Steps 0-6: Trace Processing, TraceLens Pre-Processing, Additional Pre-Computation"]
+    Prep --> Step7["Step 7: System-Level Analysis"]
+    Prep --> Step8["Step 8: Compute Kernel Analysis"]
 
-    Step6 --> CpuIdle["cpu-idle-analyzer"]
-    Step6 --> MultiKernel["multi-kernel-analyzer"]
-    Step6 --> KernelFusion["kernel-fusion-analyzer"]
+    Step7 --> CpuIdle["cpu-idle-analyzer"]
+    Step7 --> MultiKernel["multi-kernel-analyzer"]
+    Step7 --> KernelFusion["kernel-fusion-analyzer"]
     CpuIdle --> SysFindings["system_findings/"]
     MultiKernel --> SysFindings
     KernelFusion --> SysFindings
 
-    Step7 --> Gemm["gemm-analyzer"]
-    Step7 --> Sdpa["sdpa-analyzer"]
-    Step7 --> Others["other analyzers..."]
+    Step8 --> Gemm["gemm-analyzer"]
+    Step8 --> Sdpa["sdpa-analyzer"]
+    Step8 --> Others["other analyzers..."]
     Gemm --> CatFindings["category_findings/"]
     Sdpa --> CatFindings
     Others --> CatFindings
 
-    SysFindings --> Agg["Step 7.5: Aggregate"]
+    SysFindings --> Agg["Step 8.5: Aggregate"]
     CatFindings --> Agg
-    Agg --> Step8["Step 8: Validate"]
-    Step8 --> Step9["Step 9: Report Prep + Model ID"]
-    Step9 --> Step10["Step 10: Final Report"]
+    Agg --> Step9["Step 9: Validate"]
+    Step9 --> Step10["Step 10: Report Prep + Model ID"]
+    Step10 --> Step11["Step 11: Render PNG"]
+    Step11 --> Step12["Step 12: Final Report"]
 ```
 
 ### Orchestrator
@@ -263,20 +271,22 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 ### Workflow Steps
 
 ```
-0.   Query User Inputs (Comparison scope, Trace path(s), Platform(s), Analysis Mode, Environment Setup)
-1.   Generate Performance Report (branches on analysis mode and comparison scope)
-2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json + kernel_fusion_metrics.json
-6.   System-Level Analysis (CPU/Idle + Multi-Kernel + Kernel Fusion, PARALLEL) → system_findings/
-7.   Compute Kernel Subagents (PARALLEL) → category_findings/
-7.5. Aggregate per-category Compute Kernel findings → priority_data.json (globally ranked)
-8.   Validate Subagent Outputs (time sanity, efficiency anomalies, coverage)
-9.   Prepare Report Data + Model Identification (subagent) → metadata/model_info.json
-10.  Generate Final Report (analysis.md): compose System-Level + Kernel Fusion + Compute Kernel sections
+0.   Query User Inputs (interactive answers or a run YAML, Environment Setup) → cache/run_config.yaml
+1.   Generate Performance Report (one wrapper call on cache/run_config.yaml; semantic pre-processing first)
+2.   Trace-Quality Gate (deterministic fallback branch for graph-under-recorded traces)
+3-6. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json + kernel_fusion_metrics.json
+7.   System-Level Analysis (CPU/Idle + Multi-Kernel + Kernel Fusion, PARALLEL) → system_findings/
+8.   Compute Kernel Subagents (PARALLEL) → category_findings/
+8.5. Aggregate per-category Compute Kernel findings → priority_data.json (globally ranked)
+9.   Validate Subagent Outputs (time sanity, efficiency anomalies, coverage)
+10.  Prepare Report Data + Model Identification (subagent) → metadata/model_info.json
+11.  Render performance PNG if agent_extension.py is absent
+12.  Generate Final Report (analysis.md): compose System-Level + Kernel Fusion + Compute Kernel sections
 ```
 
 ### Sub-Agents
 
-**System-Level (Step 6):**
+**System-Level (Step 7):**
 
 | Agent | Purpose |
 |-------|---------|
@@ -284,7 +294,7 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 | `multi-kernel-analyzer` | Analyzes memcpy D2H/H2D patterns, NCCL blocking, compute/comm overlap |
 | `kernel-fusion-analyzer` | Identifies multi-kernel fusion opportunities and estimates savings via roofline model |
 
-**Compute Kernel (Step 7):**
+**Compute Kernel (Step 8):**
 
 | Agent | Purpose |
 |-------|---------|
@@ -304,7 +314,7 @@ The orchestrator and all 13 sub-agents run on a capable frontier reasoning model
 
 ### Supported Analysis Modes
 
-The orchestrator supports two analysis modes, selected during Step 0:
+The orchestrator supports two analysis modes, selected during Step 0. Step 1 runs these scripts through `TraceLens_generate_perf_report_from_config`:
 
 | Mode | Script | Use Case |
 |------|--------|----------|
@@ -338,6 +348,8 @@ analysis_output/
 ├── analysis.md                     # Stakeholder report (only user-facing output)
 ├── perf_report.xlsx                # Excel export of TraceLens perf report (Internal)
 ├── perf_report_csvs/               # CSV exports: gpu_timeline, ops_summary, ... (Internal)
+├── run_config.resolved.yaml        # Run config with every report option spelled out (Internal)
+├── cache/                          # cmd_prefix.txt + run_config.yaml, the completed run config (Internal)
 ├── category_data/                  # Per-category CSVs, metrics JSONs, tree data, fusion inputs (Internal)
 │   ├── category_manifest.json          # Category metadata, GPU utilization, tier info
 │   ├── multi_kernel_data.json          # Pre-computed memcpy/comm./overlap data
@@ -366,6 +378,8 @@ analysis_output/
 ├── perf_report_trace1_csvs/        # Trace 1 CSV exports: gpu_timeline, ops_summary, ... (Internal)
 ├── perf_report_trace2.xlsx         # Excel export of TraceLens perf report for trace 2 (Internal)
 ├── perf_report_trace2_csvs/        # Trace 2 CSV exports: gpu_timeline, ops_summary, ... (Internal)
+├── run_config.resolved.yaml        # Run config with every report option spelled out (Internal)
+├── cache/                          # cmd_prefix.txt + run_config.yaml, the completed run config (Internal)
 ├── category_data/                  # Per-category CSVs, metrics JSONs, tree data, fusion inputs (Internal)
 │   ├── category_manifest.json          # Category metadata, GPU utilization, tier info
 │   ├── multi_kernel_data.json          # Pre-computed memcpy/comm./overlap data
