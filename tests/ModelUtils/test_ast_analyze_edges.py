@@ -1817,6 +1817,177 @@ def test_resolve_host_scalars_guards_a_local_reassigned_from_itself():
     assert ast.unparse(resolved) == "x + 1"
 
 
+def test_self_call_argument_rebind_covers_positional_and_keyword_shapes():
+    """Only a bare name rebinds a callee parameter onto the caller's own
+    tensor; a constant carries no rename and is skipped; anything else
+    (a starred arg, a computed expression, too many positional args) makes
+    the call opaque to this rebind. A bare ``**kwargs`` forward is harmless
+    (no rename it could offer) but a computed keyword dict is not."""
+    from TraceLens.ModelUtils.ast_analyze import _self_call_argument_rebind
+
+    callee = ast.parse("def method(self, x, y, z=None): pass").body[0]
+
+    def rebind(expr: str):
+        return _self_call_argument_rebind(ast.parse(expr).body[0].value, callee)
+
+    assert rebind("self.method(a, 5)") == {"x": "a"}
+    assert rebind("self.method(a, b, c, d)") is None
+    assert rebind("self.method(*args)") is None
+    assert rebind("self.method(**extra_kwargs)") == {}
+    assert rebind("self.method(**{'a': 1})") is None
+    assert rebind("self.method(z=w)") == {"z": "w"}
+    assert rebind("self.method(z=5)") == {}
+    assert rebind("self.method(z=w + 1)") is None
+
+
+def test_fold_host_int_covers_every_arithmetic_op_and_a_zero_divisor():
+    """``q_size = self.num_idx_heads * self.idx_head_dim`` folds through
+    ``+ - * // %`` over already-folded host-scalar locals; true division is
+    outside the set this gives a constant width for (``/`` always returns a
+    float, never the integer bound a slice needs) and a zero divisor is
+    caught rather than raising."""
+    from TraceLens.ModelUtils.ast_analyze import _ForwardOperationExtractor
+
+    extractor = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    extractor.host_scalar_values = {"a": 6, "b": 4}
+
+    def fold(expr: str) -> int | None:
+        return extractor._fold_host_int(ast.parse(expr, mode="eval").body)
+
+    assert fold("a + b") == 10
+    assert fold("a - b") == 2
+    assert fold("a * b") == 24
+    assert fold("a // b") == 1
+    assert fold("a % b") == 2
+    assert fold("a // 0") is None
+    assert fold("a % 0") is None
+    assert fold("a / b") is None
+
+
+def test_apply_branch_alternatives_expands_both_the_operation_and_the_step():
+    """After an if/else merge only the survivor's producer (``norm_a``) lives
+    in ``var_producer``; a consumer that read the merged variable must be
+    expanded to depend on the recorded alternative (``norm_b``) too, so the
+    branch the model did not take on THIS call still stays live rather than
+    orphaned into a dead end. Both an operation's predecessors and a step's
+    own recorded predecessors are expanded alike. With no recorded
+    alternatives at all, this is a pure no-op."""
+    from TraceLens.ModelUtils.ast_analyze import (
+        ForwardOperation,
+        _ForwardOperationExtractor,
+    )
+
+    extractor = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    extractor.branch_alternatives = {"norm_a": {"norm_b"}}
+    extractor.operations = [
+        ForwardOperation("consumer", "Add", "", predecessors=("norm_a",))
+    ]
+    extractor.step_predecessors = {"head": ("norm_a",)}
+
+    extractor._apply_branch_alternatives()
+
+    assert extractor.operations[0].predecessors == ("norm_a", "norm_b")
+    assert extractor.step_predecessors["head"] == ("norm_a", "norm_b")
+
+    untouched = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    untouched.operations = [
+        ForwardOperation("consumer", "Add", "", predecessors=("norm_a",))
+    ]
+    untouched._apply_branch_alternatives()
+    assert untouched.operations[0].predecessors == ("norm_a",)
+
+
+def test_reconstruct_attention_step_recovers_qkv_from_the_dispatch_call():
+    """A dispatched attention call (``attention_interface(self, q, k, v,
+    attention_mask)``) that a branch or comprehension hid from the regular
+    walk still leaves each operand's producer resolvable in ``var_producer``;
+    recovered here, named after the argument so the kernel ports read
+    ``q``/``k``/``v`` rather than nothing. Already-populated predecessors, a
+    body with no dispatch call, and operands with no resolvable producer are
+    all left alone."""
+    from TraceLens.ModelUtils.ast_analyze import (
+        SYNTHETIC_ATTENTION,
+        _ForwardOperationExtractor,
+    )
+
+    body = ast.parse(
+        "attn_output, attn_weights = attention_interface(self, q, k, v, attention_mask)"
+    ).body
+
+    extractor = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    extractor.var_producer = {"q": "q_proj", "k": "k_proj", "v": "v_proj"}
+    extractor.step_predecessors = {}
+    extractor.step_predecessor_args = {}
+    extractor._reconstruct_attention_step(body)
+    assert extractor.step_predecessors[SYNTHETIC_ATTENTION] == (
+        "q_proj",
+        "k_proj",
+        "v_proj",
+    )
+    assert extractor.step_predecessor_args[SYNTHETIC_ATTENTION] == {
+        "q": "q_proj",
+        "k": "k_proj",
+        "v": "v_proj",
+    }
+
+    already_wired = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    already_wired.step_predecessors = {SYNTHETIC_ATTENTION: ("existing",)}
+    already_wired._reconstruct_attention_step(body)
+    assert already_wired.step_predecessors[SYNTHETIC_ATTENTION] == ("existing",)
+
+    no_call = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    no_call.step_predecessors = {}
+    no_call._reconstruct_attention_step(ast.parse("x = y + 1").body)
+    assert SYNTHETIC_ATTENTION not in no_call.step_predecessors
+
+    unresolvable = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    unresolvable.var_producer = {}
+    unresolvable.step_predecessors = {}
+    unresolvable._reconstruct_attention_step(body)
+    assert SYNTHETIC_ATTENTION not in unresolvable.step_predecessors
+
+
+def test_drop_phantom_attention_steps_removes_the_empty_kernel_and_its_readers():
+    """A ``@attention`` step hoisted up from a submodule's own forward (``for
+    blk in self.blocks: blk(...)``) carries no predecessors at this scope --
+    never a genuine call -- and would otherwise form a cycle once the exporter
+    mirrors it into the real nested diagram. It, its step-predecessor-args
+    entry, and its own operation are dropped outright; any OTHER step or
+    operation that named it as a predecessor has that reference stripped
+    rather than being dropped itself. A step with real predecessors is
+    untouched."""
+    from TraceLens.ModelUtils.ast_analyze import (
+        SYNTHETIC_ATTENTION,
+        ForwardOperation,
+        _ForwardOperationExtractor,
+    )
+
+    extractor = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    extractor.step_predecessors = {
+        SYNTHETIC_ATTENTION: (),
+        "head": (SYNTHETIC_ATTENTION,),
+    }
+    extractor.step_predecessor_args = {SYNTHETIC_ATTENTION: {"q": "q_proj"}}
+    extractor.operations = [
+        ForwardOperation(SYNTHETIC_ATTENTION, "AttentionOp", "", predecessors=()),
+        ForwardOperation("head", "Linear", "", predecessors=(SYNTHETIC_ATTENTION,)),
+    ]
+
+    extractor._drop_phantom_attention_steps()
+
+    assert SYNTHETIC_ATTENTION not in extractor.step_predecessors
+    assert extractor.step_predecessors["head"] == ()
+    assert SYNTHETIC_ATTENTION not in extractor.step_predecessor_args
+    assert [op.attr_name for op in extractor.operations] == ["head"]
+    assert extractor.operations[0].predecessors == ()
+
+    real_attention = _ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    real_attention.step_predecessors = {SYNTHETIC_ATTENTION: ("q_proj",)}
+    real_attention.operations = []
+    real_attention._drop_phantom_attention_steps()
+    assert real_attention.step_predecessors[SYNTHETIC_ATTENTION] == ("q_proj",)
+
+
 def test_sibling_method_delegation_rejects_submodule_and_free_calls():
     from TraceLens.ModelUtils.ast_analyze import (
         _forward_delegates_only_to_sibling_methods,

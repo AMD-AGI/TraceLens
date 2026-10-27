@@ -129,6 +129,27 @@ class TestEachChoicePicksExactlyOneArm:
         extractor = _extractor(RuntimeRegime(phase=phase), func)
         assert extractor._regime_outcome(_test_of(func, 2)) is taken
 
+    @pytest.mark.parametrize(
+        "comparison, decode, taken",
+        [
+            ("seq_len != 1", True, False),
+            ("seq_len != 1", False, True),
+            ("seq_len > 1", True, False),
+            ("seq_len > 1", False, True),
+        ],
+    )
+    def test_the_phase_decides_a_single_token_through_not_equal_and_greater_than(
+        self, comparison, decode, taken
+    ) -> None:
+        # `== 1` is the common spelling, but a model that instead asks
+        # `!= 1`/`> 1` ("more than one token, so NOT decoding") is read the
+        # same way -- just with the answer flipped.
+        func = _func(FORWARD.replace("seq_len == 1", comparison))
+        extractor = _extractor(
+            RuntimeRegime(phase="decode" if decode else "prefill"), func
+        )
+        assert extractor._regime_outcome(_test_of(func, 2)) is taken
+
     @pytest.mark.parametrize("cache, absent", [("cold", True), ("warm", False)])
     def test_the_cache_decides_what_is_stored(self, cache, absent) -> None:
         func = _func()
