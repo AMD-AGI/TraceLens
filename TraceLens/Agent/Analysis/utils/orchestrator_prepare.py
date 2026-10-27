@@ -18,7 +18,10 @@ import traceback
 
 import pandas as pd
 
-from TraceLens.Agent.Analysis.category_analyses.analysis_utils import load_perf_rows
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    PEAK_MEM_BW_KEY,
+    load_perf_rows,
+)
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms, load_arch
 from TraceLens.Agent.Analysis.utils.classify_kernels import TAXONOMY
 from TraceLens.Agent.Analysis.utils.kernel_fusion import (
@@ -150,6 +153,21 @@ def _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline: pd.DataFrame) ->
     }
 
 
+def perf_report_metadata(csv_dir: str, platform: str) -> dict:
+    """Peaks of ``platform`` plus the GPU utilization of the perf report in ``csv_dir``.
+
+    The metadata ``build_operation_metrics`` reads, shared by the agent route's
+    per-category metadata and any caller analyzing a perf report directly.
+    """
+    arch = load_arch(platform)
+    gpu_timeline = pd.read_csv(os.path.join(csv_dir, "gpu_timeline.csv"))
+    return {
+        PEAK_MEM_BW_KEY: arch["mem_bw_gbps"] / 1000,
+        "max_achievable_tflops": arch["max_achievable_tflops"],
+        "gpu_utilization": _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Prepare category data for TraceLens analysis"
@@ -261,10 +279,8 @@ def main():
     # ============================================================================
     print("\n[STEP 3] Assessing GPU Utilization...")
 
-    gpu_timeline = pd.read_csv(os.path.join(trace1_csv_dir, "gpu_timeline.csv"))
-    gpu_utilization_metrics = _gpu_utilization_metrics_from_gpu_timeline_df(
-        gpu_timeline
-    )
+    trace1_metadata = perf_report_metadata(trace1_csv_dir, platform)
+    gpu_utilization_metrics = trace1_metadata["gpu_utilization"]
     if plans is not None:
         job_utilization = {
             plan.name: _gpu_utilization_metrics_from_gpu_timeline_df(
@@ -679,8 +695,8 @@ def main():
         # Create metadata JSON
         metadata = {
             "platform": platform,
-            "peak_mem_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
-            "max_achievable_tflops": platform_specs["max_achievable_tflops"],
+            PEAK_MEM_BW_KEY: trace1_metadata[PEAK_MEM_BW_KEY],
+            "max_achievable_tflops": trace1_metadata["max_achievable_tflops"],
             "memory_gb": platform_specs.get("memory_gb"),
             "trace_path": trace_path,
             "output_dir": output_dir,
@@ -715,8 +731,8 @@ def main():
 
     cpu_idle_metadata = {
         "platform": platform,
-        "peak_mem_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
-        "max_achievable_tflops": platform_specs["max_achievable_tflops"],
+        PEAK_MEM_BW_KEY: trace1_metadata[PEAK_MEM_BW_KEY],
+        "max_achievable_tflops": trace1_metadata["max_achievable_tflops"],
         "memory_gb": platform_specs.get("memory_gb"),
         "trace_path": trace_path,
         "output_dir": output_dir,

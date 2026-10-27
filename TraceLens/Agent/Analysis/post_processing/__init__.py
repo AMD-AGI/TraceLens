@@ -8,10 +8,12 @@
 
 Sits after ``analysis.md`` generation and renders the structured, typed JSON
 artifact downstream consumers read instead of scraping markdown. Re-exports the
-public surface: the renderer and the ``analysis.json`` TypedDicts.
+public surface: the renderer, ``compute_tasks`` and the ``analysis.json`` TypedDicts.
 """
 
 from TraceLens.Agent.Analysis.post_processing.analysis_json import (
+    TASK_SOURCE_COLUMNS,
+    compute_tasks,
     render_analysis_json,
 )
 from TraceLens.Agent.Analysis.post_processing.candidate_schema import (
@@ -28,6 +30,8 @@ from TraceLens.Agent.Analysis.post_processing.candidate_schema import (
 )
 
 __all__ = [
+    "TASK_SOURCE_COLUMNS",
+    "compute_tasks",
     "render_analysis_json",
     "AnalysisReport",
     "Appendix",
