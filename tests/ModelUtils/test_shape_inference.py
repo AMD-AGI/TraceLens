@@ -828,6 +828,29 @@ def test_flatten_collapses_explicit_span_symbolic():
     assert result.shape == ("B", "S*4", 8)
 
 
+def test_rearrange_applies_the_einops_pattern_to_the_source_shape():
+    """``rearrange(x, "b s (h d) -> b h s d", d=64)`` states exactly what each
+    axis becomes; this must be applied directly rather than passed through,
+    including resolving the grouped axis's sibling size (``h``) from the
+    source shape's leftover extent."""
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 256), dtype="float16")
+    node = _node(
+        "Rearrange",
+        details=["pattern: b s (h d) -> b h s d", "axis d: 64"],
+    )
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", 4, "S", 64)
+
+
+def test_rearrange_passes_through_on_an_unsupported_pattern():
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 256), dtype="float16")
+    node = _node("Rearrange", details=["pattern: not an einops pattern"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == inp.shape
+
+
 def test_matmul_shape_inference():
     inf = _make_inferencer()
     a = TensorSpec(shape=("B", "S", 4096), dtype="float16")
@@ -897,6 +920,190 @@ def test_parse_module_ctor_parses_conv_channels():
     assert isinstance(spec, ModuleConvSpec)
     assert spec.in_channels == 64
     assert spec.out_channels == 128
+
+
+def test_qkv_parallel_linear_defaults_v_head_size_when_override_is_unresolvable():
+    """An override expression the AST walk cannot evaluate (a runtime flag the
+    caller computed, not a config value) must not abandon the whole spec --
+    MiniMax's sparse index projection sizes ``v_head_size`` off a per-layer
+    frequency list via ``0 if self.disable_index_value else self.idx_head_dim``,
+    which this module cannot resolve."""
+    import ast as _ast
+
+    from TraceLens.ModelUtils.shape_inference import (
+        ModuleLinearSpec,
+        _parse_module_ctor,
+    )
+
+    call = (
+        _ast.parse(
+            "QKVParallelLinear(hidden_size, 128, 4, total_num_kv_heads=1, "
+            "v_head_size=(0 if self.disable_index_value else self.idx_head_dim))"
+        )
+        .body[0]
+        .value
+    )
+    ctx = ShapeContext.from_spec(
+        ArchitectureSpec(name="T", model_type="t", raw_config={})
+    )
+    spec = _parse_module_ctor(
+        call, config={}, local_vars={"hidden_size": 6144}, context=ctx
+    )
+    assert isinstance(spec, ModuleLinearSpec)
+    assert spec.in_features == 6144
+    # v_head_size falls back to head_size (128), matching the keyword's own
+    # documented default rather than reporting no spec at all.
+    assert spec.out_features == 128 * 4 + 1 * 128 + 1 * 128
+
+
+def test_qkv_parallel_linear_still_uses_a_resolvable_v_head_size_override():
+    import ast as _ast
+
+    from TraceLens.ModelUtils.shape_inference import (
+        ModuleLinearSpec,
+        _parse_module_ctor,
+    )
+
+    call = (
+        _ast.parse(
+            "QKVParallelLinear(hidden_size, 128, 4, total_num_kv_heads=1, v_head_size=0)"
+        )
+        .body[0]
+        .value
+    )
+    ctx = ShapeContext.from_spec(
+        ArchitectureSpec(name="T", model_type="t", raw_config={})
+    )
+    spec = _parse_module_ctor(
+        call, config={}, local_vars={"hidden_size": 6144}, context=ctx
+    )
+    assert isinstance(spec, ModuleLinearSpec)
+    assert spec.out_features == 128 * 4 + 1 * 128 + 1 * 0
+
+
+def test_qkv_parallel_linear_is_unresolved_when_a_required_arg_cannot_be_resolved():
+    """``in_features`` itself is unresolvable (not a literal, config read, or
+    bound local): there is no honest width to report, unlike the
+    ``v_head_size`` override above which has a documented default to fall
+    back on."""
+    import ast as _ast
+
+    from TraceLens.ModelUtils.shape_inference import _parse_module_ctor
+
+    call = (
+        _ast.parse("QKVParallelLinear(unknown_hidden, 128, 4, total_num_kv_heads=1)")
+        .body[0]
+        .value
+    )
+    ctx = ShapeContext.from_spec(
+        ArchitectureSpec(name="T", model_type="t", raw_config={})
+    )
+    assert _parse_module_ctor(call, config={}, local_vars={}, context=ctx) is None
+
+
+def test_resolve_dim_expr_distributed_degree_and_min_max():
+    """``_resolve_dim_expr`` shares the distributed-degree convention
+    (``_distributed_degree_dim``) and the ``min``/``max``-capped-degree idiom
+    with ``ast_analyze.py``'s ``_config_value`` -- duplicated because this
+    resolver returns a plain ``int`` rather than ``Any``, but the same
+    recognized names and the same answers."""
+    import ast
+
+    from TraceLens.ModelUtils.shape_inference import _resolve_dim_expr
+
+    ctx = ShapeContext.from_spec(
+        ArchitectureSpec(name="T", model_type="t", raw_config={})
+    )
+    config = {"heads": 4}
+
+    def _expr(src: str) -> ast.AST:
+        return ast.parse(src, mode="eval").body
+
+    # SGLang's group-object style.
+    assert (
+        _resolve_dim_expr(
+            _expr("get_parallel().attn_tp_size"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        == 1
+    )
+    assert (
+        _resolve_dim_expr(
+            _expr("get_parallel().attn_tp_rank"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        == 0
+    )
+    assert (
+        _resolve_dim_expr(
+            _expr("get_parallel().pp_group"), config=config, local_vars={}, context=ctx
+        )
+        is None
+    )
+
+    # vLLM's standalone-function style.
+    assert (
+        _resolve_dim_expr(
+            _expr("get_tensor_model_parallel_world_size()"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        == 1
+    )
+    assert (
+        _resolve_dim_expr(
+            _expr("get_tensor_model_parallel_rank()"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        == 0
+    )
+
+    # Capping a resolved degree against another resolvable int.
+    assert (
+        _resolve_dim_expr(
+            _expr("min(get_tensor_model_parallel_world_size(), config.heads)"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        == 1
+    )
+    assert (
+        _resolve_dim_expr(
+            _expr("max(get_tensor_model_parallel_world_size(), config.heads)"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        == 4
+    )
+    # A keyword argument disqualifies the fold.
+    assert (
+        _resolve_dim_expr(
+            _expr("min(config.heads, key=abs)"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        is None
+    )
+    # An unresolvable operand leaves the whole call unresolved.
+    assert (
+        _resolve_dim_expr(
+            _expr("min(config.heads, config.missing)"),
+            config=config,
+            local_vars={},
+            context=ctx,
+        )
+        is None
+    )
 
 
 def test_conv_shape_inference_replaces_matched_channel_axis():
@@ -1130,3 +1337,386 @@ def test_add_leaves_an_unambiguous_shape_alone():
         1,
         1,
     )
+
+
+_PACKED_QKV_SOURCE = """
+import torch
+import torch.nn as nn
+
+
+class Attn(nn.Module):
+    def forward(self, q, k, v):
+        return q
+
+
+class Model(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.q_proj = nn.Linear(config.hidden_size, 4096)
+        self.k_proj = nn.Linear(config.hidden_size, 2048)
+        self.v_proj = nn.Linear(config.hidden_size, 1024)
+        self.attn = Attn()
+
+    def forward(self, hidden_states):
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
+        packed = (q, k, v)
+        return self.attn(*packed)
+"""
+
+
+def _packed_qkv_graph():
+    config = {"hidden_size": 4096}
+    analysis = analyze_source(_PACKED_QKV_SOURCE, config=config)
+    basic = BasicOpFilter.for_detailed()
+    block = build_block_node(
+        attr_name="model",
+        class_name="Model",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    spec = ArchitectureSpec(
+        name="test",
+        model_type="test",
+        hidden_size=4096,
+        raw_config=config,
+        class_registry=analysis.class_registry,
+        basic_ops=basic,
+        export_block_trees=[("Model", block)],
+    )
+    graph = build_model_graph(block, title="Model", basic_ops=basic)
+    inferencer = ShapeInferencer(spec)
+    inferencer._caller_entry_spec = TensorSpec(
+        ("B", "S", 4096), inferencer.context.dtype
+    )
+    specs = inferencer.infer_model_graph(graph, root=block)
+    return graph, specs
+
+
+def test_pack_publishes_each_ports_own_producer_shape_not_one_shared_shape():
+    """A ``Pack`` of ``q``/``k``/``v`` from differently-sized projections has
+    no single whole shape to slice -- each port must report the shape of the
+    specific producer wired to it, or ``k``/``v`` would both read back as
+    ``q``'s 4096-wide projection."""
+    from TraceLens.ModelUtils.shape_inference import PORT_SPEC_SEP
+
+    graph, specs = _packed_qkv_graph()
+    pack_node = next(node for node in graph.nodes if node.label == "Pack")
+    assert specs.get(pack_node.id) is None, "a Pack has no single whole value"
+    ported = [specs[f"{pack_node.id}{PORT_SPEC_SEP}{i}"].shape for i in range(3)]
+    assert ported == [
+        ("B", "S", 4096),
+        ("B", "S", 2048),
+        ("B", "S", 1024),
+    ]
+
+
+_MUTUALLY_EXCLUSIVE_PACKED_QKV_SOURCE = """
+import torch
+import torch.nn as nn
+
+
+class Attn(nn.Module):
+    def forward(self, q, k, v):
+        return q
+
+
+class Model(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.q_proj = nn.Linear(config.hidden_size, 4096)
+        self.k_proj = nn.Linear(config.hidden_size, 2048)
+        self.v_proj = nn.Linear(config.hidden_size, 1024)
+        self.q_proj2 = nn.Linear(config.hidden_size, 4096)
+        self.k_proj2 = nn.Linear(config.hidden_size, 2048)
+        self.v_proj2 = nn.Linear(config.hidden_size, 1024)
+        self.attn = Attn()
+
+    def forward(self, hidden_states, use_alt=None):
+        if use_alt:
+            packed = (
+                self.q_proj2(hidden_states),
+                self.k_proj2(hidden_states),
+                self.v_proj2(hidden_states),
+            )
+        else:
+            packed = (
+                self.q_proj(hidden_states),
+                self.k_proj(hidden_states),
+                self.v_proj(hidden_states),
+            )
+        return self.attn(*packed)
+"""
+
+
+def test_merge_of_two_packs_takes_each_ports_shape_from_the_first_arm_that_answers():
+    """Both branches of the ``if`` build their own ``q``/``k``/``v`` bundle, so
+    the ``Merge`` that combines them has two Pack predecessors, not one
+    producer to slice. Ordinal K's shape comes from whichever arm's own port K
+    resolved first -- the same rule the Merge's whole-value case already uses."""
+    from TraceLens.ModelUtils.shape_inference import PORT_SPEC_SEP
+
+    config = {"hidden_size": 4096}
+    analysis = analyze_source(_MUTUALLY_EXCLUSIVE_PACKED_QKV_SOURCE, config=config)
+    basic = BasicOpFilter.for_detailed()
+    block = build_block_node(
+        attr_name="model",
+        class_name="Model",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    spec = ArchitectureSpec(
+        name="test",
+        model_type="test",
+        hidden_size=4096,
+        raw_config=config,
+        class_registry=analysis.class_registry,
+        basic_ops=basic,
+        export_block_trees=[("Model", block)],
+    )
+    graph = build_model_graph(block, title="Model", basic_ops=basic)
+    inferencer = ShapeInferencer(spec)
+    inferencer._caller_entry_spec = TensorSpec(
+        ("B", "S", 4096), inferencer.context.dtype
+    )
+    specs = inferencer.infer_model_graph(graph, root=block)
+
+    merge_node = next(
+        node for node in graph.nodes if node.metadata.get("class_name") == "Merge"
+    )
+    ported = [specs[f"{merge_node.id}{PORT_SPEC_SEP}{i}"].shape for i in range(3)]
+    assert ported == [
+        ("B", "S", 4096),
+        ("B", "S", 2048),
+        ("B", "S", 1024),
+    ]
+
+
+def test_publish_output_port_specs_without_a_graph_is_a_no_op_for_pack_and_merge():
+    """``graph`` is optional on this method's signature; a caller that has no
+    graph handy (or a Pack/Merge wired to nothing yet) must not crash, and
+    must leave the port specs unpublished rather than guess."""
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+
+    inf = _make_inferencer()
+    pack_node = ModelGraphNode(
+        id="pack1",
+        kind=NodeKind.LEAF,
+        label="Pack",
+        operation=OperationKind.TORCH_FUNCTIONAL,
+        metadata={"output_names": ["q", "k", "v"]},
+    )
+    merge_node = ModelGraphNode(
+        id="merge1",
+        kind=NodeKind.LEAF,
+        label="Merge",
+        operation=OperationKind.TORCH_FUNCTIONAL,
+        metadata={"class_name": "Merge", "output_names": ["q", "k", "v"]},
+    )
+    specs: dict[str, TensorSpec] = {}
+    inf._publish_output_port_specs(pack_node, specs, root=None, graph=None)
+    inf._publish_output_port_specs(merge_node, specs, root=None, graph=None)
+    assert specs == {}
+
+
+def test_introspect_kernel_source_simulates_the_kernels_own_class(monkeypatch):
+    """When the dispatched kernel's own source (``flash_attn_fn``) is found and
+    its class has real forward ops, those ops are simulated directly -- no
+    need to fall back to an eager/pure-torch sibling."""
+    from TraceLens.ModelUtils import shape_inference as si
+
+    source = """
+class EagerAttn(torch.nn.Module):
+    def forward(self, x):
+        y = x.transpose(1, 2)
+        return y
+"""
+    monkeypatch.setattr(
+        si,
+        "_find_symbol_definition",
+        lambda module, symbol: (source, "EagerAttn", "mod"),
+    )
+    inf = _make_inferencer()
+    result = inf._introspect_kernel_source(
+        ("mod", "flash_attn_fn"),
+        [TensorSpec(shape=(2, 4, 8, 16))],
+        root=None,
+    )
+    assert result is not None and result.shape == (2, 8, 4, 16)
+
+
+def test_introspect_kernel_source_falls_back_to_an_eager_sibling(monkeypatch):
+    """A dispatcher (``flash_attn_fn``) with no introspectable source of its
+    own still resolves through its conventionally-named eager fallback
+    (``eager_attn_fn``) living in the same module."""
+    from TraceLens.ModelUtils import shape_inference as si
+
+    eager_source = """
+class EagerFallback(torch.nn.Module):
+    def forward(self, x):
+        y = x.transpose(1, 2)
+        return y
+"""
+
+    def fake_find(module, symbol):
+        if symbol == "eager_attn_fn":
+            return eager_source, "EagerFallback", "mod"
+        return None
+
+    monkeypatch.setattr(si, "_find_symbol_definition", fake_find)
+    inf = _make_inferencer()
+    result = inf._introspect_kernel_source(
+        ("mod", "flash_attn_fn"),
+        [TensorSpec(shape=(2, 4, 8, 16))],
+        root=None,
+    )
+    assert result is not None and result.shape == (2, 8, 4, 16)
+
+
+def test_introspect_kernel_source_is_none_when_nothing_is_found(monkeypatch):
+    from TraceLens.ModelUtils import shape_inference as si
+
+    monkeypatch.setattr(si, "_find_symbol_definition", lambda module, symbol: None)
+    inf = _make_inferencer()
+    result = inf._introspect_kernel_source(("mod", "flash_attn_fn"), [], root=None)
+    assert result is None
+
+
+def test_resolved_scalar_locals_feeds_arange_from_a_simple_local():
+    """A RoPE init helper's ``spatial_dim = dim // 2`` must resolve to a
+    concrete int so a later ``torch.arange(spatial_dim)`` in the same function
+    can size itself off it."""
+    import ast
+
+    from TraceLens.ModelUtils.shape_inference import _resolved_scalar_locals
+
+    ctx = _make_inferencer(dim=128).context
+    src = """
+def __init__(self, dim):
+    spatial_dim = dim // 2
+"""
+    func = ast.parse(src).body[0]
+    assert _resolved_scalar_locals(func, config={}, context=ctx) == {"spatial_dim": 64}
+
+
+def test_function_ast_locals_maps_tuple_unpacks_and_annotated_assigns():
+    """``inv_freq, self.scaling = rope_init_fn(...)`` records ``inv_freq`` at
+    its tuple ordinal (0) so a later alias chase through it lands on the right
+    unpacked element, not the whole call."""
+    import ast
+
+    from TraceLens.ModelUtils.shape_inference import _function_ast_locals
+
+    src = """
+def __init__(self, dim):
+    spatial_dim = dim // 2
+    inv_freq, self.scaling = rope_init_fn(dim)
+    other: int = 4
+"""
+    func = ast.parse(src).body[0]
+    locals_map = _function_ast_locals(func)
+    assert locals_map["spatial_dim"][1] is None
+    assert locals_map["inv_freq"][1] == 0
+    assert isinstance(locals_map["other"][0], ast.Constant)
+
+
+def test_arange_length_resolves_positional_and_keyword_bounds():
+    """A RoPE init helper's ``torch.arange(...)`` length, in every call shape
+    the source can spell: one bound, two, three, and the keyword form."""
+    import ast
+
+    from TraceLens.ModelUtils.shape_inference import _arange_length
+
+    ctx = _make_inferencer().context
+
+    def arange_call(src: str) -> ast.Call:
+        return ast.parse(src, mode="eval").body
+
+    length = lambda src: _arange_length(
+        arange_call(src), config={}, local_vars={}, context=ctx
+    )
+    assert length("torch.arange(10)") == 10
+    assert length("torch.arange(2, 10)") == 8
+    assert length("torch.arange(0, 10, 2)") == 5
+    assert length("torch.arange(start=0, end=10, step=2)") == 5
+
+
+def test_arange_length_is_none_when_unresolvable_or_non_positive_step():
+    import ast
+
+    from TraceLens.ModelUtils.shape_inference import _arange_length
+
+    ctx = _make_inferencer().context
+
+    def arange_call(src: str) -> ast.Call:
+        return ast.parse(src, mode="eval").body
+
+    length = lambda src: _arange_length(
+        arange_call(src), config={}, local_vars={}, context=ctx
+    )
+    # A bound that does not resolve to a concrete int (an unknown name).
+    assert length("torch.arange(some_unresolved_symbol)") is None
+    # A non-positive step produces no elements, not a negative-length answer.
+    assert length("torch.arange(0, 10, 0)") is None
+
+
+def test_triton_op_shape_resolves_scan_and_elementwise_families_without_running():
+    """A Triton-decomposed stage's result shape is fixed by its op family, not
+    by its (often unrunnable) torch fallback: an associative scan
+    (``cumsum``) always keeps its input's shape, and an elementwise op
+    (``add``) just broadcasts its operands."""
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+
+    inf = _make_inferencer()
+    a = TensorSpec(shape=("B", "S", 16), dtype="float16")
+    b = TensorSpec(shape=("B", "S", 1), dtype="float16")
+
+    def node(triton_op: str) -> ModelGraphNode:
+        return ModelGraphNode(
+            id="n",
+            kind=NodeKind.LEAF,
+            label="x",
+            operation=OperationKind.GPU_KERNEL,
+            metadata={"details": [f"triton_op: {triton_op}"]},
+        )
+
+    scan_result = inf._triton_op_shape(node("cumsum"), [a])
+    assert scan_result is not None and scan_result.shape == a.shape
+
+    elementwise_result = inf._triton_op_shape(node("add"), [a, b])
+    assert elementwise_result is not None and elementwise_result.shape == a.shape
+
+
+def test_triton_op_shape_declines_outside_its_two_known_families():
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+
+    inf = _make_inferencer()
+    a = TensorSpec(shape=("B", "S", 16), dtype="float16")
+    no_detail = ModelGraphNode(
+        id="n", kind=NodeKind.LEAF, label="x", operation=OperationKind.GPU_KERNEL
+    )
+    assert inf._triton_op_shape(no_detail, [a]) is None
+
+    unknown_op = ModelGraphNode(
+        id="n",
+        kind=NodeKind.LEAF,
+        label="x",
+        operation=OperationKind.GPU_KERNEL,
+        metadata={"details": ["triton_op: argmax"]},
+    )
+    assert inf._triton_op_shape(unknown_op, [a]) is None
+    assert inf._triton_op_shape(unknown_op, []) is None
+
+
+def test_product_dim_merges_a_run_of_axes_into_one_readable_extent():
+    """A merged run of axes (``view(B, S, -1)`` collapsing the head/dim axes
+    back into one) reads as a number when every merged axis is concrete, a
+    symbolic product (``B*S``) when none is, and a mixed ``sym*number`` when
+    some axes are concrete and others are not."""
+    from TraceLens.ModelUtils.shape_inference import _product_dim
+
+    assert _product_dim(()) is None
+    assert _product_dim((2, 3)) == 6
+    assert _product_dim(("B", "S")) == "B*S"
+    assert _product_dim((2, "B")) == "B*2"

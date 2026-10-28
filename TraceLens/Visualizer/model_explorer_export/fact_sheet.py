@@ -142,6 +142,8 @@ def _fact_lines(spec: ArchitectureSpec) -> list[str]:
     )
     if spec.decoder_class:
         lines.append(f"Decoder class: {spec.decoder_class}")
+    if spec.device_sensitive:
+        lines.append(f"Device: {spec.runtime_regime.device}")
     if spec.checkpoint_source:
         lines.append(_format_source_line("Checkpoint", spec.checkpoint_source))
     if spec.github_source:
