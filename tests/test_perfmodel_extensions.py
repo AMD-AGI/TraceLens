@@ -1837,6 +1837,7 @@ class TestAttentionExtensionsCoverage:
         no_annotation = sgl_kernel_fast_topk_transform_fused(event("NA"))
         assert no_annotation.flops() is None
         assert no_annotation.bytes() is None
+
     def test_mla_tilelang_sparse_fwd_topk_sliding_window(self):
         event = {
             "annotation": (
