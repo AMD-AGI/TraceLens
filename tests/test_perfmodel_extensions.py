@@ -1837,6 +1837,53 @@ class TestAttentionExtensionsCoverage:
         no_annotation = sgl_kernel_fast_topk_transform_fused(event("NA"))
         assert no_annotation.flops() is None
         assert no_annotation.bytes() is None
+    def test_mla_tilelang_sparse_fwd_topk_sliding_window(self):
+        event = {
+            "annotation": (
+                "execute_11_context_0(sq0sk0sqsq0sqsk0)"
+                "_generation_11(sq11sk1749268sqsq11sqsk1749268)"
+            ),
+            "args": {
+                "Input Dims": [[12, 8, 576], [2991488, 1, 576], [12, 1, 2048]],
+                "Input type": ["c10::Float8_e4m3fn", "c10::Float8_e4m3fn", "int"],
+            },
+        }
+        model = mla_tilelang_sparse_fwd(event)
+        assert model.param_details["sliding_window"] == 2048
+        assert model.param_details["d_h_v"] == 512
+        capped = 11 * 2048
+        assert model._cap_gen_kv(model.param_details["g_sk"]) == capped
+        assert model._cap_gen_kv(model.param_details["g_sqsk"]) == capped
+        bytes_mib = model.bytes() / (1024**2)
+        assert bytes_mib < 1815
+        assert 20 <= bytes_mib <= 30
+        duration_s = 21.81e-6
+        tb_per_s = model.bytes() / duration_s / 1e12
+        assert tb_per_s < 7.4
+        assert 0.5 <= tb_per_s <= 2.0
+
+    def test_mla_tilelang_sparse_fwd_missing_indices_no_perf(self):
+        base = {
+            "annotation": (
+                "execute_11_context_0(sq0sk0sqsq0sqsk0)"
+                "_generation_11(sq11sk1749268sqsq11sqsk1749268)"
+            ),
+        }
+        for dims in (
+            [[12, 8, 576], [2991488, 1, 576]],
+            [[12, 8, 576], [2991488, 1, 576], []],
+            [[12, 8, 576], [2991488, 1, 576], [12, 1, 0]],
+        ):
+            event = {
+                **base,
+                "args": {
+                    "Input Dims": dims,
+                    "Input type": ["c10::Float8_e4m3fn", "c10::Float8_e4m3fn", "int"],
+                },
+            }
+            model = mla_tilelang_sparse_fwd(event)
+            assert model.param_details.get("_no_perf")
+            assert model.flops() is None
 
     def test_inference_attention_no_perf(self):
         model = InferenceAttention({"annotation": "bad", "args": {}})

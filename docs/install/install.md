@@ -68,6 +68,26 @@ pip install -e '.[dev,jax]'
 python -m pytest tests/ -v
 ```
 
+### Optional: Visualizer (Model Explorer export)
+
+Install the CPU-only LLM architecture visualizer and its `huggingface_hub`
+dependency with the `[Visualizer]` extra:
+
+```bash
+pip install -e ".[Visualizer]"
+```
+
+This installs the `TraceLens.ModelUtils` and `TraceLens.Visualizer.model_explorer_export` packages and adds
+`TraceLens_visualize_model_in_explorer` (alias: `visualize_model_in_explorer`)
+to your `PATH`. See `TraceLens/Visualizer/README.md` for usage.
+
+For development on the visualizer, combine extras:
+
+```bash
+pip install -e ".[Visualizer,dev]"
+python3 -m pytest tests/Visualizer/ tests/ModelUtils/
+```
+
 ## Optional: `traceconv` for `.pftrace` input
 
 `traceconv` is needed only when you pass a Perfetto-style `.pftrace` trace
