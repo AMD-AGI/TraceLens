@@ -3979,7 +3979,7 @@ def test_orchestrator_main_multi_trace_mocked(tmp_path, monkeypatch):
     resolved = {
         "analysis_mode": "default",
         "output_dir": out,
-        "aggregation": {"policy": "combine_only_same_phase"},
+        "aggregation": {"policy": "combine_by_phase"},
         "jobs": [
             {
                 "name": name,

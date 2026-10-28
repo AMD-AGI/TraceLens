@@ -35,7 +35,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import yaml
 
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
-from TraceLens.Reporting.aggregate_perf_reports import POLICY_SAME_PHASE
+from TraceLens.Reporting.aggregate_perf_reports import POLICY_BY_PHASE
 from TraceLens.Reporting.generate_perf_report_from_config import (
     ConfigError,
     load_run_config,
@@ -283,7 +283,7 @@ def main(argv=None) -> None:
                     "jobs": [_assign_pairs(job.split(",")) for job in args.job],
                 }
                 if args.scope == SCOPE_MULTI_TRACE:
-                    config.setdefault("aggregation", {"policy": POLICY_SAME_PHASE})
+                    config.setdefault("aggregation", {"policy": POLICY_BY_PHASE})
             else:
                 config = load_run_config(args.config)
             result = check_config(config, args.scope)
@@ -330,11 +330,9 @@ def _shape_errors(scope: str, config: dict) -> List[str]:
         aggregation = config.get("aggregation")
         if (
             not isinstance(aggregation, dict)
-            or aggregation.get("policy") != POLICY_SAME_PHASE
+            or aggregation.get("policy") != POLICY_BY_PHASE
         ):
-            errors.append(
-                f"multi_trace: aggregation.policy must be {POLICY_SAME_PHASE}."
-            )
+            errors.append(f"multi_trace: aggregation.policy must be {POLICY_BY_PHASE}.")
         errors += [
             f"multi_trace: {flag} must be {json.dumps(value)}, got {json.dumps(config[flag])}."
             for flag, value in AGENT_REPORT_FLAGS.get(analysis_mode, {}).items()

@@ -85,7 +85,8 @@ Generate one report per job from a YAML file. The same entry point is
 | `jobs[].compare_to` | no | `trace_path` and, in `inference`, `capture_folder` of a trace to compare against. |
 | `jobs[].precomputed_diff_stats` | no | `diff_stats.csv` to use instead of TraceDiff. |
 | `jobs[].phase` | when `aggregation` is set | Phase label, for example `prefill` or `decode`. |
-| `aggregation.policy` | no | `combine_only_same_phase` or `combine`. Combines every job's CSVs into `perf_report_aggregated_csvs/`. |
+| `jobs[].node` | when `aggregation.policy` is `combine_by_node` | Node label, for example `prefill_w0`. Jobs with the same node combine. |
+| `aggregation.policy` | no | `combine_by_node`. Combines every job's CSVs into `perf_report_aggregated_csvs/`. `combine`, `combine_by_phase`, and `combine_stack` are reserved and not supported yet. |
 | any report parameter | no | Top-level, by Python name. Applies to every job. |
 
 **Output:** one report per job, plus the aggregated CSVs when `aggregation` is
