@@ -1,0 +1,54 @@
+{
+  "evaluations": [
+    {
+      "id": "viz-tiny-llama-html",
+      "skill_should_trigger": true,
+      "prompt": "Export a standalone Model Explorer HTML page for the Hugging Face model hf-internal-testing/tiny-random-LlamaForCausalLM and write it to model.html in the current directory. Do not serve it.",
+      "files_exist": ["model.html"],
+      "expected_behavior": [
+        "Installed the TraceLens Visualizer extra when the exporter was not already importable",
+        "Ran visualize_model_in_explorer or python -m TraceLens.Visualizer.model_explorer_export.cli against the checkpoint and wrote model.html"
+      ],
+      "unexpected_behavior": [
+        "Loaded full checkpoint weights onto a GPU",
+        "Left a local HTTP server running",
+        "Wrote an analysis.md performance report or launched a PyTorch profiler"
+      ]
+    },
+    {
+      "id": "viz-kimi-html",
+      "skill_should_trigger": true,
+      "prompt": "Draw the architecture of moonshotai/Kimi-K3 in Model Explorer and save an HTML file I can open in a browser."
+    },
+    {
+      "id": "viz-vllm-tp-shard",
+      "skill_should_trigger": true,
+      "prompt": "Show how meta-llama/Llama-3.1-70B is sharded across 8 GPUs when served with vLLM tensor parallelism, as a Model Explorer graph."
+    },
+    {
+      "id": "viz-local-decode-packed",
+      "skill_should_trigger": true,
+      "prompt": "I have a local Hugging Face checkpoint at /models/qwen. Draw its computation graph with symbolic tensor shapes for a packed decode step, and write the HTML next to the checkpoint."
+    },
+    {
+      "id": "viz-follow-skill",
+      "skill_should_trigger": true,
+      "prompt": "Follow the model visualizer installed with TraceLens and export moonshotai/Kimi-K3 to kimi.html."
+    },
+    {
+      "id": "viz-trace-analysis",
+      "skill_should_trigger": false,
+      "prompt": "My training step is slow. The PyTorch profiler trace is at trace.json. Tell me which GPU kernels to fix first and write analysis.md."
+    },
+    {
+      "id": "viz-magpie-profile",
+      "skill_should_trigger": false,
+      "prompt": "Profile a vLLM benchmark with Magpie on the GPU node and collect a PyTorch profiler trace for the analysis orchestrator."
+    },
+    {
+      "id": "viz-rewrite-modeling",
+      "skill_should_trigger": false,
+      "prompt": "Rewrite modeling_llama.py so attention is one fused kernel, then run the unit tests."
+    }
+  ]
+}

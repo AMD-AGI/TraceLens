@@ -41,7 +41,9 @@ jobs:
     secrets:
       api_key: ${{ github.event_name == 'workflow_dispatch' && (inputs.routing || inputs.behavioral) && secrets.ANTHROPIC_API_KEY || '' }}
     with:
-      skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
+      skills: |
+        TraceLens/Agent/Analysis/skills/analysis-orchestrator
+        TraceLens/Agent/Visualizer/skills/model-visualizer
       # Each step can be set to `required`, `optional`, or `off`.
       structural: ${{ github.event_name != 'workflow_dispatch' && 'required' || inputs.structural && 'required' || 'off' }}
       routing: ${{ github.event_name == 'workflow_dispatch' && inputs.routing && 'required' || 'off' }}
@@ -61,4 +63,6 @@ jobs:
         with:
           command: structural
           args: --external
-          skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
+          skills: |
+            TraceLens/Agent/Analysis/skills/analysis-orchestrator
+            TraceLens/Agent/Visualizer/skills/model-visualizer
