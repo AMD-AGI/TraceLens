@@ -1402,6 +1402,9 @@ def integrity_check_graph_nodes(
             or _is_synthetic_output(node)
             or _is_loop_carried(node)
             or node_id == "@output"
+            # A pipeline recv records a transfer into the next stage. That stage
+            # is the same folded stack tile, so the recv is a sink on purpose.
+            or _node_attr_value(node, "synthetic") == "communication_sink"
         )
         if not exempt_sink and node_id not in consumed:
             warnings.append(

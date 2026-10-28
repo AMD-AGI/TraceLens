@@ -18,10 +18,10 @@ Two layers keep the torch dependency isolated:
 
 * **Layer A (torch-free)** — turns a plain FX *inventory* (a list of
   :class:`FxNodeInfo` records: op kind, target, module namespace, input node
-  names, shape/dtype) into a :class:`~TraceLens.ModelUtils.computation_graph.ComputationGraph`
-  and then a Model Explorer payload, reusing the existing
-  ``computation_graph_to_explorer_graph`` adapter and ``apply_shape_attrs``.
-  This layer has no torch import and is unit-tested with hand-built fixtures.
+  names, shape/dtype) into a :class:`~TraceLens.ModelUtils.computation_graph.ComputationGraph`.
+  The Model Explorer payload is built by the Visualizer, so this package does
+  not import it. This layer has no torch import and is unit-tested with
+  hand-built fixtures.
 
 * **Layer B (torch shim)** — runs ``torch.fx.symbolic_trace`` + ``ShapeProp``
   (or ``torch.export``) on a real module to produce the inventory Layer A
@@ -40,17 +40,11 @@ from TraceLens.ModelUtils.computation_graph import (
     GraphNodeSpec,
     InlineFrameSpec,
 )
-from TraceLens.ModelUtils.shape_inference import TensorSpec
 from TraceLens.ModelUtils.size_provenance import (
     SizeReadResolver,
     TracedNode,
     parse_stack_trace,
 )
-
-# NOTE: ``adapter`` / ``shapes`` live under ``TraceLens.Visualizer.model_explorer_export``,
-# whose package ``__init__`` re-exports this module — importing them at module load
-# would create a circular import. They are imported lazily inside the one function
-# that needs them.
 
 _log = logging.getLogger(__name__)
 
@@ -211,55 +205,6 @@ def _add_namespace_frames(
         )
 
 
-def explorer_graph_from_fx_inventory(
-    inventory: list[FxNodeInfo],
-    *,
-    graph_id: str = "torch_module",
-    label: str | None = None,
-    include_shapes: bool = True,
-) -> dict[str, Any]:
-    """Build a single Model Explorer ``Graph`` dict from an FX inventory."""
-    from TraceLens.Visualizer.model_explorer_export.adapter import (
-        computation_graph_to_explorer_graph,
-    )
-    from TraceLens.Visualizer.model_explorer_export.shapes import apply_shape_attrs
-
-    computation = computation_graph_from_fx_inventory(inventory)
-    graph = computation_graph_to_explorer_graph(
-        computation, graph_id=graph_id, label=label
-    )
-    if include_shapes:
-        specs = {
-            info.name: TensorSpec(shape=tuple(info.shape), dtype=info.dtype or "")
-            for info in inventory
-            if info.shape is not None
-        }
-        for node in graph["nodes"]:
-            spec = specs.get(node.get("id"))
-            if spec is not None:
-                apply_shape_attrs(node, spec)
-    return graph
-
-
-def payload_from_fx_inventory(
-    inventory: list[FxNodeInfo],
-    *,
-    name: str = "torch_module",
-    include_shapes: bool = True,
-) -> dict[str, Any]:
-    """Wrap an FX inventory in a full Model Explorer payload envelope."""
-    graph = explorer_graph_from_fx_inventory(
-        inventory, graph_id=name, label=name, include_shapes=include_shapes
-    )
-    return {
-        "name": name,
-        "model_type": "torch-module",
-        "source": "tracelens-torch-introspection",
-        "tracelensViewer": {},
-        "graphCollections": [{"label": name, "graphs": [graph]}],
-    }
-
-
 # ── Layer B: torch shim (excluded from torch-free CI coverage) ───────────────
 
 
@@ -348,27 +293,6 @@ def fx_module_inventory(
             )
         )
     return inventory
-
-
-def build_torch_module_payload(
-    module: Any,
-    input_shape: tuple[int, ...],
-    *,
-    include_shapes: bool = True,
-    name: str | None = None,
-    model_dtype: Any = None,
-) -> dict[str, Any]:  # pragma: no cover
-    """Trace an ``nn.Module`` and build a Model Explorer payload.
-
-    ``input_shape`` is the shape of the module's primary input tensor
-    (batch included), e.g. ``(2, 128)`` for token ids or ``(1, 3, 224, 224)``
-    for an image. Shapes are filled in by an FX ``ShapeProp`` pass.
-    """
-    resolved_name = name or type(module).__name__
-    inventory = fx_module_inventory(module, tuple(input_shape), model_dtype=model_dtype)
-    return payload_from_fx_inventory(
-        inventory, name=resolved_name, include_shapes=include_shapes
-    )
 
 
 def export_module_inventory(
@@ -511,21 +435,6 @@ def export_module_inventory(
             ", ".join(unresolved),
         )
     return inventory
-
-
-def build_exported_module_payload(
-    module: Any,
-    input_specs: list[InputSpec],
-    *,
-    include_shapes: bool = True,
-    name: str | None = None,
-    model_dtype: Any = None,
-) -> dict[str, Any]:  # pragma: no cover
-    """Trace an ``nn.Module`` with ``torch.export`` and build a Model Explorer payload."""
-    inventory = export_module_inventory(module, input_specs, model_dtype=model_dtype)
-    return payload_from_fx_inventory(
-        inventory, name=name or type(module).__name__, include_shapes=include_shapes
-    )
 
 
 def _export_refining_ranges(

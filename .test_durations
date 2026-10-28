@@ -636,8 +636,6 @@
     "tests/test_analysis_agent_triage.py::test_extract_model_name_session_dir_plain_z": 0.00702,
     "tests/test_analysis_agent_triage.py::test_first_load_capture_event_set_none_for_missing_folder": 0.009828,
     "tests/test_analysis_agent_triage.py::test_first_load_capture_event_set_skips_corrupt_and_metadata": 0.010108,
-    "tests/test_analysis_agent_triage.py::test_gpu_graph_replay_fires_from_stream": 0.008754,
-    "tests/test_analysis_agent_triage.py::test_gpu_graph_replay_no_match_returns_none": 0.005882,
     "tests/test_analysis_agent_triage.py::test_high_idle_below_threshold_returns_none": 0.008241,
     "tests/test_analysis_agent_triage.py::test_high_idle_from_manifest": 0.008654,
     "tests/test_analysis_agent_triage.py::test_high_idle_from_timeline": 0.004906,

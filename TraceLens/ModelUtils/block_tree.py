@@ -732,6 +732,21 @@ def _side_feed_chain_attrs(node: BlockNode) -> set[str]:
     return attrs
 
 
+def _attrs_with_ordinary_consumer(children: list[BlockNode]) -> set[str]:
+    """Attrs any sibling reads as a regular (non-side) forward predecessor.
+
+    A side-feed chain's own link (e.g. a fused ``qkv`` projection feeding an
+    attention step's side input) can still be a regular predecessor of other,
+    earlier-ordered siblings in the same forward (``qkv.new_zeros(...)``,
+    ``qkv.split(...)``) -- so dropping its segment on that basis alone would
+    silently drop its node (the ``qkv`` bug this guards against).
+    """
+    attrs: set[str] = set()
+    for child in children:
+        attrs.update(child.operation_predecessors or ())
+    return attrs
+
+
 def _segment_for_step(node: BlockNode, step: BlockNode) -> ComputationSegment:
     side_specs = node.side_inputs.get(step.attr_name, [])
     if not side_specs:
@@ -1960,11 +1975,13 @@ def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
     if merge_idx is None:
         side_chain_attrs = _side_feed_chain_attrs(node)
         side_combine_producers = _forward_side_combine_producers(node)
+        ordinary_consumers = _attrs_with_ordinary_consumer(children)
         return [
             _segment_for_step(node, child)
             for child in children
             if child.attr_name not in side_chain_attrs
             or child.attr_name in side_combine_producers
+            or child.attr_name in ordinary_consumers
         ]
 
     pre_merge = children[:merge_idx]
@@ -2779,7 +2796,22 @@ def build_block_node(
             if child_class in _SKIP_INIT_CLASS_NAMES:
                 continue
             method_ops = cls.multi_op_methods.get(base_attr)
-            if method_ops:
+            # A sibling method pruned down to pure dispatch (MiniMax's
+            # ``forward_core``, once its sparse-attention arm resolves away, is
+            # left with nothing but ``self.attn(...)`` then ``self.o_proj(...)``)
+            # extracts no tensor op of its own, so it never earns a
+            # ``multi_op_methods`` entry -- but its submodule calls are recorded
+            # in ``multi_op_method_step_predecessors`` regardless, and those
+            # calls still need real child nodes, or their q/k/v boundary args
+            # never dock on the caller's producer and that producer's slots
+            # look unconsumed.
+            dispatch_only_predecessors = (
+                cls.multi_op_method_step_predecessors.get(base_attr)
+                if not method_ops
+                else None
+            )
+            if method_ops or dispatch_only_predecessors:
+                method_ops = method_ops or []
                 call_context = [
                     detail
                     for detail in child_details
@@ -2843,40 +2875,103 @@ def build_block_node(
                         ):
                             continue
                         submodule_class = cls.init_assignments.get(name)
-                        if (
-                            submodule_class is None
-                            or submodule_class in _SKIP_INIT_CLASS_NAMES
-                        ):
+                        if submodule_class is not None:
+                            if submodule_class in _SKIP_INIT_CLASS_NAMES:
+                                continue
+                            seen_submodule_attrs.add(name)
+                            submodule_children.append(
+                                build_block_node(
+                                    attr_name=name,
+                                    class_name=submodule_class,
+                                    registry=registry,
+                                    basic_ops=basic_ops,
+                                    visited=visited | {class_name},
+                                    # Carry the call-site context -- crucially the
+                                    # ``loop:`` detail -- the same way this helper's
+                                    # own op children do. Loop-body frames group
+                                    # CONTIGUOUS nodes sharing that detail, so a
+                                    # submodule sitting among them without it splits
+                                    # one loop body into two rendered boxes
+                                    # (DeepSeek's ``act_fn`` cut the expert loop in
+                                    # half, and the halves then fed each other
+                                    # through boundary tiles).
+                                    details=[
+                                        *cls.init_details.get(name, []),
+                                        *(
+                                            detail
+                                            for detail in call_context
+                                            if detail
+                                            not in cls.init_details.get(name, [])
+                                        ),
+                                    ],
+                                    forward_order=child_order,
+                                    infer_init_steps=infer_init_steps,
+                                )
+                            )
+                            continue
+                        # A plain ``self.<method>()`` called mid-expression that is
+                        # not an ``nn.Module`` submodule at all (``self._split_index_qkv(idx_qkv)``)
+                        # -- ``_multi_op_forward_methods`` expands it recursively
+                        # the same way it expands a method called from ``forward()``
+                        # itself, so render it the same way a traced free-function
+                        # call already is: a real sibling frame showing its own ops,
+                        # not a dangling predecessor name with no producer.
+                        if cls.multi_op_methods.get(name) is None:
                             continue
                         seen_submodule_attrs.add(name)
                         submodule_children.append(
-                            build_block_node(
-                                attr_name=name,
-                                class_name=submodule_class,
-                                registry=registry,
-                                basic_ops=basic_ops,
-                                visited=visited | {class_name},
-                                # Carry the call-site context -- crucially the
-                                # ``loop:`` detail -- the same way this helper's
-                                # own op children do. Loop-body frames group
-                                # CONTIGUOUS nodes sharing that detail, so a
-                                # submodule sitting among them without it splits
-                                # one loop body into two rendered boxes
-                                # (DeepSeek's ``act_fn`` cut the expert loop in
-                                # half, and the halves then fed each other
-                                # through boundary tiles).
-                                details=[
-                                    *cls.init_details.get(name, []),
-                                    *(
-                                        detail
-                                        for detail in call_context
-                                        if detail not in cls.init_details.get(name, [])
-                                    ),
+                            _expanded_free_function_node(
+                                name,
+                                cls,
+                                child_order=child_order,
+                                child_details=[
+                                    *call_context,
                                 ],
-                                forward_order=child_order,
-                                infer_init_steps=infer_init_steps,
+                                label=name,
+                                fallback_class_name="MethodOp",
+                                fallback_param_inputs=None,
                             )
                         )
+                # A method with no tensor op of its own at all (``forward_core``
+                # above) never runs the predecessor scan above -- ``method_ops``
+                # is empty, so nothing is iterated. Its submodule calls are
+                # instead the step names themselves, in
+                # ``dispatch_only_predecessors``'s own keys; resolve each the
+                # same way the embedded-call case above does.
+                for name in dispatch_only_predecessors or {}:
+                    if name in seen_submodule_attrs:
+                        continue
+                    submodule_class = cls.init_assignments.get(
+                        base_submodule_attr(name)
+                    )
+                    if (
+                        submodule_class is None
+                        or submodule_class in _SKIP_INIT_CLASS_NAMES
+                    ):
+                        continue
+                    seen_submodule_attrs.add(name)
+                    submodule_children.append(
+                        build_block_node(
+                            attr_name=name,
+                            class_name=submodule_class,
+                            registry=registry,
+                            basic_ops=basic_ops,
+                            visited=visited | {class_name},
+                            details=[
+                                *cls.init_details.get(base_submodule_attr(name), []),
+                                *(
+                                    detail
+                                    for detail in call_context
+                                    if detail
+                                    not in cls.init_details.get(
+                                        base_submodule_attr(name), []
+                                    )
+                                ),
+                            ],
+                            forward_order=child_order,
+                            infer_init_steps=infer_init_steps,
+                        )
+                    )
                 # The section 1b wiring pass (``forward_step_predecessors`` on the
                 # ENCLOSING composite node) is what actually docks a submodule
                 # child's input edge -- the same mechanism a top-level forward
@@ -2898,6 +2993,16 @@ def build_block_node(
                 # submodule call already relies on it.
                 method_step_predecessor_args = (
                     cls.multi_op_method_step_predecessor_args.get(base_attr, {})
+                )
+                # Same keying, one level deeper: {arg name -> producer slot
+                # ordinal} -- lets a consumer tell apart several arguments that
+                # all trace to the SAME producer token (MiniMax's pruned
+                # ``forward_core`` reading ``q, k, v, forward_batch`` all off
+                # this method's own boundary input) by slot, the same way the
+                # top-level ``forward_step_predecessor_ordinals`` already
+                # disambiguates a free-function call's repeated producer.
+                method_step_predecessor_ordinals = (
+                    cls.multi_op_method_step_predecessor_ordinals.get(base_attr, {})
                 )
 
                 def _method_op_leaf(
@@ -3047,6 +3152,9 @@ def build_block_node(
                         forward_step_predecessors=dict(method_step_predecessors),
                         forward_step_predecessor_args=dict(
                             method_step_predecessor_args
+                        ),
+                        forward_step_predecessor_ordinals=dict(
+                            method_step_predecessor_ordinals
                         ),
                         children=method_children,
                     )

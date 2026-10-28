@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import threading
 import webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -21,24 +20,16 @@ from urllib.parse import unquote, urlparse
 from TraceLens.Visualizer.model_explorer_export.shapes import (
     canonicalize_payload_shapes,
 )
+from TraceLens.Visualizer.model_explorer_export.viewer_assets import worker_js_bytes
 from TraceLens.Visualizer.model_explorer_export.viewer_page import (
     VIEWER_DIR,
     compose_viewer_html,
 )
 
-PACKAGE_ROOT = Path(__file__).resolve().parent
-VISUALIZER_DIST = (
-    PACKAGE_ROOT / "node_modules" / "ai-edge-model-explorer-visualizer" / "dist"
-)
-
 
 def ensure_viewer_assets() -> None:
-    """Copy worker.js from the npm package when available."""
-    worker_src = VISUALIZER_DIST / "worker.js"
-    worker_dst = VIEWER_DIR / "worker.js"
-    if worker_src.exists():
-        worker_dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(worker_src, worker_dst)
+    """Download the pinned same-origin layout worker if it is not cached."""
+    worker_js_bytes()
 
 
 def _load_payload(
@@ -97,6 +88,15 @@ def serve_viewer(
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            if path == "/worker.js":
+                body = worker_js_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/javascript; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(body)
+                return
             super().do_GET()
 
         def end_headers(self) -> None:
@@ -139,7 +139,7 @@ def main() -> int:
     parser.add_argument(
         "json",
         type=Path,
-        help="Model Explorer JSON exported by visualize_model_in_explorer.py",
+        help="Model Explorer JSON exported by visualize_model_in_explorer",
     )
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--open", action="store_true")

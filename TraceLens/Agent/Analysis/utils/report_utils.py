@@ -18,6 +18,11 @@ from typing import List
 import re
 import pandas as pd
 
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    focus_job_utilization,
+    perf_report_csv_dir,
+)
+
 
 def load_manifest(output_dir: str) -> dict:
     """Load and return the category manifest JSON from output_dir."""
@@ -26,9 +31,7 @@ def load_manifest(output_dir: str) -> dict:
         return json.load(f)
 
 
-def prepare_model_identification_data(
-    output_dir: str, comparison_scope: str = "standalone"
-) -> bool:
+def prepare_model_identification_data(output_dir: str) -> bool:
     """Prepare metadata files for the model-identification subagent.
 
     Reads unified_perf_summary.csv and writes two files under metadata/:
@@ -37,19 +40,12 @@ def prepare_model_identification_data(
 
     Args:
         output_dir: Base analysis output directory.
-        comparison_scope: ``"standalone"`` reads from ``perf_report_csvs/``;
-            ``"comparative"`` reads from ``perf_report_trace1_csvs/``.
 
     Returns:
         True on success, False if unified_perf_summary.csv is missing or unreadable.
     """
 
-    csv_dir = (
-        "perf_report_trace1_csvs"
-        if comparison_scope == "comparative"
-        else "perf_report_csvs"
-    )
-    csv_path = os.path.join(output_dir, csv_dir, "unified_perf_summary.csv")
+    csv_path = os.path.join(perf_report_csv_dir(output_dir), "unified_perf_summary.csv")
     if not os.path.isfile(csv_path):
         return False
 
@@ -101,7 +97,8 @@ def load_manifest_categories(output_dir):
         ],
     }
 
-    gpu_util = result["gpu_utilization"]
+    # System analysis is scoped to the focus job on multi_trace runs.
+    gpu_util = focus_job_utilization(manifest)
     print(
         json.dumps(
             {
