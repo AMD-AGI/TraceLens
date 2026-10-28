@@ -4,16 +4,16 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Op models: per-op values computed from an op's work.
+"""Op projections: per-op values computed from an op's work.
 
 A *perf model* (:mod:`TraceLens.PerfModel.perf_model`) says what work an op
-does: its shapes, FLOPs and bytes. An *op model* takes that work and returns
+does: its shapes, FLOPs and bytes. An *op projection* takes that work and returns
 anything to report for the op, usually a predicted time but also values such
 as a kernel configuration. :class:`TreePerfAnalyzer` measures an op,
-describes its work as an :class:`OpWork`, and runs every registered op model
+describes its work as an :class:`OpWork`, and runs every registered op projection
 on it::
 
-    def op_model(work, arch):
+    def op_projection(work, arch):
         return None or time_us or {"time_us": time_us, "Tile": "256x128x64"}
 
 The output is ``None`` (the model does not handle this op), a time in µs, or
@@ -23,14 +23,14 @@ are written. With a time, the label also gets ``<label> Time (µs)``,
 ``<label> TFLOPS/s``, ``<label> TB/s`` and ``Pct <label>`` (time as a
 percentage of the measured kernel time). Without one, ``<label> Time (µs)``
 and ``Pct <label>`` are left empty. A model that raises gets no columns for
-that op, with a one-time warning. Op models are called once per op launch,
+that op, with a one-time warning. Op projections are called once per op launch,
 so a slow model should cache its results.
 
 Roofline is always on; Origami for GEMMs and the SDPA tile model with Origami
 are built in behind flags.
 
-External op models use a simpler signature and are adapted with
-:func:`external_op_model`::
+External op projections use a simpler signature and are adapted with
+:func:`adapt_op_projection`::
 
     def model(category, params, arch):
         if category != "GEMM":
@@ -105,8 +105,8 @@ def op_work(perf_model, bwd=False):
     )
 
 
-def op_model_columns(label):
-    """``(per-shape, per-instance)`` column names for an op-model label.
+def op_projection_columns(label):
+    """``(per-shape, per-instance)`` column names for an op-projection label.
 
     Per-shape columns depend only on the op's params; per-instance columns
     depend on the measured kernel time.
@@ -117,8 +117,8 @@ def op_model_columns(label):
     )
 
 
-def op_model_labels(columns):
-    """Labels that have op-model columns in ``columns``, built-ins first."""
+def op_projection_labels(columns):
+    """Labels that have op-projection columns in ``columns``, built-ins first."""
     columns = list(columns)
     present = set(columns)
     labels = [
@@ -130,7 +130,7 @@ def op_model_labels(columns):
     return sorted(labels, key=lambda label: rank.get(label, len(rank)))
 
 
-def op_model_group_columns(columns, label, labels):
+def op_projection_group_columns(columns, label, labels):
     """``label``'s columns, in column order, with ``Pct <label>`` included.
 
     A column under a longer label that extends ``label`` (``"Origami X"`` vs
@@ -152,10 +152,10 @@ def _is_scalar(value):
     return isinstance(value, (str, bool, numbers.Number))
 
 
-def add_op_model_columns(
+def add_op_projection_columns(
     dict_metrics, label, output, gflops, bytes_moved, busy_kernel_time
 ):
-    """Write ``label``'s columns for an op model's ``output``: None, a time in
+    """Write ``label``'s columns for an op projection's ``output``: None, a time in
     µs, or a dict with an optional ``time_us`` and extra scalar columns."""
     if isinstance(output, dict):
         time_us = output.get(TIME_KEY)
@@ -184,34 +184,36 @@ def add_op_model_columns(
     )
 
 
-_op_model_warnings = set()
+_op_projection_warnings = set()
 
 
-def _warn_op_model_failed(label, work, error):
+def _warn_op_projection_failed(label, work, error):
     key = (label, work.category, type(error).__name__)
-    if key in _op_model_warnings:
+    if key in _op_projection_warnings:
         return
-    _op_model_warnings.add(key)
+    _op_projection_warnings.add(key)
     warnings.warn(
-        f"Op model {label!r} failed on a {work.category} op "
+        f"Op projection {label!r} failed on a {work.category} op "
         f"({type(error).__name__}: {error}); its columns are left empty for that "
         "op. Shown once per model, category and error type.",
         RuntimeWarning,
     )
 
 
-def add_op_model_outputs(dict_metrics, op_models, work, arch, busy_kernel_time):
-    """Run each ``{label: op_model}`` on ``work`` and write its columns.
+def add_op_projection_outputs(
+    dict_metrics, op_projections, work, arch, busy_kernel_time
+):
+    """Run each ``{label: op_projection}`` on ``work`` and write its columns.
 
     A model that raises gets no columns for this op; the others and the
     measured metrics are unaffected."""
-    for label, op_model in op_models.items():
+    for label, op_projection in op_projections.items():
         try:
-            output = op_model(work, arch)
+            output = op_projection(work, arch)
         except Exception as error:
-            _warn_op_model_failed(label, work, error)
+            _warn_op_projection_failed(label, work, error)
             continue
-        add_op_model_columns(
+        add_op_projection_columns(
             dict_metrics,
             label,
             output,
@@ -221,7 +223,7 @@ def add_op_model_outputs(dict_metrics, op_models, work, arch, busy_kernel_time):
         )
 
 
-def roofline_op_model(work, arch):
+def roofline_op_projection(work, arch):
     """Roofline time: the larger of peak-compute time and peak-bandwidth time."""
     if arch is None or work.compute_spec is None:
         return None
@@ -243,14 +245,14 @@ def roofline_op_model(work, arch):
     return {TIME_KEY: max(compute_time_us, memory_time_us), "Bound": bound}
 
 
-def external_op_model(model):
-    """Adapt ``model(category, params, arch)`` to the op-model interface.
+def adapt_op_projection(model):
+    """Adapt ``model(category, params, arch)`` to the op-projection interface.
 
     The model returns None, a time in µs, or a dict (see the module doc). A
     backward op is passed its perf model's ``bwd_category`` (``"SDPA_bwd"``,
     ...) with the forward params; ops without one (GEMM) are skipped."""
 
-    def op_model(work, arch):
+    def op_projection(work, arch):
         if work.category is None or work.params is None:
             return None
         output = model(work.category, dict(work.params), arch)
@@ -258,11 +260,11 @@ def external_op_model(model):
             return output
         return float(output)
 
-    op_model.external_model = model
-    return op_model
+    op_projection.wrapped_model = model
+    return op_projection
 
 
-def origami_gemm_model(category, params, arch):
+def origami_gemm_op_projection(category, params, arch):
     """GEMM time from Origami, as an external-style model."""
     if category != "GEMM" or arch is None:
         return None
@@ -274,7 +276,7 @@ def origami_gemm_model(category, params, arch):
     )
 
 
-def sdpa_tile_origami_op_model(work, arch):
+def sdpa_tile_origami_op_projection(work, arch):
     """TraceLens's attention tile model (``sdpa_tile.py``), with Origami
     timing each tile GEMM. Origami only models GEMMs; the tiling is
     TraceLens's own."""
@@ -283,13 +285,13 @@ def sdpa_tile_origami_op_model(work, arch):
     )
 
 
-def default_op_models(enable_origami_gemm=False, enable_origami_sdpa_tile=False):
-    """Built-in op models, in report order: Roofline; Origami for GEMMs with
+def default_op_projections(enable_origami_gemm=False, enable_origami_sdpa_tile=False):
+    """Built-in op projections, in report order: Roofline; Origami for GEMMs with
     ``enable_origami_gemm``; the SDPA tile model with Origami with
     ``enable_origami_sdpa_tile``."""
-    op_models = {"Roofline": roofline_op_model}
+    op_projections = {"Roofline": roofline_op_projection}
     if enable_origami_gemm:
-        op_models["Origami"] = external_op_model(origami_gemm_model)
+        op_projections["Origami"] = adapt_op_projection(origami_gemm_op_projection)
     if enable_origami_sdpa_tile:
-        op_models["SDPA Tile Origami"] = sdpa_tile_origami_op_model
-    return op_models
+        op_projections["SDPA Tile Origami"] = sdpa_tile_origami_op_projection
+    return op_projections

@@ -36,14 +36,14 @@ from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils, merge_intervals
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
-from ..PerfModel.op_models import (
-    add_op_model_outputs,
-    default_op_models,
-    external_op_model,
+from ..PerfModel.op_projections import (
+    add_op_projection_outputs,
+    default_op_projections,
+    adapt_op_projection,
     get_compute_spec,
-    op_model_columns,
-    op_model_group_columns,
-    op_model_labels,
+    op_projection_columns,
+    op_projection_group_columns,
+    op_projection_labels,
     op_work,
 )
 from ..PerfModel.utils import (
@@ -296,7 +296,7 @@ class TreePerfAnalyzer:
         self.arch = arch
         self.enable_origami_gemm = enable_origami_gemm
         self.enable_origami_sdpa_tile = enable_origami_sdpa_tile
-        self.op_models = default_op_models(
+        self.op_projections = default_op_projections(
             enable_origami_gemm, enable_origami_sdpa_tile
         )
         self.kernel_filters = {}
@@ -326,23 +326,23 @@ class TreePerfAnalyzer:
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
 
-    def register_op_model(self, label, model):
-        """Report op model ``model(category, params, arch)`` under ``label``:
+    def register_op_projection(self, label, model):
+        """Report op projection ``model(category, params, arch)`` under ``label``:
         ``<label> Time (µs)`` and its other columns.
 
-        See :mod:`TraceLens.PerfModel.op_models`. ``None`` removes the label.
+        See :mod:`TraceLens.PerfModel.op_projections`. ``None`` removes the label.
         Registering an existing label replaces its model.
         """
         if model is None:
-            self.op_models.pop(label, None)
+            self.op_projections.pop(label, None)
         elif not callable(model):
-            raise TypeError(f"op model {label!r} must be callable or None")
+            raise TypeError(f"op projection {label!r} must be callable or None")
         else:
-            self.op_models[label] = external_op_model(model)
+            self.op_projections[label] = adapt_op_projection(model)
 
-    def set_external_op_model(self, model):
-        """Report op model ``model(category, params, arch)`` as ``External``."""
-        self.register_op_model("External", model)
+    def set_external_op_projection(self, model):
+        """Report op projection ``model(category, params, arch)`` as ``External``."""
+        self.register_op_projection("External", model)
 
     def register_kernel_filter(self, label, keep_kernel):
         """Report the busy time of the op's kernels for which ``keep_kernel(kernel)``
@@ -437,7 +437,7 @@ class TreePerfAnalyzer:
 
     def compute_perf_metrics(self, event, bwd=False, perf_model_class=None):
         """Perf metrics for one op: measure it, model its work, then add the
-        columns of each registered op model."""
+        columns of each registered op projection."""
         busy_kernel_time, filtered_busy_times = self._measure_op_time(event, bwd)
         perf_model = self._build_perf_model(event, perf_model_class)
         work = op_work(perf_model, bwd)
@@ -451,8 +451,8 @@ class TreePerfAnalyzer:
                 work.gflops, None, busy_time
             )
         dict_metrics["Compute Spec"] = work.compute_spec or ""
-        add_op_model_outputs(
-            dict_metrics, self.op_models, work, self.arch, busy_kernel_time
+        add_op_projection_outputs(
+            dict_metrics, self.op_projections, work, self.arch, busy_kernel_time
         )
 
         for key, value in perf_model.param_details.items():
@@ -671,11 +671,13 @@ class TreePerfAnalyzer:
         # Compute Spec - static for same args
         if "Compute Spec" in df_perf_metrics.columns:
             dict_agg["Compute Spec"] = "first"
-        # Op-model outputs depend only on the op's params, so take the first;
+        # Op-projection outputs depend only on the op's params, so take the first;
         # Pct <label> depends on the measured time, so aggregate it.
-        labels = op_model_labels(df_perf_metrics.columns)
+        labels = op_projection_labels(df_perf_metrics.columns)
         for label in labels:
-            for col in op_model_group_columns(df_perf_metrics.columns, label, labels):
+            for col in op_projection_group_columns(
+                df_perf_metrics.columns, label, labels
+            ):
                 dict_agg[col] = agg_metrics if col == f"Pct {label}" else "first"
         for label in kernel_filter_labels(df_perf_metrics.columns):
             if f"{label} TFLOPS/s" in df_perf_metrics.columns:
@@ -2074,14 +2076,14 @@ class TreePerfAnalyzer:
                 "Roofline Bound",
                 "Pct Roofline",
             ]
-            for label in self.op_models:
+            for label in self.op_projections:
                 if label == "Roofline":
                     continue
-                for cols in op_model_columns(label):
+                for cols in op_projection_columns(label):
                     perf_cols.extend(cols)
             for label in self.kernel_filters:
                 perf_cols.extend([f"{label} Kernel Time (µs)", f"{label} TFLOPS/s"])
-            estimate_prefixes = tuple(f"{label} " for label in self.op_models)
+            estimate_prefixes = tuple(f"{label} " for label in self.op_projections)
 
             if include_perf_metrics and has_own_perf_model:
                 # Has own perf model - compute forward metrics
@@ -2197,7 +2199,7 @@ class TreePerfAnalyzer:
         col_order.extend(["duration_us", "has_perf_model", "is_recompute"])
         if include_perf_metrics:
             col_order.extend(perf_cols)
-            labels = sorted(self.op_models, key=len, reverse=True)
+            labels = sorted(self.op_projections, key=len, reverse=True)
             for col in df.columns:
                 label = next((n for n in labels if col.startswith(f"{n} ")), None)
                 if label is None or col in col_order:
@@ -2297,13 +2299,13 @@ class TreePerfAnalyzer:
             if col in df_temp.columns:
                 agg_dict[col] = "first"
 
-        # Op models other than roofline (placed below).
+        # Op projections other than roofline (placed below).
         # Keep the flattened "_first" names in unified_perf_summary for visibility.
-        labels = op_model_labels(df_temp.columns)
+        labels = op_projection_labels(df_temp.columns)
         for label in labels:
             if label == "Roofline":
                 continue
-            for col in op_model_group_columns(df_temp.columns, label, labels):
+            for col in op_projection_group_columns(df_temp.columns, label, labels):
                 agg_dict[col] = agg_metrics if col == f"Pct {label}" else "first"
 
         # Time-varying metrics - mean/std (varies per instance)
@@ -3566,8 +3568,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             work.gflops, work.bytes_moved, busy_kernel_time
         )
         dict_metrics["Compute Spec"] = work.compute_spec or ""
-        add_op_model_outputs(
-            dict_metrics, self.op_models, work, self.arch, busy_kernel_time
+        add_op_projection_outputs(
+            dict_metrics, self.op_projections, work, self.arch, busy_kernel_time
         )
 
         for key, value in perf_model.param_details.items():

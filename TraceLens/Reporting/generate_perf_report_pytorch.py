@@ -288,12 +288,12 @@ def apply_extension(perf_analyzer, extension_path):
     extension = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(extension)
 
-    if hasattr(extension, "external_op_model"):
-        print(f"Applying external op model from {extension_path}")
-        perf_analyzer.set_external_op_model(extension.external_op_model)
+    if hasattr(extension, "external_op_projection"):
+        print(f"Applying external op projection from {extension_path}")
+        perf_analyzer.set_external_op_projection(extension.external_op_projection)
 
     for attr, register in (
-        ("op_models", "register_op_model"),
+        ("op_projections", "register_op_projection"),
         ("kernel_filters", "register_kernel_filter"),
     ):
         if not hasattr(extension, attr):
@@ -1184,7 +1184,7 @@ def main():
         type=str,
         default=None,
         help="Python file with custom hooks: tree post-processing, perf models, "
-        "op categories, op models (op_models, external_op_model), and kernel filters.",
+        "op categories, op projections (op_projections, external_op_projection), and kernel filters.",
     )
 
     add_gpu_arch_cli_args(parser)

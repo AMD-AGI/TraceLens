@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Op models: OpWork, the built-in op models, registration, columns."""
+"""Op projections: OpWork, the built-in op projections, registration, columns."""
 
 import importlib.util
 import math
@@ -18,18 +18,18 @@ import pandas as pd
 import pytest
 
 from TraceLens.PerfModel import origami_helper, perf_model, sdpa_tile
-from TraceLens.PerfModel.op_models import (
+from TraceLens.PerfModel.op_projections import (
     OpWork,
-    add_op_model_columns,
-    add_op_model_outputs,
-    default_op_models,
-    external_op_model,
-    op_model_group_columns,
-    op_model_labels,
+    add_op_projection_columns,
+    add_op_projection_outputs,
+    default_op_projections,
+    adapt_op_projection,
+    op_projection_group_columns,
+    op_projection_labels,
     op_work,
-    origami_gemm_model,
-    roofline_op_model,
-    sdpa_tile_origami_op_model,
+    origami_gemm_op_projection,
+    roofline_op_projection,
+    sdpa_tile_origami_op_projection,
 )
 from TraceLens.Reporting.generate_perf_report_pytorch import (
     apply_extension,
@@ -61,12 +61,12 @@ def _work(**kw):
 
 class TestRoofline:
     def test_compute_bound(self):
-        output = roofline_op_model(_work(gflops=1.0, bytes_moved=1e3), ARCH)
+        output = roofline_op_projection(_work(gflops=1.0, bytes_moved=1e3), ARCH)
         assert output["time_us"] == pytest.approx(1e9 / 500e12 * 1e6)
         assert output["Bound"] == "COMPUTE_BOUND"
 
     def test_memory_bound(self):
-        output = roofline_op_model(_work(gflops=1e-6, bytes_moved=1e9), ARCH)
+        output = roofline_op_projection(_work(gflops=1e-6, bytes_moved=1e9), ARCH)
         assert output["time_us"] == pytest.approx(1e9 / 5000e9 * 1e6)
         assert output["Bound"] == "MEMORY_BOUND"
 
@@ -83,7 +83,7 @@ class TestRoofline:
         ],
     )
     def test_skips_without_inputs(self, work, arch):
-        assert roofline_op_model(work, arch) is None
+        assert roofline_op_projection(work, arch) is None
 
 
 class TestExternalModel:
@@ -96,47 +96,47 @@ class TestExternalModel:
             return 3
 
         work = _work()
-        assert external_op_model(model)(work, ARCH) == 3.0
+        assert adapt_op_projection(model)(work, ARCH) == 3.0
         assert seen["category"] == "GEMM"
         assert seen["arch"] is ARCH
         assert seen["params"] is not work.params
         assert work.params["M"] == 4
 
     def test_backward_gets_the_backward_category(self):
-        model = external_op_model(lambda category, params, arch: len(category))
+        model = adapt_op_projection(lambda category, params, arch: len(category))
         assert model(_work(category="SDPA_bwd", bwd=True), ARCH) == 8.0
         assert model(_work(category=None, bwd=True), ARCH) is None
 
     def test_skips_unknown_category(self):
-        model = external_op_model(lambda category, params, arch: 1.0)
+        model = adapt_op_projection(lambda category, params, arch: 1.0)
         assert model(_work(category=None), ARCH) is None
         assert model(_work(params=None), ARCH) is None
 
     def test_dict_output_passes_through(self):
         output = {"time_us": 2.0, "Config": "256x128"}
-        model = external_op_model(lambda category, params, arch: output)
+        model = adapt_op_projection(lambda category, params, arch: output)
         assert model(_work(), ARCH) is output
 
 
-class TestOpModelErrors:
+class TestOpProjectionErrors:
     @pytest.fixture(autouse=True)
     def _fresh(self, monkeypatch):
-        from TraceLens.PerfModel import op_models
+        from TraceLens.PerfModel import op_projections
 
-        monkeypatch.setattr(op_models, "_op_model_warnings", set())
+        monkeypatch.setattr(op_projections, "_op_projection_warnings", set())
 
     def test_failing_model_only_loses_its_own_columns(self):
         def broken(category, params, arch):
             raise ValueError("unsupported dtype")
 
         models = {
-            "Roofline": roofline_op_model,
-            "Broken": external_op_model(broken),
-            "Fine": external_op_model(lambda category, params, arch: 4.0),
+            "Roofline": roofline_op_projection,
+            "Broken": adapt_op_projection(broken),
+            "Fine": adapt_op_projection(lambda category, params, arch: 4.0),
         }
         metrics = {}
         with pytest.warns(RuntimeWarning, match="'Broken' failed on a GEMM op"):
-            add_op_model_outputs(metrics, models, _work(), ARCH, 8.0)
+            add_op_projection_outputs(metrics, models, _work(), ARCH, 8.0)
         assert "Roofline Time (µs)" in metrics
         assert metrics["Fine Time (µs)"] == 4.0
         assert not [col for col in metrics if "Broken" in col]
@@ -144,37 +144,37 @@ class TestOpModelErrors:
     def test_warns_once_per_model_category_and_error(self):
         models = {"Broken": lambda work, arch: 1 / 0}
         with pytest.warns(RuntimeWarning):
-            add_op_model_outputs({}, models, _work(), ARCH, 8.0)
+            add_op_projection_outputs({}, models, _work(), ARCH, 8.0)
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            add_op_model_outputs({}, models, _work(), ARCH, 8.0)
+            add_op_projection_outputs({}, models, _work(), ARCH, 8.0)
         with pytest.warns(RuntimeWarning, match="SDPA_fwd"):
-            add_op_model_outputs({}, models, _work(category="SDPA_fwd"), ARCH, 8.0)
+            add_op_projection_outputs({}, models, _work(category="SDPA_fwd"), ARCH, 8.0)
 
 
 class TestOrigamiGemm:
     def test_forward_gemms_only(self):
         params = {**_work().params, "dtype_A_B": ("c10::BFloat16",)}
-        origami = external_op_model(origami_gemm_model)
+        origami = adapt_op_projection(origami_gemm_op_projection)
         with patch.object(origami_helper, "gemm_time_us", return_value=7.0) as sim:
             assert origami(_work(params=params), ARCH) == 7.0
             assert origami(_work(params=params, category=None), ARCH) is None
             assert origami(_work(category="SDPA_fwd", params={}), ARCH) is None
-            assert origami_gemm_model("GEMM", params, None) is None
+            assert origami_gemm_op_projection("GEMM", params, None) is None
         sim.assert_called_once()
         assert sim.call_args.args[5] == "bf16"
 
-    def test_default_op_models_order(self):
-        assert list(default_op_models()) == ["Roofline"]
-        assert list(default_op_models(enable_origami_gemm=True)) == [
+    def test_default_op_projections_order(self):
+        assert list(default_op_projections()) == ["Roofline"]
+        assert list(default_op_projections(enable_origami_gemm=True)) == [
             "Roofline",
             "Origami",
         ]
-        assert list(default_op_models(enable_origami_sdpa_tile=True)) == [
+        assert list(default_op_projections(enable_origami_sdpa_tile=True)) == [
             "Roofline",
             "SDPA Tile Origami",
         ]
-        assert list(default_op_models(True, True)) == [
+        assert list(default_op_projections(True, True)) == [
             "Roofline",
             "Origami",
             "SDPA Tile Origami",
@@ -182,11 +182,11 @@ class TestOrigamiGemm:
 
 
 class TestSdpaTile:
-    def test_op_model_times_the_op_with_origami_gemms(self):
+    def test_op_projection_times_the_op_with_origami_gemms(self):
         pm = _Attention({})
         with patch.object(sdpa_tile, "sdpa_tile_time_us", return_value=3.0) as tile:
             work = _work(category="SDPA_bwd", perf_model=pm, bwd=True)
-            assert sdpa_tile_origami_op_model(work, ARCH) == 3.0
+            assert sdpa_tile_origami_op_projection(work, ARCH) == 3.0
         tile.assert_called_once_with(pm, ARCH, origami_helper.gemm_time_us, bwd=True)
 
     def test_only_sdpa_ops_with_an_arch_get_a_time(self):
@@ -239,7 +239,7 @@ class _Attention(perf_model.SDPA):
 class TestColumns:
     def test_dict_output_with_extra_columns(self):
         metrics = {}
-        add_op_model_columns(
+        add_op_projection_columns(
             metrics,
             "Roofline",
             {"time_us": 2.0, "Bound": "X"},
@@ -259,7 +259,7 @@ class TestColumns:
 
     def test_dict_output_without_a_time_keeps_its_columns(self):
         metrics = {}
-        add_op_model_columns(
+        add_op_projection_columns(
             metrics, "Tiles", {"Tile": "256x128", "Waves": 3}, 4.0, 2e6, 8.0
         )
         assert metrics["Tiles Tile"] == "256x128"
@@ -270,7 +270,7 @@ class TestColumns:
 
     def test_only_scalar_values_are_written(self):
         metrics = {}
-        add_op_model_columns(
+        add_op_projection_columns(
             metrics,
             "X",
             {"time_us": 1.0, "Name": "a", "N": 2, "Ok": True, "List": [1], "D": {}},
@@ -284,12 +284,12 @@ class TestColumns:
     @pytest.mark.parametrize("output", [None, 0, 0.0, {}, {"time_us": None}])
     def test_missing_output_writes_nothing(self, output):
         metrics = {}
-        add_op_model_columns(metrics, "X", output, 1.0, 1.0, 1.0)
+        add_op_projection_columns(metrics, "X", output, 1.0, 1.0, 1.0)
         assert metrics == {}
 
     def test_zero_measured_time_gives_nan_pct(self):
         metrics = {}
-        add_op_model_columns(metrics, "X", 1.0, 1.0, None, 0)
+        add_op_projection_columns(metrics, "X", 1.0, 1.0, None, 0)
         assert math.isnan(metrics["Pct X"])
         assert math.isnan(metrics["X TB/s"])
 
@@ -298,7 +298,7 @@ class TestColumns:
         for label in ("Mine", "External", "SDPA Tile Origami", "Origami", "Roofline"):
             columns += [f"{label} Time (µs)", f"Pct {label}"]
         columns += ["Non-Data-Mov Kernel Time (µs)", "Pct Nothing"]
-        assert op_model_labels(columns) == [
+        assert op_projection_labels(columns) == [
             "Roofline",
             "Origami",
             "SDPA Tile Origami",
@@ -315,30 +315,30 @@ class TestColumns:
             "Pct GEMM",
             "Pct GEMM Sim",
         ]
-        labels = op_model_labels(columns)
-        assert op_model_group_columns(columns, "GEMM", labels) == [
+        labels = op_projection_labels(columns)
+        assert op_projection_group_columns(columns, "GEMM", labels) == [
             "GEMM Time (µs)",
             "GEMM TB/s",
             "Pct GEMM",
         ]
-        assert op_model_group_columns(columns, "GEMM Sim", labels) == [
+        assert op_projection_group_columns(columns, "GEMM Sim", labels) == [
             "GEMM Sim Time (µs)",
             "GEMM Sim TB/s",
             "Pct GEMM Sim",
         ]
 
 
-def test_extension_op_models_dict(tmp_path):
+def test_extension_op_projections_dict(tmp_path):
     ext = tmp_path / "ext.py"
-    ext.write_text("op_models = {'A': lambda c, p, a: 1.0, 'B': None}\n")
+    ext.write_text("op_projections = {'A': lambda c, p, a: 1.0, 'B': None}\n")
     registered = []
     analyzer = SimpleNamespace(
-        register_op_model=lambda label, model: registered.append((label, model))
+        register_op_projection=lambda label, model: registered.append((label, model))
     )
     apply_extension(analyzer, str(ext))
     assert [label for label, _ in registered] == ["A", "B"]
 
-    ext.write_text("op_models = [1]\n")
+    ext.write_text("op_projections = [1]\n")
     with pytest.raises(TypeError):
         apply_extension(analyzer, str(ext))
 
@@ -371,11 +371,11 @@ def test_external_model_sees_the_op_direction(bwd, category, gflops):
         seen.append((category, params))
         return 10.0
 
-    analyzer = SimpleNamespace(arch=ARCH, op_models={})
-    TreePerfAnalyzer.register_op_model(analyzer, "Mine", model)
+    analyzer = SimpleNamespace(arch=ARCH, op_projections={})
+    TreePerfAnalyzer.register_op_projection(analyzer, "Mine", model)
     metrics = {}
     work = op_work(_FakeAttention(), bwd=bwd)
-    add_op_model_outputs(metrics, analyzer.op_models, work, ARCH, 20.0)
+    add_op_projection_outputs(metrics, analyzer.op_projections, work, ARCH, 20.0)
     assert seen == [(category, {"N_Q": 128})]
     assert metrics["Mine Time (µs)"] == 10.0
     assert metrics["Mine TFLOPS/s"] == pytest.approx(gflops / 10.0 * 1e3)
@@ -505,7 +505,7 @@ def test_report_keeps_ops_when_a_model_fails_and_shows_extra_columns(tmp_path):
         "    return {'Tile': '64x64'} if category == 'GEMM' else None\n"
         "def broken(category, params, arch):\n"
         "    raise ValueError('unsupported')\n"
-        "op_models = {'Configured': configured, 'Tiles': tiles_only, "
+        "op_projections = {'Configured': configured, 'Tiles': tiles_only, "
         "'Broken': broken}\n"
     )
     with pytest.warns(RuntimeWarning, match="'Broken' failed"):
@@ -540,7 +540,7 @@ def test_report_shows_every_registered_model(tmp_path):
     ext.write_text(
         "def gemm_only(category, params, arch):\n"
         "    return 3.0 if category == 'GEMM' else None\n"
-        "op_models = {'ModelA': gemm_only, 'ModelB': lambda c, p, a: 4.0}\n"
+        "op_projections = {'ModelA': gemm_only, 'ModelB': lambda c, p, a: 4.0}\n"
     )
     dfs = generate_perf_report_pytorch(
         profile_json_path=str(TRACE),

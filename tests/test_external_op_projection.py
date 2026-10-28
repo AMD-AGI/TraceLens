@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Op models: built-in Origami and an extension-registered external model."""
+"""Op projections: built-in Origami and an extension-registered external model."""
 
 import importlib
 from functools import partial
@@ -16,10 +16,10 @@ import pytest
 
 from TraceLens.PerfModel import origami_helper
 from TraceLens.PerfModel.perf_model import aten_mm
-from TraceLens.PerfModel.op_models import (
-    external_op_model,
+from TraceLens.PerfModel.op_projections import (
+    adapt_op_projection,
     op_work,
-    origami_gemm_model,
+    origami_gemm_op_projection,
 )
 from TraceLens.Reporting.generate_perf_report_pytorch import (
     generate_perf_report_pytorch,
@@ -27,7 +27,7 @@ from TraceLens.Reporting.generate_perf_report_pytorch import (
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 REPO = Path(__file__).resolve().parents[1]
-STUB = REPO / "examples" / "external_op_model_stub.py"
+STUB = REPO / "examples" / "external_op_projection_stub.py"
 TRACE = (
     REPO
     / "tests"
@@ -60,7 +60,7 @@ def test_model_gets_category_a_copy_of_params_and_arch():
         return 12
 
     gemm = _mm()
-    assert external_op_model(model)(op_work(gemm), ARCH) == 12.0
+    assert adapt_op_projection(model)(op_work(gemm), ARCH) == 12.0
     assert seen["category"] == "GEMM"
     assert (seen["params"]["N"], seen["params"]["K"]) == (32, 64)
     assert seen["arch"] is ARCH
@@ -71,7 +71,7 @@ def test_model_returning_none_gives_no_prediction():
     def model(category, params, arch):
         return None
 
-    assert external_op_model(model)(op_work(_mm()), ARCH) is None
+    assert adapt_op_projection(model)(op_work(_mm()), ARCH) is None
 
 
 @pytest.mark.parametrize(
@@ -83,7 +83,7 @@ def test_model_returning_none_gives_no_prediction():
 )
 def test_extension_file_registers_external_model(report_module):
     registered = []
-    analyzer = SimpleNamespace(set_external_op_model=registered.append)
+    analyzer = SimpleNamespace(set_external_op_projection=registered.append)
     importlib.import_module(report_module).apply_extension(analyzer, str(STUB))
     assert len(registered) == 1
     output = registered[0]("GEMM", {"M": 1, "N": 1, "K": 1, "B": 1}, None)
@@ -94,22 +94,24 @@ def test_extension_file_registers_external_model(report_module):
 def test_origami_model_passes_gemm_shape_to_origami():
     gemm = _mm()
     with patch.object(origami_helper, "gemm_time_us", return_value=7.0) as sim:
-        assert origami_gemm_model("GEMM", gemm.param_details, ARCH) == 7.0
-        assert origami_gemm_model("SDPA_fwd", gemm.param_details, ARCH) is None
-        assert origami_gemm_model("GEMM", gemm.param_details, None) is None
+        assert origami_gemm_op_projection("GEMM", gemm.param_details, ARCH) == 7.0
+        assert origami_gemm_op_projection("SDPA_fwd", gemm.param_details, ARCH) is None
+        assert origami_gemm_op_projection("GEMM", gemm.param_details, None) is None
     sim.assert_called_once_with(ARCH, 128, 32, 64, 1, "bf16")
 
 
-def test_set_external_op_model():
-    analyzer = SimpleNamespace(op_models={})
-    analyzer.register_op_model = partial(TreePerfAnalyzer.register_op_model, analyzer)
-    TreePerfAnalyzer.set_external_op_model(analyzer, len)
-    assert list(analyzer.op_models) == ["External"]
-    assert analyzer.op_models["External"].external_model is len
-    TreePerfAnalyzer.set_external_op_model(analyzer, None)
-    assert analyzer.op_models == {}
+def test_set_external_op_projection():
+    analyzer = SimpleNamespace(op_projections={})
+    analyzer.register_op_projection = partial(
+        TreePerfAnalyzer.register_op_projection, analyzer
+    )
+    TreePerfAnalyzer.set_external_op_projection(analyzer, len)
+    assert list(analyzer.op_projections) == ["External"]
+    assert analyzer.op_projections["External"].wrapped_model is len
+    TreePerfAnalyzer.set_external_op_projection(analyzer, None)
+    assert analyzer.op_projections == {}
     with pytest.raises(TypeError):
-        TreePerfAnalyzer.set_external_op_model(analyzer, "not a function")
+        TreePerfAnalyzer.set_external_op_projection(analyzer, "not a function")
 
 
 def test_report_has_origami_and_external_columns_for_gemms(tmp_path):

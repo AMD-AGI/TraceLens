@@ -156,7 +156,7 @@ This adds:
   provided.
 - Add `--enable-origami-sdpa-tile` for attention times from TraceLens's SDPA
   tile model, with Origami timing each tile GEMM (see below).
-- To add your own model, see [Add an op model](#add-an-op-model).
+- To add your own model, see [Add an op projection](#add-an-op-projection).
 
 The arch JSON specifies Max Achievable FLOPS (MAF) per compute type and
 precision; see the
@@ -213,8 +213,8 @@ can define any of:
 | `tree_postprocess_extension` | `Callable` | Called with `perf_analyzer.tree`; update the tree post-construction. |
 | `perf_model_extension` | `dict` | Map op name → custom perf-model class; overrides or extends built-in models. |
 | `op_category_extension` | `dict` | Map category-only op names to final categories, so an op appears in unified reports without a perf model. |
-| `op_models` | `dict` | Map a label → op model `fn(category, params, arch)`; see [Add an op model](#add-an-op-model). |
-| `external_op_model` | `Callable` | Same signature; registered under the label `External`. |
+| `op_projections` | `dict` | Map a label → op projection `fn(category, params, arch)`; see [Add an op projection](#add-an-op-projection). |
+| `external_op_projection` | `Callable` | Same signature; registered under the label `External`. |
 | `kernel_filters` | `dict` | Map a label → `fn(kernel_event)` returning whether to count the kernel. Each label fills `<label> Kernel Time (µs)` and `<label> TFLOPS/s` with the busy time of the op's kept kernels. |
 
 ```bash
@@ -223,26 +223,26 @@ TraceLens_generate_perf_report_pytorch \
     --extension_file my_extension.py
 ```
 
-### Add an op model
+### Add an op projection
 
 A *perf model* describes the work an op does: its parameters, FLOPs, and
-bytes. An *op model* predicts how that work runs, usually as a time, and can
+bytes. An *op projection* predicts how that work runs, usually as a time, and can
 report other per-op values, such as the kernel tile a library would pick.
-Each op model has a label, and its columns appear next to the measured
+Each op projection has a label, and its columns appear next to the measured
 metrics and the roofline.
 
-An op model is a function of the op's category, parameters, and GPU arch:
+An op projection is a function of the op's category, parameters, and GPU arch:
 
 ```python
-def my_model(category, params, arch):
+def my_op_projection(category, params, arch):
     ...
     return None                                     # op not covered
     return 12.5                                     # predicted time in µs
     return {"time_us": 12.5, "Tile": "256x128x64"}  # time plus extra columns
 ```
 
-The return value decides which columns the op gets. For a model labeled
-`MyModel`:
+The return value decides which columns the op gets. For an op projection
+labeled `MyModel`:
 
 | Return value | Columns added |
 | --- | --- |
@@ -264,15 +264,15 @@ The inputs are:
   `transpose`, for example, is set only when the GEMM kernel name parses.
   Dtypes are trace strings such as `"c10::BFloat16"`;
   `TraceLens.PerfModel.utils.torch_dtype_map` converts them to `"bf16"`.
-- `arch`: the report's GPU arch dict, or `None`. A model can ignore it and
-  target another GPU.
+- `arch`: the report's GPU arch dict, or `None`. An op projection can
+  ignore it and target another GPU.
 
-The model runs once per op launch, so the same shape arrives many times;
-cache slow calls. If the model raises, its columns stay empty for that op,
-the op's other metrics are kept, and TraceLens warns once per model,
-category, and error type. Return `None` to skip an op on purpose.
+The op projection runs once per op launch, so the same shape arrives many
+times; cache slow calls. If the op projection raises, its columns stay
+empty for that op, the op's other metrics are kept, and TraceLens warns
+once per op projection, category, and error type. Return `None` to skip an op on purpose.
 
-Register models in the extension file with an `op_models` dict:
+Register op projections in the extension file in an `op_projections` dict:
 
 ```python
 from functools import lru_cache
@@ -281,7 +281,7 @@ from functools import lru_cache
 def _gemm_time(M, N, K, B, transpose):
     return my_library.gemm(M, N, K, B, transpose)
 
-def gemm_model(category, params, arch):
+def gemm_op_projection(category, params, arch):
     if category != "GEMM":
         return None
     result = _gemm_time(
@@ -290,33 +290,33 @@ def gemm_model(category, params, arch):
     )
     return {"time_us": result.time_us, "Tile": result.tile}
 
-op_models = {"MyModel": gemm_model}
+op_projections = {"MyModel": gemm_op_projection}
 ```
 
 Every per-op sheet gets the `MyModel` columns from the table above, and the
 summary sheets pick up the label on their own (see the
-[column reference](../reference/perf-report-columns.md#op-model-columns)).
+[column reference](../reference/perf-report-columns.md#op-projection-columns)).
 Keep proprietary library calls in the extension file.
-`examples/external_op_model_stub.py` is a placeholder to start from.
+`examples/external_op_projection_stub.py` is a placeholder to start from.
 
-From Python, register a model with
-`TreePerfAnalyzer.register_op_model(label, fn)`, then
-`compute_perf_metrics(event)` runs every registered model on one op, which is
-handy when iterating on a model:
+From Python, register an op projection with
+`TreePerfAnalyzer.register_op_projection(label, fn)`, then
+`compute_perf_metrics(event)` runs every registered op projection on one
+op, which is handy when iterating on one:
 
 ```python
 from TraceLens import TreePerfAnalyzer
 
 analyzer = TreePerfAnalyzer.from_file("trace.json", arch=arch)
-analyzer.register_op_model("MyModel", gemm_model)
+analyzer.register_op_projection("MyModel", gemm_op_projection)
 gemm = next(e for e in analyzer.tree.events if e["name"] == "aten::mm")
 metrics = analyzer.compute_perf_metrics(gemm)  # param: ..., MyModel Time (µs), ...
 ```
 
 Behind this, TraceLens builds the op's perf model from the event, describes
-its work with `TraceLens.PerfModel.op_models.op_work(perf_model)`, and calls
-each op model on that work. Roofline and the Origami models use the same
-interface, in `TraceLens/PerfModel/op_models.py`.
+its work with `TraceLens.PerfModel.op_projections.op_work(perf_model)`, and calls
+each op projection on that work. Roofline and the Origami op projections use the
+same interface, in `TraceLens/PerfModel/op_projections.py`.
 
 Origami models GEMMs only. For attention, `--enable-origami-sdpa-tile` adds
 TraceLens's SDPA tile model: it times one Q·Kᵀ tile and one P·V tile on one
@@ -325,8 +325,8 @@ memory terms. Its columns are labeled `SDPA Tile Origami`. It needs
 `num_cus`, `gemm_units_per_cu`, and `mem_bw_gbps` in the arch, and
 `l1_bw_gbps` for backward. The tile model, in
 `TraceLens/PerfModel/sdpa_tile.py`, times its tiles with whatever GEMM model
-it's given as `gemm_time`; the op model passes Origami's. To use another GEMM
-model, write an op model that calls
+it's given as `gemm_time`; the op projection passes Origami's. To use another GEMM
+model, write an op projection that calls
 `sdpa_tile_time_us(work.perf_model, arch, your_gemm_time, bwd=work.bwd)`.
 
 ### Add a kernel filter
@@ -360,7 +360,7 @@ The following table describes all optional arguments.
 | `--enable-origami-gemm` | `False` | Add `Origami` GEMM times when an arch is provided. |
 | `--enable-origami-sdpa-tile` | `False` | Add `SDPA Tile Origami` attention times from TraceLens's tile model, with Origami timing each tile GEMM. |
 | `--detect_recompute` | `False` | Add an `is_recompute` column for activation checkpointing (see above). |
-| `--extension_file PATH` | `None` | Custom tree, perf-model, op-category, op-model, and kernel-filter hooks (see above). |
+| `--extension_file PATH` | `None` | Custom tree, perf-model, op-category, op-projection, and kernel-filter hooks (see above). |
 | `--enable_kernel_summary` | `False` | Add the `kernel_summary` sheet. |
 | `--short_kernel_study` | `False` | Add the short-kernel study sheets. |
 | `--short_kernel_threshold_us X` | `10` | Threshold (µs) to classify a kernel as "short". |

@@ -12,7 +12,11 @@ from itertools import chain
 import pandas as pd
 
 from ..PerfModel import perf_model
-from ..PerfModel.op_models import add_op_model_outputs, default_op_models, op_work
+from ..PerfModel.op_projections import (
+    add_op_projection_outputs,
+    default_op_projections,
+    op_work,
+)
 from ..PerfModel.utils import build_perf_metrics_dict
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
@@ -561,8 +565,8 @@ class JaxAnalyses:
 
         dict_metrics = build_perf_metrics_dict(work.gflops, work.bytes_moved, time)
         dict_metrics["Compute Spec"] = work.compute_spec or ""
-        add_op_model_outputs(
-            dict_metrics, default_op_models(enable_origami_gemm), work, arch, time
+        add_op_projection_outputs(
+            dict_metrics, default_op_projections(enable_origami_gemm), work, arch, time
         )
 
         for key, value in perf_model.param_details.items():

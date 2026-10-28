@@ -64,9 +64,9 @@ def add_simulation_time_columns(
     label="Origami",
 ):
     """
-    Add simulated time columns (Origami, or ``label`` for other op models).
+    Add simulated time columns (Origami, or ``label`` for other op projections).
     For dict outputs with extra columns, use
-    ``TraceLens.PerfModel.op_models.add_op_model_columns``.
+    ``TraceLens.PerfModel.op_projections.add_op_projection_columns``.
     """
     if not simulated_time:
         return

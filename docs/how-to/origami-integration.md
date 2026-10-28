@@ -56,7 +56,7 @@ If `import origami` fails after `pip install`, check:
 
 ## When TraceLens uses Origami
 
-Origami runs as an op model, in `TraceLens/PerfModel/op_models.py`. Both the
+Origami runs as an op projection, in `TraceLens/PerfModel/op_projections.py`. Both the
 GEMM model and the SDPA tile model in `TraceLens/PerfModel/perf_model.py` time
 GEMMs with `gemm_time_us` in `TraceLens/PerfModel/origami_helper.py`, which
 also maps TraceLens dtypes to Origami's. TraceLens calls Origami only when you
@@ -125,14 +125,14 @@ TraceLens_generate_perf_report_jax \
 
 ### Time a shape without a trace
 
-Call the GEMM op model directly with the shape as `params`:
+Call the GEMM op projection directly with the shape as `params`:
 
 ```python
-from TraceLens.PerfModel.op_models import origami_gemm_model
+from TraceLens.PerfModel.op_projections import origami_gemm_op_projection
 
 arch = {"name": "MI300X", "freq_mhz": 2100}
 params = {"M": 4096, "N": 4096, "K": 4096, "B": 1, "simulation_dtype": "bf16"}
-print(origami_gemm_model("GEMM", params, arch))  # time in µs
+print(origami_gemm_op_projection("GEMM", params, arch))  # time in µs
 ```
 
 For attention, `sdpa_fwd_time_us` and `sdpa_bwd_time_us` in

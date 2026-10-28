@@ -94,7 +94,7 @@ from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
     vllm_rocm_aiter_triton_add_rmsnorm_pad,
 )
 from TraceLens.PerfModel import kernel_name_parser, perf_model
-from TraceLens.PerfModel.op_models import origami_gemm_model
+from TraceLens.PerfModel.op_projections import origami_gemm_op_projection
 from tests.fixtures.perfmodel import (
     _ARCH,
     _GDN,
@@ -573,7 +573,10 @@ class TestGemmBaseCoverage:
 
     def test_origami_time_without_arch(self):
         model = perf_model.aten_mm(_gemm_event("aten::mm", (4, 8), (8, 16)))
-        assert origami_gemm_model(model.category, model.param_details, None) is None
+        assert (
+            origami_gemm_op_projection(model.category, model.param_details, None)
+            is None
+        )
 
     def test_origami_simulation_mocked(self, monkeypatch):
         mock_origami = MagicMock()

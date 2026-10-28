@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Placeholder external op model.
+"""Placeholder external op projection.
 
 Pass this file with ``--extension_file`` to see ``External`` columns. The
 time is ``2*M*N*K*B`` at a fixed 100 TFLOP/s, so it is not a device model.
@@ -16,11 +16,11 @@ is optional and whose other scalar values become ``External <name>``
 columns.
 
 A real model belongs in an extension file outside this repository that
-defines ``external_op_model`` the same way and imports its library itself.
+defines ``external_op_projection`` the same way and imports its library itself.
 """
 
 
-def external_op_model(category, params, arch):
+def external_op_projection(category, params, arch):
     if category != "GEMM":
         return None
     flops = 2 * params["M"] * params["N"] * params["K"] * (params.get("B") or 1)
