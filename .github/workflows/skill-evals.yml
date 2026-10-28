@@ -63,6 +63,4 @@ jobs:
         with:
           command: structural
           args: --external
-          skills: |
-            TraceLens/Agent/Analysis/skills/analysis-orchestrator
-            TraceLens/Agent/Visualizer/skills/model-visualizer
+          skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator,TraceLens/Agent/Visualizer/skills/model-visualizer

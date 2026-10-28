@@ -3625,9 +3625,12 @@ def test_standalone_module_candidates(tmp_path):
     assert mlp.kernel_type_signature == ["GEMM", "Add"]
     assert mlp.total_kernel_time_us == 2 * (50 + 50)
     # Data moved of each kernel's perf row, split into in and out.
-    assert [(k.data_in_mb, k.data_out_mb) for k in mlp.kernels] == pytest.approx(
-        [(10 * 18 / 26, 10 * 8 / 26), (4.0, 2.0)]
-    )
+    # Compare each pair on its own: pytest 9.2 rejects a list of tuples in one approx().
+    got = [(k.data_in_mb, k.data_out_mb) for k in mlp.kernels]
+    expected = [(10 * 18 / 26, 10 * 8 / 26), (4.0, 2.0)]
+    assert len(got) == len(expected)
+    for actual, want in zip(got, expected):
+        assert actual == pytest.approx(want)
 
 
 def test_standalone_attention_narrows_to_core():
