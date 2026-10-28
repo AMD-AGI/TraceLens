@@ -4,46 +4,41 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Op projections: per-op values computed from an op's work.
+"""Op projections: per-op predictions computed from an op's work.
 
 A *perf model* (:mod:`TraceLens.PerfModel.perf_model`) says what work an op
-does: its shapes, FLOPs and bytes. An *op projection* takes that work and returns
-anything to report for the op, usually a predicted time but also values such
-as a kernel configuration. :class:`TreePerfAnalyzer` measures an op,
-describes its work as an :class:`OpWork`, and runs every registered op projection
-on it::
+does: its shapes, FLOPs and bytes. An *op projection* takes that work and
+returns what to report for the op, usually a predicted time but also values
+such as a kernel configuration. :class:`TreePerfAnalyzer` measures an op,
+describes its work as an :class:`OpWork`, and runs every registered op
+projection on it::
 
     def op_projection(work, arch):
-        return None or time_us or {"time_us": time_us, "Tile": "256x128x64"}
+        if work.category != "GEMM":
+            return None
+        return {"time_us": time_us, "Tile": "256x128x64"}
 
-The output is ``None`` (the model does not handle this op), a time in µs, or
-a dict. A dict's ``time_us`` is optional; every other key ``name`` becomes a
-``<label> <name>`` column, and only scalar values (numbers, strings, bools)
-are written. With a time, the label also gets ``<label> Time (µs)``,
-``<label> TFLOPS/s``, ``<label> TB/s`` and ``Pct <label>`` (time as a
-percentage of the measured kernel time). Without one, ``<label> Time (µs)``
-and ``Pct <label>`` are left empty. A model that raises gets no columns for
-that op, with a one-time warning. Op projections are called once per op launch,
-so a slow model should cache its results.
+``work.category`` is the perf-model class's ``category`` (``"GEMM"``,
+``"SDPA_fwd"``, ...), or its ``bwd_category`` (``"SDPA_bwd"``, ...) for a
+backward op, which is ``None`` for ops without one (GEMM). ``work.params`` is
+a copy of the perf model's ``param_details``, the same values as the
+report's ``param:`` columns; any key may be missing (for example
+``transpose``, which is only set when the kernel name parses). ``arch`` is
+the GPU arch dict of the report, or ``None``.
+
+The output is ``None`` (no projection for this op) or a dict. ``time_us`` is
+optional; every other key ``name`` becomes a ``<label> <name>`` column, and
+only scalar values (numbers, strings, bools) are written. With a time, the
+label also gets ``<label> Time (µs)``, ``<label> TFLOPS/s``, ``<label> TB/s``
+and ``Pct <label>`` (time as a percentage of the measured kernel time).
+Without one, ``<label> Time (µs)`` and ``Pct <label>`` are left empty. An op
+projection that raises or returns anything else gets no columns for that
+op, with a one-time warning. Op projections are called once per op launch,
+so a slow one should cache its results.
 
 Roofline is always on; Origami for GEMMs and the SDPA tile model with Origami
-are built in behind flags.
-
-External op projections use a simpler signature and are adapted with
-:func:`adapt_op_projection`::
-
-    def model(category, params, arch):
-        if category != "GEMM":
-            return None
-        return predicted_time_us
-
-``category`` is the perf-model class's ``category`` (``"GEMM"``,
-``"SDPA_fwd"``, ...), or its ``bwd_category`` (``"SDPA_bwd"``, ...) for a
-backward op. ``params`` is a copy of the perf model's ``param_details``, the
-same values as the report's ``param:`` columns; any key may be missing (for
-example ``transpose``, which is only set when the kernel name parses).
-``arch`` is the GPU arch dict of the report, or ``None``. A proprietary
-library call belongs in an ``--extension_file``, not in this repository.
+are built in behind flags. A proprietary library call belongs in an
+``--extension_file``, not in this repository.
 """
 
 import numbers
@@ -94,9 +89,10 @@ def op_work(perf_model, bwd=False):
     """The :class:`OpWork` of a constructed perf model, forward or backward."""
     gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
     bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
+    params = getattr(perf_model, "param_details", None)
     return OpWork(
         category=getattr(perf_model, "bwd_category" if bwd else "category", None),
-        params=getattr(perf_model, "param_details", None),
+        params=dict(params) if params is not None else None,
         gflops=gflops,
         bytes_moved=bytes_moved,
         compute_spec=get_compute_spec(perf_model),
@@ -155,17 +151,14 @@ def _is_scalar(value):
 def add_op_projection_columns(
     dict_metrics, label, output, gflops, bytes_moved, busy_kernel_time
 ):
-    """Write ``label``'s columns for an op projection's ``output``: None, a time in
-    µs, or a dict with an optional ``time_us`` and extra scalar columns."""
-    if isinstance(output, dict):
-        time_us = output.get(TIME_KEY)
-        extra_columns = {
-            name: value
-            for name, value in output.items()
-            if name != TIME_KEY and _is_scalar(value)
-        }
-    else:
-        time_us, extra_columns = output, {}
+    """Write ``label``'s columns for an op projection's ``output``: a dict with
+    an optional ``time_us`` and extra scalar columns."""
+    time_us = output.get(TIME_KEY)
+    extra_columns = {
+        name: value
+        for name, value in output.items()
+        if name != TIME_KEY and _is_scalar(value)
+    }
     if not time_us and not extra_columns:
         return
     if time_us:
@@ -195,7 +188,7 @@ def _warn_op_projection_failed(label, work, error):
     warnings.warn(
         f"Op projection {label!r} failed on a {work.category} op "
         f"({type(error).__name__}: {error}); its columns are left empty for that "
-        "op. Shown once per model, category and error type.",
+        "op. Shown once per op projection, category and error type.",
         RuntimeWarning,
     )
 
@@ -205,13 +198,20 @@ def add_op_projection_outputs(
 ):
     """Run each ``{label: op_projection}`` on ``work`` and write its columns.
 
-    A model that raises gets no columns for this op; the others and the
-    measured metrics are unaffected."""
+    An op projection that raises or returns something other than a dict or
+    None gets no columns for this op; the others and the measured metrics are
+    unaffected."""
     for label, op_projection in op_projections.items():
         try:
             output = op_projection(work, arch)
+            if output is not None and not isinstance(output, dict):
+                raise TypeError(
+                    f"returned {type(output).__name__}, expected a dict or None"
+                )
         except Exception as error:
             _warn_op_projection_failed(label, work, error)
+            continue
+        if output is None:
             continue
         add_op_projection_columns(
             dict_metrics,
@@ -245,34 +245,22 @@ def roofline_op_projection(work, arch):
     return {TIME_KEY: max(compute_time_us, memory_time_us), "Bound": bound}
 
 
-def adapt_op_projection(model):
-    """Adapt ``model(category, params, arch)`` to the op-projection interface.
-
-    The model returns None, a time in µs, or a dict (see the module doc). A
-    backward op is passed its perf model's ``bwd_category`` (``"SDPA_bwd"``,
-    ...) with the forward params; ops without one (GEMM) are skipped."""
-
-    def op_projection(work, arch):
-        if work.category is None or work.params is None:
-            return None
-        output = model(work.category, dict(work.params), arch)
-        if output is None or isinstance(output, dict):
-            return output
-        return float(output)
-
-    op_projection.wrapped_model = model
-    return op_projection
+def _time_output(time_us):
+    return None if time_us is None else {TIME_KEY: time_us}
 
 
-def origami_gemm_op_projection(category, params, arch):
-    """GEMM time from Origami, as an external-style model."""
-    if category != "GEMM" or arch is None:
+def origami_gemm_op_projection(work, arch):
+    """GEMM time from Origami."""
+    if work.category != "GEMM" or arch is None:
         return None
+    params = work.params
     dtype = params.get("simulation_dtype")
     if dtype is None:
         dtype = torch_dtype_map(params["dtype_A_B"][0])
-    return origami_helper.gemm_time_us(
-        arch, params["M"], params["N"], params["K"], params.get("B", 1), dtype
+    return _time_output(
+        origami_helper.gemm_time_us(
+            arch, params["M"], params["N"], params["K"], params.get("B", 1), dtype
+        )
     )
 
 
@@ -280,8 +268,10 @@ def sdpa_tile_origami_op_projection(work, arch):
     """TraceLens's attention tile model (``sdpa_tile.py``), with Origami
     timing each tile GEMM. Origami only models GEMMs; the tiling is
     TraceLens's own."""
-    return sdpa_tile.sdpa_tile_time_us(
-        work.perf_model, arch, origami_helper.gemm_time_us, bwd=work.bwd
+    return _time_output(
+        sdpa_tile.sdpa_tile_time_us(
+            work.perf_model, arch, origami_helper.gemm_time_us, bwd=work.bwd
+        )
     )
 
 
@@ -291,7 +281,7 @@ def default_op_projections(enable_origami_gemm=False, enable_origami_sdpa_tile=F
     ``enable_origami_sdpa_tile``."""
     op_projections = {"Roofline": roofline_op_projection}
     if enable_origami_gemm:
-        op_projections["Origami"] = adapt_op_projection(origami_gemm_op_projection)
+        op_projections["Origami"] = origami_gemm_op_projection
     if enable_origami_sdpa_tile:
         op_projections["SDPA Tile Origami"] = sdpa_tile_origami_op_projection
     return op_projections

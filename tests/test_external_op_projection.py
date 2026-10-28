@@ -7,6 +7,7 @@
 """Op projections: built-in Origami and an extension-registered external model."""
 
 import importlib
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ import pytest
 from TraceLens.PerfModel import origami_helper
 from TraceLens.PerfModel.perf_model import aten_mm
 from TraceLens.PerfModel.op_projections import (
-    adapt_op_projection,
+    OpWork,
     op_work,
     origami_gemm_op_projection,
 )
@@ -51,27 +52,23 @@ def _mm():
     )
 
 
-def test_model_gets_category_a_copy_of_params_and_arch():
-    seen = {}
-
-    def model(category, params, arch):
-        seen.update(category=category, params=params, arch=arch)
-        params["M"] = -1
-        return 12
-
+def test_gemm_work_has_the_category_and_a_copy_of_the_params():
     gemm = _mm()
-    assert adapt_op_projection(model)(op_work(gemm), ARCH) == 12.0
-    assert seen["category"] == "GEMM"
-    assert (seen["params"]["N"], seen["params"]["K"]) == (32, 64)
-    assert seen["arch"] is ARCH
+    work = op_work(gemm)
+    assert work.category == "GEMM"
+    assert (work.params["M"], work.params["N"], work.params["K"]) == (128, 32, 64)
+    work.params["M"] = -1
     assert gemm.param_details["M"] == 128
 
 
-def test_model_returning_none_gives_no_prediction():
-    def model(category, params, arch):
-        return None
-
-    assert adapt_op_projection(model)(op_work(_mm()), ARCH) is None
+def _gemm_work(category="GEMM"):
+    return OpWork(
+        category=category,
+        params={"M": 1, "N": 1, "K": 1, "B": 1},
+        gflops=2e-9,
+        bytes_moved=None,
+        compute_spec=None,
+    )
 
 
 @pytest.mark.parametrize(
@@ -86,17 +83,19 @@ def test_extension_file_registers_external_model(report_module):
     analyzer = SimpleNamespace(set_external_op_projection=registered.append)
     importlib.import_module(report_module).apply_extension(analyzer, str(STUB))
     assert len(registered) == 1
-    output = registered[0]("GEMM", {"M": 1, "N": 1, "K": 1, "B": 1}, None)
+    output = registered[0](_gemm_work(), None)
     assert output["time_us"] == pytest.approx(2e-8)
     assert output["Transpose"] == "unknown"
+    assert registered[0](_gemm_work("SDPA_fwd"), None) is None
 
 
 def test_origami_model_passes_gemm_shape_to_origami():
-    gemm = _mm()
+    work = op_work(_mm())
     with patch.object(origami_helper, "gemm_time_us", return_value=7.0) as sim:
-        assert origami_gemm_op_projection("GEMM", gemm.param_details, ARCH) == 7.0
-        assert origami_gemm_op_projection("SDPA_fwd", gemm.param_details, ARCH) is None
-        assert origami_gemm_op_projection("GEMM", gemm.param_details, None) is None
+        assert origami_gemm_op_projection(work, ARCH) == {"time_us": 7.0}
+        attention = replace(work, category="SDPA_fwd")
+        assert origami_gemm_op_projection(attention, ARCH) is None
+        assert origami_gemm_op_projection(work, None) is None
     sim.assert_called_once_with(ARCH, 128, 32, 64, 1, "bf16")
 
 
@@ -107,7 +106,7 @@ def test_set_external_op_projection():
     )
     TreePerfAnalyzer.set_external_op_projection(analyzer, len)
     assert list(analyzer.op_projections) == ["External"]
-    assert analyzer.op_projections["External"].wrapped_model is len
+    assert analyzer.op_projections["External"] is len
     TreePerfAnalyzer.set_external_op_projection(analyzer, None)
     assert analyzer.op_projections == {}
     with pytest.raises(TypeError):

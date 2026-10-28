@@ -39,7 +39,6 @@ from .jax_analyses import JaxAnalyses
 from ..PerfModel.op_projections import (
     add_op_projection_outputs,
     default_op_projections,
-    adapt_op_projection,
     get_compute_spec,
     op_projection_columns,
     op_projection_group_columns,
@@ -326,23 +325,23 @@ class TreePerfAnalyzer:
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
 
-    def register_op_projection(self, label, model):
-        """Report op projection ``model(category, params, arch)`` under ``label``:
+    def register_op_projection(self, label, op_projection):
+        """Report ``op_projection(work, arch)`` under ``label``:
         ``<label> Time (µs)`` and its other columns.
 
-        See :mod:`TraceLens.PerfModel.op_projections`. ``None`` removes the label.
-        Registering an existing label replaces its model.
+        See :mod:`TraceLens.PerfModel.op_projections`. ``None`` removes the
+        label. Registering an existing label replaces its op projection.
         """
-        if model is None:
+        if op_projection is None:
             self.op_projections.pop(label, None)
-        elif not callable(model):
+        elif not callable(op_projection):
             raise TypeError(f"op projection {label!r} must be callable or None")
         else:
-            self.op_projections[label] = adapt_op_projection(model)
+            self.op_projections[label] = op_projection
 
-    def set_external_op_projection(self, model):
-        """Report op projection ``model(category, params, arch)`` as ``External``."""
-        self.register_op_projection("External", model)
+    def set_external_op_projection(self, op_projection):
+        """Report ``op_projection(work, arch)`` as ``External``."""
+        self.register_op_projection("External", op_projection)
 
     def register_kernel_filter(self, label, keep_kernel):
         """Report the busy time of the op's kernels for which ``keep_kernel(kernel)``

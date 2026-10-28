@@ -125,14 +125,13 @@ TraceLens_generate_perf_report_jax \
 
 ### Time a shape without a trace
 
-Call the GEMM op projection directly with the shape as `params`:
+Call Origami's GEMM timer directly with the shape:
 
 ```python
-from TraceLens.PerfModel.op_projections import origami_gemm_op_projection
+from TraceLens.PerfModel.origami_helper import gemm_time_us
 
 arch = {"name": "MI300X", "freq_mhz": 2100}
-params = {"M": 4096, "N": 4096, "K": 4096, "B": 1, "simulation_dtype": "bf16"}
-print(origami_gemm_op_projection("GEMM", params, arch))  # time in µs
+print(gemm_time_us(arch, M=4096, N=4096, K=4096, B=1, dtype="bf16"))  # time in µs
 ```
 
 For attention, `sdpa_fwd_time_us` and `sdpa_bwd_time_us` in

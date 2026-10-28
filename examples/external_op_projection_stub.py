@@ -9,20 +9,22 @@
 Pass this file with ``--extension_file`` to see ``External`` columns. The
 time is ``2*M*N*K*B`` at a fixed 100 TFLOP/s, so it is not a device model.
 
-``params`` holds the same values as the report's ``param:`` columns. Any key
-may be missing; ``transpose``, for example, is only there when the GEMM's
-kernel name parses. Return None, a time in µs, or a dict whose ``time_us``
-is optional and whose other scalar values become ``External <name>``
-columns.
+``work`` is the op's ``OpWork``; ``work.params`` holds the same values as the
+report's ``param:`` columns. Any key may be missing; ``transpose``, for
+example, is only there when the GEMM's kernel name parses. Return None or a
+dict whose ``time_us`` is optional and whose other scalar values become
+``External <name>`` columns.
 
 A real model belongs in an extension file outside this repository that
-defines ``external_op_projection`` the same way and imports its library itself.
+defines ``external_op_projection`` the same way and imports its library
+itself.
 """
 
 
-def external_op_projection(category, params, arch):
-    if category != "GEMM":
+def external_op_projection(work, arch):
+    if work.category != "GEMM":
         return None
+    params = work.params
     flops = 2 * params["M"] * params["N"] * params["K"] * (params.get("B") or 1)
     return {
         "time_us": flops / 100e12 * 1e6,
