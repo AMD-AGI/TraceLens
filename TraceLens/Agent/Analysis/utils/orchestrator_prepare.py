@@ -18,7 +18,10 @@ import traceback
 
 import pandas as pd
 
-from TraceLens.Agent.Analysis.category_analyses.analysis_utils import load_perf_rows
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    PEAK_MEM_BW_KEY,
+    load_perf_rows,
+)
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms, load_arch
 from TraceLens.Agent.Analysis.utils.classify_kernels import TAXONOMY
 from TraceLens.Agent.Analysis.utils.kernel_fusion import (
@@ -70,21 +73,20 @@ def _normalize_category(row):
     return category_name, category
 
 
-def _build_trace2_ops_summary_by_enhanced_category(trace2_csv_dir: str) -> list:
-    """Build trace 2 ops summary grouped by enhanced category (op-name-based).
+def ops_summary_by_enhanced_category(csv_dir: str) -> list:
+    """Roll a perf report's unified_perf_summary.csv up by enhanced category.
 
-    Uses unified_perf_summary.csv and get_enhanced_category() so that trace 2
-    categories match the trace 1 enhanced categories (e.g. CONV_fwd + CONV_bwd
-    merge into 'convolution', NORM_fwd + NORM_bwd merge into 'norm').
-    Falls back to ops_summary_by_category.csv if unified_perf_summary.csv is
-    not available.
+    Rows are sorted by GPU kernel time, descending. Categories come from
+    _normalize_category, so e.g. CONV_fwd + CONV_bwd merge into 'convolution'
+    and NORM_fwd + NORM_bwd into 'norm'. Falls back to ops_summary_by_category.csv
+    if unified_perf_summary.csv is not available.
     """
-    unified_path = os.path.join(trace2_csv_dir, "unified_perf_summary.csv")
+    unified_path = os.path.join(csv_dir, "unified_perf_summary.csv")
     if not os.path.isfile(unified_path):
         return json.loads(
-            pd.read_csv(
-                os.path.join(trace2_csv_dir, "ops_summary_by_category.csv")
-            ).to_json(orient="records")
+            pd.read_csv(os.path.join(csv_dir, "ops_summary_by_category.csv")).to_json(
+                orient="records"
+            )
         )
 
     df = pd.read_csv(unified_path)
@@ -100,9 +102,9 @@ def _build_trace2_ops_summary_by_enhanced_category(trace2_csv_dir: str) -> list:
         time_scale = 1.0
     else:
         return json.loads(
-            pd.read_csv(
-                os.path.join(trace2_csv_dir, "ops_summary_by_category.csv")
-            ).to_json(orient="records")
+            pd.read_csv(os.path.join(csv_dir, "ops_summary_by_category.csv")).to_json(
+                orient="records"
+            )
         )
 
     count_col = (
@@ -147,6 +149,21 @@ def _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline: pd.DataFrame) ->
             "percent", 0
         ),
         "idle_time_percent": gpu_data.get("idle_time", {}).get("percent", 0),
+    }
+
+
+def perf_report_metadata(csv_dir: str, platform: str) -> dict:
+    """Peaks of ``platform`` plus the GPU utilization of the perf report in ``csv_dir``.
+
+    The metadata ``build_operation_metrics`` reads, shared by the agent route's
+    per-category metadata and any caller analyzing a perf report directly.
+    """
+    arch = load_arch(platform)
+    gpu_timeline = pd.read_csv(os.path.join(csv_dir, "gpu_timeline.csv"))
+    return {
+        PEAK_MEM_BW_KEY: arch["mem_bw_gbps"] / 1000,
+        "max_achievable_tflops": arch["max_achievable_tflops"],
+        "gpu_utilization": _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline),
     }
 
 
@@ -261,10 +278,8 @@ def main():
     # ============================================================================
     print("\n[STEP 3] Assessing GPU Utilization...")
 
-    gpu_timeline = pd.read_csv(os.path.join(trace1_csv_dir, "gpu_timeline.csv"))
-    gpu_utilization_metrics = _gpu_utilization_metrics_from_gpu_timeline_df(
-        gpu_timeline
-    )
+    trace1_metadata = perf_report_metadata(trace1_csv_dir, platform)
+    gpu_utilization_metrics = trace1_metadata["gpu_utilization"]
     if plans is not None:
         job_utilization = {
             plan.name: _gpu_utilization_metrics_from_gpu_timeline_df(
@@ -289,7 +304,7 @@ def main():
             os.path.join(output_dir, "metadata", "trace2_gpu_utilization.json"), "w"
         ) as f:
             json.dump(trace2_gpu_utilization, f, indent=2)
-        trace2_ops_summary_by_category = _build_trace2_ops_summary_by_enhanced_category(
+        trace2_ops_summary_by_category = ops_summary_by_enhanced_category(
             trace2_csv_dir
         )
 
@@ -679,8 +694,8 @@ def main():
         # Create metadata JSON
         metadata = {
             "platform": platform,
-            "peak_mem_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
-            "max_achievable_tflops": platform_specs["max_achievable_tflops"],
+            PEAK_MEM_BW_KEY: trace1_metadata[PEAK_MEM_BW_KEY],
+            "max_achievable_tflops": trace1_metadata["max_achievable_tflops"],
             "memory_gb": platform_specs.get("memory_gb"),
             "trace_path": trace_path,
             "output_dir": output_dir,
@@ -715,8 +730,8 @@ def main():
 
     cpu_idle_metadata = {
         "platform": platform,
-        "peak_mem_bw_tbs": platform_specs["mem_bw_gbps"] / 1000,
-        "max_achievable_tflops": platform_specs["max_achievable_tflops"],
+        PEAK_MEM_BW_KEY: trace1_metadata[PEAK_MEM_BW_KEY],
+        "max_achievable_tflops": trace1_metadata["max_achievable_tflops"],
         "memory_gb": platform_specs.get("memory_gb"),
         "trace_path": trace_path,
         "output_dir": output_dir,
