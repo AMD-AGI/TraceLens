@@ -6,6 +6,11 @@
 
 """A branch that is not taken does not call anything either.
 
+An ``@op_l`` or ``@fn_l`` id in this file is a call key this test builds so
+``_call_source_line`` can be checked. It is not a lookup into an upstream
+modeling file.
+
+
 The list of a forward's calls is read off the function's AST, which knows
 nothing about which arms ran. So deciding a branch removed the ops inside it
 but LEFT the helpers it calls: Kimi kept a ``get_unpad_data`` frame whose

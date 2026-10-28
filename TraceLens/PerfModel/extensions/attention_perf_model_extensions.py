@@ -711,6 +711,13 @@ class pseudo_mla_prefill_fwd(InferenceAttention):
 
 
 class mla_tilelang_sparse_fwd(InferenceAttention):
+    """
+    Performance model for ``sglang::tilelang_sparse_fwd`` (TileLang SparseMLA;
+    inference: sglang).
+
+    Indices topk from ``Input Dims[2][-1]`` → ``sliding_window`` /
+    :meth:`InferenceAttention._cap_gen_kv`.
+    """
 
     @staticmethod
     def get_param_details(event):
@@ -722,6 +729,14 @@ class mla_tilelang_sparse_fwd(InferenceAttention):
             params["d_h_v"] = 512
         else:
             params["d_h_v"] = int(concrete[4])
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        if len(dims) <= 2 or len(dims[2]) < 1:
+            return InferenceAttention.no_perf_param_details()
+        topk = int(dims[2][-1])
+        if topk <= 0:
+            return InferenceAttention.no_perf_param_details()
+        params["sliding_window"] = topk
         return params
 
 

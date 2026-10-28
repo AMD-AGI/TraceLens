@@ -128,15 +128,22 @@ def _display_layer_repeat_subline(line: str) -> str:
 
 def _fact_lines(spec: ArchitectureSpec) -> list[str]:
     """Build fact-sheet bullet lines from architecture metadata."""
-    lines = [
-        f"Model type: {spec.model_type}",
-        f"Decoder: {spec.decoder_type}",
-        f"Attention: {spec.attention_type}",
-        f"Positional: {spec.positional_encoding}",
-        f"Norm: {spec.norm_type} ({spec.norm_placement})",
-    ]
+    lines = [f"Model type: {spec.model_type}"]
+    selected = _selected_parallelism(spec)
+    if selected:
+        lines.append(selected)
+    lines.extend(
+        [
+            f"Decoder: {spec.decoder_type}",
+            f"Attention: {spec.attention_type}",
+            f"Positional: {spec.positional_encoding}",
+            f"Norm: {spec.norm_type} ({spec.norm_placement})",
+        ]
+    )
     if spec.decoder_class:
         lines.append(f"Decoder class: {spec.decoder_class}")
+    if spec.device_sensitive:
+        lines.append(f"Device: {spec.runtime_regime.device}")
     if spec.checkpoint_source:
         lines.append(_format_source_line("Checkpoint", spec.checkpoint_source))
     if spec.github_source:
@@ -169,12 +176,38 @@ def _fact_lines(spec: ArchitectureSpec) -> list[str]:
         lines.append(f"Layer mix: {spec.layer_mix}")
     if spec.forward_sequence:
         lines.append(f"Forward: {format_forward_sequence(spec, arrow=' -> ')}")
+    lines.extend(_parallel_lines(spec))
     for note in spec.moe_notes[:2]:
         lines.append(f"MoE: {note}")
     for note in spec.layer_notes[:1]:
         lines.append(f"Layers: {note}")
     lines.extend(_analysis_note_lines(spec))
     return lines
+
+
+def _selected_parallelism(spec: ArchitectureSpec) -> str | None:
+    """The degrees the user asked for, shown directly under the model type."""
+    layout = getattr(spec, "parallel_layout", None)
+    if layout is None:
+        return None
+    degree = layout.degree
+    parts = []
+    if degree.tp > 1:
+        parts.append(f"TP {degree.tp}")
+    if degree.pp > 1:
+        parts.append(f"PP {degree.pp}")
+    if degree.ep > 1:
+        parts.append(f"EP {degree.ep}")
+    if not parts:
+        return None
+    return "Parallelism: " + ", ".join(parts)
+
+
+def _parallel_lines(spec: ArchitectureSpec) -> list[str]:
+    layout = getattr(spec, "parallel_layout", None)
+    if layout is None:
+        return []
+    return list(layout.fact_lines())
 
 
 def _format_analysis_note(spec: ArchitectureSpec, note: str) -> str:

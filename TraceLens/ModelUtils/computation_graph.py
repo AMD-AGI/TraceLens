@@ -1218,6 +1218,43 @@ def _has_multi_return_predecessor_ref(block: BlockNode) -> bool:
     return False
 
 
+def _has_ambiguous_method_input_args(block: BlockNode) -> bool:
+    """True when a child step reads this block's OWN boundary input on more
+    than one of its named arguments.
+
+    A plain submodule step's edges are a single, undifferentiated node-
+    construction-time chain link (see ``_has_inline_attention_child``'s own
+    docstring: "straight-line inline sub-blocks ... have their edges wired
+    during node creation"). That is correct when the step's arguments trace to
+    distinct producers, but a sibling-method frame reduced to pure dispatch
+    after its real work is pruned away (MiniMax's ``forward_core``, left with
+    nothing but ``self.attn(q, k, v, forward_batch)`` once its sparse-attention
+    arm resolves dead) can have EVERY one of those arguments bound to the
+    SAME boundary token, with no way to tell ``k``/``v`` apart from ``q`` at
+    construction time. Only sections 1/1b's ordinal-aware redirect can -- so
+    such a block must be revisited too.
+
+    Scoped to a step that actually carries ordinal evidence for the
+    disambiguation (``forward_step_predecessor_ordinals``): a step that
+    merely reads the SAME tensor on two differently-named arguments on
+    purpose (GLM vision attention's fused ``qkv`` closing over the tower's
+    own ``hidden_states`` on a second, redundant parameter) is not this
+    gap -- both arguments really do mean the identical value, construction
+    time already wired that correctly, and revisiting it here only mints a
+    second, spurious boundary tile for the same tensor.
+    """
+    for step_attr, arg_map in block.forward_step_predecessor_args.items():
+        ordinal_map = block.forward_step_predecessor_ordinals.get(step_attr, {})
+        boundary_args = [
+            name
+            for name, src in arg_map.items()
+            if is_method_input(src) and name in ordinal_map
+        ]
+        if len(boundary_args) >= 2:
+            return True
+    return False
+
+
 class DroppedSubmoduleProducerError(RuntimeError):
     """A forward operation references a submodule producer that never emitted a node.
 
@@ -1255,15 +1292,16 @@ def _iter_wiring_blocks(root: BlockNode) -> list[BlockNode]:
 
     See :func:`_has_inline_attention_child` for why straight-line descendants are
     otherwise deliberately excluded — visiting them would re-wire edges already
-    created at node-construction time. The two exceptions
-    (:func:`_has_inline_attention_child`, :func:`_has_multi_return_predecessor_ref`)
-    name a real gap in that node-construction-time wiring: a nested block whose
-    own child reads a *sibling* multi-return submodule call (an inline
-    attention kernel's q/k/v/output, or a per-slot argument such as
-    ``apply_rotary_pos_emb(cos=rotary_emb, sin=rotary_emb)``) needs the same
-    return-slot redirect sections 1/1b apply for ``root`` -- construction time
-    only resolves the single ``@method_input`` case, not a fan-out to a
-    specific return slot of a fully inline-expanded sibling.
+    created at node-construction time. The three exceptions
+    (:func:`_has_inline_attention_child`, :func:`_has_multi_return_predecessor_ref`,
+    :func:`_has_ambiguous_method_input_args`) name real gaps in that
+    node-construction-time wiring: a nested block whose own child reads a
+    *sibling* multi-return submodule call (an inline attention kernel's
+    q/k/v/output, or a per-slot argument such as ``apply_rotary_pos_emb(cos=
+    rotary_emb, sin=rotary_emb)``), or a child step whose several arguments
+    all read the SAME boundary token, need the same ordinal-aware redirect
+    sections 1/1b apply for ``root`` -- construction time only resolves the
+    single, undifferentiated ``@method_input`` case.
     """
     blocks: list[BlockNode] = [root]
     seen: set[int] = {id(root)}
@@ -1273,8 +1311,10 @@ def _iter_wiring_blocks(root: BlockNode) -> list[BlockNode]:
         if block is None or id(block) in seen:
             continue
         seen.add(id(block))
-        if _has_inline_attention_child(block) or _has_multi_return_predecessor_ref(
-            block
+        if (
+            _has_inline_attention_child(block)
+            or _has_multi_return_predecessor_ref(block)
+            or _has_ambiguous_method_input_args(block)
         ):
             blocks.append(block)
         stack.extend(getattr(block, "children", []) or [])
@@ -1679,7 +1719,28 @@ def _wire_all_predecessor_edges(
                     # enclosing graph's global input here would add a second,
                     # spurious edge — e.g. the attention's first op ``qkv`` reading
                     # both ``norm1`` (its true arg) and the raw block input.
-                    if block is not root:
+                    #
+                    # That "already bound" guarantee holds for a plain
+                    # SUBMODULE step too, not just an operation's own op-time
+                    # binding: GLM's vision attention ``qkv`` reads this
+                    # block's boundary on one clean argument, and the
+                    # pipeline's chain wiring at node-construction time
+                    # already docked that single edge -- redirecting it here
+                    # too would mint a second, spurious tile for the SAME
+                    # tensor (``hidden_states_2`` beside ``hidden_states``).
+                    #
+                    # The one real gap is a step with SEVERAL arguments that
+                    # all trace to this same unbound boundary token and carry
+                    # distinct producer ORDINALS (MiniMax's pruned
+                    # ``forward_core`` calling ``attn(q, k, v, forward_batch)``,
+                    # all four read off its own sole tuple-typed parameter):
+                    # construction time's single chain edge cannot represent
+                    # four different slots, so only THIS argument -- the one
+                    # ordinal evidence actually distinguishes -- needs the
+                    # redirect.
+                    if block is not root and (
+                        is_forward_operation(step_attr) or arg_name not in ordinal_map
+                    ):
                         continue
                     # The boundary token can name WHICH parameter it carries
                     # (``@method_input:attention_mask``). Collapsing every one of
@@ -1703,6 +1764,27 @@ def _wire_all_predecessor_edges(
                         and param != _input_label_for(root)
                     ):
                         source_index = _secondary_input_index(graph, param)
+                    elif arg_name in ordinal_map and ordinal_map[arg_name] != 0:
+                        # Known residual gap: when a step reads SEVERAL named
+                        # arguments off this same bare, unnamed boundary token
+                        # (MiniMax's pruned ``forward_core`` calling
+                        # ``self.attn(q, k, v, forward_batch)`` where all four
+                        # trace to its own sole tuple-typed parameter, not a
+                        # named secondary one), ``ordinal_map`` names each
+                        # argument's producer SLOT -- but turning that into a
+                        # distinct consumer edge needs a per-ordinal redirect
+                        # all the way through the merge-time boundary-tile
+                        # stitching (``_route_frame_exits_through_output_tiles``
+                        # in ``model_explorer_export/merge.py``), which only
+                        # ever materialises one edge per newly-minted tile.
+                        # ``input_index`` answers for the FIRST slot only (by
+                        # the same accident that makes it the method's de
+                        # facto primary); wiring every other slot to it too
+                        # would mislabel this argument with an unrelated
+                        # tensor's identity -- leaving it unwired lets the I1
+                        # dead-node check correctly flag the real producer's
+                        # (the ``Pack``'s) unconsumed slot instead.
+                        continue
                     else:
                         source_index = input_index
                 else:

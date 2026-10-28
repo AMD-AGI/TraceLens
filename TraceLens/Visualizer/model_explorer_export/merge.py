@@ -79,6 +79,7 @@ from TraceLens.Visualizer.model_explorer_export.shapes import (
     fill_missing_node_shapes,
     group_boundary_shapes,
     infer_block_tree_shapes,
+    stamp_full_shapes,
     node_output_spec,
     refine_multi_output_port_shapes,
     widen_broadcast_results,
@@ -2273,10 +2274,10 @@ def _converge_layer_variants_through_an_output_tile(
             if len(group) < 2 or len(group) != len(by_variant):
                 continue
             # The tile is the stack's output, the same port any other block
-            # hands its consumer. It lives in the stack, so opening the stack
-            # shows one input per variant and the collapsed stack still has
-            # one edge out.
+            # hands its consumer. It is drawn beside the stack: the stack box
+            # holds the variants, and this tile is the one value they hand on.
             scope = parent
+            boundary = scope.rsplit("/", 1)[0] if "/" in scope else ""
             label = exit_label(group)
             base_id = f"{scope}/@output:{label}" if scope else f"@output:{label}"
             wanted = {str(edge.get("sourceNodeId")) for edge in group}
@@ -2297,7 +2298,7 @@ def _converge_layer_variants_through_an_output_tile(
                 tile = {
                     "id": tile_id,
                     "label": label,
-                    "namespace": scope,
+                    "namespace": boundary,
                     "attrs": [{"key": "synthetic", "value": "@output"}],
                     "style": ensure_readable_text(output_port_style()),
                     "incomingEdges": [dict(edge) for edge in group],
@@ -4186,6 +4187,31 @@ def _carry_producer_shape_to_boundary_tiles(nodes: list[dict[str, Any]]) -> None
             return
 
 
+def publish_stated_shapes_and_check(graph: dict[str, Any], *, label: str) -> list[str]:
+    """Publish every stated shape, then run the post-processing checks.
+
+    Communication nodes are added after the build's own finishing passes. A
+    node that states ``output_shape`` and never publishes a port is drawn as
+    ``?`` on the edge that leaves it. The checks are the same ones the build
+    runs, so a node added later is held to the same graph.
+    """
+    nodes = graph.get("nodes")
+    if not isinstance(nodes, list):
+        return []
+    _publish_declared_shapes_as_output_ports(nodes)
+    canonicalize_port_shape_keys(nodes)
+    stamp_full_shapes(nodes)
+    # input_shapes was stamped before the per-GPU rewrite. The checks compare
+    # an op with the tensor it reads, which is the port just published.
+    _annotate_op_input_signatures(nodes)
+    warnings: list[str] = []
+    warnings.extend(type_check_graph_nodes(nodes))
+    warnings.extend(integrity_check_graph_nodes(nodes, label=label))
+    warnings.extend(group_cycle_check_graph_nodes(nodes, label=label))
+    warnings.extend(warn_degenerate_mutually_exclusive_branches(nodes))
+    return warnings
+
+
 def _publish_declared_shapes_as_output_ports(nodes: list[dict[str, Any]]) -> None:
     """A node that states a shape has to publish it, or the reader sees ``?``.
 
@@ -4687,7 +4713,8 @@ def _port_meta_attr(port: dict[str, Any], key: str) -> str | None:
 
 def _add_split_slice_tiles(nodes: list[dict[str, Any]]) -> None:
     """Surface each output slice of a multi-output split (``Unbind`` / ``Split`` /
-    ``Chunk``) as its own named, input-styled passthrough tile.
+    ``Chunk``) -- or each bundled element of a ``Pack`` -- as its own named,
+    input-styled passthrough tile.
 
     Model Explorer does not render output-*port* names, so a split's per-slice
     ports (``query_states`` / ``key_states`` / ``value_states``) are invisible on
@@ -4696,21 +4723,34 @@ def _add_split_slice_tiles(nodes: list[dict[str, Any]]) -> None:
     tiles, synthesize one tile per slice carrying the slot label and that slice's
     shape, and rewire every consumer of the port to read the tile instead. The
     split node stays visible -- no computation is hidden -- and every slice now
-    shows a readable name and its own shape.
+    shows a readable name and its own shape. ``Pack`` gets the identical
+    treatment for the same reason -- each packed element (``q``, ``idx_q``, ...)
+    is a real, independently-shaped tensor the pack's own node cannot label. So
+    does a branch ``Merge`` ("Mutually exclusive branch") whose two arms are
+    themselves such a bundle (``inner_state = (...)`` built fresh on each side
+    of an ``if``) -- its own ``output_names`` is only ever stamped in that case
+    (see ``_emit_branch_select``), never for an ordinary single-tensor merge.
 
-    General: fires for any ``Unbind`` / ``Split`` / ``Chunk`` node with two or
-    more output slices. Per-slice shapes come from ``outputsMetadata`` when a
-    ``ShapeInferencer`` drove the build; without one the tiles still appear, named
-    from the node's ``output_names`` attr (index-aligned to the ports consumers
-    already read) -- the split's topology must not depend on shape inference being
-    available. Uses a distinct ``@slice_out`` synthetic tag -- it must not
-    reintroduce the retired ``@split_out:`` id prefix.
+    General: fires for any ``Unbind`` / ``Split`` / ``Chunk`` / ``Pack`` /
+    ``Merge`` node with two or more output slices. Per-slice shapes come from
+    ``outputsMetadata`` when a ``ShapeInferencer`` drove the build; without one
+    the tiles still appear, named from the node's ``output_names`` attr
+    (index-aligned to the ports consumers already read) -- the split's topology
+    must not depend on shape inference being available. Uses a distinct
+    ``@slice_out`` synthetic tag -- it must not reintroduce the retired
+    ``@split_out:`` id prefix.
     """
     tiles: list[dict[str, Any]] = []
     # (split_id, port_id) -> (tile_id, tile_port) for every slice we surface.
     port_redirect: dict[tuple[str, str], tuple[str, str]] = {}
     for node in nodes:
-        if str(node.get("label") or "") not in {"Unbind", "Split", "Chunk"}:
+        if str(node.get("label") or "") not in {
+            "Unbind",
+            "Split",
+            "Chunk",
+            "Pack",
+            "Mutually exclusive branch",
+        }:
             continue
         split_id = str(node.get("id"))
         namespace = str(node.get("namespace", ""))
@@ -10455,12 +10495,18 @@ def build_merged_model_graph(
     canonicalize_port_shape_keys(nodes)
     if shape_inferencer is not None:
         for namespace, boundary in group_boundary_shapes(nodes).items():
-            graph_attributes.setdefault(namespace, {}).update(boundary)
+            bucket = graph_attributes.setdefault(namespace, {})
+            bucket.update(boundary)
+            for key, value in boundary.items():
+                bucket.setdefault(f"full_{key}", value)
 
     # Last structural pass: a branch reduced to one live input is that input.
     # Anything still standing with fewer than two is reported, not drawn as a choice.
     _elide_noop_merges_and_casts(nodes)
     warn_degenerate_mutually_exclusive_branches(nodes)
+    # After the last pass that writes a shape. Same text as ``output_shape``
+    # until a partition rewrites the displayed key.
+    stamp_full_shapes(nodes)
 
     return {
         "id": graph_id,

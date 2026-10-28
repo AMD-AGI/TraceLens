@@ -17,9 +17,11 @@ from TraceLens.ModelUtils.torch_introspect import (
     InputSpec,
     _dotted_prefixes,
     computation_graph_from_fx_inventory,
+    symbolic_example_sizes,
+)
+from TraceLens.Visualizer.model_explorer_export.torch_payload import (
     explorer_graph_from_fx_inventory,
     payload_from_fx_inventory,
-    symbolic_example_sizes,
 )
 from TraceLens.Visualizer.model_explorer_export.cli import (
     parse_input_shape,
