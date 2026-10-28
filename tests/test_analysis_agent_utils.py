@@ -3625,9 +3625,9 @@ def test_standalone_module_candidates(tmp_path):
     assert mlp.kernel_type_signature == ["GEMM", "Add"]
     assert mlp.total_kernel_time_us == 2 * (50 + 50)
     # Data moved of each kernel's perf row, split into in and out.
-    assert [(k.data_in_mb, k.data_out_mb) for k in mlp.kernels] == pytest.approx(
-        [(10 * 18 / 26, 10 * 8 / 26), (4.0, 2.0)]
-    )
+    assert [
+        mb for k in mlp.kernels for mb in (k.data_in_mb, k.data_out_mb)
+    ] == pytest.approx([10 * 18 / 26, 10 * 8 / 26, 4.0, 2.0])
 
 
 def test_standalone_attention_narrows_to_core():

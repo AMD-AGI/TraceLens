@@ -113,6 +113,49 @@ def test_kernel_input_names():
     assert cg._kernel_input_names(_spec(block=_node("n", details=["x"]))) == []
 
 
+def test_kernel_port_roles():
+    block = _node(
+        "k", details=["operand_role: kv=key,kv=value, extra= , bad", "other: x"]
+    )
+    # ``kv`` binds two params (DeepSeek reusing one tensor for key AND value);
+    # the first binding wins and each split-out param also answers for itself.
+    assert cg._kernel_port_roles(_spec(block=block)) == {
+        "kv": "key",
+        "key": "key",
+        "value": "value",
+    }
+    assert cg._kernel_port_roles(_spec(block=None)) == {}
+    assert cg._kernel_port_roles(_spec(block=_node("n", details=["x"]))) == {}
+
+
+def test_kernel_operand_parameters():
+    block = _node("k", details=["operand: q=query,gk=g, bad, =empty", "other: x"])
+    assert cg._kernel_operand_parameters(_spec(block=block)) == {
+        "q": "query",
+        "gk": "g",
+    }
+    assert cg._kernel_operand_parameters(_spec(block=None)) == {}
+
+
+def test_kernel_port_split():
+    block = _node("k", details=["port_split: kv=key,value", "other: x"])
+    assert cg._kernel_port_split(_spec(block=block)) == {"kv": ["key", "value"]}
+    assert cg._kernel_port_split(_spec(block=None)) == {}
+    assert cg._kernel_port_split(_spec(block=_node("n", details=["x"]))) == {}
+
+
+def test_prefer_activation_followup():
+    attr_last_index = {"short_conv": 3, "short_conv_activation": 5}
+    # A later activation follow-up node is preferred over the base step.
+    assert cg._prefer_activation_followup(attr_last_index, "short_conv", 3) == 5
+    # No follow-up recorded: the base index is kept.
+    assert cg._prefer_activation_followup({}, "short_conv", 3) == 3
+    # A follow-up that is NOT actually later (e.g. from a stale/foreign-scope
+    # entry) must not override the real, later index.
+    stale = {"short_conv": 7, "short_conv_activation": 2}
+    assert cg._prefer_activation_followup(stale, "short_conv", 7) == 7
+
+
 def test_reads_only_a_side_parameter():
     reader = _node(
         "@op_l1_c0_add",
@@ -131,6 +174,39 @@ def test_reads_only_a_side_parameter():
     assert not cg._reads_only_a_side_parameter(with_pred)
 
 
+def test_has_multi_return_predecessor_ref_via_forward_step_predecessors():
+    """A nested frame call (``apply_rotary_pos_emb(x, cos=rotary_emb,
+    sin=rotary_emb)``) names a sibling multi-return submodule
+    (``rotary_emb`` returning ``cos, sin``) only through
+    ``forward_step_predecessors``, not ``operation_predecessors``."""
+    rotary_emb = _node("rotary_emb", forward_return_order=["cos", "sin"])
+    consumer = _node("apply_rotary")
+    block = _node(
+        "root",
+        children=[rotary_emb, consumer],
+        forward_step_predecessors={"apply_rotary": ("rotary_emb",)},
+    )
+    assert cg._has_multi_return_predecessor_ref(block)
+
+
+def test_has_multi_return_predecessor_ref_via_predecessor_args():
+    rotary_emb = _node("rotary_emb", forward_return_order=["cos", "sin"])
+    consumer = _node("apply_rotary")
+    block = _node(
+        "root",
+        children=[rotary_emb, consumer],
+        forward_step_predecessor_args={"apply_rotary": {"cos": "rotary_emb"}},
+    )
+    assert cg._has_multi_return_predecessor_ref(block)
+
+
+def test_has_multi_return_predecessor_ref_false_without_any_reference():
+    rotary_emb = _node("rotary_emb", forward_return_order=["cos", "sin"])
+    unrelated = _node("unrelated")
+    block = _node("root", children=[rotary_emb, unrelated])
+    assert not cg._has_multi_return_predecessor_ref(block)
+
+
 def test_condition_detail():
     assert cg._condition_detail(None) is None
     assert cg._condition_detail(_node("x", details=["note"])) is None
@@ -147,6 +223,18 @@ def test_consumer_port_label():
     assert cg._consumer_port_label([s1, s2]) == "gate"
     s3 = aa.SideInputSpec("c", "other", [])
     assert cg._consumer_port_label([s1, s3]) == "gate"
+
+
+def test_merge_link_output_port():
+    assert cg._merge_link_output_port(None, "0") == "0"
+    # A second, genuinely different port promotes the scalar to a list.
+    assert cg._merge_link_output_port("0", "1") == ["0", "1"]
+    # The same port recorded again stays a plain scalar.
+    assert cg._merge_link_output_port("0", "0") == "0"
+    # Appending a new port onto an existing list.
+    assert cg._merge_link_output_port(["0", "1"], "2") == ["0", "1", "2"]
+    # A port already present in the list is not duplicated.
+    assert cg._merge_link_output_port(["0", "1"], "1") == ["0", "1"]
 
 
 def test_input_label_for():
@@ -477,6 +565,26 @@ def test_add_kernel_port_nodes_unlabeled_no_declared():
         s.label for s in graph.nodes if s.synthetic == cg.SYNTHETIC_KERNEL_PORT_IN
     ]
     assert labels == ["input_0"]
+
+
+def test_add_kernel_port_nodes_splits_a_shared_producer_into_role_ports():
+    """DeepSeek's attention reuses one ``kv`` tensor for both the ``key`` and
+    ``value`` kernel parameters; the single producer must fan out into two
+    role-labeled port tiles, not one tile the kernel reads twice."""
+    kernel = _node("attn", class_name="KernelOp", details=["port_split: kv=key,value"])
+    kv_src = _node("kv_src")
+    graph = cg.ComputationGraph(
+        nodes=[_spec(block=kv_src, label="kv"), _spec(block=kernel)],
+        links=[(0, 1)],
+    )
+    cg._add_kernel_port_nodes(graph)
+    port_specs = [s for s in graph.nodes if s.synthetic == cg.SYNTHETIC_KERNEL_PORT_IN]
+    assert {s.label for s in port_specs} == {"key", "value"}
+    # Both ports are fed by the same original producer.
+    for port_index, s in enumerate(graph.nodes):
+        if s.synthetic != cg.SYNTHETIC_KERNEL_PORT_IN:
+            continue
+        assert (0, port_index) in graph.links
 
 
 def test_add_kernel_output_port_nodes():
@@ -1064,6 +1172,7 @@ def test_build_fanout_kernel_tensor_pipeline_merge(monkeypatch):
 
 
 def test_build_sidecombine_moe_and_ordinary(monkeypatch):
+    gate_out = _node("gate_out", forward_order=1)
     aggregate = _node(
         "aggregate",
         details=["method `aggregate()`", f"combine: {aa.MOE_AGGREGATION_LABEL}"],
@@ -1072,19 +1181,30 @@ def test_build_sidecombine_moe_and_ordinary(monkeypatch):
     empty_side = aa.SideInputSpec("empty", "empty", [], "prior_step")
     missing_side = aa.SideInputSpec("lost", "lost", ["missing"], "prior_step")
     router_side = aa.SideInputSpec("r", "router", [], "prior_step")
+    # A real prior-step producer (the router's own gate output), named with a
+    # non-"router" port label -- the one side that actually resolves to a
+    # producer and must land its own labeled edge onto the aggregation node.
+    weighted_side = aa.SideInputSpec("weights", "weights", ["gate_out"], "prior_step")
     monkeypatch.setattr(
         cg,
         "flatten_computation_segments",
         lambda _r: [
+            SeqSegment(gate_out),
             SideCombineSegment(
                 aggregate,
-                [forward_side, empty_side, missing_side, router_side],
+                [forward_side, empty_side, missing_side, router_side, weighted_side],
                 aa.MOE_AGGREGATION_LABEL,
-            )
+            ),
         ],
     )
-    graph = cg.build_computation_graph(_node("root", children=[aggregate]))
+    graph = cg.build_computation_graph(_node("root", children=[gate_out, aggregate]))
     assert any(s.label == aa.MOE_AGGREGATION_LABEL for s in graph.nodes)
+    gate_index = next(i for i, s in enumerate(graph.nodes) if s.block is gate_out)
+    agg_index = next(
+        i for i, s in enumerate(graph.nodes) if s.label == aa.MOE_AGGREGATION_LABEL
+    )
+    assert (gate_index, agg_index) in graph.links
+    assert graph.link_port_labels[(gate_index, agg_index)] == "weights"
 
     combine = _node("combine", details=["method `combine()`"])
     weighted = aa.SideInputSpec("w", "weights", ["combine"], "prior_step")
@@ -1289,6 +1409,48 @@ def test_build_tensor_ports_segment_direct(monkeypatch):
     graph = cg.build_computation_graph(root)
     ports = [s for s in graph.nodes if s.synthetic == cg.SYNTHETIC_TENSOR]
     assert {"q", "v"} <= {s.label for s in ports}
+
+
+def test_build_tensor_ports_wires_a_kernel_pipeline_delivered_as_seq_segment(
+    monkeypatch,
+):
+    """A kernel-pipeline step that ``collect_computation_segments`` could not
+    split into named q/k/v branches (incomplete provenance) still arrives as a
+    plain ``SeqSegment`` rather than its own ``TensorPortsSegment`` -- but it
+    must still get the same per-label tensor-port routing, wiring its real
+    producer (``q_proj``) onto the pipeline's labeled port, not falling
+    through to a flat, unlabeled op chain.
+    """
+    q_proj = _node("q_proj", forward_order=1)
+    qk = _node("qk", class_name="KernelOp")
+    out = _node(
+        "out",
+        class_name="KernelOutput",
+        kernel_second_operand="input",
+        kernel_predecessors=["qk"],
+    )
+    pipeline = _node(
+        "pipeline",
+        class_name="KernelPipeline",
+        children=[qk, out],
+        forward_order=2,
+        tensor_input_labels=["q"],
+        tensor_step_targets={"q": "qk"},
+        attention_inputs={"q": ["q_proj"]},
+    )
+    root = _node("root", children=[q_proj, pipeline])
+    monkeypatch.setattr(
+        cg,
+        "flatten_computation_segments",
+        lambda _r: [SeqSegment(q_proj), SeqSegment(pipeline)],
+    )
+    graph = cg.build_computation_graph(root)
+    q_index = next(i for i, s in enumerate(graph.nodes) if s.block is q_proj)
+    port_index = next(
+        i for i, s in enumerate(graph.nodes) if s.synthetic == cg.SYNTHETIC_TENSOR
+    )
+    assert (q_index, port_index) in graph.links
+    assert graph.link_port_labels[(q_index, port_index)] == "q"
 
 
 def test_add_tensor_ports_segment_empty():
@@ -1730,6 +1892,51 @@ def test_upcoming_side_combine_and_fork():
     )
 
 
+def test_reroute_wrapper_kernel_output_edges_moves_the_edge_onto_the_tail():
+    """A dispatched attention wrapper (``sdpa_attention_forward``) expands into
+    ``<kernel> -> transpose -> contiguous``; the entry keeps
+    ``SYNTHETIC_ATTENTION`` so q/k/v provenance docks onto it, but an outside
+    consumer naming the attention call as its predecessor must be rerouted onto
+    the pipeline's real result, the post-kernel tail -- not left on the entry,
+    which would strand the layout ops as dead nodes.
+    """
+    entry_block = _node(aa.SYNTHETIC_ATTENTION, class_name="AttentionOp")
+    mid_block = _node("transpose")
+    tail_block = _node("contiguous")
+    outside_block = _node("outside")
+    graph = cg.ComputationGraph()
+    graph.nodes = [
+        _spec(key="l0:@attn_pipeline:entry", block=entry_block),
+        _spec(key="l0:@attn_pipeline:mid", block=mid_block),
+        _spec(key="l0:@attn_pipeline:tail", block=tail_block),
+        _spec(key="outside", block=outside_block),
+    ]
+    graph.links = [(0, 1), (1, 2), (0, 3)]
+    graph.link_port_labels = {(0, 3): "attn_out"}
+
+    cg._reroute_wrapper_kernel_output_edges(graph)
+
+    assert graph.links == [(0, 1), (1, 2), (2, 3)]
+    assert graph.link_port_labels == {(2, 3): "attn_out"}
+
+
+def test_reroute_wrapper_kernel_output_edges_is_a_no_op_without_a_tail():
+    """A wrapper whose kernel entry is itself the pipeline's only sink (no
+    post-kernel layout ops) has nothing to reroute onto."""
+    entry_block = _node(aa.SYNTHETIC_ATTENTION, class_name="AttentionOp")
+    outside_block = _node("outside")
+    graph = cg.ComputationGraph()
+    graph.nodes = [
+        _spec(key="l0:@attn_pipeline:entry", block=entry_block),
+        _spec(key="outside", block=outside_block),
+    ]
+    graph.links = [(0, 1)]
+
+    cg._reroute_wrapper_kernel_output_edges(graph)
+
+    assert graph.links == [(0, 1)]
+
+
 # --------------------------------------------------------------------------- #
 # Wiring: predecessor edges (module-call), attention provenance, multi-input
 # --------------------------------------------------------------------------- #
@@ -1750,6 +1957,38 @@ def test_wire_module_call_predecessor_edges(monkeypatch):
     qi = next(i for i, s in enumerate(graph.nodes) if s.block is q_proj)
     gi = next(i for i, s in enumerate(graph.nodes) if s.block is gate)
     assert (qi, gi) in graph.links
+
+
+def test_wire_module_call_predecessor_edges_scopes_a_same_named_sibling():
+    """An attention's own ``kv_proj`` beside a nested compressor's distinct,
+    identically-named ``kv_proj`` (a real MiniMax/compressor idiom): the flat,
+    last-write-wins ``attr_last_index`` would otherwise resolve the bare name to
+    whichever instance was emitted last (the compressor's own, nested one), so
+    ``out_combine``'s edge from its direct sibling ``kv_proj`` must be
+    corrected back onto THIS block's own instance, not the foreign scope's.
+    """
+    inner_kv_proj = _node("kv_proj")
+    compressor = _node("compressor", class_name="Compressor", children=[inner_kv_proj])
+    outer_kv_proj = _node("kv_proj")
+    out_combine = _node("out_combine", class_name="Add")
+    root = _node(
+        "attention",
+        class_name="Attention",
+        children=[outer_kv_proj, compressor, out_combine],
+        forward_step_predecessors={"out_combine": ("kv_proj", "compressor")},
+    )
+    graph = cg.build_computation_graph(root)
+    outer_idx = next(i for i, s in enumerate(graph.nodes) if s.block is outer_kv_proj)
+    inner_idx = next(i for i, s in enumerate(graph.nodes) if s.block is inner_kv_proj)
+    out_idx = next(i for i, s in enumerate(graph.nodes) if s.block is out_combine)
+    sources = [s for s, t in graph.links if t == out_idx]
+    # "kv_proj" must resolve to THIS block's own instance (outer_idx), and
+    # "compressor" to its true, separate output -- which, since the compressor
+    # is a composite with a single child, happens to be that same nested
+    # ``kv_proj`` node (inner_idx): a coincidence of this fixture's shape, not
+    # evidence the scoping collapsed the two predecessors onto one.
+    assert sources.count(outer_idx) == 1
+    assert sources.count(inner_idx) == 1
 
 
 def test_wire_module_call_predecessor_edges_with_argmap(monkeypatch):
@@ -1875,6 +2114,56 @@ def test_wire_multi_input_op_forward_links(monkeypatch):
     graph = cg.build_computation_graph(root)
     op_index = next(i for i, s in enumerate(graph.nodes) if s.block is op)
     assert cg._node_has_outgoing_links(graph, op_index)
+
+
+def test_add_nested_submodule_side_producers_walks_through_a_forwarded_param():
+    """A nested submodule call (DeepSeek-style ``compressor`` wrapping its own
+    ``indexer``) can read a bare parameter (``q_residual``) that its own
+    forward signature merely forwards unchanged from an ancestor's real local
+    producer (``q_a_norm``). Once ``compressor`` is inline-expanded it has no
+    node of its own, so ordinary predecessor wiring (keyed on its attr name)
+    never sees this edge; this pass must walk up the one call site that
+    forwarded the name and wire ``q_a_norm`` straight onto ``indexer``.
+    """
+    q_a_norm = _node("q_a_norm", forward_order=1)
+    other_step = _node("other_step", forward_order=2)
+    indexer = _node("indexer", forward_order=1)
+    compressor = _node(
+        "compressor",
+        class_name="Compressor",
+        forward_order=3,
+        children=[indexer],
+        forward_step_boundary_params={"indexer": ("q_residual",)},
+    )
+    root = _node(
+        "root",
+        children=[q_a_norm, other_step, compressor],
+        forward_step_predecessor_args={"compressor": {"q_residual": "q_a_norm"}},
+    )
+    graph = cg.build_computation_graph(root)
+    norm_idx = next(i for i, s in enumerate(graph.nodes) if s.block is q_a_norm)
+    indexer_idx = next(i for i, s in enumerate(graph.nodes) if s.block is indexer)
+    assert (norm_idx, indexer_idx) in graph.links
+    assert graph.link_port_labels[(norm_idx, indexer_idx)] == "q_residual"
+
+
+def test_add_nested_submodule_side_producers_gives_up_on_an_external_param():
+    """When the forwarded param traces up to root with no local producer (a
+    genuine external input, e.g. a vision tower's ``grid_thw``), the walk
+    returns ``None`` and no spurious edge is wired."""
+    indexer = _node("indexer", forward_order=1)
+    compressor = _node(
+        "compressor",
+        class_name="Compressor",
+        forward_order=1,
+        children=[indexer],
+        forward_step_boundary_params={"indexer": ("grid_thw",)},
+    )
+    root = _node("root", children=[compressor])
+    graph = cg.build_computation_graph(root)
+    indexer_idx = next(i for i, s in enumerate(graph.nodes) if s.block is indexer)
+    # Only the natural @input -> indexer chain edge; no side-producer edge added.
+    assert [src for src, dst in graph.links if dst == indexer_idx] == [0]
 
 
 # --------------------------------------------------------------------------- #

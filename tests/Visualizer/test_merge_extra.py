@@ -124,6 +124,340 @@ def test_computation_nodes_multi_output_split_and_skipped_input():
 
 
 # ---------------------------------------------------------------------------
+# _is_host_param_operand
+# ---------------------------------------------------------------------------
+
+
+def test_is_host_param_operand_matches_a_later_unlabeled_boundary_read():
+    """The entry-point edge for a host dependency (``host_params:
+    cu_seqlens``) is labelled with the parameter; a LATER op reading the same
+    host value is linked without that label, so only the edge's own slot (not
+    port 0, the activation slot) and the fact that its source is a boundary
+    tile (rather than a genuine second tensor operand) identify it.
+    """
+    node = {"attrs": [{"key": "details", "value": "host_params: cu_seqlens"}]}
+
+    matching_source = {"id": "cu_seqlens_producer", "label": "cu_seqlens"}
+    assert merge._is_host_param_operand(node, matching_source)
+
+    unrelated_source = {"id": "other", "label": "other"}
+    assert not merge._is_host_param_operand(node, unrelated_source)
+
+    boundary_source = {
+        "id": "decoder/l3/@input",
+        "label": "something_else",
+        "attrs": [{"key": "synthetic", "value": "@input"}],
+    }
+    non_primary_edge = {"targetNodeInputId": "1"}
+    assert merge._is_host_param_operand(node, boundary_source, non_primary_edge)
+
+    real_op_source = {"id": "real_op", "label": "something_else"}
+    assert not merge._is_host_param_operand(node, real_op_source, non_primary_edge)
+
+    primary_edge = {"targetNodeInputId": "0"}
+    assert not merge._is_host_param_operand(node, boundary_source, primary_edge)
+
+
+# ---------------------------------------------------------------------------
+# _producer_tile_name
+# ---------------------------------------------------------------------------
+
+
+def test_producer_tile_name_prefers_the_loop_iterators_own_bound_name():
+    """A loop body's input tile is normally named after its producer's label,
+    but a loop ITERATOR is the one exception: the value entering the body is
+    one row per iteration, so the tile takes the name each iteration binds
+    (recorded beside the iterator marker), not the op that built the whole
+    sequence. A missing/empty bound name, or no loop-iterator detail at all,
+    falls back to the producer's own label, and a label-less producer falls
+    back to the generic ``"input"``.
+    """
+    loop_iter_producer = {
+        "label": "Nonzero",
+        "attrs": [{"key": "detail", "value": "loop iterator: token_row"}],
+    }
+    assert merge._producer_tile_name(loop_iter_producer) == "token_row"
+
+    plain = {"label": "RMSNorm", "attrs": []}
+    assert merge._producer_tile_name(plain) == "RMSNorm"
+
+    no_label = {"attrs": []}
+    assert merge._producer_tile_name(no_label) == "input"
+
+    empty_bound = {
+        "label": "Nonzero",
+        "attrs": [{"key": "details", "value": "loop iterator: "}],
+    }
+    assert merge._producer_tile_name(empty_bound) == "Nonzero"
+
+
+# ---------------------------------------------------------------------------
+# _generator_shape
+# ---------------------------------------------------------------------------
+
+
+def test_generator_shape_resolves_a_shape_expression_dim_off_its_wired_operand():
+    """``torch.arange(inputs_embeds.shape[1])`` reports the recorded bound
+    expression, not a readable length; resolved here against the operand it
+    is actually wired to. Without a matching source (or without ANY wired
+    source at all) the raw expression is left alone; an inferencer that
+    raises or declines leaves the generator with no shape at all.
+    """
+    operation = SimpleNamespace(
+        attr_name="@op_arange", label="Range", details=["raw_op: arange"]
+    )
+    node_by_id = {
+        "inputs_embeds": {
+            "id": "inputs_embeds",
+            "outputsMetadata": [
+                {
+                    "id": "0",
+                    "attrs": [
+                        {"key": "shape", "value": "B x 128 x 8"},
+                        {"key": "dtype", "value": "float16"},
+                    ],
+                }
+            ],
+        }
+    }
+
+    class ArangeInferencer:
+        def _infer_node_output(self, node, preds, root=None):
+            return TensorSpec(("inputs_embeds.shape[1]",), "int64")
+
+    resolved = merge._generator_shape(
+        operation, ["inputs_embeds"], node_by_id, ArangeInferencer()
+    )
+    assert resolved.shape == ("128",)
+    assert resolved.dtype == "int64"
+
+    # No wired source at all: the raw expression passes through unresolved.
+    unresolved = merge._generator_shape(operation, [], node_by_id, ArangeInferencer())
+    assert unresolved.shape == ("inputs_embeds.shape[1]",)
+
+    class RaisingInferencer:
+        def _infer_node_output(self, node, preds, root=None):
+            raise RuntimeError("unresolvable generator")
+
+    assert (
+        merge._generator_shape(
+            operation, ["inputs_embeds"], node_by_id, RaisingInferencer()
+        )
+        is None
+    )
+
+    class DecliningInferencer:
+        def _infer_node_output(self, node, preds, root=None):
+            return None
+
+    assert (
+        merge._generator_shape(
+            operation, ["inputs_embeds"], node_by_id, DecliningInferencer()
+        )
+        is None
+    )
+
+
+# ---------------------------------------------------------------------------
+# _producer_output_spec
+# ---------------------------------------------------------------------------
+
+
+def test_producer_output_spec_distinguishes_a_method_expansion_from_a_plain_submodule():
+    """A plain submodule is fed by the spine and simply inherits it. A method
+    expansion (``self.indexer.build_block_mask(block_indices, ...)``) is not:
+    it is handed whatever sibling step its own ``forward_step_predecessors``
+    entry names, resolved through the section's already-annotated ``known``
+    specs -- and nothing at all when any piece of that chase is missing.
+    """
+    inherited_spec = TensorSpec(("B", "S", 8), "float16")
+    plain = SimpleNamespace(details=(), input_label="x", attr_name="submod")
+    assert (
+        merge._producer_output_spec(None, "Cls", plain, {}, inherited=inherited_spec)
+        is inherited_spec
+    )
+
+    method_no_label = SimpleNamespace(
+        details=("method: build_block_mask",), input_label=None, attr_name="indexer"
+    )
+    assert merge._producer_output_spec(None, "Cls", method_no_label, {}) is None
+
+    method = SimpleNamespace(
+        details=("method: build_block_mask",),
+        input_label="block_indices",
+        attr_name="indexer",
+    )
+    assert merge._producer_output_spec(None, None, method, {}) is None
+
+    structure = SimpleNamespace(
+        forward_step_predecessors={"indexer": ("hidden_states",)}
+    )
+    spec = SimpleNamespace(class_registry={"Attention": structure})
+    resolved = merge._producer_output_spec(
+        spec, "Attention", method, {"hidden_states": inherited_spec}
+    )
+    assert resolved is inherited_spec
+
+    unmapped_structure = SimpleNamespace(forward_step_predecessors={})
+    unmapped_spec = SimpleNamespace(class_registry={"Attention": unmapped_structure})
+    assert merge._producer_output_spec(unmapped_spec, "Attention", method, {}) is None
+
+
+# ---------------------------------------------------------------------------
+# _declare_tuple_boundary_ports
+# ---------------------------------------------------------------------------
+
+
+def test_declare_tuple_boundary_ports_slices_one_component_off_an_inherited_tuple():
+    """A boundary tile mirroring a SPECIFIC ordinal off an already-ported
+    tuple-returning producer (``sin`` off ``rotary_emb``'s ports) carries that
+    one component's own shape -- not the generic activation default, and not
+    the whole producer's first port either.
+    """
+    source_node = {
+        "id": "rotary_emb",
+        "label": "RotaryEmbedding",
+        "outputsMetadata": [
+            {
+                "id": "0",
+                "attrs": [
+                    {"key": "port_label", "value": "cos"},
+                    {"key": "shape", "value": "[B, S, 8] float16"},
+                    {"key": "dtype", "value": "float16"},
+                ],
+            },
+            {
+                "id": "1",
+                "attrs": [
+                    {"key": "port_label", "value": "sin"},
+                    {"key": "shape", "value": "[B, S, 8] float16"},
+                    {"key": "dtype", "value": "float16"},
+                ],
+            },
+        ],
+    }
+    mirror_tile = {
+        "id": "decoder/layer1/@input_mirror",
+        "label": "sin",
+        "attrs": [{"key": "synthetic", "value": "@input_mirror"}],
+        "incomingEdges": [{"sourceNodeId": "rotary_emb", "sourceNodeOutputId": "1"}],
+    }
+    nodes = [source_node, mirror_tile]
+    merge._declare_tuple_boundary_ports(nodes)
+
+    ports = mirror_tile["outputsMetadata"]
+    assert len(ports) == 1
+    port_attrs = {attr["key"]: attr["value"] for attr in ports[0]["attrs"]}
+    assert port_attrs == {
+        "port_label": "sin",
+        "shape": "[B, S, 8] float16",
+        "dtype": "float16",
+    }
+    tile_attrs = {attr["key"]: attr["value"] for attr in mirror_tile["attrs"]}
+    assert tile_attrs["output_shape"] == "[B, S, 8] float16"
+
+
+# ---------------------------------------------------------------------------
+# _drop_undrawn_state_reads
+# ---------------------------------------------------------------------------
+
+
+def test_drop_undrawn_state_reads_cascades_through_an_unread_chain():
+    """``buffered_kv, buffered_gate = self.buffer_kv[name], ...`` reads
+    persistent state for a branch this call does not take; the op and its
+    const weight tile are both left pointing at nothing and must go, in the
+    same cascade a dead consumer chained onto it (``concat`` reading
+    ``buffered_kv``, its const tile keyed off ``concat``) also goes -- the
+    const tile only drops once its owner is actually gone, a second pass of
+    the loop. A ``stores:``/``side_effect:``/synthetic node is kept even
+    though nothing reads it, and a surviving node's own (unrelated) edge is
+    left alone.
+    """
+    nodes = [
+        {
+            "id": "buffered_kv",
+            "attrs": [{"key": "details", "value": "method_params: x"}],
+        },
+        {
+            "id": "concat",
+            "attrs": [{"key": "details", "value": "method_params: y"}],
+            "incomingEdges": [_edge("buffered_kv")],
+        },
+        {
+            "id": "stored_state",
+            "attrs": [
+                {"key": "details", "value": "method_params: x; stores: kv_cache"}
+            ],
+        },
+        {
+            "id": "side_effecting",
+            "attrs": [
+                {"key": "details", "value": "method_params: x; side_effect: true"}
+            ],
+            "incomingEdges": [_edge("stored_state")],
+        },
+        {"id": "synthetic_input", "attrs": [{"key": "synthetic", "value": "@input"}]},
+        {"id": "concat:const:0", "attrs": []},
+    ]
+    merge._drop_undrawn_state_reads(nodes)
+
+    remaining = {node["id"] for node in nodes}
+    assert remaining == {"stored_state", "side_effecting", "synthetic_input"}
+    side_effecting = next(node for node in nodes if node["id"] == "side_effecting")
+    assert side_effecting["incomingEdges"] == [_edge("stored_state")]
+
+
+# ---------------------------------------------------------------------------
+# _untie_host_constructors_from_the_activation
+# ---------------------------------------------------------------------------
+
+
+def test_untie_host_constructors_from_the_activation_drops_the_stand_in_edge():
+    """``torch.tensor([...]).expand(...)`` is marked ``constant_extent`` but
+    still carries the frame's activation as a stand-in operand (it has no
+    real tensor input). Once its only incoming edge is that stand-in, it is
+    dropped and the op is tagged constant. A sibling that ALSO reads a real
+    producer keeps that edge and is not tagged -- it genuinely has a tensor
+    operand; a plain op untouched by this (no ``constant_extent`` detail) is
+    left alone entirely.
+    """
+    nodes = [
+        {"id": "@input", "attrs": [{"key": "synthetic", "value": "@input"}]},
+        {
+            "id": "expand",
+            "attrs": [{"key": "details", "value": "constant_extent: true"}],
+            "incomingEdges": [_edge("@input")],
+        },
+        {
+            "id": "expand_mixed",
+            "attrs": [{"key": "details", "value": "constant_extent: true"}],
+            "incomingEdges": [_edge("@input"), _edge("real_producer")],
+        },
+        {"id": "real_producer"},
+        {
+            "id": "normal_op",
+            "attrs": [{"key": "details", "value": "nothing"}],
+            "incomingEdges": [_edge("@input")],
+        },
+    ]
+    merge._untie_host_constructors_from_the_activation(nodes)
+
+    by_id = {node["id"]: node for node in nodes}
+    assert by_id["expand"]["incomingEdges"] == []
+    assert {attr["key"]: attr["value"] for attr in by_id["expand"]["attrs"]}[
+        "constant"
+    ] == "true"
+
+    mixed_sources = {
+        edge["sourceNodeId"] for edge in by_id["expand_mixed"]["incomingEdges"]
+    }
+    assert mixed_sources == {"real_producer"}
+    assert all(attr.get("key") != "constant" for attr in by_id["expand_mixed"]["attrs"])
+
+    assert by_id["normal_op"]["incomingEdges"] == [_edge("@input")]
+
+
+# ---------------------------------------------------------------------------
 # _config_leaf / _data_movement_shape
 # ---------------------------------------------------------------------------
 
@@ -161,6 +495,17 @@ def test_data_movement_shape_covers_all_branches():
     assert resolved.shape == ("B", 4, 16, "dynamic")
     # Unknown label passes source through
     assert merge._data_movement_shape(_op("Softmax"), src, spec=spec) is src
+    # Permute/Transpose reorder by the recorded axes...
+    permuted = merge._data_movement_shape(
+        _op("Permute", ["dims: 2, 0, 1"]), src, spec=spec
+    )
+    assert permuted.shape == (8, "B", "S")
+    # ...or pass through when there is no (or an invalid) dims detail.
+    assert merge._data_movement_shape(_op("Transpose"), src, spec=spec) is src
+    assert (
+        merge._data_movement_shape(_op("Permute", ["dims: 0, 0, 1"]), src, spec=spec)
+        is src
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +538,179 @@ def test_append_stack_entry_dataflow_skips_and_infers_shape(
     kept = by_id["@model_forward/op_keep"]
     assert kept["incomingEdges"][0]["sourceNodeId"] == "producer_node"
     assert result == ["@model_forward/op_keep"]
+
+
+class TestResolveLoopInvariantSource:
+    """``_resolve_loop_invariant_source``'s structural fallback chain for a
+    loop-invariant decoder input, in both its "extractor recovered an exact
+    keyword producer" and "resolve by structure" regimes."""
+
+    def _cls(self):
+        return SimpleNamespace(forward_param_inputs=["attention_mask"])
+
+    def test_a_captured_producer_handed_a_different_runtime_value_is_resolved(
+        self, monkeypatch
+    ):
+        """GLM reassigns its mask AFTER the builder runs; the extractor's exact
+        keyword producer (``mask_builder``) is not what the loop was really
+        HANDED (``actual_runtime_producer``) -- the handed value wins."""
+        monkeypatch.setattr(
+            merge, "_materialize_model_scope_producer", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            merge,
+            "_resolve_existing_producer_node",
+            lambda node_by_id, attr: (
+                "resolved_runtime" if attr == "actual_runtime_producer" else None
+            ),
+        )
+        result = merge._resolve_loop_invariant_source(
+            [],
+            {},
+            cls=self._cls(),
+            param="attention_mask",
+            primary_param="hidden_states",
+            pred_args={"attention_mask": "mask_builder"},
+            producer_map={},
+            loop_param_producers={},
+            dataflow_producers={"attention_mask": "actual_runtime_producer"},
+        )
+        assert result == "resolved_runtime"
+
+    def test_a_bare_inline_producer_falls_back_to_a_top_level_boundary(
+        self, monkeypatch
+    ):
+        """The captured producer resolves to nothing renderable (a bare inline
+        op the export never surfaces as its own node) and nothing else
+        overrides it: the forward parameter gets its own model-input tile."""
+        monkeypatch.setattr(
+            merge, "_materialize_model_scope_producer", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            merge,
+            "_ensure_top_level_input",
+            lambda nodes, node_by_id, param: "model_input_tile",
+        )
+        result = merge._resolve_loop_invariant_source(
+            [],
+            {},
+            cls=self._cls(),
+            param="attention_mask",
+            primary_param="hidden_states",
+            pred_args={"attention_mask": "mask_builder"},
+            producer_map={},
+            loop_param_producers={},
+            dataflow_producers={},
+        )
+        assert result == "model_input_tile"
+
+    def test_without_a_recovered_keyword_producer_the_handed_value_still_wins(
+        self, monkeypatch
+    ):
+        """A variant loop that leaves ``pred_args`` empty still prefers what
+        the extractor recorded the loop as actually being HANDED over any
+        other structural guess."""
+        monkeypatch.setattr(
+            merge,
+            "_resolve_existing_producer_node",
+            lambda node_by_id, attr: "resolved_x" if attr == "producer_x" else None,
+        )
+        result = merge._resolve_loop_invariant_source(
+            [],
+            {},
+            cls=self._cls(),
+            param="attention_mask",
+            primary_param="hidden_states",
+            pred_args={},
+            producer_map={},
+            loop_param_producers={},
+            dataflow_producers={"attention_mask": "producer_x"},
+        )
+        assert result == "resolved_x"
+
+    def test_falls_back_to_a_submodule_output_when_nothing_else_resolves(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            merge,
+            "_resolve_submodule_output_node",
+            lambda node_by_id, attr: "submodule_out" if attr == "mask_attr" else None,
+        )
+        result = merge._resolve_loop_invariant_source(
+            [],
+            {},
+            cls=self._cls(),
+            param="attention_mask",
+            primary_param="hidden_states",
+            pred_args={},
+            producer_map={"attention_mask": "mask_attr"},
+            loop_param_producers={},
+            dataflow_producers={},
+        )
+        assert result == "submodule_out"
+
+
+def test_is_real_model_input_without_a_shape_inferencer():
+    assert not merge._is_real_model_input("attention_mask", None)
+
+
+def test_is_real_model_input_declines_without_a_meta_trace():
+    """No meta trace means no evidence of what was really passed -- not
+    proof that it WAS, so this must decline rather than guess."""
+
+    class _Raises:
+        def _ensure_meta_input_specs(self):
+            raise RuntimeError("no meta trace available")
+
+    assert not merge._is_real_model_input("attention_mask", _Raises())
+
+
+def test_is_real_model_input_reads_what_the_causal_lm_was_really_handed():
+    """GLM's forward ACCEPTS ``attention_mask`` but is never given one; the
+    meta trace is the record of what the top-level ``ForCausalLM`` class was
+    really called with, so only a param present there counts."""
+    inferencer = SimpleNamespace(
+        _ensure_meta_input_specs=lambda: None,
+        _meta_input_specs_by_class={("ModelForCausalLM", "input_ids"): object()},
+    )
+    assert merge._is_real_model_input("input_ids", inferencer)
+    assert not merge._is_real_model_input("attention_mask", inferencer)
+
+
+def test_append_stack_entry_dataflow_recovers_a_generators_shape_source(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """``torch.arange(inputs_embeds.shape[1])`` reads no tensor OPERAND, but
+    its extent comes from one; drawing it rootless hides that dependency, so
+    the tensor behind the recorded ``arange_stop:`` bound expression must be
+    recovered from ``var_producers`` and wired as the edge."""
+    op_arange = ForwardOperation(
+        "position_ids",
+        "Arange",
+        "",
+        predecessors=(),
+        details=("raw_op: arange", "arange_stop: inputs_embeds.shape[1]"),
+    )
+    dataflow = StackEntryDataflow(
+        operations=(op_arange,),
+        output_producer="position_ids",
+        var_producers={"inputs_embeds": "embed_proj"},
+    )
+    monkeypatch.setattr(merge, "stack_entry_dataflow", lambda cls: dataflow)
+    spec = _spec(stack_pre=[], stack_model_class="M", class_registry={"M": object()})
+    nodes = [{"id": "embed_proj", "label": "embed"}]
+
+    result = merge._append_stack_entry_dataflow(
+        nodes,
+        spec=spec,
+        module_sources={"embed_proj": "embed_proj"},
+        shape_inferencer=None,
+    )
+
+    by_id = {node["id"]: node for node in nodes}
+    arange_node = by_id["@model_forward/position_ids"]
+    assert arange_node["incomingEdges"][0]["sourceNodeId"] == "embed_proj"
+    assert result == ["@model_forward/position_ids"]
 
 
 def test_append_stack_entry_dataflow_returns_none_without_dataflow(
@@ -322,6 +840,68 @@ def test_section_exits_falls_back_to_boundary_nodes():
 # ---------------------------------------------------------------------------
 # _inject_group_inputs skip + empty-entry branches (937, 969)
 # ---------------------------------------------------------------------------
+
+
+def test_name_unnamed_group_inputs_mints_a_tile_for_the_plain_edge():
+    """DeepSeek's expert loop names its three ``hidden_states`` slices on one
+    boundary but lets the routed token index cross on a plain op-to-op edge;
+    once a module already has a naming convention (one entrant IS named),
+    every other unnamed entrant must get its own boundary tile too, wired in
+    place of the raw cross-namespace edge."""
+    nodes = [
+        {"id": "ext/producer_a", "namespace": "ext", "label": "ProducerA"},
+        {"id": "ext/producer_b", "namespace": "ext", "label": "hidden_states"},
+        {
+            "id": "mod/@input:q",
+            "namespace": "mod",
+            "label": "q",
+            "attrs": [{"key": "synthetic", "value": "@input"}],
+            "incomingEdges": [_edge("ext/producer_a")],
+        },
+        {
+            "id": "mod/consumer",
+            "namespace": "mod",
+            "label": "Consumer",
+            "incomingEdges": [_edge("ext/producer_b")],
+        },
+    ]
+    merge._name_unnamed_group_inputs(nodes)
+    tile_ids = {n["id"] for n in nodes}
+    assert "mod/@input:hidden_states" in tile_ids
+    consumer = next(n for n in nodes if n["id"] == "mod/consumer")
+    assert consumer["incomingEdges"][0]["sourceNodeId"] == "mod/@input:hidden_states"
+
+
+def test_name_unnamed_group_inputs_dedupes_a_label_collision():
+    """Two distinct unnamed producers that would both earn the SAME tile name
+    (e.g. two different-shaped tensors both labeled ``weight``) must not
+    collapse onto one tile; the second gets a disambiguating suffix."""
+    nodes = [
+        {"id": "ext/named_src", "namespace": "ext", "label": "named"},
+        {"id": "ext/a", "namespace": "ext", "label": "weight"},
+        {"id": "ext/b", "namespace": "ext", "label": "weight"},
+        {
+            "id": "mod/@input:named",
+            "namespace": "mod",
+            "label": "named",
+            "attrs": [{"key": "synthetic", "value": "@input"}],
+            "incomingEdges": [_edge("ext/named_src")],
+        },
+        {
+            "id": "mod/consumer_a",
+            "namespace": "mod",
+            "incomingEdges": [_edge("ext/a")],
+        },
+        {
+            "id": "mod/consumer_b",
+            "namespace": "mod",
+            "incomingEdges": [_edge("ext/b")],
+        },
+    ]
+    merge._name_unnamed_group_inputs(nodes)
+    tile_ids = {n["id"] for n in nodes}
+    assert "mod/@input:weight" in tile_ids
+    assert "mod/@input:weight_2" in tile_ids
 
 
 def test_inject_group_inputs_skips_merged_tensor_port_parent():

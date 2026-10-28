@@ -4,8 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
-# Pull requests run the tests related to the files they change
-# (scripts/select_related_tests.py). Pushes to main run the full suite.
+# Pull requests always start this workflow. Branch protection requires the
+# "Unit Tests" and "Codecov" checks, and a path filter that skips the run
+# leaves those checks pending. scripts/select_related_tests.py still limits a
+# pull request to the tests related to its diff, and skips the suites when
+# nothing is related. Pushes to main run the full suite, and only when a
+# pushed path can affect it.
 
 name: Unit Tests
 
@@ -27,19 +31,6 @@ on:
       - ".github/workflows/unit-tests.yml"
   pull_request:
     branches: [ main ]
-    paths:
-      - "**/*.py"
-      - "**/*.js"
-      - "**/*.html"
-      - "**/NOTICE"
-      - "**/*LICENSE"
-      - "tests/**"
-      - "setup.py"
-      - "MANIFEST.in"
-      - ".coveragerc"
-      - ".test_durations"
-      - "codecov.yml"
-      - ".github/workflows/unit-tests.yml"
 
 jobs:
   select-pr-tests:
