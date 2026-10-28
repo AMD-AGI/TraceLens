@@ -8,7 +8,7 @@ See LICENSE for license information.
 
 Routing and behavior dataset for the model visualizer skill. The harness is [skillscope](https://github.com/amd/skillscope) at the same tag as [`.github/workflows/skill-evals.yml`](../../../../../../.github/workflows/skill-evals.yml) (`v0.1.3`). Structural checks run on every pull request. Routing and behavioral checks run on workflow dispatch.
 
-`evals/evals.json` holds the prompts. A prompt with only `skill_should_trigger` grades routing. `viz-tiny-llama-html` also grades behavior: it expects `model.html` and forbids a GPU weight load, a leftover server, and an analysis report. That case needs network access to the Hugging Face Hub and the `Visualizer` extra (`torch`, `transformers`, `huggingface_hub`). `evals/machine.yml` limits the run to Linux.
+`evals/evals.json` holds the prompts. A prompt with only `skill_should_trigger` grades routing. Those routing prompts cover config overrides (`viz-config-override`), attention (`viz-attention-eager`, `viz-attention-flash`), Hugging Face plans (`viz-hf-tp-pp`), vLLM tensor parallel (`viz-vllm-tp-shard`), and SGLang expert parallel (`viz-sglang-ep`). `viz-tiny-llama-html` also grades behavior: it expects `model.html` and forbids a GPU weight load, a leftover server, and an analysis report. That case needs network access to the Hugging Face Hub and the `Visualizer` extra (`torch`, `transformers`, `huggingface_hub`). `evals/machine.yml` limits the run to Linux.
 
 ## Structural check
 

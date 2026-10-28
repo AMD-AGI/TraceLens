@@ -54,8 +54,12 @@ Follow the model visualizer installed with TraceLens and export <model> to <path
 
 `<model>` is a Hugging Face id or a local checkpoint directory. If prompted,
 provide the output path, whether you want a live viewer instead of a file, the
-runtime regime (packed sequences, decode, warm cache, eager attention,
-training), and any tensor, pipeline, or expert partition counts.
+runtime regime (packed sequences, decode, warm cache, training), the attention
+implementation (`eager`, `sdpa`, `flash_attention_2`, or another name; omit it
+to keep the checkpoint's), any `KEY=VALUE` config overrides, and the sharding
+source plus counts. Hugging Face plans are the default. Name vLLM or SGLang
+when the drawing should follow that engine, and give `--tp`, `--pp`, and
+`--ep` for the axes you care about.
 
 ### Headless run
 

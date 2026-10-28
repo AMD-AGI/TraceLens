@@ -61,8 +61,10 @@ Network is required the first time a Hub model or an unpkg viewer asset is fetch
 2. **Provide if prompted:**
    - Hugging Face id or local checkpoint path
    - HTML path, or a request to serve the graph locally
-   - Runtime regime when it is not a cold rectangular prefill (packed layout, decode, warm cache, eager attention, training)
-   - Partition counts (`--tp`, `--pp`, `--ep`) and `--engine vllm` or `--engine sglang` when the drawing should follow an inference engine
+   - Runtime regime when it is not a cold rectangular prefill (packed layout, decode, warm cache, training)
+   - Attention implementation when it should not follow the checkpoint (`eager`, `sdpa`, `flash_attention_2`, `flash_attention_3`, or another `_attn_implementation` string)
+   - Config overrides as `KEY=VALUE` (repeatable; dotted keys reach nested configs)
+   - Sharding source and counts: Hugging Face plans by default, or `--engine vllm` / `--engine sglang`, with `--tp`, `--pp`, and `--ep`
 
 3. **Results:**
    - **Primary output:** a self-contained `.html` file. Open it in a browser. The visualizer element loads from unpkg on first open.
@@ -104,7 +106,7 @@ A live viewer (`--serve`, default port 8765) prints `Open viewer: http://127.0.0
 ## Workflow
 
 ```text
-0. Resolve the model source, output path, regime, and partitions
+0. Resolve the model source, output path, regime, attention, config overrides, and sharding source plus counts
 1. Install the Visualizer extra if the exporter does not import
 2. Run visualize_model_in_explorer once
 3. Confirm the HTML contains model-explorer-visualizer, or the JSON has graphCollections
@@ -117,7 +119,10 @@ The procedure, flag table, and footguns are in [reference.md](skills/model-visua
 | --- | --- |
 | Save a file | `visualize_model_in_explorer <model> -o <file>.html` |
 | JSON, then HTML | `-o model.json`, then `--from-payload model.json -o model.html` |
+| Hugging Face sharding | `--tp`, `--pp`, `--ep` and no `--engine` |
 | vLLM or SGLang sharding | `--engine vllm` or `--engine sglang` with `--tp`, `--pp`, `--ep` |
+| Attention implementation | `--attention` (`eager`, `sdpa`, `flash_attention_2`, …). Omit it to keep the checkpoint's setting |
+| Config overrides | repeat `--config-override KEY=VALUE` |
 | Decode or packed tokens | `--phase decode`, `--sequence-layout packed` |
 | Skip shapes or the meta pass | `--no-shapes`, `--no-meta-shapes` |
 

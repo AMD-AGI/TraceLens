@@ -70,6 +70,131 @@ def _patch_cli_success(monkeypatch: pytest.MonkeyPatch, payload=None) -> None:
     )
 
 
+def test_cli_forwards_overrides_attention_and_sharding(monkeypatch):
+    """Every option the visualizer skill can set has to reach the exporter.
+
+    Config overrides, the attention implementation, and the sharding source
+    (no engine for Hugging Face plans, ``vllm`` or ``sglang`` for an engine)
+    are independent. ``--engine`` is still forwarded when ``--code-path``
+    names the file, because that flag selects the plan parser.
+    """
+    captured: dict = {}
+
+    def load_model_spec(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _spec()
+
+    monkeypatch.setattr(cli, "load_model_spec", load_model_spec)
+
+    args = cli.build_parser().parse_args(
+        [
+            "org/model",
+            "--attention",
+            "flash_attention_2",
+            "--config-override",
+            "num_hidden_layers=2",
+            "--config-override",
+            "vision_config.hidden_size=1024",
+            "--config-override",
+            "torch_dtype=bfloat16",
+            "--engine",
+            "vllm",
+            "--tp",
+            "8",
+            "--pp",
+            "2",
+            "--ep",
+            "4",
+            "--code-path",
+            "modeling.py",
+            "--sequence-layout",
+            "packed",
+            "--phase",
+            "decode",
+            "--cache",
+            "warm",
+            "--mode",
+            "training",
+            "--device",
+            "cuda",
+            "--title",
+            "Custom",
+            "--github",
+            "github:o/r@main:modeling.py",
+            "--allow-repo",
+            "o/r",
+            "--config-path",
+            "config.json",
+        ]
+    )
+    cli._load_ast_spec("org/model", args)
+    kwargs = captured["kwargs"]
+    regime = kwargs["regime"]
+    assert regime.attention == "flash_attention_2"
+    assert regime.sequence_layout == "packed"
+    assert regime.phase == "decode"
+    assert regime.cache == "warm"
+    assert regime.mode == "training"
+    assert regime.device == "cuda"
+    assert kwargs["config_overrides"] == {
+        "num_hidden_layers": 2,
+        "vision_config.hidden_size": 1024,
+        "torch_dtype": "bfloat16",
+    }
+    assert kwargs["engine"] == "vllm"
+    assert kwargs["code_path"] == Path("modeling.py")
+    assert kwargs["name"] == "Custom"
+    assert kwargs["github"] == "github:o/r@main:modeling.py"
+    assert kwargs["config_path"] == "config.json"
+    assert kwargs["allow_github_repos"] == ["o/r"]
+    assert captured["args"] == ("org/model",)
+
+    bare = cli.build_parser().parse_args(["org/model"])
+    assert bare.attention is None
+    assert bare.engine is None
+    assert bare.config_override == []
+    assert (bare.tp, bare.pp, bare.ep) == (1, 1, 1)
+    assert bare.sequence_layout == "rectangular"
+    assert bare.phase == "prefill"
+    assert bare.cache == "cold"
+    assert bare.mode == "inference"
+    assert bare.device == "hip"
+    assert bare.shapes is True
+    assert bare.meta_shapes is True
+    assert bare.inline_expansion is True
+    assert bare.drop_constants is True
+    assert bare.auto_venv is True
+    assert bare.port == 8765
+    assert bare.all_tensor_ops is False
+    sglang = cli.build_parser().parse_args(["org/model", "--engine", "sglang"])
+    assert sglang.engine == "sglang"
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["org/model", "--engine", "hf"])
+
+    seen: dict = {}
+
+    def build_parallel_layout(spec, degree):
+        seen["degree"] = (degree.tp, degree.pp, degree.ep)
+        return SimpleNamespace(fact_lines=lambda: [])
+
+    monkeypatch.setattr(cli, "build_parallel_layout", build_parallel_layout)
+    monkeypatch.setattr(
+        cli,
+        "build_ast_model_explorer_payload",
+        lambda *args, **kwargs: _payload(),
+    )
+    cli._build_ast_payload("org/model", _spec(), args)
+    assert seen["degree"] == (8, 2, 4)
+
+    hugging_face = cli.build_parser().parse_args(
+        ["org/model", "--tp", "8", "--pp", "2"]
+    )
+    assert hugging_face.engine is None
+    cli._build_ast_payload("org/model", _spec(), hugging_face)
+    assert seen["degree"] == (8, 2, 1)
+
+
 def test_cli_parser_and_output_name_helpers(tmp_path: Path, monkeypatch):
     args = cli.build_parser().parse_args(
         [

@@ -8,7 +8,7 @@ See LICENSE for license information.
 
 ## Description
 
-Export a Hugging Face checkpoint to a standalone Model Explorer architecture graph without loading weights or using a GPU.
+Export a Hugging Face checkpoint to a standalone Model Explorer architecture graph, including config overrides, attention implementation, and Hugging Face, vLLM, or SGLang sharding, without loading weights or using a GPU.
 
 ## Owner
 

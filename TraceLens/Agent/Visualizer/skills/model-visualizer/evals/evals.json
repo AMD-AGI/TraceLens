@@ -36,6 +36,31 @@
       "prompt": "Follow the model visualizer installed with TraceLens and export moonshotai/Kimi-K3 to kimi.html."
     },
     {
+      "id": "viz-config-override",
+      "skill_should_trigger": true,
+      "prompt": "Export moonshotai/Kimi-K3 to a Model Explorer HTML file, but override the config so num_hidden_layers is 2 and vision_config.hidden_size is 1024."
+    },
+    {
+      "id": "viz-attention-eager",
+      "skill_should_trigger": true,
+      "prompt": "Draw meta-llama/Llama-3.1-8B in Model Explorer with the eager attention implementation so the matmul and softmax are visible, and save llama-eager.html."
+    },
+    {
+      "id": "viz-attention-flash",
+      "skill_should_trigger": true,
+      "prompt": "Visualize moonshotai/Kimi-K3 as a Model Explorer graph using flash_attention_2, packed sequences, and a decode step. Write kimi-flash.html."
+    },
+    {
+      "id": "viz-hf-tp-pp",
+      "skill_should_trigger": true,
+      "prompt": "Show the Hugging Face tensor-parallel and pipeline-parallel plan for meta-llama/Llama-3.1-70B at tp 8 and pp 2 as a Model Explorer HTML file. Do not use vLLM or SGLang."
+    },
+    {
+      "id": "viz-sglang-ep",
+      "skill_should_trigger": true,
+      "prompt": "Draw MiniMaxAI/MiniMax-M3.1-flash the way SGLang shards it, with tensor parallel 2 and expert parallel 4, and save the Model Explorer graph."
+    },
+    {
       "id": "viz-trace-analysis",
       "skill_should_trigger": false,
       "prompt": "My training step is slow. The PyTorch profiler trace is at trace.json. Tell me which GPU kernels to fix first and write analysis.md."
