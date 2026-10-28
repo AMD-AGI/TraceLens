@@ -325,9 +325,18 @@ def _apply_multi_port_shape_attrs(
     instead of synthetic per-slice tiles. Consumers were already wired to the
     right ordinal (``sourceNodeOutputId``); here each port carries its slice shape
     so the edge feeding ``view`` reads ``[B, S, 16]`` rather than the whole tensor.
+
+    A ``Pack`` has no "whole" shape to speak of -- its ports are independently-
+    shaped tensors bundled for threading through Python, not slices of one
+    tensor -- so it never gets an ``output_shape``/``output_dtype`` of its own;
+    only the per-port shapes below are real. A branch ``Merge`` reaches here
+    (with per-port specs) only when both of its arms are themselves such a
+    bundle, so the same rule applies: there is no single tensor either arm's
+    "whole" shape could honestly stand in for.
     """
     output_names = _output_names_attr(node)
-    if whole_spec is not None:
+    is_bundle = str(node.get("label") or "") in {"Pack", "Mutually exclusive branch"}
+    if whole_spec is not None and not is_bundle:
         display_text = format_shape_with_dtype(whole_spec)
         attrs = [
             item

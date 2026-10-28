@@ -142,6 +142,11 @@ class ArchitectureSpec:
     # depicts -- a decided branch leaves no trace in the drawing otherwise.
     runtime_regime: RuntimeRegime = field(default_factory=RuntimeRegime)
     config_overrides: dict[str, Any] = field(default_factory=dict)
+    # Whether the modeling source branches on which accelerator is being
+    # modeled (``runtime_regime.device``) -- shown on the fact sheet only when
+    # it actually affects this graph, not for every model regardless of
+    # relevance.
+    device_sensitive: bool = False
     # Set when the export is asked to split the model. Holds the Hugging Face
     # tensor / pipeline / expert plans evaluated at the requested partition counts.
     parallel_layout: Any = None
@@ -2414,6 +2419,7 @@ def parse_architecture(
         tie_word_embeddings=_as_bool(_get(config, "tie_word_embeddings")),
         source_path=source,
         raw_config=config,
+        device_sensitive=bool(code_analysis and code_analysis.device_sensitive),
     )
 
     total_params = _get(config, "total_params")
