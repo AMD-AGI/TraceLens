@@ -254,6 +254,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Whether `self.training` reads true (default: inference).",
     )
     regime_group.add_argument(
+        "--device",
+        choices=list(RuntimeRegime.DEVICES),
+        default=RuntimeRegime.DEVICES[0],
+        help=(
+            "The accelerator being modeled, for files that branch on "
+            "is_npu()/is_cuda()/is_hip()/... at import time. Stated, never "
+            "detected: this never probes the machine running the export "
+            "(default: hip, this repo's own vendor)."
+        ),
+    )
+    regime_group.add_argument(
         "--config-override",
         action="append",
         metavar="KEY=VALUE",
@@ -606,6 +617,7 @@ def _load_ast_spec(
             cache=args.cache,
             attention=args.attention,
             mode=args.mode,
+            device=args.device,
         ),
         config_overrides=parse_config_overrides(args.config_override),
         engine=args.engine,

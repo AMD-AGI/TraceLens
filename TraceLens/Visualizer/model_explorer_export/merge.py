@@ -4713,7 +4713,8 @@ def _port_meta_attr(port: dict[str, Any], key: str) -> str | None:
 
 def _add_split_slice_tiles(nodes: list[dict[str, Any]]) -> None:
     """Surface each output slice of a multi-output split (``Unbind`` / ``Split`` /
-    ``Chunk``) as its own named, input-styled passthrough tile.
+    ``Chunk``) -- or each bundled element of a ``Pack`` -- as its own named,
+    input-styled passthrough tile.
 
     Model Explorer does not render output-*port* names, so a split's per-slice
     ports (``query_states`` / ``key_states`` / ``value_states``) are invisible on
@@ -4722,21 +4723,34 @@ def _add_split_slice_tiles(nodes: list[dict[str, Any]]) -> None:
     tiles, synthesize one tile per slice carrying the slot label and that slice's
     shape, and rewire every consumer of the port to read the tile instead. The
     split node stays visible -- no computation is hidden -- and every slice now
-    shows a readable name and its own shape.
+    shows a readable name and its own shape. ``Pack`` gets the identical
+    treatment for the same reason -- each packed element (``q``, ``idx_q``, ...)
+    is a real, independently-shaped tensor the pack's own node cannot label. So
+    does a branch ``Merge`` ("Mutually exclusive branch") whose two arms are
+    themselves such a bundle (``inner_state = (...)`` built fresh on each side
+    of an ``if``) -- its own ``output_names`` is only ever stamped in that case
+    (see ``_emit_branch_select``), never for an ordinary single-tensor merge.
 
-    General: fires for any ``Unbind`` / ``Split`` / ``Chunk`` node with two or
-    more output slices. Per-slice shapes come from ``outputsMetadata`` when a
-    ``ShapeInferencer`` drove the build; without one the tiles still appear, named
-    from the node's ``output_names`` attr (index-aligned to the ports consumers
-    already read) -- the split's topology must not depend on shape inference being
-    available. Uses a distinct ``@slice_out`` synthetic tag -- it must not
-    reintroduce the retired ``@split_out:`` id prefix.
+    General: fires for any ``Unbind`` / ``Split`` / ``Chunk`` / ``Pack`` /
+    ``Merge`` node with two or more output slices. Per-slice shapes come from
+    ``outputsMetadata`` when a ``ShapeInferencer`` drove the build; without one
+    the tiles still appear, named from the node's ``output_names`` attr
+    (index-aligned to the ports consumers already read) -- the split's topology
+    must not depend on shape inference being available. Uses a distinct
+    ``@slice_out`` synthetic tag -- it must not reintroduce the retired
+    ``@split_out:`` id prefix.
     """
     tiles: list[dict[str, Any]] = []
     # (split_id, port_id) -> (tile_id, tile_port) for every slice we surface.
     port_redirect: dict[tuple[str, str], tuple[str, str]] = {}
     for node in nodes:
-        if str(node.get("label") or "") not in {"Unbind", "Split", "Chunk"}:
+        if str(node.get("label") or "") not in {
+            "Unbind",
+            "Split",
+            "Chunk",
+            "Pack",
+            "Mutually exclusive branch",
+        }:
             continue
         split_id = str(node.get("id"))
         namespace = str(node.get("namespace", ""))
