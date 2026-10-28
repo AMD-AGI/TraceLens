@@ -73,7 +73,7 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
     validate_subagent_outputs,
 )
 from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _build_trace2_ops_summary_by_enhanced_category,
+    ops_summary_by_enhanced_category,
     _gpu_utilization_metrics_from_gpu_timeline_df,
     _normalize_category,
 )
@@ -2097,7 +2097,7 @@ def test_perf_float():
     assert au.perf_float(None, "a") is None
 
 
-# ----- orchestrator_prepare: _build_trace2_ops_summary_by_enhanced_category -----
+# ----- orchestrator_prepare: ops_summary_by_enhanced_category -----
 
 
 def test_trace2_ops_summary_kernel_time_col(tmp_path):
@@ -2108,7 +2108,7 @@ def test_trace2_ops_summary_kernel_time_col(tmp_path):
             "operation_count": [1, 2, 3],
         }
     ).to_csv(tmp_path / "unified_perf_summary.csv", index=False)
-    rows = _build_trace2_ops_summary_by_enhanced_category(str(tmp_path))
+    rows = ops_summary_by_enhanced_category(str(tmp_path))
     gemm = next(r for r in rows if r["op category"] == "gemm")
     # µs -> ms and operation_count summed (1 + 2 = 3).
     assert gemm["total_direct_kernel_time_ms"] == pytest.approx(3.0)
@@ -2124,7 +2124,7 @@ def test_trace2_ops_summary_direct_ms_col_no_op_count(tmp_path):
             "total_direct_kernel_time_ms": [3.0, 1.0],
         }
     ).to_csv(tmp_path / "unified_perf_summary.csv", index=False)
-    rows = _build_trace2_ops_summary_by_enhanced_category(str(tmp_path))
+    rows = ops_summary_by_enhanced_category(str(tmp_path))
     fwd = next(r for r in rows if r["op category"] == "norm_fwd")
     assert fwd["total_direct_kernel_time_ms"] == pytest.approx(3.0)
     # No operation_count column -> Count falls back to group size (1).
@@ -2139,7 +2139,7 @@ def test_trace2_ops_summary_no_time_col_falls_back(tmp_path):
     pd.DataFrame({"op category": ["Fallback"], "Count": [9]}).to_csv(
         tmp_path / "ops_summary_by_category.csv", index=False
     )
-    rows = _build_trace2_ops_summary_by_enhanced_category(str(tmp_path))
+    rows = ops_summary_by_enhanced_category(str(tmp_path))
     assert rows == [{"op category": "Fallback", "Count": 9}]
 
 
@@ -2147,7 +2147,7 @@ def test_trace2_ops_summary_no_unified_falls_back(tmp_path):
     pd.DataFrame({"op category": ["OnlyFallback"], "Count": [7]}).to_csv(
         tmp_path / "ops_summary_by_category.csv", index=False
     )
-    rows = _build_trace2_ops_summary_by_enhanced_category(str(tmp_path))
+    rows = ops_summary_by_enhanced_category(str(tmp_path))
     assert rows == [{"op category": "OnlyFallback", "Count": 7}]
 
 
