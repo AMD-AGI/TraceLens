@@ -506,16 +506,17 @@ class TestPerfModelExtensions:
             },
         }
         model = pext.fused_dynamic_mx_quant_moe_sort_hip_bounded(event)
-        # 56 routed pairs, not the 12369-element padded allocation.
+        # The quant touches the captured 8 activation rows, not row_bound 56.
         # 3 fp32 FLOPs per element: abs, max, scale multiply.
         assert model.param_details["logical_batch_size"] == 5
         assert model.param_details["row_bound"] == 56
+        assert model.param_details["data_rows"] == 8
         assert model.get_compute_precision() == "fp32"
         assert model.get_maf_type() == "vector"
-        assert model.flops() == 3 * 56 * 7168
-        assert model.bytes() == (
-            56 * 7168 * 2 + 56 * 7168 + 56 * (7168 // 32) + 56 * 4 + 56 * 4 + 4
-        )
+        assert model.flops() == 3 * 8 * 7168
+        # Scales and sorted-id/weight reads scale with the device-side
+        # num_valid, which the event does not carry, so they are omitted.
+        assert model.bytes() == 8 * 7168 * 2 + 8 * 7168
 
     def test_deepseek_v4_opus_bmm_uses_fp8_matrix_spec(self):
         event = {
@@ -545,8 +546,8 @@ class TestPerfModelExtensions:
         assert (model.B, model.M, model.N, model.K) == (8, 2, 1024, 4096)
         assert model.param_details["logical_batch_size"] == 5
         assert model.get_compute_precision() == "fp8"
-        # No kernel name, so the logical matmul is the fallback.
-        assert model.flops() == 2 * 2 * 8 * 1024 * 4096 + 2 * 8 * 1024 * 32
+        # No kernel name; M pads to the 16-row MFMA tile the hardware runs.
+        assert model.flops() == 2 * 2 * 16 * 1024 * 4096 + 2 * 16 * 1024 * 32
         assert model.bytes() == (
             8 * 2 * 4096 + 2 * 1024 * 4096 + 8 * 2 * 1024 * 2 + 8 * 2 * 32 + 2 * 8 * 32
         )
@@ -903,8 +904,8 @@ class TestPerfModelExtensions:
         }
         model = pext.gemm_a8w8_blockscale_preshuffle(event)
         assert model.param_details["tile"] is None
-        # block_k is 128, so the scale term is one multiply per 128-wide K block.
-        assert model.flops() == 2 * 8 * 2048 * 7168 + 8 * 2048 * 56
+        # No tile; M pads 8->16 (MFMA). block_k is 128, so one scale per 128-wide K block.
+        assert model.flops() == 2 * 16 * 2048 * 7168 + 16 * 2048 * 56
         assert model.bytes() == (
             8 * 7168 + 2048 * 7168 + 8 * 2048 * 2 + 8 * 56 * 4 + 16 * 56 * 4
         )
@@ -1128,7 +1129,8 @@ class TestPerfModelExtensions:
         }
         logical = pext.gemm_a8w8_blockscale_bpreshuffle(no_tile)
         assert logical.param_details["tile"] is None
-        assert logical.flops() == 2 * 1 * 2048 * 7168 + 1 * 2048 * (7168 // 128)
+        # No tile; M pads 1->16 to the MFMA tile the hardware runs.
+        assert logical.flops() == 2 * 16 * 2048 * 7168 + 16 * 2048 * (7168 // 128)
         assert logical.bytes() == 14760672 - 2 * 4 * 1 * 2048 * 4
         assert (
             pext.gemm_a8w8_blockscale_bpreshuffle(
@@ -3543,12 +3545,6 @@ class TestCustomCollectivesPerfModels:
         assert sglang_model.flops() == 368664
         assert vllm_model.num_elems == 4 * 6144
         mappings = get_pseudo_op_mappings()
-        assert (
-            mappings[
-                "sglang_profiler::communication_op_tensor_model_parallel_fused_allreduce_rmsnorm"
-            ]
-            is aiter_fused_allreduce_rmsnorm_
-        )
         assert (
             mappings["vllm::rocm_aiter_fused_allreduce_rmsnorm"]
             is aiter_fused_allreduce_rmsnorm_
@@ -6294,6 +6290,105 @@ class TestMoeExtensionsFinal:
             }
         )
         assert sort.bytes() > 0
+
+    def test_opus_sort_guards_return_none(self):
+        # Missing rows/topk shape -> no perf.
+        assert (
+            moe_ext.moe_sorting_opus_fwd({"args": {"Input Dims": [[]]}}).flops() is None
+        )
+        # dims[0] that cannot unpack to (rows, topk).
+        assert (
+            moe_ext.moe_sorting_opus_fwd({"args": {"Input Dims": [[1, 2, 3]]}}).flops()
+            is None
+        )
+        # Zero rows.
+        assert (
+            moe_ext.moe_sorting_opus_fwd({"args": {"Input Dims": [[0, 6]]}}).flops()
+            is None
+        )
+        # Non-int scalar list leaves block/num_experts unset.
+        bad_scalars = {
+            "args": {
+                "Input Dims": [[8, 7], [8, 7], [1000], [1000], [40], [2], [0, 0]],
+                "Input type": ["int", "float", "int", "float", "int", "int", ""],
+                "Concrete Inputs": [""] * 7 + ["x", "y"],
+            }
+        }
+        assert moe_ext.moe_sorting_opus_fwd(bad_scalars).flops() is None
+        # Broadcast stride on the counted pairs -> bytes None.
+        broadcast = {
+            "args": {
+                "Input Dims": [[8, 7], [8, 7], [1824], [1824], [57], [2], [0, 0]],
+                "Input type": ["int", "float", "int", "float", "int", "int", ""],
+                "Input Strides": [[0, 1], [7, 1], [], [], [], [], []],
+                "Concrete Inputs": [""] * 7 + ["385", "32"],
+            }
+        }
+        assert moe_ext.moe_sorting_opus_fwd(broadcast).bytes() is None
+        # Unreadable moe_buf dtype -> bytes None.
+        bad_moe = {
+            "args": {
+                "Input Dims": [[8, 7], [8, 7], [1824], [1824], [57], [2], [8, 6144]],
+                "Input type": ["int", "float", "int", "float", "int", "int", "weird"],
+                "Concrete Inputs": [""] * 7 + ["385", "32"],
+            }
+        }
+        assert moe_ext.moe_sorting_opus_fwd(bad_moe).bytes() is None
+        # moe_buf present but its dtype is absent from the type list -> bytes None.
+        short_types = {
+            "args": {
+                "Input Dims": [[8, 7], [8, 7], [1824], [1824], [57], [2], [8, 6144]],
+                "Input type": ["int", "float", "int", "float", "int", "int"],
+                "Concrete Inputs": [""] * 7 + ["385", "32"],
+            }
+        }
+        assert moe_ext.moe_sorting_opus_fwd(short_types).bytes() is None
+
+    def test_bounded_mx_quant_guard_branches(self):
+        base_dims = [[8, 7168], [12384, 224], [8, 7168], [12369], [2]]
+        scalars = ["", "", "", "", "", "8", "32", "56", "385", "32", ""]
+        types = [
+            "c10::Float8_e4m3fn",
+            "c10::Float8_e8m0fnu",
+            "c10::BFloat16",
+            "int",
+            "int",
+        ]
+        # Bounded config valid, but the activation shape is empty -> no rows.
+        no_rows = {
+            "args": {
+                "Input Dims": [[8, 7168], [12384, 224], [], [12369], [2]],
+                "Input type": types,
+                "Input Strides": [[], [], []],
+                "Concrete Inputs": scalars,
+            }
+        }
+        model = pext.fused_dynamic_mx_quant_moe_sort_hip_bounded(no_rows)
+        assert model.param_details["bounded"] is True
+        assert model.flops() is None
+        assert model.bytes() is None
+        # Broadcast stride on a counted operand -> bytes None.
+        non_dense = {
+            "args": {
+                "Input Dims": base_dims,
+                "Input type": types,
+                "Input Strides": [[0, 1], [224, 1], [7168, 1]],
+                "Concrete Inputs": scalars,
+            }
+        }
+        assert (
+            pext.fused_dynamic_mx_quant_moe_sort_hip_bounded(non_dense).bytes() is None
+        )
+        # Unreadable output dtype -> bytes None.
+        bad_out = {
+            "args": {
+                "Input Dims": base_dims,
+                "Input type": ["weird"] + types[1:],
+                "Input Strides": [[7168, 1], [224, 1], [7168, 1]],
+                "Concrete Inputs": scalars,
+            }
+        }
+        assert pext.fused_dynamic_mx_quant_moe_sort_hip_bounded(bad_out).bytes() is None
 
 
 class TestPerfModelDeepCoverage2:

@@ -126,6 +126,14 @@ class gemm_a8w8_blockscale(GEMM):
         )
 
 
+# FP8 MFMA runs 16-row tiles, so M rounds up to this when the launched tile is unknown.
+_MFMA_M_TILE = 16
+
+
+def _pad_mfma_m(M):
+    return -(-M // _MFMA_M_TILE) * _MFMA_M_TILE
+
+
 _PRESHUFFLE_KERNEL_RE = re.compile(
     r"GROUP_K_(\d+)_GROUP_N_(\d+)_BLOCK_SIZE_M_(\d+)_BLOCK_SIZE_N_(\d+)"
     r"_BLOCK_SIZE_K_(\d+)_.*?NUM_KSPLIT_(\d+)_SPLITK_BLOCK_SIZE_(\d+)"
@@ -232,9 +240,11 @@ class gemm_a8w8_blockscale_preshuffle(gemm_a8w8_blockscale):
         M, N, K = self.M, self.N, self.K
         tile = self.param_details.get("tile")
         if not tile:
+            # No launched tile in the trace; pad M to the MFMA tile the hardware runs.
+            m = _pad_mfma_m(M)
             block_k = self.param_details.get("block_k") or 0
-            scale = M * N * (K // block_k) if block_k else 0
-            return 2 * M * N * K + scale
+            scale = m * N * (K // block_k) if block_k else 0
+            return 2 * m * N * K + scale
 
         bm, bn, bk = tile["bm"], tile["bn"], tile["bk"]
         programs = tile["num_ksplit"] * -(-M // bm) * -(-N // bn)
@@ -633,7 +643,8 @@ class opus_bmm_a8w8_mxscale_raw(GEMM):
             n = -(-self.N // tile["bn"]) * tile["bn"]
             k = -(-self.K // tile["bk"]) * tile["bk"]
         else:
-            m, n, k = tokens, self.N, self.K
+            # No launched tile in the trace; pad M to the MFMA tile the hardware runs.
+            m, n, k = _pad_mfma_m(tokens), self.N, self.K
         gemm = groups * 2 * m * n * k
         scale_groups = self.param_details.get("a_scale_shape") or ()
         if len(scale_groups) < 3 or not scale_groups[-1]:
@@ -1296,38 +1307,37 @@ class fused_dynamic_mx_quant_moe_sort_hip_bounded(fused_dynamic_mx_quant_moe_sor
         dims = args.get("Input Dims") or []
         details["dtype_out"] = types[0] if types else ""
         details["dtype_scale"] = types[1] if len(types) > 1 else ""
-        details["cols"] = dims[2][-1] if len(dims) > 2 and dims[2] else 0
+        activation = dims[2] if len(dims) > 2 and dims[2] else []
+        # The quant reads/writes the captured activation rows, not row_bound.
+        details["data_rows"] = activation[0] if len(activation) >= 2 else 0
+        details["cols"] = activation[-1] if activation else 0
         return add_logical_batch_size(details, event)
 
     def flops(self):
-        rows = self.param_details.get("row_bound")
+        if not self.param_details.get("bounded"):
+            return None
+        rows = self.param_details.get("data_rows")
         cols = self.param_details.get("cols") or 0
         if not rows or not cols:
             return None
         return 3 * rows * cols
 
     def bytes(self):
+        if not self.param_details.get("bounded"):
+            return None
         if not dense_counted_tensor(self.event, (0, 1, 2)):
             return None
-        rows = self.param_details.get("row_bound")
+        rows = self.param_details.get("data_rows")
         cols = self.param_details.get("cols") or 0
-        group = self.param_details.get("group_size") or 0
-        if not rows or not cols or not group:
+        if not rows or not cols:
             return None
         bpe_in = name2bpe(self.param_details["dtype_in_out"][0])
         bpe_out = name2bpe(self.param_details.get("dtype_out"))
-        bpe_scale = name2bpe(self.param_details.get("dtype_scale"))
-        if None in {bpe_in, bpe_out, bpe_scale}:
+        if None in {bpe_in, bpe_out}:
             return None
-        scale_cols = -(-cols // group)
-        # sorted id (int32) + sorted weight (fp32) + the num_valid scalar.
-        metadata = rows * 4 + rows * 4 + 4
-        return (
-            rows * cols * bpe_in
-            + rows * cols * bpe_out
-            + rows * scale_cols * bpe_scale
-            + metadata
-        )
+        # Scales and the sorted-id/weight reads follow the sort's device-side
+        # num_valid (padded sorted rows), which the event does not carry; omit.
+        return rows * cols * bpe_in + rows * cols * bpe_out
 
     def get_compute_precision(self):
         return "fp32"
