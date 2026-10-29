@@ -41,6 +41,14 @@ def _extras_require():
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
         ],
+        "Visualizer": [
+            "torch",
+            "transformers",
+            "huggingface_hub>=0.20",
+            # fla-core imports Triton at package import. The visualizer never
+            # launches a kernel; it only needs that import to succeed.
+            'triton; platform_system == "Linux" and platform_machine == "x86_64"',
+        ],
         "kernel_source": [
             "itanium-demangler>=1.0",
         ],
@@ -57,7 +65,7 @@ def _extras_require():
 setup(
     name="TraceLens",
     version=_wheel_version(),
-    packages=find_packages(where="."),  # Will pick up 'TraceLens' automatically
+    packages=find_packages(where="."),
     package_dir={"": "."},
     include_package_data=True,
     package_data={
@@ -65,6 +73,12 @@ setup(
             "**/*.md",
             "Agent/**/skills/**/*",
             "Agent/Analysis/utils/arch/*.json",
+        ],
+        "TraceLens.Visualizer.model_explorer_export": [
+            "viewer/*.html",
+            "viewer/app.js",
+            "viewer/NOTICE",
+            "viewer/ai-edge-model-explorer-visualizer.LICENSE",
         ],
     },
     exclude_package_data={
@@ -102,6 +116,7 @@ setup(
             "TraceLens_generate_perf_report_jax = TraceLens.Reporting.generate_perf_report_jax:main",
             "TraceLens_generate_perf_report_pytorch = TraceLens.Reporting.generate_perf_report_pytorch:main",
             "TraceLens_generate_perf_report_pytorch_inference = TraceLens.Reporting.generate_perf_report_pytorch_inference:main",
+            "TraceLens_generate_perf_report_from_config = TraceLens.Reporting.generate_perf_report_from_config:main",
             "TraceLens_generate_perf_report_rocprof = TraceLens.Reporting.generate_perf_report_rocprof:main",
             "TraceLens_compare_perf_reports_pytorch = TraceLens.Reporting.compare_perf_reports_pytorch:main",
             "TraceLens_generate_multi_rank_collective_report_pytorch = TraceLens.Reporting.generate_multi_rank_collective_report_pytorch:main",
@@ -109,6 +124,8 @@ setup(
             "TraceLens_generate_perf_report_pftrace_hip_activity = TraceLens.Reporting.generate_perf_report_pftrace_hip_activity:main",
             "TraceLens_generate_perf_report_pftrace_memory_copy = TraceLens.Reporting.generate_perf_report_pftrace_memory_copy:main",
             "TraceLens_generate_perf_report_genesis = TraceLens.Reporting.generate_perf_report_genesis:main",
+            "TraceLens_visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main",
+            "visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main",
             "TraceLens_split_trace = TraceLens.TraceUtils.split_trace.main:main",
             "TraceLens_resolve_kernel_source = TraceLens.TraceUtils.kernel_source.cli:main",
             "TraceLens_trace_index = TraceLens.TraceIndex.cli:main",
