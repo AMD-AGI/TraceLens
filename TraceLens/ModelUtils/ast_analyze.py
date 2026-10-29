@@ -28,6 +28,7 @@ _log = logging.getLogger(__name__)
 from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis
 from TraceLens.ModelUtils.config_resolve import apply_config_attribute_aliases
 from TraceLens.ModelUtils.github import pinned_module_origin
+from TraceLens.ModelUtils.parallel_plan import _ENGINE_LINEAR_STYLES
 
 DECODER_CLASS_RE = re.compile(
     r"(DecoderLayer|DecoderBlock|TransformerBlock|ModelBlock|Block)$",
@@ -94,6 +95,24 @@ ATTR_ROLE_HINTS: dict[str, str] = {
     "pre_norm": "norm",
     "norm": "norm",
 }
+
+POSITIONAL_ATTR_RE = re.compile(r"(rotary|rope|pos_emb)", re.I)
+POSITIONAL_CLASS_RE = re.compile(r"(Rotary|RoPE|PosEmb|RotaryEmbedding)", re.I)
+EMBEDDING_CLASS_RE = re.compile(r"Embedding", re.I)
+# `Head$` catches inference-repo names like ParallelHead. Attention classes are
+# classified earlier, so `AttentionHead` and friends never reach this test.
+HEAD_CLASS_RE = re.compile(r"(?:^|_)head$|Head$|LMHead|CausalLMOutput", re.I)
+# `_classify_role` checks this strict, anchored pattern first, ahead of any
+# attr-name hint -- a real MoE layer often keeps the attribute literally named
+# `mlp` (Mixtral, Qwen2MoE, DeepSeek), so only the class name can tell a MoE
+# block from a dense one there. `MOE_CLASS_RE` above is the loose fallback
+# `_classify_role` checks last, once attention/ffn/norm/positional have all
+# missed; it also backs two unrelated MoE-gate/aggregation heuristics
+# elsewhere in this file. Being unanchored, it catches engine wrapper names
+# this strict pattern does not (vLLM/SGLang's `FusedMoE`, `SharedExpertMLP`).
+_MOE_BLOCK_CLASS_RE = re.compile(
+    r"(?i)(?:^moe$|sparse_?moe(?:_?block)?$|moe_?block$|experts$)"
+)
 
 
 SYNTHETIC_ATTENTION = "@attention"
@@ -852,6 +871,9 @@ def _analyzed_base_module(config: dict[str, Any] | None) -> str | None:
     """Dotted module of the analysed modeling file, for resolving its own imports."""
     if not isinstance(config, dict):
         return None
+    analyzed = config.get(ANALYZED_MODULE_KEY)
+    if analyzed:
+        return str(analyzed)
     model_type = str(config.get("model_type") or "").strip().replace("-", "_")
     if not model_type:
         return None
@@ -1631,7 +1653,7 @@ def _class_from_module_chain(
             return None
         resolved = registry.get(symbol)
         if resolved is not None:
-            return resolved, module_tree
+            return _resolve_inherited_forward(resolved, registry), module_tree
         onward = _absolute_import_bindings(module_tree, module)
         target = onward.get(symbol)
         if not target:
@@ -1639,6 +1661,48 @@ def _class_from_module_chain(
         module, _, next_symbol = target.partition("#")
         symbol = next_symbol or symbol
     return None
+
+
+def _class_defines_forward(node: ast.ClassDef) -> bool:
+    return any(
+        isinstance(item, ast.FunctionDef) and item.name == "forward"
+        for item in node.body
+    )
+
+
+def _single_local_base_name(node: ast.ClassDef) -> str | None:
+    """The one base's bare name, when it is a plain local identifier rather than
+    a dotted/imported qualifier (``nn.Module``) -- a base this same registry can
+    actually hold, as opposed to a framework root with nothing to climb to."""
+    if len(node.bases) != 1:
+        return None
+    base = node.bases[0]
+    return base.id if isinstance(base, ast.Name) else None
+
+
+def _resolve_inherited_forward(
+    resolved: "ClassStructure", registry: dict[str, "ClassStructure"]
+) -> "ClassStructure":
+    """A subclass that overrides neither ``forward`` dispatches exactly like its
+    base -- that is what inheriting it unchanged means at runtime -- so climb to
+    the base (same file, same registry) rather than treat the subclass as an
+    empty frame with no ops of its own.
+
+    vLLM's ``MergedColumnParallelLinear(ColumnParallelLinear)`` only replaces the
+    weight loader; its forward body, and whatever that forward dispatches
+    through, is entirely the base's.
+    """
+    current = resolved
+    seen = {current.name}
+    while not _class_defines_forward(current.node):
+        base_name = _single_local_base_name(current.node)
+        if base_name is None or base_name in seen or base_name not in registry:
+            return current
+        seen.add(base_name)
+        current = registry[base_name]
+    if current is resolved:
+        return resolved
+    return dataclasses.replace(current, name=resolved.name)
 
 
 def _dispatches_to_imported_kernel(
@@ -1656,6 +1720,17 @@ def _dispatches_to_imported_kernel(
     The import can sit inside the forward OR at the top of the defining file, so
     both are considered. A class whose forward does its own arithmetic is
     expanded normally.
+
+    A third shape never names an import at all: ``ColumnParallelLinear.forward``
+    reads ``output = self.quant_method.apply(self, x, bias)``, where
+    ``quant_method`` is assigned a DIFFERENT concrete class per quantization
+    backend (``if quant_config is None: ... else: self.quant_method =
+    resolve_quant_method(...)``) -- a runtime-selected strategy object, not a
+    submodule this walk can open. The conditional assignment is the tell: an
+    attribute built unconditionally from one literal constructor is a normal
+    submodule and expands as one; an attribute assigned per-branch is a plugin
+    point, and a named (non-``forward``/``__call__``) method call through it is
+    the same kind of boundary as a call to an imported kernel.
     """
     node = getattr(structure, "node", None)
     if node is None:
@@ -1693,11 +1768,65 @@ def _dispatches_to_imported_kernel(
         for stmt in ast.walk(scope):
             if isinstance(stmt, ast.ImportFrom):
                 imported.update(alias.asname or alias.name for alias in stmt.names)
-    if not imported:
-        return False
     for stmt in ast.walk(forward):
-        if isinstance(stmt, ast.Call) and isinstance(stmt.func, ast.Name):
-            if stmt.func.id in imported:
+        if (
+            isinstance(stmt, ast.Call)
+            and isinstance(stmt.func, ast.Name)
+            and stmt.func.id in imported
+        ):
+            return True
+    return _calls_a_runtime_selected_attribute(node, forward)
+
+
+def _calls_a_runtime_selected_attribute(
+    class_node: ast.ClassDef, forward: ast.FunctionDef
+) -> bool:
+    """True when ``forward`` dispatches through ``self.<attr>.<method>(...)`` and
+    ``<attr>`` is assigned per-branch in ``__init__`` rather than built once.
+
+    ``self.quant_method(x)`` would invoke ``__call__``/``forward`` like any
+    submodule, so only an explicit, non-``forward``-like method name counts --
+    that is the shape a strategy object's named entry point takes, not a
+    regular nn.Module call.
+    """
+    for stmt in ast.walk(forward):
+        if not (
+            isinstance(stmt, ast.Call)
+            and isinstance(stmt.func, ast.Attribute)
+            and stmt.func.attr not in ("forward", "__call__")
+            and isinstance(stmt.func.value, ast.Attribute)
+            and _is_self_attr(stmt.func.value, stmt.func.value.attr)
+        ):
+            continue
+        if _is_conditionally_assigned(class_node, stmt.func.value.attr):
+            return True
+    return False
+
+
+def _is_conditionally_assigned(class_node: ast.ClassDef, attr: str) -> bool:
+    """True when ``self.<attr>`` is set inside an ``if``/``try`` branch of
+    ``__init__`` -- the concrete value genuinely varies by runtime config, so no
+    single static read of this file can name the class it ends up holding."""
+    init_func = next(
+        (
+            item
+            for item in class_node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+        ),
+        None,
+    )
+    if init_func is None:
+        return False
+    for branch in ast.walk(init_func):
+        if not isinstance(branch, (ast.If, ast.Try)):
+            continue
+        for stmt in ast.walk(branch):
+            targets: list[ast.AST] = []
+            if isinstance(stmt, ast.Assign):
+                targets = stmt.targets
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                targets = [stmt.target]
+            if any(_is_self_attr(target, attr) for target in targets):
                 return True
     return False
 
@@ -1989,6 +2118,14 @@ RUNTIME_REGIME_KEY = "_runtime_regime"
 #: source file binds at import time (see ``_device_check_globals``), threaded
 #: beside ``RUNTIME_REGIME_KEY`` on the same config dict.
 DEVICE_CHECK_GLOBALS_KEY = "_device_check_globals"
+
+#: Reserved config key carrying the dotted module name of the file actually
+#: being analysed, when it was resolved from an inference engine's own pinned
+#: source (``source.resolve_engine_modeling_files``) rather than transformers'.
+#: ``_analyzed_base_module`` reads it to resolve THIS file's own imports --
+#: absolute or relative -- against its real package, instead of assuming the
+#: transformers layout every analysed file used to be guaranteed to have.
+ANALYZED_MODULE_KEY = "_analyzed_module"
 
 #: Platform-detection functions a vLLM/SGLang modeling file calls once, at
 #: import time, to pick a vendor code path (``_is_npu = is_npu()`` then ``if
@@ -2856,6 +2993,7 @@ def _extract_self_calls_ordered(
     repeated_attrs: frozenset[str] = frozenset(),
     module_attrs: frozenset[str] = frozenset(),
     local_object_methods: dict[tuple[str, int], LocalMethod] | None = None,
+    submodule_aliases: dict[str, str] | None = None,
 ) -> None:
     """Collect self.module(...) calls in approximate evaluation order (inner-first).
 
@@ -2869,6 +3007,12 @@ def _extract_self_calls_ordered(
     forward; each call to one gets a call-site ``@l{lineno}`` suffix so two calls to
     the same child stay distinct steps (see ``submodule_callsite_attr``). Empty by
     default, so single-call forwards keep bare keys (byte-identical).
+
+    ``submodule_aliases`` maps a local variable to the submodule attr it was bound
+    to by a preceding ``var = self.A if cond else self.B`` (populated by the
+    statement walker as it resolves each assignment in source order -- see
+    ``_ternary_submodule_choice``); a later bare ``var(...)`` resolves through it
+    exactly as a direct ``self.<attr>(...)`` would.
     """
     node = _unwrap_expr(node)
     if isinstance(node, ast.Call):
@@ -2880,6 +3024,7 @@ def _extract_self_calls_ordered(
                 repeated_attrs,
                 module_attrs,
                 local_object_methods,
+                submodule_aliases,
             )
         for keyword in node.keywords:
             _extract_self_calls_ordered(
@@ -2889,6 +3034,7 @@ def _extract_self_calls_ordered(
                 repeated_attrs,
                 module_attrs,
                 local_object_methods,
+                submodule_aliases,
             )
 
         func = node.func
@@ -2929,6 +3075,20 @@ def _extract_self_calls_ordered(
             _append_forward_call(
                 out, submodule_callsite_attr(func.value.id, node.lineno)
             )
+            return
+        # A local bound to a submodule reference itself, not its output
+        # (``ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp``;
+        # ``ffn(hidden_states)``). Calling the local is then a call on that
+        # submodule, exactly as a direct ``self.<attr>(...)`` would be.
+        if (
+            submodule_aliases
+            and isinstance(func, ast.Name)
+            and func.id in submodule_aliases
+        ):
+            aliased_attr = submodule_aliases[func.id]
+            if aliased_attr in repeated_attrs:
+                aliased_attr = submodule_callsite_attr(aliased_attr, node.lineno)
+            _append_forward_call(out, aliased_attr)
             return
 
         target = _expr_name(func)
@@ -2973,6 +3133,7 @@ def _extract_self_calls_ordered(
                 repeated_attrs,
                 module_attrs,
                 local_object_methods,
+                submodule_aliases,
             )
         return
 
@@ -2984,6 +3145,7 @@ def _extract_self_calls_ordered(
             repeated_attrs,
             module_attrs,
             local_object_methods,
+            submodule_aliases,
         )
         _extract_self_calls_ordered(
             node.right,
@@ -2992,6 +3154,7 @@ def _extract_self_calls_ordered(
             repeated_attrs,
             module_attrs,
             local_object_methods,
+            submodule_aliases,
         )
         return
 
@@ -3004,6 +3167,7 @@ def _extract_self_calls_ordered(
                 repeated_attrs,
                 module_attrs,
                 local_object_methods,
+                submodule_aliases,
             )
         return
 
@@ -3015,6 +3179,7 @@ def _extract_self_calls_ordered(
             repeated_attrs,
             module_attrs,
             local_object_methods,
+            submodule_aliases,
         )
         _extract_self_calls_ordered(
             node.orelse,
@@ -3023,6 +3188,7 @@ def _extract_self_calls_ordered(
             repeated_attrs,
             module_attrs,
             local_object_methods,
+            submodule_aliases,
         )
         return
 
@@ -3034,6 +3200,7 @@ def _extract_self_calls_ordered(
             repeated_attrs,
             module_attrs,
             local_object_methods,
+            submodule_aliases,
         )
         return
 
@@ -3045,6 +3212,7 @@ def _extract_self_calls_ordered(
             repeated_attrs,
             module_attrs,
             local_object_methods,
+            submodule_aliases,
         )
         for comparator in node.comparators:
             _extract_self_calls_ordered(
@@ -3054,6 +3222,7 @@ def _extract_self_calls_ordered(
                 repeated_attrs,
                 module_attrs,
                 local_object_methods,
+                submodule_aliases,
             )
         return
 
@@ -3402,6 +3571,12 @@ def _resolve_local_module_alias_calls(
     Resolving the alias to ``self.<attr>(...)`` lets the normal forward parser retain
     the real submodule branch (routed expert, or the vision/decoder block body) instead
     of collapsing the bare-name call into a phantom kernel tile and silently dropping it.
+
+    A fourth idiom, a ternary pick between two submodules (``ffn =
+    self.block_sparse_moe if self.is_moe_layer else self.mlp; ffn(hidden_states)``),
+    is desugared separately by ``_desugar_ternary_submodule_dispatch`` below: it
+    names two *different* attrs rather than one, so it cannot be folded into a
+    single ``aliases[name] = attr`` entry the way the idioms above are.
     """
     methods = class_methods or {}
     aliases: dict[str, str] = {}
@@ -3442,26 +3617,182 @@ def _resolve_local_module_alias_calls(
                 loop_var = loop_var.elts[-1]
             if isinstance(loop_var, ast.Name):
                 aliases[loop_var.id] = attr
+
+    resolved = func
+    if aliases:
+        resolved = copy.deepcopy(resolved)
+
+        class AliasCallResolver(ast.NodeTransformer):
+            def visit_Call(self, node: ast.Call) -> ast.AST:
+                self.generic_visit(node)
+                if isinstance(node.func, ast.Name) and node.func.id in aliases:
+                    node.func = ast.copy_location(
+                        ast.Attribute(
+                            value=ast.Name(id="self", ctx=ast.Load()),
+                            attr=aliases[node.func.id],
+                            ctx=ast.Load(),
+                        ),
+                        node.func,
+                    )
+                return node
+
+        resolved = AliasCallResolver().visit(resolved)
+    return _desugar_ternary_submodule_dispatch(resolved)
+
+
+def _ternary_submodule_dispatch_assignments(
+    func: ast.FunctionDef,
+) -> dict[str, tuple[ast.expr, str, str]]:
+    """Locals bound by ``var = self.A if cond else self.B``, keyed by var name.
+
+    Only an alias used SOLELY as a bare call target (``var(...)``) or re-bound to
+    another candidate is returned: a name read any other way (passed around,
+    compared, introspected) cannot be safely desugared into two separate per-arm
+    calls by ``_desugar_ternary_submodule_dispatch`` without changing what that
+    other read sees.
+    """
+    candidates: dict[str, tuple[ast.expr, str, str]] = {}
+    declaration_targets: dict[str, int] = {}
+    multiply_declared: set[str] = set()
+    for node in ast.walk(func):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target = node.targets[0]
+        value = node.value
+        if not (isinstance(target, ast.Name) and isinstance(value, ast.IfExp)):
+            continue
+        body, orelse = value.body, value.orelse
+        if not (
+            isinstance(body, ast.Attribute)
+            and _is_self_attr(body, body.attr)
+            and isinstance(orelse, ast.Attribute)
+            and _is_self_attr(orelse, orelse.attr)
+        ):
+            continue
+        # A name re-ternary'd more than once has two candidate declarations;
+        # neither is safe to desugar (a later call could resolve against
+        # either), so exclude any var seen a second time here.
+        if target.id in candidates:
+            multiply_declared.add(target.id)
+            continue
+        candidates[target.id] = (value.test, body.attr, orelse.attr)
+        declaration_targets[target.id] = id(target)
+    candidates = {
+        var: info for var, info in candidates.items() if var not in multiply_declared
+    }
+    if not candidates:
+        return {}
+    call_targets = {
+        id(node.func)
+        for node in ast.walk(func)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    return {
+        var: info
+        for var, info in candidates.items()
+        if all(
+            id(use) in call_targets or id(use) == declaration_targets[var]
+            for use in ast.walk(func)
+            if isinstance(use, ast.Name) and use.id == var
+        )
+    }
+
+
+def _desugar_ternary_submodule_dispatch(func: ast.FunctionDef) -> ast.FunctionDef:
+    """Rewrite ``var = self.A if cond else self.B; ...; var(x)`` into an ``if``.
+
+    A per-layer flag such as ``is_moe_layer`` commonly decides which of two
+    submodules a ternary names, then calls whichever it picked -- vLLM's MiniMax
+    writes its FFN dispatch exactly this way. The two arms are mutually exclusive
+    submodule IDENTITIES, not two live tensor values, so this is not a value to
+    resolve at the ternary itself; it is the SAME shape the forward parser already
+    handles for an ordinary ``if self.is_moe_layer: ... else: ...`` (both arms
+    walked, a ``Merge`` joining whichever one actually ran -- see
+    ``_emit_branch_select``, and a variant missing one arm's submodule prunes it
+    via ``unbuilt_attrs``/``dead_steps`` the same way). Desugaring to that literal
+    shape before the forward parser ever runs reuses all of that machinery instead
+    of teaching call resolution a second, parallel notion of "maybe either one".
+
+    Each statement that calls the alias is cloned once per arm, with the call's
+    ``func`` rewritten to the arm's own ``self.<attr>``, and replaced by
+    ``if <test>: <clone-for-A> else: <clone-for-B>``. The original ternary
+    assignment is dropped: once every call through it is desugared, nothing
+    else reads the local.
+    """
+    aliases = _ternary_submodule_dispatch_assignments(func)
     if not aliases:
         return func
-
     resolved = copy.deepcopy(func)
+    # Re-resolve against the copy: the dict above keys call/assign sites by
+    # `id()` of nodes in `func`, which the deepcopy does not share.
+    aliases = _ternary_submodule_dispatch_assignments(resolved)
 
-    class AliasCallResolver(ast.NodeTransformer):
-        def visit_Call(self, node: ast.Call) -> ast.AST:
-            self.generic_visit(node)
-            if isinstance(node.func, ast.Name) and node.func.id in aliases:
+    def rewrite_call_func(stmt: ast.stmt, var: str, attr: str) -> ast.stmt:
+        clone = copy.deepcopy(stmt)
+        for node in ast.walk(clone):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == var
+            ):
                 node.func = ast.copy_location(
                     ast.Attribute(
                         value=ast.Name(id="self", ctx=ast.Load()),
-                        attr=aliases[node.func.id],
+                        attr=attr,
                         ctx=ast.Load(),
                     ),
                     node.func,
                 )
-            return node
+        return clone
 
-    return AliasCallResolver().visit(resolved)
+    def rewrite_body(stmts: list[ast.stmt]) -> list[ast.stmt]:
+        out: list[ast.stmt] = []
+        for stmt in stmts:
+            if (
+                isinstance(stmt, ast.Assign)
+                and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
+                and stmt.targets[0].id in aliases
+            ):
+                continue
+            if isinstance(stmt, ast.If):
+                stmt.body = rewrite_body(stmt.body)
+                stmt.orelse = rewrite_body(stmt.orelse)
+            elif isinstance(stmt, (ast.For, ast.While)):
+                stmt.body = rewrite_body(stmt.body)
+                stmt.orelse = rewrite_body(stmt.orelse)
+            elif isinstance(stmt, ast.With):
+                stmt.body = rewrite_body(stmt.body)
+            # A statement naming more than one alias (``ffn1(x) + ffn2(y)``) would
+            # need a cross product of arms to desugar correctly; left unresolved
+            # rather than guessing, same as a statement naming none.
+            called = {
+                node.func.id
+                for node in ast.walk(stmt)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in aliases
+            }
+            if len(called) == 1:
+                var = next(iter(called))
+                test, attr_a, attr_b = aliases[var]
+                out.append(
+                    ast.copy_location(
+                        ast.If(
+                            test=test,
+                            body=[rewrite_call_func(stmt, var, attr_a)],
+                            orelse=[rewrite_call_func(stmt, var, attr_b)],
+                        ),
+                        stmt,
+                    )
+                )
+                continue
+            out.append(stmt)
+        return out
+
+    resolved.body = rewrite_body(resolved.body)
+    ast.fix_missing_locations(resolved)
+    return resolved
 
 
 def _call_builds_host_tensor(node: ast.AST, walker: Any) -> bool:
@@ -4757,15 +5088,52 @@ def _is_self_attr(node: ast.AST, attr: str) -> bool:
     )
 
 
-POSITIONAL_ATTR_RE = re.compile(r"(rotary|rope|pos_emb)", re.I)
-POSITIONAL_CLASS_RE = re.compile(r"(Rotary|RoPE|PosEmb|RotaryEmbedding)", re.I)
-EMBEDDING_CLASS_RE = re.compile(r"Embedding", re.I)
-# `Head$` catches inference-repo names like ParallelHead. Attention classes are
-# classified earlier, so `AttentionHead` and friends never reach this test.
-HEAD_CLASS_RE = re.compile(r"(?:^|_)head$|Head$|LMHead|CausalLMOutput", re.I)
-_MOE_BLOCK_CLASS_RE = re.compile(
-    r"(?i)(?:^moe$|sparse_?moe(?:_?block)?$|moe_?block$|experts$)"
-)
+def _ternary_submodule_choice(
+    node: ast.IfExp, self_values: dict[str, Any], unbuilt_attrs: frozenset[str]
+) -> str | None:
+    """Which of two ``self.`` submodules a layer-variant's ternary picks.
+
+    ``ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp`` aliases a
+    local to whichever child module one run-time flag selects -- common where a
+    flag like ``is_moe_layer`` toggles between an MoE and a dense FFN per layer.
+    Both arms are genuine submodules, not tensor values: a bare ``self.<submodule>``
+    reference carries no producer/call-site of its own until something actually
+    calls it, so every consumer of an ``IfExp`` that otherwise tries both arms
+    generically (a value ternary) finds neither here.
+
+    Neither arm need already be called elsewhere in this forward -- a ternary is
+    often the ONLY call site a conditionally-built submodule has. ``self_values``
+    (the constructor-pass scalar settings, keyed by attr) is instead what tells a
+    genuine submodule apart from a plain config scalar sharing this same shape
+    (``bias = self.bias_a if cond else self.bias_b``): the constructor pass never
+    records a submodule/tensor assignment there (see ``_self_attr_input``), so an
+    arm absent from it is a candidate; one present is a known scalar and rules
+    the whole ternary out.
+
+    ``unbuilt_attrs`` already tells a specific layer-variant's trace which arm's
+    attribute its own ``__init__`` never assigns (the same fact that already
+    splits a model like this into separate MoE/dense variant groups): exactly one
+    side missing resolves the choice; both or neither missing stays ambiguous and
+    is left to the generic (per-caller) fallback.
+    """
+    body, orelse = node.body, node.orelse
+    if not (
+        isinstance(body, ast.Attribute)
+        and isinstance(body.value, ast.Name)
+        and body.value.id == "self"
+        and isinstance(orelse, ast.Attribute)
+        and isinstance(orelse.value, ast.Name)
+        and orelse.value.id == "self"
+    ):
+        return None
+    body_attr, orelse_attr = body.attr, orelse.attr
+    if body_attr in self_values or orelse_attr in self_values:
+        return None
+    body_unbuilt = body_attr in unbuilt_attrs
+    orelse_unbuilt = orelse_attr in unbuilt_attrs
+    if body_unbuilt == orelse_unbuilt:
+        return None
+    return orelse_attr if body_unbuilt else body_attr
 
 
 def _classify_role(attr_name: str, class_name: str) -> str:
@@ -4840,8 +5208,20 @@ def ffn_role_for_class(attr_name: str, class_name: str) -> str:
 
 
 def displays_as_linear(attr_name: str, class_name: str | None) -> bool:
-    """True when a module should be drawn as a plain Linear op."""
-    return bool(class_name and re.match(r"(?i)^Linear$", class_name))
+    """True when a module should be drawn as a plain Linear op.
+
+    A vLLM/SGLang engine shards a Linear by instantiating its own wrapper class
+    (``ColumnParallelLinear``, ``ParallelLMHead``, ...) instead of ``nn.Linear``.
+    ``parallel_plan._ENGINE_LINEAR_STYLES`` already lists exactly these classes
+    for sharding purposes; reused here (one source, not a second list) so a
+    sharded projection still reads as the GEMM it is instead of an opaque box
+    named after the engine's wrapper class.
+    """
+    if not class_name:
+        return False
+    if re.match(r"(?i)^Linear$", class_name):
+        return True
+    return any(marker in class_name for marker in _ENGINE_LINEAR_STYLES)
 
 
 def displays_as_pointwise_leaf(attr_name: str, class_name: str | None) -> bool:
@@ -5786,6 +6166,7 @@ _FUNCTION_LABELS = {
     "zeros_like": "Zeros like",
     "ones_like": "Ones like",
     "full_like": "Full like",
+    "empty_like": "Empty like",
     # The same family as ``arange`` and the ``*_like`` constructors above:
     # a tensor built from host-scalar sizes, reading no tensor operand. GLM
     # guarantees its decoder a mask with ``torch.ones(B, S, dtype=torch.bool)``
@@ -7919,6 +8300,25 @@ class _ForwardOperationExtractor:
             and (func.value.id, node.lineno) in self.local_object_methods
         ):
             return submodule_callsite_attr(func.value.id, node.lineno)
+        # A local aliased to a submodule reference itself, not its output
+        # (``ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp``;
+        # ``ffn(hidden_states)``) -- `expression`'s ``ast.IfExp`` handling binds
+        # such a local's ``var_producer`` to the chosen attr name via
+        # ``_ternary_submodule_choice``, which only fires for an attr pair that
+        # is NOT a known constructor-pass scalar (so is never in
+        # ``self.submodule_attrs``'s stricter "already called bare elsewhere"
+        # sense -- a conditionally-built submodule's ternary is often its only
+        # call site). Calling the local is then a call on that submodule,
+        # exactly as a direct ``self.<attr>(...)`` would be: the only other
+        # thing a ``var_producer`` entry can hold is a synthetic step id or a
+        # tensor-value sentinel, and a plain tensor is not callable -- so a bare
+        # attr-shaped entry reaching a call site can only be this.
+        if isinstance(func, ast.Name):
+            aliased_attr = self.var_producer.get(func.id)
+            if aliased_attr is not None and aliased_attr.isidentifier():
+                if aliased_attr in self.repeated_submodule_attrs:
+                    return submodule_callsite_attr(aliased_attr, node.lineno)
+                return aliased_attr
         target = _expr_name(func)
         if _is_module_dispatch_call(node) or (
             target and isinstance(func, ast.Name) and _is_kernel_merge_call(func)
@@ -9030,6 +9430,11 @@ class _ForwardOperationExtractor:
         if isinstance(node, ast.UnaryOp):
             return self.expression(node.operand)
         if isinstance(node, ast.IfExp):
+            submodule_choice = _ternary_submodule_choice(
+                node, self.self_values, self.unbuilt_attrs
+            )
+            if submodule_choice is not None:
+                return submodule_choice, []
             left, left_external = self.expression(node.body)
             right, right_external = self.expression(node.orelse)
             return right or left, [*left_external, *right_external]
@@ -12741,6 +13146,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 ),
                 config=self._config_for_class(node.name),
                 local_object_methods=self.local_object_methods,
+                unbuilt_attrs=unbuilt_attrs,
             )
             alternate = _alternate_forward_dispatches(forward_func)
             if alternate:
@@ -16198,6 +16604,7 @@ def _parse_forward(
     self_values: dict | None = None,
     config: dict | None = None,
     local_object_methods: dict[str, LocalMethod] | None = None,
+    unbuilt_attrs: frozenset[str] = frozenset(),
 ) -> tuple[
     list[str],
     list[str],
@@ -16212,6 +16619,10 @@ def _parse_forward(
     attention_inputs: dict[str, list[str]] = {}
     side_inputs: dict[str, list[SideInputSpec]] = {}
     forward_step_details: dict[str, list[str]] = {}
+    # Locals bound to a submodule *reference* (``ffn = self.A if cond else
+    # self.B``), not a tensor value -- resolved in source order as each
+    # assignment is walked, so a later ``ffn(...)`` call site can look it up.
+    submodule_aliases: dict[str, str] = {}
     forward_input_names = _forward_input_names(func)
     local_object_methods = _local_method_call_sites(func, local_object_methods or {})
     self_values = self_values or {}
@@ -16245,6 +16656,8 @@ def _parse_forward(
             local_object_methods=local_object_methods,
             skipped_spans=skipped_spans,
             regime_decider=regime_decider,
+            unbuilt_attrs=unbuilt_attrs,
+            submodule_aliases=submodule_aliases,
         )
     forward_step_details.update(_positional_step_details(func))
     forward_step_details.update(_einops_step_details(func))
@@ -16280,6 +16693,8 @@ def _walk_forward_stmt(
     local_object_methods: dict[tuple[str, int], LocalMethod] | None = None,
     skipped_spans: Sequence[tuple[int, int]] = (),
     regime_decider: "_RegimeDecider | None" = None,
+    unbuilt_attrs: frozenset[str] = frozenset(),
+    submodule_aliases: dict[str, str] | None = None,
 ) -> str | None:
     if isinstance(node, ast.Assign):
         stmt_calls: list[str] = []
@@ -16306,6 +16721,7 @@ def _walk_forward_stmt(
             repeated_attrs,
             module_attrs,
             local_object_methods,
+            submodule_aliases,
         )
         _inject_kernel_merge(
             expanded_value,
@@ -16331,6 +16747,21 @@ def _walk_forward_stmt(
         # ``x = self.block(x, aux)`` the first ``x`` is still the forward input;
         # treating the newly produced chain as its source invents a residual merge.
         _record_assign_targets(node, stmt_calls, var_chains)
+        # ``ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp``: the
+        # local now names a submodule, not a value ``_record_assign_targets``
+        # above can give a chain -- remember it so a later ``ffn(...)`` resolves
+        # as a real submodule call instead of an opaque ``@fn_`` placeholder.
+        if (
+            submodule_aliases is not None
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.IfExp)
+        ):
+            choice = _ternary_submodule_choice(
+                node.value, self_values or {}, unbuilt_attrs
+            )
+            if choice is not None:
+                submodule_aliases[node.targets[0].id] = choice
         return _register_forward_calls(stmt_calls, calls, norm_before, pending_norm)
 
     if isinstance(node, ast.AnnAssign) and node.value is not None:
@@ -16342,6 +16773,7 @@ def _walk_forward_stmt(
             repeated_attrs,
             module_attrs,
             local_object_methods,
+            submodule_aliases,
         )
         _inject_kernel_merge(
             node.value,
@@ -16363,6 +16795,16 @@ def _walk_forward_stmt(
             chain = _trace_var_chain(node.value, var_chains, stmt_calls)
             if chain:
                 var_chains[node.target.id] = chain
+        if (
+            submodule_aliases is not None
+            and isinstance(node.target, ast.Name)
+            and isinstance(node.value, ast.IfExp)
+        ):
+            choice = _ternary_submodule_choice(
+                node.value, self_values or {}, unbuilt_attrs
+            )
+            if choice is not None:
+                submodule_aliases[node.target.id] = choice
         return _register_forward_calls(stmt_calls, calls, norm_before, pending_norm)
 
     if isinstance(node, ast.Expr):
@@ -16374,6 +16816,7 @@ def _walk_forward_stmt(
             repeated_attrs,
             module_attrs,
             local_object_methods,
+            submodule_aliases,
         )
         _inject_kernel_merge(
             node.value,
@@ -16402,6 +16845,7 @@ def _walk_forward_stmt(
             repeated_attrs,
             module_attrs,
             local_object_methods,
+            submodule_aliases,
         )
         _inject_kernel_merge(
             node.value,
@@ -16433,6 +16877,7 @@ def _walk_forward_stmt(
             repeated_attrs,
             module_attrs,
             local_object_methods,
+            submodule_aliases,
         )
         _inject_kernel_merge(
             node.value,
@@ -16533,6 +16978,8 @@ def _walk_forward_stmt(
                 local_object_methods=local_object_methods,
                 skipped_spans=skipped_spans,
                 regime_decider=regime_decider,
+                unbuilt_attrs=unbuilt_attrs,
+                submodule_aliases=submodule_aliases,
             )
         return pending_norm
 
@@ -16558,6 +17005,8 @@ def _walk_forward_stmt(
                 local_object_methods=local_object_methods,
                 skipped_spans=skipped_spans,
                 regime_decider=regime_decider,
+                unbuilt_attrs=unbuilt_attrs,
+                submodule_aliases=submodule_aliases,
             )
         # Tensor operations are annotated by _ForwardOperationExtractor, but
         # expanded helper calls (for example `_apply_gate()`) are not operations
@@ -16596,6 +17045,8 @@ def _walk_forward_stmt(
                 local_object_methods=local_object_methods,
                 skipped_spans=skipped_spans,
                 regime_decider=regime_decider,
+                unbuilt_attrs=unbuilt_attrs,
+                submodule_aliases=submodule_aliases,
             )
         return pending_norm
 

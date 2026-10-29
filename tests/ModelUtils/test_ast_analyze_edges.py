@@ -584,6 +584,103 @@ def test_expand_conditional_components_extra_ffn_option():
     assert ("block_sparse_moe", "AltMoeBlock") in names
 
 
+def test_class_from_module_chain_climbs_to_inherited_forward(tmp_path, monkeypatch):
+    """A subclass with no own ``forward``/``__init__`` (vLLM's
+    ``MergedColumnParallelLinear(ColumnParallelLinear)`` shape) resolves to its
+    base's forward instead of an empty frame -- otherwise kernel-boundary
+    detection and expansion both see nothing and silently drop the base's real
+    dispatch."""
+    pkg = tmp_path / "fakevllm"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "linear.py").write_text(
+        "class ColumnParallelLinear:\n"
+        "    def __init__(self, quant_config):\n"
+        "        if quant_config is None:\n"
+        "            self.quant_method = UnquantizedLinearMethod()\n"
+        "        else:\n"
+        "            self.quant_method = resolve_quant_method(quant_config)\n"
+        "    def forward(self, x):\n"
+        "        bias = self.bias\n"
+        "        output = self.quant_method.apply(self, x, bias)\n"
+        "        return output\n"
+        "\n"
+        "class MergedColumnParallelLinear(ColumnParallelLinear):\n"
+        "    def weight_loader(self, param, loaded_weight):\n"
+        "        pass\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    found = aa._class_from_module_chain(
+        "fakevllm.linear", "MergedColumnParallelLinear", all_tensor_ops=False
+    )
+    assert found is not None
+    resolved, _module_tree = found
+    # Keeps the subclass's own name for display...
+    assert resolved.name == "MergedColumnParallelLinear"
+    # ...but its node is the base's, which is what has a forward to inspect.
+    assert resolved.node.name == "ColumnParallelLinear"
+    assert aa._class_defines_forward(resolved.node) is True
+    assert aa._dispatches_to_imported_kernel(resolved, None) is True
+
+
+def test_dispatches_to_imported_kernel_via_runtime_selected_attribute():
+    """``self.quant_method.apply(...)`` is a kernel boundary when ``quant_method``
+    is assigned per-branch in ``__init__`` (a vLLM ``ColumnParallelLinear`` style
+    quantization plugin point), even though nothing is imported and the body is
+    multi-statement -- neither of which the older checks catch."""
+    pluggable = _cls(
+        "ColumnParallelLinear",
+        node_src=(
+            "class ColumnParallelLinear:\n"
+            "    def __init__(self, quant_config):\n"
+            "        if quant_config is None:\n"
+            "            self.quant_method = UnquantizedLinearMethod()\n"
+            "        else:\n"
+            "            self.quant_method = resolve_quant_method(quant_config)\n"
+            "    def forward(self, x):\n"
+            "        bias = self.bias\n"
+            "        output = self.quant_method.apply(self, x, bias)\n"
+            "        return output\n"
+        ),
+    )
+    assert aa._dispatches_to_imported_kernel(pluggable, None) is True
+
+    # The same conditionally-assigned attribute called through plain
+    # ``__call__`` (``self.x(y)``) is a normal submodule invocation, not a
+    # plugin dispatch, and must still expand. (Kept multi-statement so the
+    # older single-``return <call>(...)`` rule doesn't also fire here.)
+    via_call = _cls(
+        "CallsNormally",
+        node_src=(
+            "class CallsNormally:\n"
+            "    def __init__(self, quant_config):\n"
+            "        if quant_config is None:\n"
+            "            self.quant_method = UnquantizedLinearMethod()\n"
+            "        else:\n"
+            "            self.quant_method = resolve_quant_method(quant_config)\n"
+            "    def forward(self, x):\n"
+            "        y = self.quant_method(x)\n"
+            "        return y\n"
+        ),
+    )
+    assert aa._dispatches_to_imported_kernel(via_call, None) is False
+
+    # An attribute built unconditionally from one literal constructor is a
+    # regular submodule even when called through a named method.
+    unconditional = _cls(
+        "UnconditionalAttr",
+        node_src=(
+            "class UnconditionalAttr:\n"
+            "    def __init__(self, config):\n"
+            "        self.rotary_emb = RotaryEmbedding(config)\n"
+            "    def forward(self, positions):\n"
+            "        cos_sin = self.rotary_emb.get_cos_sin(positions)\n"
+            "        return cos_sin\n"
+        ),
+    )
+    assert aa._dispatches_to_imported_kernel(unconditional, None) is False
+
+
 def test_parse_layer_module_list_edge_returns():
     parse = aa._parse_layer_module_list
     # bare list comp whose element is not a Call -> None (4720-4721)

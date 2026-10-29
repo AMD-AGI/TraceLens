@@ -18,6 +18,7 @@ from TraceLens.ModelUtils.parallel_plan import (
     build_parallel_layout,
     gpu_group_report,
     layout_from_plans,
+    locally_sharded_node_ids,
     parse_class_plans,
     parse_engine_class_plans,
     scope_graph_to_gpu_group,
@@ -372,11 +373,11 @@ def test_literal_resolves_a_negated_int_constant_but_not_other_unary_ops():
     assert _literal(parsed('{"a": -1, 2: "skip"}')) == {"a": -1}
 
 
-def test_apply_shape_edit_covers_sequence_last_and_expert_rewrites():
-    """``_ShapeEdit``'s three independent rewrite slots, applied directly to a
+def test_apply_shape_edit_covers_sequence_and_expert_rewrites():
+    """``_ShapeEdit``'s two independent rewrite slots, applied directly to a
     node's ``full_shape`` attr: a sharded sequence axis (both a concrete digit
-    and a symbolic ``S``), a sharded trailing feature width, and a sharded
-    expert count -- each only touching the dim token it names."""
+    and a symbolic ``S``), and a sharded expert count -- each only touching the
+    dim token it names."""
     from TraceLens.ModelUtils.parallel_plan import (
         _ShapeEdit,
         _apply_shape_edit,
@@ -400,12 +401,6 @@ def test_apply_shape_edit_covers_sequence_last_and_expert_rewrites():
     symbolic_edit.sequence = (4, 0)
     _apply_shape_edit(symbolic_node, symbolic_edit)
     assert _attr(symbolic_node, "output_shape") == "[B, S/4, 4096] float16"
-
-    last_node = shaped("[B, S, 4096] float16")
-    last_edit = _ShapeEdit()
-    last_edit.last = (4096, 1024)
-    _apply_shape_edit(last_node, last_edit)
-    assert _attr(last_node, "output_shape") == "[B, S, 1024] float16"
 
     experts_node = shaped("[256, 4096, 1024] float16")
     experts_edit = _ShapeEdit()
@@ -470,6 +465,11 @@ def test_a_column_parallel_output_stays_sharded_without_a_collective():
 
 
 def test_a_gather_moves_each_ranks_shard():
+    """``annotate_parallel_nodes`` is called on a graph that already carries
+    this rank's local shape (set upstream by the config-override shape-inference
+    pass, not by this module) -- here, ``in_proj_qkv``'s colwise-sharded output,
+    4 the full 8. It inserts the gather and leaves that local shape alone, but
+    the comm node it inserts shows the gather's own output: the FULL tensor."""
     layout = _layout(ParallelDegree(tp=4))
     producer = {
         "id": "block/linear_attn/in_proj_qkv",
@@ -477,13 +477,14 @@ def test_a_gather_moves_each_ranks_shard():
         "namespace": "block/linear_attn",
         "attrs": [
             {"key": "attr_name", "value": "in_proj_qkv"},
-            {"key": "output_shape", "value": "[2, 4, 8] float32"},
+            {"key": "output_shape", "value": "[2, 4, 2] float32"},
+            {"key": "full_shape", "value": "[2, 4, 8] float32"},
         ],
     }
     graph = _wired(producer)
     annotate_parallel_nodes(graph, layout)
     comm = next(node for node in graph["nodes"] if node["label"] == "gather")
-    # Full output is 2*4*8*4 = 256 bytes; the shard that moves is that divided by 4.
+    # The shard that moves is 2*4*2*4 bytes (float32) = 64 bytes.
     assert "64 bytes" in next(
         item["value"] for item in comm["attrs"] if item["key"] == "parallel"
     )
@@ -494,6 +495,12 @@ def test_a_gather_moves_each_ranks_shard():
 
 
 def test_a_column_parallel_shape_is_per_gpu_and_keeps_the_full_tensor():
+    """Colwise sizing itself is not this module's job (a config-override shape
+    re-inference pass already produced both of these graph nodes' local
+    output_shape, consistently, before annotate_parallel_nodes ever runs --
+    see local_config_overrides). What IS this module's job: leave an
+    already-local shape alone, with no collective to gather it back (colwise
+    without colwise_gather_output stays sharded for its consumer)."""
     layout = _layout(ParallelDegree(tp=4))
     producer = {
         "id": "block/self_attn/q_proj",
@@ -501,17 +508,27 @@ def test_a_column_parallel_shape_is_per_gpu_and_keeps_the_full_tensor():
         "namespace": "block/self_attn",
         "attrs": [
             {"key": "attr_name", "value": "q_proj"},
-            {"key": "output_shape", "value": "[2, 4, 8] float32"},
+            {"key": "output_shape", "value": "[2, 4, 2] float32"},
+            {"key": "full_shape", "value": "[2, 4, 8] float32"},
         ],
         "outputsMetadata": [
-            {"id": "0", "attrs": [{"key": "shape", "value": "[2, 4, 8] float32"}]}
+            {
+                "id": "0",
+                "attrs": [
+                    {"key": "shape", "value": "[2, 4, 2] float32"},
+                    {"key": "full_shape", "value": "[2, 4, 8] float32"},
+                ],
+            }
         ],
     }
     consumer = {
         "id": "block/self_attn/view",
         "label": "view",
         "namespace": "block/self_attn",
-        "attrs": [{"key": "output_shape", "value": "[2, 4, 8] float32"}],
+        "attrs": [
+            {"key": "output_shape", "value": "[2, 4, 2] float32"},
+            {"key": "full_shape", "value": "[2, 4, 8] float32"},
+        ],
         "incomingEdges": [_edge(producer["id"])],
     }
     graph = _wired(producer)
@@ -524,27 +541,96 @@ def test_a_column_parallel_shape_is_per_gpu_and_keeps_the_full_tensor():
     assert _shape(consumer) == "[2, 4, 2] float32"
     assert _full_shape(consumer) == "[2, 4, 8] float32"
 
-    uneven = {
+
+def test_local_config_overrides_divides_declared_widths_uneven_lands_on_rank_0():
+    """local_config_overrides is where colwise/rowwise/vocab sizing now lives:
+    it reads the same declared widths build_parallel_layout already checked
+    for even division, and divides them -- an uneven one landing the remainder
+    on rank 0, same as share_of everywhere else in this module."""
+    from TraceLens.ModelUtils.parallel_plan import local_config_overrides
+
+    classes = parse_class_plans(_SOURCE)
+    spec = ArchitectureSpec(
+        name="demo",
+        model_type="demo",
+        num_attention_heads=5,
+        hidden_size=40,
+        raw_config={"model_type": "demo", "architectures": []},
+    )
+    layout = layout_from_plans(classes, spec, ParallelDegree(tp=2), spec.raw_config)
+    overrides = local_config_overrides(layout, spec)
+    assert overrides["num_attention_heads"] == 3
+    # head_dim is pinned to its original (undivided-hidden-size-derived) value,
+    # not re-derived from the now-smaller head count.
+    assert overrides["head_dim"] == spec.hidden_size // spec.num_attention_heads
+
+    unsharded = local_config_overrides(_layout(ParallelDegree()), spec)
+    assert unsharded == {}
+
+
+def test_locally_sharded_node_ids_stops_at_a_gather_and_a_replicated_router():
+    """A ``gather`` leaf's own output is local, but what it feeds is the full
+    tensor on every rank -- until a fresh rule-matched leaf (its own division)
+    starts a locally-sharded region again. A ``replicated_with_grad_allreduce``
+    leaf (a router's logits, a gradient-only sync) is never locally sharded,
+    not even its own node."""
+    layout = _layout(ParallelDegree(tp=4))
+    gathered = {
+        "id": "block/linear_attn/in_proj_qkv",
+        "label": "in_proj_qkv",
+        "namespace": "block/linear_attn",
+        "attrs": [{"key": "attr_name", "value": "in_proj_qkv"}],
+        "incomingEdges": [_edge("@input")],
+    }
+    restored = {
+        "id": "block/linear_attn/view",
+        "label": "view",
+        "namespace": "block/linear_attn",
+        "attrs": [],
+        "incomingEdges": [_edge(gathered["id"])],
+    }
+    fresh_leaf = {
         "id": "block/self_attn/q_proj",
         "label": "q_proj",
         "namespace": "block/self_attn",
-        "attrs": [
-            {"key": "attr_name", "value": "q_proj"},
-            {"key": "output_shape", "value": "[5] float32"},
-        ],
+        "attrs": [{"key": "attr_name", "value": "q_proj"}],
+        "incomingEdges": [_edge(restored["id"])],
     }
-    uneven_graph = _wired(uneven)
-    annotate_parallel_nodes(uneven_graph, _layout(ParallelDegree(tp=2)))
-    assert _shape(uneven) == "[3] float32"
-    assert _full_shape(uneven) == "[5] float32"
-    from TraceLens.ModelUtils.parallel_plan import _localize_gpu_shapes
-
-    uneven_layout = _layout(ParallelDegree(tp=2))
-    uneven_layout.gpu_group = GpuGroup(index=1, gpus=(1,))
-    # Rank 0 was drawn first. Rank 1 reads the saved full shape, not that shard.
-    _localize_gpu_shapes({"nodes": uneven_graph["nodes"]}, uneven_layout)
-    assert _shape(uneven) == "[2] float32"
-    assert _full_shape(uneven) == "[5] float32"
+    past_fresh_leaf = {
+        "id": "block/self_attn/view",
+        "label": "view",
+        "namespace": "block/self_attn",
+        "attrs": [],
+        "incomingEdges": [_edge(fresh_leaf["id"])],
+    }
+    replicated_router = {
+        "id": "block/self_attn/q_norm",
+        "label": "q_norm",
+        "namespace": "block/self_attn",
+        "attrs": [{"key": "attr_name", "value": "q_norm"}],
+        "incomingEdges": [_edge("@input")],
+    }
+    graph = {
+        "nodes": [
+            {
+                "id": "@input",
+                "label": "hidden_states",
+                "namespace": "",
+                "attrs": [{"key": "synthetic", "value": "@input"}],
+            },
+            gathered,
+            restored,
+            fresh_leaf,
+            past_fresh_leaf,
+            replicated_router,
+        ]
+    }
+    sharded = locally_sharded_node_ids(graph, layout)
+    assert gathered["id"] in sharded
+    assert restored["id"] not in sharded
+    assert fresh_leaf["id"] in sharded
+    assert past_fresh_leaf["id"] in sharded
+    assert replicated_router["id"] not in sharded
 
 
 def test_expert_count_on_one_gpu_is_the_local_slice():
@@ -794,7 +880,8 @@ def test_a_collective_matches_the_attribute_path_carried_in_the_node_id():
         "namespace": "48x_Block/SomeAttention",
         "attrs": [
             {"key": "attr_name", "value": "in_proj_qkv"},
-            {"key": "output_shape", "value": "[2, 4, 8] float32"},
+            {"key": "output_shape", "value": "[2, 4, 2] float32"},
+            {"key": "full_shape", "value": "[2, 4, 8] float32"},
         ],
     }
     nested = {

@@ -981,6 +981,39 @@ def test_qkv_parallel_linear_still_uses_a_resolvable_v_head_size_override():
     assert spec.out_features == 128 * 4 + 1 * 128 + 1 * 0
 
 
+def test_qkv_parallel_linear_with_indexer_adds_the_fused_index_heads():
+    """MiniMax-M3's ``MinimaxM3QKVParallelLinearWithIndexer`` fuses a lightning
+    indexer's ``index_q``/``index_k`` into the same GEMM, after the base
+    class's own four positional args. ``index_q`` shards like a KV head
+    (scaled by its own head count); ``index_k`` is always a single replicated
+    head, contributing its width once."""
+    import ast as _ast
+
+    from TraceLens.ModelUtils.shape_inference import (
+        ModuleLinearSpec,
+        _parse_module_ctor,
+    )
+
+    call = (
+        _ast.parse(
+            "MinimaxM3QKVParallelLinearWithIndexer("
+            "hidden_size, 128, 64, 4, 4, 128, bias=False)"
+        )
+        .body[0]
+        .value
+    )
+    ctx = ShapeContext.from_spec(
+        ArchitectureSpec(name="T", model_type="t", raw_config={})
+    )
+    spec = _parse_module_ctor(
+        call, config={}, local_vars={"hidden_size": 6144}, context=ctx
+    )
+    assert isinstance(spec, ModuleLinearSpec)
+    assert spec.in_features == 6144
+    # q=64*128=8192, k=v=4*128=512 each, index_q=4*128=512, index_k=1*128=128.
+    assert spec.out_features == 8192 + 512 + 512 + 512 + 128
+
+
 def test_qkv_parallel_linear_is_unresolved_when_a_required_arg_cannot_be_resolved():
     """``in_features`` itself is unresolvable (not a literal, config read, or
     bound local): there is no honest width to report, unlike the
@@ -999,6 +1032,209 @@ def test_qkv_parallel_linear_is_unresolved_when_a_required_arg_cannot_be_resolve
         ArchitectureSpec(name="T", model_type="t", raw_config={})
     )
     assert _parse_module_ctor(call, config={}, local_vars={}, context=ctx) is None
+
+
+def test_param_unpacked_as_tokens_and_hidden_detects_the_lead_in_shape_unpack():
+    """``num_tokens, hidden_dim = hidden_states.shape`` (vLLM's ``FusedMoE``
+    blocks, among others) unpacks a 3-tuple into two names and would raise if
+    the parameter were not actually rank 2 -- a stronger rank declaration than
+    the existing raising-``dim()``-guard pattern, and one with no guard to
+    find."""
+    import ast as _ast
+
+    from TraceLens.ModelUtils.shape_inference import (
+        _param_is_unpacked_as_tokens_and_hidden,
+    )
+
+    forward = _ast.parse(
+        "def forward(self, hidden_states):\n"
+        "    num_tokens, hidden_dim = hidden_states.shape\n"
+        "    hidden_states = hidden_states.view(-1, hidden_dim)\n"
+        "    return hidden_states\n"
+    ).body[0]
+    assert _param_is_unpacked_as_tokens_and_hidden(forward, "hidden_states")
+    assert not _param_is_unpacked_as_tokens_and_hidden(forward, "other_name")
+
+
+def test_param_unpacked_as_tokens_and_hidden_ignores_a_branch_guarded_unpack():
+    """Only an unconditional, top-level unpack ranks the parameter on every
+    path; one nested inside a branch does not."""
+    import ast as _ast
+
+    from TraceLens.ModelUtils.shape_inference import (
+        _param_is_unpacked_as_tokens_and_hidden,
+    )
+
+    forward = _ast.parse(
+        "def forward(self, hidden_states):\n"
+        "    if self.flag:\n"
+        "        num_tokens, hidden_dim = hidden_states.shape\n"
+        "    return hidden_states\n"
+    ).body[0]
+    assert not _param_is_unpacked_as_tokens_and_hidden(forward, "hidden_states")
+
+
+def test_entry_spec_prefers_the_forwards_own_rank_over_the_global_meta_fallback():
+    """vLLM's packed-token convention (``[total_tokens, hidden]``) has no
+    ``transformers`` reference counterpart to trace on meta, so the
+    cross-module global meta map (traced off a *different*, 3-D-activation
+    reference implementation) must not outrank a rank this exact class's own
+    forward body declared for itself."""
+    from TraceLens.ModelUtils.block_tree import BlockNode
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+    from TraceLens.ModelUtils.ast_analyze import ClassStructure
+    import ast as _ast
+
+    class_node = _ast.parse(
+        "class MiniMaxM3MoE:\n"
+        "    def forward(self, hidden_states):\n"
+        "        num_tokens, hidden_dim = hidden_states.shape\n"
+        "        return hidden_states\n"
+    ).body[0]
+    structure = ClassStructure(
+        name="MiniMaxM3MoE",
+        node=class_node,
+        init_assignments={},
+        init_details={},
+        forward_calls=[],
+        norm_before=[],
+    )
+    spec = ArchitectureSpec(name="T", model_type="t", raw_config={}, hidden_size=6144)
+    spec.class_registry = {"MiniMaxM3MoE": structure}
+    inferencer = ShapeInferencer(spec)
+    # A class that genuinely exists only in the inference engine's own source
+    # never appears in the meta-traced class-scoped map; only the (wrong, 3-D)
+    # cross-module global guess is available here, exactly as it would be for
+    # a real vLLM-native module.
+    inferencer._meta_input_specs_loaded = True
+    inferencer._meta_input_specs["hidden_states"] = TensorSpec(
+        ("B", "S", 6144), "bfloat16"
+    )
+    root = BlockNode(
+        attr_name="block_sparse_moe",
+        class_name="MiniMaxM3MoE",
+        role="other",
+        label="MiniMaxM3MoE",
+    )
+    node = ModelGraphNode(
+        id="@input:hidden_states",
+        kind=NodeKind.LEAF,
+        label="hidden_states",
+        operation=OperationKind.UNKNOWN,
+        metadata={"synthetic": "@input"},
+    )
+    result = inferencer._entry_spec_for(node, root)
+    assert result == TensorSpec(("B*S", 6144), inferencer.context.dtype)
+
+
+def test_entry_spec_falls_back_to_the_activation_default_with_no_caller_context():
+    """A method expansion inferred on its own (a representative per-class
+    warm-up pass, or a section whose spine predecessor could not be resolved)
+    has no caller to read a real shape from: ``_caller_entry_spec`` is
+    ``None``. The documented contract is that such a boundary still gets the
+    generic ``(B, S, H)`` activation default rather than nothing at all --
+    otherwise every op reading it fires "no shape inference rule" with no
+    operand to even pass through, as MiniMax's ``MiniMaxM3MLP.forward(self,
+    x)`` did when its own spine predecessor's exit could not be resolved."""
+    from TraceLens.ModelUtils.block_tree import BlockNode
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+
+    spec = ArchitectureSpec(name="T", model_type="t", raw_config={}, hidden_size=6144)
+    inferencer = ShapeInferencer(spec)
+    inferencer._caller_entry_spec = None
+    root = BlockNode(
+        attr_name="mlp", class_name="MiniMaxM3MLP", role="other", label="MiniMaxM3MLP"
+    )
+    root.input_label = "x"
+    node = ModelGraphNode(
+        id="@input",
+        kind=NodeKind.LEAF,
+        label="x",
+        operation=OperationKind.UNKNOWN,
+        metadata={"synthetic": "@input"},
+    )
+    result = inferencer._entry_spec_for(node, root)
+    assert result == TensorSpec(("B", "S", 6144), inferencer.context.dtype)
+
+
+def test_parallel_lm_head_reads_embedding_dim_to_vocab_as_a_linear():
+    """``ParallelLMHead(num_embeddings, embedding_dim, ...)`` shares its
+    constructor signature with ``VocabParallelEmbedding``, but it PROJECTS an
+    activation onto vocab logits rather than performing an embedding lookup --
+    so its spec must read as ``Linear(embedding_dim -> num_embeddings)``, the
+    reverse of the generic ``Embedding$`` rule's argument order."""
+    import ast as _ast
+
+    from TraceLens.ModelUtils.shape_inference import (
+        ModuleLinearSpec,
+        _parse_module_ctor,
+    )
+
+    call = (
+        _ast.parse("ParallelLMHead(vocab_size, hidden_size, bias=False)").body[0].value
+    )
+    ctx = ShapeContext.from_spec(
+        ArchitectureSpec(name="T", model_type="t", raw_config={})
+    )
+    spec = _parse_module_ctor(
+        call,
+        config={},
+        local_vars={"vocab_size": 200064, "hidden_size": 6144},
+        context=ctx,
+    )
+    assert isinstance(spec, ModuleLinearSpec)
+    assert spec.in_features == 6144
+    assert spec.out_features == 200064
+
+
+def test_gated_activation_family_halves_the_last_axis():
+    """vLLM/SGLang's gated-activation family (``SiluAndMul``,
+    ``SiluAndMulWithClamp``, SGLang's ``SituAndMul``, ...) chunks its input in
+    half along the last axis and returns one gated half -- a bare-call op
+    with no constructor to size it, so the rule is the shared halving
+    contract, keyed off the op's name rather than a module class."""
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+
+    spec = ArchitectureSpec(name="T", model_type="t", raw_config={})
+    inferencer = ShapeInferencer(spec)
+    node = ModelGraphNode(
+        id="act_fn",
+        kind=NodeKind.LEAF,
+        label="SiluAndMulWithClamp",
+        operation=OperationKind.UNKNOWN,
+        metadata={},
+    )
+    result = inferencer._infer_node_output(
+        node, [TensorSpec(shape=("B", "S", 6144), dtype="bfloat16")], root=None
+    )
+    assert result == TensorSpec(shape=("B", "S", 3072), dtype="bfloat16")
+
+
+def test_fused_moe_preserves_the_hidden_states_operand_shape():
+    """vLLM's ``FusedMoEFactory`` (a factory function, so it reaches here via
+    ``label`` with no ``class_name``) and SGLang's ``FusedMoE`` module both
+    route every token through routed/shared experts and hand back a tensor
+    the same shape as ``hidden_states`` -- selected by matching the operand
+    whose last axis is the model's hidden width, not by input position, so
+    the rule stays right regardless of whether ``hidden_states`` or
+    ``router_logits`` was wired first."""
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+
+    spec = ArchitectureSpec(name="T", model_type="t", raw_config={}, hidden_size=6144)
+    inferencer = ShapeInferencer(spec)
+    node = ModelGraphNode(
+        id="experts",
+        kind=NodeKind.LEAF,
+        label="FusedMoEFactory",
+        operation=OperationKind.UNKNOWN,
+        metadata={},
+    )
+    router_logits = TensorSpec(shape=("B*S", 128), dtype="bfloat16")
+    hidden_states = TensorSpec(shape=("B*S", 6144), dtype="bfloat16")
+    result = inferencer._infer_node_output(
+        node, [router_logits, hidden_states], root=None
+    )
+    assert result == hidden_states
 
 
 def test_resolve_dim_expr_distributed_degree_and_min_max():

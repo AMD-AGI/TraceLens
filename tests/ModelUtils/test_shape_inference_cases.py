@@ -56,7 +56,7 @@ from TraceLens.ModelUtils.shape_inference import (
     _default_hidden_shape,
     _merge_flatten_dim,
     _module_path_matches,
-    _module_path_segments,
+    module_path_segments,
     _normalize_module_patterns,
     _quant_storage_dtype,
     _resolve_cast_dtype,
@@ -2362,7 +2362,7 @@ def test_normalize_module_patterns_strips_prefix_and_indices():
 
 
 def test_module_path_segments_and_matches():
-    segs = _module_path_segments("decoder/45x_Layer/self_attn/seq:0:q_proj:q_proj:0")
+    segs = module_path_segments("decoder/45x_Layer/self_attn/seq:0:q_proj:q_proj:0")
     assert segs == ["decoder", "self_attn", "q_proj"]
     assert _module_path_matches(segs, ("self_attn", "q_proj"))
     assert not _module_path_matches(segs, ("mlp", "gate"))

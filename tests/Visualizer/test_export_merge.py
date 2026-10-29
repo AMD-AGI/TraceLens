@@ -473,6 +473,10 @@ def test_overview_defaults_order_labels_and_namespaces():
     assert overview._display_label(spec.block_components[0], spec) == "late"
     assert overview._display_label(spec.block_components[1], spec) == "RMSNorm"
     assert overview._display_label(spec.block_components[2], spec) == "Linear"
+    # A vLLM/SGLang engine shards the head by instantiating ParallelLMHead
+    # instead of nn.Linear; it is still the same Linear projection.
+    engine_head = _component("head", "head", class_name="ParallelLMHead", order=1)
+    assert overview._display_label(engine_head, spec) == "Linear"
     assert overview._decoder_namespace(spec) == "2x_Dense"
     assert (
         overview._decoder_namespace(
@@ -1647,6 +1651,18 @@ def _unsqueeze_node(detail: str) -> dict:
             (1, "B", "S", 4),
             None,
             id="unsqueeze_non_integer_dim_defaults_to_zero",
+        ),
+        pytest.param(
+            {
+                "id": "seq:1:act_fn:act_fn:0",
+                "label": "SiluAndMulWithClamp",
+                "attrs": [{"key": "class_name", "value": "SiluAndMulWithClamp"}],
+            },
+            TensorSpec(("B", "S", 6144), "bfloat16"),
+            {},
+            ("B", "S", 3072),
+            "bfloat16",
+            id="gated_activation_family_halves_the_last_axis",
         ),
         pytest.param(
             {

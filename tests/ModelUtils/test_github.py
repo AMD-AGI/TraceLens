@@ -325,11 +325,12 @@ def test_resolve_engine_modeling_files_reads_the_vllm_registry(tmp_path, monkeyp
             },
         ),
     )
-    files, labels = resolve_engine_modeling_files(
+    files, labels, module = resolve_engine_modeling_files(
         "vllm", {"architectures": ["LlamaForCausalLM"], "model_type": "llama"}
     )
     assert [path.name for path in files] == ["llama.py"]
     assert labels == ["github://vllm-project/vllm@v0.32.0"]
+    assert module == "vllm.model_executor.models.llama"
 
 
 def test_resolve_engine_modeling_files_follows_vllm_package_reexport(
@@ -350,7 +351,7 @@ def test_resolve_engine_modeling_files_follows_vllm_package_reexport(
             },
         ),
     )
-    files, _labels = resolve_engine_modeling_files(
+    files, _labels, module = resolve_engine_modeling_files(
         "vllm",
         {
             "architectures": ["MiniMaxM3SparseForCausalLM"],
@@ -358,6 +359,9 @@ def test_resolve_engine_modeling_files_follows_vllm_package_reexport(
         },
     )
     assert [path.name for path in files] == ["model.py"]
+    # The module name follows the re-export's real file, not the package stub
+    # requested -- that is what lets a sibling import under it resolve too.
+    assert module == "vllm.models.minimax_m3.nvidia.model"
 
 
 def test_resolve_engine_modeling_files_guesses_sglangs_flat_filename(
@@ -372,11 +376,13 @@ def test_resolve_engine_modeling_files_guesses_sglangs_flat_filename(
             },
         ),
     )
-    files, labels = resolve_engine_modeling_files(
+    files, labels, module = resolve_engine_modeling_files(
         "sglang", {"architectures": ["LlamaForCausalLM"], "model_type": "llama"}
     )
     assert [path.name for path in files] == ["llama.py"]
     assert labels == ["github://sgl-project/sglang@v0.5.22"]
+    # sglang's importable package sits under python/, stripped from the module.
+    assert module == "sglang.srt.models.llama"
 
 
 def test_resolve_engine_modeling_files_strips_sglangs_text_suffix(
@@ -395,7 +401,7 @@ def test_resolve_engine_modeling_files_strips_sglangs_text_suffix(
             },
         ),
     )
-    files, _labels = resolve_engine_modeling_files(
+    files, _labels, module = resolve_engine_modeling_files(
         "sglang",
         {
             "architectures": ["MiniMaxM3SparseForCausalLM"],
@@ -403,6 +409,7 @@ def test_resolve_engine_modeling_files_strips_sglangs_text_suffix(
         },
     )
     assert [path.name for path in files] == ["minimax_m3.py"]
+    assert module == "sglang.srt.models.minimax_m3"
 
 
 def test_resolve_engine_modeling_files_misses_cleanly(tmp_path, monkeypatch):
@@ -410,11 +417,12 @@ def test_resolve_engine_modeling_files_misses_cleanly(tmp_path, monkeypatch):
         "TraceLens.ModelUtils.source.fetch_github_file",
         _fake_repo(tmp_path, {}),
     )
-    files, labels = resolve_engine_modeling_files(
+    files, labels, module = resolve_engine_modeling_files(
         "sglang", {"architectures": ["NoSuchForCausalLM"], "model_type": "no_such"}
     )
     assert files == []
     assert labels == []
+    assert module is None
 
 
 def test_fetch_github_file_rejects_a_repo_outside_the_policy():
